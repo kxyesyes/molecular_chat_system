@@ -1,0 +1,19 @@
+gene_symbol,structure_id,source,structure_type,method,resolution,chain_ids,ligand_ids,organism,title,file_format,local_file_path,download_url,docking_recommended,is_preferred
+EGFR,1M17,RCSB_PDB,experimental,X-ray,2.6,A,AQ4,Homo sapiens,EGFR kinase domain with inhibitor,cif,data/target_db/cache/rcsb/EGFR/1M17.cif,,1,1
+EGFR,AF-P00533-F1,AlphaFold,predicted,Predicted,,A,,Homo sapiens,AlphaFold EGFR model,cif,data/target_db/cache/alphafold/P00533/AF-P00533-F1-model_v4.cif,,0,0
+WDR5,4QL1,RCSB_PDB,experimental,X-ray,1.7,A,WDR,Homo sapiens,WDR5 WIN-site complex,cif,data/target_db/cache/rcsb/WDR5/4QL1.cif,,1,1
+WDR5,AF-P61964-F1,AlphaFold,predicted,Predicted,,A,,Homo sapiens,AlphaFold WDR5 model,cif,data/target_db/cache/alphafold/P61964/AF-P61964-F1-model_v4.cif,,0,0
+CYP3A4,3NXU,RCSB_PDB,experimental,X-ray,2.05,A,HEM;DTZ,Homo sapiens,CYP3A4 ligand-bound structure,cif,data/target_db/cache/rcsb/CYP3A4/3NXU.cif,,1,1
+CYP3A4,AF-P08684-F1,AlphaFold,predicted,Predicted,,A,,Homo sapiens,AlphaFold CYP3A4 model,cif,data/target_db/cache/alphafold/P08684/AF-P08684-F1-model_v4.cif,,0,0
+KRAS,6OIM,RCSB_PDB,experimental,X-ray,1.9,A,GDP,Homo sapiens,KRAS G12C covalent inhibitor complex,cif,data/target_db/cache/rcsb/KRAS/6OIM.cif,,1,1
+BRAF,4RZV,RCSB_PDB,experimental,X-ray,2.55,A,BAX,Homo sapiens,BRAF kinase inhibitor complex,cif,data/target_db/cache/rcsb/BRAF/4RZV.cif,,1,1
+JAK2,2B7A,RCSB_PDB,experimental,X-ray,2.0,A,,Homo sapiens,JAK2 kinase domain,cif,data/target_db/cache/rcsb/JAK2/2B7A.cif,,1,1
+PIK3CA,4JPS,RCSB_PDB,experimental,X-ray,2.8,A,ATP,Homo sapiens,PI3K alpha complex,cif,data/target_db/cache/rcsb/PIK3CA/4JPS.cif,,1,1
+ALK,2XP2,RCSB_PDB,experimental,X-ray,1.8,A,IRE,Homo sapiens,ALK kinase domain inhibitor complex,cif,data/target_db/cache/rcsb/ALK/2XP2.cif,,1,1
+MET,3DKF,RCSB_PDB,experimental,X-ray,2.0,A,ANP,Homo sapiens,MET kinase domain,cif,data/target_db/cache/rcsb/MET/3DKF.cif,,1,1
+HDAC1,4BKX,RCSB_PDB,experimental,X-ray,3.0,A,,Homo sapiens,HDAC1 corepressor complex,cif,data/target_db/cache/rcsb/HDAC1/4BKX.cif,,1,1
+CDK2,1HCK,RCSB_PDB,experimental,X-ray,1.9,A,ATP,Homo sapiens,CDK2 ATP complex,cif,data/target_db/cache/rcsb/CDK2/1HCK.cif,,1,1
+KDR,3VHE,RCSB_PDB,experimental,X-ray,1.95,A,0LI,Homo sapiens,VEGFR2 kinase inhibitor complex,cif,data/target_db/cache/rcsb/KDR/3VHE.cif,,1,1
+MYC,1NKP,RCSB_PDB,experimental,NMR,,A;B,,Homo sapiens,MYC-MAX DNA binding domain,cif,data/target_db/cache/rcsb/MYC/1NKP.cif,,0,1
+TP53,2OCJ,RCSB_PDB,experimental,X-ray,1.85,A,,Homo sapiens,p53 DNA-binding domain,cif,data/target_db/cache/rcsb/TP53/2OCJ.cif,,0,1
+AURKA,3E5A,RCSB_PDB,experimental,X-ray,2.75,A,ADP,Homo sapiens,Aurora A kinase domain,cif,data/target_db/cache/rcsb/AURKA/3E5A.cif,,1,1

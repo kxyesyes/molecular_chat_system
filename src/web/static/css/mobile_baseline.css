@@ -1,0 +1,352 @@
+/* Mobile adaptation baseline for MedChat feature pages.
+   Desktop layouts stay owned by each module CSS; this file only adds
+   small-screen safety rails for headers, grids, forms, tables, and panels. */
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+html,
+body {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+img,
+svg,
+canvas,
+iframe,
+video {
+  max-width: 100%;
+}
+
+input,
+select,
+textarea,
+button {
+  font: inherit;
+}
+
+table {
+  max-width: 100%;
+}
+
+@media (max-width: 900px) {
+  body {
+    min-width: 0;
+  }
+
+  .header {
+    min-height: 56px;
+    padding: 10px 14px !important;
+    gap: 10px;
+  }
+
+  .logo-section {
+    min-width: 0;
+    gap: 10px !important;
+  }
+
+  .logo-item {
+    min-width: 0;
+    gap: 8px !important;
+  }
+
+  .logo-item img {
+    width: auto !important;
+    height: 28px !important;
+    object-fit: contain;
+    flex: 0 0 auto;
+  }
+
+  .logo-item span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 15px !important;
+  }
+
+  .logo-divider {
+    display: none;
+  }
+
+  .nav-section {
+    flex: 0 0 auto;
+    gap: 8px !important;
+  }
+
+  .back-btn {
+    min-height: 36px;
+    padding: 7px 12px !important;
+    white-space: nowrap;
+  }
+
+  .main-content,
+  .main-container,
+  .target-page,
+  .content-wrapper {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  .main-content,
+  .content-wrapper {
+    padding-left: 12px !important;
+    padding-right: 12px !important;
+  }
+
+  .content-card,
+  .panel,
+  .hero,
+  .target-card,
+  .search-card,
+  .detail-card,
+  .workspace-panel,
+  .input-panel,
+  .result-panel,
+  .props-card,
+  .ro5-card,
+  .goal-card,
+  .ai-advice-card {
+    border-radius: 14px !important;
+  }
+
+  .quick-stats,
+  .stats-grid,
+  .grid-4,
+  .grid-3,
+  .grid-2,
+  .parameter-grid,
+  .params-grid,
+  .metric-grid,
+  .summary-grid,
+  .db-status-panel,
+  .pde-family-grid,
+  .detail-meta,
+  .structure-facts,
+  .target-result-meta,
+  .ro5-grid,
+  .goal-list {
+    grid-template-columns: 1fr !important;
+  }
+
+  .tabs,
+  .canvas-toolbar,
+  .toolbar-group,
+  .action-buttons,
+  .modal-actions,
+  .panel-header,
+  .page-header,
+  .activity-band-header,
+  .result-header,
+  .result-header-bar,
+  .target-result-item .action-row {
+    flex-wrap: wrap;
+  }
+
+  .tabs {
+    width: 100% !important;
+    overflow-x: auto;
+    border-radius: 14px !important;
+  }
+
+  .tab {
+    flex: 1 0 auto;
+    text-align: center;
+  }
+
+  .form-group input,
+  .form-group textarea,
+  .form-group select,
+  .input-field,
+  .textarea-field,
+  .ai-input,
+  .search-input {
+    min-width: 0;
+    font-size: 16px !important;
+  }
+
+  .results-table,
+  .data-table {
+    min-width: 720px;
+  }
+
+  .results-container,
+  .table-scroll,
+  .result-table-wrap,
+  .structure-list,
+  .target-results-list {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  footer {
+    flex-direction: column !important;
+    align-items: center !important;
+    gap: 28px !important;
+    padding: 32px 18px 44px !important;
+    text-align: center;
+  }
+
+  footer .section,
+  footer .contact {
+    width: 100%;
+    max-width: 420px !important;
+  }
+
+  footer .map img {
+    width: min(280px, 82vw) !important;
+  }
+
+  footer .map .img1 {
+    width: 18px !important;
+    right: 36% !important;
+  }
+
+  footer .contact .p {
+    padding-left: 0 !important;
+    justify-content: center;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  footer .contact img {
+    position: static !important;
+    transform: none !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .header {
+    align-items: center !important;
+  }
+
+  .header .logo-item:first-child span {
+    display: none;
+  }
+
+  .header .logo-item:nth-child(2) span {
+    max-width: 46vw;
+  }
+
+  .nav-section .model-status-header,
+  .nav-section #history-btn {
+    display: none !important;
+  }
+
+  .sub-header {
+    height: auto !important;
+    min-height: 58px;
+    padding: 10px 14px !important;
+    align-items: flex-start !important;
+    gap: 10px;
+  }
+
+  .sub-stats {
+    width: 100%;
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .stat-item {
+    border-left: 0 !important;
+    padding: 8px !important;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.72);
+  }
+
+  .main-container {
+    display: block !important;
+    min-height: auto !important;
+    padding: 12px !important;
+  }
+
+  .input-panel,
+  .result-panel {
+    width: 100% !important;
+    margin-bottom: 14px;
+  }
+
+  .workspace {
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+  }
+
+  .workspace > *,
+  .left-panel,
+  .center-panel,
+  .right-panel {
+    min-width: 0;
+  }
+
+  .panel,
+  .panel-body,
+  .main-content {
+    min-height: 0 !important;
+    overflow: visible !important;
+  }
+
+  .canvas-panel,
+  .ketcher-container,
+  .viewer-container,
+  #molecule-viewer,
+  #pv-container {
+    min-height: 360px !important;
+  }
+
+  .smiles-display,
+  .ai-input-row,
+  .search-form,
+  .recommended-structure,
+  .structure-item,
+  .target-result-item {
+    grid-template-columns: 1fr !important;
+  }
+
+  .ai-input-row,
+  .launch-row,
+  .action-buttons,
+  .action-btns {
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+
+  .ai-send-btn,
+  .submit-btn,
+  .action-btn,
+  .action-btn-primary,
+  .action-btn-secondary,
+  .small-btn,
+  .download-btn {
+    width: 100% !important;
+  }
+
+  .history-panel {
+    width: min(100vw, 420px) !important;
+    right: -100vw;
+  }
+
+  .history-panel.open {
+    right: 0;
+  }
+
+  .toast-container {
+    left: 12px !important;
+    right: 12px !important;
+    top: 70px !important;
+    max-width: none !important;
+  }
+
+  .modal-box,
+  .modal-content {
+    width: calc(100vw - 24px) !important;
+    max-width: calc(100vw - 24px) !important;
+    max-height: calc(100dvh - 32px) !important;
+  }
+}

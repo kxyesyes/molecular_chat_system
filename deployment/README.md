@@ -1,0 +1,514 @@
+# MedChat 服务器部署环境文档
+
+本文档用于把 MedChat 项目从本地开发环境迁移到服务器并挂网运行。内容覆盖系统环境、Python/conda 环境、药物化学工具链、数据资产、Web 服务、nginx、systemd、权限、健康检查和常见遗漏项。
+
+## 1. 推荐服务器配置
+
+推荐操作系统：
+
+```bash
+Ubuntu 22.04 LTS
+Ubuntu 24.04 LTS
+```
+
+推荐硬件：
+
+```text
+CPU: 8 核以上
+内存: 32 GB 起步，推荐 64 GB
+磁盘: 500 GB 起步，推荐 1 TB SSD
+GPU: 非必须；如果后续跑本地大模型或深度学习模型，再配置 NVIDIA GPU
+```
+
+推荐部署目录：
+
+```text
+/opt/medchat/molecular_chat_system
+/opt/medchat/tools
+/opt/medchat/data
+```
+
+## 2. 系统依赖
+
+服务器先安装基础系统包：
+
+```bash
+sudo apt update
+sudo apt install -y \
+  git curl wget unzip tar ca-certificates \
+  build-essential gcc g++ make \
+  sqlite3 nginx \
+  libglib2.0-0 libxrender1 libxext6 libsm6 libgl1 \
+  python3-dev
+```
+
+如果后续需要 HTTPS，可再安装：
+
+```bash
+sudo apt install -y certbot python3-certbot-nginx
+```
+
+## 3. Python / Conda 环境
+
+建议使用 conda 环境，不建议服务器使用 Python 3.13 直接部署。RDKit、FAISS、部分药化依赖在 Python 3.10/3.11 更稳定。
+
+推荐创建环境：
+
+```bash
+conda create -n medchat python=3.10 -y
+conda activate medchat
+```
+
+RTX3090 服务器建议优先安装部署版依赖：
+
+```bash
+pip install -r deployment/requirements.txt
+```
+
+根目录 `requirements.txt` 更偏通用开发环境；`deployment/requirements.txt` 固定了 CUDA 12.1、PyTorch、PyG、药化和 Web 服务部署所需版本，更适合 RTX3090 服务器。
+
+分子对接还需要安装 AutoDock Vina、ADFRsuite、Meeko/mk_prepare_ligand。Meeko 已包含在 `deployment/requirements.txt` 中，Vina 和 ADFRsuite 需要按服务器系统单独安装，详细步骤见 `deployment/docking_tools.md`。
+
+如果 `rdkit` 或 `faiss-cpu` 通过 pip 安装不稳定，优先使用 conda-forge：
+
+```bash
+conda install -c conda-forge rdkit faiss-cpu -y
+```
+
+如果后续确实需要 FAISS GPU，可在服务器上改用 conda 安装：
+
+```bash
+conda install -c pytorch -c nvidia faiss-gpu -y
+```
+
+项目核心 Python 依赖包括：
+
+```text
+fastapi
+uvicorn[standard]
+python-multipart
+websockets
+aiofiles
+pandas
+numpy
+tqdm
+rdkit
+faiss-cpu
+pydantic
+pyyaml
+jinja2
+requests
+httpx
+pubchempy
+```
+
+## 4. 分子对接工具链
+
+分子对接模块不是纯 Python 功能，需要额外安装外部程序。
+
+必须准备：
+
+```text
+AutoDock Vina
+ADFRsuite
+Meeko / mk_prepare_ligand
+```
+
+推荐版本：
+
+```text
+AutoDock Vina 1.2.5
+ADFRsuite 1.0
+Meeko 0.5.0
+```
+
+详细安装说明见 `deployment/docking_tools.md`。
+
+示例目录：
+
+```text
+/opt/medchat/tools/autodock/vina/vina
+/opt/medchat/tools/ADFRsuite/bin/prepare_receptor
+/opt/conda/envs/medchat/bin/mk_prepare_ligand.py
+```
+
+`.env` 中需要配置：
+
+```env
+MOLECULAR_DOCKING_ROOT=/opt/medchat/tools/autodock
+MOLECULAR_DOCKING_VINA=/opt/medchat/tools/autodock/vina/vina
+MOLECULAR_DOCKING_ADFR_BIN=/opt/medchat/tools/ADFRsuite/bin
+MOLECULAR_DOCKING_PREPARE_LIGAND=/opt/conda/envs/medchat/bin/mk_prepare_ligand.py
+```
+
+验证命令：
+
+```bash
+$MOLECULAR_DOCKING_VINA --help
+ls $MOLECULAR_DOCKING_ADFR_BIN/prepare_receptor*
+which mk_prepare_ligand.py
+```
+
+如果服务器上的 Meeko 命令名是 `mk_prepare_ligand`，不是 `mk_prepare_ligand.py`，就按真实路径填写 `MOLECULAR_DOCKING_PREPARE_LIGAND`。
+
+## 5. 模型服务环境
+
+项目可使用两类模型后端：Ollama 本地模型或 ModelScope API。
+
+### 5.1 Ollama 本地模型
+
+安装并启动：
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama serve
+ollama pull qwen2.5:3b
+```
+
+检查：
+
+```bash
+curl http://127.0.0.1:11434/api/tags
+```
+
+默认配置通常使用：
+
+```text
+Ollama 地址: http://127.0.0.1:11434
+```
+
+### 5.2 ModelScope API
+
+如果使用 ModelScope API，`.env` 中配置：
+
+```env
+MODELSCOPE_API_KEY=你的真实key
+MODELSCOPE_BASE_URL=https://api-inference.modelscope.cn/v1/chat/completions
+```
+
+生产环境不要把 API key 写死在 YAML 文件里，统一放到 `.env`。
+
+## 6. 必须迁移的数据资产
+
+挂网部署时不能只迁移代码，必须迁移数据文件、模型文件和结构缓存。
+
+### 6.1 靶点搜索模块
+
+必须包含：
+
+```text
+data/target_db/target_database.sqlite
+data/target_db/cache/
+data/target_db/seed_targets.csv
+data/target_db/seed_structures.csv
+```
+
+`.env` 配置：
+
+```env
+TARGET_DB_PATH=data/target_db/target_database.sqlite
+TARGET_CACHE_DIR=data/target_db/cache
+```
+
+如果结构缓存没有迁移，靶点搜索页面可以查到靶点，但下载 PDB/mmCIF 时可能失败。
+
+### 6.2 反向寻靶模块
+
+通常需要迁移：
+
+```text
+data/reverse_target/
+```
+
+重点检查是否存在：
+
+```text
+chembl_training_data.tsv
+chembl_data_with_fps.tsv
+morgan_fingerprints.npy
+maccs_fingerprints.npy
+metadata / summary 文件
+```
+
+如果使用完整 ChEMBL SQLite 数据库，建议配置：
+
+```env
+CHEMBL_DB_PATH=/opt/medchat/data/chembl/chembl_36.db
+```
+
+### 6.3 活性预测模块
+
+通常需要迁移：
+
+```text
+data/activity/
+data/activity/models/
+```
+
+重点检查：
+
+```text
+*.pt
+*.pkl
+*.joblib
+*.json
+```
+
+### 6.4 RAG / 分子数据库
+
+通常需要迁移：
+
+```text
+data/canonical_moses_5w.csv
+data/molecular_faiss_index.index
+```
+
+如果 FAISS index 没有迁移，服务可以启动，但 RAG 检索可能不可用或需要重建。
+
+### 6.5 临时目录和日志目录
+
+需要存在并可写：
+
+```text
+logs/
+temp_docking/
+scratch/
+```
+
+## 7. `.env` 完整示例
+
+项目根目录准备 `.env`：
+
+```env
+MEDCHAT_ENV_FILE=.env
+MEDCHAT_HOST=0.0.0.0
+MEDCHAT_PORT=8080
+MEDCHAT_DEBUG=false
+MEDCHAT_WORKERS=1
+MEDCHAT_LOG_LEVEL=info
+MEDCHAT_LOG_DIR=logs
+MEDCHAT_TEMP_DOCKING_DIR=temp_docking
+MEDCHAT_SCRATCH_DIR=scratch
+
+MODELSCOPE_API_KEY=
+MODELSCOPE_BASE_URL=https://api-inference.modelscope.cn/v1/chat/completions
+
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+
+MOLECULAR_DOCKING_ROOT=/opt/medchat/tools/autodock
+MOLECULAR_DOCKING_VINA=/opt/medchat/tools/autodock/vina/vina
+MOLECULAR_DOCKING_ADFR_BIN=/opt/medchat/tools/ADFRsuite/bin
+MOLECULAR_DOCKING_PREPARE_LIGAND=/opt/conda/envs/medchat/bin/mk_prepare_ligand.py
+
+TARGET_DB_PATH=data/target_db/target_database.sqlite
+TARGET_CACHE_DIR=data/target_db/cache
+
+CHEMBL_DB_PATH=/opt/medchat/data/chembl/chembl_36.db
+REVERSE_TARGET_DATA_DIR=data/reverse_target
+
+ACTIVITY_MODEL_DIR=data/activity/models
+RAG_INDEX_PATH=data/molecular_faiss_index.index
+
+MEDCHAT_SYSTEMD_SERVICE=deployment/medchat.service
+MEDCHAT_NGINX_CONFIG=deployment/nginx-medchat.conf
+```
+
+## 8. 权限配置
+
+建议创建独立用户运行服务：
+
+```bash
+sudo useradd -r -m -d /opt/medchat medchat
+sudo chown -R medchat:medchat /opt/medchat
+```
+
+确保这些目录可写：
+
+```bash
+chmod -R u+rwX /opt/medchat/molecular_chat_system/data
+chmod -R u+rwX /opt/medchat/molecular_chat_system/logs
+chmod -R u+rwX /opt/medchat/molecular_chat_system/temp_docking
+chmod -R u+rwX /opt/medchat/molecular_chat_system/scratch
+```
+
+## 9. 启动前健康检查
+
+在项目根目录执行：
+
+```bash
+conda activate medchat
+python scripts/health_check.py --strict
+```
+
+理想结果：
+
+```text
+RDKit: OK
+AutoDock Vina: OK
+ADFRsuite: OK
+Ligand Preparation: OK
+Target DB: OK
+Target Cache: OK
+Ollama: OK
+ModelScope: OK 或 optional
+Reverse Target Data: OK
+Activity Models: OK
+RAG Index: OK
+Writable Directories: OK
+systemd Service: OK
+nginx Config: OK
+```
+
+如果只是查看状态，不希望失败时返回非 0 状态码：
+
+```bash
+python scripts/health_check.py
+```
+
+## 10. 本地启动验证
+
+先不接 nginx，直接启动服务：
+
+```bash
+conda activate medchat
+python main.py --no-reload --host 0.0.0.0 --port 8080
+```
+
+检查：
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+浏览器访问：
+
+```text
+http://<server-ip>:8080/
+http://<server-ip>:8080/target-search
+http://<server-ip>:8080/molecular-docking
+http://<server-ip>:8080/reverse-target
+http://<server-ip>:8080/activity-prediction
+http://<server-ip>:8080/molecular-design
+```
+
+## 11. systemd 服务
+
+根据服务器真实路径修改 `deployment/medchat.service`：
+
+```text
+User
+Group
+WorkingDirectory
+EnvironmentFile
+ExecStart
+```
+
+安装并启动：
+
+```bash
+sudo cp deployment/medchat.service /etc/systemd/system/medchat.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now medchat
+sudo systemctl status medchat
+```
+
+常用命令：
+
+```bash
+sudo systemctl restart medchat
+sudo systemctl stop medchat
+sudo journalctl -u medchat -f
+```
+
+## 12. nginx 反向代理
+
+根据服务器域名修改 `deployment/nginx-medchat.conf` 中的：
+
+```text
+server_name
+client_max_body_size
+proxy_pass
+```
+
+安装配置：
+
+```bash
+sudo cp deployment/nginx-medchat.conf /etc/nginx/conf.d/medchat.conf
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+注意 `/ws` 必须保留 WebSocket 相关配置：
+
+```text
+Upgrade
+Connection
+```
+
+否则聊天或实时功能可能异常。
+
+## 13. 防火墙和端口
+
+如果使用 UFW：
+
+```bash
+sudo ufw allow 22
+sudo ufw allow 80
+sudo ufw allow 443
+sudo ufw enable
+```
+
+对公网只暴露 80/443。8080 建议只监听本机或内网，由 nginx 转发。
+
+## 14. 上线后验证清单
+
+上线后逐项验证：
+
+```text
+首页可打开
+聊天接口可响应
+WebSocket 正常
+靶点搜索可查询 WDR5 / EGFR / PDE4D
+靶点结构文件可下载
+分子对接可上传受体/配体文件
+反向寻靶可返回结果
+活性预测模型可加载
+分子设计页面可打开
+日志正常写入
+大文件上传不被 nginx 拦截
+```
+
+## 15. 常见遗漏项
+
+最容易遗漏：
+
+```text
+RDKit 和 FAISS 使用了不兼容的 Python 版本
+Vina / ADFRsuite / Meeko 没有安装或路径没填
+data/target_db/cache/ 没有迁移
+反向寻靶 fingerprint 文件没有迁移
+活性预测模型文件没有迁移
+RAG index 没有迁移
+systemd 的 WorkingDirectory 不对
+systemd 的 EnvironmentFile 不对
+服务用户没有写 logs/temp_docking/scratch 的权限
+nginx 没有配置 /ws WebSocket
+nginx client_max_body_size 太小
+公网环境没有 HTTPS
+API key 写进了 YAML 或代码
+```
+
+## 16. 建议上线顺序
+
+推荐顺序：
+
+1. 在服务器创建 conda 环境并安装依赖
+2. 迁移代码和数据资产
+3. 配置 `.env`
+4. 跑 `python scripts/health_check.py --strict`
+5. 用 `python main.py --no-reload` 手动启动验证
+6. 配置 systemd
+7. 配置 nginx
+8. 配置 HTTPS
+9. 做全模块功能验收
+10. 设置日志轮转和数据备份

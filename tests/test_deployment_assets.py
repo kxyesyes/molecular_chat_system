@@ -1,0 +1,136 @@
+import os
+import importlib.util
+import io
+import contextlib
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+class DeploymentAssetsTest(unittest.TestCase):
+    def test_deployment_files_exist(self):
+        expected = [
+            ".env.example",
+            "config/deployment.yaml",
+            "deployment/medchat.service",
+            "deployment/nginx-medchat.conf",
+            "deployment/README.md",
+            "deployment/requirements.txt",
+            "deployment/docking_tools.md",
+            "scripts/health_check.py",
+        ]
+
+        for relative_path in expected:
+            self.assertTrue((PROJECT_ROOT / relative_path).exists(), relative_path)
+
+    def test_app_config_expands_environment_placeholders(self):
+        from src.web.app import MolecularChatApp
+
+        with tempfile.TemporaryDirectory(prefix="medchat_config_") as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text(
+                """
+ollama:
+  base_url: "${MEDCHAT_TEST_OLLAMA:-http://default.invalid}"
+docking:
+  root_dir: "${MEDCHAT_TEST_DOCKING_ROOT:-/fallback/docking}"
+""",
+                encoding="utf-8",
+            )
+
+            old_value = os.environ.get("MEDCHAT_TEST_OLLAMA")
+            os.environ["MEDCHAT_TEST_OLLAMA"] = "http://ollama.example:11434"
+            try:
+                config = MolecularChatApp(config_path=str(config_path)).config
+            finally:
+                if old_value is None:
+                    os.environ.pop("MEDCHAT_TEST_OLLAMA", None)
+                else:
+                    os.environ["MEDCHAT_TEST_OLLAMA"] = old_value
+
+        self.assertEqual(config["ollama"]["base_url"], "http://ollama.example:11434")
+        self.assertEqual(config["docking"]["root_dir"], "/fallback/docking")
+
+    def test_health_check_help_runs(self):
+        result = subprocess.run(
+            [sys.executable, "scripts/health_check.py", "--help"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        self.assertIn("MedChat deployment health check", result.stdout)
+
+    def test_health_check_reports_extended_deployment_categories(self):
+        spec = importlib.util.spec_from_file_location(
+            "health_check", PROJECT_ROOT / "scripts" / "health_check.py"
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        health_check = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(health_check)
+
+        with tempfile.TemporaryDirectory(prefix="medchat_health_") as tmp:
+            root = Path(tmp)
+            (root / "data" / "target_db" / "cache").mkdir(parents=True)
+            (root / "data" / "reverse_target").mkdir(parents=True)
+            (root / "data" / "activity" / "models").mkdir(parents=True)
+            (root / "deployment").mkdir()
+            (root / "logs").mkdir()
+            (root / "temp_docking").mkdir()
+            (root / "scratch").mkdir()
+
+            db_path = root / "data" / "target_db" / "target_database.sqlite"
+            import sqlite3
+            conn = sqlite3.connect(db_path)
+            conn.execute("CREATE TABLE targets (id INTEGER PRIMARY KEY)")
+            conn.commit()
+            conn.close()
+
+            for rel_path in [
+                "data/reverse_target/chembl_data_with_fps.tsv",
+                "data/reverse_target/morgan_fingerprints.npy",
+                "data/reverse_target/maccs_fingerprints.npy",
+                "data/activity/models/model_demo.pt",
+                "data/molecular_faiss_index.index",
+                "deployment/medchat.service",
+                "deployment/nginx-medchat.conf",
+            ]:
+                (root / rel_path).write_text("demo", encoding="utf-8")
+
+            old_root = health_check.PROJECT_ROOT
+            health_check.PROJECT_ROOT = root
+            try:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    health_check.run_checks(strict=False)
+            finally:
+                health_check.PROJECT_ROOT = old_root
+
+        text = output.getvalue()
+        for label in [
+            "Ollama",
+            "ModelScope",
+            "Agent Contracts",
+            "Agent Tool Registry",
+            "Agent Components",
+            "Ligand Preparation",
+            "Reverse Target Data",
+            "Activity Models",
+            "RAG Index",
+            "Writable Directories",
+            "systemd Service",
+            "nginx Config",
+        ]:
+            self.assertIn(label, text)
+
+
+if __name__ == "__main__":
+    unittest.main()

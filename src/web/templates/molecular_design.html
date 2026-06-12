@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>MedChat – 分子定向设计</title>
+  <link rel="stylesheet" href="/static/css/molecular_design.css" />
+  <link rel="stylesheet" href="/static/css/mobile_baseline.css?v=20260511a" />
+  <link rel="stylesheet" href="/static/css/subpage_header.css?v=20260525a" />
+</head>
+<body>
+
+  <!-- ===== HEADER ===== -->
+  <div class="header">
+    <div class="logo-section">
+      <div class="logo-item">
+        <img src="/static/images/logo.png" alt="Logo" />
+        <span>海南大学药学院</span>
+      </div>
+      <div class="logo-divider"></div>
+      <div class="logo-item">
+        <img src="/static/images/logo2.png" alt="MedChat" />
+        <span>MedChat - 分子定向设计</span>
+      </div>
+    </div>
+    <div class="nav-section">
+      <button class="back-btn" onclick="window.location.href='/'">返回主页</button>
+    </div>
+  </div>
+
+  <!-- ===== MAIN ===== -->
+  <div class="main-content">
+    <div class="workspace">
+
+      <!-- ===== 左栏：官能团仓库 ===== -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-header-icon">🗂️</span>
+          <span class="panel-title">官能团仓库</span>
+          <span class="badge" style="margin-left:auto;font-size:11px" id="fragBadge">加载中</span>
+        </div>
+        <div class="panel-body">
+          <!-- 搜索 -->
+          <div class="search-box">
+            <span style="color:var(--text3);font-size:14px">🔍</span>
+            <input type="text" id="fragSearch" placeholder="搜索基团..." oninput="onSearch()" />
+          </div>
+
+          <!-- 筛选手风琴 -->
+          <div class="filter-accordion" id="filterAccordion">
+            <!-- ① 物化性质 -->
+            <div class="acc-group open" id="grp-phys">
+              <div class="acc-header" onclick="toggleAcc('grp-phys')">
+                <span class="acc-icon">💧</span>
+                <span class="acc-label">物化性质</span>
+                <span class="acc-badge" id="badge-grp-phys"></span>
+                <span class="acc-arrow">▾</span>
+              </div>
+              <div class="acc-body">
+                <div class="filter-row">
+                  <span class="tag-chip phys" data-k="label_lipophilic" onclick="toggleFilter(this)">亲脂</span>
+                  <span class="tag-chip phys" data-k="label_hydrophilic" onclick="toggleFilter(this)">亲水</span>
+                  <span class="tag-chip phys" data-k="label_amphiphilic" onclick="toggleFilter(this)">两亲</span>
+                  <span class="tag-chip phys" data-k="label_high_sp3" onclick="toggleFilter(this)">高sp³</span>
+                  <span class="tag-chip phys" data-k="label_low_tpsa" onclick="toggleFilter(this)">低极性</span>
+                  <span class="tag-chip phys" data-k="label_high_tpsa" onclick="toggleFilter(this)">高极性</span>
+                  <span class="tag-chip phys" data-k="label_high_mw" onclick="toggleFilter(this)">高分子量</span>
+                  <span class="tag-chip phys" data-k="label_high_flexibility" onclick="toggleFilter(this)">高灵活性</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- ② 酸碱性 -->
+            <div class="acc-group open" id="grp-acid">
+              <div class="acc-header" onclick="toggleAcc('grp-acid')">
+                <span class="acc-icon">⚗️</span>
+                <span class="acc-label">酸碱与电荷</span>
+                <span class="acc-badge" id="badge-grp-acid"></span>
+                <span class="acc-arrow">▾</span>
+              </div>
+              <div class="acc-body">
+                <div class="filter-row">
+                  <span class="tag-chip acid" data-k="label_acidic" onclick="toggleFilter(this)">酸性</span>
+                  <span class="tag-chip acid" data-k="label_basic" onclick="toggleFilter(this)">碱性</span>
+                  <span class="tag-chip acid" data-k="label_neutral" onclick="toggleFilter(this)">中性</span>
+                  <span class="tag-chip acid" data-k="label_zwitterionic" onclick="toggleFilter(this)">两性离子</span>
+                  <span class="tag-chip acid" data-k="label_high_hba" onclick="toggleFilter(this)">高HBA</span>
+                  <span class="tag-chip acid" data-k="label_high_hbd" onclick="toggleFilter(this)">高HBD</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- ③ 环系统 -->
+            <div class="acc-group" id="grp-ring">
+              <div class="acc-header" onclick="toggleAcc('grp-ring')">
+                <span class="acc-icon">🔷</span>
+                <span class="acc-label">环系统</span>
+                <span class="acc-badge" id="badge-grp-ring"></span>
+                <span class="acc-arrow">▸</span>
+              </div>
+              <div class="acc-body" style="display:none">
+                <div class="filter-row">
+                  <span class="tag-chip struct" data-k="label_has_aromatic_ring" onclick="toggleFilter(this)">芳香环</span>
+                  <span class="tag-chip struct" data-k="label_has_aliphatic_ring" onclick="toggleFilter(this)">脂肪环</span>
+                  <span class="tag-chip struct" data-k="label_has_heterocycle" onclick="toggleFilter(this)">杂环</span>
+                  <span class="tag-chip struct" data-k="label_n_heterocycle" onclick="toggleFilter(this)">氮杂环</span>
+                  <span class="tag-chip struct" data-k="label_o_heterocycle" onclick="toggleFilter(this)">氧杂环</span>
+                  <span class="tag-chip struct" data-k="label_s_heterocycle" onclick="toggleFilter(this)">硫杂环</span>
+                  <span class="tag-chip struct" data-k="label_multi_aromatic" onclick="toggleFilter(this)">多芳香环</span>
+                  <span class="tag-chip struct" data-k="label_multi_heterocycle" onclick="toggleFilter(this)">多杂环</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- ④ 元素富集 -->
+            <div class="acc-group" id="grp-elem">
+              <div class="acc-header" onclick="toggleAcc('grp-elem')">
+                <span class="acc-icon">🧪</span>
+                <span class="acc-label">元素富集</span>
+                <span class="acc-badge" id="badge-grp-elem"></span>
+                <span class="acc-arrow">▸</span>
+              </div>
+              <div class="acc-body" style="display:none">
+                <div class="filter-row">
+                  <span class="tag-chip elem" data-k="label_has_halogen" onclick="toggleFilter(this)">卤素</span>
+                  <span class="tag-chip elem" data-k="label_high_halogen" onclick="toggleFilter(this)">高卤素</span>
+                  <span class="tag-chip elem" data-k="label_nitrogen_rich" onclick="toggleFilter(this)">富氮</span>
+                  <span class="tag-chip elem" data-k="label_oxygen_rich" onclick="toggleFilter(this)">富氧</span>
+                  <span class="tag-chip elem" data-k="label_sulfur_rich" onclick="toggleFilter(this)">富硫</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- ⑤ 反应性与功能 -->
+            <div class="acc-group" id="grp-react">
+              <div class="acc-header" onclick="toggleAcc('grp-react')">
+                <span class="acc-icon">⚡</span>
+                <span class="acc-label">反应性与功能</span>
+                <span class="acc-badge" id="badge-grp-react"></span>
+                <span class="acc-arrow">▸</span>
+              </div>
+              <div class="acc-body" style="display:none">
+                <div class="filter-row">
+                  <span class="tag-chip react" data-k="label_nucleophilic" onclick="toggleFilter(this)">亲核</span>
+                  <span class="tag-chip react" data-k="label_electrophilic" onclick="toggleFilter(this)">亲电</span>
+                  <span class="tag-chip react" data-k="label_strong_ewg" onclick="toggleFilter(this)">强吸电子</span>
+                  <span class="tag-chip react" data-k="label_has_amide" onclick="toggleFilter(this)">含酰胺</span>
+                  <span class="tag-chip react" data-k="label_has_ester" onclick="toggleFilter(this)">含酯基</span>
+                  <span class="tag-chip react" data-k="label_bioisostere" onclick="toggleFilter(this)">生物等排</span>
+                </div>
+              </div>
+            </div>
+          </div><!-- /filter-accordion -->
+
+          <button class="tool-btn primary ai-rec" onclick="aiQuickRec()">✨ AI 智能推荐</button>
+
+          <div class="filter-title">常用基团</div>
+          <div class="common-grid" id="commonGrid"></div>
+
+          <div class="filter-title">全部片段</div>
+          <div class="fragment-grid" id="fragGrid"></div>
+
+          <div class="frag-pagination">
+            <button class="page-btn" id="prevBtn" onclick="changePage(-1)" disabled>‹</button>
+            <span class="page-info" id="pageInfo">-</span>
+            <button class="page-btn" id="nextBtn" onclick="changePage(1)">›</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== 中栏：分子画布 ===== -->
+      <div class="canvas-panel">
+        <div class="canvas-toolbar">
+          <div class="toolbar-group">
+            <button class="tool-btn" onclick="showImport()">📥 导入SMILES</button>
+            <button class="tool-btn" onclick="exportSmiles()">📤 导出</button>
+            <button class="tool-btn" onclick="clearCanvas()">🗑️ 清空</button>
+          </div>
+          <div class="toolbar-divider"></div>
+          <div class="toolbar-group" style="flex:1;display:flex;align-items:center;gap:4px;min-width:0">
+            <span style="font-size:12px;color:var(--text2);white-space:nowrap">当前SMILES:</span>
+            <div class="smiles-display" id="curSmiles" onclick="copySmiles()" title="点击复制" style="font-size:11px">等待绘制分子...</div>
+          </div>
+          <div class="toolbar-divider"></div>
+          <div class="toolbar-group">
+            <button class="tool-btn" onclick="detectSites()">🔍 识别位点</button>
+            <button class="tool-btn primary" id="subBtn" disabled onclick="execSubstitute()">⚗️ 执行取代</button>
+          </div>
+        </div>
+
+        <div class="ketcher-container">
+          <iframe id="ketcher-frame" src="/static/ketcher/index.html" allow="clipboard-read; clipboard-write"></iframe>
+          <div class="site-indicator" id="siteInd" style="opacity:0">
+            <div class="site-dot"></div>
+            <span id="siteText" style="font-size:14px">检测到取代位点</span>
+          </div>
+          <div class="loading-overlay" id="loadingOverlay">
+            <div class="spinner"></div>
+            <span style="font-size:14px">正在执行取代...</span>
+          </div>
+        </div>
+
+        <!-- AI 指令栏 -->
+        <div class="optimization-console">
+        <div class="ai-bar">
+          <div class="ai-bar-title">🤖 AI 指令优化</div>
+          <div class="ai-input-row">
+            <input class="ai-input" id="aiInput" type="text" placeholder="例如：换一个增加极性的基团..." onkeydown="if(event.key==='Enter')sendAI();" />
+            <button class="ai-send-btn" id="aiSendBtn" onclick="sendAI()">发送</button>
+          </div>
+          <div class="ai-chips">
+            <button class="ai-chip" onclick="fillAI(this)">增加水溶性</button>
+            <button class="ai-chip" onclick="fillAI(this)">降低LogP</button>
+            <button class="ai-chip" onclick="fillAI(this)">提高QED</button>
+            <button class="ai-chip" onclick="fillAI(this)">增加碱性</button>
+          </div>
+          <div id="aiReply" style="display:none;font-size:10px;color:var(--text2);background:var(--bg2);padding:6px;border-radius:4px;border:1px dashed var(--bdr);max-height:80px;overflow-y:auto;line-height:1.4"></div>
+          <div class="design-feedback" id="designFeedback" style="display:none"></div>
+        </div>
+
+        <div class="candidate-compare" id="candidateCompare">
+          <div class="candidate-compare-title">
+            <span>候选分子对比</span>
+            <small>保留最近 5 次取代</small>
+          </div>
+          <div class="candidate-compare-empty">
+            执行一次取代后，这里会显示新旧分子的关键属性变化。
+          </div>
+        </div>
+
+        <!-- 迭代历史 -->
+        <div class="history-panel">
+          <div class="history-hdr">
+            <div class="history-title">📋 迭代历史</div>
+            <button class="history-clear" onclick="clearHist()">清除</button>
+          </div>
+          <div class="history-list" id="histList">
+            <div style="text-align:center;padding:12px;color:var(--text3);font-size:12px">暂无记录</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== 右栏：属性面板 ===== -->
+      </div>
+      <div class="props-panel">
+        <!-- 属性影响卡片 -->
+        <div class="props-card">
+          <div class="props-card-hdr">
+            <span class="props-card-title">📊 属性影响</span>
+            <div class="live-badge">实时计算</div>
+          </div>
+          <div class="props-card-body">
+            <div class="prop-row">
+              <div class="prop-label">LogP</div>
+              <div class="prop-val-wrap"><span class="prop-val ph" id="pLogP">-</span><span class="prop-delta" id="dLogP" style="display:none"></span></div>
+              <div class="prop-bar-track"><div class="prop-bar" id="bLogP"></div></div>
+            </div>
+            <div class="prop-row">
+              <div class="prop-label">MW</div>
+              <div class="prop-val-wrap"><span class="prop-val ph" id="pMW">-</span><span class="prop-delta" id="dMW" style="display:none"></span></div>
+              <div class="prop-bar-track"><div class="prop-bar" id="bMW"></div></div>
+            </div>
+            <div class="prop-row">
+              <div class="prop-label">QED</div>
+              <div class="prop-val-wrap"><span class="prop-val ph" id="pQED">-</span><span class="prop-delta" id="dQED" style="display:none"></span></div>
+              <div class="prop-bar-track"><div class="prop-bar" id="bQED"></div></div>
+            </div>
+            <div class="prop-row">
+              <div class="prop-label">TPSA</div>
+              <div class="prop-val-wrap"><span class="prop-val ph" id="pTPSA">-</span><span class="prop-delta" id="dTPSA" style="display:none"></span></div>
+              <div class="prop-bar-track"><div class="prop-bar" id="bTPSA"></div></div>
+            </div>
+            <div class="prop-row">
+              <div class="prop-label">SA Score</div>
+              <div class="prop-val-wrap"><span class="prop-val ph" id="pSAS">-</span><span class="prop-delta" id="dSAS" style="display:none"></span></div>
+              <div class="prop-bar-track"><div class="prop-bar" id="bSAS"></div></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Lipinski Ro5 -->
+        <div class="ro5-card">
+          <div class="ro5-title">💊 Lipinski Ro5 &amp; Veber</div>
+          <div class="ro5-grid" id="ro5Grid">
+            <div class="ro5-item"><div class="ro5-dot"></div>MW ≤ 500</div>
+            <div class="ro5-item"><div class="ro5-dot"></div>LogP ≤ 5</div>
+            <div class="ro5-item"><div class="ro5-dot"></div>HBD ≤ 5</div>
+            <div class="ro5-item"><div class="ro5-dot"></div>HBA ≤ 10</div>
+            <div class="ro5-item"><div class="ro5-dot"></div>RotB ≤ 10</div>
+            <div class="ro5-item"><div class="ro5-dot"></div>TPSA ≤ 140</div>
+          </div>
+        </div>
+
+        <!-- 优化目标 -->
+        <div class="goal-card">
+          <div class="goal-title">🎯 优化目标达成</div>
+          <div class="goal-list" id="goalList">
+            <div class="goal-item"><span>QED ≥ 0.7</span><span class="goal-status pend">待计算</span></div>
+            <div class="goal-item"><span>MW ≤ 500 Da</span><span class="goal-status pend">待计算</span></div>
+            <div class="goal-item"><span>LogP ≤ 5</span><span class="goal-status pend">待计算</span></div>
+            <div class="goal-item"><span>SA Score ≤ 3.5</span><span class="goal-status pend">待计算</span></div>
+          </div>
+        </div>
+
+        <!-- 操作按钮 -->
+        <div class="action-btns">
+          <button class="action-btn-primary" onclick="saveMol()">💾 保存当前分子</button>
+          <button class="action-btn-secondary" onclick="exportAll()">📦 导出所有迭代结果</button>
+        </div>
+      </div>
+
+    </div><!-- /workspace -->
+  </div><!-- /main-content -->
+
+  <!-- ===== 导入 SMILES Modal ===== -->
+  <div class="modal-backdrop" id="importModal">
+    <div class="modal-box">
+      <h3>📥 导入 SMILES</h3>
+      <input class="modal-input" id="importInput" type="text" placeholder="c1ccc([*])cc1" />
+      <div class="modal-actions">
+        <button class="btn" onclick="closeImport()">取消</button>
+        <button class="btn primary" onclick="confirmImport()">导入</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast-container" id="toastBox"></div>
+
+  <!-- ===== 页脚 ===== -->
+  <footer>
+    <div class="section">
+      <dl>
+        <dt>Supported</dt>
+        <dd>PYTHON</dd><dd>PYTORCH</dd><dd>RDKIT</dd>
+      </dl>
+    </div>
+    <div class="section map">
+      <h4>Visitors</h4>
+      <div class="pic">
+        <img src="/static/images/f1.png" alt="" />
+        <img src="/static/images/f2.png" class="img1" alt="" />
+      </div>
+    </div>
+    <div class="section contact">
+      <h4>Contact us</h4>
+      <div class="p"><img src="/static/images/f3.png" alt="" /><span>No. 58 Renmin Avenue, Meilan District, Haikou City, Hainan Pro</span></div>
+      <div class="p"><img src="/static/images/f4.png" alt="" /><span>0898-66254967</span></div>
+      <div class="p"><img src="/static/images/f5.png" alt="" /><span>shhuang@hainanu.edu.cn</span></div>
+    </div>
+  </footer>
+
+  <!-- ===== JS 模块 (按依赖顺序加载) ===== -->
+  <script src="/static/js/design/config.js"></script>
+  <script src="/static/js/design/api_client.js"></script>
+  <script src="/static/js/design/ui_manager.js"></script>
+  <script src="/static/js/design/fragment_browser.js"></script>
+  <script src="/static/js/design/properties_panel.js"></script>
+  <script src="/static/js/design/history_manager.js"></script>
+  <script src="/static/js/design/molecule_editor.js"></script>
+  <script src="/static/js/design/main.js"></script>
+
+</body>
+</html>

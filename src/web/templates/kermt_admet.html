@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>KERMT ADMET预测 - MedChat</title>
+    <style>
+      /* 全局与复古样式继承 */
+      * {
+        font-family: "Inter", "微软雅黑", sans-serif;
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+        text-decoration: none;
+      }
+
+      body {
+        background: #f8fafc;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        color: #1e293b;
+      }
+
+      /* Navbar */
+      .header {
+        background-color: #0c1729;
+        padding: 15px 30px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        border-bottom: 2px solid #6366f1;
+      }
+
+      .logo-section {
+        display: flex;
+        align-items: center;
+        gap: 24px;
+      }
+
+      .logo-item {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .logo-item img {
+        height: 34px;
+      }
+
+      .logo-item span {
+        font-size: 20px;
+        font-weight: 700;
+        color: #f1f5f9;
+        letter-spacing: 0.5px;
+      }
+
+      .nav-section {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+      }
+
+      .back-btn {
+        padding: 8px 20px;
+        background: rgba(255, 255, 255, 0.1);
+        color: white;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        border-radius: 20px;
+        cursor: pointer;
+        font-size: 14px;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        backdrop-filter: blur(4px);
+      }
+
+      .back-btn:hover {
+        background: rgba(255, 255, 255, 0.25);
+        border-color: rgba(255, 255, 255, 0.6);
+        transform: translateX(-3px);
+      }
+
+      /* Main content */
+      .main-content {
+        flex: 1;
+        width: 100%;
+        display: flex;
+        justify-content: center;
+        padding-bottom: 40px;
+        background: radial-gradient(circle at top right, #eef2ff 0%, #f8fafc 100%);
+      }
+
+      .content-wrapper {
+        width: 100%;
+        max-width: 1100px;
+        padding: 40px 20px 20px;
+      }
+
+      /* Page Header */
+      .page-header {
+        text-align: center;
+        margin-bottom: 40px;
+        animation: fadeIn 0.8s ease-out;
+      }
+
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(-10px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      .page-title-wrapper {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        margin-bottom: 12px;
+      }
+
+      .page-title {
+        font-size: 36px;
+        background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-weight: 900;
+        letter-spacing: -0.5px;
+      }
+      
+      .page-subtitle {
+        color: #64748b;
+        font-size: 17px;
+        font-weight: 500;
+      }
+
+      /* Card Container */
+      .content-card {
+        background: #ffffff;
+        border-radius: 24px;
+        padding: 40px;
+        box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.05), 0 0 0 1px rgba(15, 23, 42, 0.03);
+        margin-bottom: 30px;
+      }
+
+      /* Model Info Section */
+      .model-info-banner {
+        display: flex;
+        align-items: flex-start;
+        gap: 16px;
+        background: linear-gradient(to right, #f0f4ff, #fafbff);
+        border-left: 5px solid #6366f1;
+        padding: 20px 24px;
+        border-radius: 12px;
+        margin-bottom: 32px;
+      }
+
+      .model-info-icon {
+        font-size: 28px;
+        background: #e0e7ff;
+        width: 50px;
+        height: 50px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 12px;
+        box-shadow: inset 0 2px 4px rgba(255,255,255,1), 0 2px 5px rgba(0,0,0,0.05);
+      }
+
+      .model-info-content h4 {
+        color: #1e293b;
+        font-size: 16px;
+        font-weight: 700;
+        margin-bottom: 6px;
+      }
+
+      .model-info-content p {
+        color: #475569;
+        font-size: 14px;
+        line-height: 1.6;
+      }
+
+      /* Input Form */
+      .form-group {
+        margin-bottom: 24px;
+      }
+
+      .form-label-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 10px;
+      }
+
+      .form-label-row label {
+        font-weight: 700;
+        color: #334155;
+        font-size: 15px;
+      }
+
+      .try-example {
+        font-size: 13px;
+        color: #6366f1;
+        font-weight: 600;
+        cursor: pointer;
+        transition: color 0.2s;
+        border-bottom: 1px dashed #6366f1;
+      }
+
+      .try-example:hover {
+        color: #4f46e5;
+        border-bottom-style: solid;
+      }
+
+      .input-wrapper {
+        position: relative;
+      }
+
+      .smiles-input {
+        width: 100%;
+        padding: 16px 20px;
+        border: 2px solid #e2e8f0;
+        border-radius: 14px;
+        font-size: 16px;
+        background-color: #f8fafc;
+        font-family: "Courier New", Courier, monospace;
+        color: #0f172a;
+        transition: all 0.3s;
+        box-shadow: inset 0 2px 4px rgba(0,0,0,0.01);
+      }
+
+      .smiles-input:focus {
+        outline: none;
+        border-color: #6366f1;
+        background-color: #ffffff;
+        box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.15);
+      }
+
+      /* Submit Button */
+      .submit-btn {
+        width: 100%;
+        padding: 18px;
+        background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+        color: white;
+        border: none;
+        border-radius: 14px;
+        font-size: 18px;
+        font-weight: bold;
+        cursor: pointer;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        box-shadow: 0 10px 20px -5px rgba(99, 102, 241, 0.4);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+      }
+
+      .submit-btn:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 15px 25px -5px rgba(99, 102, 241, 0.5);
+      }
+      
+      .submit-btn:active {
+        transform: translateY(0);
+      }
+
+      /* Loading State */
+      .predicting-state {
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 40px 0;
+        animation: fadeIn 0.5s;
+      }
+
+      .predicting-state.active {
+        display: flex;
+      }
+
+      .loader-cube {
+        width: 60px;
+        height: 60px;
+        position: relative;
+        margin-bottom: 24px;
+      }
+
+      .loader-cube div {
+        position: absolute;
+        width: 33%;
+        height: 33%;
+        background-color: #6366f1;
+        border-radius: 4px;
+        animation: cubeGridScale 1.3s cubic-bezier(0.2, 0.8, 0.2, 1) infinite;
+      }
+      .loader-cube div:nth-child(1) { top: 0; left: 0; animation-delay: 0.2s; }
+      .loader-cube div:nth-child(2) { top: 0; left: 33%; animation-delay: 0.3s; }
+      .loader-cube div:nth-child(3) { top: 0; left: 66%; animation-delay: 0.4s; }
+      .loader-cube div:nth-child(4) { top: 33%; left: 0; animation-delay: 0.1s; }
+      .loader-cube div:nth-child(5) { top: 33%; left: 33%; animation-delay: 0.2s; }
+      .loader-cube div:nth-child(6) { top: 33%; left: 66%; animation-delay: 0.3s; }
+      .loader-cube div:nth-child(7) { top: 66%; left: 0; animation-delay: 0.0s; }
+      .loader-cube div:nth-child(8) { top: 66%; left: 33%; animation-delay: 0.1s; }
+      .loader-cube div:nth-child(9) { top: 66%; left: 66%; animation-delay: 0.2s; }
+
+      @keyframes cubeGridScale {
+        0%, 70%, 100% { transform: scale3D(1, 1, 1); }
+        35% { transform: scale3D(0, 0, 1); }
+      }
+
+      .predicting-text {
+        color: #4f46e5;
+        font-weight: 600;
+        font-size: 16px;
+        letter-spacing: 1px;
+      }
+
+      /* Results Section */
+      .results-area {
+        display: none;
+        margin-top: 40px;
+        animation: slideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+      }
+
+      .results-area.active {
+        display: block;
+      }
+
+      @keyframes slideUp {
+        from { opacity: 0; transform: translateY(30px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      .results-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 24px;
+        padding-bottom: 16px;
+        border-bottom: 2px solid #f1f5f9;
+      }
+
+      .results-header h3 {
+        font-size: 22px;
+        color: #1e293b;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .kermt-badge {
+        background: radial-gradient(circle at top left, #34d399, #10b981);
+        color: white;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.5px;
+      }
+
+      /* Properties Grid */
+      .prop-category-title {
+        font-size: 17px;
+        font-weight: 700;
+        color: #334155;
+        margin: 25px 0 15px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .prop-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+        gap: 16px;
+      }
+
+      .prop-card {
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 16px;
+        transition: all 0.3s;
+        position: relative;
+        overflow: hidden;
+      }
+      
+      .prop-card:hover {
+        background: #ffffff;
+        box-shadow: 0 10px 20px rgba(0,0,0,0.04);
+        border-color: #cbd5e1;
+        transform: translateY(-2px);
+      }
+
+      .prop-card::before {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; width: 4px; height: 100%;
+      }
+      .prop-card.good::before { background: #10b981; }
+      .prop-card.warn::before { background: #f59e0b; }
+      .prop-card.poor::before { background: #ef4444; }
+
+      .prop-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        margin-bottom: 12px;
+      }
+
+      .prop-name {
+        font-size: 14px;
+        font-weight: 700;
+        color: #475569;
+      }
+
+      .prop-value {
+        font-size: 24px;
+        font-weight: 900;
+        color: #0f172a;
+        margin-bottom: 4px;
+      }
+
+      .prop-unit {
+        font-size: 12px;
+        color: #94a3b8;
+        font-weight: 600;
+      }
+
+      .prop-status {
+        font-size: 12px;
+        font-weight: 600;
+        padding: 3px 8px;
+        border-radius: 4px;
+      }
+
+      .status-good { background: #d1fae5; color: #065f46; }
+      .status-warn { background: #fef3c7; color: #92400e; }
+      .status-poor { background: #fee2e2; color: #991b1b; }
+
+      /* Footer (Unified logic) */
+      footer {
+        background-color: #000;
+        padding: 40px 0 60px;
+        display: flex;
+        justify-content: space-around;
+        align-items: flex-start;
+      }
+
+      footer .section { flex: 1; max-width: 380px; }
+      footer dl { text-align: center; }
+      footer dt { font-size: 28px; color: #fff; font-weight: bold; margin-bottom: 40px; cursor: pointer; }
+      footer dd { font-size: 20px; color: #fff; font-weight: bold; margin-top: 30px; cursor: pointer; }
+      footer dd:hover { opacity: 0.8; }
+      footer .map { text-align: center; }
+      footer .map img { width: 300px; vertical-align: middle; }
+      footer .map h4 { font-size: 28px; color: #fff; font-weight: bold; margin-bottom: 40px; }
+      footer .map .pic { position: relative; display: inline-block; }
+      footer .map .img1 { position: absolute; width: 20px; vertical-align: middle; right: 112px; bottom: 6px; }
+      footer .contact { max-width: 380px; }
+      footer .contact h4 { text-align: center; font-size: 28px; color: #fff; font-weight: bold; margin-bottom: 40px; }
+      footer .contact .p { margin-top: 25px; padding-left: 50px; position: relative; min-height: 38px; display: flex; align-items: center; }
+      footer .contact img { width: 30px; position: absolute; left: 0; top: 50%; transform: translateY(-50%); }
+      footer .contact span { font-size: 16px; color: #fff; line-height: 1.5; }
+
+    </style>
+    <link rel="stylesheet" href="/static/css/mobile_baseline.css?v=20260511a" />
+    <link rel="stylesheet" href="/static/css/subpage_header.css?v=20260525a" />
+  </head>
+  <body>
+    <!-- Header -->
+    <div class="header">
+      <div class="logo-section">
+        <div class="logo-item">
+          <img src="/static/images/logo.png" alt="Logo" onerror="this.src='https://via.placeholder.com/34?text=Logo'" />
+          <span>海南大学药学院</span>
+        </div>
+        <div class="logo-item">
+          <img src="/static/images/logo2.png" alt="MedChat" onerror="this.src='https://via.placeholder.com/34?text=MedChat'" />
+          <span>MedChat - KERMT ADMET</span>
+        </div>
+      </div>
+      <div class="nav-section">
+        <button class="back-btn" onclick="window.location.href='/'">返回主页</button>
+      </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="main-content">
+      <div class="content-wrapper">
+        <div class="page-header">
+          <div class="page-title-wrapper">
+            <span class="page-title">KERMT ADMET 预测模型</span>
+          </div>
+          <div class="page-subtitle">基于 Kinetic GROVER Multi-Task 深度学习架构的高精度药物前瞻性分析</div>
+        </div>
+
+        <div class="content-card">
+          <!-- Information Banner -->
+          <div class="model-info-banner">
+            <div class="model-info-icon">🧬</div>
+            <div class="model-info-content">
+              <h4>高精度多任务预测</h4>
+              <p>KERMT 模型通过在大规模跨域数据上进行的图神经网络预训练，能够同时精准评估分子的吸收(A)、分布(D)、代谢(M)、排泄(E)及毒性(T)等数十项核心生化指标，为早研阶段分子设计提供科学依据。</p>
+            </div>
+          </div>
+
+          <!-- Input Area -->
+          <form id="kermtForm">
+            <div class="form-group">
+              <div class="form-label-row">
+                <label for="smilesInput">输入分子的 SMILES 结构</label>
+                <span class="try-example" onclick="fillExample()">加载伊马替尼 (Imatinib) 示例</span>
+              </div>
+              <div class="input-wrapper">
+                <input type="text" id="smilesInput" class="smiles-input" placeholder="例如: CC1=C(C=C(C=C1)NC(=O)C2=CC=C(C=C2)CN3CCN(CC3)C)NC4=NC=CC(=N4)C5=CC=CC=N5" required autocomplete="off" />
+              </div>
+            </div>
+            
+            <button type="submit" class="submit-btn" id="predictBtn">
+              <span style="font-size: 20px;">🔬</span> 启动 KERMT 深度分析
+            </button>
+          </form>
+
+          <!-- Loading State -->
+          <div class="predicting-state" id="predictingState">
+            <div class="loader-cube">
+              <div></div><div></div><div></div>
+              <div></div><div></div><div></div>
+              <div></div><div></div><div></div>
+            </div>
+            <div class="predicting-text">KERMT 图神经网络推理中，正在提取分子多维特征...</div>
+          </div>
+
+          <!-- Results Area (Mock Data placeholder) -->
+          <div class="results-area" id="resultsArea">
+            <div class="results-header">
+              <h3>
+                <span>预测结果报告</span>
+                <span class="kermt-badge">KERMT V1.0</span>
+              </h3>
+            </div>
+
+            <!-- Absorption -->
+            <div class="prop-category-title">🟢 吸收与分布 (Absorption & Distribution)</div>
+            <div class="prop-grid">
+              <div class="prop-card good">
+                <div class="prop-header">
+                  <span class="prop-name">Caco-2 细胞通透性</span>
+                  <span class="prop-status status-good">良好</span>
+                </div>
+                <div class="prop-value" id="res-caco2">-4.65</div>
+                <div class="prop-unit">log Papp (cm/s)</div>
+              </div>
+              
+              <div class="prop-card warn">
+                <div class="prop-header">
+                  <span class="prop-name">人肠道吸收 (HIA)</span>
+                  <span class="prop-status status-warn">中等</span>
+                </div>
+                <div class="prop-value" id="res-hia">0.78</div>
+                <div class="prop-unit">概率得分 (0-1)</div>
+              </div>
+
+              <div class="prop-card poor">
+                <div class="prop-header">
+                  <span class="prop-name">血脑屏障通透性 (BBB)</span>
+                  <span class="prop-status status-poor">低渗透</span>
+                </div>
+                <div class="prop-value" id="res-bbb">0.12</div>
+                <div class="prop-unit">概率得分 (0-1)</div>
+              </div>
+            </div>
+
+            <!-- Metabolism & Toxicity -->
+            <div class="prop-category-title">🟠 代谢与毒性 (Metabolism & Toxicity)</div>
+            <div class="prop-grid">
+              <div class="prop-card warn">
+                <div class="prop-header">
+                  <span class="prop-name">CYP3A4 抑制剂预测</span>
+                  <span class="prop-status status-warn">可能抑制</span>
+                </div>
+                <div class="prop-value" id="res-cyp3a4">0.65</div>
+                <div class="prop-unit">概率得分 (0-1)</div>
+              </div>
+
+              <div class="prop-card good">
+                <div class="prop-header">
+                  <span class="prop-name">hERG 毒性 (心脏毒性)</span>
+                  <span class="prop-status status-good">安全</span>
+                </div>
+                <div class="prop-value" id="res-herg">0.15</div>
+                <div class="prop-unit">概率得分 (0-1)</div>
+              </div>
+
+              <div class="prop-card good">
+                <div class="prop-header">
+                  <span class="prop-name">AMES 致突变性</span>
+                  <span class="prop-status status-good">阴性</span>
+                </div>
+                <div class="prop-value" id="res-ames">0.02</div>
+                <div class="prop-unit">概率得分 (0-1)</div>
+              </div>
+            </div>
+            
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <footer>
+      <div class="section">
+        <dl>
+          <dt>Supported</dt>
+          <dd>PYTHON</dd>
+          <dd>PYTORCH</dd>
+          <dd>DGL / RDKIT</dd>
+        </dl>
+      </div>
+      <div class="section map">
+        <h4>Visitors</h4>
+        <div class="pic">
+          <img src="/static/images/f1.png" alt="" onerror="this.src='https://via.placeholder.com/300x150'" />
+          <!-- <img src="/static/images/f2.png" class="img1" alt="" /> -->
+        </div>
+      </div>
+      <div class="section contact">
+        <h4>Contact us</h4>
+        <div class="p">
+          <img src="/static/images/f3.png" alt="" />
+          <span>海南大学药学院</span>
+        </div>
+        <div class="p">
+          <img src="/static/images/f4.png" alt="" />
+          <span>0898-66254967</span>
+        </div>
+        <div class="p">
+          <img src="/static/images/f5.png" alt="" />
+          <span>shhuang@hainanu.edu.cn</span>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      function fillExample() {
+        const input = document.getElementById('smilesInput');
+        // Imatinib smiles
+        input.value = 'CC1=C(C=C(C=C1)NC(=O)C2=CC=C(C=C2)CN3CCN(CC3)C)NC4=NC=CC(=N4)C5=CC=CC=N5'; 
+        
+        // Highlight animation
+        input.style.backgroundColor = '#e0e7ff';
+        input.style.borderColor = '#6366f1';
+        setTimeout(() => {
+          input.style.backgroundColor = '#f8fafc';
+          input.style.borderColor = '#e2e8f0';
+        }, 400);
+      }
+
+      document.getElementById('kermtForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const smiles = document.getElementById('smilesInput').value.trim();
+        if(!smiles) return;
+
+        const btn = document.getElementById('predictBtn');
+        const loader = document.getElementById('predictingState');
+        const results = document.getElementById('resultsArea');
+
+        // Hide old results, show loader, disable button
+        results.classList.remove('active');
+        btn.disabled = true;
+        btn.style.opacity = '0.7';
+        loader.classList.add('active');
+
+        // Mock API call delay (3 seconds to simulate complex GNN inference)
+        setTimeout(() => {
+          // Logic for populating frontend with random-like or specific values can be placed here if dynamically requested later.
+          // Currently, HTML statically holds the mock values.
+
+          // Restore UI state
+          loader.classList.remove('active');
+          btn.disabled = false;
+          btn.style.opacity = '1';
+          
+          results.classList.add('active');
+          
+          // Smooth scroll to results
+          results.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          
+        }, 2500);
+      });
+    </script>
+  </body>
+</html>

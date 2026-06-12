@@ -1,0 +1,18 @@
+app:
+  env_file: "${MEDCHAT_ENV_FILE:-.env}"
+  host: "${MEDCHAT_HOST:-0.0.0.0}"
+  port: "${MEDCHAT_PORT:-8080}"
+  workers: "${MEDCHAT_WORKERS:-1}"
+  log_level: "${MEDCHAT_LOG_LEVEL:-info}"
+
+paths:
+  project_root: "${MEDCHAT_PROJECT_ROOT:-.}"
+  target_db_path: "${TARGET_DB_PATH:-data/target_db/target_database.sqlite}"
+  target_cache_dir: "${TARGET_CACHE_DIR:-data/target_db/cache}"
+
+docking:
+  root_dir: "${MOLECULAR_DOCKING_ROOT:-}"
+  vina_exe: "${MOLECULAR_DOCKING_VINA:-}"
+  adfrsuite_bin: "${MOLECULAR_DOCKING_ADFR_BIN:-}"
+  prepare_ligand_cmd: "${MOLECULAR_DOCKING_PREPARE_LIGAND:-}"
+  prepare_receptor_cmd: "${MOLECULAR_DOCKING_PREPARE_RECEPTOR:-}"

@@ -1,0 +1,141 @@
+/* Shared subfunction header, aligned with the target-search page. */
+.header {
+  min-height: 64px;
+  background: #0c1729 !important;
+  padding: 14px 30px !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1) !important;
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  position: relative !important;
+  top: auto !important;
+  z-index: 20 !important;
+  border-bottom: 0 !important;
+}
+
+.header::after {
+  content: "" !important;
+  position: absolute !important;
+  bottom: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  height: 3px !important;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.5), transparent) !important;
+}
+
+.logo-section,
+.logo-item,
+.nav-section {
+  display: flex !important;
+  align-items: center !important;
+}
+
+.logo-section {
+  gap: 20px !important;
+  min-width: 0;
+}
+
+.logo-item {
+  gap: 8px !important;
+  min-width: 0;
+}
+
+.logo-item img {
+  width: auto !important;
+  height: 34px !important;
+  flex: 0 0 auto !important;
+  object-fit: contain !important;
+}
+
+.logo-item span {
+  font-size: 18px !important;
+  font-weight: 700 !important;
+  line-height: 1.2 !important;
+  color: #ffffff !important;
+  letter-spacing: 0 !important;
+  white-space: nowrap;
+}
+
+.logo-divider {
+  display: none !important;
+}
+
+.nav-section {
+  gap: 12px !important;
+  flex: 0 0 auto;
+}
+
+.back-btn {
+  padding: 8px 20px !important;
+  background: rgba(255, 255, 255, 0.2) !important;
+  color: #ffffff !important;
+  border: 1px solid rgba(255, 255, 255, 0.3) !important;
+  border-radius: 20px !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  line-height: 1.2 !important;
+  box-shadow: none !important;
+  cursor: pointer !important;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease !important;
+  backdrop-filter: none !important;
+}
+
+.back-btn:hover {
+  background: rgba(255, 255, 255, 0.3) !important;
+  border-color: rgba(255, 255, 255, 0.5) !important;
+  transform: none !important;
+}
+
+.model-status-header {
+  border: 1px solid rgba(255, 255, 255, 0.22) !important;
+  background: rgba(255, 255, 255, 0.12) !important;
+  color: #ffffff !important;
+}
+
+.model-status-header .label {
+  color: rgba(255, 255, 255, 0.82) !important;
+}
+
+@media (max-width: 768px) {
+  .header {
+    min-height: 56px !important;
+    padding: 10px 14px !important;
+    gap: 10px !important;
+  }
+
+  .logo-section {
+    gap: 10px !important;
+    overflow: hidden;
+  }
+
+  .logo-item {
+    gap: 6px !important;
+  }
+
+  .logo-item img {
+    height: 30px !important;
+  }
+
+  .logo-item span {
+    font-size: 14px !important;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .logo-item:first-child span {
+    display: none;
+  }
+
+  .nav-section {
+    gap: 8px !important;
+  }
+
+  .back-btn {
+    padding: 7px 12px !important;
+    font-size: 12px !important;
+  }
+
+  .model-status-header {
+    display: none !important;
+  }
+}

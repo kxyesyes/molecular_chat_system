@@ -1,0 +1,16 @@
+gene_symbol,protein_name,uniprot_id,organism,target_type,description,function_summary,disease_keywords,chembl_target_id
+EGFR,Epidermal growth factor receptor,P00533,Homo sapiens,Kinase,Receptor tyrosine kinase involved in cell proliferation,cell signaling and proliferation,lung cancer;breast cancer;glioblastoma,CHEMBL203
+WDR5,WD repeat-containing protein 5,P61964,Homo sapiens,Epigenetic regulator,Scaffold protein involved in chromatin regulation,histone methyltransferase complex scaffold,MYC;leukemia;cancer,CHEMBL4523
+CYP3A4,Cytochrome P450 3A4,P08684,Homo sapiens,Enzyme,Major drug-metabolizing enzyme,xenobiotic and drug metabolism,drug metabolism;DDI;toxicity,CHEMBL340
+KRAS,GTPase KRas,P01116,Homo sapiens,GTPase,Small GTPase frequently mutated in cancer,RAS/MAPK pathway signaling,pancreatic cancer;colorectal cancer;lung cancer,CHEMBL2189121
+BRAF,Serine/threonine-protein kinase B-raf,P15056,Homo sapiens,Kinase,MAP kinase pathway kinase and oncology target,MAPK pathway kinase,melanoma;colorectal cancer;thyroid cancer,CHEMBL5145
+JAK2,Tyrosine-protein kinase JAK2,O60674,Homo sapiens,Kinase,Non-receptor tyrosine kinase in cytokine signaling,JAK/STAT signaling,myelofibrosis;polycythemia vera;leukemia,CHEMBL2971
+PIK3CA,"Phosphatidylinositol 4,5-bisphosphate 3-kinase catalytic subunit alpha",P42336,Homo sapiens,Kinase,PI3K catalytic subunit involved in growth signaling,PI3K/AKT signaling,breast cancer;solid tumor;overgrowth syndrome,CHEMBL4005
+ALK,ALK tyrosine kinase receptor,Q9UM73,Homo sapiens,Kinase,Receptor tyrosine kinase with oncogenic fusion variants,RTK signaling,lung cancer;lymphoma;neuroblastoma,CHEMBL4247
+MET,Hepatocyte growth factor receptor,P08581,Homo sapiens,Kinase,Receptor tyrosine kinase activated by HGF,invasion and growth signaling,lung cancer;gastric cancer;papillary renal carcinoma,CHEMBL3717
+HDAC1,Histone deacetylase 1,Q13547,Homo sapiens,Epigenetic enzyme,Histone deacetylase involved in transcriptional repression,chromatin remodeling,cancer;lymphoma;neurological disease,CHEMBL325
+CDK2,Cyclin-dependent kinase 2,P24941,Homo sapiens,Kinase,Cell-cycle kinase regulating G1/S transition,cell cycle regulation,cancer;cell cycle disorder,CHEMBL301
+KDR,Vascular endothelial growth factor receptor 2,P35968,Homo sapiens,Kinase,VEGF receptor driving angiogenesis,angiogenesis signaling,angiogenesis;cancer;macular degeneration,CHEMBL279
+MYC,Myc proto-oncogene protein,P01106,Homo sapiens,Transcription factor,Transcription factor controlling growth and proliferation,transcriptional regulation,MYC-driven cancer;lymphoma;leukemia,CHEMBL1250375
+TP53,Cellular tumor antigen p53,P04637,Homo sapiens,Tumor suppressor,Tumor suppressor transcription factor responding to DNA damage,DNA damage response,cancer;Li-Fraumeni syndrome,CHEMBL4096
+AURKA,Aurora kinase A,O14965,Homo sapiens,Kinase,Mitotic serine/threonine kinase,mitosis and spindle assembly,cancer;aneuploidy,CHEMBL4722

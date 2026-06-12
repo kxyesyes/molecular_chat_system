@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>反向寻靶分析 - MedChat</title>
+
+    <!-- 外部依赖 -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script>
+      window.reverseTargetDependencyStatus = { threeDmolLoaded: true };
+    </script>
+    <script src="https://3dmol.org/build/3Dmol-min.js"
+            onerror="window.reverseTargetDependencyStatus.threeDmolLoaded=false"></script>
+
+    <!-- 独立样式表 -->
+    <link rel="stylesheet" href="/static/css/reverse_target.css?v=20260516a" />
+    <link rel="stylesheet" href="/static/css/mobile_baseline.css?v=20260511a" />
+    <link rel="stylesheet" href="/static/css/subpage_header.css?v=20260525a" />
+  </head>
+  <body>
+    <!-- ═══════════ 头部导航 ═══════════ -->
+    <div class="header">
+      <div class="logo-section">
+        <div class="logo-item">
+          <img src="/static/images/logo.png" alt="Logo" />
+          <span>海南大学药学院</span>
+        </div>
+        <div class="logo-item">
+          <img src="/static/images/logo2.png" alt="MedChat" />
+          <span>MedChat - 反向寻靶</span>
+        </div>
+      </div>
+      <div class="nav-section">
+        <button class="back-btn" onclick="window.location.href='/'">返回主页</button>
+      </div>
+    </div>
+
+    <!-- ═══════════ 主要内容区域 ═══════════ -->
+    <div class="main-content">
+      <div class="content-wrapper">
+        <div class="page-header">
+          <div class="page-title">
+            🎯 反向寻靶分析系统
+            <span style="font-size:14px;background:#4f46e5;color:white;padding:2px 10px;border-radius:20px;margin-left:15px;font-weight:normal;">ChEMBL v36</span>
+          </div>
+        </div>
+
+        <!-- ── 统计卡片 ── -->
+        <div class="stats-grid" id="statsGrid">
+          <div class="stat-item">
+            <div class="stat-value">-</div>
+            <div class="stat-label">ChEMBL 36 记录总数</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-value">-</div>
+            <div class="stat-label">唯一活性分子</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-value">-</div>
+            <div class="stat-label">覆盖药物靶点</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-value">2048 + 166</div>
+            <div class="stat-label">混合指纹维度</div>
+          </div>
+        </div>
+
+        <!-- ── 主功能卡片 ── -->
+        <div class="content-card">
+          <div class="tabs">
+            <div class="tab active" onclick="switchTab('single')">单分子查询</div>
+            <div class="tab" onclick="switchTab('batch')">批量预测</div>
+          </div>
+
+          <!-- 单分子查询面板 -->
+          <div id="single-panel">
+            <div class="info-box" style="background:linear-gradient(135deg,#ede9fe,#ddd6fe);border-color:#7c3aed;color:#4c1d95;">
+              <strong>🔬 智能逆向寻靶 — 3D 药效团精修模式</strong>
+              <p>系统将基于 831,120 条 ChEMBL 36 实验数据，采用 <b>2D 大规模快筛 + 3D 空间精修</b> 级联策略：先利用双重指纹算法得到 Top 候选分子，再动态生成 3D 构象并提取<b>氢键给体/受体、疏水中心、芳香环、电荷中心</b>等空间药效团进行 Tanimoto 打分重排，挖掘具有骨架跃迁潜力的全新靶点。</p>
+            </div>
+
+            <div class="recall-presets" aria-label="反向寻靶参数预设">
+              <button type="button" class="preset-btn active" onclick="applyReverseTargetPreset('broad')">
+                广谱召回
+                <span>Top 100 · 阈值 0.5</span>
+              </button>
+              <button type="button" class="preset-btn" onclick="applyReverseTargetPreset('precise')">
+                精准模式
+                <span>Top 20 · 阈值 0.6</span>
+              </button>
+              <div class="preset-note">
+                对标 Swiss 的广谱检索时建议使用广谱召回；需要高置信靶点时切换精准模式。
+              </div>
+            </div>
+
+            <form id="predictForm">
+              <div class="form-group">
+                <label for="smiles">🧬 分子结构 (SMILES) <span style="color:#ef4444">*</span></label>
+                <input type="text" id="smiles" name="smiles"
+                       placeholder="例如: CC(=O)OC1=CC=CC=C1C(=O)O (阿司匹林)" required />
+              </div>
+
+              <div class="section-title">⚙️ 分析参数</div>
+              <div class="params-grid">
+                <div class="form-group">
+                  <label for="threshold">相似度阈值 (0.0 - 1.0)</label>
+                  <input type="number" id="threshold" name="threshold" min="0" max="1" step="0.05" value="0.5" />
+                </div>
+                <div class="form-group">
+                  <label for="topK">结果返回数量</label>
+                  <input type="number" id="topK" name="top_k" min="1" max="100" value="100" />
+                </div>
+                <div class="form-group" id="param3dRefine">
+                  <label for="maxRefine">3D 精修候选数</label>
+                  <input type="number" id="maxRefine" name="max_refine" min="1" max="100" value="50" />
+                </div>
+                <div class="form-group" id="param3dAlpha">
+                  <label for="alpha3d">3D 权重比例</label>
+                  <input type="number" id="alpha3d" name="alpha_3d" min="0.1" max="0.9" step="0.1" value="0.6" />
+                </div>
+                <div class="form-group organism-filter-group">
+                  <label for="humanOnly">结果物种过滤</label>
+                  <label class="inline-check">
+                    <input type="checkbox" id="humanOnly" checked />
+                    <span>仅展示 Human 结果</span>
+                  </label>
+                </div>
+              </div>
+
+              <button type="submit" class="submit-btn" id="submitBtn"
+                      style="background:linear-gradient(135deg,#4f46e5,#7c3aed);">
+                🔬 3D 药效团精修预测
+              </button>
+            </form>
+          </div>
+
+          <!-- 批量预测面板 -->
+          <div id="batch-panel" style="display:none">
+            <div class="info-box" style="background:#f0fdf4;border-color:#22c55e;color:#15803d">
+              <strong>📂 批量预测模式</strong>
+              <p>支持上传 CSV 或 TXT 文件进行批量预测。CSV 文件需包含 "smiles" 列，TXT 文件每行一个 SMILES。单次建议不超过 100 个分子。</p>
+            </div>
+
+            <form id="batchForm">
+              <div class="form-group">
+                <label>上传文件</label>
+                <div class="upload-area" id="uploadArea"
+                     onclick="document.getElementById('batchFile').click()">
+                  <div class="upload-icon">📄</div>
+                  <div class="upload-text">点击或拖拽文件到此处上传</div>
+                  <div class="file-info" id="fileInfo"></div>
+                </div>
+                <input type="file" id="batchFile" name="file" accept=".csv,.txt,.smi" style="display:none" required />
+              </div>
+
+              <div class="section-title">⚙️ 分析参数</div>
+              <div class="params-grid">
+                <div class="form-group">
+                  <label for="batchThreshold">相似度阈值 (0.0 - 1.0)</label>
+                  <input type="number" id="batchThreshold" name="threshold" min="0" max="1" step="0.05" value="0.6" />
+                </div>
+                <div class="form-group">
+                  <label for="batchTopK">每个分子返回数量</label>
+                  <input type="number" id="batchTopK" name="top_k" min="1" max="100" value="5" />
+                </div>
+                <div class="form-group organism-filter-group">
+                  <label for="batchHumanOnly">结果物种过滤</label>
+                  <label class="inline-check">
+                    <input type="checkbox" id="batchHumanOnly" checked />
+                    <span>仅展示 Human 结果</span>
+                  </label>
+                </div>
+              </div>
+
+              <button type="submit" class="submit-btn" id="batchSubmitBtn">🚀 开始批量预测</button>
+            </form>
+          </div>
+
+          <!-- 加载状态 -->
+          <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p style="color:#64748b">正在进行全库指纹比对分析，请稍候...</p>
+          </div>
+
+          <!-- 错误提示 -->
+          <div id="error" style="display:none;background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;padding:16px;border-radius:8px;margin-top:20px;">
+            <strong>⚠️ 分析出错</strong>
+            <p id="errorText" style="margin-top:4px"></p>
+          </div>
+
+          <!-- 结果区域 -->
+          <div class="results-container" id="results">
+            <div class="result-header-bar" style="display:flex;justify-content:space-between;align-items:center;">
+              <span id="resultCount">分析结果</span>
+              <button onclick="exportData()" class="export-btn" id="exportBtn" style="display:none">
+                <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                </svg>
+                导出CSV
+              </button>
+            </div>
+            <table class="results-table">
+              <thead id="resultsHead">
+                <tr>
+                  <th width="60">排名</th>
+                  <th>靶点名称</th>
+                  <th>生物体</th>
+                  <th>关联ID</th>
+                  <th>活性类型</th>
+                  <th>活性值 (nM)</th>
+                  <th>相似分子</th>
+                  <th width="200">综合相似度</th>
+                </tr>
+              </thead>
+              <tbody id="resultsBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════ 相似分子弹窗 ═══════════ -->
+    <div class="modal" id="similarModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 id="modalTitle">相似分子详情</h2>
+          <button class="modal-close" onclick="closeSimilarModal()">×</button>
+        </div>
+        <div class="modal-body" id="modalBody">
+          <div class="loading show">
+            <div class="spinner"></div>
+            <p>加载分子数据中...</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════ 3D 药效团详情弹窗 ═══════════ -->
+    <div class="modal" id="pharm3DModal">
+      <div class="modal-content" style="max-width:1100px;height:85vh;display:flex;flex-direction:column;background:#f8fafc;padding:0;overflow:hidden;border:none;box-shadow:0 25px 50px -12px rgba(0,0,0,0.5);">
+        <div class="modal-header" style="padding:20px 30px;background:white;border-bottom:1px solid #e2e8f0;">
+          <h3 id="pharm3DTitle" style="margin:0;font-size:20px;display:flex;align-items:center;gap:10px;">
+            <span style="font-size:24px;">🔬</span> 3D 药效团可视化分析
+          </h3>
+          <button class="modal-close" onclick="closePharm3DModal()">×</button>
+        </div>
+        <div class="modal-body" style="flex:1;display:flex;gap:0;padding:0;overflow:hidden;">
+          <!-- 左侧：3D 查看器 -->
+          <div style="flex:1.8;position:relative;background:#020617;display:flex;flex-direction:column;">
+            <div id="viewer-3d" style="width:100%;height:100%;cursor:grab;"></div>
+            <!-- 悬浮控制面板 -->
+            <div style="position:absolute;bottom:25px;left:25px;display:flex;gap:10px;z-index:10;">
+              <button onclick="resetCamera()"
+                      style="background:rgba(255,255,255,0.1);backdrop-filter:blur(12px);color:white;border:1px solid rgba(255,255,255,0.2);padding:8px 16px;border-radius:12px;font-size:13px;font-weight:500;cursor:pointer;transition:all 0.2s;">
+                🏠 重置视角
+              </button>
+              <button id="spinBtn" onclick="toggleSpin()"
+                      style="background:rgba(255,255,255,0.1);backdrop-filter:blur(12px);color:white;border:1px solid rgba(255,255,255,0.2);padding:8px 16px;border-radius:12px;font-size:13px;font-weight:500;cursor:pointer;transition:all 0.2s;">
+                🔄 自动旋转
+              </button>
+            </div>
+            <!-- 操作提示 -->
+            <div style="position:absolute;top:25px;left:25px;pointer-events:none;">
+              <div style="background:rgba(15,23,42,0.6);backdrop-filter:blur(8px);padding:10px 15px;border-radius:10px;border:1px solid rgba(255,255,255,0.1);">
+                <div style="color:#94a3b8;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">操作指南</div>
+                <div style="color:white;font-size:12px;line-height:1.6;">左键: 旋转 | 右键: 平移 | 滚轮: 缩放</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 右侧：属性与特征列表 -->
+          <div style="width:380px;background:white;border-left:1px solid #e2e8f0;display:flex;flex-direction:column;overflow:hidden;">
+            <div style="padding:25px;flex:1;overflow-y:auto;">
+              <div id="pharmInfoCard" class="info-card" style="margin-bottom:25px;border:1px solid #f1f5f9;background:#f8fafc;"></div>
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:15px;">
+                <h4 style="margin:0;font-size:15px;color:#1e293b;font-weight:700;">药效团特征点</h4>
+                <span id="featCountTag" style="background:#eff6ff;color:#3b82f6;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;">0 个特征</span>
+              </div>
+              <div id="pharmPointsList" style="display:flex;flex-direction:column;gap:2px;"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════ 页脚 ═══════════ -->
+    <footer>
+      <div class="section">
+        <dl>
+          <dt>Supported</dt>
+          <dd>PYTHON</dd>
+          <dd>PYTORCH</dd>
+          <dd>RDKIT</dd>
+        </dl>
+      </div>
+      <div class="section map">
+        <h4>Visitors</h4>
+        <div class="pic">
+          <img src="/static/images/f1.png" alt="" />
+          <img src="/static/images/f2.png" class="img1" alt="" />
+        </div>
+      </div>
+      <div class="section contact">
+        <h4>Contact us</h4>
+        <div class="p">
+          <img src="/static/images/f3.png" alt="" />
+          <span>No. 58 Renmin Avenue, Meilan District, Haikou City, Hainan Pro</span>
+        </div>
+        <div class="p">
+          <img src="/static/images/f4.png" alt="" />
+          <span>0898-66254967</span>
+        </div>
+        <div class="p">
+          <img src="/static/images/f5.png" alt="" />
+          <span>shhuang@hainanu.edu.cn</span>
+        </div>
+      </div>
+    </footer>
+
+    <!-- ═══════════ 模块化 JS（按依赖顺序加载） ═══════════ -->
+    <script src="/static/js/reverse_target/config.js?v=20260516a"></script>
+    <script src="/static/js/reverse_target/api_client.js?v=20260508a"></script>
+    <script src="/static/js/reverse_target/ui_manager.js?v=20260508a"></script>
+    <script src="/static/js/reverse_target/results_renderer.js?v=20260516a"></script>
+    <script src="/static/js/reverse_target/viewer_3d.js?v=20260505a"></script>
+    <script src="/static/js/reverse_target/main.js?v=20260516a"></script>
+  </body>
+</html>

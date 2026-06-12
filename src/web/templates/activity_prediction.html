@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>活性预测 - MedChat</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <link rel="stylesheet" href="/static/css/activity_prediction_v2.css">
+    <link rel="stylesheet" href="/static/css/mobile_baseline.css?v=20260511a">
+    <link rel="stylesheet" href="/static/css/subpage_header.css?v=20260525a">
+  </head>
+  <body>
+    <div class="header">
+      <div class="logo-section">
+        <div class="logo-item">
+          <img src="/static/images/logo.png" alt="Logo" />
+          <span>海南大学药学院</span>
+        </div>
+        <div class="logo-item">
+          <img src="/static/images/logo2.png" alt="MedChat" />
+          <span>MedChat - 活性预测</span>
+        </div>
+      </div>
+      <div class="nav-section" style="display: flex; gap: 10px; align-items: center;">
+        <div class="model-status-header">
+          <button id="modelInfoBtn" class="info-trigger" title="查看训练详情">🔥</button>
+          <span class="label">当前模型:</span>
+          <select id="modelSelector">
+            <option value="">(Loading...)</option>
+          </select>
+          <button id="deleteModelBtn" class="icon-btn-danger" onclick="confirmDeleteModel()" title="删除当前模型">🗑️</button>
+
+          <!-- 模型信息浮窗 -->
+          <div id="modelInfoPopover" class="model-info-popover">
+            <div class="popover-arrow"></div>
+            <div class="popover-content" id="popoverContent">
+              (暂无模型详情)
+            </div>
+          </div>
+        </div>
+        <button class="back-btn" onclick="window.location.href = '/'">返回主页</button>
+      </div>
+    </div>
+
+    <div class="main-content">
+      <div class="content-wrapper">
+        <div class="hero stagger-item">
+        <div class="page-title-wrapper">
+          <span class="page-icon">🧬</span>
+          <h1 class="page-title">活性预测</h1>
+        </div>
+        <p class="page-subtitle">基于多尺度递约图神经网络(RG-MPNN)的分子属性推理系统</p>
+
+        <div class="quick-stats">
+          <div class="stat-card" style="animation-delay: 0.1s;">
+            <div class="stat-label">模型状态</div>
+            <div class="stat-value" style="color:var(--success)">Ready</div>
+          </div>
+          <div class="stat-card" style="animation-delay: 0.2s;">
+            <div class="stat-label">推理架构</div>
+            <div class="stat-value">RG-MPNN</div>
+          </div>
+          <div class="stat-card" style="animation-delay: 0.3s;">
+            <div class="stat-label">当前任务</div>
+            <div id="taskTypeStat" class="stat-value">回归</div>
+          </div>
+          <div class="stat-card" style="animation-delay: 0.4s;">
+            <div class="stat-label">预测队列</div>
+            <div id="statusStat" class="stat-value">Idle</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="content-card stagger-item" style="animation-delay: 0.5s;">
+          <div class="tabs">
+            <button
+              class="tab active"
+              type="button"
+              onclick="switchTab('single', this)"
+            >
+              ⚡ 单分子预测
+            </button>
+            <button
+              class="tab"
+              type="button"
+              onclick="switchTab('batch', this)"
+            >
+              📦 批量预测
+            </button>
+            <button
+              class="tab"
+              type="button"
+              onclick="switchTab('train', this)"
+            >
+              🚀 模型训练
+            </button>
+          </div>
+
+          <div id="single-panel" class="panel">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">单分子推理</div>
+                <div class="panel-desc">
+                  输入一个 SMILES，立即得到活性值、类别和置信度。
+                </div>
+              </div>
+              <span class="chip">Low-latency Inference</span>
+            </div>
+
+            <form id="predictForm">
+              <div class="form-group" style="margin-bottom: 24px">
+                <label
+                  >SMILES 分子结构
+                  <span class="inline-link" onclick="fillExample()"
+                    >👉 使用示例</span
+                  ></label
+                >
+                <textarea
+                  id="smilesInput"
+                  name="smiles"
+                  rows="3"
+                  placeholder="例如: CC(=O)OC1=CC=CC=C1C(=O)O"
+                  required
+                ></textarea>
+              </div>
+
+
+
+
+
+
+              <button type="submit" class="submit-btn" id="submitBtn">
+                ⚡ 开始预测
+              </button>
+            </form>
+          </div>
+
+          <div id="batch-panel" class="panel" style="display: none">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">批量推理流水线</div>
+                <div class="panel-desc">
+                  上传分子数据集并进行批量预测，可控制解析策略与结果导出格式。
+                </div>
+              </div>
+              <span class="chip">Queue + Batch</span>
+            </div>
+
+            <form id="batchForm">
+              <div
+                class="upload-area"
+                onclick="document.getElementById('batchFile').click()"
+                style="margin-bottom: 24px"
+              >
+                <div style="font-size: 40px">📁</div>
+                <div style="margin-top: 8px">
+                  点击上传或拖拽文件（支持 .csv / .txt / .smi）
+                </div>
+                <div class="file-info" id="fileInfo">未选择文件</div>
+              </div>
+              <input
+                type="file"
+                id="batchFile"
+                name="file"
+                accept=".csv,.txt,.smi"
+                style="display: none"
+                required
+              />
+
+
+
+
+              <button type="submit" class="submit-btn" id="batchSubmitBtn">
+                📦 批量预测
+              </button>
+            </form>
+          </div>
+
+          <div id="train-panel" class="panel" style="display: none">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">模型训练配置</div>
+                <div class="panel-desc">配置超参数，点击「启动训练」后底部监控抽屉将自动展开。</div>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center">
+                <button type="button" class="icon-btn" onclick="importConfig()" title="导入配置">📥 导入配置</button>
+                <button type="button" class="icon-btn" onclick="exportConfig()" title="导出配置">📤 导出配置</button>
+                <span class="chip">Train Lab</span>
+              </div>
+            </div>
+
+            <form id="trainForm" onsubmit="event.preventDefault(); showLaunchModal();">
+              <div
+                class="upload-area"
+                id="trainUploadArea"
+                onclick="document.getElementById('trainFile').click()"
+              >
+                <div style="font-size:40px">🧪</div>
+                <div style="margin-top:8px">点击上传训练数据集（.csv）— 上传后自动进行数据预检</div>
+                <div class="file-info" id="trainFileInfo">未选择训练集</div>
+              </div>
+              <input type="file" id="trainFile" name="file" accept=".csv,.pde" style="display:none" required />
+
+              <div class="grid-3" style="margin-top:16px">
+                <div class="form-group">
+                  <label>SMILES 列名</label>
+                  <input id="smilesColumn" type="text" value="smiles" placeholder="例如 smiles" />
+                </div>
+                <div class="form-group">
+                  <label>目标列名（Label）</label>
+                  <input id="targetColumn" type="text" placeholder="例如 pIC50" required />
+                </div>
+                <div class="form-group">
+                  <label>划分策略</label>
+                  <select id="splitStrategy">
+                    <option>Scaffold Split</option>
+                    <option>Random Split</option>
+                    <option>Stratified</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="grid-4">
+                <div class="form-group">
+                  <label>任务类型</label>
+                  <select id="trainTaskType">
+                    <option value="regression">回归</option>
+                    <option value="classification">分类</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Epochs</label>
+                  <input id="epochs" type="number" value="120" min="1" max="2000" />
+                </div>
+                <div class="form-group">
+                  <label>Learning Rate</label>
+                  <input id="learningRate" type="number" value="0.001" step="0.0001" />
+                </div>
+                <div class="form-group">
+                  <label>Batch Size</label>
+                  <input id="batchSize" type="number" value="64" min="1" />
+                </div>
+              </div>
+
+              <details class="advanced">
+                <summary>⚙️ 高级超参数 · Advanced Settings</summary>
+                <div class="advanced-body grid-4">
+                  <div class="form-group"><label>Dropout</label><input id="dropout" type="number" value="0.20" step="0.01" min="0" max="0.9" /></div>
+                  <div class="form-group"><label>图层数</label><input id="trainLayers" type="number" value="5" min="1" /></div>
+                  <div class="form-group"><label>隐藏维度</label><input id="trainHidden" type="number" value="256" min="32" /></div>
+                  <div class="form-group"><label>Weight Decay</label><input id="trainWeightDecay" type="number" value="0.0001" step="0.0001" /></div>
+                  <div class="form-group"><label>早停耐心</label><input id="trainPatience" type="number" value="12" min="1" /></div>
+                  <div class="form-group">
+                    <label>损失函数</label>
+                    <select id="trainLoss"><option>MSE</option><option>MAE</option><option>Huber</option></select>
+                  </div>
+                  <div class="form-group">
+                    <label>学习率调度</label>
+                    <select id="trainScheduler"><option>Cosine</option><option>Step</option><option>Plateau</option></select>
+                  </div>
+                  <div class="form-group">
+                    <label>特征组合</label>
+                    <select id="trainFeatureMix"><option>Graph + Morgan</option><option>Graph only</option><option>Descriptors only</option></select>
+                  </div>
+                </div>
+              </details>
+
+              <div class="launch-row">
+                <div id="trainHint" class="train-hint"></div>
+                <button type="submit" class="submit-btn launch-btn" id="trainBtn">🚀 启动训练</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p>正在预测，请稍候...</p>
+          </div>
+
+          <div class="results-container" id="results">
+            <div class="results-title">预测分析报告</div>
+            <div id="singleSummary" class="single-summary" style="display: none;">
+              <div class="single-summary-top">
+                <div class="single-hero-card">
+                  <div class="single-eyebrow">单分子结果</div>
+                  <div class="single-score-row">
+                    <div id="singleScoreValue" class="single-score-value">0.000</div>
+                    <span id="singleClassTag" class="tag tag-neutral">Unknown</span>
+                  </div>
+                  <div id="singleModelMeta" class="single-model-meta">活性回归</div>
+                </div>
+
+                <div class="single-stat-card">
+                  <div class="single-stat-label">置信度</div>
+                  <div id="singleConfidenceValue" class="single-stat-value">--</div>
+                </div>
+
+                <div class="single-stat-card">
+                  <div class="single-stat-label">活性分类</div>
+                  <div id="singleClassValue" class="single-stat-value">--</div>
+                </div>
+
+                <div class="single-stat-card">
+                  <div class="single-stat-label">任务类型</div>
+                  <div id="singleTaskTypeValue" class="single-stat-value">--</div>
+                </div>
+              </div>
+
+              <div class="activity-band-card">
+                <div class="activity-band-header">
+                  <div>
+                    <div class="activity-band-title">活性区间</div>
+                    <div id="activityBandSubtitle" class="activity-band-subtitle">查看预测结果在当前区间中的位置。</div>
+                  </div>
+                  <div id="activityBandRange" class="activity-band-range">4.0 - 9.0</div>
+                </div>
+
+                <div class="activity-band-track">
+                  <div class="activity-band-segment band-low"><span>低</span></div>
+                  <div class="activity-band-segment band-medium"><span>中</span></div>
+                  <div class="activity-band-segment band-high"><span>高</span></div>
+                  <div id="activityBandMarker" class="activity-band-marker">
+                    <span id="activityBandMarkerLabel" class="activity-band-marker-label">0.000</span>
+                  </div>
+                </div>
+
+                <div class="activity-band-scale">
+                  <span id="bandTickStart">4.0</span>
+                  <span id="bandTickLow">5.0</span>
+                  <span id="bandTickHigh">7.0</span>
+                  <span id="bandTickEnd">9.0</span>
+                </div>
+              </div>
+            </div>
+            <div id="batchHistogram" style="width: 100%; height: 280px; display: none; padding: 10px; margin-bottom: 20px;"></div>
+            <div class="results-table-wrap">
+            <table class="results-table">
+              <thead>
+                <tr>
+                  <th>SMILES</th>
+                  <th>预测活性值</th>
+                  <th>分类</th>
+                  <th>置信度</th>
+                </tr>
+              </thead>
+              <tbody id="resultsBody"></tbody>
+            </table>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+
+
+
+    <footer>
+      <div class="section">
+        <dl>
+          <dt>Supported</dt>
+          <dd>PYTHON</dd>
+          <dd>PYTORCH</dd>
+          <dd>RDKIT</dd>
+        </dl>
+      </div>
+      <div class="section map">
+        <h4>Visitors</h4>
+        <div class="pic">
+          <img src="/static/images/f1.png" alt="" />
+          <img src="/static/images/f2.png" class="img1" alt="" />
+        </div>
+      </div>
+      <div class="section contact">
+        <h4>Contact us</h4>
+        <div class="p">
+          <img src="/static/images/f3.png" alt="" />
+          <span>海南大学药学院</span>
+        </div>
+        <div class="p">
+          <img src="/static/images/f4.png" alt="" />
+          <span>0898-66254967</span>
+        </div>
+        <div class="p">
+          <img src="/static/images/f5.png" alt="" />
+          <span>shhuang@hainanu.edu.cn</span>
+        </div>
+      </div>
+    </footer>
+
+
+    <!-- ══ Preflight Modal ══ -->
+    <div id="preflight-modal" class="modal-overlay" style="display:none">
+      <div class="modal-box">
+        <div class="modal-header">
+          <div class="modal-title">📊 数据预检 · Data Preflight</div>
+          <button class="modal-close" onclick="closePreflight()">✕</button>
+        </div>
+        <div id="preflight-body" class="preflight-body">
+          <div class="preflight-meta" id="preflight-meta"></div>
+          <div class="preflight-cols" id="preflight-cols"></div>
+          <div style="margin-top:16px;font-size:13px;color:var(--muted);font-weight:600">预览（前5行）</div>
+          <div class="preflight-preview" id="preflight-preview"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn-secondary" onclick="closePreflight()">取消</button>
+          <button class="btn-primary" onclick="confirmPreflight()">确认列映射 →</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ Launch Summary Modal ══ -->
+    <div id="launch-modal" class="modal-overlay" style="display:none">
+      <div class="modal-box">
+        <div class="modal-header">
+          <div class="modal-title">🚀 训练启动摘要 · Launch Summary</div>
+          <button class="modal-close" onclick="closeLaunchModal()">✕</button>
+        </div>
+        <div id="launch-summary" class="launch-summary"></div>
+        <div class="modal-footer">
+          <button class="btn-secondary" onclick="closeLaunchModal()">返回修改</button>
+          <button class="btn-primary" id="confirmLaunchBtn" onclick="confirmLaunch()">确认启动 →</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ Training Minimized Dock ══ -->
+    <div id="train-dock" class="train-dock" style="display:none">
+      <div class="dock-left">
+        <span class="dock-dot running" id="dock-dot"></span>
+        <span id="dock-status-text">Training</span>
+        <span class="dock-sep">·</span>
+        <span id="dock-epoch-text">Epoch 0/120</span>
+        <span class="dock-sep">·</span>
+        <span id="dock-metric-text">—</span>
+        <span class="dock-sep">·</span>
+        <span id="dock-eta-text">ETA —</span>
+      </div>
+      <button class="dock-view-btn" onclick="openDrawer()">查看 ↑</button>
+    </div>
+
+    <!-- ══ Training Bottom Drawer ══ -->
+    <div id="train-drawer" class="train-drawer" style="display:none">
+      <div class="drawer-handle" id="drawerHandle">
+        <div class="drag-pill"></div>
+        <div class="drawer-title-row">
+          <span class="drawer-title-text">🔬 训练监控 · Train Lab</span>
+          <div class="drawer-controls">
+            <button class="drawer-ctrl" onclick="toggleDrawerFull()" title="全屏/半屏">⤢</button>
+            <button class="drawer-ctrl" onclick="minimizeDrawer()" title="最小化">—</button>
+            <button class="drawer-ctrl" onclick="closeDrawer()" title="关闭">✕</button>
+          </div>
+        </div>
+      </div>
+      <div class="drawer-body">
+        <div class="drawer-stats-row">
+          <div class="dstat">
+            <div class="dstat-label">状态</div>
+            <div id="d-status" class="dstat-value val-running">Running</div>
+          </div>
+          <div class="dstat">
+            <div class="dstat-label">Epoch</div>
+            <div id="d-epoch" class="dstat-value">0 / <span id="d-total">120</span></div>
+          </div>
+          <div class="dstat">
+            <div class="dstat-label">ETA</div>
+            <div id="d-eta" class="dstat-value">—</div>
+          </div>
+          <div class="dstat">
+            <div class="dstat-label">指标</div>
+            <div id="d-metric" class="dstat-value">—</div>
+          </div>
+          <div class="drawer-progress-wrap">
+            <div class="progress-bar-outer" style="height:6px">
+              <div class="progress-bar-inner" id="drawerProgressBar" style="width:0%"></div>
+            </div>
+          </div>
+        </div>
+        <div class="drawer-main">
+          <div id="metricsChart" class="metrics-chart"></div>
+          <div class="drawer-log-wrap">
+            <div class="log-header">训练日志</div>
+            <div class="log-box" id="trainLog">[Init] Training console ready...</div>
+          </div>
+        </div>
+        <div id="trainResultArea" class="train-result-area" style="display:none">
+          <div class="metric-grid">
+            <div class="metric-card"><div class="metric-name">R²</div><div class="metric-value" id="resR2">—</div></div>
+            <div class="metric-card"><div class="metric-name">RMSE</div><div class="metric-value" id="resRMSE">—</div></div>
+            <div class="metric-card"><div class="metric-name">训练耗时</div><div class="metric-value" id="resTime">—</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/js/activity_prediction/utils.js"></script>
+    <script src="/static/js/activity_prediction/model_manager.js"></script>
+    <script src="/static/js/activity_prediction/charts.js"></script>
+    <script src="/static/js/activity_prediction/results_renderer.js"></script>
+    <script src="/static/js/activity_prediction/preflight.js"></script>
+    <script src="/static/js/activity_prediction/training_monitor.js"></script>
+    <script src="/static/js/activity_prediction/main.js"></script>
+    <script>
+      document.addEventListener("DOMContentLoaded", function () {
+        ActivityMain.init();
+      });
+    </script>
+
+  </body>
+</html>

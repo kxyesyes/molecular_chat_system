@@ -1,0 +1,4 @@
+  File "<string>", line 1
+    import pandas as pd; df = pd.read_excel('brics/标签计算说明.xlsx', sheet_name=None); [print(f'Sheet:{k}'); print(v.to_string()) for k,v in df.items()]
+                                                                                                       ^
+SyntaxError: invalid syntax

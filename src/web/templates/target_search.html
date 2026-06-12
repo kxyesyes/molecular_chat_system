@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>靶点搜寻 - MedChat</title>
+  <meta name="description" content="本地靶点数据库与蛋白结构文件检索 demo" />
+  <link rel="stylesheet" href="/static/css/target_search.css?v=20260516b" />
+  <link rel="stylesheet" href="/static/css/mobile_baseline.css?v=20260511a" />
+</head>
+
+<body>
+  <div class="header">
+    <div class="logo-section">
+      <div class="logo-item">
+        <img src="/static/images/logo.png" alt="Logo" />
+        <span>海南大学药学院</span>
+      </div>
+      <div class="logo-item">
+        <img src="/static/images/logo2.png" alt="MedChat" />
+        <span>MedChat - 靶点数据库</span>
+      </div>
+    </div>
+    <div class="nav-section">
+      <button class="back-btn" type="button" onclick="window.location.href='/'">返回主页</button>
+    </div>
+  </div>
+
+  <main class="target-page">
+    <section class="target-hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Local Target Database</p>
+        <h1>靶点搜寻</h1>
+        <p class="subtitle">搜索疾病、基因、蛋白名称，查找相关靶点及其 3D 结构文件</p>
+      </div>
+      <div class="hero-summary" aria-label="数据库概览">
+        <div>
+          <strong>15</strong>
+          <span>demo 靶点</span>
+        </div>
+        <div>
+          <strong>18</strong>
+          <span>结构索引</span>
+        </div>
+        <div>
+          <strong>SQLite</strong>
+          <span>本地检索</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="search-panel">
+      <form id="targetSearchForm" class="search-form">
+        <input id="targetQuery" type="search"
+          placeholder="请输入靶点、基因、蛋白名或疾病关键词，例如 EGFR、WDR5、CYP3A4、lung cancer" autocomplete="off" />
+        <button type="submit" id="targetSearchBtn">搜索</button>
+      </form>
+      <div class="quick-row" aria-label="快捷搜索">
+        <button type="button" data-query="EGFR">EGFR</button>
+        <button type="button" data-query="WDR5">WDR5</button>
+        <button type="button" data-query="CYP3A4">CYP3A4</button>
+        <button type="button" data-query="KRAS">KRAS</button>
+        <button type="button" data-query="BRAF">BRAF</button>
+        <button type="button" data-query="PDE5A">PDE5A</button>
+        <button type="button" data-query="PDE10A">PDE10A</button>
+      </div>
+      <div class="filter-bar" aria-label="靶点筛选">
+        <label>
+          <span>靶点类型</span>
+          <select id="filterTargetType">
+            <option value="">全部类型</option>
+            <option value="Kinase">Kinase</option>
+            <option value="Enzyme">Enzyme</option>
+            <option value="Epigenetic regulator">Epigenetic regulator</option>
+            <option value="Epigenetic enzyme">Epigenetic enzyme</option>
+            <option value="Transcription factor">Transcription factor</option>
+            <option value="Phosphodiesterase">Phosphodiesterase</option>
+            <option value="GPCR">GPCR</option>
+            <option value="Nuclear receptor">Nuclear receptor</option>
+            <option value="Protease">Protease</option>
+          </select>
+        </label>
+        <label>
+          <span>结构来源</span>
+          <select id="filterSource">
+            <option value="">全部来源</option>
+            <option value="RCSB_PDB">RCSB PDB</option>
+            <option value="AlphaFold">AlphaFold</option>
+          </select>
+        </label>
+        <label>
+          <span>Docking 等级</span>
+          <select id="filterDockingGrade">
+            <option value="">全部等级</option>
+            <option value="A">A 级：优先 docking</option>
+            <option value="B">B 级：参考筛选</option>
+            <option value="C">C 级：参考结构</option>
+          </select>
+        </label>
+        <label class="check-filter">
+          <input id="filterExperimental" type="checkbox" />
+          <span>实验结构</span>
+        </label>
+        <label class="check-filter">
+          <input id="filterDocking" type="checkbox" />
+          <span>推荐 docking</span>
+        </label>
+        <label class="check-filter">
+          <input id="filterLigand" type="checkbox" />
+          <span>含配体</span>
+        </label>
+      </div>
+    </section>
+
+    <section id="databaseStatusPanel" class="db-status-panel" aria-label="本地数据库状态">
+      <div class="db-status-loading">正在检查本地靶点数据库...</div>
+    </section>
+
+    <section id="pdeOverviewPanel" class="pde-overview-panel" aria-label="PDE 家族概览">
+      <div class="db-status-loading">正在加载 PDE 家族概览...</div>
+    </section>
+
+    <div id="targetMessage" class="message" hidden></div>
+
+    <section class="workspace-grid">
+      <div class="result-card">
+        <div class="section-head">
+          <div>
+            <h2>搜索结果</h2>
+            <p id="resultSummary">输入关键词后开始检索</p>
+          </div>
+        </div>
+        <div id="targetResults" class="target-result-list">
+          <div class="empty-cell">暂无结果</div>
+        </div>
+      </div>
+
+      <aside class="detail-card" id="detailPanel">
+        <div class="section-head">
+          <div>
+            <h2>靶点详情</h2>
+            <p>选择一个靶点查看结构列表</p>
+          </div>
+        </div>
+        <div id="targetDetail" class="target-detail-content">
+          <div class="detail-empty">尚未选择靶点</div>
+        </div>
+      </aside>
+    </section>
+  </main>
+
+  <footer>
+    <div class="section">
+      <dl>
+        <dt>Supported</dt>
+        <dd>PYTHON</dd>
+        <dd>PYTORCH</dd>
+        <dd>RDKIT</dd>
+      </dl>
+    </div>
+    <div class="section map">
+      <h4>Visitors</h4>
+      <div class="pic">
+        <img src="/static/images/f1.png" alt="" />
+        <img src="/static/images/f2.png" class="img1" alt="" />
+      </div>
+    </div>
+    <div class="section contact">
+      <h4>Contact us</h4>
+      <div class="p">
+        <img src="/static/images/f3.png" alt="" />
+        <span>No. 58 Renmin Avenue, Meilan District, Haikou City, Hainan Pro</span>
+      </div>
+      <div class="p">
+        <img src="/static/images/f4.png" alt="" />
+        <span>0898-66254967</span>
+      </div>
+      <div class="p">
+        <img src="/static/images/f5.png" alt="" />
+        <span>shhuang@hainanu.edu.cn</span>
+      </div>
+    </div>
+  </footer>
+
+  <script src="/static/js/target_search/config.js?v=20260516c"></script>
+  <script src="/static/js/target_search/api_client.js?v=20260516c"></script>
+  <script src="/static/js/target_search/main.js?v=20260516c"></script>
+</body>
+
+</html>

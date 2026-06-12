@@ -1,0 +1,9 @@
+SMILES,SPLIT,qed,logp,molwt,HBA,HBD,SAS,TPSA,NumRotBonds,scaffold_smiles,canonical_smiles
+COc1ccc(Br)c(CNC(=O)Cc2cccs2)c1,train,0.906,3.378,338.99,3,1,1.974,38.33,5,O=C(Cc1cccs1)NCc1ccccc1,COc1ccc(Br)c(CNC(=O)Cc2cccs2)c1
+O=C(c1cccc(F)c1)N(Cc1cccnc1)Cc1ccco1,train,0.722,3.656,310.11,3,0,2.017,46.34,5,O=C(Cc1cccs1)NCc1ccccc1,O=C(c1cccc(F)c1)N(Cc1cccnc1)Cc1ccco1
+Cc1ccc(NC(=O)CCn2c(=O)oc3ccccc32)cc1,train,0.805,2.932,296.12,4,1,1.832,64.24,4,O=C(Cc1cccs1)NCc1ccccc1,Cc1ccc(NC(=O)CCn2c(=O)oc3ccccc32)cc1
+COc1cccc(NC(=O)N2CCN(CC(F)(F)C(F)F)CC2)c1,train,0.832,2.745,349.14,3,1,2.324,44.81,5,O=C(Cc1cccs1)NCc1ccccc1,COc1cccc(NC(=O)N2CCN(CC(F)(F)C(F)F)CC2)c1
+O=C(NCc1ccccc1)c1cc(Cl)ccc1O,train,0.751,2.145,225.63,3,2,1.654,57.53,3,O=C(Cc1cccs1)NCc1ccccc1,O=C(NCc1ccccc1)c1cc(Cl)ccc1O
+Cc1ccc(S(=O)(=O)NCc2ccco2)cc1,train,0.689,2.567,241.29,3,1,1.897,54.57,3,O=C(Cc1cccs1)NCc1ccccc1,Cc1ccc(S(=O)(=O)NCc2ccco2)cc1
+O=C(Nc1ccccc1)C1CCCN1,train,0.914,1.234,176.22,2,2,1.234,41.13,1,O=C(Cc1cccs1)NCc1ccccc1,O=C(Nc1ccccc1)C1CCCN1
+CC(C)c1ccc(NC(=O)CN2CCOCC2)cc1,train,0.786,3.012,262.35,3,1,2.145,38.77,4,O=C(Cc1cccs1)NCc1ccccc1,CC(C)c1ccc(NC(=O)CN2CCOCC2)cc1

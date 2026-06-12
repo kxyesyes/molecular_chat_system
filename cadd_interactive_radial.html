@@ -1,0 +1,1695 @@
+<html>
+    <head>
+        <meta charset="utf-8">
+        
+            <script src="lib/bindings/utils.js"></script>
+            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/dist/vis-network.min.css" integrity="sha512-WgxfT5LWjfszlPHXRmBWHkV2eceiWTOBvrKCNbdgDYTHrT2AeLCGbF4sZlZw3UMN3WtL0tGUoIAKsu8mllg/XA==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/vis-network.min.js" integrity="sha512-LnvoEWDFrqGHlHmDD2101OrLcbsfkrzoSpvtSQtxK3RMnRV0eOkhhBN2dXHKRrUU8p2DGRTk35n4O8nWSVe1mQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+            
+        
+<center>
+<h1></h1>
+</center>
+
+<!-- <link rel="stylesheet" href="../node_modules/vis/dist/vis.min.css" type="text/css" />
+<script type="text/javascript" src="../node_modules/vis/dist/vis.js"> </script>-->
+        <link
+          href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/css/bootstrap.min.css"
+          rel="stylesheet"
+          integrity="sha384-eOJMYsd53ii+scO/bJGFsiCZc+5NDVN2yr8+0RDqr0Ql0h+rP48ckxlpbzKgwra6"
+          crossorigin="anonymous"
+        />
+        <script
+          src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/js/bootstrap.bundle.min.js"
+          integrity="sha384-JEW9xMcG8R+pH31jmWH6WWP0WintQrMb4s7ZOdauHnUtxwoG2vI5DkLtS3qm9Ekf"
+          crossorigin="anonymous"
+        ></script>
+
+
+        <center>
+          <h1></h1>
+        </center>
+        <style type="text/css">
+
+             #mynetwork {
+                 width: 100%;
+                 height: 900px;
+                 background-color: #ffffff;
+                 border: 1px solid lightgray;
+                 position: relative;
+                 float: left;
+             }
+
+             
+
+             
+
+             
+        </style>
+    
+<style>
+    body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+    }
+    #title-container {
+        position: absolute;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 1000;
+        background: rgba(255, 255, 255, 0.95);
+        padding: 15px 40px;
+        border-radius: 15px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+    }
+    #title-container h1 {
+        margin: 0;
+        font-size: 32px;
+        font-weight: bold;
+        color: #2c3e50;
+        font-family: 'Arial Unicode MS', sans-serif;
+    }
+    #legend-container {
+        position: absolute;
+        top: 100px;
+        right: 30px;
+        z-index: 1000;
+        background: rgba(255, 255, 255, 0.95);
+        padding: 20px;
+        border-radius: 12px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        font-family: 'Arial Unicode MS', sans-serif;
+    }
+    #legend-container h3 {
+        margin: 0 0 15px 0;
+        font-size: 20px;
+        color: #2c3e50;
+        border-bottom: 2px solid #3498db;
+        padding-bottom: 8px;
+    }
+    .legend-item {
+        display: flex;
+        align-items: center;
+        margin: 10px 0;
+        font-size: 16px;
+    }
+    .legend-color {
+        width: 30px;
+        height: 30px;
+        border-radius: 50%;
+        margin-right: 12px;
+        border: 3px solid white;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+    }
+    .legend-label {
+        font-weight: 600;
+        color: #34495e;
+    }
+    .edge-legend {
+        margin-top: 20px;
+        padding-top: 15px;
+        border-top: 1px solid #ddd;
+    }
+    .edge-item {
+        display: flex;
+        align-items: center;
+        margin: 8px 0;
+        font-size: 15px;
+    }
+    .edge-line {
+        width: 40px;
+        height: 3px;
+        margin-right: 10px;
+        background: black;
+    }
+    .edge-dashed {
+        background: repeating-linear-gradient(
+            to right,
+            black 0px,
+            black 8px,
+            transparent 8px,
+            transparent 16px
+        );
+    }
+    #catalog-container {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        z-index: 1000;
+        background: rgba(255, 255, 255, 0.95);
+        padding: 20px;
+        border-radius: 12px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        font-family: 'Arial Unicode MS', sans-serif;
+        max-height: 90vh;
+        overflow-y: auto;
+        transition: all 0.3s ease;
+    }
+    #catalog-container.collapsed {
+        width: 50px;
+        padding: 10px;
+        overflow: hidden;
+    }
+    #catalog-toggle {
+        cursor: pointer;
+        font-size: 24px;
+        margin-bottom: 10px;
+        user-select: none;
+        text-align: center;
+        background: #3498db;
+        color: white;
+        padding: 8px;
+        border-radius: 8px;
+        font-weight: bold;
+    }
+    #catalog-toggle:hover {
+        background: #2980b9;
+    }
+    #catalog-content {
+        transition: all 0.3s ease;
+    }
+    #catalog-container.collapsed #catalog-content {
+        display: none;
+    }
+    .catalog-part {
+        margin: 15px 0;
+        padding: 10px;
+        background: #f8f9fa;
+        border-radius: 8px;
+        border-left: 4px solid #3498db;
+    }
+    .catalog-part-title {
+        font-size: 16px;
+        font-weight: bold;
+        color: #2c3e50;
+        margin-bottom: 8px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        padding: 5px;
+        border-radius: 5px;
+    }
+    .catalog-part-title:hover {
+        background: #e8f4fc;
+        color: #2980b9;
+    }
+    .catalog-part-title.active {
+        background: #B22222;
+        color: white;
+    }
+    .catalog-chapter {
+        margin: 8px 0 8px 15px;
+        font-size: 14px;
+        color: #34495e;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        padding: 5px;
+        border-radius: 5px;
+    }
+    .catalog-chapter:hover {
+        background: #e8f4fc;
+        color: #2980b9;
+    }
+    .catalog-chapter.active {
+        background: #B22222;
+        color: white;
+    }
+    .catalog-topic {
+        margin: 4px 0 4px 30px;
+        font-size: 13px;
+        color: #7f8c8d;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        padding: 3px 5px;
+        border-radius: 5px;
+    }
+    .catalog-topic:hover {
+        background: #e8f4fc;
+        color: #2980b9;
+    }
+    .catalog-topic.active {
+        background: #B22222;
+        color: white;
+    }
+    
+    /* 重置按钮样式 */
+    #reset-btn {
+        display: block;
+        margin: 10px 0;
+        padding: 8px 15px;
+        background: #e74c3c;
+        color: white;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: bold;
+        text-align: center;
+    }
+    #reset-btn:hover {
+        background: #c0392b;
+    }
+    
+    /* 知识点详情弹窗样式 */
+    #detail-modal {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.6);
+        z-index: 2000;
+        justify-content: center;
+        align-items: center;
+    }
+    #detail-modal.show {
+        display: flex;
+    }
+    #detail-content {
+        background: white;
+        border-radius: 15px;
+        padding: 30px;
+        max-width: 600px;
+        width: 90%;
+        max-height: 80vh;
+        overflow-y: auto;
+        box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+        position: relative;
+        font-family: 'Arial Unicode MS', sans-serif;
+    }
+    #detail-close {
+        position: absolute;
+        top: 15px;
+        right: 20px;
+        font-size: 28px;
+        cursor: pointer;
+        color: #7f8c8d;
+        transition: color 0.2s;
+    }
+    #detail-close:hover {
+        color: #e74c3c;
+    }
+    #detail-title {
+        font-size: 24px;
+        font-weight: bold;
+        color: #2c3e50;
+        margin-bottom: 20px;
+        padding-right: 40px;
+        border-bottom: 3px solid #3498db;
+        padding-bottom: 10px;
+    }
+    .detail-section {
+        margin: 15px 0;
+        padding: 15px;
+        background: #f8f9fa;
+        border-radius: 8px;
+        border-left: 4px solid #3498db;
+    }
+    .detail-section h4 {
+        margin: 0 0 10px 0;
+        color: #2c3e50;
+        font-size: 16px;
+        display: flex;
+        align-items: center;
+    }
+    .detail-section h4 .icon {
+        margin-right: 8px;
+        font-size: 18px;
+    }
+    .detail-section p {
+        margin: 0;
+        color: #34495e;
+        line-height: 1.6;
+        font-size: 14px;
+    }
+    .detail-section.definition {
+        border-left-color: #3498db;
+    }
+    .detail-section.examples {
+        border-left-color: #2ecc71;
+    }
+    .detail-section.applications {
+        border-left-color: #e67e22;
+    }
+    .detail-section.software {
+        border-left-color: #9b59b6;
+    }
+    .software-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 8px;
+    }
+    .software-tag {
+        background: #9b59b6;
+        color: white;
+        padding: 4px 10px;
+        border-radius: 15px;
+        font-size: 12px;
+    }
+</style>
+
+</style>
+
+<div id="title-container">
+    <h1>《计算机辅助药物设计》课程知识图谱</h1>
+</div>
+</head>
+
+
+    <body>
+        <div class="card" style="width: 100%">
+            
+            
+            <div id="mynetwork" class="card-body"></div>
+        </div>
+
+        
+        
+
+        <script type="text/javascript">
+
+              // initialize global variables.
+              var edges;
+              var nodes;
+              var allNodes;
+              var allEdges;
+              var nodeColors;
+              var originalNodes;
+              var network;
+              var container;
+              var options, data;
+              var filter = {
+                  item : '',
+                  property : '',
+                  value : []
+              };
+
+              
+
+              
+
+              // This method is responsible for drawing the graph, returns the drawn network
+              function drawGraph() {
+                  var container = document.getElementById('mynetwork');
+
+                  
+
+                  // parsing and collecting nodes and edges from the python
+                  nodes = new vis.DataSet([{"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#4ECDC4", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#4ECDC4", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N1", "label": "\u7b2c 1 \u7bc7 CADD\u57fa\u7840", "shadow": true, "shape": "dot", "size": 50, "title": "\u7b2c 1 \u7bc7 CADD\u57fa\u7840"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#4ECDC4", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#4ECDC4", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N2", "label": "\u7b2c 1 \u7ae0 CADD\u6982\u8bba", "shadow": true, "shape": "dot", "size": 50, "title": "\u7b2c 1 \u7ae0 CADD\u6982\u8bba"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N3", "label": "\u836f\u7269\u5b9a\u4e49\u548c\u5c0f\u5206\u5b50\u836f\u7269", "shadow": true, "shape": "dot", "size": 40, "title": "\u836f\u7269\u5b9a\u4e49\u548c\u5c0f\u5206\u5b50\u836f\u7269"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N4", "label": "\u65b0\u836f\u53d1\u73b0\u53f2", "shadow": true, "shape": "dot", "size": 40, "title": "\u65b0\u836f\u53d1\u73b0\u53f2"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N5", "label": "\u836f\u7269\u7814\u53d1\u6d41\u7a0b\u6982\u8ff0", "shadow": true, "shape": "dot", "size": 40, "title": "\u836f\u7269\u7814\u53d1\u6d41\u7a0b\u6982\u8ff0"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N6", "label": "CADD\u7684\u6982\u5ff5", "shadow": true, "shape": "dot", "size": 40, "title": "CADD\u7684\u6982\u5ff5"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N7", "label": "CADD\u7684\u4e24\u5927\u5206\u7c7b", "shadow": true, "shape": "dot", "size": 40, "title": "CADD\u7684\u4e24\u5927\u5206\u7c7b"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N8", "label": "CADD\u7684\u836f\u521b\u5236\u7814\u53d1\u6d41\u7a0b", "shadow": true, "shape": "dot", "size": 40, "title": "CADD\u7684\u836f\u521b\u5236\u7814\u53d1\u6d41\u7a0b"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#45B7D1", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#45B7D1", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N9", "label": "\u7b2c 2 \u7bc7 \u57fa\u4e8e\u7ed3\u6784\u836f\u7269\u8bbe\u8ba1", "shadow": true, "shape": "dot", "size": 50, "title": "\u7b2c 2 \u7bc7 \u57fa\u4e8e\u7ed3\u6784\u836f\u7269\u8bbe\u8ba1"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#4ECDC4", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#4ECDC4", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N10", "label": "\u7b2c 2 \u7ae0 \u57fa\u4e8e\u7ed3\u6784\u836f\u7269\u8bbe\u8ba1", "shadow": true, "shape": "dot", "size": 50, "title": "\u7b2c 2 \u7ae0 \u57fa\u4e8e\u7ed3\u6784\u836f\u7269\u8bbe\u8ba1"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N11", "label": "\u57fa\u4e8e\u7ed3\u6784\u7684\u836f\u7269\u8bbe\u8ba1\u6982\u8ff0", "shadow": true, "shape": "dot", "size": 40, "title": "\u57fa\u4e8e\u7ed3\u6784\u7684\u836f\u7269\u8bbe\u8ba1\u6982\u8ff0"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N12", "label": "\u836f\u7269\u6742\u6cdb\u6027\u548c\u914d\u4f53\u6548\u7387", "shadow": true, "shape": "dot", "size": 40, "title": "\u836f\u7269\u6742\u6cdb\u6027\u548c\u914d\u4f53\u6548\u7387"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N13", "label": "\u7c7b\u836f\u6027\u4e0e\u6210\u836f\u6027\u8bc4\u4f30", "shadow": true, "shape": "dot", "size": 40, "title": "\u7c7b\u836f\u6027\u4e0e\u6210\u836f\u6027\u8bc4\u4f30"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N14", "label": "\u86cb\u767d\u7ed3\u6784\u6d4b\u5b9a\u6280\u672f", "shadow": true, "shape": "dot", "size": 40, "title": "\u86cb\u767d\u7ed3\u6784\u6d4b\u5b9a\u6280\u672f"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N15", "label": "\u914d\u4f53-\u53d7\u4f53\u5173\u952e\u76f8\u4e92\u4f5c\u7528", "shadow": true, "shape": "dot", "size": 40, "title": "\u914d\u4f53-\u53d7\u4f53\u5173\u952e\u76f8\u4e92\u4f5c\u7528"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N16", "label": "\u7ed3\u6784\u9a71\u52a8\u7684\u8ba1\u7b97\u8bbe\u8ba1\u65b9\u6cd5", "shadow": true, "shape": "dot", "size": 40, "title": "\u7ed3\u6784\u9a71\u52a8\u7684\u8ba1\u7b97\u8bbe\u8ba1\u65b9\u6cd5"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#4ECDC4", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#4ECDC4", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N17", "label": "\u7b2c 3 \u7ae0 \u5206\u5b50\u5bf9\u63a5", "shadow": true, "shape": "dot", "size": 50, "title": "\u7b2c 3 \u7ae0 \u5206\u5b50\u5bf9\u63a5"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N18", "label": "\u5bf9\u63a5\u539f\u7406\u7684\u539f\u7406\u548c\u65b9\u6cd5", "shadow": true, "shape": "dot", "size": 40, "title": "\u5bf9\u63a5\u539f\u7406\u7684\u539f\u7406\u548c\u65b9\u6cd5"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N19", "label": "\u5206\u5b50\u5bf9\u63a5\u7684\u5206\u7c7b", "shadow": true, "shape": "dot", "size": 40, "title": "\u5206\u5b50\u5bf9\u63a5\u7684\u5206\u7c7b"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N20", "label": "\u5206\u5b50\u5bf9\u63a5\u6b65\u9aa4", "shadow": true, "shape": "dot", "size": 40, "title": "\u5206\u5b50\u5bf9\u63a5\u6b65\u9aa4"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N21", "label": "\u5206\u5b50\u5bf9\u63a5\u7684\u5e94\u7528", "shadow": true, "shape": "dot", "size": 40, "title": "\u5206\u5b50\u5bf9\u63a5\u7684\u5e94\u7528"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N22", "label": "\u5206\u5b50\u5bf9\u63a5\u8f6f\u4ef6", "shadow": true, "shape": "dot", "size": 40, "title": "\u5206\u5b50\u5bf9\u63a5\u8f6f\u4ef6"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#4ECDC4", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#4ECDC4", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N23", "label": "\u7b2c 4 \u7ae0 \u5206\u5b50\u6a21\u62df", "shadow": true, "shape": "dot", "size": 50, "title": "\u7b2c 4 \u7ae0 \u5206\u5b50\u6a21\u62df"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N24", "label": "\u5206\u5b50\u6a21\u62df\u7684\u5b9a\u4e49", "shadow": true, "shape": "dot", "size": 40, "title": "\u5206\u5b50\u6a21\u62df\u7684\u5b9a\u4e49"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N25", "label": "\u91cf\u5b50\u5316\u5b66", "shadow": true, "shape": "dot", "size": 40, "title": "\u91cf\u5b50\u5316\u5b66"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N26", "label": "\u5206\u5b50\u529b\u573a", "shadow": true, "shape": "dot", "size": 40, "title": "\u5206\u5b50\u529b\u573a"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N27", "label": "\u5206\u5b50\u52a8\u529b\u5b66\u6a21\u62df", "shadow": true, "shape": "dot", "size": 40, "title": "\u5206\u5b50\u52a8\u529b\u5b66\u6a21\u62df"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#96CEB4", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#96CEB4", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N28", "label": "\u7b2c 3 \u7bc7 \u57fa\u4e8e\u914d\u4f53\u7684\u836f\u7269\u8bbe\u8ba1", "shadow": true, "shape": "dot", "size": 50, "title": "\u7b2c 3 \u7bc7 \u57fa\u4e8e\u914d\u4f53\u7684\u836f\u7269\u8bbe\u8ba1"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#4ECDC4", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#4ECDC4", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N29", "label": "\u7b2c 7 \u7ae0 \u5b9a\u91cf\u6784\u6548\u5173\u7cfb", "shadow": true, "shape": "dot", "size": 50, "title": "\u7b2c 7 \u7ae0 \u5b9a\u91cf\u6784\u6548\u5173\u7cfb"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N30", "label": "\u5206\u5b50\u63cf\u8ff0\u7b26", "shadow": true, "shape": "dot", "size": 40, "title": "\u5206\u5b50\u63cf\u8ff0\u7b26"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N31", "label": "\u7279\u5f81\u9009\u62e9\u4e0e\u964d\u7ef4", "shadow": true, "shape": "dot", "size": 40, "title": "\u7279\u5f81\u9009\u62e9\u4e0e\u964d\u7ef4"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N32", "label": "\u7ecf\u5178\u56de\u5f52/\u5206\u7c7b\u6a21\u578b", "shadow": true, "shape": "dot", "size": 40, "title": "\u7ecf\u5178\u56de\u5f52/\u5206\u7c7b\u6a21\u578b"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N33", "label": "QSAR\u5efa\u6a21\u6d41\u7a0b\u4e0e\u9a8c\u8bc1", "shadow": true, "shape": "dot", "size": 40, "title": "QSAR\u5efa\u6a21\u6d41\u7a0b\u4e0e\u9a8c\u8bc1"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#4ECDC4", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#4ECDC4", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N34", "label": "\u7b2c 8 \u7ae0 \u836f\u6548\u56e2\u6a21\u578b", "shadow": true, "shape": "dot", "size": 50, "title": "\u7b2c 8 \u7ae0 \u836f\u6548\u56e2\u6a21\u578b"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N35", "label": "\u836f\u6548\u56e2\u7684\u6982\u5ff5", "shadow": true, "shape": "dot", "size": 40, "title": "\u836f\u6548\u56e2\u7684\u6982\u5ff5"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N36", "label": "LBDD vs \u836f\u6548\u56e2\u5efa\u6a21", "shadow": true, "shape": "dot", "size": 40, "title": "LBDD vs \u836f\u6548\u56e2\u5efa\u6a21"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N37", "label": "\u865a\u62df\u7b5b\u9009", "shadow": true, "shape": "dot", "size": 40, "title": "\u865a\u62df\u7b5b\u9009"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#FFEAA7", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#FFEAA7", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N38", "label": "\u7b2c 4 \u7bc7 ADMET\u4e0e\u7c7b\u836f\u6027", "shadow": true, "shape": "dot", "size": 50, "title": "\u7b2c 4 \u7bc7 ADMET\u4e0e\u7c7b\u836f\u6027"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#4ECDC4", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#4ECDC4", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N39", "label": "\u7b2c 10 \u7ae0 \u5206\u5b50\u96f7\u836f", "shadow": true, "shape": "dot", "size": 50, "title": "\u7b2c 10 \u7ae0 \u5206\u5b50\u96f7\u836f"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N40", "label": "\u5206\u5b50\u6210\u836f\u6027", "shadow": true, "shape": "dot", "size": 40, "title": "\u5206\u5b50\u6210\u836f\u6027"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N41", "label": "\u6bd2\u7406\u5b66\u4e0e\u975e\u9776\u5411\u6027\u9884\u6d4b", "shadow": true, "shape": "dot", "size": 40, "title": "\u6bd2\u7406\u5b66\u4e0e\u975e\u9776\u5411\u6027\u9884\u6d4b"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N42", "label": "PBPK\u57fa\u7840\u6982\u5ff5", "shadow": true, "shape": "dot", "size": 40, "title": "PBPK\u57fa\u7840\u6982\u5ff5"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#FFEAA7", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#FFEAA7", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N43", "label": "\u7b2c 11 \u7ae0 ADMET\u9884\u6d4b", "shadow": true, "shape": "dot", "size": 50, "title": "\u7b2c 11 \u7ae0 ADMET\u9884\u6d4b"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N44", "label": "LogP\u3001\u6eb6\u89e3\u5ea6\u3001pKa\u3001BBB\u3001\u809d\u6bd2\u6027\u9884\u6d4b", "shadow": true, "shape": "dot", "size": 40, "title": "LogP\u3001\u6eb6\u89e3\u5ea6\u3001pKa\u3001BBB\u3001\u809d\u6bd2\u6027\u9884\u6d4b"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N45", "label": "\u5546\u7528\u8f6f\u4ef6", "shadow": true, "shape": "dot", "size": 40, "title": "\u5546\u7528\u8f6f\u4ef6"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N46", "label": "\u57fa\u4e8eML\u7684ADMET\u9884\u6d4b", "shadow": true, "shape": "dot", "size": 40, "title": "\u57fa\u4e8eML\u7684ADMET\u9884\u6d4b"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#A29BFE", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#A29BFE", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N47", "label": "\u7b2c 5 \u7bc7 AI\u9a71\u52a8\u7684\u836f\u7269\u8bbe\u8ba1", "shadow": true, "shape": "dot", "size": 50, "title": "\u7b2c 5 \u7bc7 AI\u9a71\u52a8\u7684\u836f\u7269\u8bbe\u8ba1"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#A29BFE", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#A29BFE", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N48", "label": "\u7b2c 12 \u7ae0 \u6df1\u5ea6\u5b66\u4e60AIDD\u5e94\u7528", "shadow": true, "shape": "dot", "size": 50, "title": "\u7b2c 12 \u7ae0 \u6df1\u5ea6\u5b66\u4e60AIDD\u5e94\u7528"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N49", "label": "\u5206\u5b50\u8868\u793a\u5b66\u4e60", "shadow": true, "shape": "dot", "size": 40, "title": "\u5206\u5b50\u8868\u793a\u5b66\u4e60"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N50", "label": "\u5316\u5408\u7269\u6027\u8d28\u9884\u6d4b", "shadow": true, "shape": "dot", "size": 40, "title": "\u5316\u5408\u7269\u6027\u8d28\u9884\u6d4b"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N51", "label": "\u86cb\u767d\u8d28\u7ed3\u6784\u9884\u6d4b", "shadow": true, "shape": "dot", "size": 40, "title": "\u86cb\u767d\u8d28\u7ed3\u6784\u9884\u6d4b"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#4ECDC4", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#4ECDC4", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N52", "label": "\u7b2c 13 \u7ae0 \u5206\u5b50\u751f\u6210\u6a21\u578b", "shadow": true, "shape": "dot", "size": 50, "title": "\u7b2c 13 \u7ae0 \u5206\u5b50\u751f\u6210\u6a21\u578b"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N53", "label": "RNN/VAE/GAN/Flow", "shadow": true, "shape": "dot", "size": 40, "title": "RNN/VAE/GAN/Flow"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N54", "label": "\u57fa\u4e8e\u5f3a\u5316\u5b66\u4e60\u7684\u5206\u5b50\u4f18\u5316", "shadow": true, "shape": "dot", "size": 40, "title": "\u57fa\u4e8e\u5f3a\u5316\u5b66\u4e60\u7684\u5206\u5b50\u4f18\u5316"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N55", "label": "\u751f\u6210\u5f0fAI\u548c\u5206\u5b50\u751f\u6210", "shadow": true, "shape": "dot", "size": 40, "title": "\u751f\u6210\u5f0fAI\u548c\u5206\u5b50\u751f\u6210"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#A29BFE", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#A29BFE", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N56", "label": "\u7b2c 14 \u7ae0 \u5927\u8bed\u8a00\u6a21\u578b\u4e0e\u591a\u6a21\u6001\u836f\u7269\u8bbe\u8ba1", "shadow": true, "shape": "dot", "size": 50, "title": "\u7b2c 14 \u7ae0 \u5927\u8bed\u8a00\u6a21\u578b\u4e0e\u591a\u6a21\u6001\u836f\u7269\u8bbe\u8ba1"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N57", "label": "\u5927\u8bed\u8a00\u6a21\u578b\u7528\u4e8e\u836f\u7269\u7814\u53d1", "shadow": true, "shape": "dot", "size": 40, "title": "\u5927\u8bed\u8a00\u6a21\u578b\u7528\u4e8e\u836f\u7269\u7814\u53d1"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N58", "label": "\u591a\u6a21\u6001\u6a21\u578b\uff08\u5e8f\u5217-\u7ed3\u6784-\u6027\u8d28\uff09", "shadow": true, "shape": "dot", "size": 40, "title": "\u591a\u6a21\u6001\u6a21\u578b\uff08\u5e8f\u5217-\u7ed3\u6784-\u6027\u8d28\uff09"}, {"borderWidth": 5, "borderWidthSelected": 10, "color": {"background": "#DFE6E9", "border": "white", "highlight": {"background": "#B22222", "border": "#8B1A1A"}, "hover": {"background": "#DFE6E9", "border": "#CD5C5C"}}, "font": {"color": "black"}, "id": "N59", "label": "\u81ea\u76d1\u7763\u5b66\u4e60\u5728\u836f\u7269\u53d1\u73b0\u4e2d\u7684\u6700\u65b0\u8fdb\u5c55", "shadow": true, "shape": "dot", "size": 40, "title": "\u81ea\u76d1\u7763\u5b66\u4e60\u5728\u836f\u7269\u53d1\u73b0\u4e2d\u7684\u6700\u65b0\u8fdb\u5c55"}]);
+                  edges = new vis.DataSet([{"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N1", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N2", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N2", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N3", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N2", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N4", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N2", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N5", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N2", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N6", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N2", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N7", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N2", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N8", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N9", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N10", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N9", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N17", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N9", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N23", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N10", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N11", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N10", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N12", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N10", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N13", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N10", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N14", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N10", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N15", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N10", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N16", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N17", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N18", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N17", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N19", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N17", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N20", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N17", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N21", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N17", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N22", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N23", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N24", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N23", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N25", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N23", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N26", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N23", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N27", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N28", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N29", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N28", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N34", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N29", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N30", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N29", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N31", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N29", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N32", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N29", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N33", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N34", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N35", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N34", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N36", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N34", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N37", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N38", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N39", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N38", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N43", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N39", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N40", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N39", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N41", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N39", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N42", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N43", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N44", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N43", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N45", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N43", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N46", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N47", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N48", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N47", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N52", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N47", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N56", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N48", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N49", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N48", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N50", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N48", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N51", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N52", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N53", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N52", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N54", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N52", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N55", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N56", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N57", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N56", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N58", "width": 1.5}, {"arrows": {"to": {"enabled": true, "scaleFactor": 1.3}}, "color": {"color": "black", "highlight": "#B22222", "hover": "#CD5C5C"}, "from": "N56", "shadow": true, "smooth": {"type": "cubicBezier"}, "title": "\u5c42\u6b21\u8fde\u63a5", "to": "N59", "width": 1.5}]);
+
+                  nodeColors = {};
+                  allNodes = nodes.get({ returnType: "Object" });
+                  for (nodeId in allNodes) {
+                    nodeColors[nodeId] = allNodes[nodeId].color;
+                  }
+                  allEdges = edges.get({ returnType: "Object" });
+                  // adding nodes and edges to the graph
+                  data = {nodes: nodes, edges: edges};
+
+                  var options = {"physics": {"enabled": true, "forceAtlas2Based": {"gravitationalConstant": -50, "centralGravity": 0.01, "springLength": 200, "springConstant": 0.08, "damping": 0.4, "avoidOverlap": 1}, "maxVelocity": 50, "minVelocity": 0.1, "solver": "forceAtlas2Based", "stabilization": {"enabled": true, "iterations": 100}}, "interaction": {"dragNodes": true, "dragView": true, "zoomView": true, "hover": true, "hoverConnectedEdges": true, "selectConnectedEdges": true, "tooltipDelay": 200, "navigationButtons": true, "multiselect": true, "keyboard": {"enabled": true}}, "nodes": {"font": {"size": 24, "face": "Arial", "bold": {"size": 28}}, "borderWidth": 4, "borderWidthSelected": 8, "chosen": {"node": true, "label": true}, "shadow": {"enabled": true, "size": 10, "x": 5, "y": 5}}, "edges": {"arrows": {"to": {"enabled": true, "scaleFactor": 1.5}}, "smooth": {"enabled": true, "type": "cubicBezier", "roundness": 0.5}, "width": 1.5, "chosen": {"edge": true, "label": false}, "hoverWidth": 1.5, "selectionWidth": 2, "shadow": {"enabled": true, "size": 3}}};
+
+                  
+
+
+                  
+
+                  network = new vis.Network(container, data, options);
+
+                  
+
+                  
+
+                  
+
+
+                  
+
+                  return network;
+
+              }
+              drawGraph();
+        </script>
+    <div id="catalog-container">
+    <div id="catalog-toggle" onclick="toggleCatalog()">📚 目录</div>
+    <button id="reset-btn" onclick="resetView()">🔄 显示全部节点</button>
+    <div id="catalog-content">
+        <div class="catalog-part">
+            <div class="catalog-part-title" onclick="focusNode('第 1 篇 CADD基础')">📖 第 1 篇 CADD基础</div>
+            <div class="catalog-chapter" onclick="focusNode('第 1 章 CADD概论')">第 1 章 CADD概论</div>
+            <div class="catalog-topic" onclick="focusNode('药物定义和小分子药物')">• 药物定义和小分子药物</div>
+            <div class="catalog-topic" onclick="focusNode('新药发现史')">• 新药发现史</div>
+            <div class="catalog-topic" onclick="focusNode('药物研发流程概述')">• 药物研发流程概述</div>
+            <div class="catalog-topic" onclick="focusNode('CADD的概念')">• CADD的概念</div>
+            <div class="catalog-topic" onclick="focusNode('CADD的两大分类')">• CADD的两大分类</div>
+            <div class="catalog-topic" onclick="focusNode('CADD的药创制研发流程')">• CADD的药创制研发流程</div>
+        </div>
+        <div class="catalog-part">
+            <div class="catalog-part-title" onclick="focusNode('第 2 篇 基于结构药物设计')">🔬 第 2 篇 基于结构药物设计</div>
+            <div class="catalog-chapter" onclick="focusNode('第 2 章 基于结构药物设计')">第 2 章 基于结构药物设计</div>
+            <div class="catalog-topic" onclick="focusNode('基于结构的药物设计概述')">• 基于结构的药物设计概述</div>
+            <div class="catalog-topic" onclick="focusNode('药物杂泛性和配体效率')">• 药物杂泛性和配体效率</div>
+            <div class="catalog-topic" onclick="focusNode('类药性与成药性评估')">• 类药性与成药性评估</div>
+            <div class="catalog-topic" onclick="focusNode('蛋白结构测定技术')">• 蛋白结构测定技术</div>
+            <div class="catalog-topic" onclick="focusNode('配体-受体关键相互作用')">• 配体-受体关键相互作用</div>
+            <div class="catalog-topic" onclick="focusNode('结构驱动的计算设计方法')">• 结构驱动的计算设计方法</div>
+            <div class="catalog-chapter" onclick="focusNode('第 3 章 分子对接')">第 3 章 分子对接</div>
+            <div class="catalog-topic" onclick="focusNode('对接原理的原理和方法')">• 对接原理的原理和方法</div>
+            <div class="catalog-topic" onclick="focusNode('分子对接的分类')">• 分子对接的分类</div>
+            <div class="catalog-topic" onclick="focusNode('分子对接步骤')">• 分子对接步骤</div>
+            <div class="catalog-topic" onclick="focusNode('分子对接的应用')">• 分子对接的应用</div>
+            <div class="catalog-topic" onclick="focusNode('分子对接软件')">• 分子对接软件</div>
+            <div class="catalog-chapter" onclick="focusNode('第 4 章 分子模拟')">第 4 章 分子模拟</div>
+            <div class="catalog-topic" onclick="focusNode('分子模拟的定义')">• 分子模拟的定义</div>
+            <div class="catalog-topic" onclick="focusNode('量子化学')">• 量子化学</div>
+            <div class="catalog-topic" onclick="focusNode('分子力场')">• 分子力场</div>
+            <div class="catalog-topic" onclick="focusNode('分子动力学模拟')">• 分子动力学模拟</div>
+        </div>
+        <div class="catalog-part">
+            <div class="catalog-part-title" onclick="focusNode('第 3 篇 基于配体的药物设计')">💊 第 3 篇 基于配体的药物设计</div>
+            <div class="catalog-chapter" onclick="focusNode('第 7 章 定量构效关系')">第 7 章 定量构效关系</div>
+            <div class="catalog-topic" onclick="focusNode('分子描述符')">• 分子描述符</div>
+            <div class="catalog-topic" onclick="focusNode('特征选择与降维')">• 特征选择与降维</div>
+            <div class="catalog-topic" onclick="focusNode('经典回归/分类模型')">• 经典回归/分类模型</div>
+            <div class="catalog-topic" onclick="focusNode('QSAR建模流程与验证')">• QSAR建模流程与验证</div>
+            <div class="catalog-chapter" onclick="focusNode('第 8 章 药效团模型')">第 8 章 药效团模型</div>
+            <div class="catalog-topic" onclick="focusNode('药效团的概念')">• 药效团的概念</div>
+            <div class="catalog-topic" onclick="focusNode('LBDD vs 药效团建模')">• LBDD vs 药效团建模</div>
+            <div class="catalog-topic" onclick="focusNode('虚拟筛选')">• 虚拟筛选</div>
+        </div>
+        <div class="catalog-part">
+            <div class="catalog-part-title" onclick="focusNode('第 4 篇 ADMET与类药性')">🧪 第 4 篇 ADMET与类药性</div>
+            <div class="catalog-chapter" onclick="focusNode('第 10 章 分子雷药')">第 10 章 分子雷药</div>
+            <div class="catalog-topic" onclick="focusNode('分子成药性')">• 分子成药性</div>
+            <div class="catalog-topic" onclick="focusNode('毒理学与非靶向性预测')">• 毒理学与非靶向性预测</div>
+            <div class="catalog-topic" onclick="focusNode('PBPK基础概念')">• PBPK基础概念</div>
+            <div class="catalog-chapter" onclick="focusNode('第 11 章 ADMET预测')">第 11 章 ADMET预测</div>
+            <div class="catalog-topic" onclick="focusNode('LogP、溶解度、pKa、BBB、肝毒性预测')">• LogP、溶解度、pKa、BBB、肝毒性预测</div>
+            <div class="catalog-topic" onclick="focusNode('商用软件')">• 商用软件</div>
+            <div class="catalog-topic" onclick="focusNode('基于ML的ADMET预测')">• 基于ML的ADMET预测</div>
+        </div>
+        <div class="catalog-part">
+            <div class="catalog-part-title" onclick="focusNode('第 5 篇 AI驱动的药物设计')">🤖 第 5 篇 AI驱动的药物设计</div>
+            <div class="catalog-chapter" onclick="focusNode('第 12 章 深度学习AIDD应用')">第 12 章 深度学习AIDD应用</div>
+            <div class="catalog-topic" onclick="focusNode('分子表示学习')">• 分子表示学习</div>
+            <div class="catalog-topic" onclick="focusNode('化合物性质预测')">• 化合物性质预测</div>
+            <div class="catalog-topic" onclick="focusNode('蛋白质结构预测')">• 蛋白质结构预测</div>
+            <div class="catalog-chapter" onclick="focusNode('第 13 章 分子生成模型')">第 13 章 分子生成模型</div>
+            <div class="catalog-topic" onclick="focusNode('RNN/VAE/GAN/Flow')">• RNN/VAE/GAN/Flow</div>
+            <div class="catalog-topic" onclick="focusNode('基于强化学习的分子优化')">• 基于强化学习的分子优化</div>
+            <div class="catalog-topic" onclick="focusNode('生成式AI和分子生成')">• 生成式AI和分子生成</div>
+            <div class="catalog-chapter" onclick="focusNode('第 14 章 大语言模型与多模态药物设计')">第 14 章 大语言模型与多模态药物设计</div>
+            <div class="catalog-topic" onclick="focusNode('大语言模型用于药物研发')">• 大语言模型用于药物研发</div>
+            <div class="catalog-topic" onclick="focusNode('多模态模型（序列-结构-性质）')">• 多模态模型（序列-结构-性质）</div>
+            <div class="catalog-topic" onclick="focusNode('自监督学习在药物发现中的最新进展')">• 自监督学习在药物发现中的最新进展</div>
+        </div>
+    </div>
+</div>
+
+<!-- 知识点详情弹窗 -->
+<div id="detail-modal">
+    <div id="detail-content">
+        <span id="detail-close" onclick="closeDetailModal()">&times;</span>
+        <div id="detail-title">知识点标题</div>
+        
+        <div class="detail-section definition">
+            <h4><span class="icon">📖</span>释义</h4>
+            <p id="detail-definition">暂无释义</p>
+        </div>
+        
+        <div class="detail-section examples">
+            <h4><span class="icon">💡</span>案例</h4>
+            <p id="detail-examples">暂无案例</p>
+        </div>
+        
+        <div class="detail-section applications">
+            <h4><span class="icon">🎯</span>应用</h4>
+            <p id="detail-applications">暂无应用</p>
+        </div>
+        
+        <div class="detail-section software">
+            <h4><span class="icon">💻</span>代表软件</h4>
+            <div id="detail-software" class="software-tags">暂无软件</div>
+        </div>
+    </div>
+</div>
+
+<div id="legend-container">
+    <h3>📊 节点类型</h3>
+    <div class="legend-item">
+        <div class="legend-color" style="background-color: #4ECDC4;"></div>
+        <span class="legend-label">基础方法</span>
+    </div>
+    <div class="legend-item">
+        <div class="legend-color" style="background-color: #45B7D1;"></div>
+        <span class="legend-label">SBDD</span>
+    </div>
+    <div class="legend-item">
+        <div class="legend-color" style="background-color: #96CEB4;"></div>
+        <span class="legend-label">LBDD</span>
+    </div>
+    <div class="legend-item">
+        <div class="legend-color" style="background-color: #FFEAA7;"></div>
+        <span class="legend-label">ADMET</span>
+    </div>
+    <div class="legend-item">
+        <div class="legend-color" style="background-color: #A29BFE;"></div>
+        <span class="legend-label">AIDD</span>
+    </div>
+    <div class="legend-item">
+        <div class="legend-color" style="background-color: #DFE6E9;"></div>
+        <span class="legend-label">知识点</span>
+    </div>
+    
+    <div class="edge-legend">
+        <h3 style="font-size: 18px; margin-bottom: 10px;">🔗 连接类型</h3>
+        <div class="edge-item">
+            <div class="edge-line"></div>
+            <span>层次连接</span>
+        </div>
+        <div class="edge-item">
+            <div class="edge-line edge-dashed"></div>
+            <span>章节关联</span>
+        </div>
+    </div>
+</div>
+</body>
+
+<script>
+// 节点标题到ID的映射
+var nodeMapping = {
+    "第 1 篇 CADD基础": "N1",
+    "第 1 章 CADD概论": "N2",
+    "药物定义和小分子药物": "N3",
+    "新药发现史": "N4",
+    "药物研发流程概述": "N5",
+    "CADD的概念": "N6",
+    "CADD的两大分类": "N7",
+    "CADD的药创制研发流程": "N8",
+    "第 2 篇 基于结构药物设计": "N9",
+    "第 2 章 基于结构药物设计": "N10",
+    "基于结构的药物设计概述": "N11",
+    "药物杂泛性和配体效率": "N12",
+    "类药性与成药性评估": "N13",
+    "蛋白结构测定技术": "N14",
+    "配体-受体关键相互作用": "N15",
+    "结构驱动的计算设计方法": "N16",
+    "第 3 章 分子对接": "N17",
+    "对接原理的原理和方法": "N18",
+    "分子对接的分类": "N19",
+    "分子对接步骤": "N20",
+    "分子对接的应用": "N21",
+    "分子对接软件": "N22",
+    "第 4 章 分子模拟": "N23",
+    "分子模拟的定义": "N24",
+    "量子化学": "N25",
+    "分子力场": "N26",
+    "分子动力学模拟": "N27",
+    "第 3 篇 基于配体的药物设计": "N28",
+    "第 7 章 定量构效关系": "N29",
+    "分子描述符": "N30",
+    "特征选择与降维": "N31",
+    "经典回归/分类模型": "N32",
+    "QSAR建模流程与验证": "N33",
+    "第 8 章 药效团模型": "N34",
+    "药效团的概念": "N35",
+    "LBDD vs 药效团建模": "N36",
+    "虚拟筛选": "N37",
+    "第 4 篇 ADMET与类药性": "N38",
+    "第 10 章 分子雷药": "N39",
+    "分子成药性": "N40",
+    "毒理学与非靶向性预测": "N41",
+    "PBPK基础概念": "N42",
+    "第 11 章 ADMET预测": "N43",
+    "LogP、溶解度、pKa、BBB、肝毒性预测": "N44",
+    "商用软件": "N45",
+    "基于ML的ADMET预测": "N46",
+    "第 5 篇 AI驱动的药物设计": "N47",
+    "第 12 章 深度学习AIDD应用": "N48",
+    "分子表示学习": "N49",
+    "化合物性质预测": "N50",
+    "蛋白质结构预测": "N51",
+    "第 13 章 分子生成模型": "N52",
+    "RNN/VAE/GAN/Flow": "N53",
+    "基于强化学习的分子优化": "N54",
+    "生成式AI和分子生成": "N55",
+    "第 14 章 大语言模型与多模态药物设计": "N56",
+    "大语言模型用于药物研发": "N57",
+    "多模态模型（序列-结构-性质）": "N58",
+    "自监督学习在药物发现中的最新进展": "N59",
+};
+
+
+// 节点层级关系
+var nodeChildren = {
+    "N1": ["N8", "N7", "N6", "N5", "N2", "N3", "N4"],
+    "N2": ["N7", "N5", "N3", "N4", "N8", "N6"],
+    "N3": [],
+    "N4": [],
+    "N5": [],
+    "N6": [],
+    "N7": [],
+    "N8": [],
+    "N9": ["N27", "N23", "N12", "N16", "N26", "N14", "N10", "N17", "N13", "N24", "N15", "N11", "N19", "N22", "N21", "N25", "N18", "N20"],
+    "N10": ["N12", "N16", "N14", "N13", "N15", "N11"],
+    "N11": [],
+    "N12": [],
+    "N13": [],
+    "N14": [],
+    "N15": [],
+    "N16": [],
+    "N17": ["N19", "N22", "N21", "N18", "N20"],
+    "N18": [],
+    "N19": [],
+    "N20": [],
+    "N21": [],
+    "N22": [],
+    "N23": ["N24", "N27", "N25", "N26"],
+    "N24": [],
+    "N25": [],
+    "N26": [],
+    "N27": [],
+    "N28": ["N37", "N29", "N30", "N33", "N35", "N34", "N32", "N36", "N31"],
+    "N29": ["N30", "N32", "N33", "N31"],
+    "N30": [],
+    "N31": [],
+    "N32": [],
+    "N33": [],
+    "N34": ["N35", "N37", "N36"],
+    "N35": [],
+    "N36": [],
+    "N37": [],
+    "N38": ["N46", "N45", "N39", "N44", "N42", "N43", "N41", "N40"],
+    "N39": ["N42", "N40", "N41"],
+    "N40": [],
+    "N41": [],
+    "N42": [],
+    "N43": ["N45", "N44", "N46"],
+    "N44": [],
+    "N45": [],
+    "N46": [],
+    "N47": ["N52", "N49", "N50", "N54", "N55", "N48", "N51", "N53", "N56", "N57", "N58", "N59"],
+    "N48": ["N51", "N49", "N50"],
+    "N49": [],
+    "N50": [],
+    "N51": [],
+    "N52": ["N53", "N54", "N55"],
+    "N53": [],
+    "N54": [],
+    "N55": [],
+    "N56": ["N57", "N58", "N59"],
+    "N57": [],
+    "N58": [],
+    "N59": [],
+};
+
+var nodeParents = {
+    "N1": [],
+    "N2": ["N1"],
+    "N3": ["N1", "N2"],
+    "N4": ["N1", "N2"],
+    "N5": ["N1", "N2"],
+    "N6": ["N1", "N2"],
+    "N7": ["N1", "N2"],
+    "N8": ["N1", "N2"],
+    "N9": [],
+    "N10": ["N9"],
+    "N11": ["N9", "N10"],
+    "N12": ["N9", "N10"],
+    "N13": ["N9", "N10"],
+    "N14": ["N9", "N10"],
+    "N15": ["N9", "N10"],
+    "N16": ["N9", "N10"],
+    "N17": ["N9"],
+    "N18": ["N17", "N9"],
+    "N19": ["N17", "N9"],
+    "N20": ["N17", "N9"],
+    "N21": ["N17", "N9"],
+    "N22": ["N17", "N9"],
+    "N23": ["N9"],
+    "N24": ["N9", "N23"],
+    "N25": ["N9", "N23"],
+    "N26": ["N9", "N23"],
+    "N27": ["N9", "N23"],
+    "N28": [],
+    "N29": ["N28"],
+    "N30": ["N29", "N28"],
+    "N31": ["N29", "N28"],
+    "N32": ["N29", "N28"],
+    "N33": ["N29", "N28"],
+    "N34": ["N28"],
+    "N35": ["N34", "N28"],
+    "N36": ["N34", "N28"],
+    "N37": ["N34", "N28"],
+    "N38": [],
+    "N39": ["N38"],
+    "N40": ["N39", "N38"],
+    "N41": ["N39", "N38"],
+    "N42": ["N39", "N38"],
+    "N43": ["N38"],
+    "N44": ["N43", "N38"],
+    "N45": ["N43", "N38"],
+    "N46": ["N43", "N38"],
+    "N47": [],
+    "N48": ["N47"],
+    "N49": ["N48", "N47"],
+    "N50": ["N48", "N47"],
+    "N51": ["N48", "N47"],
+    "N52": ["N47"],
+    "N53": ["N52", "N47"],
+    "N54": ["N52", "N47"],
+    "N55": ["N52", "N47"],
+    "N56": ["N47"],
+    "N57": ["N56", "N47"],
+    "N58": ["N56", "N47"],
+    "N59": ["N56", "N47"],
+};
+
+
+// 所有节点和边
+var allNodes = ["N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8", "N9", "N10", "N11", "N12", "N13", "N14", "N15", "N16", "N17", "N18", "N19", "N20", "N21", "N22", "N23", "N24", "N25", "N26", "N27", "N28", "N29", "N30", "N31", "N32", "N33", "N34", "N35", "N36", "N37", "N38", "N39", "N40", "N41", "N42", "N43", "N44", "N45", "N46", "N47", "N48", "N49", "N50", "N51", "N52", "N53", "N54", "N55", "N56", "N57", "N58", "N59"];
+
+var allEdges = [
+    {from: "N1", to: "N2"},
+    {from: "N2", to: "N3"},
+    {from: "N2", to: "N4"},
+    {from: "N2", to: "N5"},
+    {from: "N2", to: "N6"},
+    {from: "N2", to: "N7"},
+    {from: "N2", to: "N8"},
+    {from: "N9", to: "N10"},
+    {from: "N9", to: "N17"},
+    {from: "N9", to: "N23"},
+    {from: "N10", to: "N11"},
+    {from: "N10", to: "N12"},
+    {from: "N10", to: "N13"},
+    {from: "N10", to: "N14"},
+    {from: "N10", to: "N15"},
+    {from: "N10", to: "N16"},
+    {from: "N17", to: "N18"},
+    {from: "N17", to: "N19"},
+    {from: "N17", to: "N20"},
+    {from: "N17", to: "N21"},
+    {from: "N17", to: "N22"},
+    {from: "N23", to: "N24"},
+    {from: "N23", to: "N25"},
+    {from: "N23", to: "N26"},
+    {from: "N23", to: "N27"},
+    {from: "N28", to: "N29"},
+    {from: "N28", to: "N34"},
+    {from: "N29", to: "N30"},
+    {from: "N29", to: "N31"},
+    {from: "N29", to: "N32"},
+    {from: "N29", to: "N33"},
+    {from: "N34", to: "N35"},
+    {from: "N34", to: "N36"},
+    {from: "N34", to: "N37"},
+    {from: "N38", to: "N39"},
+    {from: "N38", to: "N43"},
+    {from: "N39", to: "N40"},
+    {from: "N39", to: "N41"},
+    {from: "N39", to: "N42"},
+    {from: "N43", to: "N44"},
+    {from: "N43", to: "N45"},
+    {from: "N43", to: "N46"},
+    {from: "N47", to: "N48"},
+    {from: "N47", to: "N52"},
+    {from: "N47", to: "N56"},
+    {from: "N48", to: "N49"},
+    {from: "N48", to: "N50"},
+    {from: "N48", to: "N51"},
+    {from: "N52", to: "N53"},
+    {from: "N52", to: "N54"},
+    {from: "N52", to: "N55"},
+    {from: "N56", to: "N57"},
+    {from: "N56", to: "N58"},
+    {from: "N56", to: "N59"},
+];
+
+
+// 知识点详情
+var knowledgeDetails = {
+  "药物定义和小分子药物": {
+    "definition": "药物是指能够用于预防、诊断、治疗疾病或调节生理功能的活性物质，来源可包括天然产物、化学合成、生物技术和核酸工程等。小分子药物通常分子量较低（常见在 100-900 Da 范围），可通过口服、注射等多种途径给药，具备易修饰、易放大生产、结构可优化和成药经验丰富等优势。小分子药物设计关注靶点结合能力、选择性、代谢稳定性、溶解度与毒理风险之间的平衡，是现代药物研发最成熟也最具竞争力的方向之一。",
+    "examples": "阿司匹林、二甲双胍、阿托伐他汀和伊马替尼均为典型小分子药物。以伊马替尼为例，其通过与 BCR-ABL 激酶 ATP 结合位点特异作用实现精准治疗；以他汀类为例，通过抑制 HMG-CoA 还原酶发挥降脂作用，体现了小分子药物在慢病和肿瘤等领域的广泛应用价值。",
+    "applications": "药物化学课程导入、先导化合物性质评估、成药性筛选标准建立、药物发现策略制定",
+    "software": "DrugBank, ChEMBL, PubChem, SwissADME, RDKit"
+  },
+  "新药发现史": {
+    "definition": "新药发现史反映了药物研发方法从经验驱动到机制驱动再到数据与算法驱动的演化。早期阶段以天然药和偶然发现为主；中期阶段受有机合成、受体理论和酶学发展推动，形成了系统化先导优化思路；现代阶段融合结构生物学、高通量筛选、计算模拟和人工智能，强调多学科协同、证据链闭环和迭代优化效率。",
+    "examples": "从柳树皮中的水杨酸发展到乙酰水杨酸（阿司匹林），展示了从天然活性到化学优化的路径；青霉素体现了偶然发现与工业放大结合的成功；磺胺类药物开启了现代化学治疗；伊马替尼和奥司他韦等案例则代表了机制导向与结构导向药物发现方法的成熟。",
+    "applications": "药物研发史教学、研发范式比较分析、项目立项论证、创新策略和失败教训总结",
+    "software": "Reaxys, SciFinder, PubMed, ClinicalTrials.gov"
+  },
+  "药物研发流程概述": {
+    "definition": "药物研发是由基础研究、转化研究与临床开发串联的分阶段流程，核心环节包括：靶点识别与验证、苗头化合物发现、先导优化、候选药物确定、临床前药效与安全性评价、I-III 期临床试验、注册申报与上市后再评价。该流程通常历时多年，具有高失败率与高成本特征，因此需要通过数据治理、流程标准化和阶段性决策门（go/no-go）来控制风险。",
+    "examples": "典型执行路线为：基于组学和文献提出疾病相关靶点 -> 通过虚拟筛选和实验筛选获得苗头分子 -> 基于 SAR 和 ADMET 进行迭代优化 -> 完成药代、毒理和药效临床前研究 -> 进入临床分期验证安全性与疗效 -> 申报上市并开展药物警戒。",
+    "applications": "研发里程碑设计、跨部门协作管理、成本与风险评估、申报路径规划",
+    "software": "Pipeline Pilot, KNIME, Benchling, Dotmatics, PerkinElmer Signals"
+  },
+  "CADD的概念": {
+    "definition": "CADD（Computer-Aided Drug Design）是利用计算化学、分子模拟、化学信息学和机器学习方法支持药物发现与优化的技术体系。其核心目标是通过计算模型提高研发决策质量，缩小实验搜索空间，减少无效合成和筛选成本。CADD并非替代实验，而是与生物实验形成“计算提出假设-实验验证-计算再优化”的闭环工作模式。",
+    "examples": "在先导发现阶段，CADD可通过虚拟筛选从百万级化合物中筛出候选；在先导优化阶段，可借助分子对接、药效团、自由能估算解释 SAR 规律并指导取代基修饰；在后期可结合ADMET预测辅助优先级排序。",
+    "applications": "命中化合物发现、结合模式解释、先导优化、失败风险前移识别、研发效率提升",
+    "software": "Schrodinger Suite, MOE, Discovery Studio, AutoDock Vina, RDKit"
+  },
+  "CADD的两大分类": {
+    "definition": "CADD主要分为两类：基于结构的药物设计（SBDD）与基于配体的药物设计（LBDD）。SBDD依赖靶点三维结构信息，强调口袋识别、分子对接、MD模拟和相互作用解析；LBDD在靶点结构未知或不可靠时，利用已知活性分子构建QSAR、药效团或相似性模型进行预测和筛选。两者在实际项目中常结合使用，以实现互补验证和稳健决策。",
+    "examples": "SBDD经典流程包括蛋白准备、口袋定义、对接筛选和复评分；LBDD常见流程包括分子描述符计算、特征选择、模型训练与外部验证。实践中常先用LBDD快速预筛，再用SBDD做结构层面的精筛和机制解释，提高命中率与可解释性。",
+    "applications": "结构信息充分项目的精细优化、结构未知项目的模型筛选、多策略并行筛选、靶点与配体协同建模",
+    "software": "Glide, GOLD, AutoDock Vina, LigandScout, scikit-learn, RDKit"
+  },
+  "CADD的药创制研发流程": {
+    "definition": "CADD驱动的新药创制流程通常包含：靶点与结构数据准备、化合物库整理、虚拟筛选、命中确认、先导优化、ADMET预测、优先队列输出和实验迭代。该流程强调分阶段筛选与数据回流，通过计算与实验双向反馈不断提升模型可靠性与候选分子质量，最终服务于候选药物提名。",
+    "examples": "实操中可采用“快筛-精筛-验证”三级流程：先进行规则过滤与快速对接，再进行高精度对接/重打分/聚类去冗余，最后结合ADMET与可合成性选择小批量分子进入实验。若实验结果与预测偏差较大，则更新训练集和参数并重新迭代。",
+    "applications": "虚拟筛选流程构建、先导化合物优先级排序、化学空间探索、计算-实验闭环优化",
+    "software": "VirtualFlow, AutoDock Vina, Glide, KNIME, RDKit, gmx_MMPBSA"
+  },
+  "基于结构的药物设计概述": {
+    "definition": "基于结构的药物设计（Structure-Based Drug Design, SBDD）是以靶标蛋白三维结构为核心输入，通过结构解析、相互作用建模与计算评估来指导分子设计的理性研发方法。与仅凭经验改造不同，SBDD强调“结构证据驱动”的迭代闭环：先确认可结合位点，再构建结合假设，再通过计算筛选和实验验证持续优化。其目标不仅是提升活性，还包括提高选择性、控制理化性质并降低开发风险。SBDD通常贯穿先导发现到候选药物提名全流程，是现代小分子研发中的关键方法学支柱。",
+    "examples": "常见实践路径为：从晶体结构或高质量同源模型出发，识别锚点氢键与疏水亚口袋；围绕核心骨架进行定向取代基设计；利用对接和重打分筛选候选；再结合生测和结构复核修正设计假设。一个典型轮次可能包含 20-80 个虚拟衍生物、5-20 个优先合成分子，并在下一轮根据 SAR 回写规则继续优化。",
+    "applications": "先导化合物发现、结合模式解释、系列分子选择性优化、研发决策支持",
+    "software": "PyMOL, ChimeraX, Discovery Studio, Schrödinger, MOE"
+  },
+  "药物杂泛性和配体效率": {
+    "definition": "药物杂泛性（promiscuity）是指同一配体与多个靶点发生显著结合或同一靶点可被多类化学骨架识别的现象。适度杂泛性可用于多靶点治疗，但过度杂泛性会带来脱靶毒性和临床安全风险。配体效率（Ligand Efficiency, LE）用于衡量“每个非氢原子贡献的结合能”，常以 LE = -ΔG / Nheavy 近似评估；同时还常配合 LLE（Lipophilic Ligand Efficiency）与 FQ 等指标综合判断优化质量。该主题的核心是避免“仅追求活性数值”的陷阱，转向“活性-选择性-理化性质”三者平衡。",
+    "examples": "在先导优化中，某分子 IC50 从 1 uM 优化到 20 nM，但通过增加疏水大基团实现，导致 LogP 上升、hERG 风险增加，此时 LE/LLE 可能并未改善。更优方案通常是保留关键锚点作用、以较小改造提升几何匹配，从而在提升活性的同时保持效率指标和安全窗口。",
+    "applications": "先导系列优先级排序、脱靶风险早筛、多目标优化策略制定、药效与安全平衡评估",
+    "software": "RDKit, DataWarrior, Schrödinger, MOE, KNIME"
+  },
+  "类药性与成药性评估": {
+    "definition": "类药性关注分子在理化层面是否具备成为药物的基本可行性，成药性则进一步评估“目标是否可做、分子是否可开发、项目是否可推进”的综合可行性。类药性常考察分子量、LogP、HBD/HBA、TPSA、可旋转键、芳香环负担等参数；成药性还需结合靶点可药性、PK/PD可达性、毒理信号、合成可行性与知识产权空间。两者联用可显著降低后期失败率，是研发早期做减法和定方向的关键步骤。",
+    "examples": "实践中常先用 Lipinski/Veber 规则快速预筛，再通过口袋可药性打分（如 SiteScore）与早期 ADMET 预测进行二级过滤。若出现“活性提升但溶解度骤降”或“效力增加但CYP抑制增强”的矛盾信号，通常需要回退到结构层面重构取代基策略，而不是继续沿单指标优化。",
+    "applications": "项目早期风险控制、化合物队列分层管理、立项与推进决策、失败风险前移识别",
+    "software": "SwissADME, RDKit, SiteMap, fpocket, CavityPlus"
+  },
+  "蛋白结构测定技术": {
+    "definition": "高质量结构数据是SBDD成功率的决定因素之一。X射线晶体学具有高分辨率优势，适合精细解析配体位姿与关键相互作用；NMR可在溶液状态观察构象动态、结合位点扰动及弱结合信号；Cryo-EM不依赖结晶，特别适用于膜蛋白和大分子复合体。三者并非替代关系，而是围绕“静态精度 + 动态信息 + 大体系可达性”形成互补，需按靶点类型与问题场景组合使用。",
+    "examples": "常见组合策略为：先用Cryo-EM确定复合体整体构象和状态，再在高分辨率区域进行局部建模与对接；或先用晶体结构确定关键残基取向，再用NMR验证溶液中是否存在构象交换。对于难结晶靶点，也可先用预测结构和低分辨率数据建立初始模型，再通过实验迭代校正。",
+    "applications": "结合位点确认、构象状态识别、结构质量评估、复合物建模与验证",
+    "software": "CCP4, PHENIX, RELION, cryoSPARC, TopSpin, NMRPipe"
+  },
+  "配体-受体关键相互作用": {
+    "definition": "配体-受体结合稳定性由多类弱相互作用协同决定，主要包括氢键、盐桥/离子作用、范德华作用、pi-pi 与阳离子-pi 作用、疏水包埋及水网络介导相互作用。高质量结合模式通常体现为“关键锚点明确、几何关系合理、能量贡献分布均衡”。在设计中不仅要看作用“有没有”，还要看“方向性是否正确、距离角度是否合理、是否引入不利应变或排斥”。",
+    "examples": "优化时常采用“先保锚点、再补空腔、后调性质”的策略：先锁定与保守残基形成的核心氢键，再通过芳环位置微调增强 pi 相互作用，用小取代基填充疏水口袋，最后检查是否引入静电冲突或构象应变。若活性提升但选择性下降，往往需要利用非保守位点设计差异化相互作用。",
+    "applications": "SAR机制解释、结合模式优化、选择性提升、耐药突变应对设计",
+    "software": "LigPlot+, PLIP, PyMOL, Discovery Studio, ChimeraX"
+  },
+  "结构驱动的计算设计方法": {
+    "definition": "结构驱动设计通常由“口袋分析-分子生成与筛选-稳定性验证-回写迭代”组成工具链。分子对接用于快速提出位姿假设，虚拟筛选用于在大库中富集候选，重打分与自由能方法用于提高排序可信度，分子动力学用于检验复合物在动态环境中的稳定性。关键不在于单一方法最强，而在于流程串联后的证据一致性和可复现性。",
+    "examples": "典型流程可为：口袋定义 -> 化合物库标准化与构象生成 -> 分层对接（快筛/精筛）-> 视觉检查与聚类去冗余 -> MM-GBSA 或 FEP 复评 -> 短程MD验证关键作用保持率 -> 输出合成清单。若MD显示关键氢键占有率低或姿势漂移明显，应回到设计阶段调整骨架或取代基布局。",
+    "applications": "命中发现、候选优选、结合稳定性验证、研发周期与成本压缩",
+    "software": "AutoDock Vina, Glide, GOLD, RDKit, GROMACS, AMBER, NAMD"
+  },
+  "分子对接基本原理": {
+    "definition": "分子对接的本质是：在受体结合位点内搜索配体可能的空间姿势（位移、取向、构象），并用打分函数估计每个姿势的相对结合能力。其核心包含两部分：采样（能否找到合理姿势）与打分（能否把好姿势排在前面）。由于受体柔性、溶剂效应与熵项通常被简化，对接结果应被视为“高价值假设”，而不是最终真值。",
+    "examples": "同一配体在同一口袋可能产生多个打分接近的姿势，需结合关键残基相互作用、已知SAR和构象合理性人工复核。实践中常采用“先快后准”的分层策略：先快速筛掉明显不匹配分子，再对候选进行精细对接。",
+    "applications": "结合模式预测、先导化合物发现、虚拟筛选初筛",
+    "software": "AutoDock Vina, Glide, GOLD, DOCK, rDock"
+  },
+  "受体与配体准备": {
+    "definition": "对接质量很大程度取决于准备阶段。受体准备需要处理缺失原子/残基、质子化状态、金属位点、水分子策略与口袋定义；配体准备需要统一化学结构、生成合理电荷与立体异构体、考虑不同质子化/互变异构状态，并生成多构象。准备阶段的误差会被后续流程放大，是导致“对接分数好但实验无活性”的常见原因。",
+    "examples": "受体中活性口袋关键水分子是否保留、His残基质子化形式如何设定、配体是否选择正确互变异构体，这些细节都可能改变对接结果排序。规范流程通常包含标准化日志，确保结果可复现。",
+    "applications": "提升对接可靠性、降低假阳性、保证结果可复现",
+    "software": "Protein Preparation Wizard, AutoDockTools, ChimeraX, RDKit, Open Babel"
+  },
+  "打分函数与参数优化": {
+    "definition": "打分函数用于近似估计结合强弱，常分为力场型、经验型、知识型和机器学习型。参数设置（网格范围、采样强度、柔性残基、约束条件）直接影响搜索空间和排序稳定性。实际项目中，单一打分函数往往不足以可靠排序，需要结合共识打分、重打分（如MM-GBSA）和人工结构检查。",
+    "examples": "若网格过小会漏掉合理姿势，过大则增加噪声；若采样强度不足，容易错过关键构象。常见策略是用已知活性配体做“回顾性再对接”校准参数，确认方法能否重现合理结合模式后再用于新分子筛选。",
+    "applications": "排序准确性提升、参数可解释优化、模型校准与方法验证",
+    "software": "GlideScore, ChemScore, AutoDock Vina score, MM-GBSA tools"
+  },
+  "对接结果分析与可视化": {
+    "definition": "对接后分析不仅看分数，更要看相互作用网络与几何合理性。关键检查包括：是否命中已知关键残基、是否形成合理氢键几何、是否存在明显原子冲突、疏水基团是否进入匹配口袋、配体暴露部分是否符合溶剂环境。对接结果需要与实验SAR和结构生物学信息交叉验证，避免“分高但不合理”的误判。",
+    "examples": "当两个候选分数接近时，通常优先选择相互作用更稳定、构象应变更小、合成可行性更高的分子。可通过2D相互作用图和3D叠合图快速比较系列化合物的差异。",
+    "applications": "候选优选、SAR解释、结构优化方向确定",
+    "software": "PyMOL, Discovery Studio Visualizer, LigPlot+, PLIP, ChimeraX"
+  },
+  "基于对接的虚拟筛选流程": {
+    "definition": "基于对接的虚拟筛选通常采用“库准备 -> 分级筛选 -> 多指标优选 -> 实验验证”的流程。为平衡速度与准确性，常用多阶段策略：第一阶段高通量粗筛，第二阶段高精度复筛，第三阶段人工审阅并结合ADMET与化学可合成性打分。最终输出的是“值得优先合成/采购”的小规模候选集。",
+    "examples": "例如从百万级化合物库开始，先过滤PAINS与明显不成药结构，再用快速对接保留前5%-10%，随后精筛并做聚类去冗余，最终选出几十到上百个多样化候选进入实验。",
+    "applications": "命中发现、成本控制、筛选效率提升、候选清单生成",
+    "software": "Glide HTVS/SP/XP, AutoDock Vina, VirtualFlow, KNIME, RDKit"
+  },
+  "分子对接常见问题与改进": {
+    "definition": "分子对接常见问题包括：受体构象单一导致偏差、打分函数误排序、忽略关键水分子/金属离子、配体状态设定错误、数据泄漏造成过高回顾性表现。改进方向包括：多构象受体对接、共识打分、引入水网络信息、对命中进行MD复核、并用独立测试集评估流程稳健性。",
+    "examples": "当对接命中率偏低时，优先排查受体准备与口袋定义；当排序不稳定时，可增加共识打分并引入实验已知阴性样本做判别测试。对于重要候选，建议追加短程MD观察关键相互作用是否可持续保持。",
+    "applications": "流程质控、命中率提升、假阳性降低、结果稳健性增强",
+    "software": "AutoDock Vina, Glide, GOLD, GROMACS, AMBER, PLIP"
+  },
+  "对接原理的原理和方法": {
+    "definition": "分子对接（Molecular Docking）的核心目标是预测小分子在靶标结合位点中的合理结合姿势，并给出相对结合优先级。其理论基础可概括为两部分：一是“构象采样”，即在三维空间中搜索配体可能的位置、朝向与构象；二是“能量评估”，即用打分函数估计该姿势是否稳定、是否可能对应较强结合。教学中可将其理解为“先找可能姿势，再判断姿势好坏”的两阶段流程。常用方法包括刚性/半柔性/柔性对接、分层对接（先快筛后精筛）、约束对接（利用关键残基信息约束姿势）以及再对接验证（redocking）等。需要强调的是，对接结果是高价值的结构假设，不是最终实验结论，必须结合SAR、生物实验和结构可视化共同判断。",
+    "examples": "在课堂演示中，可先选一个有共晶结构的体系进行再对接：先移除晶体配体，再用对接程序回填，并比较预测姿势与晶体姿势的一致性（例如关键氢键是否重现、姿势是否落在同一口袋区域）。之后再引入一批同系列新分子，用同一参数完成预测，比较它们在关键位点上的相互作用差异，从而解释为什么某些分子活性更高。这个过程能够让学生同时理解“原理、方法、验证、解释”四个层面。",
+    "applications": "结合模式假设提出、先导分子早期筛选、结构驱动优化方向设计、构效关系解释与复盘、实验优先级排序",
+    "software": "AutoDock Vina, Glide, GOLD, DOCK, rDock, FlexX, Surflex"
+  },
+  "分子对接的分类": {
+    "definition": "分子对接可从多个维度进行分类。按受体与配体柔性处理可分为：刚性对接、半柔性对接（最常用）和柔性/诱导契合对接；按研究对象可分为蛋白-小分子对接、蛋白-蛋白对接、核酸相关对接；按作用机制可分为非共价对接与共价对接；按是否已知位点可分为定点对接和盲对接。不同分类对应不同适用场景：例如大规模虚拟筛选优先考虑半柔性和高通量策略，而精细机制研究更适合柔性对接或后续分子动力学复核。教学上建议强调“问题决定方法”，而不是“固定软件固定参数”。",
+    "examples": "例如在激酶项目中，常先用半柔性定点对接做快速筛选；当怀疑受体侧链显著重排时，再引入诱导契合对接。对于共价抑制剂（如靶向半胱氨酸位点）则应采用共价对接流程，不宜直接套用非共价参数。若靶点活性位点未知，可先进行盲对接探索潜在口袋，再结合口袋分析和文献证据收缩到重点区域做精筛。",
+    "applications": "不同研发阶段的方法分流、不同靶点类型的流程设计、复杂体系的计算策略选择、课堂案例中方法比较训练",
+    "software": "Glide, GOLD, AutoDock Vina, CovDock, HADDOCK, RosettaDock, rDock"
+  },
+  "分子对接步骤": {
+    "definition": "标准分子对接步骤通常包括：第一步受体准备（补氢、质子化状态处理、缺失残基修复、关键水/金属离子策略）；第二步配体准备（结构标准化、互变异构体与立体异构体枚举、电荷分配与构象生成）；第三步定义结合位点与网格参数；第四步运行对接（设置采样强度、约束条件、输出姿势数）；第五步结果后处理（打分排序、去冗余、相互作用几何检查、可合成性与ADMET初筛）；第六步验证与迭代（再对接、已知活性分子回顾验证、参数回标）。这套流程的关键不是“跑完”，而是“可复现、可解释、可迭代”。",
+    "examples": "在教学实操中可采用“快筛-精筛-复核”三段式：先用HTVS模式筛掉明显不匹配分子，再对Top集合进行SP/XP精筛，最后通过2D/3D可视化检查关键作用并进行聚类去冗余。若某些分子分数高但构象明显不合理（如严重原子冲突、关键锚点缺失），应判定为假阳性并回到参数阶段修正，而不是机械按分数选分子。",
+    "applications": "大规模虚拟筛选流程化执行、项目内标准SOP建立、跨批次结果可比性保障、实验候选清单生成",
+    "software": "Protein Preparation Wizard, LigPrep, AutoDockTools, ChimeraX, PyMOL, KNIME, Maestro"
+  },
+  "分子对接的应用": {
+    "definition": "分子对接在药物研发中的应用覆盖“发现-优化-解释”全链条。在先导发现阶段，它用于从大规模化合物库中快速富集潜在活性分子；在先导优化阶段，它用于解释构效关系、指导取代基改造与骨架优化；在机制研究阶段，它用于分析关键残基作用、推测耐药突变影响和提出实验验证假设；在药物重定位中，它可辅助评估已有药物与新靶点的潜在结合可能。其最大价值在于降低实验搜索空间、提升决策效率，但应始终与实验数据闭环。",
+    "examples": "典型案例是先对百万级库做计算筛选，将候选压缩到百级以内，再通过生物实验验证命中分子；随后依据对接姿势观察关键位点作用是否稳健，提出下一轮结构修改策略。另一个教学案例是对比野生型与突变型受体的对接结果，分析突变后口袋体积、电荷环境和关键相互作用变化，帮助学生理解“结构变化如何影响活性”。",
+    "applications": "命中发现与富集、构效关系解释、耐药机制分析、药物重定位探索、计算与实验闭环优化",
+    "software": "AutoDock Vina, Glide, GOLD, Discovery Studio, PyMOL, PLIP, LigPlot+"
+  },
+  "分子对接软件": {
+    "definition": "分子对接软件可分为商业平台与开源工具两大类。商业平台通常集成了受体准备、配体准备、对接计算和结果分析，流程完整、界面友好、适合团队规范化使用；开源工具通常更灵活、可脚本化程度高、适合教学和批量计算。选软件时应综合考虑：计算精度、运行速度、是否支持共价/金属/水网络等特殊场景、参数可控性、自动化能力与结果可解释性。实际项目中，常采用多软件交叉验证与共识筛选来提升稳健性。",
+    "examples": "课堂上可布置“同库多软件对比”作业：同一靶点分别用Vina和Glide（或GOLD）运行，比较Top命中重叠度、关键作用保留率与耗时差异。学生通常会发现不同软件排名并不完全一致，这正是为什么需要后处理分析和多证据融合。再配合PyMOL与PLIP输出结构图和相互作用图，能够显著提升结果汇报质量。",
+    "applications": "教学实训与课程作业、科研筛选流程搭建、工业项目方法学比较、高通量自动化计算管线建设",
+    "software": "AutoDock Vina, Glide, GOLD, rDock, DOCK6, LeDock, idock, CovDock, HADDOCK, PyMOL, PLIP"
+  },
+  "分子模拟的定义": {
+    "definition": "分子模拟（Molecular Simulation）是用理论模型与数值计算在原子/分子尺度“重现并预测”体系的结构、能量与随时间演化行为的方法体系。它通常沿着“建立模型（量子/经典/多尺度）→ 计算能量与受力 → 采样与统计 → 输出可解释指标”的思路，将微观相互作用与宏观可观测性质（构象分布、结合稳定性、热力学量等）连接起来。在药物设计中，分子模拟常与实验形成“计算提出假设—实验验证—计算再优化”的闭环，用于降低试错成本与提高机制解释能力。",
+    "examples": "同一蛋白-配体体系可用不同层级模型回答不同问题：量子化学解释电子效应与反应机理；分子力场给出大体系能量模型；分子动力学在给定温压条件下产生轨迹并统计RMSD/RMSF或自由能变化，从而判断结合模式是否稳定、哪些残基更关键。",
+    "applications": "机制解释（相互作用本质/构象变化）、性质预测（相对稳定性/趋势判断）、虚拟筛选后处理（对接姿势复核）、先导优化（取代基电子效应与相互作用稳定性评估）、多尺度建模（QM/MM等）。",
+    "software": "GROMACS, AMBER, NAMD, OpenMM, CHARMM; Gaussian, ORCA; PyMOL, VMD"
+  },
+  "量子化学": {
+    "definition": "量子化学以量子力学为基础，从微观层面研究分子电子结构与运动规律。其核心是量子力学对微观粒子（电子、原子、分子）运动规律的描述：通过求解薛定谔方程（Schrödinger Equation）得到波函数与能量等信息。量子叠加态与观测导致的“波函数坍缩”可用“薛定谔的猫”思想实验理解：在测量前体系处于叠加态，测量使体系呈现确定结果，从而体现量子不确定性与观测的作用。",
+    "examples": "从教学角度：用简单体系说明“波函数—能级—轨道/电子密度”的关系，并解释为何不同构象/互变异构体/质子化状态会有不同能量与电荷分布。从方法角度：从头计算（Ab initio）以物理常数和原子序数为基础，不依赖经验参数；半经验法（Semi-empirical）引入由实验拟合的参数以显著提升速度，适合快速评估与大规模扫描。",
+    "applications": "药物设计中用于更精细地研究药物-靶标相互作用（电子效应、极化、关键氢键/配位的本质）、计算更可靠的能量/自由能趋势（如QM/MM或局部QM复评）、优化分子的电子结构（电荷分布、轨道能级）指导取代基设计，以及预测代谢反应路径与潜在毒性机制（活性代谢物形成等）。",
+    "software": "Gaussian, ORCA, GAMESS, Q-Chem, Psi4, NWChem, CP2K"
+  },
+  "分子力场": {
+    "definition": "分子力场（Molecular Force Field，也称分子力学）用经典势能函数近似描述分子体系的能量，只考虑原子排布而不显式处理电子构型。总能量（E_total）通常由键合作用与非键作用构成：键伸缩、键角弯曲、二面角扭转等（bonded terms），以及范德华力与静电作用等（non-bonded terms），必要时还会用简化项近似氢键等效应。",
+    "examples": "常见势函数形式包括：键伸缩能常用谐振子模型或莫斯函数（Morse Function）；键角弯折能多用谐振子模型；二面角扭转能用于描述绕单键旋转势垒（与势垒高度、多重度和相因子相关）；非键相互作用中范德华力常用 Lennard-Jones（LJ）6-12 势函数描述。教学中可通过对比“同体系不同力场/参数化策略”展示结果对相互作用强弱与稳定性的敏感性。",
+    "applications": "为MD与能量分析提供可复现的能量模型：计算受力与势能、进行构象搜索与采样、解释相互作用贡献，并支撑自由能相关分析流程。药物设计中，力场与参数化一致性直接影响蛋白-配体相互作用稳定性与基于轨迹的能量/自由能估计可靠性。",
+    "software": "AMBER, CHARMM, OPLS（蛋白/核酸）; MM2/MM3（有机小分子）; UFF（通用全元素）; MMFF（配体-受体/药物样分子）"
+  },
+  "分子动力学模拟": {
+    "definition": "分子动力学（Molecular Dynamics, MD）以经典力学为框架，结合分子力场，在给定热力学条件下模拟分子体系随时间演化的动态过程。其核心流程为：初始化位置/速度 → 根据势能函数计算受力 → 数值积分运动方程更新位置与速度 → 对轨迹进行采样与统计。MD覆盖从飞秒到微秒乃至更长的时间尺度，可用于把静态结构信息转化为动态行为与统计性质。",
+    "examples": "关键分析指标常包括：均方根偏差（RMSD）用于监测整体稳定性与收敛；均方根波动（RMSF）用于识别柔性区域与关键环区；结合/构象转换过程可在反应坐标上讨论自由能变化趋势（如自由能面或相对自由能差）。课堂演示中可用“对接姿势→短程MD→相互作用占有率/RMSD变化”来说明为何MD常用于对接结果复核。",
+    "applications": "验证与优化药物-靶标结合模式（稳定性、关键相互作用占有率）、评估构象柔性与诱导契合、辅助解释SAR与突变影响，并作为自由能估算与多尺度方法（如与QM/MM结合）的动力学采样基础。",
+    "software": "GROMACS, AMBER, NAMD, OpenMM, CHARMM, Desmond, LAMMPS"
+  },
+  "蛋白与小分子体系构建": {
+    "definition": "MD体系构建是模拟前的关键准备步骤，直接影响模拟的成功与否。完整流程包括：(1)蛋白质处理：添加缺失原子和残基、确定质子化状态(使用PROPKA或H++)、处理二硫键、选择合适的末端封端；(2)小分子参数化：生成力场参数和电荷，常用GAFF+AM1-BCC或CGenFF；(3)体系组装：将蛋白质和配体放入模拟盒子，添加水分子(通常使用TIP3P)；(4)加离子：添加反离子中和体系电荷，可能还需要添加盐(如150mM NaCl)模拟生理条件；(5)能量最小化：消除不合理接触；(6)平衡模拟：NVT平衡温度，NPT平衡压力和密度。",
+    "examples": "蛋白-配体复合物的MD体系搭建是药物设计中的常见任务。以GROMACS为例：首先使用pdb2gmx处理蛋白质，选择力场和水模型；然后使用ACPYPE为配体生成GAFF参数；使用editconf定义盒子大小(通常蛋白到边界至少1.0nm)；solvate添加水分子；genion添加离子；最后进行能量最小化和平衡。CHARMM-GUI提供了友好的网页界面，可以自动完成体系构建，特别适合膜蛋白体系。对于复杂体系(如蛋白质-DNA复合物、多聚体)，需要特别注意各组分的兼容性。",
+    "applications": "MD模拟准备、体系平衡验证稳定性、生产模拟研究动态行为、膜蛋白体系构建、多组分复合物模拟",
+    "software": "tleap, CHARMM-GUI, VMD, GROMACS tools, pdb4amber, Packmol"
+  },
+  "生产模拟、能量分析": {
+    "definition": "生产模拟(Production Run)是在体系充分平衡后进行的正式MD模拟，用于收集统计数据和分析动态行为。模拟时长取决于研究问题，通常蛋白质-配体体系需要100ns以上。轨迹分析是从模拟数据中提取有意义信息的过程，常用分析包括：(1)RMSD(均方根偏差)，监测结构稳定性和构象变化；(2)RMSF(均方根涨落)，识别柔性区域；(3)氢键分析，研究关键相互作用的稳定性；(4)主成分分析(PCA)，提取主要运动模式；(5)聚类分析，识别代表性构象；(6)相关性分析，研究残基间的协同运动。这些分析帮助理解蛋白质功能和药物作用机制。",
+    "examples": "100ns蛋白-配体MD模拟是验证对接结果的标准方法：如果配体在模拟过程中保持稳定的结合模式和相互作用，说明对接结果可靠。RMSD分析可以判断蛋白质和配体是否达到平衡，通常要求RMSD在平衡后波动小于0.2nm。RMSF分析可以识别活性位点的柔性环区，这些区域可能参与配体识别。氢键占有率分析帮助确定关键相互作用，占有率>50%的氢键通常是重要的。PCA可以揭示蛋白质的功能性运动，如酶的开合运动、GPCR的激活运动等。",
+    "applications": "结合模式验证确认对接结果、构象变化研究功能机制、药物设计指导优化、动态药效团提取、别构机制研究",
+    "software": "GROMACS analysis tools, cpptraj, MDAnalysis, MDTraj, Bio3D, PyEMMA"
+  },
+  "结合自由能计算": {
+    "definition": "结合自由能(ΔG_bind)是定量描述配体-受体结合强度的热力学参数，与实验测定的IC50/Ki直接相关。计算方法主要分为两类：(1)终点方法，如MM-PBSA/GBSA，从MD轨迹提取代表性构象，计算结合态和自由态的能量差，计算量小但精度有限；(2)炼金术方法，如自由能微扰(FEP)和热力学积分(TI)，通过构建热力学循环计算相对结合自由能，精度高但计算量大。MM-PBSA将结合自由能分解为：分子力学能(范德华+静电)、极性溶剂化能(PB或GB)、非极性溶剂化能和熵贡献。FEP通过逐步变换配体计算自由能差，是药物优化的重要工具。",
+    "examples": "MM-PBSA是最常用的结合自由能计算方法，适合快速评估和排序化合物。典型流程：从MD轨迹提取100-500帧构象，使用MMPBSA.py或gmx_MMPBSA计算各能量项。结果可以进行能量分解，识别关键残基对结合的贡献。FEP计算在药物优化中应用广泛，Schrödinger的FEP+在多个公开基准测试中表现优异，预测误差约1 kcal/mol。相对结合自由能计算(RBFE)比较两个配体的结合差异，指导结构优化。TIES方法通过多副本模拟提高FEP的收敛性和可靠性。",
+    "applications": "先导化合物优化指导结构修饰、虚拟筛选后处理重排序、SAR研究理解构效关系、选择性预测、耐药性突变分析",
+    "software": "gmx_MMPBSA, MMPBSA.py, FEP+, TIES, pmx, alchemlyb"
+  },
+  "结合口袋分析": {
+    "definition": "结合口袋分析是识别和表征蛋白质表面或内部可能的配体结合位点的计算方法，是SBDD的起点。分析内容包括：(1)口袋识别：使用几何方法(如alpha球)或能量方法检测蛋白质表面的空腔；(2)可药性评估：根据口袋的大小、形状、封闭程度、疏水性等特征判断是否适合小分子结合；(3)热点分析：识别对结合贡献最大的残基；(4)口袋比较：比较不同蛋白或不同构象的口袋相似性。口袋分析还可以发现隐藏口袋(cryptic pocket)，这些口袋只在特定构象下暴露，可能成为新的药物靶点。别构位点的发现为开发新型调节剂提供了机会。",
+    "examples": "SiteMap是Schrödinger开发的口袋分析工具，可以计算SiteScore和Dscore评估可药性，>0.8通常认为可药。fpocket是流行的开源工具，使用Voronoi镶嵌和alpha球方法检测口袋。CavityPlus提供了全面的口袋分析功能，包括口袋检测、可药性评估和别构位点预测。在实际应用中，对MD轨迹进行口袋分析可以发现隐藏口袋，如p53-MDM2相互作用界面的隐藏口袋导致了新型抑制剂的发现。激酶的别构口袋(如MEK的别构位点)已成为药物设计的重要靶点。",
+    "applications": "靶点可药性评估判断是否适合小分子、新结合位点发现开发新型药物、别构位点识别设计别构调节剂、口袋比较研究选择性",
+    "software": "SiteMap, fpocket, DoGSiteScorer, CavityPlus, POCASA, PocketFinder, MetaPocket"
+  },
+  "药效团构建": {
+    "definition": "基于结构的药效团(Structure-Based Pharmacophore)是从蛋白质-配体复合物结构中提取的药效团模型，综合了受体和配体的信息。构建方法包括：(1)基于复合物结构：分析配体与受体的相互作用，将关键相互作用转化为药效团特征；(2)基于受体结构：不需要已知配体，直接从结合口袋的理化性质推导可能的药效团特征(e-药效团)；(3)动态药效团：从MD轨迹提取，考虑受体柔性。药效团特征包括氢键供体/受体、疏水中心、芳香环、正/负电荷中心等，以及它们之间的距离和角度约束。结构基药效团比配体基药效团更能反映结合位点的要求。",
+    "examples": "基于配体-受体复合物的药效团是最常用的方法：以CDK2抑制剂为例，从晶体结构分析可以提取与铰链区形成氢键的特征、填充疏水口袋的特征等。LigandScout可以自动从复合物结构生成药效团，并支持排除体积的定义。e-药效团(基于受体的药效团)不需要已知配体，从口袋的氢键位点、疏水区域推导药效团，适合新靶点的药物发现。Schrödinger的Phase可以生成基于受体的假设，用于虚拟筛选。动态药效团从MD轨迹提取，考虑了受体的构象变化，更加稳健。",
+    "applications": "虚拟筛选发现新骨架、先导化合物发现、结构优化指导设计、骨架跃迁发现新化学类型、选择性优化",
+    "software": "Phase, LigandScout, Pharmer, ZINCPharmer, Pharmit, MOE Pharmacophore"
+  },
+  "基于结构的衍生物设计": {
+    "definition": "基于结构的衍生物设计是利用受体三维结构信息指导先导化合物结构修饰和优化的方法。主要策略包括：(1)R基团替换：保持核心骨架不变，系统替换取代基，探索SAR；(2)片段生长：从结合口袋的空余空间出发，向配体添加新基团以增强结合；(3)片段连接：将两个结合在相邻位点的片段连接成完整分子；(4)骨架跃迁：保持药效团特征不变，更换分子骨架；(5)生物电子等排替换：用理化性质相似的基团替换原有基团。设计过程需要综合考虑活性、选择性、ADMET性质和合成可行性。",
+    "examples": "基于对接结果的R基团替换是最常用的优化策略：Schrödinger的CombiGlide可以自动枚举R基团组合并进行对接评估。片段生长设计在FBDD(片段药物发现)中广泛应用，如从激酶铰链结合片段出发，向溶剂暴露区域生长提高活性。BREED软件通过重组已知活性分子的片段生成新化合物。Spark使用生物电子等排替换探索化学空间。在实际项目中，通常结合多种策略：先用对接筛选R基团，再用MM-GBSA精确评估，最后选择合成可行的化合物进行实验验证。",
+    "applications": "先导化合物优化提高活性和选择性、ADMET改善降低毒性风险、合成可行性考虑、专利规避设计新化合物",
+    "software": "CombiGlide, BREED, Spark, R-group enumeration, FEP+"
+  },
+  "虚拟筛选（SBVS）": {
+    "definition": "基于结构的虚拟筛选(Structure-Based Virtual Screening, SBVS)使用分子对接技术从大型化合物库中计算筛选潜在活性分子，是先导化合物发现的重要方法。SBVS流程包括：(1)化合物库准备：获取商业库或内部库，进行标准化处理、生成3D构象、过滤不合理结构；(2)受体准备：处理晶体结构，定义结合位点；(3)对接筛选：使用高通量对接程序筛选，通常分为初筛和精筛；(4)结果分析：根据打分排序，结合化学多样性、ADMET性质等因素选择化合物；(5)实验验证：购买或合成候选化合物进行活性测试。SBVS可以大幅降低实验筛选成本，提高命中率。",
+    "examples": "百万级化合物库的SBVS是工业界的常见实践：使用AutoDock Vina或Glide HTVS进行初筛(每个化合物几秒)，选取top 10%进行SP精筛，再选取top 1%进行XP精筛和MM-GBSA重打分。最终选择100-1000个化合物进行实验测试，命中率通常为1-10%。片段虚拟筛选(Fragment-Based VS)筛选小片段(MW<300)，命中率更高但活性较弱，需要后续优化。VirtualFlow是高性能虚拟筛选平台，可以在云计算环境中筛选数十亿化合物。药物重定位使用SBVS筛选已上市药物的新靶点。",
+    "applications": "先导化合物发现加速药物研发、药物重定位发现老药新用途、靶点验证确认可药性、化合物库富集提高筛选效率",
+    "software": "Glide HTVS/SP/XP, AutoDock Vina, VirtualFlow, DOCK, rDock, FRED"
+  },
+  "分子描述符": {
+    "definition": "分子描述符(Molecular Descriptor)是将分子结构转换为数值特征的方法，是QSAR建模和机器学习的基础。描述符类型包括：(1)物化性质描述符：分子量、LogP、TPSA、氢键供体/受体数等；(2)拓扑描述符：基于分子图的连接性指数、Wiener指数等；(3)几何描述符：基于3D结构的形状、表面积、体积等；(4)电子描述符：电荷分布、偶极矩、HOMO/LUMO能级等；(5)分子指纹：将分子特征编码为位向量，如ECFP、MACCS keys。描述符的选择影响模型性能，需要考虑与目标性质的相关性、描述符之间的相关性和可解释性。",
+    "examples": "分子量(MW)、LogP(脂水分配系数)、TPSA(拓扑极性表面积)是最常用的物化描述符，与药物的吸收和渗透性密切相关。Lipinski五规则就是基于这些描述符。摩根指纹(Morgan Fingerprint，也称ECFP)通过迭代编码原子环境，广泛用于相似性搜索和机器学习。RDKit可以计算200多种描述符，Mordred可以计算1800多种描述符。在实际建模中，通常计算大量描述符，然后通过特征选择选择最相关的子集。3D描述符(如WHIM、GETAWAY)需要3D构象，计算量较大但包含更多信息。",
+    "applications": "QSAR建模预测活性和性质、机器学习分子表示、相似性搜索发现类似物、化学空间分析、虚拟筛选过滤",
+    "software": "RDKit, Mordred, PaDEL-Descriptor, Dragon, MOE, CDK"
+  },
+  "特征选择与降维": {
+    "definition": "特征选择(Feature Selection)是从大量描述符中选择最相关特征的过程，降维(Dimensionality Reduction)是将高维数据映射到低维空间。目的是：(1)减少过拟合风险；(2)提高模型可解释性；(3)降低计算成本。特征选择方法包括：过滤法(基于统计指标筛选)、包装法(如递归特征消除RFE)、嵌入法(如LASSO、随机森林特征重要性)。降维方法包括：线性方法如PCA(主成分分析)、非线性方法如t-SNE、UMAP。在QSAR建模中，通常先去除低方差和高相关性特征，再使用特征选择算法选择最优子集。",
+    "examples": "递归特征消除(RFE)是常用的包装法特征选择：使用随机森林等模型评估特征重要性，逐步移除最不重要的特征，直到达到目标数量。PCA可以将数百个描述符压缩为几个主成分，同时保留大部分方差信息。t-SNE和UMAP用于化学空间可视化，将高维描述符空间映射到2D，观察化合物的分布和聚类。在实际建模中，通常保留10-50个特征，既保证模型性能又便于解释。SHAP值可以解释每个特征对预测的贡献，帮助理解构效关系。",
+    "applications": "QSAR建模优化提高预测性能、数据可视化展示化学空间、模型解释理解构效关系、过拟合控制、计算效率提升",
+    "software": "scikit-learn, R caret, KNIME, XGBoost, SHAP"
+  },
+  "经典回归/分类模型": {
+    "definition": "QSAR中的机器学习模型用于建立分子描述符与生物活性/性质之间的定量关系。回归模型预测连续值(如pIC50)，分类模型预测类别(如活性/非活性)。经典模型包括：(1)线性模型：多元线性回归(MLR)、偏最小二乘(PLS)，可解释性好；(2)树模型：随机森林(RF)、梯度提升树(XGBoost、LightGBM)，性能优异且能评估特征重要性；(3)支持向量机(SVM)：适合小样本，核函数处理非线性；(4)神经网络：深度学习模型如DNN、GNN，适合大数据集。模型选择需要考虑数据量、特征类型、可解释性需求和计算资源。",
+    "examples": "随机森林(RF)是QSAR中最常用的模型之一：由多棵决策树组成，通过投票或平均得到最终预测，不易过拟合且能评估特征重要性。在MoleculeNet基准测试中，RF在多个数据集上表现优异。XGBoost和LightGBM是高效的梯度提升实现，在Kaggle竞赛中广泛使用。SVM配合RBF核可以处理非线性关系，适合中等规模数据集。深度学习模型如图神经网络(GNN)直接在分子图上操作，在大数据集上表现出色，但需要更多数据和计算资源。",
+    "applications": "活性预测评估化合物效力、ADMET预测早期筛选、虚拟筛选排序、毒性预测安全性评估、性质预测指导设计",
+    "software": "scikit-learn, XGBoost, LightGBM, DeepChem, PyTorch, TensorFlow"
+  },
+  "QSAR建模流程与验证": {
+    "definition": "QSAR建模是一个系统的流程，包括：(1)数据收集：从ChEMBL、PubChem等数据库获取活性数据，注意数据质量和一致性；(2)数据预处理：结构标准化、去除重复和异常值、活性值转换(如pIC50)；(3)描述符计算：选择合适的描述符类型；(4)数据划分：通常80%训练集、20%测试集，注意保持分布一致；(5)模型训练：选择算法、调优超参数；(6)模型验证：内部验证(交叉验证)和外部验证(独立测试集)；(7)应用域评估：确定模型的适用范围。验证指标包括R²、RMSE(回归)和AUC、准确率(分类)。Y-随机化检验模型是否过拟合。",
+    "examples": "5折交叉验证是最常用的内部验证方法：将数据分成5份，轮流用4份训练、1份验证，取平均性能。外部测试集验证更能反映模型的泛化能力，应该在模型开发完成后只使用一次。Y-随机化将活性值随机打乱后重新建模，如果性能明显下降说明原模型不是偶然相关。应用域(Applicability Domain)评估新化合物是否在模型的适用范围内，常用方法包括描述符空间距离、杠杆值等。OECD指南规定了QSAR模型验证的五项原则，是监管接受的基础。",
+    "applications": "活性预测模型开发、ADMET模型验证确保可靠性、监管提交支持药物审批、模型更新和维护",
+    "software": "KNIME, Pipeline Pilot, OCHEM, DeepChem, scikit-learn"
+  },
+  "药效团的概念": {
+    "definition": "药效团(Pharmacophore)是分子中负责与生物靶点特异性相互作用并触发(或阻断)生物响应的空间和电子特征的抽象集合，是分子识别的分子基础。药效团不是真实的分子或分子片段，而是对多个活性分子共同特征的抽象描述。标准药效团特征包括：(1)氢键供体(HBD)：能够提供氢原子形成氢键的基团，如-OH、-NH；(2)氢键受体(HBA)：能够接受氢原子形成氢键的基团，如C=O、-O-；(3)疏水中心(H)：非极性基团聚集区域；(4)芳香环(Ar)：参与π-π堆积或阳离子-π作用；(5)正电荷中心(PI)：带正电的基团；(6)负电荷中心(NI)：带负电的基团。药效团模型还包括特征间的距离和角度约束，以及排除体积(不允许原子存在的区域)。",
+    "examples": "组胺H1受体拮抗剂的经典药效团包含：一个碱性氮原子(与受体形成盐桥)、两个芳香环(填充疏水口袋)，三者呈特定的空间排列。这一药效团模型解释了为什么结构差异很大的化合物(如苯海拉明、氯雷他定、西替利嗪)都具有抗组胺活性。阿片类药物的Beckett-Casy药效团模型是最早的药效团之一，包含碱性氮、芳香环和特定的立体化学要求。HIV蛋白酶抑制剂的药效团包含与催化Asp形成氢键的羟基和填充S1/S1'口袋的疏水基团。",
+    "applications": "虚拟筛选从化合物库筛选活性分子、先导化合物发现、SAR研究理解构效关系、骨架跃迁发现新化学类型、专利规避设计新结构",
+    "software": "Phase, LigandScout, MOE Pharmacophore, Catalyst, Pharmer, PharmaGist"
+  },
+  "LBDD vs 药效团建模": {
+    "definition": "基于配体的药效团建模(Ligand-Based Pharmacophore Modeling)是在靶点结构未知的情况下，从一组已知活性分子中提取共同药效团特征的方法。建模流程包括：(1)活性分子收集：选择结构多样但活性相似的化合物；(2)构象生成：为每个分子生成多个低能构象；(3)分子叠合：将分子在3D空间中对齐，使药效团特征重合；(4)共同特征提取：识别所有活性分子共有的药效团特征；(5)模型验证：使用已知活性和非活性分子验证模型的区分能力。与SBDD相比，LBDD不需要靶点结构，适用于靶点结构未知或难以获得的情况，但模型质量依赖于训练分子的数量和多样性。",
+    "examples": "多活性分子叠合建模是最常用的方法：以COX-2抑制剂为例，收集10-20个已知活性化合物(包括不同骨架)，使用Phase或Catalyst生成构象并叠合，提取共同特征(如磺酰胺基团的氢键受体、三环骨架的疏水特征)。共同特征药效团(Common Feature Pharmacophore)关注所有活性分子共有的最小特征集。HipHop算法(Catalyst)专门用于从活性分子中提取共同特征。定量药效团(如HypoGen)还考虑活性值，生成能够预测活性强弱的模型。",
+    "applications": "活性分子骨架跃迁发现新化学类型、新靶点药物发现、专利规避、虚拟筛选、SAR研究",
+    "software": "Phase, Catalyst/HipHop/HypoGen, GALAHAD, MOE, PharmaGist, Pharmer"
+  },
+  "虚拟筛选": {
+    "definition": "基于药效团的虚拟筛选(Pharmacophore-Based Virtual Screening)使用药效团模型作为3D查询，从化合物库中筛选匹配药效团特征的分子。筛选流程包括：(1)药效团模型准备：确定特征类型、空间约束和容差；(2)化合物库准备：生成3D构象库；(3)药效团匹配：检查每个分子是否存在匹配药效团的构象；(4)结果排序：根据匹配程度、适配分数等排序；(5)后处理：结合ADMET过滤、化学多样性分析选择候选分子。与对接相比，药效团筛选速度更快(不需要计算相互作用能)，且不依赖于受体结构的准确性，适合发现结构新颖的活性分子。",
+    "examples": "使用药效团搜索ZINC数据库是常见的应用场景：ZINC包含数亿个可购买化合物，使用ZINCPharmer可以在几分钟内完成药效团搜索。Pharmit是另一个高效的在线药效团搜索工具，支持自定义药效团查询。在实际项目中，通常先用药效团筛选缩小候选范围(从百万级到万级)，再用分子对接精筛。3D药效团筛选比2D指纹搜索更能发现骨架新颖的活性分子，因为它关注的是空间特征而非子结构。多药效团筛选(使用多个模型的共识)可以提高命中率。",
+    "applications": "先导化合物发现、骨架跃迁发现新化学类型、化合物库富集提高筛选效率、药物重定位、多靶点药物发现",
+    "software": "Phase, ZINCPharmer, Pharmer, Pharmit, MOE, LigandScout"
+  },
+  "分子指纹": {
+    "definition": "分子指纹(Molecular Fingerprint)是将分子结构特征编码为固定长度位向量(0/1)或计数向量的方法，是化学信息学的核心概念。主要类型包括：(1)子结构指纹：记录特定子结构的存在与否，如MACCS keys(166位，记录预定义的结构模式)；(2)拓扑指纹：基于原子路径编码，如Daylight指纹；(3)圆形指纹：基于原子中心环境迭代编码，如ECFP(Extended Connectivity Fingerprint)、Morgan指纹，半径参数控制编码范围；(4)药效团指纹：编码药效团特征对的距离分布。指纹的选择影响相似性搜索和机器学习的效果，不同指纹适用于不同任务。ECFP4(半径2)是目前最常用的指纹类型，在多种任务中表现优异。",
+    "examples": "ECFP4(Extended Connectivity Fingerprint, radius=2)是最流行的圆形指纹：从每个原子出发，迭代编码2步范围内的原子环境，生成的特征数量与分子大小相关，通常折叠为1024或2048位。MACCS keys是经典的子结构指纹，166位分别对应166种预定义的结构模式(如芳香环、羰基等)，可解释性好但信息量有限。RDKit指纹是RDKit默认的拓扑指纹，基于原子路径生成。在实际应用中，ECFP4在活性预测和相似性搜索中通常表现最好，MACCS keys适合需要可解释性的场景。",
+    "applications": "相似性搜索发现类似物、聚类分析化合物分组、机器学习分子表示、虚拟筛选、化学空间可视化、去重复和多样性分析",
+    "software": "RDKit, CDK, Open Babel, ChemFP, KNIME"
+  },
+  "相似性搜索": {
+    "definition": "相似性搜索(Similarity Search)是基于分子指纹的相似性度量从化合物数据库中检索与查询分子相似的化合物的方法。核心假设是\"相似结构具有相似性质\"(Similar Property Principle)。常用相似性度量包括：(1)Tanimoto系数(也称Jaccard系数)：Tc = c/(a+b-c)，其中c是共有位数，a和b分别是两分子的位数，是最常用的度量；(2)Dice系数：Dc = 2c/(a+b)；(3)余弦相似度。搜索策略包括：阈值搜索(返回相似度高于阈值的分子)、k近邻搜索(返回最相似的k个分子)。相似性搜索速度快，可以在秒级内搜索数百万化合物，是先导化合物发现的重要方法。",
+    "examples": "基于活性分子的相似物搜索是最常见的应用：从一个已知活性分子出发，在ChEMBL或ZINC数据库中搜索Tanimoto相似度>0.7的化合物，这些化合物很可能具有相似的活性。近邻分析(k-NN)可以用于活性预测：一个化合物的活性可以由其最近邻活性分子的活性加权平均估计。在SAR研究中，相似性搜索帮助发现活性悬崖(Activity Cliff)——结构高度相似但活性差异很大的分子对，这些对SAR研究很有价值。多查询搜索使用多个活性分子作为查询，取并集或交集。",
+    "applications": "先导化合物发现、SAR拓展发现类似物、专利规避设计新结构、活性悬崖发现、化合物采购决策、数据库去重",
+    "software": "RDKit, ChEMBL, PubChem, ZINC, SmallWorld, FPSim2"
+  },
+  "常用工具与案例": {
+    "definition": "相似性方法有多种在线和离线工具，各有特点和适用场景。在线工具方便快捷，适合小规模搜索；离线工具适合大规模筛选和定制化需求。除了结构相似性，还有基于生物活性谱的相似性方法(如SEA)，可以发现结构不同但靶点相似的化合物。相似性方法的成功案例证明了\"相似结构相似性质\"原则的有效性，但也需要注意活性悬崖现象——小的结构变化可能导致活性的剧烈变化。",
+    "examples": "SwissSimilarity是瑞士生物信息学研究所开发的免费在线工具，支持多种指纹类型和数据库搜索，界面友好。ChEMBL数据库内置相似性搜索功能，可以直接搜索已有生物活性数据的化合物。PubChem提供2D和3D相似性搜索。SEA(Similarity Ensemble Approach)基于配体集合的相似性预测化合物的靶点，成功预测了多个老药的新靶点，推动了药物重定位研究。SmallWorld使用图编辑距离进行相似性搜索，可以发现传统指纹方法遗漏的类似物。",
+    "applications": "药物重定位发现老药新用途、先导化合物发现、靶点预测、多药理学研究、化合物库设计",
+    "software": "SwissSimilarity, ChEMBL, PubChem, SEA, SmallWorld, MolPort"
+  },
+  "分子成药性": {
+    "definition": "分子成药性(Druglikeness)是评估化合物是否具有成为口服药物潜力的一系列理化性质标准。最著名的是Lipinski五规则(Rule of Five, Ro5)：分子量≤500、LogP≤5、氢键供体≤5、氢键受体≤10，违反两条以上规则的化合物口服吸收可能较差。其他重要规则包括：Veber规则(可旋转键≤10、TPSA≤140Å²)关注口服生物利用度；Ghose规则、Egan规则等针对特定性质。对于CNS药物，要求更严格(MW<450、LogP<5、TPSA<90、HBD≤3)以穿透血脑屏障。需要注意的是，这些规则是统计规律而非绝对标准，天然产物和大环化合物常违反Ro5但仍具有良好的成药性(超越Ro5空间)。",
+    "examples": "Lipinski五规则源于对已上市口服药物的统计分析，约90%的口服药物符合该规则。阿托伐他汀(Lipitor)完美符合Ro5：MW=559(略超)、LogP=4.5、HBD=4、HBA=5。环孢素A是著名的\"超越Ro5\"药物：MW=1203，但通过分子内氢键和构象柔性实现良好的口服吸收。在药物设计中，通常在先导化合物优化早期就监控这些性质，避免后期因成药性问题导致项目失败。ADMET雷达图可以直观展示化合物的多维成药性特征。",
+    "applications": "化合物库过滤去除不成药分子、先导化合物评估早期预警、药物设计指导优化方向、虚拟筛选预过滤",
+    "software": "SwissADME, FAF-Drugs, RDKit, DataWarrior, ADMET Predictor"
+  },
+  "毒理学与非靶向性预测": {
+    "definition": "计算毒理学(In Silico Toxicology)利用计算方法预测化合物的潜在毒性，是药物安全性评估的重要组成部分。毒性类型包括：(1)急性毒性：LD50预测；(2)器官毒性：肝毒性(DILI)、心脏毒性(hERG抑制导致QT延长)、肾毒性；(3)遗传毒性：致突变性(Ames试验预测)、致癌性；(4)发育毒性：致畸性；(5)皮肤致敏性。预测方法包括：基于规则的专家系统(识别毒性警示结构)、QSAR模型、机器学习模型。脱靶预测评估化合物与非预期靶点的相互作用，如激酶选择性panel、GPCR panel等。早期毒性预测可以减少后期临床失败。",
+    "examples": "hERG(人ether-à-go-go相关基因)钾离子通道抑制是心脏毒性的主要原因，多个药物因hERG毒性撤市(如特非那定、西沙必利)，因此hERG预测是必检项目。Derek Nexus使用基于知识的规则预测毒性，可以解释预测结果(识别毒性警示结构)。ProTox-II是免费的在线毒性预测工具，整合了多种毒性终点的预测模型。结构警示(Structural Alerts)如硝基芳烃、醌类等与特定毒性相关，在化合物设计时应尽量避免。",
+    "applications": "安全性评估早期筛选、先导化合物优化去除毒性基团、候选药物筛选、监管提交支持、化合物库设计",
+    "software": "Derek Nexus, Toxtree, ProTox-II, pkCSM, ADMETlab, ADMET Predictor"
+  },
+  "PBPK基础概念": {
+    "definition": "生理药代动力学(Physiologically Based Pharmacokinetic, PBPK)模型是基于人体生理学和解剖学原理，将人体划分为多个器官/组织室，用微分方程描述药物在体内吸收、分布、代谢和排泄过程的数学模型。PBPK模型的组成包括：(1)系统参数：器官体积、血流量、组织组成等生理参数；(2)药物参数：溶解度、渗透性、血浆蛋白结合率、代谢清除率等；(3)模型结构：器官间的连接和药物转运方程。PBPK模型可以预测药物在不同人群(儿童、老年人、肝肾功能不全患者)、不同给药方案下的药代动力学行为，以及药物-药物相互作用(DDI)。FDA和EMA已将PBPK建模纳入药物研发指南。",
+    "examples": "药物-药物相互作用(DDI)预测是PBPK的重要应用：当两个药物共同给药时，一个药物可能抑制或诱导另一个药物的代谢酶(如CYP3A4)，导致血药浓度变化。PBPK模型可以定量预测这种相互作用的程度，指导临床用药。儿科剂量预测利用儿童的生理参数(器官大小、代谢酶成熟度等)外推成人数据。肝功能不全患者的剂量调整也可以通过PBPK模拟指导。GastroPlus和Simcyp是制药行业最常用的商业PBPK软件，被监管机构广泛接受。",
+    "applications": "临床试验设计优化给药方案、剂量优化个体化用药、药物相互作用研究、特殊人群用药指导、首次人体试验(FIH)剂量预测、监管提交",
+    "software": "GastroPlus, Simcyp, PK-Sim, MATLAB SimBiology"
+  },
+  "LogP、溶解度、pKa、BBB、肝毒性预测": {
+    "definition": "ADMET性质的计算预测是药物设计的重要环节，主要预测项目包括：(1)LogP(脂水分配系数)：影响膜渗透性和蛋白结合，常用方法有原子加和法(如ALogP、XLogP)和机器学习方法；(2)水溶解度：影响口服吸收和配方设计，通常预测LogS(mol/L)；(3)pKa(解离常数)：影响药物的离子化状态、溶解度和膜渗透性；(4)BBB(血脑屏障)透过性：CNS药物需要穿透BBB，非CNS药物应避免；(5)肝毒性(DILI)：药物性肝损伤是药物撤市的主要原因之一。这些性质的早期预测可以指导化合物优化，减少后期失败风险。",
+    "examples": "LogP预测方法众多：XLogP3基于原子加和法，计算快速；ChemAxon的LogP使用片段方法，精度较高；机器学习方法如基于分子指纹的随机森林模型在大数据集上表现优异。水溶解度预测的挑战在于实验数据的不一致性，ESOL数据集是常用的基准。pKa预测对于含可离子化基团的药物很重要，ChemAxon和Schrödinger的Epik是常用工具。BBB预测常用的描述符包括TPSA、LogP、分子量和氢键数，机器学习模型如基于ECFP的随机森林在BBBP数据集上达到较高准确率。",
+    "applications": "先导化合物优化指导结构修饰、候选药物筛选早期淘汰、配方设计、CNS药物设计、安全性评估",
+    "software": "SwissADME, pkCSM, ADMETlab, ADMET Predictor, QikProp, ChemAxon"
+  },
+  "商用软件": {
+    "definition": "商业ADMET预测软件提供全面、经过验证的性质预测模型，通常具有友好的用户界面、技术支持和定期更新。主要商业软件包括：(1)ADMET Predictor(Simulations Plus)：功能最全面，覆盖吸收、分布、代谢、排泄、毒性等200多个终点；(2)StarDrop(Optibrium)：强调多参数优化(MPO)，帮助平衡多个ADMET性质；(3)QikProp(Schrödinger)：快速预测，与Schrödinger套件集成；(4)DEREK/METEOR(Lhasa)：基于知识的毒性和代谢预测。商业软件的优势在于模型经过广泛验证、持续更新、有技术支持，适合工业应用和监管提交。",
+    "examples": "ADMET Predictor是制药行业使用最广泛的商业ADMET软件，其模型基于大量内部和公开数据训练，预测准确性经过多次验证。软件可以预测Caco-2渗透性、血浆蛋白结合率、CYP抑制和代谢、hERG抑制、肝毒性等关键性质。StarDrop的独特之处在于其多参数优化功能，可以可视化化合物在多维ADMET空间中的位置，指导优化方向。QikProp计算速度快，适合高通量筛选，与Glide对接结合使用可以在虚拟筛选中同时考虑活性和ADMET。",
+    "applications": "工业药物研发全流程ADMET评估、高通量ADMET筛选、监管提交支持、多参数优化、化合物优先级排序",
+    "software": "ADMET Predictor, StarDrop, QikProp, DEREK, METEOR, Percepta"
+  },
+  "基于ML的ADMET预测": {
+    "definition": "机器学习(ML)和深度学习(DL)方法为ADMET预测带来了新的可能性，能够从大规模数据中学习复杂的结构-性质关系。主要方法包括：(1)传统ML：随机森林、XGBoost、SVM等，基于分子指纹或描述符；(2)图神经网络(GNN)：直接在分子图上学习，如AttentiveFP、MPNN、D-MPNN；(3)Transformer模型：基于SMILES序列的注意力机制模型；(4)多任务学习：同时预测多个ADMET性质，利用任务间的相关性提高预测性能。深度学习模型在大数据集上通常优于传统方法，但需要更多数据和计算资源，且可解释性较差。",
+    "examples": "Chemprop是MIT开发的基于消息传递神经网络(D-MPNN)的分子性质预测工具，在多个ADMET基准测试中表现优异，支持多任务学习和不确定性估计。ADMETlab 2.0是中国团队开发的免费在线ADMET预测平台，整合了多种深度学习模型，覆盖吸收、分布、代谢、排泄、毒性等88个终点。TDC(Therapeutics Data Commons)提供了标准化的ADMET数据集和基准，方便模型比较。在实际应用中，通常ensemble多个模型(如GNN+RF)以提高预测的稳健性。",
+    "applications": "新型ADMET模型开发、多任务学习同时预测多个性质、迁移学习利用相关任务、不确定性估计评估预测可靠性、虚拟筛选后处理",
+    "software": "DeepChem, Chemprop, ADMETlab 2.0, TDC, DGL-LifeSci, MoleculeNet"
+  },
+  "分子表示学习": {
+    "definition": "分子表示学习(Molecular Representation Learning)是使用深度学习自动从分子数据中学习有意义的向量表示(embedding)的方法，是AI药物发现的基础。主要表示类型包括：(1)序列表示：将SMILES字符串输入RNN或Transformer，学习序列级表示；(2)图表示：将分子建模为原子(节点)和化学键(边)的图，使用GNN学习图级表示；(3)3D表示：考虑原子的空间坐标，使用3D-CNN、SchNet、EGNN等学习几何感知表示。好的分子表示应该能够捕获与下游任务相关的化学信息，如药效团特征、物化性质等。预训练+微调的范式可以利用大量无标注数据学习通用表示，再在小数据集上微调。",
+    "examples": "图神经网络(GNN)是目前最流行的分子表示学习方法：消息传递神经网络(MPNN)通过迭代聚合邻居信息更新节点表示，最后池化得到图级表示。AttentiveFP使用注意力机制学习原子重要性，在多个ADMET任务上表现优异。SMILES Transformer将SMILES作为序列处理，使用自注意力机制捕获长程依赖。3D表示学习如SchNet使用连续卷积处理原子距离，适合需要3D信息的任务(如结合亲和力预测)。分子预训练模型如GROVER、MolBERT在大规模无标注数据上预训练，可以迁移到下游任务。",
+    "applications": "分子性质预测作为下游任务的基础、分子生成学习化学空间、虚拟筛选分子编码、药物-靶点相互作用预测、分子相似性计算",
+    "software": "DeepChem, DGL-LifeSci, TorchDrug, PyG, RDKit, Hugging Face Transformers"
+  },
+  "化合物性质预测": {
+    "definition": "基于深度学习的化合物性质预测是将分子表示学习与监督学习结合，预测化合物的各种生物活性和理化性质。预测任务包括：(1)活性预测：预测pIC50、Ki等连续值或活性/非活性分类；(2)ADMET预测：溶解度、渗透性、代谢稳定性、毒性等；(3)靶点预测：预测化合物可能作用的靶点。模型架构通常为：分子编码器(GNN/Transformer)+预测头(MLP)。训练策略包括：单任务学习、多任务学习(同时预测多个性质)、迁移学习(从相关任务迁移)。数据质量和数量是影响模型性能的关键因素，需要注意数据不平衡、活性悬崖等问题。",
+    "examples": "Chemprop的D-MPNN在MoleculeNet基准的多个数据集上取得最佳或接近最佳性能，特别是在BACE、HIV、BBBP等分类任务上。AttentiveFP在溶解度(ESOL)和脂溶性(Lipophilicity)回归任务上表现优异。多任务学习在ADMET预测中特别有效，因为不同ADMET性质之间存在相关性(如溶解度和渗透性)。在实际应用中，通常需要ensemble多个模型、使用交叉验证评估性能、并进行应用域分析确保预测的可靠性。不确定性估计(如MC Dropout、ensemble方差)帮助识别预测不可靠的化合物。",
+    "applications": "虚拟筛选活性预测、先导化合物优化性质预测、ADMET筛选早期淘汰、靶点预测药物重定位、毒性预测安全性评估",
+    "software": "Chemprop, MoleculeNet, TDC, DeepChem, DGL-LifeSci, TorchDrug"
+  },
+  "蛋白质结构预测": {
+    "definition": "蛋白质结构预测是从氨基酸序列预测蛋白质三维结构的计算方法，是结构生物学的核心问题之一。2020年AlphaFold2的突破性进展彻底改变了这一领域，其预测精度接近实验方法。AlphaFold2的核心创新包括：(1)多序列比对(MSA)提取进化信息；(2)Evoformer模块处理序列和结构信息的交互；(3)结构模块迭代精修3D坐标；(4)端到端训练直接优化结构损失。ESMFold使用蛋白质语言模型(ESM-2)，不需要MSA，预测速度更快。RoseTTAFold使用三轨注意力机制。这些方法已预测了超过2亿个蛋白质结构，为药物设计提供了前所未有的结构资源。",
+    "examples": "AlphaFold2在CASP14竞赛中取得了革命性的成绩，GDT-TS分数达到92.4，远超其他方法。AlphaFold数据库(由DeepMind和EMBL-EBI维护)已预测了几乎所有已知蛋白质的结构，可以免费下载使用。ESMFold的优势在于速度快(不需要搜索MSA)，适合大规模预测，但精度略低于AlphaFold2。在药物设计中，AlphaFold预测的结构已被用于虚拟筛选和分子对接，但需要注意：(1)预测结构可能缺少配体诱导的构象变化；(2)柔性区域(如loop)的预测精度较低；(3)结合口袋的细节可能不够准确。结合MD模拟精修预测结构是常用策略。",
+    "applications": "靶点结构获取加速SBDD、药物设计虚拟筛选、蛋白质工程结构指导设计、蛋白质-蛋白质相互作用研究、抗体设计、突变效应预测",
+    "software": "AlphaFold, ESMFold, RoseTTAFold, ColabFold, OmegaFold, OpenFold"
+  },
+  "RNN/VAE/GAN/Flow": {
+    "definition": "深度生成模型用于学习分子的分布并生成新分子，是AI驱动的分子设计的核心技术。主要模型类型包括：(1)RNN(循环神经网络)：将SMILES作为序列，逐字符生成，如SMILES-LSTM；(2)VAE(变分自编码器)：学习连续的潜在空间，支持插值和优化，如JT-VAE(基于分子树)、SELFIES-VAE；(3)GAN(生成对抗网络)：生成器和判别器对抗训练，如MolGAN(基于图)；(4)Flow(流模型)：可逆变换学习精确的概率分布，如GraphNVP、MoFlow。每种模型有不同的优缺点：RNN简单但生成的分子可能无效；VAE支持潜在空间操作但生成质量有限；GAN生成质量高但训练不稳定；Flow提供精确概率但计算量大。",
+    "examples": "REINVENT是AstraZeneca开发的基于RNN的分子生成平台，使用强化学习引导生成具有特定性质的分子，已在多个实际项目中应用。JT-VAE(Junction Tree VAE)将分子分解为子结构树，保证生成分子的化学有效性(接近100%)。MolGAN直接在分子图上操作，使用GAN框架生成分子。GraphNVP使用可逆的图神经网络，可以精确计算生成概率。MOSES(Molecular Sets)基准提供了标准化的生成模型评估指标，包括有效性、唯一性、新颖性、多样性等。在实际应用中，通常结合多种模型和策略，如先用VAE探索化学空间，再用RL优化特定性质。",
+    "applications": "新分子设计从头生成新骨架、先导化合物优化性质导向生成、化学空间探索发现新区域、骨架跃迁、多样性库设计",
+    "software": "REINVENT, GuacaMol, MOSES, GENTRL, GraphINVENT, MolGPT"
+  },
+  "基于强化学习的分子优化": {
+    "definition": "基于强化学习(Reinforcement Learning, RL)的分子优化将分子生成建模为序列决策过程，通过奖励信号引导生成具有期望性质的分子。RL框架包括：(1)状态：当前部分生成的分子；(2)动作：添加原子/键或选择子结构；(3)奖励：基于性质预测模型(如活性、ADMET)或对接打分；(4)策略：生成模型(RNN/GNN)。主要方法包括：策略梯度方法(如REINFORCE)直接优化期望奖励；Actor-Critic方法使用价值网络减少方差；基于图的RL如GCPN、GraphAF逐步构建分子图。多目标优化通过加权奖励或Pareto优化同时优化多个性质。",
+    "examples": "REINVENT使用REINFORCE算法训练RNN生成器，奖励函数可以灵活定义(如对接打分、QSAR预测、相似性约束等)，在AstraZeneca的多个项目中成功应用。MolDQN使用深度Q网络学习分子修改策略，可以从已有分子出发进行优化。GCPN(Graph Convolutional Policy Network)在分子图上操作，逐步添加原子和键。在实际应用中，奖励函数的设计至关重要：需要平衡活性、选择性、ADMET等多个目标，避免模型利用奖励函数的漏洞(reward hacking)。预训练+微调策略可以加速收敛。",
+    "applications": "多目标分子优化平衡多个性质、性质导向设计生成满足特定要求的分子、先导化合物优化、从头药物设计、化学空间探索",
+    "software": "REINVENT, MolDQN, GCPN, GraphAF, ChemRL, MolRL"
+  },
+  "生成式AI和分子生成": {
+    "definition": "生成式AI的最新进展为分子设计带来了新的可能性，主要包括扩散模型和大语言模型两个方向。扩散模型(Diffusion Models)通过逐步去噪过程生成数据，在图像生成领域取得巨大成功后被引入分子生成：(1)EDM(E(3) Diffusion Model)直接在3D坐标上扩散；(2)DiffSBDD基于蛋白质口袋生成3D配体；(3)Pocket2Mol使用自回归扩散生成口袋特异性分子。大语言模型(LLM)可以将分子生成建模为序列生成任务：(1)MolGPT使用GPT架构生成SMILES；(2)专门针对化学的LLM如ChemGPT。这些方法可以生成3D构象感知的分子，更适合基于结构的药物设计。",
+    "examples": "DiffSBDD是第一个基于扩散模型的结构基分子生成方法，给定蛋白质口袋结构，可以直接生成适合口袋的3D分子构象。Pocket2Mol使用E(3)等变图神经网络，在多个靶点上生成的分子对接打分优于传统方法。TargetDiff进一步改进了条件扩散模型。MolGPT将SMILES生成建模为语言模型任务，可以通过prompt引导生成。这些方法的优势在于：(1)直接生成3D构象，避免了构象生成的额外步骤；(2)可以利用蛋白质结构信息进行条件生成；(3)生成质量和多样性通常优于传统方法。",
+    "applications": "3D分子生成直接生成结合构象、蛋白质-配体共设计口袋特异性生成、从头药物设计、构象生成、分子优化",
+    "software": "DiffSBDD, Pocket2Mol, TargetDiff, EDM, MolGPT, 3D-SBDD, DiffDock"
+  },
+  "大语言模型用于药物研发": {
+    "definition": "大语言模型(Large Language Models, LLM)是在海量文本数据上预训练的深度学习模型，具有强大的语言理解和生成能力，正在被应用于药物研发的多个环节。应用方向包括：(1)文献挖掘和知识提取：从海量生物医学文献中提取药物-靶点关系、副作用信息等；(2)分子生成：将SMILES作为\"化学语言\"，使用LLM生成新分子；(3)性质预测：通过提示工程(prompt engineering)或微调进行分子性质预测；(4)实验设计：辅助设计实验方案、分析实验结果；(5)科学问答：回答药物研发相关问题。专门针对生物医学领域训练的LLM如BioGPT、PubMedBERT在专业任务上表现更好。",
+    "examples": "ChatGPT/GPT-4可以辅助药物设计的多个环节：解释分子结构、建议优化方向、编写分析代码、总结文献等。BioGPT是微软在PubMed文献上训练的生物医学LLM，在关系提取、问答等任务上表现优异。Galactica是Meta训练的科学LLM，可以生成分子SMILES和预测性质。在实际应用中，LLM主要作为辅助工具：帮助研究人员快速获取信息、生成假设、编写代码等。需要注意LLM可能产生\"幻觉\"(生成看似合理但错误的信息)，专业判断仍然必要。专门针对化学的LLM如ChemLLM正在开发中。",
+    "applications": "知识提取从文献挖掘信息、假设生成辅助研究思路、实验设计优化方案、代码生成自动化分析、科学问答快速获取信息、文献总结",
+    "software": "ChatGPT/GPT-4, BioGPT, Galactica, PubMedBERT, SciBERT, ChemBERTa"
+  },
+  "多模态模型（序列-结构-性质）": {
+    "definition": "多模态分子模型融合分子的多种表示形式(序列、2D图、3D结构)和相关信息(性质、文本描述)，学习更全面的分子表示。主要方法包括：(1)序列-图融合：同时处理SMILES和分子图，如MolBERT；(2)2D-3D融合：结合拓扑和几何信息，如GEM、Uni-Mol；(3)分子-文本融合：将分子与自然语言描述对齐，如MoleculeSTM、MoMu；(4)分子-蛋白质融合：联合建模配体和靶点，如DrugCLIP。多模态学习的优势在于不同模态提供互补信息，可以学习更鲁棒的表示。对比学习是常用的多模态预训练方法，通过拉近相关模态、推远无关模态学习对齐的表示空间。",
+    "examples": "Uni-Mol是深势科技开发的分子预训练模型，同时考虑2D拓扑和3D几何信息，在多个下游任务上取得最佳性能。GEM(Geometry-Enhanced Molecular)使用几何感知的预训练任务学习3D感知的分子表示。MoleculeSTM将分子与文本描述对齐，可以通过自然语言检索分子或描述分子性质。DrugCLIP使用对比学习联合建模药物和靶点，用于药物-靶点相互作用预测。这些多模态模型通常在大规模数据上预训练，然后微调到具体任务，体现了\"预训练+微调\"的范式优势。",
+    "applications": "分子表示学习获得更全面的表示、性质预测提高预测性能、分子生成条件生成、药物-靶点相互作用预测、分子检索跨模态搜索",
+    "software": "Uni-Mol, GEM, MoleculeSTM, DrugCLIP, MoMu, GraphMVP"
+  },
+  "自监督学习在药物发现中的最新进展": {
+    "definition": "自监督学习(Self-Supervised Learning, SSL)通过设计预训练任务从大量无标注数据中学习有用的表示，然后迁移到下游任务。在药物发现中，SSL解决了标注数据稀缺的问题。主要预训练策略包括：(1)掩码预测：随机掩码部分原子/键，预测被掩码的内容，如MolBERT、GROVER；(2)对比学习：拉近相似分子(或同一分子的不同视图)的表示，推远不同分子，如MolCLR、GraphMVP；(3)生成式预训练：学习生成分子，如ChemBERTa；(4)多任务预训练：同时进行多种预训练任务。预训练模型可以通过微调或作为特征提取器用于下游任务，在小数据集上通常显著优于从头训练。",
+    "examples": "GROVER(Graph Representation frOm self-superVised mEssage passing tRansformer)在1000万分子上预训练，使用消息传递和Transformer架构，在MoleculeNet基准的多个任务上取得最佳性能。ChemBERTa是在PubChem的7700万SMILES上预训练的BERT模型，可以直接用于分子性质预测或作为特征提取器。MolCLR使用对比学习，通过原子掩码、键删除、子图采样等方式生成分子的不同视图。在实际应用中，预训练模型的选择需要考虑下游任务的特点：需要3D信息的任务应选择3D感知的预训练模型(如Uni-Mol)；序列任务可以使用SMILES预训练模型(如ChemBERTa)。",
+    "applications": "分子预训练学习通用表示、少样本学习在小数据集上有效、迁移学习跨任务迁移、特征提取作为下游任务输入、数据增强生成训练样本",
+    "software": "MolBERT, ChemBERTa, GROVER, MoLFormer, MolCLR, GraphMVP, Uni-Mol"
+  }
+};
+
+
+// 节点类型
+var nodeTypes = {
+    "N1": "基础",
+    "N2": "基础",
+    "N3": "知识点",
+    "N4": "知识点",
+    "N5": "知识点",
+    "N6": "知识点",
+    "N7": "知识点",
+    "N8": "知识点",
+    "N9": "SBDD",
+    "N10": "基础",
+    "N11": "知识点",
+    "N12": "知识点",
+    "N13": "知识点",
+    "N14": "知识点",
+    "N15": "知识点",
+    "N16": "知识点",
+    "N17": "基础",
+    "N18": "知识点",
+    "N19": "知识点",
+    "N20": "知识点",
+    "N21": "知识点",
+    "N22": "知识点",
+    "N23": "基础",
+    "N24": "知识点",
+    "N25": "知识点",
+    "N26": "知识点",
+    "N27": "知识点",
+    "N28": "LBDD",
+    "N29": "基础",
+    "N30": "知识点",
+    "N31": "知识点",
+    "N32": "知识点",
+    "N33": "知识点",
+    "N34": "基础",
+    "N35": "知识点",
+    "N36": "知识点",
+    "N37": "知识点",
+    "N38": "ADMET",
+    "N39": "基础",
+    "N40": "知识点",
+    "N41": "知识点",
+    "N42": "知识点",
+    "N43": "ADMET",
+    "N44": "知识点",
+    "N45": "知识点",
+    "N46": "知识点",
+    "N47": "AI",
+    "N48": "AI",
+    "N49": "知识点",
+    "N50": "知识点",
+    "N51": "知识点",
+    "N52": "基础",
+    "N53": "知识点",
+    "N54": "知识点",
+    "N55": "知识点",
+    "N56": "AI",
+    "N57": "知识点",
+    "N58": "知识点",
+    "N59": "知识点",
+};
+
+
+// 当前高亮的目录项
+var currentActiveItem = null;
+
+// 原始节点和边数据（用于恢复）
+var originalNodes = null;
+var originalEdges = null;
+
+// 保存节点原始颜色
+var originalNodeColors = {};
+
+// 等待pyvis的network初始化完成后再绑定事件
+function initCustomFeatures() {
+    if (typeof nodes === 'undefined' || typeof edges === 'undefined' || typeof network === 'undefined') {
+        console.log('等待network初始化...');
+        setTimeout(initCustomFeatures, 100);
+        return;
+    }
+    
+    originalNodes = nodes.get();
+    originalEdges = edges.get();
+    
+    // 保存每个节点的原始颜色
+    originalNodes.forEach(function(node) {
+        originalNodeColors[node.id] = {
+            color: node.color,
+            font: node.font
+        };
+    });
+    
+    // 绑定双击节点事件
+    network.on('doubleClick', function(params) {
+        if (params.nodes.length > 0) {
+            var nodeId = params.nodes[0];
+            focusNodeById(nodeId);
+        }
+    });
+    
+    // 绑定点击空白区域事件
+    network.on('click', function(params) {
+        // 如果没有点击任何节点或边，则恢复全部显示
+        if (params.nodes.length === 0 && params.edges.length === 0) {
+            resetView();
+        }
+    });
+    
+    console.log('✓ 自定义功能已初始化，双击节点事件和点击空白区域事件已绑定');
+}
+
+// 启动初始化
+initCustomFeatures();
+
+// 根据节点ID过滤显示（供双击调用）
+function focusNodeById(nodeId) {
+    // 获取节点标题
+    var nodeData = nodes.get(nodeId);
+    if (!nodeData) {
+        console.log('未找到节点: ' + nodeId);
+        return;
+    }
+    var title = nodeData.label || nodeData.title || nodeId;
+    
+    // 移除之前的目录高亮
+    if (currentActiveItem) {
+        currentActiveItem.classList.remove('active');
+        currentActiveItem = null;
+    }
+    
+    // 检查是否为知识点（叶子节点）
+    var isKnowledgePoint = nodeTypes[nodeId] === '知识点';
+    
+    // 获取要高亮的节点：当前节点 + 所有子孙节点 + 所有祖先节点
+    var highlightedNodes = new Set();
+    highlightedNodes.add(nodeId);
+    
+    // 添加所有子孙节点
+    var children = nodeChildren[nodeId] || [];
+    children.forEach(function(child) {
+        highlightedNodes.add(child);
+    });
+    
+    // 添加所有祖先节点
+    var parents = nodeParents[nodeId] || [];
+    parents.forEach(function(parent) {
+        highlightedNodes.add(parent);
+    });
+    
+    // 更新节点样式：高亮相关节点，其他节点变透明
+    var nodeUpdates = [];
+    allNodes.forEach(function(nid) {
+        var isHighlighted = highlightedNodes.has(nid);
+        var originalColor = originalNodeColors[nid];
+        
+        if (isHighlighted) {
+            // 恢复原始颜色
+            nodeUpdates.push({
+                id: nid,
+                color: originalColor ? originalColor.color : undefined,
+                font: originalColor ? originalColor.font : undefined,
+                opacity: 1
+            });
+        } else {
+            // 变透明
+            nodeUpdates.push({
+                id: nid,
+                color: {
+                    background: 'rgba(200, 200, 200, 0.15)',
+                    border: 'rgba(150, 150, 150, 0.15)',
+                    highlight: {
+                        background: 'rgba(200, 200, 200, 0.25)',
+                        border: 'rgba(150, 150, 150, 0.25)'
+                    },
+                    hover: {
+                        background: 'rgba(200, 200, 200, 0.2)',
+                        border: 'rgba(150, 150, 150, 0.2)'
+                    }
+                },
+                font: {
+                    color: 'rgba(100, 100, 100, 0.2)',
+                    size: 24
+                },
+                opacity: 0.2
+            });
+        }
+    });
+    nodes.update(nodeUpdates);
+    
+    // 更新边样式：相关边正常显示，其他边变透明
+    var edgeUpdates = [];
+    edges.get().forEach(function(edge) {
+        var isHighlighted = highlightedNodes.has(edge.from) && highlightedNodes.has(edge.to);
+        if (isHighlighted) {
+            edgeUpdates.push({
+                id: edge.id,
+                color: {
+                    color: 'black',
+                    highlight: '#B22222',
+                    hover: '#CD5C5C'
+                },
+                width: 1.5
+            });
+        } else {
+            edgeUpdates.push({
+                id: edge.id,
+                color: {
+                    color: 'rgba(200, 200, 200, 0.1)',
+                    highlight: 'rgba(200, 200, 200, 0.15)',
+                    hover: 'rgba(200, 200, 200, 0.15)'
+                },
+                width: 0.5
+            });
+        }
+    });
+    edges.update(edgeUpdates);
+    
+    // 选中节点并聚焦
+    network.selectNodes([nodeId]);
+    
+    // 获取高亮节点数量来决定缩放级别（缩小50%）
+    var highlightedCount = highlightedNodes.size;
+    var targetScale = 1.0;  // 默认缩放（原来2.0，缩小50%）
+    if (highlightedCount > 10) {
+        targetScale = 0.75;  // 原来1.5，缩小50%
+    }
+    if (highlightedCount > 20) {
+        targetScale = 0.6;   // 原来1.2，缩小50%
+    }
+    
+    // 聚焦到选中节点（平滑动画，速度慢一倍）
+    network.focus(nodeId, {
+        scale: targetScale,
+        animation: {
+            duration: 2000,  // 原来1000ms，慢一倍
+            easingFunction: 'easeInOutQuad'
+        }
+    });
+    
+    // 只有知识点才弹出详情弹窗（双击时）
+    if (isKnowledgePoint) {
+        showKnowledgeDetail(title);
+    }
+    
+    console.log('已聚焦到节点: ' + title + ' (ID: ' + nodeId + ')，高亮 ' + highlightedNodes.size + ' 个节点，缩放: ' + targetScale);
+}
+
+// 点击目录项，过滤显示对应节点和下级节点
+function focusNode(title) {
+    // 确保network已初始化
+    if (typeof nodes === 'undefined' || typeof network === 'undefined') {
+        console.log('network尚未初始化');
+        return;
+    }
+    
+    var nodeId = nodeMapping[title];
+    if (!nodeId) {
+        console.log('未找到节点: ' + title);
+        return;
+    }
+    
+    // 移除之前的高亮
+    if (currentActiveItem) {
+        currentActiveItem.classList.remove('active');
+    }
+    
+    // 高亮当前点击的目录项
+    var clickedItem = event.target;
+    clickedItem.classList.add('active');
+    currentActiveItem = clickedItem;
+    
+    // 检查是否为知识点（叶子节点）
+    var isKnowledgePoint = nodeTypes[nodeId] === '知识点';
+    
+    // 获取要高亮的节点：当前节点 + 所有子孙节点 + 所有祖先节点
+    var highlightedNodes = new Set();
+    highlightedNodes.add(nodeId);
+    
+    // 添加所有子孙节点
+    var children = nodeChildren[nodeId] || [];
+    children.forEach(function(child) {
+        highlightedNodes.add(child);
+    });
+    
+    // 添加所有祖先节点
+    var parents = nodeParents[nodeId] || [];
+    parents.forEach(function(parent) {
+        highlightedNodes.add(parent);
+    });
+    
+    // 更新节点样式：高亮相关节点，其他节点变透明
+    var nodeUpdates = [];
+    allNodes.forEach(function(nid) {
+        var isHighlighted = highlightedNodes.has(nid);
+        var originalColor = originalNodeColors[nid];
+        
+        if (isHighlighted) {
+            // 恢复原始颜色
+            nodeUpdates.push({
+                id: nid,
+                color: originalColor ? originalColor.color : undefined,
+                font: originalColor ? originalColor.font : undefined,
+                opacity: 1
+            });
+        } else {
+            // 变透明
+            nodeUpdates.push({
+                id: nid,
+                color: {
+                    background: 'rgba(200, 200, 200, 0.15)',
+                    border: 'rgba(150, 150, 150, 0.15)',
+                    highlight: {
+                        background: 'rgba(200, 200, 200, 0.25)',
+                        border: 'rgba(150, 150, 150, 0.25)'
+                    },
+                    hover: {
+                        background: 'rgba(200, 200, 200, 0.2)',
+                        border: 'rgba(150, 150, 150, 0.2)'
+                    }
+                },
+                font: {
+                    color: 'rgba(100, 100, 100, 0.2)',
+                    size: 24
+                },
+                opacity: 0.2
+            });
+        }
+    });
+    nodes.update(nodeUpdates);
+    
+    // 更新边样式：相关边正常显示，其他边变透明
+    var edgeUpdates = [];
+    edges.get().forEach(function(edge) {
+        var isHighlighted = highlightedNodes.has(edge.from) && highlightedNodes.has(edge.to);
+        if (isHighlighted) {
+            edgeUpdates.push({
+                id: edge.id,
+                color: {
+                    color: 'black',
+                    highlight: '#B22222',
+                    hover: '#CD5C5C'
+                },
+                width: 1.5
+            });
+        } else {
+            edgeUpdates.push({
+                id: edge.id,
+                color: {
+                    color: 'rgba(200, 200, 200, 0.1)',
+                    highlight: 'rgba(200, 200, 200, 0.15)',
+                    hover: 'rgba(200, 200, 200, 0.15)'
+                },
+                width: 0.5
+            });
+        }
+    });
+    edges.update(edgeUpdates);
+    
+    // 选中节点并聚焦
+    network.selectNodes([nodeId]);
+    
+    // 获取高亮节点数量来决定缩放级别（缩小50%）
+    var highlightedCount = highlightedNodes.size;
+    var targetScale = 1.0;  // 默认缩放（原来2.0，缩小50%）
+    if (highlightedCount > 10) {
+        targetScale = 0.75;  // 原来1.5，缩小50%
+    }
+    if (highlightedCount > 20) {
+        targetScale = 0.6;   // 原来1.2，缩小50%
+    }
+    
+    // 聚焦到选中节点（平滑动画，速度慢一倍）
+    network.focus(nodeId, {
+        scale: targetScale,
+        animation: {
+            duration: 2000,  // 原来1000ms，慢一倍
+            easingFunction: 'easeInOutQuad'
+        }
+    });
+    
+    // 只有知识点才弹出详情弹窗（点击目录时）
+    if (isKnowledgePoint) {
+        showKnowledgeDetail(title);
+    }
+    
+    console.log('已聚焦到节点: ' + title + ' (ID: ' + nodeId + ')，高亮 ' + highlightedNodes.size + ' 个节点，缩放: ' + targetScale);
+}
+
+// 重置视图，显示所有节点
+function resetView() {
+    // 确保network已初始化
+    if (typeof nodes === 'undefined' || typeof network === 'undefined') {
+        console.log('network尚未初始化');
+        return;
+    }
+    
+    // 移除目录高亮
+    if (currentActiveItem) {
+        currentActiveItem.classList.remove('active');
+        currentActiveItem = null;
+    }
+    
+    // 恢复所有节点的原始颜色
+    var nodeUpdates = [];
+    allNodes.forEach(function(nid) {
+        var originalColor = originalNodeColors[nid];
+        nodeUpdates.push({
+            id: nid,
+            color: originalColor ? originalColor.color : undefined,
+            font: originalColor ? originalColor.font : undefined,
+            opacity: 1
+        });
+    });
+    nodes.update(nodeUpdates);
+    
+    // 恢复所有边的原始样式
+    var edgeUpdates = [];
+    edges.get().forEach(function(edge) {
+        edgeUpdates.push({
+            id: edge.id,
+            color: {
+                color: 'black',
+                highlight: '#B22222',
+                hover: '#CD5C5C'
+            },
+            width: 1.5
+        });
+    });
+    edges.update(edgeUpdates);
+    
+    // 取消选中并适应视图（平滑动画，速度慢一倍）
+    network.unselectAll();
+    network.fit({
+        animation: {
+            duration: 2000,  // 原来1000ms，慢一倍
+            easingFunction: 'easeInOutQuad'
+        }
+    });
+    
+    console.log('已重置视图，恢复所有节点');
+}
+
+// 显示知识点详情弹窗
+function showKnowledgeDetail(title) {
+    var detail = knowledgeDetails[title];
+    if (!detail) {
+        console.log('未找到知识点详情: ' + title);
+        return;
+    }
+    
+    var modal = document.getElementById('detail-modal');
+    var titleEl = document.getElementById('detail-title');
+    var definitionEl = document.getElementById('detail-definition');
+    var examplesEl = document.getElementById('detail-examples');
+    var applicationsEl = document.getElementById('detail-applications');
+    var softwareEl = document.getElementById('detail-software');
+    
+    titleEl.textContent = '📚 ' + title;
+    definitionEl.textContent = detail.definition || '暂无释义';
+    examplesEl.textContent = detail.examples || '暂无案例';
+    applicationsEl.textContent = detail.applications || '暂无应用';
+    
+    // 处理软件标签
+    var softwareList = (detail.software || '').split(', ');
+    var softwareHtml = '';
+    softwareList.forEach(function(sw) {
+        if (sw.trim()) {
+            softwareHtml += '<span class="software-tag">' + sw.trim() + '</span>';
+        }
+    });
+    softwareEl.innerHTML = softwareHtml || '<span style="color: #7f8c8d;">暂无软件推荐</span>';
+    
+    modal.classList.add('show');
+}
+
+// 关闭详情弹窗
+function closeDetailModal() {
+    var modal = document.getElementById('detail-modal');
+    modal.classList.remove('show');
+}
+
+// 点击弹窗背景关闭
+document.addEventListener('click', function(e) {
+    var modal = document.getElementById('detail-modal');
+    if (e.target === modal) {
+        closeDetailModal();
+    }
+});
+
+// ESC键关闭弹窗
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        closeDetailModal();
+    }
+});
+
+function toggleCatalog() {
+    var catalog = document.getElementById('catalog-container');
+    catalog.classList.toggle('collapsed');
+}
+</script>
+</html>

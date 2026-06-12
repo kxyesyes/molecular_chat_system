@@ -1,0 +1,36 @@
+# 分子聊天系统RAG配置（修复版）
+models:
+  default: "gmm-llama:latest" # 使用你的模型
+  available:
+    - "gmm-llama:latest"
+
+ollama:
+  base_url: "${OLLAMA_BASE_URL:-http://localhost:11434}"
+  model: "${OLLAMA_MODEL:-gmm-llama:latest}"
+
+# RAG配置
+rag:
+  enabled: true
+  csv_path: "data/canonical_moses_5w.csv"
+  embedding_model: "nomic-embed-text:latest" # 添加:latest标签
+  vector_store_path: "data/molecular_faiss_index"
+  default_k: 2
+  property_search:
+    enabled: true
+  similarity_search:
+    enabled: true
+
+inference:
+  stream: true
+  temperature: 0.9
+  max_tokens: 600  # 降低生成长度以节省显存
+  timeout: 120 # 增加超时时间
+
+web:
+  host: "0.0.0.0"
+  port: 6000
+  debug: false
+
+logging:
+  level: "INFO"
+  file: "./logs/app.log"

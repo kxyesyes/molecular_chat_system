@@ -1,0 +1,86 @@
+# ModelScope配置文件
+# 魔搭社区大模型API配置
+
+# ModelScope API配置
+modelscope:
+  api_key: "${MODELSCOPE_API_KEY:-}"
+  base_url: "https://api-inference.modelscope.cn/v1/chat/completions"
+
+  # 默认模型
+  default_model: "glm5.1"
+
+  # 可用模型配置
+  models:
+    glm5.1:
+      name: "ZhipuAI/GLM-5.1"
+      description: "智谱AI GLM-5.1模型，中文理解能力强，推理速度快"
+      max_tokens: 2000
+      temperature: 0.7
+
+    qwen3:
+      name: "Qwen/Qwen3-235B-A22B-Instruct-2507"
+      description: "通义千问Qwen3大模型，超大规模参数，性能强大"
+      max_tokens: 2000
+      temperature: 0.7
+
+# Agent配置
+agent:
+  # Agent类型: "react" (推理模式) 或 "simple" (快速模式)
+  type: "react"
+
+  # 最大推理迭代次数
+  max_iterations: 5
+
+  # 工具超时时间（秒）
+  tool_timeout: 60
+
+  # 是否启用工具并行执行
+  parallel_execution: false
+
+# 推理参数
+inference:
+  stream: true
+  temperature: 0.7
+  max_tokens: 1500
+  timeout: 150
+
+# Web服务配置
+web:
+  host: "0.0.0.0"
+  port: 8080
+  debug: false
+  cors_origins:
+    - "http://localhost:8080"
+    - "http://127.0.0.1:8080"
+
+# 日志配置
+logging:
+  level: "INFO"
+  file: "./logs/modelscope_agent.log"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# RAG配置
+rag:
+  enabled: true
+  index_path: "./data/molecular_faiss_index.index"
+  top_k: 5
+
+# 分子生成配置
+molecular_generation:
+  enabled: true
+  default_count: 5
+  max_count: 10
+  use_llm_assist: true
+
+  # 属性约束
+  constraints:
+    max_molecular_weight: 1000
+    min_molecular_weight: 100
+    max_logp: 5
+    min_logp: -2
+
+docking:
+  root_dir: "D:/Chemicaltools/Dock/autodock"
+  vina_exe: ""
+  adfrsuite_bin: ""
+  prepare_ligand_cmd: ""

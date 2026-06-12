@@ -1,0 +1,2533 @@
+﻿<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+
+<head runat="server">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Med-chat</title>
+  <meta name="description" content="" />
+  <meta name="keywords" content="" />
+  <style>
+    * {
+      font-family: "微软雅黑";
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      text-decoration: none;
+      background-repeat: no-repeat;
+    }
+
+    /* 主题变量定义 */
+    :root,
+    [data-theme="medium"] {
+      --theme-primary: #F3D9A4;
+      --theme-primary-soft: #FFF3DC;
+      --theme-primary-bg: #FFF9EF;
+      --theme-primary-bg-2: #FFF0D2;
+      --theme-primary-bg-3: #FFFFFF;
+      --theme-primary-border: #F1E1C2;
+      --theme-primary-text: #6B4A16;
+    }
+
+    [data-theme="low"] {
+      --theme-primary: #F6BFC0;
+      --theme-primary-soft: #FCE8E8;
+      --theme-primary-bg: #FFF5F5;
+      --theme-primary-bg-2: #FDEDED;
+      --theme-primary-bg-3: #FFFFFF;
+      --theme-primary-border: #F6D4D4;
+      --theme-primary-text: #7A2E2E;
+    }
+
+    [data-theme="high"] {
+      --theme-primary: #BEE8CC;
+      --theme-primary-soft: #E5F8EA;
+      --theme-primary-bg: #F2FCF5;
+      --theme-primary-bg-2: #E4F8EA;
+      --theme-primary-bg-3: #FFFFFF;
+      --theme-primary-border: #CBEED6;
+      --theme-primary-text: #215C39;
+    }
+
+    /* 自定义滚动条 - 用于横向滑动布局 */
+    .custom-scrollbar::-webkit-scrollbar {
+      height: 8px;
+    }
+
+    .custom-scrollbar::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 4px;
+    }
+
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+      background: #94a3b8;
+    }
+
+    header {
+      height: 60px;
+      background-color: #0c1729;
+      align-items: center;
+      display: flex;
+      justify-content: space-between;
+      padding: 0 24px;
+    }
+
+    header .logo .item {
+      display: inline-block;
+      margin-right: 24px;
+    }
+
+    header .logo .item img {
+      vertical-align: middle;
+      height: auto;
+      object-fit: contain;
+    }
+
+    header .logo .item span {
+      font-size: 21px;
+      color: #fff;
+      vertical-align: middle;
+      margin-left: 12px;
+      font-weight: 800;
+    }
+
+    header .right {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 20px;
+      flex-shrink: 0;
+    }
+
+    /* 模型选择组合区 */
+    .model-control {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(255, 255, 255, 0.05);
+      padding: 4px 12px;
+      border-radius: 8px;
+    }
+
+    .model-control img {
+      width: 18px;
+    }
+
+    .model-control span {
+      font-size: 14px;
+      color: #f1f5f9;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    header .right select {
+      width: 160px;
+      height: 28px;
+      font-size: 13px;
+      color: #1e2937;
+      outline: none;
+      border: none;
+      border-radius: 6px;
+      background-color: #f1f5f9;
+      padding: 0 8px;
+      cursor: pointer;
+    }
+
+    header .right .link {
+      width: 90px;
+      height: 32px;
+      border-radius: 5px;
+      background-color: #f1f5f9;
+      text-align: center;
+      line-height: 32px;
+      font-size: 16px;
+      color: #484848;
+    }
+
+    .index_con .left {
+      width: 280px;
+      background-color: rgba(255, 255, 255, 0.92);
+      padding: 22px;
+      padding-right: 22px;
+      flex-shrink: 0;
+      border-right: 1px solid rgba(15, 23, 42, 0.06);
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .index_con .left h3 img {
+      width: 18px;
+      vertical-align: middle;
+    }
+
+    .index_con .left h3 span {
+      font-size: 18px;
+      color: #161618;
+      vertical-align: middle;
+      margin-left: 3px;
+    }
+
+    .index_con .left h4 {
+      font-size: 14px;
+      color: #64748b;
+      margin-top: 24px;
+      margin-bottom: 6px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+
+    .index_con .left .list_nav {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+      /* 最小间距，实际间距由 space-evenly 动态计算 */
+      margin-top: 14px;
+      flex: 1;
+      /* 关键：占满剩余空间 */
+      align-content: space-evenly;
+      /* 均匀分配行间距 */
+    }
+
+    .index_con .left .list_nav .item {
+      height: 100px;
+      background-color: #f8fafc;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all 0.24s cubic-bezier(0.4, 0, 0.2, 1);
+      border-radius: 16px;
+      border: 1px solid transparent;
+    }
+
+    .index_con .left .list_nav .item:hover {
+      background-color: var(--theme-primary-soft);
+      border-color: var(--theme-primary-border);
+      transform: translateY(-3px);
+      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.05);
+    }
+
+    .index_con .left .list_nav .item img {
+      width: 40px;
+    }
+
+    .index_con .left .list_nav .item span {
+      font-size: 14px;
+      color: #33363b;
+      margin-top: 8px;
+      font-weight: 600;
+    }
+
+    .index_con .left .data {
+      margin-top: 24px;
+      /* 固定间距，不再用 auto */
+      padding-top: 20px;
+      border-top: 1px solid rgba(15, 23, 42, 0.04);
+      padding-bottom: 10px;
+    }
+
+    .index_con .left .data h4 {
+      margin-top: 0;
+      font-size: 14px;
+      color: #64748b;
+      margin-bottom: 6px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+
+    .index_con .left .data .btn {
+      background-color: #f8fafc;
+      width: 100%;
+      height: 60px;
+      text-align: left;
+      margin-top: 10px;
+      cursor: pointer;
+      transition: all 0.24s ease;
+      display: flex;
+      align-items: center;
+      padding: 0 18px;
+      border-radius: 14px;
+      border: 1px solid transparent;
+    }
+
+    .index_con .left .data .btn:hover {
+      background-color: var(--theme-primary-soft);
+      border-color: var(--theme-primary-border);
+      transform: translateY(-2px);
+      box-shadow: 0 6px 15px rgba(0, 0, 0, 0.04);
+    }
+
+    .index_con .left .data .btn img {
+      width: 40px;
+      margin-right: 14px;
+      mix-blend-mode: multiply;
+    }
+
+    .index_con .left .data .btn span {
+      font-size: 15px;
+      color: #33363b;
+      font-weight: 600;
+    }
+
+    .index_con .right {
+      flex: 1;
+      background-color: #ffffff;
+      background-image: url("/static/images/r1.png");
+      background-size: cover;
+      background-position: center;
+      position: relative;
+      min-height: calc(100vh - 60px);
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-start;
+      transition: margin-left 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .index_con .right::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: rgba(255, 255, 255, 0.16);
+      opacity: 1;
+      z-index: 0;
+      pointer-events: none;
+    }
+
+    .index_con .right>* {
+      position: relative;
+      z-index: 1;
+    }
+
+    /* 侧边栏遮罩 - 优化为仅在移动端或特定状态下拦截 */
+    .sidebar-mask {
+      position: fixed;
+      top: 60px;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: rgba(0, 0, 0, 0.2);
+      z-index: 99;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 220ms ease, visibility 220ms ease;
+      pointer-events: none;
+      /* 默认不拦截点击 */
+    }
+
+    /* 只有在激活且宽度较小时才拦截点击 */
+    @media (max-width: 1024px) {
+      .sidebar-mask.is-active {
+        opacity: 1;
+        visibility: visible;
+        pointer-events: auto;
+      }
+    }
+
+    /* 侧边栏整体样式优化 */
+    .index_con .left {
+      width: 280px;
+      background-color: #ffffff;
+      padding: 22px;
+      flex-shrink: 0;
+      border-right: 1px solid rgba(15, 23, 42, 0.06);
+      box-shadow: 10px 0 30px rgba(15, 23, 42, 0.04);
+      backdrop-filter: blur(10px);
+      display: flex;
+      flex-direction: column;
+      z-index: 100;
+      transform: translateX(0);
+      margin-left: 0;
+      opacity: 1;
+      transition: transform 280ms cubic-bezier(0.4, 0, 0.2, 1),
+        margin-left 280ms cubic-bezier(0.4, 0, 0.2, 1),
+        opacity 220ms ease;
+      will-change: transform, margin-left, opacity;
+    }
+
+    /* 关闭状态 - 使用负 margin 实现推拉效果 */
+    .index_con .left.is-closing {
+      transform: translateX(-100%);
+      margin-left: -280px;
+      opacity: 0;
+    }
+
+    /* 侧边栏头部布局 */
+    .sidebar-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 4px;
+      padding-right: 4px;
+    }
+
+    .sidebar-header h3 {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .sidebar-header h3 img {
+      width: 18px;
+    }
+
+    .sidebar-header h3 span {
+      font-size: 18px;
+      color: #111827;
+      font-weight: 700;
+    }
+
+    /* 关闭按钮样式 */
+    .close-sidebar-button {
+      width: 36px;
+      height: 36px;
+      border-radius: 999px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      color: #1f2937;
+      transition: background-color 160ms ease, transform 100ms ease;
+      margin-top: -4px;
+      margin-right: -8px;
+    }
+
+    .close-sidebar-button:hover {
+      background: rgba(15, 23, 42, 0.06);
+    }
+
+    .close-sidebar-button:active {
+      transform: scale(0.92);
+    }
+
+    .close-sidebar-button:focus-visible {
+      outline: 2px solid rgba(99, 102, 241, 0.35);
+      outline-offset: 2px;
+    }
+
+    /* 打开侧边栏按钮（侧边栏关闭时显示） */
+    .open-sidebar-trigger {
+      position: fixed;
+      left: 20px;
+      top: 80px;
+      width: 42px;
+      height: 42px;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      z-index: 90;
+      opacity: 0;
+      transform: translateX(-20px);
+      transition: all 0.3s ease;
+      visibility: hidden;
+    }
+
+    .open-sidebar-trigger.is-visible {
+      opacity: 1;
+      transform: translateX(0);
+      visibility: visible;
+    }
+
+    .open-sidebar-trigger:hover {
+      background: #f8fafc;
+      transform: scale(1.05);
+    }
+
+    /* 主题切换组件样式 */
+    .theme-switcher {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      height: 32px;
+      padding: 2px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.1);
+      margin-right: 20px;
+    }
+
+    .theme-option {
+      width: 48px;
+      height: 28px;
+      border-radius: 12px;
+      border: 1px solid transparent;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 180ms ease;
+      color: rgba(255, 255, 255, 0.8);
+      background: transparent;
+    }
+
+    .theme-option.low {
+      background: #FCE8E8;
+      color: #7A2E2E;
+      opacity: 0.6;
+    }
+
+    .theme-option.medium {
+      background: #FFF3DC;
+      color: #6B4A16;
+      opacity: 0.6;
+    }
+
+    .theme-option.high {
+      background: #E5F8EA;
+      color: #215C39;
+      opacity: 0.6;
+    }
+
+    .theme-option:hover {
+      opacity: 0.9;
+      transform: translateY(-1px);
+    }
+
+    .theme-option:active {
+      transform: scale(0.96);
+    }
+
+    .theme-option.active {
+      opacity: 1;
+      border-color: #fff;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+      font-weight: 800;
+    }
+
+    .index_con .right .mass {
+      text-align: center;
+      margin-top: auto;
+      transform: translateY(-68px);
+    }
+
+    .index_con .right .mass img {
+      vertical-align: middle;
+      width: 66px;
+      height: 66px;
+      object-fit: contain;
+    }
+
+    .index_con .right .mass h2 {
+      font-size: 30px;
+      color: #1e2738;
+      margin-top: 0;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+
+    .index_con .right .mass p {
+      font-size: 20px;
+      color: #707b86;
+      margin-top: 24px;
+    }
+
+    .index_con .right .mass .welcome-en {
+      display: block;
+      margin-top: 8px;
+      font-size: 15px;
+      line-height: 1.4;
+      color: #8a95a3;
+      font-weight: 500;
+      letter-spacing: 0;
+    }
+
+    .index_con .right .icon_list {
+      text-align: center;
+      margin-top: 6vh;
+      transform: translateY(-68px);
+    }
+    }
+
+    .index_con .right .icon_list h3 {
+      font-size: 20px;
+      color: #32243e;
+    }
+
+    .index_con .right .icon_list .list {
+      margin-top: 2vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 24px;
+      flex-wrap: wrap;
+    }
+
+    .index_con .right .icon_list .item {
+      display: inline-block;
+      width: 240px;
+      height: 70px;
+      background-color: rgba(255, 255, 255, 0.85);
+      margin: 0;
+      line-height: 70px;
+      cursor: pointer;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      border-radius: 16px;
+      border: 1px solid var(--theme-primary-border);
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.04);
+    }
+
+    .index_con .right .icon_list .item:hover {
+      background-color: #f0f9ff;
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
+
+    .index_con .right .icon_list .item img {
+      width: 24px;
+      vertical-align: middle;
+    }
+
+    .index_con .right .icon_list .item span {
+      font-size: 20px;
+      color: #33363b;
+      font-weight: bold;
+      vertical-align: middle;
+      margin-left: 24px;
+    }
+
+    .index_con .right .icon_list .item.item-compact {
+      width: 150px;
+      height: 54px;
+      line-height: 54px;
+    }
+
+    .index_con .right .icon_list .item.item-compact img {
+      width: 18px;
+    }
+
+    .index_con .right .icon_list .item.item-compact span {
+      font-size: 14px;
+      margin-left: 10px;
+    }
+
+    .index_con .right .icon_list .item.knowledge-entry {
+      width: 76px;
+      height: 76px;
+      padding: 0;
+      line-height: normal;
+      background: transparent;
+      border: 0;
+      box-shadow: none;
+      display: inline-flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      border-radius: 999px;
+    }
+
+    .index_con .right .icon_list .item.knowledge-entry:hover {
+      background: transparent;
+      transform: translateY(-2px);
+      box-shadow: none;
+    }
+
+    .index_con .right .icon_list .item.knowledge-entry img {
+      width: 44px;
+      height: 44px;
+      padding: 10px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.9);
+      border: 1px solid var(--theme-primary-border);
+      box-shadow: 0 10px 22px rgba(99, 102, 241, 0.12);
+      object-fit: contain;
+      transition: all 0.24s ease;
+    }
+
+    .index_con .right .icon_list .item.knowledge-entry:hover img {
+      background: #f0f9ff;
+      border-color: var(--theme-primary);
+      box-shadow: 0 12px 26px rgba(99, 102, 241, 0.18);
+    }
+
+    .index_con .right .icon_list .item.knowledge-entry span {
+      margin-left: 0;
+      font-size: 12px;
+      line-height: 1;
+      color: #4b5563;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .index_con .right .fill {
+      margin-top: auto;
+      position: relative;
+      padding: 0 40px;
+      width: 100%;
+      max-width: 1200px;
+      margin-left: auto;
+      margin-right: auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+    }
+
+    .index_con .right .fill input {
+      width: 100%;
+      max-width: 1000px;
+      flex: 1;
+      min-width: 0;
+      outline: none;
+      height: 55px;
+      padding: 0 20px;
+      background: #fdfdfd;
+      border-radius: 8px;
+      border: 1px solid rgba(15, 23, 42, 0.18);
+      box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08),
+        inset 0 1px 0 rgba(255, 255, 255, 0.9);
+      font-size: 16px;
+      color: #333;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .index_con .right .fill input:hover {
+      border-color: var(--theme-primary-border);
+      box-shadow: 0 10px 28px rgba(15, 23, 42, 0.1),
+        0 0 0 4px var(--theme-primary-soft);
+    }
+
+    .index_con .right .fill input:focus {
+      border-color: var(--theme-primary);
+      box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12),
+        0 0 0 4px var(--theme-primary-soft);
+    }
+
+    .index_con .right .fill .pic {
+      position: static;
+      transform: none;
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      flex-shrink: 0;
+      order: 1;
+    }
+
+    .index_con .right .fill .pic img {
+      display: block;
+      width: 32px;
+      height: 32px;
+      margin: 0;
+      cursor: pointer;
+      padding: 6px;
+      background: #f1f5f9;
+      border-radius: 50%;
+      transition: all 0.2s ease;
+    }
+
+    .index_con .right .fill .pic img:hover {
+      background: #e2e8f0;
+      transform: translateY(-1px);
+    }
+
+    .index_con .right .fill .btn {
+      position: static;
+      transform: none;
+      width: 42px;
+      height: 42px;
+      cursor: pointer;
+      background-color: var(--theme-primary);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--theme-primary-text, #ffffff);
+      transition: all 0.3s ease;
+      flex-shrink: 0;
+      order: 2;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+    }
+
+    .index_con .right .fill .btn:hover {
+      transform: scale(1.1);
+    }
+
+    .index_con .right .tool {
+      display: flex;
+      margin-top: 2vh;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0 40px;
+      width: 100%;
+      max-width: 1200px;
+      margin-left: auto;
+      margin-right: auto;
+      margin-bottom: 4vh;
+    }
+
+    .index_con .right .tool .chose .item {
+      display: inline-block;
+      margin-right: 22px;
+      cursor: pointer;
+    }
+
+    .index_con .right .tool .chose .icon {
+      width: 20px;
+      height: 20px;
+      border-radius: 3px;
+      background-color: var(--theme-primary);
+      display: inline-block;
+      vertical-align: middle;
+      background-size: 12px auto;
+      background-image: url(/static/images/r10.png);
+      background-position: center;
+      background-repeat: no-repeat;
+    }
+
+    .index_con .right .tool .chose span {
+      font-size: 18px;
+      color: #3c3c3c;
+      vertical-align: middle;
+    }
+
+    .index_con .right .more {
+      width: 120px;
+      height: 36px;
+      background-color: #fff;
+      border-radius: 8px;
+      text-align: center;
+      line-height: 36px;
+      cursor: pointer;
+      transition: background-color 0.3s ease;
+    }
+
+    .index_con .right .more:hover {
+      background-color: #f0f9ff;
+    }
+
+    .index_con .right .more img {
+      width: 20px;
+      vertical-align: -2px;
+    }
+
+    .index_con .right .more span {
+      font-size: 18px;
+      color: #3c3c3c;
+      margin-left: 10px;
+      vertical-align: middle;
+    }
+
+    /* ============================================
+         聊天消息容器（ChatGPT/Gemini 标准布局）
+         整个高度链被锁定，只有此处可滚动
+         ============================================ */
+    .chat-messages {
+      display: none;
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 24px 40px;
+      scroll-behavior: smooth;
+    }
+
+    /* 聊天模式：欢迎区隐藏，消息区可见 */
+    .chat-mode .mass,
+    .chat-mode .icon_list {
+      display: none !important;
+    }
+
+    .chat-mode .chat-messages {
+      display: block !important;
+    }
+
+    /* 底部输入区容器 —— 让 fill + tool 保持原有样式，仅做布局包裹 */
+    .index_con .right .chat-composer {
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      width: 100%;
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 0;
+      gap: 18px;
+      border-radius: 0;
+      border: 0;
+      background: transparent;
+      box-shadow: none;
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }
+
+    .index_con .right .chat-composer .fill {
+      width: 100%;
+      max-width: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      gap: 0;
+      position: relative;
+    }
+
+    .index_con .right .chat-composer .fill input {
+      order: 1;
+      height: 58px;
+      max-width: none;
+      padding: 0 188px 0 28px;
+      border-radius: 999px;
+      border: 1px solid rgba(198, 207, 226, 0.9);
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9),
+        0 12px 30px rgba(21, 33, 65, 0.1);
+      font-size: 16px;
+      color: #23304f;
+    }
+
+    .index_con .right .chat-composer .fill input:hover,
+    .index_con .right .chat-composer .fill input:focus {
+      border-color: rgba(112, 103, 242, 0.45);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.95),
+        0 16px 38px rgba(82, 72, 212, 0.12);
+    }
+
+    .index_con .right .chat-composer .fill .pic {
+      order: 2;
+      position: absolute;
+      right: 82px;
+      top: 50%;
+      transform: translateY(-50%);
+      height: 44px;
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      gap: 8px;
+      z-index: 2;
+    }
+
+    .index_con .right .chat-composer .fill .pic img {
+      width: 38px;
+      height: 38px;
+      padding: 9px;
+      border-radius: 50%;
+      background-color: #f5f6fb;
+      box-shadow: 0 1px 0 rgba(255, 255, 255, 0.9);
+      object-fit: contain;
+      filter: none;
+      transition: background-color 0.18s ease, transform 0.18s ease,
+        box-shadow 0.18s ease;
+    }
+
+    .index_con .right .chat-composer .fill .pic img:hover {
+      background: #ececff;
+      transform: translateY(-1px);
+      box-shadow: 0 8px 18px rgba(80, 72, 180, 0.1);
+    }
+
+    .index_con .right .chat-composer .fill .btn {
+      order: 3;
+      width: 54px;
+      height: 54px;
+      flex: 0 0 54px;
+      position: relative;
+      border-radius: 50%;
+      background-color: #5f46f0;
+      background-image: linear-gradient(135deg, #6a54ff 0%, #4f3de5 100%);
+      background-repeat: no-repeat;
+      background-position: center;
+      background-size: 100% 100%;
+      box-shadow: 0 14px 32px rgba(102, 126, 234, 0.3);
+      font-size: 0;
+      color: transparent;
+      text-indent: -9999px;
+      margin-left: -62px;
+      z-index: 3;
+      border: none;
+      outline: none;
+      overflow: hidden;
+    }
+
+    .index_con .right .chat-composer .fill .btn::before {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 25px;
+      height: 25px;
+      transform: translate(-50%, -50%);
+      background: #fff;
+      -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M2.4 12.4 21.2 3.2c.7-.3 1.4.4 1.1 1.1l-7.1 17.9c-.3.8-1.4.9-1.8.1l-3.2-6.1-5.8-2.2c-.8-.3-.9-1.3-.1-1.6Zm4.4.7 4.2 1.6 2.5 4.8 5.1-12.9-11.8 6.5Zm4.5 1.1 6.7-6.7-5.2 8.1-1.5-1.4Z'/%3E%3C/svg%3E") center / contain no-repeat;
+      mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M2.4 12.4 21.2 3.2c.7-.3 1.4.4 1.1 1.1l-7.1 17.9c-.3.8-1.4.9-1.8.1l-3.2-6.1-5.8-2.2c-.8-.3-.9-1.3-.1-1.6Zm4.4.7 4.2 1.6 2.5 4.8 5.1-12.9-11.8 6.5Zm4.5 1.1 6.7-6.7-5.2 8.1-1.5-1.4Z'/%3E%3C/svg%3E") center / contain no-repeat;
+    }
+
+    .index_con .right .chat-composer .fill .btn:hover {
+      transform: translateY(-2px) scale(1.03);
+    }
+
+    .index_con .right .chat-composer .tool {
+      width: 100%;
+      max-width: none;
+      margin: 0;
+      padding: 0 12px;
+      border-top: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .index_con .right .chat-composer .tool .chose {
+      display: flex;
+      align-items: center;
+      gap: 46px;
+    }
+
+    .index_con .right .chat-composer .tool .chose .item {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0;
+    }
+
+    .index_con .right .chat-composer .tool .chose .icon {
+      width: 23px;
+      height: 23px;
+      border-radius: 6px;
+      background-size: 14px auto;
+    }
+
+    .index_con .right .chat-composer .tool .chose span {
+      font-size: 17px;
+      color: #222b3f;
+      font-weight: 500;
+    }
+
+    .index_con .right .chat-composer .more {
+      position: relative;
+      width: auto;
+      min-width: 124px;
+      height: 38px;
+      padding: 0 14px;
+      border-radius: 12px;
+      border: 0;
+      background: transparent;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      line-height: normal;
+      box-shadow: none;
+    }
+
+    .index_con .right .chat-composer .more::before {
+      content: "";
+      position: absolute;
+      left: -34px;
+      width: 1px;
+      height: 28px;
+      background: rgba(220, 226, 238, 0.95);
+    }
+
+    .index_con .right .chat-composer .more img {
+      width: 20px;
+    }
+
+    .index_con .right .chat-composer .more span {
+      margin-left: 0;
+      font-size: 17px;
+      font-weight: 500;
+      color: #222b3f;
+      /* 与 RAG 和智能工具保持一致 */
+    }
+
+    @media (max-width: 1180px) {
+      .index_con .right .chat-composer {
+        max-width: 760px;
+      }
+
+      .index_con .right .chat-composer .fill input {
+        padding-right: 168px;
+        font-size: 15px;
+      }
+
+      .index_con .right .chat-composer .fill .pic {
+        right: 76px;
+      }
+
+      .index_con .right .chat-composer .tool .chose {
+        gap: 28px;
+      }
+    }
+
+    @media (max-width: 768px) {
+
+      html,
+      body {
+        width: 100%;
+        max-width: 100%;
+        overflow-x: hidden;
+      }
+
+      body {
+        min-height: 100dvh;
+      }
+
+      header {
+        height: 56px;
+        padding: 0 12px;
+        position: sticky;
+        top: 0;
+        z-index: 120;
+      }
+
+      header .logo {
+        display: flex;
+        align-items: center;
+        min-width: 0;
+        gap: 10px;
+      }
+
+      header .logo .item {
+        display: inline-flex;
+        align-items: center;
+        margin-right: 0;
+        min-width: 0;
+      }
+
+      header .logo .item:first-child span {
+        display: none;
+      }
+
+      header .logo .item:first-child img {
+        width: 28px !important;
+        height: 28px;
+        object-fit: contain;
+      }
+
+      header .logo .item:nth-child(2) img {
+        width: 32px !important;
+        height: 32px;
+        border-radius: 8px;
+        object-fit: contain;
+      }
+
+      header .logo .item span {
+        font-size: 17px;
+        margin-left: 8px;
+        white-space: nowrap;
+      }
+
+      header .right {
+        display: none;
+      }
+
+      .index_con {
+        display: block;
+        min-height: calc(100dvh - 56px);
+        overflow-x: hidden;
+      }
+
+      body.chat-active .index_con {
+        height: calc(100dvh - 56px);
+      }
+
+      .sidebar-mask {
+        top: 56px;
+        background: rgba(15, 23, 42, 0.34);
+        backdrop-filter: blur(3px);
+        -webkit-backdrop-filter: blur(3px);
+        z-index: 130;
+      }
+
+      .index_con .left {
+        position: fixed;
+        top: 56px;
+        left: 0;
+        bottom: 0;
+        width: min(84vw, 320px);
+        height: calc(100dvh - 56px);
+        padding: 18px;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        z-index: 140;
+        transform: translateX(-100%);
+        margin-left: 0;
+        opacity: 0;
+        border-right: 1px solid rgba(15, 23, 42, 0.08);
+        box-shadow: 18px 0 42px rgba(15, 23, 42, 0.22);
+      }
+
+      .index_con .left.is-open {
+        transform: translateX(0);
+        opacity: 1;
+      }
+
+      .index_con .left.is-closing {
+        transform: translateX(-100%);
+        margin-left: 0;
+        opacity: 0;
+      }
+
+      .index_con .left .list_nav {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .index_con .left .list_nav .item {
+        height: 88px;
+      }
+
+      .index_con .left .list_nav .item img {
+        width: 34px;
+      }
+
+      .index_con .left .list_nav .item span {
+        font-size: 12px;
+        margin-top: 6px;
+      }
+
+      .open-sidebar-trigger {
+        left: 12px;
+        top: 68px;
+        width: 42px;
+        height: 42px;
+        z-index: 125;
+        opacity: 1;
+        visibility: visible;
+        transform: translateX(0);
+        border: 1px solid rgba(15, 23, 42, 0.08);
+      }
+
+      .open-sidebar-trigger.is-visible {
+        opacity: 1;
+        visibility: visible;
+        transform: translateX(0);
+      }
+
+      .index_con .right {
+        width: 100%;
+        min-width: 0;
+        min-height: calc(100dvh - 56px);
+        padding: 22px 14px 132px;
+        overflow-x: hidden;
+      }
+
+      .index_con .right .mass {
+        margin-top: clamp(90px, 18dvh, 170px);
+        transform: none;
+      }
+
+      .index_con .right .mass img {
+        width: 52px;
+        height: 52px;
+      }
+
+      .index_con .right .mass b {
+        font-size: 26px;
+      }
+
+      .index_con .right .mass p {
+        font-size: 15px;
+        margin-top: 14px;
+      }
+
+      .index_con .right .mass .welcome-en {
+        margin-top: 6px;
+        font-size: 12px;
+      }
+
+      .index_con .right .icon_list {
+        margin-top: 42px;
+        transform: none;
+      }
+
+      .index_con .right .icon_list .list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        width: min(100%, 360px);
+        margin: 18px auto 0;
+      }
+
+      .index_con .right .icon_list .item {
+        width: auto;
+        height: 58px;
+        margin: 0;
+        line-height: normal;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        border-radius: 14px;
+      }
+
+      .index_con .right .icon_list .item img {
+        width: 21px;
+      }
+
+      .index_con .right .icon_list .item span {
+        font-size: 15px;
+        margin-left: 0;
+      }
+
+      .index_con .right .icon_list .item.item-compact {
+        width: auto;
+        height: 58px;
+        line-height: normal;
+      }
+
+      .index_con .right .icon_list .item.item-compact span {
+        font-size: 13px;
+      }
+
+      .index_con .right .icon_list .item.knowledge-entry {
+        width: auto;
+        height: 58px;
+        flex-direction: row;
+        gap: 8px;
+        background-color: rgba(255, 255, 255, 0.85);
+        border: 1px solid var(--theme-primary-border);
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.04);
+        border-radius: 14px;
+      }
+
+      .index_con .right .icon_list .item.knowledge-entry img {
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        box-shadow: none;
+      }
+
+      .index_con .right .icon_list .item.knowledge-entry span {
+        font-size: 13px;
+      }
+
+      .index_con .right .chat-messages {
+        padding: 14px 2px 16px;
+      }
+
+      .index_con .right .chat-composer {
+        position: fixed;
+        left: 10px;
+        right: 10px;
+        bottom: calc(10px + env(safe-area-inset-bottom));
+        width: auto;
+        max-width: none;
+        z-index: 115;
+        gap: 10px;
+        padding: 0;
+      }
+
+      body:not(.chat-active) .index_con .right .chat-composer {
+        margin-top: 0;
+        margin-bottom: 0;
+      }
+
+      .index_con .right .chat-composer .fill input {
+        height: 48px;
+        padding: 0 104px 0 16px;
+        font-size: 13px;
+        border-radius: 999px;
+      }
+
+      .index_con .right .chat-composer .fill .pic {
+        right: 58px;
+        gap: 4px;
+      }
+
+      .index_con .right .chat-composer .fill .pic img {
+        width: 32px;
+        height: 32px;
+        padding: 8px;
+      }
+
+      .index_con .right .chat-composer .fill .btn {
+        width: 46px;
+        height: 46px;
+        flex-basis: 46px;
+        margin-left: -50px;
+      }
+
+      .index_con .right .chat-composer .tool {
+        padding: 0 4px;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .index_con .right .chat-composer .tool .chose {
+        gap: 12px;
+        min-width: 0;
+      }
+
+      .index_con .right .chat-composer .tool .chose .item {
+        gap: 5px;
+      }
+
+      .index_con .right .chat-composer .tool .chose .icon {
+        width: 18px;
+        height: 18px;
+        border-radius: 5px;
+      }
+
+      .index_con .right .chat-composer .tool .chose span,
+      .index_con .right .chat-composer .more span {
+        font-size: 13px;
+        white-space: nowrap;
+      }
+
+      .index_con .right .chat-composer .more {
+        min-width: auto;
+        height: 30px;
+        padding: 0 2px;
+        gap: 5px;
+      }
+
+      .index_con .right .chat-composer .more::before {
+        display: none;
+      }
+
+      .index_con .right .chat-composer .more img {
+        width: 17px;
+      }
+
+      .advanced-options-panel {
+        width: calc(100vw - 24px) !important;
+        max-width: calc(100vw - 24px) !important;
+        max-height: calc(100dvh - 34px);
+        overflow-y: auto;
+        border-radius: 18px !important;
+      }
+    }
+
+    .message {
+      animation: fadeIn 0.3s ease-in-out;
+    }
+
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(10px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .chat-messages::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    .chat-messages::-webkit-scrollbar-track {
+      background: #f1f1f1;
+      border-radius: 4px;
+    }
+
+    .chat-messages::-webkit-scrollbar-thumb {
+      background: #888;
+      border-radius: 4px;
+    }
+
+    .chat-messages::-webkit-scrollbar-thumb:hover {
+      background: #555;
+    }
+
+    .status-message {
+      animation: slideUp 0.3s ease-out;
+    }
+
+    @keyframes slideUp {
+      from {
+        opacity: 0;
+        transform: translateY(20px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    /* 修复footer布局对齐问题 */
+    footer {
+      background-color: #000;
+      padding: 5vh 60px;
+      display: flex;
+      justify-content: space-around;
+      align-items: flex-start;
+      margin-top: auto;
+    }
+
+    footer .section {
+      flex: 1;
+      max-width: 380px;
+    }
+
+    footer dl {
+      text-align: center;
+    }
+
+    footer dt {
+      font-size: 28px;
+      color: #fff;
+      font-weight: bold;
+      margin-bottom: 40px;
+      cursor: pointer;
+    }
+
+    footer dd {
+      font-size: 20px;
+      color: #fff;
+      font-weight: bold;
+      margin-top: 30px;
+      cursor: pointer;
+    }
+
+    footer dd:hover {
+      opacity: 0.8;
+    }
+
+    footer .map {
+      text-align: center;
+    }
+
+    footer .map img {
+      width: 300px;
+      vertical-align: middle;
+    }
+
+    footer .map h4 {
+      font-size: 28px;
+      color: #fff;
+      font-weight: bold;
+      margin-bottom: 40px;
+    }
+
+    footer .map .pic {
+      position: relative;
+      display: inline-block;
+    }
+
+    footer .map .img1 {
+      position: absolute;
+      width: 20px;
+      vertical-align: middle;
+      right: 112px;
+      bottom: 6px;
+    }
+
+    footer .contact {
+      max-width: 380px;
+    }
+
+    footer .contact h4 {
+      text-align: center;
+      font-size: 28px;
+      color: #fff;
+      font-weight: bold;
+      margin-bottom: 40px;
+    }
+
+    footer .contact .p {
+      margin-top: 25px;
+      padding-left: 50px;
+      position: relative;
+      min-height: 38px;
+      display: flex;
+      align-items: center;
+    }
+
+    footer .contact img {
+      width: 30px;
+      position: absolute;
+      left: 0;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+
+    footer .contact span {
+      font-size: 16px;
+      color: #fff;
+      line-height: 1.5;
+    }
+
+    /* ============================================
+         ChatGPT/Gemini 标准布局：页面锁定 100vh
+         只有聊天消息区可滚动，body 永不滚动
+         ============================================ */
+    body {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    body.chat-active {
+      height: 100vh;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    body.chat-active footer {
+      display: none;
+    }
+
+    body.chat-active .index_con {
+      height: calc(100vh - 60px);
+      min-height: 0;
+      flex: none;
+      overflow: hidden;
+    }
+
+    body.chat-active .index_con .right {
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .index_con {
+      flex: 1;
+      min-height: calc(100vh - 60px);
+      position: relative;
+      display: flex;
+    }
+
+    /* 初始状态下，composer 的 auto margin 与 .mass 共同居中欢迎内容 */
+    body:not(.chat-active) .index_con .right .chat-composer {
+      margin-top: clamp(36px, 7vh, 86px);
+      margin-bottom: clamp(34px, 8vh, 96px);
+    }
+
+    /* ========== 高级选项弹窗样式 ========== */
+
+    /* 遮罩层 - 提升特异性避免被 .right > * 覆盖 */
+    .index_con .right .advanced-options-overlay {
+      position: fixed !important;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(17, 17, 17, 0.62);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      z-index: 9999 !important;
+      display: none;
+      opacity: 0;
+      transition: opacity 0.22s ease;
+    }
+
+    .index_con .right .advanced-options-overlay.show {
+      opacity: 1;
+    }
+
+    /* 面板主体 - 提升特异性并使用 !important 确保脱离文档流 */
+    .index_con .right .advanced-options-panel {
+      position: fixed !important;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%) scale(0.96);
+      width: 380px;
+      max-width: calc(100vw - 28px);
+      background: #ffffff;
+      border: 1px solid rgba(17, 17, 17, 0.12);
+      border-radius: 10px;
+      box-shadow: 0 28px 90px rgba(0, 0, 0, 0.36);
+      z-index: 10000 !important;
+      overflow: hidden;
+      opacity: 0;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+    }
+
+    .index_con .right .advanced-options-panel.show {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1);
+    }
+
+    /* 面板头部 */
+    .advanced-options-panel .panel-header {
+      background: #ffffff;
+      padding: 16px 16px 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-bottom: 1px solid rgba(17, 17, 17, 0.08);
+    }
+
+    .advanced-options-panel .header-icon {
+      width: 28px;
+      height: 28px;
+      background: #ffffff;
+      border: 1px solid rgba(17, 17, 17, 0.1);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #111111;
+      flex: 0 0 auto;
+    }
+
+    .advanced-options-panel .header-icon svg {
+      width: 14px;
+      height: 14px;
+    }
+
+    .advanced-options-panel .header-text {
+      flex: 1;
+    }
+
+    .advanced-options-panel .header-text h3 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 800;
+      color: #111111;
+      letter-spacing: -0.01em;
+    }
+
+    .advanced-options-panel .header-text p {
+      margin: 5px 0 0 0;
+      font-size: 12px;
+      color: #777777;
+    }
+
+    .advanced-options-panel .close-btn {
+      width: 26px;
+      height: 26px;
+      border: none;
+      background: transparent;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #555555;
+      transition: all 0.2s;
+    }
+
+    .advanced-options-panel .close-btn:hover {
+      background: #f3f3f3;
+      color: #111111;
+      transform: none;
+    }
+
+    /* 面板内容 */
+    .advanced-options-panel .panel-content {
+      padding: 14px 16px 0;
+      background: #ffffff;
+    }
+
+    /* 选项卡片 */
+    .advanced-options-panel .option-card {
+      background: #ffffff;
+      border: 1px solid rgba(17, 17, 17, 0.1);
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 10px;
+      display: flex;
+      gap: 12px;
+      box-shadow: none;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .advanced-options-panel .option-card:hover {
+      border-color: rgba(17, 17, 17, 0.22);
+      box-shadow: 0 10px 26px rgba(17, 17, 17, 0.06);
+      transform: none;
+    }
+
+    .advanced-options-panel .option-card:last-of-type {
+      margin-bottom: 0;
+    }
+
+    /* 卡片图标 */
+    .advanced-options-panel .card-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      background: #f6f6f6;
+      border: 1px solid rgba(17, 17, 17, 0.08);
+      color: #111111;
+    }
+
+    .advanced-options-panel .card-icon svg {
+      width: 17px;
+      height: 17px;
+    }
+
+    .advanced-options-panel .rag-icon {
+      background: #f6f6f6;
+      color: #111111;
+    }
+
+    .advanced-options-panel .temp-icon {
+      background: #f6f6f6;
+      color: #111111;
+    }
+
+    .advanced-options-panel .mol-count-icon {
+      background: #f6f6f6;
+      color: #111111;
+    }
+
+    /* 卡片内容 */
+    .advanced-options-panel .card-content {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .advanced-options-panel .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 9px;
+      gap: 10px;
+    }
+
+    .advanced-options-panel .card-title {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+
+    .advanced-options-panel .card-title>span:first-child {
+      font-size: 14px;
+      font-weight: 800;
+      color: #111111;
+    }
+
+    .advanced-options-panel .badge {
+      font-size: 9px;
+      font-weight: 800;
+      color: #555555;
+      background: #f2f2f2;
+      border: 1px solid rgba(17, 17, 17, 0.06);
+      padding: 3px 7px;
+      border-radius: 999px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .advanced-options-panel .card-value {
+      font-size: 22px;
+      font-weight: 850;
+      color: #111111;
+      line-height: 1;
+      min-width: 34px;
+      text-align: right;
+    }
+
+    /* 滑块样式 */
+    .advanced-options-panel .slider-container {
+      position: relative;
+      margin-bottom: 9px;
+    }
+
+    .advanced-options-panel .modern-slider {
+      width: 100%;
+      height: 5px;
+      border-radius: 999px;
+      background: #e7e7e7;
+      outline: none;
+      -webkit-appearance: none;
+      appearance: none;
+      cursor: pointer;
+    }
+
+    .advanced-options-panel .modern-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #111111;
+      border: 2px solid #ffffff;
+      cursor: grab;
+      box-shadow: 0 2px 8px rgba(17, 17, 17, 0.28);
+      transition: all 0.2s;
+    }
+
+    .advanced-options-panel .modern-slider::-webkit-slider-thumb:hover {
+      transform: scale(1.1);
+      box-shadow: 0 4px 12px rgba(17, 17, 17, 0.32);
+    }
+
+    .advanced-options-panel .modern-slider::-webkit-slider-thumb:active {
+      cursor: grabbing;
+      transform: scale(1.04);
+    }
+
+    .advanced-options-panel .modern-slider::-moz-range-thumb {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #111111;
+      border: 2px solid #ffffff;
+      box-shadow: 0 2px 8px rgba(17, 17, 17, 0.28);
+      cursor: grab;
+    }
+
+    .advanced-options-panel .slider-track-fill {
+      display: none;
+    }
+
+    .advanced-options-panel .slider-labels {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 5px;
+    }
+
+    .advanced-options-panel .slider-labels span {
+      font-size: 10px;
+      font-weight: 600;
+      color: #8a8a8a;
+    }
+
+    .advanced-options-panel .card-description {
+      font-size: 11px;
+      color: #6f6f6f;
+      line-height: 1.5;
+    }
+
+    /* 底部操作栏 */
+    .advanced-options-panel .panel-footer {
+      margin: 2px -16px 0;
+      padding: 12px 16px;
+      background: #fff;
+      border-top: 1px solid rgba(17, 17, 17, 0.08);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .advanced-options-panel .reset-btn {
+      padding: 9px 16px;
+      background: #111111;
+      border: none;
+      border-radius: 7px;
+      color: white;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: background 0.2s ease, transform 0.2s ease;
+    }
+
+    .advanced-options-panel .reset-btn:hover {
+      background: #2a2a2a;
+      transform: translateY(-1px);
+      box-shadow: none;
+    }
+
+    .advanced-options-panel .reset-btn svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    .advanced-options-panel .footer-info {
+      font-size: 11px;
+      color: #7a7a7a;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+
+    .advanced-options-panel .footer-info svg {
+      width: 14px;
+      height: 14px;
+    }
+
+    .llm-settings-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 1200;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(15, 23, 42, 0.42);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      padding: 24px;
+    }
+
+    .llm-settings-overlay.is-open {
+      display: flex;
+    }
+
+    .llm-settings-panel {
+      width: min(520px, 100%);
+      background: #ffffff;
+      border-radius: 18px;
+      box-shadow: 0 30px 80px rgba(15, 23, 42, 0.24);
+      border: 1px solid rgba(226, 232, 240, 0.9);
+      overflow: hidden;
+    }
+
+    .llm-settings-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 22px 24px;
+      background: linear-gradient(135deg, #0f172a, #1e293b);
+      color: #fff;
+    }
+
+    .llm-settings-header strong {
+      display: block;
+      font-size: 20px;
+      letter-spacing: 0.02em;
+    }
+
+    .llm-settings-header span {
+      display: block;
+      margin-top: 4px;
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.72);
+    }
+
+    .llm-settings-close {
+      width: 34px;
+      height: 34px;
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.08);
+      color: #fff;
+      cursor: pointer;
+      font-size: 20px;
+      line-height: 1;
+    }
+
+    .llm-settings-body {
+      padding: 22px 24px 24px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .llm-settings-field {
+      display: grid;
+      gap: 7px;
+    }
+
+    .llm-settings-field label {
+      color: #334155;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .llm-settings-field input,
+    .llm-settings-field select {
+      width: 100%;
+      height: 42px;
+      border-radius: 10px;
+      border: 1px solid #dbe4ef;
+      background: #f8fafc;
+      color: #0f172a;
+      font-size: 14px;
+      padding: 0 12px;
+      outline: none;
+    }
+
+    .llm-settings-field input:focus,
+    .llm-settings-field select:focus {
+      border-color: #6366f1;
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+      background: #fff;
+    }
+
+    .llm-settings-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .llm-key-hint {
+      font-size: 12px;
+      color: #64748b;
+    }
+
+    .llm-settings-actions {
+      display: flex;
+      gap: 10px;
+      justify-content: flex-end;
+      padding-top: 6px;
+    }
+
+    .llm-settings-actions button {
+      min-width: 104px;
+      height: 40px;
+      border-radius: 10px;
+      border: 1px solid #dbe4ef;
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .llm-test-btn {
+      background: #f8fafc;
+      color: #334155;
+    }
+
+    .llm-save-btn {
+      background: #111827;
+      color: #fff;
+      border-color: #111827 !important;
+    }
+
+    .llm-settings-status {
+      min-height: 20px;
+      color: #64748b;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    @media (max-width: 640px) {
+      .llm-settings-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+  <!-- SMILES分子可视化库 -->
+  <script src="/static/js/lib/smiles-drawer.min.js"></script>
+</head>
+
+<body>
+  <header>
+    <div class="logo">
+      <div class="item">
+        <img style="width: 36px; height: 36px; object-fit: contain" src="/static/images/logo.png" alt="" />
+        <span>海南大学药学院</span>
+      </div>
+      <div class="item">
+        <img style="width: 38px; height: 38px; object-fit: contain" src="/static/images/logo2.png" alt="" />
+        <span>MedChat</span>
+      </div>
+    </div>
+    <div class="right">
+      <div class="theme-switcher" id="themeSwitcher">
+        <button class="theme-option low" data-theme="low" title="低">低</button>
+        <button class="theme-option medium" data-theme="medium" title="中">中</button>
+        <button class="theme-option high" data-theme="high" title="高">高</button>
+      </div>
+
+      <div class="model-control">
+        <img src="/static/images/top1.png" alt="" />
+        <span>模型</span>
+        <select id="modelSelect">
+          <option value="glm4" selected>GLM-5.1 (魔搭)</option>
+          <option value="qwen3">Qwen3-235B (魔搭)</option>
+        </select>
+      </div>
+
+      <div class="link" id="connectionStatus" style="
+            background-color: #fbbf24;
+            color: #fff;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 500;
+            white-space: nowrap;
+          ">
+        连接中...
+      </div>
+
+      <img style="width: 20px; cursor: pointer" src="/static/images/top2.png" alt="" id="settingsBtn" />
+    </div>
+  </header>
+
+  <div class="llm-settings-overlay" id="llmSettingsOverlay" aria-hidden="true">
+    <div class="llm-settings-panel" role="dialog" aria-modal="true" aria-labelledby="llmSettingsTitle">
+      <div class="llm-settings-header">
+        <div>
+          <strong id="llmSettingsTitle">模型接入设置</strong>
+          <span>配置外部 API Key 或本地 Ollama，让 MedChat 接入可用 LLM</span>
+        </div>
+        <button class="llm-settings-close" type="button" id="closeLlmSettings" aria-label="关闭">×</button>
+      </div>
+      <div class="llm-settings-body">
+        <div class="llm-settings-grid">
+          <div class="llm-settings-field">
+            <label for="llmProvider">服务商</label>
+            <select id="llmProvider">
+              <option value="ollama">本地 Ollama</option>
+              <option value="modelscope">ModelScope</option>
+              <option value="openai_compatible">OpenAI 兼容接口</option>
+              <option value="custom">自定义接口</option>
+            </select>
+          </div>
+          <div class="llm-settings-field">
+            <label for="llmStream">输出模式</label>
+            <select id="llmStream">
+              <option value="true">流式输出</option>
+              <option value="false">普通输出</option>
+            </select>
+          </div>
+        </div>
+        <div class="llm-settings-field">
+          <label for="llmBaseUrl">Base URL</label>
+          <input id="llmBaseUrl" type="text" placeholder="http://localhost:11434 或 https://api.xxx.com/v1/chat/completions" />
+        </div>
+        <div class="llm-settings-field">
+          <label for="llmModelName">模型名称</label>
+          <input id="llmModelName" type="text" placeholder="gmm-llama:latest / ZhipuAI/GLM-5.1 / qwen..." />
+        </div>
+        <div class="llm-settings-field">
+          <label for="llmApiKey">API Key</label>
+          <input id="llmApiKey" type="password" autocomplete="off" placeholder="本地 Ollama 可留空；外部 API 请填写 Key" />
+          <div class="llm-key-hint" id="llmApiKeyHint">未读取配置</div>
+        </div>
+        <div class="llm-settings-status" id="llmSettingsStatus"></div>
+        <div class="llm-settings-actions">
+          <button class="llm-test-btn" type="button" id="testLlmConfig">测试连接</button>
+          <button class="llm-save-btn" type="button" id="saveLlmConfig">保存并启用</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sidebar-mask" id="sidebarMask"></div>
+
+  <div class="open-sidebar-trigger" id="openSidebarBtn" title="打开分析工具">
+    <img src="/static/images/left1.png" style="width: 20px;" alt="" />
+  </div>
+
+  <div class="index_con">
+    <div class="left" id="sidebarPanel">
+      <div class="sidebar-header">
+        <h3>
+          <img src="/static/images/left1.png" alt="" />
+          <span>分析工具</span>
+        </h3>
+        <button class="close-sidebar-button" id="closeSidebarBtn" title="收起侧边栏">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="11 17 6 12 11 7"></polyline>
+            <polyline points="18 17 13 12 18 7"></polyline>
+          </svg>
+        </button>
+      </div>
+      <h4>快速分析</h4>
+      <div class="list_nav">
+        <div class="item" onclick="window.location.href='http://database.tdd-lab.com'">
+          <img src="/static/images/l1.png" alt="" />
+          <span>数据库</span>
+        </div>
+        <div class="item" onclick="window.location.href='http://software.tdd-lab.com'">
+          <img src="/static/images/l2.png" alt="" />
+          <span>Lead优化</span>
+        </div>
+        <div class="item" data-action="admet" onclick="window.location.href='/kermt-admet'">
+          <img src="/static/images/l3.png" alt="" />
+          <span>ADMET预测</span>
+        </div>
+        <div class="item" onclick="window.location.href='/target-search'">
+          <img src="/static/images/l4.png" alt="" />
+          <span>靶点搜索</span>
+        </div>
+        <div class="item" onclick="window.location.href='/activity-prediction'">
+          <img src="/static/images/l5.png" alt="" />
+          <span>活性预测</span>
+        </div>
+        <!-- 修复：反向寻靶跳转到正确的子页面 /reverse-target -->
+        <div class="item" onclick="window.location.href='/reverse-target'">
+          <img src="/static/images/l6.png" alt="" />
+          <span>反向寻靶</span>
+        </div>
+        <div class="item" onclick="window.location.href='/molecular-docking'">
+          <img src="/static/images/l8.png" alt="" />
+          <span>分子对接</span>
+        </div>
+        <div class="item" onclick="window.location.href='/molecular-design'" style="position:relative;">
+          <img src="/static/images/l5.png" alt="" />
+          <span>分子设计</span>
+          <span
+            style="position:absolute;top:4px;right:4px;background:linear-gradient(45deg,#667eea,#764ba2);color:#fff;font-size:9px;padding:1px 5px;border-radius:8px;font-weight:600;">NEW</span>
+        </div>
+      </div>
+
+      <div class="data">
+        <h4>数据管理</h4>
+        <div class="btn">
+          <img src="/static/images/l9.png" alt="" />
+          <span>上传文档</span>
+        </div>
+        <div class="btn">
+          <img src="/static/images/I12.png" alt="" />
+          <span>我的项目</span>
+        </div>
+        <div class="btn">
+          <img src="/static/images/I11.png" alt="" />
+          <span>分析记录</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="right">
+      <div class="mass" style="text-align: center">
+        <div style="
+              display: flex;
+              align-items: center;
+              gap: 14px;
+              justify-content: center;
+            ">
+          <img src="/static/images/logo3.png" alt="" />
+          <h2>MedChat</h2>
+        </div>
+        <p>专业的AI药物设计平台</p>
+      </div>
+      <div class="icon_list">
+        <div class="list">
+          <div class="item knowledge-entry" data-action="knowledge-graph" title="知识图谱"
+            onclick="window.open('./cadd_interactive_radial.html', '_blank')">
+            <img src="/static/images/r11.png" alt="" />
+            <span>知识图谱</span>
+          </div>
+          <div class="item" data-action="analyze-ethanol">
+            <img src="/static/images/r6.png" alt="" />
+            <span>分析乙醇性质</span>
+          </div>
+          <div class="item" data-action="generate-molecule">
+            <img src="/static/images/r5.png" alt="" />
+            <span>生成类药分子</span>
+          </div>
+          <div class="item" data-action="admet" onclick="window.location.href='/kermt-admet'">
+            <img src="/static/images/r4.png" alt="" />
+            <span>ADMET预测</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="fill">
+        <input type="text" placeholder="请输入您的问题，例如：'分析CCO的分子性质'或'生成符合条件的分子'..." />
+        <div class="btn">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+            style="margin-left: -2px; margin-top: 2px;">
+            <line x1="22" y1="2" x2="11" y2="13"></line>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+          </svg>
+        </div>
+        <div class="pic">
+          <img src="/static/images/r7.png" alt="" />
+          <img src="/static/images/r8.png" alt="" />
+        </div>
+      </div>
+
+      <div class="tool">
+        <div class="chose">
+          <div class="item">
+            <div class="icon"></div>
+            <span>RAG检索</span>
+          </div>
+          <div class="item">
+            <div class="icon"></div>
+            <span>智能工具</span>
+          </div>
+        </div>
+        <div class="more">
+          <img src="/static/images/r11.png" alt="" />
+          <span>高级选项</span>
+        </div>
+      </div>
+
+      <!-- 高级选项遮罩层 -->
+      <div class="advanced-options-overlay" id="advancedOptionsOverlay"></div>
+
+      <!-- 高级选项面板 - 重构版 -->
+      <div class="advanced-options-panel" id="advancedOptionsPanel" style="display: none">
+        <!-- 面板头部 -->
+        <div class="panel-header">
+          <div class="header-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M12 1v6m0 6v6m5.2-13.2l-4.2 4.2m0 6l4.2 4.2M23 12h-6m-6 0H1m18.2 5.2l-4.2-4.2m0-6l4.2-4.2">
+              </path>
+            </svg>
+          </div>
+          <div class="header-text">
+            <h3>高级选项</h3>
+            <p>自定义系统参数</p>
+          </div>
+          <button class="close-btn" id="closeAdvancedPanel">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+
+        <!-- 面板内容 -->
+        <div class="panel-content">
+          <!-- RAG检索数量 -->
+          <div class="option-card">
+            <div class="card-icon rag-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"></circle>
+                <path d="m21 21-4.35-4.35"></path>
+              </svg>
+            </div>
+            <div class="card-content">
+              <div class="card-header">
+                <div class="card-title">
+                  <span>RAG 检索数量</span>
+                  <span class="badge">Retrieval</span>
+                </div>
+                <div class="card-value" id="ragCountValue">5</div>
+              </div>
+              <div class="slider-container">
+                <input type="range" id="ragCountSlider" min="1" max="20" value="5" class="modern-slider" />
+                <div class="slider-track-fill" id="ragSliderFill"></div>
+                <div class="slider-labels">
+                  <span>1</span>
+                  <span>20</span>
+                </div>
+              </div>
+              <div class="card-description">
+                返回最相似的分子数量，数值越大检索范围越广
+              </div>
+            </div>
+          </div>
+
+          <!-- 生成温度 -->
+          <div class="option-card">
+            <div class="card-icon temp-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"></path>
+              </svg>
+            </div>
+            <div class="card-content">
+              <div class="card-header">
+                <div class="card-title">
+                  <span>生成温度</span>
+                  <span class="badge">Temperature</span>
+                </div>
+                <div class="card-value" id="temperatureValue">0.7</div>
+              </div>
+              <div class="slider-container">
+                <input type="range" id="temperatureSlider" min="0" max="2" step="0.1" value="0.7"
+                  class="modern-slider" />
+                <div class="slider-track-fill" id="tempSliderFill"></div>
+                <div class="slider-labels">
+                  <span>0.0</span>
+                  <span>2.0</span>
+                </div>
+              </div>
+              <div class="card-description">
+                控制生成的随机性：低温度更确定，高温度更多样
+              </div>
+            </div>
+          </div>
+
+          <!-- 分子生成数量 -->
+          <div class="option-card">
+            <div class="card-icon mol-count-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="7" height="7"></rect>
+                <rect x="14" y="3" width="7" height="7"></rect>
+                <rect x="14" y="14" width="7" height="7"></rect>
+                <rect x="3" y="14" width="7" height="7"></rect>
+              </svg>
+            </div>
+            <div class="card-content">
+              <div class="card-header">
+                <div class="card-title">
+                  <span>分子生成数量</span>
+                  <span class="badge">Generation</span>
+                </div>
+                <div class="card-value" id="molCountValue">5</div>
+              </div>
+              <div class="slider-container">
+                <input type="range" id="molCountSlider" min="1" max="10" value="5" class="modern-slider" />
+                <div class="slider-track-fill" id="molSliderFill"></div>
+                <div class="slider-labels">
+                  <span>1</span>
+                  <span>10</span>
+                </div>
+              </div>
+              <div class="card-description">
+                控制 AI 单次生成的分子候选方案数量
+              </div>
+            </div>
+          </div>
+
+          <!-- 底部操作栏 -->
+          <div class="panel-footer">
+            <button class="reset-btn" id="resetAdvancedOptions">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+              </svg>
+              恢复默认
+            </button>
+            <div class="footer-info">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="16" x2="12" y2="12"></line>
+                <line x1="12" y1="8" x2="12.01" y2="8"></line>
+              </svg>
+              设置自动保存
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <div class="section">
+      <dl>
+        <dt>Supported</dt>
+        <dd>PYTHON</dd>
+        <dd>PYTORCH</dd>
+        <dd>RDKIT</dd>
+      </dl>
+    </div>
+
+    <div class="section map">
+      <h4>Visitors</h4>
+      <div class="pic">
+        <img src="/static/images/f1.png" alt="" />
+        <img src="/static/images/f2.png" class="img1" alt="" />
+      </div>
+    </div>
+
+    <div class="section contact">
+      <h4>Contact us</h4>
+      <div class="p">
+        <img src="/static/images/f3.png" alt="" />
+        <span>No. 58 Renmin Avenue, Meilan District, Haikou City, Hainan
+          Pro</span>
+      </div>
+      <div class="p">
+        <img src="/static/images/f4.png" alt="" />
+        <span>0898-66254967</span>
+      </div>
+      <div class="p">
+        <img src="/static/images/f5.png" alt="" />
+        <span>shhuang@hainanu.edu.cn</span>
+      </div>
+    </div>
+  </footer>
+  <script src="/static/js/home/config.js?v=20260422-toolbar-fix"></script>
+  <script src="/static/js/home/state.js?v=20260422-toolbar-fix"></script>
+  <script src="/static/js/home/theme.js"></script>
+  <script src="/static/js/home/formatters.js"></script>
+  <script src="/static/js/home/molecule_renderer.js"></script>
+  <script src="/static/js/home/chat_renderer.js"></script>
+  <script src="/static/js/home/advanced_options.js"></script>
+  <script src="/static/js/home/ws_client.js"></script>
+  <script src="/static/js/home/main.js?v=20260422-toolbar-fix"></script>
+</body>
+
+</html>

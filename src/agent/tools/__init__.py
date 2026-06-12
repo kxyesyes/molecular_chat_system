@@ -1,0 +1,86 @@
+from .property_calculator import PropertyCalculator
+from .admet_predictor import ADMETPredictor
+from .drug_likeness_assessment import DrugLikenessAssessment
+from .llm_molecular_generator import LLMMolecularGenerator
+
+# 核心工具列表 - 按重要性和使用频率排序
+CORE_TOOLS = [
+    'PropertyCalculator',
+    'ADMETPredictor',
+    'DrugLikenessAssessment',
+    'LLMMolecularGenerator'
+]
+
+# 可选工具列表 - 延迟加载以提升性能
+OPTIONAL_TOOLS = [
+    'MolecularDocking',
+    'ReverseTargetTool',
+    'TargetDatabaseTool',
+    'ActivityPredictorTool',
+    'RAGSearchTool',
+]
+
+__all__ = CORE_TOOLS + OPTIONAL_TOOLS
+
+def get_core_tools(llm=None):
+    """获取核心工具实例"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # 为 LLM 分子生成工具创建专门的 gmm-llama 连接
+    # 这样 gmm-llama 只用于分子生成，主聊天使用 ModelScope 模型
+    try:
+        from src.web.app import OllamaModel
+        gmm_llama_model = OllamaModel(
+            base_url="http://localhost:11434",
+            model_name="gmm-llama:latest"
+        )
+        logger.info("✅ 为分子生成工具创建独立的 gmm-llama:latest 连接")
+    except Exception as e:
+        logger.warning(f"无法创建 gmm-llama 连接: {e}")
+        gmm_llama_model = None
+    
+    return [
+        PropertyCalculator(),
+        ADMETPredictor(),
+        DrugLikenessAssessment(),
+        LLMMolecularGenerator(llm_model=gmm_llama_model)  # ✅ 使用专门的 gmm-llama
+    ]
+
+def get_optional_tool(tool_name, llm=None):
+    """延迟加载可选工具"""
+    if tool_name == 'MolecularDocking':
+        from .molecular_docking import MolecularDocking
+        return MolecularDocking()
+    elif tool_name == 'ReverseTargetTool':
+        from .reverse_target_tool import ReverseTargetTool
+        return ReverseTargetTool()
+    elif tool_name == 'TargetDatabaseTool':
+        from .target_database_tool import TargetDatabaseTool
+        return TargetDatabaseTool()
+    elif tool_name == 'ActivityPredictorTool':
+        from .activity_predictor_tool import ActivityPredictorTool
+        return ActivityPredictorTool()
+    elif tool_name == 'RAGSearchTool':
+        from .rag_search_tool import RAGSearchTool
+        return RAGSearchTool()
+    else:
+        raise ValueError(f"Unknown optional tool: {tool_name}")
+
+
+def get_all_tools(llm=None):
+    """获取所有工具实例（核心 + 可选），用于 Skill 系统的工具池。"""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    tools = get_core_tools(llm)
+
+    for tool_name in OPTIONAL_TOOLS:
+        try:
+            tool = get_optional_tool(tool_name, llm)
+            tools.append(tool)
+            logger.info(f"✅ 可选工具加载成功: {tool_name}")
+        except Exception as e:
+            logger.warning(f"⚠️ 可选工具加载失败（跳过）: {tool_name} - {e}")
+
+    return tools
