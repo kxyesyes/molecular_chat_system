@@ -700,7 +700,19 @@ class MolecularChatApp:
             logger.info("✅ 靶点搜索 demo 路由注册成功")
         except Exception as e:
             logger.warning(f"⚠️ 靶点搜索 demo 路由注册失败: {e}")
-    
+        # Register task runtime and system metadata routes for Agent workflows.
+        try:
+            from src.task_runtime.routes import setup_task_routes
+            from .routes.agent_workflow_routes import setup_agent_workflow_routes
+            from .routes.system_routes import setup_system_routes
+
+            setup_task_routes(self.app)
+            setup_agent_workflow_routes(self.app)
+            setup_system_routes(self.app)
+            logger.info("Task runtime and system metadata routes registered")
+        except Exception as e:
+            logger.warning(f"Task runtime routes registration failed: {e}")
+
     async def _handle_websocket(self, websocket: WebSocket):
         """Handle WebSocket connections"""
         await websocket.accept()

@@ -237,6 +237,49 @@ def check_agent_components() -> tuple[bool, str]:
         return False, f"Agent component check failed: {exc}"
 
 
+def check_task_runtime() -> tuple[bool, str]:
+    try:
+        from src.task_runtime import TaskManager
+
+        with tempfile.TemporaryDirectory(prefix="medchat_task_health_") as tmp:
+            manager = TaskManager(db_path=Path(tmp) / "tasks.sqlite", max_workers=1)
+            record = manager.submit(
+                "health_check",
+                {"value": 1},
+                lambda payload: {"value": payload["value"], "artifacts": []},
+            )
+            import time
+
+            for _ in range(50):
+                finished = manager.get(record.task_id)
+                if finished.status.value in {"succeeded", "failed"}:
+                    break
+                time.sleep(0.02)
+            else:
+                return False, "task runtime did not complete a local health task"
+            if finished.status.value != "succeeded":
+                return False, f"health task failed: {finished.error}"
+        return True, "SQLite task runtime is available"
+    except Exception as exc:
+        return False, f"Task runtime check failed: {exc}"
+
+
+def check_supervisor_agent() -> tuple[bool, str]:
+    try:
+        from src.agent.supervisor import SupervisorAgent
+
+        supervisor = SupervisorAgent(tools={})
+        plan = supervisor.plan(
+            "Design PDE5 drug-like molecules and evaluate docking",
+            skill_name="target_driven_design",
+        )
+        if len(plan.get("steps", [])) < 5:
+            return False, "Supervisor did not create a multi-step target-driven plan"
+        return True, f"Supervisor plan has {len(plan['steps'])} steps"
+    except Exception as exc:
+        return False, f"Supervisor Agent check failed: {exc}"
+
+
 def check_reverse_target_data() -> tuple[bool, str]:
     data_dir = resolve_project_path(os.environ.get("REVERSE_TARGET_DATA_DIR", "data/reverse_target"))
     required_any = [
@@ -376,6 +419,8 @@ def run_checks(strict: bool) -> int:
         ("Agent Contracts", check_agent_contracts),
         ("Agent Tool Registry", check_agent_tool_registry),
         ("Agent Components", check_agent_components),
+        ("Task Runtime", check_task_runtime),
+        ("Supervisor Agent", check_supervisor_agent),
         ("Reverse Target Data", check_reverse_target_data),
         ("Activity Models", check_activity_models),
         ("RAG Index", check_rag_index),

@@ -9,13 +9,14 @@ from fastapi import Body, Response
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+from src.molecular_design.fragment_repository import get_fragment_database_path
 from src.molecular_design.service import MolecularDesignService
 
 logger = logging.getLogger(__name__)
 
 # ── 路径配置 ──────────────────────────────────────
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-_FRAG_DB_PATH = os.path.join(_BASE_DIR, "brics", "fragments_labeled.csv")
+_FRAG_DB_PATH = get_fragment_database_path(_BASE_DIR)
 _SAVE_DIR = os.path.join(_BASE_DIR, "data", "design_results")
 
 if not os.path.exists(_SAVE_DIR):
