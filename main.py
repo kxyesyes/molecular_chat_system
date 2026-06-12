@@ -10,6 +10,9 @@ import argparse
 import logging
 from pathlib import Path
 
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 6001
+
 # 添加项目根目录到Python路径
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
@@ -25,6 +28,8 @@ try:
     setup_warning_filters()
 except ImportError:
     pass
+
+Path("logs").mkdir(parents=True, exist_ok=True)
 
 # 设置日志
 logging.basicConfig(
@@ -57,13 +62,38 @@ def load_env_file(env_path: str = ".env"):
         logger.warning(f"Unable to load env file {path}: {exc}")
 
 
+def _parse_bool(value: str | bool | None, default: bool = False) -> bool:
+    """Parse common truthy/falsy env strings."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if not raw_value:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        logger.warning(f"Invalid integer for {name}: {raw_value!r}; using {default}")
+        return default
+
+
 def check_environment():
     """检查运行环境"""
     issues = []
     
     # 检查Python版本
-    if sys.version_info < (3, 7):
-        issues.append(f"Python版本过低: {sys.version}, 需要3.7+")
+    if sys.version_info < (3, 10):
+        issues.append(f"Python版本过低: {sys.version}, 需要3.10+")
     
     # 检查必要的包
     required_packages = {
@@ -201,17 +231,15 @@ def create_default_config():
         logger.info(f"Using default Ollama config: {config_path}")
         return str(config_path)
 
-    """创建默认配置文件"""
-    if not config_path.exists():
-        config_content = """# Ollama配置
+    config_content = """# Ollama配置
 models:
-  default: "gmm-llama:latest"
+  default: "${OLLAMA_MODEL:-gmm-llama:latest}"
   available:
     - "gmm-llama:latest"
 
 ollama:
-  base_url: "http://localhost:11434"
-  model: "gmm-llama:latest"
+  base_url: "${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
+  model: "${OLLAMA_MODEL:-gmm-llama:latest}"
 
 inference:
   stream: true
@@ -220,31 +248,41 @@ inference:
   timeout: 60
 
 web:
-  host: "0.0.0.0"
-  port: 6000
+  host: "${MEDCHAT_HOST:-127.0.0.1}"
+  port: ${MEDCHAT_PORT:-6001}
   debug: false
 
 logging:
   level: "INFO"
   file: "./logs/app.log"
 """
-        config_path.write_text(config_content, encoding='utf-8')
-        logger.info(f"✓ 创建默认配置文件: {config_path}")
+    config_path.write_text(config_content, encoding='utf-8')
+    logger.info(f"✓ 创建默认配置文件: {config_path}")
     
     return str(config_path)
 
 
 def main():
     """主函数"""
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument(
+        "--env-file",
+        default=os.environ.get("MEDCHAT_ENV_FILE", ".env"),
+        help="环境变量文件路径 (默认: .env)"
+    )
+    pre_args, _ = pre_parser.parse_known_args()
+    load_env_file(pre_args.env_file)
+
     parser = argparse.ArgumentParser(
         description="分子聊天系统",
+        parents=[pre_parser],
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
   python main.py                    # 使用默认配置启动
-  python main.py --port 8888        # 指定端口
+  python main.py --port 6001        # 指定端口
   python main.py --debug            # 调试模式
-  python main.py --no-reload        # 禁用自动重载
+  python main.py --reload           # 开发模式启用自动重载
         """
     )
     
@@ -260,14 +298,14 @@ def main():
     )
     parser.add_argument(
         "--host",
-        default="0.0.0.0",
-        help="服务器地址 (默认: 0.0.0.0)"
+        default=None,
+        help=f"服务器地址 (默认读取 MEDCHAT_HOST，未设置则 {DEFAULT_HOST})"
     )
     parser.add_argument(
         "--port",
         type=int,
-        default=6000,
-        help="服务器端口 (默认: 6000)"
+        default=None,
+        help=f"服务器端口 (默认读取 MEDCHAT_PORT，未设置则 {DEFAULT_PORT})"
     )
     parser.add_argument(
         "--debug",
@@ -277,21 +315,34 @@ def main():
     parser.add_argument(
         "--reload",
         action="store_true",
-        default=True,
-        help="启用自动重载 (默认启用)"
+        help="启用自动重载 (开发模式使用，生产请关闭)"
     )
     parser.add_argument(
         "--no-reload",
         action="store_true",
         help="禁用自动重载"
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Uvicorn worker 数量 (默认读取 MEDCHAT_WORKERS，未设置则 1)"
+    )
     
     args = parser.parse_args()
-    load_env_file(os.environ.get("MEDCHAT_ENV_FILE", ".env"))
+    load_env_file(args.env_file)
     
-    # 如果指定了no-reload，则禁用reload
+    host = args.host or os.environ.get("MEDCHAT_HOST", DEFAULT_HOST)
+    port = args.port if args.port is not None else _env_int("MEDCHAT_PORT", DEFAULT_PORT)
+    debug = args.debug or _parse_bool(os.environ.get("MEDCHAT_DEBUG"), False)
+    reload_enabled = args.reload or _parse_bool(os.environ.get("MEDCHAT_RELOAD"), False)
+    workers = args.workers if args.workers is not None else _env_int("MEDCHAT_WORKERS", 1)
+
     if args.no_reload:
-        args.reload = False
+        reload_enabled = False
+    if reload_enabled and workers != 1:
+        logger.warning("Uvicorn reload mode does not support multiple workers; using workers=1")
+        workers = 1
     
     try:
         print("="*60)
@@ -333,7 +384,9 @@ def main():
         
         print("\n" + "="*60)
         print(f"配置文件: {config_path}")
-        print(f"服务地址: http://{args.host}:{args.port}")
+        print(f"服务地址: http://{host}:{port}")
+        print(f"自动重载: {'开启' if reload_enabled else '关闭'}")
+        print(f"Worker数量: {workers}")
         if using_modelscope:
             print("模型后端: ModelScope (Ollama 保留为可选能力)")
         print("="*60)
@@ -344,11 +397,12 @@ def main():
         
         uvicorn.run(
             "src.web.app:app",
-            host=args.host,
-            port=args.port,
-            reload=args.reload and not args.no_reload,
-            log_level="debug" if args.debug else "info",
-            access_log=args.debug
+            host=host,
+            port=port,
+            reload=reload_enabled,
+            workers=workers,
+            log_level="debug" if debug else os.environ.get("MEDCHAT_LOG_LEVEL", "info"),
+            access_log=debug
         )
         
     except KeyboardInterrupt:
@@ -359,7 +413,7 @@ def main():
         logger.info("请运行: pip install fastapi uvicorn httpx pyyaml jinja2 websockets python-multipart")
         return 1
     except Exception as e:
-        logger.error(f"启动失败: {e}", exc_info=args.debug)
+        logger.error(f"启动失败: {e}", exc_info=debug)
         return 1
     
     return 0

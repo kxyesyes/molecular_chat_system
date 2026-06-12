@@ -100,7 +100,12 @@ def register_main_routes(
 
     @app.get("/cadd_interactive_radial.html")
     async def cadd_interactive_radial_page():
-        html_path = Path(__file__).resolve().parents[3] / "cadd_interactive_radial.html"
+        html_path = (
+            Path(__file__).resolve().parents[1]
+            / "static"
+            / "knowledge"
+            / "cadd_interactive_radial.html"
+        )
         if not html_path.exists():
             raise HTTPException(status_code=404, detail="cadd_interactive_radial.html not found")
         return FileResponse(html_path, media_type="text/html")

@@ -27,9 +27,9 @@ inference:
   timeout: 120 # 增加超时时间
 
 web:
-  host: "0.0.0.0"
-  port: 6000
-  debug: false
+  host: "${MEDCHAT_HOST:-127.0.0.1}"
+  port: ${MEDCHAT_PORT:-6001}
+  debug: ${MEDCHAT_DEBUG:-false}
 
 logging:
   level: "INFO"

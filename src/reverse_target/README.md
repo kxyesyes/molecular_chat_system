@@ -1,5 +1,10 @@
 # 反向寻靶数据库构建工具
 
+> Active implementation note: the runtime reverse-target module is
+> `src/reverse_target`. The older `src/target_reverse` prototype has been
+> archived under `archive/legacy_target_reverse` and must not be imported by
+> web routes, API handlers, or Agent tools.
+
 本工具用于构建基于 ChEMBL v36 数据库的反向寻靶系统，包括数据下载、提取清洗和分子指纹生成。
 
 ## 功能特性

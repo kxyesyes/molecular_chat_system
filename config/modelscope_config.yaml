@@ -4,7 +4,7 @@
 # ModelScope API配置
 modelscope:
   api_key: "${MODELSCOPE_API_KEY:-}"
-  base_url: "https://api-inference.modelscope.cn/v1/chat/completions"
+  base_url: "${MODELSCOPE_BASE_URL:-https://api-inference.modelscope.cn/v1/chat/completions}"
 
   # 默认模型
   default_model: "glm5.1"
@@ -46,12 +46,12 @@ inference:
 
 # Web服务配置
 web:
-  host: "0.0.0.0"
-  port: 8080
-  debug: false
+  host: "${MEDCHAT_HOST:-127.0.0.1}"
+  port: ${MEDCHAT_PORT:-6001}
+  debug: ${MEDCHAT_DEBUG:-false}
   cors_origins:
-    - "http://localhost:8080"
-    - "http://127.0.0.1:8080"
+    - "http://localhost:${MEDCHAT_PORT:-6001}"
+    - "http://127.0.0.1:${MEDCHAT_PORT:-6001}"
 
 # 日志配置
 logging:
@@ -80,7 +80,8 @@ molecular_generation:
     min_logp: -2
 
 docking:
-  root_dir: "D:/Chemicaltools/Dock/autodock"
-  vina_exe: ""
-  adfrsuite_bin: ""
-  prepare_ligand_cmd: ""
+  root_dir: "${MOLECULAR_DOCKING_ROOT:-}"
+  vina_exe: "${MOLECULAR_DOCKING_VINA:-}"
+  adfrsuite_bin: "${MOLECULAR_DOCKING_ADFR_BIN:-}"
+  prepare_ligand_cmd: "${MOLECULAR_DOCKING_PREPARE_LIGAND:-}"
+  prepare_receptor_cmd: "${MOLECULAR_DOCKING_PREPARE_RECEPTOR:-}"

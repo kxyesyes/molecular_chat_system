@@ -280,6 +280,27 @@ def check_rag_index() -> tuple[bool, str]:
     return True, f"{index_path}"
 
 
+def check_data_registry() -> tuple[bool, str]:
+    registry_path = PROJECT_ROOT / "data" / "REGISTRY.md"
+    if not registry_path.exists():
+        return False, f"data registry not found: {registry_path}"
+    text = registry_path.read_text(encoding="utf-8", errors="ignore")
+    required_terms = ["Target DB", "Reverse Target Data", "Activity Models", "RAG Index"]
+    missing = [term for term in required_terms if term not in text]
+    if missing:
+        return False, f"{registry_path} missing terms: {', '.join(missing)}"
+    return True, f"{registry_path}"
+
+
+def check_sample_assets() -> tuple[bool, str]:
+    sample_dir = PROJECT_ROOT / "data" / "samples"
+    expected = [sample_dir / "5.sdf", sample_dir / "MAGL_5zun.pdb"]
+    missing = [path.name for path in expected if not path.exists()]
+    if missing:
+        return False, f"missing sample assets in {sample_dir}: {', '.join(missing)}"
+    return True, f"{sample_dir} ({len(expected)} files)"
+
+
 def check_writable_directories() -> tuple[bool, str]:
     dirs = [
         resolve_project_path(os.environ.get("MEDCHAT_LOG_DIR", "logs")),
@@ -358,6 +379,8 @@ def run_checks(strict: bool) -> int:
         ("Reverse Target Data", check_reverse_target_data),
         ("Activity Models", check_activity_models),
         ("RAG Index", check_rag_index),
+        ("Data Registry", check_data_registry),
+        ("Sample Assets", check_sample_assets),
         ("Writable Directories", check_writable_directories),
         ("systemd Service", check_systemd_service),
         ("nginx Config", check_nginx_config),

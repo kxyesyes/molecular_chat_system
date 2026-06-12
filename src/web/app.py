@@ -45,6 +45,8 @@ logger = logging.getLogger(__name__)
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
+DEFAULT_WEB_HOST = "127.0.0.1"
+DEFAULT_WEB_PORT = 6001
 
 
 def load_env_file(env_path: str | Path = ".env") -> None:
@@ -81,6 +83,26 @@ def expand_env_placeholders(value: Any) -> Any:
         return os.environ.get(env_name, default)
 
     return _ENV_PATTERN.sub(replace, value)
+
+
+def env_int(name: str, default: int) -> int:
+    """Read an integer environment variable with a safe fallback."""
+    value = os.environ.get(name)
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning(f"Invalid integer for {name}: {value!r}; using {default}")
+        return default
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    """Read a boolean environment variable with a safe fallback."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 
@@ -490,8 +512,8 @@ class MolecularChatApp:
         """Return default configuration"""
         return {
             "ollama": {
-                "base_url": "http://localhost:11434",
-                "model": "gmm-llama:latest"
+                "base_url": os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+                "model": os.environ.get("OLLAMA_MODEL", "gmm-llama:latest")
             },
             "rag": {
                 "enabled": True,
@@ -506,9 +528,9 @@ class MolecularChatApp:
                 "max_tokens": 1500
             },
             "web": {
-                "host": "0.0.0.0",
-                "port": 8080,
-                "debug": False
+                "host": os.environ.get("MEDCHAT_HOST", DEFAULT_WEB_HOST),
+                "port": env_int("MEDCHAT_PORT", DEFAULT_WEB_PORT),
+                "debug": env_bool("MEDCHAT_DEBUG", False)
             }
         }
     
@@ -965,10 +987,10 @@ Key guidelines:
         
         logger.info("Molecular Chat System initialized successfully")
     
-    def run(self, host: str = "0.0.0.0", port: int = 8080, debug: bool = False):
+    def run(self, host: Optional[str] = None, port: Optional[int] = None, debug: bool = False):
         """Run the application"""
-        host = host or self.config.get("web", {}).get("host", "0.0.0.0")
-        port = port or self.config.get("web", {}).get("port", 8080)
+        host = host or self.config.get("web", {}).get("host", DEFAULT_WEB_HOST)
+        port = port or self.config.get("web", {}).get("port", DEFAULT_WEB_PORT)
         debug = debug or self.config.get("web", {}).get("debug", False)
         
         uvicorn.run(
@@ -1008,8 +1030,8 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Molecular Chat System")
-    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
-    parser.add_argument("--port", type=int, default=8080, help="Port to bind to")
+    parser.add_argument("--host", default=os.environ.get("MEDCHAT_HOST", DEFAULT_WEB_HOST), help="Host to bind to")
+    parser.add_argument("--port", type=int, default=env_int("MEDCHAT_PORT", DEFAULT_WEB_PORT), help="Port to bind to")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--no-reload", action="store_true", help="Disable auto-reload")
     

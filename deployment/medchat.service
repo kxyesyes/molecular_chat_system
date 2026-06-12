@@ -8,7 +8,7 @@ User=medchat
 Group=medchat
 WorkingDirectory=/opt/medchat/molecular_chat_system
 EnvironmentFile=/opt/medchat/molecular_chat_system/.env
-ExecStart=/opt/conda/envs/medchat/bin/python main.py --no-reload --host 0.0.0.0 --port 8080
+ExecStart=/opt/conda/envs/medchat/bin/python main.py --no-reload
 Restart=always
 RestartSec=3
 TimeoutStartSec=120
@@ -16,4 +16,3 @@ TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
-

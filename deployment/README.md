@@ -281,9 +281,10 @@ scratch/
 
 ```env
 MEDCHAT_ENV_FILE=.env
-MEDCHAT_HOST=0.0.0.0
-MEDCHAT_PORT=8080
+MEDCHAT_HOST=127.0.0.1
+MEDCHAT_PORT=6001
 MEDCHAT_DEBUG=false
+MEDCHAT_RELOAD=false
 MEDCHAT_WORKERS=1
 MEDCHAT_LOG_LEVEL=info
 MEDCHAT_LOG_DIR=logs
@@ -371,24 +372,24 @@ python scripts/health_check.py
 
 ```bash
 conda activate medchat
-python main.py --no-reload --host 0.0.0.0 --port 8080
+python main.py --no-reload
 ```
 
 检查：
 
 ```bash
-curl http://127.0.0.1:8080/health
+curl http://127.0.0.1:6001/health
 ```
 
 浏览器访问：
 
 ```text
-http://<server-ip>:8080/
-http://<server-ip>:8080/target-search
-http://<server-ip>:8080/molecular-docking
-http://<server-ip>:8080/reverse-target
-http://<server-ip>:8080/activity-prediction
-http://<server-ip>:8080/molecular-design
+http://<server-ip>:6001/
+http://<server-ip>:6001/target-search
+http://<server-ip>:6001/molecular-docking
+http://<server-ip>:6001/reverse-target
+http://<server-ip>:6001/activity-prediction
+http://<server-ip>:6001/molecular-design
 ```
 
 ## 11. systemd 服务
@@ -458,7 +459,7 @@ sudo ufw allow 443
 sudo ufw enable
 ```
 
-对公网只暴露 80/443。8080 建议只监听本机或内网，由 nginx 转发。
+对公网只暴露 80/443。应用端口建议只监听本机或内网，由 nginx 转发。
 
 ## 14. 上线后验证清单
 

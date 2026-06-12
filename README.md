@@ -37,7 +37,7 @@
 
 ### 环境要求
 
-- Python 3.7+
+- Python 3.10+
 - Ollama 本地服务
 - 建议具备 8GB 以上内存
 
@@ -53,7 +53,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-启动后访问 Web 首页即可开始使用。默认情况下，服务会运行在本地开发环境中，后续也可以迁移到 Linux 服务器部署。
+启动后访问 `http://127.0.0.1:6001` 即可开始使用。端口、主机、worker 数等运行参数可通过 `.env` 或命令行覆盖；命令行参数优先级最高。
 
 ## 项目结构
 
@@ -63,13 +63,16 @@ molecular_chat_system/
 ├── requirements.txt        # Python 依赖
 ├── config/                 # 配置文件
 ├── data/                   # 数据与索引
+│   ├── REGISTRY.md         # 本地数据资产登记与部署说明
+│   └── samples/            # 轻量样例分子/蛋白文件
 ├── docs/                   # 文档
 ├── src/                    # 源代码
 │   ├── agent/              # Agent 与工具层
 │   ├── docking/            # 分子对接服务
+│   ├── molecular_design/   # 分子设计服务
 │   ├── rag/                # 检索增强生成
 │   ├── reverse_target/     # 反向寻靶相关功能
-│   ├── target_reverse/     # 目标反推模块
+│   ├── target_search/      # 靶点搜索与本地靶点库
 │   ├── utils/              # 通用工具
 │   └── web/                # Web 应用与路由
 ├── logs/                   # 日志

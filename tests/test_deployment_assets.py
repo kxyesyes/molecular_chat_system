@@ -18,16 +18,30 @@ class DeploymentAssetsTest(unittest.TestCase):
         expected = [
             ".env.example",
             "config/deployment.yaml",
+            "data/REGISTRY.md",
+            "data/samples/5.sdf",
+            "data/samples/MAGL_5zun.pdb",
             "deployment/medchat.service",
             "deployment/nginx-medchat.conf",
             "deployment/README.md",
             "deployment/requirements.txt",
             "deployment/docking_tools.md",
             "scripts/health_check.py",
+            "src/web/static/knowledge/cadd_interactive_radial.html",
         ]
 
         for relative_path in expected:
             self.assertTrue((PROJECT_ROOT / relative_path).exists(), relative_path)
+
+    def test_legacy_target_reverse_is_archived_only(self):
+        legacy_dir = PROJECT_ROOT / "archive" / "legacy_target_reverse"
+        self.assertTrue(legacy_dir.exists())
+
+        forbidden_markers = ("src.target_reverse", "legacy_target_reverse")
+        for path in (PROJECT_ROOT / "src").rglob("*.py"):
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for marker in forbidden_markers:
+                self.assertNotIn(marker, text, f"{marker} should not be imported by runtime code: {path}")
 
     def test_app_config_expands_environment_placeholders(self):
         from src.web.app import MolecularChatApp
@@ -82,6 +96,7 @@ docking:
             (root / "data" / "target_db" / "cache").mkdir(parents=True)
             (root / "data" / "reverse_target").mkdir(parents=True)
             (root / "data" / "activity" / "models").mkdir(parents=True)
+            (root / "data" / "samples").mkdir(parents=True)
             (root / "deployment").mkdir()
             (root / "logs").mkdir()
             (root / "temp_docking").mkdir()
@@ -100,10 +115,16 @@ docking:
                 "data/reverse_target/maccs_fingerprints.npy",
                 "data/activity/models/model_demo.pt",
                 "data/molecular_faiss_index.index",
+                "data/samples/5.sdf",
+                "data/samples/MAGL_5zun.pdb",
                 "deployment/medchat.service",
                 "deployment/nginx-medchat.conf",
             ]:
                 (root / rel_path).write_text("demo", encoding="utf-8")
+            (root / "data" / "REGISTRY.md").write_text(
+                "Target DB\nTarget Cache\nReverse Target Data\nActivity Models\nRAG Index\nSample Assets\n",
+                encoding="utf-8",
+            )
 
             old_root = health_check.PROJECT_ROOT
             health_check.PROJECT_ROOT = root
@@ -125,6 +146,8 @@ docking:
             "Reverse Target Data",
             "Activity Models",
             "RAG Index",
+            "Data Registry",
+            "Sample Assets",
             "Writable Directories",
             "systemd Service",
             "nginx Config",
