@@ -1,7 +1,7 @@
 # MedChat Agent Platform Enhancement Design
 
 **Date:** 2026-06-18
-**Status:** Approved design pending written-spec review
+**Status:** Approved for implementation
 **Scope:** State persistence, curated long-term memory, centralized multi-agent collaboration, tool adaptation, skill routing, and evaluation
 
 ## 1. Goal
