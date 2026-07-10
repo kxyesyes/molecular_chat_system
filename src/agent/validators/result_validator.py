@@ -3,7 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from src.agent.contracts import ToolResult
+from src.agent.contracts import (
+    AgentErrorCode,
+    AgentExecutionError,
+    ToolResult,
+)
+
+from .domain_validators import DOMAIN_VALIDATORS
 
 
 class AgentResultValidator:
@@ -16,8 +22,29 @@ class AgentResultValidator:
         warnings = list(result.warnings)
         warnings.extend(self._validate_smiles_payload(result.data))
         warnings.extend(self._validate_file_payload(result.data))
+        domain_error = next(
+            (
+                message
+                for validator in DOMAIN_VALIDATORS
+                if (message := validator.validate(result))
+            ),
+            None,
+        )
+        if domain_error:
+            warnings.append(domain_error)
+            result.success = False
+            result.message = domain_error
+            result.formatted = ""
+            result.error = AgentExecutionError(
+                code=AgentErrorCode.INVALID_OUTPUT,
+                message=domain_error,
+                details={"tool_name": result.tool_name},
+            )
         result.warnings = warnings
-        result.quality = {**result.quality, "validated": not bool(warnings)}
+        result.quality = {
+            **result.quality,
+            "validated": not bool(warnings) and result.success,
+        }
         return result
 
     def _validate_smiles_payload(self, data: Any) -> list[str]:

@@ -3,15 +3,21 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from src.agent.persistence.base import AgentStateStore
 from src.agent.runtime.task_state import TaskEvent, TaskEventType
 
 
 class AgentEventBus:
     """Collect agent task events and optionally forward them to a callback."""
 
-    def __init__(self, on_event: Callable[[TaskEvent], None] | None = None):
+    def __init__(
+        self,
+        on_event: Callable[[TaskEvent], None] | None = None,
+        state_store: AgentStateStore | None = None,
+    ):
         self.events: list[TaskEvent] = []
         self.on_event = on_event
+        self.state_store = state_store
 
     def emit(
         self,
@@ -33,6 +39,8 @@ class AgentEventBus:
             payload=payload,
         )
         self.events.append(task_event)
+        if self.state_store:
+            self.state_store.append_event(task_event.to_dict())
         if self.on_event:
             self.on_event(task_event)
         return task_event

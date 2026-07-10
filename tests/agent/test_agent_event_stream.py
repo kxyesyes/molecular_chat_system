@@ -1,7 +1,9 @@
 from src.agent.contracts import AgentContext
 from src.agent.orchestrators.base import WorkflowStep
 from src.agent.orchestrators.workflow import WorkflowOrchestrator
+from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
+from src.agent.runtime.task_state import TaskEventType
 
 
 class FakeTool:
@@ -29,3 +31,19 @@ def test_workflow_emits_structured_events():
     assert any(event["event"] == "tool_started" for event in events)
     assert any(event["event"] == "tool_completed" for event in events)
     assert events[-1]["event"] == "task_completed"
+
+
+def test_event_bus_persists_legacy_compatible_event_payloads(tmp_path):
+    store = SQLiteAgentStateStore(tmp_path / "state.sqlite3")
+    event_bus = AgentEventBus(state_store=store)
+
+    event = event_bus.emit(
+        trace_id="persisted-events",
+        event=TaskEventType.TASK_STARTED,
+        message="started",
+        skill="comprehensive_evaluation",
+    )
+
+    persisted = store.get_events("persisted-events")
+    assert persisted[0]["event"] == "task_started"
+    assert event.to_dict()["type"] == "agent_event"

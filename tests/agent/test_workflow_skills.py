@@ -26,34 +26,40 @@ def build_agent_with_tools(tool_names):
     return agent
 
 
-def test_comprehensive_skill_declares_workflow_steps():
+def test_comprehensive_skill_declares_permissions_not_plan_steps():
     skill = ComprehensiveEvaluationSkill()
 
-    assert [step.tool_name for step in skill.workflow_steps] == [
+    assert skill.is_workflow is True
+    assert skill.allowed_tools == [
         "property_calculator",
         "drug_likeness_assessment",
         "admet_predictor",
         "activity_predictor",
         "reverse_target_predictor",
+        "target_database_search",
     ]
+    assert not hasattr(skill, "workflow_steps")
 
 
-def test_hit_to_lead_skill_declares_workflow_steps():
+def test_hit_to_lead_skill_declares_permissions_not_plan_steps():
     skill = HitToLeadSkill()
 
-    assert [step.tool_name for step in skill.workflow_steps] == [
+    assert skill.is_workflow is True
+    assert skill.allowed_tools == [
         "property_calculator",
+        "drug_likeness_assessment",
         "admet_predictor",
         "activity_predictor",
         "llm_molecular_generator",
-        "property_calculator",
     ]
+    assert not hasattr(skill, "workflow_steps")
 
 
 def test_react_agent_executes_workflow_skill_without_llm():
     skill = ComprehensiveEvaluationSkill()
     planned_tool_names = [
         "property_calculator",
+        "drug_likeness_assessment",
         "admet_predictor",
         "activity_predictor",
         "reverse_target_predictor",

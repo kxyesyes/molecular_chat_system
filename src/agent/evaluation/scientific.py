@@ -1,0 +1,1468 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+import time
+from collections import Counter
+from pathlib import Path
+from typing import Any, Iterable, Mapping
+
+from src.agent.contracts import AgentContext, ToolResult
+from src.agent.orchestrators import WorkflowOrchestrator
+from src.agent.persistence import redact_sensitive
+from src.agent.planning import TaskPlanner
+from src.agent.routing import HybridSkillRouter
+from src.agent.runtime.workflow_executor import WorkflowExecutor
+from src.agent.skills.skill_registry import SkillRegistry
+from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
+from src.agent.tools.admet_predictor import ADMETPredictor
+from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
+from src.agent.tools.llm_molecular_generator import LLMMolecularGenerator
+from src.agent.tools.molecular_docking import MolecularDocking
+from src.agent.tools.property_calculator import PropertyCalculator
+from src.agent.tools.rag_search_tool import RAGSearchTool
+from src.agent.tools.reverse_target_tool import ReverseTargetTool
+from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+from .models import EvaluationCase
+from .runner import chemistry_metrics, latency_metrics, load_cases
+
+
+GOLDEN_SCIENTIFIC_CASE_IDS = [f"GOLD-{index:03d}" for index in range(1, 13)]
+
+
+def summarize_scientific_stability(iterations: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize repeated real scientific acceptance runs.
+
+    `partial` counts as non-catastrophic completion for stability because the
+    acceptance contract explicitly allows missing real dependencies to degrade
+    to partial instead of fabricated success.
+    """
+
+    results = [
+        result
+        for iteration in iterations
+        for result in iteration.get("results", [])
+        if isinstance(result, dict)
+    ]
+    latencies = [
+        float(result.get("latency_ms", 0))
+        for result in results
+        if isinstance(result.get("latency_ms", 0), (int, float))
+    ]
+    successful = sum(
+        1 for result in results if result.get("status") in {"passed", "partial"}
+    )
+    failure_types = Counter(
+        str(result.get("error"))
+        for result in results
+        if result.get("status") != "passed" and result.get("error")
+    )
+    return {
+        "run_count": len(iterations),
+        "case_count": len(results),
+        "pass_rate": successful / len(results) if results else 0.0,
+        "latency": latency_metrics(latencies),
+        "failure_types": dict(failure_types),
+    }
+
+
+def replay_scientific_report(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Replay anti-hallucination/truth/provenance checks from a saved report."""
+
+    source_cases = report.get("real_cases", {}).get("results", [])
+    replayed: list[dict[str, Any]] = []
+    for case_result in source_cases:
+        result = dict(case_result)
+        status, reasons = _replay_case_status(result)
+        result["status"] = status
+        result["replay_reasons"] = reasons
+        replayed.append(result)
+
+    counts = _status_counts(replayed)
+    return {
+        "mode": "replay",
+        "status": _overall_status(replayed),
+        "metrics": {
+            "case_count": len(replayed),
+            "passed_count": counts["passed"],
+            "partial_count": counts["partial"],
+            "failed_count": counts["failed"],
+            "skipped_count": counts["skipped"],
+            "pass_rate": (
+                (counts["passed"] + counts["partial"]) / len(replayed)
+                if replayed
+                else 0.0
+            ),
+        },
+        "results": redact_sensitive(replayed),
+    }
+
+
+class ScientificAcceptanceRunner:
+    """Execute scientific acceptance cases with real tool outputs."""
+
+    def __init__(
+        self,
+        dataset_dir: str | Path,
+        project_root: str | Path,
+        *,
+        dataset_path: str | Path | None = None,
+        router: HybridSkillRouter | None = None,
+        planner: TaskPlanner | None = None,
+        tools: Mapping[str, Any] | None = None,
+    ):
+        self.dataset_dir = Path(dataset_dir)
+        self.project_root = Path(project_root)
+        self.dataset_path = (
+            Path(dataset_path)
+            if dataset_path is not None
+            else self.dataset_dir / "golden_scientific_cases.jsonl"
+        )
+        if not self.dataset_path.is_absolute():
+            self.dataset_path = self.project_root / self.dataset_path
+        self.router = router or HybridSkillRouter()
+        self.planner = planner or TaskPlanner()
+        self.skills = SkillRegistry()
+        self.tools = dict(tools or self._build_real_tools())
+
+    def run(self, repeat: int = 1) -> dict[str, Any]:
+        iterations = []
+        for iteration_index in range(max(1, repeat)):
+            iterations.append(self.run_once(iteration_index=iteration_index + 1))
+
+        latest = iterations[-1] if iterations else {"results": []}
+        stability = summarize_scientific_stability(iterations)
+        results = latest.get("results", [])
+        return redact_sensitive(
+            {
+                "status": _overall_status(results),
+                "case_count": len(results),
+                "passed_or_partial_count": sum(
+                    1
+                    for result in results
+                    if result.get("status") in {"passed", "partial"}
+                ),
+                "results": results,
+                "iterations": iterations,
+                "stability": stability,
+                "dataset": _repo_relative(str(self.dataset_path), self.project_root),
+            }
+        )
+
+    def run_once(self, *, iteration_index: int = 1) -> dict[str, Any]:
+        cases = load_cases(self.dataset_path)
+        results = [self.run_case(case) for case in cases]
+        return {
+            "iteration": iteration_index,
+            "case_count": len(results),
+            "status": _overall_status(results),
+            "results": results,
+        }
+
+    def run_case(self, case: EvaluationCase) -> dict[str, Any]:
+        started = time.perf_counter()
+        decision = self.router.decide(case.prompt)
+        actual_skill = decision.selected_skill
+        execution_error: str | None = None
+        executions = []
+        plan_metadata: dict[str, Any] = {}
+
+        if actual_skill != case.expected_skill:
+            execution_error = (
+                f"skill_mismatch:{actual_skill or 'none'}"
+                f"!= {case.expected_skill or 'none'}"
+            )
+
+        skill = self.skills.get_skill_by_name(actual_skill or "")
+        if actual_skill is not None and skill is None and execution_error is None:
+            execution_error = "skill_not_found"
+
+        if skill is not None:
+            repeat_runs = int(case.metadata.get("repeat_runs", 1) or 1)
+            for run_index in range(max(1, repeat_runs)):
+                trace_id = (
+                    case.case_id
+                    if repeat_runs == 1
+                    else f"{case.case_id}-run-{run_index + 1}"
+                )
+                context = AgentContext(
+                    query=case.prompt,
+                    trace_id=trace_id,
+                    active_skill=actual_skill,
+                    metadata=self._case_metadata(case),
+                    mol_count=int(case.metadata.get("requested_count", 5) or 5),
+                )
+                try:
+                    execution = WorkflowExecutor(
+                        planner=self.planner,
+                        orchestrator=WorkflowOrchestrator(),
+                    ).execute(context, skill, self.tools)
+                    executions.append(execution)
+                except Exception as exc:  # pragma: no cover - defensive real-run guard
+                    execution_error = f"execution_exception:{type(exc).__name__}"
+                    break
+            if executions:
+                plan_metadata = (
+                    dict(executions[0].plan.metadata)
+                    if len(executions) == 1
+                    else {
+                        "repeat_runs": len(executions),
+                        "runs": [dict(item.plan.metadata) for item in executions],
+                    }
+                )
+
+        tool_results = [
+            result
+            for execution in executions
+            for result in execution.result.tool_results
+        ]
+        primary_execution = executions[0] if executions else None
+        actual_tools = [item.tool_name for item in tool_results]
+        events = [
+            event
+            for execution in executions
+            for event in execution.events
+        ]
+        final_text = _collect_case_text(tool_results, primary_execution)
+        anti_hallucination = _anti_hallucination(case, final_text)
+        tool_provenance = [
+            _tool_provenance(item, self.project_root) for item in tool_results
+        ]
+        truth_checks = self._truth_checks(
+            case,
+            tool_results,
+            anti_hallucination,
+            executions=executions,
+        )
+        status, error = _case_status(
+            case=case,
+            actual_skill=actual_skill,
+            actual_tools=actual_tools,
+            anti_hallucination=anti_hallucination,
+            truth_checks=truth_checks,
+            execution_success=(
+                all(
+                    bool(item.result.success or item.result.partial)
+                    for item in executions
+                )
+                if executions
+                else False
+            ),
+            execution_error=execution_error,
+        )
+        scoring = _score_scientific_case(
+            case=case,
+            actual_skill=actual_skill,
+            actual_tools=actual_tools,
+            events=events,
+            tool_provenance=tool_provenance,
+            anti_hallucination=anti_hallucination,
+            truth_checks=truth_checks,
+            case_status=status,
+            case_error=error,
+        )
+        return redact_sensitive(
+            {
+                "case_id": case.case_id,
+                "status": status,
+                "error": error,
+                "expected_skill": case.expected_skill,
+                "actual_skill": actual_skill,
+                "expected_tools": case.expected_tools,
+                "actual_tools": actual_tools,
+                "events": events,
+                "event_sequence": [
+                    item.get("event") for item in events if isinstance(item, dict)
+                ],
+                "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+                "warnings": (
+                    [
+                        warning
+                        for execution in executions
+                        for warning in execution.result.warnings
+                    ]
+                ),
+                "tool_provenance": tool_provenance,
+                "anti_hallucination": anti_hallucination,
+                "truth_checks": truth_checks,
+                "plan_metadata": plan_metadata,
+                **scoring,
+            }
+        )
+
+    def _case_metadata(self, case: EvaluationCase) -> dict[str, Any]:
+        metadata = dict(case.metadata or {})
+        docking_input = metadata.get("docking_input")
+        if isinstance(docking_input, dict):
+            metadata["docking_input"] = _resolve_docking_input(
+                docking_input,
+                self.project_root,
+            )
+        return metadata
+
+    def _truth_checks(
+        self,
+        case: EvaluationCase,
+        tool_results: list[ToolResult],
+        anti_hallucination: dict[str, Any],
+        executions: list[Any] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        requested = case.scientific_acceptance.get("truth_checks", [])
+        checks: dict[str, dict[str, Any]] = {}
+        for name in requested:
+            if name in {"rdkit_properties", "drug_likeness", "baseline_properties"}:
+                checks[name] = _check_successful_tool(
+                    tool_results,
+                    "property_calculator"
+                    if name != "drug_likeness"
+                    else "drug_likeness_assessment",
+                    evidence="RDKit-derived structured data",
+                )
+            elif name in {"candidate_properties"}:
+                checks[name] = _check_successful_tool(
+                    tool_results,
+                    "property_calculator",
+                    evidence="candidate property data",
+                )
+            elif name == "admet_method":
+                checks[name] = _check_admet_method(tool_results)
+            elif name == "rg_mpnn_provenance":
+                checks[name] = _check_rg_mpnn(tool_results)
+            elif name == "target_database_evidence":
+                checks[name] = _check_target_database_evidence(tool_results)
+            elif name == "reverse_target_evidence":
+                checks[name] = _check_reverse_target_evidence(tool_results)
+            elif name == "reverse_target_low_confidence":
+                checks[name] = _check_reverse_target_low_confidence(tool_results)
+            elif name in {
+                "generation_count_valid_unique",
+                "generation_validity",
+            }:
+                checks[name] = _check_generation(
+                    tool_results,
+                    requested_count=case.metadata.get("requested_count"),
+                    expected_model=case.metadata.get(
+                        "expected_generator_model",
+                        "gmm-llama:latest",
+                    ),
+                    strict_count=name == "generation_count_valid_unique",
+                )
+            elif name in {"vina_pose", "binding_energy_numeric"}:
+                checks[name] = _check_vina(tool_results)
+            elif name == "invalid_smiles_rejected":
+                checks[name] = _check_invalid_smiles_rejected(
+                    tool_results,
+                    anti_hallucination,
+                )
+            elif name == "docking_parameters_required":
+                checks[name] = _check_docking_rejected(
+                    tool_results,
+                    anti_hallucination,
+                )
+            elif name == "rag_source_or_explicit_no_hit":
+                checks[name] = _check_rag_source_or_explicit_no_hit(tool_results)
+            elif name == "generation_repeat_stats":
+                checks[name] = _check_generation_repeat_stats(
+                    tool_results,
+                    repeat_runs=case.metadata.get("repeat_runs", 1),
+                    requested_count=case.metadata.get("requested_count"),
+                    expected_model=case.metadata.get(
+                        "expected_generator_model",
+                        "gmm-llama:latest",
+                    ),
+                    executions=executions or [],
+                )
+            elif name == "workflow_repeat_consistency":
+                checks[name] = _check_workflow_repeat_consistency(executions or [])
+            elif name == "data_flow_generated_smiles_consumed":
+                checks[name] = _check_data_flow_generated_smiles_consumed(
+                    tool_results,
+                    downstream_tools=case.metadata.get(
+                        "downstream_tools",
+                        ["property_calculator", "admet_predictor", "activity_predictor"],
+                    ),
+                    executions=executions or [],
+                )
+            elif name == "data_flow_reverse_targets_consumed":
+                checks[name] = _check_data_flow_reverse_targets_consumed(
+                    tool_results,
+                    executions=executions or [],
+                )
+            elif name == "core_retention_aromatic_ring":
+                checks[name] = _check_core_retention_aromatic_ring(
+                    tool_results,
+                    core_smiles=str(case.metadata.get("core_smiles", "c1ccccc1")),
+                )
+            elif name == "unauthorized_tool_rejected":
+                checks[name] = _check_unauthorized_tool_rejected(
+                    tool_results,
+                    anti_hallucination,
+                )
+            else:
+                checks[name] = {
+                    "status": "partial",
+                    "reason": f"truth_check_not_implemented:{name}",
+                }
+        return checks
+
+    def _build_real_tools(self) -> dict[str, Any]:
+        tools: dict[str, Any] = {
+            "property_calculator": PropertyCalculator(),
+            "drug_likeness_assessment": DrugLikenessAssessment(),
+            "admet_predictor": ADMETPredictor(),
+            "activity_predictor": ActivityPredictorTool(),
+            "reverse_target_predictor": ReverseTargetTool(),
+            "target_database_search": TargetDatabaseTool(),
+            "molecular_docking": MolecularDocking(),
+            "rag_search": RAGSearchTool(),
+        }
+        tools["llm_molecular_generator"] = LLMMolecularGenerator(
+            _build_ollama_model()
+        )
+        return tools
+
+
+def _build_ollama_model() -> Any:
+    try:
+        from src.web.models.ollama_model import OllamaModel
+
+        return OllamaModel(
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            model_name=os.getenv("OLLAMA_MODEL", "gmm-llama:latest"),
+        )
+    except Exception:
+        return None
+
+
+def _status_counts(results: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    counter = Counter(str(item.get("status", "failed")) for item in results)
+    return {
+        "passed": counter.get("passed", 0),
+        "partial": counter.get("partial", 0),
+        "failed": counter.get("failed", 0),
+        "skipped": counter.get("skipped", 0),
+    }
+
+
+def _overall_status(results: Iterable[Mapping[str, Any]]) -> str:
+    result_list = list(results)
+    if not result_list:
+        return "failed"
+    statuses = {str(item.get("status", "failed")) for item in result_list}
+    if "failed" in statuses:
+        return "failed"
+    if statuses & {"partial", "skipped"}:
+        return "partial"
+    return "passed"
+
+
+def _replay_case_status(case_result: Mapping[str, Any]) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    anti = case_result.get("anti_hallucination") or {}
+    if anti.get("forbidden_found"):
+        reasons.append("forbidden_patterns_found")
+    if anti.get("status") == "failed":
+        reasons.append("anti_hallucination_failed")
+    if not case_result.get("tool_provenance") and case_result.get("expected_tools"):
+        reasons.append("missing_tool_provenance")
+    truth_checks = case_result.get("truth_checks") or {}
+    requires_truth_checks = bool(case_result.get("expected_tools")) or (
+        case_result.get("expected_skill") is not None
+    )
+    if not truth_checks and requires_truth_checks:
+        reasons.append("missing_truth_checks")
+    failed_truth = [
+        name
+        for name, check in truth_checks.items()
+        if isinstance(check, Mapping) and check.get("status") == "failed"
+    ]
+    partial_truth = [
+        name
+        for name, check in truth_checks.items()
+        if isinstance(check, Mapping) and check.get("status") == "partial"
+    ]
+    if failed_truth:
+        reasons.append("truth_failed:" + ",".join(sorted(failed_truth)))
+    if reasons:
+        return "failed", reasons
+    if partial_truth or case_result.get("status") in {"partial", "skipped"}:
+        return "partial", ["truth_partial:" + ",".join(sorted(partial_truth))]
+    return "passed", []
+
+
+def _collect_case_text(
+    tool_results: list[ToolResult],
+    execution: Any | None,
+) -> str:
+    parts = []
+    if execution is not None:
+        parts.extend(
+            [
+                getattr(execution.result, "message", ""),
+                getattr(execution.result, "final_answer", ""),
+            ]
+        )
+    for result in tool_results:
+        parts.extend(
+            [
+                result.message,
+                result.formatted,
+                json.dumps(result.data, ensure_ascii=False, default=str),
+            ]
+        )
+    return "\n".join(str(part) for part in parts if part)
+
+
+def _anti_hallucination(
+    case: EvaluationCase,
+    final_text: str,
+) -> dict[str, Any]:
+    lowered = final_text.lower()
+    forbidden_found = [
+        pattern
+        for pattern in case.forbidden_patterns
+        if pattern.lower() in lowered
+    ]
+    return {
+        "status": "failed" if forbidden_found else "passed",
+        "forbidden_found": forbidden_found,
+        "checked_patterns": list(case.forbidden_patterns),
+    }
+
+
+def _tool_provenance(result: ToolResult, project_root: Path) -> dict[str, Any]:
+    legacy = result.to_legacy_dict()
+    data_summary = _summarize_value(result.data)
+    model_name = (
+        result.quality.get("model_name")
+        or result.quality.get("model")
+        or result.quality.get("model_provenance", {}).get("model_path")
+        or result.quality.get("model_provenance", {}).get("model_type")
+        or result.quality.get("engine")
+    )
+    return {
+        "tool_name": result.tool_name,
+        "model_name": model_name,
+        "success": result.success,
+        "input_summary": _summarize_value(legacy.get("input")),
+        "output_summary": data_summary or result.message,
+        "artifact_paths": _artifact_paths(result, project_root),
+        "quality": result.quality,
+        "evidence": result.evidence,
+    }
+
+
+def _artifact_paths(result: ToolResult, project_root: Path) -> list[str]:
+    paths = []
+    for artifact in result.artifacts:
+        raw_path = artifact.path
+        paths.append(_repo_relative(raw_path, project_root))
+    if isinstance(result.data, Mapping):
+        for key in ("pose_file", "output_pdbqt", "output_file", "result_file"):
+            if result.data.get(key):
+                paths.append(_repo_relative(str(result.data[key]), project_root))
+    return sorted(set(paths))
+
+
+def _repo_relative(path_value: str, project_root: Path) -> str:
+    try:
+        path = Path(path_value)
+        if not path.is_absolute():
+            path = (project_root / path).resolve()
+        return str(path.resolve().relative_to(project_root.resolve()))
+    except Exception:
+        return path_value
+
+
+def _summarize_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return f"list[{len(value)}]"
+    if isinstance(value, Mapping):
+        keys = ", ".join(str(key) for key in list(value.keys())[:8])
+        return f"dict[{keys}]"
+    text = str(value)
+    return text[:300] + ("..." if len(text) > 300 else "")
+
+
+def _resolve_docking_input(
+    docking_input: Mapping[str, Any],
+    project_root: Path,
+) -> dict[str, Any]:
+    resolved = dict(docking_input)
+    for key in ("receptor_path", "ligand_path"):
+        if resolved.get(key):
+            path = Path(str(resolved[key]))
+            if not path.is_absolute():
+                path = (project_root / path).resolve()
+            resolved[key] = str(path)
+    return resolved
+
+
+def _find_tool(
+    tool_results: list[ToolResult],
+    tool_name: str,
+) -> ToolResult | None:
+    return next((item for item in tool_results if item.tool_name == tool_name), None)
+
+
+def _check_successful_tool(
+    tool_results: list[ToolResult],
+    tool_name: str,
+    *,
+    evidence: str,
+) -> dict[str, Any]:
+    result = _find_tool(tool_results, tool_name)
+    if result is None:
+        return {"status": "failed", "reason": f"tool_not_run:{tool_name}"}
+    if not result.success:
+        return {
+            "status": "partial",
+            "reason": result.message or f"tool_failed:{tool_name}",
+        }
+    return {"status": "passed", "evidence": evidence}
+
+
+def _check_admet_method(tool_results: list[ToolResult]) -> dict[str, Any]:
+    result = _find_tool(tool_results, "admet_predictor")
+    if result is None:
+        return {"status": "failed", "reason": "tool_not_run:admet_predictor"}
+    if not result.success:
+        return {"status": "partial", "reason": result.message}
+    text = json.dumps(result.data, ensure_ascii=False, default=str).lower()
+    if "prediction_method" in text or "rdkit" in text or "adme" in text:
+        return {"status": "passed", "evidence": "ADMET method/source present"}
+    return {"status": "failed", "reason": "missing_admet_prediction_method"}
+
+
+def _check_rg_mpnn(tool_results: list[ToolResult]) -> dict[str, Any]:
+    result = _find_tool(tool_results, "activity_predictor")
+    if result is None:
+        return {"status": "failed", "reason": "tool_not_run:activity_predictor"}
+    provenance = result.quality.get("model_provenance", {})
+    demo_mode = bool(provenance.get("demo_mode", True))
+    if not result.success:
+        return {"status": "partial", "reason": result.message}
+    if demo_mode:
+        return {
+            "status": "partial",
+            "reason": "rg_mpnn_demo_mode",
+            "provenance": provenance,
+        }
+    return {"status": "passed", "provenance": provenance}
+
+
+def _check_target_database_evidence(tool_results: list[ToolResult]) -> dict[str, Any]:
+    result = _find_tool(tool_results, "target_database_search")
+    if result is None:
+        return {"status": "failed", "reason": "tool_not_run:target_database_search"}
+    if not result.success:
+        return {"status": "partial", "reason": result.message}
+    records = result.data if isinstance(result.data, list) else []
+    if not records:
+        return {"status": "partial", "reason": "no_target_records"}
+    evidence_count = sum(1 for record in records if _target_record_has_evidence(record))
+    if evidence_count:
+        return {
+            "status": "passed",
+            "evidence_count": evidence_count,
+            "record_count": len(records),
+        }
+    return {"status": "failed", "reason": "target_records_without_evidence"}
+
+
+def _target_record_has_evidence(record: Any) -> bool:
+    if not isinstance(record, Mapping):
+        return False
+    evidence_keys = {
+        "uniprot_id",
+        "pdb_id",
+        "pdb_ids",
+        "structures",
+        "structure_count",
+        "has_experimental_structure",
+        "has_alphafold_structure",
+        "match_reason",
+        "source",
+    }
+    return any(record.get(key) for key in evidence_keys)
+
+
+def _check_reverse_target_evidence(tool_results: list[ToolResult]) -> dict[str, Any]:
+    result = _find_tool(tool_results, "reverse_target_predictor")
+    if result is None:
+        return {
+            "status": "failed",
+            "reason": "tool_not_run:reverse_target_predictor",
+        }
+    if not result.success:
+        return {"status": "partial", "reason": result.message}
+    records = result.data if isinstance(result.data, list) else []
+    if not records:
+        return {"status": "partial", "reason": "no_reverse_target_records"}
+    missing = [
+        record
+        for record in records
+        if isinstance(record, Mapping)
+        and not any(
+            record.get(key) is not None
+            for key in (
+                "final_similarity",
+                "morgan_similarity",
+                "maccs_similarity",
+                "evidence",
+                "source",
+            )
+        )
+    ]
+    if missing:
+        return {"status": "failed", "reason": "reverse_targets_without_evidence"}
+    return {"status": "passed", "evidence_count": len(records)}
+
+
+def _check_reverse_target_low_confidence(
+    tool_results: list[ToolResult],
+) -> dict[str, Any]:
+    evidence = _check_reverse_target_evidence(tool_results)
+    if evidence["status"] == "failed":
+        return evidence
+    result = _find_tool(tool_results, "reverse_target_predictor")
+    records = result.data if result is not None and isinstance(result.data, list) else []
+    if not records:
+        return {"status": "passed", "evidence": "no high-confidence targets"}
+    similarities = [
+        float(record.get("final_similarity", 0.0))
+        for record in records
+        if isinstance(record, Mapping)
+        and isinstance(record.get("final_similarity", 0.0), (int, float))
+    ]
+    if not similarities or max(similarities) < 0.7:
+        return {"status": "passed", "max_similarity": max(similarities or [0.0])}
+    return {
+        "status": "partial",
+        "reason": "targets_not_low_confidence",
+        "max_similarity": max(similarities),
+    }
+
+
+def _check_generation(
+    tool_results: list[ToolResult],
+    *,
+    requested_count: Any,
+    expected_model: str,
+    strict_count: bool,
+) -> dict[str, Any]:
+    result = _find_tool(tool_results, "llm_molecular_generator")
+    if result is None:
+        return {"status": "failed", "reason": "tool_not_run:llm_molecular_generator"}
+    if not result.success:
+        return {"status": "partial", "reason": result.message}
+    records = result.data if isinstance(result.data, list) else []
+    smiles = [
+        str(item.get("smiles") if isinstance(item, Mapping) else item)
+        for item in records
+        if item
+    ]
+    requested = int(requested_count or len(smiles) or 0)
+    metrics = chemistry_metrics(smiles, requested_count=requested if strict_count else None)
+    model_names = {
+        str(item.get("model"))
+        for item in records
+        if isinstance(item, Mapping) and item.get("model")
+    }
+    model_ok = not model_names or expected_model in model_names
+    valid_unique_ok = metrics["valid_smiles_rate"] == 1.0 and (
+        metrics["unique_valid_smiles"] >= requested if strict_count else bool(smiles)
+    )
+    count_ok = (
+        metrics["requested_count_compliance"] if strict_count else bool(smiles)
+    )
+    if model_ok and valid_unique_ok and count_ok:
+        return {"status": "passed", "metrics": metrics, "models": sorted(model_names)}
+    return {
+        "status": "partial",
+        "reason": "generation_acceptance_not_met",
+        "metrics": metrics,
+        "models": sorted(model_names),
+    }
+
+
+def _check_vina(tool_results: list[ToolResult]) -> dict[str, Any]:
+    result = _find_tool(tool_results, "molecular_docking")
+    if result is None:
+        return {"status": "failed", "reason": "tool_not_run:molecular_docking"}
+    if not result.success:
+        return {"status": "partial", "reason": result.message, "data": result.data}
+    data = result.data if isinstance(result.data, Mapping) else {}
+    energy = _extract_binding_energy(data)
+    pose_exists = _pose_file_exists(data, result)
+    if isinstance(energy, (int, float)) and pose_exists:
+        return {"status": "passed", "binding_energy": energy, "pose_file_exists": True}
+    return {
+        "status": "partial",
+        "reason": "missing_numeric_energy_or_pose",
+        "binding_energy": energy,
+        "pose_file_exists": pose_exists,
+    }
+
+
+def _extract_binding_energy(data: Mapping[str, Any]) -> float | None:
+    candidates = [
+        data.get("best_energy"),
+        data.get("binding_energy"),
+        data.get("affinity"),
+    ]
+    best_pose = data.get("best_pose")
+    if isinstance(best_pose, Mapping):
+        candidates.extend(
+            [
+                best_pose.get("binding_energy"),
+                best_pose.get("energy"),
+                best_pose.get("affinity"),
+            ]
+        )
+    poses = data.get("poses")
+    if isinstance(poses, list) and poses:
+        first = poses[0]
+        if isinstance(first, Mapping):
+            candidates.extend(
+                [first.get("energy"), first.get("binding_energy"), first.get("affinity")]
+            )
+    results = data.get("results")
+    if isinstance(results, list) and results:
+        first_result = results[0]
+        if isinstance(first_result, Mapping):
+            candidates.extend(
+                [
+                    first_result.get("binding_energy"),
+                    first_result.get("energy"),
+                    first_result.get("affinity"),
+                ]
+            )
+    for value in candidates:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            match = re.search(r"-?\d+(?:\.\d+)?", value)
+            if match:
+                return float(match.group(0))
+    return None
+
+
+def _pose_file_exists(data: Mapping[str, Any], result: ToolResult) -> bool:
+    candidates: list[str] = []
+    for key in ("pose_file", "output_pdbqt", "output_file", "result_file"):
+        if data.get(key):
+            candidates.append(str(data[key]))
+    for artifact in result.artifacts:
+        candidates.append(artifact.path)
+    for value in candidates:
+        try:
+            if Path(value).is_file():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _check_invalid_smiles_rejected(
+    tool_results: list[ToolResult],
+    anti_hallucination: Mapping[str, Any],
+) -> dict[str, Any]:
+    successful_claim_tools = [
+        result.tool_name for result in tool_results if result.success
+    ]
+    if anti_hallucination.get("forbidden_found"):
+        return {
+            "status": "failed",
+            "reason": "forbidden_scientific_claim_for_invalid_smiles",
+        }
+    if not successful_claim_tools:
+        return {"status": "passed", "evidence": "no successful scientific tool output"}
+    return {
+        "status": "failed",
+        "reason": "invalid_smiles_produced_successful_tool_output",
+        "successful_tools": successful_claim_tools,
+    }
+
+
+def _check_docking_rejected(
+    tool_results: list[ToolResult],
+    anti_hallucination: Mapping[str, Any],
+) -> dict[str, Any]:
+    if anti_hallucination.get("forbidden_found"):
+        return {"status": "failed", "reason": "docking_energy_claim_without_inputs"}
+    result = _find_tool(tool_results, "molecular_docking")
+    if result is None:
+        return {"status": "passed", "evidence": "docking tool not executed"}
+    if not result.success:
+        return {"status": "passed", "evidence": result.message}
+    return {"status": "failed", "reason": "docking_succeeded_without_required_inputs"}
+
+
+def _check_rag_source_or_explicit_no_hit(
+    tool_results: list[ToolResult],
+) -> dict[str, Any]:
+    result = _find_tool_any(tool_results, {"rag_search", "rag_database_search"})
+    if result is None:
+        return {"status": "failed", "reason": "tool_not_run:rag_search"}
+    if not result.success:
+        return {"status": "partial", "reason": result.message}
+
+    records = result.data if isinstance(result.data, list) else []
+    if records:
+        sourced = [
+            record
+            for record in records
+            if isinstance(record, Mapping)
+            and any(
+                record.get(key)
+                for key in (
+                    "source",
+                    "source_path",
+                    "document",
+                    "file",
+                    "url",
+                    "citation",
+                    "similarity_score",
+                )
+            )
+        ]
+        if sourced or result.evidence:
+            return {
+                "status": "passed",
+                "evidence_count": len(sourced) + len(result.evidence),
+            }
+        return {"status": "failed", "reason": "rag_records_without_source"}
+
+    message = (result.message or result.formatted or "").lower()
+    no_hit_markers = (
+        "no matching",
+        "no relevant",
+        "no results",
+        "not found",
+        "未检索",
+        "未找到",
+        "没有检索",
+        "没有找到",
+        "无匹配",
+    )
+    if any(marker in message for marker in no_hit_markers):
+        return {"status": "passed", "evidence": "explicit_no_hit"}
+    return {"status": "failed", "reason": "empty_rag_result_without_no_hit_message"}
+
+
+def _check_generation_repeat_stats(
+    tool_results: list[ToolResult],
+    *,
+    repeat_runs: Any,
+    requested_count: Any,
+    expected_model: str,
+    executions: list[Any] | None = None,
+) -> dict[str, Any]:
+    expected_runs = int(repeat_runs or 1)
+    requested = int(requested_count or 0)
+    groups = _generation_groups(tool_results, executions or [])
+    if not groups:
+        return {"status": "failed", "reason": "tool_not_run:llm_molecular_generator"}
+    if len(groups) < expected_runs:
+        return {
+            "status": "partial",
+            "reason": "repeat_generation_runs_missing",
+            "actual_runs": len(groups),
+            "expected_runs": expected_runs,
+        }
+
+    summaries = []
+    failures = []
+    for index, records in enumerate(groups[:expected_runs], 1):
+        smiles = _extract_smiles_values(records)
+        metrics = chemistry_metrics(
+            smiles,
+            requested_count=requested if requested else None,
+        )
+        model_names = {
+            str(item.get("model"))
+            for item in records
+            if isinstance(item, Mapping) and item.get("model")
+        }
+        valid_count = int(round(metrics["valid_smiles_rate"] * len(smiles)))
+        unique_count = int(metrics["unique_valid_smiles"])
+        summary = {
+            "run": index,
+            "actual_count": len(smiles),
+            "valid_count": valid_count,
+            "unique_count": unique_count,
+            "duplicate_count": max(0, valid_count - unique_count),
+            "models": sorted(model_names),
+        }
+        summaries.append(summary)
+        if requested and len(smiles) != requested:
+            failures.append(f"run_{index}_count")
+        if requested and unique_count < requested:
+            failures.append(f"run_{index}_unique")
+        if smiles and valid_count != len(smiles):
+            failures.append(f"run_{index}_validity")
+        if model_names and expected_model not in model_names:
+            failures.append(f"run_{index}_model")
+
+    if failures:
+        return {
+            "status": "partial",
+            "reason": "generation_repeat_acceptance_not_met",
+            "failures": failures,
+            "runs": summaries,
+        }
+    return {"status": "passed", "runs": summaries}
+
+
+def _check_workflow_repeat_consistency(executions: list[Any]) -> dict[str, Any]:
+    if len(executions) < 2:
+        return {"status": "partial", "reason": "repeat_workflow_runs_missing"}
+    tool_sequences = [
+        [result.tool_name for result in execution.result.tool_results]
+        for execution in executions
+    ]
+    event_sequences = [
+        [
+            event.get("event")
+            for event in execution.events
+            if isinstance(event, Mapping)
+            and event.get("event")
+            in {
+                "task_started",
+                "planning_started",
+                "planning_completed",
+                "tool_started",
+                "tool_completed",
+                "tool_failed",
+                "task_completed",
+                "task_failed",
+            }
+        ]
+        for execution in executions
+    ]
+    statuses = [
+        "partial"
+        if execution.result.partial
+        else "passed"
+        if execution.result.success
+        else "failed"
+        for execution in executions
+    ]
+    if len({tuple(sequence) for sequence in tool_sequences}) > 1:
+        return {
+            "status": "partial",
+            "reason": "tool_order_changed",
+            "tool_sequences": tool_sequences,
+        }
+    if len({tuple(sequence) for sequence in event_sequences}) > 1:
+        return {
+            "status": "partial",
+            "reason": "event_sequence_changed",
+            "event_sequences": event_sequences,
+        }
+    if len(set(statuses)) > 1:
+        return {"status": "partial", "reason": "workflow_status_changed", "statuses": statuses}
+    return {
+        "status": "passed",
+        "tool_sequence": tool_sequences[0],
+        "event_sequence": event_sequences[0],
+        "statuses": statuses,
+    }
+
+
+def _check_data_flow_generated_smiles_consumed(
+    tool_results: list[ToolResult],
+    *,
+    downstream_tools: list[str],
+    executions: list[Any] | None = None,
+) -> dict[str, Any]:
+    plan_evidence = (
+        _plan_has_data_flow(
+            executions or [],
+            source_output_key="molecules",
+            downstream_tools=set(downstream_tools),
+        )
+        or _plan_has_data_flow(
+            executions or [],
+            source_output_key="candidates",
+            downstream_tools=set(downstream_tools),
+        )
+    )
+    if plan_evidence:
+        return {"status": "passed", "evidence": plan_evidence}
+
+    generator = _find_tool(tool_results, "llm_molecular_generator")
+    if generator is None:
+        return {"status": "failed", "reason": "tool_not_run:llm_molecular_generator"}
+    if not generator.success:
+        return {"status": "partial", "reason": generator.message}
+    generated = set(_extract_smiles_values(generator.data))
+    if not generated:
+        return {"status": "partial", "reason": "no_generated_smiles"}
+
+    consumed_by = []
+    for tool_name in downstream_tools:
+        result = _find_tool(tool_results, tool_name)
+        if result is None or not result.success:
+            continue
+        downstream_smiles = set(_extract_smiles_values(result.data))
+        if downstream_smiles & generated:
+            consumed_by.append(tool_name)
+    if consumed_by:
+        return {"status": "passed", "consumed_by": consumed_by}
+    return {"status": "failed", "reason": "generated_smiles_not_consumed"}
+
+
+def _check_data_flow_reverse_targets_consumed(
+    tool_results: list[ToolResult],
+    *,
+    executions: list[Any] | None = None,
+) -> dict[str, Any]:
+    plan_evidence = _plan_has_data_flow(
+        executions or [],
+        source_output_key="targets",
+        downstream_tools={"target_database_search"},
+    )
+    if plan_evidence:
+        return {"status": "passed", "evidence": plan_evidence}
+    reverse = _find_tool(tool_results, "reverse_target_predictor")
+    target_search = _find_tool(tool_results, "target_database_search")
+    if reverse is None:
+        return {"status": "failed", "reason": "tool_not_run:reverse_target_predictor"}
+    if target_search is None:
+        return {"status": "failed", "reason": "tool_not_run:target_database_search"}
+    if not reverse.success:
+        return {"status": "partial", "reason": reverse.message}
+    if not target_search.success:
+        return {"status": "partial", "reason": target_search.message}
+    return {"status": "passed", "evidence": "reverse-target step followed by target search"}
+
+
+def _check_core_retention_aromatic_ring(
+    tool_results: list[ToolResult],
+    *,
+    core_smiles: str,
+) -> dict[str, Any]:
+    result = _find_tool(tool_results, "llm_molecular_generator")
+    if result is None:
+        return {"status": "failed", "reason": "tool_not_run:llm_molecular_generator"}
+    if not result.success:
+        return {"status": "partial", "reason": result.message}
+    smiles = _extract_smiles_values(result.data)
+    if not smiles:
+        return {"status": "partial", "reason": "no_generated_smiles"}
+    retained = [value for value in smiles if _has_aromatic_core(value, core_smiles)]
+    if len(retained) == len(smiles):
+        return {"status": "passed", "retained_count": len(retained)}
+    return {
+        "status": "partial",
+        "reason": "aromatic_core_not_retained_by_all_candidates",
+        "retained_count": len(retained),
+        "candidate_count": len(smiles),
+    }
+
+
+def _check_unauthorized_tool_rejected(
+    tool_results: list[ToolResult],
+    anti_hallucination: Mapping[str, Any],
+) -> dict[str, Any]:
+    if anti_hallucination.get("forbidden_found"):
+        return {"status": "failed", "reason": "forbidden_claim_after_injection"}
+    unsafe_success = [
+        result.tool_name
+        for result in tool_results
+        if result.success and result.tool_name in {"run_docking", "molecular_docking"}
+    ]
+    if unsafe_success:
+        return {
+            "status": "failed",
+            "reason": "unauthorized_or_incomplete_docking_succeeded",
+            "tools": unsafe_success,
+        }
+    return {"status": "passed", "evidence": "no unauthorized successful tool call"}
+
+
+def _generation_groups(
+    tool_results: list[ToolResult],
+    executions: list[Any],
+) -> list[list[Any]]:
+    if executions:
+        groups = []
+        for execution in executions:
+            result = _find_tool(execution.result.tool_results, "llm_molecular_generator")
+            if result and result.success:
+                data = result.data
+                groups.append(data if isinstance(data, list) else [data])
+        return groups
+
+    result = _find_tool(tool_results, "llm_molecular_generator")
+    if result is None or not result.success:
+        return []
+    data = result.data
+    if isinstance(data, Mapping) and isinstance(data.get("repeat_runs"), list):
+        return [
+            run if isinstance(run, list) else [run]
+            for run in data["repeat_runs"]
+        ]
+    return [data if isinstance(data, list) else [data]]
+
+
+def _plan_has_data_flow(
+    executions: list[Any],
+    *,
+    source_output_key: str,
+    downstream_tools: set[str],
+) -> str | None:
+    for execution in executions:
+        source_steps = {
+            step.output_key
+            for step in execution.plan.steps
+            if step.output_key == source_output_key
+        }
+        if not source_steps:
+            continue
+        actual_tools = {result.tool_name for result in execution.result.tool_results}
+        for step in execution.plan.steps:
+            if (
+                step.tool_name in downstream_tools
+                and step.input_from == source_output_key
+                and step.tool_name in actual_tools
+            ):
+                return f"{source_output_key}->{step.tool_name}"
+    return None
+
+
+def _extract_smiles_values(value: Any) -> list[str]:
+    values: list[str] = []
+    if isinstance(value, Mapping):
+        if value.get("smiles"):
+            values.append(str(value["smiles"]))
+        for nested_key in ("data", "results", "molecules", "candidates"):
+            nested = value.get(nested_key)
+            if nested is not None:
+                values.extend(_extract_smiles_values(nested))
+    elif isinstance(value, list):
+        for item in value:
+            values.extend(_extract_smiles_values(item))
+    elif isinstance(value, str):
+        if re.search(r"[BCNOPSFI]|Cl|Br", value):
+            values.append(value)
+    return [item for item in values if item]
+
+
+def _find_tool_any(
+    tool_results: list[ToolResult],
+    tool_names: set[str],
+) -> ToolResult | None:
+    return next((item for item in tool_results if item.tool_name in tool_names), None)
+
+
+def _has_aromatic_core(smiles: str, core_smiles: str) -> bool:
+    try:
+        from rdkit import Chem
+
+        mol = Chem.MolFromSmiles(smiles)
+        core = Chem.MolFromSmiles(core_smiles)
+        return bool(mol is not None and core is not None and mol.HasSubstructMatch(core))
+    except Exception:
+        normalized = smiles.lower()
+        return "c1ccccc1" in normalized or "c1cccc" in normalized
+
+
+def _case_status(
+    *,
+    case: EvaluationCase,
+    actual_skill: str | None,
+    actual_tools: list[str],
+    anti_hallucination: Mapping[str, Any],
+    truth_checks: Mapping[str, Mapping[str, Any]],
+    execution_success: bool,
+    execution_error: str | None,
+) -> tuple[str, str | None]:
+    if anti_hallucination.get("forbidden_found"):
+        return "failed", "forbidden_patterns_found"
+    if actual_skill != case.expected_skill:
+        return "failed", execution_error or "skill_mismatch"
+    forbidden_called = set(actual_tools) & set(case.forbidden_tools)
+    if forbidden_called:
+        return "failed", "forbidden_tools_called:" + ",".join(sorted(forbidden_called))
+    failed_truth = [
+        name
+        for name, check in truth_checks.items()
+        if check.get("status") == "failed"
+    ]
+    if failed_truth:
+        return "failed", "truth_failed:" + ",".join(sorted(failed_truth))
+    partial_truth = [
+        name
+        for name, check in truth_checks.items()
+        if check.get("status") == "partial"
+    ]
+    if partial_truth:
+        return "partial", "truth_partial:" + ",".join(sorted(partial_truth))
+    expected_missing = [
+        name for name in case.expected_tools if name not in actual_tools
+    ]
+    if expected_missing:
+        return "partial", "expected_tools_missing:" + ",".join(expected_missing)
+    if execution_error:
+        return "partial", execution_error
+    if not execution_success and case.expected_tools:
+        return "partial", "workflow_not_successful"
+    return "passed", None
+
+
+def _score_scientific_case(
+    *,
+    case: EvaluationCase,
+    actual_skill: str | None,
+    actual_tools: list[str],
+    events: list[Mapping[str, Any]],
+    tool_provenance: list[Mapping[str, Any]],
+    anti_hallucination: Mapping[str, Any],
+    truth_checks: Mapping[str, Mapping[str, Any]],
+    case_status: str,
+    case_error: str | None,
+) -> dict[str, Any]:
+    """Score a real scientific case using the documented 100-point rubric."""
+
+    routing = 15 if actual_skill == case.expected_skill else 0
+
+    expected_counts = Counter(case.expected_tools)
+    actual_counts = Counter(actual_tools)
+    forbidden_called = set(actual_tools) & set(case.forbidden_tools)
+    successful_tool_called = any(
+        bool(item.get("success")) for item in tool_provenance
+    )
+    expected_tools_present = all(
+        actual_counts[name] >= count for name, count in expected_counts.items()
+    )
+    if case.expected_tools:
+        tool_selection_ok = expected_tools_present and not forbidden_called
+    else:
+        tool_selection_ok = not forbidden_called and not successful_tool_called
+    tool_selection = 15 if tool_selection_ok else 0
+
+    if case.expected_tools:
+        order_ok = _is_ordered_subsequence(case.expected_tools, actual_tools)
+    else:
+        order_ok = not successful_tool_called
+    workflow_order = 15 if order_ok else 0
+
+    truth_statuses = [str(check.get("status", "failed")) for check in truth_checks.values()]
+    required_provenance = list(
+        case.scientific_acceptance.get("provenance_required", []) or []
+    )
+    provenance_names = [str(item.get("tool_name", "")) for item in tool_provenance]
+    provenance_present = all(name in provenance_names for name in required_provenance)
+    if "failed" in truth_statuses:
+        real_tool_execution = 0
+    elif "partial" in truth_statuses:
+        real_tool_execution = 10
+    elif truth_statuses:
+        real_tool_execution = 20
+    elif not case.expected_tools and not successful_tool_called:
+        real_tool_execution = 20
+    elif provenance_present and case_status == "passed":
+        real_tool_execution = 20
+    else:
+        real_tool_execution = 0
+
+    data_flow_checks = [
+        check
+        for name, check in truth_checks.items()
+        if name.startswith("data_flow_")
+        or name in {"workflow_repeat_consistency", "generation_repeat_stats"}
+    ]
+    data_flow_statuses = [str(check.get("status", "failed")) for check in data_flow_checks]
+    if "failed" in data_flow_statuses:
+        upstream_data_consumption = 0
+    elif "partial" in data_flow_statuses:
+        upstream_data_consumption = 7
+    else:
+        upstream_data_consumption = 15
+
+    anti_hallucination_score = (
+        10
+        if not anti_hallucination.get("forbidden_found")
+        and anti_hallucination.get("status") != "failed"
+        else 0
+    )
+
+    event_sequence = [
+        str(item.get("event", "")) for item in events if isinstance(item, Mapping)
+    ]
+    expected_events_present = _is_ordered_subsequence(
+        case.expected_events,
+        event_sequence,
+    )
+    trace_present = not case.expected_events or all(
+        bool(item.get("trace_id")) for item in events if isinstance(item, Mapping)
+    )
+    structured_provenance = (
+        10
+        if provenance_present and expected_events_present and trace_present
+        else 0
+    )
+
+    score_breakdown = {
+        "routing": routing,
+        "tool_selection": tool_selection,
+        "workflow_order": workflow_order,
+        "real_tool_execution": real_tool_execution,
+        "upstream_data_consumption": upstream_data_consumption,
+        "anti_hallucination": anti_hallucination_score,
+        "structured_provenance": structured_provenance,
+    }
+    hard_failure_reasons = _hard_failure_reasons(
+        case_error=case_error,
+        anti_hallucination=anti_hallucination,
+        truth_checks=truth_checks,
+    )
+    return {
+        "score": 0 if hard_failure_reasons else sum(score_breakdown.values()),
+        "score_breakdown": score_breakdown,
+        "hard_failure": bool(hard_failure_reasons),
+        "hard_failure_reasons": hard_failure_reasons,
+    }
+
+
+def _is_ordered_subsequence(expected: Iterable[str], actual: Iterable[str]) -> bool:
+    remaining = iter(actual)
+    return all(any(item == expected_item for item in remaining) for expected_item in expected)
+
+
+def _hard_failure_reasons(
+    *,
+    case_error: str | None,
+    anti_hallucination: Mapping[str, Any],
+    truth_checks: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    reasons: list[str] = []
+    if anti_hallucination.get("forbidden_found") or anti_hallucination.get("status") == "failed":
+        reasons.append("forbidden_patterns_found")
+    if case_error and case_error.startswith("forbidden_tools_called:"):
+        reasons.append(case_error)
+
+    unsafe_markers = (
+        "fabricat",
+        "simulat",
+        "demo",
+        "without_input",
+        "without inputs",
+        "scientific_claim",
+        "energy_claim",
+    )
+    for name, check in truth_checks.items():
+        if check.get("status") != "failed":
+            continue
+        reason = str(check.get("reason", "")).lower()
+        if any(marker in reason for marker in unsafe_markers):
+            reasons.append(f"truth_failed:{name}")
+    return list(dict.fromkeys(reasons))

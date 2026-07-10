@@ -5,8 +5,6 @@
 最终汇总生成一份完整的候选药物评估报告。
 """
 
-from src.agent.orchestrators import WorkflowStep
-
 from .base_skill import BaseSkill
 
 
@@ -28,15 +26,9 @@ class ComprehensiveEvaluationSkill(BaseSkill):
         "admet_predictor",
         "activity_predictor",
         "reverse_target_predictor",
+        "target_database_search",
     ]
-
-    workflow_steps = [
-        WorkflowStep("properties", "property_calculator"),
-        WorkflowStep("drug_likeness", "drug_likeness_assessment"),
-        WorkflowStep("admet", "admet_predictor"),
-        WorkflowStep("activity", "activity_predictor"),
-        WorkflowStep("reverse_target", "reverse_target_predictor"),
-    ]
+    is_workflow = True
 
     # 需要更多推理步骤来完成多工具串联
     max_iterations_override = 8

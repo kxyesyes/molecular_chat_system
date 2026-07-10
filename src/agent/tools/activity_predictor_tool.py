@@ -60,6 +60,9 @@ class ActivityPredictorTool(BaseMolecularTool):
         try:
             predictor = self._get_predictor()
             predictions = predictor.predict(smiles_list)
+            successful_predictions = [
+                pred for pred in predictions if pred.get("success")
+            ]
 
             lines = [
                 "## 🔬 分子活性预测结果 (RG-MPNN)",
@@ -91,10 +94,21 @@ class ActivityPredictorTool(BaseMolecularTool):
                         f"| `{pred.get('smiles', 'N/A')[:40]}` | - | ❌ 失败 | - | {pred.get('error', '')} |"
                     )
 
-            result['success'] = True
+            result['success'] = bool(successful_predictions)
             result['data'] = predictions
-            result['formatted'] = "\n".join(lines)
-            result['message'] = f"完成 {len(predictions)} 个分子的活性预测"
+            result['formatted'] = "\n".join(lines) if successful_predictions else ""
+            result['message'] = (
+                f"完成 {len(successful_predictions)} 个分子的活性预测"
+                if successful_predictions
+                else "RG-MPNN 未返回任何真实活性预测结果"
+            )
+            result['quality'] = {
+                "model_provenance": {
+                    "model_path": getattr(predictor, "current_model_path", None),
+                    "demo_mode": bool(getattr(predictor, "demo_mode", True)),
+                    "model_type": "RG-MPNN",
+                }
+            }
 
         except Exception as e:
             logger.error(f"活性预测失败: {e}", exc_info=True)

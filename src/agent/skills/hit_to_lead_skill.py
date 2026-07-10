@@ -5,8 +5,6 @@
 引导用户完成先导化合物的迭代优化。
 """
 
-from src.agent.orchestrators import WorkflowStep
-
 from .base_skill import BaseSkill
 
 
@@ -28,14 +26,7 @@ class HitToLeadSkill(BaseSkill):
         "activity_predictor",
         "llm_molecular_generator",
     ]
-
-    workflow_steps = [
-        WorkflowStep("baseline_properties", "property_calculator"),
-        WorkflowStep("baseline_admet", "admet_predictor"),
-        WorkflowStep("baseline_activity", "activity_predictor"),
-        WorkflowStep("generate_candidates", "llm_molecular_generator"),
-        WorkflowStep("candidate_properties", "property_calculator"),
-    ]
+    is_workflow = True
 
     max_iterations_override = 10
 

@@ -23,6 +23,7 @@ class BaseSkill:
     description: str = "基础技能"
     system_prompt: str = ""
     allowed_tools: List[str] = []
+    is_workflow: bool = False
     # 触发关键词（用于快速规则匹配）
     trigger_keywords: List[str] = []
 

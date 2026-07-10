@@ -24,14 +24,13 @@ def test_target_driven_design_skill_routes_before_atomic_target_search():
     assert skill.name == "target_driven_design"
 
 
-def test_target_driven_design_workflow_runs_target_to_docking_plan():
+def test_target_driven_design_workflow_runs_target_to_screening_plan_without_docking():
     planned_tool_names = [
         "target_database_search",
         "llm_molecular_generator",
         "property_calculator",
         "admet_predictor",
         "activity_predictor",
-        "molecular_docking",
     ]
     agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
     agent.llm = None

@@ -1,0 +1,411 @@
+from __future__ import annotations
+
+import json
+
+from src.agent.evaluation import (
+    EvaluationCase,
+    EvaluationRunner,
+    chemistry_metrics,
+    latency_metrics,
+    load_cases,
+    score_workflow,
+)
+from src.agent.evaluation.scientific import (
+    GOLDEN_SCIENTIFIC_CASE_IDS,
+    _extract_binding_energy,
+    _check_data_flow_generated_smiles_consumed,
+    _check_generation_repeat_stats,
+    _check_rag_source_or_explicit_no_hit,
+    replay_scientific_report,
+    summarize_scientific_stability,
+)
+from src.agent.contracts import ToolResult
+from src.agent.routing import HybridSkillRouter
+
+
+def test_load_cases_reads_versioned_jsonl(tmp_path):
+    path = tmp_path / "cases.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "case_id": "R-001",
+                "version": "1.0",
+                "category": "routing",
+                "prompt": "分析 CCO 的 ADMET",
+                "expected_skill": "admet_assessment",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    cases = load_cases(path)
+
+    assert cases == [
+        EvaluationCase(
+            case_id="R-001",
+            version="1.0",
+            category="routing",
+            prompt="分析 CCO 的 ADMET",
+            expected_skill="admet_assessment",
+        )
+    ]
+
+
+def test_real_agent_dataset_contains_all_docx_cases():
+    cases = load_cases("data/agent_evals/real_agent_cases.jsonl")
+
+    assert [case.case_id for case in cases] == [
+        f"REAL-{index:03d}" for index in range(1, 17)
+    ]
+    assert all(case.version == "1.0" for case in cases)
+    assert cases[4].requires_external == [
+        "target_database",
+        "ollama",
+        "rg_mpnn",
+    ]
+    assert cases[10].allow_mock is True
+
+
+def test_golden_scientific_dataset_contains_12_traceable_cases():
+    cases = load_cases("data/agent_evals/golden_scientific_cases.jsonl")
+
+    assert [case.case_id for case in cases] == GOLDEN_SCIENTIFIC_CASE_IDS
+    assert all(case.version == "1.0" for case in cases)
+    assert all(case.allow_mock is False for case in cases)
+
+    required_fields = {
+        "real_tool_required",
+        "truth_checks",
+        "provenance_required",
+        "acceptance",
+    }
+    for case in cases:
+        assert case.expected_skill is not None
+        assert isinstance(case.expected_tools, list)
+        assert isinstance(case.forbidden_patterns, list)
+        assert case.scientific_acceptance
+        assert required_fields.issubset(case.scientific_acceptance)
+
+
+def test_diverse_scientific_dataset_contains_20_traceable_cases():
+    cases = load_cases("data/agent_evals/diverse_scientific_cases.jsonl")
+
+    assert [case.case_id for case in cases] == [
+        f"DIVERSE-{index:03d}" for index in range(1, 21)
+    ]
+    assert all(case.version == "1.0" for case in cases)
+    assert all(case.allow_mock is False for case in cases)
+
+    required_acceptance_fields = {
+        "real_tool_required",
+        "truth_checks",
+        "provenance_required",
+        "acceptance",
+    }
+    for case in cases:
+        assert case.category
+        assert case.prompt
+        assert isinstance(case.expected_tools, list)
+        assert isinstance(case.forbidden_tools, list)
+        assert isinstance(case.forbidden_patterns, list)
+        assert isinstance(case.requires_external, list)
+        assert isinstance(case.expected_events, list)
+        assert case.pass_criteria
+        assert required_acceptance_fields.issubset(case.scientific_acceptance)
+
+
+def test_generation_data_flow_check_requires_downstream_consumption():
+    generated = ToolResult.success_result(
+        "llm_molecular_generator",
+        data=[{"smiles": "CCO"}, {"smiles": "CCN"}],
+    )
+    properties = ToolResult.success_result(
+        "property_calculator",
+        data=[{"smiles": "CCO"}, {"smiles": "CCN"}],
+    )
+
+    passed = _check_data_flow_generated_smiles_consumed(
+        [generated, properties],
+        downstream_tools=["property_calculator"],
+    )
+    failed = _check_data_flow_generated_smiles_consumed(
+        [generated],
+        downstream_tools=["property_calculator"],
+    )
+
+    assert passed["status"] == "passed"
+    assert failed["status"] == "failed"
+    assert failed["reason"] == "generated_smiles_not_consumed"
+
+
+def test_generation_data_flow_check_accepts_hit_to_lead_candidates_plan():
+    class Step:
+        def __init__(self, tool_name, output_key=None, input_from=None):
+            self.tool_name = tool_name
+            self.output_key = output_key
+            self.input_from = input_from
+
+    class Plan:
+        steps = [
+            Step("llm_molecular_generator", output_key="candidates"),
+            Step("property_calculator", input_from="candidates"),
+        ]
+
+    class Result:
+        tool_results = [
+            ToolResult.success_result("llm_molecular_generator", data=[{"smiles": "c1ccccc1O"}]),
+            ToolResult.success_result("property_calculator", data=[{"molecular_weight": 94.11}]),
+        ]
+
+    class Execution:
+        plan = Plan()
+        result = Result()
+
+    result = _check_data_flow_generated_smiles_consumed(
+        Result.tool_results,
+        downstream_tools=["property_calculator"],
+        executions=[Execution()],
+    )
+
+    assert result["status"] == "passed"
+
+
+def test_generation_repeat_stats_check_requires_each_requested_round():
+    repeated = ToolResult.success_result(
+        "llm_molecular_generator",
+        data={
+            "repeat_runs": [
+                [{"smiles": "CCO"}, {"smiles": "CCN"}],
+                [{"smiles": "CCC"}, {"smiles": "CCCl"}],
+            ]
+        },
+    )
+
+    result = _check_generation_repeat_stats(
+        [repeated],
+        repeat_runs=2,
+        requested_count=2,
+        expected_model="gmm-llama:latest",
+    )
+
+    assert result["status"] == "passed"
+    assert result["runs"][0]["valid_count"] == 2
+    assert result["runs"][1]["unique_count"] == 2
+
+
+def test_rag_truth_check_allows_sources_or_explicit_no_hit():
+    with_source = ToolResult.success_result(
+        "rag_search",
+        data=[{"source": "docs/vina.md", "content": "box center"}],
+        evidence=[{"source": "docs/vina.md"}],
+    )
+    explicit_no_hit = ToolResult.success_result(
+        "rag_search",
+        data=[],
+        message="No matching sources found in local knowledge base.",
+    )
+    fabricated = ToolResult.success_result(
+        "rag_search",
+        data=[],
+        message="Here is the answer with no source.",
+    )
+
+    assert _check_rag_source_or_explicit_no_hit([with_source])["status"] == "passed"
+    assert _check_rag_source_or_explicit_no_hit([explicit_no_hit])["status"] == "passed"
+    assert _check_rag_source_or_explicit_no_hit([fabricated])["status"] == "failed"
+
+
+def test_replay_scientific_report_checks_truth_provenance_and_forbidden_patterns():
+    report = {
+        "mode": "real",
+        "status": "passed",
+        "real_cases": {
+            "case_count": 1,
+            "results": [
+                {
+                    "case_id": "GOLD-001",
+                    "status": "passed",
+                    "anti_hallucination": {
+                        "status": "passed",
+                        "forbidden_found": [],
+                    },
+                    "truth_checks": {
+                        "rdkit": {"status": "passed"},
+                    },
+                    "tool_provenance": [
+                        {
+                            "tool_name": "property_calculator",
+                            "input_summary": "aspirin",
+                            "output_summary": "mw/logp/qed",
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+
+    replayed = replay_scientific_report(report)
+
+    assert replayed["mode"] == "replay"
+    assert replayed["status"] == "passed"
+    assert replayed["metrics"]["case_count"] == 1
+
+    report["real_cases"]["results"][0]["anti_hallucination"]["forbidden_found"] = [
+        "kcal/mol"
+    ]
+    replayed = replay_scientific_report(report)
+
+    assert replayed["status"] == "failed"
+    assert replayed["results"][0]["status"] == "failed"
+
+
+def test_replay_allows_no_tool_general_chat_case_without_truth_checks():
+    report = {
+        "mode": "real",
+        "status": "passed",
+        "real_cases": {
+            "results": [
+                {
+                    "case_id": "DIVERSE-015",
+                    "status": "passed",
+                    "expected_skill": None,
+                    "actual_skill": None,
+                    "expected_tools": [],
+                    "actual_tools": [],
+                    "anti_hallucination": {
+                        "status": "passed",
+                        "forbidden_found": [],
+                    },
+                    "truth_checks": {},
+                    "tool_provenance": [],
+                }
+            ],
+        },
+    }
+
+    replayed = replay_scientific_report(report)
+
+    assert replayed["status"] == "passed"
+    assert replayed["results"][0]["status"] == "passed"
+
+
+def test_scientific_stability_summary_reports_latency_and_failure_types():
+    iterations = [
+        {
+            "results": [
+                {"case_id": "GOLD-001", "status": "passed", "latency_ms": 100},
+                {"case_id": "GOLD-002", "status": "failed", "latency_ms": 300, "error": "rg_mpnn_demo"},
+            ]
+        },
+        {
+            "results": [
+                {"case_id": "GOLD-001", "status": "partial", "latency_ms": 200, "error": "vina_missing"},
+                {"case_id": "GOLD-002", "status": "passed", "latency_ms": 400},
+            ]
+        },
+    ]
+
+    stability = summarize_scientific_stability(iterations)
+
+    assert stability["run_count"] == 2
+    assert stability["case_count"] == 4
+    assert stability["pass_rate"] == 0.75
+    assert stability["latency"]["p50_ms"] == 250
+    assert stability["failure_types"] == {"rg_mpnn_demo": 1, "vina_missing": 1}
+
+
+def test_scientific_vina_energy_parser_reads_best_pose_and_results():
+    assert (
+        _extract_binding_energy(
+            {
+                "best_pose": {"binding_energy": -3.6},
+                "results": [{"binding_energy": -3.7}],
+            }
+        )
+        == -3.6
+    )
+
+
+def test_routing_evaluation_reports_top1_top3_and_abstention():
+    cases = [
+        EvaluationCase(
+            case_id="R-001",
+            version="1",
+            category="routing",
+            prompt="预测 CCO 的 pIC50",
+            expected_skill="activity_prediction",
+        ),
+        EvaluationCase(
+            case_id="R-002",
+            version="1",
+            category="routing",
+            prompt="你好，今天心情不错。",
+            expected_skill=None,
+        ),
+    ]
+
+    report = EvaluationRunner(router=HybridSkillRouter()).evaluate_routing(cases)
+
+    assert report.metrics["top1_accuracy"] == 1.0
+    assert report.metrics["top3_accuracy"] == 1.0
+    assert report.metrics["correct_abstention_rate"] == 1.0
+    assert all(result.score == 10 for result in report.results)
+
+
+def test_workflow_score_penalizes_order_and_fabrication():
+    perfect = score_workflow(
+        expected_tools=["property", "admet", "activity"],
+        actual_tools=["property", "admet", "activity"],
+        forbidden_tools=[],
+        fabricated=False,
+        structured_output=True,
+    )
+    unsafe = score_workflow(
+        expected_tools=["property", "admet", "activity"],
+        actual_tools=["activity", "property"],
+        forbidden_tools=["docking"],
+        fabricated=True,
+        structured_output=False,
+    )
+
+    assert perfect["score"] == 10
+    assert unsafe["score"] < 5
+    assert unsafe["anti_hallucination"] == 0
+
+
+def test_chemistry_metrics_measure_validity_uniqueness_and_count():
+    metrics = chemistry_metrics(["CCO", "CCO", "not-a-smiles"], requested_count=3)
+
+    assert metrics["valid_smiles_rate"] == 2 / 3
+    assert metrics["unique_valid_smiles"] == 1
+    assert metrics["requested_count_compliance"] is True
+
+
+def test_latency_metrics_return_p50_and_p95():
+    metrics = latency_metrics([10, 20, 30, 40, 50])
+
+    assert metrics["p50_ms"] == 30
+    assert metrics["p95_ms"] >= 40
+
+
+def test_report_serialization_redacts_secrets(tmp_path):
+    report = EvaluationRunner(router=HybridSkillRouter()).evaluate_routing(
+        [
+            EvaluationCase(
+                case_id="R-001",
+                version="1",
+                category="routing",
+                prompt="分析 CCO 的 ADMET",
+                expected_skill="admet_assessment",
+                metadata={"api_key": "secret-value"},
+            )
+        ]
+    )
+    path = tmp_path / "report.json"
+    report.write_json(path)
+
+    content = path.read_text(encoding="utf-8")
+    assert "secret-value" not in content
+    assert "[REDACTED]" in content

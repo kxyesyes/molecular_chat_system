@@ -28,8 +28,9 @@ class ReActStep:
 class ReActMolecularAgent:
     """基于ReAct框架的分子agent"""
 
-    def __init__(self, llm=None):
+    def __init__(self, llm=None, molecular_generator_llm=None):
         self.llm = llm
+        self.molecular_generator_llm = molecular_generator_llm
         self.tools = {}
         self.max_iterations = 5  # 最大推理循环次数
         self._active_skill = None  # 当前激活的技能
@@ -46,7 +47,7 @@ class ReActMolecularAgent:
         """初始化工具集合 - 使用统一的工具注册表"""
         try:
             from .tools import get_all_tools
-            all_tools = get_all_tools()
+            all_tools = get_all_tools(self.molecular_generator_llm)
 
             for tool in all_tools:
                 self.tools[tool.name] = tool
@@ -57,6 +58,15 @@ class ReActMolecularAgent:
         except Exception as e:
             logger.error(f"Tool initialization failed: {e}")
             raise
+
+    def set_llm(self, llm) -> None:
+        """Update the Agent reasoning LLM without replacing dedicated tool models."""
+        self.llm = llm
+        for tool_name, tool in self.tools.items():
+            if tool_name == "llm_molecular_generator":
+                continue
+            if hasattr(tool, "llm"):
+                tool.llm = llm
 
     def should_use_tools(self, query: str) -> bool:
         """判断是否需要使用工具处理查询"""
@@ -95,7 +105,14 @@ class ReActMolecularAgent:
         logger.info("未检测到需要使用工具的查询")
         return False
 
-    def execute(self, query: str, temperature: float = 0.7, mol_count: int = 5, active_skill=None) -> Dict[str, Any]:
+    def execute(
+        self,
+        query: str,
+        temperature: float = 0.7,
+        mol_count: int = 5,
+        active_skill=None,
+        event_callback=None,
+    ) -> Dict[str, Any]:
         """执行ReAct推理循环 - 集成 Skill 路由"""
         import time
         from .metrics import metrics_system
@@ -129,9 +146,13 @@ class ReActMolecularAgent:
             logger.info("未匹配到特定技能，使用通用模式")
 
         try:
-            if self._active_skill and hasattr(self._active_skill, "workflow_steps"):
+            if self._active_skill and getattr(self._active_skill, "is_workflow", False):
                 logger.info(f"使用 WorkflowOrchestrator 执行技能: {self._active_skill.name}")
-                return self._execute_workflow_skill(query, result)
+                return self._execute_workflow_skill(
+                    query,
+                    result,
+                    event_callback=event_callback,
+                )
 
             if not self.llm:
                 logger.warning("LLM不可用，直接使用回退模式")
@@ -272,6 +293,13 @@ class ReActMolecularAgent:
                     final_answer=last_step.observation
                 )
 
+        if not previous_steps and self._is_molecular_generation_query(query):
+            return ReActStep(
+                thought="检测到明确的分子生成需求，必须调用分子生成工具，禁止直接编造结果。",
+                action="llm_molecular_generator",
+                action_input=query,
+            )
+
         # 构建ReAct提示
         prompt = self._build_react_prompt(query, previous_steps)
 
@@ -303,6 +331,22 @@ class ReActMolecularAgent:
                 action="property_calculator",
                 action_input=query
             )
+
+    def _is_molecular_generation_query(self, query: str) -> bool:
+        lowered = (query or "").lower()
+        generation_terms = (
+            "随机生成",
+            "生成一个",
+            "生成",
+            "设计一个",
+            "设计",
+            "generate",
+            "design",
+        )
+        molecule_terms = ("分子", "类药", "药物", "smiles", "molecule", "compound", "drug-like")
+        return any(term in lowered for term in generation_terms) and any(
+            term in lowered for term in molecule_terms
+        )
 
     def _extract_first_smiles(self, query: str) -> str:
         """从查询中提取第一个有效SMILES字符串"""
@@ -717,14 +761,17 @@ class ReActMolecularAgent:
             logger.error(f"Tool execution failed: {e}")
             return f"工具执行出错: {str(e)}", {}
 
-    def _execute_workflow_skill(self, query: str, base_result: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_workflow_skill(
+        self,
+        query: str,
+        base_result: Dict[str, Any],
+        event_callback=None,
+    ) -> Dict[str, Any]:
         """Execute declarative workflow skills without relying on LLM reasoning."""
         from uuid import uuid4
 
         from .contracts import AgentContext
-        from .orchestrators import WorkflowOrchestrator
-        from .planning import TaskPlanner
-        from .runtime.event_bus import AgentEventBus
+        from .runtime.workflow_executor import WorkflowExecutor
 
         context = AgentContext(
             query=query,
@@ -733,19 +780,14 @@ class ReActMolecularAgent:
             temperature=getattr(self, "current_temperature", 0.7),
             mol_count=getattr(self, "current_mol_count", 5),
         )
-        plan = TaskPlanner().plan(context)
-        steps = list(plan.steps)
-        if not steps and self._active_skill and hasattr(self._active_skill, "workflow_steps"):
-            steps = list(self._active_skill.workflow_steps)
-
-        event_bus = AgentEventBus()
-        orchestrator = WorkflowOrchestrator(event_bus=event_bus)
-        agent_result = orchestrator.run(
+        execution = WorkflowExecutor().execute(
             context=context,
-            steps=steps,
-            tools=self.tools,
-            continue_on_error=True,
+            skill=self._active_skill,
+            all_tools=self.tools,
+            event_callback=event_callback,
         )
+        plan = execution.plan
+        agent_result = execution.result
 
         tool_results = {item.tool_name: item.to_legacy_dict() for item in agent_result.tool_results}
         base_result.update(
@@ -759,10 +801,10 @@ class ReActMolecularAgent:
                 "partial": agent_result.partial,
                 "trace_id": agent_result.trace_id,
                 "agent_result": agent_result,
-                "agent_events": [event.to_dict() for event in event_bus.events],
+                "agent_events": execution.events,
                 "workflow_plan": {
                     "workflow_name": plan.workflow_name,
-                    "steps": [step.tool_name for step in steps],
+                    "steps": [step.tool_name for step in plan.steps],
                     "metadata": plan.metadata,
                 },
             }

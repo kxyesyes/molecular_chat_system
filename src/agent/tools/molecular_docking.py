@@ -72,41 +72,123 @@ class MolecularDocking(BaseMolecularTool):
 
         return result
 
-    def execute(self, query: str) -> Dict[str, Any]:
-        """执行分子对接"""
+    def execute(self, query: str | Dict[str, Any]) -> Dict[str, Any]:
+        """Run real docking only for structured requests with complete inputs."""
         result = self._create_base_result(query)
 
+        if not isinstance(query, dict):
+            result["message"] = (
+                "Docking requires receptor and ligand inputs plus docking box "
+                "center/size parameters; no binding energy was calculated."
+            )
+            result["reasoning"] = (
+                "A target name and SMILES alone are insufficient for a real "
+                "AutoDock Vina run."
+            )
+            return result
+
+        required = {"receptor_path", "center", "size"}
+        missing = sorted(required - set(query))
+        if not query.get("ligand_path") and not query.get("smiles"):
+            missing.append("ligand_path or smiles")
+        if missing:
+            result["message"] = (
+                "Missing docking inputs: "
+                + ", ".join(missing)
+                + ". No binding energy was calculated."
+            )
+            result["reasoning"] = "Docking precondition validation failed."
+            return result
+
         try:
-            # 提取SMILES
-            smiles_list = self.extract_smiles(query)
+            import asyncio
+            from pathlib import Path
 
-            # 识别目标蛋白质
-            target_info = self._identify_target(query)
+            from src.docking.molecular_docking_service import (
+                DockingConfig,
+                MolecularDockingService,
+            )
 
-            if not smiles_list and not target_info:
-                result['message'] = "请提供配体分子的SMILES结构或指定目标蛋白质。"
-                result['reasoning'] = "分子对接需要配体分子和目标蛋白质信息。"
+            receptor_path = Path(str(query["receptor_path"])).expanduser().resolve()
+            if not receptor_path.is_file():
+                result["message"] = (
+                    f"Receptor file does not exist: {receptor_path}. "
+                    "No binding energy was calculated."
+                )
                 return result
-
-            # 执行对接预测
-            docking_results = self._perform_docking(smiles_list, target_info, query)
-
-            if not docking_results:
-                result['message'] = "对接预测失败，请检查输入参数。"
-                result['reasoning'] = "无法完成分子对接计算，可能是输入格式问题或服务不可用。"
+            center = tuple(float(value) for value in query["center"])
+            size = tuple(float(value) for value in query["size"])
+            if len(center) != 3 or len(size) != 3:
+                result["message"] = "Docking center and size must each contain 3 values."
                 return result
-
-            # 成功 - 准备结果
-            result['success'] = True
-            result['data'] = docking_results
-            result['formatted'] = self._format_docking_results(docking_results)
-            result['reasoning'] = self._generate_docking_reasoning(docking_results)
-            result['message'] = f"成功完成 {len(docking_results.get('ligands', []))} 个分子的对接预测"
-
+            config = DockingConfig(
+                center_x=center[0],
+                center_y=center[1],
+                center_z=center[2],
+                size_x=size[0],
+                size_y=size[1],
+                size_z=size[2],
+                exhaustiveness=int(query.get("exhaustiveness", 8)),
+                num_modes=int(query.get("num_modes", 10)),
+                energy_range=float(query.get("energy_range", 3.0)),
+                manual_center=True,
+            )
+            service = MolecularDockingService(config=query.get("runtime_config"))
+            if not service.verify_environment():
+                result["message"] = (
+                    "AutoDock Vina docking environment is unavailable. "
+                    "No binding energy was calculated."
+                )
+                result["data"] = {"diagnostics": service.env_diagnostics()}
+                return result
+            ligand_input = query.get("smiles")
+            input_type = "smiles"
+            if not ligand_input:
+                ligand_path = Path(str(query["ligand_path"])).expanduser().resolve()
+                if not ligand_path.is_file():
+                    result["message"] = (
+                        f"Ligand file does not exist: {ligand_path}. "
+                        "No binding energy was calculated."
+                    )
+                    return result
+                ligand_input = str(ligand_path)
+                input_type = "file"
+            docking_result = asyncio.run(
+                service.perform_docking(
+                    receptor_file=str(receptor_path),
+                    ligand_input=str(ligand_input),
+                    config=config,
+                    input_type=input_type,
+                )
+            )
+            result["success"] = bool(docking_result.get("success"))
+            result["data"] = docking_result
+            result["quality"] = {
+                "docking_inputs": {
+                    "receptor_path": str(receptor_path),
+                    "ligand_input": str(ligand_input),
+                    "center": list(center),
+                    "size": list(size),
+                },
+                "engine": "AutoDock Vina",
+                "real_execution": True,
+            }
+            result["message"] = (
+                "Real AutoDock Vina docking completed."
+                if result["success"]
+                else docking_result.get("error", "Docking failed.")
+            )
+            result["formatted"] = (
+                f"Docking job: {docking_result.get('job_id')}\n"
+                f"Poses: {docking_result.get('total_poses', 0)}"
+                if result["success"]
+                else ""
+            )
+            result["reasoning"] = "Results were parsed from an actual Vina output file."
         except Exception as e:
             logger.error(f"Molecular docking failed: {e}")
-            result['message'] = f"分子对接失败: {str(e)}"
-            result['reasoning'] = "在对接过程中发生了意外错误。"
+            result["message"] = f"Docking failed: {str(e)}"
+            result["reasoning"] = "The real docking pipeline raised an error."
 
         return result
 
@@ -142,70 +224,6 @@ class MolecularDocking(BaseMolecularTool):
                     }
 
         return None
-
-    def _perform_docking(self, smiles_list: List[str], target_info: Optional[Dict], query: str) -> Optional[Dict[str, Any]]:
-        """执行分子对接计算（模拟实现）"""
-        try:
-            # 如果没有提供SMILES，使用示例分子
-            if not smiles_list:
-                smiles_list = ["CCO", "CC(=O)O"]  # 示例分子
-
-            # 如果没有指定靶点，使用默认靶点
-            if not target_info:
-                target_info = {
-                    "target_id": "covid_mpro",
-                    "target_name": "COVID-19 主蛋白酶",
-                    "pdb_id": "6LU7",
-                    "description": "SARS-CoV-2主蛋白酶",
-                    "binding_site": "H41, C145活性位点"
-                }
-
-            # 模拟对接计算结果
-            ligand_results = []
-            for i, smiles in enumerate(smiles_list):
-                # 模拟对接评分（实际应用中这里会调用真实的对接软件）
-                docking_score = self._calculate_mock_docking_score(smiles)
-
-                ligand_result = {
-                    "smiles": smiles,
-                    "ligand_id": f"ligand_{i+1}",
-                    "docking_score": docking_score,
-                    "binding_affinity": round(-docking_score * 1.2, 2),  # kcal/mol
-                    "binding_mode": self._generate_binding_mode(smiles),
-                    "interactions": self._generate_interactions(smiles),
-                    "drug_likeness": self._assess_drug_likeness(smiles)
-                }
-                ligand_results.append(ligand_result)
-
-            # 按对接评分排序
-            ligand_results.sort(key=lambda x: x["docking_score"], reverse=True)
-
-            return {
-                "target": target_info,
-                "ligands": ligand_results,
-                "methodology": "基于结构的分子对接",
-                "scoring_function": "模拟评分函数",
-                "total_ligands": len(ligand_results)
-            }
-
-        except Exception as e:
-            logger.error(f"Docking calculation failed: {e}")
-            return None
-
-    def _calculate_mock_docking_score(self, smiles: str) -> float:
-        """计算模拟对接评分"""
-        # 基于SMILES长度和复杂度的简单评分
-        base_score = 5.0
-        length_factor = min(len(smiles) / 20.0, 1.0)
-        complexity_factor = smiles.count('(') * 0.5 + smiles.count('=') * 0.3
-
-        # 添加一些随机性以模拟真实对接
-        import random
-        random.seed(hash(smiles) % 1000)
-        random_factor = random.uniform(-2.0, 2.0)
-
-        score = base_score + length_factor * 3.0 + complexity_factor + random_factor
-        return round(max(0, min(10, score)), 2)
 
     def _generate_binding_mode(self, smiles: str) -> str:
         """生成结合模式描述"""

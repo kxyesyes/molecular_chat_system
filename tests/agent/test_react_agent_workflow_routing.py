@@ -3,7 +3,7 @@ from src.agent.react_agent import ReActMolecularAgent
 
 class FakeSkill:
     name = "comprehensive_evaluation"
-    workflow_steps = True
+    is_workflow = True
 
 
 def test_workflow_skill_uses_planner_and_returns_legacy_dict(monkeypatch):
@@ -14,7 +14,7 @@ def test_workflow_skill_uses_planner_and_returns_legacy_dict(monkeypatch):
     agent.skill_router = None
     agent._active_skill = None
 
-    def fake_execute_workflow_skill(query, result):
+    def fake_execute_workflow_skill(query, result, event_callback=None):
         result["success"] = True
         result["active_skill"] = "comprehensive_evaluation"
         result["final_answer"] = "workflow ok"

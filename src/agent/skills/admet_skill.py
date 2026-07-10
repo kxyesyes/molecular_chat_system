@@ -16,6 +16,7 @@ class AdmetSkill(BaseSkill):
     ]
 
     allowed_tools = ["property_calculator", "admet_predictor", "drug_likeness_assessment"]
+    is_workflow = True
 
     system_prompt = """# 💊 ADMET 与基础属性评估专家 (ADMET Assessment Expert)
 

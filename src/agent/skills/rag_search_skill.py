@@ -7,7 +7,7 @@ class RAGSearchSkill(BaseSkill):
     """
     name = "rag_search"
     description = "Searches the local RAG molecular database for similar compounds, structural properties, and related domain knowledge."
-    allowed_tools = ["rag_database_search"]
+    allowed_tools = ["rag_search"]
     trigger_keywords = ["数据库", "检索", "查一下", "知识库", "类似分子", "库里", "database", "similar"]
     max_iterations_override = 3
         

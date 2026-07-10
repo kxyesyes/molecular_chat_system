@@ -168,6 +168,17 @@ class LLMMolecularGenerator(BaseMolecularTool):
             result['formatted'] = self._format_llm_results(valid_molecules, intent, query)
             result['message'] = f"LLM成功生成 {len(valid_molecules)} 个分子结构"
             result['reasoning'] = f"使用gmm-llama模型基于您的描述生成了{len(valid_molecules)}个符合要求的分子结构。"
+            requested_count = int(intent.get('count') or len(valid_molecules))
+            result['quality'] = {
+                "model": self._get_model_name(),
+                "requested_count": requested_count,
+                "actual_count": len(valid_molecules),
+                "partial_generation": len(valid_molecules) < requested_count,
+            }
+            if len(valid_molecules) < requested_count:
+                result.setdefault('warnings', []).append(
+                    f"Only generated {len(valid_molecules)} valid unique SMILES out of requested {requested_count}."
+                )
             
         except Exception as e:
             logger.error(f"LLM分子生成失败: {e}", exc_info=True)
@@ -180,6 +191,7 @@ class LLMMolecularGenerator(BaseMolecularTool):
         target_count = intent['count']
         valid_molecules = []
         all_generated_smiles = set()  # 避免重复
+        canonical_smiles_seen = set()
         
         logger.info(f"🎯 目标生成 {target_count} 个分子")
         
@@ -196,6 +208,10 @@ class LLMMolecularGenerator(BaseMolecularTool):
                 else:
                     generated_smiles = self._generate_with_llm(intent)
                 
+                if not generated_smiles:
+                    continue
+
+                generated_smiles = self._filter_generated_smiles(generated_smiles)
                 if not generated_smiles:
                     continue
                 
@@ -215,6 +231,9 @@ class LLMMolecularGenerator(BaseMolecularTool):
                         if mol is None:
                             continue
                         canonical = Chem.MolToSmiles(mol)
+                    if canonical in canonical_smiles_seen:
+                        continue
+                    canonical_smiles_seen.add(canonical)
                     valid_molecules.append({
                         "smiles": canonical,
                         "model": self._get_model_name(),
@@ -225,6 +244,94 @@ class LLMMolecularGenerator(BaseMolecularTool):
                 continue
 
         return valid_molecules[:target_count]
+
+    @staticmethod
+    def _looks_like_raw_smiles(candidate: str) -> bool:
+        """Cheap pre-filter before RDKit parsing to avoid feeding prose to RDKit."""
+        if not candidate:
+            return False
+
+        value = candidate.strip().strip("`'\".,;")
+        if not value or len(value) > 300:
+            return False
+
+        if re.search(r"\s", value):
+            return False
+
+        if value.lower() in {
+            "here",
+            "smiles",
+            "molecule",
+            "candidate",
+            "compound",
+            "result",
+            "none",
+            "n/a",
+        }:
+            return False
+
+        if not re.match(r"^[A-Za-z0-9@+\-\[\]\(\)=#\\/%.:]+$", value):
+            return False
+
+        has_atom = False
+        index = 0
+        while index < len(value):
+            char = value[index]
+            if not char.isalpha():
+                index += 1
+                continue
+            if char == "C" and index + 1 < len(value) and value[index + 1] == "l":
+                has_atom = True
+                index += 2
+                continue
+            if char == "B" and index + 1 < len(value) and value[index + 1] == "r":
+                has_atom = True
+                index += 2
+                continue
+            if char in "BCNOFPSIHbcnops":
+                has_atom = True
+                index += 1
+                continue
+            return False
+
+        return has_atom
+
+    @classmethod
+    def _clean_generated_smiles_line(cls, line: str) -> Optional[str]:
+        """Extract one SMILES candidate from a generated line, if it is unambiguous."""
+        if not line:
+            return None
+
+        value = line.strip()
+        value = re.sub(r"^\s*(?:[-*•]|\d+[\).:\-]|[A-Za-z][\).:\-])\s*", "", value)
+        value = value.strip().strip("`'\"")
+
+        if ":" in value:
+            label, rest = value.split(":", 1)
+            if re.match(r"(?i)^\s*(smiles|candidate|molecule|compound|structure)\s*$", label):
+                value = rest.strip()
+
+        if re.search(r"\s", value):
+            tokens = [
+                token.strip().strip("`'\".,;")
+                for token in re.split(r"[\s,;]+", value)
+                if token.strip()
+            ]
+            candidates = [token for token in tokens if cls._looks_like_raw_smiles(token)]
+            return candidates[0] if len(candidates) == 1 else None
+
+        value = value.strip().strip("`'\".,;")
+        return value if cls._looks_like_raw_smiles(value) else None
+
+    @classmethod
+    def _filter_generated_smiles(cls, generated: List[str]) -> List[str]:
+        """Keep only line-level SMILES candidates before expensive validation."""
+        filtered: List[str] = []
+        for line in generated or []:
+            candidate = cls._clean_generated_smiles_line(str(line))
+            if candidate:
+                filtered.append(candidate)
+        return filtered
     
     def _analyze_generation_intent(self, query: str) -> Dict[str, Any]:
         """分析生成意图 - 改进版，更准确识别数量"""
@@ -478,7 +585,7 @@ class LLMMolecularGenerator(BaseMolecularTool):
     
     def _format_llm_results(self, molecules: List[Dict[str, Any]], intent: Dict[str, Any], query: str) -> str:
         """格式化LLM生成结果（不在文本中重复数值型分子属性）"""
-        output = ["🤖 **LLM分子生成结果** (gmm-llama模型)\n"]
+        output = [f"🤖 **LLM分子生成结果** ({self._get_model_name()})\n"]
 
         output.append(f"查询: {query[:100]}")
         output.append(f"生成数量: {len(molecules)}\n")

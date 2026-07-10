@@ -1,0 +1,109 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+from src.agent.contracts import (
+    AgentContext,
+    AgentErrorCode,
+    AgentExecutionError,
+    AgentResult,
+)
+from src.agent.orchestrators import WorkflowOrchestrator
+from src.agent.planning import TaskPlanner, WorkflowPlan
+from src.agent.runtime.event_bus import AgentEventBus
+from src.agent.skills.base_skill import BaseSkill
+
+
+@dataclass
+class WorkflowExecution:
+    plan: WorkflowPlan
+    result: AgentResult
+    events: list[dict[str, Any]]
+
+
+class WorkflowExecutor:
+    """Single boundary for planning, permission checks, and workflow execution."""
+
+    def __init__(
+        self,
+        planner: TaskPlanner | None = None,
+        orchestrator: WorkflowOrchestrator | None = None,
+    ):
+        self.planner = planner or TaskPlanner()
+        self.orchestrator = orchestrator
+
+    def execute(
+        self,
+        context: AgentContext,
+        skill: BaseSkill,
+        all_tools: Mapping[str, Any],
+        event_callback=None,
+        idempotency_key: str | None = None,
+    ) -> WorkflowExecution:
+        plan = self.planner.plan(context)
+        allowed = set(skill.allowed_tools or [])
+        planned = [step.tool_name for step in plan.steps]
+        unauthorized = [name for name in planned if allowed and name not in allowed]
+        missing = [name for name in planned if name not in all_tools]
+
+        if unauthorized or missing:
+            details = {
+                "skill": skill.name,
+                "unauthorized_tools": unauthorized,
+                "missing_tools": missing,
+                "planned_tools": planned,
+                "allowed_tools": sorted(allowed),
+            }
+            code = (
+                AgentErrorCode.UNAUTHORIZED_TOOL
+                if unauthorized
+                else AgentErrorCode.TOOL_UNAVAILABLE
+            )
+            error = AgentExecutionError(
+                code=code,
+                message="Workflow plan failed execution preflight",
+                details=details,
+            )
+            return WorkflowExecution(
+                plan=plan,
+                result=AgentResult(
+                    trace_id=context.trace_id,
+                    success=False,
+                    message=error.message,
+                    skill_name=skill.name,
+                    error=error,
+                    metadata={"preflight": details},
+                ),
+                events=[],
+            )
+
+        filtered_tools = {
+            name: tool
+            for name, tool in all_tools.items()
+            if not allowed or name in allowed
+        }
+        state_store = getattr(
+            self.orchestrator,
+            "state_store",
+            None,
+        )
+        event_bus = AgentEventBus(
+            on_event=event_callback,
+            state_store=state_store,
+        )
+        orchestrator = self.orchestrator or WorkflowOrchestrator(event_bus=event_bus)
+        if self.orchestrator is not None:
+            orchestrator.event_bus = event_bus
+        result = orchestrator.run(
+            context=context,
+            steps=plan.steps,
+            tools=filtered_tools,
+            continue_on_error=False,
+            idempotency_key=idempotency_key,
+        )
+        return WorkflowExecution(
+            plan=plan,
+            result=result,
+            events=[event.to_dict() for event in event_bus.events],
+        )

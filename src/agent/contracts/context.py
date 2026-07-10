@@ -16,6 +16,7 @@ class AgentContext:
     stream: bool = True
     temperature: float = 0.7
     mol_count: int = 5
+    memory: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def with_skill(self, skill_name: str) -> "AgentContext":
@@ -30,5 +31,6 @@ class AgentContext:
             stream=self.stream,
             temperature=self.temperature,
             mol_count=self.mol_count,
+            memory=list(self.memory),
             metadata=dict(self.metadata),
         )

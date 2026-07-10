@@ -1,7 +1,5 @@
 """靶点驱动分子设计编排技能"""
 
-from src.agent.orchestrators import WorkflowStep
-
 from .base_skill import BaseSkill
 
 
@@ -23,15 +21,7 @@ class TargetDrivenDesignSkill(BaseSkill):
         "activity_predictor",
         "molecular_docking",
     ]
-
-    workflow_steps = [
-        WorkflowStep("target_search", "target_database_search"),
-        WorkflowStep("molecule_generation", "llm_molecular_generator"),
-        WorkflowStep("properties", "property_calculator"),
-        WorkflowStep("admet", "admet_predictor"),
-        WorkflowStep("activity", "activity_predictor"),
-        WorkflowStep("docking", "molecular_docking"),
-    ]
+    is_workflow = True
 
     max_iterations_override = 12
 

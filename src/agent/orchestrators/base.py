@@ -9,8 +9,30 @@ class WorkflowStep:
     name: str
     tool_name: str
     input_data: Any = None
+    input_from: str | None = None
+    input_template: str | None = None
     continue_on_error: bool | None = None
     required: bool = True
     timeout_seconds: float | None = None
     output_key: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class WorkflowState:
+    trace_id: str
+    inputs: dict[str, Any] = field(default_factory=dict)
+    outputs: dict[str, Any] = field(default_factory=dict)
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    errors: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "trace_id": self.trace_id,
+            "inputs": self.inputs,
+            "outputs": self.outputs,
+            "artifacts": self.artifacts,
+            "warnings": self.warnings,
+            "errors": self.errors,
+        }

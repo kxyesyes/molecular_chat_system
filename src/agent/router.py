@@ -26,6 +26,9 @@ class SkillRouter:
 
     def __init__(self):
         self.registry = SkillRegistry()
+        from .routing import HybridSkillRouter
+
+        self.hybrid_router = HybridSkillRouter(registry=self.registry)
         logger.info(
             f"SkillRouter 初始化完成，已注册 {len(self.registry.skills)} 个技能: "
             f"{[s.name for s in self.registry.skills]}"
@@ -43,6 +46,23 @@ class SkillRouter:
             匹配到的 Skill 实例，如果没有匹配则返回 None
         """
         from .metrics import metrics_system
+
+        self.hybrid_router.llm = llm
+        decision = self.hybrid_router.decide(query)
+        if decision.selected_skill:
+            skill = self.registry.get_skill_by_name(decision.selected_skill)
+            if skill:
+                logger.info(
+                    "[Router] 混合路由命中: %s (confidence=%.2f, source=%s)",
+                    skill.name,
+                    decision.confidence,
+                    decision.source,
+                )
+                metrics_system.record_route_attempt(skill.name, True)
+                return skill
+        if decision.source == "fallback":
+            logger.info("[Router] 混合路由选择安全回退")
+            return None
 
         # 第一级：快速规则路由
         skill = self.registry.route_by_rules(query)

@@ -22,6 +22,9 @@ class TaskPlanner:
         skill = context.active_skill or ""
         query = context.query
 
+        if skill == "admet_assessment":
+            return self._admet_plan(query)
+
         if skill in {"comprehensive_evaluation", "comprehensive_evaluation_skill"}:
             return self._comprehensive_plan(query)
 
@@ -33,10 +36,103 @@ class TaskPlanner:
         if skill == "hit_to_lead_optimization":
             return self._lead_optimization_plan(query)
 
+        if skill == "target_database_search":
+            return WorkflowPlan(
+                workflow_name="target_database_search",
+                steps=[
+                    WorkflowStep(
+                        name="target_database_search",
+                        tool_name="target_database_search",
+                        input_data=self._extract_target_hint(query),
+                        output_key="result",
+                    )
+                ],
+                metadata={"input_type": "target_hint", "atomic": True},
+            )
+
+        if skill == "docking_simulation" and isinstance(
+            context.metadata.get("docking_input"), dict
+        ):
+            return WorkflowPlan(
+                workflow_name="docking_simulation",
+                steps=[
+                    WorkflowStep(
+                        name="docking_simulation",
+                        tool_name="molecular_docking",
+                        input_data=context.metadata["docking_input"],
+                        output_key="result",
+                    )
+                ],
+                metadata={"input_type": "structured_docking", "atomic": True},
+            )
+
+        if skill == "docking_simulation" and self._looks_like_unauthorized_tool_request(query):
+            return WorkflowPlan(
+                workflow_name="docking_simulation",
+                steps=[],
+                metadata={
+                    "input_type": "rejected_unauthorized_tool_request",
+                    "reason": "unauthorized_tool_request",
+                },
+            )
+
+        atomic_tools = {
+            "molecular_design": "llm_molecular_generator",
+            "activity_prediction": "activity_predictor",
+            "reverse_target_prediction": "reverse_target_predictor",
+            "docking_simulation": "molecular_docking",
+            "rag_search": "rag_search",
+        }
+        if skill in atomic_tools:
+            return WorkflowPlan(
+                workflow_name=skill,
+                steps=[
+                    WorkflowStep(
+                        name=skill,
+                        tool_name=atomic_tools[skill],
+                        input_data=query,
+                        output_key="result",
+                    )
+                ],
+                metadata={"input_type": "query", "atomic": True},
+            )
+
         return WorkflowPlan(
             workflow_name=skill or "single_step",
             steps=[],
             metadata={"reason": "no deterministic workflow matched"},
+        )
+
+    def _admet_plan(self, query: str) -> WorkflowPlan:
+        steps = [
+            WorkflowStep(
+                "properties",
+                "property_calculator",
+                query,
+                output_key="properties",
+            ),
+            WorkflowStep(
+                "drug_likeness",
+                "drug_likeness_assessment",
+                query,
+                output_key="drug_likeness",
+            ),
+        ]
+        if self._wants_admet(query):
+            steps.append(
+                WorkflowStep(
+                    "admet",
+                    "admet_predictor",
+                    query,
+                    required=False,
+                    continue_on_error=True,
+                    output_key="admet",
+                )
+            )
+        return WorkflowPlan(
+            workflow_name="admet_assessment",
+            steps=steps,
+            metadata={"input_type": "molecule"},
         )
 
     def _comprehensive_plan(self, query: str) -> WorkflowPlan:
@@ -45,10 +141,19 @@ class TaskPlanner:
             steps=[
                 WorkflowStep("properties", "property_calculator", query, output_key="properties"),
                 WorkflowStep(
+                    "drug_likeness",
+                    "drug_likeness_assessment",
+                    query,
+                    continue_on_error=True,
+                    required=False,
+                    output_key="drug_likeness",
+                ),
+                WorkflowStep(
                     "admet",
                     "admet_predictor",
                     query,
                     continue_on_error=True,
+                    required=False,
                     output_key="admet",
                 ),
                 WorkflowStep(
@@ -56,6 +161,7 @@ class TaskPlanner:
                     "activity_predictor",
                     query,
                     continue_on_error=True,
+                    required=False,
                     output_key="activity",
                 ),
                 WorkflowStep(
@@ -63,14 +169,17 @@ class TaskPlanner:
                     "reverse_target_predictor",
                     query,
                     continue_on_error=True,
+                    required=False,
                     output_key="targets",
                 ),
                 WorkflowStep(
                     "target_structures",
                     "target_database_search",
-                    query,
+                    input_from="targets",
                     continue_on_error=True,
+                    required=False,
                     output_key="structures",
+                    metadata={"input_mode": "raw"},
                 ),
             ],
             metadata={"input_type": "molecule"},
@@ -79,6 +188,7 @@ class TaskPlanner:
     def _target_driven_design_plan(self, query: str) -> WorkflowPlan:
         target_hint = self._extract_target_hint(query)
         requested_count = self._extract_requested_count(query, default=20)
+        docking_top_n = self._extract_top_n(query, default=min(5, requested_count))
         return WorkflowPlan(
             workflow_name="target_driven_design",
             steps=[
@@ -89,30 +199,34 @@ class TaskPlanner:
                     query,
                     output_key="molecules",
                 ),
-                WorkflowStep("properties", "property_calculator", query, output_key="properties"),
+                WorkflowStep(
+                    "properties",
+                    "property_calculator",
+                    input_from="molecules",
+                    output_key="properties",
+                ),
                 WorkflowStep(
                     "admet",
                     "admet_predictor",
-                    query,
+                    input_from="molecules",
                     continue_on_error=True,
+                    required=False,
                     output_key="admet",
                 ),
                 WorkflowStep(
                     "activity",
                     "activity_predictor",
-                    query,
+                    input_from="molecules",
                     continue_on_error=True,
+                    required=False,
                     output_key="activity",
                 ),
-                WorkflowStep(
-                    "docking",
-                    "molecular_docking",
-                    query,
-                    continue_on_error=True,
-                    output_key="docking",
-                ),
             ],
-            metadata={"target_hint": target_hint, "requested_count": requested_count},
+            metadata={
+                "target_hint": target_hint,
+                "requested_count": requested_count,
+                "docking_top_n": docking_top_n,
+            },
         )
 
     def _lead_optimization_plan(self, query: str) -> WorkflowPlan:
@@ -126,24 +240,32 @@ class TaskPlanner:
                     output_key="baseline",
                 ),
                 WorkflowStep(
+                    "baseline_admet",
+                    "admet_predictor",
+                    query,
+                    required=False,
+                    continue_on_error=True,
+                    output_key="baseline_admet",
+                ),
+                WorkflowStep(
+                    "baseline_activity",
+                    "activity_predictor",
+                    query,
+                    required=False,
+                    continue_on_error=True,
+                    output_key="baseline_activity",
+                ),
+                WorkflowStep(
                     "molecule_generation",
                     "llm_molecular_generator",
                     query,
                     output_key="candidates",
                 ),
                 WorkflowStep(
-                    "candidate_admet",
-                    "admet_predictor",
-                    query,
-                    continue_on_error=True,
-                    output_key="admet",
-                ),
-                WorkflowStep(
-                    "candidate_activity",
-                    "activity_predictor",
-                    query,
-                    continue_on_error=True,
-                    output_key="activity",
+                    "candidate_properties",
+                    "property_calculator",
+                    input_from="candidates",
+                    output_key="candidate_properties",
                 ),
             ],
             metadata={"input_type": "lead_molecule"},
@@ -156,8 +278,16 @@ class TaskPlanner:
 
     @staticmethod
     def _extract_target_hint(query: str) -> str:
-        match = re.search(r"(PDE\d+[A-Z]?|EGFR|KRAS|BRAF|JAK2|ALK|MET|CDK2|KDR)", query, re.I)
+        match = re.search(r"(PDE\d+[A-Z]?|EGFR|BACE1|KRAS|BRAF|JAK2|ALK|MET|CDK2|KDR)", query, re.I)
         return match.group(1).upper() if match else query.strip()
+
+    @staticmethod
+    def _looks_like_unauthorized_tool_request(query: str) -> bool:
+        lowered = query.lower()
+        return (
+            "run_docking" in lowered
+            and any(marker in lowered for marker in ("未授权", "忽略系统限制", "unauthorized", "ignore system"))
+        )
 
     @staticmethod
     def _extract_requested_count(query: str, default: int) -> int:
@@ -182,3 +312,27 @@ class TaskPlanner:
             if f"{text}个" in query:
                 return value
         return default
+
+    @staticmethod
+    def _extract_top_n(query: str, default: int) -> int:
+        match = re.search(r"(?:前\s*|top\s*)(\d+)", query, re.I)
+        if not match:
+            return default
+        return max(1, min(100, int(match.group(1))))
+
+    @staticmethod
+    def _wants_admet(query: str) -> bool:
+        lowered = query.lower()
+        return any(
+            token in lowered
+            for token in (
+                "admet",
+                "adme",
+                "吸收",
+                "分布",
+                "代谢",
+                "排泄",
+                "毒性",
+                "风险",
+            )
+        )

@@ -55,6 +55,10 @@ class ToolResult:
         message: str,
         details: dict | None = None,
         elapsed_ms: int | None = None,
+        warnings: list[str] | None = None,
+        evidence: list[dict[str, Any]] | None = None,
+        artifacts: list[WorkflowArtifact] | None = None,
+        quality: dict[str, Any] | None = None,
     ) -> "ToolResult":
         return cls(
             tool_name=tool_name,
@@ -63,6 +67,10 @@ class ToolResult:
             data=None,
             error=AgentExecutionError(code=code, message=message, details=details),
             elapsed_ms=elapsed_ms,
+            warnings=warnings or [],
+            evidence=evidence or [],
+            artifacts=artifacts or [],
+            quality=quality or {},
         )
 
     def to_legacy_dict(self) -> dict:
@@ -129,6 +137,22 @@ class AgentResult:
         )
 
     def to_legacy_dict(self) -> dict:
+        tool_result_sequence: list[dict[str, Any]] = []
+        tool_results_by_step: dict[str, dict[str, Any]] = {}
+        for index, result in enumerate(self.tool_results, start=1):
+            payload = result.to_legacy_dict()
+            step_id = str(
+                result.quality.get("step_id")
+                or f"{result.tool_name}:{index}"
+            )
+            step_payload = {
+                "step_id": step_id,
+                "tool_name": result.tool_name,
+                **payload,
+            }
+            tool_result_sequence.append(step_payload)
+            tool_results_by_step[step_id] = step_payload
+
         return {
             "success": self.success,
             "message": self.message,
@@ -138,6 +162,8 @@ class AgentResult:
                 result.tool_name: result.to_legacy_dict()
                 for result in self.tool_results
             },
+            "tool_result_sequence": tool_result_sequence,
+            "tool_results_by_step": tool_results_by_step,
             "partial": self.partial,
             "error": self.error.to_dict() if self.error else None,
             "metadata": self.metadata,

@@ -41,10 +41,15 @@ class BaseMolecularTool:
         complex_matches = re.findall(complex_smiles_pattern, text)
 
         for match in complex_matches:
+            candidate = match.strip().strip("`'\".,;")
             # 过滤掉纯英文单词
-            if not re.match(r'^[a-zA-Z]+$', match) and len(match) >= 6:
-                candidates.append(match)
-                logger.info(f"检测到复杂分子结构: {match}")
+            if (
+                not re.match(r'^[a-zA-Z]+$', candidate)
+                and len(candidate) >= 6
+                and self.validate_smiles(candidate)
+            ):
+                candidates.append(candidate)
+                logger.info(f"检测到复杂分子结构: {candidate}")
 
         # 方法2: 检查预定义的简单分子（仅在没有复杂分子时）
         if not candidates:
@@ -69,9 +74,10 @@ class BaseMolecularTool:
         for pattern in special_patterns:
             matches = re.findall(pattern, text)
             for match in matches:
-                if len(match) >= 10:  # 确保是复杂分子
-                    candidates.append(match)
-                    logger.info(f"检测到特殊分子模式: {match}")
+                candidate = match.strip().strip("`'\".,;")
+                if len(candidate) >= 10 and self.validate_smiles(candidate):  # 确保是复杂分子
+                    candidates.append(candidate)
+                    logger.info(f"检测到特殊分子模式: {candidate}")
 
         # 验证并去重
         valid_smiles = []
@@ -156,7 +162,30 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
     """Run legacy tools and normalize their output into ToolResult."""
     import time
 
-    from src.agent.contracts import AgentErrorCode, ToolResult
+    from src.agent.contracts import AgentErrorCode, ToolResult, WorkflowArtifact
+
+    def normalize_artifacts(values: Any) -> list[WorkflowArtifact]:
+        artifacts: list[WorkflowArtifact] = []
+        for value in values or []:
+            if isinstance(value, WorkflowArtifact):
+                artifacts.append(value)
+            elif isinstance(value, dict):
+                artifacts.append(
+                    WorkflowArtifact(
+                        artifact_type=str(value.get("artifact_type", "file")),
+                        path=str(value.get("path", "")),
+                        label=str(value.get("label", value.get("path", "artifact"))),
+                        mime_type=value.get("mime_type"),
+                        metadata=dict(value.get("metadata") or {}),
+                    )
+                )
+        return artifacts
+
+    def normalize_error_code(value: Any) -> AgentErrorCode:
+        try:
+            return AgentErrorCode(str(value))
+        except ValueError:
+            return AgentErrorCode.INTERNAL_ERROR
 
     tool_name = getattr(tool, "name", tool.__class__.__name__)
     start = time.perf_counter()
@@ -181,13 +210,34 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
                     message=raw_result.get("message", ""),
                     formatted=raw_result.get("formatted", ""),
                     elapsed_ms=elapsed_ms,
+                    warnings=list(raw_result.get("warnings") or []),
+                    evidence=list(raw_result.get("evidence") or []),
+                    artifacts=normalize_artifacts(raw_result.get("artifacts")),
+                    quality=dict(raw_result.get("quality") or {}),
                 )
+            raw_error = raw_result.get("error") or {}
+            if isinstance(raw_error, dict):
+                error_message = raw_error.get("message") or raw_result.get(
+                    "message", "Tool execution failed"
+                )
+                error_code = raw_error.get("code")
+                error_details = raw_error.get("details") or {"raw_result": raw_result}
+            else:
+                error_message = str(raw_error) or raw_result.get(
+                    "message", "Tool execution failed"
+                )
+                error_code = raw_result.get("error_code")
+                error_details = {"raw_result": raw_result}
             return ToolResult.error_result(
                 tool_name=tool_name,
-                code=AgentErrorCode.INTERNAL_ERROR,
-                message=raw_result.get("message", "Tool execution failed"),
-                details={"raw_result": raw_result},
+                code=normalize_error_code(error_code),
+                message=error_message,
+                details=error_details,
                 elapsed_ms=elapsed_ms,
+                warnings=list(raw_result.get("warnings") or []),
+                evidence=list(raw_result.get("evidence") or []),
+                artifacts=normalize_artifacts(raw_result.get("artifacts")),
+                quality=dict(raw_result.get("quality") or {}),
             )
 
         return ToolResult.success_result(

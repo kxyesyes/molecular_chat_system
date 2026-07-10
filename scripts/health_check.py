@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import os
 import sqlite3
 import subprocess
@@ -56,6 +57,9 @@ def check_vina() -> tuple[bool, str]:
     if vina_in_path:
         candidates.append(vina_in_path)
     if not candidates:
+        diagnostics = _docking_diagnostics()
+        if diagnostics.get("vina", {}).get("exists"):
+            return True, str(diagnostics["vina"]["path"])
         return False, "No Vina path found (set MOLECULAR_DOCKING_VINA)"
 
     vina_path = Path(candidates[0]).expanduser()
@@ -86,6 +90,10 @@ def check_adfrsuite() -> tuple[bool, str]:
 
     adfr_bin = os.environ.get("MOLECULAR_DOCKING_ADFR_BIN", "").strip()
     if not adfr_bin:
+        diagnostics = _docking_diagnostics()
+        receptor = diagnostics.get("adfr_prepare_receptor", {})
+        if receptor.get("exists"):
+            return True, str(receptor.get("path"))
         return False, "MOLECULAR_DOCKING_ADFR_BIN is empty (or set MOLECULAR_DOCKING_PREPARE_RECEPTOR)"
     adfr_dir = Path(adfr_bin).expanduser()
     if not adfr_dir.exists():
@@ -110,6 +118,10 @@ def check_ligand_preparation() -> tuple[bool, str]:
         if found:
             candidates.append(found)
     if not candidates:
+        diagnostics = _docking_diagnostics()
+        ligand = diagnostics.get("mk_prepare_ligand", {})
+        if ligand.get("exists"):
+            return True, str(ligand.get("path"))
         return False, "mk_prepare_ligand not found (set MOLECULAR_DOCKING_PREPARE_LIGAND)"
 
     command_path = Path(candidates[0]).expanduser()
@@ -155,7 +167,18 @@ def check_ollama() -> tuple[bool, str]:
         with urllib.request.urlopen(url, timeout=3) as response:
             if response.status != 200:
                 return False, f"{url} returned HTTP {response.status}"
-            return True, f"{url}"
+            payload = json.loads(response.read().decode("utf-8"))
+            names = {
+                str(item.get("name"))
+                for item in payload.get("models", [])
+                if item.get("name")
+            }
+            required_model = os.environ.get(
+                "MOLECULAR_GENERATOR_MODEL", "gmm-llama:latest"
+            )
+            if required_model not in names:
+                return False, f"{url} reachable but {required_model} is not installed"
+            return True, f"{url} ({required_model})"
     except urllib.error.URLError as exc:
         return False, f"Ollama not reachable at {url}: {exc}"
     except Exception as exc:
@@ -235,6 +258,51 @@ def check_agent_components() -> tuple[bool, str]:
         return True, f"planner, orchestrator and {len(registry.skills)} skills are available"
     except Exception as exc:
         return False, f"Agent component check failed: {exc}"
+
+
+def check_agent_platform() -> tuple[bool, str]:
+    try:
+        from src.agent.evaluation import EvaluationCase, EvaluationRunner
+        from src.agent.persistence import SQLiteAgentStateStore
+        from src.agent.routing import HybridSkillRouter
+
+        with tempfile.TemporaryDirectory(prefix="medchat_agent_platform_") as tmp:
+            store = SQLiteAgentStateStore(Path(tmp) / "agent.sqlite3")
+            store.start_run(
+                {
+                    "trace_id": "health-platform",
+                    "status": "running",
+                    "query": "health",
+                }
+            )
+            store.save_checkpoint(
+                {
+                    "trace_id": "health-platform",
+                    "step_id": "health",
+                    "status": "succeeded",
+                    "output": {"ok": True},
+                }
+            )
+            checkpoint = store.latest_checkpoint("health-platform", "health")
+            if not checkpoint or checkpoint.get("output") != {"ok": True}:
+                return False, "Agent persistence checkpoint round trip failed"
+
+        report = EvaluationRunner(HybridSkillRouter()).evaluate_routing(
+            [
+                EvaluationCase(
+                    case_id="health-route",
+                    version="1",
+                    category="routing",
+                    prompt="分析 CCO 的 ADMET",
+                    expected_skill="admet_assessment",
+                )
+            ]
+        )
+        if report.metrics.get("top1_accuracy") != 1.0:
+            return False, "Agent routing evaluation health case failed"
+        return True, "persistence, hybrid routing and evaluation are available"
+    except Exception as exc:
+        return False, f"Agent platform check failed: {exc}"
 
 
 def check_task_runtime() -> tuple[bool, str]:
@@ -406,6 +474,15 @@ def shutil_which(cmd: str) -> str | None:
     return shutil.which(cmd)
 
 
+def _docking_diagnostics() -> dict:
+    try:
+        from src.docking import docking_service
+
+        return docking_service.env_diagnostics()
+    except Exception:
+        return {}
+
+
 def run_checks(strict: bool) -> int:
     checks: list[tuple[str, Callable[[], tuple[bool, str]]]] = [
         ("RDKit", check_rdkit),
@@ -419,6 +496,7 @@ def run_checks(strict: bool) -> int:
         ("Agent Contracts", check_agent_contracts),
         ("Agent Tool Registry", check_agent_tool_registry),
         ("Agent Components", check_agent_components),
+        ("Agent Platform", check_agent_platform),
         ("Task Runtime", check_task_runtime),
         ("Supervisor Agent", check_supervisor_agent),
         ("Reverse Target Data", check_reverse_target_data),
