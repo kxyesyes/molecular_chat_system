@@ -171,7 +171,7 @@ python scripts/run_agent_acceptance.py --mode real
 python scripts/run_agent_acceptance.py --mode all
 ```
 
-`real`/`all` 会调用真实本地或外部服务，运行前确认凭据、模型和科学工具可用。
+`real`/`all` 会调用真实本地或外部服务，运行前确认凭据、模型和科学工具可用。测试允许使用真实外部 API key，但 key 只能来自运行时环境变量或本机密钥管理器，例如 `OPENAI_COMPATIBLE_API_KEY`；禁止输出、保存、提交、写入日志或报告。报告中只允许记录 `API key present: true` 或 `sk-***...***` 等脱敏状态。
 
 ### 靶点数据库检查
 
@@ -223,7 +223,7 @@ Get-ChildItem src/web/static/js -Recurse -Filter *.js -File |
 5. 范围不清楚、存在破坏性选择或会扩大任务边界时，先询问用户。
 6. 诊断任务只分析，不自动实施修复，除非用户明确要求修复。
 7. 修改功能或 Bug 时先建立可复现测试，再做最小修复。
-8. 不读取、输出或提交真实密钥；日志和报告必须脱敏。
+8. 测试允许使用真实外部 API key，但 key 只能来自运行时环境变量或本机密钥管理器；禁止输出、保存、提交、写入日志或报告。报告中只允许记录 `API key present: true` 或 `sk-***...***` 等脱敏状态。
 9. 不使用 `git reset --hard`、`git clean` 或覆盖式 checkout 回退用户改动。
 10. 完成时报告准确文件、命令、测试结果、分支、commit 和 PR。
 
@@ -257,7 +257,7 @@ test: cover checkpoint recovery
 
 ## 9. 禁止提交的内容
 
-- `.env`、API Key、token、密码、数据库连接凭据；
+- `.env`、API Key、token、密码、数据库连接凭据、写有真实密钥的临时脚本/报告/命令输出；
 - 用户输入、聊天原文、个人信息、未脱敏日志；
 - `outputs/`、`scratch/`、`temp_docking/`、`logs/`；
 - SQLite/DB 运行文件、FAISS 索引、模型权重、训练缓存；
@@ -273,7 +273,7 @@ test: cover checkpoint recovery
 - [ ] 当前分支不是 `main`。
 - [ ] `git status --short` 中只暂存本任务文件。
 - [ ] 未回退或覆盖用户已有改动。
-- [ ] 未写入 `.env`、密钥、token、隐私数据或机器专用凭据。
+- [ ] 真实 API key 仅来自运行时环境变量或本机密钥管理器，未写入 `.env`、日志、报告、命令输出、token、隐私数据或机器专用凭据。
 - [ ] 新行为有对应测试；文档命令有真实文件依据。
 - [ ] Python 测试、相关聚焦测试和 `compileall` 已运行。
 - [ ] 修改 JavaScript 时已运行 `node --check` 和相关 Node 测试。
