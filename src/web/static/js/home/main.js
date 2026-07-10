@@ -525,7 +525,7 @@
       elements.llmSettingsOverlay.setAttribute("aria-hidden", "false");
       setLlmSettingsStatus("正在读取当前模型配置...");
       try {
-        const response = await fetch("/api/llm/config");
+        const response = await window.MedChatAdminAuth.fetch("/api/llm/config");
         const result = await response.json();
         if (!result.success) {
           throw new Error(result.message || "读取配置失败");
@@ -577,7 +577,7 @@
       const payload = collectLlmSettingsForm();
       setLlmSettingsStatus("正在测试连接...");
       try {
-        const response = await fetch("/api/llm/test", {
+        const response = await window.MedChatAdminAuth.fetch("/api/llm/test", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -597,7 +597,7 @@
       const payload = collectLlmSettingsForm();
       setLlmSettingsStatus("正在保存并启用配置...");
       try {
-        const response = await fetch("/api/llm/config", {
+        const response = await window.MedChatAdminAuth.fetch("/api/llm/config", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -859,45 +859,50 @@
       return;
     }
 
+    elements.managedFileList.replaceChildren();
+
     if (!HomeState.managedFiles.length) {
-      elements.managedFileList.innerHTML =
-        '<li class="file-manager-list__empty">暂无文件，请先添加文档。</li>';
+      const emptyItem = document.createElement("li");
+      emptyItem.className = "file-manager-list__empty";
+      emptyItem.textContent = "暂无文件，请先添加文档。";
+      elements.managedFileList.appendChild(emptyItem);
       return;
     }
 
-    elements.managedFileList.innerHTML = HomeState.managedFiles
-      .map(function (file) {
-        return `
-          <li class="file-manager-list__item">
-            <div class="file-manager-list__meta">
-              <strong>${file.name}</strong>
-              <span>${Math.max(1, Math.round(file.size / 1024))} KB</span>
-            </div>
-            <button
-              class="file-manager-list__remove"
-              type="button"
-              data-file-id="${file.id}"
-              aria-label="移除 ${file.name}"
-            >
-              移除
-            </button>
-          </li>
-        `;
-      })
-      .join("");
+    HomeState.managedFiles.forEach(function (file) {
+      const item = document.createElement("li");
+      item.className = "file-manager-list__item";
 
-    elements.managedFileList
-      .querySelectorAll(".file-manager-list__remove")
-      .forEach(function (button) {
-        button.addEventListener("click", function () {
-          const fileId = button.getAttribute("data-file-id");
-          HomeState.managedFiles = HomeState.managedFiles.filter(function (file) {
-            return file.id !== fileId;
-          });
-          persistManagedFiles();
-          renderManagedFiles();
+      const meta = document.createElement("div");
+      meta.className = "file-manager-list__meta";
+
+      const fileName = document.createElement("strong");
+      fileName.textContent = file.name;
+
+      const fileSize = document.createElement("span");
+      const sizeKb = Math.max(1, Math.round((Number(file.size) || 0) / 1024));
+      fileSize.textContent = `${sizeKb} KB`;
+
+      meta.append(fileName, fileSize);
+
+      const removeButton = document.createElement("button");
+      removeButton.className = "file-manager-list__remove";
+      removeButton.type = "button";
+      removeButton.dataset.fileId = file.id;
+      removeButton.setAttribute("aria-label", `移除 ${file.name}`);
+      removeButton.textContent = "移除";
+      removeButton.addEventListener("click", function () {
+        const fileId = String(file.id);
+        HomeState.managedFiles = HomeState.managedFiles.filter(function (item) {
+          return item.id !== fileId;
         });
+        persistManagedFiles();
+        renderManagedFiles();
       });
+
+      item.append(meta, removeButton);
+      elements.managedFileList.appendChild(item);
+    });
   }
 
   async function handleModelChange(e) {
@@ -912,7 +917,7 @@
     }
 
     try {
-      const response = await fetch("/api/switch_model", {
+      const response = await window.MedChatAdminAuth.fetch("/api/switch_model", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1028,10 +1033,12 @@
       gap: 10px;
     `;
 
-    toast.innerHTML = `
-      <span style="font-size: 20px;">${icon}</span>
-      <span>${message}</span>
-    `;
+    const iconSpan = document.createElement("span");
+    iconSpan.style.fontSize = "20px";
+    iconSpan.textContent = icon;
+    const messageSpan = document.createElement("span");
+    messageSpan.textContent = message;
+    toast.append(iconSpan, messageSpan);
 
     // 添加动画样式
     if (!document.getElementById("toast-animation-style")) {
@@ -1599,7 +1606,13 @@
             backdrop-filter: blur(10px);
         `;
 
-    statusDiv.innerHTML = `<span style="margin-right: 8px;">✨</span>${message}`;
+    const iconSpan = document.createElement("span");
+    iconSpan.style.marginRight = "8px";
+    iconSpan.textContent = "✨";
+    const messageSpan = document.createElement("span");
+    messageSpan.textContent = message;
+    statusDiv.appendChild(iconSpan);
+    statusDiv.appendChild(messageSpan);
     elements.chatContainer.appendChild(statusDiv);
 
     // 3秒后自动移除
@@ -1629,7 +1642,13 @@
             backdrop-filter: blur(10px);
         `;
 
-    toolDiv.innerHTML = `🔧 ${message}`;
+    const iconSpan = document.createElement("span");
+    iconSpan.style.marginRight = "8px";
+    iconSpan.textContent = "🔧";
+    const messageSpan = document.createElement("span");
+    messageSpan.textContent = message;
+    toolDiv.appendChild(iconSpan);
+    toolDiv.appendChild(messageSpan);
     elements.chatContainer.appendChild(toolDiv);
 
     HomeChatRenderer.scrollToBottom();
@@ -2605,7 +2624,11 @@
       error: "❌",
     };
 
-    notification.innerHTML = `<span>${icons[type]}</span><span>${message}</span>`;
+    const iconSpan = document.createElement("span");
+    iconSpan.textContent = icons[type] || icons.info;
+    const messageSpan = document.createElement("span");
+    messageSpan.textContent = message;
+    notification.append(iconSpan, messageSpan);
     document.body.appendChild(notification);
 
     // 3秒后自动移除
@@ -2992,6 +3015,7 @@
 
   // 格式化反应预测结果
   function formatReactionPrediction(content) {
+    const safeContent = escapeHtml(content);
     if (content.includes("预测的可能产物")) {
       let visualContent = `
         <div style="background: linear-gradient(135deg, #fbb6ce20 0%, #f687b320 100%); border-radius: 16px; padding: 24px; margin: 16px 0;">
@@ -3011,7 +3035,7 @@
           <div style="background: white; border-radius: 12px; padding: 20px; margin: 16px 0; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
             <h4 style="margin: 0 0 12px 0; color: #2d3748;">⚗️ 反应物</h4>
             <div style="background: #f0f9ff; padding: 12px; border-radius: 8px; font-family: monospace; font-size: 16px; color: #0c4a6e; border: 2px solid #7dd3fc;">
-              ${reactantMatch[1]}
+              ${escapeHtml(reactantMatch[1])}
             </div>
           </div>
         `;
@@ -3031,9 +3055,9 @@
           const productMatch = product.match(
             /\d+\.\s*`([^`]+)`\s*\(置信度:\s*(\d+\.?\d*)%\)/
           );
-          if (productMatch) {
-            const productSMILES = productMatch[1];
-            const confidence = productMatch[2];
+            if (productMatch) {
+              const productSMILES = productMatch[1];
+              const confidence = productMatch[2];
             const confidenceNum = parseFloat(confidence);
 
             let confidenceColor = "#ef4444";
@@ -3047,11 +3071,11 @@
                 </div>
                 <div style="flex: 1; margin-right: 16px;">
                   <div style="background: #e0f2fe; padding: 10px; border-radius: 6px; font-family: monospace; font-size: 14px; color: #0c4a6e;">
-                    ${productSMILES}
+                    ${escapeHtml(productSMILES)}
                   </div>
                 </div>
                 <div style="background: ${confidenceColor}; color: white; padding: 8px 16px; border-radius: 20px; font-size: 14px; font-weight: bold; min-width: 80px; text-align: center;">
-                  ${confidence}%
+                  ${escapeHtml(confidence)}%
                 </div>
               </div>
             `;
@@ -3073,11 +3097,12 @@
       return visualContent;
     }
 
-    return content.replace(/\n/g, "<br>");
+    return safeContent.replace(/\n/g, "<br>");
   }
 
   // 格式化文献搜索结果
   function formatLiteratureResults(content) {
+    const safeContent = escapeHtml(content);
     if (content.includes("相关文献") || content.includes("相关专利")) {
       let visualContent = `
         <div style="background: linear-gradient(135deg, #a7f3d020 0%, #6ee7b720 100%); border-radius: 16px; padding: 24px; margin: 16px 0;">
@@ -3091,7 +3116,7 @@
       `;
 
       // 简单地格式化内容，保持原有的结构但增加样式
-      const formattedContent = content
+      const formattedContent = safeContent
         .replace(
           /\*\*(.*?)\*\*/g,
           '<strong style="color: #2d3748;">$1</strong>'
@@ -3113,11 +3138,12 @@
       return visualContent;
     }
 
-    return content.replace(/\n/g, "<br>");
+    return safeContent.replace(/\n/g, "<br>");
   }
 
   // 格式化ADMET预测结果
   function formatADMETResults(content) {
+    const safeContent = escapeHtml(content);
     if (
       content.includes("增强ADMET属性预测结果") ||
       content.includes("**理化性质:**")
@@ -3134,7 +3160,7 @@
       `;
 
       // 格式化内容并添加样式
-      let formattedContent = content
+      let formattedContent = safeContent
         .replace(/💊 增强ADMET属性预测结果/g, "")
         .replace(
           /\*\*(.*?)\*\*/g,
@@ -3162,11 +3188,12 @@
       visualContent += `</div>`;
       return visualContent;
     }
-    return content.replace(/\n/g, "<br>");
+    return safeContent.replace(/\n/g, "<br>");
   }
 
   // 格式化类药评估结果
   function formatDrugLikenessResults(content) {
+    const safeContent = escapeHtml(content);
     if (
       content.includes("类药性评估结果") ||
       content.includes("**综合评估:**")
@@ -3182,7 +3209,7 @@
           </div>
       `;
 
-      let formattedContent = content
+      let formattedContent = safeContent
         .replace(/💊 类药性评估结果/g, "")
         .replace(
           /\*\*(.*?)\*\*/g,
@@ -3215,11 +3242,12 @@
       visualContent += `</div>`;
       return visualContent;
     }
-    return content.replace(/\n/g, "<br>");
+    return safeContent.replace(/\n/g, "<br>");
   }
 
   // 格式化基础分子属性结果
   function formatMolecularProperties(content) {
+    const safeContent = escapeHtml(content);
     if (content.includes("基础分子属性计算结果")) {
       let visualContent = `
         <div style="background: linear-gradient(135deg, #ecfdf520 0%, #d1fae520 100%); border-radius: 16px; padding: 24px; margin: 16px 0;">
@@ -3232,7 +3260,7 @@
           </div>
       `;
 
-      let formattedContent = content
+      let formattedContent = safeContent
         .replace(/🧬 基础分子属性计算结果/g, "")
         .replace(
           /📊 关键属性:/g,
@@ -3256,11 +3284,12 @@
       visualContent += `</div>`;
       return visualContent;
     }
-    return content.replace(/\n/g, "<br>");
+    return safeContent.replace(/\n/g, "<br>");
   }
 
   // 格式化ReAct推理结果
   function formatReActResults(content) {
+    const safeContent = escapeHtml(content);
     if (
       content.includes("**推理过程:**") ||
       content.includes("**使用工具:**")
@@ -3276,7 +3305,7 @@
           </div>
       `;
 
-      let formattedContent = content
+      let formattedContent = safeContent
         .replace(
           /\*\*(推理过程|使用工具|分析结果):\*\*/g,
           '<div style="background: #fffbeb; margin: 16px 0; padding: 12px; border-radius: 8px; border-left: 4px solid #f59e0b;"><strong style="color: #92400e; font-size: 16px;">🔧 $1</strong></div>'
@@ -3300,7 +3329,7 @@
       visualContent += `</div>`;
       return visualContent;
     }
-    return content.replace(/\n/g, "<br>");
+    return safeContent.replace(/\n/g, "<br>");
   }
 
   // 获取分子属性（用于旧版本的分子卡片）

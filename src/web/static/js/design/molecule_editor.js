@@ -67,13 +67,31 @@ var MoleculeEditor = (function () {
     addCandidateComparison(beforeProps, afterProps, smiles, fragmentLabel);
   }
 
+  function candidateScore(beforeProps, afterProps) {
+    if (!afterProps) return 0;
+    beforeProps = beforeProps || {};
+    function delta(key) {
+      var beforeValue = Number(beforeProps[key]);
+      var afterValue = Number(afterProps[key]);
+      if (!Number.isFinite(beforeValue) || !Number.isFinite(afterValue)) return 0;
+      return afterValue - beforeValue;
+    }
+    var score = 0;
+    score += delta("qed") * 30;
+    score -= delta("logp") * 4;
+    score -= delta("mw") * 0.02;
+    score -= delta("tpsa") * 0.03;
+    score -= delta("sa_score") * 5;
+    return Number(score.toFixed(4));
+  }
+
   function renderCandidateBoard() {
     var box = document.getElementById("candidateCompare");
     if (!box) return;
     var candidates = S.candidates || [];
     var header =
       '<div class="candidate-compare-title">' +
-      "<span>候选分子对比</span><small>保留最近 5 次取代</small>" +
+      "<span>候选分子对比</span><small>按综合分保留 Top 10</small>" +
       "</div>";
     if (!candidates.length) {
       box.innerHTML =
@@ -125,14 +143,24 @@ var MoleculeEditor = (function () {
   function addCandidateComparison(beforeProps, afterProps, smiles, fragmentLabel) {
     if (!afterProps) return;
     S.candidates = S.candidates || [];
+    var existingIndex = S.candidates.findIndex(function (candidate) {
+      return candidate.smiles === smiles;
+    });
+    if (existingIndex >= 0) {
+      S.candidates.splice(existingIndex, 1);
+    }
     S.candidates.unshift({
       step: S.iter,
       smiles: smiles,
       fragmentLabel: fragmentLabel,
       beforeProps: beforeProps || {},
       props: Object.assign({}, afterProps),
+      score: candidateScore(beforeProps, afterProps),
     });
-    S.candidates = S.candidates.slice(0, 5);
+    S.candidates.sort(function (a, b) {
+      return (b.score || 0) - (a.score || 0);
+    });
+    S.candidates = S.candidates.slice(0, 10);
     renderCandidateBoard();
   }
 
@@ -214,7 +242,7 @@ var MoleculeEditor = (function () {
         S.iter++;
         var iterEl = document.getElementById("iterCount");
         if (iterEl) iterEl.textContent = S.iter;
-        await PropertiesPanel.calcProps(d.new_smiles);
+        await PropertiesPanel.calcProps(d.new_smiles, smi);
         HistoryManager.addHist(d.new_smiles, S.curProps);
         renderCandidateComparison(beforeProps, S.curProps, d.new_smiles, S.selectedFrag.label);
         UI.setFeedback("取代完成，候选分子的属性变化已更新。", "success");

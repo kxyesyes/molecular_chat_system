@@ -1,8 +1,22 @@
 "use strict";
 
 window.HomeFormatters = (function () {
+  const Safe = window.MedChatSafeRender || {
+    escapeHtml: function (content) {
+      return String(content)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/'/g, "&#039;")
+        .replace(/"/g, "&quot;");
+    },
+    safeUrl: function () {
+      return "#";
+    },
+  };
+
   function escapeHtml(content) {
-    return String(content).replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return Safe.escapeHtml(content);
   }
 
   function withCardFrame(icon, title, subtitle, gradient, bodyHtml) {
@@ -45,7 +59,15 @@ window.HomeFormatters = (function () {
       .replace(/\*(.*?)\*/g, "<em>$1</em>")
       .replace(
         /\[([^\]]+)\]\(([^)]+)\)/g,
-        '<a href="$2" target="_blank" style="color: #4299e1; text-decoration: underline;">$1</a>',
+        function (_, label, url) {
+          return (
+            '<a href="' +
+            Safe.safeUrl(url) +
+            '" target="_blank" rel="noopener noreferrer" style="color: #4299e1; text-decoration: underline;">' +
+            escapeHtml(label) +
+            "</a>"
+          );
+        },
       )
       .replace(/\n/g, "<br>");
   }

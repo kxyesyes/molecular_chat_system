@@ -7,7 +7,7 @@ import sys
 from typing import List, Dict, Any, Optional
 import httpx
 import yaml
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
@@ -21,6 +21,7 @@ from .llm_runtime_config import (
     public_llm_config,
     save_runtime_config,
 )
+from .admin_auth import require_admin
 
 try:
     import faiss  # type: ignore
@@ -402,15 +403,17 @@ class MolecularChatApp:
         
         self.rag_system = RAGSystem(self.config)
         
+        self.agent_state_store = None
+        self.agent_tool_registry = None
+
         # 初始化Agent系统
         try:
-            from src.agent.react_agent import ReActMolecularAgent
-            self.agent_system = ReActMolecularAgent(llm=None)  # Agent工具使用自己的gmm-llama
+            self.molecular_generator_model = _init_ollama_model()
+            self.agent_system = self._create_chat_agent()
             logger.info("✅ Agent系统初始化成功")
         except Exception as e:
             logger.warning(f"⚠️ Agent系统初始化失败: {e}")
             self.agent_system = None
-        
         # 初始化ChatHandler
         try:
             from src.web.chat_handler import ChatHandler
@@ -431,7 +434,81 @@ class MolecularChatApp:
         self.app = FastAPI(title="Molecular Chat System")
         self._setup_routes()
 
+    def _create_chat_agent(self):
+        """Create the sole chat-facing Supervisor entry point."""
+        from src.agent.supervisor import SupervisorAgent
+        from src.agent.tools import get_all_tools
+
+        tools = {
+            tool.name: tool
+            for tool in get_all_tools(self.molecular_generator_model)
+        }
+        return SupervisorAgent(
+            tools=tools,
+            llm=self.model,
+            molecular_generator_llm=self.molecular_generator_model,
+            state_store=self._get_agent_state_store(),
+        )
+
+    def _get_agent_state_store(self):
+        from src.agent.persistence import SQLiteAgentStateStore
+
+        if self.agent_state_store is None:
+            configured_path = Path(
+                os.environ.get("AGENT_STATE_DB", "data/agent_state.sqlite3")
+            )
+            state_path = (
+                configured_path
+                if configured_path.is_absolute()
+                else project_root / configured_path
+            )
+            self.agent_state_store = SQLiteAgentStateStore(state_path)
+        return self.agent_state_store
+
+    def _create_supervisor_agent(self):
+        from src.agent.specialists import build_default_specialists
+        from src.agent.supervisor import SupervisorAgent
+        from src.agent.tooling import build_tool_registry
+
+        state_store = self._get_agent_state_store()
+        if self.agent_tool_registry is None:
+            tools = (
+                self.agent_system.tools.values()
+                if self.agent_system is not None
+                else []
+            )
+            self.agent_tool_registry = build_tool_registry(tools)
+        return SupervisorAgent(
+            tool_registry=self.agent_tool_registry,
+            specialists=build_default_specialists(),
+            state_store=state_store,
+        )
+
     def _llm_config_from_yaml(self) -> Dict[str, Any]:
+        external_api_key = (
+            os.environ.get("OPENAI_COMPATIBLE_API_KEY")
+            or os.environ.get("EXTERNAL_LLM_API_KEY")
+            or ""
+        ).strip()
+        if external_api_key:
+            return normalize_llm_config(
+                {
+                    "provider": "openai_compatible",
+                    "base_url": (
+                        os.environ.get("OPENAI_COMPATIBLE_BASE_URL")
+                        or os.environ.get("EXTERNAL_LLM_BASE_URL")
+                        or ""
+                    ),
+                    "model_name": (
+                        os.environ.get("OPENAI_COMPATIBLE_MODEL")
+                        or os.environ.get("EXTERNAL_LLM_MODEL")
+                        or ""
+                    ),
+                    "api_key": external_api_key,
+                    "stream": self.config.get("inference", {}).get("stream", True),
+                }
+            )
+
         modelscope_config = self.config.get("modelscope", {})
         modelscope_api_key = str(modelscope_config.get("api_key", "") or "").strip()
         if modelscope_config and modelscope_api_key:
@@ -461,15 +538,33 @@ class MolecularChatApp:
         )
 
     def _load_active_llm_config(self) -> Dict[str, Any]:
-        config = load_runtime_config(self.runtime_llm_config_path) or self._llm_config_from_yaml()
+        environment_config = self._llm_config_from_yaml()
+        runtime_config = load_runtime_config(self.runtime_llm_config_path)
+        if runtime_config:
+            config = {**environment_config, **runtime_config}
+            config["api_key"] = (
+                environment_config.get("api_key", "")
+                if runtime_config.get("provider") == environment_config.get("provider")
+                else ""
+            )
+        else:
+            config = environment_config
         if not config.get("base_url"):
             config["base_url"] = (
                 "http://localhost:11434"
                 if config.get("provider") == "ollama"
-                else "https://api-inference.modelscope.cn/v1/chat/completions"
+                else (
+                    "https://api-inference.modelscope.cn/v1/chat/completions"
+                    if config.get("provider") == "modelscope"
+                    else "https://api.openai.com/v1/chat/completions"
+                )
             )
         if not config.get("model_name"):
-            config["model_name"] = "gmm-llama:latest" if config.get("provider") == "ollama" else "ZhipuAI/GLM-5.1"
+            config["model_name"] = (
+                "gmm-llama:latest"
+                if config.get("provider") == "ollama"
+                else ("ZhipuAI/GLM-5.1" if config.get("provider") == "modelscope" else "gpt-4o-mini")
+            )
         return normalize_llm_config(config)
 
     def _create_model_from_llm_config(self, llm_config: Dict[str, Any]):
@@ -480,12 +575,22 @@ class MolecularChatApp:
                 model_name=config.get("model_name") or "gmm-llama:latest",
             )
 
-        from src.agent.modelscope_model import ModelScopeModel
+        if config.get("provider") == "modelscope":
+            from src.agent.modelscope_model import ModelScopeModel
 
-        return ModelScopeModel(
+            return ModelScopeModel(
+                api_key=config.get("api_key", ""),
+                model_name=config.get("model_name") or "ZhipuAI/GLM-5.1",
+                base_url=config.get("base_url") or "https://api-inference.modelscope.cn/v1/chat/completions",
+            )
+
+        from src.agent.openai_compatible_model import OpenAICompatibleModel
+
+        return OpenAICompatibleModel(
             api_key=config.get("api_key", ""),
-            model_name=config.get("model_name") or "ZhipuAI/GLM-5.1",
-            base_url=config.get("base_url") or "https://api-inference.modelscope.cn/v1/chat/completions",
+            model_name=config.get("model_name") or "gpt-4o-mini",
+            base_url=config.get("base_url") or "https://api.openai.com/v1/chat/completions",
+            provider_name="OpenAI-compatible",
         )
 
     def _apply_llm_config(self, llm_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -496,6 +601,11 @@ class MolecularChatApp:
         if self.chat_handler:
             self.chat_handler.model = self.model
             self.chat_handler.config = self.config
+        if self.agent_system:
+            if hasattr(self.agent_system, "set_llm"):
+                self.agent_system.set_llm(self.model)
+            else:
+                self.agent_system.llm = self.model
         return config
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
@@ -574,8 +684,7 @@ class MolecularChatApp:
                 # 使用新的ChatHandler（支持Agent工具）
                 await self.chat_handler.handle_websocket(websocket)
             else:
-                # 回退到旧的处理方式
-                await self._handle_websocket(websocket)
+                await self._reject_websocket_without_chat_handler(websocket)
 
         @self.app.get("/health")
         async def health_check():
@@ -588,7 +697,7 @@ class MolecularChatApp:
                 "timestamp": __import__('time').time()
             }
 
-        @self.app.get("/api/llm/config")
+        @self.app.get("/api/llm/config", dependencies=[Depends(require_admin)])
         async def get_llm_config():
             """Return public LLM connection configuration without leaking API keys."""
             return {
@@ -596,7 +705,7 @@ class MolecularChatApp:
                 "config": public_llm_config(self.active_llm_config),
             }
 
-        @self.app.post("/api/llm/config")
+        @self.app.post("/api/llm/config", dependencies=[Depends(require_admin)])
         async def save_llm_config(request: Request):
             """Save and activate runtime LLM connection configuration."""
             payload = await request.json()
@@ -617,7 +726,7 @@ class MolecularChatApp:
                 "config": public_llm_config(saved_config),
             }
 
-        @self.app.post("/api/llm/test")
+        @self.app.post("/api/llm/test", dependencies=[Depends(require_admin)])
         async def test_llm_config(request: Request):
             """Test a submitted LLM connection without saving it."""
             payload = await request.json()
@@ -628,11 +737,12 @@ class MolecularChatApp:
             try:
                 test_model = self._create_model_from_llm_config(test_config)
                 response = await test_model.generate(
-                    "请用一句中文回复：连接测试成功。",
+                    "Reply with exactly: CONNECTION_OK",
                     temperature=0.1,
                     max_tokens=64,
                 )
-                is_success = bool(response and "失败" not in response and "未配置" not in response)
+                failure_markers = ("失败", "未配置", "HTTP ", "API Key", "Base URL", "模型名称")
+                is_success = bool(response and not any(marker in response for marker in failure_markers))
                 return {
                     "success": is_success,
                     "message": "连接测试成功" if is_success else response,
@@ -642,7 +752,7 @@ class MolecularChatApp:
                 logger.error(f"LLM connection test failed: {e}", exc_info=True)
                 return {"success": False, "message": f"连接测试失败: {str(e)}"}
 
-        @self.app.post("/api/switch_model")
+        @self.app.post("/api/switch_model", dependencies=[Depends(require_admin)])
         async def switch_model(request: Request):
             """Switch model name for the current provider."""
             payload = await request.json()
@@ -707,11 +817,34 @@ class MolecularChatApp:
             from .routes.system_routes import setup_system_routes
 
             setup_task_routes(self.app)
-            setup_agent_workflow_routes(self.app)
+            setup_agent_workflow_routes(
+                self.app,
+                supervisor_factory=self._create_supervisor_agent,
+            )
             setup_system_routes(self.app)
             logger.info("Task runtime and system metadata routes registered")
         except Exception as e:
             logger.warning(f"Task runtime routes registration failed: {e}")
+
+    async def _reject_websocket_without_chat_handler(self, websocket: WebSocket):
+        """Fail closed when the modern ChatHandler/Agent entrypoint is unavailable.
+
+        Falling back to the legacy websocket handler can bypass SupervisorAgent,
+        WorkflowOrchestrator, ToolResult normalization, and domain validators.
+        """
+        logger.error(
+            "ChatHandler unavailable; refusing websocket connection to avoid "
+            "bypassing the SupervisorAgent workflow"
+        )
+        await websocket.accept()
+        await websocket.send_text(json.dumps({
+            "type": "error",
+            "message": (
+                "Chat service is unavailable because the modern Agent entrypoint "
+                "was not initialized. Please check server startup logs."
+            ),
+        }, ensure_ascii=False))
+        await websocket.close(code=1011)
 
     async def _handle_websocket(self, websocket: WebSocket):
         """Handle WebSocket connections"""

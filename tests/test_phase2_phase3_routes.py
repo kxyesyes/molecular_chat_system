@@ -10,6 +10,7 @@ from src.web.routes.system_routes import setup_system_routes
 
 
 def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEDCHAT_ADMIN_TOKEN", "unit-admin-token")
     monkeypatch.setenv("MEDCHAT_TASK_DB_PATH", str(tmp_path / "tasks.sqlite"))
     task_manager_module._MANAGER = None
 
@@ -18,6 +19,7 @@ def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
     setup_system_routes(app)
     setup_agent_workflow_routes(app)
     client = TestClient(app)
+    admin_headers = {"X-MedChat-Admin-Token": "unit-admin-token"}
 
     plan_response = client.post(
         "/api/agent/workflows/plan",
@@ -25,18 +27,23 @@ def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
             "query": "Design PDE5 drug-like molecules and evaluate docking",
             "skill_name": "target_driven_design",
         },
+        headers=admin_headers,
     )
     assert plan_response.status_code == 200
     plan_payload = plan_response.json()
     assert plan_payload["success"] is True
     assert len(plan_payload["data"]["steps"]) >= 3
 
-    task_response = client.post("/api/tasks/demo", json={"hello": "world"})
+    task_response = client.post(
+        "/api/tasks/demo",
+        json={"hello": "world"},
+        headers=admin_headers,
+    )
     assert task_response.status_code == 200
     task_id = task_response.json()["data"]["task_id"]
 
     for _ in range(50):
-        status_response = client.get(f"/api/tasks/{task_id}")
+        status_response = client.get(f"/api/tasks/{task_id}", headers=admin_headers)
         status_payload = status_response.json()["data"]
         if status_payload["status"] == "succeeded":
             break
@@ -44,6 +51,6 @@ def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
     else:
         raise AssertionError("demo task did not finish")
 
-    versions_response = client.get("/api/system/data-versions")
+    versions_response = client.get("/api/system/data-versions", headers=admin_headers)
     assert versions_response.status_code == 200
     assert "target_db" in versions_response.json()["data"]

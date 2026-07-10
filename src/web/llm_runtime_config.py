@@ -8,6 +8,7 @@ from typing import Any, Dict
 
 
 DEFAULT_PROVIDER = "ollama"
+PERSISTED_FIELDS = ("provider", "base_url", "model_name", "stream")
 
 
 def normalize_llm_config(raw: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -47,13 +48,21 @@ def load_runtime_config(path: str | Path) -> Dict[str, Any]:
     if not config_path.exists():
         return {}
     with config_path.open("r", encoding="utf-8") as f:
-        return normalize_llm_config(json.load(f))
+        raw = json.load(f)
+    config = normalize_llm_config(raw)
+    config["api_key"] = ""
+    if isinstance(raw, dict) and "api_key" in raw:
+        persisted = {key: config[key] for key in PERSISTED_FIELDS}
+        with config_path.open("w", encoding="utf-8") as f:
+            json.dump(persisted, f, ensure_ascii=False, indent=2)
+    return config
 
 
 def save_runtime_config(path: str | Path, raw: Dict[str, Any]) -> Dict[str, Any]:
     config = normalize_llm_config(raw)
+    persisted = {key: config[key] for key in PERSISTED_FIELDS}
     config_path = Path(path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with config_path.open("w", encoding="utf-8") as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
+        json.dump(persisted, f, ensure_ascii=False, indent=2)
     return config

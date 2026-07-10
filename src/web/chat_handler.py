@@ -25,6 +25,7 @@ class ChatHandler:
     async def handle_websocket(self, websocket: WebSocket):
         """处理 WebSocket 连接"""
         await websocket.accept()
+        conversation_history: List[Dict[str, Any]] = []
         
         # 连接建立后立即发送连接成功消息
         try:
@@ -70,7 +71,16 @@ class ChatHandler:
                 await self._send_status(websocket, "Processing your message...")
 
                 # 处理消息，传递高级配置
-                await self._process_message(websocket, message, enable_rag, enable_tools, rag_count, temperature, mol_count)
+                await self._process_message(
+                    websocket,
+                    message,
+                    enable_rag,
+                    enable_tools,
+                    rag_count,
+                    temperature,
+                    mol_count,
+                    conversation_history=conversation_history,
+                )
                     
         except WebSocketDisconnect:
             logger.info("WebSocket disconnected")
@@ -91,15 +101,24 @@ class ChatHandler:
     async def _process_message(self, websocket: WebSocket, message: str, 
                               enable_rag: bool, enable_tools: bool, 
                               rag_count: int = 5, temperature: float = 0.7,
-                              mol_count: int = 5):
+                              mol_count: int = 5,
+                              conversation_history: List[Dict[str, Any]] | None = None):
         """处理用户消息 - 性能优化版"""
+        history = (
+            conversation_history
+            if conversation_history is not None
+            else self.conversation_history
+        )
         start_time = time.time()
         full_response = ""
         agent_used = False
         agent_response = ""
+        agent_result = None
         
         # 优化1: 并行执行Agent和RAG检索（如果都启用）
         agent_task = None
+        agent_event_queue = None
+        live_agent_events = 0
         rag_task = None
         
         # Agent 处理（使用temperature参数）
@@ -140,7 +159,26 @@ class ChatHandler:
                     "message": "🔧 启动智能代理..."
                 }))
                 
-            agent_task = asyncio.create_task(self._execute_agent(message, temperature, mol_count, matched_skill))
+            loop = asyncio.get_running_loop()
+            agent_event_queue = asyncio.Queue()
+
+            def on_agent_event(event):
+                payload = event.to_dict() if hasattr(event, "to_dict") else event
+                if isinstance(payload, dict):
+                    loop.call_soon_threadsafe(
+                        agent_event_queue.put_nowait,
+                        payload,
+                    )
+
+            agent_task = asyncio.create_task(
+                self._execute_agent(
+                    message,
+                    temperature,
+                    mol_count,
+                    matched_skill,
+                    event_callback=on_agent_event,
+                )
+            )
         
         # 等待并行任务完成
         retrieved_molecules = []
@@ -149,8 +187,23 @@ class ChatHandler:
         
         if agent_task:
             try:
+                while not agent_task.done():
+                    try:
+                        event = await asyncio.wait_for(
+                            agent_event_queue.get(),
+                            timeout=0.05,
+                        )
+                    except asyncio.TimeoutError:
+                        continue
+                    await self._send_agent_event(websocket, event)
+                    live_agent_events += 1
                 agent_result = await agent_task
-                await self._send_agent_events(websocket, agent_result)
+                while agent_event_queue and not agent_event_queue.empty():
+                    event = agent_event_queue.get_nowait()
+                    await self._send_agent_event(websocket, event)
+                    live_agent_events += 1
+                if not live_agent_events:
+                    await self._send_agent_events(websocket, agent_result)
                 if agent_result.get('success'):
                     agent_response = agent_result.get('final_answer', '')
                     agent_used = True
@@ -159,8 +212,11 @@ class ChatHandler:
                     
                     # 检查是否有 RAG 工具结果，并将其注入 UI
                     tool_results = agent_result.get('tool_results', {})
-                    if 'rag_database_search' in tool_results:
-                        rag_res = tool_results['rag_database_search']
+                    rag_res = (
+                        tool_results.get('rag_search')
+                        or tool_results.get('rag_database_search')
+                    )
+                    if rag_res:
                         if rag_res.get('success') and rag_res.get('data'):
                             retrieved_molecules = rag_res['data']
                             rag_context = self._format_rag_context(retrieved_molecules)
@@ -224,10 +280,45 @@ class ChatHandler:
                 logger.error(f"Legacy RAG search failed: {e}")
         
         # 构建提示词
+        summarize_workflow = self.config.get("agent", {}).get(
+            "summarize_workflow_results",
+            False,
+        )
+        is_workflow_result = bool(
+            agent_result and agent_result.get("workflow_plan")
+        )
+        if (
+            agent_used
+            and agent_response
+            and is_workflow_result
+            and not summarize_workflow
+        ):
+            full_response = agent_response
+            await websocket.send_text(json.dumps({
+                "type": "complete",
+                "content": full_response,
+            }, ensure_ascii=False))
+            history.append({
+                "user": message,
+                "agent_used": True,
+                "agent_response": agent_response,
+                "rag_enabled": enable_rag,
+                "molecules_retrieved": len(retrieved_molecules),
+                "assistant": full_response,
+            })
+            if len(history) > 20:
+                del history[:-20]
+            return
+
         if agent_used and agent_response:
             prompt = self._build_prompt_with_agent(message, agent_response, rag_context, retrieved_molecules)
         else:
-            prompt = self._build_prompt(message, rag_context, retrieved_molecules)
+            prompt = self._build_prompt(
+                message,
+                rag_context,
+                retrieved_molecules,
+                conversation_history=history,
+            )
         
         # 优化3: 缩短提示词长度（为4GB显存优化）
         if len(prompt) > 3000:  # 降低阈值从4000到3000
@@ -288,7 +379,7 @@ class ChatHandler:
             }))
         
         # 优化5: 限制对话历史长度，避免内存泄漏
-        self.conversation_history.append({
+        history.append({
             "user": message,
             "agent_used": agent_used,
             "agent_response": agent_response if agent_used else None,
@@ -298,17 +389,36 @@ class ChatHandler:
         })
         
         # 只保留最近20条对话
-        if len(self.conversation_history) > 20:
-            self.conversation_history = self.conversation_history[-20:]
+        if len(history) > 20:
+            del history[:-20]
     
-    async def _execute_agent(self, message: str, temperature: float = 0.7, mol_count: int = 5, active_skill=None):
+    async def _execute_agent(
+        self,
+        message: str,
+        temperature: float = 0.7,
+        mol_count: int = 5,
+        active_skill=None,
+        event_callback=None,
+    ):
         """异步执行Agent（用于并行处理）"""
         try:
+            import inspect
+
+            execute_parameters = inspect.signature(
+                self.agent_system.execute
+            ).parameters
+            execute_kwargs = {
+                "temperature": temperature,
+                "mol_count": mol_count,
+                "active_skill": active_skill,
+            }
+            if "event_callback" in execute_parameters:
+                execute_kwargs["event_callback"] = event_callback
             # 在线程池中执行同步的agent.execute，传递temperature和mol_count参数
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
                 None, 
-                lambda: self.agent_system.execute(message, temperature=temperature, mol_count=mol_count, active_skill=active_skill)
+                lambda: self.agent_system.execute(message, **execute_kwargs)
             )
             return result
         except Exception as e:
@@ -324,10 +434,14 @@ class ChatHandler:
         for event in events:
             if not isinstance(event, dict):
                 continue
-            await websocket.send_text(json.dumps({
-                "type": "agent_event",
-                "event": event,
-            }, ensure_ascii=False))
+            await self._send_agent_event(websocket, event)
+
+    @staticmethod
+    async def _send_agent_event(websocket: WebSocket, event: Dict[str, Any]):
+        await websocket.send_text(json.dumps({
+            "type": "agent_event",
+            "event": event,
+        }, ensure_ascii=False))
     
     async def _send_greeting(self, websocket: WebSocket):
         """发送问候语 - 端到端药物设计系统"""
@@ -434,17 +548,23 @@ class ChatHandler:
         
         return "\n".join(context_parts)
     
-    def _build_prompt(self, user_message: str, rag_context: str, 
-                     retrieved_molecules: List[Dict[str, Any]]) -> str:
+    def _build_prompt(self, user_message: str, rag_context: str,
+                     retrieved_molecules: List[Dict[str, Any]],
+                     conversation_history: List[Dict[str, Any]] | None = None) -> str:
         """构建提示词 - 中文优化版，针对API-key模型"""
+        history = (
+            conversation_history
+            if conversation_history is not None
+            else self.conversation_history
+        )
         
         # 导入系统提示词
         from src.agent.prompts import DRUG_DESIGN_SYSTEM_PROMPT
         
         # 构建对话上下文
         conversation_context = ""
-        if self.conversation_history:
-            recent_history = self.conversation_history[-2:]  # 仅2轮对话，降低显存占用
+        if history:
+            recent_history = history[-2:]  # 仅2轮对话，降低显存占用
             conversation_context = "\n## 📝 最近对话历史\n"
             for i, entry in enumerate(recent_history, 1):
                 conversation_context += f"\n**对话 {i}:**\n"

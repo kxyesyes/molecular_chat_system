@@ -196,7 +196,7 @@ window.ActivityMain = (function () {
     formData.append("lr_scheduler", document.getElementById("trainScheduler").value);
 
     try {
-      const response = await fetch("/api/activity/train", {
+      const response = await window.MedChatAdminAuth.fetch("/api/activity/train", {
         method: "POST",
         body: formData,
       });

@@ -133,7 +133,7 @@ window.ActivityTraining = (function () {
 
     activeTimer = setInterval(async function () {
       try {
-        const res = await fetch(`/api/activity/train/status/${jobId}`);
+        const res = await window.MedChatAdminAuth.fetch(`/api/activity/train/status/${jobId}`);
         const payload = await res.json();
         if (!res.ok || !payload.success) return;
 
@@ -225,7 +225,7 @@ window.ActivityTraining = (function () {
       if (dock) dock.style.display = "flex";
       ActivityUtils.setText("dock-status-text", "Reconnecting...");
 
-      fetch(`/api/activity/train/status/${parsed.jobId}`)
+      window.MedChatAdminAuth.fetch(`/api/activity/train/status/${parsed.jobId}`)
         .then(function (response) {
           return response.json();
         })

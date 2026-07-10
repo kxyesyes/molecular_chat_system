@@ -39,11 +39,16 @@ var DesignApi = (function () {
   }
 
   /** 计算分子属性 */
-  async function calcProperties(smiles) {
+  async function calcProperties(smiles, options) {
+    options = options || {};
     var r = await fetch(_BASE + "/properties", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ smiles: smiles }),
+      body: JSON.stringify({
+        smiles: smiles,
+        command: options.command || "",
+        reference_smiles: options.reference_smiles || "",
+      }),
     });
     return r.json();
   }

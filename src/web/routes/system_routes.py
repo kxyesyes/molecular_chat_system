@@ -1,25 +1,44 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+import os
+from pathlib import Path
+
+from fastapi import Depends, FastAPI
 
 from src.system import collect_data_versions
-from src.task_runtime.database import get_task_db_path, init_db
+from src.task_runtime.database import get_task_db_path
 from src.web.api_response import api_success
+from src.web.admin_auth import require_admin
+
+
+def _is_task_db_writable(task_db: Path) -> bool:
+    if task_db.exists():
+        return os.access(task_db, os.W_OK)
+    return task_db.parent.exists() and os.access(task_db.parent, os.W_OK)
 
 
 def setup_system_routes(app: FastAPI) -> None:
-    @app.get("/api/system/data-versions")
+    @app.get("/api/system/data-versions", dependencies=[Depends(require_admin)])
     async def get_data_versions():
         return api_success(collect_data_versions())
 
-    @app.get("/api/system/runtime")
+    @app.get("/api/system/runtime", dependencies=[Depends(require_admin)])
     async def get_runtime_info():
-        task_db = init_db(get_task_db_path())
+        task_db = get_task_db_path()
         return api_success(
             {
                 "task_runtime": {
-                    "db_path": task_db.as_posix(),
-                    "exists": task_db.exists(),
+                    "db": {
+                        "name": task_db.name,
+                        "type": "sqlite",
+                        "location": (
+                            "configured"
+                            if os.environ.get("MEDCHAT_TASK_DB_PATH")
+                            else "default"
+                        ),
+                        "exists": task_db.exists(),
+                        "writable": _is_task_db_writable(task_db),
+                    },
                 }
             }
         )

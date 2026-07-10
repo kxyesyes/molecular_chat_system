@@ -210,10 +210,17 @@ def setup_design_routes(app, model=None, config=None):
     async def calc_properties(payload: Dict[str, Any] = Body(...)):
         """计算分子的物化属性（LogP/MW/QED/TPSA/HBD/HBA/RotBonds/SA Score）"""
         smiles = payload.get("smiles", "").strip()
+        command = payload.get("command", "").strip()
+        reference_smiles = payload.get("reference_smiles", "").strip()
         if not smiles:
             return _error_response("SMILES不能为空", status_code=400)
         try:
-            return await run_in_threadpool(design_service.calculate_properties, smiles)
+            return await run_in_threadpool(
+                design_service.calculate_properties,
+                smiles,
+                command,
+                reference_smiles,
+            )
 
         except ValueError as e:
             return _error_response(str(e), status_code=400)
@@ -287,4 +294,3 @@ def setup_design_routes(app, model=None, config=None):
         except Exception as e:
             logger.error(f"导出历史失败: {e}")
             return _error_response(str(e), status_code=500)
-
