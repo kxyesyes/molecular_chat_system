@@ -21,4 +21,12 @@ class CommandAdapter:
         return [self.executable, *args]
 
     def run(self, args: List[str], cwd: Optional[str] = None, timeout: Optional[int] = None):
-        return subprocess.run(args, capture_output=True, text=True, cwd=cwd, timeout=timeout)
+        return subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=cwd,
+            timeout=timeout,
+        )

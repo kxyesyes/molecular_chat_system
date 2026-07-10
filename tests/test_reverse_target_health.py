@@ -1,5 +1,6 @@
 import pickle
 import os
+import json
 import tempfile
 import threading
 import time
@@ -31,9 +32,13 @@ class ReverseTargetHealthTest(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def _write_minimal_database_files(self):
-        (self.data_dir / "chembl_training_data.tsv").write_text(
+        (self.data_dir / "chembl_data_with_fps.tsv").write_text(
             "molecule_chembl_id\tcanonical_smiles\ttarget_name\tstandard_type\tstandard_value\torganism\n"
             "CHEMBL25\tCCO\tDemo target\tIC50\t100\tHuman\n",
+            encoding="utf-8",
+        )
+        (self.data_dir / "chembl_training_data.tsv").write_text(
+            "molecule_chembl_id\tcanonical_smiles\ttarget_name\tstandard_type\tstandard_value\torganism\n",
             encoding="utf-8",
         )
         (self.data_dir / "morgan_fingerprints.npy").write_bytes(b"morgan-demo")
@@ -87,6 +92,7 @@ class ReverseTargetHealthTest(unittest.TestCase):
         self.assertTrue(response.json()["ready"])
         self.assertEqual(response.json()["record_count"], 1)
 
+    @unittest.skipUnless(HAS_RDKIT, "RDKit is not installed in this Python environment")
     def test_global_predictor_uses_configured_data_dir(self):
         import src.reverse_target.predictor as predictor_module
         from src.reverse_target.predictor import ReverseTargetPredictor
@@ -106,6 +112,22 @@ class ReverseTargetHealthTest(unittest.TestCase):
                 os.environ["REVERSE_TARGET_DATA_DIR"] = previous_env
 
         self.assertEqual(predictor.data_dir, self.data_dir)
+
+    def test_health_prefers_aligned_training_data_and_metadata_record_count(self):
+        from src.reverse_target.health import inspect_reverse_target_database
+
+        self._write_minimal_database_files()
+        (self.data_dir / "reverse_target_metadata.json").write_text(
+            json.dumps({"record_count": 12345, "source": "test"}),
+            encoding="utf-8",
+        )
+
+        with patch("src.reverse_target.health._count_tsv_records", side_effect=AssertionError("should not scan")):
+            health = inspect_reverse_target_database(self.data_dir)
+
+        self.assertTrue(health["ready"])
+        self.assertEqual(health["record_count"], 12345)
+        self.assertTrue(health["files"]["training_data"]["path"].endswith("chembl_data_with_fps.tsv"))
 
     @unittest.skipUnless(HAS_RDKIT, "RDKit is not installed in this Python environment")
     def test_predictor_organism_filter_keeps_human_rows(self):
@@ -162,6 +184,73 @@ class ReverseTargetHealthTest(unittest.TestCase):
 
         self.assertTrue(predictor._loaded)
         self.assertEqual(read_count, 1)
+
+    @unittest.skipUnless(HAS_RDKIT, "RDKit is not installed in this Python environment")
+    def test_predictor_prefers_aligned_data_and_validates_fingerprint_rows(self):
+        from src.reverse_target.predictor import ReverseTargetPredictor
+
+        (self.data_dir / "chembl_data_with_fps.tsv").write_text(
+            "molecule_chembl_id\tcanonical_smiles\ttarget_name\tstandard_type\tstandard_value\torganism\n"
+            "CHEMBL1\tCCO\tTarget A\tIC50\t1\tHuman\n"
+            "CHEMBL2\tCCC\tTarget B\tIC50\t2\tHuman\n",
+            encoding="utf-8",
+        )
+        (self.data_dir / "chembl_training_data.tsv").write_text(
+            "molecule_chembl_id\tcanonical_smiles\ttarget_name\tstandard_type\tstandard_value\torganism\n"
+            "CHEMBL0\tC\tWrong target\tIC50\t9\tHuman\n",
+            encoding="utf-8",
+        )
+        (self.data_dir / "morgan_fingerprints.npy").write_bytes(b"placeholder")
+        (self.data_dir / "maccs_fingerprints.npy").write_bytes(b"placeholder")
+
+        predictor = ReverseTargetPredictor(data_dir=self.data_dir)
+
+        def fake_np_load(path, mmap_mode=None):
+            name = Path(path).name
+            if name == "morgan_fingerprints.npy":
+                return np.array([[1, 0, 1]], dtype=np.uint8)
+            if name == "maccs_fingerprints.npy":
+                return np.array([[1, 1]], dtype=np.uint8)
+            return np.array([2], dtype=np.uint16)
+
+        with patch("src.reverse_target.predictor.np.load", side_effect=fake_np_load):
+            with self.assertRaisesRegex(ValueError, "row count mismatch"):
+                predictor.load()
+
+        self.assertEqual(predictor.training_data_path.name, "chembl_data_with_fps.tsv")
+
+    @unittest.skipUnless(HAS_RDKIT, "RDKit is not installed in this Python environment")
+    def test_similarity_combination_uses_morgan_weight(self):
+        from src.reverse_target.predictor import ReverseTargetPredictor
+
+        predictor = ReverseTargetPredictor(data_dir=self.data_dir)
+        combined = predictor._combine_similarity_scores(
+            np.array([1.0, 0.0], dtype=float),
+            np.array([0.0, 1.0], dtype=float),
+        )
+
+        self.assertGreater(combined[0], combined[1])
+
+    @unittest.skipUnless(HAS_RDKIT, "RDKit is not installed in this Python environment")
+    def test_raw_candidate_selection_is_target_diverse(self):
+        from src.reverse_target.predictor import ReverseTargetPredictor
+
+        predictor = ReverseTargetPredictor(data_dir=self.data_dir)
+        predictor.df = pd.DataFrame(
+            {
+                "target_name": ["A", "A", "A", "B", "C"],
+                "organism": ["Human"] * 5,
+                "molecule_chembl_id": [f"CHEMBL{i}" for i in range(5)],
+                "canonical_smiles": ["CCO"] * 5,
+                "standard_type": ["IC50"] * 5,
+                "standard_value": [1, 2, 3, 4, 5],
+            }
+        )
+        final_sims = np.array([0.99, 0.98, 0.97, 0.96, 0.95], dtype=float)
+
+        selected = predictor._select_diverse_candidate_indices(np.arange(5), final_sims, limit=3)
+
+        self.assertEqual(selected.tolist(), [0, 3, 4])
 
 
 class FingerprintConversionCompatibilityTest(unittest.TestCase):

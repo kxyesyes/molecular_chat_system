@@ -9,6 +9,7 @@ import logging
 from typing import Dict, List, Any, Tuple, Optional
 import shutil
 from dataclasses import dataclass
+from pathlib import Path
 import sys
 
 from .adapters import ADFRAdapter, MeekoAdapter, OpenBabelAdapter, VinaAdapter
@@ -746,11 +747,25 @@ class MolecularDockingService:
                     "ligand_efficiency": round(result.binding_energy / heavy_atom_count, 3)
                 })
 
+            best_pose = dict(formatted_results[0]) if formatted_results else None
+            resolved_pose_file = str(Path(output_pdbqt).resolve())
+            if best_pose is not None:
+                best_pose["pose_file"] = resolved_pose_file
+            try:
+                from src.docking.history_index import build_history_record, upsert_history_record
+
+                upsert_history_record(
+                    self.work_dir,
+                    build_history_record(job_dir, job_id=job_id, status="completed"),
+                )
+            except Exception as index_error:
+                logger.warning(f"Failed to update docking history index: {index_error}")
             return {
                 "success": True,
                 "job_id": job_id,
                 "results": formatted_results,
-                "best_pose": formatted_results[0] if formatted_results else None,
+                "best_pose": best_pose,
+                "pose_file": resolved_pose_file,
                 "total_poses": len(formatted_results)
             }
 

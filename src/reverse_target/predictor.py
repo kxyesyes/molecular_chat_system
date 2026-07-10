@@ -5,6 +5,7 @@
 
 import numpy as np
 import pandas as pd
+import os
 from pathlib import Path
 from typing import List, Dict, Tuple
 from rdkit import Chem
@@ -45,9 +46,11 @@ class ReverseTargetPredictor:
         self.data_dir = Path(data_dir)
         
         # 数据文件路径
-        self.training_data_path = self.data_dir / "chembl_training_data.tsv"
+        self.training_data_path = self._resolve_training_data_path()
         self.morgan_fp_path = self.data_dir / "morgan_fingerprints.npy"
         self.maccs_fp_path = self.data_dir / "maccs_fingerprints.npy"
+        self.morgan_popcount_path = self.data_dir / "morgan_popcounts.npy"
+        self.maccs_popcount_path = self.data_dir / "maccs_popcounts.npy"
         self.metadata_path = self.data_dir / "fingerprint_metadata.pkl"
         
         # 数据缓存
@@ -57,6 +60,11 @@ class ReverseTargetPredictor:
         self.metadata = None
         self._loaded = False
         self._load_lock = threading.Lock()
+
+    def _resolve_training_data_path(self) -> Path:
+        aligned_path = self.data_dir / "chembl_data_with_fps.tsv"
+        legacy_path = self.data_dir / "chembl_training_data.tsv"
+        return aligned_path if aligned_path.exists() else legacy_path
     
     def load(self):
         """加载数据和指纹"""
@@ -82,12 +90,19 @@ class ReverseTargetPredictor:
             # 使用内存映射模式加载大文件，减少内存占用
             self.morgan_fps = np.load(self.morgan_fp_path, mmap_mode='r')
             self.maccs_fps = np.load(self.maccs_fp_path, mmap_mode='r')
+            self._validate_database_shapes()
             
             # 预计算指纹的 popcounts (1的个数) 以加速 Tanimoto 计算
             # 注意：这里会触发全量读取，如果内存不足可能需要分块计算
             print("正在预计算指纹统计信息...")
-            self.morgan_popcounts = np.sum(self.morgan_fps, axis=1)
-            self.maccs_popcounts = np.sum(self.maccs_fps, axis=1)
+            self.morgan_popcounts = self._load_or_compute_popcounts(
+                self.morgan_fps,
+                self.morgan_popcount_path,
+            )
+            self.maccs_popcounts = self._load_or_compute_popcounts(
+                self.maccs_fps,
+                self.maccs_popcount_path,
+            )
             
             # 加载元数据
             if self.metadata_path.exists():
@@ -96,6 +111,49 @@ class ReverseTargetPredictor:
             
             print(f"加载完成: {len(self.df)} 条数据, {self.df['target_name'].nunique()} 个靶点")
             self._loaded = True
+
+    def _validate_database_shapes(self):
+        row_count = len(self.df)
+        morgan_rows = int(self.morgan_fps.shape[0])
+        maccs_rows = int(self.maccs_fps.shape[0])
+        if row_count != morgan_rows or row_count != maccs_rows:
+            raise ValueError(
+                "Reverse-target database row count mismatch: "
+                f"{self.training_data_path.name} has {row_count} rows, "
+                f"Morgan fingerprints have {morgan_rows}, "
+                f"MACCS fingerprints have {maccs_rows}. "
+                "Rebuild TSV and fingerprint arrays from the same filtered dataset."
+            )
+
+    def _load_or_compute_popcounts(self, fingerprints: np.ndarray, popcount_path: Path) -> np.ndarray:
+        if popcount_path.exists():
+            popcounts = np.load(popcount_path, mmap_mode='r')
+            if popcounts.shape[0] == fingerprints.shape[0]:
+                return popcounts
+
+        n_samples = int(fingerprints.shape[0])
+        popcounts = np.zeros(n_samples, dtype=np.uint16)
+        try:
+            chunk_size = int(os.getenv("REVERSE_TARGET_POPCOUNT_CHUNK_SIZE", "50000"))
+        except ValueError:
+            chunk_size = 50000
+        chunk_size = max(1, chunk_size)
+        for start in range(0, n_samples, chunk_size):
+            end = min(start + chunk_size, n_samples)
+            popcounts[start:end] = np.sum(fingerprints[start:end], axis=1, dtype=np.uint32)
+        try:
+            np.save(popcount_path, popcounts)
+        except OSError:
+            pass
+        return popcounts
+
+    def _combine_similarity_scores(self, morgan_sims: np.ndarray, maccs_sims: np.ndarray) -> np.ndarray:
+        try:
+            morgan_weight = float(os.getenv("REVERSE_TARGET_MORGAN_WEIGHT", "0.7"))
+        except ValueError:
+            morgan_weight = 0.7
+        morgan_weight = min(1.0, max(0.0, morgan_weight))
+        return (morgan_sims * morgan_weight) + (maccs_sims * (1.0 - morgan_weight))
     
     def compute_query_fingerprints(self, smiles: str) -> Tuple[np.ndarray, np.ndarray]:
         """计算查询分子的指纹"""
@@ -201,8 +259,7 @@ class ReverseTargetPredictor:
         morgan_sims = self.batch_tanimoto_similarity(query_morgan, self.morgan_fps, self.morgan_popcounts)
         maccs_sims = self.batch_tanimoto_similarity(query_maccs, self.maccs_fps, self.maccs_popcounts)
         
-        # 综合相似度（Morgan和MACCS的平均）
-        final_sims = (morgan_sims + maccs_sims) / 2.0
+        final_sims = self._combine_similarity_scores(morgan_sims, maccs_sims)
         
         # 过滤低于阈值的结果
         mask = final_sims >= threshold
@@ -326,7 +383,7 @@ class ReverseTargetPredictor:
         # 批量计算相似度 (传入预计算的 popcounts)
         morgan_sims = self.batch_tanimoto_similarity(query_morgan, self.morgan_fps, self.morgan_popcounts)
         maccs_sims = self.batch_tanimoto_similarity(query_maccs, self.maccs_fps, self.maccs_popcounts)
-        final_sims = (morgan_sims + maccs_sims) / 2.0
+        final_sims = self._combine_similarity_scores(morgan_sims, maccs_sims)
         
         # 过滤：相似度 >= threshold 且 target_name 匹配
         target_mask = self.df['target_name'] == target_name
@@ -396,7 +453,7 @@ class ReverseTargetPredictor:
         query_morgan, query_maccs = self.compute_query_fingerprints(smiles)
         morgan_sims = self.batch_tanimoto_similarity(query_morgan, self.morgan_fps, self.morgan_popcounts)
         maccs_sims  = self.batch_tanimoto_similarity(query_maccs,  self.maccs_fps,  self.maccs_popcounts)
-        final_sims  = (morgan_sims + maccs_sims) / 2.0
+        final_sims  = self._combine_similarity_scores(morgan_sims, maccs_sims)
 
         mask = final_sims >= threshold
         mask = self._apply_organism_filter(mask, organism_filter)
@@ -404,9 +461,7 @@ class ReverseTargetPredictor:
             return []
 
         indices = np.where(mask)[0]
-        # 按相似度降序取 top limit
-        order = np.argsort(final_sims[indices])[::-1][:limit]
-        top_indices = indices[order]
+        top_indices = self._select_diverse_candidate_indices(indices, final_sims, limit)
 
         results = []
         for idx in top_indices:
@@ -422,6 +477,50 @@ class ReverseTargetPredictor:
                 'final_similarity':  float(final_sims[idx]),
             })
         return results
+
+    def _select_diverse_candidate_indices(
+        self,
+        indices: np.ndarray,
+        final_sims: np.ndarray,
+        limit: int,
+        per_target_limit: int | None = None,
+    ) -> np.ndarray:
+        if len(indices) == 0 or limit <= 0:
+            return np.array([], dtype=int)
+        if self.df is None or "target_name" not in self.df.columns:
+            order = np.argsort(final_sims[indices])[::-1][:limit]
+            return indices[order]
+
+        per_target = per_target_limit
+        if per_target is None:
+            try:
+                per_target = int(os.getenv("REVERSE_TARGET_RAW_PER_TARGET_LIMIT", "1"))
+            except ValueError:
+                per_target = 1
+        per_target = max(1, per_target)
+
+        ranked = indices[np.argsort(final_sims[indices])[::-1]]
+        selected: List[int] = []
+        deferred: List[int] = []
+        target_counts: Dict[str, int] = {}
+
+        for idx in ranked:
+            target = str(self.df.iloc[int(idx)]["target_name"])
+            count = target_counts.get(target, 0)
+            if count < per_target:
+                selected.append(int(idx))
+                target_counts[target] = count + 1
+                if len(selected) >= limit:
+                    return np.array(selected, dtype=int)
+            else:
+                deferred.append(int(idx))
+
+        for idx in deferred:
+            selected.append(idx)
+            if len(selected) >= limit:
+                break
+
+        return np.array(selected, dtype=int)
 
     def _apply_organism_filter(self, mask: np.ndarray, organism_filter: str = "") -> np.ndarray:
         organism_filter = (organism_filter or "").strip()

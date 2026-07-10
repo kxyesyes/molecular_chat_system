@@ -12,7 +12,6 @@ from typing import List, Dict, Any, Union, Optional
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem.SaltRemover import SaltRemover
-from rdkit.Chem import QED
 
 logger = logging.getLogger(__name__)
 
@@ -262,40 +261,19 @@ class ActivityPredictor:
             return None
 
     def _predict_demo(self, smiles_list: List[str]) -> List[Dict[str, Any]]:
-        """演示模式：基于 QED 的启发式评分"""
-        results = []
-        for smi in smiles_list:
-            try:
-                mol = Chem.MolFromSmiles(smi)
-                if mol:
-                    # 使用 QED (Drug-likeness) 作为演示评分
-                    # QED 范围 0-1
-                    qed_score = QED.qed(mol)
-                    
-                    # 模拟活性 pIC50 范围 (例如 4.0 - 9.0)
-                    # 简单的线性映射：0.5 -> 6.0 (Medium)
-                    activity = 4.0 + qed_score * 5.0 
-                    
-                    # 加一点随机性让它看起来不那么线性
-                    import random
-                    noise = random.uniform(-0.2, 0.2)
-                    activity += noise
-                    
-                    cls = "High" if activity > 7.5 else ("Medium" if activity > 5.5 else "Low")
-                    
-                    results.append({
-                        "smiles": smi,
-                        "activity_score": float(activity),
-                        "class": cls,
-                        "confidence": 0.8 + (qed_score * 0.1),
-                        "success": True,
-                        "note": "Demo Mode (Simulated)"
-                    })
-                else:
-                     results.append({"smiles": smi, "success": False, "error": "Invalid SMILES"})
-            except Exception as e:
-                results.append({"smiles": smi, "success": False, "error": f"Processing error: {str(e)}"})
-        return results
+        """Return an explicit failure when no validated RG-MPNN model is loaded."""
+        return [
+            {
+                "smiles": smi,
+                "success": False,
+                "error": (
+                    "RG-MPNN model weights are unavailable; "
+                    "no activity score was calculated."
+                ),
+                "note": "Model unavailable",
+            }
+            for smi in smiles_list
+        ]
 
     def predict(self, smiles: Union[str, List[str]]) -> List[Dict[str, Any]]:
         """
