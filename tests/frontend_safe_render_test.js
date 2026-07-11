@@ -83,6 +83,7 @@ assert(
 
 const homeFormatters = read("src/web/static/js/home/formatters.js");
 const homeMain = read("src/web/static/js/home/main.js");
+const homeChatRenderer = read("src/web/static/js/home/chat_renderer.js");
 
 function extractFunction(source, functionName) {
   const marker = `function ${functionName}`;
@@ -148,6 +149,19 @@ assert(
   assert(
     !body.includes("return content.replace"),
     `${functionName} fallback must not return raw content.replace(...) HTML`,
+  );
+});
+
+["showToast", "showNotification"].forEach((functionName) => {
+  const body = extractFunction(homeChatRenderer, functionName);
+  assert(
+    !body.includes("<span>${message}</span>"),
+    `${functionName} must not inject raw message into innerHTML`,
+  );
+  assert(
+    body.includes(".textContent = message") ||
+      body.includes("Safe.escapeHtml(message"),
+    `${functionName} must render message through textContent or the shared safe helper`,
   );
 });
 
