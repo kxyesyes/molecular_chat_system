@@ -1,5 +1,11 @@
 // ==================== UI状态管理 ====================
 const Safe = window.MedChatSafeRender;
+const Admin = window.MedChatAdminAuth;
+function requireAdminHelper() {
+  if (!Admin || typeof Admin.fetch !== "function") {
+    throw new Error("MedChat admin authentication helper is unavailable");
+  }
+}
 
 const UIManager = {
   // 更新按钮状态
@@ -1525,8 +1531,9 @@ function loadDockingHistory() {
   const listEl = document.getElementById("history-list");
   if (!listEl) return;
   listEl.innerHTML = '<div class="history-empty">加载中...</div>';
+  requireAdminHelper();
 
-  fetch("/api/docking/history")
+  Admin.fetch("/api/docking/history")
     .then((r) => r.json())
     .then((data) => {
       if (!data.success || !data.history || data.history.length === 0) {
@@ -1587,8 +1594,9 @@ function loadDockingHistory() {
 
 function clearAllHistory() {
   if (!confirm("确定要清除所有对接历史记录？\n此操作不可撤销！")) return;
+  requireAdminHelper();
 
-  fetch("/api/docking/history", { method: "DELETE" })
+  Admin.fetch("/api/docking/history", { method: "DELETE" })
     .then((r) => r.json())
     .then((data) => {
       if (data.success) {
@@ -1603,8 +1611,9 @@ function clearAllHistory() {
 
 function deleteHistoryJob(jobId) {
   if (!confirm(`确定删除任务 ${jobId} ？`)) return;
+  requireAdminHelper();
 
-  fetch(`/api/docking/history/${jobId}`, { method: "DELETE" })
+  Admin.fetch(`/api/docking/history/${jobId}`, { method: "DELETE" })
     .then((r) => r.json())
     .then((data) => {
       if (data.success) {

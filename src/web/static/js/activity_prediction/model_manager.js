@@ -1,5 +1,12 @@
 "use strict";
 
+const Admin = window.MedChatAdminAuth;
+function requireAdminHelper() {
+  if (!Admin || typeof Admin.fetch !== "function") {
+    throw new Error("MedChat admin authentication helper is unavailable");
+  }
+}
+
 window.ActivityModels = (function () {
   let allModels = [];
   let popoverBound = false;
@@ -116,9 +123,10 @@ window.ActivityModels = (function () {
 
   async function switchCurrentModel(file) {
     if (!file) return;
+    requireAdminHelper();
 
     try {
-      const res = await fetch("/api/activity/models/switch", {
+      const res = await Admin.fetch("/api/activity/models/switch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model_file: file }),
@@ -141,8 +149,10 @@ window.ActivityModels = (function () {
   }
 
   async function loadModels() {
+    requireAdminHelper();
+
     try {
-      const res = await fetch("/api/activity/models");
+      const res = await Admin.fetch("/api/activity/models");
       const data = await res.json();
       if (!data.success) return [];
 
@@ -207,9 +217,10 @@ window.ActivityModels = (function () {
     ) {
       return;
     }
+    requireAdminHelper();
 
     try {
-      const res = await fetch(`/api/activity/models/${modelId}`, {
+      const res = await Admin.fetch(`/api/activity/models/${modelId}`, {
         method: "DELETE",
       });
       const data = await res.json();
