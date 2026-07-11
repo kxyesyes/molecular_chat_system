@@ -6,6 +6,7 @@
 import os
 import subprocess
 import logging
+import math
 from typing import Dict, List, Any, Tuple, Optional
 import shutil
 from dataclasses import dataclass
@@ -90,6 +91,24 @@ class MolecularDockingService:
         """Configure docking tool paths from config or environment."""
         raw_config = config or {}
         docking_config = raw_config.get("docking", raw_config)
+
+        raw_vina_timeout = docking_config.get("vina_timeout_seconds")
+        if raw_vina_timeout is None:
+            raw_vina_timeout = os.environ.get(
+                "MOLECULAR_DOCKING_VINA_TIMEOUT_SECONDS",
+                "300",
+            )
+        try:
+            vina_timeout_seconds = float(raw_vina_timeout)
+            if not math.isfinite(vina_timeout_seconds) or vina_timeout_seconds <= 0:
+                raise ValueError("timeout must be a positive finite number")
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid Vina timeout %r; using the 300 second default",
+                raw_vina_timeout,
+            )
+            vina_timeout_seconds = 300.0
+        self.vina_timeout_seconds = vina_timeout_seconds
 
         root_dir = docking_config.get("root_dir") or os.environ.get("MOLECULAR_DOCKING_ROOT", "")
         root_dir = os.path.abspath(root_dir) if root_dir else ""
@@ -483,8 +502,14 @@ class MolecularDockingService:
             logger.error(f"配体文件准备异常: {e}")
             return False
 
-    def run_vina_docking(self, receptor_path: str, ligand_path: str,
-                        config: DockingConfig, output_path: str) -> bool:
+    def run_vina_docking(
+        self,
+        receptor_path: str,
+        ligand_path: str,
+        config: DockingConfig,
+        output_path: str,
+        job_dir: Optional[str] = None,
+    ) -> bool:
         """
         运行AutoDock Vina对接计算
         """
@@ -542,9 +567,13 @@ class MolecularDockingService:
                     config.size_y = sy
                     config.size_z = sz
 
-            # 创建配置文件
-            config_path = os.path.join(self.work_dir, "config.txt")
-            with open(config_path, 'w') as f:
+            # 每个作业拥有独立配置文件和进程工作目录。
+            resolved_job_dir = os.path.abspath(
+                job_dir or os.path.dirname(os.path.abspath(output_path))
+            )
+            os.makedirs(resolved_job_dir, exist_ok=True)
+            config_path = os.path.join(resolved_job_dir, "config.txt")
+            with open(config_path, 'w', encoding='utf-8') as f:
                 f.write(f"receptor = {receptor_path}\n")
                 f.write(f"ligand = {ligand_path}\n")
                 f.write(f"out = {output_path}\n")
@@ -559,8 +588,11 @@ class MolecularDockingService:
                 f.write(f"energy_range = {config.energy_range}\n")
 
             # 运行Vina
-            cmd = self.vina_adapter.build_run_command(config_path)
-            result = self.vina_adapter.run_config(config_path, self.work_dir)
+            result = self.vina_adapter.run_config(
+                config_path,
+                resolved_job_dir,
+                timeout=self.vina_timeout_seconds,
+            )
 
             if result.returncode == 0:
                 logger.info(f"Vina对接计算成功: {output_path}")
@@ -569,6 +601,12 @@ class MolecularDockingService:
                 logger.error(f"Vina对接计算失败: {result.stderr}")
                 return False
 
+        except subprocess.TimeoutExpired:
+            logger.error(
+                "Vina docking timed out after %s seconds",
+                self.vina_timeout_seconds,
+            )
+            raise
         except Exception as e:
             logger.error(f"Vina对接计算异常: {e}")
             return False
@@ -706,7 +744,23 @@ class MolecularDockingService:
 
             # 3. 运行对接计算
             output_pdbqt = os.path.join(job_dir, "result.pdbqt")
-            if not self.run_vina_docking(receptor_pdbqt, ligand_pdbqt, config, output_pdbqt):
+            try:
+                docking_succeeded = self.run_vina_docking(
+                    receptor_pdbqt,
+                    ligand_pdbqt,
+                    config,
+                    output_pdbqt,
+                    job_dir=job_dir,
+                )
+            except subprocess.TimeoutExpired:
+                return {
+                    "success": False,
+                    "error": (
+                        "AutoDock Vina timed out after "
+                        f"{self.vina_timeout_seconds} seconds"
+                    ),
+                }
+            if not docking_succeeded:
                 return {"success": False, "error": "对接计算失败"}
 
             # 4. 解析结果

@@ -1,11 +1,18 @@
 import json
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.web.routes.api_routes import setup_api_routes
+from src.docking.history_index import (
+    read_history_page,
+    remove_history_record,
+    upsert_history_record,
+)
 
 
 ADMIN_TOKEN = "unit-admin-token"
@@ -78,3 +85,66 @@ def test_docking_history_reads_index_with_pagination(tmp_path, monkeypatch):
     assert payload["history"][0]["job_id"] == "0005"
     assert payload["history"][0]["best_energy"] == -14.9
     assert elapsed_ms < 100
+
+
+def test_docking_history_concurrent_mutation_and_reads_preserve_records(tmp_path):
+    initial_keep = {f"keep-{index}" for index in range(10)}
+    initial_remove = {f"remove-{index}" for index in range(20)}
+    for index, job_id in enumerate(sorted(initial_keep | initial_remove)):
+        upsert_history_record(
+            tmp_path,
+            {"job_id": job_id, "timestamp": float(index), "status": "completed"},
+        )
+
+    writer_count = 8
+    records_per_writer = 25
+    remover_count = 4
+    reader_count = 4
+    barrier = threading.Barrier(writer_count + remover_count + reader_count)
+
+    def write_records(worker_index: int) -> None:
+        barrier.wait()
+        for record_index in range(records_per_writer):
+            job_id = f"writer-{worker_index}-{record_index}"
+            upsert_history_record(
+                tmp_path,
+                {
+                    "job_id": job_id,
+                    "timestamp": float(worker_index * records_per_writer + record_index),
+                    "status": "completed",
+                },
+            )
+
+    def remove_records(worker_index: int) -> None:
+        barrier.wait()
+        for record_index in range(worker_index, len(initial_remove), remover_count):
+            remove_history_record(tmp_path, f"remove-{record_index}")
+
+    def read_records() -> None:
+        barrier.wait()
+        for _ in range(50):
+            read_history_page(tmp_path, page=1, limit=200)
+            json.loads((tmp_path / "docking_history_index.json").read_text(encoding="utf-8"))
+
+    with ThreadPoolExecutor(
+        max_workers=writer_count + remover_count + reader_count
+    ) as executor:
+        futures = [executor.submit(write_records, index) for index in range(writer_count)]
+        futures.extend(
+            executor.submit(remove_records, index) for index in range(remover_count)
+        )
+        futures.extend(executor.submit(read_records) for _ in range(reader_count))
+        for future in futures:
+            future.result()
+
+    payload = json.loads(
+        (tmp_path / "docking_history_index.json").read_text(encoding="utf-8")
+    )
+    final_job_ids = {record["job_id"] for record in payload["records"]}
+    expected_written = {
+        f"writer-{worker_index}-{record_index}"
+        for worker_index in range(writer_count)
+        for record_index in range(records_per_writer)
+    }
+    assert initial_keep | expected_written <= final_job_ids
+    assert final_job_ids.isdisjoint(initial_remove)

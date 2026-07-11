@@ -2,7 +2,7 @@
 
 import os
 import subprocess
-from typing import List, Optional
+from typing import List, Optional, Union
 
 
 class CommandAdapter:
@@ -20,7 +20,12 @@ class CommandAdapter:
             return ["cmd", "/c", self.executable, *args]
         return [self.executable, *args]
 
-    def run(self, args: List[str], cwd: Optional[str] = None, timeout: Optional[int] = None):
+    def run(
+        self,
+        args: List[str],
+        cwd: Optional[str] = None,
+        timeout: Optional[Union[int, float]] = None,
+    ):
         return subprocess.run(
             args,
             capture_output=True,

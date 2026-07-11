@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 
 HISTORY_INDEX_FILE = "docking_history_index.json"
 _VINA_RESULT_RE = re.compile(r"REMARK\s+VINA\s+RESULT:\s*([\-+]?\d*\.?\d+)")
+_HISTORY_INDEX_LOCK = threading.RLock()
 
 
 def history_index_path(work_dir: str | Path) -> Path:
@@ -16,27 +18,29 @@ def history_index_path(work_dir: str | Path) -> Path:
 
 
 def _load_records(work_dir: str | Path) -> list[dict[str, Any]]:
-    path = history_index_path(work_dir)
-    if not path.exists():
-        return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    with _HISTORY_INDEX_LOCK:
+        path = history_index_path(work_dir)
+        if not path.exists():
+            return []
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
 
-    raw_records = payload if isinstance(payload, list) else payload.get("records", [])
-    return [record for record in raw_records if isinstance(record, dict)]
+        raw_records = payload if isinstance(payload, list) else payload.get("records", [])
+        return [record for record in raw_records if isinstance(record, dict)]
 
 
 def _write_records(work_dir: str | Path, records: list[dict[str, Any]]) -> None:
-    path = history_index_path(work_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(path.suffix + ".tmp")
-    temp_path.write_text(
-        json.dumps({"records": records}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    temp_path.replace(path)
+    with _HISTORY_INDEX_LOCK:
+        path = history_index_path(work_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+        temp_path.write_text(
+            json.dumps({"records": records}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temp_path.replace(path)
 
 
 def _parse_vina_summary(result_file: Path) -> tuple[float | None, int]:
@@ -107,16 +111,17 @@ def build_history_record(
 
 
 def upsert_history_record(work_dir: str | Path, record: dict[str, Any]) -> None:
-    job_id = str(record.get("job_id") or "").strip()
-    if not job_id:
-        return
-    records_by_id = {
-        str(existing.get("job_id")): existing
-        for existing in _load_records(work_dir)
-        if existing.get("job_id")
-    }
-    records_by_id[job_id] = record
-    _write_records(work_dir, list(records_by_id.values()))
+    with _HISTORY_INDEX_LOCK:
+        job_id = str(record.get("job_id") or "").strip()
+        if not job_id:
+            return
+        records_by_id = {
+            str(existing.get("job_id")): existing
+            for existing in _load_records(work_dir)
+            if existing.get("job_id")
+        }
+        records_by_id[job_id] = record
+        _write_records(work_dir, list(records_by_id.values()))
 
 
 def read_history_page(
@@ -124,27 +129,30 @@ def read_history_page(
     page: int = 1,
     limit: int = 50,
 ) -> tuple[list[dict[str, Any]], int, int, int]:
-    resolved_page = max(1, int(page or 1))
-    resolved_limit = max(1, min(200, int(limit or 50)))
-    records = sorted(
-        _load_records(work_dir),
-        key=lambda item: float(item.get("timestamp") or 0),
-        reverse=True,
-    )
-    total = len(records)
-    start = (resolved_page - 1) * resolved_limit
-    end = start + resolved_limit
-    return records[start:end], total, resolved_page, resolved_limit
+    with _HISTORY_INDEX_LOCK:
+        resolved_page = max(1, int(page or 1))
+        resolved_limit = max(1, min(200, int(limit or 50)))
+        records = sorted(
+            _load_records(work_dir),
+            key=lambda item: float(item.get("timestamp") or 0),
+            reverse=True,
+        )
+        total = len(records)
+        start = (resolved_page - 1) * resolved_limit
+        end = start + resolved_limit
+        return records[start:end], total, resolved_page, resolved_limit
 
 
 def remove_history_record(work_dir: str | Path, job_id: str) -> None:
-    records = [
-        record
-        for record in _load_records(work_dir)
-        if str(record.get("job_id")) != str(job_id)
-    ]
-    _write_records(work_dir, records)
+    with _HISTORY_INDEX_LOCK:
+        records = [
+            record
+            for record in _load_records(work_dir)
+            if str(record.get("job_id")) != str(job_id)
+        ]
+        _write_records(work_dir, records)
 
 
 def clear_history_records(work_dir: str | Path) -> None:
-    _write_records(work_dir, [])
+    with _HISTORY_INDEX_LOCK:
+        _write_records(work_dir, [])

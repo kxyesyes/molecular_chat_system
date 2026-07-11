@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import requests
+from pathlib import Path
 
 from src.activity.predictor import ActivityPredictor
 from src.agent.tools import get_optional_tool
 from src.agent.tools.rxn_chemistry_agent import RXNChemistryAgent
+from src.agent.tools.molecular_docking import MolecularDocking
 
 
 def test_activity_predictor_without_real_weights_returns_no_simulated_score() -> None:
@@ -94,3 +96,36 @@ def test_rxn_tool_is_available_to_the_legacy_react_tool_pool() -> None:
     tool = get_optional_tool("RXNChemistryAgent")
 
     assert tool.name == "rxn_chemistry_agent"
+
+
+def test_molecular_docking_source_has_no_synthetic_result_code() -> None:
+    source_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "agent"
+        / "tools"
+        / "molecular_docking.py"
+    )
+    source = source_path.read_text(encoding="utf-8")
+    forbidden = {
+        "_generate_binding_mode",
+        "_generate_interactions",
+        "docking_score",
+        "binding_affinity",
+        "common_targets",
+        "_identify_target",
+        "_format_docking_results",
+        "_generate_docking_reasoning",
+    }
+
+    assert forbidden.isdisjoint(source.split())
+    for token in forbidden:
+        assert token not in source
+
+
+def test_molecular_docking_missing_structured_inputs_has_no_energy_claim() -> None:
+    result = MolecularDocking().execute({"receptor_path": "missing.pdbqt"})
+
+    assert result["success"] is False
+    assert "kcal/mol" not in str(result)
+    assert "missing" in result["message"].lower()
