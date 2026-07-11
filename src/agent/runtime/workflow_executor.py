@@ -92,9 +92,11 @@ class WorkflowExecutor:
             on_event=event_callback,
             state_store=state_store,
         )
-        orchestrator = self.orchestrator or WorkflowOrchestrator(event_bus=event_bus)
-        if self.orchestrator is not None:
-            orchestrator.event_bus = event_bus
+        orchestrator = (
+            self.orchestrator.for_request(event_bus)
+            if self.orchestrator is not None
+            else WorkflowOrchestrator(event_bus=event_bus)
+        )
         result = orchestrator.run(
             context=context,
             steps=plan.steps,

@@ -42,6 +42,16 @@ class WorkflowOrchestrator:
         self.workflow_version = workflow_version
         self.adapter_version = adapter_version
 
+    def for_request(self, event_bus: AgentEventBus) -> WorkflowOrchestrator:
+        """Create an isolated orchestrator for one request's event stream."""
+        return WorkflowOrchestrator(
+            event_bus=event_bus,
+            validator=self.validator,
+            state_store=self.state_store,
+            workflow_version=self.workflow_version,
+            adapter_version=self.adapter_version,
+        )
+
     def run(
         self,
         context: AgentContext,

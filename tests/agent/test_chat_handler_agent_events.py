@@ -87,23 +87,27 @@ class LiveEventAgentSystem(FakeAgentSystem):
         event_callback=None,
     ):
         assert event_callback is not None
-        event_callback(
-            {
-                "type": "agent_event",
-                "event": "task_started",
-                "message": "live start",
-                "trace_id": "live-1",
-            }
-        )
-        event_callback(
-            {
-                "type": "agent_event",
-                "event": "tool_completed",
-                "message": "live tool",
-                "trace_id": "live-1",
-                "tool": "property_calculator",
-            }
-        )
+        for event in (
+            "task_started",
+            "planning_started",
+            "planning_completed",
+            "tool_started",
+            "tool_completed",
+            "tool_failed",
+            "task_completed",
+            "task_failed",
+        ):
+            event_callback(
+                {
+                    "type": "agent_event",
+                    "event": event,
+                    "message": f"live {event}",
+                    "trace_id": "live-1",
+                    "tool": (
+                        "property_calculator" if event.startswith("tool_") else None
+                    ),
+                }
+            )
         return {
             "success": True,
             "final_answer": "live workflow completed",
@@ -205,7 +209,16 @@ def test_chat_handler_forwards_events_while_agent_is_running():
         for item in websocket.messages
         if item["type"] == "agent_event"
     ]
-    assert live_events == ["task_started", "tool_completed"]
+    assert live_events == [
+        "task_started",
+        "planning_started",
+        "planning_completed",
+        "tool_started",
+        "tool_completed",
+        "tool_failed",
+        "task_completed",
+        "task_failed",
+    ]
     result_index = next(
         index
         for index, item in enumerate(websocket.messages)
