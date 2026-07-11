@@ -86,20 +86,38 @@ const homeMain = read("src/web/static/js/home/main.js");
 const homeChatRenderer = read("src/web/static/js/home/chat_renderer.js");
 
 function extractFunction(source, functionName) {
-  const marker = `function ${functionName}`;
-  const start = source.indexOf(marker);
-  assert(start >= 0, `Missing ${functionName}`);
-  const braceStart = source.indexOf("{", start);
-  let depth = 0;
-  for (let i = braceStart; i < source.length; i += 1) {
-    if (source[i] === "{") depth += 1;
-    if (source[i] === "}") {
-      depth -= 1;
-      if (depth === 0) return source.slice(start, i + 1);
-    }
-  }
-  fail(`Could not parse ${functionName}`);
+  const escapedName = functionName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(
+    `^([ \\t]*)(?:async\\s+)?function\\s+${escapedName}\\s*\\(`,
+    "m",
+  ).exec(source);
+  assert(match, `Missing ${functionName}`);
+  const indentation = match[1].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const nextDeclaration = new RegExp(
+    `^${indentation}(?:async\\s+)?function\\s+[A-Za-z_$][\\w$]*\\s*\\(`,
+    "gm",
+  );
+  nextDeclaration.lastIndex = match.index + match[0].length;
+  const nextMatch = nextDeclaration.exec(source);
+  return source.slice(match.index, nextMatch ? nextMatch.index : source.length);
 }
+
+const extractionProbe = [
+  "  function probe() {",
+  '    const quoted = "}";',
+  "    const templated = `value { still template }`;",
+  "    // } ignored comment brace",
+  "    /* { ignored block comment brace } */",
+  "    return quoted + templated;",
+  "  }",
+  "  function afterProbe() {}",
+].join("\n");
+const extractedProbe = extractFunction(extractionProbe, "probe");
+assert(
+  extractedProbe.includes("return quoted + templated;") &&
+    !extractedProbe.includes("function afterProbe"),
+  "extractFunction must use declaration boundaries instead of braces in strings, templates, or comments",
+);
 
 assert(
   homeFormatters.includes("MedChatSafeRender"),
@@ -152,18 +170,161 @@ assert(
   );
 });
 
+function exerciseChatMessageSink(functionName) {
+  class FakeElement {
+    constructor(label, isRoot) {
+      this.label = label;
+      this.isRoot = Boolean(isRoot);
+      this.style = {};
+      this.children = [];
+      this.parentNode = null;
+      this._innerHTML = "";
+      this._textContent = "";
+    }
+
+    set innerHTML(value) {
+      this.children.forEach((child) => {
+        child.parentNode = null;
+      });
+      this.children = [];
+      this._textContent = "";
+      this._innerHTML = String(value);
+    }
+
+    get innerHTML() {
+      return this._innerHTML;
+    }
+
+    set textContent(value) {
+      this.children.forEach((child) => {
+        child.parentNode = null;
+      });
+      this.children = [];
+      this._innerHTML = "";
+      this._textContent = String(value);
+    }
+
+    get textContent() {
+      return this._textContent;
+    }
+
+    appendChild(child) {
+      child.parentNode = this;
+      this.children.push(child);
+      return child;
+    }
+
+    append(...children) {
+      children.forEach((child) => {
+        if (typeof child === "string") {
+          const textNode = new FakeElement("#text", false);
+          textNode.textContent = child;
+          this.appendChild(textNode);
+        } else {
+          this.appendChild(child);
+        }
+      });
+    }
+
+    removeChild(child) {
+      this.children = this.children.filter((candidate) => candidate !== child);
+      child.parentNode = null;
+    }
+
+    remove() {
+      if (this.parentNode) this.parentNode.removeChild(this);
+    }
+
+    replaceChildren(...children) {
+      this.children.forEach((child) => {
+        child.parentNode = null;
+      });
+      this.children = [];
+      this._innerHTML = "";
+      this._textContent = "";
+      this.append(...children);
+    }
+
+    setAttribute(name, value) {
+      this[name] = String(value);
+    }
+  }
+
+  const document = {
+    body: new FakeElement("body", true),
+    head: new FakeElement("head", true),
+    createElement(tagName) {
+      return new FakeElement(`<${tagName}>`, false);
+    },
+    createTextNode(value) {
+      const node = new FakeElement("#text", false);
+      node.textContent = value;
+      return node;
+    },
+    getElementById() {
+      return null;
+    },
+  };
+  const sandbox = {
+    console,
+    document,
+    HomeState: { elements: {} },
+    setTimeout() {},
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(helperPath, "utf8"), sandbox, {
+    filename: helperPath,
+  });
+  sandbox.Safe = sandbox.MedChatSafeRender;
+  vm.runInContext(homeChatRenderer, sandbox, {
+    filename: "src/web/static/js/home/chat_renderer.js",
+  });
+
+  const payload = `<img src=x onerror="${functionName}-xss">`;
+  sandbox.HomeChatRenderer[functionName](payload, "info");
+
+  function collectNodes(root) {
+    const nodes = [root];
+    root.children.forEach((child) => nodes.push(...collectNodes(child)));
+    return nodes;
+  }
+
+  const renderedNodes = [document.body, document.head].flatMap(collectNodes);
+  const rawHtmlSinks = renderedNodes.filter((node) =>
+    node.innerHTML.includes(payload),
+  );
+  const safelyRendered =
+    renderedNodes.some((node) => node.textContent.includes(payload)) ||
+    renderedNodes.some((node) =>
+      node.innerHTML.includes(Safe.escapeHtml(payload)),
+    );
+
+  return {
+    payload,
+    rawHtmlSinks,
+    safelyRendered,
+  };
+}
+
+const chatSinkFailures = [];
 ["showToast", "showNotification"].forEach((functionName) => {
-  const body = extractFunction(homeChatRenderer, functionName);
-  assert(
-    !body.includes("<span>${message}</span>"),
-    `${functionName} must not inject raw message into innerHTML`,
-  );
-  assert(
-    body.includes(".textContent = message") ||
-      body.includes("Safe.escapeHtml(message"),
-    `${functionName} must render message through textContent or the shared safe helper`,
-  );
+  const result = exerciseChatMessageSink(functionName);
+  if (result.rawHtmlSinks.length) {
+    chatSinkFailures.push(
+      `${functionName} inserted raw message into innerHTML (${result.rawHtmlSinks
+        .map((node) => node.label)
+        .join(", ")})`,
+    );
+  }
+  if (!result.safelyRendered) {
+    chatSinkFailures.push(
+      `${functionName} must deliver message through textContent/createTextNode or escaped innerHTML`,
+    );
+  }
 });
+assert(chatSinkFailures.length === 0, chatSinkFailures.join("\n"));
 
 const designMain = read("src/web/static/js/design/main.js");
 assert(
