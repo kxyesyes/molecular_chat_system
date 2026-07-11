@@ -20,6 +20,19 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _terminal_state(result: Any) -> tuple[TaskStatus, str | None]:
+    if not isinstance(result, dict):
+        return TaskStatus.SUCCEEDED, None
+
+    returned_failed = result.get("success") is False
+    returned_failed = returned_failed or str(result.get("status", "")).strip().lower() == "failed"
+    if not returned_failed:
+        return TaskStatus.SUCCEEDED, None
+
+    error = result.get("error") or result.get("message") or "Task returned a failed result"
+    return TaskStatus.FAILED, str(error)
+
+
 class TaskManager:
     """Small SQLite-backed task runner for long-running demo workflows."""
 
@@ -102,7 +115,8 @@ class TaskManager:
             if result is None:
                 result = {}
             artifacts = result.get("artifacts", []) if isinstance(result, dict) else []
-            self._mark_finished(task_id, TaskStatus.SUCCEEDED, result=result, artifacts=artifacts)
+            status, error = _terminal_state(result)
+            self._mark_finished(task_id, status, result=result, error=error, artifacts=artifacts)
         except Exception as exc:  # pragma: no cover - exact failures are task-specific
             self._mark_finished(task_id, TaskStatus.FAILED, error=str(exc))
         finally:

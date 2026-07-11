@@ -1,6 +1,6 @@
 import time
 
-from src.task_runtime import TaskManager
+from src.task_runtime import TaskManager, TaskStatus
 
 
 def wait_for_terminal(manager: TaskManager, task_id: str):
@@ -38,3 +38,44 @@ def test_task_manager_persists_failed_task(tmp_path):
 
     assert finished.status.value == "failed"
     assert "boom" in finished.error
+
+
+def test_task_manager_preserves_returned_status_failure(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    result = {
+        "status": "failed",
+        "message": "tool unavailable",
+        "artifacts": [{"name": "diagnostic.log"}],
+    }
+
+    record = manager.submit("unit_test", {}, lambda _payload: result)
+    finished = wait_for_terminal(manager, record.task_id)
+
+    assert finished.status is TaskStatus.FAILED
+    assert finished.result == result
+    assert finished.error == "tool unavailable"
+    assert finished.artifacts == result["artifacts"]
+
+
+def test_task_manager_preserves_returned_success_false_failure(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    result = {"success": False, "error": "invalid input"}
+
+    record = manager.submit("unit_test", {}, lambda _payload: result)
+    finished = wait_for_terminal(manager, record.task_id)
+
+    assert finished.status is TaskStatus.FAILED
+    assert finished.result == result
+    assert finished.error == "invalid input"
+
+
+def test_task_manager_normalizes_returned_failed_status(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    result = {"status": "  FaIlEd  "}
+
+    record = manager.submit("unit_test", {}, lambda _payload: result)
+    finished = wait_for_terminal(manager, record.task_id)
+
+    assert finished.status is TaskStatus.FAILED
+    assert finished.result == result
+    assert finished.error == "Task returned a failed result"
