@@ -805,6 +805,7 @@ class MolecularDockingService:
             resolved_pose_file = str(Path(output_pdbqt).resolve())
             if best_pose is not None:
                 best_pose["pose_file"] = resolved_pose_file
+            history_warnings = []
             try:
                 from src.docking.history_index import build_history_record, upsert_history_record
 
@@ -814,7 +815,22 @@ class MolecularDockingService:
                 )
             except Exception as index_error:
                 logger.warning(f"Failed to update docking history index: {index_error}")
-            return {
+                history_warnings.append(
+                    {
+                        "code": "history_persistence_failed",
+                        "message": (
+                            "Docking completed, but its history index record "
+                            "could not be persisted."
+                        ),
+                        "traceability": {
+                            "job_id": job_id,
+                            "job_dir": str(Path(job_dir).resolve()),
+                            "pose_file": resolved_pose_file,
+                            "history_index_recorded": False,
+                        },
+                    }
+                )
+            response = {
                 "success": True,
                 "job_id": job_id,
                 "results": formatted_results,
@@ -822,6 +838,9 @@ class MolecularDockingService:
                 "pose_file": resolved_pose_file,
                 "total_poses": len(formatted_results)
             }
+            if history_warnings:
+                response["warnings"] = history_warnings
+            return response
 
         except Exception as e:
             logger.error(f"分子对接流程异常: {e}")

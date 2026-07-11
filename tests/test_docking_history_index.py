@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -8,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.web.routes.api_routes import setup_api_routes
+from src.docking import history_index as history_index_module
 from src.docking.history_index import (
     read_history_page,
     remove_history_record,
@@ -58,6 +60,24 @@ def write_history_index(work_dir: Path, count: int = 120) -> None:
         json.dumps({"records": records}),
         encoding="utf-8",
     )
+
+
+def _multiprocess_upsert_worker(
+    work_dir: str,
+    worker_index: int,
+    record_count: int,
+    start_event,
+) -> None:
+    start_event.wait(timeout=10)
+    for record_index in range(record_count):
+        upsert_history_record(
+            work_dir,
+            {
+                "job_id": f"process-{worker_index}-{record_index}",
+                "timestamp": float(worker_index * record_count + record_index),
+                "status": "completed",
+            },
+        )
 
 
 def test_docking_history_reads_index_with_pagination(tmp_path, monkeypatch):
@@ -148,3 +168,57 @@ def test_docking_history_concurrent_mutation_and_reads_preserve_records(tmp_path
     }
     assert initial_keep | expected_written <= final_job_ids
     assert final_job_ids.isdisjoint(initial_remove)
+
+
+def test_docking_history_multiprocess_upserts_preserve_all_records(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    worker_count = 6
+    records_per_worker = 20
+    start_event = context.Event()
+    processes = [
+        context.Process(
+            target=_multiprocess_upsert_worker,
+            args=(str(tmp_path), worker_index, records_per_worker, start_event),
+        )
+        for worker_index in range(worker_count)
+    ]
+
+    try:
+        for process in processes:
+            process.start()
+        start_event.set()
+        for process in processes:
+            process.join(timeout=30)
+
+        assert all(not process.is_alive() for process in processes)
+        assert [process.exitcode for process in processes] == [0] * worker_count
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=5)
+
+    payload = json.loads(
+        (tmp_path / "docking_history_index.json").read_text(encoding="utf-8")
+    )
+    final_job_ids = {record["job_id"] for record in payload["records"]}
+    expected_job_ids = {
+        f"process-{worker_index}-{record_index}"
+        for worker_index in range(worker_count)
+        for record_index in range(records_per_worker)
+    }
+    assert final_job_ids == expected_job_ids
+
+
+def test_docking_history_lock_rejects_nonfinite_timing_configuration(monkeypatch):
+    monkeypatch.setenv("MEDCHAT_DOCKING_HISTORY_LOCK_TIMEOUT_SECONDS", "nan")
+    monkeypatch.setenv("MEDCHAT_DOCKING_HISTORY_LOCK_POLL_SECONDS", "inf")
+
+    assert history_index_module._configured_positive_float(
+        "MEDCHAT_DOCKING_HISTORY_LOCK_TIMEOUT_SECONDS",
+        10.0,
+    ) == 10.0
+    assert history_index_module._configured_positive_float(
+        "MEDCHAT_DOCKING_HISTORY_LOCK_POLL_SECONDS",
+        0.05,
+    ) == 0.05
