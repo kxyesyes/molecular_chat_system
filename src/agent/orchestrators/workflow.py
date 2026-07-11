@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from copy import copy
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from collections.abc import Mapping
 from dataclasses import replace
@@ -45,7 +45,28 @@ class WorkflowOrchestrator:
 
     def for_request(self, event_bus: AgentEventBus) -> WorkflowOrchestrator:
         """Create an isolated orchestrator for one request's event stream."""
-        request_orchestrator = copy(self)
+        shared_dependencies = (
+            self.event_bus,
+            self.validator,
+            self.state_store,
+        )
+        memo = {
+            id(dependency): dependency
+            for dependency in shared_dependencies
+            if dependency is not None
+        }
+        try:
+            request_orchestrator = deepcopy(self, memo)
+        except Exception as exc:
+            raise TypeError(
+                f"Cannot safely clone {type(self).__name__} extension state; "
+                "override for_request(event_bus) to provide request isolation"
+            ) from exc
+        if request_orchestrator is self:
+            raise TypeError(
+                f"Cannot safely clone {type(self).__name__} extension state; "
+                "override for_request(event_bus) to provide request isolation"
+            )
         request_orchestrator.event_bus = event_bus
         request_orchestrator.validator = self.validator
         request_orchestrator.state_store = self.state_store

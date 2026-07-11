@@ -1,5 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Lock
+
+import pytest
 
 from src.agent.contracts import AgentContext, AgentErrorCode
 from src.agent.orchestrators import WorkflowOrchestrator
@@ -153,13 +155,18 @@ def test_executor_preserves_injected_orchestrator_subclass_extensions():
         def __init__(self, audit_marker, **kwargs):
             super().__init__(**kwargs)
             self.audit_marker = audit_marker
-            self.run_count = 0
+            self.audit_traces = []
+            self.audit_by_trace = {}
 
         def run(self, *args, **kwargs):
-            self.run_count += 1
+            trace_id = kwargs["context"].trace_id
+            self.audit_traces.append(trace_id)
+            self.audit_by_trace[trace_id] = {"recorded": True}
             result = super().run(*args, **kwargs)
             result.metadata["audit_marker"] = self.audit_marker
             result.metadata["orchestrator_type"] = type(self).__name__
+            result.metadata["audit_traces"] = list(self.audit_traces)
+            result.metadata["audit_by_trace"] = dict(self.audit_by_trace)
             return result
 
     original_event_bus = AgentEventBus()
@@ -168,25 +175,60 @@ def test_executor_preserves_injected_orchestrator_subclass_extensions():
         event_bus=original_event_bus,
     )
 
-    execution = WorkflowExecutor(
+    executor = WorkflowExecutor(
         planner=SingleStepPlanner(),
         orchestrator=shared_orchestrator,
-    ).execute(
-        context=AgentContext(
-            query="CCO",
-            trace_id="subclass-trace",
-            active_skill="comprehensive_evaluation",
-        ),
-        skill=FakeSkill(),
-        all_tools={"property_calculator": FakeTool("property_calculator")},
+    )
+    executions = []
+    for trace_id in ("subclass-trace-a", "subclass-trace-b"):
+        executions.append(
+            executor.execute(
+                context=AgentContext(
+                    query="CCO",
+                    trace_id=trace_id,
+                    active_skill="comprehensive_evaluation",
+                ),
+                skill=FakeSkill(),
+                all_tools={
+                    "property_calculator": FakeTool("property_calculator")
+                },
+            )
+        )
+
+    for execution, trace_id in zip(
+        executions,
+        ("subclass-trace-a", "subclass-trace-b"),
+    ):
+        assert execution.result.success is True
+        assert execution.result.metadata["audit_marker"] == "configured-extension"
+        assert execution.result.metadata["orchestrator_type"] == (
+            "AuditedWorkflowOrchestrator"
+        )
+        assert execution.result.metadata["audit_traces"] == [trace_id]
+        assert set(execution.result.metadata["audit_by_trace"]) == {trace_id}
+
+    assert shared_orchestrator.audit_traces == []
+    assert shared_orchestrator.audit_by_trace == {}
+    assert shared_orchestrator.event_bus is original_event_bus
+
+
+def test_orchestrator_requires_override_for_uncopyable_extension_state():
+    class LockedWorkflowOrchestrator(WorkflowOrchestrator):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.extension_lock = Lock()
+
+    original_event_bus = AgentEventBus()
+    shared_orchestrator = LockedWorkflowOrchestrator(
+        event_bus=original_event_bus
     )
 
-    assert execution.result.success is True
-    assert execution.result.metadata["audit_marker"] == "configured-extension"
-    assert execution.result.metadata["orchestrator_type"] == (
-        "AuditedWorkflowOrchestrator"
-    )
-    assert shared_orchestrator.run_count == 0
+    with pytest.raises(
+        TypeError,
+        match=r"LockedWorkflowOrchestrator.*override for_request",
+    ):
+        shared_orchestrator.for_request(AgentEventBus())
+
     assert shared_orchestrator.event_bus is original_event_bus
 
 
