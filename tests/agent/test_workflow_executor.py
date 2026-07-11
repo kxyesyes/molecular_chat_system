@@ -4,6 +4,7 @@ from threading import Barrier
 from src.agent.contracts import AgentContext, AgentErrorCode
 from src.agent.orchestrators import WorkflowOrchestrator
 from src.agent.orchestrators.base import WorkflowStep
+from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.planning import WorkflowPlan
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.workflow_executor import WorkflowExecutor
@@ -145,3 +146,90 @@ def test_executor_isolates_event_bus_for_concurrent_requests():
             execution.result.trace_id
         }
     assert shared_orchestrator.event_bus is original_event_bus
+
+
+def test_executor_preserves_injected_orchestrator_subclass_extensions():
+    class AuditedWorkflowOrchestrator(WorkflowOrchestrator):
+        def __init__(self, audit_marker, **kwargs):
+            super().__init__(**kwargs)
+            self.audit_marker = audit_marker
+            self.run_count = 0
+
+        def run(self, *args, **kwargs):
+            self.run_count += 1
+            result = super().run(*args, **kwargs)
+            result.metadata["audit_marker"] = self.audit_marker
+            result.metadata["orchestrator_type"] = type(self).__name__
+            return result
+
+    original_event_bus = AgentEventBus()
+    shared_orchestrator = AuditedWorkflowOrchestrator(
+        "configured-extension",
+        event_bus=original_event_bus,
+    )
+
+    execution = WorkflowExecutor(
+        planner=SingleStepPlanner(),
+        orchestrator=shared_orchestrator,
+    ).execute(
+        context=AgentContext(
+            query="CCO",
+            trace_id="subclass-trace",
+            active_skill="comprehensive_evaluation",
+        ),
+        skill=FakeSkill(),
+        all_tools={"property_calculator": FakeTool("property_calculator")},
+    )
+
+    assert execution.result.success is True
+    assert execution.result.metadata["audit_marker"] == "configured-extension"
+    assert execution.result.metadata["orchestrator_type"] == (
+        "AuditedWorkflowOrchestrator"
+    )
+    assert shared_orchestrator.run_count == 0
+    assert shared_orchestrator.event_bus is original_event_bus
+
+
+def test_callback_exception_does_not_interrupt_injected_orchestrator(tmp_path):
+    state_store = SQLiteAgentStateStore(tmp_path / "agent-state.sqlite3")
+    tool = FakeTool("property_calculator")
+
+    def failing_callback(_event):
+        raise RuntimeError("callback transport failed")
+
+    execution = WorkflowExecutor(
+        planner=SingleStepPlanner(),
+        orchestrator=WorkflowOrchestrator(state_store=state_store),
+    ).execute(
+        context=AgentContext(
+            query="CCO",
+            trace_id="callback-injected",
+            active_skill="comprehensive_evaluation",
+        ),
+        skill=FakeSkill(),
+        all_tools={"property_calculator": tool},
+        event_callback=failing_callback,
+    )
+
+    assert execution.result.success is True
+    assert tool.calls == ["CCO"]
+    assert state_store.get_run("callback-injected")["status"] == "succeeded"
+
+
+def test_callback_exception_does_not_interrupt_default_orchestrator():
+    def failing_callback(_event):
+        raise RuntimeError("callback transport failed")
+
+    execution = WorkflowExecutor(planner=SingleStepPlanner()).execute(
+        context=AgentContext(
+            query="CCO",
+            trace_id="callback-default",
+            active_skill="comprehensive_evaluation",
+        ),
+        skill=FakeSkill(),
+        all_tools={"property_calculator": FakeTool("property_calculator")},
+        event_callback=failing_callback,
+    )
+
+    assert execution.result.success is True
+    assert execution.events[-1]["event"] == "task_completed"

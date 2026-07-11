@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import copy
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from collections.abc import Mapping
 from dataclasses import replace
@@ -44,13 +45,13 @@ class WorkflowOrchestrator:
 
     def for_request(self, event_bus: AgentEventBus) -> WorkflowOrchestrator:
         """Create an isolated orchestrator for one request's event stream."""
-        return WorkflowOrchestrator(
-            event_bus=event_bus,
-            validator=self.validator,
-            state_store=self.state_store,
-            workflow_version=self.workflow_version,
-            adapter_version=self.adapter_version,
-        )
+        request_orchestrator = copy(self)
+        request_orchestrator.event_bus = event_bus
+        request_orchestrator.validator = self.validator
+        request_orchestrator.state_store = self.state_store
+        request_orchestrator.workflow_version = self.workflow_version
+        request_orchestrator.adapter_version = self.adapter_version
+        return request_orchestrator
 
     def run(
         self,

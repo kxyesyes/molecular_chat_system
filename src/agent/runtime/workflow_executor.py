@@ -88,8 +88,17 @@ class WorkflowExecutor:
             "state_store",
             None,
         )
+
+        def notify_event(event):
+            if event_callback is None:
+                return
+            try:
+                event_callback(event)
+            except Exception:
+                return
+
         event_bus = AgentEventBus(
-            on_event=event_callback,
+            on_event=notify_event if event_callback is not None else None,
             state_store=state_store,
         )
         orchestrator = (
