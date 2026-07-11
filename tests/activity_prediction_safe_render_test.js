@@ -85,7 +85,12 @@ function createCaptureDom(requiredIds) {
     }
 
     replaceChildren(...children) {
+      this.children.forEach((child) => {
+        child.parentNode = null;
+      });
       this.children = [];
+      this._innerHTML = "";
+      this._textContent = "";
       this.append(...children);
     }
 
@@ -141,7 +146,62 @@ function runModule(relPath, dom, globals) {
   return sandbox;
 }
 
-function assertSafelyRendered(dom, payload, label, requiredRootLabels) {
+const executableUrlAttributes = new Set([
+  "formaction",
+  "href",
+  "src",
+  "srcset",
+  "xlink:href",
+]);
+
+function findExecutableAttributeViolations(nodes, payload) {
+  const violations = [];
+
+  nodes.forEach((node) => {
+    const candidates = new Map();
+    Object.entries(node.attributes || {}).forEach(([name, value]) => {
+      candidates.set(name.toLowerCase(), String(value));
+    });
+    Object.keys(node).forEach((name) => {
+      const normalizedName = name.toLowerCase();
+      if (
+        normalizedName === "srcdoc" ||
+        normalizedName.startsWith("on") ||
+        executableUrlAttributes.has(normalizedName)
+      ) {
+        candidates.set(normalizedName, String(node[name]));
+      }
+    });
+
+    candidates.forEach((value, name) => {
+      const isExecutableAttribute =
+        name === "srcdoc" ||
+        name.startsWith("on") ||
+        executableUrlAttributes.has(name);
+      const unsafeUrl =
+        executableUrlAttributes.has(name) &&
+        /^(?:javascript:|data:\s*text\/html)/i.test(value.trim());
+      if (isExecutableAttribute && (value.includes(payload) || unsafeUrl)) {
+        violations.push({ node, name, value });
+      }
+    });
+  });
+
+  return violations;
+}
+
+function assertSafelyRendered(
+  dom,
+  payload,
+  label,
+  requiredRootLabels,
+  failureTarget,
+) {
+  const targetFailures = failureTarget || failures;
+  function record(condition, message) {
+    if (!condition) targetFailures.push(message);
+  }
+
   function collectNodes(root) {
     const nodes = [root];
     root.children.forEach((child) => nodes.push(...collectNodes(child)));
@@ -157,10 +217,21 @@ function assertSafelyRendered(dom, payload, label, requiredRootLabels) {
   const rawHtmlSinks = connectedNodes.filter((node) =>
     node.innerHTML.includes(payload),
   );
-  check(
+  record(
     rawHtmlSinks.length === 0,
     `${label} reached innerHTML without escaping (${rawHtmlSinks
       .map((node) => node.label)
+      .join(", ")})`,
+  );
+
+  const executableAttributeSinks = findExecutableAttributeViolations(
+    connectedNodes,
+    payload,
+  );
+  record(
+    executableAttributeSinks.length === 0,
+    `${label} reached executable attributes (${executableAttributeSinks
+      .map((violation) => `${violation.node.label}.${violation.name}`)
       .join(", ")})`,
   );
 
@@ -177,8 +248,8 @@ function assertSafelyRendered(dom, payload, label, requiredRootLabels) {
   if (expectedRoots.length) {
     expectedRoots.forEach((rootLabel) => {
       const root = roots.find((node) => node.label === rootLabel);
-      check(Boolean(root), `${label} expected DOM root ${rootLabel}`);
-      check(
+      record(Boolean(root), `${label} expected DOM root ${rootLabel}`);
+      record(
         Boolean(root) && nodeContainsSafePayload(root),
         `${label} must reach ${rootLabel} through textContent/createTextNode or escaped innerHTML`,
       );
@@ -189,11 +260,64 @@ function assertSafelyRendered(dom, payload, label, requiredRootLabels) {
   const reachedSafeSink = connectedNodes.some((node) =>
     nodeContainsSafePayload(node),
   );
-  check(
+  record(
     reachedSafeSink,
     `${label} must reach the rendered DOM through textContent/createTextNode or escaped innerHTML`,
   );
 }
+
+const attributeProbePayload = '<img src=x onerror="attribute-probe-xss">';
+const attributeProbeDom = createCaptureDom(["attribute-probe-root"]);
+const attributeProbeRoot = attributeProbeDom.elements.get(
+  "attribute-probe-root",
+);
+const attributeProbeText = attributeProbeDom.document.createElement("span");
+attributeProbeText.textContent = attributeProbePayload;
+const attributeProbeFrame = attributeProbeDom.document.createElement("iframe");
+attributeProbeFrame.srcdoc = attributeProbePayload;
+const attributeProbeButton = attributeProbeDom.document.createElement("button");
+attributeProbeButton.setAttribute("onclick", attributeProbePayload);
+const attributeProbeLink = attributeProbeDom.document.createElement("a");
+attributeProbeLink.href = "javascript:alert(1)";
+const attributeProbeImage = attributeProbeDom.document.createElement("img");
+attributeProbeImage.src = "javascript:alert(1)";
+attributeProbeRoot.append(
+  attributeProbeText,
+  attributeProbeFrame,
+  attributeProbeButton,
+  attributeProbeLink,
+  attributeProbeImage,
+);
+const attributeProbeFailures = [];
+assertSafelyRendered(
+  attributeProbeDom,
+  attributeProbePayload,
+  "executable attribute mutation probe",
+  ["#attribute-probe-root"],
+  attributeProbeFailures,
+);
+const attributeProbeNodes = [attributeProbeRoot].flatMap(function collect(node) {
+  return [node, ...node.children.flatMap(collect)];
+});
+const attributeProbeViolationNames = new Set(
+  findExecutableAttributeViolations(
+    attributeProbeNodes,
+    attributeProbePayload,
+  ).map((violation) => violation.name),
+);
+check(
+  attributeProbeText.textContent === attributeProbePayload,
+  "Executable attribute mutation probe must also render the payload safely as text",
+);
+check(
+  ["srcdoc", "onclick", "href", "src"].every((name) =>
+    attributeProbeViolationNames.has(name),
+  ) &&
+    attributeProbeFailures.some((message) =>
+      message.includes("reached executable attributes"),
+    ),
+  "Executable attribute mutation probe must make the rendering assertion reject srcdoc, on*, and javascript: href/src",
+);
 
 const activityHtml = read("src/web/templates/activity_prediction.html");
 const safeRenderScript = "/static/js/shared/safe_render.js";

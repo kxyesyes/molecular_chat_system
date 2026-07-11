@@ -170,7 +170,51 @@ assert(
   );
 });
 
-function exerciseChatMessageSink(functionName) {
+const executableUrlAttributes = new Set([
+  "formaction",
+  "href",
+  "src",
+  "srcset",
+  "xlink:href",
+]);
+
+function findExecutableAttributeViolations(nodes, payload) {
+  const violations = [];
+
+  nodes.forEach((node) => {
+    const candidates = new Map();
+    Object.entries(node.attributes || {}).forEach(([name, value]) => {
+      candidates.set(name.toLowerCase(), String(value));
+    });
+    Object.keys(node).forEach((name) => {
+      const normalizedName = name.toLowerCase();
+      if (
+        normalizedName === "srcdoc" ||
+        normalizedName.startsWith("on") ||
+        executableUrlAttributes.has(normalizedName)
+      ) {
+        candidates.set(normalizedName, String(node[name]));
+      }
+    });
+
+    candidates.forEach((value, name) => {
+      const isExecutableAttribute =
+        name === "srcdoc" ||
+        name.startsWith("on") ||
+        executableUrlAttributes.has(name);
+      const unsafeUrl =
+        executableUrlAttributes.has(name) &&
+        /^(?:javascript:|data:\s*text\/html)/i.test(value.trim());
+      if (isExecutableAttribute && (value.includes(payload) || unsafeUrl)) {
+        violations.push({ node, name, value });
+      }
+    });
+  });
+
+  return violations;
+}
+
+function exerciseChatMessageSink(functionName, options) {
   class FakeElement {
     constructor(label, isRoot) {
       this.label = label;
@@ -178,6 +222,7 @@ function exerciseChatMessageSink(functionName) {
       this.style = {};
       this.children = [];
       this.parentNode = null;
+      this.attributes = {};
       this._innerHTML = "";
       this._textContent = "";
     }
@@ -246,7 +291,7 @@ function exerciseChatMessageSink(functionName) {
     }
 
     setAttribute(name, value) {
-      this[name] = String(value);
+      this.attributes[name] = String(value);
     }
   }
 
@@ -282,8 +327,23 @@ function exerciseChatMessageSink(functionName) {
     filename: "src/web/static/js/home/chat_renderer.js",
   });
 
-  const payload = `<img src=x onerror="${functionName}-xss">`;
-  sandbox.HomeChatRenderer[functionName](payload, "info");
+  const scenarioName = functionName || "attribute-probe";
+  const payload = `<img src=x onerror="${scenarioName}-xss">`;
+  if (options && options.attributeProbe) {
+    const text = document.createElement("span");
+    text.textContent = payload;
+    const frame = document.createElement("iframe");
+    frame.srcdoc = payload;
+    const button = document.createElement("button");
+    button.setAttribute("onclick", payload);
+    const link = document.createElement("a");
+    link.href = "javascript:alert(1)";
+    const image = document.createElement("img");
+    image.src = "javascript:alert(1)";
+    document.body.append(text, frame, button, link, image);
+  } else {
+    sandbox.HomeChatRenderer[functionName](payload, "info");
+  }
 
   function collectNodes(root) {
     const nodes = [root];
@@ -295,6 +355,10 @@ function exerciseChatMessageSink(functionName) {
   const rawHtmlSinks = renderedNodes.filter((node) =>
     node.innerHTML.includes(payload),
   );
+  const executableAttributeSinks = findExecutableAttributeViolations(
+    renderedNodes,
+    payload,
+  );
   const safelyRendered =
     renderedNodes.some((node) => node.textContent.includes(payload)) ||
     renderedNodes.some((node) =>
@@ -304,25 +368,62 @@ function exerciseChatMessageSink(functionName) {
   return {
     payload,
     rawHtmlSinks,
+    executableAttributeSinks,
     safelyRendered,
   };
 }
 
-const chatSinkFailures = [];
-["showToast", "showNotification"].forEach((functionName) => {
-  const result = exerciseChatMessageSink(functionName);
+function collectChatSinkFailures(result, functionName) {
+  const sinkFailures = [];
   if (result.rawHtmlSinks.length) {
-    chatSinkFailures.push(
+    sinkFailures.push(
       `${functionName} inserted raw message into innerHTML (${result.rawHtmlSinks
         .map((node) => node.label)
         .join(", ")})`,
     );
   }
+  if (result.executableAttributeSinks.length) {
+    sinkFailures.push(
+      `${functionName} inserted message into executable attributes (${result.executableAttributeSinks
+        .map((violation) => `${violation.node.label}.${violation.name}`)
+        .join(", ")})`,
+    );
+  }
   if (!result.safelyRendered) {
-    chatSinkFailures.push(
+    sinkFailures.push(
       `${functionName} must deliver message through textContent/createTextNode or escaped innerHTML`,
     );
   }
+  return sinkFailures;
+}
+
+const chatAttributeProbe = exerciseChatMessageSink(null, {
+  attributeProbe: true,
+});
+const chatAttributeProbeFailures = collectChatSinkFailures(
+  chatAttributeProbe,
+  "chat attribute mutation probe",
+);
+assert(
+  chatAttributeProbe.safelyRendered,
+  "Chat executable attribute mutation probe must also render the payload safely as text",
+);
+assert(
+  ["srcdoc", "onclick", "href", "src"].every((name) =>
+    chatAttributeProbe.executableAttributeSinks.some(
+      (violation) => violation.name === name,
+    ),
+  ) &&
+    chatAttributeProbeFailures.some((message) =>
+      message.includes("inserted message into executable attributes"),
+    ),
+  "Chat rendering assertion must reject srcdoc, on*, and javascript: href/src even when textContent is safe",
+);
+
+const chatSinkFailures = [];
+["showToast", "showNotification"].forEach((functionName) => {
+  const result = exerciseChatMessageSink(functionName);
+  chatSinkFailures.push(...collectChatSinkFailures(result, functionName));
 });
 assert(chatSinkFailures.length === 0, chatSinkFailures.join("\n"));
 
