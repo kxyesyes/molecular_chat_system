@@ -11,6 +11,7 @@ from .spec import RetryPolicy, ToolSpec
 
 TOOL_AGENT_OWNERS = {
     "target_database_search": "target",
+    "reverse_target_predictor": "reverse_target",
     "llm_molecular_generator": "molecular_design",
     "property_calculator": "property_admet",
     "drug_likeness_assessment": "property_admet",

@@ -4,6 +4,7 @@ from .agents import (
     MolecularDesignAgent,
     PropertyAdmetAgent,
     ReportAgent,
+    ReverseTargetAgent,
     TargetAgent,
     build_default_specialists,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "MolecularDesignAgent",
     "PropertyAdmetAgent",
     "ReportAgent",
+    "ReverseTargetAgent",
     "SpecialistAgent",
     "TargetAgent",
     "build_default_specialists",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel
 
 from src.agent.specialists import build_default_specialists
@@ -13,7 +15,7 @@ from src.agent.tooling import (
 
 
 class QueryInput(BaseModel):
-    query: str
+    query: Any
 
 
 class FakeTool:
@@ -32,6 +34,7 @@ class FakeTool:
 
 OWNERS = {
     "target_database_search": "target",
+    "reverse_target_predictor": "reverse_target",
     "llm_molecular_generator": "molecular_design",
     "property_calculator": "property_admet",
     "drug_likeness_assessment": "property_admet",
@@ -45,7 +48,12 @@ def build_registry():
     registry = ToolRegistry()
     tools = {}
     for name, owner in OWNERS.items():
-        output = [{"smiles": "CCO"}] if name == "llm_molecular_generator" else None
+        if name == "llm_molecular_generator":
+            output = [{"smiles": "CCO"}]
+        elif name == "reverse_target_predictor":
+            output = [{"gene_symbol": "EGFR", "final_similarity": 0.91}]
+        else:
+            output = None
         tool = FakeTool(name, output=output)
         tools[name] = tool
         registry.register(
@@ -106,6 +114,41 @@ def test_supervisor_delegates_each_step_to_declared_specialist():
     assert result["result"]["tool_results_by_step"][property_step]["tool_name"] == (
         "property_calculator"
     )
+
+
+def test_supervisor_delegates_reverse_target_output_to_target_search():
+    registry, tools = build_registry()
+    supervisor = SupervisorAgent(
+        tool_registry=registry,
+        specialists=build_default_specialists(),
+    )
+
+    result = supervisor.run(
+        "Comprehensively evaluate CCO",
+        skill_name="comprehensive_evaluation",
+    )
+
+    expected_targets = [{"gene_symbol": "EGFR", "final_similarity": 0.91}]
+    assert result["status"] == "succeeded"
+    assert [item["tool_name"] for item in result["delegations"]] == [
+        "property_calculator",
+        "drug_likeness_assessment",
+        "admet_predictor",
+        "activity_predictor",
+        "reverse_target_predictor",
+        "target_database_search",
+    ]
+    assert [item["agent_name"] for item in result["delegations"][-2:]] == [
+        "reverse_target",
+        "target",
+    ]
+    assert tools["target_database_search"].calls == [expected_targets]
+    assert [
+        item["tool_name"]
+        for item in result["result"]["tool_result_sequence"][-2:]
+    ] == ["reverse_target_predictor", "target_database_search"]
+    assert "reverse_target_predictor" in result["result"]["tool_results"]
+    assert "target_database_search" in result["result"]["tool_results"]
 
 
 def test_supervisor_rejects_registry_tool_owned_by_wrong_agent():

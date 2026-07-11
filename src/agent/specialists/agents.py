@@ -11,6 +11,11 @@ class TargetAgent(SpecialistAgent):
     allowed_tools = {"target_database_search"}
 
 
+class ReverseTargetAgent(SpecialistAgent):
+    name = "reverse_target"
+    allowed_tools = {"reverse_target_predictor"}
+
+
 class MolecularDesignAgent(SpecialistAgent):
     name = "molecular_design"
     allowed_tools = {"llm_molecular_generator"}
@@ -74,6 +79,7 @@ class ReportAgent(SpecialistAgent):
 def build_default_specialists() -> dict[str, SpecialistAgent]:
     agents = [
         TargetAgent(),
+        ReverseTargetAgent(),
         MolecularDesignAgent(),
         PropertyAdmetAgent(),
         ActivityAgent(),

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import pytest
 from pydantic import BaseModel
 
+import src.agent.specialists as specialists
 from src.agent.specialists import (
     ActivityAgent,
     AgentTask,
@@ -10,12 +12,14 @@ from src.agent.specialists import (
     PropertyAdmetAgent,
     ReportAgent,
     TargetAgent,
+    build_default_specialists,
 )
 from src.agent.tooling import (
     LegacyPythonToolAdapter,
     RetryPolicy,
     ToolRegistry,
     ToolSpec,
+    build_tool_registry,
 )
 
 
@@ -88,6 +92,36 @@ def test_specialist_agent_tool_ownership_is_explicit():
         "get_docking_result",
     } == DockingAgent.allowed_tools
     assert ReportAgent.allowed_tools == set()
+
+
+def test_reverse_target_agent_owns_only_reverse_target_predictor():
+    agent_class = getattr(specialists, "ReverseTargetAgent", None)
+
+    assert agent_class is not None
+    assert agent_class.name == "reverse_target"
+    assert agent_class.allowed_tools == {"reverse_target_predictor"}
+
+
+def test_reverse_target_tool_registry_owner_and_capability_are_explicit():
+    registry = build_tool_registry([EchoTool("reverse_target_predictor")])
+
+    adapter = registry.resolve(
+        "reverse_target_predictor", agent_name="reverse_target"
+    )
+    assert adapter.spec.owner_agents == {"reverse_target"}
+    assert adapter.spec.capabilities == {"reverse_target"}
+    with pytest.raises(PermissionError):
+        registry.resolve(
+            "reverse_target_predictor", agent_name="target"
+        )
+
+
+def test_default_specialists_include_reverse_target_agent():
+    agent_class = getattr(specialists, "ReverseTargetAgent", None)
+    default_specialists = build_default_specialists()
+
+    assert agent_class is not None
+    assert isinstance(default_specialists["reverse_target"], agent_class)
 
 
 def test_molecular_design_agent_executes_only_local_generator_tool():
