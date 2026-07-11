@@ -1,6 +1,22 @@
 "use strict";
 
 window.ActivityResults = (function () {
+  function createCell(text, styleText) {
+    const cell = document.createElement("td");
+    if (styleText) cell.style.cssText = styleText;
+    cell.textContent = text;
+    return cell;
+  }
+
+  function createTagCell(text, className) {
+    const cell = document.createElement("td");
+    const tag = document.createElement("span");
+    tag.className = className;
+    tag.textContent = text;
+    cell.appendChild(tag);
+    return cell;
+  }
+
   function resetViews() {
     const singleSummary = document.getElementById("singleSummary");
     const batchHistEl = document.getElementById("batchHistogram");
@@ -89,7 +105,7 @@ window.ActivityResults = (function () {
     const tbody = document.getElementById("resultsBody");
     if (!tbody) return;
 
-    tbody.innerHTML = "";
+    tbody.replaceChildren();
 
     dataList.forEach(function (item, index) {
       const score = Number(item.activity_score || 0);
@@ -101,32 +117,47 @@ window.ActivityResults = (function () {
       row.className = "stagger-item";
       row.style.animationDelay = `${index * 0.05}s`;
 
+      const smilesCell = createCell(
+        item.smiles || "-",
+        "max-width: 360px; word-break: break-all; font-family: Consolas, monospace;",
+      );
+
+      let animatedScoreCell = null;
       if (item.success === false) {
-        row.innerHTML = `
-          <td style="max-width: 360px; word-break: break-all; font-family: Consolas, monospace;">${item.smiles || "-"}</td>
-          <td style="font-weight:700; min-width: 80px; color: #b91c1c;">${item.error || "Error"}</td>
-          <td><span class="tag tag-error">Failed</span></td>
-          <td>--</td>
-        `;
+        row.append(
+          smilesCell,
+          createCell(
+            item.error || "Error",
+            "font-weight:700; min-width: 80px; color: #b91c1c;",
+          ),
+          createTagCell("Failed", "tag tag-error"),
+          createCell("--"),
+        );
       } else {
-        row.innerHTML = `
-          <td style="max-width: 360px; word-break: break-all; font-family: Consolas, monospace;">${item.smiles || "-"}</td>
-          <td id="${rowId}" style="font-weight:700; min-width: 80px;">0.000</td>
-          <td><span class="tag ${ActivityUtils.getTagClass(
-            cls,
-            score,
-            true,
-            ActivityModels.getTaskType(),
-            ActivityModels.getRangeConfig(),
-          )}">${cls}</span></td>
-          <td>${(conf * 100).toFixed(1)}%</td>
-        `;
+        const scoreCell = createCell(
+          "0.000",
+          "font-weight:700; min-width: 80px;",
+        );
+        scoreCell.id = rowId;
+        const tagClass = ActivityUtils.getTagClass(
+          cls,
+          score,
+          true,
+          ActivityModels.getTaskType(),
+          ActivityModels.getRangeConfig(),
+        );
+        row.append(
+          smilesCell,
+          scoreCell,
+          createTagCell(cls, `tag ${tagClass}`),
+          createCell(`${(conf * 100).toFixed(1)}%`),
+        );
+        animatedScoreCell = scoreCell;
       }
 
       tbody.appendChild(row);
-
-      if (item.success !== false) {
-        ActivityUtils.animateNumber(document.getElementById(rowId), score);
+      if (animatedScoreCell) {
+        ActivityUtils.animateNumber(animatedScoreCell, score);
       }
     });
   }

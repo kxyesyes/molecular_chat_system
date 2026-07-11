@@ -81,10 +81,12 @@ window.HomeChatRenderer = (function () {
       gap: 10px;
     `;
 
-    toast.innerHTML = `
-      <span style="font-size: 20px;">${icon}</span>
-      <span>${message}</span>
-    `;
+    const iconSpan = document.createElement("span");
+    iconSpan.style.fontSize = "20px";
+    iconSpan.textContent = icon;
+    const messageSpan = document.createElement("span");
+    messageSpan.textContent = message;
+    toast.append(iconSpan, messageSpan);
 
     document.body.appendChild(toast);
 
@@ -135,7 +137,11 @@ window.HomeChatRenderer = (function () {
       gap: 10px;
     `;
 
-    notification.innerHTML = `<span>${icons[normalizedType]}</span><span>${message}</span>`;
+    const iconSpan = document.createElement("span");
+    iconSpan.textContent = icons[normalizedType] || icons.info;
+    const messageSpan = document.createElement("span");
+    messageSpan.textContent = message;
+    notification.append(iconSpan, messageSpan);
     document.body.appendChild(notification);
 
     setTimeout(function () {

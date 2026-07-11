@@ -11,6 +11,33 @@ window.ActivityTraining = (function () {
     return { key: "value", label: "Metric" };
   }
 
+  function normalizeState(state) {
+    return state === "done" || state === "error" ? state : "running";
+  }
+
+  function formatMetricValue(value) {
+    return value !== undefined && value !== null
+      ? Number(value).toFixed(4)
+      : "--";
+  }
+
+  function createMetricCard(label, value, valueId) {
+    const card = document.createElement("div");
+    card.className = "metric-card";
+
+    const name = document.createElement("div");
+    name.className = "metric-name";
+    name.textContent = label;
+
+    const metricValue = document.createElement("div");
+    metricValue.className = "metric-value";
+    metricValue.id = valueId;
+    metricValue.textContent = value;
+
+    card.append(name, metricValue);
+    return card;
+  }
+
   function openDrawer() {
     const dock = document.getElementById("train-dock");
     const drawer = document.getElementById("train-drawer");
@@ -61,25 +88,35 @@ window.ActivityTraining = (function () {
   }
 
   function updateDock(epoch, total, metric, eta, state) {
+    const safeState = normalizeState(state);
     const dot = document.getElementById("dock-dot");
-    if (dot) dot.className = `dock-dot ${state || "running"}`;
+    if (dot) dot.className = `dock-dot ${safeState}`;
 
     ActivityUtils.setText("dock-epoch-text", `Epoch ${epoch}/${total}`);
     ActivityUtils.setText("dock-metric-text", metric || "—");
     ActivityUtils.setText("dock-eta-text", eta ? `ETA ${eta}` : "ETA —");
     ActivityUtils.setText(
       "dock-status-text",
-      state === "running"
+      safeState === "running"
         ? "Training"
-        : state === "done"
+        : safeState === "done"
           ? "Done ✓"
           : "Error ✗",
     );
   }
 
   function updateDrawerStats(epoch, total, metric, eta, state) {
+    const safeState = normalizeState(state);
     const epochEl = document.getElementById("d-epoch");
-    if (epochEl) epochEl.innerHTML = `${epoch} / <span id="d-total">${total}</span>`;
+    if (epochEl) {
+      const totalEl = document.createElement("span");
+      totalEl.id = "d-total";
+      totalEl.textContent = total;
+      epochEl.replaceChildren(
+        document.createTextNode(`${epoch} / `),
+        totalEl,
+      );
+    }
 
     ActivityUtils.setText("d-metric", metric || "—");
     ActivityUtils.setText("d-eta", eta || "—");
@@ -87,8 +124,12 @@ window.ActivityTraining = (function () {
     const statusEl = document.getElementById("d-status");
     if (!statusEl) return;
     statusEl.textContent =
-      state === "running" ? "Running" : state === "done" ? "Done ✓" : "Error ✗";
-    statusEl.className = `dstat-value val-${state || "running"}`;
+      safeState === "running"
+        ? "Running"
+        : safeState === "done"
+          ? "Done ✓"
+          : "Error ✗";
+    statusEl.className = `dstat-value val-${safeState}`;
   }
 
   function renderTrainingSummary(status, elapsedSeconds) {
@@ -106,16 +147,37 @@ window.ActivityTraining = (function () {
     const min = Math.floor((elapsedSeconds || 0) / 60);
     const sec = Math.floor((elapsedSeconds || 0) % 60);
 
-    area.innerHTML = `
-      <div class="metric-grid">
-        <div class="metric-card"><div class="metric-name">${descriptor.label}</div><div class="metric-value" id="resR2">${bestMetrics[descriptor.key] !== undefined ? Number(bestMetrics[descriptor.key]).toFixed(4) : "--"}</div></div>
-        <div class="metric-card"><div class="metric-name">${secondaryLabel}</div><div class="metric-value" id="resRMSE">${secondaryValue !== undefined ? Number(secondaryValue).toFixed(4) : "--"}</div></div>
-        <div class="metric-card"><div class="metric-name">Best Epoch</div><div class="metric-value" id="resBestEpoch">${source.best_epoch || "--"}</div></div>
-        <div class="metric-card"><div class="metric-name">Train Loss</div><div class="metric-value" id="resTrainLoss">${safeTrainLoss !== undefined && safeTrainLoss !== null ? Number(safeTrainLoss).toFixed(4) : "--"}</div></div>
-        <div class="metric-card"><div class="metric-name">Val Loss</div><div class="metric-value" id="resValLoss">${safeValLoss !== undefined && safeValLoss !== null ? Number(safeValLoss).toFixed(4) : "--"}</div></div>
-        <div class="metric-card"><div class="metric-name">训练耗时</div><div class="metric-value" id="resTime">${elapsedSeconds ? `${min}m ${sec}s` : "--"}</div></div>
-      </div>
-    `;
+    const metricGrid = document.createElement("div");
+    metricGrid.className = "metric-grid";
+    metricGrid.append(
+      createMetricCard(
+        descriptor.label,
+        formatMetricValue(bestMetrics[descriptor.key]),
+        "resR2",
+      ),
+      createMetricCard(
+        secondaryLabel,
+        formatMetricValue(secondaryValue),
+        "resRMSE",
+      ),
+      createMetricCard("Best Epoch", source.best_epoch || "--", "resBestEpoch"),
+      createMetricCard(
+        "Train Loss",
+        formatMetricValue(safeTrainLoss),
+        "resTrainLoss",
+      ),
+      createMetricCard(
+        "Val Loss",
+        formatMetricValue(safeValLoss),
+        "resValLoss",
+      ),
+      createMetricCard(
+        "训练耗时",
+        elapsedSeconds ? `${min}m ${sec}s` : "--",
+        "resTime",
+      ),
+    );
+    area.replaceChildren(metricGrid);
     area.style.display = "block";
   }
 
@@ -138,7 +200,10 @@ window.ActivityTraining = (function () {
         if (!res.ok || !payload.success) return;
 
         const status = payload.status;
-        const progress = status.progress ?? 0;
+        const rawProgress = Number(status.progress ?? 0);
+        const progress = Number.isFinite(rawProgress)
+          ? Math.max(0, Math.min(100, rawProgress))
+          : 0;
         const progressBar = document.getElementById("drawerProgressBar");
         if (progressBar) progressBar.style.width = `${progress}%`;
 
