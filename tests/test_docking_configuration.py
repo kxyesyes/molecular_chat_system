@@ -8,6 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 from src.docking.molecular_docking_service import (
@@ -17,6 +20,7 @@ from src.docking.molecular_docking_service import (
 )
 from src.docking.adapters.base import CommandAdapter
 from src.docking.adapters.vina_adapter import VinaAdapter
+from src.web.routes.api_routes import setup_api_routes
 
 
 class RecordingVinaAdapter:
@@ -302,12 +306,54 @@ class DockingConfigurationTest(unittest.TestCase):
             self.assertTrue(result["success"])
             self.assertEqual(result["best_pose"]["binding_energy"], -7.25)
             warning = result["warnings"][0]
-            self.assertEqual(warning["code"], "history_persistence_failed")
-            self.assertEqual(warning["traceability"]["job_id"], result["job_id"])
-            self.assertEqual(
-                Path(warning["traceability"]["job_dir"]).parent,
-                root,
+            self.assertIsInstance(warning, str)
+            self.assertIn("history", warning.lower())
+            self.assertNotIn("history lock unavailable", warning)
+            self.assertEqual(Path(result["pose_file"]).parent.parent, root)
+
+    def test_docking_batch_and_single_api_preserve_history_warnings(self):
+        warning = "History persistence failed; docking output remains available."
+
+        class WarningDockingService:
+            def __init__(self, work_dir):
+                self.work_dir = str(work_dir)
+
+            async def perform_docking(self, **kwargs):
+                return {
+                    "success": True,
+                    "job_id": "warning-job",
+                    "results": [],
+                    "best_pose": None,
+                    "pose_file": str(Path(self.work_dir) / "result.pdbqt"),
+                    "total_poses": 0,
+                    "warnings": [warning],
+                }
+
+        with tempfile.TemporaryDirectory(prefix="docking_warning_api_") as tmp:
+            app = FastAPI()
+            setup_api_routes(app, docking_service=WarningDockingService(tmp))
+            client = TestClient(app)
+
+            batch_response = client.post(
+                "/api/docking/batch_submit",
+                files={"protein_file": ("protein.pdb", b"ATOM")},
+                data={"batch_smiles": "CCO ligand-one"},
             )
+            single_response = client.post(
+                "/api/docking/submit",
+                files={"protein_file": ("protein.pdb", b"ATOM")},
+                data={"smiles": "CCO"},
+            )
+
+        self.assertEqual(batch_response.status_code, 200)
+        batch_item = batch_response.json()["results"][0]
+        self.assertTrue(batch_item["success"])
+        self.assertIsNone(batch_item["best_energy"])
+        self.assertEqual(batch_item["warnings"], [warning])
+        self.assertTrue(all(isinstance(item, str) for item in batch_item["warnings"]))
+
+        self.assertEqual(single_response.status_code, 200)
+        self.assertEqual(single_response.json()["warnings"], [warning])
 
     def test_vina_timeout_can_be_configured_from_environment(self):
         with patch.dict(

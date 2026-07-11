@@ -7,9 +7,27 @@
 from typing import Dict, Any
 import logging
 
+from src.agent.persistence.redaction import redact_sensitive
+
 from .base_tool import BaseMolecularTool
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_warning_strings(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    warnings = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        warning = value.strip()
+        if not warning:
+            continue
+        warning = redact_sensitive(warning)
+        if isinstance(warning, str) and warning not in warnings:
+            warnings.append(warning)
+    return warnings
 
 
 class MolecularDocking(BaseMolecularTool):
@@ -139,8 +157,12 @@ class MolecularDocking(BaseMolecularTool):
                     input_type=input_type,
                 )
             )
+            warnings = _normalize_warning_strings(docking_result.get("warnings"))
+            docking_data = dict(docking_result)
+            docking_data["warnings"] = warnings
             result["success"] = bool(docking_result.get("success"))
-            result["data"] = docking_result
+            result["data"] = docking_data
+            result["warnings"] = warnings
             result["quality"] = {
                 "docking_inputs": {
                     "receptor_path": str(receptor_path),

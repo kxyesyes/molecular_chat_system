@@ -816,19 +816,8 @@ class MolecularDockingService:
             except Exception as index_error:
                 logger.warning(f"Failed to update docking history index: {index_error}")
                 history_warnings.append(
-                    {
-                        "code": "history_persistence_failed",
-                        "message": (
-                            "Docking completed, but its history index record "
-                            "could not be persisted."
-                        ),
-                        "traceability": {
-                            "job_id": job_id,
-                            "job_dir": str(Path(job_dir).resolve()),
-                            "pose_file": resolved_pose_file,
-                            "history_index_recorded": False,
-                        },
-                    }
+                    "History persistence failed; docking output remains "
+                    "available through the returned job and pose references."
                 )
             response = {
                 "success": True,

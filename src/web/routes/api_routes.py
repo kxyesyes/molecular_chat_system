@@ -9,9 +9,26 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Optional
 from fastapi import Depends, UploadFile, File, Form, HTTPException, Response, Body
 
+from src.agent.persistence.redaction import redact_sensitive
 from src.web.admin_auth import require_admin
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_warning_strings(values: Any) -> List[str]:
+    if not isinstance(values, list):
+        return []
+    warnings = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        warning = value.strip()
+        if not warning:
+            continue
+        warning = redact_sensitive(warning)
+        if isinstance(warning, str) and warning not in warnings:
+            warnings.append(warning)
+    return warnings
 
 
 def _parse_positive_int_env(name: str, default: int) -> int:
@@ -345,6 +362,7 @@ def setup_api_routes(app, docking_service=None):
                         "best_energy": best_pose.get("binding_energy") if best_pose else None,
                         "total_poses": result.get("total_poses", 0),
                         "error": result.get("error"),
+                        "warnings": _normalize_warning_strings(result.get("warnings")),
                     })
                 except Exception as item_error:
                     logger.error(f"批量对接子任务失败 ({job['ligand_name']}): {item_error}")
@@ -358,6 +376,7 @@ def setup_api_routes(app, docking_service=None):
                         "best_energy": None,
                         "total_poses": 0,
                         "error": str(item_error),
+                        "warnings": [],
                     })
 
             completed = sum(1 for item in batch_results if item["success"])
