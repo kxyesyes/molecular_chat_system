@@ -212,6 +212,8 @@ def setup_api_routes(app, docking_service=None):
                     input_type="file"
                 )
 
+            result = dict(result)
+            result["warnings"] = _normalize_warning_strings(result.get("warnings"))
             return result
 
         except HTTPException:

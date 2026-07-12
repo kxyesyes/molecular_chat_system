@@ -267,6 +267,50 @@ class DockingConfigurationTest(unittest.TestCase):
             time.sleep(2.25)
             self.assertFalse(marker_file.exists())
 
+    @unittest.skipUnless(os.name == "nt", "Windows Job Object regression")
+    def test_command_adapter_timeout_terminates_orphaned_windows_child(self):
+        with tempfile.TemporaryDirectory(prefix="command_orphan_") as tmp:
+            root = Path(tmp)
+            child_script = root / "orphan_marker.py"
+            marker_file = root / "orphan-survived.marker"
+            batch_file = root / "launch_orphan.bat"
+            child_script.write_text(
+                "\n".join(
+                    [
+                        "import sys",
+                        "import time",
+                        "from pathlib import Path",
+                        "print('orphan-started', flush=True)",
+                        "time.sleep(2.0)",
+                        "Path(sys.argv[1]).write_text('survived', encoding='utf-8')",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            batch_file.write_text(
+                (
+                    "@echo off\r\n"
+                    f'start "" /b "{sys.executable}" "{child_script}" "%~1"\r\n'
+                    "exit /b 0\r\n"
+                ),
+                encoding="utf-8",
+            )
+            adapter = CommandAdapter(str(batch_file))
+
+            started = time.perf_counter()
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                adapter.run(
+                    adapter.wrap_command(str(marker_file)),
+                    cwd=str(root),
+                    timeout=0.25,
+                )
+            elapsed = time.perf_counter() - started
+
+            self.assertLess(elapsed, 1.5)
+            self.assertIn("orphan-started", _decoded_stream(caught.exception.stdout))
+            time.sleep(2.25)
+            self.assertFalse(marker_file.exists())
+
     def test_history_persistence_failure_returns_traceability_warning(self):
         with tempfile.TemporaryDirectory(prefix="docking_history_warning_") as tmp:
             root = Path(tmp)
@@ -313,6 +357,9 @@ class DockingConfigurationTest(unittest.TestCase):
 
     def test_docking_batch_and_single_api_preserve_history_warnings(self):
         warning = "History persistence failed; docking output remains available."
+        credential_warning = "Bearer abcdefghijklmnop"
+        raw_warnings = [warning, credential_warning, 7, "   "]
+        expected_warnings = [warning, "[REDACTED]"]
 
         class WarningDockingService:
             def __init__(self, work_dir):
@@ -326,7 +373,7 @@ class DockingConfigurationTest(unittest.TestCase):
                     "best_pose": None,
                     "pose_file": str(Path(self.work_dir) / "result.pdbqt"),
                     "total_poses": 0,
-                    "warnings": [warning],
+                    "warnings": list(raw_warnings),
                 }
 
         with tempfile.TemporaryDirectory(prefix="docking_warning_api_") as tmp:
@@ -349,11 +396,14 @@ class DockingConfigurationTest(unittest.TestCase):
         batch_item = batch_response.json()["results"][0]
         self.assertTrue(batch_item["success"])
         self.assertIsNone(batch_item["best_energy"])
-        self.assertEqual(batch_item["warnings"], [warning])
+        self.assertEqual(batch_item["warnings"], expected_warnings)
         self.assertTrue(all(isinstance(item, str) for item in batch_item["warnings"]))
 
         self.assertEqual(single_response.status_code, 200)
-        self.assertEqual(single_response.json()["warnings"], [warning])
+        self.assertEqual(single_response.json()["warnings"], expected_warnings)
+        self.assertTrue(
+            all(isinstance(item, str) for item in single_response.json()["warnings"])
+        )
 
     def test_vina_timeout_can_be_configured_from_environment(self):
         with patch.dict(
