@@ -296,10 +296,12 @@ class RAGSystem:
         if index_path.is_file() and index_manifest_path.is_file():
             try:
                 candidate_manifest = load_manifest(index_manifest_path)
+                candidate_index_sha256 = file_sha256(index_path)
                 candidate_index = faiss.read_index(str(index_path))
                 validate_manifest(
                     candidate_manifest,
                     source_path=self.source_path,
+                    index_sha256=candidate_index_sha256,
                     embedding_model=self.embedding_model_name,
                     vector_dimension=int(candidate_index.d),
                     vector_count=int(candidate_index.ntotal),
@@ -407,20 +409,21 @@ class RAGSystem:
                     schema_version=CURRENT_SCHEMA_VERSION,
                     source_path=str(self.source_path),
                     source_sha256=file_sha256(self.source_path),
+                    index_sha256="",
                     embedding_model=self.embedding_model_name,
                     vector_dimension=dimension,
                     vector_count=len(row_mapping),
                     row_mapping=row_mapping,
                     created_at=datetime.now(timezone.utc).isoformat(),
                 )
-                atomic_save_index_pair(
+                persisted_manifest = atomic_save_index_pair(
                     candidate_index,
                     Path(f"{vector_store_path}.index"),
                     candidate_manifest,
                     faiss_module=faiss,
                 )
                 self.vector_index = candidate_index
-                self.manifest = candidate_manifest
+                self.manifest = persisted_manifest
                 self.index_status = "created"
                 
                 logger.info(f"Created and saved vector index with {len(embeddings)} embeddings")
@@ -490,6 +493,7 @@ class RAGSystem:
                     mol_data['provenance'] = {
                         "source_path": self.manifest.source_path,
                         "source_sha256": self.manifest.source_sha256,
+                        "index_sha256": self.manifest.index_sha256,
                         "embedding_model": self.manifest.embedding_model,
                         "manifest_schema_version": self.manifest.schema_version,
                         "builder_version": self.manifest.builder_version,

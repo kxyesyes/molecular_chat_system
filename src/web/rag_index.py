@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
@@ -10,11 +10,12 @@ from typing import Any, Mapping
 import uuid
 
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 _REQUIRED_MANIFEST_FIELDS = {
     "schema_version",
     "source_path",
     "source_sha256",
+    "index_sha256",
     "embedding_model",
     "vector_dimension",
     "vector_count",
@@ -33,6 +34,7 @@ class RAGIndexManifest:
     schema_version: int
     source_path: str
     source_sha256: str
+    index_sha256: str
     embedding_model: str
     vector_dimension: int
     vector_count: int
@@ -45,6 +47,7 @@ class RAGIndexManifest:
             "schema_version": self.schema_version,
             "source_path": self.source_path,
             "source_sha256": self.source_sha256,
+            "index_sha256": self.index_sha256,
             "embedding_model": self.embedding_model,
             "vector_dimension": self.vector_dimension,
             "vector_count": self.vector_count,
@@ -76,6 +79,7 @@ class RAGIndexManifest:
             schema_version=payload["schema_version"],
             source_path=payload["source_path"],
             source_sha256=payload["source_sha256"],
+            index_sha256=payload["index_sha256"],
             embedding_model=payload["embedding_model"],
             vector_dimension=payload["vector_dimension"],
             vector_count=payload["vector_count"],
@@ -145,6 +149,7 @@ def validate_manifest(
     manifest: RAGIndexManifest,
     *,
     source_path: str | Path,
+    index_sha256: str,
     embedding_model: str,
     vector_dimension: int,
     vector_count: int,
@@ -166,6 +171,8 @@ def validate_manifest(
         ) from error
     if manifest.source_sha256 != current_source_sha256:
         issues.append("source SHA256 mismatch")
+    if manifest.index_sha256 != index_sha256:
+        issues.append("index SHA256 mismatch")
     if manifest.embedding_model != embedding_model:
         issues.append("embedding model mismatch")
     issues.extend(
@@ -216,7 +223,7 @@ def atomic_save_index_pair(
     manifest: RAGIndexManifest,
     *,
     faiss_module: Any,
-) -> None:
+) -> RAGIndexManifest:
     """Commit an index first and its manifest last, rolling back on failure."""
     final_index_path = Path(index_path)
     final_manifest_path = manifest_path(final_index_path)
@@ -234,13 +241,17 @@ def atomic_save_index_pair(
         _validate_index_shape(written_index, manifest)
         with temp_index_path.open("r+b") as index_file:
             os.fsync(index_file.fileno())
+        persisted_manifest = replace(
+            manifest,
+            index_sha256=file_sha256(temp_index_path),
+        )
 
         with temp_manifest_path.open(
             "w",
             encoding="utf-8",
             newline="\n",
         ) as manifest_file:
-            manifest_file.write(manifest.to_json())
+            manifest_file.write(persisted_manifest.to_json())
             manifest_file.write("\n")
             manifest_file.flush()
             os.fsync(manifest_file.fileno())
@@ -271,3 +282,4 @@ def atomic_save_index_pair(
                 temp_path.unlink(missing_ok=True)
             except OSError:
                 pass
+    return persisted_manifest

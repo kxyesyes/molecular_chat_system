@@ -48,6 +48,7 @@ def _make_manifest(
     source_path: Path,
     *,
     embedding_model: str = "model-a",
+    index_sha256: str = "1" * 64,
     vector_dimension: int = 2,
     row_mapping: list[int] | None = None,
 ) -> RAGIndexManifest:
@@ -56,6 +57,7 @@ def _make_manifest(
         schema_version=CURRENT_SCHEMA_VERSION,
         source_path=str(source_path),
         source_sha256=file_sha256(source_path),
+        index_sha256=index_sha256,
         embedding_model=embedding_model,
         vector_dimension=vector_dimension,
         vector_count=len(resolved_mapping),
@@ -72,6 +74,8 @@ def test_manifest_json_round_trip_is_frozen_and_has_builder_version(tmp_path):
     restored = RAGIndexManifest.from_json(manifest.to_json())
 
     assert restored == manifest
+    assert restored.schema_version == 2
+    assert restored.index_sha256 == "1" * 64
     assert restored.builder_version == "1"
     with pytest.raises(dataclasses.FrozenInstanceError):
         restored.vector_count = 99
@@ -111,6 +115,9 @@ def test_index_records_source_row_mapping_and_search_resolves_faiss_label(tmp_pa
 
     assert rag.manifest is not None
     assert rag.manifest.row_mapping == [0, 2]
+    assert rag.manifest.index_sha256 == file_sha256(
+        Path(str(vector_store_path) + ".index")
+    )
     assert rag.vector_index.ntotal == 2
 
     async def query_embedding(_text: str) -> np.ndarray:
@@ -129,9 +136,11 @@ def test_index_records_source_row_mapping_and_search_resolves_faiss_label(tmp_pa
 @pytest.mark.parametrize(
     ("mutation", "expected_message"),
     [
+        ({"schema_version": 1}, "schema version"),
         ({"schema_version": 999}, "schema version"),
         ({"schema_version": True}, "schema version"),
         ({"source_sha256": "0" * 64}, "source SHA256"),
+        ({"index_sha256": "0" * 64}, "index SHA256"),
         ({"embedding_model": "model-b"}, "embedding model"),
         ({"vector_dimension": 3}, "vector dimension"),
         ({"vector_count": 1}, "vector count"),
@@ -151,6 +160,7 @@ def test_manifest_validation_rejects_incompatible_provenance_and_shape(
         validate_manifest(
             manifest,
             source_path=source_path,
+            index_sha256="1" * 64,
             embedding_model="model-a",
             vector_dimension=2,
             vector_count=2,
@@ -172,11 +182,12 @@ def test_manifest_load_rejects_invalid_json_without_echoing_contents(tmp_path):
     assert secret_marker not in str(error.value)
 
 
-def test_manifest_load_rejects_missing_builder_version(tmp_path):
+@pytest.mark.parametrize("missing_field", ["builder_version", "index_sha256"])
+def test_manifest_load_rejects_missing_required_field(tmp_path, missing_field):
     source_path = tmp_path / "molecules.csv"
     _write_source(source_path)
     payload = _make_manifest(source_path).to_dict()
-    payload.pop("builder_version")
+    payload.pop(missing_field)
     path = manifest_path(tmp_path / "molecular.index")
     path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -215,12 +226,13 @@ def test_incompatible_existing_pair_is_rebuilt_when_embeddings_are_available(tmp
     vector_store_path = tmp_path / "molecular_faiss"
     index_path = Path(str(vector_store_path) + ".index")
     old_manifest = _make_manifest(source_path, embedding_model="old-model")
-    atomic_save_index_pair(
+    persisted_old_manifest = atomic_save_index_pair(
         _make_index(2, [[1.0, 0.0], [0.0, 1.0]]),
         index_path,
         old_manifest,
         faiss_module=faiss,
     )
+    assert persisted_old_manifest.index_sha256 == file_sha256(index_path)
     rag = RAGSystem({"rag": {}})
     rag.csv_path = source_path
     rag.source_path = source_path
@@ -244,6 +256,49 @@ def test_incompatible_existing_pair_is_rebuilt_when_embeddings_are_available(tmp
     assert rag.manifest is not None
     assert rag.manifest.embedding_model == "model-a"
     assert rag.manifest.row_mapping == [0, 2]
+
+
+def test_load_rejects_index_bytes_from_a_different_manifest_generation(tmp_path):
+    source_path = tmp_path / "molecules.csv"
+    dataframe = _write_source(source_path)
+    vector_store_path = tmp_path / "molecular_faiss"
+    index_path = Path(str(vector_store_path) + ".index")
+    old_manifest = _make_manifest(source_path, row_mapping=[0, 1])
+    atomic_save_index_pair(
+        _make_index(2, [[1.0, 0.0], [0.0, 1.0]]),
+        index_path,
+        old_manifest,
+        faiss_module=faiss,
+    )
+
+    replacement_path = tmp_path / "new-generation.index"
+    new_manifest = _make_manifest(source_path, row_mapping=[2, 0])
+    persisted_new_manifest = atomic_save_index_pair(
+        _make_index(2, [[0.0, 1.0], [1.0, 0.0]]),
+        replacement_path,
+        new_manifest,
+        faiss_module=faiss,
+    )
+    assert persisted_new_manifest.row_mapping == [2, 0]
+    os.replace(replacement_path, index_path)
+
+    rag = RAGSystem({"rag": {}})
+    rag.csv_path = source_path
+    rag.source_path = source_path
+    rag.embedding_model_name = "model-a"
+    rag.molecules_df = dataframe
+
+    async def unavailable_embedding(_text: str) -> np.ndarray:
+        return np.asarray([])
+
+    rag.get_embedding = unavailable_embedding
+    asyncio.run(rag._load_or_create_index(str(vector_store_path)))
+
+    assert "incompatible" in rag.index_status
+    assert rag.vector_index is None
+    assert rag.manifest is None
+    rag.is_initialized = True
+    assert asyncio.run(rag.search_similar_molecules("third molecule", k=1)) == []
 
 
 def test_atomic_pair_failure_preserves_last_usable_index_and_manifest(
@@ -298,6 +353,7 @@ def test_atomic_pair_failure_preserves_last_usable_index_and_manifest(
     validate_manifest(
         loaded_manifest,
         source_path=source_path,
+        index_sha256=file_sha256(index_path),
         embedding_model="model-a",
         vector_dimension=loaded_index.d,
         vector_count=loaded_index.ntotal,
@@ -335,7 +391,7 @@ def test_atomic_pair_fsyncs_both_temps_before_replacing_index_then_manifest(
     monkeypatch.setattr("src.web.rag_index.os.fsync", record_fsync)
     monkeypatch.setattr("src.web.rag_index.os.replace", record_replace)
 
-    atomic_save_index_pair(
+    persisted_manifest = atomic_save_index_pair(
         _make_index(2, [[1.0, 0.0]]),
         index_path,
         manifest,
@@ -358,3 +414,5 @@ def test_atomic_pair_fsyncs_both_temps_before_replacing_index_then_manifest(
     ]
     assert replace_events[0][1] != index_path
     assert replace_events[1][1] != final_manifest_path
+    assert persisted_manifest.index_sha256 == file_sha256(index_path)
+    assert load_manifest(final_manifest_path) == persisted_manifest
