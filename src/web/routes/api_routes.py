@@ -1503,35 +1503,44 @@ def setup_api_routes(app, docking_service=None):
     @app.get("/api/activity/models", dependencies=[Depends(require_admin)])
     async def list_activity_models():
         """列出所有已训练的活性模型"""
-        from src.activity.trainer import list_available_models, get_best_model_path
+        from src.activity.trainer import list_available_models, get_current_model_id
+
         models = list_available_models()
-        current_model_path = get_best_model_path()
-        current_model_file = None
-        if current_model_path:
-            import os
-            current_model_file = os.path.basename(current_model_path)
-            
-        return {"success": True, "models": models, "current_model": current_model_file}
+        return {
+            "success": True,
+            "models": models,
+            "current_model": get_current_model_id(),
+        }
 
     @app.post("/api/activity/models/switch", dependencies=[Depends(require_admin)])
-    async def switch_activity_model(data: Dict[str, str] = Body(...)):
+    async def switch_activity_model(data: Dict[str, Any] = Body(...)):
         """切换当前使用的活性预测模型权重"""
+        if set(data) != {"model_id"} or not isinstance(data.get("model_id"), str):
+            raise HTTPException(status_code=400, detail="仅接受 model_id 参数")
+
+        model_id = data["model_id"]
         try:
-            model_file = data.get("model_file")
-            if not model_file:
-                raise HTTPException(status_code=400, detail="缺少 model_file 参数")
-                
             from src.activity.trainer import set_active_model
-            set_active_model(model_file)
-            
+
+            set_active_model(model_id)
+
             # Force reload in predictor
             from src.activity.predictor import get_predictor
+
             predictor = get_predictor()
-            predictor._loaded = False  # trigger reload on next predict
-            
-            return {"success": True, "message": f"已切换至模型 {model_file}"}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            if hasattr(predictor, "invalidate"):
+                predictor.invalidate()
+            else:
+                predictor._loaded = False  # compatibility for injected predictors
+
+            return {"success": True, "message": f"已切换至模型 {model_id}"}
+        except ValueError:
+            raise HTTPException(status_code=400, detail="model_id 无效或模型未注册")
+        except HTTPException:
+            raise
+        except Exception:
+            logger.exception("切换活性模型失败")
+            raise HTTPException(status_code=500, detail="切换活性模型失败")
 
     @app.delete("/api/activity/models/{model_id}", dependencies=[Depends(require_admin)])
     async def remove_activity_model(model_id: str):
@@ -1540,10 +1549,11 @@ def setup_api_routes(app, docking_service=None):
             from src.activity.trainer import delete_model
             delete_model(model_id)
             return {"success": True, "message": f"模型 {model_id} 已删除"}
-        except ValueError as ve:
-            raise HTTPException(status_code=404, detail=str(ve))
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except ValueError:
+            raise HTTPException(status_code=404, detail="模型未注册或记录无效")
+        except Exception:
+            logger.exception("删除活性模型失败")
+            raise HTTPException(status_code=500, detail="删除活性模型失败")
 
     # ==================== 分子属性计算 API ====================
     

@@ -3,17 +3,26 @@
 负责调用 RG-MPNN 模型进行分子活性预测
 """
 
-import os
 import sys
 import logging
-import json
+import inspect
 from pathlib import Path
-from typing import List, Dict, Any, Union, Optional
+from typing import List, Dict, Any, Union, Optional, Tuple
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem.SaltRemover import SaltRemover
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_torch_load(torch_module, checkpoint_path: Path, device):
+    load_kwargs = {"map_location": device}
+    try:
+        if "weights_only" in inspect.signature(torch_module.load).parameters:
+            load_kwargs["weights_only"] = True
+    except (TypeError, ValueError):
+        logger.warning("Unable to inspect torch.load signature; using compatible arguments")
+    return torch_module.load(checkpoint_path, **load_kwargs)
 
 # Add rg_mpnn to sys.path to allow internal imports
 current_dir = Path(__file__).parent
@@ -46,18 +55,16 @@ class ActivityPredictor:
             
         self.remover = SaltRemover()
 
-    def _find_checkpoint_path(self) -> Optional[Path]:
-        ckpt_path = None
+    def _find_checkpoint(self) -> Tuple[Optional[Path], Optional[Dict[str, Any]]]:
         try:
-            from src.activity.trainer import get_best_model_path
-            custom_model = get_best_model_path()
-            if custom_model and Path(custom_model).exists():
-                ckpt_path = Path(custom_model)
-        except ImportError:
-            pass
+            from src.activity.trainer import get_best_model, get_model_registry
 
-        if ckpt_path:
-            return ckpt_path
+            metadata = get_best_model()
+            if metadata is not None:
+                checkpoint = get_model_registry().resolve_weights(metadata["model_id"])
+                return checkpoint, metadata
+        except (ImportError, ValueError) as exc:
+            logger.warning("Registered activity model is unavailable: %s", exc)
 
         possible_paths = [
             Path("data/activity/rg_mpnn/best_model.pt"),
@@ -67,27 +74,32 @@ class ActivityPredictor:
 
         for p in possible_paths:
             if p.exists():
-                return p
-        return None
+                return p, None
+        return None, None
+
+    def _find_checkpoint_path(self) -> Optional[Path]:
+        checkpoint, _metadata = self._find_checkpoint()
+        return checkpoint
 
     def _get_model_info_for_checkpoint(self, ckpt_path: Path) -> Optional[Dict[str, Any]]:
-        models_dir = Path("data/activity/models")
-        if not models_dir.exists():
-            return None
+        try:
+            from src.activity.trainer import get_model_registry
 
-        ckpt_name = ckpt_path.name
-        model_id = ckpt_name.replace("model_rgmpnn_", "").replace(".pt", "")
-        info_candidates = [models_dir / f"{model_id}_info.json"]
-
-        for info_path in info_candidates:
-            if not info_path.exists():
-                continue
-            try:
-                with open(info_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception as exc:
-                logger.warning(f"Failed to read model info {info_path}: {exc}")
+            registry = get_model_registry()
+            resolved_checkpoint = ckpt_path.resolve(strict=True)
+            for metadata in registry.list():
+                if registry.resolve_weights(metadata["model_id"]) == resolved_checkpoint:
+                    return metadata
+        except (ImportError, OSError, ValueError) as exc:
+            logger.warning("Unable to resolve registered checkpoint metadata: %s", exc)
         return None
+
+    def invalidate(self) -> None:
+        self.model = None
+        self._loaded = False
+        self.demo_mode = False
+        self.model_config = None
+        self.current_model_path = None
 
     def _infer_model_config_from_state_dict(self, state_dict: Dict[str, Any]) -> Dict[str, Any]:
         lin1_weight = state_dict["lin1.weight"]
@@ -127,6 +139,11 @@ class ActivityPredictor:
         if self._loaded:
             return
 
+        self.demo_mode = False
+        self.model = None
+        self.model_config = None
+        self.current_model_path = None
+
         if not self.has_torch:
             logger.warning("环境缺失 PyTorch，启用演示模式 (Demo Mode)。")
             self.demo_mode = True
@@ -155,13 +172,12 @@ class ActivityPredictor:
 
             import torch
             
-            ckpt_path = self._find_checkpoint_path()
+            ckpt_path, info = self._find_checkpoint()
             
             if ckpt_path:
                 logger.info(f"Loading weights from {ckpt_path}")
-                state = torch.load(ckpt_path, map_location=self.device)
+                state = _safe_torch_load(torch, ckpt_path, self.device)
                 state_dict = state['state_dict'] if 'state_dict' in state else state
-                info = self._get_model_info_for_checkpoint(ckpt_path)
                 model_config = (info or {}).get("model_config") or self._infer_model_config_from_state_dict(state_dict)
 
                 self.model_config = model_config

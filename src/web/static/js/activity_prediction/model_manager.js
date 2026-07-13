@@ -16,7 +16,10 @@ window.ActivityModels = (function () {
   }
 
   function setAll(models) {
-    allModels = models || [];
+    allModels = (models || []).map(function (item) {
+      if (!item || item.model_id) return item;
+      return Object.assign({}, item, { model_id: item.weights_file });
+    });
   }
 
   function getSelectedMeta() {
@@ -24,7 +27,7 @@ window.ActivityModels = (function () {
     if (!selector) return null;
     return (
       allModels.find(function (model) {
-        return model.weights_file === selector.value;
+        return model.model_id === selector.value;
       }) || null
     );
   }
@@ -68,9 +71,9 @@ window.ActivityModels = (function () {
     const content = document.getElementById("popoverContent");
     if (!selector || !content) return;
 
-    const selectedFile = selector.value;
+    const selectedModelId = selector.value;
     const model = allModels.find(function (item) {
-      return item.weights_file === selectedFile;
+      return item.model_id === selectedModelId;
     });
 
     if (!model) {
@@ -121,15 +124,15 @@ window.ActivityModels = (function () {
     content.appendChild(date);
   }
 
-  async function switchCurrentModel(file) {
-    if (!file) return;
+  async function switchCurrentModel(modelId) {
+    if (!modelId) return;
     requireAdminHelper();
 
     try {
       const res = await Admin.fetch("/api/activity/models/switch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model_file: file }),
+        body: JSON.stringify({ model_id: modelId }),
       });
       const data = await res.json();
 
@@ -182,10 +185,9 @@ window.ActivityModels = (function () {
 
       allModels.forEach(function (model) {
         const opt = document.createElement("option");
-        opt.value = model.weights_file;
-        opt.setAttribute("data-id", model.model_id);
+        opt.value = model.model_id;
         opt.textContent = model.name;
-        if (data.current_model === model.weights_file) {
+        if (data.current_model === model.model_id) {
           opt.selected = true;
         }
         selector.appendChild(opt);
@@ -207,7 +209,7 @@ window.ActivityModels = (function () {
     const selectedOpt = selector.options[selector.selectedIndex];
     if (!selectedOpt || !selectedOpt.value) return;
 
-    const modelId = selectedOpt.getAttribute("data-id");
+    const modelId = selectedOpt.value;
     const modelName = selectedOpt.textContent;
 
     if (

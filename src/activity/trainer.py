@@ -1,6 +1,6 @@
 import os
 import time
-import json
+import hashlib
 import uuid
 import threading
 import logging
@@ -9,71 +9,94 @@ from typing import Dict, Any, List
 import pandas as pd
 import numpy as np
 
+from src.activity.model_registry import ActivityModelRegistry
+
 logger = logging.getLogger(__name__)
 
 # Global dictionary to track training jobs
 training_jobs: Dict[str, Dict[str, Any]] = {}
 MODELS_DIR = Path("data/activity/models")
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
-ACTIVE_MODEL_OVERRIDE = None
+
+
+def get_model_registry() -> ActivityModelRegistry:
+    return ActivityModelRegistry(MODELS_DIR)
 
 def save_model_info(model_id: str, info: dict):
-    info_path = MODELS_DIR / f"{model_id}_info.json"
-    with open(info_path, "w", encoding="utf-8") as f:
-        json.dump(info, f, ensure_ascii=False, indent=2)
+    if info.get("model_id") != model_id:
+        raise ValueError("model_id does not match metadata")
+    return get_model_registry().register(info)
 
 def list_available_models():
-    models = []
-    if not MODELS_DIR.exists():
-        return models
-    for fp in MODELS_DIR.glob("*_info.json"):
-        try:
-            with open(fp, "r", encoding="utf-8") as f:
-                info = json.load(f)
-            models.append(info)
-        except Exception as e:
-            logger.warning(f"Failed to read model info {fp}: {e}")
-    # Sort by creation time descending
-    models.sort(key=lambda x: x.get("created_at", 0), reverse=True)
-    return models
+    return get_model_registry().list()
 
-def set_active_model(model_filename: str):
-    global ACTIVE_MODEL_OVERRIDE
-    ACTIVE_MODEL_OVERRIDE = model_filename
+def set_active_model(model_id: str):
+    return get_model_registry().select(model_id)
 
 def delete_model(model_id: str):
-    """删除模型权重及其描述信息"""
-    models = list_available_models()
-    target_info = next((m for m in models if m['model_id'] == model_id), None)
-    if not target_info:
-        raise ValueError("模型不存在")
-    
-    # 获取文件名
-    weights_file = target_info.get("weights_file")
-    info_file = f"{model_id}_info.json"
-    
-    # 物理删除
-    if weights_file:
-        weights_path = MODELS_DIR / weights_file
-        if weights_path.exists():
-            os.remove(weights_path)
-            
-    info_path = MODELS_DIR / info_file
-    if info_path.exists():
-        os.remove(info_path)
-    
-    return True
+    """删除已注册的模型权重及其 metadata。"""
+    return get_model_registry().delete(model_id)
+
+
+def get_best_model():
+    registry = get_model_registry()
+    active = registry.get_active()
+    if active is not None:
+        return active
+
+    models = registry.list()
+    return models[0] if models else None
 
 def get_best_model_path():
-    global ACTIVE_MODEL_OVERRIDE
-    if ACTIVE_MODEL_OVERRIDE:
-        return str(MODELS_DIR / ACTIVE_MODEL_OVERRIDE)
-    
-    models = list_available_models()
-    if not models:
+    model = get_best_model()
+    if model is None:
         return None
-    # Pick the most recent one as default "current" model for now
-    return str(MODELS_DIR / models[0]["weights_file"])
+    return str(get_model_registry().resolve_weights(model["model_id"]))
+
+
+def get_current_model_id():
+    model = get_best_model()
+    return model["model_id"] if model is not None else None
+
+
+def _sha256_file(file_path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(file_path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _build_model_metadata(
+    *,
+    model_id: str,
+    weights_file: str,
+    task_type: str,
+    target_column: str,
+    file_path: str,
+    samples: int,
+    best_metrics: dict,
+    model_config: dict,
+    created_at: float | None = None,
+) -> dict:
+    created_at = time.time() if created_at is None else created_at
+    return {
+        "model_id": model_id,
+        "created_at": created_at,
+        "task_type": task_type,
+        "endpoint": target_column,
+        "units": "unspecified",
+        "dataset_sha256": _sha256_file(file_path),
+        "split_strategy": "random",
+        "random_seed": 42,
+        "model_config": dict(model_config),
+        "target": target_column,
+        "dataset": Path(file_path).name,
+        "samples": samples,
+        "best_metrics": best_metrics,
+        "weights_file": weights_file,
+        "name": f"{target_column} ({task_type}) - {time.strftime('%Y%m%d%H%M', time.localtime(created_at))}",
+    }
 
 class ActivityTrainer:
     def __init__(self, job_id: str):
@@ -417,31 +440,33 @@ class ActivityTrainer:
                 model_filename = f"model_rgmpnn_{self.job_id}.pt"
                 model_path = MODELS_DIR / model_filename
                 torch.save({'state_dict': best_weights}, model_path)
-                
-                # Save info
-                info = {
-                    "model_id": self.job_id,
-                    "created_at": time.time(),
-                    "task_type": task_type,
-                    "target": target_column,
-                    "dataset": Path(file_path).name,
-                    "samples": len(valid_atom_data),
-                    "best_metrics": best_metrics,
-                    "weights_file": model_filename,
-                    "model_config": {
-                        "in_channels": atom_dim,
-                        "edge_dim": bond_dim,
-                        "channels": hidden_size,
-                        "out_channels": out_channels,
-                        "num_passing_atom": num_layers,
-                        "num_passing_pool": 1,
-                        "num_passing_rg": 1,
-                        "num_passing_mol": 1,
-                        "dropout": dropout,
-                    },
-                    "name": f"{target_column} ({task_type}) - {time.strftime('%Y%m%d%H%M')}"
+
+                model_config = {
+                    "in_channels": atom_dim,
+                    "edge_dim": bond_dim,
+                    "channels": hidden_size,
+                    "out_channels": out_channels,
+                    "num_passing_atom": num_layers,
+                    "num_passing_pool": 1,
+                    "num_passing_rg": 1,
+                    "num_passing_mol": 1,
+                    "dropout": dropout,
                 }
-                save_model_info(self.job_id, info)
+                info = _build_model_metadata(
+                    model_id=self.job_id,
+                    weights_file=model_filename,
+                    task_type=task_type,
+                    target_column=target_column,
+                    file_path=file_path,
+                    samples=len(valid_atom_data),
+                    best_metrics=best_metrics,
+                    model_config=model_config,
+                )
+                try:
+                    save_model_info(self.job_id, info)
+                except Exception:
+                    model_path.unlink(missing_ok=True)
+                    raise
                 
                 self._log(f"Training completed successfully! Model saved as {model_filename}")
                 self.status["state"] = "completed"
