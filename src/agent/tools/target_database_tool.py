@@ -83,6 +83,25 @@ class TargetDatabaseTool(BaseMolecularTool):
                 for target in search_result.get("results", []):
                     if isinstance(target, dict):
                         target = {**target, "source_query": search_query}
+                        target_id = target.get("target_id", target.get("id"))
+                        recommended_structures: list[dict[str, Any]] = []
+                        if target_id not in (None, ""):
+                            try:
+                                structure_payload = service.get_target_structures(
+                                    int(target_id)
+                                )
+                                structures = structure_payload.get("structures", [])
+                                recommended_structures = [
+                                    dict(structure)
+                                    for structure in structures[:3]
+                                    if isinstance(structure, dict)
+                                ]
+                            except Exception as exc:
+                                result.setdefault("warnings", []).append(
+                                    "Could not load structures for target "
+                                    f"{target_id}: {exc}"
+                                )
+                        target["recommended_structures"] = recommended_structures
                     targets.append(target)
 
             if not targets:
@@ -116,6 +135,7 @@ class TargetDatabaseTool(BaseMolecularTool):
                 has_exp = "yes" if target.get("has_experimental_structure") else "no"
                 has_af = "yes" if target.get("has_alphafold_structure") else "no"
                 match_reason = target.get("match_reason", "")
+                recommended_structures = target.get("recommended_structures", [])
 
                 lines.append(f"### {index}. {gene} ({protein})")
                 lines.append(f"- UniProt: {uniprot}")
@@ -125,6 +145,19 @@ class TargetDatabaseTool(BaseMolecularTool):
                     f"- Experimental structure: {has_exp} | AlphaFold: {has_af}"
                 )
                 lines.append(f"- Match source: {match_reason}")
+                if recommended_structures:
+                    lines.append("- Recommended structures:")
+                    for structure in recommended_structures:
+                        structure_id = structure.get("structure_id", "N/A")
+                        source = structure.get("source", "N/A")
+                        recommendation = structure.get(
+                            "recommendation_level", "unrated"
+                        )
+                        lines.append(
+                            f"  - {structure_id} ({source}; {recommendation})"
+                        )
+                else:
+                    lines.append("- Recommended structures: none recorded")
                 lines.append("")
 
             result["success"] = True

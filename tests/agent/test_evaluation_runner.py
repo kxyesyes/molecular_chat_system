@@ -156,7 +156,10 @@ def test_generation_data_flow_check_accepts_hit_to_lead_candidates_plan():
     class Result:
         tool_results = [
             ToolResult.success_result("llm_molecular_generator", data=[{"smiles": "c1ccccc1O"}]),
-            ToolResult.success_result("property_calculator", data=[{"molecular_weight": 94.11}]),
+            ToolResult.success_result(
+                "property_calculator",
+                data=[{"smiles": "Oc1ccccc1", "molecular_weight": 94.11}],
+            ),
         ]
 
     class Execution:

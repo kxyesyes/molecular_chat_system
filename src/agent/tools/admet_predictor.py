@@ -5,18 +5,33 @@ ADMET属性预测工具 - 基于adme_py库
 移除毒性评估，专注于ADME属性预测
 """
 
+from importlib import metadata as importlib_metadata
 from typing import Dict, List, Optional, Any
 import logging
 import json
 
+ADME = None
+ADME_PY_VERSION = None
 try:
+    import adme_py as _adme_py_module
     from adme_py import ADME
+
     ADME_PY_AVAILABLE = True
+    for _distribution_name in ("adme-py", "adme_py"):
+        try:
+            ADME_PY_VERSION = importlib_metadata.version(_distribution_name)
+            break
+        except importlib_metadata.PackageNotFoundError:
+            continue
+    if ADME_PY_VERSION is None:
+        ADME_PY_VERSION = str(
+            getattr(_adme_py_module, "__version__", "unknown")
+        )
 except ImportError:
     ADME_PY_AVAILABLE = False
 
 try:
-    from rdkit import Chem
+    from rdkit import Chem, rdBase
     from rdkit.Chem import Crippen, Descriptors, Lipinski, rdMolDescriptors
     RDKIT_AVAILABLE = True
 except ImportError:
@@ -138,6 +153,8 @@ class ADMETPredictor(BaseMolecularTool):
             # 转换为我们的格式
             admet_props = {
                 # 理化性质
+                'prediction_method': 'adme_py',
+                'backend_version': str(ADME_PY_VERSION or 'unknown'),
                 'physicochemical': adme_results.get('physiochemical', {}),
 
                 # 溶解性
@@ -227,6 +244,7 @@ class ADMETPredictor(BaseMolecularTool):
 
             return {
                 "prediction_method": "rdkit_rules",
+                "backend_version": str(rdBase.rdkitVersion),
                 "physicochemical": {
                     "formula": rdMolDescriptors.CalcMolFormula(mol),
                     "molecular_weight": molecular_weight,

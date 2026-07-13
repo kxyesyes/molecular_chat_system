@@ -4,14 +4,16 @@ import asyncio
 import json
 import os
 import re
+import tempfile
 import time
 from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from uuid import uuid4
 
 from src.agent.contracts import AgentContext, ToolResult
 from src.agent.orchestrators import WorkflowOrchestrator
-from src.agent.persistence import redact_sensitive
+from src.agent.persistence import SQLiteAgentStateStore, redact_sensitive
 from src.agent.planning import TaskPlanner
 from src.agent.routing import HybridSkillRouter
 from src.agent.runtime.workflow_executor import WorkflowExecutor
@@ -168,6 +170,7 @@ class ScientificAcceptanceRunner:
         actual_skill = decision.selected_skill
         execution_error: str | None = None
         executions = []
+        execution_records: list[dict[str, Any]] = []
         plan_metadata: dict[str, Any] = {}
 
         if actual_skill != case.expected_skill:
@@ -182,28 +185,45 @@ class ScientificAcceptanceRunner:
 
         if skill is not None:
             repeat_runs = int(case.metadata.get("repeat_runs", 1) or 1)
-            for run_index in range(max(1, repeat_runs)):
-                trace_id = (
-                    case.case_id
-                    if repeat_runs == 1
-                    else f"{case.case_id}-run-{run_index + 1}"
-                )
-                context = AgentContext(
-                    query=case.prompt,
-                    trace_id=trace_id,
-                    active_skill=actual_skill,
-                    metadata=self._case_metadata(case),
-                    mol_count=int(case.metadata.get("requested_count", 5) or 5),
-                )
-                try:
-                    execution = WorkflowExecutor(
-                        planner=self.planner,
-                        orchestrator=WorkflowOrchestrator(),
-                    ).execute(context, skill, self.tools)
-                    executions.append(execution)
-                except Exception as exc:  # pragma: no cover - defensive real-run guard
-                    execution_error = f"execution_exception:{type(exc).__name__}"
-                    break
+            with tempfile.TemporaryDirectory(
+                prefix="medchat-scientific-acceptance-"
+            ) as state_dir:
+                state_store = SQLiteAgentStateStore(Path(state_dir) / "state.sqlite")
+                for run_index in range(max(1, repeat_runs)):
+                    trace_suffix = uuid4().hex[:12]
+                    trace_id = f"{case.case_id}-{trace_suffix}"
+                    if repeat_runs > 1:
+                        trace_id = f"{trace_id}-run-{run_index + 1}"
+                    context = AgentContext(
+                        query=case.prompt,
+                        trace_id=trace_id,
+                        active_skill=actual_skill,
+                        metadata=self._case_metadata(case),
+                        mol_count=int(case.metadata.get("requested_count", 5) or 5),
+                    )
+                    try:
+                        execution = WorkflowExecutor(
+                            planner=self.planner,
+                            orchestrator=WorkflowOrchestrator(
+                                state_store=state_store
+                            ),
+                        ).execute(context, skill, self.tools)
+                        executions.append(execution)
+                        for record in state_store.get_tool_executions(trace_id):
+                            persisted = dict(record)
+                            checkpoint = state_store.latest_checkpoint(
+                                trace_id,
+                                str(record.get("step_id") or ""),
+                            )
+                            persisted["input_hash"] = (
+                                checkpoint.get("input_hash")
+                                if checkpoint
+                                else None
+                            )
+                            execution_records.append(persisted)
+                    except Exception as exc:  # pragma: no cover - defensive real-run guard
+                        execution_error = f"execution_exception:{type(exc).__name__}"
+                        break
             if executions:
                 plan_metadata = (
                     dict(executions[0].plan.metadata)
@@ -229,7 +249,16 @@ class ScientificAcceptanceRunner:
         final_text = _collect_case_text(tool_results, primary_execution)
         anti_hallucination = _anti_hallucination(case, final_text)
         tool_provenance = [
-            _tool_provenance(item, self.project_root) for item in tool_results
+            _tool_provenance(
+                item,
+                self.project_root,
+                execution_record=(
+                    execution_records[index]
+                    if index < len(execution_records)
+                    else None
+                ),
+            )
+            for index, item in enumerate(tool_results)
         ]
         truth_checks = self._truth_checks(
             case,
@@ -533,8 +562,13 @@ def _anti_hallucination(
     }
 
 
-def _tool_provenance(result: ToolResult, project_root: Path) -> dict[str, Any]:
-    legacy = result.to_legacy_dict()
+def _tool_provenance(
+    result: ToolResult,
+    project_root: Path,
+    *,
+    execution_record: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    persisted = dict(execution_record or {})
     data_summary = _summarize_value(result.data)
     model_name = (
         result.quality.get("model_name")
@@ -547,7 +581,11 @@ def _tool_provenance(result: ToolResult, project_root: Path) -> dict[str, Any]:
         "tool_name": result.tool_name,
         "model_name": model_name,
         "success": result.success,
-        "input_summary": _summarize_value(legacy.get("input")),
+        "trace_id": persisted.get("trace_id"),
+        "step_id": persisted.get("step_id")
+        or result.quality.get("step_id"),
+        "input_hash": persisted.get("input_hash"),
+        "input_summary": _summarize_value(persisted.get("input")),
         "output_summary": data_summary or result.message,
         "artifact_paths": _artifact_paths(result, project_root),
         "quality": result.quality,
@@ -633,10 +671,32 @@ def _check_admet_method(tool_results: list[ToolResult]) -> dict[str, Any]:
         return {"status": "failed", "reason": "tool_not_run:admet_predictor"}
     if not result.success:
         return {"status": "partial", "reason": result.message}
-    text = json.dumps(result.data, ensure_ascii=False, default=str).lower()
-    if "prediction_method" in text or "rdkit" in text or "adme" in text:
-        return {"status": "passed", "evidence": "ADMET method/source present"}
-    return {"status": "failed", "reason": "missing_admet_prediction_method"}
+    entries = result.data if isinstance(result.data, list) else []
+    admet_records = [
+        entry.get("admet")
+        for entry in entries
+        if isinstance(entry, Mapping) and isinstance(entry.get("admet"), Mapping)
+    ]
+    if not admet_records or any(
+        not record.get("prediction_method") for record in admet_records
+    ):
+        return {"status": "failed", "reason": "missing_admet_prediction_method"}
+    if any(
+        str(record.get("prediction_method")).casefold() == "adme_py"
+        and str(record.get("backend_version") or "").casefold()
+        in {"", "unknown", "none"}
+        for record in admet_records
+    ):
+        return {
+            "status": "partial",
+            "reason": "adme_py_package_version_unavailable",
+        }
+    return {
+        "status": "passed",
+        "prediction_methods": sorted(
+            {str(record["prediction_method"]) for record in admet_records}
+        ),
+    }
 
 
 def _check_rg_mpnn(tool_results: list[ToolResult]) -> dict[str, Any]:
@@ -665,12 +725,38 @@ def _check_target_database_evidence(tool_results: list[ToolResult]) -> dict[str,
     records = result.data if isinstance(result.data, list) else []
     if not records:
         return {"status": "partial", "reason": "no_target_records"}
+    structure_claims_without_records = [
+        record
+        for record in records
+        if isinstance(record, Mapping)
+        and (
+            record.get("structure_count") not in (None, "", 0, "0")
+            or bool(record.get("has_experimental_structure"))
+            or bool(record.get("has_alphafold_structure"))
+        )
+        and not (
+            isinstance(record.get("recommended_structures"), list)
+            and record.get("recommended_structures")
+        )
+    ]
+    if structure_claims_without_records:
+        return {
+            "status": "failed",
+            "reason": "target_structure_counts_without_recommended_records",
+        }
     evidence_count = sum(1 for record in records if _target_record_has_evidence(record))
     if evidence_count:
+        recommended_structure_count = sum(
+            len(record.get("recommended_structures", []))
+            for record in records
+            if isinstance(record, Mapping)
+            and isinstance(record.get("recommended_structures"), list)
+        )
         return {
             "status": "passed",
             "evidence_count": evidence_count,
             "record_count": len(records),
+            "recommended_structure_count": recommended_structure_count,
         }
     return {"status": "failed", "reason": "target_records_without_evidence"}
 
@@ -683,9 +769,7 @@ def _target_record_has_evidence(record: Any) -> bool:
         "pdb_id",
         "pdb_ids",
         "structures",
-        "structure_count",
-        "has_experimental_structure",
-        "has_alphafold_structure",
+        "recommended_structures",
         "match_reason",
         "source",
     }
@@ -707,8 +791,9 @@ def _check_reverse_target_evidence(tool_results: list[ToolResult]) -> dict[str, 
     missing = [
         record
         for record in records
-        if isinstance(record, Mapping)
-        and not any(
+        if not isinstance(record, Mapping)
+        or not record.get("target_identifier")
+        or not any(
             record.get(key) is not None
             for key in (
                 "final_similarity",
@@ -1094,29 +1179,58 @@ def _check_data_flow_generated_smiles_consumed(
             downstream_tools=set(downstream_tools),
         )
     )
-    if plan_evidence:
-        return {"status": "passed", "evidence": plan_evidence}
-
     generator = _find_tool(tool_results, "llm_molecular_generator")
     if generator is None:
+        if plan_evidence:
+            return {
+                "status": "partial",
+                "reason": "plan_wiring_without_generator_execution",
+                "plan_wiring": plan_evidence,
+            }
         return {"status": "failed", "reason": "tool_not_run:llm_molecular_generator"}
     if not generator.success:
-        return {"status": "partial", "reason": generator.message}
-    generated = set(_extract_smiles_values(generator.data))
+        return {
+            "status": "partial",
+            "reason": generator.message,
+            "plan_wiring": plan_evidence,
+        }
+    generated = _canonical_smiles_set(generator.data)
     if not generated:
-        return {"status": "partial", "reason": "no_generated_smiles"}
+        return {
+            "status": "partial",
+            "reason": "no_generated_smiles",
+            "plan_wiring": plan_evidence,
+        }
 
     consumed_by = []
+    observed_downstream = []
     for tool_name in downstream_tools:
         result = _find_tool(tool_results, tool_name)
         if result is None or not result.success:
             continue
-        downstream_smiles = set(_extract_smiles_values(result.data))
+        observed_downstream.append(tool_name)
+        downstream_smiles = _canonical_smiles_set(result.data)
         if downstream_smiles & generated:
             consumed_by.append(tool_name)
     if consumed_by:
-        return {"status": "passed", "consumed_by": consumed_by}
-    return {"status": "failed", "reason": "generated_smiles_not_consumed"}
+        return {
+            "status": "passed",
+            "consumed_by": consumed_by,
+            "plan_wiring": plan_evidence,
+            "generated_canonical_smiles": sorted(generated),
+        }
+    if not observed_downstream and plan_evidence:
+        return {
+            "status": "partial",
+            "reason": "plan_wiring_without_observed_downstream_output",
+            "plan_wiring": plan_evidence,
+        }
+    return {
+        "status": "failed",
+        "reason": "generated_smiles_not_consumed",
+        "plan_wiring": plan_evidence,
+        "observed_downstream_tools": observed_downstream,
+    }
 
 
 def _check_data_flow_reverse_targets_consumed(
@@ -1129,19 +1243,48 @@ def _check_data_flow_reverse_targets_consumed(
         source_output_key="targets",
         downstream_tools={"target_database_search"},
     )
-    if plan_evidence:
-        return {"status": "passed", "evidence": plan_evidence}
     reverse = _find_tool(tool_results, "reverse_target_predictor")
     target_search = _find_tool(tool_results, "target_database_search")
     if reverse is None:
+        if plan_evidence:
+            return {
+                "status": "partial",
+                "reason": "plan_wiring_without_reverse_target_execution",
+                "plan_wiring": plan_evidence,
+            }
         return {"status": "failed", "reason": "tool_not_run:reverse_target_predictor"}
     if target_search is None:
+        if plan_evidence:
+            return {
+                "status": "partial",
+                "reason": "plan_wiring_without_target_search_execution",
+                "plan_wiring": plan_evidence,
+            }
         return {"status": "failed", "reason": "tool_not_run:target_database_search"}
     if not reverse.success:
         return {"status": "partial", "reason": reverse.message}
     if not target_search.success:
         return {"status": "partial", "reason": target_search.message}
-    return {"status": "passed", "evidence": "reverse-target step followed by target search"}
+    reverse_targets = _target_identifier_set(reverse.data)
+    searched_targets = _target_identifier_set(target_search.data)
+    consumed = sorted(reverse_targets & searched_targets)
+    if consumed:
+        return {
+            "status": "passed",
+            "consumed_target_identifiers": consumed,
+            "plan_wiring": plan_evidence,
+        }
+    if not reverse_targets or not searched_targets:
+        return {
+            "status": "partial",
+            "reason": "target_dataflow_records_missing",
+            "plan_wiring": plan_evidence,
+        }
+    return {
+        "status": "failed",
+        "reason": "reverse_targets_not_consumed",
+        "plan_wiring": plan_evidence,
+    }
 
 
 def _check_core_retention_aromatic_ring(
@@ -1256,6 +1399,64 @@ def _extract_smiles_values(value: Any) -> list[str]:
     return [item for item in values if item]
 
 
+def _canonical_smiles_set(value: Any) -> set[str]:
+    raw_values = _extract_smiles_values(value)
+    if not raw_values:
+        return set()
+    try:
+        from rdkit import Chem
+    except ImportError:
+        return {item.strip() for item in raw_values if item.strip()}
+
+    canonical: set[str] = set()
+    for smiles in raw_values:
+        molecule = Chem.MolFromSmiles(smiles)
+        if molecule is not None:
+            canonical.add(
+                Chem.MolToSmiles(
+                    molecule,
+                    canonical=True,
+                    isomericSmiles=True,
+                )
+            )
+    return canonical
+
+
+def _target_identifier_set(value: Any) -> set[str]:
+    identifiers: set[str] = set()
+
+    def add(raw: Any) -> None:
+        if raw in (None, ""):
+            return
+        normalized = re.sub(r"[^a-z0-9]+", "", str(raw).casefold())
+        if normalized:
+            identifiers.add(normalized)
+
+    def collect(item: Any) -> None:
+        if isinstance(item, Mapping):
+            for key in (
+                "target_identifier",
+                "target_chembl_id",
+                "uniprot_id",
+                "target_id",
+                "gene_symbol",
+                "target_gene",
+                "target_name",
+                "protein_name",
+                "source_query",
+            ):
+                add(item.get(key))
+            for nested_key in ("data", "results", "targets"):
+                if nested_key in item:
+                    collect(item[nested_key])
+        elif isinstance(item, (list, tuple)):
+            for nested in item:
+                collect(nested)
+
+    collect(value)
+    return identifiers
+
+
 def _find_tool_any(
     tool_results: list[ToolResult],
     tool_names: set[str],
@@ -1358,9 +1559,19 @@ def _score_scientific_case(
     truth_statuses = [str(check.get("status", "failed")) for check in truth_checks.values()]
     required_provenance = list(
         case.scientific_acceptance.get("provenance_required", []) or []
-    )
+    ) or list(dict.fromkeys(case.expected_tools))
     provenance_names = [str(item.get("tool_name", "")) for item in tool_provenance]
     provenance_present = all(name in provenance_names for name in required_provenance)
+    required_provenance_records = [
+        item
+        for name in required_provenance
+        for item in tool_provenance
+        if str(item.get("tool_name", "")) == name
+    ]
+    provenance_complete = provenance_present and all(
+        _provenance_record_complete(item)
+        for item in required_provenance_records
+    )
     if "failed" in truth_statuses:
         real_tool_execution = 0
     elif "partial" in truth_statuses:
@@ -1405,9 +1616,15 @@ def _score_scientific_case(
     trace_present = not case.expected_events or all(
         bool(item.get("trace_id")) for item in events if isinstance(item, Mapping)
     )
+    event_trace_present = (
+        not case.expected_tools
+        or bool(events)
+        and expected_events_present
+        and trace_present
+    )
     structured_provenance = (
         10
-        if provenance_present and expected_events_present and trace_present
+        if provenance_complete and event_trace_present
         else 0
     )
 
@@ -1431,6 +1648,18 @@ def _score_scientific_case(
         "hard_failure": bool(hard_failure_reasons),
         "hard_failure_reasons": hard_failure_reasons,
     }
+
+
+def _provenance_record_complete(record: Mapping[str, Any]) -> bool:
+    input_hash = str(record.get("input_hash") or "")
+    return bool(
+        str(record.get("tool_name") or "").strip()
+        and str(record.get("trace_id") or "").strip()
+        and str(record.get("input_summary") or "").strip()
+        and len(input_hash) == 64
+        and all(character in "0123456789abcdefABCDEF" for character in input_hash)
+        and str(record.get("output_summary") or "").strip()
+    )
 
 
 def _is_ordered_subsequence(expected: Iterable[str], actual: Iterable[str]) -> bool:

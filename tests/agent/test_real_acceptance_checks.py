@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 from scripts.run_agent_acceptance import (
     _evaluate_activity_result,
     _evaluate_docking_result,
@@ -10,6 +13,9 @@ from scripts.run_agent_acceptance import (
 )
 from src.agent.evaluation import scientific
 from src.agent.evaluation.models import EvaluationCase
+from src.agent.contracts import AgentResult, ToolResult
+from src.agent.orchestrators import WorkflowStep
+from src.agent.planning import WorkflowPlan
 
 
 def test_generation_check_requires_valid_unique_requested_count() -> None:
@@ -69,8 +75,22 @@ def test_scientific_case_score_reports_all_seven_dimensions() -> None:
             {"event": "task_completed", "trace_id": "score-trace"},
         ],
         tool_provenance=[
-            {"tool_name": "property_calculator", "success": True},
-            {"tool_name": "admet_predictor", "success": True},
+            {
+                "tool_name": "property_calculator",
+                "success": True,
+                "trace_id": "score-trace",
+                "input_hash": "a" * 64,
+                "input_summary": "aspirin",
+                "output_summary": "properties",
+            },
+            {
+                "tool_name": "admet_predictor",
+                "success": True,
+                "trace_id": "score-trace",
+                "input_hash": "b" * 64,
+                "input_summary": "aspirin",
+                "output_summary": "admet",
+            },
         ],
         anti_hallucination={"status": "passed", "forbidden_found": []},
         truth_checks={
@@ -92,6 +112,288 @@ def test_scientific_case_score_reports_all_seven_dimensions() -> None:
         "structured_provenance": 10,
     }
     assert scored["hard_failure"] is False
+
+
+def test_structured_provenance_score_requires_input_hash_summaries_and_event_trace() -> None:
+    case = EvaluationCase(
+        case_id="PROV-001",
+        version="1",
+        category="properties",
+        prompt="calculate",
+        expected_skill="admet_assessment",
+        expected_tools=["property_calculator"],
+        expected_events=["task_started", "tool_completed", "task_completed"],
+        scientific_acceptance={"provenance_required": ["property_calculator"]},
+    )
+
+    scored = scientific._score_scientific_case(
+        case=case,
+        actual_skill="admet_assessment",
+        actual_tools=["property_calculator"],
+        events=[
+            {"event": "task_started", "trace_id": "trace"},
+            {"event": "tool_completed", "trace_id": "trace"},
+            {"event": "task_completed", "trace_id": "trace"},
+        ],
+        tool_provenance=[
+            {
+                "tool_name": "property_calculator",
+                "success": True,
+                "input_summary": "",
+                "input_hash": "",
+                "output_summary": "properties",
+            }
+        ],
+        anti_hallucination={"status": "passed", "forbidden_found": []},
+        truth_checks={},
+        case_status="passed",
+        case_error=None,
+    )
+
+    assert scored["score_breakdown"]["structured_provenance"] == 0
+
+
+def _wired_generation_execution(tool_results):
+    return SimpleNamespace(
+        plan=WorkflowPlan(
+            workflow_name="generation-dataflow",
+            steps=[
+                WorkflowStep(
+                    "generate",
+                    "llm_molecular_generator",
+                    output_key="molecules",
+                ),
+                WorkflowStep(
+                    "properties",
+                    "property_calculator",
+                    input_from="molecules",
+                    output_key="properties",
+                ),
+            ],
+        ),
+        result=AgentResult(
+            trace_id="dataflow-trace",
+            success=True,
+            message="done",
+            tool_results=tool_results,
+        ),
+    )
+
+
+def test_generated_smiles_dataflow_requires_observed_canonical_intersection() -> None:
+    generator = ToolResult.success_result(
+        "llm_molecular_generator",
+        data=[{"smiles": "OCC"}],
+    )
+    downstream = ToolResult.success_result(
+        "property_calculator",
+        data=[{"smiles": "CCO", "molecular_weight": 46.07}],
+    )
+    execution = _wired_generation_execution([generator, downstream])
+
+    check = scientific._check_data_flow_generated_smiles_consumed(
+        [generator, downstream],
+        downstream_tools=["property_calculator"],
+        executions=[execution],
+    )
+
+    assert check["status"] == "passed"
+    assert check["consumed_by"] == ["property_calculator"]
+
+
+def test_plan_wiring_cannot_pass_when_downstream_output_lacks_generated_smiles() -> None:
+    generator = ToolResult.success_result(
+        "llm_molecular_generator",
+        data=[{"smiles": "CCO"}],
+    )
+    downstream = ToolResult.success_result(
+        "property_calculator",
+        data=[{"smiles": "CCC", "molecular_weight": 44.1}],
+    )
+    execution = _wired_generation_execution([generator, downstream])
+
+    check = scientific._check_data_flow_generated_smiles_consumed(
+        [generator, downstream],
+        downstream_tools=["property_calculator"],
+        executions=[execution],
+    )
+
+    assert check["status"] == "failed"
+    assert check["reason"] == "generated_smiles_not_consumed"
+    assert check["plan_wiring"] == "molecules->property_calculator"
+
+
+def test_tool_provenance_uses_persisted_execution_input_and_hash() -> None:
+    result = ToolResult.success_result(
+        "property_calculator",
+        data=[{"smiles": "CCO", "molecular_weight": 46.07}],
+    )
+    provenance = scientific._tool_provenance(
+        result,
+        Path.cwd(),
+        execution_record={
+            "trace_id": "trace-1",
+            "step_id": "properties",
+            "input": [{"smiles": "CCO"}],
+            "input_hash": "c" * 64,
+        },
+    )
+
+    assert provenance["trace_id"] == "trace-1"
+    assert provenance["step_id"] == "properties"
+    assert provenance["input_hash"] == "c" * 64
+    assert provenance["input_summary"]
+    assert provenance["output_summary"]
+
+
+def test_scientific_runner_builds_report_provenance_from_persisted_execution(
+    tmp_path,
+) -> None:
+    class FakeRouter:
+        def decide(self, _prompt):
+            return SimpleNamespace(selected_skill="admet_assessment")
+
+    class FakePlanner:
+        def plan(self, _context):
+            return WorkflowPlan(
+                workflow_name="properties-only",
+                steps=[
+                    WorkflowStep(
+                        "properties",
+                        "property_calculator",
+                        input_data={"smiles": "CCO"},
+                        output_key="properties",
+                    )
+                ],
+            )
+
+    class FakePropertyTool:
+        name = "property_calculator"
+
+        def execute(self, input_data):
+            assert input_data == {"smiles": "CCO"}
+            return {
+                "success": True,
+                "message": "calculated",
+                "data": [{"smiles": "CCO", "molecular_weight": 46.07}],
+            }
+
+    case = EvaluationCase(
+        case_id="PROV-RUN-001",
+        version="1",
+        category="properties",
+        prompt="calculate CCO",
+        expected_skill="admet_assessment",
+        expected_tools=["property_calculator"],
+        expected_events=[
+            "task_started",
+            "planning_started",
+            "planning_completed",
+            "tool_started",
+            "tool_completed",
+            "task_completed",
+        ],
+        scientific_acceptance={"provenance_required": ["property_calculator"]},
+    )
+    runner = scientific.ScientificAcceptanceRunner(
+        dataset_dir=tmp_path,
+        project_root=tmp_path,
+        router=FakeRouter(),
+        planner=FakePlanner(),
+        tools={"property_calculator": FakePropertyTool()},
+    )
+
+    report = runner.run_case(case)
+
+    assert report["status"] == "passed"
+    provenance = report["tool_provenance"][0]
+    assert provenance["trace_id"].startswith("PROV-RUN-001-")
+    assert len(provenance["input_hash"]) == 64
+    assert provenance["input_summary"]
+    assert provenance["output_summary"]
+    assert report["score_breakdown"]["structured_provenance"] == 10
+
+
+def test_target_database_truth_check_rejects_structure_counts_without_records() -> None:
+    result = ToolResult.success_result(
+        "target_database_search",
+        data=[
+            {
+                "gene_symbol": "EGFR",
+                "uniprot_id": "P00533",
+                "structure_count": 3,
+                "has_experimental_structure": True,
+            }
+        ],
+    )
+
+    check = scientific._check_target_database_evidence([result])
+
+    assert check == {
+        "status": "failed",
+        "reason": "target_structure_counts_without_recommended_records",
+    }
+
+
+def test_admet_truth_check_requires_adme_py_package_version() -> None:
+    result = ToolResult.success_result(
+        "admet_predictor",
+        data=[
+            {
+                "smiles": "CCO",
+                "admet": {
+                    "prediction_method": "adme_py",
+                    "backend_version": "unknown",
+                },
+            }
+        ],
+    )
+
+    check = scientific._check_admet_method([result])
+
+    assert check == {
+        "status": "partial",
+        "reason": "adme_py_package_version_unavailable",
+    }
+
+
+def test_reverse_target_dataflow_requires_observed_target_intersection() -> None:
+    reverse = ToolResult.success_result(
+        "reverse_target_predictor",
+        data=[
+            {
+                "target_identifier": "CHEMBL203",
+                "target_name": "Epidermal growth factor receptor",
+                "final_similarity": 0.8,
+            }
+        ],
+    )
+    target_search = ToolResult.success_result(
+        "target_database_search",
+        data=[
+            {
+                "source_query": "Epidermal growth factor receptor",
+                "gene_symbol": "EGFR",
+                "uniprot_id": "P00533",
+                "recommended_structures": [{"structure_id": "4WKQ"}],
+            }
+        ],
+    )
+
+    passed = scientific._check_data_flow_reverse_targets_consumed(
+        [reverse, target_search]
+    )
+    assert passed["status"] == "passed"
+    assert passed["consumed_target_identifiers"]
+
+    target_search.data[0]["source_query"] = "PDE5A"
+    target_search.data[0]["gene_symbol"] = "PDE5A"
+    target_search.data[0]["uniprot_id"] = "O76074"
+    failed = scientific._check_data_flow_reverse_targets_consumed(
+        [reverse, target_search]
+    )
+    assert failed["status"] == "failed"
+    assert failed["reason"] == "reverse_targets_not_consumed"
 
 
 def test_scientific_case_score_zeros_hard_hallucination_failure() -> None:

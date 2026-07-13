@@ -5,7 +5,8 @@
 将 src.reverse_target.predictor.ReverseTargetPredictor 包装为标准 Agent Tool。
 """
 
-from typing import Dict, Any
+import hashlib
+from typing import Dict, Any, Mapping
 import logging
 from .base_tool import BaseMolecularTool
 
@@ -46,6 +47,46 @@ class ReverseTargetTool(BaseMolecularTool):
         has_smiles = bool(self.extract_smiles(query))
         return has_keyword and has_smiles
 
+    @staticmethod
+    def _normalize_target_record(record: Mapping[str, Any]) -> Dict[str, Any]:
+        normalized = dict(record)
+        target_identifier = next(
+            (
+                str(record.get(key)).strip()
+                for key in (
+                    "target_chembl_id",
+                    "target_identifier",
+                    "uniprot_id",
+                    "target_id",
+                )
+                if record.get(key) not in (None, "")
+            ),
+            "",
+        )
+        if not target_identifier:
+            stable_source = "|".join(
+                (
+                    str(record.get("target_name") or "").strip().casefold(),
+                    str(record.get("organism") or "").strip().casefold(),
+                )
+            )
+            digest = hashlib.sha256(stable_source.encode("utf-8")).hexdigest()
+            target_identifier = f"name-sha256:{digest}"
+        normalized["target_identifier"] = target_identifier
+
+        assay_fields = {
+            "type": record.get("standard_type"),
+            "relation": record.get("standard_relation"),
+            "value": record.get("standard_value"),
+            "units": record.get("standard_units"),
+        }
+        normalized["assay"] = {
+            key: value
+            for key, value in assay_fields.items()
+            if value not in (None, "")
+        }
+        return normalized
+
     def execute(self, query: str) -> Dict[str, Any]:
         result = self._create_base_result(query)
 
@@ -64,6 +105,11 @@ class ReverseTargetTool(BaseMolecularTool):
         try:
             predictor = self._get_predictor()
             targets = predictor.predict(smiles, threshold=0.6, top_k=10, combine_by_target=True)
+            targets = [
+                self._normalize_target_record(target)
+                for target in targets
+                if isinstance(target, Mapping)
+            ]
 
             if not targets:
                 result['success'] = True
