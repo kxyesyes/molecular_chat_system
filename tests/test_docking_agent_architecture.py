@@ -172,6 +172,53 @@ class DockingAgentArchitectureTests(unittest.TestCase):
         error_log.assert_not_called()
         warning_log.assert_not_called()
 
+    def test_docking_report_rejects_invalid_image_payload_types(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from src.web.routes import api_routes
+
+        class FakeDockingService:
+            def __init__(self, work_dir):
+                self.work_dir = work_dir
+
+            def parse_vina_results(self, result_file):
+                return []
+
+        invalid_payloads = [
+            {"format": "md", "smiles_images": "ABCDEFGHIJK"},
+            {"format": "md", "smiles_images": ["ABC", 7]},
+            {"format": "md", "viewer_png_base64": {"payload": "VIEWER_SECRET"}},
+        ]
+
+        with tempfile.TemporaryDirectory(prefix="docking_report_types_") as work_dir:
+            job_dir = Path(work_dir) / "docking_job-1"
+            job_dir.mkdir()
+            (job_dir / "result.pdbqt").write_text("MODEL 1\nENDMDL\n", encoding="utf-8")
+
+            app = FastAPI()
+            api_routes.setup_api_routes(app, docking_service=FakeDockingService(work_dir))
+
+            with patch.dict(
+                os.environ,
+                {"MEDCHAT_DOCKING_REPORT_MAX_BASE64_BYTES": "10"},
+            ), patch.object(api_routes.logger, "error") as error_log, patch.object(
+                api_routes.logger,
+                "warning",
+            ) as warning_log:
+                with TestClient(app) as client:
+                    for payload in invalid_payloads:
+                        with self.subTest(payload_type=type(payload.get("smiles_images"))):
+                            response = client.post(
+                                "/api/docking/report/job-1",
+                                json=payload,
+                            )
+                            self.assertEqual(response.status_code, 422, response.text)
+                            self.assertNotIn("ABCDEFGHIJK", response.text)
+                            self.assertNotIn("VIEWER_SECRET", response.text)
+
+        error_log.assert_not_called()
+        warning_log.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

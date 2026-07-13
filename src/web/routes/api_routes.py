@@ -82,18 +82,33 @@ async def _invoke_in_threadpool(func, *args, **kwargs):
     return await run_in_threadpool(invoke)
 
 
-def _validate_report_base64_payload(viewer_png_b64: Any, smiles_images_b64: Any) -> None:
+def _validate_report_base64_payload(
+    viewer_png_b64: Any,
+    smiles_images_b64: Any,
+) -> tuple[Optional[str], List[str]]:
+    if viewer_png_b64 is not None and not isinstance(viewer_png_b64, str):
+        raise HTTPException(
+            status_code=422,
+            detail="viewer_png_base64 must be a string or null",
+        )
+    if not isinstance(smiles_images_b64, list) or not all(
+        isinstance(value, str) for value in smiles_images_b64
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="smiles_images must be a list of strings",
+        )
+
     max_bytes = _get_int_env(
         "MEDCHAT_DOCKING_REPORT_MAX_BASE64_BYTES",
         10 * 1024 * 1024,
     )
     total_bytes = 0
     values = [viewer_png_b64]
-    if isinstance(smiles_images_b64, list):
-        values.extend(smiles_images_b64)
+    values.extend(smiles_images_b64)
 
     for value in values:
-        if not isinstance(value, str):
+        if value is None:
             continue
         total_bytes += len(value.encode("utf-8"))
         if total_bytes > max_bytes:
@@ -101,6 +116,7 @@ def _validate_report_base64_payload(viewer_png_b64: Any, smiles_images_b64: Any)
                 status_code=413,
                 detail="Docking report image payload exceeds the configured limit",
             )
+    return viewer_png_b64, smiles_images_b64
 
 
 def _validate_docking_limits(
@@ -922,8 +938,11 @@ def setup_api_routes(app, docking_service=None):
             if payload and isinstance(payload, dict):
                 fmt = str(payload.get("format", "md")).lower()
                 viewer_png_b64 = payload.get("viewer_png_base64")
-                smiles_images_b64 = payload.get("smiles_images", []) or []
-            _validate_report_base64_payload(viewer_png_b64, smiles_images_b64)
+                smiles_images_b64 = payload.get("smiles_images", [])
+            viewer_png_b64, smiles_images_b64 = _validate_report_base64_payload(
+                viewer_png_b64,
+                smiles_images_b64,
+            )
 
             # 生成报告内容
             from .report_generator import generate_report
