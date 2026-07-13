@@ -1381,9 +1381,13 @@ def setup_api_routes(app, docking_service=None):
     ):
         """活性预测 API"""
         try:
-            from src.activity.predictor import get_predictor
-            predictor = get_predictor()
-            results = predictor.predict(smiles)
+            def run_activity_prediction():
+                from src.activity.predictor import get_predictor
+
+                predictor = get_predictor()
+                return predictor.predict(smiles)
+
+            results = await _invoke_in_threadpool(run_activity_prediction)
             return {"success": True, "results": results}
         except Exception as e:
             logger.error(f"活性预测失败: {e}")
@@ -1407,9 +1411,13 @@ def setup_api_routes(app, docking_service=None):
                     if parts:
                         smiles_list.append(parts[0])
             
-            from src.activity.predictor import get_predictor
-            predictor = get_predictor()
-            results = predictor.predict(smiles_list)
+            def run_activity_batch_prediction():
+                from src.activity.predictor import get_predictor
+
+                predictor = get_predictor()
+                return predictor.predict(smiles_list)
+
+            results = await _invoke_in_threadpool(run_activity_batch_prediction)
             return {"success": True, "results": results}
         except HTTPException:
             raise
@@ -1433,13 +1441,21 @@ def setup_api_routes(app, docking_service=None):
         weight_decay: float        = Form(0.0001, ge=0, le=1),
         patience: int              = Form(12, ge=1, le=1000),
         loss_metric: str           = Form("MSE"),
-        lr_scheduler: str          = Form("Cosine")
+        lr_scheduler: str          = Form("Cosine"),
+        split_strategy: str        = Form("scaffold"),
+        random_seed: int           = Form(42, ge=0, le=2147483647)
     ):
         """提交活性预测模型训练任务"""
         temp_file = None
         temp_path = None
         retain_temp_file = False
         try:
+            split_strategy = split_strategy.strip().lower()
+            if split_strategy not in {"scaffold", "random"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail="split_strategy must be 'scaffold' or 'random'",
+                )
             content = await _read_upload_limited(file, "activity training dataset")
 
             # 1. 保存上传的数据集
@@ -1468,7 +1484,9 @@ def setup_api_routes(app, docking_service=None):
                 weight_decay=weight_decay,
                 patience=patience,
                 loss_metric=loss_metric,
-                lr_scheduler=lr_scheduler
+                lr_scheduler=lr_scheduler,
+                split_strategy=split_strategy,
+                random_seed=random_seed,
             )
             retain_temp_file = True
 

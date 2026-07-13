@@ -6,13 +6,51 @@
 import sys
 import logging
 import inspect
+import math
 from pathlib import Path
 from typing import List, Dict, Any, Union, Optional, Tuple
-import numpy as np
 from rdkit import Chem
 from rdkit.Chem.SaltRemover import SaltRemover
 
 logger = logging.getLogger(__name__)
+
+_SUPPORTED_TASK_TYPES = {"regression", "classification"}
+_INVALID_ENDPOINTS = {"unknown", "unspecified"}
+
+
+def _validate_prediction_metadata(metadata: Any) -> Dict[str, Any]:
+    if not isinstance(metadata, dict):
+        raise ValueError("Activity model metadata is unavailable")
+
+    task_type = metadata.get("task_type")
+    if task_type not in _SUPPORTED_TASK_TYPES:
+        raise ValueError("Activity model metadata has an invalid task_type")
+
+    endpoint = metadata.get("endpoint")
+    if (
+        not isinstance(endpoint, str)
+        or not endpoint.strip()
+        or endpoint.strip().lower() in _INVALID_ENDPOINTS
+    ):
+        raise ValueError("Activity model metadata has an invalid endpoint")
+
+    units = metadata.get("units")
+    if not isinstance(units, str) or not units.strip():
+        raise ValueError("Activity model metadata has invalid or missing units")
+
+    model_id = metadata.get("model_id")
+    if not isinstance(model_id, str) or not model_id.strip():
+        raise ValueError("Activity model metadata has an invalid model_id")
+
+    weights_sha256 = metadata.get("weights_sha256")
+    if (
+        not isinstance(weights_sha256, str)
+        or len(weights_sha256) != 64
+        or any(character not in "0123456789abcdefABCDEF" for character in weights_sha256)
+    ):
+        raise ValueError("Activity model metadata has an invalid weights_sha256")
+
+    return dict(metadata)
 
 
 def _safe_torch_load(torch_module, checkpoint_path: Path, device):
@@ -42,6 +80,8 @@ class ActivityPredictor:
         self.demo_mode = False # Flag for demo/fallback mode
         self.model_config = None
         self.current_model_path = None
+        self.current_model_metadata = None
+        self.model_unavailable_reason = None
         
         # Try to check if torch is available
         try:
@@ -100,6 +140,17 @@ class ActivityPredictor:
         self.demo_mode = False
         self.model_config = None
         self.current_model_path = None
+        self.current_model_metadata = None
+        self.model_unavailable_reason = None
+
+    def _mark_unavailable(self, reason: str) -> None:
+        self.demo_mode = True
+        self.model = None
+        self.model_config = None
+        self.current_model_path = None
+        self.current_model_metadata = None
+        self.model_unavailable_reason = reason
+        self._loaded = True
 
     def _infer_model_config_from_state_dict(self, state_dict: Dict[str, Any]) -> Dict[str, Any]:
         lin1_weight = state_dict["lin1.weight"]
@@ -143,11 +194,26 @@ class ActivityPredictor:
         self.model = None
         self.model_config = None
         self.current_model_path = None
+        self.current_model_metadata = None
+        self.model_unavailable_reason = None
 
         if not self.has_torch:
-            logger.warning("环境缺失 PyTorch，启用演示模式 (Demo Mode)。")
-            self.demo_mode = True
-            self._loaded = True
+            self._mark_unavailable(
+                "PyTorch is unavailable; no RG-MPNN prediction was calculated."
+            )
+            return
+
+        ckpt_path, info = self._find_checkpoint()
+        if ckpt_path is None:
+            self._mark_unavailable(
+                "RG-MPNN model weights are unavailable; no prediction was calculated."
+            )
+            return
+        try:
+            validated_metadata = _validate_prediction_metadata(info)
+        except ValueError as exc:
+            logger.warning("Activity model metadata is unavailable or invalid: %s", exc)
+            self._mark_unavailable(str(exc))
             return
 
         logger.info("正在加载 RG-MPNN 模型...")
@@ -172,13 +238,13 @@ class ActivityPredictor:
 
             import torch
             
-            ckpt_path, info = self._find_checkpoint()
-            
             if ckpt_path:
                 logger.info(f"Loading weights from {ckpt_path}")
                 state = _safe_torch_load(torch, ckpt_path, self.device)
                 state_dict = state['state_dict'] if 'state_dict' in state else state
-                model_config = (info or {}).get("model_config") or self._infer_model_config_from_state_dict(state_dict)
+                model_config = validated_metadata.get(
+                    "model_config"
+                ) or self._infer_model_config_from_state_dict(state_dict)
 
                 self.model_config = model_config
                 self.current_model_path = str(ckpt_path)
@@ -212,14 +278,16 @@ class ActivityPredictor:
             
             if not self.demo_mode:
                 self.model.eval()
+                self.current_model_metadata = validated_metadata
             
             self._loaded = True
             logger.info(f"RG-MPNN 模型加载完成 (Demo Mode: {self.demo_mode})")
             
         except Exception as e:
             logger.error(f"模型加载失败: {e}。切换至演示模式。")
-            self.demo_mode = True
-            self._loaded = True
+            self._mark_unavailable(
+                f"RG-MPNN model load failed; no prediction was calculated: {e}"
+            )
 
     def process_smiles(self, smi: str):
         """处理单个 SMILES"""
@@ -278,100 +346,138 @@ class ActivityPredictor:
 
     def _predict_demo(self, smiles_list: List[str]) -> List[Dict[str, Any]]:
         """Return an explicit failure when no validated RG-MPNN model is loaded."""
+        reason = self.model_unavailable_reason or (
+            "RG-MPNN model weights are unavailable; no prediction was calculated."
+        )
         return [
             {
                 "smiles": smi,
                 "success": False,
-                "error": (
-                    "RG-MPNN model weights are unavailable; "
-                    "no activity score was calculated."
-                ),
+                "error": reason,
                 "note": "Model unavailable",
             }
             for smi in smiles_list
         ]
 
-    def predict(self, smiles: Union[str, List[str]]) -> List[Dict[str, Any]]:
-        """
-        预测分子活性
-        """
+    def _predict_task_aware(
+        self, smiles: Union[str, List[str]]
+    ) -> List[Dict[str, Any]]:
         if not self._loaded:
             self.load()
-            
-        if isinstance(smiles, str):
-            smiles_list = [smiles]
-        else:
-            smiles_list = smiles
-            
-        # 如果在演示模式，直接返回模拟结果
+
+        smiles_list = [smiles] if isinstance(smiles, str) else list(smiles)
         if self.demo_mode:
             return self._predict_demo(smiles_list)
-            
-        results = []
+
+        try:
+            metadata = _validate_prediction_metadata(self.current_model_metadata)
+        except ValueError as exc:
+            return [
+                {"smiles": smi, "success": False, "error": str(exc)}
+                for smi in smiles_list
+            ]
+
+        if self.model is None:
+            return [
+                {
+                    "smiles": smi,
+                    "success": False,
+                    "error": (
+                        "RG-MPNN model is unavailable; "
+                        "no prediction was calculated."
+                    ),
+                }
+                for smi in smiles_list
+            ]
+
+        results: List[Optional[Dict[str, Any]]] = [None] * len(smiles_list)
         valid_atom_data = []
         valid_rg_data = []
         valid_indices = []
-        
-        # Pre-process
-        for i, smi in enumerate(smiles_list):
-            processed = self.process_smiles(smi.strip())
-            if processed:
-                atom_data, rg_data = processed
-                valid_atom_data.append(atom_data)
-                valid_rg_data.append(rg_data)
-                valid_indices.append(i)
-            else:
-                results.append({
+
+        for index, smi in enumerate(smiles_list):
+            if not isinstance(smi, str) or not smi.strip():
+                results[index] = {
                     "smiles": smi,
                     "success": False,
-                    "error": "Invalid SMILES or processing error"
-                })
-        
-        if not valid_atom_data:
-            return results
-            
-        # Batching and Inference
-        from torch_geometric.data import Batch
-        import torch
-        
-        try:
-            atom_batch = Batch.from_data_list(valid_atom_data).to(self.device)
-            rg_batch = Batch.from_data_list(valid_rg_data).to(self.device)
-            
-            with torch.no_grad():
-                out, fp = self.model(atom_batch, rg_batch)
-                scores = out.cpu().numpy()
-                
-                for idx, score in zip(valid_indices, scores):
-                    smi = smiles_list[idx]
-                    val = float(score)
-                    results.append({
-                        "smiles": smi,
-                        "activity_score": val,
-                        "class": "High" if val > 7 else ("Medium" if val > 5 else "Low"),
-                        "confidence": 1.0,
-                        "success": True
-                    })
-                    
-        except Exception as e:
-            logger.error(f"Inference batch failed: {e}")
-            for idx in valid_indices:
-                results.append({
-                    "smiles": smiles_list[idx],
+                    "error": "Invalid SMILES or processing error",
+                }
+                continue
+            processed = self.process_smiles(smi.strip())
+            if processed is None:
+                results[index] = {
+                    "smiles": smi,
                     "success": False,
-                    "error": f"Inference error: {str(e)}"
-                })
-                
-        # Reorder results
-        final_results = []
-        res_map = {r['smiles']: r for r in results}
-        for smi in smiles_list:
-            if smi.strip() in res_map:
-                final_results.append(res_map[smi.strip()])
-            else:
-                final_results.append({"smiles": smi, "success": False, "error": "Unknown error"})
-                
-        return final_results
+                    "error": "Invalid SMILES or processing error",
+                }
+                continue
+            atom_data, rg_data = processed
+            valid_atom_data.append(atom_data)
+            valid_rg_data.append(rg_data)
+            valid_indices.append(index)
+
+        if valid_atom_data:
+            from torch_geometric.data import Batch
+            import torch
+
+            try:
+                atom_batch = Batch.from_data_list(valid_atom_data).to(self.device)
+                rg_batch = Batch.from_data_list(valid_rg_data).to(self.device)
+                with torch.no_grad():
+                    output, _fingerprint = self.model(atom_batch, rg_batch)
+                    if metadata["task_type"] == "classification":
+                        predictions = (
+                            torch.sigmoid(output)
+                            .detach()
+                            .cpu()
+                            .reshape(-1)
+                            .tolist()
+                        )
+                        output_key = "probability"
+                    else:
+                        predictions = output.detach().cpu().reshape(-1).tolist()
+                        output_key = "value"
+
+                if len(predictions) != len(valid_indices):
+                    raise ValueError(
+                        "Model output count does not match the input batch"
+                    )
+
+                for index, raw_value in zip(valid_indices, predictions):
+                    value = float(raw_value)
+                    if not math.isfinite(value):
+                        raise ValueError("Model returned a non-finite prediction")
+                    results[index] = {
+                        "smiles": smiles_list[index],
+                        "success": True,
+                        "task_type": metadata["task_type"],
+                        "endpoint": metadata["endpoint"],
+                        output_key: value,
+                        "units": metadata["units"],
+                    }
+            except Exception as exc:
+                logger.error("Inference batch failed: %s", exc)
+                for index in valid_indices:
+                    results[index] = {
+                        "smiles": smiles_list[index],
+                        "success": False,
+                        "error": f"Inference error: {exc}",
+                    }
+
+        return [
+            result
+            if result is not None
+            else {
+                "smiles": smiles_list[index],
+                "success": False,
+                "error": "Unknown error",
+            }
+            for index, result in enumerate(results)
+        ]
+
+    def predict(self, smiles: Union[str, List[str]]) -> List[Dict[str, Any]]:
+        """Predict registered endpoint values without inferring task semantics."""
+        return self._predict_task_aware(smiles)
 
 # 全局实例
 _predictor = None
