@@ -92,6 +92,82 @@ class ReverseTargetHealthTest(unittest.TestCase):
         self.assertTrue(response.json()["ready"])
         self.assertEqual(response.json()["record_count"], 1)
 
+    def test_reverse_predict_and_batch_run_predictor_methods_in_worker_threads(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from starlette.concurrency import run_in_threadpool as starlette_run_in_threadpool
+        from src.reverse_target import predictor as predictor_module
+        from src.web.routes import api_routes
+
+        route_thread_ids = []
+        predictor_thread_ids = []
+
+        async def recording_run_in_threadpool(func, *args, **kwargs):
+            route_thread_ids.append(threading.get_ident())
+            return await starlette_run_in_threadpool(func, *args, **kwargs)
+
+        class FakePredictor:
+            def predict(self, **kwargs):
+                predictor_thread_ids.append(threading.get_ident())
+                return []
+
+            def predict_batch(self, **kwargs):
+                predictor_thread_ids.append(threading.get_ident())
+                return []
+
+        app = FastAPI()
+        api_routes.setup_api_routes(app)
+
+        with patch.object(
+            api_routes,
+            "run_in_threadpool",
+            new=recording_run_in_threadpool,
+            create=True,
+        ), patch.object(predictor_module, "get_predictor", return_value=FakePredictor()):
+            with TestClient(app) as client:
+                direct = client.post(
+                    "/api/reverse_target/predict",
+                    data={"smiles": "CCO", "threshold": "0.6", "top_k": "10"},
+                )
+                batch = client.post(
+                    "/api/reverse_target/batch_predict",
+                    files={"file": ("smiles.txt", b"CCO\nCCC\n", "text/plain")},
+                    data={"threshold": "0.6", "top_k": "10"},
+                )
+
+        self.assertEqual(direct.status_code, 200, direct.text)
+        self.assertEqual(batch.status_code, 200, batch.text)
+        self.assertEqual(len(predictor_thread_ids), 2)
+        self.assertEqual(len(route_thread_ids), 2)
+        self.assertTrue(all(worker_id not in route_thread_ids for worker_id in predictor_thread_ids))
+
+    def test_reverse_batch_rejects_upload_over_configured_limit(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from src.reverse_target import predictor as predictor_module
+        from src.web.routes.api_routes import setup_api_routes
+
+        class FailIfCalledPredictor:
+            def predict_batch(self, **kwargs):
+                raise AssertionError("predict_batch must not run for an oversized upload")
+
+        app = FastAPI()
+        setup_api_routes(app)
+
+        with patch.dict(os.environ, {"MEDCHAT_MAX_UPLOAD_BYTES": "4"}), patch.object(
+            predictor_module,
+            "get_predictor",
+            return_value=FailIfCalledPredictor(),
+        ):
+            response = TestClient(app).post(
+                "/api/reverse_target/batch_predict",
+                files={"file": ("smiles.txt", b"CCO\nCCC\n", "text/plain")},
+                data={"threshold": "0.6", "top_k": "10"},
+            )
+
+        self.assertEqual(response.status_code, 413, response.text)
+        self.assertNotIn("CCO", response.text)
+
     @unittest.skipUnless(HAS_RDKIT, "RDKit is not installed in this Python environment")
     def test_global_predictor_uses_configured_data_dir(self):
         import src.reverse_target.predictor as predictor_module

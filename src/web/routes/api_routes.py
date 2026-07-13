@@ -5,9 +5,11 @@ import os
 import logging
 import tempfile
 import asyncio
+import inspect
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Optional
-from fastapi import Depends, UploadFile, File, Form, HTTPException, Response, Body
+from fastapi import Depends, UploadFile, File, Form, HTTPException, Response, Body, Query
+from starlette.concurrency import run_in_threadpool
 
 from src.agent.persistence.redaction import redact_sensitive
 from src.web.admin_auth import require_admin
@@ -68,6 +70,37 @@ async def _read_upload_limited(upload: UploadFile, label: str) -> bytes:
             detail=f"{label} exceeds the configured upload limit",
         )
     return content
+
+
+async def _invoke_in_threadpool(func, *args, **kwargs):
+    def invoke():
+        result = func(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return asyncio.run(result)
+        return result
+
+    return await run_in_threadpool(invoke)
+
+
+def _validate_report_base64_payload(viewer_png_b64: Any, smiles_images_b64: Any) -> None:
+    max_bytes = _get_int_env(
+        "MEDCHAT_DOCKING_REPORT_MAX_BASE64_BYTES",
+        10 * 1024 * 1024,
+    )
+    total_bytes = 0
+    values = [viewer_png_b64]
+    if isinstance(smiles_images_b64, list):
+        values.extend(smiles_images_b64)
+
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        total_bytes += len(value.encode("utf-8"))
+        if total_bytes > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail="Docking report image payload exceeds the configured limit",
+            )
 
 
 def _validate_docking_limits(
@@ -187,7 +220,8 @@ def setup_api_routes(app, docking_service=None):
             # 执行对接
             ligand_temp_path = None
             if smiles:
-                result = await docking_service.perform_docking(
+                result = await _invoke_in_threadpool(
+                    docking_service.perform_docking,
                     receptor_file=protein_temp.name,
                     ligand_input=smiles,
                     config=config,
@@ -205,7 +239,8 @@ def setup_api_routes(app, docking_service=None):
                 ligand_temp.close()
                 ligand_temp_path = ligand_temp.name
                 
-                result = await docking_service.perform_docking(
+                result = await _invoke_in_threadpool(
+                    docking_service.perform_docking,
                     receptor_file=protein_temp.name,
                     ligand_input=ligand_temp_path,
                     config=config,
@@ -347,7 +382,8 @@ def setup_api_routes(app, docking_service=None):
             for index, job in enumerate(jobs, 1):
                 config = copy.deepcopy(base_config)
                 try:
-                    result = await docking_service.perform_docking(
+                    result = await _invoke_in_threadpool(
+                        docking_service.perform_docking,
                         receptor_file=protein_temp.name,
                         ligand_input=job["ligand_input"],
                         config=config,
@@ -727,7 +763,11 @@ def setup_api_routes(app, docking_service=None):
             raise HTTPException(status_code=500, detail=f"转换失败: {str(e)}")
 
     @app.get("/api/utils/smiles_to_image")
-    async def smiles_to_image(smiles: str, width: int = 300, height: int = 200):
+    async def smiles_to_image(
+        smiles: str,
+        width: int = Query(300, ge=64, le=2048),
+        height: int = Query(200, ge=64, le=2048),
+    ):
         """生成分子2D图片"""
         try:
             from rdkit import Chem
@@ -759,9 +799,9 @@ def setup_api_routes(app, docking_service=None):
     async def get_mcs(
         smiles1: str,
         smiles2: str,
-        width: int = 360,
-        height: int = 260,
-        timeout: int = 3,
+        width: int = Query(360, ge=64, le=2048),
+        height: int = Query(260, ge=64, le=2048),
+        timeout: int = Query(3, ge=1, le=30),
     ):
         """计算两分子的最大公共子结构(MCS)，返回SMARTS与高亮SVG"""
         try:
@@ -883,6 +923,7 @@ def setup_api_routes(app, docking_service=None):
                 fmt = str(payload.get("format", "md")).lower()
                 viewer_png_b64 = payload.get("viewer_png_base64")
                 smiles_images_b64 = payload.get("smiles_images", []) or []
+            _validate_report_base64_payload(viewer_png_b64, smiles_images_b64)
 
             # 生成报告内容
             from .report_generator import generate_report
@@ -916,7 +957,8 @@ def setup_api_routes(app, docking_service=None):
             
             from src.reverse_target.predictor import get_predictor
             predictor = get_predictor()
-            results = predictor.predict(
+            results = await _invoke_in_threadpool(
+                predictor.predict,
                 smiles=smiles.strip(),
                 threshold=threshold,
                 top_k=top_k,
@@ -953,7 +995,7 @@ def setup_api_routes(app, docking_service=None):
             if top_k < 1 or top_k > 100:
                 raise HTTPException(status_code=400, detail="返回数量必须在1-100之间")
 
-            content = await file.read()
+            content = await _read_upload_limited(file, "reverse target batch file")
             text = content.decode("utf-8")
             
             smiles_list = []
@@ -1002,7 +1044,8 @@ def setup_api_routes(app, docking_service=None):
 
             from src.reverse_target.predictor import get_predictor
             predictor = get_predictor()
-            results = predictor.predict_batch(
+            results = await _invoke_in_threadpool(
+                predictor.predict_batch,
                 smiles_list=smiles_list,
                 threshold=threshold,
                 top_k=top_k,

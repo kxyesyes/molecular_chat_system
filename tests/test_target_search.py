@@ -2,6 +2,8 @@ import unittest
 from pathlib import Path
 import sys
 import tempfile
+import threading
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -385,6 +387,53 @@ class TargetSearchDemoTest(unittest.TestCase):
             routes.TargetSearchService = original_service
 
         self.assertEqual(response.status_code, 404)
+
+    def test_structure_download_preparation_runs_in_worker_thread(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from starlette.concurrency import run_in_threadpool as starlette_run_in_threadpool
+        from src.target_search import routes
+
+        route_thread_ids = []
+        service_thread_ids = []
+        structure_file = self.root / "prepared.cif"
+        structure_file.write_bytes(b"data_demo\n")
+
+        async def recording_run_in_threadpool(func, *args, **kwargs):
+            route_thread_ids.append(threading.get_ident())
+            return await starlette_run_in_threadpool(func, *args, **kwargs)
+
+        class FakeTargetSearchService:
+            def prepare_structure_file(self, structure_db_id, requested_format):
+                service_thread_ids.append(threading.get_ident())
+                return {
+                    "success": True,
+                    "file_path": str(structure_file),
+                    "file_format": requested_format,
+                }
+
+        with patch.object(
+            routes,
+            "TargetSearchService",
+            return_value=FakeTargetSearchService(),
+        ), patch.object(
+            routes,
+            "run_in_threadpool",
+            new=recording_run_in_threadpool,
+            create=True,
+        ):
+            app = FastAPI()
+            routes.setup_target_search_routes(app)
+            with TestClient(app) as client:
+                response = client.get(
+                    "/api/target-db/structures/1/download?format=cif"
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.content, b"data_demo\n")
+        self.assertEqual(len(route_thread_ids), 1)
+        self.assertEqual(len(service_thread_ids), 1)
+        self.assertNotEqual(route_thread_ids[0], service_thread_ids[0])
 
     def test_preflight_route_returns_404_for_missing_structure(self):
         from fastapi import FastAPI
