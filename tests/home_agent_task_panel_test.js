@@ -28,4 +28,21 @@ if (missing.length) {
   process.exit(1);
 }
 
+const completionSnippets = [
+  "completeLastMessage(message.content);",
+  "function completeLastMessage(content)",
+  "removeTypingIndicator();",
+];
+
+const missingCompletionSnippets = completionSnippets.filter(
+  (snippet) => !source.includes(snippet)
+);
+
+if (missingCompletionSnippets.length) {
+  console.error(
+    `Missing workflow completion rendering snippets: ${missingCompletionSnippets.join(", ")}`
+  );
+  process.exit(1);
+}
+
 console.log("Homepage agent task panel static checks passed");
