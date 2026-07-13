@@ -1,5 +1,210 @@
 # 最新任务交接
 
+## 2026-07-13 科学运行时加固与真实科研验收
+
+### 任务状态
+
+- 当前分支：`codex/scientific-runtime-hardening`，未直接修改、合并或提交到 `main`。
+- 实施依据：
+  - `docs/superpowers/specs/2026-07-11-scientific-runtime-hardening-design.md`
+  - `docs/superpowers/plans/2026-07-11-scientific-runtime-hardening.md`
+- 计划中的 17 个任务均已实施。行为修改均先建立失败契约，再完成最小修复。
+- 本轮从 `b1527e9` 到 `f68dc1f` 共 34 个主题化提交；最终交接文档单独提交。
+- 真实运行产物保存在本地 `outputs/agent_evaluation/` 和 `temp_docking/`，均不提交 Git。
+
+### 已完成的加固
+
+1. 前端与管理面
+   - 收敛 activity、chat、docking 页面动态内容的安全渲染路径，补齐静态 XSS 契约。
+   - 管理 API 调用统一携带管理 token；任务失败状态不再被前端包装为成功。
+2. Agent 与状态恢复
+   - 每个请求使用独立 EventBus 和 Orchestrator 扩展状态，避免跨请求事件、回调和可变状态串线。
+   - 增加反向寻靶 specialist 所有权，保留 Supervisor 作为聊天唯一 Agent 入口。
+   - 修复 checkpoint 在相同 `created_at` 下错误选中旧 `running` 记录的竞态，幂等请求和重启恢复不再偶发重复执行工具。
+3. Docking 与异步边界
+   - 每个 docking job 使用独立目录；取消/超时时终止完整进程树；Windows Job Object 和跨进程历史锁生效。
+   - Vina 不可用或失败时不再返回合成能量；历史持久化失败作为 warning 传播。
+   - 性质、反向寻靶冷启动、docking 报告等重任务移出 FastAPI 事件循环；上传大小、图片类型和临时训练文件清理均有契约。
+4. RAG、活性模型与科学真实性
+   - RAG index 使用 manifest、源数据 hash、index hash、row mapping、原子写入和不可变快照；能力不可用时在执行边界失败。
+   - 活性模型路径限制在 registry 根目录，注册、切换、删除和训练生命周期使用原子状态更新。
+   - ADME、反向寻靶、靶点结构、docking 和分子生成保留结构化 provenance；数据流检查使用真实 canonical SMILES 和持久化工具执行记录。
+5. 部署与代码所有权
+   - 靶点 SQLite 使用 WAL、busy timeout 和外键；结构下载具备大小上限、格式校验、临时文件和原子替换。
+   - 日志改为追加式滚动文件；CI/CPU 与 CUDA 部署依赖 profile 明确分离。
+   - 新增 `.github/workflows/quality.yml`，离线运行全量 pytest、compileall、6 个 Node 契约和只输出文件名的凭据扫描。
+   - 删除四个已证明无生产导入的旧实现：`src/web/rag_service.py`、`src/rag/molecular_rag.py`、`src/web/models.py`、`src/web/static/js/script.legacy.backup.js`。
+   - `src/web/models/ollama_model.py` 是唯一 Ollama 类实现；聊天适配器兼容本地同步生成 API 与外部异步模型 API。
+
+### 本轮精确文件范围
+
+共 77 个文件（相对 `4e69de4`），其中删除 4 个旧文件：
+
+```text
+.github/workflows/quality.yml
+data/REGISTRY.md
+deployment/README.md
+deployment/requirements.txt
+docs/PROJECT_STANDARDS.md
+docs/superpowers/plans/2026-07-11-scientific-runtime-hardening.md
+docs/superpowers/specs/2026-07-11-scientific-runtime-hardening-design.md
+main.py
+requirements.txt
+src/activity/model_registry.py
+src/activity/predictor.py
+src/activity/trainer.py
+src/agent/contracts/context.py
+src/agent/evaluation/scientific.py
+src/agent/orchestrators/workflow.py
+src/agent/persistence/sqlite_store.py
+src/agent/runtime/workflow_executor.py
+src/agent/specialists/__init__.py
+src/agent/specialists/agents.py
+src/agent/supervisor.py
+src/agent/tooling/factory.py
+src/agent/tools/__init__.py
+src/agent/tools/activity_predictor_tool.py
+src/agent/tools/admet_predictor.py
+src/agent/tools/molecular_docking.py
+src/agent/tools/reverse_target_tool.py
+src/agent/tools/target_database_tool.py
+src/docking/adapters/base.py
+src/docking/adapters/vina_adapter.py
+src/docking/history_index.py
+src/docking/molecular_docking_service.py
+src/rag/molecular_rag.py (deleted)
+src/target_search/database.py
+src/target_search/downloader.py
+src/target_search/routes.py
+src/target_search/seed.py
+src/task_runtime/manager.py
+src/web/app.py
+src/web/chat_handler.py
+src/web/models.py (deleted)
+src/web/models/__init__.py
+src/web/rag_index.py
+src/web/rag_service.py (deleted)
+src/web/routes/api_routes.py
+src/web/static/js/activity_prediction/main.js
+src/web/static/js/activity_prediction/model_manager.js
+src/web/static/js/activity_prediction/preflight.js
+src/web/static/js/activity_prediction/results_renderer.js
+src/web/static/js/activity_prediction/training_monitor.js
+src/web/static/js/docking/ui_manager.js
+src/web/static/js/home/chat_renderer.js
+src/web/static/js/script.legacy.backup.js (deleted)
+src/web/templates/activity_prediction.html
+src/web/templates/molecular_docking.html
+tests/activity_prediction_safe_render_test.js
+tests/admin_fetch_test.js
+tests/agent/test_chat_handler_agent_events.py
+tests/agent/test_domain_result_validators.py
+tests/agent/test_evaluation_runner.py
+tests/agent/test_real_acceptance_checks.py
+tests/agent/test_specialist_agents.py
+tests/agent/test_supervisor_delegation.py
+tests/agent/test_workflow_executor.py
+tests/agent/test_workflow_resume.py
+tests/frontend_safe_render_test.js
+tests/test_activity_model_registry.py
+tests/test_activity_prediction_contract.py
+tests/test_agent_anti_hallucination_fallbacks.py
+tests/test_agent_platform_health_check.py
+tests/test_deployment_assets.py
+tests/test_docking_agent_architecture.py
+tests/test_docking_configuration.py
+tests/test_docking_history_index.py
+tests/test_rag_index_manifest.py
+tests/test_reverse_target_health.py
+tests/test_target_search.py
+tests/test_task_runtime.py
+```
+
+本交接提交另修改 `docs/handoff/latest.md`。
+
+### 最终验证结果
+
+实际运行命令与结果：
+
+```powershell
+C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests -q -p no:cacheprovider
+# 439 passed, 1 skipped, 9 subtests passed, 6 warnings
+
+C:\Users\xkx52\.conda\envs\MedChat\python.exe -m compileall -q src scripts
+# passed
+
+# src/web/static/js 下排除 ketcher/backup 后的全部 JS
+node --check <47 changed/supported JS files>
+# 47/47 passed
+
+node tests/*.js
+# 6/6 passed
+
+C:\Users\xkx52\.conda\envs\MedChat\python.exe scripts/run_agent_acceptance.py --mode contract
+# passed, 34/34, pass_rate=1.0
+
+C:\Users\xkx52\.conda\envs\MedChat\python.exe scripts/run_agent_acceptance.py --mode real --case-set golden --repeat 3
+# partial；36 次案例执行中 27 passed、9 partial、0 failed、0 skipped
+
+C:\Users\xkx52\.conda\envs\MedChat\python.exe scripts/health_check.py --strict
+# 22/22 passed
+```
+
+全量 pytest 的唯一 skip 是 Windows 上不适用的 POSIX process-group 回归。6 条 warning 均为现有依赖/迁移提示：3 条 SWIG 类型、2 条 FastAPI `on_event` 弃用、1 条 PyTorch Geometric distributed 弃用。
+
+### Golden 真实科研案例
+
+三轮结果完全一致：每轮 9 passed、3 partial、0 failed、0 skipped。
+
+| Case | 场景 | 状态 | 分数 | 结论 |
+|---|---|---:|---:|---|
+| GOLD-001 | 阿司匹林性质/类药性 | passed | 100 | RDKit 性质与 Lipinski/QED 通过 |
+| GOLD-002 | 咖啡因 ADMET/类药性 | passed | 100 | ADMET method 与规则来源完整 |
+| GOLD-003 | 伊马替尼综合评价 | partial | 90 | 性质、ADMET、反向寻靶、靶点证据通过；RG-MPNN 无真实结果 |
+| GOLD-004 | EGFR 结构搜索 | passed | 100 | 数据库证据通过，无伪结合能 |
+| GOLD-005 | PDE5A 结构搜索 | passed | 100 | 数据库证据通过，无伪结合能 |
+| GOLD-006 | 伊马替尼反向寻靶 | passed | 100 | 相似度/数据库证据通过 |
+| GOLD-007 | 长链烷烃低可信寻靶 | passed | 100 | 正确保留低可信状态 |
+| GOLD-008 | PDE5 靶点驱动设计 | partial | 90 | 10 个有效唯一 SMILES 被下游性质/ADMET 消费；RG-MPNN 无真实结果 |
+| GOLD-009 | Hit-to-lead | partial | 90 | baseline、候选生成与候选性质数据流闭环；RG-MPNN 无真实结果 |
+| GOLD-010 | 样例 Vina docking | passed | 100 | 3 个 pose、最佳能量 -3.5、pose 文件存在 |
+| GOLD-011 | 无效 SMILES | passed | 100 | 结构化失败，无 QED/LogP/pIC50/kcal/mol 伪结果 |
+| GOLD-012 | 缺参数 docking | passed | 100 | 明确拒绝，无结合能伪结果 |
+
+稳定性统计：
+
+- 报告总状态：`partial`。
+- 严格 passed rate：`27/36 = 75%`；partial rate：`9/36 = 25%`；failed/skipped rate：`0%`。
+- 报告内 `pass_rate=1.0` 表示 passed 或可诚实解释的 partial 均完成，不代表 36 次全部严格通过。
+- p50 latency：`179.335 ms`；p95 latency：`60268.288 ms`。
+- 唯一失败类型：`truth_partial:rg_mpnn_provenance`，共 9 次。
+- 12 个案例的 anti-hallucination 均通过，未发现伪造 pIC50、binding energy、文献或实验结论。
+- 事件序列、trace、tool results、warnings、provenance 和 artifact 相对路径均被保留。
+
+真实依赖探针：
+
+- 外部主模型：`gemini-3.1-pro`，passed，精确探针匹配，2667 ms。
+- 本地分子生成：Ollama `gmm-llama:latest`，passed，3/3 有效且唯一，35875 ms。
+- 靶点搜索：passed，返回 1 条可追溯结果，52 ms。
+- RG-MPNN：failed，3 个探针分子均无真实预测，`real_model_used=false`，未输出模拟 pIC50。
+- AutoDock Vina：passed，3 个 pose，最佳能量 -3.5，pose 文件存在，22768 ms。
+
+结构化报告：`outputs/agent_evaluation/agent_acceptance_report.json`。该文件可由 Python `json` 正常解析；真实运行时 API key 值和 `sk-*` 凭据模式均未出现在报告中。
+
+### 已知限制与后续优先级
+
+1. **P0：恢复 RG-MPNN 模型 registry 与真实推理。** 当前有两个历史 registry info 文件被判定为无效或不在 registry state，真实探针 0/3 成功。这会使综合评价、靶点驱动设计和 hit-to-lead 固定为 partial。应重新注册经校验的模型目录，要求权重、配置、scaler 和 provenance 完整，再跑 GOLD-003/008/009。
+2. **P1：收紧 SMILES 提取。** 真实日志显示 `SMILES:`、`RG-MPNN`、`partial/failed`、`Objectives:` 等普通文本被尝试送入 RDKit。当前 Validator 阻止了伪结果，但产生噪声和额外开销。应改为边界明确的结构提取，并为自然语言标签补负例契约。
+3. **P1：提高生成候选的科学质量与延迟稳定性。** 最终数量/有效性契约通过，但生成过程中出现无效 SMILES，PDE5 候选中还出现形式上有效但科研价值很低的单原子 `I`；p95 超过 60 秒。应增加最小重原子数、片段/盐过滤、靶点约束和分阶段超时，并验证优化目标确实改善而不只验证“候选已被消费”。
+4. **P2：迁移 FastAPI lifespan。** `@app.on_event("startup")` 仍产生弃用 warning，建议独立任务迁移，不与科学行为修改混合。
+
+### 凭据与安全状态
+
+- 外部 API key 仅从当前进程的 `OPENAI_COMPATIBLE_API_KEY` 读取；base URL 和 model 也只来自运行时环境变量。
+- key 未写入源码、`.env`、测试、日志、报告或 Git；报告只记录 provider/model/latency/success。
+- 真实报告检查：runtime key value 命中 `false`，`sk-*` 长凭据模式命中 `false`，私钥标记命中 `false`。
+- 最终提交前已运行 tracked-file 凭据扫描与 `git diff --check`，均通过；只精确暂存本交接文件。
+
 ## 2026-07-10 工作树整理与 Agent 升级交接
 
 - 当前分支：`codex/agent-runtime-real-validation`，未直接修改或合并 `main`。
