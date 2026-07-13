@@ -68,10 +68,10 @@ MedChat 是面向药物设计与计算药物化学的 Web 平台，不是单一�
 
 ### 2.5 依赖版本
 
-- `requirements.txt`：通用开发环境；
-- `deployment/requirements.txt`：Linux、CUDA 12.1、RTX3090 部署环境。
+- `requirements.txt`：Python 3.10 的 CI / CPU 开发环境，不包含 CUDA 版 PyTorch/PyG；
+- `deployment/requirements.txt`：Linux、CUDA 12.1、RTX3090 生产部署环境，包含 GPU 深度学习栈。
 
-两套文件中的 FastAPI、Uvicorn、Pydantic、HTTPX 等版本不同。哪一套是发布基线为“待确认”；修改依赖时必须说明目标环境并避免同时盲目同步。
+两套 profile 不可互换，版本也不要求机械同步。CI 使用根依赖验证不需要真实模型/密钥的离线质量门；GPU 服务器使用 deployment profile，并在部署后额外运行健康检查和真实工具验收。修改依赖时必须说明目标 profile，并验证另一 profile 是否需要兼容调整。
 
 ## 3. 目录结构说明
 
@@ -325,7 +325,7 @@ node tests/reverse_target_pagination_test.js
 - 真实测试必须明确依赖、超时和是否跳过；
 - 不能用“测试通过”替代源码编译、健康检查和安全扫描。
 
-当前没有覆盖率阈值或 CI 配置，属于“待确认”。
+`.github/workflows/quality.yml` 在 Python 3.10 上运行完整 Python 测试、源码编译、全部受支持的 Node 契约测试和跟踪文件密钥扫描。该离线 CI 不读取真实 API key，也不把缺失 Ollama、RG-MPNN 权重或 Vina 包装成真实通过。覆盖率阈值和分支必需检查仍为“待确认”。
 
 ## 12. Git 提交规范
 
@@ -440,11 +440,11 @@ GitHub 分支保护和必需审批人数为“待确认”。
 ## 待确认事项汇总
 
 1. Python 3.11 是否纳入正式支持范围。
-2. `requirements.txt` 与 `deployment/requirements.txt` 的发布基线和同步策略。
+2. `requirements.txt` 与 `deployment/requirements.txt` 的跨 profile 版本兼容窗口和升级节奏。
 3. 是否引入 Ruff/Black、ESLint/Prettier 和统一配置。
 4. API 是否逐步统一到 `api_success/api_error`。
 5. FastAPI `on_event` 何时迁移到 lifespan。
-6. CI 平台、覆盖率阈值和必需检查。
+6. CI 覆盖率阈值、必需检查名称和是否增加 GPU/真实工具的受控工作流。
 7. GitHub 分支保护、审批人数和 CODEOWNERS。
 8. README 声明 MIT，但根目录未见独立 LICENSE 文件，许可证状态需确认。
 9. 用户数据、上传文件、日志和任务记录的保留策略。

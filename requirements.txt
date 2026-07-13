@@ -1,3 +1,7 @@
+# CI / CPU development profile (Python 3.10).
+# This profile and deployment/requirements.txt are not interchangeable:
+# the deployment profile pins a CUDA/PyG stack for the Linux GPU server.
+
 # Web框架 - 核心依赖
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
