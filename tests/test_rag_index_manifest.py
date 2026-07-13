@@ -301,6 +301,71 @@ def test_load_rejects_index_bytes_from_a_different_manifest_generation(tmp_path)
     assert asyncio.run(rag.search_similar_molecules("third molecule", k=1)) == []
 
 
+def test_load_uses_one_generation_when_index_is_replaced_between_hash_and_read(
+    tmp_path,
+    monkeypatch,
+):
+    source_path = tmp_path / "molecules.csv"
+    dataframe = _write_source(source_path)
+    vector_store_path = tmp_path / "molecular_faiss"
+    index_path = Path(str(vector_store_path) + ".index")
+    persisted_old_manifest = atomic_save_index_pair(
+        _make_index(2, [[1.0, 0.0], [0.0, 1.0]]),
+        index_path,
+        _make_manifest(source_path, row_mapping=[0, 1]),
+        faiss_module=faiss,
+    )
+    replacement_path = tmp_path / "new-generation.index"
+    persisted_new_manifest = atomic_save_index_pair(
+        _make_index(2, [[0.0, 1.0], [1.0, 0.0]]),
+        replacement_path,
+        _make_manifest(source_path, row_mapping=[2, 0]),
+        faiss_module=faiss,
+    )
+    assert persisted_old_manifest.index_sha256 != persisted_new_manifest.index_sha256
+
+    real_file_sha256 = file_sha256
+    replacement_performed = False
+
+    def hash_then_replace_final_index(path):
+        nonlocal replacement_performed
+        digest = real_file_sha256(path)
+        if not replacement_performed and Path(path) != source_path:
+            os.replace(replacement_path, index_path)
+            replacement_performed = True
+        return digest
+
+    monkeypatch.setattr("src.web.app.file_sha256", hash_then_replace_final_index)
+    rag = RAGSystem({"rag": {}})
+    rag.csv_path = source_path
+    rag.source_path = source_path
+    rag.embedding_model_name = "model-a"
+    rag.molecules_df = dataframe
+
+    async def query_embedding(_text: str) -> np.ndarray:
+        return np.asarray([0.0, 1.0])
+
+    rag.get_embedding = query_embedding
+    asyncio.run(rag._load_or_create_index(str(vector_store_path)))
+
+    assert replacement_performed is True
+    if "incompatible" in rag.index_status:
+        assert rag.vector_index is None
+        assert rag.manifest is None
+        return
+
+    assert rag.index_status == "loaded"
+    assert rag.manifest is not None
+    assert rag.manifest.index_sha256 == persisted_old_manifest.index_sha256
+    rag.is_initialized = True
+    results = asyncio.run(rag.search_similar_molecules("second molecule", k=1))
+    assert results[0]["source_index"] == 1
+    assert (
+        results[0]["provenance"]["index_sha256"]
+        == persisted_old_manifest.index_sha256
+    )
+
+
 def test_atomic_pair_failure_preserves_last_usable_index_and_manifest(
     tmp_path,
     monkeypatch,

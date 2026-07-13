@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 import uuid
 
 
@@ -113,7 +114,8 @@ def manifest_path(index_path: str | Path) -> Path:
 
 def load_manifest(path: str | Path) -> RAGIndexManifest:
     try:
-        payload = Path(path).read_text(encoding="utf-8")
+        with Path(path).open("r", encoding="utf-8") as manifest_file:
+            payload = manifest_file.read()
     except OSError as error:
         raise RAGIndexCompatibilityError(
             "RAG index manifest incompatible: manifest is unavailable"
@@ -203,6 +205,24 @@ def _unique_temp_path(final_path: Path, purpose: str) -> Path:
     return final_path.with_name(
         f".{final_path.name}.{os.getpid()}.{uuid.uuid4().hex}.{purpose}.tmp"
     )
+
+
+@contextmanager
+def immutable_index_snapshot(index_path: str | Path) -> Iterator[Path]:
+    """Copy one opened index generation to a unique immutable read snapshot."""
+    final_index_path = Path(index_path)
+    snapshot_path = _unique_temp_path(final_index_path, "snapshot")
+    try:
+        with final_index_path.open("rb") as source_file:
+            with snapshot_path.open("xb") as snapshot_file:
+                shutil.copyfileobj(source_file, snapshot_file)
+                snapshot_file.flush()
+        yield snapshot_path
+    finally:
+        try:
+            snapshot_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _validate_index_shape(index: Any, manifest: RAGIndexManifest) -> None:

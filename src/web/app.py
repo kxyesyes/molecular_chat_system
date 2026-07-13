@@ -29,6 +29,7 @@ from .rag_index import (
     RAGIndexManifest,
     atomic_save_index_pair,
     file_sha256,
+    immutable_index_snapshot,
     load_manifest,
     manifest_path,
     validate_manifest,
@@ -296,21 +297,22 @@ class RAGSystem:
         if index_path.is_file() and index_manifest_path.is_file():
             try:
                 candidate_manifest = load_manifest(index_manifest_path)
-                candidate_index_sha256 = file_sha256(index_path)
-                candidate_index = faiss.read_index(str(index_path))
-                validate_manifest(
-                    candidate_manifest,
-                    source_path=self.source_path,
-                    index_sha256=candidate_index_sha256,
-                    embedding_model=self.embedding_model_name,
-                    vector_dimension=int(candidate_index.d),
-                    vector_count=int(candidate_index.ntotal),
-                    source_row_count=(
-                        len(self.molecules_df)
-                        if self.molecules_df is not None
-                        else 0
-                    ),
-                )
+                with immutable_index_snapshot(index_path) as index_snapshot_path:
+                    candidate_index_sha256 = file_sha256(index_snapshot_path)
+                    candidate_index = faiss.read_index(str(index_snapshot_path))
+                    validate_manifest(
+                        candidate_manifest,
+                        source_path=self.source_path,
+                        index_sha256=candidate_index_sha256,
+                        embedding_model=self.embedding_model_name,
+                        vector_dimension=int(candidate_index.d),
+                        vector_count=int(candidate_index.ntotal),
+                        source_row_count=(
+                            len(self.molecules_df)
+                            if self.molecules_df is not None
+                            else 0
+                        ),
+                    )
             except RAGIndexCompatibilityError as error:
                 incompatible_reason = str(error)
             except Exception:
