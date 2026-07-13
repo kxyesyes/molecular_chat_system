@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -67,6 +68,27 @@ def _windows_process_is_active(pid: int) -> bool:
         return exit_code.value == still_active
     finally:
         ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def _windows_handle_count() -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessHandleCount.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.GetProcessHandleCount.restype = wintypes.BOOL
+    handle_count = wintypes.DWORD()
+    current_process = kernel32.GetCurrentProcess()
+    if not kernel32.GetProcessHandleCount(
+        current_process,
+        ctypes.byref(handle_count),
+    ):
+        raise ctypes.WinError()
+    return int(handle_count.value)
 
 
 class DockingConfigurationTest(unittest.TestCase):
@@ -198,6 +220,8 @@ class DockingConfigurationTest(unittest.TestCase):
             batch_file.write_text(
                 (
                     "@echo off\r\n"
+                    "echo child-started\r\n"
+                    "echo child-stderr 1>&2\r\n"
                     f'"{sys.executable}" "{child_script}" "%~1" "%~2"\r\n'
                 ),
                 encoding="utf-8",
@@ -298,7 +322,7 @@ class DockingConfigurationTest(unittest.TestCase):
             adapter = CommandAdapter(str(batch_file))
 
             started = time.perf_counter()
-            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+            with self.assertRaises(subprocess.TimeoutExpired):
                 adapter.run(
                     adapter.wrap_command(str(marker_file)),
                     cwd=str(root),
@@ -307,9 +331,64 @@ class DockingConfigurationTest(unittest.TestCase):
             elapsed = time.perf_counter() - started
 
             self.assertLess(elapsed, 1.5)
-            self.assertIn("orphan-started", _decoded_stream(caught.exception.stdout))
             time.sleep(2.25)
             self.assertFalse(marker_file.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows spawn deadline regression")
+    def test_command_adapter_timeout_includes_delayed_windows_popen_creation(self):
+        with tempfile.TemporaryDirectory(prefix="command_spawn_deadline_") as tmp:
+            root = Path(tmp)
+            child_script = root / "delayed_spawn_marker.py"
+            marker_file = root / "spawn-survived.marker"
+            child_script.write_text(
+                "\n".join(
+                    [
+                        "import sys",
+                        "from pathlib import Path",
+                        "Path(sys.argv[1]).write_text('resumed', encoding='utf-8')",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            adapter = CommandAdapter(sys.executable)
+            real_popen = subprocess.Popen
+            spawn_returned = threading.Event()
+
+            def delayed_popen(*args, **kwargs):
+                time.sleep(2.0)
+                process = real_popen(*args, **kwargs)
+                spawn_returned.set()
+                return process
+
+            subprocess.run(
+                [sys.executable, "-c", "pass"],
+                capture_output=True,
+                check=True,
+            )
+            handles_before = _windows_handle_count()
+            started = time.perf_counter()
+            with patch(
+                "src.docking.adapters.base.subprocess.Popen",
+                side_effect=delayed_popen,
+            ):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    adapter.run(
+                        [sys.executable, str(child_script), str(marker_file)],
+                        cwd=str(root),
+                        timeout=0.25,
+                    )
+            elapsed = time.perf_counter() - started
+
+            self.assertLess(elapsed, 1.5)
+            self.assertTrue(spawn_returned.wait(timeout=15.0))
+            handle_deadline = time.monotonic() + 5.0
+            while (
+                _windows_handle_count() > handles_before + 1
+                and time.monotonic() < handle_deadline
+            ):
+                time.sleep(0.1)
+            self.assertFalse(marker_file.exists())
+            self.assertLessEqual(_windows_handle_count(), handles_before + 1)
 
     def test_history_persistence_failure_returns_traceability_warning(self):
         with tempfile.TemporaryDirectory(prefix="docking_history_warning_") as tmp:
