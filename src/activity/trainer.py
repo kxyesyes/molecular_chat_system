@@ -80,6 +80,7 @@ def _build_model_metadata(
     created_at: float | None = None,
 ) -> dict:
     created_at = time.time() if created_at is None else created_at
+    metrics = dict(best_metrics or {})
     return {
         "model_id": model_id,
         "created_at": created_at,
@@ -90,10 +91,13 @@ def _build_model_metadata(
         "split_strategy": "random",
         "random_seed": 42,
         "model_config": dict(model_config),
+        "model_format": "pytorch_state_dict",
+        "weights_sha256": _sha256_file(MODELS_DIR / weights_file),
+        "metrics": metrics,
         "target": target_column,
         "dataset": Path(file_path).name,
         "samples": samples,
-        "best_metrics": best_metrics,
+        "best_metrics": metrics,
         "weights_file": weights_file,
         "name": f"{target_column} ({task_type}) - {time.strftime('%Y%m%d%H%M', time.localtime(created_at))}",
     }

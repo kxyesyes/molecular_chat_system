@@ -1548,6 +1548,14 @@ def setup_api_routes(app, docking_service=None):
         try:
             from src.activity.trainer import delete_model
             delete_model(model_id)
+
+            from src.activity.predictor import get_predictor
+
+            predictor = get_predictor()
+            if hasattr(predictor, "invalidate"):
+                predictor.invalidate()
+            else:
+                predictor._loaded = False  # compatibility for injected predictors
             return {"success": True, "message": f"模型 {model_id} 已删除"}
         except ValueError:
             raise HTTPException(status_code=404, detail="模型未注册或记录无效")

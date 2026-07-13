@@ -336,7 +336,7 @@ check(
 
 try {
   const dom = createCaptureDom(["modelSelector", "popoverContent"]);
-  dom.elements.get("modelSelector").value = "unsafe.pt";
+  dom.elements.get("modelSelector").value = "unsafe-model";
   const sandbox = runModule(
     "src/web/static/js/activity_prediction/model_manager.js",
     dom,
@@ -352,6 +352,7 @@ try {
   const targetPayload = '<svg onload="model-target-xss">';
   sandbox.ActivityModels.setAll([
     {
+      model_id: "unsafe-model",
       weights_file: "unsafe.pt",
       name: namePayload,
       target: targetPayload,
@@ -365,6 +366,39 @@ try {
   assertSafelyRendered(dom, targetPayload, "model.target", ["#popoverContent"]);
 } catch (error) {
   failures.push(`Model popover render contract could not execute: ${error.message}`);
+}
+
+try {
+  const dom = createCaptureDom(["modelSelector", "popoverContent"]);
+  dom.elements.get("modelSelector").value = "legacy.pt";
+  const sandbox = runModule(
+    "src/web/static/js/activity_prediction/model_manager.js",
+    dom,
+    {
+      ActivityUtils: {
+        DEFAULT_ACTIVITY_RANGE: {
+          regression: { label: "regression" },
+        },
+      },
+    },
+  );
+  sandbox.ActivityModels.setAll([
+    {
+      weights_file: "legacy.pt",
+      name: "legacy record without model id",
+      task_type: "regression",
+    },
+  ]);
+  check(
+    sandbox.ActivityModels.getAll()[0].model_id === undefined,
+    "ActivityModels.setAll must not derive model_id from weights_file",
+  );
+  check(
+    sandbox.ActivityModels.getSelectedMeta() === null,
+    "Activity model selection must reject records without model_id",
+  );
+} catch (error) {
+  failures.push(`Strict model_id contract could not execute: ${error.message}`);
 }
 
 try {

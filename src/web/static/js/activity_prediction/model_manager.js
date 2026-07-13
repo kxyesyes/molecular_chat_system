@@ -16,10 +16,7 @@ window.ActivityModels = (function () {
   }
 
   function setAll(models) {
-    allModels = (models || []).map(function (item) {
-      if (!item || item.model_id) return item;
-      return Object.assign({}, item, { model_id: item.weights_file });
-    });
+    allModels = models || [];
   }
 
   function getSelectedMeta() {
