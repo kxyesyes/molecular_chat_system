@@ -14,6 +14,22 @@ const jsPath = path.join(
   "main.js"
 );
 const source = fs.readFileSync(jsPath, "utf8");
+const templatePath = path.join(
+  __dirname,
+  "..",
+  "src",
+  "web",
+  "templates",
+  "index.html"
+);
+const templateSource = fs.readFileSync(templatePath, "utf8");
+
+assert.ok(
+  templateSource.includes(
+    '/static/js/home/main.js?v=20260713-workflow-complete-v2'
+  ),
+  "homepage must cache-bust the workflow completion fix"
+);
 
 function extractFunction(functionName) {
   const start = source.indexOf(`function ${functionName}(`);
