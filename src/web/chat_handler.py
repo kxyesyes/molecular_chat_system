@@ -177,6 +177,8 @@ class ChatHandler:
                     mol_count,
                     matched_skill,
                     event_callback=on_agent_event,
+                    enable_rag=enable_rag,
+                    enable_tools=enable_tools,
                 )
             )
         
@@ -399,6 +401,8 @@ class ChatHandler:
         mol_count: int = 5,
         active_skill=None,
         event_callback=None,
+        enable_rag: bool = True,
+        enable_tools: bool = True,
     ):
         """异步执行Agent（用于并行处理）"""
         try:
@@ -414,6 +418,11 @@ class ChatHandler:
             }
             if "event_callback" in execute_parameters:
                 execute_kwargs["event_callback"] = event_callback
+            if "capabilities" in execute_parameters:
+                execute_kwargs["capabilities"] = {
+                    "rag": bool(enable_rag),
+                    "scientific_tools": bool(enable_tools),
+                }
             # 在线程池中执行同步的agent.execute，传递temperature和mol_count参数
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(

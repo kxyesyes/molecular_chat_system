@@ -4,7 +4,12 @@ from dataclasses import asdict
 from typing import Any, Mapping
 from uuid import uuid4
 
-from src.agent.contracts import AgentContext, AgentResult
+from src.agent.contracts import (
+    AgentContext,
+    AgentErrorCode,
+    AgentExecutionError,
+    AgentResult,
+)
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.planning.task_planner import TaskPlanner
 from src.agent.router import SkillRouter
@@ -15,6 +20,11 @@ from src.agent.persistence.base import AgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.task_state import TaskEventType
 from src.agent.runtime.workflow_executor import WorkflowExecutor
+
+
+RAG_TOOL_NAMES = frozenset(
+    {"rag_search", "rag_database_search", "database_search"}
+)
 
 
 class SupervisorAgent:
@@ -71,6 +81,7 @@ class SupervisorAgent:
         mol_count: int = 5,
         active_skill=None,
         event_callback=None,
+        capabilities: Mapping[str, bool] | None = None,
     ) -> dict[str, Any]:
         """Chat-compatible entry point backed by the workflow runtime."""
         skill = active_skill or self.skill_router.route(query, llm=self.llm)
@@ -92,16 +103,50 @@ class SupervisorAgent:
             active_skill=skill.name,
             temperature=temperature,
             mol_count=mol_count,
+            metadata=(
+                {"capabilities": dict(capabilities)}
+                if capabilities is not None
+                else {}
+            ),
         )
+        request_tools = self._request_tools(context)
         execution = WorkflowExecutor(
             planner=self.planner,
             orchestrator=self.orchestrator,
         ).execute(
             context=context,
             skill=skill,
-            all_tools=self.tools,
+            all_tools=request_tools,
             event_callback=event_callback,
         )
+        capability_failure = self._capability_failure_result(
+            context,
+            [step.tool_name for step in execution.plan.steps],
+        )
+        if capability_failure is not None:
+            legacy_failure = capability_failure.to_legacy_dict()
+            return {
+                "success": False,
+                "final_answer": capability_failure.final_answer,
+                "tools_used": [],
+                "active_skill": skill.name,
+                "tool_results": legacy_failure["tool_results"],
+                "tool_result_sequence": legacy_failure["tool_result_sequence"],
+                "tool_results_by_step": legacy_failure["tool_results_by_step"],
+                "partial": False,
+                "trace_id": capability_failure.trace_id,
+                "agent_result": capability_failure,
+                "agent_events": [],
+                "error": legacy_failure["error"],
+                "metadata": legacy_failure["metadata"],
+                "workflow_plan": {
+                    "workflow_name": execution.plan.workflow_name,
+                    "steps": [
+                        step.tool_name for step in execution.plan.steps
+                    ],
+                    "metadata": execution.plan.metadata,
+                },
+            }
         result = execution.result
         legacy_result = result.to_legacy_dict()
         return {
@@ -170,6 +215,19 @@ class SupervisorAgent:
         context = self._build_context(query, skill_name, trace_id, metadata)
         workflow_plan = self.planner.plan(context)
         steps = workflow_plan.steps
+        request_tools = self._request_tools(context)
+
+        capability_failure = self._capability_failure_result(
+            context,
+            [step.tool_name for step in steps],
+        )
+        if capability_failure is not None:
+            return self._format_run_result(
+                workflow_plan.workflow_name,
+                workflow_plan.metadata,
+                steps,
+                capability_failure,
+            )
 
         if not steps:
             return {
@@ -206,7 +264,7 @@ class SupervisorAgent:
         ).execute(
             context=context,
             skill=skill,
-            all_tools=self.tools,
+            all_tools=request_tools,
             idempotency_key=idempotency_key,
         )
         return self._format_run_result(
@@ -543,6 +601,85 @@ class SupervisorAgent:
             active_skill=active_skill,
             workflow_name=active_skill,
             metadata=metadata or {},
+        )
+
+    def _request_tools(self, context: AgentContext) -> dict[str, Any]:
+        """Build a request-local tool view without mutating shared tools."""
+        capabilities = context.capabilities
+        if not capabilities["scientific_tools"]:
+            return {}
+        if capabilities["rag"]:
+            return dict(self.tools)
+        rag_names = self._rag_tool_names()
+        return {
+            name: tool
+            for name, tool in self.tools.items()
+            if name not in rag_names
+        }
+
+    def _rag_tool_names(self) -> set[str]:
+        names = set(RAG_TOOL_NAMES)
+        candidates = list(self.tools.items())
+        if self.tool_registry is not None:
+            candidates.extend(self.tool_registry.as_mapping().items())
+        for registered_name, tool in candidates:
+            tool_name = str(getattr(tool, "name", registered_name))
+            raw_aliases = getattr(tool, "aliases", None)
+            if raw_aliases is None and hasattr(tool, "spec"):
+                raw_aliases = getattr(tool.spec, "aliases", set())
+            if isinstance(raw_aliases, str):
+                aliases = {raw_aliases}
+            else:
+                aliases = set(raw_aliases or set())
+            related_names = {registered_name, tool_name, *aliases}
+            if related_names & names:
+                names.update(related_names)
+        return names
+
+    def _capability_failure_result(
+        self,
+        context: AgentContext,
+        planned_tools: list[str],
+    ) -> AgentResult | None:
+        capabilities = context.capabilities
+        if not capabilities["scientific_tools"]:
+            capability = "scientific_tools"
+            blocked_tools = list(planned_tools)
+        elif not capabilities["rag"]:
+            capability = "RAG"
+            rag_names = self._rag_tool_names()
+            blocked_tools = [
+                name for name in planned_tools if name in rag_names
+            ]
+        else:
+            return None
+
+        if not blocked_tools:
+            return None
+
+        message = (
+            f"{capability} capability disabled; unavailable tools: "
+            f"{', '.join(blocked_tools)}"
+        )
+        details = {
+            "reason": "capability_disabled",
+            "capability": capability.lower(),
+            "disabled_tools": blocked_tools,
+            "capabilities": capabilities,
+        }
+        error = AgentExecutionError(
+            code=AgentErrorCode.TOOL_UNAVAILABLE,
+            message=message,
+            details=details,
+        )
+        return AgentResult(
+            trace_id=context.trace_id,
+            success=False,
+            message=message,
+            final_answer=message,
+            skill_name=context.active_skill,
+            error=error,
+            metadata={"capability_failure": details},
         )
 
     def _route_skill(self, query: str) -> str | None:
