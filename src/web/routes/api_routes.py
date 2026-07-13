@@ -1411,6 +1411,8 @@ def setup_api_routes(app, docking_service=None):
             predictor = get_predictor()
             results = predictor.predict(smiles_list)
             return {"success": True, "results": results}
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"批量活性预测失败: {e}")
             raise HTTPException(status_code=500, detail=str(e))
@@ -1434,20 +1436,26 @@ def setup_api_routes(app, docking_service=None):
         lr_scheduler: str          = Form("Cosine")
     ):
         """提交活性预测模型训练任务"""
+        temp_file = None
+        temp_path = None
+        retain_temp_file = False
         try:
+            content = await _read_upload_limited(file, "activity training dataset")
+
             # 1. 保存上传的数据集
-            import tempfile
             from src.activity.trainer import submit_training_job
-            
+
             ext = os.path.splitext(file.filename)[1] or ".csv"
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
-            content = await _read_upload_limited(file, "activity training dataset")
-            temp_file.write(content)
-            temp_file.close()
+            temp_path = temp_file.name
+            try:
+                temp_file.write(content)
+            finally:
+                temp_file.close()
 
             # 2. 启动后台训练
             job_id = submit_training_job(
-                file_path=temp_file.name,
+                file_path=temp_path,
                 target_column=target_column,
                 task_type=task_type,
                 epochs=epochs,
@@ -1462,11 +1470,26 @@ def setup_api_routes(app, docking_service=None):
                 loss_metric=loss_metric,
                 lr_scheduler=lr_scheduler
             )
-            
+            retain_temp_file = True
+
             return {"success": True, "job_id": job_id, "message": "训练任务已启动"}
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"启动训练失败: {e}")
             raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            if temp_file is not None:
+                try:
+                    temp_file.close()
+                except Exception:
+                    pass
+            if temp_path and not retain_temp_file:
+                try:
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
+                except Exception:
+                    pass
 
     @app.get("/api/activity/train/status/{job_id}", dependencies=[Depends(require_admin)])
     async def get_training_status(job_id: str):

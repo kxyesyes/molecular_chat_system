@@ -219,6 +219,110 @@ class DockingAgentArchitectureTests(unittest.TestCase):
         error_log.assert_not_called()
         warning_log.assert_not_called()
 
+    def test_activity_batch_preserves_upload_limit_without_calling_predictor(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from src.activity import predictor as predictor_module
+        from src.web.routes.api_routes import setup_api_routes
+
+        app = FastAPI()
+        setup_api_routes(app)
+
+        with patch.dict(os.environ, {"MEDCHAT_MAX_UPLOAD_BYTES": "4"}), patch.object(
+            predictor_module,
+            "get_predictor",
+        ) as get_predictor:
+            response = TestClient(app).post(
+                "/api/activity/batch_predict",
+                files={"file": ("smiles.txt", b"CCO\nCCC\n", "text/plain")},
+            )
+
+        self.assertEqual(response.status_code, 413, response.text)
+        get_predictor.assert_not_called()
+
+    def test_activity_training_rejects_oversized_upload_before_creating_temp_file(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from src.activity import trainer as trainer_module
+        from src.web.routes.api_routes import setup_api_routes
+
+        app = FastAPI()
+        setup_api_routes(app)
+
+        with patch.dict(
+            os.environ,
+            {
+                "MEDCHAT_ADMIN_TOKEN": "unit-admin-token",
+                "MEDCHAT_MAX_UPLOAD_BYTES": "4",
+            },
+        ), patch.object(tempfile, "NamedTemporaryFile") as named_temp_file, patch.object(
+            trainer_module,
+            "submit_training_job",
+        ) as submit_training_job:
+            response = TestClient(app).post(
+                "/api/activity/train",
+                headers={"X-MedChat-Admin-Token": "unit-admin-token"},
+                files={"file": ("train.csv", b"smiles,y\nCCO,1\n", "text/csv")},
+                data={"target_column": "y"},
+            )
+
+        self.assertEqual(response.status_code, 413, response.text)
+        named_temp_file.assert_not_called()
+        submit_training_job.assert_not_called()
+
+    def test_activity_training_removes_closed_temp_file_when_submission_fails(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from src.activity import trainer as trainer_module
+        from src.web.routes.api_routes import setup_api_routes
+
+        class TrackingTempFile:
+            def __init__(self, path):
+                self.name = str(path)
+                self._handle = open(path, "wb")
+
+            @property
+            def closed(self):
+                return self._handle.closed
+
+            def write(self, content):
+                return self._handle.write(content)
+
+            def close(self):
+                self._handle.close()
+
+        with tempfile.TemporaryDirectory(prefix="activity_training_cleanup_") as temp_dir:
+            temp_path = Path(temp_dir) / "training.csv"
+            tracked_temp_file = TrackingTempFile(temp_path)
+            app = FastAPI()
+            setup_api_routes(app)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "MEDCHAT_ADMIN_TOKEN": "unit-admin-token",
+                    "MEDCHAT_MAX_UPLOAD_BYTES": "1024",
+                },
+            ), patch.object(
+                tempfile,
+                "NamedTemporaryFile",
+                return_value=tracked_temp_file,
+            ), patch.object(
+                trainer_module,
+                "submit_training_job",
+                side_effect=RuntimeError("submission failed"),
+            ):
+                response = TestClient(app).post(
+                    "/api/activity/train",
+                    headers={"X-MedChat-Admin-Token": "unit-admin-token"},
+                    files={"file": ("train.csv", b"smiles,y\nCCO,1\n", "text/csv")},
+                    data={"target_column": "y"},
+                )
+
+            self.assertEqual(response.status_code, 500, response.text)
+            self.assertTrue(tracked_temp_file.closed)
+            self.assertFalse(temp_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
