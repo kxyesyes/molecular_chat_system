@@ -367,7 +367,7 @@
           break;
 
         case "complete":
-          completeLastMessage();
+          completeLastMessage(message.content);
           clearToolStatus(); // 清除工具状态显示
           break;
 
@@ -1561,31 +1561,98 @@
     HomeChatRenderer.scrollToBottom();
   }
 
+  function resolveCompletionAction(state) {
+    const hasFinalContent =
+      typeof state.finalContent === "string" && state.finalContent.length > 0;
+
+    if (state.lastMessageComplete) {
+      return {
+        action:
+          state.hadTypingIndicator && hasFinalContent ? "create" : "ignore",
+        hasFinalContent,
+      };
+    }
+
+    if (!state.hasLastMessage) {
+      return {
+        action: hasFinalContent ? "create" : "ignore",
+        hasFinalContent,
+      };
+    }
+
+    if (
+      hasFinalContent &&
+      state.lastMessageContent !== state.finalContent
+    ) {
+      return { action: "replace", hasFinalContent };
+    }
+
+    return { action: "finalize", hasFinalContent };
+  }
+
   // 完成最后一条消息
-  function completeLastMessage() {
-    const lastMessage = elements.chatContainer.querySelector(
+  function completeLastMessage(content) {
+    const hadTypingIndicator = Boolean(
+      elements.chatContainer.querySelector(".typing-indicator-wrapper")
+    );
+    removeTypingIndicator();
+
+    let lastMessage = elements.chatContainer.querySelector(
       ".assistant-wrapper:last-child .message-box"
     );
-    if (lastMessage) {
-      lastMessage.classList.remove("streaming");
-      lastMessage.classList.add("complete");
+    const lastMessageContent = lastMessage?.getAttribute("data-content") || "";
+    const completion = resolveCompletionAction({
+      hadTypingIndicator,
+      hasLastMessage: Boolean(lastMessage),
+      lastMessageComplete: Boolean(lastMessage?.classList.contains("complete")),
+      lastMessageContent,
+      finalContent: content,
+    });
 
-      // 移除光标
-      const cursor = lastMessage.querySelector(".cursor");
-      if (cursor) {
-        cursor.remove();
+    if (completion.action === "ignore") {
+      return;
+    }
+
+    // Agent 工作流可能不发送 stream 帧，直接以 complete.content 返回完整结果。
+    if (completion.action === "create") {
+      appendToLastMessage(content);
+      lastMessage = elements.chatContainer.querySelector(
+        ".assistant-wrapper:last-child .message-box"
+      );
+    } else if (completion.action === "replace") {
+      lastMessage.setAttribute("data-content", content);
+      const messageContent =
+        lastMessage.querySelector(".message-content") ||
+        lastMessage.querySelector("div:last-child");
+      if (messageContent) {
+        messageContent.innerHTML = HomeFormatters.formatContent(content);
       }
+    }
 
-      // 保存完整内容到历史
-      const content =
-        lastMessage.getAttribute("data-content") || lastMessage.textContent;
-    currentMessages.push({ role: "assistant", content: content });
+    if (!lastMessage) {
+      return;
+    }
+
+    lastMessage.classList.remove("streaming");
+    lastMessage.classList.add("complete");
+
+    // 移除光标
+    const cursor = lastMessage.querySelector(".cursor");
+    if (cursor) {
+      cursor.remove();
+    }
+
+    // 保存完整内容到历史
+    const finalContent = completion.hasFinalContent
+      ? content
+      : lastMessage.getAttribute("data-content") || lastMessage.textContent;
+    lastMessage.setAttribute("data-content", finalContent);
+    currentMessages.push({ role: "assistant", content: finalContent });
     HomeState.currentMessages = currentMessages.slice();
     updateToolbarControlStates();
 
-      // ✨ 检测并渲染SMILES分子结构
-      detectAndRenderMolecules(lastMessage, content);
-    }
+    // ✨ 检测并渲染SMILES分子结构
+    detectAndRenderMolecules(lastMessage, finalContent);
   }
 
   // 显示状态消息 - 美化版
