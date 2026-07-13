@@ -101,6 +101,34 @@ def test_idempotency_key_reuses_existing_run_without_duplicate_tool_call(tmp_pat
     assert tool.calls == ["CCO"]
 
 
+def test_checkpoint_resume_prefers_latest_write_when_timestamps_tie(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "src.agent.persistence.sqlite_store.time.time",
+        lambda: 1_700_000_000.0,
+    )
+    store = SQLiteAgentStateStore(tmp_path / "state.sqlite3")
+    tool = CountingTool("properties", {"qed": 0.4})
+    steps = [WorkflowStep("properties", "properties")]
+    context = AgentContext(query="CCO", trace_id="timestamp-tie")
+
+    WorkflowOrchestrator(state_store=store).run(
+        context,
+        steps,
+        {"properties": tool},
+    )
+    resumed = WorkflowOrchestrator(state_store=store).run(
+        context,
+        steps,
+        {"properties": tool},
+    )
+
+    assert resumed.success is True
+    assert resumed.metadata["reused_steps"] == ["properties"]
+    assert tool.calls == ["CCO"]
+
+
 def test_tool_execution_and_terminal_run_status_are_persisted(tmp_path):
     store = SQLiteAgentStateStore(tmp_path / "state.sqlite3")
     tool = CountingTool("properties", {"qed": 0.4})

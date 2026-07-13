@@ -260,7 +260,7 @@ class SQLiteAgentStateStore:
         if step_id is not None:
             query += " AND step_id = ?"
             params.append(step_id)
-        query += " ORDER BY created_at DESC LIMIT 1"
+        query += " ORDER BY created_at DESC, rowid DESC LIMIT 1"
         with self._connect() as connection:
             row = connection.execute(query, params).fetchone()
         if not row:
