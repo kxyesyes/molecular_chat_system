@@ -23,6 +23,7 @@ from .llm_runtime_config import (
     save_runtime_config,
 )
 from .admin_auth import require_admin
+from .models import OllamaModel, generate_for_chat
 from .rag_index import (
     CURRENT_SCHEMA_VERSION,
     RAGIndexCompatibilityError,
@@ -118,78 +119,6 @@ def env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-
-class OllamaModel:
-    """Ollama model interface for chat completion"""
-    
-    def __init__(self, base_url: str = "http://localhost:11434", model_name: str = "gmm-llama:latest"):
-        self.base_url = base_url
-        self.model_name = model_name
-        # 增加超时时间到150秒，与内存中的配置一致
-        self.client = httpx.AsyncClient(timeout=150.0)
-    
-    async def generate(self, prompt: str, temperature: float = 0.7, max_tokens: int = 1500) -> str:
-        """Generate response from Ollama model"""
-        try:
-            response = await self.client.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": self.model_name,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {
-                        "temperature": temperature,
-                        "num_predict": max_tokens
-                    }
-                }
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                return result.get("response", "")
-            else:
-                logger.error(f"Ollama API error: {response.status_code}")
-                return "I apologize, but I'm having trouble generating a response right now."
-                
-        except Exception as e:
-            logger.error(f"Error calling Ollama: {e}")
-            return "I apologize, but I'm experiencing technical difficulties."
-    
-    async def stream_generate(self, prompt: str, temperature: float = 0.7, max_tokens: int = 1500):
-        """Stream response from Ollama model"""
-        try:
-            async with self.client.stream(
-                "POST",
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": self.model_name,
-                    "prompt": prompt,
-                    "stream": True,
-                    "options": {
-                        "temperature": temperature,
-                        "num_predict": max_tokens
-                    }
-                }
-            ) as response:
-                
-                if response.status_code == 200:
-                    async for line in response.aiter_lines():
-                        if line:
-                            try:
-                                data = json.loads(line)
-                                if "response" in data:
-                                    yield data["response"]
-                                if data.get("done", False):
-                                    break
-                            except json.JSONDecodeError:
-                                continue
-                else:
-                    logger.error(f"Ollama streaming API error: {response.status_code}")
-                    yield "I apologize, but I'm having trouble generating a response right now."
-                    
-        except Exception as e:
-            logger.error(f"Error streaming from Ollama: {e}")
-            yield "I apologize, but I'm experiencing technical difficulties."
 
 class RAGSystem:
     """Retrieval-Augmented Generation system for molecular data"""
@@ -889,7 +818,8 @@ class MolecularChatApp:
 
             try:
                 test_model = self._create_model_from_llm_config(test_config)
-                response = await test_model.generate(
+                response = await generate_for_chat(
+                    test_model,
                     "Reply with exactly: CONNECTION_OK",
                     temperature=0.1,
                     max_tokens=64,
@@ -1083,7 +1013,8 @@ class MolecularChatApp:
                     }))
                 else:
                     # Non-streaming generation
-                    full_response = await self.model.generate(
+                    full_response = await generate_for_chat(
+                        self.model,
                         prompt,
                         temperature=self.config.get("inference", {}).get("temperature", 0.7),
                         max_tokens=self.config.get("inference", {}).get("max_tokens", 1500)

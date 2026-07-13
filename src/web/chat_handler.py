@@ -9,6 +9,8 @@ import time
 from typing import List, Dict, Any
 from fastapi import WebSocket, WebSocketDisconnect
 
+from src.web.models import generate_for_chat
+
 logger = logging.getLogger(__name__)
 
 
@@ -360,7 +362,8 @@ class ChatHandler:
             except Exception as stream_error:
                 logger.error(f"流式生成错误: {stream_error}")
                 await self._send_status(websocket, "⚠️ 切换到标准生成模式...")
-                full_response = await self.model.generate(
+                full_response = await generate_for_chat(
+                    self.model,
                     prompt,
                     temperature=self.config.get("inference", {}).get("temperature", 0.7),
                     max_tokens=self.config.get("inference", {}).get("max_tokens", 1500)
@@ -370,7 +373,8 @@ class ChatHandler:
                     "message": full_response
                 }))
         else:
-            full_response = await self.model.generate(
+            full_response = await generate_for_chat(
+                self.model,
                 prompt,
                 temperature=self.config.get("inference", {}).get("temperature", 0.7),
                 max_tokens=self.config.get("inference", {}).get("max_tokens", 1500)
