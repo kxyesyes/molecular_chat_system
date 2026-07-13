@@ -20,6 +20,7 @@ _REQUIRED_MANIFEST_FIELDS = {
     "vector_count",
     "row_mapping",
     "created_at",
+    "builder_version",
 }
 
 
@@ -80,7 +81,7 @@ class RAGIndexManifest:
             vector_count=payload["vector_count"],
             row_mapping=list(row_mapping),
             created_at=payload["created_at"],
-            builder_version=payload.get("builder_version", "1"),
+            builder_version=payload["builder_version"],
         )
 
     @classmethod
@@ -231,6 +232,8 @@ def atomic_save_index_pair(
         faiss_module.write_index(index, str(temp_index_path))
         written_index = faiss_module.read_index(str(temp_index_path))
         _validate_index_shape(written_index, manifest)
+        with temp_index_path.open("r+b") as index_file:
+            os.fsync(index_file.fileno())
 
         with temp_manifest_path.open(
             "w",

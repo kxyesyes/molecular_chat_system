@@ -1,5 +1,6 @@
 import asyncio
 import dataclasses
+import json
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -171,6 +172,18 @@ def test_manifest_load_rejects_invalid_json_without_echoing_contents(tmp_path):
     assert secret_marker not in str(error.value)
 
 
+def test_manifest_load_rejects_missing_builder_version(tmp_path):
+    source_path = tmp_path / "molecules.csv"
+    _write_source(source_path)
+    payload = _make_manifest(source_path).to_dict()
+    payload.pop("builder_version")
+    path = manifest_path(tmp_path / "molecular.index")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RAGIndexCompatibilityError, match="required fields"):
+        load_manifest(path)
+
+
 def test_load_rejects_index_without_manifest_instead_of_using_stale_index(tmp_path):
     source_path = tmp_path / "molecules.csv"
     dataframe = _write_source(source_path)
@@ -292,3 +305,56 @@ def test_atomic_pair_failure_preserves_last_usable_index_and_manifest(
     )
     assert not list(tmp_path.glob("*.tmp"))
     assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_atomic_pair_fsyncs_both_temps_before_replacing_index_then_manifest(
+    tmp_path,
+    monkeypatch,
+):
+    source_path = tmp_path / "molecules.csv"
+    _write_source(source_path)
+    index_path = tmp_path / "molecular.index"
+    final_manifest_path = manifest_path(index_path)
+    manifest = _make_manifest(
+        source_path,
+        vector_dimension=2,
+        row_mapping=[0],
+    )
+    events = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def record_fsync(file_descriptor):
+        events.append(("fsync", None, None))
+        return real_fsync(file_descriptor)
+
+    def record_replace(source, destination):
+        events.append(("replace", Path(source), Path(destination)))
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("src.web.rag_index.os.fsync", record_fsync)
+    monkeypatch.setattr("src.web.rag_index.os.replace", record_replace)
+
+    atomic_save_index_pair(
+        _make_index(2, [[1.0, 0.0]]),
+        index_path,
+        manifest,
+        faiss_module=faiss,
+    )
+
+    fsync_positions = [
+        position for position, event in enumerate(events) if event[0] == "fsync"
+    ]
+    replace_events = [event for event in events if event[0] == "replace"]
+    first_replace_position = next(
+        position for position, event in enumerate(events) if event[0] == "replace"
+    )
+
+    assert len(fsync_positions) >= 2
+    assert max(fsync_positions) < first_replace_position
+    assert [event[2] for event in replace_events] == [
+        index_path,
+        final_manifest_path,
+    ]
+    assert replace_events[0][1] != index_path
+    assert replace_events[1][1] != final_manifest_path
