@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -22,6 +23,16 @@ from .llm_runtime_config import (
     save_runtime_config,
 )
 from .admin_auth import require_admin
+from .rag_index import (
+    CURRENT_SCHEMA_VERSION,
+    RAGIndexCompatibilityError,
+    RAGIndexManifest,
+    atomic_save_index_pair,
+    file_sha256,
+    load_manifest,
+    manifest_path,
+    validate_manifest,
+)
 
 try:
     import faiss  # type: ignore
@@ -185,8 +196,19 @@ class RAGSystem:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.embedding_model = None
+        rag_config = self.config.get("rag", {})
+        self.embedding_model_name = rag_config.get(
+            "embedding_model",
+            "nomic-embed-text:latest",
+        )
         self.vector_index = None
         self.molecules_df: Optional[pd.DataFrame] = None
+        self.csv_path = Path(
+            rag_config.get("csv_path", "data/canonical_moses_5w.csv")
+        )
+        self.source_path = self.csv_path
+        self.manifest: Optional[RAGIndexManifest] = None
+        self.index_status = "uninitialized"
         self.is_initialized = False
     
     async def initialize(self):
@@ -194,6 +216,7 @@ class RAGSystem:
         try:
             if faiss is None:
                 logger.warning("FAISS is not installed; RAG retrieval is disabled.")
+                self.index_status = "unavailable: faiss is not installed"
                 self.is_initialized = False
                 return
 
@@ -206,23 +229,38 @@ class RAGSystem:
             self.embedding_model_name = embedding_model_name
             
             # Load molecular data
-            csv_path = self.config.get("rag", {}).get("csv_path", "data/canonical_moses_5w.csv")
-            if os.path.exists(csv_path):
-                self.molecules_df = pd.read_csv(csv_path)
-                logger.info(f"Loaded {len(self.molecules_df)} molecules from {csv_path}")
+            self.csv_path = Path(
+                self.config.get("rag", {}).get(
+                    "csv_path",
+                    "data/canonical_moses_5w.csv",
+                )
+            )
+            self.source_path = self.csv_path
+            if self.csv_path.exists():
+                self.molecules_df = pd.read_csv(self.csv_path)
+                logger.info(
+                    f"Loaded {len(self.molecules_df)} molecules from {self.csv_path}"
+                )
             else:
-                logger.warning(f"Molecular data file not found: {csv_path}")
+                logger.warning(f"Molecular data file not found: {self.csv_path}")
                 self.molecules_df = pd.DataFrame()
             
             # Load or create vector index
             vector_store_path = self.config.get("rag", {}).get("vector_store_path", "data/molecular_faiss_index")
             await self._load_or_create_index(vector_store_path)
             
-            self.is_initialized = True
-            logger.info("RAG system initialized successfully")
+            self.is_initialized = self.vector_index is not None and self.manifest is not None
+            if self.is_initialized:
+                logger.info("RAG system initialized successfully")
+            else:
+                logger.warning(
+                    "RAG system initialized without a usable index: %s",
+                    self.index_status,
+                )
             
         except Exception as e:
             logger.error(f"Failed to initialize RAG system: {e}")
+            self.index_status = "error: initialization failed"
             self.is_initialized = False
     
     async def get_embedding(self, text: str) -> np.ndarray:
@@ -249,22 +287,63 @@ class RAGSystem:
     
     async def _load_or_create_index(self, vector_store_path: str):
         """Load existing vector index or create new one"""
-        try:
-            if os.path.exists(f"{vector_store_path}.index"):
-                # Load existing index
-                self.vector_index = faiss.read_index(f"{vector_store_path}.index")
-                logger.info("Loaded existing vector index")
+        index_path = Path(f"{vector_store_path}.index")
+        index_manifest_path = manifest_path(index_path)
+        incompatible_reason: Optional[str] = None
+        self.vector_index = None
+        self.manifest = None
+
+        if index_path.is_file() and index_manifest_path.is_file():
+            try:
+                candidate_manifest = load_manifest(index_manifest_path)
+                candidate_index = faiss.read_index(str(index_path))
+                validate_manifest(
+                    candidate_manifest,
+                    source_path=self.source_path,
+                    embedding_model=self.embedding_model_name,
+                    vector_dimension=int(candidate_index.d),
+                    vector_count=int(candidate_index.ntotal),
+                    source_row_count=(
+                        len(self.molecules_df)
+                        if self.molecules_df is not None
+                        else 0
+                    ),
+                )
+            except RAGIndexCompatibilityError as error:
+                incompatible_reason = str(error)
+            except Exception:
+                incompatible_reason = (
+                    "RAG index manifest incompatible: index cannot be read"
+                )
             else:
-                # Create new index
-                if self.molecules_df is not None and not self.molecules_df.empty:
-                    await self._create_index(vector_store_path)
-                else:
-                    logger.warning("No molecular data available to create index")
-                    self.vector_index = None
-                    
-        except Exception as e:
-            logger.error(f"Error with vector index: {e}")
-            self.vector_index = None
+                self.vector_index = candidate_index
+                self.manifest = candidate_manifest
+                self.index_status = "loaded"
+                logger.info("Loaded compatible vector index and manifest")
+                return
+        elif index_path.exists() or index_manifest_path.exists():
+            incompatible_reason = (
+                "RAG index manifest incompatible: index and manifest must both exist"
+            )
+
+        if incompatible_reason:
+            self.index_status = f"incompatible: {incompatible_reason}"
+            logger.warning("Rejected existing RAG index: %s", incompatible_reason)
+
+        if self.molecules_df is not None and not self.molecules_df.empty:
+            await self._create_index(vector_store_path)
+            if self.vector_index is not None and self.manifest is not None:
+                if incompatible_reason:
+                    self.index_status = "rebuilt_after_incompatible"
+                return
+
+        self.vector_index = None
+        self.manifest = None
+        if incompatible_reason:
+            self.index_status = f"incompatible: {incompatible_reason}"
+        elif self.index_status == "uninitialized":
+            self.index_status = "unavailable: no molecular data"
+            logger.warning("No molecular data available to create index")
     
     async def _create_index(self, vector_store_path: str):
         """Create vector index from molecular data"""
@@ -272,53 +351,100 @@ class RAGSystem:
             logger.info("Creating vector index from molecular data...")
             
             # Create embeddings for molecules
-            embeddings = []
+            embeddings: List[np.ndarray] = []
+            row_mapping: List[int] = []
+            embedding_dimension: Optional[int] = None
             if self.molecules_df is not None:
-                count = 0
-                for _, row in self.molecules_df.iterrows():
+                for source_position, (_, row) in enumerate(
+                    self.molecules_df.iterrows()
+                ):
                     # Create text representation of molecule
                     mol_text = f"SMILES: {row.get('SMILES', '')}"
                     embedding = await self.get_embedding(mol_text)
-                    
-                    if len(embedding) > 0:
-                        embeddings.append(embedding)
+
+                    embedding_array = np.asarray(embedding)
+                    if embedding_array.ndim != 1 or embedding_array.size == 0:
+                        continue
+                    if not np.all(np.isfinite(embedding_array)):
+                        logger.warning(
+                            "Skipping non-finite embedding for source row %s",
+                            source_position,
+                        )
+                        continue
+                    current_dimension = int(embedding_array.shape[0])
+                    if embedding_dimension is None:
+                        embedding_dimension = current_dimension
+                    elif current_dimension != embedding_dimension:
+                        logger.warning(
+                            "Skipping source row %s with incompatible embedding dimension",
+                            source_position,
+                        )
+                        continue
+                    embeddings.append(embedding_array.astype(np.float32))
+                    row_mapping.append(source_position)
                     
                     # Use counter for progress tracking
-                    if count % 100 == 0 and self.molecules_df is not None:
-                        logger.info(f"Processed {count}/{len(self.molecules_df)} molecules")
-                    count += 1
+                    if source_position % 100 == 0:
+                        logger.info(
+                            f"Processed {source_position}/{len(self.molecules_df)} molecules"
+                        )
             
             if embeddings:
                 embeddings_array = np.vstack(embeddings)
                 
                 # Create FAISS index
                 dimension = embeddings_array.shape[1]
-                self.vector_index = faiss.IndexFlatIP(dimension)  # Inner product for similarity
+                candidate_index = faiss.IndexFlatIP(dimension)  # Inner product for similarity
                 
                 # Normalize embeddings for cosine similarity
                 embeddings_float32 = embeddings_array.astype(np.float32)
                 faiss.normalize_L2(embeddings_float32)
-                if self.vector_index is not None:
-                    # Add embeddings to index - FAISS add method takes the array directly
-                    # Ignore type checking errors for FAISS methods
-                    self.vector_index.add(embeddings_float32)  # type: ignore
-                
-                # Save index
-                os.makedirs(os.path.dirname(vector_store_path), exist_ok=True)
-                if self.vector_index is not None:
-                    faiss.write_index(self.vector_index, f"{vector_store_path}.index")
+                # Add embeddings to index - FAISS add method takes the array directly
+                # Ignore type checking errors for FAISS methods
+                candidate_index.add(embeddings_float32)  # type: ignore
+
+                candidate_manifest = RAGIndexManifest(
+                    schema_version=CURRENT_SCHEMA_VERSION,
+                    source_path=str(self.source_path),
+                    source_sha256=file_sha256(self.source_path),
+                    embedding_model=self.embedding_model_name,
+                    vector_dimension=dimension,
+                    vector_count=len(row_mapping),
+                    row_mapping=row_mapping,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+                atomic_save_index_pair(
+                    candidate_index,
+                    Path(f"{vector_store_path}.index"),
+                    candidate_manifest,
+                    faiss_module=faiss,
+                )
+                self.vector_index = candidate_index
+                self.manifest = candidate_manifest
+                self.index_status = "created"
                 
                 logger.info(f"Created and saved vector index with {len(embeddings)} embeddings")
             else:
                 logger.error("No valid embeddings created")
+                self.vector_index = None
+                self.manifest = None
+                self.index_status = "unavailable: no valid embeddings"
                 
         except Exception as e:
             logger.error(f"Error creating vector index: {e}")
             self.vector_index = None
+            self.manifest = None
+            self.index_status = "error: index creation failed"
     
     async def search_similar_molecules(self, query: str, k: int = 2) -> List[Dict[str, Any]]:
         """Search for similar molecules based on query"""
-        if not self.is_initialized or self.vector_index is None or self.molecules_df is None or self.molecules_df.empty:
+        if (
+            not self.is_initialized
+            or self.vector_index is None
+            or self.manifest is None
+            or self.molecules_df is None
+            or self.molecules_df.empty
+        ):
             return []
         
         try:
@@ -329,6 +455,9 @@ class RAGSystem:
             
             # Normalize query embedding
             query_embedding = query_embedding.reshape(1, -1).astype(np.float32)
+            if query_embedding.shape[1] != int(self.vector_index.d):
+                logger.warning("RAG query embedding dimension is incompatible")
+                return []
             faiss.normalize_L2(query_embedding)
             
             # Search with proper parameters
@@ -343,12 +472,30 @@ class RAGSystem:
             
             # Return results
             results = []
-            if self.molecules_df is not None:
-                for i, (score, idx) in enumerate(zip(scores[0], indices[0])):
-                    if idx < len(self.molecules_df):
-                        mol_data = self.molecules_df.iloc[idx].to_dict()
-                        mol_data['similarity_score'] = float(score)
-                        results.append(mol_data)
+            if self.molecules_df is not None and self.manifest is not None:
+                for score, label in zip(scores[0], indices[0]):
+                    vector_label = int(label)
+                    if vector_label < 0 or vector_label >= len(
+                        self.manifest.row_mapping
+                    ):
+                        continue
+                    source_position = self.manifest.row_mapping[vector_label]
+                    if source_position < 0 or source_position >= len(
+                        self.molecules_df
+                    ):
+                        continue
+                    mol_data = self.molecules_df.iloc[source_position].to_dict()
+                    mol_data['similarity_score'] = float(score)
+                    mol_data['source_index'] = source_position
+                    mol_data['provenance'] = {
+                        "source_path": self.manifest.source_path,
+                        "source_sha256": self.manifest.source_sha256,
+                        "embedding_model": self.manifest.embedding_model,
+                        "manifest_schema_version": self.manifest.schema_version,
+                        "builder_version": self.manifest.builder_version,
+                        "vector_label": vector_label,
+                    }
+                    results.append(mol_data)
             
             return results
             
