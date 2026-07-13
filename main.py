@@ -8,6 +8,7 @@ import os
 import sys
 import argparse
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 DEFAULT_HOST = "127.0.0.1"
@@ -34,7 +35,12 @@ Path("logs").mkdir(parents=True, exist_ok=True)
 # 设置日志
 logging.basicConfig(
     handlers=[
-        logging.FileHandler("logs/app.log", encoding='utf-8', mode='w'),
+        RotatingFileHandler(
+            "logs/app.log",
+            maxBytes=10 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        ),
         logging.StreamHandler(sys.stdout)
     ],
     level=logging.INFO,

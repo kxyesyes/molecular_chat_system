@@ -2,15 +2,28 @@
 
 from __future__ import annotations
 
+import gzip
 import logging
+import os
+import re
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 import requests
 
-from .database import absolute_from_project, get_connection, relative_to_project
+from .database import (
+    absolute_from_project,
+    get_cache_dir,
+    get_connection,
+    relative_to_project,
+)
 
 logger = logging.getLogger(__name__)
+
+MAX_STRUCTURE_DOWNLOAD_BYTES = 50 * 1024 * 1024
+VALIDATION_READ_BYTES = 2 * 1024 * 1024
+DEFAULT_CACHE_PREFIX = Path("data") / "target_db" / "cache"
 
 RCSB_FORMAT_EXTENSIONS = {
     "cif": "cif",
@@ -36,7 +49,7 @@ class StructureDownloader:
     def prepare_structure_file(self, structure: dict, requested_format: Optional[str] = None) -> dict:
         file_format = (requested_format or structure.get("file_format") or "cif").lower()
         local_path = self._local_path_for_format(structure, file_format)
-        absolute_path = absolute_from_project(local_path, self.project_root)
+        absolute_path = self._absolute_cache_path(local_path)
 
         if absolute_path.exists():
             self._mark_downloaded(structure["id"], local_path)
@@ -85,9 +98,9 @@ class StructureDownloader:
 
         absolute_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            response = requests.get(url, timeout=30)
+            response = requests.get(url, timeout=30, stream=True)
             response.raise_for_status()
-            absolute_path.write_bytes(response.content)
+            self._publish_response(response, absolute_path, file_format)
             self._mark_downloaded(structure["id"], local_path, download_url=url, file_format=file_format)
             return {
                 "success": True,
@@ -118,9 +131,9 @@ class StructureDownloader:
         last_error: Optional[Exception] = None
         for url in candidate_urls:
             try:
-                response = requests.get(url, timeout=45)
+                response = requests.get(url, timeout=45, stream=True)
                 response.raise_for_status()
-                absolute_path.write_bytes(response.content)
+                self._publish_response(response, absolute_path, file_format)
                 self._mark_downloaded(structure["id"], local_path, download_url=url, file_format=file_format)
                 return {
                     "success": True,
@@ -129,7 +142,7 @@ class StructureDownloader:
                     "file_format": file_format,
                     "message": "Downloaded and cached AlphaFold structure file.",
                 }
-            except requests.RequestException as exc:
+            except (requests.RequestException, StructureDownloadError) as exc:
                 last_error = exc
                 logger.warning("AlphaFold download failed for %s from %s: %s", structure.get("structure_id"), url, exc)
         raise StructureDownloadError(f"Failed to download AlphaFold model as {file_format}: {last_error}")
@@ -160,9 +173,9 @@ class StructureDownloader:
     def _legacy_alphafold_download(self, structure: dict, file_format: str, local_path: str, absolute_path: Path) -> dict:
         try:
             url = self._alphafold_url(structure, file_format)
-            response = requests.get(url, timeout=45)
+            response = requests.get(url, timeout=45, stream=True)
             response.raise_for_status()
-            absolute_path.write_bytes(response.content)
+            self._publish_response(response, absolute_path, file_format)
             self._mark_downloaded(structure["id"], local_path, download_url=url, file_format=file_format)
             return {
                 "success": True,
@@ -171,9 +184,105 @@ class StructureDownloader:
                 "file_format": file_format,
                 "message": "Downloaded and cached AlphaFold structure file.",
             }
-        except requests.RequestException as exc:
+        except (requests.RequestException, StructureDownloadError) as exc:
             logger.warning("AlphaFold download failed for %s: %s", structure.get("structure_id"), exc)
             raise StructureDownloadError(f"Failed to download AlphaFold model as {file_format}: {exc}") from exc
+
+    def _absolute_cache_path(self, local_path: str | Path) -> Path:
+        path = Path(local_path)
+        if path.is_absolute():
+            return path
+        try:
+            cache_relative = path.relative_to(DEFAULT_CACHE_PREFIX)
+        except ValueError:
+            return absolute_from_project(path, self.project_root)
+        return get_cache_dir(self.project_root) / cache_relative
+
+    def _publish_response(
+        self,
+        response,
+        final_path: Path,
+        file_format: str,
+    ) -> None:
+        content_length = self._content_length(response)
+        if (
+            content_length is not None
+            and content_length > MAX_STRUCTURE_DOWNLOAD_BYTES
+        ):
+            raise StructureDownloadError(
+                "Structure download exceeds the maximum allowed size"
+            )
+
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = final_path.with_name(
+            f".{final_path.name}.{uuid4().hex}.tmp"
+        )
+        total_bytes = 0
+        try:
+            with temporary_path.open("xb") as handle:
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    total_bytes += len(chunk)
+                    if total_bytes > MAX_STRUCTURE_DOWNLOAD_BYTES:
+                        raise StructureDownloadError(
+                            "Structure download exceeds the maximum allowed size"
+                        )
+                    handle.write(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+
+            if total_bytes == 0:
+                raise StructureDownloadError("Structure download returned no data")
+            self._validate_structure_file(temporary_path, file_format)
+            temporary_path.replace(final_path)
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _content_length(response) -> Optional[int]:
+        headers = getattr(response, "headers", {}) or {}
+        raw_value = headers.get("Content-Length") or headers.get("content-length")
+        if raw_value in (None, ""):
+            return None
+        try:
+            return max(0, int(raw_value))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _validate_structure_file(path: Path, file_format: str) -> None:
+        normalized_format = file_format.lower()
+        try:
+            if normalized_format.endswith(".gz"):
+                with gzip.open(path, "rb") as handle:
+                    sample = handle.read(VALIDATION_READ_BYTES)
+                normalized_format = normalized_format.removesuffix(".gz")
+            else:
+                with path.open("rb") as handle:
+                    sample = handle.read(VALIDATION_READ_BYTES)
+        except (OSError, EOFError) as exc:
+            raise StructureDownloadError(
+                f"Structure file validation failed: {exc}"
+            ) from exc
+
+        text = sample.decode("utf-8", errors="replace")
+        if normalized_format == "cif":
+            valid = bool(
+                re.search(r"(?m)^data_\S+", text)
+                and ("_atom_site." in text or re.search(r"(?m)^(ATOM|HETATM)\b", text))
+            )
+        elif normalized_format == "pdb":
+            valid = bool(
+                re.search(r"(?m)^(HEADER|TITLE|MODEL|ATOM  |HETATM)", text)
+            )
+        else:
+            valid = False
+        if not valid:
+            raise StructureDownloadError(
+                f"Structure file validation failed for format {file_format}"
+            )
 
     def _mark_downloaded(
         self,

@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+import os
 import sys
 import tempfile
 import threading
@@ -24,6 +25,94 @@ class TargetSearchDemoTest(unittest.TestCase):
 
         seed_database(project_root=self.root)
         return TargetSearchService(project_root=self.root)
+
+    def test_connection_uses_concurrent_durable_sqlite_pragmas(self):
+        from src.target_search.database import get_connection
+
+        conn = get_connection(project_root=self.root)
+        try:
+            pragma = lambda name: next(iter(conn.execute(f"PRAGMA {name}").fetchone().values()))
+            self.assertEqual(str(pragma("journal_mode")).lower(), "wal")
+            self.assertEqual(int(pragma("synchronous")), 1)
+            self.assertEqual(int(pragma("busy_timeout")), 30000)
+            self.assertEqual(int(pragma("foreign_keys")), 1)
+            self.assertNotEqual(str(pragma("locking_mode")).lower(), "exclusive")
+        finally:
+            conn.close()
+
+    def test_target_runtime_paths_honor_environment_overrides(self):
+        from src.target_search.database import (
+            absolute_from_project,
+            get_cache_dir,
+            get_db_path,
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "TARGET_DB_PATH": "runtime/targets.sqlite",
+                "TARGET_CACHE_DIR": "runtime/target-cache",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                get_db_path(self.root),
+                (self.root / "runtime" / "targets.sqlite").resolve(),
+            )
+            self.assertEqual(
+                get_cache_dir(self.root),
+                (self.root / "runtime" / "target-cache").resolve(),
+            )
+            self.assertEqual(
+                absolute_from_project(
+                    "data/target_db/cache/rcsb/EGFR/4WKQ.cif",
+                    self.root,
+                ),
+                (
+                    self.root
+                    / "runtime"
+                    / "target-cache"
+                    / "rcsb"
+                    / "EGFR"
+                    / "4WKQ.cif"
+                ).resolve(),
+            )
+
+    def test_rebuild_deletes_the_configured_database_not_the_default(self):
+        from src.target_search.database import get_connection
+        from src.target_search.seed import rebuild_database, seed_database
+
+        configured = self.root / "runtime" / "targets.sqlite"
+        default = self.root / "data" / "target_db" / "target_database.sqlite"
+        with patch.dict(
+            os.environ,
+            {"TARGET_DB_PATH": str(configured)},
+            clear=False,
+        ):
+            seed_database(self.root)
+            conn = get_connection(self.root)
+            try:
+                conn.execute(
+                    "INSERT INTO targets (gene_symbol, uniprot_id) VALUES (?, ?)",
+                    ("ONLY_BEFORE_REBUILD", "TEST-ONLY-BEFORE"),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            rebuild_database(self.root)
+            conn = get_connection(self.root)
+            try:
+                row = conn.execute(
+                    "SELECT id FROM targets WHERE gene_symbol = ?",
+                    ("ONLY_BEFORE_REBUILD",),
+                ).fetchone()
+            finally:
+                conn.close()
+
+        self.assertIsNone(row)
+        self.assertTrue(configured.is_file())
+        self.assertFalse(default.exists())
 
     def test_empty_search_returns_no_results(self):
         service = self._seeded_service()
@@ -283,6 +372,117 @@ class TargetSearchDemoTest(unittest.TestCase):
                 service.prepare_structure_file(alphafold["id"], requested_format="cif")
         finally:
             downloader.requests.get = original_get
+
+    def test_structure_download_streams_validates_and_atomically_replaces(self):
+        from src.target_search import downloader as downloader_module
+
+        final_path = self.root / "runtime-cache" / "rcsb" / "EGFR" / "4WKQ.cif"
+
+        class FakeResponse:
+            headers = {"Content-Length": "35"}
+
+            def raise_for_status(self):
+                return None
+
+            def iter_content(self, chunk_size):
+                self_outer.assertFalse(final_path.exists())
+                yield b"data_4WKQ\n"
+                yield b"_atom_site.id\nATOM\n"
+
+        self_outer = self
+
+        def fake_get(_url, *, timeout, stream):
+            self.assertEqual(timeout, 30)
+            self.assertTrue(stream)
+            return FakeResponse()
+
+        structure = {
+            "id": 7,
+            "structure_id": "4WKQ",
+            "source": "RCSB_PDB",
+            "file_format": "cif",
+            "local_file_path": "data/target_db/cache/rcsb/EGFR/4WKQ.cif",
+            "download_url": "https://files.rcsb.org/download/4WKQ.cif",
+        }
+        with patch.dict(
+            os.environ,
+            {"TARGET_CACHE_DIR": "runtime-cache"},
+            clear=False,
+        ), patch.object(
+            downloader_module.requests,
+            "get",
+            side_effect=fake_get,
+        ), patch.object(
+            downloader_module.StructureDownloader,
+            "_mark_downloaded",
+        ) as mark_downloaded:
+            prepared = downloader_module.StructureDownloader(
+                self.root
+            ).prepare_structure_file(structure)
+
+        self.assertEqual(Path(prepared["file_path"]), final_path)
+        self.assertTrue(final_path.is_file())
+        self.assertIn(b"_atom_site.id", final_path.read_bytes())
+        self.assertFalse(list(final_path.parent.glob("*.tmp")))
+        mark_downloaded.assert_called_once()
+
+    def test_invalid_or_oversized_download_never_publishes_cache_file(self):
+        from src.target_search import downloader as downloader_module
+
+        structure = {
+            "id": 8,
+            "structure_id": "BAD1",
+            "source": "RCSB_PDB",
+            "file_format": "cif",
+            "local_file_path": "data/target_db/cache/rcsb/BAD/BAD1.cif",
+            "download_url": "https://example.invalid/BAD1.cif",
+        }
+        final_path = self.root / structure["local_file_path"]
+
+        class InvalidResponse:
+            headers = {}
+
+            def raise_for_status(self):
+                return None
+
+            def iter_content(self, chunk_size):
+                yield b"<html>not a structure</html>"
+
+        instance = downloader_module.StructureDownloader(self.root)
+        with patch.object(
+            downloader_module.requests,
+            "get",
+            return_value=InvalidResponse(),
+        ), patch.object(instance, "_mark_downloaded") as mark_downloaded:
+            with self.assertRaisesRegex(
+                downloader_module.StructureDownloadError,
+                "validation",
+            ):
+                instance.prepare_structure_file(structure)
+
+        self.assertFalse(final_path.exists())
+        self.assertFalse(list(final_path.parent.glob("*.tmp")))
+        mark_downloaded.assert_not_called()
+
+        class OversizedResponse(InvalidResponse):
+            headers = {"Content-Length": "100"}
+
+        with patch.object(
+            downloader_module,
+            "MAX_STRUCTURE_DOWNLOAD_BYTES",
+            10,
+        ), patch.object(
+            downloader_module.requests,
+            "get",
+            return_value=OversizedResponse(),
+        ):
+            with self.assertRaisesRegex(
+                downloader_module.StructureDownloadError,
+                "maximum",
+            ):
+                instance.prepare_structure_file(structure)
+
+        self.assertFalse(final_path.exists())
 
     def test_structure_preflight_reports_cache_and_docking_readiness(self):
         service = self._seeded_service()

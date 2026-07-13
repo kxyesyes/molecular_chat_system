@@ -513,3 +513,18 @@ API key 写进了 YAML 或代码
 8. 配置 HTTPS
 9. 做全模块功能验收
 10. 设置日志轮转和数据备份
+
+## 17. 运行时数据库、缓存与日志安全
+
+生产环境建议把靶点数据库和结构缓存放在独立持久化卷，并通过环境变量配置：
+
+```env
+TARGET_DB_PATH=/var/lib/medchat/target/target_database.sqlite
+TARGET_CACHE_DIR=/var/lib/medchat/target/cache
+```
+
+相对路径按项目根目录解析。靶点数据库使用 SQLite WAL、`synchronous=NORMAL`、30 秒 busy timeout 和外键约束；不要在部署脚本中改回 `journal_mode=OFF` 或 `locking_mode=EXCLUSIVE`。
+
+RCSB/AlphaFold 文件会先流式写入同目录临时文件，默认最大 50 MiB。下载内容通过 PDB/mmCIF 基本结构标记校验后才原子发布到正式缓存路径；失败或超限不会更新数据库的 `is_downloaded` 状态。
+
+`main.py` 对 `logs/app.log` 使用追加式轮转日志：单文件 10 MiB，保留 5 个备份。服务用户必须对 `logs/`、`TARGET_DB_PATH` 的父目录及 `TARGET_CACHE_DIR` 具有写权限；这些运行产物不得提交到 Git。

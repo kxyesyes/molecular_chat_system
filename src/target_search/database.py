@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 from typing import Iterable, Optional
@@ -21,11 +22,32 @@ def get_target_db_dir(project_root: Optional[Path | str] = None) -> Path:
 
 
 def get_db_path(project_root: Optional[Path | str] = None) -> Path:
-    return get_target_db_dir(project_root) / DB_FILENAME
+    return _configured_path(
+        "TARGET_DB_PATH",
+        TARGET_DB_DIR / DB_FILENAME,
+        project_root,
+    )
 
 
 def get_cache_dir(project_root: Optional[Path | str] = None) -> Path:
-    return get_target_db_dir(project_root) / "cache"
+    return _configured_path(
+        "TARGET_CACHE_DIR",
+        TARGET_DB_DIR / "cache",
+        project_root,
+    )
+
+
+def _configured_path(
+    environment_name: str,
+    default_relative_path: Path,
+    project_root: Optional[Path | str] = None,
+) -> Path:
+    root = resolve_project_root(project_root)
+    configured = os.environ.get(environment_name, "").strip()
+    path = Path(os.path.expandvars(os.path.expanduser(configured))) if configured else default_relative_path
+    if not path.is_absolute():
+        path = root / path
+    return path.resolve()
 
 
 def relative_to_project(path: Path, project_root: Optional[Path | str] = None) -> str:
@@ -40,6 +62,12 @@ def absolute_from_project(path_value: str | Path, project_root: Optional[Path | 
     path = Path(path_value)
     if path.is_absolute():
         return path
+    try:
+        cache_relative = path.relative_to(TARGET_DB_DIR / "cache")
+    except ValueError:
+        cache_relative = None
+    if cache_relative is not None:
+        return (get_cache_dir(project_root) / cache_relative).resolve()
     return resolve_project_root(project_root) / path
 
 
@@ -50,11 +78,11 @@ def dict_factory(cursor: sqlite3.Cursor, row: Iterable[object]) -> dict:
 def get_connection(project_root: Optional[Path | str] = None) -> sqlite3.Connection:
     db_path = get_db_path(project_root)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = dict_factory
-    conn.execute("PRAGMA journal_mode = OFF")
-    conn.execute("PRAGMA synchronous = OFF")
-    conn.execute("PRAGMA locking_mode = EXCLUSIVE")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 

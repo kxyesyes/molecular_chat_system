@@ -6,7 +6,13 @@ import csv
 from pathlib import Path
 from typing import Optional
 
-from .database import get_target_db_dir, init_db, get_connection, resolve_project_root
+from .database import (
+    get_connection,
+    get_db_path,
+    get_target_db_dir,
+    init_db,
+    resolve_project_root,
+)
 
 
 DEFAULT_ALIASES = {
@@ -141,7 +147,7 @@ def seed_database(project_root: Optional[Path | str] = None) -> dict:
 
 def rebuild_database(project_root: Optional[Path | str] = None) -> dict:
     root = resolve_project_root(project_root)
-    db_path = get_target_db_dir(root) / "target_database.sqlite"
+    db_path = get_db_path(root)
     if db_path.exists():
         db_path.unlink()
     return seed_database(root)

@@ -82,6 +82,12 @@ docking:
 
         self.assertIn("MedChat deployment health check", result.stdout)
 
+    def test_main_uses_append_rotating_file_logging(self):
+        source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
+
+        self.assertIn("RotatingFileHandler", source)
+        self.assertNotIn('FileHandler("logs/app.log", encoding=\'utf-8\', mode=\'w\')', source)
+
     def test_health_check_reports_extended_deployment_categories(self):
         spec = importlib.util.spec_from_file_location(
             "health_check", PROJECT_ROOT / "scripts" / "health_check.py"
