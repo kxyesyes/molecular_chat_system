@@ -955,16 +955,19 @@ def setup_api_routes(app, docking_service=None):
             if top_k < 1 or top_k > 100:
                 raise HTTPException(status_code=400, detail="返回数量必须在1-100之间")
             
-            from src.reverse_target.predictor import get_predictor
-            predictor = get_predictor()
-            results = await _invoke_in_threadpool(
-                predictor.predict,
-                smiles=smiles.strip(),
-                threshold=threshold,
-                top_k=top_k,
-                combine_by_target=True,
-                organism_filter=organism_filter,
-            )
+            def run_prediction():
+                from src.reverse_target.predictor import get_predictor
+
+                predictor = get_predictor()
+                return predictor.predict(
+                    smiles=smiles.strip(),
+                    threshold=threshold,
+                    top_k=top_k,
+                    combine_by_target=True,
+                    organism_filter=organism_filter,
+                )
+
+            results = await _invoke_in_threadpool(run_prediction)
             
             logger.info(f"反向寻靶预测成功: 找到 {len(results)} 个靶点")
             
@@ -1042,16 +1045,19 @@ def setup_api_routes(app, docking_service=None):
             if not smiles_list:
                 raise HTTPException(status_code=400, detail="未能从文件中解析出有效的SMILES")
 
-            from src.reverse_target.predictor import get_predictor
-            predictor = get_predictor()
-            results = await _invoke_in_threadpool(
-                predictor.predict_batch,
-                smiles_list=smiles_list,
-                threshold=threshold,
-                top_k=top_k,
-                combine_by_target=True,
-                organism_filter=organism_filter,
-            )
+            def run_batch_prediction():
+                from src.reverse_target.predictor import get_predictor
+
+                predictor = get_predictor()
+                return predictor.predict_batch(
+                    smiles_list=smiles_list,
+                    threshold=threshold,
+                    top_k=top_k,
+                    combine_by_target=True,
+                    organism_filter=organism_filter,
+                )
+
+            results = await _invoke_in_threadpool(run_batch_prediction)
             
             logger.info(f"批量反向寻靶预测完成: {len(results)} 个分子")
             

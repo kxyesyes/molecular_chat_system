@@ -100,7 +100,7 @@ class ReverseTargetHealthTest(unittest.TestCase):
         from src.web.routes import api_routes
 
         route_thread_ids = []
-        predictor_thread_ids = []
+        predictor_thread_events = []
 
         async def recording_run_in_threadpool(func, *args, **kwargs):
             route_thread_ids.append(threading.get_ident())
@@ -108,12 +108,18 @@ class ReverseTargetHealthTest(unittest.TestCase):
 
         class FakePredictor:
             def predict(self, **kwargs):
-                predictor_thread_ids.append(threading.get_ident())
+                predictor_thread_events.append(("predict", threading.get_ident()))
                 return []
 
             def predict_batch(self, **kwargs):
-                predictor_thread_ids.append(threading.get_ident())
+                predictor_thread_events.append(("predict_batch", threading.get_ident()))
                 return []
+
+        fake_predictor = FakePredictor()
+
+        def fake_get_predictor():
+            predictor_thread_events.append(("get_predictor", threading.get_ident()))
+            return fake_predictor
 
         app = FastAPI()
         api_routes.setup_api_routes(app)
@@ -123,7 +129,7 @@ class ReverseTargetHealthTest(unittest.TestCase):
             "run_in_threadpool",
             new=recording_run_in_threadpool,
             create=True,
-        ), patch.object(predictor_module, "get_predictor", return_value=FakePredictor()):
+        ), patch.object(predictor_module, "get_predictor", new=fake_get_predictor):
             with TestClient(app) as client:
                 direct = client.post(
                     "/api/reverse_target/predict",
@@ -137,9 +143,16 @@ class ReverseTargetHealthTest(unittest.TestCase):
 
         self.assertEqual(direct.status_code, 200, direct.text)
         self.assertEqual(batch.status_code, 200, batch.text)
-        self.assertEqual(len(predictor_thread_ids), 2)
         self.assertEqual(len(route_thread_ids), 2)
-        self.assertTrue(all(worker_id not in route_thread_ids for worker_id in predictor_thread_ids))
+        self.assertEqual(
+            [event for event, _ in predictor_thread_events],
+            ["get_predictor", "predict", "get_predictor", "predict_batch"],
+        )
+        for index in range(2):
+            getter_thread_id = predictor_thread_events[index * 2][1]
+            predict_thread_id = predictor_thread_events[index * 2 + 1][1]
+            self.assertEqual(getter_thread_id, predict_thread_id)
+            self.assertNotEqual(route_thread_ids[index], getter_thread_id)
 
     def test_reverse_batch_rejects_upload_over_configured_limit(self):
         from fastapi import FastAPI
