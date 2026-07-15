@@ -14,6 +14,27 @@ from .router import SkillRouter
 
 logger = logging.getLogger(__name__)
 
+_TOOL_NAME_MAPPING = {
+    'property_calculator': 'property_calculator',
+    'drug_likeness_assessment': 'drug_likeness_assessment',
+    'admet_predictor': 'admet_predictor',
+    'molecular_docking': 'molecular_docking',
+    'rxn_chemistry_agent': 'rxn_chemistry_agent',
+    'molecular_generator': 'molecular_generator',
+    'llm_molecular_generator': 'llm_molecular_generator',
+    'property': 'property_calculator',
+    'admet': 'admet_predictor',
+    'docking': 'molecular_docking',
+    'reaction': 'rxn_chemistry_agent',
+    'drug_likeness': 'drug_likeness_assessment',
+    'generator': 'molecular_generator',
+    'llm_generator': 'llm_molecular_generator',
+    'ai_generator': 'llm_molecular_generator',
+    'rag_database_search': 'rag_database_search',
+    'rag_search': 'rag_database_search',
+    'database_search': 'rag_database_search',
+}
+
 
 @dataclass
 class ReActStep:
@@ -528,18 +549,12 @@ class ReActMolecularAgent:
 
         # WorkflowPolicy 不承载 persona/system prompt，只控制工具权限。
         policy_extra_prompt = ""
+        active_tools = self._filter_tools_for_active_policy(self.tools)
         if self._active_skill:
-            # 策略模式：只暴露该策略声明的工具
-            active_tools = self.skill_router.get_tools_for_skill(
-                self._active_skill, self.tools
-            )
             logger.info(
                 f"[WorkflowPolicy] 策略={self._active_skill.name}, "
                 f"暴露工具={list(active_tools.keys())}"
             )
-        else:
-            # 通用模式：暴露全部工具
-            active_tools = self.tools
 
         # 工具描述
         tool_descriptions = []
@@ -664,44 +679,21 @@ class ReActMolecularAgent:
             # 标准化工具名称匹配
             tool_name = tool_name.strip().lower()
 
-            # 工具名称映射
-            tool_name_mapping = {
-                'property_calculator': 'property_calculator',
-                'drug_likeness_assessment': 'drug_likeness_assessment',
-                'admet_predictor': 'admet_predictor',
-                'molecular_docking': 'molecular_docking',
-                'rxn_chemistry_agent': 'rxn_chemistry_agent',
-                'molecular_generator': 'molecular_generator',
-                'llm_molecular_generator': 'llm_molecular_generator',
-                # 允许一些别名
-                'property': 'property_calculator',
-                'admet': 'admet_predictor',
-                'docking': 'molecular_docking',
-                'reaction': 'rxn_chemistry_agent',
-                'drug_likeness': 'drug_likeness_assessment',
-                'generator': 'molecular_generator',
-                'llm_generator': 'llm_molecular_generator',
-                'ai_generator': 'llm_molecular_generator',
-                'rag_database_search': 'rag_database_search',
-                'rag_search': 'rag_database_search',
-                'database_search': 'rag_database_search'
-            }
-
             # 尝试匹配工具名称
-            matched_tool_name = tool_name_mapping.get(tool_name)
+            matched_tool_name = _TOOL_NAME_MAPPING.get(tool_name)
+            if not matched_tool_name and tool_name in self.tools:
+                matched_tool_name = tool_name
             if not matched_tool_name:
                 # 尝试部分匹配
-                for alias, real_name in tool_name_mapping.items():
+                for alias, real_name in _TOOL_NAME_MAPPING.items():
                     if alias in tool_name or tool_name in alias:
                         matched_tool_name = real_name
                         break
 
             if matched_tool_name and self._active_skill:
                 allowed_tools = tuple(self._active_skill.allowed_tools)
-                normalized_allowed_tools = {
-                    tool_name_mapping.get(name, name) for name in allowed_tools
-                }
-                if matched_tool_name not in normalized_allowed_tools:
+                policy_tools = self._filter_tools_for_active_policy(self.tools)
+                if matched_tool_name not in policy_tools:
                     logger.error(
                         "工作流策略 '%s' 拒绝执行工具 '%s'；允许的工具: %s",
                         self._active_skill.name,
@@ -756,6 +748,28 @@ class ReActMolecularAgent:
         except Exception as e:
             logger.error(f"Tool execution failed: {e}")
             return f"工具执行出错: {str(e)}", {}
+
+    @staticmethod
+    def _canonical_tool_name(tool_name: str) -> str:
+        normalized = tool_name.strip().lower()
+        return _TOOL_NAME_MAPPING.get(normalized, normalized)
+
+    def _filter_tools_for_active_policy(
+        self,
+        tools: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not self._active_skill:
+            return dict(tools)
+
+        allowed_tools = {
+            self._canonical_tool_name(name)
+            for name in self._active_skill.allowed_tools
+        }
+        return {
+            name: tool
+            for name, tool in tools.items()
+            if self._canonical_tool_name(name) in allowed_tools
+        }
 
     def _execute_workflow_skill(
         self,
@@ -836,19 +850,27 @@ class ReActMolecularAgent:
             'steps': [],
             'final_answer': '',
             'reasoning_trace': ['使用简化模式处理请求'],
-            'tools_used': []
+            'tools_used': [],
+            'active_skill': self._active_skill.name if self._active_skill else None,
         }
 
         try:
-            # 找到匹配的工具
+            policy_tools = self._filter_tools_for_active_policy(self.tools)
             matching_tools = []
-            for tool_name, tool in self.tools.items():
+            for tool_name, tool in policy_tools.items():
                 if hasattr(tool, 'should_use') and tool.should_use(query):
                     matching_tools.append((tool_name, tool))
                     logger.info(f"✅ 工具 {tool_name} 匹配成功")
 
             if not matching_tools:
-                result['final_answer'] = "未找到合适的工具来处理您的请求。请提供更具体的信息或SMILES结构。"
+                if self._active_skill:
+                    result['success'] = False
+                    result['final_answer'] = (
+                        f"工作流策略 '{self._active_skill.name}' "
+                        "没有允许且匹配的可用工具；未执行任何计算或预测。"
+                    )
+                else:
+                    result['final_answer'] = "未找到合适的工具来处理您的请求。请提供更具体的信息或SMILES结构。"
                 return result
 
             # 工具优先级调整 - 优化版

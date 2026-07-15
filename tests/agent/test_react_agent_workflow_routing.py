@@ -1,5 +1,4 @@
 from src.agent.react_agent import ReActMolecularAgent
-from src.agent.router import SkillRouter
 from src.agent.workflows import WorkflowCatalog
 
 
@@ -57,10 +56,37 @@ def test_single_step_policy_prompt_names_only_allowed_tools():
         "property_calculator": PromptTool("Calculate molecular properties"),
         "activity_predictor": PromptTool("Predict molecular activity"),
     }
-    agent.skill_router = SkillRouter()
     agent._active_skill = WorkflowCatalog().require("activity_prediction")
 
     prompt = agent._build_react_prompt("预测 CCO 的活性", [])
 
     assert "activity_predictor" in prompt
     assert "property_calculator" not in prompt
+
+
+def test_no_llm_fallback_blocks_forbidden_policy_tool_end_to_end():
+    calls = []
+
+    class MatchingPropertyTool:
+        def should_use(self, query):
+            return True
+
+        def execute(self, query):
+            calls.append(query)
+            return {"success": True, "formatted": "fabricated property result"}
+
+    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+    agent.llm = None
+    agent.tools = {"property_calculator": MatchingPropertyTool()}
+    agent.max_iterations = 5
+    agent.skill_router = None
+    agent._active_skill = None
+    policy = WorkflowCatalog().require("activity_prediction")
+
+    response = agent.execute("预测 CCO 的活性", active_skill=policy)
+
+    assert calls == []
+    assert response["success"] is False
+    assert response["active_skill"] == "activity_prediction"
+    assert response["tools_used"] == []
+    assert "没有允许且匹配的可用工具" in response["final_answer"]
