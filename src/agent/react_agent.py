@@ -563,6 +563,16 @@ class ReActMolecularAgent:
 
         tools_text = "\n".join(tool_descriptions)
         tool_names_text = ", ".join(tool_names)
+        if tool_names:
+            tool_scope_rule = (
+                f"7. 🔬 **遵守工具范围** - 只可调用 [{tool_names_text}] 中的工具；"
+                "若没有合适工具，明确说明无法完成，禁止调用其他工具。"
+            )
+        else:
+            tool_scope_rule = (
+                "7. 🔬 **遵守工具范围** - 当前没有可用工具；"
+                "明确说明无法完成，禁止编造结果。"
+            )
 
         # 构建历史步骤
         agent_scratchpad = ""
@@ -604,8 +614,8 @@ class ReActMolecularAgent:
 3. 🔄 **迭代优化** - 如果一个工具不够，可以调用多个
 4. ✅ **基于事实** - 最终答案必须基于工具观察结果
 5. 🚫 **避免重复** - 不要重复调用相同的工具和输入
-6. 🔴 **严禁编造数值** - 分子量、LogP、QED、TPSA等数值**绝对禁止**凭经验猜测！必须先调用工具才能回答。
-7. 🔬 **SMILES必须调工具** - 只要问题中包含SMILES分子结构，第一步必须调用 `property_calculator` 获取真实计算结果，禁止直接给出数值答案。
+6. 🔴 **严禁编造数值** - 任何科学数值都必须来自上述可用工具的真实计算或预测，禁止凭经验猜测。
+{tool_scope_rule}
 
 ## 当前任务
 **问题**: {query}
@@ -685,6 +695,25 @@ class ReActMolecularAgent:
                     if alias in tool_name or tool_name in alias:
                         matched_tool_name = real_name
                         break
+
+            if matched_tool_name and self._active_skill:
+                allowed_tools = tuple(self._active_skill.allowed_tools)
+                normalized_allowed_tools = {
+                    tool_name_mapping.get(name, name) for name in allowed_tools
+                }
+                if matched_tool_name not in normalized_allowed_tools:
+                    logger.error(
+                        "工作流策略 '%s' 拒绝执行工具 '%s'；允许的工具: %s",
+                        self._active_skill.name,
+                        matched_tool_name,
+                        list(allowed_tools),
+                    )
+                    return (
+                        f"错误: 工作流策略 '{self._active_skill.name}' "
+                        f"不允许执行工具 '{matched_tool_name}'。"
+                        f"允许的工具: {list(allowed_tools)}",
+                        {},
+                    )
 
             if not matched_tool_name or matched_tool_name not in self.tools:
                 available_tools = list(self.tools.keys())

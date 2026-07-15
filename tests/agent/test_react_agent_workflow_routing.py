@@ -1,4 +1,5 @@
 from src.agent.react_agent import ReActMolecularAgent
+from src.agent.router import SkillRouter
 from src.agent.workflows import WorkflowCatalog
 
 
@@ -25,3 +26,41 @@ def test_workflow_skill_uses_planner_and_returns_legacy_dict(monkeypatch):
     assert response["success"] is True
     assert response["active_skill"] == "comprehensive_evaluation"
     assert response["final_answer"] == "workflow ok"
+
+
+def test_single_step_policy_blocks_forbidden_tool_execution():
+    calls = []
+
+    class RecordingPropertyTool:
+        def execute(self, query):
+            calls.append(query)
+            return {"success": True, "summary": "forbidden tool ran"}
+
+    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+    agent.tools = {"property_calculator": RecordingPropertyTool()}
+    agent._active_skill = WorkflowCatalog().require("activity_prediction")
+
+    observation, raw_result = agent._execute_tool("property_calculator", "CCO")
+
+    assert calls == []
+    assert raw_result == {}
+    assert "不允许执行工具 'property_calculator'" in observation
+
+
+def test_single_step_policy_prompt_names_only_allowed_tools():
+    class PromptTool:
+        def __init__(self, description):
+            self.description = description
+
+    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+    agent.tools = {
+        "property_calculator": PromptTool("Calculate molecular properties"),
+        "activity_predictor": PromptTool("Predict molecular activity"),
+    }
+    agent.skill_router = SkillRouter()
+    agent._active_skill = WorkflowCatalog().require("activity_prediction")
+
+    prompt = agent._build_react_prompt("预测 CCO 的活性", [])
+
+    assert "activity_predictor" in prompt
+    assert "property_calculator" not in prompt
