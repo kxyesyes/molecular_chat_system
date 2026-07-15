@@ -47,7 +47,13 @@ class SupervisorAgent:
         self.tools = dict(tools) if tools is not None else build_default_tools()
         self.llm = llm
         self.molecular_generator_llm = molecular_generator_llm
-        self.catalog = catalog if catalog is not None else WorkflowCatalog()
+        router_catalog = getattr(skill_router, "catalog", None)
+        if catalog is not None:
+            self.catalog = catalog
+        elif isinstance(router_catalog, WorkflowCatalog):
+            self.catalog = router_catalog
+        else:
+            self.catalog = WorkflowCatalog()
         self.skill_router = skill_router or SkillRouter(catalog=self.catalog)
         self.planner = planner or TaskPlanner()
         self.tool_registry = tool_registry
@@ -314,6 +320,7 @@ class SupervisorAgent:
             policy=policy,
             all_tools=request_tools,
             idempotency_key=idempotency_key,
+            plan=workflow_plan,
         )
         return self._format_run_result(
             execution.plan.workflow_name,
