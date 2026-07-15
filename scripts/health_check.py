@@ -238,12 +238,12 @@ def check_agent_components() -> tuple[bool, str]:
         from src.agent.orchestrators import WorkflowOrchestrator
         from src.agent.planning import TaskPlanner
         from src.agent.runtime.event_bus import AgentEventBus
-        from src.agent.skills.skill_registry import SkillRegistry
+        from src.agent.workflows import WorkflowCatalog
 
-        registry = SkillRegistry()
-        target_skill = registry.get_skill_by_name("target_driven_design")
-        if target_skill is None:
-            return False, "target_driven_design skill is not registered"
+        catalog = WorkflowCatalog()
+        target_policy = catalog.get("target_driven_design")
+        if target_policy is None:
+            return False, "target_driven_design workflow policy is not registered"
 
         context = AgentContext(
             query="基于 PDE5 设计 20 个类药候选分子",
@@ -255,7 +255,12 @@ def check_agent_components() -> tuple[bool, str]:
             return False, "TaskPlanner did not produce the target-driven workflow"
 
         WorkflowOrchestrator(event_bus=AgentEventBus())
-        return True, f"planner, orchestrator and {len(registry.skills)} skills are available"
+        policy_names = ", ".join(policy.name for policy in catalog.policies)
+        return (
+            True,
+            f"planner, orchestrator and {len(catalog.policies)} workflow policies "
+            f"are available: {policy_names}",
+        )
     except Exception as exc:
         return False, f"Agent component check failed: {exc}"
 

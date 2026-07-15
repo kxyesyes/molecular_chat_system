@@ -30,12 +30,10 @@ from src.agent.persistence import redact_sensitive
 from src.agent.planning import TaskPlanner
 from src.agent.routing import HybridSkillRouter
 from src.agent.runtime.workflow_executor import WorkflowExecutor
-from src.agent.skills.comprehensive_evaluation_skill import (
-    ComprehensiveEvaluationSkill,
-)
 from src.agent.tools.base_tool import execute_tool_compat
 from src.agent.tools.molecular_docking import MolecularDocking
 from src.agent.tools.property_calculator import PropertyCalculator
+from src.agent.workflows import WorkflowCatalog
 
 
 DATASET_DIR = PROJECT_ROOT / "data" / "agent_evals"
@@ -173,6 +171,8 @@ def _run_real_case_contracts(
     from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
     from src.agent.planning.task_planner import WorkflowPlan
 
+    catalog = router.catalog
+
     class ContractTool:
         def __init__(self, name: str, *, fail: bool = False):
             self.name = name
@@ -264,7 +264,7 @@ def _run_real_case_contracts(
                     trace_id=case.case_id,
                     active_skill="comprehensive_evaluation",
                 ),
-                ComprehensiveEvaluationSkill(),
+                catalog.require("comprehensive_evaluation"),
                 {"run_docking": ContractTool("run_docking")},
             )
             actual_skill = "comprehensive_evaluation"
@@ -563,7 +563,6 @@ def _test_docking_execution() -> dict[str, Any]:
 
 def _run_docx_real_case_matrix() -> dict[str, Any]:
     from src.agent.orchestrators import WorkflowOrchestrator
-    from src.agent.skills.skill_registry import SkillRegistry
     from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
     from src.agent.tools.admet_predictor import ADMETPredictor
     from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
@@ -573,9 +572,9 @@ def _run_docx_real_case_matrix() -> dict[str, Any]:
     from src.web.models.ollama_model import OllamaModel
 
     cases = load_cases(DATASET_DIR / "real_agent_cases.jsonl")
-    router = HybridSkillRouter()
+    catalog = WorkflowCatalog()
+    router = HybridSkillRouter(catalog=catalog)
     planner = TaskPlanner()
-    skills = SkillRegistry()
     ollama_model = OllamaModel(
         base_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
         model_name=os.environ.get(
@@ -689,7 +688,7 @@ def _run_docx_real_case_matrix() -> dict[str, Any]:
                         trace_id=case.case_id,
                         active_skill="comprehensive_evaluation",
                     ),
-                    ComprehensiveEvaluationSkill(),
+                    catalog.require("comprehensive_evaluation"),
                     {"run_docking": object()},
                 )
                 rejected = bool(
@@ -781,14 +780,14 @@ def _run_docx_real_case_matrix() -> dict[str, Any]:
                 )
                 continue
 
-            skill = skills.get_skill_by_name(actual_skill or "")
-            if skill is None:
+            policy = catalog.get(actual_skill or "")
+            if policy is None:
                 finish(
                     case,
                     status="failed",
                     actual_skill=actual_skill,
                     actual_tools=[],
-                    details={"reason": "No workflow skill resolved"},
+                    details={"reason": "No workflow policy resolved"},
                 )
                 continue
 
@@ -814,7 +813,7 @@ def _run_docx_real_case_matrix() -> dict[str, Any]:
                     trace_id=case.case_id,
                     active_skill=actual_skill,
                 ),
-                skill,
+                policy,
                 case_tools,
             )
             actual_tools = [

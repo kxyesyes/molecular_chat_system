@@ -17,7 +17,6 @@ from src.agent.persistence import SQLiteAgentStateStore, redact_sensitive
 from src.agent.planning import TaskPlanner
 from src.agent.routing import HybridSkillRouter
 from src.agent.runtime.workflow_executor import WorkflowExecutor
-from src.agent.skills.skill_registry import SkillRegistry
 from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
 from src.agent.tools.admet_predictor import ADMETPredictor
 from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
@@ -27,6 +26,7 @@ from src.agent.tools.property_calculator import PropertyCalculator
 from src.agent.tools.rag_search_tool import RAGSearchTool
 from src.agent.tools.reverse_target_tool import ReverseTargetTool
 from src.agent.tools.target_database_tool import TargetDatabaseTool
+from src.agent.workflows import WorkflowCatalog
 
 from .models import EvaluationCase
 from .runner import chemistry_metrics, latency_metrics, load_cases
@@ -125,9 +125,9 @@ class ScientificAcceptanceRunner:
         )
         if not self.dataset_path.is_absolute():
             self.dataset_path = self.project_root / self.dataset_path
-        self.router = router or HybridSkillRouter()
+        self.catalog = getattr(router, "catalog", None) or WorkflowCatalog()
+        self.router = router or HybridSkillRouter(catalog=self.catalog)
         self.planner = planner or TaskPlanner()
-        self.skills = SkillRegistry()
         self.tools = dict(tools or self._build_real_tools())
 
     def run(self, repeat: int = 1) -> dict[str, Any]:
@@ -179,11 +179,11 @@ class ScientificAcceptanceRunner:
                 f"!= {case.expected_skill or 'none'}"
             )
 
-        skill = self.skills.get_skill_by_name(actual_skill or "")
-        if actual_skill is not None and skill is None and execution_error is None:
+        policy = self.catalog.get(actual_skill or "")
+        if actual_skill is not None and policy is None and execution_error is None:
             execution_error = "skill_not_found"
 
-        if skill is not None:
+        if policy is not None:
             repeat_runs = int(case.metadata.get("repeat_runs", 1) or 1)
             with tempfile.TemporaryDirectory(
                 prefix="medchat-scientific-acceptance-"
@@ -207,7 +207,7 @@ class ScientificAcceptanceRunner:
                             orchestrator=WorkflowOrchestrator(
                                 state_store=state_store
                             ),
-                        ).execute(context, skill, self.tools)
+                        ).execute(context, policy, self.tools)
                         executions.append(execution)
                         for record in state_store.get_tool_executions(trace_id):
                             persisted = dict(record)

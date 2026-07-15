@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib
 import json
+from pathlib import Path
 
 from src.agent.evaluation import (
     EvaluationCase,
@@ -12,6 +14,7 @@ from src.agent.evaluation import (
 )
 from src.agent.evaluation.scientific import (
     GOLDEN_SCIENTIFIC_CASE_IDS,
+    ScientificAcceptanceRunner,
     _extract_binding_energy,
     _check_data_flow_generated_smiles_consumed,
     _check_generation_repeat_stats,
@@ -21,6 +24,55 @@ from src.agent.evaluation.scientific import (
 )
 from src.agent.contracts import ToolResult
 from src.agent.routing import HybridSkillRouter
+from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
+
+
+def test_acceptance_modules_import_without_legacy_skill_package():
+    root = Path(__file__).resolve().parents[2]
+    modules = (
+        root / "src" / "agent" / "evaluation" / "scientific.py",
+        root / "scripts" / "run_agent_acceptance.py",
+        root / "scripts" / "health_check.py",
+    )
+    forbidden = (
+        "src.agent." + "skills",
+        "Skill" + "Registry",
+        "ComprehensiveEvaluation" + "Skill",
+    )
+
+    offenders = {
+        path.relative_to(root).as_posix(): [
+            marker for marker in forbidden if marker in path.read_text(encoding="utf-8")
+        ]
+        for path in modules
+    }
+
+    assert {path: markers for path, markers in offenders.items() if markers} == {}
+    assert importlib.import_module("scripts.run_agent_acceptance") is not None
+    assert importlib.import_module("src.agent.evaluation.scientific") is not None
+    assert importlib.import_module("scripts.health_check") is not None
+
+
+def test_scientific_runner_reuses_injected_router_catalog(tmp_path):
+    catalog = WorkflowCatalog(
+        (
+            WorkflowPolicy(
+                name="custom_workflow",
+                description="custom",
+                allowed_tools=("custom_tool",),
+            ),
+        )
+    )
+    router = HybridSkillRouter(catalog=catalog)
+
+    runner = ScientificAcceptanceRunner(
+        dataset_dir=tmp_path,
+        project_root=tmp_path,
+        router=router,
+        tools={"custom_tool": object()},
+    )
+
+    assert runner.catalog is catalog
 
 
 def test_load_cases_reads_versioned_jsonl(tmp_path):
