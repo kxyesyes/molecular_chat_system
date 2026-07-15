@@ -16,6 +16,7 @@ def test_legacy_skill_package_is_removed():
 def _legacy_references(path: Path, content: str) -> list[str]:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
+        warnings.simplefilter("ignore", SyntaxWarning)
         tree = ast.parse(content.removeprefix("\ufeff"), filename=str(path))
     relative_parts = path.relative_to(ROOT).parts
     inside_agent_package = relative_parts[:2] == ("src", "agent")
