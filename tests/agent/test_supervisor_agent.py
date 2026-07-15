@@ -1,3 +1,6 @@
+from src.agent.orchestrators.base import WorkflowStep
+from src.agent.planning import WorkflowPlan
+from src.agent.router import SkillRouter
 from src.agent.supervisor import SupervisorAgent
 from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
 
@@ -163,6 +166,31 @@ def test_supervisor_default_router_uses_injected_catalog_instance():
     assert supervisor.skill_router.catalog is catalog
 
 
+def test_supervisor_uses_restricted_injected_router_catalog_by_default():
+    generator = FakeTool("llm_molecular_generator")
+    restricted_catalog = WorkflowCatalog(
+        (
+            WorkflowPolicy(
+                name="molecular_design",
+                description="deny all molecular design tools",
+                allowed_tools=(),
+            ),
+        )
+    )
+    router = SkillRouter(catalog=restricted_catalog)
+    supervisor = SupervisorAgent(
+        tools={"llm_molecular_generator": generator},
+        skill_router=router,
+    )
+
+    result = supervisor.execute("generate one molecule")
+
+    assert supervisor.catalog is restricted_catalog
+    assert result["success"] is False
+    assert result["agent_result"].error.code.value == "unauthorized_tool"
+    assert generator.calls == []
+
+
 def test_supervisor_canonicalizes_custom_router_policy_through_catalog():
     generator = FakeTool("llm_molecular_generator")
     restricted_policy = WorkflowPolicy(
@@ -218,3 +246,54 @@ def test_supervisor_run_returns_structured_failure_for_unknown_workflow():
     assert result["status"] == "failed"
     assert result["message"].startswith("Unknown workflow")
     assert result["result"] is None
+
+
+def test_supervisor_run_executes_the_single_prechecked_plan():
+    class StatefulPlanner:
+        def __init__(self):
+            self.calls = 0
+
+        def plan(self, context):
+            self.calls += 1
+            tool_name = (
+                "llm_molecular_generator"
+                if self.calls == 1
+                else "property_calculator"
+            )
+            return WorkflowPlan(
+                workflow_name="molecular_design",
+                steps=[
+                    WorkflowStep(
+                        name=f"plan_{self.calls}",
+                        tool_name=tool_name,
+                        input_data=context.query,
+                        output_key="result",
+                    )
+                ],
+                metadata={"plan_call": self.calls},
+            )
+
+    planner = StatefulPlanner()
+    generator = FakeTool("llm_molecular_generator")
+    property_tool = FakeTool("property_calculator")
+    supervisor = SupervisorAgent(
+        tools={
+            "llm_molecular_generator": generator,
+            "property_calculator": property_tool,
+        },
+        planner=planner,
+    )
+
+    result = supervisor.run(
+        "generate one molecule",
+        skill_name="molecular_design",
+    )
+
+    assert planner.calls == 1
+    assert result["status"] == "succeeded"
+    assert result["plan"]["metadata"]["plan_call"] == 1
+    assert result["plan"]["steps"][0]["tool_name"] == (
+        "llm_molecular_generator"
+    )
+    assert generator.calls == ["generate one molecule"]
+    assert property_tool.calls == []

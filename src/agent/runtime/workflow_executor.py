@@ -40,8 +40,10 @@ class WorkflowExecutor:
         all_tools: Mapping[str, Any],
         event_callback=None,
         idempotency_key: str | None = None,
+        plan: WorkflowPlan | None = None,
     ) -> WorkflowExecution:
-        plan = self.planner.plan(context)
+        if plan is None:
+            plan = self.planner.plan(context)
         preflight_failure = self.preflight(
             context=context,
             policy=policy,
@@ -100,7 +102,8 @@ class WorkflowExecutor:
         all_tools: Mapping[str, Any],
         plan: WorkflowPlan | None = None,
     ) -> WorkflowExecution | None:
-        plan = plan or self.planner.plan(context)
+        if plan is None:
+            plan = self.planner.plan(context)
         allowed = set(policy.allowed_tools)
         planned = [step.tool_name for step in plan.steps]
         unauthorized = [name for name in planned if name not in allowed]
