@@ -50,6 +50,14 @@ def test_policy_is_immutable():
         policy.name = "changed"
 
 
+def test_catalog_policy_collection_is_immutable():
+    catalog = WorkflowCatalog()
+    replacement = (WorkflowPolicy("replacement", "Replacement policy", ()),)
+
+    with pytest.raises(AttributeError):
+        catalog.policies = replacement
+
+
 def test_catalog_rejects_duplicate_policy_names():
     first = WorkflowPolicy("duplicate", "First policy", ("first_tool",))
     second = WorkflowPolicy("duplicate", "Second policy", ("second_tool",))

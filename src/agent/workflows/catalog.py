@@ -104,10 +104,14 @@ class WorkflowCatalog:
     def __init__(
         self, policies: Iterable[WorkflowPolicy] = WORKFLOW_POLICIES
     ) -> None:
-        self.policies = tuple(policies)
-        self._by_name = {policy.name: policy for policy in self.policies}
-        if len(self._by_name) != len(self.policies):
+        self._policies = tuple(policies)
+        self._by_name = {policy.name: policy for policy in self._policies}
+        if len(self._by_name) != len(self._policies):
             raise ValueError("Workflow policy names must be unique")
+
+    @property
+    def policies(self) -> tuple[WorkflowPolicy, ...]:
+        return self._policies
 
     def get(self, name: str) -> WorkflowPolicy | None:
         return self._by_name.get(name)
@@ -121,5 +125,5 @@ class WorkflowCatalog:
     def llm_catalog(self) -> str:
         return "\n".join(
             f"{index}. **{policy.name}**: {policy.description}"
-            for index, policy in enumerate(self.policies, start=1)
+            for index, policy in enumerate(self._policies, start=1)
         )
