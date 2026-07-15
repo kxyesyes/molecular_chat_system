@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from src.agent.specialists import build_default_specialists
+from src.agent.specialists import SpecialistAgent, build_default_specialists
 from src.agent.supervisor import SupervisorAgent
 from src.agent.tooling import (
     LegacyPythonToolAdapter,
@@ -12,6 +12,7 @@ from src.agent.tooling import (
     ToolRegistry,
     ToolSpec,
 )
+from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
 
 
 class QueryInput(BaseModel):
@@ -32,6 +33,22 @@ class FakeTool:
         return {"success": True, "message": "ok", "data": data}
 
 
+class RecordingPropertySpecialist(SpecialistAgent):
+    name = "property_admet"
+    allowed_tools = {
+        "property_calculator",
+        "drug_likeness_assessment",
+        "admet_predictor",
+    }
+
+    def __init__(self):
+        self.calls = []
+
+    def execute_task(self, task, registry):
+        self.calls.append(task)
+        return super().execute_task(task, registry)
+
+
 OWNERS = {
     "target_database_search": "target",
     "reverse_target_predictor": "reverse_target",
@@ -44,10 +61,12 @@ OWNERS = {
 }
 
 
-def build_registry():
+def build_registry(excluded=()):
     registry = ToolRegistry()
     tools = {}
     for name, owner in OWNERS.items():
+        if name in excluded:
+            continue
         if name == "llm_molecular_generator":
             output = [{"smiles": "CCO"}]
         elif name == "reverse_target_predictor":
@@ -173,3 +192,57 @@ def test_supervisor_rejects_registry_tool_owned_by_wrong_agent():
         and item["agent_name"] == "property_admet"
         for item in result["delegations"]
     )
+
+
+def test_supervisor_rejects_forbidden_plan_before_delegating():
+    registry, tools = build_registry()
+    specialist = RecordingPropertySpecialist()
+    restricted_policy = WorkflowPolicy(
+        name="comprehensive_evaluation",
+        description="target lookup only",
+        allowed_tools=("target_database_search",),
+        is_multi_step=True,
+    )
+    supervisor = SupervisorAgent(
+        catalog=WorkflowCatalog((restricted_policy,)),
+        tool_registry=registry,
+        specialists={specialist.name: specialist},
+    )
+
+    result = supervisor.run(
+        "Comprehensively evaluate CCO",
+        skill_name="comprehensive_evaluation",
+    )
+
+    assert result["status"] == "failed"
+    assert specialist.calls == []
+    assert all(tool.calls == [] for tool in tools.values())
+    preflight = result["result"]["metadata"]["preflight"]
+    assert preflight["unauthorized_tools"] == [
+        "property_calculator",
+        "drug_likeness_assessment",
+        "admet_predictor",
+        "activity_predictor",
+        "reverse_target_predictor",
+    ]
+
+
+def test_supervisor_rejects_missing_tool_before_delegating():
+    registry, tools = build_registry(excluded={"activity_predictor"})
+    specialist = RecordingPropertySpecialist()
+    supervisor = SupervisorAgent(
+        tool_registry=registry,
+        specialists={specialist.name: specialist},
+    )
+
+    result = supervisor.run(
+        "Comprehensively evaluate CCO",
+        skill_name="comprehensive_evaluation",
+    )
+
+    assert result["status"] == "failed"
+    assert specialist.calls == []
+    assert all(tool.calls == [] for tool in tools.values())
+    assert result["result"]["metadata"]["preflight"]["missing_tools"] == [
+        "activity_predictor"
+    ]

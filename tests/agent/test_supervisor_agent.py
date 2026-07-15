@@ -1,5 +1,5 @@
 from src.agent.supervisor import SupervisorAgent
-from src.agent.workflows import WorkflowCatalog
+from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
 
 
 class FakeTool:
@@ -145,6 +145,66 @@ def test_supervisor_resolves_compatibility_workflow_name_from_catalog():
     assert result["success"] is True
     assert result["active_skill"] == "molecular_design"
     assert result["tools_used"] == ["llm_molecular_generator"]
+
+
+def test_supervisor_default_router_uses_injected_catalog_instance():
+    catalog = WorkflowCatalog(
+        (
+            WorkflowPolicy(
+                name="molecular_design",
+                description="restricted molecular design",
+                allowed_tools=(),
+            ),
+        )
+    )
+
+    supervisor = SupervisorAgent(tools={}, catalog=catalog)
+
+    assert supervisor.skill_router.catalog is catalog
+
+
+def test_supervisor_canonicalizes_custom_router_policy_through_catalog():
+    generator = FakeTool("llm_molecular_generator")
+    restricted_policy = WorkflowPolicy(
+        name="molecular_design",
+        description="restricted molecular design",
+        allowed_tools=(),
+    )
+    broad_policy = WorkflowCatalog().require("molecular_design")
+    supervisor = SupervisorAgent(
+        tools={"llm_molecular_generator": generator},
+        catalog=WorkflowCatalog((restricted_policy,)),
+        skill_router=FakeRouter(broad_policy),
+    )
+
+    result = supervisor.execute("generate one molecule")
+
+    assert result["success"] is False
+    assert result["agent_result"].error.code.value == "unauthorized_tool"
+    assert generator.calls == []
+
+
+def test_supervisor_canonicalizes_explicit_policy_object_through_catalog():
+    generator = FakeTool("llm_molecular_generator")
+    restricted_policy = WorkflowPolicy(
+        name="molecular_design",
+        description="restricted molecular design",
+        allowed_tools=(),
+    )
+    broad_policy = WorkflowCatalog().require("molecular_design")
+    supervisor = SupervisorAgent(
+        tools={"llm_molecular_generator": generator},
+        catalog=WorkflowCatalog((restricted_policy,)),
+    )
+
+    result = supervisor.execute(
+        "generate one molecule",
+        active_skill=broad_policy,
+    )
+
+    assert result["success"] is False
+    assert result["agent_result"].error.code.value == "unauthorized_tool"
+    assert generator.calls == []
 
 
 def test_supervisor_run_returns_structured_failure_for_unknown_workflow():

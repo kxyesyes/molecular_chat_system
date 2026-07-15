@@ -86,6 +86,34 @@ def test_executor_rejects_unauthorized_plan_before_any_tool_runs():
     assert execution.events == []
 
 
+def test_executor_empty_policy_denies_every_planned_tool():
+    tool = FakeTool("property_calculator")
+    empty_policy = WorkflowPolicy(
+        name="deny_all",
+        description="deny every tool",
+        allowed_tools=(),
+    )
+
+    execution = WorkflowExecutor(planner=SingleStepPlanner()).execute(
+        context=AgentContext(
+            query="CCO",
+            trace_id="deny-all",
+            active_skill=empty_policy.name,
+        ),
+        policy=empty_policy,
+        all_tools={"property_calculator": tool},
+    )
+
+    assert execution.result.success is False
+    assert execution.result.error.code == AgentErrorCode.UNAUTHORIZED_TOOL
+    assert execution.result.error.details["unauthorized_tools"] == [
+        "property_calculator"
+    ]
+    assert execution.result.error.details["allowed_tools"] == []
+    assert tool.calls == []
+    assert execution.events == []
+
+
 def test_executor_runs_planner_steps_with_filtered_tools():
     full_policy = WorkflowPolicy(
         name="comprehensive_evaluation",

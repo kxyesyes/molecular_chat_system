@@ -42,46 +42,20 @@ class WorkflowExecutor:
         idempotency_key: str | None = None,
     ) -> WorkflowExecution:
         plan = self.planner.plan(context)
+        preflight_failure = self.preflight(
+            context=context,
+            policy=policy,
+            all_tools=all_tools,
+            plan=plan,
+        )
+        if preflight_failure is not None:
+            return preflight_failure
+
         allowed = set(policy.allowed_tools)
-        planned = [step.tool_name for step in plan.steps]
-        unauthorized = [name for name in planned if allowed and name not in allowed]
-        missing = [name for name in planned if name not in all_tools]
-
-        if unauthorized or missing:
-            details = {
-                "skill": policy.name,
-                "unauthorized_tools": unauthorized,
-                "missing_tools": missing,
-                "planned_tools": planned,
-                "allowed_tools": sorted(allowed),
-            }
-            code = (
-                AgentErrorCode.UNAUTHORIZED_TOOL
-                if unauthorized
-                else AgentErrorCode.TOOL_UNAVAILABLE
-            )
-            error = AgentExecutionError(
-                code=code,
-                message="Workflow plan failed execution preflight",
-                details=details,
-            )
-            return WorkflowExecution(
-                plan=plan,
-                result=AgentResult(
-                    trace_id=context.trace_id,
-                    success=False,
-                    message=error.message,
-                    skill_name=policy.name,
-                    error=error,
-                    metadata={"preflight": details},
-                ),
-                events=[],
-            )
-
         filtered_tools = {
             name: tool
             for name, tool in all_tools.items()
-            if not allowed or name in allowed
+            if name in allowed
         }
         state_store = getattr(
             self.orchestrator,
@@ -118,3 +92,48 @@ class WorkflowExecutor:
             result=result,
             events=[event.to_dict() for event in event_bus.events],
         )
+
+    def preflight(
+        self,
+        context: AgentContext,
+        policy: WorkflowPolicy,
+        all_tools: Mapping[str, Any],
+        plan: WorkflowPlan | None = None,
+    ) -> WorkflowExecution | None:
+        plan = plan or self.planner.plan(context)
+        allowed = set(policy.allowed_tools)
+        planned = [step.tool_name for step in plan.steps]
+        unauthorized = [name for name in planned if name not in allowed]
+        missing = [name for name in planned if name not in all_tools]
+
+        if unauthorized or missing:
+            details = {
+                "skill": policy.name,
+                "unauthorized_tools": unauthorized,
+                "missing_tools": missing,
+                "planned_tools": planned,
+                "allowed_tools": sorted(allowed),
+            }
+            code = (
+                AgentErrorCode.UNAUTHORIZED_TOOL
+                if unauthorized
+                else AgentErrorCode.TOOL_UNAVAILABLE
+            )
+            error = AgentExecutionError(
+                code=code,
+                message="Workflow plan failed execution preflight",
+                details=details,
+            )
+            return WorkflowExecution(
+                plan=plan,
+                result=AgentResult(
+                    trace_id=context.trace_id,
+                    success=False,
+                    message=error.message,
+                    skill_name=policy.name,
+                    error=error,
+                    metadata={"preflight": details},
+                ),
+                events=[],
+            )
+        return None
