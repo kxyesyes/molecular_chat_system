@@ -8,47 +8,15 @@ from collections import defaultdict
 from typing import Any
 
 from src.agent.persistence.base import AgentStateStore
-from src.agent.skills.skill_registry import SkillRegistry
 from src.agent.tooling import ToolRegistry
+from src.agent.workflows import WorkflowCatalog
 
 from .models import RouteCandidate, RouteDecision
 
 
-SKILL_TOOLS = {
-    "admet_assessment": [
-        "property_calculator",
-        "admet_predictor",
-        "drug_likeness_assessment",
-    ],
-    "activity_prediction": ["activity_predictor"],
-    "reverse_target_prediction": ["reverse_target_predictor"],
-    "target_database_search": ["target_database_search"],
-    "molecular_design": ["llm_molecular_generator"],
-    "docking_simulation": ["molecular_docking"],
-    "comprehensive_evaluation": [
-        "property_calculator",
-        "drug_likeness_assessment",
-        "admet_predictor",
-        "activity_predictor",
-        "reverse_target_predictor",
-        "target_database_search",
-    ],
-    "hit_to_lead_optimization": [
-        "property_calculator",
-        "admet_predictor",
-        "activity_predictor",
-        "llm_molecular_generator",
-        "property_calculator",
-    ],
-    "target_driven_design": [
-        "target_database_search",
-        "llm_molecular_generator",
-        "property_calculator",
-        "admet_predictor",
-        "activity_predictor",
-        "molecular_docking",
-    ],
-    "rag_search": ["rag_search"],
+WORKFLOW_TOOLS = {
+    policy.name: list(policy.allowed_tools)
+    for policy in WorkflowCatalog().policies
 }
 
 TARGET_PATTERN = re.compile(
@@ -62,14 +30,14 @@ SMILES_PATTERN = re.compile(
 class HybridSkillRouter:
     def __init__(
         self,
-        registry: SkillRegistry | None = None,
+        catalog: WorkflowCatalog | None = None,
         tool_registry: ToolRegistry | None = None,
         state_store: AgentStateStore | None = None,
         llm: Any = None,
         llm_margin_threshold: float = 0.12,
         minimum_confidence: float = 0.3,
     ):
-        self.registry = registry or SkillRegistry()
+        self.catalog = catalog or WorkflowCatalog()
         self.tool_registry = tool_registry
         self.state_store = state_store
         self.llm = llm
@@ -273,7 +241,7 @@ class HybridSkillRouter:
             reasons=decision_reasons + confirmation_reasons,
             source=source,
             requires_confirmation=bool(confirmation_reasons),
-            allowed_tools=SKILL_TOOLS.get(selected, []),
+            allowed_tools=WORKFLOW_TOOLS.get(selected, []),
         )
 
     @staticmethod
@@ -333,7 +301,7 @@ class HybridSkillRouter:
             return
         for skill, score in list(scores.items()):
             unavailable = []
-            for tool_name in SKILL_TOOLS.get(skill, []):
+            for tool_name in WORKFLOW_TOOLS.get(skill, []):
                 try:
                     self.tool_registry.resolve(tool_name)
                 except (KeyError, RuntimeError):

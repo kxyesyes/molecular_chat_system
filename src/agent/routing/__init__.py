@@ -1,9 +1,9 @@
-from .hybrid import HybridSkillRouter, SKILL_TOOLS
+from .hybrid import HybridSkillRouter, WORKFLOW_TOOLS
 from .models import RouteCandidate, RouteDecision
 
 __all__ = [
     "HybridSkillRouter",
     "RouteCandidate",
     "RouteDecision",
-    "SKILL_TOOLS",
+    "WORKFLOW_TOOLS",
 ]

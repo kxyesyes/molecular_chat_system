@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 
 from src.agent.persistence import SQLiteAgentStateStore
+from src.agent.router import SkillRouter
 from src.agent.routing import HybridSkillRouter
+from src.agent.workflows import WorkflowPolicy
 
 
 def test_router_returns_ranked_explainable_decision():
@@ -93,3 +95,11 @@ def test_llm_arbitration_is_bounded_to_ranked_candidates():
         candidate.skill_name for candidate in decision.candidates
     }
     assert decision.source == "llm"
+
+
+def test_skill_router_returns_workflow_policy():
+    policy = SkillRouter().route("请计算 CCO 的分子量和 LogP")
+
+    assert isinstance(policy, WorkflowPolicy)
+    assert policy.name == "admet_assessment"
+    assert "property_calculator" in policy.allowed_tools
