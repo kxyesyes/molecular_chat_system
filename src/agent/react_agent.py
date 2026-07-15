@@ -792,7 +792,7 @@ class ReActMolecularAgent:
         )
         execution = WorkflowExecutor().execute(
             context=context,
-            skill=self._active_skill,
+            policy=self._active_skill,
             all_tools=self.tools,
             event_callback=event_callback,
         )

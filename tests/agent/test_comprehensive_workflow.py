@@ -1,5 +1,5 @@
 from src.agent.react_agent import ReActMolecularAgent
-from src.agent.skills.comprehensive_evaluation_skill import ComprehensiveEvaluationSkill
+from src.agent.workflows import WorkflowCatalog
 
 
 class FakeTool:
@@ -33,7 +33,7 @@ def test_comprehensive_workflow_runs_standard_planned_chain():
 
     result = agent.execute(
         "请全面评估 CCO 的成药性",
-        active_skill=ComprehensiveEvaluationSkill(),
+        active_skill=WorkflowCatalog().require("comprehensive_evaluation"),
     )
 
     assert result["success"] is True

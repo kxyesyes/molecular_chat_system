@@ -10,13 +10,14 @@ from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.planning import WorkflowPlan
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.workflow_executor import WorkflowExecutor
-from src.agent.skills.base_skill import BaseSkill
+from src.agent.workflows import WorkflowPolicy
 
 
-class FakeSkill(BaseSkill):
-    name = "comprehensive_evaluation"
-    is_workflow = True
-    allowed_tools = ["property_calculator"]
+FAKE_POLICY = WorkflowPolicy(
+    name="comprehensive_evaluation",
+    description="test workflow",
+    allowed_tools=("property_calculator",),
+)
 
 
 class FakeTool:
@@ -75,7 +76,7 @@ def test_executor_rejects_unauthorized_plan_before_any_tool_runs():
             trace_id="unauthorized",
             active_skill="comprehensive_evaluation",
         ),
-        skill=FakeSkill(),
+        policy=FAKE_POLICY,
         all_tools=other_tools,
     )
 
@@ -86,30 +87,34 @@ def test_executor_rejects_unauthorized_plan_before_any_tool_runs():
 
 
 def test_executor_runs_planner_steps_with_filtered_tools():
-    class FullSkill(FakeSkill):
-        allowed_tools = [
+    full_policy = WorkflowPolicy(
+        name="comprehensive_evaluation",
+        description="full workflow",
+        allowed_tools=(
             "property_calculator",
             "drug_likeness_assessment",
             "admet_predictor",
             "activity_predictor",
             "reverse_target_predictor",
             "target_database_search",
-        ]
+        ),
+        is_multi_step=True,
+    )
 
-    tools = {name: FakeTool(name) for name in FullSkill.allowed_tools}
+    tools = {name: FakeTool(name) for name in full_policy.allowed_tools}
     execution = WorkflowExecutor().execute(
         context=AgentContext(
             query="全面分析 CCO",
             trace_id="allowed",
             active_skill="comprehensive_evaluation",
         ),
-        skill=FullSkill(),
+        policy=full_policy,
         all_tools=tools,
     )
 
     assert execution.result.success is True
     assert [item.tool_name for item in execution.result.tool_results] == list(
-        FullSkill.allowed_tools
+        full_policy.allowed_tools
     )
     assert execution.plan.workflow_name == "comprehensive_evaluation"
     assert execution.events[0]["event"] == "task_started"
@@ -132,7 +137,7 @@ def test_executor_isolates_event_bus_for_concurrent_requests():
                 trace_id=trace_id,
                 active_skill="comprehensive_evaluation",
             ),
-            skill=FakeSkill(),
+            policy=FAKE_POLICY,
             all_tools={"property_calculator": tool},
             event_callback=callback_events[trace_id].append,
         )
@@ -188,7 +193,7 @@ def test_executor_preserves_injected_orchestrator_subclass_extensions():
                     trace_id=trace_id,
                     active_skill="comprehensive_evaluation",
                 ),
-                skill=FakeSkill(),
+                policy=FAKE_POLICY,
                 all_tools={
                     "property_calculator": FakeTool("property_calculator")
                 },
@@ -248,7 +253,7 @@ def test_callback_exception_does_not_interrupt_injected_orchestrator(tmp_path):
             trace_id="callback-injected",
             active_skill="comprehensive_evaluation",
         ),
-        skill=FakeSkill(),
+        policy=FAKE_POLICY,
         all_tools={"property_calculator": tool},
         event_callback=failing_callback,
     )
@@ -268,7 +273,7 @@ def test_callback_exception_does_not_interrupt_default_orchestrator():
             trace_id="callback-default",
             active_skill="comprehensive_evaluation",
         ),
-        skill=FakeSkill(),
+        policy=FAKE_POLICY,
         all_tools={"property_calculator": FakeTool("property_calculator")},
         event_callback=failing_callback,
     )

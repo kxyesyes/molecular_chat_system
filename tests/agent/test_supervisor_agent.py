@@ -1,4 +1,5 @@
 from src.agent.supervisor import SupervisorAgent
+from src.agent.workflows import WorkflowCatalog
 
 
 class FakeTool:
@@ -70,12 +71,6 @@ class FakeRouter:
         return self.skill
 
 
-class FakeSkill:
-    name = "molecular_design"
-    allowed_tools = ["llm_molecular_generator"]
-    is_workflow = True
-
-
 class FakeLLM:
     model_name = "external-main"
 
@@ -86,18 +81,18 @@ class FakeLocalGenerator:
 
 def test_supervisor_exposes_chat_handler_execution_contract_and_live_events():
     tools = {"llm_molecular_generator": FakeTool("llm_molecular_generator")}
-    skill = FakeSkill()
+    policy = WorkflowCatalog().require("molecular_design")
     supervisor = SupervisorAgent(
         tools=tools,
         llm=FakeLLM(),
         molecular_generator_llm=FakeLocalGenerator(),
-        skill_router=FakeRouter(skill),
+        skill_router=FakeRouter(policy),
     )
     events = []
 
     result = supervisor.execute(
         "generate one molecule",
-        active_skill=skill,
+        active_skill=policy,
         event_callback=lambda event: events.append(event.to_dict()),
     )
 
@@ -124,7 +119,9 @@ def test_supervisor_updates_main_llm_without_rebinding_local_generator():
         },
         llm=FakeLLM(),
         molecular_generator_llm=generator.llm,
-        skill_router=FakeRouter(FakeSkill()),
+        skill_router=FakeRouter(
+            WorkflowCatalog().require("molecular_design")
+        ),
     )
     next_llm = object()
 
@@ -133,3 +130,31 @@ def test_supervisor_updates_main_llm_without_rebinding_local_generator():
     assert supervisor.llm is next_llm
     assert property_tool.llm is next_llm
     assert generator.llm.model_name == "gmm-llama:latest"
+
+
+def test_supervisor_resolves_compatibility_workflow_name_from_catalog():
+    tools = {"llm_molecular_generator": FakeTool("llm_molecular_generator")}
+    catalog = WorkflowCatalog()
+    supervisor = SupervisorAgent(tools=tools, catalog=catalog)
+
+    result = supervisor.execute(
+        "generate one molecule",
+        active_skill="molecular_design",
+    )
+
+    assert result["success"] is True
+    assert result["active_skill"] == "molecular_design"
+    assert result["tools_used"] == ["llm_molecular_generator"]
+
+
+def test_supervisor_run_returns_structured_failure_for_unknown_workflow():
+    supervisor = SupervisorAgent(tools={}, catalog=WorkflowCatalog())
+
+    result = supervisor.run(
+        query="run an unknown workflow",
+        skill_name="unknown_workflow",
+    )
+
+    assert result["status"] == "failed"
+    assert result["message"].startswith("Unknown workflow")
+    assert result["result"] is None

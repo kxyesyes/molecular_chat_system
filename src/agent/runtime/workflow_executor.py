@@ -12,7 +12,7 @@ from src.agent.contracts import (
 from src.agent.orchestrators import WorkflowOrchestrator
 from src.agent.planning import TaskPlanner, WorkflowPlan
 from src.agent.runtime.event_bus import AgentEventBus
-from src.agent.skills.base_skill import BaseSkill
+from src.agent.workflows import WorkflowPolicy
 
 
 @dataclass
@@ -36,20 +36,20 @@ class WorkflowExecutor:
     def execute(
         self,
         context: AgentContext,
-        skill: BaseSkill,
+        policy: WorkflowPolicy,
         all_tools: Mapping[str, Any],
         event_callback=None,
         idempotency_key: str | None = None,
     ) -> WorkflowExecution:
         plan = self.planner.plan(context)
-        allowed = set(skill.allowed_tools or [])
+        allowed = set(policy.allowed_tools)
         planned = [step.tool_name for step in plan.steps]
         unauthorized = [name for name in planned if allowed and name not in allowed]
         missing = [name for name in planned if name not in all_tools]
 
         if unauthorized or missing:
             details = {
-                "skill": skill.name,
+                "skill": policy.name,
                 "unauthorized_tools": unauthorized,
                 "missing_tools": missing,
                 "planned_tools": planned,
@@ -71,7 +71,7 @@ class WorkflowExecutor:
                     trace_id=context.trace_id,
                     success=False,
                     message=error.message,
-                    skill_name=skill.name,
+                    skill_name=policy.name,
                     error=error,
                     metadata={"preflight": details},
                 ),

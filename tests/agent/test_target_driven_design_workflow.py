@@ -1,5 +1,6 @@
 from src.agent.react_agent import ReActMolecularAgent
-from src.agent.skills.skill_registry import SkillRegistry
+from src.agent.router import SkillRouter
+from src.agent.workflows import WorkflowCatalog
 
 
 class FakeTool:
@@ -15,13 +16,13 @@ class FakeTool:
         }
 
 
-def test_target_driven_design_skill_routes_before_atomic_target_search():
-    registry = SkillRegistry()
+def test_target_driven_design_policy_routes_before_atomic_target_search():
+    router = SkillRouter()
 
-    skill = registry.route_by_rules("基于 PDE5 设计 20 个类药候选分子")
+    policy = router.route("基于 PDE5 设计 20 个类药候选分子")
 
-    assert skill is not None
-    assert skill.name == "target_driven_design"
+    assert policy is not None
+    assert policy.name == "target_driven_design"
 
 
 def test_target_driven_design_workflow_runs_target_to_screening_plan_without_docking():
@@ -39,8 +40,11 @@ def test_target_driven_design_workflow_runs_target_to_screening_plan_without_doc
     agent._active_skill = None
     agent.tools = {name: FakeTool(name) for name in planned_tool_names}
 
-    skill = SkillRegistry().get_skill_by_name("target_driven_design")
-    result = agent.execute("基于 PDE5 设计 20 个类药候选分子", active_skill=skill)
+    policy = WorkflowCatalog().require("target_driven_design")
+    result = agent.execute(
+        "基于 PDE5 设计 20 个类药候选分子",
+        active_skill=policy,
+    )
 
     assert result["success"] is True
     assert result["active_skill"] == "target_driven_design"
