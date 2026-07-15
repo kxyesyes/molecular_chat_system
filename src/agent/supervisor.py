@@ -13,13 +13,13 @@ from src.agent.contracts import (
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.planning.task_planner import TaskPlanner
 from src.agent.router import SkillRouter
-from src.agent.skills.skill_registry import SkillRegistry
 from src.agent.specialists import AgentTask, AgentTaskResult, SpecialistAgent
 from src.agent.tooling import RetryPolicy, TOOL_AGENT_OWNERS, ToolRegistry
 from src.agent.persistence.base import AgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.task_state import TaskEventType
 from src.agent.runtime.workflow_executor import WorkflowExecutor
+from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
 
 
 RAG_TOOL_NAMES = frozenset(
@@ -34,7 +34,7 @@ class SupervisorAgent:
         self,
         tools: Mapping[str, Any] | None = None,
         planner: TaskPlanner | None = None,
-        registry: SkillRegistry | None = None,
+        catalog: WorkflowCatalog | None = None,
         orchestrator: WorkflowOrchestrator | None = None,
         tool_registry: ToolRegistry | None = None,
         specialists: Mapping[str, SpecialistAgent] | None = None,
@@ -49,7 +49,7 @@ class SupervisorAgent:
         self.molecular_generator_llm = molecular_generator_llm
         self.skill_router = skill_router or SkillRouter()
         self.planner = planner or TaskPlanner()
-        self.registry = registry or SkillRegistry()
+        self.catalog = catalog or WorkflowCatalog()
         self.tool_registry = tool_registry
         self.specialists = dict(specialists or {})
         self.state_store = state_store
@@ -72,7 +72,18 @@ class SupervisorAgent:
 
     def should_use_tools(self, query: str) -> bool:
         """Return whether the query maps to a supported scientific skill."""
-        return self.skill_router.route(query, llm=self.llm) is not None
+        return self._resolve_policy(query) is not None
+
+    def _resolve_policy(
+        self,
+        query: str,
+        active_workflow: WorkflowPolicy | str | None = None,
+    ) -> WorkflowPolicy | None:
+        if isinstance(active_workflow, WorkflowPolicy):
+            return active_workflow
+        if isinstance(active_workflow, str):
+            return self.catalog.get(active_workflow)
+        return self.skill_router.route(query, llm=self.llm)
 
     def execute(
         self,
@@ -84,8 +95,8 @@ class SupervisorAgent:
         capabilities: Mapping[str, bool] | None = None,
     ) -> dict[str, Any]:
         """Chat-compatible entry point backed by the workflow runtime."""
-        skill = active_skill or self.skill_router.route(query, llm=self.llm)
-        if skill is None:
+        policy = self._resolve_policy(query, active_skill)
+        if policy is None:
             return {
                 "success": False,
                 "final_answer": "No supported scientific workflow matched the request",
@@ -100,7 +111,7 @@ class SupervisorAgent:
         context = AgentContext(
             query=query,
             trace_id=f"agent-{uuid4().hex[:12]}",
-            active_skill=skill.name,
+            active_skill=policy.name,
             temperature=temperature,
             mol_count=mol_count,
             metadata=(
@@ -115,7 +126,7 @@ class SupervisorAgent:
             orchestrator=self.orchestrator,
         ).execute(
             context=context,
-            skill=skill,
+            policy=policy,
             all_tools=request_tools,
             event_callback=event_callback,
         )
@@ -129,7 +140,7 @@ class SupervisorAgent:
                 "success": False,
                 "final_answer": capability_failure.final_answer,
                 "tools_used": [],
-                "active_skill": skill.name,
+                "active_skill": policy.name,
                 "tool_results": legacy_failure["tool_results"],
                 "tool_result_sequence": legacy_failure["tool_result_sequence"],
                 "tool_results_by_step": legacy_failure["tool_results_by_step"],
@@ -153,7 +164,7 @@ class SupervisorAgent:
             "success": result.success or result.partial,
             "final_answer": result.final_answer or result.message,
             "tools_used": [item.tool_name for item in result.tool_results],
-            "active_skill": skill.name,
+            "active_skill": policy.name,
             "tool_results": legacy_result["tool_results"],
             "tool_result_sequence": legacy_result["tool_result_sequence"],
             "tool_results_by_step": legacy_result["tool_results_by_step"],
@@ -217,6 +228,20 @@ class SupervisorAgent:
         steps = workflow_plan.steps
         request_tools = self._request_tools(context)
 
+        policy = self.catalog.get(context.active_skill or "")
+        if context.active_skill and policy is None:
+            return {
+                "trace_id": context.trace_id,
+                "status": "failed",
+                "message": f"Unknown workflow: {context.active_skill}",
+                "plan": {
+                    "workflow_name": workflow_plan.workflow_name,
+                    "steps": [self._step_to_dict(step) for step in steps],
+                    "metadata": workflow_plan.metadata,
+                },
+                "result": None,
+            }
+
         capability_failure = self._capability_failure_result(
             context,
             [step.tool_name for step in steps],
@@ -245,12 +270,11 @@ class SupervisorAgent:
         if self.tool_registry and self.specialists:
             return self._run_delegated(context, workflow_plan.workflow_name, workflow_plan.metadata, steps)
 
-        skill = self.registry.get_skill_by_name(context.active_skill or "")
-        if skill is None:
+        if policy is None:
             return {
                 "trace_id": context.trace_id,
                 "status": "failed",
-                "message": f"Unknown workflow skill: {context.active_skill}",
+                "message": "No supported scientific workflow matched the request",
                 "plan": {
                     "workflow_name": workflow_plan.workflow_name,
                     "steps": [self._step_to_dict(step) for step in steps],
@@ -263,7 +287,7 @@ class SupervisorAgent:
             orchestrator=self.orchestrator,
         ).execute(
             context=context,
-            skill=skill,
+            policy=policy,
             all_tools=request_tools,
             idempotency_key=idempotency_key,
         )
@@ -594,7 +618,8 @@ class SupervisorAgent:
         trace_id: str | None,
         metadata: dict[str, Any] | None,
     ) -> AgentContext:
-        active_skill = skill_name or self._route_skill(query)
+        policy = self._resolve_policy(query, skill_name)
+        active_skill = policy.name if policy is not None else skill_name
         return AgentContext(
             query=query,
             trace_id=trace_id or str(uuid4()),
@@ -681,19 +706,6 @@ class SupervisorAgent:
             error=error,
             metadata={"capability_failure": details},
         )
-
-    def _route_skill(self, query: str) -> str | None:
-        routed = self.registry.route_by_rules(query)
-        if routed:
-            return routed.name
-        query_lower = query.lower()
-        if any(token in query_lower for token in ["设计", "生成", "design", "generate"]) and any(
-            token in query_lower for token in ["pde", "egfr", "kras", "braf", "target", "靶点"]
-        ):
-            return "target_driven_design"
-        if any(token in query_lower for token in ["全面", "综合", "comprehensive"]):
-            return "comprehensive_evaluation"
-        return None
 
     @staticmethod
     def _step_to_dict(step: WorkflowStep) -> dict[str, Any]:
