@@ -47,9 +47,9 @@ class SupervisorAgent:
         self.tools = dict(tools) if tools is not None else build_default_tools()
         self.llm = llm
         self.molecular_generator_llm = molecular_generator_llm
-        self.skill_router = skill_router or SkillRouter()
+        self.catalog = catalog if catalog is not None else WorkflowCatalog()
+        self.skill_router = skill_router or SkillRouter(catalog=self.catalog)
         self.planner = planner or TaskPlanner()
-        self.catalog = catalog or WorkflowCatalog()
         self.tool_registry = tool_registry
         self.specialists = dict(specialists or {})
         self.state_store = state_store
@@ -80,10 +80,13 @@ class SupervisorAgent:
         active_workflow: WorkflowPolicy | str | None = None,
     ) -> WorkflowPolicy | None:
         if isinstance(active_workflow, WorkflowPolicy):
-            return active_workflow
+            return self.catalog.get(active_workflow.name)
         if isinstance(active_workflow, str):
             return self.catalog.get(active_workflow)
-        return self.skill_router.route(query, llm=self.llm)
+        routed = self.skill_router.route(query, llm=self.llm)
+        if routed is None:
+            return None
+        return self.catalog.get(routed.name)
 
     def execute(
         self,
@@ -267,9 +270,6 @@ class SupervisorAgent:
                 "result": None,
             }
 
-        if self.tool_registry and self.specialists:
-            return self._run_delegated(context, workflow_plan.workflow_name, workflow_plan.metadata, steps)
-
         if policy is None:
             return {
                 "trace_id": context.trace_id,
@@ -282,10 +282,34 @@ class SupervisorAgent:
                 },
                 "result": None,
             }
-        execution = WorkflowExecutor(
+
+        executor = WorkflowExecutor(
             planner=self.planner,
             orchestrator=self.orchestrator,
-        ).execute(
+        )
+        delegated = self.tool_registry is not None and bool(self.specialists)
+        if delegated:
+            preflight_failure = executor.preflight(
+                context=context,
+                policy=policy,
+                all_tools=self.tool_registry.as_mapping(),
+                plan=workflow_plan,
+            )
+            if preflight_failure is not None:
+                return self._format_run_result(
+                    workflow_plan.workflow_name,
+                    workflow_plan.metadata,
+                    workflow_plan.steps,
+                    preflight_failure.result,
+                )
+            return self._run_delegated(
+                context,
+                workflow_plan.workflow_name,
+                workflow_plan.metadata,
+                steps,
+            )
+
+        execution = executor.execute(
             context=context,
             policy=policy,
             all_tools=request_tools,
