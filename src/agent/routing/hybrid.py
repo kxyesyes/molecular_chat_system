@@ -5,6 +5,7 @@ import inspect
 import json
 import re
 from collections import defaultdict
+from types import MappingProxyType
 from typing import Any
 
 from src.agent.persistence.base import AgentStateStore
@@ -14,10 +15,12 @@ from src.agent.workflows import WorkflowCatalog
 from .models import RouteCandidate, RouteDecision
 
 
-WORKFLOW_TOOLS = {
-    policy.name: list(policy.allowed_tools)
-    for policy in WorkflowCatalog().policies
-}
+WORKFLOW_TOOLS = MappingProxyType(
+    {
+        policy.name: policy.allowed_tools
+        for policy in WorkflowCatalog().policies
+    }
+)
 
 TARGET_PATTERN = re.compile(
     r"\b(PDE\d+[A-Z]?|EGFR|BACE1|KRAS|BRAF|JAK2|ALK|MET|CDK2|KDR)\b", re.I
@@ -241,7 +244,7 @@ class HybridSkillRouter:
             reasons=decision_reasons + confirmation_reasons,
             source=source,
             requires_confirmation=bool(confirmation_reasons),
-            allowed_tools=WORKFLOW_TOOLS.get(selected, []),
+            allowed_tools=self._allowed_tools_for(selected),
         )
 
     @staticmethod
@@ -301,7 +304,7 @@ class HybridSkillRouter:
             return
         for skill, score in list(scores.items()):
             unavailable = []
-            for tool_name in WORKFLOW_TOOLS.get(skill, []):
+            for tool_name in self._allowed_tools_for(skill):
                 try:
                     self.tool_registry.resolve(tool_name)
                 except (KeyError, RuntimeError):
@@ -311,6 +314,10 @@ class HybridSkillRouter:
                 reasons[skill].append(
                     f"unavailable tools: {', '.join(sorted(unavailable))}"
                 )
+
+    def _allowed_tools_for(self, workflow_name: str) -> list[str]:
+        policy = self.catalog.get(workflow_name)
+        return list(policy.allowed_tools) if policy else []
 
     @staticmethod
     def _rank(

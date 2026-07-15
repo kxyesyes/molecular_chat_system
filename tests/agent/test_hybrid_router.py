@@ -5,7 +5,7 @@ import json
 from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.router import SkillRouter
 from src.agent.routing import HybridSkillRouter
-from src.agent.workflows import WorkflowPolicy
+from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
 
 
 def test_router_returns_ranked_explainable_decision():
@@ -103,3 +103,21 @@ def test_skill_router_returns_workflow_policy():
     assert isinstance(policy, WorkflowPolicy)
     assert policy.name == "admet_assessment"
     assert "property_calculator" in policy.allowed_tools
+
+
+def test_injected_catalog_controls_runtime_allowed_tools():
+    catalog = WorkflowCatalog(
+        (
+            WorkflowPolicy(
+                name="admet_assessment",
+                description="Restricted property calculation workflow",
+                allowed_tools=("property_calculator",),
+            ),
+        )
+    )
+
+    decision = HybridSkillRouter(catalog=catalog).decide(
+        "请计算 CCO 的分子量和 LogP"
+    )
+
+    assert decision.allowed_tools == ["property_calculator"]

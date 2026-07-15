@@ -1,9 +1,5 @@
 from src.agent.react_agent import ReActMolecularAgent
-
-
-class FakeSkill:
-    name = "comprehensive_evaluation"
-    is_workflow = True
+from src.agent.workflows import WorkflowCatalog
 
 
 def test_workflow_skill_uses_planner_and_returns_legacy_dict(monkeypatch):
@@ -23,7 +19,8 @@ def test_workflow_skill_uses_planner_and_returns_legacy_dict(monkeypatch):
 
     monkeypatch.setattr(agent, "_execute_workflow_skill", fake_execute_workflow_skill)
 
-    response = agent.execute("全面分析 CCO", active_skill=FakeSkill())
+    policy = WorkflowCatalog().require("comprehensive_evaluation")
+    response = agent.execute("全面分析 CCO", active_skill=policy)
 
     assert response["success"] is True
     assert response["active_skill"] == "comprehensive_evaluation"

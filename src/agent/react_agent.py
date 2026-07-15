@@ -33,14 +33,14 @@ class ReActMolecularAgent:
         self.molecular_generator_llm = molecular_generator_llm
         self.tools = {}
         self.max_iterations = 5  # 最大推理循环次数
-        self._active_skill = None  # 当前激活的技能
+        self._active_skill = None  # 当前激活的工作流策略
         self._initialize_tools()
-        # 初始化 Skill 路由器
+        # 初始化工作流策略路由器
         try:
             self.skill_router = SkillRouter()
-            logger.info("✅ SkillRouter 初始化成功")
+            logger.info("✅ 工作流策略路由器初始化成功")
         except Exception as e:
-            logger.warning(f"⚠️ SkillRouter 初始化失败，将使用传统模式: {e}")
+            logger.warning(f"⚠️ 工作流策略路由器初始化失败，将使用传统模式: {e}")
             self.skill_router = None
 
     def _initialize_tools(self):
@@ -113,7 +113,7 @@ class ReActMolecularAgent:
         active_skill=None,
         event_callback=None,
     ) -> Dict[str, Any]:
-        """执行ReAct推理循环 - 集成 Skill 路由"""
+        """执行ReAct推理循环 - 集成工作流策略路由"""
         import time
         from .metrics import metrics_system
         start_time = time.time()
@@ -127,27 +127,29 @@ class ReActMolecularAgent:
             'final_answer': '',
             'reasoning_trace': [],
             'tools_used': [],
-            'active_skill': None  # 记录激活的技能
+            'active_skill': None  # 兼容字段：记录激活的工作流策略
         }
 
         logger.info(f"=== ReAct Agent 开始执行 ===")
         logger.info(f"查询: {query}")
         logger.info(f"LLM可用: {self.llm is not None}")
 
-        # ── Skill 路由：按需加载上下文 ──────────────────────────
+        # ── 工作流策略路由 ──────────────────────────────────────
         self._active_skill = active_skill
         if not self._active_skill and self.skill_router:
             self._active_skill = self.skill_router.route(query, llm=self.llm)
             
         if self._active_skill:
             result['active_skill'] = self._active_skill.name
-            logger.info(f"🎯 激活技能: {self._active_skill.name}")
+            logger.info(f"🎯 激活工作流策略: {self._active_skill.name}")
         else:
-            logger.info("未匹配到特定技能，使用通用模式")
+            logger.info("未匹配到工作流策略，使用通用模式")
 
         try:
-            if self._active_skill and getattr(self._active_skill, "is_workflow", False):
-                logger.info(f"使用 WorkflowOrchestrator 执行技能: {self._active_skill.name}")
+            if self._active_skill and self._active_skill.is_multi_step:
+                logger.info(
+                    f"使用 WorkflowOrchestrator 执行工作流策略: {self._active_skill.name}"
+                )
                 return self._execute_workflow_skill(
                     query,
                     result,
@@ -162,14 +164,8 @@ class ReActMolecularAgent:
             steps = []
             tools_executed = set()  # 跟踪已执行的工具，避免重复
 
-            # 编排技能需要更多推理步数来串联多个工具
-            effective_max_iterations = self.max_iterations
-            if self._active_skill and hasattr(self._active_skill, 'max_iterations_override'):
-                effective_max_iterations = self._active_skill.max_iterations_override
-                logger.info(f"📈 编排技能 {self._active_skill.name} 提升最大迭代次数: {effective_max_iterations}")
-
-            for iteration in range(effective_max_iterations):
-                logger.info(f"ReAct iteration {iteration + 1}/{effective_max_iterations}")
+            for iteration in range(self.max_iterations):
+                logger.info(f"ReAct iteration {iteration + 1}/{self.max_iterations}")
 
                 # 生成思考和行动
                 step = self._generate_react_step(query, steps)
@@ -528,23 +524,22 @@ class ReActMolecularAgent:
             return f"思考: 检测到分子结构信息，使用基础属性计算工具进行分析。\n行动: property_calculator\n行动输入: {query}"
 
     def _build_react_prompt(self, query: str, previous_steps: List[ReActStep]) -> str:
-        """构建ReAct提示 - 支持 Skill 动态上下文注入"""
+        """构建 ReAct 提示，并按工作流策略过滤工具。"""
 
-        # ── 根据是否有激活技能，决定工具范围和系统提示 ──────────
+        # WorkflowPolicy 不承载 persona/system prompt，只控制工具权限。
+        policy_extra_prompt = ""
         if self._active_skill:
-            # 技能模式：只暴露该技能声明的工具
+            # 策略模式：只暴露该策略声明的工具
             active_tools = self.skill_router.get_tools_for_skill(
                 self._active_skill, self.tools
             )
-            skill_system_prompt = self._active_skill.system_prompt
             logger.info(
-                f"[Skill模式] 技能={self._active_skill.name}, "
+                f"[WorkflowPolicy] 策略={self._active_skill.name}, "
                 f"暴露工具={list(active_tools.keys())}"
             )
         else:
             # 通用模式：暴露全部工具
             active_tools = self.tools
-            skill_system_prompt = ""
 
         # 工具描述
         tool_descriptions = []
@@ -584,35 +579,7 @@ class ReActMolecularAgent:
                         agent_scratchpad += f"观察: {obs}\n"
 
         # ── 组装最终 Prompt ───────────────────────────────────
-        if skill_system_prompt:
-            # 技能模式：注入技能专属的 System Prompt
-            complete_prompt = f"""{skill_system_prompt}
-
----
-
-## 可用工具
-{tools_text}
-
-## ReAct 推理格式
-使用以下格式进行推理和行动：
-
-思考: 分析当前情况，决定下一步行动
-行动: 选择一个工具，必须是 [{tool_names_text}] 之一
-行动输入: 工具的输入参数
-观察: 工具返回的结果
-... (可以重复多次)
-思考: 我现在有足够信息给出最终答案了
-最终答案: 对用户问题的完整回答
-
-## 当前任务
-**问题**: {query}
-{agent_scratchpad}
-
-请开始推理（从"思考:"开始）：
-"""
-        else:
-            # 通用模式：使用原有的通用提示词
-            complete_prompt = f"""# 🧬 药物设计智能Agent - ReAct推理模式
+        complete_prompt = f"""{policy_extra_prompt}# 🧬 药物设计智能Agent - ReAct推理模式
 
 ## 你的角色
 你是药物设计系统的智能Agent，负责通过推理和行动解决用户问题。
@@ -767,7 +734,7 @@ class ReActMolecularAgent:
         base_result: Dict[str, Any],
         event_callback=None,
     ) -> Dict[str, Any]:
-        """Execute declarative workflow skills without relying on LLM reasoning."""
+        """Execute a declarative workflow policy without LLM reasoning."""
         from uuid import uuid4
 
         from .contracts import AgentContext
