@@ -121,3 +121,36 @@ def test_injected_catalog_controls_runtime_allowed_tools():
     )
 
     assert decision.allowed_tools == ["property_calculator"]
+
+
+def test_tool_filter_distinguishes_empty_policy_from_no_policy():
+    router = SkillRouter()
+    all_tools = {
+        "property_calculator": object(),
+        "activity_predictor": object(),
+    }
+    deny_all_policy = WorkflowPolicy(
+        name="deny_all",
+        description="Policy with no tool permissions",
+        allowed_tools=(),
+    )
+
+    assert router.get_tools_for_skill(deny_all_policy, all_tools) == {}
+    assert router.get_tools_for_skill(None, all_tools) == all_tools
+
+
+def test_skill_router_reuses_injected_catalog_for_restricted_routing():
+    restricted_policy = WorkflowPolicy(
+        name="admet_assessment",
+        description="Restricted property workflow",
+        allowed_tools=("property_calculator",),
+    )
+    catalog = WorkflowCatalog((restricted_policy,))
+
+    router = SkillRouter(catalog=catalog)
+    routed_policy = router.route("请计算 CCO 的分子量和 LogP")
+
+    assert router.catalog is catalog
+    assert router.hybrid_router.catalog is catalog
+    assert routed_policy is restricted_policy
+    assert routed_policy.allowed_tools == ("property_calculator",)

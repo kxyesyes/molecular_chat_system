@@ -46,6 +46,25 @@ def test_single_step_policy_blocks_forbidden_tool_execution():
     assert "不允许执行工具 'property_calculator'" in observation
 
 
+def test_allowed_alias_keyed_tool_executes_through_registered_name():
+    calls = []
+
+    class RegisteredRagTool:
+        def execute(self, query):
+            calls.append(query)
+            return {"success": True, "summary": "rag result"}
+
+    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+    agent.tools = {"rag_search": RegisteredRagTool()}
+    agent._active_skill = WorkflowCatalog().require("rag_search")
+
+    observation, raw_result = agent._execute_tool("rag_search", "本地知识库检索")
+
+    assert calls == ["本地知识库检索"]
+    assert raw_result["success"] is True
+    assert observation == "rag result"
+
+
 def test_single_step_policy_prompt_names_only_allowed_tools():
     class PromptTool:
         def __init__(self, description):

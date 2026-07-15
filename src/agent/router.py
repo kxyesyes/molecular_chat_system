@@ -22,8 +22,8 @@ class SkillRouter:
     职责：接收用户 query → 返回应该激活的 Skill。
     """
 
-    def __init__(self):
-        self.catalog = WorkflowCatalog()
+    def __init__(self, catalog: WorkflowCatalog | None = None):
+        self.catalog = catalog if catalog is not None else WorkflowCatalog()
         from .routing import HybridSkillRouter
 
         self.hybrid_router = HybridSkillRouter(catalog=self.catalog)
@@ -65,19 +65,23 @@ class SkillRouter:
         logger.info("[Router] 未匹配到已注册工作流，将使用通用处理模式")
         return None
 
-    def get_tools_for_skill(self, skill: WorkflowPolicy, all_tools: dict) -> dict:
+    def get_tools_for_skill(
+        self,
+        skill: WorkflowPolicy | None,
+        all_tools: dict,
+    ) -> dict:
         """
         根据技能的 allowed_tools 过滤出该技能可用的工具子集。
 
         Args:
-            skill: 激活的工作流策略
+            skill: 激活的工作流策略；None 表示没有策略限制
             all_tools: 全部工具字典 {tool_name: tool_instance}
 
         Returns:
             过滤后的工具字典
         """
-        if not skill.allowed_tools:
-            return all_tools  # 如果技能没有限制，返回所有工具
+        if skill is None:
+            return all_tools
 
         filtered = {}
         for tool_name in skill.allowed_tools:

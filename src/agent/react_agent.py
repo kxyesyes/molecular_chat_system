@@ -676,19 +676,11 @@ class ReActMolecularAgent:
     def _execute_tool(self, tool_name: str, tool_input: str) -> tuple[str, Dict[str, Any]]:
         """执行工具调用"""
         try:
-            # 标准化工具名称匹配
-            tool_name = tool_name.strip().lower()
-
-            # 尝试匹配工具名称
-            matched_tool_name = _TOOL_NAME_MAPPING.get(tool_name)
-            if not matched_tool_name and tool_name in self.tools:
-                matched_tool_name = tool_name
-            if not matched_tool_name:
-                # 尝试部分匹配
-                for alias, real_name in _TOOL_NAME_MAPPING.items():
-                    if alias in tool_name or tool_name in alias:
-                        matched_tool_name = real_name
-                        break
+            requested_tool_name = tool_name.strip().lower()
+            matched_tool_name = self._resolve_registered_tool_name(
+                requested_tool_name,
+                self.tools,
+            )
 
             if matched_tool_name and self._active_skill:
                 allowed_tools = tuple(self._active_skill.allowed_tools)
@@ -709,8 +701,8 @@ class ReActMolecularAgent:
 
             if not matched_tool_name or matched_tool_name not in self.tools:
                 available_tools = list(self.tools.keys())
-                logger.error(f"工具 '{tool_name}' 未找到。可用工具: {available_tools}")
-                return f"错误: 未找到工具 '{tool_name}'。可用工具: {available_tools}", {}
+                logger.error(f"工具 '{requested_tool_name}' 未找到。可用工具: {available_tools}")
+                return f"错误: 未找到工具 '{requested_tool_name}'。可用工具: {available_tools}", {}
 
             tool = self.tools[matched_tool_name]
             logger.info(f"执行工具: {matched_tool_name} with input: {tool_input[:100]}...")
@@ -753,6 +745,28 @@ class ReActMolecularAgent:
     def _canonical_tool_name(tool_name: str) -> str:
         normalized = tool_name.strip().lower()
         return _TOOL_NAME_MAPPING.get(normalized, normalized)
+
+    def _resolve_registered_tool_name(
+        self,
+        requested_name: str,
+        tools: Dict[str, Any],
+    ) -> str | None:
+        normalized = requested_name.strip().lower()
+        if normalized in tools:
+            return normalized
+
+        canonical_name = _TOOL_NAME_MAPPING.get(normalized)
+        if canonical_name is None:
+            for alias, mapped_name in _TOOL_NAME_MAPPING.items():
+                if alias in normalized or normalized in alias:
+                    canonical_name = mapped_name
+                    break
+        canonical_name = canonical_name or normalized
+
+        for registered_name in tools:
+            if self._canonical_tool_name(registered_name) == canonical_name:
+                return registered_name
+        return None
 
     def _filter_tools_for_active_policy(
         self,
