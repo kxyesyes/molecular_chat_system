@@ -6,10 +6,15 @@ from typing import Any
 from src.agent.contracts import (
     AgentErrorCode,
     AgentExecutionError,
+    ObservationStatus,
     ToolResult,
 )
 
 from .domain_validators import DOMAIN_VALIDATORS
+from .molecule_candidates import (
+    CandidateValidationUnavailable,
+    sanitize_generated_candidates,
+)
 
 
 class AgentResultValidator:
@@ -18,6 +23,53 @@ class AgentResultValidator:
     def validate_tool_result(self, result: ToolResult) -> ToolResult:
         if not result.success:
             return result
+
+        if result.tool_name == "llm_molecular_generator":
+            try:
+                sanitized = sanitize_generated_candidates(result.data)
+            except CandidateValidationUnavailable as exc:
+                result.success = False
+                result.status = ObservationStatus.UNAVAILABLE
+                result.data = None
+                result.formatted = ""
+                result.message = str(exc)
+                result.error = AgentExecutionError(
+                    code=AgentErrorCode.TOOL_UNAVAILABLE,
+                    message=str(exc),
+                    details={"tool_name": result.tool_name},
+                )
+                return result
+
+            requested = int(
+                result.quality.get("requested_count") or sanitized.valid_count
+            )
+            result.quality = {
+                **result.quality,
+                "valid_count": sanitized.valid_count,
+                "unique_count": sanitized.valid_count,
+                "invalid_count": sanitized.invalid_count,
+                "duplicate_count": sanitized.duplicate_count,
+                "validation_method": "RDKit",
+            }
+            if not sanitized.candidates:
+                result.success = False
+                result.status = ObservationStatus.FAILED
+                result.data = None
+                result.formatted = ""
+                result.message = "Generated output contained no valid unique SMILES"
+                result.error = AgentExecutionError(
+                    code=AgentErrorCode.INVALID_OUTPUT,
+                    message=result.message,
+                    details=result.quality,
+                )
+                return result
+            result.data = sanitized.candidates
+            if sanitized.valid_count < requested:
+                result.status = ObservationStatus.PARTIAL
+                result.warnings.append(
+                    f"Generated {sanitized.valid_count} valid unique SMILES "
+                    f"out of {requested} requested"
+                )
 
         warnings = list(result.warnings)
         warnings.extend(self._validate_smiles_payload(result.data))
