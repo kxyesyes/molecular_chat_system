@@ -14,12 +14,12 @@ class EvidenceLedger:
         self._records: dict[str, dict[str, Any]] = {}
         self._claims: dict[str, ScientificClaim] = {}
 
-    def register_tool_result(
+    def prepare_provenance(
         self,
-        step_id: str,
         input_digest: str,
         result: ToolResult,
-    ) -> str:
+    ) -> ToolProvenance:
+        """Attach provenance without registering unvalidated result data."""
         provenance = result.provenance
         if provenance is None:
             provenance = ToolProvenance(
@@ -34,6 +34,15 @@ class EvidenceLedger:
         elif provenance.input_digest is None:
             provenance = replace(provenance, input_digest=input_digest)
         result.provenance = provenance
+        return provenance
+
+    def register_tool_result(
+        self,
+        step_id: str,
+        input_digest: str,
+        result: ToolResult,
+    ) -> str:
+        provenance = self.prepare_provenance(input_digest, result)
         payload = {
             "trace_id": self.trace_id,
             "step_id": step_id,

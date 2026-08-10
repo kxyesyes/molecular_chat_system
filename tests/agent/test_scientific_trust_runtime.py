@@ -1,4 +1,5 @@
 from src.agent.contracts import AgentContext, ObservationStatus, ToolResult
+from src.agent.evidence import EvidenceLedger
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.runtime.event_bus import AgentEventBus
 
@@ -43,7 +44,31 @@ def test_partial_tool_result_produces_partial_terminal_event_and_evidence():
     )
     assert result.tool_results[0].provenance.model_name == "gmm-llama:latest"
     assert result.tool_results[0].provenance.input_digest
+    candidate_provenance = result.tool_results[0].data["candidates"][0][
+        "generation_provenance"
+    ]
+    assert candidate_provenance["model_name"] == "gmm-llama:latest"
+    assert (
+        candidate_provenance["input_digest"]
+        == result.tool_results[0].provenance.input_digest
+    )
     assert event_bus.events[-1].event.value == "task_partial"
+
+
+def test_prepare_provenance_does_not_register_unvalidated_result():
+    ledger = EvidenceLedger("prepare-only")
+    result = ToolResult.success_result(
+        "llm_molecular_generator",
+        data=[{"smiles": "CCO"}],
+        quality={"model": "gmm-llama:latest"},
+    )
+
+    provenance = ledger.prepare_provenance("input-hash", result)
+
+    assert result.provenance is provenance
+    assert provenance.model_name == "gmm-llama:latest"
+    assert provenance.input_digest == "input-hash"
+    assert ledger.to_list() == []
 
 
 def test_failed_required_tool_never_reports_completed_outcome():

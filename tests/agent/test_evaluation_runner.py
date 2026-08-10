@@ -15,6 +15,7 @@ from src.agent.evaluation import (
 from src.agent.evaluation.scientific import (
     GOLDEN_SCIENTIFIC_CASE_IDS,
     ScientificAcceptanceRunner,
+    _check_generation,
     _extract_binding_energy,
     _check_data_flow_generated_smiles_consumed,
     _check_generation_repeat_stats,
@@ -22,8 +23,9 @@ from src.agent.evaluation.scientific import (
     replay_scientific_report,
     summarize_scientific_stability,
 )
-from src.agent.contracts import ToolResult
+from src.agent.contracts import ToolProvenance, ToolResult
 from src.agent.routing import HybridSkillRouter
+from src.agent.validators import AgentResultValidator
 from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
 
 
@@ -190,6 +192,33 @@ def test_generation_data_flow_check_requires_downstream_consumption():
     assert passed["status"] == "passed"
     assert failed["status"] == "failed"
     assert failed["reason"] == "generated_smiles_not_consumed"
+
+
+def test_generation_check_accepts_validated_candidate_set_provenance():
+    expected_model = "gmm-llama:latest"
+    generated = ToolResult.success_result(
+        "llm_molecular_generator",
+        data=[{"smiles": "CCO"}, {"smiles": "CCN"}],
+        quality={"requested_count": 2, "model": expected_model},
+        provenance=ToolProvenance(
+            tool_name="llm_molecular_generator",
+            model_name=expected_model,
+            input_digest="input-digest",
+        ),
+    )
+    validated = AgentResultValidator().validate_tool_result(generated)
+    validated.provenance = None
+    validated.quality = {}
+
+    check = _check_generation(
+        [validated],
+        requested_count=2,
+        expected_model=expected_model,
+        strict_count=True,
+    )
+
+    assert check["status"] == "passed"
+    assert check["models"] == [expected_model]
 
 
 def test_generation_data_flow_check_accepts_hit_to_lead_candidates_plan():

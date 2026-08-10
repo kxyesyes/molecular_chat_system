@@ -227,6 +227,7 @@ class WorkflowOrchestrator:
                 "step_id": step.name,
                 "output_key": step.output_key,
             }
+            ledger.prepare_provenance(input_hash, result)
             result = self.validator.validate_tool_result(result)
             evidence_id = ledger.register_tool_result(
                 step_id=step.name,

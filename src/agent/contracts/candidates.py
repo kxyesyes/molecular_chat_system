@@ -81,6 +81,24 @@ def _require_non_empty_str(name: str, value: str) -> None:
         raise ValueError(f"{name} cannot be empty")
 
 
+def _require_exact_mapping(
+    name: str,
+    value: Any,
+    expected_fields: set[str],
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{name} must be a mapping")
+    actual_fields = set(value)
+    if actual_fields != expected_fields:
+        missing = sorted(expected_fields - actual_fields)
+        unexpected = sorted(actual_fields - expected_fields)
+        raise ValueError(
+            f"{name} fields do not match contract; "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+    return value
+
+
 def build_candidate_id(candidate_index: int, canonical_smiles: str) -> str:
     _require_positive_int("candidate_index", candidate_index)
     _require_non_empty_str("canonical_smiles", canonical_smiles)
@@ -157,6 +175,38 @@ class CandidateRecord:
                 generation_provenance if generation_provenance is not None else {}
             ),
             metadata=metadata if metadata is not None else {},
+        )
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> CandidateRecord:
+        """Strictly restore a serialized CandidateRecord."""
+        payload = _require_exact_mapping(
+            "candidate record",
+            value,
+            {
+                "candidate_id",
+                "source_index",
+                "original_smiles",
+                "canonical_smiles",
+                "validation",
+                "generation_provenance",
+                "metadata",
+                "smiles",
+            },
+        )
+        canonical_smiles = payload["canonical_smiles"]
+        if not isinstance(payload["smiles"], str):
+            raise ValueError("smiles must be a string")
+        if payload["smiles"] != canonical_smiles:
+            raise ValueError("smiles must match canonical_smiles")
+        return cls(
+            candidate_id=payload["candidate_id"],
+            source_index=payload["source_index"],
+            original_smiles=payload["original_smiles"],
+            canonical_smiles=canonical_smiles,
+            validation=payload["validation"],
+            generation_provenance=payload["generation_provenance"],
+            metadata=payload["metadata"],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -244,6 +294,63 @@ class CandidateSet:
     @property
     def unique_count(self) -> int:
         return len(self.candidates)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> CandidateSet:
+        """Strictly restore a version 1 serialized CandidateSet."""
+        payload = _require_exact_mapping(
+            "candidate set",
+            value,
+            {
+                "version",
+                "requested_count",
+                "valid_count",
+                "unique_count",
+                "invalid_count",
+                "duplicate_count",
+                "candidates",
+                "rejected",
+                "status",
+            },
+        )
+        if payload["version"] != "1":
+            raise ValueError("candidate set version must be '1'")
+        for field_name in (
+            "requested_count",
+            "valid_count",
+            "unique_count",
+            "invalid_count",
+            "duplicate_count",
+        ):
+            _require_non_negative_int(field_name, payload[field_name])
+        if not isinstance(payload["candidates"], list):
+            raise ValueError("candidates must be a list")
+        if not isinstance(payload["rejected"], list):
+            raise ValueError("rejected must be a list")
+        if not isinstance(payload["status"], str):
+            raise ValueError("status must be a string")
+        try:
+            status = ObservationStatus(payload["status"])
+        except ValueError as exc:
+            raise ValueError("status is not a valid ObservationStatus") from exc
+
+        candidates = tuple(
+            CandidateRecord.from_dict(candidate)
+            for candidate in payload["candidates"]
+        )
+        actual_count = len(candidates)
+        if payload["valid_count"] != actual_count:
+            raise ValueError("valid_count does not match candidates")
+        if payload["unique_count"] != actual_count:
+            raise ValueError("unique_count does not match candidates")
+        return cls(
+            requested_count=payload["requested_count"],
+            candidates=candidates,
+            invalid_count=payload["invalid_count"],
+            duplicate_count=payload["duplicate_count"],
+            rejected=tuple(payload["rejected"]),
+            status=status,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {

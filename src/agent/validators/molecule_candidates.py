@@ -12,6 +12,8 @@ class CandidateValidationUnavailable(RuntimeError):
 
 @dataclass(frozen=True)
 class CandidateSanitization:
+    """Internal immutable result produced by generated-candidate sanitization."""
+
     candidate_set: CandidateSet
 
     @property
@@ -36,26 +38,7 @@ def sanitize_generated_candidates(
     requested_count: int | None = None,
     generation_provenance: dict[str, Any] | None = None,
 ) -> CandidateSanitization:
-    try:
-        from rdkit import Chem
-    except Exception as exc:
-        raise CandidateValidationUnavailable(
-            "RDKit is required to validate generated molecules"
-        ) from exc
-
-    if isinstance(data, list):
-        raw = data
-    elif isinstance(data, dict):
-        raw = next(
-            (
-                data[key]
-                for key in ("molecules", "candidates", "data")
-                if isinstance(data.get(key), list)
-            ),
-            [],
-        )
-    else:
-        raw = []
+    raw = _extract_candidate_items(data)
 
     if requested_count is None:
         requested = len(raw)
@@ -65,6 +48,13 @@ def sanitize_generated_candidates(
         if requested_count < 0:
             raise ValueError("requested_count must be a non-negative integer")
         requested = requested_count
+
+    try:
+        from rdkit import Chem
+    except Exception as exc:
+        raise CandidateValidationUnavailable(
+            "RDKit is required to validate generated molecules"
+        ) from exc
 
     accepted: list[CandidateRecord] = []
     rejected: list[dict[str, Any]] = []
@@ -157,3 +147,21 @@ def sanitize_generated_candidates(
             status=status,
         )
     )
+
+
+def _extract_candidate_items(data: Any) -> list[Any]:
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+
+    first_empty: list[Any] | None = None
+    for key in ("molecules", "candidates", "data"):
+        value = data.get(key)
+        if not isinstance(value, list):
+            continue
+        if value:
+            return value
+        if first_empty is None:
+            first_empty = value
+    return first_empty if first_empty is not None else []

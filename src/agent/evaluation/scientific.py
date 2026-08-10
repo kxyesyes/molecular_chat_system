@@ -946,7 +946,13 @@ def _check_generation(
         return {"status": "failed", "reason": "tool_not_run:llm_molecular_generator"}
     if not result.success:
         return {"status": "partial", "reason": result.message}
-    records = result.data if isinstance(result.data, list) else []
+    if (
+        isinstance(result.data, Mapping)
+        and isinstance(result.data.get("candidates"), list)
+    ):
+        records = result.data["candidates"]
+    else:
+        records = result.data if isinstance(result.data, list) else []
     smiles = [
         str(item.get("smiles") if isinstance(item, Mapping) else item)
         for item in records
@@ -954,11 +960,24 @@ def _check_generation(
     ]
     requested = int(requested_count or len(smiles) or 0)
     metrics = chemistry_metrics(smiles, requested_count=requested if strict_count else None)
-    model_names = {
-        str(item.get("model"))
-        for item in records
-        if isinstance(item, Mapping) and item.get("model")
-    }
+    model_names: set[str] = set()
+    for item in records:
+        if not isinstance(item, Mapping):
+            continue
+        generation_provenance = item.get("generation_provenance")
+        if isinstance(generation_provenance, Mapping):
+            model_name = generation_provenance.get("model_name")
+            if model_name:
+                model_names.add(str(model_name))
+        metadata = item.get("metadata")
+        if isinstance(metadata, Mapping) and metadata.get("model"):
+            model_names.add(str(metadata["model"]))
+        if item.get("model"):
+            model_names.add(str(item["model"]))
+    if result.provenance and result.provenance.model_name:
+        model_names.add(str(result.provenance.model_name))
+    if result.quality.get("model"):
+        model_names.add(str(result.quality["model"]))
     model_ok = not model_names or expected_model in model_names
     valid_unique_ok = metrics["valid_smiles_rate"] == 1.0 and (
         metrics["unique_valid_smiles"] >= requested if strict_count else bool(smiles)

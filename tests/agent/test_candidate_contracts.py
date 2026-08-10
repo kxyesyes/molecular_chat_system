@@ -527,3 +527,64 @@ def test_candidate_set_does_not_overconstrain_other_statuses(status):
     )
 
     assert candidate_set.status == status
+
+
+def test_candidate_record_and_set_strict_dict_round_trip():
+    candidate = _candidate(
+        candidate_index=1,
+        source_index=2,
+        original_smiles="OCC",
+        canonical_smiles="CCO",
+        generation_provenance={"model_name": "gmm-llama:latest"},
+        metadata={"source": "llm"},
+    )
+    candidate_set = contracts.CandidateSet(
+        requested_count=2,
+        candidates=(candidate,),
+        invalid_count=1,
+        rejected=({"source_index": 1, "reason": "invalid_smiles"},),
+        status=contracts.ObservationStatus.PARTIAL,
+    )
+
+    restored_candidate = contracts.CandidateRecord.from_dict(candidate.to_dict())
+    restored_set = contracts.CandidateSet.from_dict(candidate_set.to_dict())
+
+    assert restored_candidate.to_dict() == candidate.to_dict()
+    assert restored_set.to_dict() == candidate_set.to_dict()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("version", "2"),
+        ("status", "unknown"),
+        ("valid_count", 2),
+        ("unique_count", 0),
+        ("requested_count", "2"),
+        ("candidates", ()),
+    ],
+)
+def test_candidate_set_from_dict_rejects_malformed_payload(
+    field_name,
+    invalid_value,
+):
+    payload = contracts.CandidateSet(
+        requested_count=1,
+        candidates=(_candidate(),),
+    ).to_dict()
+    payload[field_name] = invalid_value
+
+    with pytest.raises(ValueError):
+        contracts.CandidateSet.from_dict(payload)
+
+
+def test_candidate_record_from_dict_rejects_alias_mismatch_and_extra_fields():
+    payload = _candidate().to_dict()
+    payload["smiles"] = "CCN"
+    with pytest.raises(ValueError):
+        contracts.CandidateRecord.from_dict(payload)
+
+    payload = _candidate().to_dict()
+    payload["unexpected"] = True
+    with pytest.raises(ValueError):
+        contracts.CandidateRecord.from_dict(payload)
