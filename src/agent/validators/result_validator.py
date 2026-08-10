@@ -6,6 +6,7 @@ from typing import Any
 from src.agent.contracts import (
     AgentErrorCode,
     AgentExecutionError,
+    CandidateSet,
     ObservationStatus,
     ToolResult,
 )
@@ -25,14 +26,41 @@ class AgentResultValidator:
             return result
 
         if result.tool_name == "llm_molecular_generator":
+            requested_count = result.quality.get("requested_count")
+            generation_provenance = (
+                result.provenance.to_dict() if result.provenance else None
+            )
             try:
-                sanitized = sanitize_generated_candidates(result.data)
+                sanitized = sanitize_generated_candidates(
+                    result.data,
+                    requested_count=requested_count,
+                    generation_provenance=generation_provenance,
+                )
             except CandidateValidationUnavailable as exc:
+                unavailable_requested = self._known_requested_count(
+                    requested_count,
+                    result.data,
+                )
+                candidate_set = CandidateSet(
+                    requested_count=unavailable_requested,
+                    candidates=(),
+                    status=ObservationStatus.UNAVAILABLE,
+                )
                 result.success = False
                 result.status = ObservationStatus.UNAVAILABLE
-                result.data = None
+                result.data = candidate_set.to_dict()
                 result.formatted = ""
                 result.message = str(exc)
+                result.quality = {
+                    **result.quality,
+                    "requested_count": unavailable_requested,
+                    "valid_count": 0,
+                    "unique_count": 0,
+                    "invalid_count": 0,
+                    "duplicate_count": 0,
+                    "validation_method": "RDKit",
+                    "output_contract": "CandidateSet@1",
+                }
                 result.error = AgentExecutionError(
                     code=AgentErrorCode.TOOL_UNAVAILABLE,
                     message=str(exc),
@@ -40,21 +68,22 @@ class AgentResultValidator:
                 )
                 return result
 
-            requested = int(
-                result.quality.get("requested_count") or sanitized.valid_count
-            )
+            candidate_set = sanitized.candidate_set
+            result.data = candidate_set.to_dict()
+            result.status = candidate_set.status
             result.quality = {
                 **result.quality,
-                "valid_count": sanitized.valid_count,
-                "unique_count": sanitized.valid_count,
-                "invalid_count": sanitized.invalid_count,
-                "duplicate_count": sanitized.duplicate_count,
+                "requested_count": candidate_set.requested_count,
+                "valid_count": candidate_set.valid_count,
+                "unique_count": candidate_set.unique_count,
+                "invalid_count": candidate_set.invalid_count,
+                "duplicate_count": candidate_set.duplicate_count,
                 "validation_method": "RDKit",
+                "output_contract": "CandidateSet@1",
             }
-            if not sanitized.candidates:
+            if not candidate_set.candidates:
                 result.success = False
                 result.status = ObservationStatus.FAILED
-                result.data = None
                 result.formatted = ""
                 result.message = "Generated output contained no valid unique SMILES"
                 result.error = AgentExecutionError(
@@ -63,12 +92,10 @@ class AgentResultValidator:
                     details=result.quality,
                 )
                 return result
-            result.data = sanitized.candidates
-            if sanitized.valid_count < requested:
-                result.status = ObservationStatus.PARTIAL
+            if candidate_set.status == ObservationStatus.PARTIAL:
                 result.warnings.append(
-                    f"Generated {sanitized.valid_count} valid unique SMILES "
-                    f"out of {requested} requested"
+                    f"Generated {candidate_set.valid_count} valid unique SMILES "
+                    f"out of {candidate_set.requested_count} requested"
                 )
 
         warnings = list(result.warnings)
@@ -99,6 +126,23 @@ class AgentResultValidator:
             "validated": not bool(warnings) and result.success,
         }
         return result
+
+    @staticmethod
+    def _known_requested_count(requested_count: Any, data: Any) -> int:
+        if (
+            not isinstance(requested_count, bool)
+            and isinstance(requested_count, int)
+            and requested_count >= 0
+        ):
+            return requested_count
+        if isinstance(data, list):
+            return len(data)
+        if isinstance(data, dict):
+            for key in ("molecules", "candidates", "data"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    return len(value)
+        return 0
 
     def _validate_smiles_payload(self, data: Any) -> list[str]:
         warnings: list[str] = []

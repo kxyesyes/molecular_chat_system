@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from src.agent.contracts import CandidateRecord, CandidateSet, ObservationStatus
+
 
 class CandidateValidationUnavailable(RuntimeError):
     pass
@@ -10,16 +12,31 @@ class CandidateValidationUnavailable(RuntimeError):
 
 @dataclass(frozen=True)
 class CandidateSanitization:
-    candidates: list[dict[str, Any]]
-    invalid_count: int
-    duplicate_count: int
+    candidate_set: CandidateSet
+
+    @property
+    def candidates(self) -> list[dict[str, Any]]:
+        return [candidate.to_dict() for candidate in self.candidate_set.candidates]
 
     @property
     def valid_count(self) -> int:
-        return len(self.candidates)
+        return self.candidate_set.valid_count
+
+    @property
+    def invalid_count(self) -> int:
+        return self.candidate_set.invalid_count
+
+    @property
+    def duplicate_count(self) -> int:
+        return self.candidate_set.duplicate_count
 
 
-def sanitize_generated_candidates(data: Any) -> CandidateSanitization:
+def sanitize_generated_candidates(
+    data: Any,
+    *,
+    requested_count: int | None = None,
+    generation_provenance: dict[str, Any] | None = None,
+) -> CandidateSanitization:
     try:
         from rdkit import Chem
     except Exception as exc:
@@ -27,39 +44,117 @@ def sanitize_generated_candidates(data: Any) -> CandidateSanitization:
             "RDKit is required to validate generated molecules"
         ) from exc
 
-    raw = data
-    if isinstance(data, dict):
-        raw = (
-            data.get("molecules")
-            or data.get("candidates")
-            or data.get("data")
-            or []
+    if isinstance(data, list):
+        raw = data
+    elif isinstance(data, dict):
+        raw = next(
+            (
+                data[key]
+                for key in ("molecules", "candidates", "data")
+                if isinstance(data.get(key), list)
+            ),
+            [],
         )
-    if not isinstance(raw, list):
+    else:
         raw = []
 
-    accepted: list[dict[str, Any]] = []
+    if requested_count is None:
+        requested = len(raw)
+    else:
+        if isinstance(requested_count, bool) or not isinstance(requested_count, int):
+            raise TypeError("requested_count must be a non-negative integer")
+        if requested_count < 0:
+            raise ValueError("requested_count must be a non-negative integer")
+        requested = requested_count
+
+    accepted: list[CandidateRecord] = []
+    rejected: list[dict[str, Any]] = []
     seen: set[str] = set()
     invalid_count = 0
     duplicate_count = 0
-    for item in raw:
-        candidate = dict(item) if isinstance(item, dict) else {"smiles": str(item)}
-        smiles = str(candidate.get("smiles") or "").strip()
-        mol = Chem.MolFromSmiles(smiles) if smiles else None
+    for source_index, item in enumerate(raw, start=1):
+        if isinstance(item, dict):
+            smiles = str(item.get("smiles") or "").strip()
+            metadata = {key: value for key, value in item.items() if key != "smiles"}
+        else:
+            smiles = str(item or "").strip()
+            metadata = {}
+
+        mol = None
+        try:
+            mol = Chem.MolFromSmiles(smiles) if smiles else None
+            canonical = Chem.MolToSmiles(mol) if mol is not None else None
+        except Exception:
+            mol = None
+            canonical = None
         if mol is None:
             invalid_count += 1
+            rejected.append(
+                {
+                    "source_index": source_index,
+                    "smiles": smiles,
+                    "reason": "invalid_smiles",
+                }
+            )
             continue
-        canonical = Chem.MolToSmiles(mol)
+        assert canonical is not None
         if canonical in seen:
             duplicate_count += 1
+            rejected.append(
+                {
+                    "source_index": source_index,
+                    "smiles": smiles,
+                    "reason": "duplicate_smiles",
+                }
+            )
             continue
         seen.add(canonical)
-        candidate["smiles"] = canonical
-        candidate["validation"] = {"valid": True, "method": "RDKit"}
+
+        try:
+            candidate = CandidateRecord.from_smiles(
+                candidate_index=len(accepted) + 1,
+                source_index=source_index,
+                original_smiles=smiles,
+                canonical_smiles=canonical,
+                generation_provenance=generation_provenance,
+                metadata=metadata,
+            )
+        except ValueError:
+            invalid_count += 1
+            rejected.append(
+                {
+                    "source_index": source_index,
+                    "smiles": smiles,
+                    "reason": "invalid_candidate_metadata",
+                }
+            )
+            continue
+
+        if len(accepted) >= requested:
+            rejected.append(
+                {
+                    "source_index": source_index,
+                    "smiles": smiles,
+                    "reason": "excess_candidate",
+                }
+            )
+            continue
         accepted.append(candidate)
 
+    if requested > 0 and len(accepted) == requested:
+        status = ObservationStatus.SUCCEEDED
+    elif accepted:
+        status = ObservationStatus.PARTIAL
+    else:
+        status = ObservationStatus.FAILED
+
     return CandidateSanitization(
-        candidates=accepted,
-        invalid_count=invalid_count,
-        duplicate_count=duplicate_count,
+        candidate_set=CandidateSet(
+            requested_count=requested,
+            candidates=tuple(accepted),
+            invalid_count=invalid_count,
+            duplicate_count=duplicate_count,
+            rejected=tuple(rejected),
+            status=status,
+        )
     )
