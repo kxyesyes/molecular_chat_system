@@ -12,10 +12,62 @@ from scripts.run_agent_acceptance import (
     run_real,
 )
 from src.agent.evaluation import scientific
+from src.agent.evaluation.scientific import (
+    check_data_flow_evidence,
+    check_generated_candidate_truth,
+    check_scientific_claim_evidence,
+)
 from src.agent.evaluation.models import EvaluationCase
 from src.agent.contracts import AgentResult, ToolResult
 from src.agent.orchestrators import WorkflowStep
 from src.agent.planning import WorkflowPlan
+
+
+def test_generation_truth_check_rejects_invalid_or_duplicate_candidates():
+    check = check_generated_candidate_truth(
+        {
+            "tool_results": [
+                {
+                    "tool_name": "llm_molecular_generator",
+                    "success": True,
+                    "data": [{"smiles": "CCO"}, {"smiles": "OCC"}],
+                    "quality": {
+                        "requested_count": 2,
+                        "valid_count": 2,
+                        "unique_count": 1,
+                        "validation_method": "RDKit",
+                    },
+                }
+            ]
+        }
+    )
+    assert check["passed"] is False
+    assert check["reason"] == "generated_candidates_not_unique"
+
+
+def test_claim_truth_check_rejects_claim_without_evidence():
+    check = check_scientific_claim_evidence(
+        {"claims": [{"claim_id": "pic50", "value": 7.2, "evidence_ids": []}]}
+    )
+    assert check == {"passed": False, "reason": "claim_without_evidence"}
+
+
+def test_data_flow_check_requires_bound_generation_output():
+    check = check_data_flow_evidence(
+        {
+            "plan": {
+                "steps": [
+                    {"step_id": "generate", "output_key": "molecules"},
+                    {
+                        "step_id": "properties",
+                        "input_binding": "$.request.query",
+                    },
+                ]
+            }
+        }
+    )
+    assert check["passed"] is False
+    assert check["reason"] == "generated_output_not_consumed"
 
 
 def test_generation_check_requires_valid_unique_requested_count() -> None:

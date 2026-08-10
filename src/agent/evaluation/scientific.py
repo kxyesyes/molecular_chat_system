@@ -35,6 +35,56 @@ from .runner import chemistry_metrics, latency_metrics, load_cases
 GOLDEN_SCIENTIFIC_CASE_IDS = [f"GOLD-{index:03d}" for index in range(1, 13)]
 
 
+def check_generated_candidate_truth(result: dict[str, Any]) -> dict[str, Any]:
+    entries = result.get("tool_results") or []
+    generator = next(
+        (
+            item
+            for item in entries
+            if item.get("tool_name") == "llm_molecular_generator"
+        ),
+        None,
+    )
+    if not generator:
+        return {"passed": False, "reason": "generator_result_missing"}
+    quality = generator.get("quality") or {}
+    if quality.get("validation_method") != "RDKit":
+        return {"passed": False, "reason": "rdkit_validation_missing"}
+    if int(quality.get("unique_count") or 0) < int(
+        quality.get("valid_count") or 0
+    ):
+        return {
+            "passed": False,
+            "reason": "generated_candidates_not_unique",
+        }
+    return {"passed": True, "reason": "validated_unique_candidates"}
+
+
+def check_scientific_claim_evidence(result: dict[str, Any]) -> dict[str, Any]:
+    for claim in result.get("claims") or []:
+        if not claim.get("evidence_ids"):
+            return {"passed": False, "reason": "claim_without_evidence"}
+    return {"passed": True, "reason": "all_claims_have_evidence"}
+
+
+def check_data_flow_evidence(result: dict[str, Any]) -> dict[str, Any]:
+    steps = ((result.get("plan") or {}).get("steps") or [])
+    generation_outputs = {
+        step.get("output_key")
+        for step in steps
+        if step.get("output_key")
+        and step.get("step_id") in {"generate", "molecule_generation"}
+    }
+    if not generation_outputs:
+        return {"passed": True, "reason": "generation_not_requested"}
+    bindings = {step.get("input_binding") for step in steps}
+    if not any(
+        f"$.outputs.{key}" in bindings for key in generation_outputs
+    ):
+        return {"passed": False, "reason": "generated_output_not_consumed"}
+    return {"passed": True, "reason": "generated_output_consumed"}
+
+
 def summarize_scientific_stability(iterations: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarize repeated real scientific acceptance runs.
 
@@ -266,6 +316,56 @@ class ScientificAcceptanceRunner:
             anti_hallucination,
             executions=executions,
         )
+
+        def as_truth_status(check: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "status": "passed" if check.get("passed") else "failed",
+                "reason": check.get("reason", "automatic_truth_check"),
+            }
+
+        serialized_tool_results = [
+            {"tool_name": item.tool_name, **item.to_legacy_dict()}
+            for item in tool_results
+        ]
+        if any(
+            item.tool_name == "llm_molecular_generator"
+            for item in tool_results
+        ):
+            truth_checks["generated_candidate_contract"] = as_truth_status(
+                check_generated_candidate_truth(
+                    {"tool_results": serialized_tool_results}
+                )
+            )
+
+        claims = (
+            primary_execution.result.metadata.get("claims", [])
+            if primary_execution
+            else []
+        )
+        truth_checks["scientific_claim_evidence"] = as_truth_status(
+            check_scientific_claim_evidence({"claims": claims})
+        )
+
+        if primary_execution and any(
+            step.name in {"generate", "molecule_generation"}
+            for step in primary_execution.plan.steps
+        ):
+            truth_checks["compiled_data_flow"] = as_truth_status(
+                check_data_flow_evidence(
+                    {
+                        "plan": {
+                            "steps": [
+                                {
+                                    "step_id": step.name,
+                                    "output_key": step.output_key,
+                                    "input_binding": step.input_binding,
+                                }
+                                for step in primary_execution.plan.steps
+                            ]
+                        }
+                    }
+                )
+            )
         status, error = _case_status(
             case=case,
             actual_skill=actual_skill,
