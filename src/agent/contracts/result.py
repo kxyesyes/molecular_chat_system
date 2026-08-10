@@ -5,6 +5,7 @@ from typing import Any
 
 from .domain import WorkflowArtifact
 from .errors import AgentErrorCode, AgentExecutionError
+from .scientific import ObservationStatus, RunOutcome, ToolProvenance
 
 
 @dataclass
@@ -20,6 +21,16 @@ class ToolResult:
     evidence: list[dict[str, Any]] = field(default_factory=list)
     artifacts: list[WorkflowArtifact] = field(default_factory=list)
     quality: dict[str, Any] = field(default_factory=dict)
+    status: ObservationStatus | None = None
+    provenance: ToolProvenance | None = None
+
+    def __post_init__(self) -> None:
+        if self.status is None:
+            self.status = (
+                ObservationStatus.SUCCEEDED
+                if self.success
+                else ObservationStatus.FAILED
+            )
 
     @classmethod
     def success_result(
@@ -33,6 +44,8 @@ class ToolResult:
         evidence: list[dict[str, Any]] | None = None,
         artifacts: list[WorkflowArtifact] | None = None,
         quality: dict[str, Any] | None = None,
+        status: ObservationStatus | None = None,
+        provenance: ToolProvenance | None = None,
     ) -> "ToolResult":
         return cls(
             tool_name=tool_name,
@@ -45,6 +58,8 @@ class ToolResult:
             evidence=evidence or [],
             artifacts=artifacts or [],
             quality=quality or {},
+            status=status,
+            provenance=provenance,
         )
 
     @classmethod
@@ -59,6 +74,8 @@ class ToolResult:
         evidence: list[dict[str, Any]] | None = None,
         artifacts: list[WorkflowArtifact] | None = None,
         quality: dict[str, Any] | None = None,
+        status: ObservationStatus | None = None,
+        provenance: ToolProvenance | None = None,
     ) -> "ToolResult":
         return cls(
             tool_name=tool_name,
@@ -71,6 +88,8 @@ class ToolResult:
             evidence=evidence or [],
             artifacts=artifacts or [],
             quality=quality or {},
+            status=status,
+            provenance=provenance,
         )
 
     def to_legacy_dict(self) -> dict:
@@ -85,6 +104,8 @@ class ToolResult:
             "evidence": self.evidence,
             "artifacts": [artifact.to_dict() for artifact in self.artifacts],
             "quality": self.quality,
+            "status": self.status.value if self.status else None,
+            "provenance": self.provenance.to_dict() if self.provenance else None,
         }
 
 
@@ -102,6 +123,7 @@ class AgentResult:
     warnings: list[str] = field(default_factory=list)
     evidence: list[dict[str, Any]] = field(default_factory=list)
     artifacts: list[WorkflowArtifact] = field(default_factory=list)
+    outcome: RunOutcome | None = None
 
     @classmethod
     def from_tool_results(
@@ -113,9 +135,19 @@ class AgentResult:
         final_answer: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> "AgentResult":
-        success = bool(tool_results) and all(item.success for item in tool_results)
-        partial = any(item.success for item in tool_results) and any(
-            not item.success for item in tool_results
+        has_partial_observation = any(
+            item.status == ObservationStatus.PARTIAL for item in tool_results
+        )
+        all_succeeded = bool(tool_results) and all(item.success for item in tool_results)
+        any_succeeded = any(item.success for item in tool_results)
+        success = all_succeeded and not has_partial_observation
+        partial = any_succeeded and (not all_succeeded or has_partial_observation)
+        outcome = (
+            RunOutcome.COMPLETED
+            if success
+            else RunOutcome.PARTIAL
+            if partial
+            else RunOutcome.FAILED
         )
         first_error = next((item.error for item in tool_results if item.error), None)
         warnings = [warning for item in tool_results for warning in item.warnings]
@@ -134,6 +166,7 @@ class AgentResult:
             warnings=warnings,
             evidence=evidence,
             artifacts=artifacts,
+            outcome=outcome,
         )
 
     def to_legacy_dict(self) -> dict:
@@ -155,6 +188,9 @@ class AgentResult:
 
         return {
             "success": self.success,
+            "status": self.outcome.value if self.outcome else (
+                "completed" if self.success else "partial" if self.partial else "failed"
+            ),
             "message": self.message,
             "final_answer": self.final_answer,
             "active_skill": self.skill_name,

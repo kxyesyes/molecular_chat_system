@@ -1,7 +1,10 @@
 from src.agent.contracts import (
+    AgentErrorCode,
+    AgentResult,
     ObservationStatus,
     RunOutcome,
     ScientificClaim,
+    ToolResult,
     ToolProvenance,
 )
 
@@ -50,3 +53,45 @@ def test_status_enums_are_stable_strings():
     assert ObservationStatus.UNAVAILABLE.value == "unavailable"
     assert ObservationStatus.INVALID_INPUT.value == "invalid_input"
     assert RunOutcome.PARTIAL.value == "partial"
+
+
+def test_tool_result_exposes_status_and_provenance_without_breaking_legacy_dict():
+    provenance = ToolProvenance(tool_name="property_calculator", tool_version="3")
+    result = ToolResult.success_result(
+        "property_calculator",
+        data={"molecular_weight": 46.07},
+        provenance=provenance,
+    )
+
+    payload = result.to_legacy_dict()
+    assert result.status == ObservationStatus.SUCCEEDED
+    assert payload["status"] == "succeeded"
+    assert payload["provenance"]["tool_version"] == "3"
+
+
+def test_partial_observation_makes_agent_result_partial():
+    result = ToolResult.success_result(
+        "llm_molecular_generator",
+        data=[{"smiles": "CCO"}],
+        status=ObservationStatus.PARTIAL,
+    )
+
+    agent_result = AgentResult.from_tool_results(
+        trace_id="partial-generation",
+        skill_name="molecular_design",
+        tool_results=[result],
+    )
+
+    assert agent_result.success is False
+    assert agent_result.partial is True
+    assert agent_result.outcome == RunOutcome.PARTIAL
+    assert agent_result.to_legacy_dict()["status"] == "partial"
+
+
+def test_failed_tool_uses_failed_observation_status():
+    result = ToolResult.error_result(
+        "activity_predictor",
+        AgentErrorCode.MODEL_UNAVAILABLE,
+        "weights missing",
+    )
+    assert result.status == ObservationStatus.FAILED
