@@ -1,5 +1,111 @@
 # 最新任务交接
 
+## 2026-08-10 工业级 Agent 科学信任基础
+
+### 任务状态
+
+- 当前实现分支：`codex/industrial-agent-scientific-trust`，基于已批准计划 `docs/superpowers/plans/2026-08-10-industrial-agent-scientific-trust-foundation.md`。
+- 实现位于隔离 worktree，未覆盖原工作区中的前端、Supervisor、报告层等未提交改动，未直接修改或合并 `main`。
+- 下一阶段计划名：`industrial-agent-langgraph-harness`。本轮没有引入 LangGraph，而是先完成框架无关的科学状态、能力、编译、绑定、证据和真实性门禁。
+- API key 仅从运行时环境读取；报告只确认 `API key present: true`。三份验收报告的 `sk-*` 长凭据扫描结果均为 0 命中。
+
+### 已完成的架构能力
+
+1. 新增 `ObservationStatus`、`RunOutcome`、`ToolProvenance` 和 `ScientificClaim`；`ToolResult`/`AgentResult` 在保留 legacy 字典兼容性的同时输出明确状态和 provenance。
+2. 新增版本化科学能力目录，工具注册表可按能力解析真实实现，未知能力不会隐式落到任意工具。
+3. 新增工作流计划编译器，在执行前拒绝工具越权、能力错配、重复步骤/输出和不存在的上游绑定。
+4. 新增受限 Binding Resolver。靶点驱动设计强制绑定 `target search -> generation`，hit-to-lead 强制绑定 `baseline properties -> generation`，候选性质、ADMET、活性步骤消费生成候选。
+5. 生成候选在进入下游或前端前由 RDKit 校验、canonicalize 和去重；无有效候选时失败，数量不足时为 `partial`。
+6. 新增 Evidence Ledger 和 claim-safe renderer。demo/fallback 结果不可作为可用科学证据，未知或不可用 evidence 不能支撑 claim。
+7. Orchestrator 为每个工具观察登记 evidence，最终 metadata 保留账本；部分结果发出 `task_partial`，不再伪装为 `task_completed`。
+8. 真实验收新增候选有效性、claim evidence 和显式数据流的确定性 truth gates；LLM 自评不参与硬性科学通过判定。
+
+### 本轮提交
+
+```text
+135b8df feat(agent): add scientific outcome contracts
+e856f64 feat(agent): preserve tool truth status and provenance
+301ecce feat(agent): add scientific capability catalog
+aa29290 feat(agent): compile workflow plans before execution
+9e6d012 feat(agent): bind downstream steps to upstream outputs
+e566cd4 fix(agent): reject invalid generated molecules
+a25c787 feat(agent): add evidence ledger and claim renderer
+db6ba85 feat(agent): persist evidence-backed run outcomes
+64cf3ec test(agent): gate releases on scientific evidence
+97ff892 test(agent): enforce generated molecule output contract
+```
+
+### 修改文件范围
+
+- 契约与能力：`src/agent/contracts/`、`src/agent/capabilities/`、`src/agent/tooling/registry.py`。
+- 计划与执行：`src/agent/planning/`、`src/agent/orchestrators/base.py`、`src/agent/orchestrators/workflow.py`、`src/agent/runtime/workflow_executor.py`、`src/agent/runtime/task_state.py`。
+- 科学真实性：`src/agent/validators/`、`src/agent/evidence/`、`src/agent/evaluation/scientific.py`。
+- 测试：`tests/agent/test_scientific_contracts.py`、`test_capability_catalog.py`、`test_plan_compiler.py`、`test_binding_resolver.py`、`test_generated_candidate_validation.py`、`test_evidence_ledger.py`、`test_scientific_trust_runtime.py` 及相关既有回归测试。
+- 文档：`docs/PROJECT_STANDARDS.md`、`docs/handoff/latest.md`。
+
+### 验证命令与结果
+
+```powershell
+C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\agent -q -p no:cacheprovider
+# 272 passed, 5 warnings
+
+C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\test_agent_anti_hallucination_fallbacks.py tests\test_agent_platform_health_check.py tests\agent\test_real_acceptance_checks.py -q -p no:cacheprovider
+# 34 passed, 5 warnings
+
+C:\Users\xkx52\.conda\envs\MedChat\python.exe -m compileall -q src scripts
+# passed
+
+C:\Users\xkx52\.conda\envs\MedChat\python.exe scripts\run_agent_acceptance.py --mode contract --output outputs\agent_evaluation\agent_acceptance_contract_report.json
+# passed
+
+C:\Users\xkx52\.conda\envs\MedChat\python.exe scripts\run_agent_acceptance.py --mode real --case-set golden --repeat 1
+# 启动命令在 124 秒上限处 exit 124；此前已写出完整、可解析的 real 报告，报告状态为 partial。
+# 无遗留 Python 验收进程。该退出生命周期问题不得记为命令成功。
+
+C:\Users\xkx52\.conda\envs\MedChat\python.exe scripts\run_agent_acceptance.py --mode replay --replay-input outputs\agent_evaluation\agent_acceptance_report.json --output outputs\agent_evaluation\agent_acceptance_replay_report.json
+# exit 0，partial；离线复现 real truth-check 决策。
+```
+
+现有 5 条 warning 为 3 条 SWIG 类型弃用提示和 2 条 FastAPI `on_event` 弃用提示，不影响本轮科学契约结论。
+
+### 真实 golden 案例结果
+
+| Case | 状态 | 分数 | 真实结论 |
+|---|---:|---:|---|
+| GOLD-001 | passed | 100 | 阿司匹林 RDKit 性质与类药性通过 |
+| GOLD-002 | passed | 100 | 咖啡因性质、类药性、ADMET 方法记录通过 |
+| GOLD-003 | partial | 90 | RG-MPNN、反向寻靶数据和下游靶点证据不可用 |
+| GOLD-004 | partial | 90 | EGFR 本地靶点结构记录为空 |
+| GOLD-005 | partial | 90 | PDE5A 本地靶点结构记录为空 |
+| GOLD-006 | partial | 90 | 反向寻靶训练数据缺失 |
+| GOLD-007 | partial | 100 | 低可信反向寻靶未伪造结果，但工作流没有成功工具输出 |
+| GOLD-008 | partial | 90 | 10/10 有效唯一候选及数据流通过；靶点证据为空且 RG-MPNN 不可用 |
+| GOLD-009 | partial | 90 | 基线到候选数据流通过；RG-MPNN 不可用 |
+| GOLD-010 | passed | 100 | 真实 Vina 生成 3 个 pose，报告中 pose 文件存在、结合能为数值 |
+| GOLD-011 | passed | 100 | 无效 SMILES 被拒绝，未返回伪性质 |
+| GOLD-012 | passed | 100 | 缺 docking 参数时拒绝计算，未返回伪结合能 |
+
+稳定性：12 个案例中 5 passed、7 partial、0 failed、0 skipped；严格 passed rate 为 41.67%，partial rate 为 58.33%。验收器的非灾难完成率为 100%，不代表所有案例严格通过。p50 为 254.75 ms，p95 为 40104.95 ms。
+
+真实依赖探针：
+
+- 外部主模型 `gemini-3.1-pro`：passed，4252 ms；未记录密钥值。
+- 本地 Ollama `gmm-llama:latest`：passed，3/3 有效唯一候选，53708 ms。
+- AutoDock Vina：项目适配器真实执行 passed；虽然系统 PATH 未发现 `vina` 命令，但适配器找到可用后端并生成 pose。
+- RG-MPNN：failed，真实模型未加载，未输出模拟 pIC50。
+- 靶点搜索：failed，本地探针返回 0 条记录。
+- 反向寻靶：训练数据 `data/reverse_target/chembl_training_data.tsv` 缺失。
+
+本地运行产物位于 `outputs/agent_evaluation/` 和 `temp_docking/`，受忽略规则保护，不提交 Git。
+
+### 已发现、下一阶段优先处理的问题
+
+1. **P0：关键上游结果只有“绑定存在”校验，没有“科学证据可用”校验。** GOLD-008 的靶点搜索没有记录，但生成器仍收到 `Validated target evidence: None` 并继续生成。下一阶段应为 required evidence 增加 semantic gate；空证据时停止、请求补充或明确降级为非靶点约束生成。
+2. **P0：候选身份与下游结果缺少一一对应清单。** GOLD-008 生成 10 个候选，但性质/ADMET 输出摘要显示 11 条。应引入带 `candidate_id` 的 CandidateSet，按 ID 连接性质、ADMET、活性和排序，拒绝基数漂移。
+3. **P1：长任务生命周期与资源治理仍不足。** real 报告已写完但 CLI 未在 124 秒内干净退出；本地生成探针 53.7 秒、docking 案例 76.7 秒。`industrial-agent-langgraph-harness` 应加入 durable execution、每节点 time budget、取消传播、增量报告和任务队列并发限制。
+
+部署侧还需恢复并校验 RG-MPNN registry/权重、靶点数据库和反向寻靶训练数据；在这些资产可用前，相关案例必须继续保持 `partial`/`failed`。
+
 ## 2026-07-13 科学运行时加固与真实科研验收
 
 ### 任务状态

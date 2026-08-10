@@ -136,6 +136,13 @@ src/web/static/js/<feature>/main.js
 11. 外部工具调用必须设置超时，并将标准错误转换为结构化错误。
 12. 新增公共行为必须有聚焦测试和全量回归。
 
+### 5.1 Agent 科学执行契约
+
+- Agent plans must compile before execution. Multi-step plans must bind downstream inputs to versioned upstream outputs. Scientific claims require accepted evidence, and generated molecular candidates must pass RDKit validation and canonical deduplication before they are returned to downstream tools or the frontend.
+- 工具观察必须保留显式状态、provenance、warnings、evidence 和 artifacts；`partial`、`unavailable`、`failed` 不得转换为完成态。
+- 编译器只接受受限绑定语法，运行时不得执行任意表达式；靶点驱动设计和 hit-to-lead 必须验证关键上游结果确实进入下游步骤。
+- demo、fallback 或缺少真实模型/工具证据的结果不得支撑科学 claim。
+
 ## 6. API 设计规范
 
 ### 6.1 URL
