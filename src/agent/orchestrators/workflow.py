@@ -14,6 +14,7 @@ from src.agent.contracts import (
     AgentResult,
     ToolResult,
 )
+from src.agent.evidence import EvidenceLedger
 from src.agent.persistence.base import AgentStateStore
 from src.agent.persistence.redaction import redact_sensitive
 from src.agent.planning.bindings import BindingResolutionError, BindingResolver
@@ -89,6 +90,7 @@ class WorkflowOrchestrator:
             trace_id=context.trace_id,
             inputs={"query": context.query, **dict(context.metadata or {})},
         )
+        ledger = EvidenceLedger(context.trace_id)
         outputs = state.outputs
         reused_steps: list[str] = []
         total_steps = max(len(steps), 1)
@@ -226,6 +228,15 @@ class WorkflowOrchestrator:
                 "output_key": step.output_key,
             }
             result = self.validator.validate_tool_result(result)
+            evidence_id = ledger.register_tool_result(
+                step_id=step.name,
+                input_digest=input_hash,
+                result=result,
+            )
+            result.quality = {
+                **result.quality,
+                "evidence_id": evidence_id,
+            }
             if not result.success and not step.required:
                 optional_warning = (
                     f"Optional step {step.name} ({step.tool_name}) failed: "
@@ -302,11 +313,18 @@ class WorkflowOrchestrator:
                 "completed_count": len(results),
                 "reused_steps": reused_steps,
                 "workflow_state": redact_sensitive(state.to_dict()),
+                "evidence_ledger": ledger.to_list(),
+                "claims": [
+                    claim.to_dict()
+                    for claim in ledger.claims().values()
+                ],
             },
         )
         completion_event = (
             TaskEventType.TASK_COMPLETED
-            if agent_result.success or agent_result.partial
+            if agent_result.success
+            else TaskEventType.TASK_PARTIAL
+            if agent_result.partial
             else TaskEventType.TASK_FAILED
         )
         self._emit(

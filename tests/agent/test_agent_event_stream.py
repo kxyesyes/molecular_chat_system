@@ -3,7 +3,7 @@ from src.agent.orchestrators.base import WorkflowStep
 from src.agent.orchestrators.workflow import WorkflowOrchestrator
 from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
-from src.agent.runtime.task_state import TaskEventType
+from src.agent.runtime.task_state import AgentTaskState, TaskEventType
 
 
 class FakeTool:
@@ -47,3 +47,16 @@ def test_event_bus_persists_legacy_compatible_event_payloads(tmp_path):
     persisted = store.get_events("persisted-events")
     assert persisted[0]["event"] == "task_started"
     assert event.to_dict()["type"] == "agent_event"
+
+
+def test_partial_terminal_event_sets_unambiguous_task_state():
+    state = AgentTaskState(trace_id="partial-state")
+
+    state.add_event(
+        TaskEventType.TASK_PARTIAL,
+        "workflow returned partial scientific results",
+        progress=1.0,
+    )
+
+    assert state.status == "partial"
+    assert state.progress == 1.0

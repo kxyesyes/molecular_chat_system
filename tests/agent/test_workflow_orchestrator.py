@@ -227,8 +227,17 @@ def test_workflow_can_pass_raw_upstream_output_to_downstream_tool():
 
 
 def test_workflow_binding_and_template_pass_target_evidence_to_generator():
+    class ValidGenerator(FakeTool):
+        def execute(self, query):
+            self.calls.append(query)
+            return {
+                "success": True,
+                "message": "generated",
+                "data": [{"smiles": "CCO"}],
+            }
+
     target_tool = FakeTool("target_database_search")
-    generator = FakeTool("llm_molecular_generator")
+    generator = ValidGenerator("llm_molecular_generator")
 
     result = WorkflowOrchestrator().run(
         context=AgentContext(
