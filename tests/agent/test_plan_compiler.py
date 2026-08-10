@@ -85,3 +85,55 @@ def test_compiler_rejects_capability_tool_mismatch():
             plan,
             WorkflowCatalog().require("admet_assessment"),
         )
+
+
+def test_compiler_rejects_target_design_that_ignores_target_evidence():
+    plan = WorkflowPlan(
+        workflow_name="target_driven_design",
+        steps=[
+            WorkflowStep(
+                "target_search",
+                "target_database_search",
+                output_key="target",
+                capability="target.structure.search",
+            ),
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_data="original query only",
+                output_key="molecules",
+                capability="molecule.generate",
+            ),
+        ],
+    )
+    with pytest.raises(PlanCompilationError, match="target evidence"):
+        PlanCompiler().compile(
+            plan,
+            WorkflowCatalog().require("target_driven_design"),
+        )
+
+
+def test_compiler_rejects_lead_generation_that_ignores_baseline_properties():
+    plan = WorkflowPlan(
+        workflow_name="hit_to_lead_optimization",
+        steps=[
+            WorkflowStep(
+                "baseline_properties",
+                "property_calculator",
+                output_key="baseline",
+                capability="molecule.properties",
+            ),
+            WorkflowStep(
+                "molecule_generation",
+                "llm_molecular_generator",
+                input_data="original query only",
+                output_key="candidates",
+                capability="molecule.generate",
+            ),
+        ],
+    )
+    with pytest.raises(PlanCompilationError, match="baseline properties"):
+        PlanCompiler().compile(
+            plan,
+            WorkflowCatalog().require("hit_to_lead_optimization"),
+        )

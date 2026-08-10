@@ -45,9 +45,16 @@ def test_target_driven_design_plan_for_pde5_query():
     ]
     assert plan.metadata["target_hint"] == "PDE5"
     assert plan.metadata["requested_count"] == 20
+    generation_step = plan.steps[1]
+    assert generation_step.input_binding == "$.outputs.target"
+    assert generation_step.input_transform == "identity"
+    assert "Validated target evidence" in generation_step.input_template
     assert plan.steps[2].input_from == "molecules"
+    assert plan.steps[2].input_binding == "$.outputs.molecules"
     assert plan.steps[3].input_from == "molecules"
+    assert plan.steps[3].input_binding == "$.outputs.molecules"
     assert plan.steps[4].input_from == "molecules"
+    assert plan.steps[4].input_binding == "$.outputs.molecules"
 
 
 def test_comprehensive_target_search_consumes_reverse_target_output():
@@ -63,7 +70,27 @@ def test_comprehensive_target_search_consumes_reverse_target_output():
 
     target_step = next(step for step in plan.steps if step.name == "target_structures")
     assert target_step.input_from == "targets"
+    assert target_step.input_binding == "$.outputs.targets"
     assert target_step.metadata["input_mode"] == "raw"
+
+
+def test_hit_to_lead_generation_consumes_computed_baseline():
+    plan = TaskPlanner().plan(
+        AgentContext(
+            query="Optimize c1ccccc1CCCCCC to lower LogP and improve QED",
+            trace_id="trace-lead",
+            active_skill="hit_to_lead_optimization",
+        )
+    )
+
+    generation_step = next(
+        step for step in plan.steps if step.name == "molecule_generation"
+    )
+    assert generation_step.input_binding == "$.outputs.baseline"
+    candidate_step = next(
+        step for step in plan.steps if step.name == "candidate_properties"
+    )
+    assert candidate_step.input_binding == "$.outputs.candidates"
 
 
 def test_atomic_skills_receive_single_step_declarative_plans():

@@ -226,6 +226,45 @@ def test_workflow_can_pass_raw_upstream_output_to_downstream_tool():
     assert target_tool.calls == [[{"gene_symbol": "EGFR", "final_similarity": 0.91}]]
 
 
+def test_workflow_binding_and_template_pass_target_evidence_to_generator():
+    target_tool = FakeTool("target_database_search")
+    generator = FakeTool("llm_molecular_generator")
+
+    result = WorkflowOrchestrator().run(
+        context=AgentContext(
+            query="Design molecules for EGFR",
+            trace_id="bound-target",
+        ),
+        steps=[
+            WorkflowStep(
+                "target_search",
+                "target_database_search",
+                "EGFR",
+                output_key="target",
+            ),
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_binding="$.outputs.target",
+                input_template=(
+                    "User request: {query}\n"
+                    "Validated target evidence: {input}"
+                ),
+            ),
+        ],
+        tools={
+            "target_database_search": target_tool,
+            "llm_molecular_generator": generator,
+        },
+    )
+
+    assert result.success is True
+    assert generator.calls == [
+        "User request: Design molecules for EGFR\n"
+        "Validated target evidence: {'input': 'EGFR'}"
+    ]
+
+
 def test_required_failure_stops_even_when_workflow_default_continues():
     context = AgentContext(query="analyze CCO", trace_id="required-stop")
     first = FakeTool("required_tool", success=False)

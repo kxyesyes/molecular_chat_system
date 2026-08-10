@@ -16,6 +16,7 @@ from src.agent.contracts import (
 )
 from src.agent.persistence.base import AgentStateStore
 from src.agent.persistence.redaction import redact_sensitive
+from src.agent.planning.bindings import BindingResolutionError, BindingResolver
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.task_state import TaskEventType
 from src.agent.tools.base_tool import execute_tool_compat
@@ -142,48 +143,82 @@ class WorkflowOrchestrator:
                 progress=index / total_steps,
             )
             tool = tools.get(step.tool_name)
-            input_data = self._resolve_input(context, step, outputs)
-            input_hash = self._input_hash(input_data)
-            tool_version = str(
-                step.metadata.get(
-                    "tool_version",
-                    getattr(tool, "version", "1") if tool is not None else "missing",
+            try:
+                input_data = self._resolve_input(context, step, outputs)
+            except BindingResolutionError as exc:
+                input_data = {
+                    "binding": step.input_binding,
+                    "resolution_error": str(exc),
+                }
+                input_hash = self._input_hash(input_data)
+                tool_version = str(
+                    getattr(tool, "version", "1") if tool else "missing"
                 )
-            )
-            model_version = str(
-                step.metadata.get(
-                    "model_version",
-                    getattr(getattr(tool, "llm_model", None), "model_name", ""),
+                model_version = str(
+                    getattr(getattr(tool, "llm_model", None), "model_name", "")
                 )
-            )
-            checkpoint = self._compatible_checkpoint(
-                context.trace_id,
-                step,
-                input_hash,
-                tool_version,
-                model_version,
-            )
-
-            if checkpoint:
-                result = self._result_from_checkpoint(step.tool_name, checkpoint)
-                reused_steps.append(step.name)
-            elif tool is None:
+                checkpoint = None
                 result = ToolResult.error_result(
                     tool_name=step.tool_name,
-                    code=AgentErrorCode.INTERNAL_ERROR,
-                    message=f"Tool not found: {step.tool_name}",
-                    details={"step": step.name},
+                    code=AgentErrorCode.INVALID_INPUT,
+                    message="Workflow input binding could not be resolved",
+                    details={
+                        "step": step.name,
+                        "selector": step.input_binding,
+                        "reason": str(exc),
+                    },
                 )
             else:
-                self._save_checkpoint(
-                    context,
-                    step,
-                    status="running",
-                    input_hash=input_hash,
-                    tool_version=tool_version,
-                    model_version=model_version,
+                input_hash = self._input_hash(input_data)
+                tool_version = str(
+                    step.metadata.get(
+                        "tool_version",
+                        getattr(tool, "version", "1")
+                        if tool is not None
+                        else "missing",
+                    )
                 )
-                result = self._execute_step(tool, input_data, step)
+                model_version = str(
+                    step.metadata.get(
+                        "model_version",
+                        getattr(
+                            getattr(tool, "llm_model", None),
+                            "model_name",
+                            "",
+                        ),
+                    )
+                )
+                checkpoint = self._compatible_checkpoint(
+                    context.trace_id,
+                    step,
+                    input_hash,
+                    tool_version,
+                    model_version,
+                )
+
+                if checkpoint:
+                    result = self._result_from_checkpoint(
+                        step.tool_name,
+                        checkpoint,
+                    )
+                    reused_steps.append(step.name)
+                elif tool is None:
+                    result = ToolResult.error_result(
+                        tool_name=step.tool_name,
+                        code=AgentErrorCode.INTERNAL_ERROR,
+                        message=f"Tool not found: {step.tool_name}",
+                        details={"step": step.name},
+                    )
+                else:
+                    self._save_checkpoint(
+                        context,
+                        step,
+                        status="running",
+                        input_hash=input_hash,
+                        tool_version=tool_version,
+                        model_version=model_version,
+                    )
+                    result = self._execute_step(tool, input_data, step)
 
             result.quality = {
                 **result.quality,
@@ -461,7 +496,14 @@ class WorkflowOrchestrator:
         step: WorkflowStep,
         outputs: Mapping[str, Any],
     ) -> Any:
-        if step.input_from:
+        if step.input_binding:
+            input_data = BindingResolver().resolve(
+                step.input_binding,
+                step.input_transform,
+                request={"query": context.query, "metadata": context.metadata},
+                outputs=outputs,
+            )
+        elif step.input_from:
             raw_input = outputs.get(step.input_from)
             input_data = (
                 raw_input

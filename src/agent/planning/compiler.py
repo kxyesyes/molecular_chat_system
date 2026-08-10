@@ -68,4 +68,81 @@ class PlanCompiler:
                     )
                 producers[step.output_key] = step.name
 
+        step_capabilities = {
+            step.name: (
+                step.capability or capability_for_tool(step.tool_name).name
+            )
+            for step in plan.steps
+        }
+
+        if plan.workflow_name == "target_driven_design":
+            target_step = next(
+                (
+                    step
+                    for step in plan.steps
+                    if step_capabilities[step.name] == "target.structure.search"
+                ),
+                None,
+            )
+            generation_step = next(
+                (
+                    step
+                    for step in plan.steps
+                    if step_capabilities[step.name] == "molecule.generate"
+                ),
+                None,
+            )
+            expected_binding = (
+                f"$.outputs.{target_step.output_key}"
+                if target_step and target_step.output_key
+                else None
+            )
+            if (
+                generation_step is None
+                or not expected_binding
+                or generation_step.input_binding != expected_binding
+            ):
+                raise PlanCompilationError(
+                    "Target-driven generation must consume target evidence"
+                )
+
+        if plan.workflow_name == "hit_to_lead_optimization":
+            generation_index = next(
+                (
+                    index
+                    for index, step in enumerate(plan.steps)
+                    if step_capabilities[step.name] == "molecule.generate"
+                ),
+                None,
+            )
+            baseline_step = next(
+                (
+                    step
+                    for index, step in enumerate(plan.steps)
+                    if generation_index is not None
+                    and index < generation_index
+                    and step_capabilities[step.name] == "molecule.properties"
+                    and step.output_key
+                ),
+                None,
+            )
+            generation_step = (
+                plan.steps[generation_index]
+                if generation_index is not None
+                else None
+            )
+            expected_binding = (
+                f"$.outputs.{baseline_step.output_key}"
+                if baseline_step
+                else None
+            )
+            if (
+                generation_step is None
+                or not expected_binding
+                or generation_step.input_binding != expected_binding
+            ):
+                raise PlanCompilationError(
+                    "Hit-to-lead generation must consume baseline properties"
+                )
+
         return CompiledPlan(plan=plan, dependencies=dependencies)
