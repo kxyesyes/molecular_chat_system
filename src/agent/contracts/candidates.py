@@ -1,22 +1,61 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from hashlib import sha256
+from math import isfinite
 from types import MappingProxyType
 from typing import Any
 
 from .scientific import ObservationStatus
 
 
-def _freeze_json(value: Any) -> Any:
+_CANDIDATE_ID_PATTERN = re.compile(r"^cand-(\d+)-([0-9a-f]{8})$")
+
+
+def _freeze_json(value: Any, active_containers: set[int] | None = None) -> Any:
+    if active_containers is None:
+        active_containers = set()
+
     if isinstance(value, Mapping):
-        return MappingProxyType(
-            {key: _freeze_json(item) for key, item in value.items()}
-        )
+        container_id = id(value)
+        if container_id in active_containers:
+            raise ValueError("JSON values cannot contain circular references")
+        active_containers.add(container_id)
+        try:
+            frozen = {}
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise ValueError("JSON mapping keys must be strings")
+                frozen[key] = _freeze_json(item, active_containers)
+            return MappingProxyType(frozen)
+        finally:
+            active_containers.remove(container_id)
+
     if isinstance(value, (list, tuple)):
-        return tuple(_freeze_json(item) for item in value)
-    return value
+        container_id = id(value)
+        if container_id in active_containers:
+            raise ValueError("JSON values cannot contain circular references")
+        active_containers.add(container_id)
+        try:
+            return tuple(_freeze_json(item, active_containers) for item in value)
+        finally:
+            active_containers.remove(container_id)
+
+    if value is None or type(value) in (bool, int, str):
+        return value
+    if type(value) is float:
+        if not isfinite(value):
+            raise ValueError("JSON float values must be finite")
+        return value
+    raise ValueError(f"unsupported JSON value type: {type(value).__name__}")
+
+
+def _freeze_json_mapping(name: str, value: Any) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{name} must be a JSON mapping")
+    return _freeze_json(value)
 
 
 def _thaw_json(value: Any) -> Any:
@@ -37,10 +76,14 @@ def _require_non_negative_int(name: str, value: int) -> None:
         raise ValueError(f"{name} must be a non-negative integer")
 
 
+def _require_non_empty_str(name: str, value: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} cannot be empty")
+
+
 def build_candidate_id(candidate_index: int, canonical_smiles: str) -> str:
     _require_positive_int("candidate_index", candidate_index)
-    if not isinstance(canonical_smiles, str) or not canonical_smiles.strip():
-        raise ValueError("canonical_smiles cannot be empty")
+    _require_non_empty_str("canonical_smiles", canonical_smiles)
     digest = sha256(canonical_smiles.encode("utf-8")).hexdigest()[:8]
     return f"cand-{candidate_index:03d}-{digest}"
 
@@ -56,13 +99,41 @@ class CandidateRecord:
     metadata: Mapping[str, Any]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "validation", _freeze_json(self.validation))
+        _require_positive_int("source_index", self.source_index)
+        _require_non_empty_str("original_smiles", self.original_smiles)
+        _require_non_empty_str("canonical_smiles", self.canonical_smiles)
+
+        match = (
+            _CANDIDATE_ID_PATTERN.fullmatch(self.candidate_id)
+            if isinstance(self.candidate_id, str)
+            else None
+        )
+        if match is None:
+            raise ValueError("candidate_id has an invalid format")
+        candidate_index = int(match.group(1))
+        _require_positive_int("candidate index in candidate_id", candidate_index)
+        expected_id = build_candidate_id(candidate_index, self.canonical_smiles)
+        if self.candidate_id != expected_id:
+            raise ValueError("candidate_id does not match canonical_smiles")
+
+        object.__setattr__(
+            self,
+            "validation",
+            _freeze_json_mapping("validation", self.validation),
+        )
         object.__setattr__(
             self,
             "generation_provenance",
-            _freeze_json(self.generation_provenance),
+            _freeze_json_mapping(
+                "generation_provenance",
+                self.generation_provenance,
+            ),
         )
-        object.__setattr__(self, "metadata", _freeze_json(self.metadata))
+        object.__setattr__(
+            self,
+            "metadata",
+            _freeze_json_mapping("metadata", self.metadata),
+        )
 
     @classmethod
     def from_smiles(
@@ -112,12 +183,28 @@ class CandidateSet:
     version: str = field(default="1", init=False)
 
     def __post_init__(self) -> None:
-        _require_positive_int("requested_count", self.requested_count)
+        if not isinstance(self.status, ObservationStatus):
+            raise ValueError("status must be an ObservationStatus")
+        _require_non_negative_int("requested_count", self.requested_count)
         _require_non_negative_int("invalid_count", self.invalid_count)
         _require_non_negative_int("duplicate_count", self.duplicate_count)
 
-        candidates = tuple(self.candidates)
-        rejected = tuple(_freeze_json(item) for item in self.rejected)
+        try:
+            candidates = tuple(self.candidates)
+        except TypeError as exc:
+            raise ValueError(
+                "candidates must be an iterable of CandidateRecord"
+            ) from exc
+        if any(not isinstance(candidate, CandidateRecord) for candidate in candidates):
+            raise ValueError("candidates must contain only CandidateRecord values")
+
+        try:
+            rejected_items = tuple(self.rejected)
+        except TypeError as exc:
+            raise ValueError("rejected must be an iterable of JSON mappings") from exc
+        rejected = tuple(
+            _freeze_json_mapping("rejected item", item) for item in rejected_items
+        )
         object.__setattr__(self, "candidates", candidates)
         object.__setattr__(self, "rejected", rejected)
 
@@ -133,8 +220,14 @@ class CandidateSet:
             raise ValueError("canonical_smiles values must be unique")
 
         valid_count = len(candidates)
+        if self.status in (ObservationStatus.SUCCEEDED, ObservationStatus.PARTIAL):
+            if self.requested_count == 0:
+                raise ValueError(
+                    "succeeded and partial candidate sets require requested candidates"
+                )
+
         if self.status == ObservationStatus.SUCCEEDED:
-            if valid_count == 0 or valid_count != self.requested_count:
+            if valid_count != self.requested_count:
                 raise ValueError(
                     "succeeded candidate sets require all requested candidates"
                 )

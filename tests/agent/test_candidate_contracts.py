@@ -5,6 +5,10 @@ import pytest
 from src.agent import contracts
 
 
+class _NonJsonObject:
+    pass
+
+
 def _candidate(
     candidate_index=1,
     canonical_smiles="CCO",
@@ -24,6 +28,20 @@ def _candidate(
         generation_provenance=generation_provenance,
         metadata=metadata,
     )
+
+
+def _direct_candidate(**overrides):
+    values = {
+        "candidate_id": contracts.build_candidate_id(1, "CCO"),
+        "source_index": 1,
+        "original_smiles": "C(C)O",
+        "canonical_smiles": "CCO",
+        "validation": {"valid": True, "method": "RDKit"},
+        "generation_provenance": {},
+        "metadata": {},
+    }
+    values.update(overrides)
+    return contracts.CandidateRecord(**values)
 
 
 def test_build_candidate_id_is_stable_for_candidate_index_and_canonical_smiles():
@@ -89,6 +107,40 @@ def test_candidate_id_ignores_source_index_and_original_smiles():
 def test_candidate_record_rejects_invalid_source_index(source_index):
     with pytest.raises(ValueError):
         _candidate(source_index=source_index)
+
+
+def test_candidate_record_accepts_valid_direct_construction():
+    candidate = _direct_candidate()
+
+    assert candidate.candidate_id == contracts.build_candidate_id(1, "CCO")
+    assert candidate.source_index == 1
+
+
+@pytest.mark.parametrize("source_index", [True, False, 0, -1, 1.5])
+def test_direct_candidate_record_rejects_invalid_source_index(source_index):
+    with pytest.raises(ValueError):
+        _direct_candidate(source_index=source_index)
+
+
+@pytest.mark.parametrize("smiles_field", ["original_smiles", "canonical_smiles"])
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_direct_candidate_record_rejects_empty_smiles(smiles_field, value):
+    with pytest.raises(ValueError):
+        _direct_candidate(**{smiles_field: value})
+
+
+@pytest.mark.parametrize(
+    "candidate_id",
+    [
+        "candidate-001-ab1de819",
+        "cand-000-ab1de819",
+        "cand-001-DEADBEEF",
+        "cand-001-deadbeef",
+    ],
+)
+def test_direct_candidate_record_rejects_invalid_or_mismatched_id(candidate_id):
+    with pytest.raises(ValueError):
+        _direct_candidate(candidate_id=candidate_id)
 
 
 def test_candidate_record_serializes_all_fields_with_legacy_smiles_alias():
@@ -157,6 +209,51 @@ def test_candidate_record_recursively_freezes_inputs_and_thaws_fresh_payloads():
     }
 
 
+@pytest.mark.parametrize(
+    "field_name",
+    ["validation", "generation_provenance", "metadata"],
+)
+def test_candidate_record_json_mappings_reject_non_string_keys(field_name):
+    with pytest.raises(ValueError):
+        _direct_candidate(**{field_name: {1: "not-json"}})
+
+
+@pytest.mark.parametrize(
+    "invalid_leaf",
+    [
+        {"not", "json"},
+        b"bytes",
+        bytearray(b"bytes"),
+        _NonJsonObject(),
+    ],
+)
+def test_candidate_record_json_mappings_reject_non_json_leaves(invalid_leaf):
+    with pytest.raises(ValueError):
+        _direct_candidate(metadata={"nested": [invalid_leaf]})
+
+
+@pytest.mark.parametrize("non_finite", [float("nan"), float("inf"), float("-inf")])
+def test_candidate_record_json_mappings_reject_non_finite_floats(non_finite):
+    with pytest.raises(ValueError):
+        _direct_candidate(metadata={"score": non_finite})
+
+
+def test_candidate_record_json_mappings_reject_mapping_cycles():
+    cyclic = {}
+    cyclic["self"] = cyclic
+
+    with pytest.raises(ValueError):
+        _direct_candidate(metadata=cyclic)
+
+
+def test_candidate_record_json_mappings_reject_sequence_cycles():
+    cyclic = []
+    cyclic.append(cyclic)
+
+    with pytest.raises(ValueError):
+        _direct_candidate(metadata={"items": cyclic})
+
+
 def test_candidate_set_serializes_counts_candidates_rejections_and_partial_status():
     candidate = contracts.CandidateRecord.from_smiles(
         candidate_index=1,
@@ -215,7 +312,7 @@ def test_candidate_set_recursively_freezes_rejected_and_thaws_fresh_payloads():
     ]
 
 
-@pytest.mark.parametrize("requested_count", [True, False, 0, -1, 1.5])
+@pytest.mark.parametrize("requested_count", [True, False, -1, 1.5])
 def test_candidate_set_rejects_invalid_requested_count(requested_count):
     with pytest.raises(ValueError):
         contracts.CandidateSet(
@@ -252,15 +349,17 @@ def test_candidate_set_rejects_more_candidates_than_requested():
 
 
 def test_candidate_set_rejects_duplicate_candidate_ids():
-    first = _candidate(1, "CCO")
-    duplicate_id = contracts.CandidateRecord(
-        candidate_id=first.candidate_id,
+    first = _candidate(
+        candidate_index=1,
+        source_index=1,
+        original_smiles="C(C)O",
+        canonical_smiles="CCO",
+    )
+    duplicate_id = _candidate(
+        candidate_index=1,
         source_index=2,
-        original_smiles="CCN",
-        canonical_smiles="CCN",
-        validation={"valid": True},
-        generation_provenance={},
-        metadata={},
+        original_smiles="OCC",
+        canonical_smiles="CCO",
     )
 
     with pytest.raises(ValueError):
@@ -314,6 +413,102 @@ def test_candidate_set_version_is_fixed_and_not_accepted_at_initialization():
             requested_count=1,
             candidates=(_candidate(),),
             version="2",
+        )
+
+
+@pytest.mark.parametrize("status", ["failed", None])
+def test_candidate_set_rejects_non_observation_status(status):
+    with pytest.raises(ValueError):
+        contracts.CandidateSet(
+            requested_count=1,
+            candidates=(),
+            status=status,
+        )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        contracts.ObservationStatus.FAILED,
+        contracts.ObservationStatus.UNAVAILABLE,
+        contracts.ObservationStatus.INVALID_INPUT,
+    ],
+)
+def test_candidate_set_allows_zero_requested_for_non_success_statuses(status):
+    candidate_set = contracts.CandidateSet(
+        requested_count=0,
+        candidates=(),
+        status=status,
+    )
+
+    assert candidate_set.requested_count == 0
+    assert candidate_set.candidates == ()
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        contracts.ObservationStatus.SUCCEEDED,
+        contracts.ObservationStatus.PARTIAL,
+    ],
+)
+def test_candidate_set_rejects_zero_requested_for_success_statuses(status):
+    with pytest.raises(ValueError):
+        contracts.CandidateSet(
+            requested_count=0,
+            candidates=(),
+            status=status,
+        )
+
+
+def test_candidate_set_normalizes_candidate_lists_to_tuple():
+    candidate = _candidate()
+    candidate_set = contracts.CandidateSet(
+        requested_count=1,
+        candidates=[candidate],
+    )
+
+    assert candidate_set.candidates == (candidate,)
+    assert isinstance(candidate_set.candidates, tuple)
+
+
+def test_candidate_set_rejects_non_candidate_record_items():
+    with pytest.raises(ValueError):
+        contracts.CandidateSet(
+            requested_count=1,
+            candidates=[{"candidate_id": "not-a-record"}],
+            status=contracts.ObservationStatus.FAILED,
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_rejected",
+    [
+        ({1: "non-string-key"},),
+        ({"leaf": {"not", "json"}},),
+        ({"score": float("inf")},),
+    ],
+)
+def test_candidate_set_rejected_rejects_invalid_json(invalid_rejected):
+    with pytest.raises(ValueError):
+        contracts.CandidateSet(
+            requested_count=1,
+            candidates=(),
+            rejected=invalid_rejected,
+            status=contracts.ObservationStatus.FAILED,
+        )
+
+
+def test_candidate_set_rejected_rejects_cycles():
+    cyclic = {}
+    cyclic["self"] = cyclic
+
+    with pytest.raises(ValueError):
+        contracts.CandidateSet(
+            requested_count=1,
+            candidates=(),
+            rejected=(cyclic,),
+            status=contracts.ObservationStatus.FAILED,
         )
 
 
