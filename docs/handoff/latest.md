@@ -33,6 +33,7 @@ a25c787 feat(agent): add evidence ledger and claim renderer
 db6ba85 feat(agent): persist evidence-backed run outcomes
 64cf3ec test(agent): gate releases on scientific evidence
 97ff892 test(agent): enforce generated molecule output contract
+88e175e fix(agent): synchronize validated status and provenance
 ```
 
 ### 修改文件范围
