@@ -1,3 +1,4 @@
+from .candidates import CandidateRecord, CandidateSet, build_candidate_id
 from .context import AgentContext
 from .domain import (
     DockingCandidate,
@@ -21,6 +22,8 @@ __all__ = [
     "AgentErrorCode",
     "AgentExecutionError",
     "AgentResult",
+    "CandidateRecord",
+    "CandidateSet",
     "MoleculeCandidate",
     "ObservationStatus",
     "RunOutcome",
@@ -30,4 +33,5 @@ __all__ = [
     "ToolResult",
     "ToolProvenance",
     "WorkflowArtifact",
+    "build_candidate_id",
 ]
