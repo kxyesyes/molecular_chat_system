@@ -169,7 +169,7 @@ def test_candidate_record_serializes_all_fields_with_legacy_smiles_alias():
 
 
 def test_candidate_record_recursively_freezes_inputs_and_thaws_fresh_payloads():
-    validation = {"valid": True, "checks": [{"method": "RDKit"}]}
+    validation = {"valid": True, "method": "RDKit"}
     provenance = {"models": [{"name": "gmm-llama", "versions": ["1"]}]}
     metadata = {"tags": ["generated"], "scores": {"qed": [0.7]}}
     candidate = contracts.CandidateRecord(
@@ -182,7 +182,7 @@ def test_candidate_record_recursively_freezes_inputs_and_thaws_fresh_payloads():
         metadata=metadata,
     )
 
-    validation["checks"][0]["method"] = "changed"
+    validation["method"] = "changed"
     provenance["models"][0]["versions"].append("2")
     metadata["tags"].append("mutated")
     metadata["scores"]["qed"][0] = 0.1
@@ -193,13 +193,13 @@ def test_candidate_record_recursively_freezes_inputs_and_thaws_fresh_payloads():
         candidate.generation_provenance["models"][0]["name"] = "changed"
 
     first_payload = candidate.to_dict()
-    first_payload["validation"]["checks"][0]["method"] = "payload-change"
+    first_payload["validation"]["method"] = "payload-change"
     first_payload["generation_provenance"]["models"][0]["versions"].append("3")
     first_payload["metadata"]["tags"].append("payload-change")
     first_payload["metadata"]["scores"]["qed"][0] = 0.2
 
     second_payload = candidate.to_dict()
-    assert second_payload["validation"]["checks"] == [{"method": "RDKit"}]
+    assert second_payload["validation"] == {"valid": True, "method": "RDKit"}
     assert second_payload["generation_provenance"]["models"] == [
         {"name": "gmm-llama", "versions": ["1"]}
     ]
@@ -257,13 +257,17 @@ def test_candidate_record_json_mappings_reject_sequence_cycles():
 def test_candidate_set_serializes_counts_candidates_rejections_and_partial_status():
     candidate = contracts.CandidateRecord.from_smiles(
         candidate_index=1,
-        source_index=3,
+        source_index=4,
         original_smiles="C(C)O",
         canonical_smiles="CCO",
         generation_provenance={"tool_name": "llm_molecular_generator"},
         metadata={},
     )
-    rejected = ({"source_index": 1, "reason": "invalid_smiles"},)
+    rejected = (
+        {"source_index": 1, "smiles": "bad", "reason": "invalid_smiles"},
+        {"source_index": 2, "smiles": "OCC", "reason": "duplicate_smiles"},
+        {"source_index": 3, "smiles": "C(C)O", "reason": "duplicate_smiles"},
+    )
     candidate_set = contracts.CandidateSet(
         requested_count=4,
         candidates=(candidate,),
@@ -283,7 +287,15 @@ def test_candidate_set_serializes_counts_candidates_rejections_and_partial_statu
         "invalid_count": 1,
         "duplicate_count": 2,
         "candidates": [candidate.to_dict()],
-        "rejected": [{"source_index": 1, "reason": "invalid_smiles"}],
+        "rejected": [
+            {"source_index": 1, "smiles": "bad", "reason": "invalid_smiles"},
+            {"source_index": 2, "smiles": "OCC", "reason": "duplicate_smiles"},
+            {
+                "source_index": 3,
+                "smiles": "C(C)O",
+                "reason": "duplicate_smiles",
+            },
+        ],
         "status": "partial",
     }
 
@@ -292,10 +304,18 @@ def test_candidate_set_serializes_counts_candidates_rejections_and_partial_statu
 
 
 def test_candidate_set_recursively_freezes_rejected_and_thaws_fresh_payloads():
-    rejected = [{"source_index": 2, "details": {"codes": ["invalid_smiles"]}}]
+    rejected = [
+        {
+            "source_index": 2,
+            "smiles": "bad",
+            "reason": "invalid_smiles",
+            "details": {"codes": ["invalid_smiles"]},
+        }
+    ]
     candidate_set = contracts.CandidateSet(
         requested_count=2,
         candidates=(_candidate(),),
+        invalid_count=1,
         rejected=rejected,
         status=contracts.ObservationStatus.PARTIAL,
     )
@@ -308,7 +328,12 @@ def test_candidate_set_recursively_freezes_rejected_and_thaws_fresh_payloads():
     first_payload["rejected"][0]["details"]["codes"].append("payload-change")
 
     assert candidate_set.to_dict()["rejected"] == [
-        {"source_index": 2, "details": {"codes": ["invalid_smiles"]}}
+        {
+            "source_index": 2,
+            "smiles": "bad",
+            "reason": "invalid_smiles",
+            "details": {"codes": ["invalid_smiles"]},
+        }
     ]
 
 
@@ -542,7 +567,13 @@ def test_candidate_record_and_set_strict_dict_round_trip():
         requested_count=2,
         candidates=(candidate,),
         invalid_count=1,
-        rejected=({"source_index": 1, "reason": "invalid_smiles"},),
+        rejected=(
+            {
+                "source_index": 1,
+                "smiles": "bad",
+                "reason": "invalid_smiles",
+            },
+        ),
         status=contracts.ObservationStatus.PARTIAL,
     )
 
@@ -588,3 +619,123 @@ def test_candidate_record_from_dict_rejects_alias_mismatch_and_extra_fields():
     payload["unexpected"] = True
     with pytest.raises(ValueError):
         contracts.CandidateRecord.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    "validation",
+    [
+        {"valid": False, "method": "RDKit"},
+        {"valid": None, "method": "RDKit"},
+        {"valid": 1, "method": "RDKit"},
+        {"valid": True, "method": "rdkit"},
+        {"valid": True, "method": "RDKit", "extra": True},
+    ],
+)
+def test_candidate_record_requires_exact_rdkit_success_validation(validation):
+    with pytest.raises(ValueError):
+        _direct_candidate(validation=validation)
+
+    payload = _candidate().to_dict()
+    payload["validation"] = validation
+    with pytest.raises(ValueError):
+        contracts.CandidateRecord.from_dict(payload)
+
+
+def test_candidate_set_requires_candidate_ids_to_follow_candidate_order():
+    with pytest.raises(ValueError):
+        contracts.CandidateSet(
+            requested_count=1,
+            candidates=(_candidate(candidate_index=2, source_index=1),),
+        )
+
+
+@pytest.mark.parametrize(
+    ("candidate_source", "rejected"),
+    [
+        (
+            1,
+            (
+                {
+                    "source_index": 1,
+                    "smiles": "invalid",
+                    "reason": "invalid_smiles",
+                },
+            ),
+        ),
+        (2, ()),
+    ],
+)
+def test_candidate_set_requires_unique_contiguous_source_indexes(
+    candidate_source,
+    rejected,
+):
+    with pytest.raises(ValueError):
+        contracts.CandidateSet(
+            requested_count=2,
+            candidates=(_candidate(source_index=candidate_source),),
+            invalid_count=1 if rejected else 0,
+            rejected=rejected,
+            status=contracts.ObservationStatus.PARTIAL,
+        )
+
+
+@pytest.mark.parametrize(
+    "rejected",
+    [
+        {"source_index": 1, "reason": "invalid_smiles"},
+        {"source_index": 1, "smiles": "", "reason": "invalid_smiles"},
+        {"source_index": True, "smiles": "bad", "reason": "invalid_smiles"},
+        {"source_index": 1, "smiles": "bad", "reason": "unknown"},
+    ],
+)
+def test_candidate_set_rejects_invalid_rejected_record_schema(rejected):
+    with pytest.raises(ValueError):
+        contracts.CandidateSet(
+            requested_count=1,
+            candidates=(),
+            invalid_count=1,
+            rejected=(rejected,),
+            status=contracts.ObservationStatus.FAILED,
+        )
+
+
+@pytest.mark.parametrize(
+    ("invalid_count", "duplicate_count"),
+    [(0, 0), (2, 1), (1, 0)],
+)
+def test_candidate_set_counts_must_match_rejected_reasons(
+    invalid_count,
+    duplicate_count,
+):
+    rejected = (
+        {"source_index": 1, "smiles": "bad", "reason": "invalid_smiles"},
+        {"source_index": 2, "smiles": "OCC", "reason": "duplicate_smiles"},
+    )
+    with pytest.raises(ValueError):
+        contracts.CandidateSet(
+            requested_count=2,
+            candidates=(),
+            invalid_count=invalid_count,
+            duplicate_count=duplicate_count,
+            rejected=rejected,
+            status=contracts.ObservationStatus.FAILED,
+        )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        contracts.ObservationStatus.FAILED,
+        contracts.ObservationStatus.UNAVAILABLE,
+        contracts.ObservationStatus.INVALID_INPUT,
+        contracts.ObservationStatus.REJECTED,
+        contracts.ObservationStatus.CANCELLED,
+    ],
+)
+def test_non_success_candidate_set_statuses_require_empty_candidates(status):
+    with pytest.raises(ValueError):
+        contracts.CandidateSet(
+            requested_count=1,
+            candidates=(_candidate(),),
+            status=status,
+        )

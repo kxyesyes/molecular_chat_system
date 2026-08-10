@@ -86,6 +86,7 @@ class AgentResultValidator:
             if self._looks_like_candidate_set(original_data):
                 candidate_set = CandidateSet.from_dict(original_data)
                 raw_count = candidate_set.valid_count + len(candidate_set.rejected)
+                self._revalidate_candidate_set(candidate_set)
             else:
                 candidate_set = sanitize_generated_candidates(
                     original_data,
@@ -124,7 +125,12 @@ class AgentResultValidator:
                 validation_available=False,
             )
 
-        validation_available = candidate_set.status != ObservationStatus.UNAVAILABLE
+        validation_available = candidate_set.status not in {
+            ObservationStatus.UNAVAILABLE,
+            ObservationStatus.INVALID_INPUT,
+            ObservationStatus.REJECTED,
+            ObservationStatus.CANCELLED,
+        }
         result.data = candidate_set.to_dict()
         result.status = candidate_set.status
         result.quality = self._generator_quality(
@@ -138,25 +144,19 @@ class AgentResultValidator:
             candidate_set,
         )
 
-        if candidate_set.status == ObservationStatus.UNAVAILABLE:
+        if candidate_set.status not in {
+            ObservationStatus.SUCCEEDED,
+            ObservationStatus.PARTIAL,
+        }:
+            code, message = self._candidate_set_failure(candidate_set.status)
             return self._fail_generator_result(
                 result,
                 candidate_set,
                 raw_count=raw_count,
-                message=result.message or "RDKit is unavailable",
-                code=AgentErrorCode.TOOL_UNAVAILABLE,
-                status=ObservationStatus.UNAVAILABLE,
-                validation_available=False,
-            )
-        if not candidate_set.candidates:
-            return self._fail_generator_result(
-                result,
-                candidate_set,
-                raw_count=raw_count,
-                message="Generated output contained no valid unique SMILES",
-                code=AgentErrorCode.INVALID_OUTPUT,
-                status=ObservationStatus.FAILED,
-                validation_available=True,
+                message=message,
+                code=code,
+                status=candidate_set.status,
+                validation_available=validation_available,
             )
 
         result.success = True
@@ -202,6 +202,62 @@ class AgentResultValidator:
             "candidates",
             "status",
         }.issubset(data)
+
+    @staticmethod
+    def _revalidate_candidate_set(candidate_set: CandidateSet) -> None:
+        if not candidate_set.candidates:
+            return
+        try:
+            from rdkit import Chem
+        except Exception as exc:
+            raise CandidateValidationUnavailable(
+                "RDKit is required to revalidate serialized candidates"
+            ) from exc
+
+        for candidate in candidate_set.candidates:
+            try:
+                molecule = Chem.MolFromSmiles(candidate.canonical_smiles)
+                canonical = (
+                    Chem.MolToSmiles(molecule)
+                    if molecule is not None
+                    else None
+                )
+            except Exception as exc:
+                raise ValueError(
+                    "serialized candidate failed RDKit validation"
+                ) from exc
+            if molecule is None or canonical != candidate.canonical_smiles:
+                raise ValueError(
+                    "serialized canonical_smiles does not match RDKit"
+                )
+
+    @staticmethod
+    def _candidate_set_failure(
+        status: ObservationStatus,
+    ) -> tuple[AgentErrorCode, str]:
+        failures = {
+            ObservationStatus.FAILED: (
+                AgentErrorCode.INVALID_OUTPUT,
+                "Generated output contained no valid unique SMILES",
+            ),
+            ObservationStatus.UNAVAILABLE: (
+                AgentErrorCode.TOOL_UNAVAILABLE,
+                "Generated candidate validation is unavailable",
+            ),
+            ObservationStatus.INVALID_INPUT: (
+                AgentErrorCode.INVALID_INPUT,
+                "Generated candidate input is invalid",
+            ),
+            ObservationStatus.REJECTED: (
+                AgentErrorCode.VALIDATION_ERROR,
+                "Generated candidate output was rejected",
+            ),
+            ObservationStatus.CANCELLED: (
+                AgentErrorCode.INTERNAL_ERROR,
+                "Generated candidate validation was cancelled",
+            ),
+        }
+        return failures[status]
 
     @staticmethod
     def _raw_candidate_count(data: Any) -> int:
@@ -286,12 +342,31 @@ class AgentResultValidator:
 
     @staticmethod
     def _format_candidate_set(candidate_set: CandidateSet) -> str:
-        lines = ["## Validated molecular candidates", ""]
+        lines = [
+            "## Validated molecular candidates",
+            "",
+            "| Candidate ID | Canonical SMILES |",
+            "| --- | --- |",
+        ]
         lines.extend(
-            f"- `{candidate.candidate_id}`: `{candidate.canonical_smiles}`"
+            "| "
+            f"{AgentResultValidator._escape_markdown_table_cell(candidate.candidate_id)}"
+            " | "
+            f"{AgentResultValidator._escape_markdown_table_cell(candidate.canonical_smiles)}"
+            " |"
             for candidate in candidate_set.candidates
         )
         return "\n".join(lines)
+
+    @staticmethod
+    def _escape_markdown_table_cell(value: Any) -> str:
+        return (
+            str(value)
+            .replace("\r", " ")
+            .replace("\n", " ")
+            .replace("|", "\\|")
+            .replace(chr(96), "\\" + chr(96))
+        )
 
     def _validate_smiles_payload(self, data: Any) -> list[str]:
         warnings: list[str] = []

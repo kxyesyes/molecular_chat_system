@@ -31,8 +31,12 @@ class EvidenceLedger:
                 fallback_used=bool(result.quality.get("fallback_used", False)),
                 input_digest=input_digest,
             )
-        elif provenance.input_digest is None:
-            provenance = replace(provenance, input_digest=input_digest)
+        else:
+            provenance = replace(
+                provenance,
+                tool_name=result.tool_name,
+                input_digest=input_digest,
+            )
         result.provenance = provenance
         return provenance
 

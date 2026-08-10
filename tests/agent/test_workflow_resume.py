@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from src.agent.contracts import AgentContext, ToolResult
+from src.agent.contracts import (
+    AgentContext,
+    ObservationStatus,
+    ToolProvenance,
+    ToolResult,
+)
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.persistence import SQLiteAgentStateStore
 
@@ -42,8 +47,12 @@ class CountingCandidateGenerator:
             ],
             quality={
                 "requested_count": 3,
-                "model": "gmm-llama:latest",
             },
+            provenance=ToolProvenance(
+                tool_name="different-tool",
+                model_name="gmm-llama:latest",
+                input_digest="forged-input",
+            ),
         )
 
 
@@ -213,8 +222,39 @@ def test_generator_candidate_set_survives_checkpoint_reuse(tmp_path):
         "generation_provenance"
     ]
     assert candidate_provenance["model_name"] == "gmm-llama:latest"
+    assert resumed_result.provenance.model_name == "gmm-llama:latest"
+    assert candidate_provenance["tool_name"] == "llm_molecular_generator"
     assert (
         candidate_provenance["input_digest"]
         == resumed_result.provenance.input_digest
     )
+    assert resumed_result.provenance.input_digest != "forged-input"
+    evidence = resumed.metadata["evidence_ledger"][0]
+    assert evidence["tool_name"] == evidence["provenance"]["tool_name"]
+    assert evidence["input_digest"] == evidence["provenance"]["input_digest"]
     assert "OCC" not in resumed.final_answer
+
+
+def test_checkpoint_result_restores_status_and_provenance():
+    provenance = ToolProvenance(
+        tool_name="llm_molecular_generator",
+        model_name="gmm-llama:latest",
+        input_digest="stored-input",
+    )
+    checkpoint = {
+        "output": {
+            "data": {"version": "1"},
+            "message": "stored",
+            "status": "partial",
+            "quality": {},
+            "provenance": provenance.to_dict(),
+        }
+    }
+
+    restored = WorkflowOrchestrator._result_from_checkpoint(
+        "llm_molecular_generator",
+        checkpoint,
+    )
+
+    assert restored.status == ObservationStatus.PARTIAL
+    assert restored.provenance == provenance

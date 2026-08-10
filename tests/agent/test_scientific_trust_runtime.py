@@ -1,4 +1,11 @@
-from src.agent.contracts import AgentContext, ObservationStatus, ToolResult
+import pytest
+
+from src.agent.contracts import (
+    AgentContext,
+    ObservationStatus,
+    ToolProvenance,
+    ToolResult,
+)
 from src.agent.evidence import EvidenceLedger
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.runtime.event_bus import AgentEventBus
@@ -69,6 +76,55 @@ def test_prepare_provenance_does_not_register_unvalidated_result():
     assert provenance.model_name == "gmm-llama:latest"
     assert provenance.input_digest == "input-hash"
     assert ledger.to_list() == []
+
+
+def test_prepare_provenance_overrides_forged_runtime_owned_fields():
+    ledger = EvidenceLedger("runtime-owned")
+    result = ToolResult.success_result(
+        "llm_molecular_generator",
+        data=[{"smiles": "CCO"}],
+        provenance=ToolProvenance(
+            tool_name="different-tool",
+            model_name="gmm-llama:latest",
+            input_digest="forged-input",
+            demo_mode=True,
+        ),
+    )
+
+    provenance = ledger.prepare_provenance("real-input", result)
+    evidence_id = ledger.register_tool_result(
+        "generate",
+        "real-input",
+        result,
+    )
+    record = ledger.get(evidence_id)
+
+    assert provenance.tool_name == result.tool_name
+    assert provenance.input_digest == "real-input"
+    assert provenance.model_name == "gmm-llama:latest"
+    assert provenance.demo_mode is True
+    assert record["tool_name"] == record["provenance"]["tool_name"]
+    assert record["input_digest"] == record["provenance"]["input_digest"]
+
+
+def test_tool_provenance_strict_dict_round_trip_and_rejects_bad_types():
+    provenance = ToolProvenance(
+        tool_name="llm_molecular_generator",
+        model_name="gmm-llama:latest",
+        input_digest="input-hash",
+    )
+
+    assert ToolProvenance.from_dict(provenance.to_dict()) == provenance
+
+    payload = provenance.to_dict()
+    payload["demo_mode"] = "false"
+    with pytest.raises(ValueError):
+        ToolProvenance.from_dict(payload)
+
+    payload = provenance.to_dict()
+    payload["unexpected"] = True
+    with pytest.raises(ValueError):
+        ToolProvenance.from_dict(payload)
 
 
 def test_failed_required_tool_never_reports_completed_outcome():

@@ -960,7 +960,7 @@ def _check_generation(
     ]
     requested = int(requested_count or len(smiles) or 0)
     metrics = chemistry_metrics(smiles, requested_count=requested if strict_count else None)
-    model_names: set[str] = set()
+    candidate_model_names: set[str] = set()
     for item in records:
         if not isinstance(item, Mapping):
             continue
@@ -968,24 +968,46 @@ def _check_generation(
         if isinstance(generation_provenance, Mapping):
             model_name = generation_provenance.get("model_name")
             if model_name:
-                model_names.add(str(model_name))
+                candidate_model_names.add(str(model_name))
         metadata = item.get("metadata")
         if isinstance(metadata, Mapping) and metadata.get("model"):
-            model_names.add(str(metadata["model"]))
+            candidate_model_names.add(str(metadata["model"]))
         if item.get("model"):
-            model_names.add(str(item["model"]))
+            candidate_model_names.add(str(item["model"]))
+    top_level_model_names: set[str] = set()
     if result.provenance and result.provenance.model_name:
-        model_names.add(str(result.provenance.model_name))
+        top_level_model_names.add(str(result.provenance.model_name))
     if result.quality.get("model"):
-        model_names.add(str(result.quality["model"]))
-    model_ok = not model_names or expected_model in model_names
+        top_level_model_names.add(str(result.quality["model"]))
+    model_names = candidate_model_names | top_level_model_names
+    if not model_names:
+        return {
+            "status": "partial",
+            "reason": "model_provenance_missing",
+            "metrics": metrics,
+            "models": [],
+        }
+    expected_models = {expected_model}
+    if (
+        candidate_model_names
+        and candidate_model_names != expected_models
+    ) or (
+        top_level_model_names
+        and top_level_model_names != expected_models
+    ):
+        return {
+            "status": "partial",
+            "reason": "conflicting_generation_model_provenance",
+            "metrics": metrics,
+            "models": sorted(model_names),
+        }
     valid_unique_ok = metrics["valid_smiles_rate"] == 1.0 and (
         metrics["unique_valid_smiles"] >= requested if strict_count else bool(smiles)
     )
     count_ok = (
         metrics["requested_count_compliance"] if strict_count else bool(smiles)
     )
-    if model_ok and valid_unique_ok and count_ok:
+    if valid_unique_ok and count_ok:
         return {"status": "passed", "metrics": metrics, "models": sorted(model_names)}
     return {
         "status": "partial",

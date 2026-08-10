@@ -12,6 +12,12 @@ from .scientific import ObservationStatus
 
 
 _CANDIDATE_ID_PATTERN = re.compile(r"^cand-(\d+)-([0-9a-f]{8})$")
+_REJECTED_REASONS = {
+    "invalid_smiles",
+    "invalid_candidate_metadata",
+    "duplicate_smiles",
+    "excess_candidate",
+}
 
 
 def _freeze_json(value: Any, active_containers: set[int] | None = None) -> Any:
@@ -133,6 +139,16 @@ class CandidateRecord:
         expected_id = build_candidate_id(candidate_index, self.canonical_smiles)
         if self.candidate_id != expected_id:
             raise ValueError("candidate_id does not match canonical_smiles")
+
+        if (
+            not isinstance(self.validation, Mapping)
+            or set(self.validation) != {"valid", "method"}
+            or self.validation.get("valid") is not True
+            or self.validation.get("method") != "RDKit"
+        ):
+            raise ValueError(
+                "validation must be exactly {'valid': True, 'method': 'RDKit'}"
+            )
 
         object.__setattr__(
             self,
@@ -269,6 +285,49 @@ class CandidateSet:
         if len(set(canonical_smiles)) != len(canonical_smiles):
             raise ValueError("canonical_smiles values must be unique")
 
+        for candidate_index, candidate in enumerate(candidates, start=1):
+            expected_id = build_candidate_id(
+                candidate_index,
+                candidate.canonical_smiles,
+            )
+            if candidate.candidate_id != expected_id:
+                raise ValueError(
+                    "candidate_id indexes must follow candidate order from 1"
+                )
+
+        invalid_reasons = 0
+        duplicate_reasons = 0
+        rejected_source_indexes: list[int] = []
+        for item in rejected:
+            source_index = item.get("source_index")
+            smiles = item.get("smiles")
+            reason = item.get("reason")
+            _require_positive_int("rejected source_index", source_index)
+            _require_non_empty_str("rejected smiles", smiles)
+            if reason not in _REJECTED_REASONS:
+                raise ValueError("rejected reason is not allowed")
+            rejected_source_indexes.append(source_index)
+            if reason in {"invalid_smiles", "invalid_candidate_metadata"}:
+                invalid_reasons += 1
+            elif reason == "duplicate_smiles":
+                duplicate_reasons += 1
+
+        if self.invalid_count != invalid_reasons:
+            raise ValueError("invalid_count does not match rejected reasons")
+        if self.duplicate_count != duplicate_reasons:
+            raise ValueError("duplicate_count does not match rejected reasons")
+
+        source_indexes = [
+            candidate.source_index for candidate in candidates
+        ] + rejected_source_indexes
+        if (
+            len(set(source_indexes)) != len(source_indexes)
+            or set(source_indexes) != set(range(1, len(source_indexes) + 1))
+        ):
+            raise ValueError(
+                "source_index values must be unique and contiguous from 1"
+            )
+
         valid_count = len(candidates)
         if self.status in (ObservationStatus.SUCCEEDED, ObservationStatus.PARTIAL):
             if self.requested_count == 0:
@@ -286,6 +345,8 @@ class CandidateSet:
                 raise ValueError(
                     "partial candidate sets require some but not all candidates"
                 )
+        elif candidates:
+            raise ValueError("non-success candidate sets cannot contain candidates")
 
     @property
     def valid_count(self) -> int:

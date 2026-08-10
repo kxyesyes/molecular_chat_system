@@ -2,7 +2,16 @@ import sys
 
 import pytest
 
-from src.agent.contracts import ObservationStatus, ToolProvenance, ToolResult
+from src.agent.contracts import (
+    AgentResult,
+    CandidateRecord,
+    CandidateSet,
+    ObservationStatus,
+    RunOutcome,
+    ToolProvenance,
+    ToolResult,
+    build_candidate_id,
+)
 from src.agent.validators import (
     AgentResultValidator,
     CandidateValidationUnavailable,
@@ -389,3 +398,122 @@ def test_generator_unavailable_quality_is_fully_normalized(monkeypatch):
         "validation_available": False,
         "validation_method": None,
     }
+
+
+@pytest.mark.parametrize(
+    ("status", "error_code"),
+    [
+        (ObservationStatus.FAILED, "invalid_output"),
+        (ObservationStatus.UNAVAILABLE, "tool_unavailable"),
+        (ObservationStatus.INVALID_INPUT, "invalid_input"),
+        (ObservationStatus.REJECTED, "validation_error"),
+        (ObservationStatus.CANCELLED, "internal_error"),
+    ],
+)
+def test_non_success_candidate_set_status_is_preserved_and_never_completes(
+    status,
+    error_code,
+):
+    candidate_set = CandidateSet(
+        requested_count=1,
+        candidates=(),
+        status=status,
+    )
+    result = ToolResult.success_result(
+        "llm_molecular_generator",
+        data=candidate_set.to_dict(),
+    )
+
+    validated = AgentResultValidator().validate_tool_result(result)
+    agent_result = AgentResult.from_tool_results(
+        trace_id="non-success-candidate-set",
+        skill_name="molecular_design",
+        tool_results=[validated],
+    )
+
+    assert validated.success is False
+    assert validated.status == status
+    assert validated.data["status"] == status.value
+    assert validated.error.code.value == error_code
+    assert agent_result.success is False
+    assert agent_result.outcome != RunOutcome.COMPLETED
+
+
+@pytest.mark.parametrize(
+    "canonical_smiles",
+    ["OCC", "CCO\n|" + chr(96) + "unsafe"],
+)
+def test_serialized_candidate_set_is_rejected_when_rdkit_canonical_disagrees(
+    canonical_smiles,
+):
+    candidate = CandidateRecord(
+        candidate_id=build_candidate_id(1, canonical_smiles),
+        source_index=1,
+        original_smiles=canonical_smiles,
+        canonical_smiles=canonical_smiles,
+        validation={"valid": True, "method": "RDKit"},
+        generation_provenance={},
+        metadata={},
+    )
+    candidate_set = CandidateSet(
+        requested_count=1,
+        candidates=(candidate,),
+    )
+    result = ToolResult.success_result(
+        "llm_molecular_generator",
+        data=candidate_set.to_dict(),
+        formatted=f"unsafe {canonical_smiles}",
+    )
+
+    validated = AgentResultValidator().validate_tool_result(result)
+
+    assert validated.success is False
+    assert validated.status == ObservationStatus.FAILED
+    assert validated.error.code.value == "invalid_output"
+    assert validated.data["candidates"] == []
+    assert validated.formatted == ""
+    assert canonical_smiles not in validated.formatted
+
+
+def test_candidate_markdown_table_escapes_cells_after_scientific_validation(
+    monkeypatch,
+):
+    import rdkit
+
+    canonical_smiles = "CCO|" + chr(96) + "\r\nN"
+
+    class FakeChem:
+        @staticmethod
+        def MolFromSmiles(_smiles):
+            return object()
+
+        @staticmethod
+        def MolToSmiles(_mol):
+            return canonical_smiles
+
+    monkeypatch.setattr(rdkit, "Chem", FakeChem, raising=False)
+    candidate = CandidateRecord(
+        candidate_id=build_candidate_id(1, canonical_smiles),
+        source_index=1,
+        original_smiles=canonical_smiles,
+        canonical_smiles=canonical_smiles,
+        validation={"valid": True, "method": "RDKit"},
+        generation_provenance={},
+        metadata={},
+    )
+    result = ToolResult.success_result(
+        "llm_molecular_generator",
+        data=CandidateSet(
+            requested_count=1,
+            candidates=(candidate,),
+        ).to_dict(),
+    )
+
+    validated = AgentResultValidator().validate_tool_result(result)
+
+    assert validated.success is True
+    assert "| Candidate ID | Canonical SMILES |" in validated.formatted
+    assert "\\|" in validated.formatted
+    assert "\\" + chr(96) in validated.formatted
+    assert "\r" not in validated.formatted
+    assert canonical_smiles not in validated.formatted

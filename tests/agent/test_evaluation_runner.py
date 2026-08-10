@@ -221,6 +221,110 @@ def test_generation_check_accepts_validated_candidate_set_provenance():
     assert check["models"] == [expected_model]
 
 
+def test_generation_check_rejects_conflicting_candidate_models():
+    expected_model = "gmm-llama:latest"
+    generated = ToolResult.success_result(
+        "llm_molecular_generator",
+        data=[
+            {
+                "smiles": "CCO",
+                "generation_provenance": {"model_name": expected_model},
+            },
+            {
+                "smiles": "CCN",
+                "generation_provenance": {"model_name": "conflicting-model"},
+            },
+        ],
+        quality={"model": expected_model},
+        provenance=ToolProvenance(
+            tool_name="llm_molecular_generator",
+            model_name=expected_model,
+        ),
+    )
+
+    check = _check_generation(
+        [generated],
+        requested_count=2,
+        expected_model=expected_model,
+        strict_count=True,
+    )
+
+    assert check["status"] == "partial"
+    assert check["reason"] == "conflicting_generation_model_provenance"
+
+
+def test_generation_check_rejects_conflicting_top_level_model():
+    expected_model = "gmm-llama:latest"
+    generated = ToolResult.success_result(
+        "llm_molecular_generator",
+        data=[
+            {
+                "smiles": "CCO",
+                "generation_provenance": {"model_name": expected_model},
+            }
+        ],
+        quality={"model": expected_model},
+        provenance=ToolProvenance(
+            tool_name="llm_molecular_generator",
+            model_name="conflicting-model",
+        ),
+    )
+
+    check = _check_generation(
+        [generated],
+        requested_count=1,
+        expected_model=expected_model,
+        strict_count=True,
+    )
+
+    assert check["status"] == "partial"
+    assert check["reason"] == "conflicting_generation_model_provenance"
+
+
+def test_generation_check_passes_when_all_model_provenance_agrees():
+    expected_model = "gmm-llama:latest"
+    generated = ToolResult.success_result(
+        "llm_molecular_generator",
+        data=[
+            {
+                "smiles": "CCO",
+                "generation_provenance": {"model_name": expected_model},
+            }
+        ],
+        quality={"model": expected_model},
+        provenance=ToolProvenance(
+            tool_name="llm_molecular_generator",
+            model_name=expected_model,
+        ),
+    )
+
+    check = _check_generation(
+        [generated],
+        requested_count=1,
+        expected_model=expected_model,
+        strict_count=True,
+    )
+
+    assert check["status"] == "passed"
+
+
+def test_generation_check_requires_model_provenance():
+    generated = ToolResult.success_result(
+        "llm_molecular_generator",
+        data=[{"smiles": "CCO"}],
+    )
+
+    check = _check_generation(
+        [generated],
+        requested_count=1,
+        expected_model="gmm-llama:latest",
+        strict_count=True,
+    )
+
+    assert check["status"] == "partial"
+    assert check["reason"] == "model_provenance_missing"
+
+
 def test_generation_data_flow_check_accepts_hit_to_lead_candidates_plan():
     class Step:
         def __init__(self, tool_name, output_key=None, input_from=None):

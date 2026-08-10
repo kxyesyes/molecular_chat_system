@@ -12,6 +12,8 @@ from src.agent.contracts import (
     AgentContext,
     AgentErrorCode,
     AgentResult,
+    ObservationStatus,
+    ToolProvenance,
     ToolResult,
 )
 from src.agent.evidence import EvidenceLedger
@@ -431,6 +433,18 @@ class WorkflowOrchestrator:
         tool_name: str, checkpoint: Mapping[str, Any]
     ) -> ToolResult:
         output = checkpoint.get("output") or {}
+        status_value = output.get("status")
+        status = (
+            ObservationStatus(status_value)
+            if status_value is not None
+            else None
+        )
+        provenance_value = output.get("provenance")
+        provenance = (
+            ToolProvenance.from_dict(provenance_value)
+            if provenance_value is not None
+            else None
+        )
         return ToolResult.success_result(
             tool_name=tool_name,
             data=output.get("data"),
@@ -440,6 +454,8 @@ class WorkflowOrchestrator:
             warnings=output.get("warnings", []),
             evidence=output.get("evidence", []),
             quality=output.get("quality", {}),
+            status=status,
+            provenance=provenance,
         )
 
     def _save_checkpoint(
