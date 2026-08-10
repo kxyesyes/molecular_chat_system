@@ -80,3 +80,22 @@ def test_registry_rejects_duplicate_canonical_names():
 
     with pytest.raises(ValueError, match="already registered"):
         registry.register(build_adapter())
+
+
+def test_registry_resolves_versioned_scientific_capability():
+    registry = ToolRegistry()
+    registry.register(build_adapter())
+
+    adapter = registry.resolve_capability(
+        "molecule.properties",
+        agent_name="property_admet",
+    )
+
+    assert adapter.spec.name == "property_calculator"
+
+
+def test_registry_rejects_capability_without_registered_implementation():
+    registry = ToolRegistry()
+
+    with pytest.raises(RuntimeError, match="No available tool implements capability"):
+        registry.resolve_capability("molecule.properties")

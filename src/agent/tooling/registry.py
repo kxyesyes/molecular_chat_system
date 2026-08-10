@@ -54,6 +54,33 @@ class ToolRegistry:
             adapters = [item for item in adapters if item.health()["available"]]
         return adapters
 
+    def resolve_capability(
+        self,
+        capability: str,
+        agent_name: str | None = None,
+        require_available: bool = True,
+    ) -> ToolAdapter:
+        from src.agent.capabilities import get_capability
+
+        spec = get_capability(capability)
+        candidates = []
+        for tool_name in spec.tool_names:
+            try:
+                candidates.append(
+                    self.resolve(
+                        tool_name,
+                        agent_name=agent_name,
+                        require_available=require_available,
+                    )
+                )
+            except (KeyError, RuntimeError):
+                continue
+        if not candidates:
+            raise RuntimeError(
+                f"No available tool implements capability: {capability}"
+            )
+        return candidates[0]
+
     def validate_plan(
         self, tool_names: list[str], agent_name: str | None = None
     ) -> None:
