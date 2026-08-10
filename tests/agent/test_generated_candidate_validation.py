@@ -118,6 +118,32 @@ def test_invalid_candidate_metadata_is_rejected_without_crashing():
     ]
 
 
+def test_invalid_metadata_does_not_reserve_canonical_smiles():
+    sanitized = sanitize_generated_candidates(
+        [
+            {"smiles": "CCO", "tags": {"not", "json"}},
+            {"smiles": "OCC", "source": "llm"},
+        ],
+        requested_count=1,
+    )
+
+    candidate_set = sanitized.candidate_set
+    candidate = candidate_set.to_dict()["candidates"][0]
+    assert candidate_set.status == ObservationStatus.SUCCEEDED
+    assert candidate_set.valid_count == 1
+    assert candidate_set.invalid_count == 1
+    assert candidate_set.duplicate_count == 0
+    assert candidate["source_index"] == 2
+    assert candidate["candidate_id"].startswith("cand-001-")
+
+
+def test_requested_count_accepts_positional_argument():
+    sanitized = sanitize_generated_candidates([], 0)
+
+    assert sanitized.candidate_set.requested_count == 0
+    assert sanitized.candidate_set.status == ObservationStatus.FAILED
+
+
 def test_rdkit_parse_exception_is_rejected_as_invalid_smiles(monkeypatch):
     import rdkit
 

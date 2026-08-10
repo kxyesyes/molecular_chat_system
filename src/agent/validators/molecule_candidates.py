@@ -33,7 +33,6 @@ class CandidateSanitization:
 
 def sanitize_generated_candidates(
     data: Any,
-    *,
     requested_count: int | None = None,
     generation_provenance: dict[str, Any] | None = None,
 ) -> CandidateSanitization:
@@ -108,7 +107,6 @@ def sanitize_generated_candidates(
                 }
             )
             continue
-        seen.add(canonical)
 
         try:
             candidate = CandidateRecord.from_smiles(
@@ -130,6 +128,7 @@ def sanitize_generated_candidates(
             )
             continue
 
+        seen.add(canonical)
         if len(accepted) >= requested:
             rejected.append(
                 {
