@@ -8,6 +8,13 @@ class FakeTool:
         self.name = name
 
     def execute(self, query):
+        if self.name == "llm_molecular_generator":
+            return {
+                "success": True,
+                "message": f"{self.name} completed",
+                "data": [{"smiles": "CCO"}],
+                "formatted": "generated CCO",
+            }
         return {
             "success": True,
             "message": f"{self.name} completed",

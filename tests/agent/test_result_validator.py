@@ -2,7 +2,7 @@ from src.agent.contracts import ToolResult
 from src.agent.validators.result_validator import AgentResultValidator
 
 
-def test_validator_marks_invalid_smiles_candidate():
+def test_validator_rejects_invalid_generated_smiles_candidate():
     validator = AgentResultValidator()
     result = ToolResult.success_result(
         tool_name="llm_molecular_generator",
@@ -12,8 +12,10 @@ def test_validator_marks_invalid_smiles_candidate():
 
     validated = validator.validate_tool_result(result)
 
-    assert validated.success is True
-    assert any("Invalid SMILES" in warning for warning in validated.warnings)
+    assert validated.success is False
+    assert validated.data is None
+    assert validated.error.code.value == "invalid_output"
+    assert validated.status.value == "failed"
 
 
 def test_validator_warns_missing_artifact_path():
