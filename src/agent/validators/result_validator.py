@@ -85,6 +85,7 @@ class AgentResultValidator:
         if domain_error:
             warnings.append(domain_error)
             result.success = False
+            result.status = ObservationStatus.FAILED
             result.message = domain_error
             result.formatted = ""
             result.error = AgentExecutionError(

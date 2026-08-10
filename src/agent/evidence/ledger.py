@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from typing import Any
 
 from src.agent.contracts import ScientificClaim, ToolProvenance, ToolResult
@@ -19,15 +20,20 @@ class EvidenceLedger:
         input_digest: str,
         result: ToolResult,
     ) -> str:
-        provenance = result.provenance or ToolProvenance(
-            tool_name=result.tool_name,
-            tool_version=str(result.quality.get("tool_version") or "1"),
-            model_name=result.quality.get("model"),
-            model_version=result.quality.get("model_version"),
-            demo_mode=bool(result.quality.get("demo_mode", False)),
-            fallback_used=bool(result.quality.get("fallback_used", False)),
-            input_digest=input_digest,
-        )
+        provenance = result.provenance
+        if provenance is None:
+            provenance = ToolProvenance(
+                tool_name=result.tool_name,
+                tool_version=str(result.quality.get("tool_version") or "1"),
+                model_name=result.quality.get("model"),
+                model_version=result.quality.get("model_version"),
+                demo_mode=bool(result.quality.get("demo_mode", False)),
+                fallback_used=bool(result.quality.get("fallback_used", False)),
+                input_digest=input_digest,
+            )
+        elif provenance.input_digest is None:
+            provenance = replace(provenance, input_digest=input_digest)
+        result.provenance = provenance
         payload = {
             "trace_id": self.trace_id,
             "step_id": step_id,

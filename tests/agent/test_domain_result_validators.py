@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from src.agent.contracts import AgentErrorCode, ToolResult
+from src.agent.contracts import AgentErrorCode, ObservationStatus, ToolResult
 from src.agent.tools.admet_predictor import ADMETPredictor
 from src.agent.tools.reverse_target_tool import ReverseTargetTool
 from src.agent.tools.target_database_tool import TargetDatabaseTool
@@ -21,6 +21,7 @@ def test_docking_validator_rejects_energy_without_execution_evidence():
 
     assert validated.success is False
     assert validated.error.code == AgentErrorCode.INVALID_OUTPUT
+    assert validated.status == ObservationStatus.FAILED
     assert "docking evidence" in validated.message.lower()
 
 

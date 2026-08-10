@@ -41,6 +41,8 @@ def test_partial_tool_result_produces_partial_terminal_event_and_evidence():
         result.metadata["evidence_ledger"][0]["provenance"]["model_name"]
         == "gmm-llama:latest"
     )
+    assert result.tool_results[0].provenance.model_name == "gmm-llama:latest"
+    assert result.tool_results[0].provenance.input_digest
     assert event_bus.events[-1].event.value == "task_partial"
 
 
