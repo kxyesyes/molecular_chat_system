@@ -10,7 +10,12 @@ from src.agent.contracts import (
     AgentResult,
 )
 from src.agent.orchestrators import WorkflowOrchestrator
-from src.agent.planning import TaskPlanner, WorkflowPlan
+from src.agent.planning import (
+    PlanCompilationError,
+    PlanCompiler,
+    TaskPlanner,
+    WorkflowPlan,
+)
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.workflows import WorkflowPolicy
 
@@ -29,9 +34,11 @@ class WorkflowExecutor:
         self,
         planner: TaskPlanner | None = None,
         orchestrator: WorkflowOrchestrator | None = None,
+        compiler: PlanCompiler | None = None,
     ):
         self.planner = planner or TaskPlanner()
         self.orchestrator = orchestrator
+        self.compiler = compiler or PlanCompiler()
 
     def execute(
         self,
@@ -136,6 +143,26 @@ class WorkflowExecutor:
                     skill_name=policy.name,
                     error=error,
                     metadata={"preflight": details},
+                ),
+                events=[],
+            )
+        try:
+            self.compiler.compile(plan, policy)
+        except (PlanCompilationError, KeyError) as exc:
+            error = AgentExecutionError(
+                code=AgentErrorCode.VALIDATION_ERROR,
+                message="Workflow plan failed compilation",
+                details={"skill": policy.name, "reason": str(exc)},
+            )
+            return WorkflowExecution(
+                plan=plan,
+                result=AgentResult(
+                    trace_id=context.trace_id,
+                    success=False,
+                    message=error.message,
+                    skill_name=policy.name,
+                    error=error,
+                    metadata={"preflight": error.details},
                 ),
                 events=[],
             )

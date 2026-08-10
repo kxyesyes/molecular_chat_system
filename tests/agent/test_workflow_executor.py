@@ -308,3 +308,34 @@ def test_callback_exception_does_not_interrupt_default_orchestrator():
 
     assert execution.result.success is True
     assert execution.events[-1]["event"] == "task_completed"
+
+
+def test_executor_rejects_uncompilable_binding_before_tool_runs():
+    tool = FakeTool("property_calculator")
+    plan = WorkflowPlan(
+        workflow_name="comprehensive_evaluation",
+        steps=[
+            WorkflowStep(
+                name="properties",
+                tool_name="property_calculator",
+                input_binding="$.outputs.missing",
+            )
+        ],
+    )
+
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="CCO",
+            trace_id="invalid-binding",
+            active_skill="comprehensive_evaluation",
+        ),
+        policy=FAKE_POLICY,
+        all_tools={"property_calculator": tool},
+        plan=plan,
+    )
+
+    assert execution.result.success is False
+    assert execution.result.error.code == AgentErrorCode.VALIDATION_ERROR
+    assert "missing" in execution.result.error.details["reason"]
+    assert tool.calls == []
+    assert execution.events == []

@@ -16,6 +16,10 @@ class WorkflowStep:
     timeout_seconds: float | None = None
     output_key: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    capability: str | None = None
+    input_binding: str | None = None
+    input_transform: str = "identity"
+    output_contract: str | None = None
 
 
 @dataclass
