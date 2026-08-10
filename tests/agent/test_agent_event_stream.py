@@ -1,4 +1,12 @@
-from src.agent.contracts import AgentContext
+import pytest
+
+from src.agent.contracts import (
+    AgentContext,
+    AgentErrorCode,
+    ObservationStatus,
+    RunOutcome,
+    ToolResult,
+)
 from src.agent.orchestrators.base import WorkflowStep
 from src.agent.orchestrators.workflow import WorkflowOrchestrator
 from src.agent.persistence import SQLiteAgentStateStore
@@ -60,3 +68,69 @@ def test_partial_terminal_event_sets_unambiguous_task_state():
 
     assert state.status == "partial"
     assert state.progress == 1.0
+
+
+class TerminalTool:
+    name = "terminal_tool"
+
+    def __init__(self, status, code):
+        self.status = status
+        self.code = code
+
+    def execute(self, _query):
+        return ToolResult.error_result(
+            self.name,
+            self.code,
+            self.status.value,
+            status=self.status,
+        )
+
+
+@pytest.mark.parametrize(
+    ("observation_status", "error_code_name", "outcome", "terminal_event_name"),
+    [
+        (
+            ObservationStatus.REJECTED,
+            "VALIDATION_ERROR",
+            RunOutcome.REJECTED,
+            "TASK_REJECTED",
+        ),
+        (
+            ObservationStatus.CANCELLED,
+            "CANCELLED",
+            RunOutcome.CANCELLED,
+            "TASK_CANCELLED",
+        ),
+    ],
+)
+def test_workflow_preserves_terminal_event_and_persisted_status(
+    tmp_path,
+    observation_status,
+    error_code_name,
+    outcome,
+    terminal_event_name,
+):
+    store = SQLiteAgentStateStore(tmp_path / f"{observation_status.value}.sqlite3")
+    event_bus = AgentEventBus(state_store=store)
+    tool = TerminalTool(
+        observation_status,
+        getattr(AgentErrorCode, error_code_name),
+    )
+    terminal_event = getattr(TaskEventType, terminal_event_name)
+    trace_id = f"terminal-{observation_status.value}"
+
+    result = WorkflowOrchestrator(
+        event_bus=event_bus,
+        state_store=store,
+    ).run(
+        AgentContext(query="CCO", trace_id=trace_id),
+        [WorkflowStep(name="terminal", tool_name=tool.name)],
+        {tool.name: tool},
+    )
+
+    assert result.outcome == outcome
+    assert event_bus.events[-1].event == terminal_event
+    assert store.get_events(trace_id)[-1]["event"] == terminal_event.value
+    assert store.get_run(trace_id)["status"] == outcome.value
+    assert store.get_tool_executions(trace_id)[0]["status"] == outcome.value
+    assert store.latest_checkpoint(trace_id, "terminal")["status"] == outcome.value

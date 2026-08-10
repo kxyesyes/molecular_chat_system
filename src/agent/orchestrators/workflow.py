@@ -12,7 +12,9 @@ from src.agent.contracts import (
     AgentContext,
     AgentErrorCode,
     AgentResult,
+    CandidateSet,
     ObservationStatus,
+    RunOutcome,
     ToolProvenance,
     ToolResult,
 )
@@ -95,6 +97,7 @@ class WorkflowOrchestrator:
         ledger = EvidenceLedger(context.trace_id)
         outputs = state.outputs
         reused_steps: list[str] = []
+        checkpoint_warnings: list[dict[str, str]] = []
         total_steps = max(len(steps), 1)
 
         if self.state_store:
@@ -139,6 +142,8 @@ class WorkflowOrchestrator:
         )
 
         for index, step in enumerate(steps):
+            checkpoint_reused = False
+            checkpoint_warning: str | None = None
             self._emit(
                 context,
                 TaskEventType.TOOL_STARTED,
@@ -201,28 +206,47 @@ class WorkflowOrchestrator:
                 )
 
                 if checkpoint:
-                    result = self._result_from_checkpoint(
-                        step.tool_name,
-                        checkpoint,
-                    )
-                    reused_steps.append(step.name)
-                elif tool is None:
-                    result = ToolResult.error_result(
-                        tool_name=step.tool_name,
-                        code=AgentErrorCode.INTERNAL_ERROR,
-                        message=f"Tool not found: {step.tool_name}",
-                        details={"step": step.name},
-                    )
-                else:
-                    self._save_checkpoint(
-                        context,
-                        step,
-                        status="running",
-                        input_hash=input_hash,
-                        tool_version=tool_version,
-                        model_version=model_version,
-                    )
-                    result = self._execute_step(tool, input_data, step)
+                    try:
+                        result = self._result_from_checkpoint(
+                            step.tool_name,
+                            checkpoint,
+                        )
+                    except (AttributeError, KeyError, TypeError, ValueError):
+                        checkpoint = None
+                        checkpoint_warning = (
+                            f"Ignored incompatible checkpoint for {step.name}"
+                        )
+                        checkpoint_warnings.append(
+                            {
+                                "step": step.name,
+                                "reason": "checkpoint_deserialization_failed",
+                            }
+                        )
+                    else:
+                        checkpoint_reused = True
+                        reused_steps.append(step.name)
+
+                if not checkpoint_reused:
+                    if tool is None:
+                        result = ToolResult.error_result(
+                            tool_name=step.tool_name,
+                            code=AgentErrorCode.INTERNAL_ERROR,
+                            message=f"Tool not found: {step.tool_name}",
+                            details={"step": step.name},
+                        )
+                    else:
+                        self._save_checkpoint(
+                            context,
+                            step,
+                            status="running",
+                            input_hash=input_hash,
+                            tool_version=tool_version,
+                            model_version=model_version,
+                        )
+                        result = self._execute_step(tool, input_data, step)
+
+            if checkpoint_warning and checkpoint_warning not in result.warnings:
+                result.warnings.append(checkpoint_warning)
 
             result.quality = {
                 **result.quality,
@@ -230,7 +254,10 @@ class WorkflowOrchestrator:
                 "output_key": step.output_key,
             }
             ledger.prepare_provenance(input_hash, result)
-            result = self.validator.validate_tool_result(result)
+            result = self.validator.validate_tool_result(
+                result,
+                trusted_checkpoint=checkpoint_reused,
+            )
             evidence_id = ledger.register_tool_result(
                 step_id=step.name,
                 input_digest=input_hash,
@@ -247,7 +274,7 @@ class WorkflowOrchestrator:
                 )
                 if optional_warning not in result.warnings:
                     result.warnings.append(optional_warning)
-            if not checkpoint:
+            if not checkpoint_reused:
                 self._persist_execution(
                     context,
                     step,
@@ -315,6 +342,7 @@ class WorkflowOrchestrator:
                 "step_count": len(steps),
                 "completed_count": len(results),
                 "reused_steps": reused_steps,
+                "checkpoint_warnings": checkpoint_warnings,
                 "workflow_state": redact_sensitive(state.to_dict()),
                 "evidence_ledger": ledger.to_list(),
                 "claims": [
@@ -323,13 +351,13 @@ class WorkflowOrchestrator:
                 ],
             },
         )
-        completion_event = (
-            TaskEventType.TASK_COMPLETED
-            if agent_result.success
-            else TaskEventType.TASK_PARTIAL
-            if agent_result.partial
-            else TaskEventType.TASK_FAILED
-        )
+        completion_event = {
+            RunOutcome.COMPLETED: TaskEventType.TASK_COMPLETED,
+            RunOutcome.PARTIAL: TaskEventType.TASK_PARTIAL,
+            RunOutcome.REJECTED: TaskEventType.TASK_REJECTED,
+            RunOutcome.CANCELLED: TaskEventType.TASK_CANCELLED,
+            RunOutcome.FAILED: TaskEventType.TASK_FAILED,
+        }[agent_result.outcome]
         self._emit(
             context,
             completion_event,
@@ -340,10 +368,8 @@ class WorkflowOrchestrator:
         if self.state_store:
             status = (
                 "succeeded"
-                if agent_result.success
-                else "partial"
-                if agent_result.partial
-                else "failed"
+                if agent_result.outcome == RunOutcome.COMPLETED
+                else agent_result.outcome.value
             )
             self.state_store.update_run_status(context.trace_id, status)
         return agent_result
@@ -445,15 +471,22 @@ class WorkflowOrchestrator:
             if provenance_value is not None
             else None
         )
+        data = output.get("data")
+        quality = output.get("quality") or {}
+        if (
+            tool_name == "llm_molecular_generator"
+            and quality.get("output_contract") == "CandidateSet@1"
+        ):
+            CandidateSet.from_dict(data)
         return ToolResult.success_result(
             tool_name=tool_name,
-            data=output.get("data"),
+            data=data,
             message=output.get("message", "Reused compatible checkpoint"),
             formatted=output.get("formatted", ""),
             elapsed_ms=output.get("elapsed_ms"),
             warnings=output.get("warnings", []),
             evidence=output.get("evidence", []),
-            quality=output.get("quality", {}),
+            quality=quality,
             status=status,
             provenance=provenance,
         )
@@ -501,12 +534,13 @@ class WorkflowOrchestrator:
         if not self.state_store:
             return
         legacy_result = result.to_legacy_dict()
+        persisted_status = self._result_persistence_status(result)
         self.state_store.record_tool_execution(
             {
                 "trace_id": context.trace_id,
                 "step_id": step.name,
                 "tool_name": step.tool_name,
-                "status": "succeeded" if result.success else "failed",
+                "status": persisted_status,
                 "input": input_data,
                 "output": legacy_result if result.success else None,
                 "error": legacy_result.get("error"),
@@ -516,13 +550,24 @@ class WorkflowOrchestrator:
         self._save_checkpoint(
             context,
             step,
-            status="succeeded" if result.success else "failed",
+            status=persisted_status,
             input_hash=input_hash,
             tool_version=tool_version,
             model_version=model_version,
             output=legacy_result if result.success else None,
             error=legacy_result.get("error"),
         )
+
+    @staticmethod
+    def _result_persistence_status(result: ToolResult) -> str:
+        if result.success:
+            return "succeeded"
+        if result.status in {
+            ObservationStatus.REJECTED,
+            ObservationStatus.CANCELLED,
+        }:
+            return result.status.value
+        return "failed"
 
     @classmethod
     def _resolve_input(

@@ -121,6 +121,29 @@ def test_empty_generated_output_defaults_to_failed_zero_request_candidate_set():
     assert sanitized.valid_count == 0
 
 
+@pytest.mark.parametrize("item", [{}, {"smiles": ""}, {"smiles": None}])
+def test_sanitizer_preserves_empty_invalid_smiles_rejection(item):
+    candidate_set = sanitize_generated_candidates([item], 1).candidate_set
+
+    assert candidate_set.status == ObservationStatus.FAILED
+    assert candidate_set.invalid_count == 1
+    assert candidate_set.to_dict()["rejected"] == [
+        {"source_index": 1, "smiles": "", "reason": "invalid_smiles"}
+    ]
+
+
+def test_empty_invalid_candidate_does_not_discard_following_valid_candidate():
+    candidate_set = sanitize_generated_candidates(
+        [{"smiles": ""}, {"smiles": "CCO"}],
+        1,
+    ).candidate_set
+
+    assert candidate_set.status == ObservationStatus.SUCCEEDED
+    assert candidate_set.invalid_count == 1
+    assert [item.source_index for item in candidate_set.candidates] == [2]
+    assert [item.canonical_smiles for item in candidate_set.candidates] == ["CCO"]
+
+
 def test_invalid_candidate_metadata_is_rejected_without_crashing():
     sanitized = sanitize_generated_candidates(
         [{"smiles": "CCO", "tags": {"not", "json"}}],
@@ -407,7 +430,7 @@ def test_generator_unavailable_quality_is_fully_normalized(monkeypatch):
         (ObservationStatus.UNAVAILABLE, "tool_unavailable"),
         (ObservationStatus.INVALID_INPUT, "invalid_input"),
         (ObservationStatus.REJECTED, "validation_error"),
-        (ObservationStatus.CANCELLED, "internal_error"),
+        (ObservationStatus.CANCELLED, "cancelled"),
     ],
 )
 def test_non_success_candidate_set_status_is_preserved_and_never_completes(
@@ -517,3 +540,77 @@ def test_candidate_markdown_table_escapes_cells_after_scientific_validation(
     assert "\\" + chr(96) in validated.formatted
     assert "\r" not in validated.formatted
     assert canonical_smiles not in validated.formatted
+
+
+def _candidate_set_with_forged_rejection(reason):
+    if reason in {"invalid_smiles", "invalid_candidate_metadata"}:
+        return CandidateSet(
+            requested_count=1,
+            candidates=(),
+            invalid_count=1,
+            rejected=(
+                {"source_index": 1, "smiles": "CCO", "reason": reason},
+            ),
+            status=ObservationStatus.FAILED,
+        )
+
+    candidate = CandidateRecord.from_smiles(
+        candidate_index=1,
+        source_index=1,
+        original_smiles="CCO",
+        canonical_smiles="CCO",
+    )
+    return CandidateSet(
+        requested_count=2,
+        candidates=(candidate,),
+        duplicate_count=1 if reason == "duplicate_smiles" else 0,
+        rejected=(
+            {"source_index": 2, "smiles": "CCN", "reason": reason},
+        ),
+        status=ObservationStatus.PARTIAL,
+    )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "invalid_smiles",
+        "duplicate_smiles",
+        "excess_candidate",
+        "invalid_candidate_metadata",
+    ],
+)
+def test_untrusted_candidate_set_rejects_forged_rejection_reason(reason):
+    result = ToolResult.success_result(
+        "llm_molecular_generator",
+        data=_candidate_set_with_forged_rejection(reason).to_dict(),
+    )
+
+    validated = AgentResultValidator().validate_tool_result(result)
+
+    assert validated.success is False
+    assert validated.status == ObservationStatus.FAILED
+    assert validated.error.code.value == "invalid_output"
+    assert validated.data["rejected"] == []
+    assert "Invalid generated candidate output" in validated.message
+
+
+def test_trusted_checkpoint_may_restore_invalid_candidate_metadata_rejection():
+    candidate_set = _candidate_set_with_forged_rejection(
+        "invalid_candidate_metadata"
+    )
+    result = ToolResult.success_result(
+        "llm_molecular_generator",
+        data=candidate_set.to_dict(),
+    )
+
+    validated = AgentResultValidator().validate_tool_result(
+        result,
+        trusted_checkpoint=True,
+    )
+
+    assert validated.status == ObservationStatus.FAILED
+    assert validated.data == candidate_set.to_dict()
+    assert validated.data["rejected"][0]["reason"] == (
+        "invalid_candidate_metadata"
+    )

@@ -135,21 +135,53 @@ class AgentResult:
         final_answer: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> "AgentResult":
-        has_partial_observation = any(
-            item.status == ObservationStatus.PARTIAL for item in tool_results
+        successful_observations = [
+            item
+            for item in tool_results
+            if item.success
+            and item.status
+            in {ObservationStatus.SUCCEEDED, ObservationStatus.PARTIAL}
+        ]
+        all_succeeded = bool(tool_results) and all(
+            item.success and item.status == ObservationStatus.SUCCEEDED
+            for item in tool_results
         )
-        all_succeeded = bool(tool_results) and all(item.success for item in tool_results)
-        any_succeeded = any(item.success for item in tool_results)
-        success = all_succeeded and not has_partial_observation
-        partial = any_succeeded and (not all_succeeded or has_partial_observation)
-        outcome = (
-            RunOutcome.COMPLETED
-            if success
-            else RunOutcome.PARTIAL
-            if partial
-            else RunOutcome.FAILED
-        )
-        first_error = next((item.error for item in tool_results if item.error), None)
+        any_succeeded = bool(successful_observations)
+        success = all_succeeded
+        partial = any_succeeded and not all_succeeded
+        if success:
+            outcome = RunOutcome.COMPLETED
+        elif partial:
+            outcome = RunOutcome.PARTIAL
+        elif any(
+            item.status == ObservationStatus.CANCELLED for item in tool_results
+        ):
+            outcome = RunOutcome.CANCELLED
+        elif any(
+            item.status == ObservationStatus.REJECTED for item in tool_results
+        ):
+            outcome = RunOutcome.REJECTED
+        else:
+            outcome = RunOutcome.FAILED
+        preferred_error_status = {
+            RunOutcome.CANCELLED: ObservationStatus.CANCELLED,
+            RunOutcome.REJECTED: ObservationStatus.REJECTED,
+        }.get(outcome)
+        first_error = None
+        if preferred_error_status:
+            first_error = next(
+                (
+                    item.error
+                    for item in tool_results
+                    if item.error and item.status == preferred_error_status
+                ),
+                None,
+            )
+        if first_error is None:
+            first_error = next(
+                (item.error for item in tool_results if item.error),
+                None,
+            )
         warnings = [warning for item in tool_results for warning in item.warnings]
         evidence = [entry for item in tool_results for entry in item.evidence]
         artifacts = [artifact for item in tool_results for artifact in item.artifacts]

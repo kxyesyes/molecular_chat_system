@@ -40,9 +40,17 @@ _GENERATOR_QUALITY_FIELDS = {
 class AgentResultValidator:
     """Validate common agent tool outputs without blocking partial success."""
 
-    def validate_tool_result(self, result: ToolResult) -> ToolResult:
+    def validate_tool_result(
+        self,
+        result: ToolResult,
+        *,
+        trusted_checkpoint: bool = False,
+    ) -> ToolResult:
         if result.tool_name == "llm_molecular_generator" and result.success:
-            return self._validate_generator_result(result)
+            return self._validate_generator_result(
+                result,
+                trusted_checkpoint=trusted_checkpoint,
+            )
         if not result.success:
             return result
 
@@ -75,7 +83,12 @@ class AgentResultValidator:
         }
         return result
 
-    def _validate_generator_result(self, result: ToolResult) -> ToolResult:
+    def _validate_generator_result(
+        self,
+        result: ToolResult,
+        *,
+        trusted_checkpoint: bool,
+    ) -> ToolResult:
         original_data = result.data
         raw_count = self._raw_candidate_count(original_data)
         requested_count = result.quality.get("requested_count")
@@ -86,7 +99,10 @@ class AgentResultValidator:
             if self._looks_like_candidate_set(original_data):
                 candidate_set = CandidateSet.from_dict(original_data)
                 raw_count = candidate_set.valid_count + len(candidate_set.rejected)
-                self._revalidate_candidate_set(candidate_set)
+                self._revalidate_candidate_set(
+                    candidate_set,
+                    trusted_checkpoint=trusted_checkpoint,
+                )
             else:
                 candidate_set = sanitize_generated_candidates(
                     original_data,
@@ -203,10 +219,24 @@ class AgentResultValidator:
             "status",
         }.issubset(data)
 
-    @staticmethod
-    def _revalidate_candidate_set(candidate_set: CandidateSet) -> None:
-        if not candidate_set.candidates:
+    @classmethod
+    def _revalidate_candidate_set(
+        cls,
+        candidate_set: CandidateSet,
+        *,
+        trusted_checkpoint: bool,
+    ) -> None:
+        if not candidate_set.candidates and (
+            trusted_checkpoint or not candidate_set.rejected
+        ):
             return
+        if not trusted_checkpoint and any(
+            item["reason"] == "invalid_candidate_metadata"
+            for item in candidate_set.rejected
+        ):
+            raise ValueError(
+                "untrusted candidate set cannot assert invalid candidate metadata"
+            )
         try:
             from rdkit import Chem
         except Exception as exc:
@@ -214,22 +244,78 @@ class AgentResultValidator:
                 "RDKit is required to revalidate serialized candidates"
             ) from exc
 
-        for candidate in candidate_set.candidates:
-            try:
-                molecule = Chem.MolFromSmiles(candidate.canonical_smiles)
-                canonical = (
-                    Chem.MolToSmiles(molecule)
-                    if molecule is not None
-                    else None
+        candidates_by_source = {
+            candidate.source_index: candidate
+            for candidate in candidate_set.candidates
+        }
+        rejected_by_source = {
+            item["source_index"]: item for item in candidate_set.rejected
+        }
+        seen: set[str] = set()
+        accepted_count = 0
+        total_records = len(candidates_by_source) + len(rejected_by_source)
+        for source_index in range(1, total_records + 1):
+            candidate = candidates_by_source.get(source_index)
+            if candidate is not None:
+                canonical = cls._canonicalize_with_rdkit(
+                    Chem,
+                    candidate.canonical_smiles,
                 )
-            except Exception as exc:
-                raise ValueError(
-                    "serialized candidate failed RDKit validation"
-                ) from exc
-            if molecule is None or canonical != candidate.canonical_smiles:
-                raise ValueError(
-                    "serialized canonical_smiles does not match RDKit"
-                )
+                if canonical != candidate.canonical_smiles:
+                    raise ValueError(
+                        "serialized canonical_smiles does not match RDKit"
+                    )
+                if canonical in seen:
+                    raise ValueError(
+                        "serialized accepted candidate is a duplicate"
+                    )
+                if accepted_count >= candidate_set.requested_count:
+                    raise ValueError(
+                        "serialized accepted candidate exceeds requested_count"
+                    )
+                seen.add(canonical)
+                accepted_count += 1
+                continue
+
+            rejected = rejected_by_source[source_index]
+            if trusted_checkpoint:
+                continue
+            reason = rejected["reason"]
+            smiles = rejected["smiles"]
+            if reason == "invalid_smiles" and not smiles.strip():
+                continue
+            canonical = cls._canonicalize_with_rdkit(Chem, smiles)
+            if reason == "invalid_smiles":
+                if canonical is not None:
+                    raise ValueError("invalid_smiles rejection is not invalid")
+                continue
+            if canonical is None:
+                raise ValueError(f"{reason} rejection is not valid SMILES")
+            if reason == "duplicate_smiles":
+                if canonical not in seen:
+                    raise ValueError(
+                        "duplicate_smiles rejection has no prior duplicate"
+                    )
+                continue
+            if reason == "excess_candidate":
+                if (
+                    canonical in seen
+                    or accepted_count < candidate_set.requested_count
+                ):
+                    raise ValueError(
+                        "excess_candidate rejection is not a unique excess candidate"
+                    )
+                seen.add(canonical)
+                continue
+            raise ValueError("untrusted rejected reason cannot be verified")
+
+    @staticmethod
+    def _canonicalize_with_rdkit(Chem: Any, smiles: str) -> str | None:
+        try:
+            molecule = Chem.MolFromSmiles(smiles)
+            return Chem.MolToSmiles(molecule) if molecule is not None else None
+        except Exception:
+            return None
 
     @staticmethod
     def _candidate_set_failure(
@@ -253,7 +339,7 @@ class AgentResultValidator:
                 "Generated candidate output was rejected",
             ),
             ObservationStatus.CANCELLED: (
-                AgentErrorCode.INTERNAL_ERROR,
+                AgentErrorCode.CANCELLED,
                 "Generated candidate validation was cancelled",
             ),
         }

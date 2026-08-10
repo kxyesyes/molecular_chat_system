@@ -683,7 +683,6 @@ def test_candidate_set_requires_unique_contiguous_source_indexes(
     "rejected",
     [
         {"source_index": 1, "reason": "invalid_smiles"},
-        {"source_index": 1, "smiles": "", "reason": "invalid_smiles"},
         {"source_index": True, "smiles": "bad", "reason": "invalid_smiles"},
         {"source_index": 1, "smiles": "bad", "reason": "unknown"},
     ],
@@ -695,6 +694,36 @@ def test_candidate_set_rejects_invalid_rejected_record_schema(rejected):
             candidates=(),
             invalid_count=1,
             rejected=(rejected,),
+            status=contracts.ObservationStatus.FAILED,
+        )
+
+
+def test_candidate_set_allows_empty_smiles_only_for_invalid_smiles_rejection():
+    candidate_set = contracts.CandidateSet(
+        requested_count=1,
+        candidates=(),
+        invalid_count=1,
+        rejected=(
+            {"source_index": 1, "smiles": "", "reason": "invalid_smiles"},
+        ),
+        status=contracts.ObservationStatus.FAILED,
+    )
+
+    assert candidate_set.to_dict()["rejected"] == [
+        {"source_index": 1, "smiles": "", "reason": "invalid_smiles"}
+    ]
+
+    with pytest.raises(ValueError):
+        contracts.CandidateSet(
+            requested_count=1,
+            candidates=(),
+            rejected=(
+                {
+                    "source_index": 1,
+                    "smiles": "",
+                    "reason": "excess_candidate",
+                },
+            ),
             status=contracts.ObservationStatus.FAILED,
         )
 

@@ -39,3 +39,16 @@ def test_task_event_serializes_for_websocket():
     assert payload["trace_id"] == "trace-1"
     assert payload["event"] == "tool_started"
     assert payload["progress"] == 0.2
+
+
+def test_task_state_preserves_rejected_and_cancelled_terminal_events():
+    rejected = AgentTaskState(trace_id="rejected")
+    cancelled = AgentTaskState(trace_id="cancelled")
+
+    rejected.add_event(TaskEventType.TASK_REJECTED, "rejected")
+    cancelled.add_event(TaskEventType.TASK_CANCELLED, "cancelled")
+
+    assert rejected.status == "rejected"
+    assert rejected.progress == 1.0
+    assert cancelled.status == "cancelled"
+    assert cancelled.progress == 1.0

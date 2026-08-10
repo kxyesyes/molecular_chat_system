@@ -95,3 +95,77 @@ def test_failed_tool_uses_failed_observation_status():
         "weights missing",
     )
     assert result.status == ObservationStatus.FAILED
+
+
+def test_agent_result_terminal_outcome_prefers_cancelled_then_rejected():
+    failed = ToolResult.error_result(
+        "property_calculator",
+        AgentErrorCode.INVALID_OUTPUT,
+        "failed",
+    )
+    rejected = ToolResult.error_result(
+        "activity_predictor",
+        AgentErrorCode.VALIDATION_ERROR,
+        "rejected",
+        status=ObservationStatus.REJECTED,
+    )
+    cancelled = ToolResult.error_result(
+        "admet_predictor",
+        AgentErrorCode.CANCELLED,
+        "cancelled",
+        status=ObservationStatus.CANCELLED,
+    )
+
+    rejected_result = AgentResult.from_tool_results(
+        trace_id="rejected-run",
+        skill_name="evaluation",
+        tool_results=[failed, rejected],
+    )
+    cancelled_result = AgentResult.from_tool_results(
+        trace_id="cancelled-run",
+        skill_name="evaluation",
+        tool_results=[failed, rejected, cancelled],
+    )
+
+    assert rejected_result.outcome == RunOutcome.REJECTED
+    assert rejected_result.error.code == AgentErrorCode.VALIDATION_ERROR
+    assert rejected_result.to_legacy_dict()["status"] == "rejected"
+    assert cancelled_result.outcome == RunOutcome.CANCELLED
+    assert cancelled_result.error.code == AgentErrorCode.CANCELLED
+    assert cancelled_result.to_legacy_dict()["status"] == "cancelled"
+
+
+def test_agent_result_with_success_and_cancelled_result_is_partial():
+    succeeded = ToolResult.success_result("property_calculator", {"mw": 46.07})
+    cancelled = ToolResult.error_result(
+        "admet_predictor",
+        AgentErrorCode.CANCELLED,
+        "cancelled",
+        status=ObservationStatus.CANCELLED,
+    )
+
+    result = AgentResult.from_tool_results(
+        trace_id="partially-cancelled-run",
+        skill_name="evaluation",
+        tool_results=[succeeded, cancelled],
+    )
+
+    assert result.partial is True
+    assert result.outcome == RunOutcome.PARTIAL
+
+
+def test_terminal_observation_status_cannot_be_completed_by_success_flag():
+    cancelled = ToolResult.success_result(
+        "admet_predictor",
+        status=ObservationStatus.CANCELLED,
+    )
+
+    result = AgentResult.from_tool_results(
+        trace_id="inconsistent-cancelled-run",
+        skill_name="evaluation",
+        tool_results=[cancelled],
+    )
+
+    assert result.success is False
+    assert result.partial is False
+    assert result.outcome == RunOutcome.CANCELLED

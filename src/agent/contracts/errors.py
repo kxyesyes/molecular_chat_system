@@ -15,6 +15,7 @@ class AgentErrorCode(str, Enum):
     UNAUTHORIZED_TOOL = "unauthorized_tool"
     MODEL_UNAVAILABLE = "model_unavailable"
     EMPTY_RESULT = "empty_result"
+    CANCELLED = "cancelled"
     INTERNAL_ERROR = "internal_error"
 
 

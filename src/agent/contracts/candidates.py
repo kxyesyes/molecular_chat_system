@@ -303,9 +303,12 @@ class CandidateSet:
             smiles = item.get("smiles")
             reason = item.get("reason")
             _require_positive_int("rejected source_index", source_index)
-            _require_non_empty_str("rejected smiles", smiles)
             if reason not in _REJECTED_REASONS:
                 raise ValueError("rejected reason is not allowed")
+            if not isinstance(smiles, str):
+                raise ValueError("rejected smiles must be a string")
+            if reason != "invalid_smiles" and not smiles.strip():
+                raise ValueError("rejected smiles cannot be empty")
             rejected_source_indexes.append(source_index)
             if reason in {"invalid_smiles", "invalid_candidate_metadata"}:
                 invalid_reasons += 1

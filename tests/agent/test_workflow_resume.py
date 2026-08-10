@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from src.agent.contracts import (
     AgentContext,
+    CandidateRecord,
+    CandidateSet,
     ObservationStatus,
     ToolProvenance,
     ToolResult,
@@ -53,6 +55,24 @@ class CountingCandidateGenerator:
                 model_name="gmm-llama:latest",
                 input_digest="forged-input",
             ),
+        )
+
+
+class MetadataRejectingCandidateGenerator:
+    name = "llm_molecular_generator"
+
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, query):
+        self.calls.append(query)
+        return ToolResult.success_result(
+            self.name,
+            data=[
+                {"smiles": "CCO", "tags": {"not", "json"}},
+                {"smiles": "CCN"},
+            ],
+            quality={"requested_count": 1},
         )
 
 
@@ -243,7 +263,18 @@ def test_checkpoint_result_restores_status_and_provenance():
     )
     checkpoint = {
         "output": {
-            "data": {"version": "1"},
+            "data": CandidateSet(
+                requested_count=2,
+                candidates=(
+                    CandidateRecord.from_smiles(
+                        candidate_index=1,
+                        source_index=1,
+                        original_smiles="CCO",
+                        canonical_smiles="CCO",
+                    ),
+                ),
+                status=ObservationStatus.PARTIAL,
+            ).to_dict(),
             "message": "stored",
             "status": "partial",
             "quality": {},
@@ -258,3 +289,139 @@ def test_checkpoint_result_restores_status_and_provenance():
 
     assert restored.status == ObservationStatus.PARTIAL
     assert restored.provenance == provenance
+
+
+def test_validated_checkpoint_trusts_invalid_candidate_metadata_rejection(
+    tmp_path,
+):
+    store = SQLiteAgentStateStore(tmp_path / "trusted-candidate.sqlite3")
+    generator = MetadataRejectingCandidateGenerator()
+    context = AgentContext(query="generate", trace_id="trusted-candidate")
+    steps = [
+        WorkflowStep(
+            "generate",
+            "llm_molecular_generator",
+            output_key="molecules",
+        )
+    ]
+
+    first = WorkflowOrchestrator(state_store=store).run(
+        context,
+        steps,
+        {generator.name: generator},
+    )
+    resumed = WorkflowOrchestrator(state_store=store).run(
+        context,
+        steps,
+        {generator.name: generator},
+    )
+
+    assert first.success is True
+    assert resumed.success is True
+    assert generator.calls == ["generate"]
+    assert resumed.metadata["reused_steps"] == ["generate"]
+    assert resumed.tool_results[0].data["rejected"] == [
+        {
+            "source_index": 1,
+            "smiles": "CCO",
+            "reason": "invalid_candidate_metadata",
+        }
+    ]
+
+
+def test_corrupted_checkpoint_is_cache_miss_and_reexecutes_tool(tmp_path):
+    store = SQLiteAgentStateStore(tmp_path / "corrupted-checkpoint.sqlite3")
+    tool = CountingTool("properties", {"qed": 0.4})
+    context = AgentContext(query="CCO", trace_id="corrupted-checkpoint")
+    step = WorkflowStep("properties", "properties", output_key="properties")
+    orchestrator = WorkflowOrchestrator(state_store=store)
+    input_hash = orchestrator._input_hash("CCO")
+    store.save_checkpoint(
+        {
+            "trace_id": context.trace_id,
+            "step_id": step.name,
+            "workflow_version": orchestrator.workflow_version,
+            "status": "succeeded",
+            "input_hash": input_hash,
+            "tool_name": step.tool_name,
+            "tool_version": "1",
+            "adapter_version": orchestrator.adapter_version,
+            "model_version": "",
+            "output": {"status": "corrupted-status"},
+            "error": None,
+            "metadata": {},
+        }
+    )
+
+    result = orchestrator.run(
+        context,
+        [step],
+        {tool.name: tool},
+    )
+
+    assert result.success is True
+    assert tool.calls == ["CCO"]
+    assert result.metadata["reused_steps"] == []
+    assert result.metadata["checkpoint_warnings"] == [
+        {
+            "step": "properties",
+            "reason": "checkpoint_deserialization_failed",
+        }
+    ]
+    assert "Ignored incompatible checkpoint for properties" in result.warnings
+    assert store.latest_checkpoint(context.trace_id, step.name)["status"] == (
+        "succeeded"
+    )
+
+
+def test_corrupted_candidate_set_checkpoint_reexecutes_generator(tmp_path):
+    store = SQLiteAgentStateStore(tmp_path / "corrupted-candidates.sqlite3")
+    generator = CountingCandidateGenerator()
+    context = AgentContext(query="generate", trace_id="corrupted-candidates")
+    step = WorkflowStep(
+        "generate",
+        generator.name,
+        output_key="molecules",
+    )
+    orchestrator = WorkflowOrchestrator(state_store=store)
+    store.save_checkpoint(
+        {
+            "trace_id": context.trace_id,
+            "step_id": step.name,
+            "workflow_version": orchestrator.workflow_version,
+            "status": "succeeded",
+            "input_hash": orchestrator._input_hash("generate"),
+            "tool_name": step.tool_name,
+            "tool_version": "1",
+            "adapter_version": orchestrator.adapter_version,
+            "model_version": "",
+            "output": {
+                "status": "succeeded",
+                "quality": {"output_contract": "CandidateSet@1"},
+                "data": {
+                    "version": "1",
+                    "requested_count": 1,
+                    "candidates": [],
+                    "status": "succeeded",
+                },
+            },
+            "error": None,
+            "metadata": {},
+        }
+    )
+
+    result = orchestrator.run(
+        context,
+        [step],
+        {generator.name: generator},
+    )
+
+    assert result.partial is True
+    assert generator.calls == ["generate"]
+    assert result.metadata["reused_steps"] == []
+    assert result.metadata["checkpoint_warnings"] == [
+        {
+            "step": "generate",
+            "reason": "checkpoint_deserialization_failed",
+        }
+    ]
