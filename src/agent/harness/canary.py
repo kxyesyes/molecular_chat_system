@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+
+
+MAX_CANARY_KEY_LENGTH = 4096
 
 
 LANGGRAPH_CANARY_WORKFLOWS = frozenset(
@@ -32,14 +35,15 @@ class CanaryDecision:
         }
 
 
+@dataclass(frozen=True, slots=True, init=False)
 class LangGraphCanarySelector:
+    percent: int
+    _valid_percent: bool = field(repr=False)
+
     def __init__(self, percent: Any):
-        self._valid_percent = (
-            isinstance(percent, int)
-            and not isinstance(percent, bool)
-            and 0 <= percent <= 100
-        )
-        self.percent = percent if self._valid_percent else 0
+        valid_percent = type(percent) is int and 0 <= percent <= 100
+        object.__setattr__(self, "percent", percent if valid_percent else 0)
+        object.__setattr__(self, "_valid_percent", valid_percent)
 
     def select(
         self,
@@ -56,10 +60,12 @@ class LangGraphCanarySelector:
         if executor_supported is not True:
             return self._legacy("unsupported_delegated_executor")
 
-        key = idempotency_key or trace_id
-        if not key:
+        key = self._select_key(idempotency_key, trace_id)
+        if key is None:
             return self._legacy("missing_canary_key")
-        digest = hashlib.sha256(str(key).encode("utf-8")).hexdigest()
+        if key is False:
+            return self._legacy("invalid_canary_key")
+        digest = hashlib.sha256(key).hexdigest()
         bucket = int(digest[:8], 16) % 100
         if bucket < self.percent:
             return CanaryDecision(
@@ -69,6 +75,34 @@ class LangGraphCanarySelector:
                 percent=self.percent,
             )
         return self._legacy("canary_not_selected", bucket=bucket)
+
+    @staticmethod
+    def _select_key(
+        idempotency_key: Any,
+        trace_id: Any,
+    ) -> bytes | None | bool:
+        if idempotency_key is not None:
+            if type(idempotency_key) is not str:
+                return False
+            if idempotency_key != "":
+                return LangGraphCanarySelector._encode_key(idempotency_key)
+
+        if trace_id is None:
+            return None
+        if type(trace_id) is not str:
+            return False
+        if trace_id == "":
+            return None
+        return LangGraphCanarySelector._encode_key(trace_id)
+
+    @staticmethod
+    def _encode_key(key: str) -> bytes | bool:
+        if not 1 <= len(key) <= MAX_CANARY_KEY_LENGTH:
+            return False
+        try:
+            return key.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
 
     def _legacy(
         self,
@@ -86,6 +120,7 @@ class LangGraphCanarySelector:
 
 __all__ = [
     "LANGGRAPH_CANARY_WORKFLOWS",
+    "MAX_CANARY_KEY_LENGTH",
     "CanaryDecision",
     "LangGraphCanarySelector",
 ]

@@ -11,6 +11,7 @@ from src.agent.harness import (
     CanaryDecision,
     LangGraphCanarySelector,
 )
+from src.agent.harness.canary import MAX_CANARY_KEY_LENGTH
 
 
 ALLOWLIST = frozenset(
@@ -22,6 +23,43 @@ ALLOWLIST = frozenset(
         "rag_search",
     }
 )
+
+
+class ExplodingKey:
+    def __bool__(self):
+        raise AssertionError("PRIVATE key __bool__ must not be called")
+
+    def __str__(self):
+        raise AssertionError("PRIVATE key __str__ must not be called")
+
+
+class ExplodingStrSubclass(str):
+    def __bool__(self):
+        raise AssertionError("PRIVATE str subclass __bool__ must not be called")
+
+    def __str__(self):
+        raise AssertionError("PRIVATE str subclass __str__ must not be called")
+
+    def encode(self, *args, **kwargs):
+        raise AssertionError("PRIVATE str subclass encode must not be called")
+
+
+class IntSubclass(int):
+    pass
+
+
+class ExplodingPercent:
+    def __bool__(self):
+        raise AssertionError("PRIVATE percent __bool__ must not be called")
+
+    def __le__(self, other):
+        raise AssertionError("PRIVATE percent comparison must not be called")
+
+    def __ge__(self, other):
+        raise AssertionError("PRIVATE percent comparison must not be called")
+
+    def __repr__(self):
+        raise AssertionError("PRIVATE percent repr must not be called")
 
 
 def _bucket(key) -> int:
@@ -114,6 +152,44 @@ def test_invalid_percent_has_highest_priority_and_fails_closed(percent):
     )
 
 
+def test_invalid_int_subclass_percent_wins_before_adversarial_key_checks():
+    decision = LangGraphCanarySelector(percent=IntSubclass(100)).select(
+        workflow_name="admet_assessment",
+        trace_id=ExplodingKey(),
+        idempotency_key=ExplodingKey(),
+        executor_supported=True,
+    )
+
+    assert decision == CanaryDecision(
+        backend="legacy",
+        reason="invalid_canary_percent",
+        bucket=None,
+        percent=0,
+    )
+
+
+def test_malicious_percent_is_rejected_without_protocol_calls_or_leaks():
+    selector = LangGraphCanarySelector(percent=ExplodingPercent())
+    decision = selector.select(
+        workflow_name="admet_assessment",
+        trace_id=ExplodingKey(),
+        idempotency_key=ExplodingKey(),
+        executor_supported=True,
+    )
+
+    assert decision.reason == "invalid_canary_percent"
+    assert decision.percent == 0
+    assert "PRIVATE" not in repr(selector)
+    assert "_valid_percent" not in repr(selector)
+
+    assert decision == CanaryDecision(
+        backend="legacy",
+        reason="invalid_canary_percent",
+        bucket=None,
+        percent=0,
+    )
+
+
 def test_non_allowlisted_workflow_fails_closed_before_executor_check():
     decision = _select(
         100,
@@ -155,6 +231,94 @@ def test_missing_canary_key_fails_closed(trace_id, idempotency_key):
         "missing_canary_key",
         None,
     )
+
+
+@pytest.mark.parametrize("invalid_key", [7, object()])
+@pytest.mark.parametrize("field", ["trace_id", "idempotency_key"])
+def test_non_string_keys_fail_closed(invalid_key, field):
+    values = {
+        "trace_id": "valid-trace",
+        "idempotency_key": None,
+    }
+    values[field] = invalid_key
+
+    decision = _select(100, **values)
+
+    assert (decision.backend, decision.reason, decision.bucket) == (
+        "legacy",
+        "invalid_canary_key",
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_key_factory",
+    [ExplodingKey, lambda: ExplodingStrSubclass("PRIVATE-subclass")],
+    ids=["object", "str-subclass"],
+)
+@pytest.mark.parametrize("field", ["trace_id", "idempotency_key"])
+def test_adversarial_keys_are_rejected_without_calling_user_protocols(
+    invalid_key_factory,
+    field,
+):
+    values = {
+        "trace_id": "valid-trace",
+        "idempotency_key": None,
+    }
+    values[field] = invalid_key_factory()
+
+    decision = _select(100, **values)
+
+    assert decision == CanaryDecision(
+        backend="legacy",
+        reason="invalid_canary_key",
+        bucket=None,
+        percent=100,
+    )
+    assert "PRIVATE" not in json.dumps(decision.to_dict())
+
+
+def test_invalid_nonempty_idempotency_key_never_falls_back_to_valid_trace():
+    decision = _select(
+        100,
+        trace_id="valid-fallback-trace",
+        idempotency_key=7,
+    )
+
+    assert decision.reason == "invalid_canary_key"
+    assert decision.bucket is None
+
+
+def test_isolated_surrogate_fails_closed_without_unicode_error():
+    decision = _select(
+        100,
+        trace_id="\ud800",
+        idempotency_key=None,
+    )
+
+    assert decision.reason == "invalid_canary_key"
+    assert decision.bucket is None
+
+
+def test_canary_key_length_limit_is_inclusive():
+    assert MAX_CANARY_KEY_LENGTH == 4096
+
+    maximum = _select(100, trace_id="a" * MAX_CANARY_KEY_LENGTH)
+    oversized = _select(100, trace_id="a" * (MAX_CANARY_KEY_LENGTH + 1))
+
+    assert maximum.backend == "langgraph"
+    assert maximum.bucket == _bucket("a" * MAX_CANARY_KEY_LENGTH)
+    assert oversized.reason == "invalid_canary_key"
+    assert oversized.bucket is None
+
+
+def test_unicode_key_is_stable_and_utf8_hashed():
+    key = "稳定分桶🧪"
+
+    first = _select(100, trace_id=key)
+    second = _select(100, trace_id=key)
+
+    assert first.bucket == second.bucket == _bucket(key)
 
 
 def test_idempotency_key_takes_priority_and_is_stable_across_traces():
@@ -204,8 +368,8 @@ def test_decision_serialization_is_public_and_does_not_leak_keys():
     }
     assert "private-trace-id" not in encoded
     assert "private-request-key" not in encoded
-    assert "private-trace-id" not in repr(vars(selector))
-    assert "private-request-key" not in repr(vars(selector))
+    assert "private-trace-id" not in repr(selector)
+    assert "private-request-key" not in repr(selector)
 
 
 def test_canary_decision_is_frozen():
@@ -213,6 +377,15 @@ def test_canary_decision_is_frozen():
 
     with pytest.raises(FrozenInstanceError):
         decision.backend = "legacy"
+
+
+def test_selector_configuration_is_frozen():
+    selector = LangGraphCanarySelector(percent=0)
+
+    with pytest.raises((FrozenInstanceError, AttributeError)):
+        selector.percent = 100
+    with pytest.raises((FrozenInstanceError, AttributeError)):
+        selector._valid_percent = True
 
 
 def test_selectors_do_not_share_mutable_state():
