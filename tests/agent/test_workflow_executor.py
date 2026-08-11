@@ -110,6 +110,13 @@ class CountingPrepareExecutor(WorkflowExecutor):
         return super().prepare(*args, **kwargs)
 
 
+class ToolVisibilityOrchestrator(WorkflowOrchestrator):
+    def run(self, *args, **kwargs):
+        result = super().run(*args, **kwargs)
+        result.metadata["visible_tools"] = sorted(kwargs["tools"])
+        return result
+
+
 def test_prepare_returns_compiled_request_scoped_workflow():
     first = FakeTool("property_calculator")
     unrelated = FakeTool("admet_predictor")
@@ -147,6 +154,68 @@ def test_prepare_returns_compiled_request_scoped_workflow():
         "second": ("first",),
     }
     assert dict(prepared.tools) == {"property_calculator": first}
+
+
+def test_prepare_preserves_all_available_policy_allowed_tools():
+    policy = WorkflowPolicy(
+        name="policy-visible-tools",
+        description="expose all authorized tools",
+        allowed_tools=("property_calculator", "admet_predictor"),
+    )
+    context = AgentContext(query="CCO", trace_id="policy-visible-tools")
+    plan = SingleStepPlanner().plan(context)
+    property_tool = FakeTool("property_calculator")
+    admet_tool = FakeTool("admet_predictor")
+    unauthorized_tool = FakeTool("activity_predictor")
+    all_tools = {
+        "property_calculator": property_tool,
+        "admet_predictor": admet_tool,
+        "activity_predictor": unauthorized_tool,
+    }
+    executor = WorkflowExecutor(orchestrator=ToolVisibilityOrchestrator())
+
+    prepared = executor.prepare(
+        context=context,
+        policy=policy,
+        all_tools=all_tools,
+        plan=plan,
+    )
+    execution = executor.execute(
+        context=context,
+        policy=policy,
+        all_tools=all_tools,
+        plan=plan,
+    )
+
+    assert set(prepared.tools) == {
+        "property_calculator",
+        "admet_predictor",
+    }
+    assert execution.result.metadata["visible_tools"] == [
+        "admet_predictor",
+        "property_calculator",
+    ]
+    assert "activity_predictor" not in prepared.tools
+
+
+def test_unused_policy_allowed_tool_may_be_absent():
+    policy = WorkflowPolicy(
+        name="unused-allowed-tool",
+        description="unused allowed tools are optional",
+        allowed_tools=("property_calculator", "admet_predictor"),
+    )
+    context = AgentContext(query="CCO", trace_id="unused-allowed-tool")
+
+    execution = WorkflowExecutor(planner=SingleStepPlanner()).execute(
+        context=context,
+        policy=policy,
+        all_tools={
+            "property_calculator": FakeTool("property_calculator")
+        },
+    )
+
+    assert execution.result.success is True
+    assert execution.result.error is None
 
 
 def test_prepared_tools_are_defensive_and_read_only():

@@ -96,12 +96,11 @@ class WorkflowExecutor:
             return failure
         assert compiled is not None
 
-        planned_tools = {step.tool_name for step in plan.steps}
         allowed = set(policy.allowed_tools)
         filtered_tools = {
             name: tool
             for name, tool in all_tools.items()
-            if name in allowed and name in planned_tools
+            if name in allowed
         }
         state_store = getattr(self.orchestrator, "state_store", None)
 
