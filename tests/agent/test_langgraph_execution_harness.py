@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import builtins
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError, fields
+from threading import Event, Lock
 
 import pytest
 
@@ -400,7 +402,10 @@ def test_default_driver_dependency_failure_reports_legacy_fallback(
 
     def unavailable_langgraph(name, *args, **kwargs):
         if name == "langgraph.graph":
-            raise ModuleNotFoundError("No module named 'langgraph'")
+            raise ModuleNotFoundError(
+                "No module named 'langgraph'",
+                name="langgraph",
+            )
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", unavailable_langgraph)
@@ -609,3 +614,299 @@ def test_step_node_uses_closed_outcomes_and_terminal_reasons(
     ]
     assert state["terminal_reason"] == safe_reason
     assert "PRIVATE" not in json.dumps(state)
+
+
+def _many_step_plan(count: int) -> WorkflowPlan:
+    return WorkflowPlan(
+        workflow_name=ADMET_POLICY.name,
+        steps=[
+            WorkflowStep(
+                name=f"properties-{index:03d}",
+                tool_name="property_calculator",
+                input_data="CCO",
+            )
+            for index in range(count)
+        ],
+    )
+
+
+@pytest.mark.parametrize("count", [25, 30, 100])
+def test_default_stategraph_executes_long_plans_without_recursion_failure(count):
+    tool = CountingTool("property_calculator")
+
+    run = LangGraphExecutionHarness(WorkflowExecutor()).execute(
+        context=_context(f"long-plan-{count}"),
+        policy=ADMET_POLICY,
+        all_tools={tool.name: tool},
+        plan=_many_step_plan(count),
+    )
+
+    assert run.authoritative.result.success is True
+    assert run.execution.error_code is None
+    assert run.execution.tool_attempt_count == count
+    assert tool.calls == ["CCO"] * count
+
+
+def test_default_stategraph_empty_plan_is_not_reported_as_build_failure():
+    run = LangGraphExecutionHarness(WorkflowExecutor()).execute(
+        context=_context("empty-plan"),
+        policy=ADMET_POLICY,
+        all_tools={},
+        plan=WorkflowPlan(workflow_name=ADMET_POLICY.name, steps=[]),
+    )
+
+    assert run.authoritative.result.success is False
+    assert run.execution.tool_attempt_count == 0
+    assert run.execution.fallback_before_execution is False
+    assert run.execution.error_code is None
+
+
+class CountingPrivateSemanticValidator:
+    def __init__(self, *, raises: bool = False):
+        self.calls = 0
+        self.raises = raises
+
+    def validate(self, _step, _input_data):
+        self.calls += 1
+        if self.raises:
+            raise RuntimeError("PRIVATE semantic validator input")
+        return SemanticDecision(
+            allowed=False,
+            requirement="PRIVATE-requirement",
+            reason="PRIVATE-query-value",
+        )
+
+
+def test_zero_tool_semantic_progress_never_reenters_sequential_fallback():
+    validator = CountingPrivateSemanticValidator()
+    tool = CountingTool("property_calculator")
+    run = LangGraphExecutionHarness(
+        WorkflowExecutor(
+            orchestrator=WorkflowOrchestrator(semantic_validator=validator)
+        ),
+        graph_runner=RaiseAfterFirstNode(),
+    ).execute(
+        context=_context("semantic-progress"),
+        policy=ADMET_POLICY,
+        all_tools={tool.name: tool},
+        plan=_one_step_plan(),
+    )
+
+    assert validator.calls == 1
+    assert tool.calls == []
+    assert run.authoritative.result.success is False
+    assert run.execution.fallback_before_execution is False
+    assert run.execution.error_code == "langgraph_runtime_after_tool_or_progress"
+
+
+def test_validator_exception_is_contained_and_not_retried():
+    validator = CountingPrivateSemanticValidator(raises=True)
+    tool = CountingTool("property_calculator")
+    run = LangGraphExecutionHarness(
+        WorkflowExecutor(
+            orchestrator=WorkflowOrchestrator(semantic_validator=validator)
+        )
+    ).execute(
+        context=_context("validator-exception"),
+        policy=ADMET_POLICY,
+        all_tools={tool.name: tool},
+        plan=_one_step_plan(),
+    )
+
+    assert validator.calls == 1
+    assert tool.calls == []
+    assert run.authoritative.result.success is False
+    assert run.execution.error_code == "langgraph_runtime_after_tool_or_progress"
+    assert "PRIVATE" not in json.dumps(run.execution.to_dict())
+
+
+class FalseTerminalRunner(SequentialInjectedRunner):
+    def invoke(self, _state):
+        return {"terminal": True}
+
+
+def test_runner_cannot_claim_terminal_without_terminal_session():
+    tool = CountingTool("property_calculator")
+    run = LangGraphExecutionHarness(
+        WorkflowExecutor(), graph_runner=FalseTerminalRunner()
+    ).execute(
+        context=_context("false-terminal"),
+        policy=ADMET_POLICY,
+        all_tools={tool.name: tool},
+        plan=_one_step_plan(),
+    )
+
+    assert tool.calls == []
+    assert run.authoritative.result.success is False
+    assert run.execution.error_code == "langgraph_runner_state_mismatch"
+
+
+class PrematureFinishRunner(SequentialInjectedRunner):
+    def invoke(self, _state):
+        self.session.execute_step(0)
+        self.session.finish()
+        raise RuntimeError("PRIVATE after premature finish")
+
+
+def test_runner_cannot_finalize_authoritative_session_itself():
+    tool = CountingTool("property_calculator")
+    run = LangGraphExecutionHarness(
+        WorkflowExecutor(), graph_runner=PrematureFinishRunner()
+    ).execute(
+        context=_context("premature-finish"),
+        policy=ADMET_POLICY,
+        all_tools={tool.name: tool},
+        plan=_one_step_plan(),
+    )
+
+    assert tool.calls == ["CCO"]
+    assert run.authoritative.result.success is False
+    assert run.execution.error_code == "langgraph_runtime_after_tool"
+    assert "PRIVATE" not in json.dumps(run.execution.to_dict())
+
+
+class MutatingBuildRunner(SequentialInjectedRunner):
+    def build(self, *, session, plan):
+        session.start()
+        session.execute_step(0)
+        raise RuntimeError("PRIVATE build mutation")
+
+
+def test_runner_build_side_effect_is_not_started_or_executed_twice():
+    tool = CountingTool("property_calculator")
+    run = LangGraphExecutionHarness(
+        WorkflowExecutor(), graph_runner=MutatingBuildRunner()
+    ).execute(
+        context=_context("mutating-build"),
+        policy=ADMET_POLICY,
+        all_tools={tool.name: tool},
+        plan=_one_step_plan(),
+    )
+
+    assert tool.calls == ["CCO"]
+    assert run.authoritative.result.success is False
+    assert run.execution.error_code == "langgraph_runner_build_side_effect"
+
+
+def test_shared_stateful_runner_is_request_isolated_under_concurrency():
+    runner = SequentialInjectedRunner()
+    harness = LangGraphExecutionHarness(WorkflowExecutor(), graph_runner=runner)
+    first = CountingTool("property_calculator")
+    second = CountingTool("property_calculator")
+
+    def execute(trace_id, tool):
+        return harness.execute(
+            context=_context(trace_id),
+            policy=ADMET_POLICY,
+            all_tools={tool.name: tool},
+            plan=_one_step_plan(),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(execute, "concurrent-one", first),
+            pool.submit(execute, "concurrent-two", second),
+        ]
+        runs = [future.result() for future in futures]
+
+    assert all(run.authoritative.result.success for run in runs)
+    assert first.calls == ["CCO"]
+    assert second.calls == ["CCO"]
+
+
+class CrossHarnessStatefulRunner(SequentialInjectedRunner):
+    def __init__(self):
+        super().__init__()
+        self._build_lock = Lock()
+        self._build_count = 0
+        self._second_build_entered = Event()
+
+    def build(self, *, session, plan):
+        with self._build_lock:
+            self._build_count += 1
+            build_number = self._build_count
+        self.session = session
+        self.plan = plan
+        if build_number == 1:
+            self._second_build_entered.wait(timeout=0.25)
+        else:
+            self._second_build_entered.set()
+        return self
+
+
+def test_shared_runner_is_isolated_across_distinct_harness_instances():
+    runner = CrossHarnessStatefulRunner()
+    harnesses = [
+        LangGraphExecutionHarness(WorkflowExecutor(), graph_runner=runner),
+        LangGraphExecutionHarness(WorkflowExecutor(), graph_runner=runner),
+    ]
+    tools = [CountingTool("property_calculator") for _ in harnesses]
+
+    def execute(index):
+        return harnesses[index].execute(
+            context=_context(f"cross-harness-{index}"),
+            policy=ADMET_POLICY,
+            all_tools={tools[index].name: tools[index]},
+            plan=_one_step_plan(),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        runs = list(pool.map(execute, range(2)))
+
+    assert all(run.authoritative.result.success for run in runs)
+    assert all(run.execution.error_code is None for run in runs)
+    assert all(not run.execution.fallback_before_execution for run in runs)
+    assert [tool.calls for tool in tools] == [["CCO"], ["CCO"]]
+
+
+def test_internal_module_not_found_is_build_failure_not_dependency_missing(
+    monkeypatch,
+):
+    tool = CountingTool("property_calculator")
+
+    def internal_import_failure():
+        exc = ModuleNotFoundError("PRIVATE internal import")
+        exc.name = "private_internal_dependency"
+        raise exc
+
+    monkeypatch.setattr(
+        langgraph_execution, "_load_langgraph_api", internal_import_failure
+    )
+    run = LangGraphExecutionHarness(WorkflowExecutor()).execute(
+        context=_context("internal-import"),
+        policy=ADMET_POLICY,
+        all_tools={tool.name: tool},
+        plan=_one_step_plan(),
+    )
+
+    assert tool.calls == ["CCO"]
+    assert run.authoritative.result.success is True
+    assert run.execution.backend == "langgraph"
+    assert run.execution.error_code == "langgraph_build_before_execution"
+
+
+def test_unencodable_plan_fingerprint_fails_before_tool_execution():
+    tool = CountingTool("property_calculator")
+    plan = WorkflowPlan(
+        workflow_name=ADMET_POLICY.name,
+        steps=[
+            WorkflowStep(
+                name="private-\ud800",
+                tool_name=tool.name,
+                input_data="CCO",
+            )
+        ],
+    )
+
+    run = LangGraphExecutionHarness(WorkflowExecutor()).execute(
+        context=_context("invalid-fingerprint"),
+        policy=ADMET_POLICY,
+        all_tools={tool.name: tool},
+        plan=plan,
+    )
+
+    assert tool.calls == []
+    assert run.authoritative.result.success is False
+    assert run.execution.tool_attempt_count == 0
+    assert run.execution.error_code == "invalid_plan_fingerprint"
+    assert len(run.execution.plan_fingerprint) == 64
