@@ -6,7 +6,7 @@ from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from collections.abc import Mapping
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.agent.contracts import (
     AgentContext,
@@ -33,6 +33,9 @@ from src.agent.validators import (
 )
 
 from .base import WorkflowState, WorkflowStep
+
+if TYPE_CHECKING:
+    from src.agent.runtime.run_session import WorkflowRunSession
 
 
 class WorkflowOrchestrator:
@@ -88,6 +91,25 @@ class WorkflowOrchestrator:
         request_orchestrator.workflow_version = self.workflow_version
         request_orchestrator.adapter_version = self.adapter_version
         return request_orchestrator
+
+    def create_session(
+        self,
+        context: AgentContext,
+        steps: list[WorkflowStep],
+        tools: Mapping[str, Any],
+        continue_on_error: bool = False,
+        idempotency_key: str | None = None,
+    ) -> WorkflowRunSession:
+        from src.agent.runtime.run_session import WorkflowRunSession
+
+        return WorkflowRunSession(
+            orchestrator=self,
+            context=context,
+            steps=steps,
+            tools=tools,
+            continue_on_error=continue_on_error,
+            idempotency_key=idempotency_key,
+        )
 
     def run(
         self,
