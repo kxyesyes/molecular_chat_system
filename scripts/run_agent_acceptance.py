@@ -143,6 +143,7 @@ def run_contract() -> dict[str, Any]:
         "status": "passed" if passed == len(all_results) else "failed",
         "metrics": {
             **routing_report.metrics,
+            "routing_case_count": routing_report.metrics.get("case_count", 0),
             "workflow_case_count": len(workflow_results),
             "failure_case_count": len(failure_results),
             "real_case_count": len(real_case_results),
@@ -162,9 +163,21 @@ def run_contract() -> dict[str, Any]:
             for item in all_results
         ],
     }
+    report["metrics"]["case_count"] = len(all_results)
     harness_probe = _run_harness_contract_probe()
     if harness_probe is not None:
-        report["harness_shadow"] = harness_probe
+        if harness_probe.get("backend") in {"legacy", "langgraph"}:
+            report["harness_canary"] = harness_probe
+        else:
+            report["harness_shadow"] = harness_probe
+        requested_canary = (
+            os.getenv("AGENT_HARNESS_MODE", "legacy").strip().lower()
+            == "langgraph_canary"
+        )
+        if harness_probe.get("status") == "failed" or (
+            requested_canary and harness_probe.get("status") == "unavailable"
+        ):
+            report["status"] = "failed"
     return report
 
 
@@ -227,6 +240,25 @@ def _run_harness_contract_probe(
             **harness_run.shadow.to_dict(),
             "authoritative_tool_calls": tool.calls,
         }
+    if harness_run.execution is not None:
+        execution_metadata = harness_run.execution.to_dict()
+        if (
+            execution_metadata.get("backend") not in {"legacy", "langgraph"}
+            or execution_metadata.get("tool_attempt_count") != tool.calls
+            or len(str(execution_metadata.get("plan_fingerprint") or "")) != 64
+        ):
+            return {
+                "status": "failed",
+                "error_code": "invalid_harness_execution_metadata",
+                "authoritative_tool_calls": tool.calls,
+            }
+        return redact_sensitive(
+            {
+                **execution_metadata,
+                "status": "passed",
+                "authoritative_tool_calls": tool.calls,
+            }
+        )
     warning = getattr(factory, "last_warning", None)
     if warning:
         return {

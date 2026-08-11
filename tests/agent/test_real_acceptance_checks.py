@@ -10,6 +10,7 @@ from scripts.run_agent_acceptance import (
     _evaluate_docking_result,
     _evaluate_generation_result,
     _resolve_real_dataset,
+    run_contract,
     run_replay,
     run_real,
 )
@@ -77,6 +78,51 @@ def test_contract_harness_probe_records_shadow_without_double_execution():
     assert probe["status"] == "matched"
     assert probe["matched"] is True
     assert probe["authoritative_tool_calls"] == 1
+
+
+def test_contract_canary_probe_keeps_case_count_and_one_tool_call(monkeypatch):
+    monkeypatch.setenv("AGENT_HARNESS_MODE", "langgraph_canary")
+    monkeypatch.setenv("AGENT_LANGGRAPH_CANARY_PERCENT", "100")
+
+    report = run_contract()
+
+    assert report["metrics"]["case_count"] == 34
+    assert report["harness_canary"]["authoritative_tool_calls"] == 1
+    assert report["harness_canary"]["tool_attempt_count"] == 1
+    assert report["harness_canary"]["backend"] == "langgraph"
+
+
+def test_failed_canary_probe_fails_contract_release_gate(monkeypatch):
+    monkeypatch.setattr(
+        "scripts.run_agent_acceptance._run_harness_contract_probe",
+        lambda: {
+            "status": "failed",
+            "error_code": "invalid_harness_execution_metadata",
+            "authoritative_tool_calls": 1,
+        },
+    )
+
+    report = run_contract()
+
+    assert report["status"] == "failed"
+    assert report["harness_shadow"]["status"] == "failed"
+
+
+def test_unavailable_requested_canary_fails_contract_release_gate(monkeypatch):
+    monkeypatch.setenv("AGENT_HARNESS_MODE", "langgraph_canary")
+    monkeypatch.setattr(
+        "scripts.run_agent_acceptance._run_harness_contract_probe",
+        lambda: {
+            "status": "unavailable",
+            "error_code": "langgraph_optional_dependency_unavailable",
+            "authoritative_tool_calls": 1,
+        },
+    )
+
+    report = run_contract()
+
+    assert report["status"] == "failed"
+    assert report["harness_shadow"]["status"] == "unavailable"
 
 
 def test_external_model_probe_allows_reasoning_model_output_budget(monkeypatch):

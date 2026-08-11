@@ -4,6 +4,8 @@ import importlib
 import json
 from pathlib import Path
 
+import pytest
+
 from src.agent.evaluation import (
     EvaluationCase,
     EvaluationRunner,
@@ -20,11 +22,17 @@ from src.agent.evaluation.scientific import (
     _check_data_flow_generated_smiles_consumed,
     _check_generation_repeat_stats,
     _check_rag_source_or_explicit_no_hit,
+    _redact_case_literals,
     replay_scientific_report,
     summarize_scientific_stability,
 )
 from src.agent.contracts import ToolProvenance, ToolResult
-from src.agent.harness import HarnessRun, LegacyHarness, ShadowComparison
+from src.agent.harness import (
+    HarnessExecutionMetadata,
+    HarnessRun,
+    LegacyHarness,
+    ShadowComparison,
+)
 from src.agent.routing import HybridSkillRouter
 from src.agent.validators import AgentResultValidator
 from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
@@ -159,6 +167,232 @@ def test_scientific_report_includes_redacted_harness_shadow(tmp_path):
     assert report["harness_shadow"]["status"] == "matched"
     assert "prompt" not in report["harness_shadow"]
     assert "secret prompt" not in json.dumps(report["harness_shadow"])
+
+
+def test_scientific_report_records_canary_without_sensitive_inputs(tmp_path):
+    class Decision:
+        selected_skill = "custom_workflow"
+
+    class Router:
+        def __init__(self, catalog):
+            self.catalog = catalog
+
+        def decide(self, _prompt):
+            return Decision()
+
+    class Tool:
+        name = "property_calculator"
+
+        def execute(self, query):
+            return ToolResult.success_result(self.name, data={"query": query})
+
+    class CanaryFactory:
+        last_warning = None
+
+        def create(self, executor):
+            legacy = LegacyHarness(executor)
+
+            class Backend:
+                def execute(self, **kwargs):
+                    execution = legacy.execute(**kwargs).authoritative
+                    return HarnessRun(
+                        authoritative=execution,
+                        execution=HarnessExecutionMetadata(
+                            backend="langgraph",
+                            backend_version="test",
+                            selection_reason="canary_selected",
+                            canary_bucket=7,
+                            plan_fingerprint="a" * 64,
+                            tool_attempt_count=1,
+                            fallback_before_execution=False,
+                            elapsed_ms=3,
+                        ),
+                    )
+
+            return Backend()
+
+    class Planner:
+        def plan(self, context):
+            from src.agent.orchestrators import WorkflowStep
+            from src.agent.planning import WorkflowPlan
+
+            return WorkflowPlan(
+                workflow_name=context.active_skill,
+                steps=[
+                    WorkflowStep(
+                        "properties",
+                        "property_calculator",
+                        input_data="CCO",
+                    )
+                ],
+            )
+
+    catalog = WorkflowCatalog(
+        (
+            WorkflowPolicy(
+                name="custom_workflow",
+                description="custom",
+                allowed_tools=("property_calculator",),
+            ),
+        )
+    )
+    runner = ScientificAcceptanceRunner(
+        dataset_dir=tmp_path,
+        project_root=tmp_path,
+        router=Router(catalog),
+        planner=Planner(),
+        tools={"property_calculator": Tool()},
+        harness_factory=CanaryFactory(),
+    )
+    case = EvaluationCase(
+        case_id="CANARY-001",
+        version="1",
+        category="harness",
+        prompt="private prompt CCO",
+        expected_skill="custom_workflow",
+        expected_tools=["property_calculator"],
+        metadata={"idempotency_key": "private-key"},
+    )
+
+    report = runner.run_case(case)
+
+    assert "harness_execution" in report, report
+    assert report["harness_execution"]["backend"] == "langgraph"
+    assert report["harness_execution"]["tool_attempt_count"] == len(
+        report["actual_tools"]
+    )
+    serialized = json.dumps(report)
+    assert "private prompt CCO" not in serialized
+    assert "private-key" not in serialized
+
+
+def test_case_literal_redaction_covers_mapping_keys():
+    redacted = _redact_case_literals(
+        {
+            "private prompt CCO": {"private-key": "safe"},
+            "nested": ["prefix private prompt CCO suffix"],
+        },
+        ("private prompt CCO", "private-key"),
+    )
+
+    serialized = json.dumps(redacted)
+    assert "private prompt CCO" not in serialized
+    assert "private-key" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("second_metadata", "expected_error"),
+    [
+        ("invalid", "invalid_harness_execution_metadata"),
+        ("missing", "harness_execution_metadata_missing"),
+    ],
+)
+def test_repeated_harness_metadata_keeps_invalid_run_alignment(
+    tmp_path,
+    second_metadata,
+    expected_error,
+):
+    class Decision:
+        selected_skill = "custom_workflow"
+
+    class Router:
+        def __init__(self, catalog):
+            self.catalog = catalog
+
+        def decide(self, _prompt):
+            return Decision()
+
+    class Tool:
+        name = "property_calculator"
+
+        def execute(self, query):
+            return ToolResult.success_result(self.name, data={"query": query})
+
+    class Factory:
+        last_warning = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, executor):
+            legacy = LegacyHarness(executor)
+            parent = self
+
+            class Backend:
+                def execute(self, **kwargs):
+                    parent.calls += 1
+                    execution = legacy.execute(**kwargs).authoritative
+                    if parent.calls == 2 and second_metadata == "missing":
+                        return HarnessRun(authoritative=execution)
+                    attempts = 1 if parent.calls == 1 else 99
+                    return HarnessRun(
+                        authoritative=execution,
+                        execution=HarnessExecutionMetadata(
+                            backend="langgraph",
+                            backend_version="test",
+                            selection_reason="canary_selected",
+                            canary_bucket=7,
+                            plan_fingerprint="a" * 64,
+                            tool_attempt_count=attempts,
+                            fallback_before_execution=False,
+                            elapsed_ms=3,
+                        ),
+                    )
+
+            return Backend()
+
+    class Planner:
+        def plan(self, context):
+            from src.agent.orchestrators import WorkflowStep
+            from src.agent.planning import WorkflowPlan
+
+            return WorkflowPlan(
+                workflow_name=context.active_skill,
+                steps=[
+                    WorkflowStep(
+                        "properties",
+                        "property_calculator",
+                        input_data="CCO",
+                    )
+                ],
+            )
+
+    catalog = WorkflowCatalog(
+        (
+            WorkflowPolicy(
+                name="custom_workflow",
+                description="custom",
+                allowed_tools=("property_calculator",),
+            ),
+        )
+    )
+    runner = ScientificAcceptanceRunner(
+        dataset_dir=tmp_path,
+        project_root=tmp_path,
+        router=Router(catalog),
+        planner=Planner(),
+        tools={"property_calculator": Tool()},
+        harness_factory=Factory(),
+    )
+    case = EvaluationCase(
+        case_id="CANARY-REPEAT",
+        version="1",
+        category="harness",
+        prompt="properties for CCO",
+        expected_skill="custom_workflow",
+        expected_tools=["property_calculator", "property_calculator"],
+        metadata={"repeat_runs": 2},
+    )
+
+    report = runner.run_case(case)
+
+    runs = report["harness_execution"]["runs"]
+    assert len(runs) == 2
+    assert runs[0]["backend"] == "langgraph"
+    assert runs[1] == {
+        "status": "invalid",
+        "error_code": expected_error,
+    }
 
 
 def test_load_cases_reads_versioned_jsonl(tmp_path):
