@@ -21,7 +21,11 @@ from src.agent.tooling import RetryPolicy, TOOL_AGENT_OWNERS, ToolRegistry
 from src.agent.persistence.base import AgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.task_state import TaskEventType
-from src.agent.runtime.workflow_executor import WorkflowExecution, WorkflowExecutor
+from src.agent.runtime.workflow_executor import (
+    PreparedWorkflow,
+    WorkflowExecution,
+    WorkflowExecutor,
+)
 from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
 
 
@@ -53,15 +57,18 @@ class _DelegatedWorkflowExecutor:
     ) -> WorkflowExecution:
         del event_callback, idempotency_key
         plan = plan or self.supervisor.planner.plan(context)
-        preflight_failure = self.preflight_executor.preflight(
+        prepared = self.preflight_executor.prepare(
             context=context,
             policy=policy,
             all_tools=all_tools,
             plan=plan,
         )
-        if preflight_failure is not None:
-            return preflight_failure
-        return self.supervisor._run_delegated(context, plan)
+        if isinstance(prepared, WorkflowExecution):
+            return prepared
+        assert isinstance(prepared, PreparedWorkflow)
+        execution = self.supervisor._run_delegated(context, prepared.plan)
+        execution.compiled_dependencies = prepared.compiled.dependencies
+        return execution
 
 
 class SupervisorAgent:
@@ -375,6 +382,11 @@ class SupervisorAgent:
         harness = self.harness_factory.create(executor)
         harness_run = harness.execute(**kwargs)
         execution = harness_run.authoritative
+        metadata_updates: dict[str, Any] = {}
+        if harness_run.execution is not None:
+            execution_metadata = harness_run.execution.to_dict()
+            execution.result.metadata["harness_execution"] = execution_metadata
+            metadata_updates["harness_execution"] = execution_metadata
         shadow_metadata: dict[str, Any] | None = None
         if harness_run.shadow is not None:
             shadow_metadata = harness_run.shadow.to_dict()
@@ -387,15 +399,18 @@ class SupervisorAgent:
                 }
         if shadow_metadata is not None:
             execution.result.metadata["harness_shadow"] = shadow_metadata
-            if self.state_store:
-                try:
-                    if self.state_store.get_run(execution.result.trace_id) is not None:
-                        self.state_store.update_run_metadata(
-                            execution.result.trace_id,
-                            {"harness_shadow": shadow_metadata},
-                        )
-                except Exception:
-                    pass
+            metadata_updates["harness_shadow"] = shadow_metadata
+        if self.state_store and metadata_updates:
+            try:
+                if self.state_store.get_run(execution.result.trace_id) is not None:
+                    self.state_store.update_run_metadata(
+                        execution.result.trace_id,
+                        metadata_updates,
+                    )
+            except Exception:
+                warning = "harness_metadata_persistence_failed"
+                if warning not in execution.result.warnings:
+                    execution.result.warnings.append(warning)
         return execution
 
     def _run_delegated(
@@ -407,6 +422,7 @@ class SupervisorAgent:
         outputs: dict[str, Any] = {}
         delegations: list[dict[str, Any]] = []
         tool_results = []
+        tool_attempt_count = 0
         skipped_steps: list[dict[str, str]] = []
         semantic_evidence: list[dict[str, str]] = []
         idempotency_key = context.metadata.get("idempotency_key")
@@ -563,6 +579,7 @@ class SupervisorAgent:
                     metrics={"reused_checkpoint": True},
                 )
             else:
+                tool_attempt_count += 1
                 task_result = specialist.execute_task(task, self.tool_registry)
             for item in task_result.tool_results:
                 item.quality = {
@@ -675,6 +692,7 @@ class SupervisorAgent:
             plan=plan,
             result=agent_result,
             events=events,
+            tool_attempt_count=tool_attempt_count,
         )
 
     @staticmethod

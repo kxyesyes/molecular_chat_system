@@ -7,6 +7,7 @@ from collections.abc import Callable
 from src.agent.runtime.workflow_executor import WorkflowExecutor
 
 from .base import HarnessBackend
+from .canary import CanaryHarness, LangGraphCanarySelector
 from .langgraph_backend import LangGraphPlanSimulator
 from .legacy import LegacyHarness
 from .shadow import ShadowHarness
@@ -38,11 +39,21 @@ class HarnessFactory:
                     LegacyHarness(executor),
                     LangGraphPlanSimulator(),
                 )
+        if self.mode == "langgraph_canary":
+            try:
+                available = bool(self._available())
+            except Exception:
+                available = False
+            if available:
+                return CanaryHarness(
+                    executor,
+                    LangGraphCanarySelector(_canary_percent()),
+                )
         self.last_warning = (
             "langgraph_execution_not_enabled"
             if self.mode == "langgraph"
             else "langgraph_optional_dependency_unavailable"
-            if self.mode == "shadow"
+            if self.mode in {"shadow", "langgraph_canary"}
             else "invalid_agent_harness_mode"
         )
         return LegacyHarness(executor)
@@ -50,6 +61,16 @@ class HarnessFactory:
     @staticmethod
     def _probe_langgraph() -> bool:
         return importlib.util.find_spec("langgraph") is not None
+
+
+def _canary_percent():
+    raw = os.getenv("AGENT_LANGGRAPH_CANARY_PERCENT", "0")
+    if type(raw) is not str:
+        return raw
+    try:
+        return int(raw.strip())
+    except (TypeError, ValueError):
+        return raw
 
 
 __all__ = ["HarnessFactory"]

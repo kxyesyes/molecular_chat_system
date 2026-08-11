@@ -1264,3 +1264,26 @@ def test_executor_rejects_uncompilable_binding_before_tool_runs():
     assert "missing" in execution.result.error.details["reason"]
     assert tool.calls == []
     assert execution.events == []
+
+
+def test_execution_preserves_exact_compilation_and_tool_attempt_count():
+    compiler = CountingCompiler()
+    tool = FakeTool("property_calculator")
+    executor = WorkflowExecutor(
+        planner=SingleStepPlanner(),
+        compiler=compiler,
+    )
+
+    execution = executor.execute(
+        context=AgentContext(
+            query="CCO",
+            trace_id="runtime-provenance",
+            active_skill="comprehensive_evaluation",
+        ),
+        policy=FAKE_POLICY,
+        all_tools={tool.name: tool},
+    )
+
+    assert compiler.calls == 1
+    assert execution.compiled_dependencies == compiler.last_compiled.dependencies
+    assert execution.tool_attempt_count == 1

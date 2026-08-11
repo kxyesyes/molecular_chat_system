@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
-from typing import Any
+import time
+from dataclasses import dataclass, field, replace
+from typing import Any, Mapping
+
+from src.agent.planning import WorkflowPlan
+from src.agent.runtime.workflow_executor import WorkflowExecutor
+
+from .base import HarnessExecutionMetadata, HarnessRun
+from .shadow import plan_fingerprint
 
 
 MAX_CANARY_KEY_LENGTH = 4096
@@ -118,9 +125,82 @@ class LangGraphCanarySelector:
         )
 
 
+class CanaryHarness:
+    """Route one prepared request to a deterministic canary or control cohort."""
+
+    def __init__(self, executor: Any, selector: LangGraphCanarySelector):
+        from .langgraph_execution import LangGraphExecutionHarness
+        from .legacy import LegacyHarness
+
+        self.executor = executor
+        self.selector = selector
+        self.langgraph = LangGraphExecutionHarness(executor)
+        self.legacy = LegacyHarness(executor)
+
+    def execute(self, **kwargs: Any) -> HarnessRun:
+        context = kwargs["context"]
+        policy = kwargs["policy"]
+        decision = self.selector.select(
+            workflow_name=policy.name,
+            trace_id=context.trace_id,
+            idempotency_key=kwargs.get("idempotency_key"),
+            executor_supported=isinstance(self.executor, WorkflowExecutor),
+        )
+        if decision.backend == "langgraph":
+            run = self.langgraph.execute(**kwargs)
+            assert run.execution is not None
+            return replace(
+                run,
+                execution=replace(
+                    run.execution,
+                    selection_reason=decision.reason,
+                    canary_bucket=decision.bucket,
+                ),
+            )
+
+        started = time.perf_counter()
+        run = self.legacy.execute(**kwargs)
+        metadata = _legacy_execution_metadata(
+            decision=decision,
+            plan=run.authoritative.plan,
+            dependencies=run.authoritative.compiled_dependencies,
+            tool_attempt_count=run.authoritative.tool_attempt_count,
+            started=started,
+        )
+        return replace(run, execution=metadata)
+
+
+def _legacy_execution_metadata(
+    *,
+    decision: CanaryDecision,
+    plan: WorkflowPlan,
+    dependencies: Mapping[str, tuple[str, ...] | list[str]],
+    tool_attempt_count: int,
+    started: float,
+) -> HarnessExecutionMetadata:
+    try:
+        fingerprint = plan_fingerprint(plan, dependencies)
+        error_code = None
+    except Exception:
+        fingerprint = hashlib.sha256(b"invalid_plan_fingerprint").hexdigest()
+        error_code = "invalid_plan_fingerprint"
+    return HarnessExecutionMetadata(
+        backend="legacy",
+        backend_version="builtin",
+        selection_reason=decision.reason,
+        canary_bucket=decision.bucket,
+        plan_fingerprint=fingerprint,
+        tool_attempt_count=max(0, int(tool_attempt_count)),
+        fallback_before_execution=False,
+        elapsed_ms=max(0, int((time.perf_counter() - started) * 1000)),
+        error_code=error_code,
+    )
+
+
 __all__ = [
     "LANGGRAPH_CANARY_WORKFLOWS",
     "MAX_CANARY_KEY_LENGTH",
     "CanaryDecision",
+    "CanaryHarness",
     "LangGraphCanarySelector",
 ]

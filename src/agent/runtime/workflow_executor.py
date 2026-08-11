@@ -33,6 +33,10 @@ class WorkflowExecution:
     plan: WorkflowPlan
     result: AgentResult
     events: list[dict[str, Any]]
+    compiled_dependencies: Mapping[
+        str, tuple[str, ...] | list[str]
+    ] = field(default_factory=dict)
+    tool_attempt_count: int = 0
 
 
 class PreparedWorkflowConsumedError(RuntimeError):
@@ -197,6 +201,11 @@ class PreparedWorkflow:
             plan=self._execution_payload.rebuild_plan(),
             result=result,
             events=[event.to_dict() for event in self.event_bus.events],
+            compiled_dependencies=self.compiled.dependencies,
+            tool_attempt_count=max(
+                0,
+                int(result.metadata.get("tool_attempt_count", 0)),
+            ),
         )
 
 

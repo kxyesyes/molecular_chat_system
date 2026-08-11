@@ -740,6 +740,7 @@ class WorkflowRunSession:
             metadata={
                 "step_count": len(self.steps),
                 "completed_count": len(self.results),
+                "tool_attempt_count": self.tool_attempt_count,
                 "reused_steps": self.reused_steps,
                 "checkpoint_warnings": self.checkpoint_warnings,
                 "skipped_steps": self.skipped_steps,

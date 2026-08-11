@@ -340,6 +340,7 @@ def test_checkpoint_reuse_does_not_increment_tool_attempt_count(tmp_path):
     assert session.tool_attempt_count == 0
     assert tool.calls == ["CCO"]
     assert result.metadata["reused_steps"] == ["properties"]
+    assert result.metadata["tool_attempt_count"] == 0
 
 
 def test_semantic_precondition_skip_does_not_call_tool():

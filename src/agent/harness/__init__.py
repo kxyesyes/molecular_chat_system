@@ -7,6 +7,7 @@ from .base import (
 from .canary import (
     LANGGRAPH_CANARY_WORKFLOWS,
     CanaryDecision,
+    CanaryHarness,
     LangGraphCanarySelector,
 )
 from .factory import HarnessFactory
@@ -27,6 +28,7 @@ __all__ = [
     "LegacyHarness",
     "CanaryGraphState",
     "CanaryDecision",
+    "CanaryHarness",
     "ShadowHarness",
     "ShadowComparison",
 ]
