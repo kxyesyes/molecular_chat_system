@@ -18,6 +18,32 @@ from .base import HarnessExecutionMetadata, HarnessRun
 from .shadow import plan_fingerprint
 
 
+_SAFE_STEP_OUTCOMES = frozenset(
+    {
+        "succeeded",
+        "partial",
+        "failed",
+        "unavailable",
+        "invalid_input",
+        "rejected",
+        "cancelled",
+        "skipped_precondition",
+    }
+)
+_SAFE_TERMINAL_REASONS = frozenset(
+    {
+        "last_step",
+        "required_step_failed",
+        "step_failed",
+        "empty_plan",
+    }
+)
+
+
+class _LangGraphDependencyUnavailable(RuntimeError):
+    pass
+
+
 class CanaryGraphState(TypedDict):
     visited_steps: Annotated[list[str], operator.add]
     step_outcomes: Annotated[list[dict[str, str]], operator.add]
@@ -69,10 +95,21 @@ class LangGraphExecutionHarness:
         assert isinstance(prepared, PreparedWorkflow)
 
         session = prepared.create_session()
+        backend = "langgraph"
+        backend_version = self.backend_version
+        selection_reason = "direct_langgraph_execution"
         fallback_before_execution = False
         error_code = None
         try:
             graph = self._build_graph(session, prepared.plan)
+        except _LangGraphDependencyUnavailable:
+            session.start()
+            backend = "legacy"
+            backend_version = "unknown"
+            selection_reason = "langgraph_dependency_unavailable"
+            fallback_before_execution = True
+            error_code = "langgraph_dependency_unavailable"
+            _run_sequentially(session)
         except Exception:
             session.start()
             fallback_before_execution = True
@@ -100,6 +137,9 @@ class LangGraphExecutionHarness:
             authoritative=authoritative,
             execution=self._metadata(
                 prepared,
+                backend=backend,
+                backend_version=backend_version,
+                selection_reason=selection_reason,
                 tool_attempt_count=session.tool_attempt_count,
                 fallback_before_execution=fallback_before_execution,
                 error_code=error_code,
@@ -111,7 +151,7 @@ class LangGraphExecutionHarness:
         if self.graph_runner is not None:
             return self.graph_runner.build(session=session, plan=plan)
 
-        from langgraph.graph import END, START, StateGraph
+        StateGraph, START, END = _load_langgraph_api()
 
         builder = StateGraph(CanaryGraphState)
         if not plan.steps:
@@ -144,6 +184,9 @@ class LangGraphExecutionHarness:
         self,
         prepared: PreparedWorkflow,
         *,
+        backend: str,
+        backend_version: str,
+        selection_reason: str,
         tool_attempt_count: int,
         fallback_before_execution: bool,
         error_code: str | None,
@@ -152,6 +195,9 @@ class LangGraphExecutionHarness:
         return self._metadata_for(
             plan=prepared.plan,
             dependencies=prepared.compiled.dependencies,
+            backend=backend,
+            backend_version=backend_version,
+            selection_reason=selection_reason,
             tool_attempt_count=tool_attempt_count,
             fallback_before_execution=fallback_before_execution,
             error_code=error_code,
@@ -163,15 +209,22 @@ class LangGraphExecutionHarness:
         *,
         plan: WorkflowPlan,
         dependencies: Mapping[str, tuple[str, ...] | list[str]],
+        backend: str = "langgraph",
+        backend_version: str | None = None,
+        selection_reason: str = "direct_langgraph_execution",
         tool_attempt_count: int,
         fallback_before_execution: bool,
         error_code: str | None,
         started: float,
     ) -> HarnessExecutionMetadata:
         return HarnessExecutionMetadata(
-            backend="langgraph",
-            backend_version=self.backend_version,
-            selection_reason="direct_langgraph_execution",
+            backend=backend,
+            backend_version=(
+                self.backend_version
+                if backend_version is None
+                else backend_version
+            ),
+            selection_reason=selection_reason,
             canary_bucket=None,
             plan_fingerprint=plan_fingerprint(plan, dependencies),
             tool_attempt_count=tool_attempt_count,
@@ -205,16 +258,17 @@ def _execution_error_code(execution: WorkflowExecution) -> str:
 def _step_node(session: Any, index: int):
     def execute(_state: CanaryGraphState) -> CanaryGraphState:
         advance = session.execute_step(index)
+        step_token = f"step-{index:03d}"
         return {
-            "visited_steps": [advance.step_id],
+            "visited_steps": [step_token],
             "step_outcomes": [
                 {
-                    "step_id": advance.step_id,
-                    "outcome": advance.outcome,
+                    "step_id": step_token,
+                    "outcome": _safe_step_outcome(advance.outcome),
                 }
             ],
             "terminal": advance.terminal,
-            "terminal_reason": advance.reason or "",
+            "terminal_reason": _safe_terminal_reason(advance),
         }
 
     return execute
@@ -232,6 +286,28 @@ def _langgraph_version() -> str:
         return importlib_metadata.version("langgraph")
     except Exception:
         return "unknown"
+
+
+def _load_langgraph_api() -> tuple[Any, Any, Any]:
+    try:
+        from langgraph.graph import END, START, StateGraph
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise _LangGraphDependencyUnavailable() from exc
+    return StateGraph, START, END
+
+
+def _safe_step_outcome(outcome: Any) -> str:
+    normalized = str(outcome)
+    return normalized if normalized in _SAFE_STEP_OUTCOMES else "unknown"
+
+
+def _safe_terminal_reason(advance: Any) -> str:
+    if not advance.terminal:
+        return ""
+    if str(advance.outcome) == "skipped_precondition":
+        return "semantic_precondition_failed"
+    reason = str(advance.reason or "")
+    return reason if reason in _SAFE_TERMINAL_REASONS else "workflow_terminal"
 
 
 __all__ = ["CanaryGraphState", "LangGraphExecutionHarness"]

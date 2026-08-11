@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import json
 from dataclasses import FrozenInstanceError, fields
 
@@ -18,9 +19,13 @@ from src.agent.harness import (
     HarnessRun,
     LangGraphExecutionHarness,
 )
+import src.agent.harness.langgraph_execution as langgraph_execution
+from src.agent.orchestrators import WorkflowOrchestrator
 from src.agent.orchestrators.base import WorkflowStep
 from src.agent.planning import WorkflowPlan
+from src.agent.runtime.run_session import StepAdvance
 from src.agent.runtime.workflow_executor import WorkflowExecution, WorkflowExecutor
+from src.agent.validators.semantic_inputs import SemanticDecision
 from src.agent.workflows import WorkflowPolicy
 
 
@@ -168,6 +173,25 @@ class CountingPrepareExecutor(WorkflowExecutor):
     def prepare(self, *args, **kwargs):
         self.prepare_calls += 1
         return super().prepare(*args, **kwargs)
+
+
+class PrivateSemanticValidator:
+    def validate(self, _step, _input_data):
+        return SemanticDecision(
+            allowed=False,
+            requirement="PRIVATE-requirement",
+            reason="PRIVATE-query-value",
+        )
+
+
+class AdvanceSession:
+    def __init__(self, advance):
+        self.advance = advance
+        self.indices = []
+
+    def execute_step(self, index):
+        self.indices.append(index)
+        return self.advance
 
 
 def test_execution_metadata_is_frozen_serializable_and_redacted():
@@ -368,6 +392,40 @@ def test_graph_failure_before_tool_uses_same_session_sequential_fallback(
     assert events.count("task_completed") == 1
 
 
+def test_default_driver_dependency_failure_reports_legacy_fallback(
+    monkeypatch,
+):
+    tool = CountingTool("property_calculator")
+    original_import = builtins.__import__
+
+    def unavailable_langgraph(name, *args, **kwargs):
+        if name == "langgraph.graph":
+            raise ModuleNotFoundError("No module named 'langgraph'")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", unavailable_langgraph)
+    run = LangGraphExecutionHarness(WorkflowExecutor()).execute(
+        context=_context("dependency-unavailable"),
+        policy=ADMET_POLICY,
+        all_tools={tool.name: tool},
+        plan=_one_step_plan(),
+    )
+
+    assert tool.calls == ["CCO"]
+    assert run.authoritative.result.success is True
+    assert run.execution.backend == "legacy"
+    assert run.execution.backend_version == "unknown"
+    assert run.execution.selection_reason == "langgraph_dependency_unavailable"
+    assert run.execution.fallback_before_execution is True
+    assert run.execution.tool_attempt_count == 1
+    assert run.execution.error_code == "langgraph_dependency_unavailable"
+    events = [item["event"] for item in run.authoritative.events]
+    assert events.count("task_started") == 1
+    assert events.count("planning_started") == 1
+    assert events.count("planning_completed") == 1
+    assert events.count("task_completed") == 1
+
+
 @pytest.mark.parametrize("runner", [RaiseAfterFirstNode(), ReenterFirstNode()])
 def test_graph_failure_after_tool_attempt_never_replays_tool(runner):
     tool = CountingTool("property_calculator")
@@ -452,3 +510,102 @@ def test_prepare_is_once_and_fingerprint_excludes_runtime_inputs():
     serialized = json.dumps(first.execution.to_dict())
     assert "PRIVATE" not in serialized
     assert "property_calculator" not in serialized
+
+
+def test_step_node_redacts_private_step_and_semantic_reason_from_state():
+    private_name = "PRIVATE-query-value-step"
+    plan = WorkflowPlan(
+        workflow_name=ADMET_POLICY.name,
+        steps=[
+            WorkflowStep(
+                name=private_name,
+                tool_name="property_calculator",
+                input_data="CCO",
+            )
+        ],
+    )
+    prepared = WorkflowExecutor(
+        orchestrator=WorkflowOrchestrator(
+            semantic_validator=PrivateSemanticValidator()
+        )
+    ).prepare(
+        context=_context("private-state"),
+        policy=ADMET_POLICY,
+        all_tools={"property_calculator": CountingTool("property_calculator")},
+        plan=plan,
+    )
+    session = prepared.create_session()
+    session.start()
+
+    state = langgraph_execution._step_node(session, 0)(
+        langgraph_execution._initial_state()
+    )
+    result = session.finish()
+
+    assert "PRIVATE" not in json.dumps(state)
+    assert state == {
+        "visited_steps": ["step-000"],
+        "step_outcomes": [
+            {"step_id": "step-000", "outcome": "skipped_precondition"}
+        ],
+        "terminal": True,
+        "terminal_reason": "semantic_precondition_failed",
+    }
+    assert result.outcome == RunOutcome.FAILED
+
+
+@pytest.mark.parametrize(
+    ("outcome", "terminal", "reason", "safe_outcome", "safe_reason"),
+    [
+        ("succeeded", True, "last_step", "succeeded", "last_step"),
+        (
+            "failed",
+            True,
+            "required_step_failed",
+            "failed",
+            "required_step_failed",
+        ),
+        ("failed", True, "step_failed", "failed", "step_failed"),
+        (
+            "PRIVATE-outcome",
+            True,
+            "PRIVATE-query-value",
+            "unknown",
+            "workflow_terminal",
+        ),
+        (
+            "succeeded",
+            False,
+            "PRIVATE-query-value",
+            "succeeded",
+            "",
+        ),
+    ],
+)
+def test_step_node_uses_closed_outcomes_and_terminal_reasons(
+    outcome,
+    terminal,
+    reason,
+    safe_outcome,
+    safe_reason,
+):
+    session = AdvanceSession(
+        StepAdvance(
+            step_id="PRIVATE-query-value",
+            outcome=outcome,
+            terminal=terminal,
+            reason=reason,
+        )
+    )
+
+    state = langgraph_execution._step_node(session, 7)(
+        langgraph_execution._initial_state()
+    )
+
+    assert session.indices == [7]
+    assert state["visited_steps"] == ["step-007"]
+    assert state["step_outcomes"] == [
+        {"step_id": "step-007", "outcome": safe_outcome}
+    ]
+    assert state["terminal_reason"] == safe_reason
+    assert "PRIVATE" not in json.dumps(state)
