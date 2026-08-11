@@ -84,6 +84,36 @@ def test_store_redacts_nested_secrets_before_persisting(tmp_path):
     )
 
 
+def test_state_store_merges_shadow_metadata_without_losing_request_metadata(tmp_path):
+    store = SQLiteAgentStateStore(tmp_path / "state.sqlite3")
+    store.start_run(
+        {
+            "trace_id": "shadow-persist",
+            "status": "running",
+            "metadata": {"request_tag": "keep-me"},
+        }
+    )
+
+    store.update_run_metadata(
+        "shadow-persist",
+        {
+            "harness_shadow": {
+                "status": "matched",
+                "plan_fingerprint": "a" * 64,
+                "api_key": "must-not-persist",
+            }
+        },
+    )
+
+    metadata = store.get_run("shadow-persist")["metadata"]
+    assert metadata["request_tag"] == "keep-me"
+    assert metadata["harness_shadow"]["status"] == "matched"
+    assert metadata["harness_shadow"]["api_key"] == "[REDACTED]"
+
+    with pytest.raises(KeyError, match="missing-trace"):
+        store.update_run_metadata("missing-trace", {"harness_shadow": {}})
+
+
 def test_memory_admission_requires_validated_structured_content(tmp_path):
     store = SQLiteAgentStateStore(tmp_path / "agent_state.sqlite3")
 

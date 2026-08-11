@@ -11,6 +11,10 @@ class AgentStateStore(Protocol):
 
     def get_run(self, trace_id: str) -> dict[str, Any] | None: ...
 
+    def update_run_metadata(
+        self, trace_id: str, metadata: dict[str, Any]
+    ) -> None: ...
+
     def save_checkpoint(self, checkpoint: dict[str, Any]) -> None: ...
 
     def latest_checkpoint(

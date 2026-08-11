@@ -24,6 +24,7 @@ from src.agent.evaluation.scientific import (
     summarize_scientific_stability,
 )
 from src.agent.contracts import ToolProvenance, ToolResult
+from src.agent.harness import HarnessRun, LegacyHarness, ShadowComparison
 from src.agent.routing import HybridSkillRouter
 from src.agent.validators import AgentResultValidator
 from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
@@ -75,6 +76,89 @@ def test_scientific_runner_reuses_injected_router_catalog(tmp_path):
     )
 
     assert runner.catalog is catalog
+
+
+def test_scientific_report_includes_redacted_harness_shadow(tmp_path):
+    class Decision:
+        selected_skill = "custom_workflow"
+
+    class Router:
+        def __init__(self, catalog):
+            self.catalog = catalog
+
+        def decide(self, _prompt):
+            return Decision()
+
+    class Tool:
+        name = "custom_tool"
+
+        def execute(self, query):
+            return ToolResult.success_result(self.name, data={"query": query})
+
+    class ShadowFactory:
+        last_warning = None
+
+        def create(self, executor):
+            legacy = LegacyHarness(executor)
+
+            class Backend:
+                def execute(self, **kwargs):
+                    execution = legacy.execute(**kwargs).authoritative
+                    return HarnessRun(
+                        authoritative=execution,
+                        shadow=ShadowComparison(
+                            backend="langgraph",
+                            backend_version="test",
+                            status="matched",
+                            plan_fingerprint="a" * 64,
+                            matched=True,
+                            elapsed_ms=3,
+                        ),
+                    )
+
+            return Backend()
+
+    class Planner:
+        def plan(self, context):
+            from src.agent.orchestrators import WorkflowStep
+            from src.agent.planning import WorkflowPlan
+
+            return WorkflowPlan(
+                workflow_name=context.active_skill,
+                steps=[WorkflowStep("custom", "custom_tool", input_data=context.query)],
+            )
+
+    catalog = WorkflowCatalog(
+        (
+            WorkflowPolicy(
+                name="custom_workflow",
+                description="custom",
+                allowed_tools=("custom_tool",),
+            ),
+        )
+    )
+    runner = ScientificAcceptanceRunner(
+        dataset_dir=tmp_path,
+        project_root=tmp_path,
+        router=Router(catalog),
+        planner=Planner(),
+        tools={"custom_tool": Tool()},
+        harness_factory=ShadowFactory(),
+    )
+    case = EvaluationCase(
+        case_id="SHADOW-001",
+        version="1",
+        category="harness",
+        prompt="secret prompt",
+        expected_skill="custom_workflow",
+        expected_tools=["custom_tool"],
+    )
+
+    report = runner.run_case(case)
+
+    assert report["harness_shadow"]["status"] == "matched"
+    assert "prompt" not in report["harness_shadow"]
+    assert "secret prompt" not in json.dumps(report["harness_shadow"])
 
 
 def test_load_cases_reads_versioned_jsonl(tmp_path):

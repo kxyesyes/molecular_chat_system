@@ -11,7 +11,9 @@ from src.agent.contracts import (
     AgentResult,
     ToolResult,
 )
+from src.agent.harness import HarnessFactory
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
+from src.agent.planning import PlanCompiler, WorkflowPlan
 from src.agent.planning.task_planner import TaskPlanner
 from src.agent.router import SkillRouter
 from src.agent.specialists import AgentTask, AgentTaskResult, SpecialistAgent
@@ -19,13 +21,47 @@ from src.agent.tooling import RetryPolicy, TOOL_AGENT_OWNERS, ToolRegistry
 from src.agent.persistence.base import AgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.task_state import TaskEventType
-from src.agent.runtime.workflow_executor import WorkflowExecutor
+from src.agent.runtime.workflow_executor import WorkflowExecution, WorkflowExecutor
 from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
 
 
 RAG_TOOL_NAMES = frozenset(
     {"rag_search", "rag_database_search", "database_search"}
 )
+
+
+class _DelegatedWorkflowExecutor:
+    """Adapt the existing specialist loop to the common harness boundary."""
+
+    def __init__(self, supervisor: "SupervisorAgent"):
+        self.supervisor = supervisor
+        self.compiler = PlanCompiler()
+        self.preflight_executor = WorkflowExecutor(
+            planner=supervisor.planner,
+            compiler=self.compiler,
+        )
+
+    def execute(
+        self,
+        *,
+        context: AgentContext,
+        policy: WorkflowPolicy,
+        all_tools: Mapping[str, Any],
+        event_callback: Any = None,
+        idempotency_key: str | None = None,
+        plan: WorkflowPlan | None = None,
+    ) -> WorkflowExecution:
+        del event_callback, idempotency_key
+        plan = plan or self.supervisor.planner.plan(context)
+        preflight_failure = self.preflight_executor.preflight(
+            context=context,
+            policy=policy,
+            all_tools=all_tools,
+            plan=plan,
+        )
+        if preflight_failure is not None:
+            return preflight_failure
+        return self.supervisor._run_delegated(context, plan)
 
 
 class SupervisorAgent:
@@ -44,6 +80,7 @@ class SupervisorAgent:
         llm: Any = None,
         molecular_generator_llm: Any = None,
         skill_router: SkillRouter | None = None,
+        harness_factory: HarnessFactory | None = None,
     ):
         self.tools = dict(tools) if tools is not None else build_default_tools()
         self.llm = llm
@@ -67,6 +104,7 @@ class SupervisorAgent:
             event_bus=self.event_bus,
             state_store=state_store,
         )
+        self.harness_factory = harness_factory or HarnessFactory()
 
     def set_llm(self, llm: Any) -> None:
         """Update the main model without rebinding the local generator."""
@@ -131,10 +169,11 @@ class SupervisorAgent:
             ),
         )
         request_tools = self._request_tools(context)
-        execution = WorkflowExecutor(
-            planner=self.planner,
-            orchestrator=self.orchestrator,
-        ).execute(
+        execution = self._execute_with_harness(
+            WorkflowExecutor(
+                planner=self.planner,
+                orchestrator=self.orchestrator,
+            ),
             context=context,
             policy=policy,
             all_tools=request_tools,
@@ -296,27 +335,25 @@ class SupervisorAgent:
         )
         delegated = self.tool_registry is not None and bool(self.specialists)
         if delegated:
-            preflight_failure = executor.preflight(
+            execution = self._execute_with_harness(
+                _DelegatedWorkflowExecutor(self),
                 context=context,
                 policy=policy,
                 all_tools=self.tool_registry.as_mapping(),
+                idempotency_key=idempotency_key,
                 plan=workflow_plan,
             )
-            if preflight_failure is not None:
-                return self._format_run_result(
-                    workflow_plan.workflow_name,
-                    workflow_plan.metadata,
-                    workflow_plan.steps,
-                    preflight_failure.result,
-                )
-            return self._run_delegated(
-                context,
-                workflow_plan.workflow_name,
-                workflow_plan.metadata,
-                steps,
+            if "_harness_delegations" in execution.result.metadata:
+                return self._format_delegated_run_result(execution)
+            return self._format_run_result(
+                execution.plan.workflow_name,
+                execution.plan.metadata,
+                execution.plan.steps,
+                execution.result,
             )
 
-        execution = executor.execute(
+        execution = self._execute_with_harness(
+            executor,
             context=context,
             policy=policy,
             all_tools=request_tools,
@@ -330,13 +367,43 @@ class SupervisorAgent:
             execution.result,
         )
 
+    def _execute_with_harness(
+        self,
+        executor: WorkflowExecutor,
+        **kwargs: Any,
+    ) -> WorkflowExecution:
+        harness = self.harness_factory.create(executor)
+        harness_run = harness.execute(**kwargs)
+        execution = harness_run.authoritative
+        shadow_metadata: dict[str, Any] | None = None
+        if harness_run.shadow is not None:
+            shadow_metadata = harness_run.shadow.to_dict()
+        else:
+            warning = getattr(self.harness_factory, "last_warning", None)
+            if warning:
+                shadow_metadata = {
+                    "status": "unavailable",
+                    "error_code": warning,
+                }
+        if shadow_metadata is not None:
+            execution.result.metadata["harness_shadow"] = shadow_metadata
+            if self.state_store:
+                try:
+                    if self.state_store.get_run(execution.result.trace_id) is not None:
+                        self.state_store.update_run_metadata(
+                            execution.result.trace_id,
+                            {"harness_shadow": shadow_metadata},
+                        )
+                except Exception:
+                    pass
+        return execution
+
     def _run_delegated(
         self,
         context: AgentContext,
-        workflow_name: str,
-        plan_metadata: dict[str, Any],
-        steps: list[WorkflowStep],
-    ) -> dict[str, Any]:
+        plan: WorkflowPlan,
+    ) -> WorkflowExecution:
+        steps = plan.steps
         outputs: dict[str, Any] = {}
         delegations: list[dict[str, Any]] = []
         tool_results = []
@@ -570,7 +637,7 @@ class SupervisorAgent:
         )
         if self.state_store:
             self.state_store.update_run_status(context.trace_id, status)
-        serialized_results = AgentResult(
+        agent_result = AgentResult(
             trace_id=context.trace_id,
             success=status == "succeeded",
             partial=status == "partial",
@@ -587,6 +654,7 @@ class SupervisorAgent:
             metadata={
                 "skipped_steps": skipped_steps,
                 "semantic_evidence": semantic_evidence,
+                "_harness_delegations": delegations,
             },
             error=(
                 AgentExecutionError(
@@ -597,37 +665,55 @@ class SupervisorAgent:
                 if skipped_steps
                 else None
             ),
-        ).to_legacy_dict()
+        )
+        events = (
+            [event.to_dict() for event in self.event_bus.events]
+            if self.event_bus
+            else []
+        )
+        return WorkflowExecution(
+            plan=plan,
+            result=agent_result,
+            events=events,
+        )
+
+    @staticmethod
+    def _format_delegated_run_result(
+        execution: WorkflowExecution,
+    ) -> dict[str, Any]:
+        result = execution.result
+        status = (
+            "succeeded" if result.success else "partial" if result.partial else "failed"
+        )
+        serialized_results = result.to_legacy_dict()
+        delegations = list(result.metadata.pop("_harness_delegations", []))
         return {
-            "trace_id": context.trace_id,
+            "trace_id": result.trace_id,
             "status": status,
-            "message": (
-                "Workflow completed"
-                if status == "succeeded"
-                else "Workflow returned partial results"
-                if status == "partial"
-                else "Workflow failed"
-            ),
+            "message": result.message,
             "plan": {
-                "workflow_name": workflow_name,
-                "metadata": plan_metadata,
-                "steps": [self._step_to_dict(step) for step in steps],
+                "workflow_name": execution.plan.workflow_name,
+                "metadata": execution.plan.metadata,
+                "steps": [
+                    SupervisorAgent._step_to_dict(step)
+                    for step in execution.plan.steps
+                ],
             },
             "summary": {
-                "completed_steps": len(tool_results),
-                "successful_steps": successful,
-                "failed_steps": failed,
+                "completed_steps": len(result.tool_results),
+                "successful_steps": sum(
+                    1 for item in result.tool_results if item.success
+                ),
+                "failed_steps": sum(
+                    1 for item in result.tool_results if not item.success
+                ),
             },
             "delegations": delegations,
-            "agent_events": (
-                [event.to_dict() for event in self.event_bus.events]
-                if self.event_bus
-                else []
-            ),
+            "agent_events": execution.events,
             "result": {
-                "success": status == "succeeded",
-                "partial": status == "partial",
-                "final_answer": final_answer,
+                "success": result.success,
+                "partial": result.partial,
+                "final_answer": result.final_answer,
                 "tool_results": serialized_results["tool_results"],
                 "tool_result_sequence": serialized_results["tool_result_sequence"],
                 "tool_results_by_step": serialized_results["tool_results_by_step"],

@@ -12,6 +12,7 @@ from typing import Any, Iterable, Mapping
 from uuid import uuid4
 
 from src.agent.contracts import AgentContext, ToolResult
+from src.agent.harness import HarnessFactory
 from src.agent.orchestrators import WorkflowOrchestrator
 from src.agent.persistence import SQLiteAgentStateStore, redact_sensitive
 from src.agent.planning import TaskPlanner
@@ -165,6 +166,7 @@ class ScientificAcceptanceRunner:
         router: HybridSkillRouter | None = None,
         planner: TaskPlanner | None = None,
         tools: Mapping[str, Any] | None = None,
+        harness_factory: HarnessFactory | None = None,
     ):
         self.dataset_dir = Path(dataset_dir)
         self.project_root = Path(project_root)
@@ -179,6 +181,7 @@ class ScientificAcceptanceRunner:
         self.router = router or HybridSkillRouter(catalog=self.catalog)
         self.planner = planner or TaskPlanner()
         self.tools = dict(tools or self._build_real_tools())
+        self.harness_factory = harness_factory or HarnessFactory()
 
     def run(self, repeat: int = 1) -> dict[str, Any]:
         iterations = []
@@ -220,6 +223,7 @@ class ScientificAcceptanceRunner:
         actual_skill = decision.selected_skill
         execution_error: str | None = None
         executions = []
+        harness_shadows: list[dict[str, Any]] = []
         execution_records: list[dict[str, Any]] = []
         plan_metadata: dict[str, Any] = {}
 
@@ -252,12 +256,31 @@ class ScientificAcceptanceRunner:
                         mol_count=int(case.metadata.get("requested_count", 5) or 5),
                     )
                     try:
-                        execution = WorkflowExecutor(
+                        executor = WorkflowExecutor(
                             planner=self.planner,
                             orchestrator=WorkflowOrchestrator(
                                 state_store=state_store
                             ),
-                        ).execute(context, policy, self.tools)
+                        )
+                        harness_run = self.harness_factory.create(executor).execute(
+                            context=context,
+                            policy=policy,
+                            all_tools=self.tools,
+                        )
+                        execution = harness_run.authoritative
+                        shadow_metadata = (
+                            harness_run.shadow.to_dict()
+                            if harness_run.shadow is not None
+                            else None
+                        )
+                        if shadow_metadata is not None:
+                            execution.result.metadata["harness_shadow"] = shadow_metadata
+                            harness_shadows.append(shadow_metadata)
+                            if state_store.get_run(trace_id) is not None:
+                                state_store.update_run_metadata(
+                                    trace_id,
+                                    {"harness_shadow": shadow_metadata},
+                                )
                         executions.append(execution)
                         for record in state_store.get_tool_executions(trace_id):
                             persisted = dict(record)
@@ -393,8 +416,7 @@ class ScientificAcceptanceRunner:
             case_status=status,
             case_error=error,
         )
-        return redact_sensitive(
-            {
+        report = {
                 "case_id": case.case_id,
                 "status": status,
                 "error": error,
@@ -420,7 +442,13 @@ class ScientificAcceptanceRunner:
                 "plan_metadata": plan_metadata,
                 **scoring,
             }
-        )
+        if harness_shadows:
+            report["harness_shadow"] = (
+                harness_shadows[0]
+                if len(harness_shadows) == 1
+                else {"runs": harness_shadows}
+            )
+        return redact_sensitive(report)
 
     def _case_metadata(self, case: EvaluationCase) -> dict[str, Any]:
         metadata = dict(case.metadata or {})

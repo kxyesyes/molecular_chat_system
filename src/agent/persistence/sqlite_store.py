@@ -203,6 +203,32 @@ class SQLiteAgentStateStore:
                 (status, time.time(), trace_id),
             )
 
+    def update_run_metadata(
+        self,
+        trace_id: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        incoming = redact_sensitive(metadata)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT metadata_json FROM agent_runs WHERE trace_id = ?",
+                (trace_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(trace_id)
+            current = _json_load(row["metadata_json"], {})
+            if not isinstance(current, dict):
+                current = {}
+            merged = redact_sensitive({**current, **incoming})
+            connection.execute(
+                """
+                UPDATE agent_runs
+                SET metadata_json = ?, updated_at = ?
+                WHERE trace_id = ?
+                """,
+                (_json_dump(merged), time.time(), trace_id),
+            )
+
     def get_run(self, trace_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(
