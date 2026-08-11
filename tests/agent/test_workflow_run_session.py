@@ -1092,7 +1092,55 @@ def test_legacy_run_delegates_entire_lifecycle_to_created_session(monkeypatch):
     assert result is marker
 
 
+def test_legacy_run_uses_session_plan_when_start_callback_clears_source_steps():
+    tool = CountingTool()
+    steps = [
+        WorkflowStep("first", tool.name, "CCO"),
+        WorkflowStep("second", tool.name, "CCN"),
+    ]
+
+    def clear_source_steps(event):
+        if event.event == TaskEventType.TASK_STARTED:
+            steps.clear()
+
+    result = WorkflowOrchestrator(
+        event_bus=AgentEventBus(on_event=clear_source_steps)
+    ).run(
+        AgentContext(query="seed", trace_id="cleared-source-steps"),
+        steps,
+        {tool.name: tool},
+    )
+
+    assert steps == []
+    assert tool.calls == ["CCO", "CCN"]
+    assert result.success is True
+    assert result.metadata["completed_count"] == 2
+
+
+def test_legacy_run_ignores_steps_appended_by_start_callback():
+    tool = CountingTool()
+    steps = []
+
+    def append_source_step(event):
+        if event.event == TaskEventType.TASK_STARTED:
+            steps.append(WorkflowStep("late", tool.name, "late-input"))
+
+    result = WorkflowOrchestrator(
+        event_bus=AgentEventBus(on_event=append_source_step)
+    ).run(
+        AgentContext(query="seed", trace_id="appended-source-steps"),
+        steps,
+        {tool.name: tool},
+    )
+
+    assert len(steps) == 1
+    assert tool.calls == []
+    assert result.outcome == RunOutcome.FAILED
+    assert result.metadata["completed_count"] == 0
+
+
 def _manual_session_driver(orchestrator, context, steps, tools, **kwargs):
+    step_count = len(steps)
     session = orchestrator.create_session(
         context=context,
         steps=steps,
@@ -1100,7 +1148,7 @@ def _manual_session_driver(orchestrator, context, steps, tools, **kwargs):
         **kwargs,
     )
     session.start()
-    for index in range(len(steps)):
+    for index in range(step_count):
         advance = session.execute_step(index)
         if advance.terminal:
             break
@@ -1117,15 +1165,13 @@ def _without_runtime_identity(value):
         "trace_id",
         "updated_at",
     }
-    if isinstance(value, dict):
-        return {
-            key: _without_runtime_identity(item)
-            for key, item in value.items()
-            if key not in ignored
-        }
-    if isinstance(value, list):
-        return [_without_runtime_identity(item) for item in value]
-    return value
+    if not isinstance(value, dict):
+        return deepcopy(value)
+    return {
+        key: deepcopy(item)
+        for key, item in value.items()
+        if key not in ignored
+    }
 
 
 def _public_events(event_bus):
@@ -1136,7 +1182,7 @@ def _public_events(event_bus):
             "skill": event.skill,
             "tool": event.tool,
             "progress": event.progress,
-            "payload": _without_runtime_identity(deepcopy(event.payload)),
+            "payload": deepcopy(event.payload),
         }
         for event in event_bus.events
     ]
@@ -1152,13 +1198,15 @@ def test_public_event_projection_preserves_skill_and_business_payload():
         tool="llm_molecular_generator",
         progress=0.75,
         payload={
-            "trace_id": "runtime-trace",
-            "timestamp": "2026-08-11T00:00:00Z",
-            "session_attempt_id": "attempt-random",
             "status": "succeeded",
             "warnings": ["business warning"],
             "quality": {"validated": True},
             "evidence": [{"claim": "CCO is valid"}],
+            "business_audit": {
+                "trace_id": "source-trace",
+                "timestamp": "2026-08-11T00:00:00Z",
+                "created_at": "2026-08-10T00:00:00Z",
+            },
         },
     )
 
@@ -1174,6 +1222,11 @@ def test_public_event_projection_preserves_skill_and_business_payload():
                 "warnings": ["business warning"],
                 "quality": {"validated": True},
                 "evidence": [{"claim": "CCO is valid"}],
+                "business_audit": {
+                    "trace_id": "source-trace",
+                    "timestamp": "2026-08-11T00:00:00Z",
+                    "created_at": "2026-08-10T00:00:00Z",
+                },
             },
         }
     ]

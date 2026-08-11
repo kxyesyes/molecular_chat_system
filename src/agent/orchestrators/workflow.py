@@ -114,6 +114,7 @@ class WorkflowOrchestrator:
         continue_on_error: bool = False,
         idempotency_key: str | None = None,
     ) -> AgentResult:
+        step_count = len(steps)
         session = self.create_session(
             context=context,
             steps=steps,
@@ -122,7 +123,7 @@ class WorkflowOrchestrator:
             idempotency_key=idempotency_key,
         )
         session.start()
-        for index in range(len(steps)):
+        for index in range(step_count):
             advance = session.execute_step(index)
             if advance.terminal:
                 break
