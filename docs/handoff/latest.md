@@ -1,5 +1,70 @@
 # 最新任务交接
 
+## 2026-08-11 LangGraph 权威 canary 执行阶段
+
+### 状态与范围
+
+- 当前分支：`codex/industrial-agent-langgraph-canary`，位于隔离 worktree；原始混杂工作树未被修改、回退或清理，未直接修改或合并 `main`。
+- 默认仍为 `AGENT_HARNESS_MODE=legacy`、`AGENT_LANGGRAPH_CANARY_PERCENT=0`。只有固定 allowlist、受支持的直接 `WorkflowExecutor` 和稳定 hash 分桶同时满足时才使用 LangGraph；delegated specialist 始终留在 legacy control cohort。
+- 权威科学语义仍由 `WorkflowRunSession`、统一 ToolResult、Validator、Evidence Ledger 和真实工具产物决定。LangGraph 只负责受约束的节点调度，不能自行终结 session、设置权威失败或伪造成功。
+- 真实 API key 仅从运行时环境变量读取。本轮只确认 `OPENAI_COMPATIBLE_API_KEY/BASE_URL/MODEL` 均为 present，未输出、保存、提交或写入报告。
+
+### 关键实现
+
+1. 提取并统一 `WorkflowRunSession` 生命周期，legacy loop 与 LangGraph driver 共享同一权威状态机，确保每一步最多执行一次。
+2. 新增 deterministic canary selector：固定 allowlist、0–100 整数比例、稳定 SHA-256 bucket、非法配置和非法 key fail closed，metadata 不保存原始 trace/idempotency key。
+3. LangGraph 0.2.76 driver 支持 100 步长计划、空计划、required/optional terminal、精确递归上限和内部安全节点名。
+4. 任一 semantic/checkpoint/session 进度发生后，即使真实工具尝试数仍为 0，也禁止回退重放；验证器、runner 或图异常被收敛为稳定错误码。
+5. 注入 runner 使用受限 session façade，不能调用 `finish()`/`fail_runtime()`；共享 runner 通过 runner 级弱引用锁跨 harness 隔离，避免并发 session 串线。
+6. `WorkflowExecution` 保留执行前的精确 compiled dependencies 与 session 真实 `tool_attempt_count`。checkpoint 复用为 0 次尝试，不再按 ToolResult 数量误计。
+7. Supervisor 将脱敏 `harness_execution` 写入 AgentResult 和状态存储；持久化失败只追加 `harness_metadata_persistence_failed` warning，不改变科研结果状态。
+8. acceptance 报告保留单轮或逐轮 canary metadata，并验证 backend、64 位 fingerprint 与工具尝试数；完整 prompt/idempotency key 在 mapping key/value 中均被脱敏。
+9. contract 保持 34 个原案例，canary 探针独立统计；探针 failed，或明确请求 canary 但 unavailable，都会使发布门禁失败。
+
+### 本阶段提交
+
+```text
+fb5b324 feat(agent): add deterministic langgraph canary selector
+0689418 fix(agent): harden canary selector inputs
+1a5a824 feat(agent): execute allowlisted workflows with langgraph
+14dc1c9 fix(agent): harden langgraph fallback metadata
+704d907 fix(agent): harden langgraph driver boundaries
+0d20f83 feat(agent): route safe workflows through canary
+92125c0 test(agent): gate langgraph canary releases
+```
+
+### 最终验证
+
+- 默认 legacy：`638 passed, 1 skipped`。
+- `AGENT_HARNESS_MODE=langgraph_canary`、`AGENT_LANGGRAPH_CANARY_PERCENT=100`：`638 passed, 1 skipped`。
+- 反幻觉、平台健康与真实验收辅助测试：`46 passed`。
+- LangGraph/Shadow 性能与边界测试（含 `MEDCHAT_RUN_PERF_TESTS=1`）：`39 passed`。
+- `python -m compileall -q src scripts`：通过。
+- `pip check`：`No broken requirements found`。
+- canary contract：`passed`，34/34；探针 backend=`langgraph`、version=`0.2.76`、tool attempts=`1`、实际调用=`1`。
+- changed-file 敏感形状扫描：0 命中；`git diff --check`：通过。
+
+### 真实 golden 三轮结果
+
+- 报告：`outputs/agent_evaluation/agent_acceptance_canary_real.json`（本地忽略产物，不提交）。
+- 总状态：`partial`；12 个案例 × 3 轮，共 36 个结果。
+- 每轮均为 `5 passed / 7 partial / 0 failed / 0 skipped`；严格 passed rate 41.67%，partial rate 58.33%。报告中的 `pass_rate=1.0` 表示 36/36 均为 passed 或诚实 partial，不表示全部严格通过。
+- 稳定性：三轮案例状态和失败类型完全一致；p50=`100.65 ms`，p95=`15721.59 ms`。
+- 外部主模型：`gemini-3.1-pro` passed，约 `5287 ms`；报告未记录 key。
+- 本地分子生成：Ollama `gmm-llama:latest` passed，约 `5312 ms`。
+- AutoDock Vina：passed，真实 pose 与数值 binding energy 检查通过，约 `14897 ms`。
+- 靶点搜索探针：failed；相关 EGFR/PDE5A/设计案例保持 partial。
+- RG-MPNN 真实推理探针：failed；未输出模拟 pIC50，相关案例保持 partial。
+- 反向寻靶缺少 `data/reverse_target/chembl_training_data.tsv`；相关案例保持 partial，未编造靶点证据。
+
+### 回滚与后续优先级
+
+- 一键回滚：保持或设置 `AGENT_HARNESS_MODE=legacy`、`AGENT_LANGGRAPH_CANARY_PERCENT=0`，无需修改代码或科研工具。
+- P0：补齐并校验靶点数据库资产，使 target search 能返回可追溯结构证据后再扩大 target workflow canary。
+- P0：恢复 RG-MPNN registry、权重、scaler 与 provenance 完整性；在此之前活性相关结果必须继续 partial/failed。
+- P1：补齐反向寻靶训练数据并建立版本/hash 注册，禁止用 demo/fallback 代替。
+- P1：生产 rollout 从低比例开始，监控 backend 分布、fallback_before_execution、tool_attempt_count、terminal event 唯一性和 p95；delegated workflow 暂不进入 LangGraph。
+
 ## 2026-08-11 LangGraph Shadow Harness 与科学信任验收收尾
 
 ### 状态与范围
