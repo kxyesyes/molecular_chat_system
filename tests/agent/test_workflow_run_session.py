@@ -832,6 +832,62 @@ def test_execution_commit_then_raise_retries_with_same_stable_id(tmp_path):
     assert session.tool_attempt_count == 1
 
 
+def test_new_session_attempt_can_replace_failed_checkpoint_and_then_be_reused(
+    tmp_path,
+):
+    store = SQLiteAgentStateStore(tmp_path / "cross-session-attempt.sqlite3")
+    trace_id = "cross-session-attempt"
+    tool = OutcomeTool("property_calculator", success=False)
+    steps = [WorkflowStep("properties", tool.name, "CCO")]
+
+    first, _ = _make_session(
+        steps=steps,
+        tools={tool.name: tool},
+        trace_id=trace_id,
+        state_store=store,
+    )
+    first.start()
+    first.execute_step(0)
+    first_result = first.finish()
+
+    assert first_result.success is False
+    assert len(store.get_tool_executions(trace_id)) == 1
+    assert store.latest_checkpoint(trace_id, "properties")["status"] == "failed"
+
+    tool.success = True
+    second, _ = _make_session(
+        steps=steps,
+        tools={tool.name: tool},
+        trace_id=trace_id,
+        state_store=store,
+    )
+    second.start()
+    second.execute_step(0)
+    second_result = second.finish()
+
+    assert second_result.success is True
+    assert second.tool_attempt_count == 1
+    assert tool.calls == ["CCO", "CCO"]
+    assert len(store.get_tool_executions(trace_id)) == 2
+    assert store.latest_checkpoint(trace_id, "properties")["status"] == "succeeded"
+
+    third, _ = _make_session(
+        steps=steps,
+        tools={tool.name: tool},
+        trace_id=trace_id,
+        state_store=store,
+    )
+    third.start()
+    advance = third.execute_step(0)
+    third_result = third.finish()
+
+    assert advance.outcome == "succeeded"
+    assert third_result.success is True
+    assert third.tool_attempt_count == 0
+    assert tool.calls == ["CCO", "CCO"]
+    assert third_result.metadata["reused_steps"] == ["properties"]
+
+
 @pytest.mark.parametrize(
     ("attribute", "value"),
     [

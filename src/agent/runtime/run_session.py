@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from src.agent.contracts import (
     AgentContext,
@@ -41,6 +42,7 @@ _UNSET = object()
 
 @dataclass
 class _StepJournal:
+    attempt_id: str = field(default_factory=lambda: uuid4().hex)
     input_data: Any = _UNSET
     input_hash: str = ""
     tool_version: str = ""
@@ -234,7 +236,10 @@ class WorkflowRunSession:
             )
 
         step = self.steps[index]
-        journal = self._step_journals.setdefault(index, _StepJournal())
+        journal = self._step_journals.get(index)
+        if journal is None:
+            journal = _StepJournal()
+            self._step_journals[index] = journal
         tool = self.tools.get(step.tool_name)
         if journal.result is None:
             if journal.tool_attempted:
@@ -576,6 +581,7 @@ class WorkflowRunSession:
                         self.context.trace_id,
                         step.name,
                         journal.input_hash,
+                        journal.attempt_id,
                     ),
                     "trace_id": self.context.trace_id,
                     "step_id": step.name,
@@ -619,6 +625,7 @@ class WorkflowRunSession:
                     self.context.trace_id,
                     step.name,
                     journal.input_hash,
+                    journal.attempt_id,
                 ),
                 "trace_id": self.context.trace_id,
                 "step_id": step.name,
