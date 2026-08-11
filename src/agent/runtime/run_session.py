@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -54,7 +55,8 @@ class _StepJournal:
     tool_attempted: bool = False
     result: ToolResult | None = None
     normalized: bool = False
-    persisted: bool = False
+    execution_recorded: bool = False
+    checkpoint_saved: bool = False
     reused_recorded: bool = False
     checkpoint_warning_recorded: bool = False
     semantic_evidence_recorded: bool = False
@@ -305,18 +307,8 @@ class WorkflowRunSession:
         ):
             self.semantic_evidence.append(journal.semantic_evidence_entry)
             journal.semantic_evidence_recorded = True
-        if not journal.persisted:
-            if not journal.checkpoint_reused:
-                self.orchestrator._persist_execution(
-                    self.context,
-                    step,
-                    journal.input_data,
-                    result,
-                    journal.input_hash,
-                    journal.tool_version,
-                    journal.model_version,
-                )
-            journal.persisted = True
+        if not journal.checkpoint_reused:
+            self._persist_step_result(step, journal, result)
         if not journal.output_applied:
             if result.success and step.output_key:
                 self.outputs[step.output_key] = result.data
@@ -548,13 +540,11 @@ class WorkflowRunSession:
             )
             return
         if not journal.running_checkpoint_saved:
-            self.orchestrator._save_checkpoint(
-                self.context,
+            self._save_session_checkpoint(
                 step,
+                journal,
                 status="running",
-                input_hash=journal.input_hash,
-                tool_version=journal.tool_version,
-                model_version=journal.model_version,
+                checkpoint_phase="running",
             )
             journal.running_checkpoint_saved = True
         self._tool_attempt_count += 1
@@ -563,6 +553,86 @@ class WorkflowRunSession:
             tool,
             journal.input_data,
             step,
+        )
+
+    def _persist_step_result(
+        self,
+        step: WorkflowStep,
+        journal: _StepJournal,
+        result: ToolResult,
+    ) -> None:
+        state_store = self.orchestrator.state_store
+        if not state_store:
+            journal.execution_recorded = True
+            journal.checkpoint_saved = True
+            return
+        legacy_result = result.to_legacy_dict()
+        persisted_status = self.orchestrator._result_persistence_status(result)
+        if not journal.execution_recorded:
+            state_store.record_tool_execution(
+                {
+                    "id": self._stable_id(
+                        "execution",
+                        self.context.trace_id,
+                        step.name,
+                        journal.input_hash,
+                    ),
+                    "trace_id": self.context.trace_id,
+                    "step_id": step.name,
+                    "tool_name": step.tool_name,
+                    "status": persisted_status,
+                    "input": journal.input_data,
+                    "output": legacy_result if result.success else None,
+                    "error": legacy_result.get("error"),
+                    "elapsed_ms": result.elapsed_ms,
+                }
+            )
+            journal.execution_recorded = True
+        if not journal.checkpoint_saved:
+            self._save_session_checkpoint(
+                step,
+                journal,
+                status=persisted_status,
+                checkpoint_phase="result",
+                output=legacy_result if result.success else None,
+                error=legacy_result.get("error"),
+            )
+            journal.checkpoint_saved = True
+
+    def _save_session_checkpoint(
+        self,
+        step: WorkflowStep,
+        journal: _StepJournal,
+        *,
+        status: str,
+        checkpoint_phase: str,
+        output: Any = None,
+        error: Any = None,
+    ) -> None:
+        state_store = self.orchestrator.state_store
+        if not state_store:
+            return
+        state_store.save_checkpoint(
+            {
+                "id": self._stable_id(
+                    f"checkpoint-{checkpoint_phase}",
+                    self.context.trace_id,
+                    step.name,
+                    journal.input_hash,
+                ),
+                "trace_id": self.context.trace_id,
+                "step_id": step.name,
+                "workflow_version": self.orchestrator.workflow_version,
+                "status": status,
+                "input_hash": journal.input_hash,
+                "tool_name": step.tool_name,
+                "tool_version": journal.tool_version,
+                "adapter_version": self.orchestrator.adapter_version,
+                "model_version": journal.model_version,
+                "output": output,
+                "error": error,
+                "metadata": step.metadata,
+            }
         )
 
     def fail_runtime(self, error_code: Any) -> None:
@@ -713,30 +783,23 @@ class WorkflowRunSession:
         if key in self._published_events:
             return
         event_bus = self.orchestrator.event_bus
-        events = getattr(event_bus, "events", None)
-        prior_event_count = len(events) if isinstance(events, list) else None
-        try:
-            self.orchestrator._emit(
-                context,
-                event,
-                message,
+        if event_bus is not None:
+            event_bus.emit(
+                trace_id=context.trace_id,
+                event=event,
+                message=message,
+                skill=context.active_skill,
+                event_id=self._stable_id("event", context.trace_id, key),
                 **kwargs,
             )
-        except Exception:
-            current_events = getattr(event_bus, "events", None)
-            if prior_event_count is not None and isinstance(
-                current_events,
-                list,
-            ):
-                if any(
-                    item.trace_id == context.trace_id
-                    and item.event == event
-                    for item in current_events[prior_event_count:]
-                ):
-                    self._published_events.add(key)
-            raise
-        else:
-            self._published_events.add(key)
+        self._published_events.add(key)
+
+    @staticmethod
+    def _stable_id(namespace: str, *parts: str) -> str:
+        digest = hashlib.sha256(
+            "\x1f".join((namespace, *map(str, parts))).encode("utf-8")
+        ).hexdigest()
+        return f"{namespace}-{digest}"
 
     def _require_active(self) -> None:
         if not self._started:

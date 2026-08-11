@@ -253,7 +253,7 @@ class SQLiteAgentStateStore:
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO agent_checkpoints (
+                INSERT OR IGNORE INTO agent_checkpoints (
                     id, trace_id, step_id, workflow_version, status, input_hash,
                     tool_name, tool_version, adapter_version, model_version,
                     output_json, error_json, retry_count, metadata_json, created_at
@@ -300,6 +300,14 @@ class SQLiteAgentStateStore:
     def append_event(self, event: dict[str, Any]) -> int:
         data = redact_sensitive(event)
         with self._lock, self._connect() as connection:
+            event_id = data.get("id")
+            if event_id:
+                existing = connection.execute(
+                    "SELECT sequence FROM agent_events WHERE id = ?",
+                    (event_id,),
+                ).fetchone()
+                if existing:
+                    return int(existing[0])
             row = connection.execute(
                 "SELECT COALESCE(MAX(sequence), 0) + 1 FROM agent_events WHERE trace_id = ?",
                 (data["trace_id"],),
@@ -313,7 +321,7 @@ class SQLiteAgentStateStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    str(uuid4()),
+                    event_id or str(uuid4()),
                     data["trace_id"],
                     sequence,
                     data["event"],
@@ -346,7 +354,7 @@ class SQLiteAgentStateStore:
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO tool_executions (
+                INSERT OR IGNORE INTO tool_executions (
                     id, trace_id, step_id, tool_name, status, input_json,
                     output_json, error_json, elapsed_ms, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

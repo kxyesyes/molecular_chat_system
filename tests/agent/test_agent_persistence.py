@@ -195,6 +195,52 @@ def test_store_records_artifacts_tool_executions_and_routing_feedback(tmp_path):
     )
 
 
+def test_store_stable_ids_make_event_execution_and_checkpoint_idempotent(
+    tmp_path,
+):
+    db_path = tmp_path / "stable-ids.sqlite3"
+    store = SQLiteAgentStateStore(db_path)
+    event = {
+        "id": "event-stable",
+        "trace_id": "stable-trace",
+        "event": "tool_completed",
+        "message": "done",
+    }
+    execution = {
+        "id": "execution-stable",
+        "trace_id": "stable-trace",
+        "step_id": "properties",
+        "tool_name": "property_calculator",
+        "status": "succeeded",
+    }
+    checkpoint = {
+        "id": "checkpoint-stable",
+        "trace_id": "stable-trace",
+        "step_id": "properties",
+        "status": "succeeded",
+    }
+
+    assert store.append_event(event) == store.append_event(event) == 1
+    assert store.record_tool_execution(execution) == "execution-stable"
+    assert store.record_tool_execution(execution) == "execution-stable"
+    store.save_checkpoint(checkpoint)
+    store.save_checkpoint(checkpoint)
+
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM agent_events WHERE id = ?",
+            ("event-stable",),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM tool_executions WHERE id = ?",
+            ("execution-stable",),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM agent_checkpoints WHERE id = ?",
+            ("checkpoint-stable",),
+        ).fetchone()[0] == 1
+
+
 def test_redact_sensitive_handles_keys_and_credential_shaped_values():
     redacted = redact_sensitive(
         {

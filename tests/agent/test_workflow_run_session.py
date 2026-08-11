@@ -114,6 +114,46 @@ class CountingCheckpointStore(SQLiteAgentStateStore):
         return super().latest_checkpoint(trace_id, step_id)
 
 
+class FailSessionEventPersistenceOnceStore(SQLiteAgentStateStore):
+    def __init__(self, path, *, after_commit):
+        super().__init__(path)
+        self.after_commit = after_commit
+        self.failed = False
+
+    def append_event(self, event):
+        if not self.failed:
+            self.failed = True
+            if self.after_commit:
+                super().append_event(event)
+            raise RuntimeError("session event persistence failed")
+        return super().append_event(event)
+
+
+class FailFinalCheckpointOnceStore(SQLiteAgentStateStore):
+    def __init__(self, path):
+        super().__init__(path)
+        self.failed = False
+
+    def save_checkpoint(self, checkpoint):
+        if checkpoint.get("status") != "running" and not self.failed:
+            self.failed = True
+            raise RuntimeError("final checkpoint persistence failed")
+        return super().save_checkpoint(checkpoint)
+
+
+class CommitThenFailExecutionOnceStore(SQLiteAgentStateStore):
+    def __init__(self, path):
+        super().__init__(path)
+        self.failed = False
+
+    def record_tool_execution(self, execution):
+        execution_id = super().record_tool_execution(execution)
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("execution wrapper failed after commit")
+        return execution_id
+
+
 class FailOnceSemanticValidator:
     def __init__(self):
         self.calls = 0
@@ -162,16 +202,16 @@ class FailOnceExtend(list):
         return super().extend(values)
 
 
-class FailOncePersistOrchestrator(WorkflowOrchestrator):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+class FailOncePersistStore(SQLiteAgentStateStore):
+    def __init__(self, path):
+        super().__init__(path)
         self.persist_attempts = 0
 
-    def _persist_execution(self, *args, **kwargs):
+    def record_tool_execution(self, execution):
         self.persist_attempts += 1
         if self.persist_attempts == 1:
             raise RuntimeError("step persistence failed")
-        return super()._persist_execution(*args, **kwargs)
+        return super().record_tool_execution(execution)
 
 
 class FailAfterTerminalEventBus(AgentEventBus):
@@ -570,6 +610,43 @@ def test_start_retry_does_not_duplicate_events_appended_before_callback_failure(
     assert event_names.count(TaskEventType.PLANNING_COMPLETED) == 1
 
 
+@pytest.mark.parametrize("after_commit", [False, True])
+def test_session_event_persistence_retry_is_exactly_once(
+    tmp_path,
+    after_commit,
+):
+    trace_id = f"session-event-{after_commit}"
+    store = FailSessionEventPersistenceOnceStore(
+        tmp_path / f"session-event-{after_commit}.sqlite3",
+        after_commit=after_commit,
+    )
+    session, event_bus = _make_session(
+        steps=[],
+        tools={},
+        trace_id=trace_id,
+        state_store=store,
+    )
+
+    with pytest.raises(RuntimeError, match="session event persistence failed"):
+        session.start()
+
+    session.start()
+    session.finish()
+
+    task_started_memory = [
+        event
+        for event in event_bus.events
+        if event.event == TaskEventType.TASK_STARTED
+    ]
+    task_started_database = [
+        event
+        for event in store.get_events(trace_id)
+        if event["event"] == TaskEventType.TASK_STARTED.value
+    ]
+    assert len(task_started_memory) == 1
+    assert len(task_started_database) == 1
+
+
 def test_tool_started_callback_failure_retries_without_duplicate_or_tool_call():
     tool = CountingTool()
     event_bus = AgentEventBus(
@@ -659,12 +736,12 @@ def test_checkpoint_state_update_failure_resumes_without_rereading_checkpoint(
 
 
 def test_missing_tool_persistence_failure_resumes_cached_result(tmp_path):
-    store = SQLiteAgentStateStore(tmp_path / "missing-tool.sqlite3")
-    orchestrator = FailOncePersistOrchestrator(state_store=store)
-    session = orchestrator.create_session(
-        context=AgentContext(query="CCO", trace_id="missing-tool"),
+    store = FailOncePersistStore(tmp_path / "missing-tool.sqlite3")
+    session, _ = _make_session(
         steps=[WorkflowStep("missing", "not_registered", "CCO")],
         tools={},
+        trace_id="missing-tool",
+        state_store=store,
     )
     session.start()
 
@@ -678,7 +755,7 @@ def test_missing_tool_persistence_failure_resumes_cached_result(tmp_path):
 
     assert advance.outcome == "failed"
     assert result.success is False
-    assert orchestrator.persist_attempts == 2
+    assert store.persist_attempts == 2
 
 
 def test_real_tool_postprocess_failure_resumes_without_second_tool_call():
@@ -702,6 +779,57 @@ def test_real_tool_postprocess_failure_resumes_without_second_tool_call():
     assert advance.terminal is True
     assert result.success is True
     assert tool.calls == ["CCO"]
+
+
+def test_final_checkpoint_failure_retries_without_duplicate_execution(tmp_path):
+    store = FailFinalCheckpointOnceStore(tmp_path / "checkpoint-failure.sqlite3")
+    tool = CountingTool()
+    trace_id = "checkpoint-failure"
+    session, _ = _make_session(
+        tools={tool.name: tool},
+        trace_id=trace_id,
+        state_store=store,
+    )
+    session.start()
+
+    with pytest.raises(RuntimeError, match="final checkpoint persistence failed"):
+        session.execute_step(0)
+
+    assert len(store.get_tool_executions(trace_id)) == 1
+    advance = session.execute_step(0)
+    session.finish()
+
+    assert advance.terminal is True
+    assert len(store.get_tool_executions(trace_id)) == 1
+    assert store.latest_checkpoint(trace_id, "properties")["status"] == "succeeded"
+    assert tool.calls == ["CCO"]
+    assert session.tool_attempt_count == 1
+
+
+def test_execution_commit_then_raise_retries_with_same_stable_id(tmp_path):
+    store = CommitThenFailExecutionOnceStore(
+        tmp_path / "execution-commit-failure.sqlite3"
+    )
+    tool = CountingTool()
+    trace_id = "execution-commit-failure"
+    session, _ = _make_session(
+        tools={tool.name: tool},
+        trace_id=trace_id,
+        state_store=store,
+    )
+    session.start()
+
+    with pytest.raises(RuntimeError, match="execution wrapper failed after commit"):
+        session.execute_step(0)
+
+    assert len(store.get_tool_executions(trace_id)) == 1
+    advance = session.execute_step(0)
+    session.finish()
+
+    assert advance.terminal is True
+    assert len(store.get_tool_executions(trace_id)) == 1
+    assert tool.calls == ["CCO"]
+    assert session.tool_attempt_count == 1
 
 
 @pytest.mark.parametrize(

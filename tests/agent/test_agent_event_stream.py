@@ -21,6 +21,30 @@ class FakeTool:
         return {"success": True, "message": "ok", "data": {"query": query}, "formatted": "OK"}
 
 
+class FailEventPersistenceOnceStore(SQLiteAgentStateStore):
+    def __init__(self, path, *, after_commit):
+        super().__init__(path)
+        self.after_commit = after_commit
+        self.failed = False
+
+    def append_event(self, event):
+        if not self.failed:
+            self.failed = True
+            if self.after_commit:
+                super().append_event(event)
+            raise RuntimeError("event persistence interrupted")
+        return super().append_event(event)
+
+
+class CountingFailingCallback:
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, _event):
+        self.calls += 1
+        raise RuntimeError("event callback failed")
+
+
 def test_workflow_emits_structured_events():
     event_bus = AgentEventBus()
     orchestrator = WorkflowOrchestrator(event_bus=event_bus)
@@ -55,6 +79,61 @@ def test_event_bus_persists_legacy_compatible_event_payloads(tmp_path):
     persisted = store.get_events("persisted-events")
     assert persisted[0]["event"] == "task_started"
     assert event.to_dict()["type"] == "agent_event"
+
+
+@pytest.mark.parametrize("after_commit", [False, True])
+def test_event_bus_retries_stable_event_without_duplicate_memory_or_database(
+    tmp_path,
+    after_commit,
+):
+    store = FailEventPersistenceOnceStore(
+        tmp_path / f"event-{after_commit}.sqlite3",
+        after_commit=after_commit,
+    )
+    callback_events = []
+    event_bus = AgentEventBus(
+        state_store=store,
+        on_event=callback_events.append,
+    )
+    kwargs = {
+        "trace_id": "stable-event",
+        "event": TaskEventType.TASK_STARTED,
+        "message": "started",
+        "event_id": "event-stable-event-task-started",
+    }
+
+    with pytest.raises(RuntimeError, match="persistence interrupted"):
+        event_bus.emit(**kwargs)
+
+    assert len(event_bus.events) == 1
+    assert len(store.get_events("stable-event")) == int(after_commit)
+    event = event_bus.emit(**kwargs)
+
+    assert len(event_bus.events) == 1
+    assert len(store.get_events("stable-event")) == 1
+    assert callback_events == [event]
+    assert "event_id" not in event.to_dict()
+
+
+def test_event_bus_callback_is_attempted_at_most_once_for_stable_event(tmp_path):
+    store = SQLiteAgentStateStore(tmp_path / "callback.sqlite3")
+    callback = CountingFailingCallback()
+    event_bus = AgentEventBus(state_store=store, on_event=callback)
+    kwargs = {
+        "trace_id": "callback-event",
+        "event": TaskEventType.TOOL_STARTED,
+        "message": "running",
+        "event_id": "event-callback-tool-started",
+    }
+
+    with pytest.raises(RuntimeError, match="callback failed"):
+        event_bus.emit(**kwargs)
+
+    retried = event_bus.emit(**kwargs)
+
+    assert callback.calls == 1
+    assert event_bus.events == [retried]
+    assert len(store.get_events("callback-event")) == 1
 
 
 def test_partial_terminal_event_sets_unambiguous_task_state():
