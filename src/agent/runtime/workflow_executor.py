@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from _thread import LockType
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
+from threading import Lock
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -33,6 +35,11 @@ class WorkflowExecution:
     events: list[dict[str, Any]]
 
 
+class PreparedWorkflowConsumedError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("PreparedWorkflow has already been consumed")
+
+
 @dataclass
 class _PreflightCapture:
     owner: object
@@ -59,8 +66,11 @@ class _PreparedExecutionPayload:
     def rebuild(self) -> tuple[AgentContext, WorkflowPlan]:
         return (
             _copy_boundary(self.context, "execution context"),
-            _copy_boundary(self.plan, "execution plan"),
+            self.rebuild_plan(),
         )
+
+    def rebuild_plan(self) -> WorkflowPlan:
+        return _copy_boundary(self.plan, "execution plan")
 
 
 @dataclass(frozen=True)
@@ -76,6 +86,18 @@ class PreparedWorkflow:
     event_bus: AgentEventBus
     idempotency_key: str | None = None
     _execution_payload: _PreparedExecutionPayload = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _consume_lock: LockType = field(
+        default_factory=Lock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _consumed: bool = field(
+        default=False,
         init=False,
         repr=False,
         compare=False,
@@ -143,6 +165,7 @@ class PreparedWorkflow:
             _PREPARED_INPUTS_ARE_SNAPSHOTS.reset(token)
 
     def create_session(self):
+        self._consume()
         context, plan = self._execution_payload.rebuild()
         return self.orchestrator.create_session(
             context=context,
@@ -153,6 +176,7 @@ class PreparedWorkflow:
         )
 
     def _run(self) -> AgentResult:
+        self._consume()
         context, plan = self._execution_payload.rebuild()
         return self.orchestrator.run(
             context=context,
@@ -162,9 +186,15 @@ class PreparedWorkflow:
             idempotency_key=self.idempotency_key,
         )
 
+    def _consume(self) -> None:
+        with self._consume_lock:
+            if self._consumed:
+                raise PreparedWorkflowConsumedError()
+            object.__setattr__(self, "_consumed", True)
+
     def to_execution(self, result: AgentResult) -> WorkflowExecution:
         return WorkflowExecution(
-            plan=self.plan,
+            plan=self._execution_payload.rebuild_plan(),
             result=result,
             events=[event.to_dict() for event in self.event_bus.events],
         )

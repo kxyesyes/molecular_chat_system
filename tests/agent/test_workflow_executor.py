@@ -534,16 +534,10 @@ def test_prepared_public_mutation_cannot_change_actual_execution_inputs():
 
     session = prepared.create_session()
     session_call = prepared.orchestrator.create_session_calls[0]
-
-    class PreparedReturningExecutor(WorkflowExecutor):
-        def prepare(self, *args, **kwargs):
-            return prepared
-
-    execution = PreparedReturningExecutor().execute(
-        context=context,
-        policy=FAKE_POLICY,
-        all_tools={"property_calculator": tool},
-    )
+    session.start()
+    session.execute_step(0)
+    result = session.finish()
+    execution = prepared.to_execution(result)
 
     assert session.context.trace_id == "stable-trace"
     assert session.context.query == "stable-query"
@@ -557,7 +551,56 @@ def test_prepared_public_mutation_cannot_change_actual_execution_inputs():
     assert session_call["steps"][0].metadata == {"labels": ["stable"]}
     assert prepared.compiled.plan is prepared.plan
     assert execution.result.trace_id == "stable-trace"
+    assert execution.plan is not prepared.plan
+    assert execution.plan.workflow_name == "stable-plan"
+    assert execution.plan.metadata == {"planning": {"source": "stable"}}
+    assert len(execution.plan.steps) == 1
+    assert execution.plan.steps[0].input_data == {
+        "molecule": {"smiles": "CCO"}
+    }
+    assert execution.plan.steps[0].metadata == {"labels": ["stable"]}
+    assert execution.plan.steps is not session_call["steps"]
+    assert (
+        execution.plan.steps[0].input_data
+        is not session_call["steps"][0].input_data
+    )
     assert tool.calls == [{"molecule": {"smiles": "CCO"}}]
+
+
+def test_prepared_public_mutation_cannot_change_run_inputs():
+    context = AgentContext(query="CCO", trace_id="stable-run")
+    tool = FakeTool("property_calculator")
+    prepared = WorkflowExecutor(planner=SingleStepPlanner()).prepare(
+        context=context,
+        policy=FAKE_POLICY,
+        all_tools={"property_calculator": tool},
+    )
+
+    prepared.context.trace_id = "tampered-run"
+    object.__setattr__(prepared.plan.steps[0], "input_data", "N")
+    prepared.plan.steps.append(
+        WorkflowStep(
+            name="injected-run",
+            tool_name="property_calculator",
+            input_data="O",
+        )
+    )
+
+    class PreparedReturningExecutor(WorkflowExecutor):
+        def prepare(self, *args, **kwargs):
+            return prepared
+
+    execution = PreparedReturningExecutor().execute(
+        context=context,
+        policy=FAKE_POLICY,
+        all_tools={"property_calculator": tool},
+    )
+
+    assert execution.result.trace_id == "stable-run"
+    assert execution.plan.workflow_name == "single_step"
+    assert len(execution.plan.steps) == 1
+    assert execution.plan.steps[0].input_data == "CCO"
+    assert tool.calls == ["CCO"]
 
 
 def test_prepared_to_execution_serializes_request_events():
@@ -581,9 +624,124 @@ def test_prepared_to_execution_serializes_request_events():
 
     execution = prepared.to_execution(result)
 
-    assert execution.plan is prepared.plan
+    assert execution.plan is not prepared.plan
+    assert execution.plan == prepared.plan
     assert execution.result is result
     assert [event["event"] for event in execution.events] == ["task_started"]
+
+
+def test_prepared_session_consumption_is_one_shot_but_reporting_is_not():
+    tool = FakeTool("property_calculator")
+    prepared = WorkflowExecutor(
+        planner=SingleStepPlanner(),
+        orchestrator=InputRecordingOrchestrator(),
+    ).prepare(
+        context=AgentContext(query="CCO", trace_id="one-shot-session"),
+        policy=FAKE_POLICY,
+        all_tools={"property_calculator": tool},
+    )
+    provisional = AgentResult(
+        trace_id="one-shot-session",
+        success=True,
+        message="not consumed",
+    )
+
+    first_report = prepared.to_execution(provisional)
+    second_report = prepared.to_execution(provisional)
+    session = prepared.create_session()
+    session.start()
+    session.execute_step(0)
+    result = session.finish()
+    completed_report = prepared.to_execution(result)
+    repeated_report = prepared.to_execution(result)
+
+    assert first_report.plan is not second_report.plan
+    assert completed_report.plan is not repeated_report.plan
+    assert completed_report.result is result
+    assert tool.calls == ["CCO"]
+    with pytest.raises(
+        workflow_executor_module.PreparedWorkflowConsumedError,
+        match="PreparedWorkflow has already been consumed",
+    ):
+        prepared.create_session()
+    with pytest.raises(
+        workflow_executor_module.PreparedWorkflowConsumedError,
+        match="PreparedWorkflow has already been consumed",
+    ):
+        prepared._run()
+
+
+def test_prepared_run_consumption_is_one_shot():
+    tool = FakeTool("property_calculator")
+    context = AgentContext(query="CCO", trace_id="one-shot-run")
+    prepared = WorkflowExecutor(planner=SingleStepPlanner()).prepare(
+        context=context,
+        policy=FAKE_POLICY,
+        all_tools={"property_calculator": tool},
+    )
+
+    class PreparedReturningExecutor(WorkflowExecutor):
+        def prepare(self, *args, **kwargs):
+            return prepared
+
+    executor = PreparedReturningExecutor()
+    execution = executor.execute(
+        context=context,
+        policy=FAKE_POLICY,
+        all_tools={"property_calculator": tool},
+    )
+    events_before_retry = [
+        event.to_dict() for event in prepared.event_bus.events
+    ]
+
+    assert execution.result.success is True
+    with pytest.raises(
+        workflow_executor_module.PreparedWorkflowConsumedError,
+        match="PreparedWorkflow has already been consumed",
+    ):
+        executor.execute(
+            context=context,
+            policy=FAKE_POLICY,
+            all_tools={"property_calculator": tool},
+        )
+    assert tool.calls == ["CCO"]
+    assert [event.to_dict() for event in prepared.event_bus.events] == (
+        events_before_retry
+    )
+
+
+def test_prepared_consumption_guard_is_atomic_across_threads():
+    prepared = WorkflowExecutor(
+        planner=SingleStepPlanner(),
+        orchestrator=InputRecordingOrchestrator(),
+    ).prepare(
+        context=AgentContext(query="CCO", trace_id="one-shot-concurrent"),
+        policy=FAKE_POLICY,
+        all_tools={"property_calculator": FakeTool("property_calculator")},
+    )
+    barrier = Barrier(2)
+
+    def consume():
+        barrier.wait(timeout=5)
+        try:
+            return prepared.create_session()
+        except RuntimeError as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(consume) for _ in range(2)]
+        outcomes = [future.result() for future in futures]
+
+    errors = [outcome for outcome in outcomes if isinstance(outcome, RuntimeError)]
+    sessions = [outcome for outcome in outcomes if not isinstance(outcome, RuntimeError)]
+    assert len(sessions) == 1
+    assert len(errors) == 1
+    assert isinstance(
+        errors[0],
+        workflow_executor_module.PreparedWorkflowConsumedError,
+    )
+    assert str(errors[0]) == "PreparedWorkflow has already been consumed"
+    assert len(prepared.orchestrator.create_session_calls) == 1
 
 
 def test_prepare_calls_planner_and_compiler_once_per_request():
