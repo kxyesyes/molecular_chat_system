@@ -36,9 +36,36 @@ class ShadowComparison:
 
 
 @dataclass(frozen=True)
+class HarnessExecutionMetadata:
+    backend: str
+    backend_version: str
+    selection_reason: str
+    canary_bucket: int | None
+    plan_fingerprint: str
+    tool_attempt_count: int
+    fallback_before_execution: bool
+    elapsed_ms: int
+    error_code: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "backend": self.backend,
+            "backend_version": self.backend_version,
+            "selection_reason": self.selection_reason,
+            "canary_bucket": self.canary_bucket,
+            "plan_fingerprint": self.plan_fingerprint,
+            "tool_attempt_count": self.tool_attempt_count,
+            "fallback_before_execution": self.fallback_before_execution,
+            "elapsed_ms": self.elapsed_ms,
+            "error_code": self.error_code,
+        }
+
+
+@dataclass(frozen=True)
 class HarnessRun:
     authoritative: WorkflowExecution
     shadow: ShadowComparison | None = None
+    execution: HarnessExecutionMetadata | None = None
 
 
 class HarnessBackend(Protocol):
@@ -54,4 +81,9 @@ class HarnessBackend(Protocol):
     ) -> HarnessRun: ...
 
 
-__all__ = ["HarnessBackend", "HarnessRun", "ShadowComparison"]
+__all__ = [
+    "HarnessBackend",
+    "HarnessExecutionMetadata",
+    "HarnessRun",
+    "ShadowComparison",
+]
