@@ -25,7 +25,7 @@ from src.agent.planning.bindings import BindingResolutionError, BindingResolver
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.task_state import TaskEventType
 from src.agent.tools.base_tool import execute_tool_compat
-from src.agent.validators import AgentResultValidator
+from src.agent.validators import AgentResultValidator, align_candidate_results
 
 from .base import WorkflowState, WorkflowStep
 
@@ -258,6 +258,13 @@ class WorkflowOrchestrator:
                 result,
                 trusted_checkpoint=checkpoint_reused,
             )
+            candidate_source = step.metadata.get("candidate_source")
+            if candidate_source and result.success:
+                result = align_candidate_results(
+                    outputs.get(str(candidate_source)),
+                    result,
+                    required=step.required,
+                )
             evidence_id = ledger.register_tool_result(
                 step_id=step.name,
                 input_digest=input_hash,

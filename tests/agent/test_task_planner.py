@@ -51,10 +51,13 @@ def test_target_driven_design_plan_for_pde5_query():
     assert "Validated target evidence" in generation_step.input_template
     assert plan.steps[2].input_from == "molecules"
     assert plan.steps[2].input_binding == "$.outputs.molecules"
+    assert plan.steps[2].metadata["candidate_source"] == "molecules"
     assert plan.steps[3].input_from == "molecules"
     assert plan.steps[3].input_binding == "$.outputs.molecules"
+    assert plan.steps[3].metadata["candidate_source"] == "molecules"
     assert plan.steps[4].input_from == "molecules"
     assert plan.steps[4].input_binding == "$.outputs.molecules"
+    assert plan.steps[4].metadata["candidate_source"] == "molecules"
 
 
 def test_comprehensive_target_search_consumes_reverse_target_output():
@@ -91,6 +94,7 @@ def test_hit_to_lead_generation_consumes_computed_baseline():
         step for step in plan.steps if step.name == "candidate_properties"
     )
     assert candidate_step.input_binding == "$.outputs.candidates"
+    assert candidate_step.metadata["candidate_source"] == "candidates"
 
 
 def test_atomic_skills_receive_single_step_declarative_plans():

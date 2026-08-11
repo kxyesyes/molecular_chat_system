@@ -19,10 +19,18 @@ class FakeTool:
                 "data": [{"smiles": "CCO"}],
                 "formatted": "generated CCO",
             }
+        if self.name == "property_calculator":
+            data = [{"smiles": "CCO", "properties": {"molecular_weight": 46.07}}]
+        elif self.name == "admet_predictor":
+            data = [{"smiles": "CCO", "admet": {"prediction_method": "test"}}]
+        elif self.name == "activity_predictor":
+            data = [{"smiles": "CCO", "success": True, "value": 0.5}]
+        else:
+            data = {"query": query}
         return {
             "success": True,
             "message": f"{self.name} ok",
-            "data": {"query": query},
+            "data": data,
             "formatted": f"{self.name}: {query}",
         }
 
