@@ -933,6 +933,19 @@ def test_session_lifecycle_state_is_read_only(attribute, value):
         setattr(session, attribute, value)
 
 
+def test_session_step_count_uses_internal_snapshot_and_is_read_only():
+    source_steps = [
+        WorkflowStep("first", "first_tool", "CCO"),
+        WorkflowStep("second", "second_tool", "CCN"),
+    ]
+    session, _ = _make_session(steps=source_steps, tools={})
+    source_steps.clear()
+
+    assert session.step_count == 2
+    with pytest.raises(AttributeError):
+        session.step_count = 0
+
+
 def test_pre_tool_semantic_failure_can_retry_same_step_safely():
     validator = FailOnceSemanticValidator()
     tool = CountingTool()
@@ -1043,6 +1056,7 @@ def test_legacy_run_delegates_entire_lifecycle_to_created_session(monkeypatch):
 
     class SessionDouble:
         def __init__(self):
+            self.step_count = len(steps)
             self.start_calls = 0
             self.execute_calls = []
             self.finish_calls = 0
@@ -1089,6 +1103,62 @@ def test_legacy_run_delegates_entire_lifecycle_to_created_session(monkeypatch):
     assert session.start_calls == 1
     assert session.execute_calls == [0, 1]
     assert session.finish_calls == 1
+    assert result is marker
+
+
+@pytest.mark.parametrize(
+    ("caller_step_count", "session_step_count"),
+    [(1, 3), (2, 0)],
+)
+def test_legacy_run_uses_authoritative_session_step_count(
+    monkeypatch,
+    caller_step_count,
+    session_step_count,
+):
+    orchestrator = WorkflowOrchestrator()
+    caller_steps = [
+        WorkflowStep(f"caller-{index}", f"tool-{index}")
+        for index in range(caller_step_count)
+    ]
+    marker = object()
+
+    class OverrideSession:
+        step_count = session_step_count
+
+        def __init__(self):
+            self.started = False
+            self.execute_calls = []
+            self.finished = False
+
+        def start(self):
+            self.started = True
+
+        def execute_step(self, index):
+            assert 0 <= index < self.step_count
+            self.execute_calls.append(index)
+            return SimpleNamespace(terminal=index == self.step_count - 1)
+
+        def finish(self):
+            assert self.execute_calls == list(range(self.step_count))
+            self.finished = True
+            return marker
+
+    session = OverrideSession()
+    monkeypatch.setattr(
+        orchestrator,
+        "create_session",
+        lambda **_kwargs: session,
+    )
+
+    result = orchestrator.run(
+        AgentContext(query="seed", trace_id="session-plan-override"),
+        caller_steps,
+        {},
+    )
+
+    assert session.started is True
+    assert session.execute_calls == list(range(session_step_count))
+    assert session.finished is True
     assert result is marker
 
 
@@ -1140,13 +1210,13 @@ def test_legacy_run_ignores_steps_appended_by_start_callback():
 
 
 def _manual_session_driver(orchestrator, context, steps, tools, **kwargs):
-    step_count = len(steps)
     session = orchestrator.create_session(
         context=context,
         steps=steps,
         tools=tools,
         **kwargs,
     )
+    step_count = session.step_count
     session.start()
     for index in range(step_count):
         advance = session.execute_step(index)

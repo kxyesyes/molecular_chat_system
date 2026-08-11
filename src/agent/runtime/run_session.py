@@ -133,6 +133,10 @@ class WorkflowRunSession:
     def next_index(self) -> int:
         return self._next_index
 
+    @property
+    def step_count(self) -> int:
+        return len(self.steps)
+
     def start(self) -> None:
         if self.started:
             raise SessionLifecycleError("workflow session has already started")
