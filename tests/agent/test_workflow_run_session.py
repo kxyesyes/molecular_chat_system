@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import FrozenInstanceError
+from types import SimpleNamespace
 
 import pytest
 
@@ -1026,3 +1028,195 @@ def test_finish_retry_does_not_duplicate_terminal_event_after_callback_failure()
     assert [event.event.value for event in event_bus.events].count(
         "task_completed"
     ) == 1
+
+
+def test_legacy_run_delegates_entire_lifecycle_to_created_session(monkeypatch):
+    orchestrator = WorkflowOrchestrator()
+    context = AgentContext(query="CCO", trace_id="delegated-run")
+    steps = [
+        WorkflowStep(f"step-{index}", f"tool-{index}")
+        for index in range(4)
+    ]
+    tools = {"sentinel": object()}
+    marker = object()
+    create_calls = []
+
+    class SessionDouble:
+        def __init__(self):
+            self.start_calls = 0
+            self.execute_calls = []
+            self.finish_calls = 0
+
+        def start(self):
+            self.start_calls += 1
+
+        def execute_step(self, index):
+            self.execute_calls.append(index)
+            return SimpleNamespace(terminal=index == 1)
+
+        def finish(self):
+            self.finish_calls += 1
+            return marker
+
+    session = SessionDouble()
+
+    def fake_create_session(**kwargs):
+        create_calls.append(kwargs)
+        return session
+
+    monkeypatch.setattr(orchestrator, "create_session", fake_create_session)
+
+    result = orchestrator.run(
+        context,
+        steps,
+        tools,
+        continue_on_error=True,
+        idempotency_key="delegation-key",
+    )
+
+    assert create_calls == [
+        {
+            "context": context,
+            "steps": steps,
+            "tools": tools,
+            "continue_on_error": True,
+            "idempotency_key": "delegation-key",
+        }
+    ]
+    assert create_calls[0]["context"] is context
+    assert create_calls[0]["steps"] is steps
+    assert create_calls[0]["tools"] is tools
+    assert session.start_calls == 1
+    assert session.execute_calls == [0, 1]
+    assert session.finish_calls == 1
+    assert result is marker
+
+
+def _manual_session_driver(orchestrator, context, steps, tools, **kwargs):
+    session = orchestrator.create_session(
+        context=context,
+        steps=steps,
+        tools=tools,
+        **kwargs,
+    )
+    session.start()
+    for index in range(len(steps)):
+        advance = session.execute_step(index)
+        if advance.terminal:
+            break
+    return session.finish()
+
+
+def _without_runtime_identity(value):
+    ignored = {
+        "attempt_id",
+        "created_at",
+        "event_id",
+        "session_attempt_id",
+        "timestamp",
+        "updated_at",
+    }
+    if isinstance(value, dict):
+        return {
+            key: _without_runtime_identity(item)
+            for key, item in value.items()
+            if key not in ignored
+        }
+    if isinstance(value, list):
+        return [_without_runtime_identity(item) for item in value]
+    return value
+
+
+def _public_events(event_bus):
+    return [
+        (
+            event.event.value,
+            event.message,
+            event.tool,
+            event.progress,
+        )
+        for event in event_bus.events
+    ]
+
+
+def test_legacy_run_matches_manual_session_for_single_success():
+    context = AgentContext(query="CCO", trace_id="single-parity")
+    steps = [
+        WorkflowStep(
+            "properties",
+            "property_calculator",
+            input_data="CCO",
+            output_key="properties",
+        )
+    ]
+    legacy_tool = CountingTool()
+    manual_tool = CountingTool()
+    legacy_events = AgentEventBus()
+    manual_events = AgentEventBus()
+
+    legacy_result = WorkflowOrchestrator(event_bus=legacy_events).run(
+        context,
+        steps,
+        {legacy_tool.name: legacy_tool},
+    )
+    manual_result = _manual_session_driver(
+        WorkflowOrchestrator(event_bus=manual_events),
+        context,
+        steps,
+        {manual_tool.name: manual_tool},
+    )
+
+    assert _without_runtime_identity(
+        deepcopy(legacy_result.to_legacy_dict())
+    ) == _without_runtime_identity(deepcopy(manual_result.to_legacy_dict()))
+    assert _public_events(legacy_events) == _public_events(manual_events)
+    assert legacy_tool.calls == manual_tool.calls == ["CCO"]
+
+
+def test_legacy_run_matches_manual_session_for_optional_failure_then_success():
+    context = AgentContext(query="seed", trace_id="multi-step-parity")
+    steps = [
+        WorkflowStep(
+            "optional",
+            "optional_tool",
+            input_data="optional-input",
+            required=False,
+        ),
+        WorkflowStep(
+            "required",
+            "required_tool",
+            input_data="required-input",
+            output_key="result",
+        ),
+    ]
+    legacy_optional = OutcomeTool("optional_tool", success=False)
+    legacy_required = OutcomeTool("required_tool", success=True)
+    manual_optional = OutcomeTool("optional_tool", success=False)
+    manual_required = OutcomeTool("required_tool", success=True)
+    legacy_events = AgentEventBus()
+    manual_events = AgentEventBus()
+
+    legacy_result = WorkflowOrchestrator(event_bus=legacy_events).run(
+        context,
+        steps,
+        {
+            legacy_optional.name: legacy_optional,
+            legacy_required.name: legacy_required,
+        },
+    )
+    manual_result = _manual_session_driver(
+        WorkflowOrchestrator(event_bus=manual_events),
+        context,
+        steps,
+        {
+            manual_optional.name: manual_optional,
+            manual_required.name: manual_required,
+        },
+    )
+
+    assert _without_runtime_identity(
+        deepcopy(legacy_result.to_legacy_dict())
+    ) == _without_runtime_identity(deepcopy(manual_result.to_legacy_dict()))
+    assert _public_events(legacy_events) == _public_events(manual_events)
+    assert legacy_optional.calls == manual_optional.calls == ["optional-input"]
+    assert legacy_required.calls == manual_required.calls == ["required-input"]

@@ -11,28 +11,23 @@ from typing import TYPE_CHECKING, Any
 from src.agent.contracts import (
     AgentContext,
     AgentErrorCode,
-    AgentExecutionError,
     AgentResult,
     CandidateSet,
     ObservationStatus,
-    RunOutcome,
     ToolProvenance,
     ToolResult,
 )
-from src.agent.evidence import EvidenceLedger
 from src.agent.persistence.base import AgentStateStore
-from src.agent.persistence.redaction import redact_sensitive
-from src.agent.planning.bindings import BindingResolutionError, BindingResolver
+from src.agent.planning.bindings import BindingResolver
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.task_state import TaskEventType
 from src.agent.tools.base_tool import execute_tool_compat
 from src.agent.validators import (
     AgentResultValidator,
     SemanticInputValidator,
-    align_candidate_results,
 )
 
-from .base import WorkflowState, WorkflowStep
+from .base import WorkflowStep
 
 if TYPE_CHECKING:
     from src.agent.runtime.run_session import WorkflowRunSession
@@ -119,353 +114,19 @@ class WorkflowOrchestrator:
         continue_on_error: bool = False,
         idempotency_key: str | None = None,
     ) -> AgentResult:
-        context = self._resolve_idempotent_context(context, idempotency_key)
-        results: list[ToolResult] = []
-        state = WorkflowState(
-            trace_id=context.trace_id,
-            inputs={"query": context.query, **dict(context.metadata or {})},
+        session = self.create_session(
+            context=context,
+            steps=steps,
+            tools=tools,
+            continue_on_error=continue_on_error,
+            idempotency_key=idempotency_key,
         )
-        ledger = EvidenceLedger(context.trace_id)
-        outputs = state.outputs
-        reused_steps: list[str] = []
-        checkpoint_warnings: list[dict[str, str]] = []
-        skipped_steps: list[dict[str, str]] = []
-        semantic_evidence: list[dict[str, str]] = []
-        total_steps = max(len(steps), 1)
-
-        if self.state_store:
-            self.state_store.start_run(
-                {
-                    "trace_id": context.trace_id,
-                    "status": "running",
-                    "skill_name": context.active_skill,
-                    "query": context.query,
-                    "workflow_version": self.workflow_version,
-                    "idempotency_key": idempotency_key,
-                    "user_id": context.user_id,
-                    "session_id": context.session_id,
-                    "metadata": context.metadata,
-                }
-            )
-
-        self._emit(
-            context,
-            TaskEventType.TASK_STARTED,
-            "Agent workflow started",
-            progress=0.0,
-        )
-        self._emit(
-            context,
-            TaskEventType.PLANNING_STARTED,
-            "Workflow planning started",
-            progress=0.0,
-            payload={"step_count": len(steps)},
-        )
-        self._emit(
-            context,
-            TaskEventType.PLANNING_COMPLETED,
-            "Workflow planning completed",
-            progress=0.0,
-            payload={
-                "steps": [
-                    {"name": step.name, "tool_name": step.tool_name}
-                    for step in steps
-                ]
-            },
-        )
-
-        for index, step in enumerate(steps):
-            checkpoint_reused = False
-            checkpoint_warning: str | None = None
-            tool = tools.get(step.tool_name)
-            try:
-                input_data = self._resolve_input(context, step, outputs)
-            except BindingResolutionError as exc:
-                input_data = {
-                    "binding": step.input_binding,
-                    "resolution_error": str(exc),
-                }
-                input_hash = self._input_hash(input_data)
-                tool_version = str(
-                    getattr(tool, "version", "1") if tool else "missing"
-                )
-                model_version = str(
-                    getattr(getattr(tool, "llm_model", None), "model_name", "")
-                )
-                checkpoint = None
-                result = ToolResult.error_result(
-                    tool_name=step.tool_name,
-                    code=AgentErrorCode.INVALID_INPUT,
-                    message="Workflow input binding could not be resolved",
-                    details={
-                        "step": step.name,
-                        "selector": step.input_binding,
-                        "reason": str(exc),
-                    },
-                )
-            else:
-                semantic_input = self._resolve_semantic_input(
-                    context,
-                    step,
-                    outputs,
-                )
-                decision = self.semantic_validator.validate(step, semantic_input)
-                if not decision.allowed:
-                    skipped_steps.append(
-                        {
-                            "step_id": step.name,
-                            "status": "skipped_precondition",
-                            "requirement": str(decision.requirement or ""),
-                            "reason": str(decision.reason or ""),
-                        }
-                    )
-                    for remaining in steps[index + 1 :]:
-                        skipped_steps.append(
-                            {
-                                "step_id": remaining.name,
-                                "status": "skipped_precondition",
-                                "requirement": str(decision.requirement or ""),
-                                "reason": f"blocked_by:{step.name}",
-                            }
-                        )
-                    break
-                if decision.evidence_digest:
-                    semantic_evidence.append(
-                        {
-                            "step_id": step.name,
-                            "requirement": str(decision.requirement or ""),
-                            "evidence_digest": decision.evidence_digest,
-                        }
-                    )
-                self._emit(
-                    context,
-                    TaskEventType.TOOL_STARTED,
-                    f"Running {step.name}",
-                    tool=step.tool_name,
-                    progress=index / total_steps,
-                )
-                input_hash = self._input_hash(input_data)
-                tool_version = str(
-                    step.metadata.get(
-                        "tool_version",
-                        getattr(tool, "version", "1")
-                        if tool is not None
-                        else "missing",
-                    )
-                )
-                model_version = str(
-                    step.metadata.get(
-                        "model_version",
-                        getattr(
-                            getattr(tool, "llm_model", None),
-                            "model_name",
-                            "",
-                        ),
-                    )
-                )
-                checkpoint = self._compatible_checkpoint(
-                    context.trace_id,
-                    step,
-                    input_hash,
-                    tool_version,
-                    model_version,
-                )
-
-                if checkpoint:
-                    try:
-                        result = self._result_from_checkpoint(
-                            step.tool_name,
-                            checkpoint,
-                        )
-                    except (AttributeError, KeyError, TypeError, ValueError):
-                        checkpoint = None
-                        checkpoint_warning = (
-                            f"Ignored incompatible checkpoint for {step.name}"
-                        )
-                        checkpoint_warnings.append(
-                            {
-                                "step": step.name,
-                                "reason": "checkpoint_deserialization_failed",
-                            }
-                        )
-                    else:
-                        checkpoint_reused = True
-                        reused_steps.append(step.name)
-
-                if not checkpoint_reused:
-                    if tool is None:
-                        result = ToolResult.error_result(
-                            tool_name=step.tool_name,
-                            code=AgentErrorCode.INTERNAL_ERROR,
-                            message=f"Tool not found: {step.tool_name}",
-                            details={"step": step.name},
-                        )
-                    else:
-                        self._save_checkpoint(
-                            context,
-                            step,
-                            status="running",
-                            input_hash=input_hash,
-                            tool_version=tool_version,
-                            model_version=model_version,
-                        )
-                        result = self._execute_step(tool, input_data, step)
-
-            if checkpoint_warning and checkpoint_warning not in result.warnings:
-                result.warnings.append(checkpoint_warning)
-
-            result.quality = {
-                **result.quality,
-                "step_id": step.name,
-                "output_key": step.output_key,
-            }
-            ledger.prepare_provenance(input_hash, result)
-            result = self.validator.validate_tool_result(
-                result,
-                trusted_checkpoint=checkpoint_reused,
-            )
-            candidate_source = step.metadata.get("candidate_source")
-            if candidate_source and result.success:
-                result = align_candidate_results(
-                    outputs.get(str(candidate_source)),
-                    result,
-                    required=step.required,
-                )
-            evidence_id = ledger.register_tool_result(
-                step_id=step.name,
-                input_digest=input_hash,
-                result=result,
-            )
-            result.quality = {
-                **result.quality,
-                "evidence_id": evidence_id,
-            }
-            if not result.success and not step.required:
-                optional_warning = (
-                    f"Optional step {step.name} ({step.tool_name}) failed: "
-                    f"{result.message}"
-                )
-                if optional_warning not in result.warnings:
-                    result.warnings.append(optional_warning)
-            if not checkpoint_reused:
-                self._persist_execution(
-                    context,
-                    step,
-                    input_data,
-                    result,
-                    input_hash,
-                    tool_version,
-                    model_version,
-                )
-            if result.success and step.output_key:
-                outputs[step.output_key] = result.data
-            state.warnings.extend(result.warnings)
-            state.artifacts.extend(
-                artifact.to_dict() for artifact in result.artifacts
-            )
-            if not result.success:
-                state.errors.append(
-                    {
-                        "step": step.name,
-                        "tool": step.tool_name,
-                        "error": result.error.to_dict() if result.error else None,
-                    }
-                )
-            if result.warnings:
-                self._emit(
-                    context,
-                    TaskEventType.VALIDATION_WARNING,
-                    "Tool result has validation warnings",
-                    tool=step.tool_name,
-                    payload={"warnings": result.warnings},
-                )
-
-            results.append(result)
-            event_type = TaskEventType.TOOL_COMPLETED if result.success else TaskEventType.TOOL_FAILED
-            self._emit(
-                context,
-                event_type,
-                result.message or f"{step.name} completed",
-                tool=step.tool_name,
-                progress=(index + 1) / total_steps,
-                payload=result.to_legacy_dict(),
-            )
-
-            if step.required and not result.success:
-                should_continue = False
-            elif step.continue_on_error is not None:
-                should_continue = step.continue_on_error
-            else:
-                should_continue = not step.required or continue_on_error
-            if not result.success and not should_continue:
+        session.start()
+        for index in range(len(steps)):
+            advance = session.execute_step(index)
+            if advance.terminal:
                 break
-
-        final_answer = "\n\n".join(
-            item.formatted for item in results if item.success and item.formatted
-        )
-        message = self._build_message(results)
-
-        agent_result = AgentResult.from_tool_results(
-            trace_id=context.trace_id,
-            skill_name=context.active_skill,
-            tool_results=results,
-            message=message,
-            final_answer=final_answer,
-            metadata={
-                "step_count": len(steps),
-                "completed_count": len(results),
-                "reused_steps": reused_steps,
-                "checkpoint_warnings": checkpoint_warnings,
-                "skipped_steps": skipped_steps,
-                "semantic_evidence": semantic_evidence,
-                "workflow_state": redact_sensitive(state.to_dict()),
-                "evidence_ledger": ledger.to_list(),
-                "claims": [
-                    claim.to_dict()
-                    for claim in ledger.claims().values()
-                ],
-            },
-        )
-        if skipped_steps:
-            has_success = any(item.success for item in results)
-            agent_result.success = False
-            agent_result.partial = has_success
-            agent_result.outcome = (
-                RunOutcome.PARTIAL if has_success else RunOutcome.FAILED
-            )
-            agent_result.message = (
-                "Workflow returned partial results because a scientific "
-                "precondition failed"
-                if has_success
-                else "Workflow failed because a scientific precondition failed"
-            )
-            agent_result.error = AgentExecutionError(
-                code=AgentErrorCode.VALIDATION_ERROR,
-                message="Scientific workflow precondition failed",
-                details={"skipped_steps": skipped_steps},
-            )
-        completion_event = {
-            RunOutcome.COMPLETED: TaskEventType.TASK_COMPLETED,
-            RunOutcome.PARTIAL: TaskEventType.TASK_PARTIAL,
-            RunOutcome.REJECTED: TaskEventType.TASK_REJECTED,
-            RunOutcome.CANCELLED: TaskEventType.TASK_CANCELLED,
-            RunOutcome.FAILED: TaskEventType.TASK_FAILED,
-        }[agent_result.outcome]
-        self._emit(
-            context,
-            completion_event,
-            message,
-            progress=1.0,
-            payload=agent_result.to_legacy_dict(),
-        )
-        if self.state_store:
-            status = (
-                "succeeded"
-                if agent_result.outcome == RunOutcome.COMPLETED
-                else agent_result.outcome.value
-            )
-            self.state_store.update_run_status(context.trace_id, status)
-        return agent_result
+        return session.finish()
 
     @staticmethod
     def _execute_step(
