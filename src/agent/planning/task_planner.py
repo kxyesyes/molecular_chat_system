@@ -210,6 +210,7 @@ class TaskPlanner:
                     output_key="molecules",
                     capability="molecule.generate",
                     output_contract="CandidateSet@1",
+                    preconditions=("target_evidence",),
                 ),
                 WorkflowStep(
                     "properties",

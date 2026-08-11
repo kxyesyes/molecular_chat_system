@@ -20,6 +20,18 @@ class WorkflowStep:
     input_binding: str | None = None
     input_transform: str = "identity"
     output_contract: str | None = None
+    preconditions: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.preconditions, tuple):
+            raise ValueError("preconditions must be an immutable tuple")
+        if any(
+            not isinstance(requirement, str) or not requirement.strip()
+            for requirement in self.preconditions
+        ):
+            raise ValueError("preconditions must contain non-empty strings")
+        if len(set(self.preconditions)) != len(self.preconditions):
+            raise ValueError("preconditions must be unique")
 
 
 @dataclass

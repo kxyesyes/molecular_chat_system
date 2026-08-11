@@ -24,6 +24,7 @@ def test_compiler_accepts_bound_upstream_output():
                 output_key="molecules",
                 capability="molecule.generate",
                 output_contract="CandidateSet@1",
+                preconditions=("target_evidence",),
             ),
             WorkflowStep(
                 "properties",
@@ -107,6 +108,53 @@ def test_compiler_rejects_target_design_that_ignores_target_evidence():
         ],
     )
     with pytest.raises(PlanCompilationError, match="target evidence"):
+        PlanCompiler().compile(
+            plan,
+            WorkflowCatalog().require("target_driven_design"),
+        )
+
+
+def test_compiler_rejects_unknown_semantic_precondition():
+    plan = WorkflowPlan(
+        workflow_name="admet_assessment",
+        steps=[
+            WorkflowStep(
+                "properties",
+                "property_calculator",
+                preconditions=("imaginary_evidence",),
+            )
+        ],
+    )
+
+    with pytest.raises(PlanCompilationError, match="Unsupported semantic"):
+        PlanCompiler().compile(
+            plan,
+            WorkflowCatalog().require("admet_assessment"),
+        )
+
+
+def test_compiler_rejects_target_evidence_gate_bound_to_non_target_output():
+    plan = WorkflowPlan(
+        workflow_name="target_driven_design",
+        steps=[
+            WorkflowStep(
+                "properties",
+                "property_calculator",
+                input_data="CCO",
+                output_key="not_target",
+                capability="molecule.properties",
+            ),
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_binding="$.outputs.not_target",
+                capability="molecule.generate",
+                preconditions=("target_evidence",),
+            ),
+        ],
+    )
+
+    with pytest.raises(PlanCompilationError, match="target structure search"):
         PlanCompiler().compile(
             plan,
             WorkflowCatalog().require("target_driven_design"),

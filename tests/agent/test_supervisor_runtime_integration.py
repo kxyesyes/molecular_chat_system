@@ -24,7 +24,10 @@ class FakeTool:
 
 def build_tools():
     return [
-        FakeTool("target_database_search"),
+        FakeTool(
+            "target_database_search",
+            [{"gene_symbol": "PDE5A", "source": "local_target_db"}],
+        ),
         FakeTool("llm_molecular_generator", [{"smiles": "CCO"}]),
         FakeTool("property_calculator"),
         FakeTool("admet_predictor"),

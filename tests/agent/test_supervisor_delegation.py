@@ -61,13 +61,19 @@ OWNERS = {
 }
 
 
-def build_registry(excluded=()):
+def build_registry(excluded=(), target_output=None):
     registry = ToolRegistry()
     tools = {}
     for name, owner in OWNERS.items():
         if name in excluded:
             continue
-        if name == "llm_molecular_generator":
+        if name == "target_database_search":
+            output = (
+                target_output
+                if target_output is not None
+                else [{"gene_symbol": "PDE5A", "source": "local_target_db"}]
+            )
+        elif name == "llm_molecular_generator":
             output = [{"smiles": "CCO"}]
         elif name == "reverse_target_predictor":
             output = [{"gene_symbol": "EGFR", "final_similarity": 0.91}]
@@ -95,6 +101,26 @@ def build_registry(excluded=()):
             )
         )
     return registry, tools
+
+
+def test_delegated_supervisor_does_not_bypass_target_evidence_gate():
+    registry, tools = build_registry(target_output=[])
+    supervisor = SupervisorAgent(
+        tool_registry=registry,
+        specialists=build_default_specialists(),
+    )
+
+    result = supervisor.run(
+        "Design PDE5A candidates",
+        skill_name="target_driven_design",
+    )
+
+    assert result["status"] == "partial"
+    assert tools["target_database_search"].calls
+    assert tools["llm_molecular_generator"].calls == []
+    assert result["result"]["metadata"]["skipped_steps"][0]["step_id"] == (
+        "molecule_generation"
+    )
 
 
 def test_supervisor_delegates_each_step_to_declared_specialist():

@@ -49,6 +49,7 @@ def test_target_driven_design_plan_for_pde5_query():
     assert generation_step.input_binding == "$.outputs.target"
     assert generation_step.input_transform == "identity"
     assert "Validated target evidence" in generation_step.input_template
+    assert generation_step.preconditions == ("target_evidence",)
     assert plan.steps[2].input_from == "molecules"
     assert plan.steps[2].input_binding == "$.outputs.molecules"
     assert plan.steps[2].metadata["candidate_source"] == "molecules"

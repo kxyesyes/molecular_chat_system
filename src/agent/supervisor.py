@@ -9,6 +9,7 @@ from src.agent.contracts import (
     AgentErrorCode,
     AgentExecutionError,
     AgentResult,
+    ToolResult,
 )
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.planning.task_planner import TaskPlanner
@@ -339,6 +340,8 @@ class SupervisorAgent:
         outputs: dict[str, Any] = {}
         delegations: list[dict[str, Any]] = []
         tool_results = []
+        skipped_steps: list[dict[str, str]] = []
+        semantic_evidence: list[dict[str, str]] = []
         idempotency_key = context.metadata.get("idempotency_key")
 
         if self.state_store:
@@ -379,8 +382,6 @@ class SupervisorAgent:
             agent_name = TOOL_AGENT_OWNERS.get(step.tool_name)
             specialist = self.specialists.get(agent_name or "")
             if specialist is None:
-                from src.agent.contracts import AgentErrorCode, ToolResult
-
                 missing = ToolResult.error_result(
                     step.tool_name,
                     AgentErrorCode.TOOL_UNAVAILABLE,
@@ -406,6 +407,42 @@ class SupervisorAgent:
                 continue
 
             input_data = self.orchestrator._resolve_input(context, step, outputs)
+            semantic_input = self.orchestrator._resolve_semantic_input(
+                context,
+                step,
+                outputs,
+            )
+            decision = self.orchestrator.semantic_validator.validate(
+                step,
+                semantic_input,
+            )
+            if not decision.allowed:
+                skipped_steps.append(
+                    {
+                        "step_id": step.name,
+                        "status": "skipped_precondition",
+                        "requirement": str(decision.requirement or ""),
+                        "reason": str(decision.reason or ""),
+                    }
+                )
+                for remaining in steps[index + 1 :]:
+                    skipped_steps.append(
+                        {
+                            "step_id": remaining.name,
+                            "status": "skipped_precondition",
+                            "requirement": str(decision.requirement or ""),
+                            "reason": f"blocked_by:{step.name}",
+                        }
+                    )
+                break
+            if decision.evidence_digest:
+                semantic_evidence.append(
+                    {
+                        "step_id": step.name,
+                        "requirement": str(decision.requirement or ""),
+                        "evidence_digest": decision.evidence_digest,
+                    }
+                )
             self._emit(
                 context,
                 TaskEventType.TOOL_STARTED,
@@ -514,6 +551,8 @@ class SupervisorAgent:
         successful = sum(1 for item in tool_results if item.success)
         failed = sum(1 for item in tool_results if not item.success)
         status = "succeeded" if successful and not failed else "partial" if successful else "failed"
+        if skipped_steps:
+            status = "partial" if successful else "failed"
         final_answer = "\n\n".join(
             item.formatted for item in tool_results if item.success and item.formatted
         )
@@ -521,7 +560,9 @@ class SupervisorAgent:
             context,
             (
                 TaskEventType.TASK_COMPLETED
-                if status in {"succeeded", "partial"}
+                if status == "succeeded"
+                else TaskEventType.TASK_PARTIAL
+                if status == "partial"
                 else TaskEventType.TASK_FAILED
             ),
             f"Supervisor workflow {status}",
@@ -543,6 +584,19 @@ class SupervisorAgent:
             skill_name=context.active_skill,
             final_answer=final_answer,
             tool_results=tool_results,
+            metadata={
+                "skipped_steps": skipped_steps,
+                "semantic_evidence": semantic_evidence,
+            },
+            error=(
+                AgentExecutionError(
+                    code=AgentErrorCode.VALIDATION_ERROR,
+                    message="Scientific workflow precondition failed",
+                    details={"skipped_steps": skipped_steps},
+                )
+                if skipped_steps
+                else None
+            ),
         ).to_legacy_dict()
         return {
             "trace_id": context.trace_id,
@@ -577,6 +631,8 @@ class SupervisorAgent:
                 "tool_results": serialized_results["tool_results"],
                 "tool_result_sequence": serialized_results["tool_result_sequence"],
                 "tool_results_by_step": serialized_results["tool_results_by_step"],
+                "metadata": serialized_results["metadata"],
+                "error": serialized_results["error"],
             },
         }
 
@@ -742,6 +798,7 @@ class SupervisorAgent:
     def _step_to_dict(step: WorkflowStep) -> dict[str, Any]:
         data = asdict(step)
         data["required"] = bool(data.get("required", True))
+        data["preconditions"] = list(step.preconditions)
         return data
 
     @staticmethod

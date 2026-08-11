@@ -12,6 +12,15 @@ class FakeTool:
 
     def execute(self, query):
         self.calls.append(query)
+        if self.name == "target_database_search":
+            return {
+                "success": True,
+                "message": f"{self.name} ok",
+                "data": [
+                    {"gene_symbol": "PDE5A", "source": "local_target_db"}
+                ],
+                "formatted": "validated PDE5A target evidence",
+            }
         if self.name == "llm_molecular_generator":
             return {
                 "success": True,
@@ -63,6 +72,10 @@ def test_supervisor_generates_target_driven_plan():
         "llm_molecular_generator",
         "property_calculator",
     ]
+    generation_step = next(
+        step for step in plan["steps"] if step["name"] == "molecule_generation"
+    )
+    assert generation_step["preconditions"] == ["target_evidence"]
 
 
 def test_supervisor_runs_multi_tool_workflow():

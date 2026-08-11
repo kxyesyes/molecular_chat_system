@@ -8,6 +8,15 @@ class FakeTool:
         self.name = name
 
     def execute(self, query):
+        if self.name == "target_database_search":
+            return {
+                "success": True,
+                "message": f"{self.name} completed",
+                "data": [
+                    {"gene_symbol": "PDE5A", "source": "local_target_db"}
+                ],
+                "formatted": "validated PDE5A target evidence",
+            }
         if self.name == "llm_molecular_generator":
             return {
                 "success": True,

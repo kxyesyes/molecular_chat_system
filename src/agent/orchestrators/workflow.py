@@ -11,6 +11,7 @@ from typing import Any
 from src.agent.contracts import (
     AgentContext,
     AgentErrorCode,
+    AgentExecutionError,
     AgentResult,
     CandidateSet,
     ObservationStatus,
@@ -25,7 +26,11 @@ from src.agent.planning.bindings import BindingResolutionError, BindingResolver
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.task_state import TaskEventType
 from src.agent.tools.base_tool import execute_tool_compat
-from src.agent.validators import AgentResultValidator, align_candidate_results
+from src.agent.validators import (
+    AgentResultValidator,
+    SemanticInputValidator,
+    align_candidate_results,
+)
 
 from .base import WorkflowState, WorkflowStep
 
@@ -40,12 +45,14 @@ class WorkflowOrchestrator:
         state_store: AgentStateStore | None = None,
         workflow_version: str = "1",
         adapter_version: str = "1",
+        semantic_validator: SemanticInputValidator | None = None,
     ):
         self.state_store = state_store
         self.event_bus = event_bus or (
             AgentEventBus(state_store=state_store) if state_store else None
         )
         self.validator = validator or AgentResultValidator()
+        self.semantic_validator = semantic_validator or SemanticInputValidator()
         self.workflow_version = workflow_version
         self.adapter_version = adapter_version
 
@@ -55,6 +62,7 @@ class WorkflowOrchestrator:
             self.event_bus,
             self.validator,
             self.state_store,
+            self.semantic_validator,
         )
         memo = {
             id(dependency): dependency
@@ -76,6 +84,7 @@ class WorkflowOrchestrator:
         request_orchestrator.event_bus = event_bus
         request_orchestrator.validator = self.validator
         request_orchestrator.state_store = self.state_store
+        request_orchestrator.semantic_validator = self.semantic_validator
         request_orchestrator.workflow_version = self.workflow_version
         request_orchestrator.adapter_version = self.adapter_version
         return request_orchestrator
@@ -98,6 +107,8 @@ class WorkflowOrchestrator:
         outputs = state.outputs
         reused_steps: list[str] = []
         checkpoint_warnings: list[dict[str, str]] = []
+        skipped_steps: list[dict[str, str]] = []
+        semantic_evidence: list[dict[str, str]] = []
         total_steps = max(len(steps), 1)
 
         if self.state_store:
@@ -144,13 +155,6 @@ class WorkflowOrchestrator:
         for index, step in enumerate(steps):
             checkpoint_reused = False
             checkpoint_warning: str | None = None
-            self._emit(
-                context,
-                TaskEventType.TOOL_STARTED,
-                f"Running {step.name}",
-                tool=step.tool_name,
-                progress=index / total_steps,
-            )
             tool = tools.get(step.tool_name)
             try:
                 input_data = self._resolve_input(context, step, outputs)
@@ -178,6 +182,46 @@ class WorkflowOrchestrator:
                     },
                 )
             else:
+                semantic_input = self._resolve_semantic_input(
+                    context,
+                    step,
+                    outputs,
+                )
+                decision = self.semantic_validator.validate(step, semantic_input)
+                if not decision.allowed:
+                    skipped_steps.append(
+                        {
+                            "step_id": step.name,
+                            "status": "skipped_precondition",
+                            "requirement": str(decision.requirement or ""),
+                            "reason": str(decision.reason or ""),
+                        }
+                    )
+                    for remaining in steps[index + 1 :]:
+                        skipped_steps.append(
+                            {
+                                "step_id": remaining.name,
+                                "status": "skipped_precondition",
+                                "requirement": str(decision.requirement or ""),
+                                "reason": f"blocked_by:{step.name}",
+                            }
+                        )
+                    break
+                if decision.evidence_digest:
+                    semantic_evidence.append(
+                        {
+                            "step_id": step.name,
+                            "requirement": str(decision.requirement or ""),
+                            "evidence_digest": decision.evidence_digest,
+                        }
+                    )
+                self._emit(
+                    context,
+                    TaskEventType.TOOL_STARTED,
+                    f"Running {step.name}",
+                    tool=step.tool_name,
+                    progress=index / total_steps,
+                )
                 input_hash = self._input_hash(input_data)
                 tool_version = str(
                     step.metadata.get(
@@ -350,6 +394,8 @@ class WorkflowOrchestrator:
                 "completed_count": len(results),
                 "reused_steps": reused_steps,
                 "checkpoint_warnings": checkpoint_warnings,
+                "skipped_steps": skipped_steps,
+                "semantic_evidence": semantic_evidence,
                 "workflow_state": redact_sensitive(state.to_dict()),
                 "evidence_ledger": ledger.to_list(),
                 "claims": [
@@ -358,6 +404,24 @@ class WorkflowOrchestrator:
                 ],
             },
         )
+        if skipped_steps:
+            has_success = any(item.success for item in results)
+            agent_result.success = False
+            agent_result.partial = has_success
+            agent_result.outcome = (
+                RunOutcome.PARTIAL if has_success else RunOutcome.FAILED
+            )
+            agent_result.message = (
+                "Workflow returned partial results because a scientific "
+                "precondition failed"
+                if has_success
+                else "Workflow failed because a scientific precondition failed"
+            )
+            agent_result.error = AgentExecutionError(
+                code=AgentErrorCode.VALIDATION_ERROR,
+                message="Scientific workflow precondition failed",
+                details={"skipped_steps": skipped_steps},
+            )
         completion_event = {
             RunOutcome.COMPLETED: TaskEventType.TASK_COMPLETED,
             RunOutcome.PARTIAL: TaskEventType.TASK_PARTIAL,
@@ -583,6 +647,18 @@ class WorkflowOrchestrator:
         step: WorkflowStep,
         outputs: Mapping[str, Any],
     ) -> Any:
+        input_data = cls._resolve_semantic_input(context, step, outputs)
+        if step.input_template:
+            return step.input_template.format(input=input_data, query=context.query)
+        return input_data
+
+    @classmethod
+    def _resolve_semantic_input(
+        cls,
+        context: AgentContext,
+        step: WorkflowStep,
+        outputs: Mapping[str, Any],
+    ) -> Any:
         if step.input_binding:
             input_data = BindingResolver().resolve(
                 step.input_binding,
@@ -599,9 +675,6 @@ class WorkflowOrchestrator:
             )
         else:
             input_data = context.query if step.input_data is None else step.input_data
-
-        if step.input_template:
-            return step.input_template.format(input=input_data, query=context.query)
         return input_data
 
     @classmethod

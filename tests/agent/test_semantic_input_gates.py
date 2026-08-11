@@ -1,0 +1,189 @@
+from __future__ import annotations
+
+from src.agent.contracts import AgentContext, ToolResult
+from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
+from src.agent.planning import WorkflowPlan
+from src.agent.runtime.event_bus import AgentEventBus
+from src.agent.runtime.workflow_executor import WorkflowExecutor
+from src.agent.validators.semantic_inputs import SemanticInputValidator
+from src.agent.workflows import WorkflowCatalog
+
+
+class CountingTool:
+    def __init__(self, name: str, data):
+        self.name = name
+        self.data = data
+        self.calls = 0
+        self.inputs = []
+
+    def execute(self, query):
+        self.calls += 1
+        self.inputs.append(query)
+        quality = (
+            {"requested_count": len(self.data), "model": "gmm-llama:latest"}
+            if self.name == "llm_molecular_generator"
+            else {}
+        )
+        return ToolResult.success_result(
+            self.name,
+            data=self.data,
+            message=f"{self.name} completed",
+            quality=quality,
+        )
+
+
+def _target_design_plan() -> WorkflowPlan:
+    return WorkflowPlan(
+        workflow_name="target_driven_design",
+        steps=[
+            WorkflowStep(
+                "target_search",
+                "target_database_search",
+                input_data="PDE5A",
+                output_key="target",
+                capability="target.structure.search",
+            ),
+            WorkflowStep(
+                "molecule_generation",
+                "llm_molecular_generator",
+                input_binding="$.outputs.target",
+                input_transform="identity",
+                output_key="molecules",
+                capability="molecule.generate",
+                preconditions=("target_evidence",),
+            ),
+        ],
+    )
+
+
+def _run_target_design(target: CountingTool, generator: CountingTool):
+    event_bus = AgentEventBus()
+    execution = WorkflowExecutor(
+        orchestrator=WorkflowOrchestrator(event_bus=event_bus)
+    ).execute(
+        context=AgentContext(
+            query="Design PDE5A candidates",
+            trace_id="semantic-target-design",
+            active_skill="target_driven_design",
+        ),
+        policy=WorkflowCatalog().require("target_driven_design"),
+        all_tools={
+            "target_database_search": target,
+            "llm_molecular_generator": generator,
+        },
+        plan=_target_design_plan(),
+    )
+    return execution, event_bus
+
+
+def test_empty_target_records_skip_generation_and_return_partial():
+    target = CountingTool("target_database_search", data=[])
+    generator = CountingTool(
+        "llm_molecular_generator", data=[{"smiles": "CCO"}]
+    )
+
+    execution, _ = _run_target_design(target, generator)
+
+    assert target.calls == 1
+    assert generator.calls == 0
+    assert execution.result.partial is True
+    assert execution.result.success is False
+    assert execution.result.error is not None
+    assert execution.result.error.code.value == "validation_error"
+    assert execution.result.metadata["skipped_steps"] == [
+        {
+            "step_id": "molecule_generation",
+            "status": "skipped_precondition",
+            "requirement": "target_evidence",
+            "reason": "target_evidence_missing",
+        }
+    ]
+    assert [item.tool_name for item in execution.result.tool_results] == [
+        "target_database_search"
+    ]
+    assert not any(
+        event["event"] == "tool_started"
+        and event["tool"] == "llm_molecular_generator"
+        for event in execution.events
+    )
+    assert execution.events[-1]["event"] == "task_partial"
+
+
+def test_structured_target_evidence_is_consumed_by_generator():
+    target_data = [
+        {
+            "gene_symbol": "PDE5A",
+            "source": "local_target_db",
+            "recommended_structures": [{"structure_id": "1UDT"}],
+        }
+    ]
+    target = CountingTool("target_database_search", data=target_data)
+    generator = CountingTool(
+        "llm_molecular_generator", data=[{"smiles": "CCO"}]
+    )
+
+    execution, _ = _run_target_design(target, generator)
+
+    assert execution.result.success is True
+    assert generator.calls == 1
+    assert "PDE5A" in str(generator.inputs[0])
+    assert "1UDT" in str(generator.inputs[0])
+    assert execution.result.metadata["semantic_evidence"][0]["requirement"] == (
+        "target_evidence"
+    )
+    assert len(execution.result.metadata["semantic_evidence"][0]["evidence_digest"]) == 64
+
+
+def test_demo_or_placeholder_target_evidence_is_rejected():
+    validator = SemanticInputValidator()
+    step = _target_design_plan().steps[1]
+
+    demo = validator.validate(
+        step,
+        [{"gene_symbol": "PDE5A", "source": "local", "demo_mode": True}],
+    )
+    placeholder = validator.validate(
+        step,
+        [{"gene_symbol": "PDE5A", "source": "None"}],
+    )
+    fallback = validator.validate(
+        step,
+        [
+            {
+                "gene_symbol": "PDE5A",
+                "source": "local",
+                "fallback_used": "true",
+            }
+        ],
+    )
+
+    assert demo.allowed is False
+    assert demo.reason == "target_evidence_missing"
+    assert placeholder.allowed is False
+    assert placeholder.reason == "target_evidence_missing"
+    assert fallback.allowed is False
+    assert fallback.reason == "target_evidence_missing"
+
+
+def test_workflow_step_requires_immutable_unique_preconditions():
+    try:
+        WorkflowStep(
+            "generate",
+            "llm_molecular_generator",
+            preconditions=["target_evidence"],
+        )
+    except ValueError as exc:
+        assert "tuple" in str(exc)
+    else:
+        raise AssertionError("mutable preconditions must be rejected")
+
+    try:
+        WorkflowStep(
+            "generate",
+            "llm_molecular_generator",
+            preconditions=("target_evidence", "target_evidence"),
+        )
+    except ValueError as exc:
+        assert "unique" in str(exc)
+    else:
+        raise AssertionError("duplicate preconditions must be rejected")

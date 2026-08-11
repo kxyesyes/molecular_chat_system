@@ -21,6 +21,7 @@ class CompiledPlan:
 
 class PlanCompiler:
     OUTPUT_SELECTOR = re.compile(r"^\$\.outputs\.([A-Za-z0-9_-]+)$")
+    SUPPORTED_PRECONDITIONS = frozenset({"target_evidence"})
 
     def compile(self, plan: WorkflowPlan, policy: WorkflowPolicy) -> CompiledPlan:
         seen_steps: set[str] = set()
@@ -32,6 +33,14 @@ class PlanCompiler:
             if step.name in seen_steps:
                 raise PlanCompilationError(f"Duplicate step name: {step.name}")
             seen_steps.add(step.name)
+            unknown_preconditions = (
+                set(step.preconditions) - self.SUPPORTED_PRECONDITIONS
+            )
+            if unknown_preconditions:
+                raise PlanCompilationError(
+                    f"Unsupported semantic preconditions for {step.name}: "
+                    f"{sorted(unknown_preconditions)}"
+                )
             if step.tool_name not in allowed:
                 raise PlanCompilationError(
                     f"Tool {step.tool_name} is not allowed by {policy.name}"
@@ -75,6 +84,19 @@ class PlanCompiler:
             for step in plan.steps
         }
 
+        for step in plan.steps:
+            if "target_evidence" not in step.preconditions:
+                continue
+            dependency_steps = dependencies.get(step.name, ())
+            if not any(
+                step_capabilities.get(dependency) == "target.structure.search"
+                for dependency in dependency_steps
+            ):
+                raise PlanCompilationError(
+                    f"Semantic precondition target_evidence for {step.name} "
+                    "must consume a target structure search output"
+                )
+
         if plan.workflow_name == "target_driven_design":
             target_step = next(
                 (
@@ -104,6 +126,10 @@ class PlanCompiler:
             ):
                 raise PlanCompilationError(
                     "Target-driven generation must consume target evidence"
+                )
+            if "target_evidence" not in generation_step.preconditions:
+                raise PlanCompilationError(
+                    "Target-driven generation must declare target evidence precondition"
                 )
 
         if plan.workflow_name == "hit_to_lead_optimization":
