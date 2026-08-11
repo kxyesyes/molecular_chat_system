@@ -1114,6 +1114,7 @@ def _without_runtime_identity(value):
         "event_id",
         "session_attempt_id",
         "timestamp",
+        "trace_id",
         "updated_at",
     }
     if isinstance(value, dict):
@@ -1129,14 +1130,66 @@ def _without_runtime_identity(value):
 
 def _public_events(event_bus):
     return [
-        (
-            event.event.value,
-            event.message,
-            event.tool,
-            event.progress,
-        )
+        {
+            "event": event.event.value,
+            "message": event.message,
+            "skill": event.skill,
+            "tool": event.tool,
+            "progress": event.progress,
+            "payload": _without_runtime_identity(deepcopy(event.payload)),
+        }
         for event in event_bus.events
     ]
+
+
+def test_public_event_projection_preserves_skill_and_business_payload():
+    event_bus = AgentEventBus()
+    event_bus.emit(
+        trace_id="runtime-trace",
+        event=TaskEventType.TOOL_COMPLETED,
+        message="candidate generation completed",
+        skill="molecule_generation",
+        tool="llm_molecular_generator",
+        progress=0.75,
+        payload={
+            "trace_id": "runtime-trace",
+            "timestamp": "2026-08-11T00:00:00Z",
+            "session_attempt_id": "attempt-random",
+            "status": "succeeded",
+            "warnings": ["business warning"],
+            "quality": {"validated": True},
+            "evidence": [{"claim": "CCO is valid"}],
+        },
+    )
+
+    assert _public_events(event_bus) == [
+        {
+            "event": "tool_completed",
+            "message": "candidate generation completed",
+            "skill": "molecule_generation",
+            "tool": "llm_molecular_generator",
+            "progress": 0.75,
+            "payload": {
+                "status": "succeeded",
+                "warnings": ["business warning"],
+                "quality": {"validated": True},
+                "evidence": [{"claim": "CCO is valid"}],
+            },
+        }
+    ]
+
+    different_payload = AgentEventBus()
+    different_payload.emit(
+        trace_id="other-runtime-trace",
+        event=TaskEventType.TOOL_COMPLETED,
+        message="candidate generation completed",
+        skill="different_skill",
+        tool="llm_molecular_generator",
+        progress=0.75,
+        payload={"status": "failed", "quality": {"validated": False}},
+    )
+
+    assert _public_events(event_bus) != _public_events(different_payload)
 
 
 def test_legacy_run_matches_manual_session_for_single_success():
