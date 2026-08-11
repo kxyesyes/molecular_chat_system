@@ -19,6 +19,9 @@ from src.agent.planning import (
     TaskPlanner,
     WorkflowPlan,
 )
+# Planning initializes the orchestrators package; bind its public runtime type
+# only after that cycle-sensitive import has completed.
+from src.agent.orchestrators import WorkflowOrchestrator
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.workflows import WorkflowPolicy
 
@@ -56,7 +59,7 @@ class PreparedWorkflow:
     plan: WorkflowPlan
     compiled: CompiledPlan
     tools: Mapping[str, Any]
-    orchestrator: Any
+    orchestrator: WorkflowOrchestrator
     event_bus: AgentEventBus
     idempotency_key: str | None = None
 
@@ -94,7 +97,7 @@ class PreparedWorkflow:
         plan: WorkflowPlan,
         compiled: CompiledPlan,
         tools: Mapping[str, Any],
-        orchestrator: Any,
+        orchestrator: WorkflowOrchestrator,
         event_bus: AgentEventBus,
         idempotency_key: str | None,
     ) -> PreparedWorkflow:

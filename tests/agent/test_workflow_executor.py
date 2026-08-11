@@ -436,7 +436,13 @@ def test_direct_prepared_workflow_construction_takes_a_defensive_snapshot():
 def test_prepared_workflow_type_hints_resolve_at_runtime():
     hints = get_type_hints(workflow_executor_module.PreparedWorkflow)
 
-    assert "orchestrator" in hints
+    assert hints["orchestrator"] is WorkflowOrchestrator
+
+
+def test_workflow_executor_init_type_hints_resolve_at_runtime():
+    hints = get_type_hints(WorkflowExecutor.__init__)
+
+    assert hints["orchestrator"] == WorkflowOrchestrator | None
 
 
 def test_prepared_create_session_uses_preflight_inputs():
