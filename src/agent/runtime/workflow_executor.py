@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -35,6 +35,7 @@ class WorkflowExecution:
 
 @dataclass
 class _PreflightCapture:
+    owner: object
     used: bool = False
     compiled: CompiledPlan | None = None
     failure: WorkflowExecution | None = None
@@ -51,6 +52,18 @@ _PREPARED_INPUTS_ARE_SNAPSHOTS: ContextVar[bool] = ContextVar(
 
 
 @dataclass(frozen=True)
+class _PreparedExecutionPayload:
+    context: AgentContext
+    plan: WorkflowPlan
+
+    def rebuild(self) -> tuple[AgentContext, WorkflowPlan]:
+        return (
+            _copy_boundary(self.context, "execution context"),
+            _copy_boundary(self.plan, "execution plan"),
+        )
+
+
+@dataclass(frozen=True)
 class PreparedWorkflow:
     """Runtime-only snapshot; tool values retain identity, registry structure does not."""
 
@@ -62,6 +75,11 @@ class PreparedWorkflow:
     orchestrator: WorkflowOrchestrator
     event_bus: AgentEventBus
     idempotency_key: str | None = None
+    _execution_payload: _PreparedExecutionPayload = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if _PREPARED_INPUTS_ARE_SNAPSHOTS.get():
@@ -87,6 +105,14 @@ class PreparedWorkflow:
         # The registry is a request-scoped shallow copy by design. Tool objects
         # are stateful runtime extensions and must preserve their identity.
         object.__setattr__(self, "tools", MappingProxyType(dict(self.tools)))
+        object.__setattr__(
+            self,
+            "_execution_payload",
+            _PreparedExecutionPayload(
+                context=_copy_boundary(context, "execution context"),
+                plan=_copy_boundary(plan, "execution plan"),
+            ),
+        )
 
     @classmethod
     def _from_snapshot(
@@ -117,9 +143,20 @@ class PreparedWorkflow:
             _PREPARED_INPUTS_ARE_SNAPSHOTS.reset(token)
 
     def create_session(self):
+        context, plan = self._execution_payload.rebuild()
         return self.orchestrator.create_session(
-            context=self.context,
-            steps=self.plan.steps,
+            context=context,
+            steps=plan.steps,
+            tools=self.tools,
+            continue_on_error=False,
+            idempotency_key=self.idempotency_key,
+        )
+
+    def _run(self) -> AgentResult:
+        context, plan = self._execution_payload.rebuild()
+        return self.orchestrator.run(
+            context=context,
+            steps=plan.steps,
             tools=self.tools,
             continue_on_error=False,
             idempotency_key=self.idempotency_key,
@@ -168,7 +205,7 @@ class WorkflowExecutor:
                 plan=plan_snapshot,
             )
         else:
-            capture = _PreflightCapture()
+            capture = _PreflightCapture(owner=self)
             token = _ACTIVE_PREFLIGHT_CAPTURE.set(capture)
             try:
                 override_failure = self.preflight(
@@ -314,13 +351,7 @@ class WorkflowExecutor:
         )
         if isinstance(prepared, WorkflowExecution):
             return prepared
-        result = prepared.orchestrator.run(
-            context=prepared.context,
-            steps=prepared.plan.steps,
-            tools=prepared.tools,
-            continue_on_error=False,
-            idempotency_key=prepared.idempotency_key,
-        )
+        result = prepared._run()
         return prepared.to_execution(result)
 
     def preflight(
@@ -339,7 +370,7 @@ class WorkflowExecutor:
             plan=plan,
         )
         capture = _ACTIVE_PREFLIGHT_CAPTURE.get()
-        if capture is not None:
+        if capture is not None and capture.owner is self:
             capture.used = True
             capture.compiled = compiled
             capture.failure = failure

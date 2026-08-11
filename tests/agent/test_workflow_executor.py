@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
@@ -99,6 +100,16 @@ class SessionRecordingOrchestrator(WorkflowOrchestrator):
     def create_session(self, **kwargs):
         self.create_session_calls.append(kwargs)
         return "recorded-session"
+
+
+class InputRecordingOrchestrator(WorkflowOrchestrator):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.create_session_calls = []
+
+    def create_session(self, **kwargs):
+        self.create_session_calls.append(kwargs)
+        return super().create_session(**kwargs)
 
 
 class CountingPlanner(SingleStepPlanner):
@@ -445,6 +456,12 @@ def test_workflow_executor_init_type_hints_resolve_at_runtime():
     assert hints["orchestrator"] == WorkflowOrchestrator | None
 
 
+def test_compiled_plan_dependencies_type_contract_is_mapping():
+    hints = get_type_hints(CompiledPlan)
+
+    assert hints["dependencies"] == Mapping[str, tuple[str, ...]]
+
+
 def test_prepared_create_session_uses_preflight_inputs():
     context = AgentContext(query="CCO", trace_id="prepared-session")
     tool = FakeTool("property_calculator")
@@ -470,6 +487,77 @@ def test_prepared_create_session_uses_preflight_inputs():
             "idempotency_key": "prepared-idempotency",
         }
     ]
+
+
+def test_prepared_public_mutation_cannot_change_actual_execution_inputs():
+    context = AgentContext(
+        query="stable-query",
+        trace_id="stable-trace",
+        metadata={"request": {"source": "stable"}},
+    )
+    plan = WorkflowPlan(
+        workflow_name="stable-plan",
+        steps=[
+            WorkflowStep(
+                name="stable-step",
+                tool_name="property_calculator",
+                input_data={"molecule": {"smiles": "CCO"}},
+                metadata={"labels": ["stable"]},
+            )
+        ],
+        metadata={"planning": {"source": "stable"}},
+    )
+    tool = FakeTool("property_calculator")
+    prepared = WorkflowExecutor(
+        orchestrator=InputRecordingOrchestrator(),
+    ).prepare(
+        context=context,
+        policy=FAKE_POLICY,
+        all_tools={"property_calculator": tool},
+        plan=plan,
+    )
+
+    prepared.context.query = "tampered-query"
+    prepared.context.trace_id = "tampered-trace"
+    prepared.context.metadata["request"]["source"] = "tampered"
+    prepared.plan.workflow_name = "tampered-plan"
+    prepared.plan.metadata["planning"]["source"] = "tampered"
+    prepared.plan.steps[0].input_data["molecule"]["smiles"] = "N"
+    prepared.plan.steps[0].metadata["labels"].append("tampered")
+    prepared.plan.steps.append(
+        WorkflowStep(
+            name="injected-step",
+            tool_name="property_calculator",
+            input_data={"molecule": {"smiles": "O"}},
+        )
+    )
+
+    session = prepared.create_session()
+    session_call = prepared.orchestrator.create_session_calls[0]
+
+    class PreparedReturningExecutor(WorkflowExecutor):
+        def prepare(self, *args, **kwargs):
+            return prepared
+
+    execution = PreparedReturningExecutor().execute(
+        context=context,
+        policy=FAKE_POLICY,
+        all_tools={"property_calculator": tool},
+    )
+
+    assert session.context.trace_id == "stable-trace"
+    assert session.context.query == "stable-query"
+    assert session.context.metadata == {
+        "request": {"source": "stable"}
+    }
+    assert len(session_call["steps"]) == 1
+    assert session_call["steps"][0].input_data == {
+        "molecule": {"smiles": "CCO"}
+    }
+    assert session_call["steps"][0].metadata == {"labels": ["stable"]}
+    assert prepared.compiled.plan is prepared.plan
+    assert execution.result.trace_id == "stable-trace"
+    assert tool.calls == [{"molecule": {"smiles": "CCO"}}]
 
 
 def test_prepared_to_execution_serializes_request_events():
@@ -620,6 +708,71 @@ def test_prepare_override_calling_super_compiles_only_once():
     assert isinstance(prepared, workflow_executor_module.PreparedWorkflow)
     assert executor.preflight_calls == 1
     assert compiler.calls == 1
+
+
+def test_prepare_capture_ignores_reentrant_preflight_from_other_executor():
+    tool = FakeTool("property_calculator")
+    all_tools = {"property_calculator": tool}
+    inner_plan = WorkflowPlan(
+        workflow_name="inner",
+        steps=[
+            WorkflowStep(
+                name="inner-first",
+                tool_name="property_calculator",
+                input_data="CCO",
+                output_key="inner-output",
+            ),
+            WorkflowStep(
+                name="inner-second",
+                tool_name="property_calculator",
+                input_binding="$.outputs.inner-output",
+            ),
+        ],
+    )
+    inner_compiler = CountingCompiler()
+    inner_executor = WorkflowExecutor(compiler=inner_compiler)
+
+    class ReentrantPreflightExecutor(WorkflowExecutor):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.preflight_calls = 0
+
+        def preflight(self, context, policy, all_tools, plan=None):
+            self.preflight_calls += 1
+            failure = inner_executor.preflight(
+                context=AgentContext(query="inner", trace_id="inner"),
+                policy=policy,
+                all_tools=all_tools,
+                plan=inner_plan,
+            )
+            assert failure is None
+            return None
+
+    outer_plan = WorkflowPlan(
+        workflow_name="outer",
+        steps=[
+            WorkflowStep(
+                name="outer-only",
+                tool_name="property_calculator",
+                input_data="CCO",
+            )
+        ],
+    )
+    outer_compiler = CountingCompiler()
+    outer_executor = ReentrantPreflightExecutor(compiler=outer_compiler)
+
+    prepared = outer_executor.prepare(
+        context=AgentContext(query="outer", trace_id="outer"),
+        policy=FAKE_POLICY,
+        all_tools=all_tools,
+        plan=outer_plan,
+    )
+
+    assert prepared.compiled.plan is prepared.plan
+    assert prepared.compiled.dependencies == {"outer-only": ()}
+    assert outer_executor.preflight_calls == 1
+    assert outer_compiler.calls == 1
+    assert inner_compiler.calls == 1
 
 
 def test_execute_calls_prepare_once_and_consumes_prepared_workflow():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import re
 
@@ -16,7 +17,7 @@ class PlanCompilationError(ValueError):
 @dataclass(frozen=True)
 class CompiledPlan:
     plan: WorkflowPlan
-    dependencies: dict[str, tuple[str, ...]]
+    dependencies: Mapping[str, tuple[str, ...]]
 
 
 class PlanCompiler:
