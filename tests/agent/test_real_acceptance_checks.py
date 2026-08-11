@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from scripts.run_agent_acceptance import (
+    _test_external_model,
+    _run_harness_contract_probe,
     _evaluate_activity_result,
     _evaluate_docking_result,
     _evaluate_generation_result,
@@ -11,6 +13,7 @@ from scripts.run_agent_acceptance import (
     run_replay,
     run_real,
 )
+from src.agent.harness import HarnessRun, LegacyHarness, ShadowComparison
 from src.agent.evaluation import scientific
 from src.agent.evaluation.scientific import (
     check_data_flow_evidence,
@@ -43,6 +46,64 @@ def test_generation_truth_check_rejects_invalid_or_duplicate_candidates():
     )
     assert check["passed"] is False
     assert check["reason"] == "generated_candidates_not_unique"
+
+
+def test_contract_harness_probe_records_shadow_without_double_execution():
+    class Factory:
+        last_warning = None
+
+        def create(self, executor):
+            legacy = LegacyHarness(executor)
+
+            class Backend:
+                def execute(self, **kwargs):
+                    execution = legacy.execute(**kwargs).authoritative
+                    return HarnessRun(
+                        authoritative=execution,
+                        shadow=ShadowComparison(
+                            backend="langgraph",
+                            backend_version="test",
+                            status="matched",
+                            plan_fingerprint="a" * 64,
+                            matched=True,
+                            elapsed_ms=2,
+                        ),
+                    )
+
+            return Backend()
+
+    probe = _run_harness_contract_probe(Factory())
+
+    assert probe["status"] == "matched"
+    assert probe["matched"] is True
+    assert probe["authoritative_tool_calls"] == 1
+
+
+def test_external_model_probe_allows_reasoning_model_output_budget(monkeypatch):
+    captured = {}
+
+    class Model:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def generate(self, _prompt, *, temperature, max_tokens):
+            captured["temperature"] = temperature
+            captured["max_tokens"] = max_tokens
+            return "AGENT_ACCEPTANCE_OK" if max_tokens >= 256 else "budget_exhausted"
+
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "runtime-test-key")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "reasoning-model")
+    monkeypatch.setattr(
+        "scripts.run_agent_acceptance.OpenAICompatibleModel",
+        Model,
+    )
+
+    result = __import__("asyncio").run(_test_external_model())
+
+    assert result["status"] == "passed"
+    assert result["response_matched"] is True
+    assert captured == {"temperature": 0.0, "max_tokens": 256}
 
 
 def test_claim_truth_check_rejects_claim_without_evidence():
@@ -385,6 +446,224 @@ def test_target_database_truth_check_rejects_structure_counts_without_records() 
         "status": "failed",
         "reason": "target_structure_counts_without_recommended_records",
     }
+
+
+def test_target_design_truth_check_rejects_generation_after_empty_target_evidence():
+    check = scientific._check_target_driven_generation_gate(
+        tool_results=[
+            ToolResult.success_result("target_database_search", data=[]),
+            ToolResult.success_result(
+                "llm_molecular_generator",
+                data={"candidates": []},
+            ),
+        ],
+        skipped_steps=[],
+    )
+
+    assert check == {
+        "status": "failed",
+        "reason": "generation_ran_without_usable_target_evidence",
+    }
+
+
+def test_target_design_truth_check_accepts_documented_precondition_skip():
+    check = scientific._check_target_driven_generation_gate(
+        tool_results=[ToolResult.success_result("target_database_search", data=[])],
+        skipped_steps=[
+            {
+                "step_id": "molecule_generation",
+                "status": "skipped_precondition",
+                "requirement": "target_evidence",
+            }
+        ],
+    )
+
+    assert check["status"] == "passed"
+    assert check["reason"] == "generation_blocked_without_target_evidence"
+
+
+def test_safe_target_gate_marks_dependent_truth_checks_skipped_not_failed():
+    checks = {
+        "target_database_evidence": {"status": "partial", "reason": "no records"},
+        "generation_count_valid_unique": {
+            "status": "failed",
+            "reason": "tool_not_run:llm_molecular_generator",
+        },
+        "admet_method": {
+            "status": "failed",
+            "reason": "tool_not_run:admet_predictor",
+        },
+        "rg_mpnn_provenance": {
+            "status": "failed",
+            "reason": "tool_not_run:activity_predictor",
+        },
+    }
+
+    scientific._mark_safe_gate_dependents_skipped(checks)
+
+    assert checks["target_database_evidence"]["status"] == "partial"
+    assert checks["generation_count_valid_unique"] == {
+        "status": "skipped",
+        "reason": "blocked_by_target_evidence_gate",
+    }
+    assert checks["admet_method"]["status"] == "skipped"
+    assert checks["rg_mpnn_provenance"]["status"] == "skipped"
+
+
+def test_candidate_identity_truth_check_requires_exact_downstream_subset():
+    generated = ToolResult.success_result(
+        "llm_molecular_generator",
+        data={
+            "requested_count": 2,
+            "candidates": [
+                {"candidate_id": "cand-001-a", "smiles": "CCO"},
+                {"candidate_id": "cand-002-b", "smiles": "CCN"},
+            ],
+        },
+    )
+    downstream = ToolResult.success_result(
+        "property_calculator",
+        data=[
+            {"candidate_id": "cand-001-a", "smiles": "CCO"},
+            {"candidate_id": "unknown", "smiles": "CCC"},
+        ],
+    )
+
+    check = scientific._check_candidate_identity_closed_loop(
+        [generated, downstream]
+    )
+
+    assert check["status"] == "failed"
+    assert check["reason"] == "unknown_downstream_candidate_id"
+
+
+def test_candidate_identity_truth_check_marks_missing_required_properties_partial():
+    generated = ToolResult.success_result(
+        "llm_molecular_generator",
+        data={
+            "candidates": [
+                {"candidate_id": "cand-001-a", "smiles": "CCO"},
+                {"candidate_id": "cand-002-b", "smiles": "CCN"},
+            ]
+        },
+    )
+    properties = ToolResult.success_result(
+        "property_calculator",
+        data=[{"candidate_id": "cand-001-a", "smiles": "CCO"}],
+    )
+
+    check = scientific._check_candidate_identity_closed_loop(
+        [generated, properties]
+    )
+
+    assert check["status"] == "partial"
+    assert check["reason"] == "required_candidate_properties_incomplete"
+    assert check["missing_candidate_ids"] == ["cand-002-b"]
+
+
+def test_candidate_identity_truth_check_rejects_smiles_reassigned_to_known_id():
+    generated = ToolResult.success_result(
+        "llm_molecular_generator",
+        data={
+            "candidates": [
+                {
+                    "candidate_id": "cand-001-a",
+                    "smiles": "CCO",
+                    "canonical_smiles": "CCO",
+                }
+            ]
+        },
+    )
+    properties = ToolResult.success_result(
+        "property_calculator",
+        data=[{"candidate_id": "cand-001-a", "smiles": "CCN"}],
+    )
+
+    check = scientific._check_candidate_identity_closed_loop(
+        [generated, properties]
+    )
+
+    assert check["status"] == "failed"
+    assert check["reason"] == "downstream_candidate_smiles_mismatch"
+    assert check["tool_name"] == "property_calculator"
+
+
+def test_target_design_runner_registers_automatic_gates_and_skips_generator(tmp_path):
+    class Router:
+        def decide(self, _prompt):
+            return SimpleNamespace(selected_skill="target_driven_design")
+
+    class Planner:
+        def plan(self, _context):
+            return WorkflowPlan(
+                workflow_name="target_driven_design",
+                steps=[
+                    WorkflowStep(
+                        "target_search",
+                        "target_database_search",
+                        input_data="PDE5A",
+                        output_key="target_info",
+                    ),
+                    WorkflowStep(
+                        "molecule_generation",
+                        "llm_molecular_generator",
+                        input_from="target_info",
+                        input_binding="$.outputs.target_info",
+                        output_key="candidates",
+                        preconditions=("target_evidence",),
+                    ),
+                ],
+            )
+
+    class TargetTool:
+        name = "target_database_search"
+
+        def execute(self, _query):
+            return ToolResult.success_result(self.name, data=[])
+
+    class GeneratorTool:
+        name = "llm_molecular_generator"
+
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, _query):
+            self.calls += 1
+            return ToolResult.success_result(self.name, data={"candidates": []})
+
+    generator = GeneratorTool()
+    runner = scientific.ScientificAcceptanceRunner(
+        dataset_dir=tmp_path,
+        project_root=tmp_path,
+        router=Router(),
+        planner=Planner(),
+        tools={
+            "target_database_search": TargetTool(),
+            "llm_molecular_generator": generator,
+        },
+    )
+    case = EvaluationCase(
+        case_id="AUTO-GATE-001",
+        version="1",
+        category="target_design",
+        prompt="Design PDE5A candidates",
+        expected_skill="target_driven_design",
+        expected_tools=["target_database_search"],
+    )
+
+    report = runner.run_case(case)
+
+    assert generator.calls == 0
+    assert report["automatic_truth_checks"] == [
+        "target_driven_generation_gate",
+        "candidate_identity_closed_loop",
+    ]
+    assert report["truth_checks"]["target_driven_generation_gate"]["status"] == (
+        "passed"
+    )
+    assert report["truth_checks"]["candidate_identity_closed_loop"]["status"] == (
+        "passed"
+    )
 
 
 def test_admet_truth_check_requires_adme_py_package_version() -> None:

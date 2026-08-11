@@ -26,6 +26,7 @@ from src.agent.evaluation import (
     score_workflow,
 )
 from src.agent.openai_compatible_model import OpenAICompatibleModel
+from src.agent.harness import HarnessFactory
 from src.agent.persistence import redact_sensitive
 from src.agent.planning import TaskPlanner
 from src.agent.routing import HybridSkillRouter
@@ -137,7 +138,7 @@ def run_contract() -> dict[str, Any]:
         + real_case_results
     )
     passed = sum(item.status == "passed" for item in all_results)
-    return {
+    report = {
         "mode": "contract",
         "status": "passed" if passed == len(all_results) else "failed",
         "metrics": {
@@ -161,6 +162,79 @@ def run_contract() -> dict[str, Any]:
             for item in all_results
         ],
     }
+    harness_probe = _run_harness_contract_probe()
+    if harness_probe is not None:
+        report["harness_shadow"] = harness_probe
+    return report
+
+
+def _run_harness_contract_probe(
+    harness_factory: HarnessFactory | None = None,
+) -> dict[str, Any] | None:
+    from src.agent.contracts import ToolResult
+    from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
+    from src.agent.planning import WorkflowPlan
+
+    class ProbeTool:
+        name = "property_calculator"
+
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, query):
+            self.calls += 1
+            return ToolResult.success_result(
+                self.name,
+                data={"input_type": type(query).__name__},
+            )
+
+    tool = ProbeTool()
+    plan = WorkflowPlan(
+        workflow_name="admet_assessment",
+        steps=[
+            WorkflowStep(
+                "properties",
+                tool.name,
+                input_data={"smiles": "CCO"},
+                output_key="properties",
+            )
+        ],
+    )
+    factory = harness_factory or HarnessFactory()
+    harness_run = factory.create(
+        WorkflowExecutor(
+            planner=TaskPlanner(),
+            orchestrator=WorkflowOrchestrator(),
+        )
+    ).execute(
+        context=AgentContext(
+            query="harness contract probe",
+            trace_id="HARNESS-CONTRACT",
+            active_skill="admet_assessment",
+        ),
+        policy=WorkflowCatalog().require("admet_assessment"),
+        all_tools={tool.name: tool},
+        plan=plan,
+    )
+    if not harness_run.authoritative.result.success or tool.calls != 1:
+        return {
+            "status": "failed",
+            "error_code": "authoritative_contract_failed",
+            "authoritative_tool_calls": tool.calls,
+        }
+    if harness_run.shadow is not None:
+        return {
+            **harness_run.shadow.to_dict(),
+            "authoritative_tool_calls": tool.calls,
+        }
+    warning = getattr(factory, "last_warning", None)
+    if warning:
+        return {
+            "status": "unavailable",
+            "error_code": warning,
+            "authoritative_tool_calls": tool.calls,
+        }
+    return None
 
 
 def _run_real_case_contracts(
@@ -365,7 +439,7 @@ async def _test_external_model() -> dict[str, Any]:
     response = await model.generate(
         "Reply with exactly: AGENT_ACCEPTANCE_OK",
         temperature=0.0,
-        max_tokens=32,
+        max_tokens=256,
     )
     return {
         "status": "passed" if "AGENT_ACCEPTANCE_OK" in response else "failed",

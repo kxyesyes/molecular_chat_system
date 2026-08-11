@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from src.agent.contracts import AgentContext, ToolResult
 from src.agent.harness import HarnessFactory
-from src.agent.orchestrators import WorkflowOrchestrator
+from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.persistence import SQLiteAgentStateStore, redact_sensitive
 from src.agent.planning import TaskPlanner
 from src.agent.routing import HybridSkillRouter
@@ -27,6 +27,7 @@ from src.agent.tools.property_calculator import PropertyCalculator
 from src.agent.tools.rag_search_tool import RAGSearchTool
 from src.agent.tools.reverse_target_tool import ReverseTargetTool
 from src.agent.tools.target_database_tool import TargetDatabaseTool
+from src.agent.validators import SemanticInputValidator
 from src.agent.workflows import WorkflowCatalog
 
 from .models import EvaluationCase
@@ -339,6 +340,32 @@ class ScientificAcceptanceRunner:
             anti_hallucination,
             executions=executions,
         )
+        automatic_truth_checks: list[str] = []
+        if actual_skill == "target_driven_design":
+            skipped_steps = [
+                item
+                for execution in executions
+                for item in execution.result.metadata.get("skipped_steps", [])
+                if isinstance(item, Mapping)
+            ]
+            generation_gate_check = _check_target_driven_generation_gate(
+                tool_results,
+                skipped_steps=skipped_steps,
+            )
+            truth_checks["target_driven_generation_gate"] = generation_gate_check
+            truth_checks["candidate_identity_closed_loop"] = (
+                _check_candidate_identity_closed_loop(tool_results)
+            )
+            if generation_gate_check.get("reason") == (
+                "generation_blocked_without_target_evidence"
+            ):
+                _mark_safe_gate_dependents_skipped(truth_checks)
+            automatic_truth_checks.extend(
+                [
+                    "target_driven_generation_gate",
+                    "candidate_identity_closed_loop",
+                ]
+            )
 
         def as_truth_status(check: dict[str, Any]) -> dict[str, Any]:
             return {
@@ -439,6 +466,7 @@ class ScientificAcceptanceRunner:
                 "tool_provenance": tool_provenance,
                 "anti_hallucination": anti_hallucination,
                 "truth_checks": truth_checks,
+                "automatic_truth_checks": automatic_truth_checks,
                 "plan_metadata": plan_metadata,
                 **scoring,
             }
@@ -887,6 +915,246 @@ def _check_target_database_evidence(tool_results: list[ToolResult]) -> dict[str,
             "recommended_structure_count": recommended_structure_count,
         }
     return {"status": "failed", "reason": "target_records_without_evidence"}
+
+
+def _check_target_driven_generation_gate(
+    tool_results: list[ToolResult],
+    skipped_steps: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    validator = SemanticInputValidator()
+    gate_step = WorkflowStep(
+        "molecule_generation",
+        "llm_molecular_generator",
+        preconditions=("target_evidence",),
+    )
+    target_results = [
+        item
+        for item in tool_results
+        if item.tool_name == "target_database_search" and item.success
+    ]
+    usable_evidence = any(
+        validator.validate(gate_step, item.data).allowed
+        for item in target_results
+    )
+    generation_ran = any(
+        item.tool_name == "llm_molecular_generator"
+        for item in tool_results
+    )
+
+    if not usable_evidence:
+        if generation_ran:
+            return {
+                "status": "failed",
+                "reason": "generation_ran_without_usable_target_evidence",
+            }
+        documented_skip = any(
+            item.get("status") == "skipped_precondition"
+            and item.get("requirement") == "target_evidence"
+            and item.get("step_id") in {"generate", "molecule_generation"}
+            for item in skipped_steps
+        )
+        if documented_skip:
+            return {
+                "status": "passed",
+                "reason": "generation_blocked_without_target_evidence",
+            }
+        return {
+            "status": "failed",
+            "reason": "missing_target_evidence_gate_record",
+        }
+
+    if not generation_ran:
+        return {
+            "status": "failed",
+            "reason": "generation_not_run_with_usable_target_evidence",
+        }
+    return {"status": "passed", "reason": "usable_target_evidence_consumed"}
+
+
+def _check_candidate_identity_closed_loop(
+    tool_results: list[ToolResult],
+) -> dict[str, Any]:
+    generation_results = [
+        item
+        for item in tool_results
+        if item.tool_name == "llm_molecular_generator"
+    ]
+    if not generation_results:
+        return {"status": "passed", "reason": "generation_not_run"}
+    if any(not item.success for item in generation_results):
+        return {"status": "failed", "reason": "generation_not_successful"}
+
+    try:
+        from rdkit import Chem, rdBase
+    except Exception:
+        return {
+            "status": "partial",
+            "reason": "rdkit_unavailable_for_candidate_identity",
+        }
+
+    def canonical_smiles(record: Mapping[str, Any]) -> str | None:
+        value = record.get("canonical_smiles") or record.get("smiles")
+        if not isinstance(value, str) or not value.strip():
+            return None
+        with rdBase.BlockLogs():
+            molecule = Chem.MolFromSmiles(value)
+            return Chem.MolToSmiles(molecule) if molecule is not None else None
+
+    generated_ids: list[str] = []
+    generated_smiles_by_id: dict[str, str] = {}
+    for result in generation_results:
+        records = _candidate_records(result.data)
+        if not records:
+            return {"status": "failed", "reason": "generated_candidates_missing"}
+        result_ids = [record.get("candidate_id") for record in records]
+        if any(not isinstance(item, str) or not item.strip() for item in result_ids):
+            return {"status": "failed", "reason": "generated_candidate_id_missing"}
+        normalized_ids = [str(item).strip() for item in result_ids]
+        if len(normalized_ids) != len(set(normalized_ids)):
+            return {"status": "failed", "reason": "generated_candidate_id_duplicate"}
+        for candidate_id, record in zip(normalized_ids, records):
+            canonical = canonical_smiles(record)
+            if canonical is None:
+                return {
+                    "status": "failed",
+                    "reason": "generated_candidate_smiles_invalid",
+                    "candidate_id": candidate_id,
+                }
+            previous = generated_smiles_by_id.get(candidate_id)
+            if previous is not None and previous != canonical:
+                return {
+                    "status": "failed",
+                    "reason": "generated_candidate_id_reassigned",
+                    "candidate_id": candidate_id,
+                }
+            generated_smiles_by_id[candidate_id] = canonical
+        generated_ids.extend(normalized_ids)
+
+    generated_set = set(generated_ids)
+    downstream_tools = {
+        "property_calculator",
+        "drug_likeness_assessment",
+        "admet_predictor",
+        "activity_predictor",
+    }
+    downstream_records: dict[str, list[Mapping[str, Any]]] = {}
+    for result in tool_results:
+        if result.tool_name not in downstream_tools or not result.success:
+            continue
+        records = _candidate_records(result.data)
+        if records:
+            downstream_records.setdefault(result.tool_name, []).extend(records)
+
+    for tool_name, records in downstream_records.items():
+        ids = [record.get("candidate_id") for record in records]
+        if any(not isinstance(item, str) or not item.strip() for item in ids):
+            return {
+                "status": "failed",
+                "reason": "downstream_candidate_id_missing",
+                "tool_name": tool_name,
+            }
+        unknown = sorted(
+            {
+                str(item).strip()
+                for item in ids
+                if str(item).strip() not in generated_set
+            }
+        )
+        if unknown:
+            return {
+                "status": "failed",
+                "reason": "unknown_downstream_candidate_id",
+                "tool_name": tool_name,
+                "unknown_candidate_ids": unknown,
+            }
+        for record in records:
+            candidate_id = str(record.get("candidate_id")).strip()
+            canonical = canonical_smiles(record)
+            if canonical is None:
+                return {
+                    "status": "failed",
+                    "reason": "downstream_candidate_smiles_invalid",
+                    "tool_name": tool_name,
+                    "candidate_id": candidate_id,
+                }
+            if canonical != generated_smiles_by_id[candidate_id]:
+                return {
+                    "status": "failed",
+                    "reason": "downstream_candidate_smiles_mismatch",
+                    "tool_name": tool_name,
+                    "candidate_id": candidate_id,
+                }
+
+    property_ids = {
+        str(record.get("candidate_id")).strip()
+        for record in downstream_records.get("property_calculator", [])
+        if isinstance(record.get("candidate_id"), str)
+    }
+    aligned_property_ids = generated_set & property_ids
+    if not aligned_property_ids:
+        return {
+            "status": "failed",
+            "reason": "required_candidate_properties_missing",
+        }
+    missing = sorted(generated_set - aligned_property_ids)
+    if missing:
+        return {
+            "status": "partial",
+            "reason": "required_candidate_properties_incomplete",
+            "missing_candidate_ids": missing,
+        }
+    return {
+        "status": "passed",
+        "generated_candidate_count": len(generated_set),
+        "property_candidate_count": len(aligned_property_ids),
+    }
+
+
+def _mark_safe_gate_dependents_skipped(
+    truth_checks: dict[str, dict[str, Any]],
+) -> None:
+    dependent_checks = {
+        "generation_count_valid_unique": "llm_molecular_generator",
+        "admet_method": "admet_predictor",
+        "rg_mpnn_provenance": "activity_predictor",
+        "candidate_properties": "property_calculator",
+        "data_flow_generated_smiles_consumed": "llm_molecular_generator",
+    }
+    for name, tool_name in dependent_checks.items():
+        check = truth_checks.get(name)
+        if not isinstance(check, Mapping):
+            continue
+        if check.get("reason") != f"tool_not_run:{tool_name}":
+            continue
+        truth_checks[name] = {
+            "status": "skipped",
+            "reason": "blocked_by_target_evidence_gate",
+        }
+
+
+def _candidate_records(value: Any) -> list[Mapping[str, Any]]:
+    records: list[Mapping[str, Any]] = []
+
+    def collect(item: Any) -> None:
+        if isinstance(item, Mapping):
+            if "candidate_id" in item or (
+                "smiles" in item
+                and not any(
+                    key in item
+                    for key in ("candidates", "records", "results", "data")
+                )
+            ):
+                records.append(item)
+                return
+            for key in ("candidates", "records", "results", "data"):
+                if key in item:
+                    collect(item[key])
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                collect(child)
+
+    collect(value)
+    return records
 
 
 def _target_record_has_evidence(record: Any) -> bool:

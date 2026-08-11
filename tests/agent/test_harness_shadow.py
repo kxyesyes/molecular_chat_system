@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import time
+
+import pytest
 
 from src.agent.contracts import AgentContext, AgentResult, RunOutcome, ToolResult
 from src.agent.harness import (
@@ -11,6 +14,7 @@ from src.agent.harness import (
     ShadowHarness,
 )
 from src.agent.harness.shadow import compare_control_state, plan_fingerprint
+from src.agent.harness.langgraph_backend import LangGraphPlanSimulator
 from src.agent.orchestrators import WorkflowStep
 from src.agent.planning import PlanCompiler, WorkflowPlan
 from src.agent.runtime.workflow_executor import WorkflowExecution
@@ -268,3 +272,38 @@ def test_control_diff_uses_only_allowed_deterministic_categories():
     )
     serialized = json.dumps(comparison.to_dict(), sort_keys=True)
     assert serialized == json.dumps(comparison.to_dict(), sort_keys=True)
+
+
+@pytest.mark.skipif(
+    os.getenv("MEDCHAT_RUN_PERF_TESTS") != "1",
+    reason="performance test disabled",
+)
+def test_langgraph_shadow_plan_simulation_performance():
+    simulator = LangGraphPlanSimulator()
+    compiled = PlanCompiler().compile(PLAN, POLICY)
+    summary = {
+        "workflow": PLAN.workflow_name,
+        "node_order": [step.name for step in PLAN.steps],
+        "dependencies": {
+            key: list(value) for key, value in compiled.dependencies.items()
+        },
+        "required": {step.name: step.required for step in PLAN.steps},
+        "risk_gates": {
+            step.name: list(step.preconditions) for step in PLAN.steps
+        },
+        "candidate_mapping": {"generated_ids": [], "downstream_ids": {}},
+        "terminal_outcome": "completed",
+    }
+
+    for _ in range(5):
+        simulator.simulate(PLAN, compiled, summary)
+
+    durations_ms = []
+    for _ in range(100):
+        started = time.perf_counter_ns()
+        comparison = simulator.simulate(PLAN, compiled, summary)
+        durations_ms.append((time.perf_counter_ns() - started) / 1_000_000)
+        assert comparison.matched is True
+
+    p95_ms = sorted(durations_ms)[94]
+    assert p95_ms <= 100

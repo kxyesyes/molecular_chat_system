@@ -46,6 +46,7 @@ class BaseMolecularTool:
             if (
                 not re.match(r'^[a-zA-Z]+$', candidate)
                 and len(candidate) >= 6
+                and self._is_plausible_smiles_lexeme(candidate)
                 and self.validate_smiles(candidate)
             ):
                 candidates.append(candidate)
@@ -95,7 +96,7 @@ class BaseMolecularTool:
             if len(candidate) <= 2 and candidate not in ['CCO']:
                 continue
 
-            if self.validate_smiles(candidate):
+            if self._is_plausible_smiles_lexeme(candidate) and self.validate_smiles(candidate):
                 valid_smiles.append(candidate)
                 seen.add(candidate)
                 logger.info(f"验证成功的SMILES: {candidate}")
@@ -108,10 +109,26 @@ class BaseMolecularTool:
             return self._basic_smiles_validation(smiles)
 
         try:
-            mol = Chem.MolFromSmiles(smiles)
+            try:
+                from rdkit import rdBase
+
+                with rdBase.BlockLogs():
+                    mol = Chem.MolFromSmiles(smiles)
+            except (AttributeError, ImportError):
+                mol = Chem.MolFromSmiles(smiles)
             return mol is not None
         except:
             return False
+
+    @staticmethod
+    def _is_plausible_smiles_lexeme(candidate: str) -> bool:
+        value = str(candidate or "").strip()
+        if not value or value.startswith(":") or value.endswith(":"):
+            return False
+        unbracketed = re.sub(r"\[[^\]]*\]", "", value)
+        letters = "".join(character for character in unbracketed if character.isalpha())
+        letters = letters.replace("Cl", "").replace("Br", "")
+        return all(character in "BCNOPSFIbcnops" for character in letters)
 
     def _basic_smiles_validation(self, smiles: str) -> bool:
         """基本SMILES验证（无RDKit时）"""

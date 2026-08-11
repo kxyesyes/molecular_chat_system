@@ -1,5 +1,54 @@
 # 最新任务交接
 
+## 2026-08-11 LangGraph Shadow Harness 与科学信任验收收尾
+
+### 状态与范围
+
+- 当前分支：`codex/industrial-agent-scientific-trust`；实施位于隔离 worktree，未覆盖原工作区的混杂改动，未直接修改或合并 `main`。
+- 本阶段在既有 Supervisor/Orchestrator 上增加可选 harness 边界，采用“最终平台化、分阶段迁移”方式；默认仍为 legacy 权威执行，`shadow` 只做无副作用对照。
+- 真实 API key 仅从运行时环境读取；没有写入源码、测试、日志或报告。报告凭据形状扫描为 0 命中。
+
+### 已完成能力
+
+1. 新增统一 `WorkflowHarness`，支持 `legacy` 与可选 `shadow`；Supervisor 直接执行和专家委派均经过同一边界。
+2. LangGraph shadow 是有界、超时、无工具副作用的状态对照；依赖不可用或持久化失败时保留权威结果并记录 warning。
+3. shadow fingerprint/diff 排除时间戳等非确定字段，拒绝凭据形状数据；科学验收报告保留 backend、版本、耗时、匹配结果和权威工具调用次数。
+4. 目标驱动设计增加真实证据门：无可用靶点证据时禁止分子生成，下游 ADMET/活性检查标记为前置门禁阻断，不再误判为伪造成功。
+5. 新增候选集身份闭环检查，确保下游结果对齐已生成且经 RDKit 验证的 canonical SMILES。
+6. 收紧 SMILES 提取：先过滤明显的自然语言标签，再在屏蔽 RDKit 解析日志的情况下做真实结构验证，防止验收文本被当成 SMILES 送入解析器。
+7. acceptance `contract` 模式增加 harness 探针；权威工具每案例仍只执行一次，报告 case 数与 legacy 断言保持兼容。
+
+### 依赖与运行边界
+
+- MedChat Conda 环境已对齐为 `langgraph 0.2.76`、`langchain-core 0.2.43`、`langchain 0.2.16`、`langchain-community 0.2.17`、`langsmith 0.1.147`；`pip check` 报告无损坏依赖。
+- `AGENT_HARNESS_MODE` 默认为 `legacy`；当前只允许用 `shadow` 做比对。不得将 LangGraph 切换为权威执行器，直到具备完整工具调度、恢复、幂等性和生产容量证据。
+- 分子生成仍由本地 Ollama `gmm-llama:latest` 执行；外部 OpenAI-compatible 模型仅用于主模型连通与理解边界测试。
+
+### 最终验证结果
+
+- Agent 全量测试：`474 passed, 1 skipped`；唯一 skip 是需显式设置 `MEDCHAT_RUN_PERF_TESTS=1` 的性能阈值测试。
+- 反幻觉/平台健康/真实检查聚焦集：`43 passed`。
+- `compileall` 通过；legacy contract 与 shadow contract 均为 `passed`，旧有 34/34 contract 案例保持通过。
+- shadow 热身后 100 次基准：p50 `1.826 ms`、p95 `2.046 ms`、max `2.414 ms`；跨进程冷启动约 `317–397 ms`。
+- 12 个 golden 真实案例重复 3 轮：每轮 `5 passed / 7 partial / 0 failed`，共36 个结果的 passed-or-partial rate 为 `1.0`，p50 `113.16 ms`，p95 `14315.53 ms`。
+- 36/36 个真实案例的 shadow 与权威结果匹配；shadow p50 `4.5 ms`、p95 `10.0 ms`；forbidden pattern 命中数为 0。
+- 真实外部主模型连通成功；本地 `gmm-llama:latest` 生成检查成功（3/3 有效且唯一）；Vina 真实对接成功（3 poses，最佳能量 `-3.5`，pose 文件存在）。
+- 最终代码再跑 1 轮保持 `5 passed / 7 partial / 0 failed`，12/12 shadow 匹配，forbidden pattern 命中为 0。
+
+### 如实保留的 partial 原因
+
+- 本地靶点数据库未返回可用记录，相关靶点检索和靶点驱动生成案例保持 `partial`；生成器被科学证据门正确阻断。
+- RG-MPNN 真实模型路径未配置，活性案例保持 `partial`，未输出伪 pIC50。
+- 反向寻靶缺少 `data/reverse_target/chembl_training_data.tsv`，相关证据检查保持 `partial`。
+- 这些缺失不会被 demo/fallback 包装成科学成功，也不会阻碍已具备真实依赖的 RDKit、Ollama 和 Vina 检查如实通过。
+
+### 报告与后续建议
+
+- 三轮稳定性报告：`outputs/agent_evaluation/agent_acceptance_report.json`。
+- 最终单轮报告：`outputs/agent_evaluation/agent_acceptance_post_smiles_report.json`。
+- 最终 contract 报告：`outputs/agent_evaluation/agent_acceptance_contract_final.json` 与 `outputs/agent_evaluation/agent_acceptance_contract_shadow_final.json`。
+- `outputs/` 为本地验收产物，不应提交。下一阶段优先补齐靶点数据、真实 RG-MPNN 权重与反向寻靶训练数据，再评估 shadow 执行器的恢复/幂等能力，不建议直接切为权威执行。
+
 ## 2026-08-10 工业级 Agent 科学信任基础
 
 ### 任务状态
