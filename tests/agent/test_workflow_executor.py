@@ -3,12 +3,15 @@ from threading import Barrier, Lock
 
 import pytest
 
-from src.agent.contracts import AgentContext, AgentErrorCode
+from src.agent.contracts import AgentContext, AgentErrorCode, AgentResult
 from src.agent.orchestrators import WorkflowOrchestrator
 from src.agent.orchestrators.base import WorkflowStep
 from src.agent.persistence import SQLiteAgentStateStore
-from src.agent.planning import WorkflowPlan
+from src.agent.planning import PlanCompiler, WorkflowPlan
+from src.agent import runtime as runtime_module
+from src.agent.runtime import workflow_executor as workflow_executor_module
 from src.agent.runtime.event_bus import AgentEventBus
+from src.agent.runtime.task_state import TaskEventType
 from src.agent.runtime.workflow_executor import WorkflowExecutor
 from src.agent.workflows import WorkflowPolicy
 
@@ -57,6 +60,289 @@ class BarrierTool(FakeTool):
     def execute(self, query):
         self.barrier.wait(timeout=5)
         return super().execute(query)
+
+
+class SessionRecordingOrchestrator(WorkflowOrchestrator):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.create_session_calls = []
+
+    def create_session(self, **kwargs):
+        self.create_session_calls.append(kwargs)
+        return "recorded-session"
+
+
+class CountingPlanner(SingleStepPlanner):
+    def __init__(self):
+        self.calls = 0
+
+    def plan(self, context):
+        self.calls += 1
+        return super().plan(context)
+
+
+class CountingCompiler(PlanCompiler):
+    def __init__(self):
+        self.calls = 0
+
+    def compile(self, plan, policy):
+        self.calls += 1
+        return super().compile(plan, policy)
+
+
+class ExplodingPreflightOrchestrator:
+    state_store = None
+
+    def for_request(self, _event_bus):
+        raise AssertionError("preflight failure created an orchestrator")
+
+    def run(self, **_kwargs):
+        raise AssertionError("preflight failure ran an orchestrator")
+
+
+class CountingPrepareExecutor(WorkflowExecutor):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.prepare_calls = 0
+
+    def prepare(self, *args, **kwargs):
+        self.prepare_calls += 1
+        return super().prepare(*args, **kwargs)
+
+
+def test_prepare_returns_compiled_request_scoped_workflow():
+    first = FakeTool("property_calculator")
+    unrelated = FakeTool("admet_predictor")
+    plan = WorkflowPlan(
+        workflow_name="prepared",
+        steps=[
+            WorkflowStep(
+                name="first",
+                tool_name="property_calculator",
+                input_data="CCO",
+                output_key="properties",
+            ),
+            WorkflowStep(
+                name="second",
+                tool_name="property_calculator",
+                input_binding="$.outputs.properties",
+            ),
+        ],
+    )
+
+    prepared = WorkflowExecutor().prepare(
+        context=AgentContext(query="CCO", trace_id="prepared"),
+        policy=FAKE_POLICY,
+        all_tools={
+            "property_calculator": first,
+            "admet_predictor": unrelated,
+        },
+        plan=plan,
+    )
+
+    assert isinstance(prepared, workflow_executor_module.PreparedWorkflow)
+    assert prepared.plan.workflow_name == "prepared"
+    assert prepared.compiled.dependencies == {
+        "first": (),
+        "second": ("first",),
+    }
+    assert dict(prepared.tools) == {"property_calculator": first}
+
+
+def test_prepared_tools_are_defensive_and_read_only():
+    original = FakeTool("property_calculator")
+    replacement = FakeTool("property_calculator")
+    all_tools = {"property_calculator": original}
+    prepared = WorkflowExecutor(planner=SingleStepPlanner()).prepare(
+        context=AgentContext(query="CCO", trace_id="immutable-tools"),
+        policy=FAKE_POLICY,
+        all_tools=all_tools,
+    )
+
+    all_tools["property_calculator"] = replacement
+
+    assert prepared.tools["property_calculator"] is original
+    with pytest.raises(TypeError):
+        prepared.tools["property_calculator"] = replacement
+
+
+def test_prepared_create_session_uses_preflight_inputs():
+    context = AgentContext(query="CCO", trace_id="prepared-session")
+    tool = FakeTool("property_calculator")
+    prepared = WorkflowExecutor(
+        planner=SingleStepPlanner(),
+        orchestrator=SessionRecordingOrchestrator(),
+    ).prepare(
+        context=context,
+        policy=FAKE_POLICY,
+        all_tools={"property_calculator": tool},
+        idempotency_key="prepared-idempotency",
+    )
+
+    session = prepared.create_session()
+
+    assert session == "recorded-session"
+    assert prepared.orchestrator.create_session_calls == [
+        {
+            "context": context,
+            "steps": prepared.plan.steps,
+            "tools": prepared.tools,
+            "continue_on_error": False,
+            "idempotency_key": "prepared-idempotency",
+        }
+    ]
+
+
+def test_prepared_to_execution_serializes_request_events():
+    prepared = WorkflowExecutor(planner=SingleStepPlanner()).prepare(
+        context=AgentContext(query="CCO", trace_id="prepared-events"),
+        policy=FAKE_POLICY,
+        all_tools={
+            "property_calculator": FakeTool("property_calculator")
+        },
+    )
+    prepared.event_bus.emit(
+        trace_id="prepared-events",
+        event=TaskEventType.TASK_STARTED,
+        message="started",
+    )
+    result = AgentResult(
+        trace_id="prepared-events",
+        success=True,
+        message="done",
+    )
+
+    execution = prepared.to_execution(result)
+
+    assert execution.plan is prepared.plan
+    assert execution.result is result
+    assert [event["event"] for event in execution.events] == ["task_started"]
+
+
+def test_prepare_calls_planner_and_compiler_once_per_request():
+    planner = CountingPlanner()
+    compiler = CountingCompiler()
+    executor = WorkflowExecutor(planner=planner, compiler=compiler)
+
+    prepared = executor.prepare(
+        context=AgentContext(query="CCO", trace_id="counted-preflight"),
+        policy=FAKE_POLICY,
+        all_tools={
+            "property_calculator": FakeTool("property_calculator")
+        },
+    )
+
+    assert isinstance(prepared, workflow_executor_module.PreparedWorkflow)
+    assert planner.calls == 1
+    assert compiler.calls == 1
+
+
+def test_prepare_with_plan_skips_planner_and_compiles_once():
+    planner = CountingPlanner()
+    compiler = CountingCompiler()
+    executor = WorkflowExecutor(planner=planner, compiler=compiler)
+    plan = SingleStepPlanner().plan(
+        AgentContext(query="CCO", trace_id="provided-plan")
+    )
+
+    prepared = executor.prepare(
+        context=AgentContext(query="CCO", trace_id="provided-plan"),
+        policy=FAKE_POLICY,
+        all_tools={
+            "property_calculator": FakeTool("property_calculator")
+        },
+        plan=plan,
+    )
+
+    assert prepared.plan is plan
+    assert planner.calls == 0
+    assert compiler.calls == 1
+
+
+@pytest.mark.parametrize(
+    ("policy", "all_tools", "expected_code"),
+    [
+        (
+            WorkflowPolicy(
+                name="deny",
+                description="deny",
+                allowed_tools=(),
+            ),
+            {"property_calculator": FakeTool("property_calculator")},
+            AgentErrorCode.UNAUTHORIZED_TOOL,
+        ),
+        (FAKE_POLICY, {}, AgentErrorCode.TOOL_UNAVAILABLE),
+    ],
+)
+def test_prepare_returns_existing_preflight_failure_without_orchestrator(
+    policy,
+    all_tools,
+    expected_code,
+):
+    execution = WorkflowExecutor(
+        planner=SingleStepPlanner(),
+        orchestrator=ExplodingPreflightOrchestrator(),
+    ).prepare(
+        context=AgentContext(query="CCO", trace_id="preflight-failure"),
+        policy=policy,
+        all_tools=all_tools,
+    )
+
+    assert isinstance(execution, workflow_executor_module.WorkflowExecution)
+    assert execution.result.error.code == expected_code
+    assert execution.result.message == "Workflow plan failed execution preflight"
+    assert execution.events == []
+
+
+def test_execute_calls_prepare_once_and_consumes_prepared_workflow():
+    executor = CountingPrepareExecutor(planner=SingleStepPlanner())
+
+    execution = executor.execute(
+        context=AgentContext(query="CCO", trace_id="execute-prepared"),
+        policy=FAKE_POLICY,
+        all_tools={
+            "property_calculator": FakeTool("property_calculator")
+        },
+    )
+
+    assert executor.prepare_calls == 1
+    assert execution.result.success is True
+
+
+def test_execute_returns_prepare_failure_without_running():
+    plan = SingleStepPlanner().plan(
+        AgentContext(query="CCO", trace_id="prepared-failure")
+    )
+    failure = workflow_executor_module.WorkflowExecution(
+        plan=plan,
+        result=AgentResult(
+            trace_id="prepared-failure",
+            success=False,
+            message="blocked",
+        ),
+        events=[],
+    )
+
+    class FailureExecutor(WorkflowExecutor):
+        def prepare(self, *args, **kwargs):
+            return failure
+
+    execution = FailureExecutor(
+        planner=ExplodingPreflightOrchestrator(),
+        orchestrator=ExplodingPreflightOrchestrator(),
+    ).execute(
+        context=AgentContext(query="CCO", trace_id="prepared-failure"),
+        policy=FAKE_POLICY,
+        all_tools={},
+    )
+
+    assert execution is failure
+
+
+def test_runtime_exports_prepared_workflow():
+    assert runtime_module.PreparedWorkflow is (
+        workflow_executor_module.PreparedWorkflow
+    )
 
 
 def test_executor_rejects_unauthorized_plan_before_any_tool_runs():
