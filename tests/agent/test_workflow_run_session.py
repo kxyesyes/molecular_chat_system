@@ -14,6 +14,8 @@ from src.agent.contracts import (
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
+from src.agent.runtime.task_state import TaskEventType
+from src.agent.validators import AgentResultValidator
 from src.agent.validators.semantic_inputs import SemanticDecision
 
 
@@ -92,6 +94,26 @@ class FailOnceStatusStore(SQLiteAgentStateStore):
         return super().update_run_status(trace_id, status)
 
 
+class CountingStartStore(SQLiteAgentStateStore):
+    def __init__(self, path):
+        super().__init__(path)
+        self.start_attempts = 0
+
+    def start_run(self, run):
+        self.start_attempts += 1
+        return super().start_run(run)
+
+
+class CountingCheckpointStore(SQLiteAgentStateStore):
+    def __init__(self, path):
+        super().__init__(path)
+        self.latest_checkpoint_calls = 0
+
+    def latest_checkpoint(self, trace_id, step_id=None):
+        self.latest_checkpoint_calls += 1
+        return super().latest_checkpoint(trace_id, step_id)
+
+
 class FailOnceSemanticValidator:
     def __init__(self):
         self.calls = 0
@@ -101,6 +123,55 @@ class FailOnceSemanticValidator:
         if self.calls == 1:
             raise RuntimeError("semantic validator unavailable")
         return SemanticDecision(True)
+
+
+class FailOncePostprocessValidator(AgentResultValidator):
+    def __init__(self):
+        self.calls = 0
+
+    def validate_tool_result(self, result, *, trusted_checkpoint=False):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("tool result postprocess failed")
+        return super().validate_tool_result(
+            result,
+            trusted_checkpoint=trusted_checkpoint,
+        )
+
+
+class FailOnceEventCallback:
+    def __init__(self, target):
+        self.target = target
+        self.failed = False
+
+    def __call__(self, event):
+        if event.event == self.target and not self.failed:
+            self.failed = True
+            raise RuntimeError(f"{self.target.value} callback failed")
+
+
+class FailOnceExtend(list):
+    def __init__(self):
+        super().__init__()
+        self.failed = False
+
+    def extend(self, values):
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("workflow state update failed")
+        return super().extend(values)
+
+
+class FailOncePersistOrchestrator(WorkflowOrchestrator):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.persist_attempts = 0
+
+    def _persist_execution(self, *args, **kwargs):
+        self.persist_attempts += 1
+        if self.persist_attempts == 1:
+            raise RuntimeError("step persistence failed")
+        return super()._persist_execution(*args, **kwargs)
 
 
 class FailAfterTerminalEventBus(AgentEventBus):
@@ -126,6 +197,7 @@ def _make_session(
     state_store=None,
     continue_on_error=False,
     semantic_validator=None,
+    validator=None,
     event_bus=None,
 ):
     event_bus = event_bus or AgentEventBus(state_store=state_store)
@@ -133,6 +205,7 @@ def _make_session(
         event_bus=event_bus,
         state_store=state_store,
         semantic_validator=semantic_validator,
+        validator=validator,
     )
     session = orchestrator.create_session(
         context=AgentContext(query="CCO", trace_id=trace_id),
@@ -430,26 +503,221 @@ def test_optional_failure_can_explicitly_stop():
     assert result.success is False
 
 
-def test_global_continue_on_error_keeps_optional_workflow_moving():
-    first = OutcomeTool("optional", success=False)
+def test_global_continue_on_error_matches_legacy_required_failure_stop():
+    legacy_first = OutcomeTool("required", success=False)
+    legacy_second = OutcomeTool("after", success=True)
+    steps = [
+        WorkflowStep("required", legacy_first.name, "CCO", required=True),
+        WorkflowStep("after", legacy_second.name, "CCN"),
+    ]
+    legacy_result = WorkflowOrchestrator().run(
+        AgentContext(query="CCO", trace_id="legacy-global-continue"),
+        steps,
+        {legacy_first.name: legacy_first, legacy_second.name: legacy_second},
+        continue_on_error=True,
+    )
+
+    first = OutcomeTool("required", success=False)
     second = OutcomeTool("after", success=True)
     session, _ = _make_session(
-        steps=[
-            WorkflowStep("optional", first.name, "CCO", required=False),
-            WorkflowStep("after", second.name, "CCN"),
-        ],
+        steps=steps,
         tools={first.name: first, second.name: second},
         continue_on_error=True,
     )
     session.start()
 
     advance = session.execute_step(0)
-    session.execute_step(1)
     result = session.finish()
 
-    assert advance.terminal is False
-    assert second.calls == ["CCN"]
-    assert result.partial is True
+    assert advance.terminal is True
+    assert legacy_second.calls == []
+    assert second.calls == legacy_second.calls
+    assert result.outcome == legacy_result.outcome
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [TaskEventType.TASK_STARTED, TaskEventType.PLANNING_STARTED],
+)
+def test_start_retry_does_not_duplicate_events_appended_before_callback_failure(
+    tmp_path,
+    event_type,
+):
+    store = CountingStartStore(tmp_path / f"{event_type.value}.sqlite3")
+    event_bus = AgentEventBus(
+        on_event=FailOnceEventCallback(event_type),
+        state_store=store,
+    )
+    session, _ = _make_session(
+        steps=[],
+        tools={},
+        trace_id=f"retry-{event_type.value}",
+        state_store=store,
+        event_bus=event_bus,
+    )
+
+    with pytest.raises(RuntimeError, match="callback failed"):
+        session.start()
+
+    assert session.started is False
+    session.start()
+    session.finish()
+
+    assert store.start_attempts == 1
+    event_names = [event.event for event in event_bus.events]
+    assert event_names.count(TaskEventType.TASK_STARTED) == 1
+    assert event_names.count(TaskEventType.PLANNING_STARTED) == 1
+    assert event_names.count(TaskEventType.PLANNING_COMPLETED) == 1
+
+
+def test_tool_started_callback_failure_retries_without_duplicate_or_tool_call():
+    tool = CountingTool()
+    event_bus = AgentEventBus(
+        on_event=FailOnceEventCallback(TaskEventType.TOOL_STARTED)
+    )
+    session, _ = _make_session(tools={tool.name: tool}, event_bus=event_bus)
+    session.start()
+
+    with pytest.raises(RuntimeError, match="tool_started callback failed"):
+        session.execute_step(0)
+
+    assert session.tool_attempt_count == 0
+    assert session.next_index == 0
+    assert tool.calls == []
+    advance = session.execute_step(0)
+    session.finish()
+
+    assert advance.terminal is True
+    assert tool.calls == ["CCO"]
+    assert [event.event for event in event_bus.events].count(
+        TaskEventType.TOOL_STARTED
+    ) == 1
+
+
+def test_checkpoint_terminal_event_failure_resumes_without_tool_or_duplicate(
+    tmp_path,
+):
+    store = SQLiteAgentStateStore(tmp_path / "checkpoint-event.sqlite3")
+    tool = CountingTool()
+    context = AgentContext(query="CCO", trace_id="checkpoint-event")
+    steps = [WorkflowStep("properties", tool.name, "CCO")]
+    WorkflowOrchestrator(state_store=store).run(context, steps, {tool.name: tool})
+    event_bus = AgentEventBus(
+        on_event=FailOnceEventCallback(TaskEventType.TOOL_COMPLETED),
+        state_store=store,
+    )
+    session = WorkflowOrchestrator(
+        event_bus=event_bus,
+        state_store=store,
+    ).create_session(context=context, steps=steps, tools={tool.name: tool})
+    session.start()
+
+    with pytest.raises(RuntimeError, match="tool_completed callback failed"):
+        session.execute_step(0)
+
+    assert session.tool_attempt_count == 0
+    assert session.next_index == 0
+    advance = session.execute_step(0)
+    result = session.finish()
+
+    assert advance.terminal is True
+    assert tool.calls == ["CCO"]
+    assert result.metadata["reused_steps"] == ["properties"]
+    assert [event.event for event in event_bus.events].count(
+        TaskEventType.TOOL_COMPLETED
+    ) == 1
+
+
+def test_checkpoint_state_update_failure_resumes_without_rereading_checkpoint(
+    tmp_path,
+):
+    store = CountingCheckpointStore(tmp_path / "checkpoint-state.sqlite3")
+    tool = CountingTool()
+    context = AgentContext(query="CCO", trace_id="checkpoint-state")
+    steps = [WorkflowStep("properties", tool.name, "CCO")]
+    WorkflowOrchestrator(state_store=store).run(context, steps, {tool.name: tool})
+    baseline_reads = store.latest_checkpoint_calls
+    session = WorkflowOrchestrator(state_store=store).create_session(
+        context=context,
+        steps=steps,
+        tools={tool.name: tool},
+    )
+    session.start()
+    session.state.warnings = FailOnceExtend()
+
+    with pytest.raises(RuntimeError, match="workflow state update failed"):
+        session.execute_step(0)
+
+    assert session.next_index == 0
+    advance = session.execute_step(0)
+    session.finish()
+
+    assert advance.terminal is True
+    assert session.tool_attempt_count == 0
+    assert store.latest_checkpoint_calls - baseline_reads == 1
+    assert tool.calls == ["CCO"]
+
+
+def test_missing_tool_persistence_failure_resumes_cached_result(tmp_path):
+    store = SQLiteAgentStateStore(tmp_path / "missing-tool.sqlite3")
+    orchestrator = FailOncePersistOrchestrator(state_store=store)
+    session = orchestrator.create_session(
+        context=AgentContext(query="CCO", trace_id="missing-tool"),
+        steps=[WorkflowStep("missing", "not_registered", "CCO")],
+        tools={},
+    )
+    session.start()
+
+    with pytest.raises(RuntimeError, match="step persistence failed"):
+        session.execute_step(0)
+
+    assert session.next_index == 0
+    assert session.tool_attempt_count == 0
+    advance = session.execute_step(0)
+    result = session.finish()
+
+    assert advance.outcome == "failed"
+    assert result.success is False
+    assert orchestrator.persist_attempts == 2
+
+
+def test_real_tool_postprocess_failure_resumes_without_second_tool_call():
+    tool = CountingTool()
+    validator = FailOncePostprocessValidator()
+    session, _ = _make_session(
+        tools={tool.name: tool},
+        validator=validator,
+    )
+    session.start()
+
+    with pytest.raises(RuntimeError, match="tool result postprocess failed"):
+        session.execute_step(0)
+
+    assert session.tool_attempt_count == 1
+    assert session.next_index == 0
+    assert tool.calls == ["CCO"]
+    advance = session.execute_step(0)
+    result = session.finish()
+
+    assert advance.terminal is True
+    assert result.success is True
+    assert tool.calls == ["CCO"]
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [
+        ("started", True),
+        ("finished", True),
+        ("tool_attempt_count", 9),
+        ("next_index", 9),
+    ],
+)
+def test_session_lifecycle_state_is_read_only(attribute, value):
+    session, _ = _make_session(steps=[], tools={})
+
+    with pytest.raises(AttributeError):
+        setattr(session, attribute, value)
 
 
 def test_pre_tool_semantic_failure_can_retry_same_step_safely():
