@@ -56,9 +56,14 @@ class WorkflowRunSession:
         self.started = False
         self.finished = False
         self.tool_attempt_count = 0
+        self.next_index = 0
         self._executed_indices: set[int] = set()
         self._terminal_reached = False
         self._runtime_error: AgentExecutionError | None = None
+        self._final_result: AgentResult | None = None
+        self._final_message: str | None = None
+        self._terminal_event_emitted = False
+        self._run_status_updated = False
 
         self.results: list[ToolResult] = []
         self.state: Any = None
@@ -73,59 +78,52 @@ class WorkflowRunSession:
     def start(self) -> None:
         if self.started:
             raise SessionLifecycleError("workflow session has already started")
-        self.started = True
 
         from src.agent.orchestrators.base import WorkflowState
 
-        self.context = self.orchestrator._resolve_idempotent_context(
+        context = self.orchestrator._resolve_idempotent_context(
             self.context,
             self.idempotency_key,
         )
-        self.results = []
-        self.state = WorkflowState(
-            trace_id=self.context.trace_id,
+        state = WorkflowState(
+            trace_id=context.trace_id,
             inputs={
-                "query": self.context.query,
-                **dict(self.context.metadata or {}),
+                "query": context.query,
+                **dict(context.metadata or {}),
             },
         )
-        self.ledger = EvidenceLedger(self.context.trace_id)
-        self.outputs = self.state.outputs
-        self.reused_steps = []
-        self.checkpoint_warnings = []
-        self.skipped_steps = []
-        self.semantic_evidence = []
+        ledger = EvidenceLedger(context.trace_id)
 
         if self.orchestrator.state_store:
             self.orchestrator.state_store.start_run(
                 {
-                    "trace_id": self.context.trace_id,
+                    "trace_id": context.trace_id,
                     "status": "running",
-                    "skill_name": self.context.active_skill,
-                    "query": self.context.query,
+                    "skill_name": context.active_skill,
+                    "query": context.query,
                     "workflow_version": self.orchestrator.workflow_version,
                     "idempotency_key": self.idempotency_key,
-                    "user_id": self.context.user_id,
-                    "session_id": self.context.session_id,
-                    "metadata": self.context.metadata,
+                    "user_id": context.user_id,
+                    "session_id": context.session_id,
+                    "metadata": context.metadata,
                 }
             )
 
         self.orchestrator._emit(
-            self.context,
+            context,
             TaskEventType.TASK_STARTED,
             "Agent workflow started",
             progress=0.0,
         )
         self.orchestrator._emit(
-            self.context,
+            context,
             TaskEventType.PLANNING_STARTED,
             "Workflow planning started",
             progress=0.0,
             payload={"step_count": len(self.steps)},
         )
         self.orchestrator._emit(
-            self.context,
+            context,
             TaskEventType.PLANNING_COMPLETED,
             "Workflow planning completed",
             progress=0.0,
@@ -137,6 +135,20 @@ class WorkflowRunSession:
             },
         )
 
+        self.context = context
+        self.results = []
+        self.state = state
+        self.ledger = ledger
+        self.outputs = state.outputs
+        self.reused_steps = []
+        self.checkpoint_warnings = []
+        self.skipped_steps = []
+        self.semantic_evidence = []
+        self.next_index = 0
+        self._executed_indices = set()
+        self._terminal_reached = not self.steps
+        self.started = True
+
     def execute_step(self, index: int) -> StepAdvance:
         self._require_active()
         if isinstance(index, bool) or not isinstance(index, int):
@@ -145,13 +157,20 @@ class WorkflowRunSession:
             raise SessionLifecycleError("workflow step index is out of range")
         if index in self._executed_indices:
             raise SessionLifecycleError("workflow step has already been executed")
+        if index != self.next_index:
+            raise SessionLifecycleError(
+                f"workflow step {self.next_index} must execute next"
+            )
         if self._terminal_reached:
-            raise SessionLifecycleError("workflow session already reached a terminal step")
-        self._executed_indices.add(index)
+            raise SessionLifecycleError(
+                "workflow session already reached a terminal step"
+            )
 
         step = self.steps[index]
         checkpoint_reused = False
         checkpoint_warning: str | None = None
+        checkpoint_warning_entry: dict[str, str] | None = None
+        semantic_evidence_entry: dict[str, str] | None = None
         tool = self.tools.get(step.tool_name)
         try:
             input_data = self.orchestrator._resolve_input(
@@ -209,6 +228,7 @@ class WorkflowRunSession:
                             "reason": f"blocked_by:{step.name}",
                         }
                     )
+                self._consume_step(index)
                 self._terminal_reached = True
                 return StepAdvance(
                     step_id=step.name,
@@ -217,13 +237,11 @@ class WorkflowRunSession:
                     reason=str(decision.reason or ""),
                 )
             if decision.evidence_digest:
-                self.semantic_evidence.append(
-                    {
-                        "step_id": step.name,
-                        "requirement": str(decision.requirement or ""),
-                        "evidence_digest": decision.evidence_digest,
-                    }
-                )
+                semantic_evidence_entry = {
+                    "step_id": step.name,
+                    "requirement": str(decision.requirement or ""),
+                    "evidence_digest": decision.evidence_digest,
+                }
             self.orchestrator._emit(
                 self.context,
                 TaskEventType.TOOL_STARTED,
@@ -268,15 +286,12 @@ class WorkflowRunSession:
                     checkpoint_warning = (
                         f"Ignored incompatible checkpoint for {step.name}"
                     )
-                    self.checkpoint_warnings.append(
-                        {
-                            "step": step.name,
-                            "reason": "checkpoint_deserialization_failed",
-                        }
-                    )
+                    checkpoint_warning_entry = {
+                        "step": step.name,
+                        "reason": "checkpoint_deserialization_failed",
+                    }
                 else:
                     checkpoint_reused = True
-                    self.reused_steps.append(step.name)
 
             if not checkpoint_reused:
                 if tool is None:
@@ -296,6 +311,7 @@ class WorkflowRunSession:
                         model_version=model_version,
                     )
                     self.tool_attempt_count += 1
+                    self._consume_step(index)
                     result = self.orchestrator._execute_step(
                         tool,
                         input_data,
@@ -339,6 +355,14 @@ class WorkflowRunSession:
             )
             if optional_warning not in result.warnings:
                 result.warnings.append(optional_warning)
+        if index not in self._executed_indices:
+            self._consume_step(index)
+        if checkpoint_reused:
+            self.reused_steps.append(step.name)
+        if checkpoint_warning_entry:
+            self.checkpoint_warnings.append(checkpoint_warning_entry)
+        if semantic_evidence_entry:
+            self.semantic_evidence.append(semantic_evidence_entry)
         if not checkpoint_reused:
             self.orchestrator._persist_execution(
                 self.context,
@@ -413,6 +437,10 @@ class WorkflowRunSession:
 
     def fail_runtime(self, error_code: Any) -> None:
         self._require_active()
+        if self._runtime_error is not None:
+            raise SessionLifecycleError("workflow runtime failure is already set")
+        if self._final_result is not None:
+            raise SessionLifecycleError("workflow finalization has already started")
         runtime_code = (
             error_code.value
             if isinstance(error_code, AgentErrorCode)
@@ -434,8 +462,65 @@ class WorkflowRunSession:
 
     def finish(self) -> AgentResult:
         self._require_active()
-        self.finished = True
+        if not self._terminal_reached:
+            raise SessionLifecycleError(
+                "workflow session has not reached a terminal state"
+            )
+        if self._final_result is None:
+            self._final_result, self._final_message = self._build_final_result()
+        agent_result = self._final_result
+        assert self._final_message is not None
 
+        completion_event = {
+            RunOutcome.COMPLETED: TaskEventType.TASK_COMPLETED,
+            RunOutcome.PARTIAL: TaskEventType.TASK_PARTIAL,
+            RunOutcome.REJECTED: TaskEventType.TASK_REJECTED,
+            RunOutcome.CANCELLED: TaskEventType.TASK_CANCELLED,
+            RunOutcome.FAILED: TaskEventType.TASK_FAILED,
+        }[agent_result.outcome]
+        if not self._terminal_event_emitted:
+            event_bus = self.orchestrator.event_bus
+            prior_event_count = (
+                len(event_bus.events)
+                if event_bus is not None and hasattr(event_bus, "events")
+                else None
+            )
+            try:
+                self.orchestrator._emit(
+                    self.context,
+                    completion_event,
+                    self._final_message,
+                    progress=1.0,
+                    payload=agent_result.to_legacy_dict(),
+                )
+            except Exception:
+                if prior_event_count is not None:
+                    new_events = event_bus.events[prior_event_count:]
+                    self._terminal_event_emitted = any(
+                        event.trace_id == self.context.trace_id
+                        and event.event == completion_event
+                        for event in new_events
+                    )
+                raise
+            else:
+                self._terminal_event_emitted = True
+        if self.orchestrator.state_store and not self._run_status_updated:
+            status = (
+                "succeeded"
+                if agent_result.outcome == RunOutcome.COMPLETED
+                else agent_result.outcome.value
+            )
+            self.orchestrator.state_store.update_run_status(
+                self.context.trace_id,
+                status,
+            )
+            self._run_status_updated = True
+        elif not self.orchestrator.state_store:
+            self._run_status_updated = True
+        self.finished = True
+        return agent_result
+
+    def _build_final_result(self) -> tuple[AgentResult, str]:
         final_answer = "\n\n".join(
             item.formatted
             for item in self.results
@@ -490,32 +575,11 @@ class WorkflowRunSession:
             agent_result.message = message
             agent_result.final_answer = ""
             agent_result.error = self._runtime_error
+        return agent_result, message
 
-        completion_event = {
-            RunOutcome.COMPLETED: TaskEventType.TASK_COMPLETED,
-            RunOutcome.PARTIAL: TaskEventType.TASK_PARTIAL,
-            RunOutcome.REJECTED: TaskEventType.TASK_REJECTED,
-            RunOutcome.CANCELLED: TaskEventType.TASK_CANCELLED,
-            RunOutcome.FAILED: TaskEventType.TASK_FAILED,
-        }[agent_result.outcome]
-        self.orchestrator._emit(
-            self.context,
-            completion_event,
-            message,
-            progress=1.0,
-            payload=agent_result.to_legacy_dict(),
-        )
-        if self.orchestrator.state_store:
-            status = (
-                "succeeded"
-                if agent_result.outcome == RunOutcome.COMPLETED
-                else agent_result.outcome.value
-            )
-            self.orchestrator.state_store.update_run_status(
-                self.context.trace_id,
-                status,
-            )
-        return agent_result
+    def _consume_step(self, index: int) -> None:
+        self._executed_indices.add(index)
+        self.next_index = index + 1
 
     def _require_active(self) -> None:
         if not self.started:
