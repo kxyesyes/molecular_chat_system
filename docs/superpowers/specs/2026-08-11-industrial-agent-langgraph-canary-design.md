@@ -38,6 +38,7 @@
 - 不引入 LangGraph checkpointer，不建第二套状态数据库。
 - 不引入 Temporal、PostgreSQL、NATS、MinIO、OPA、OIDC 或 Kubernetes。
 - 不修改前端、WebSocket 公共事件格式、科学工具模型边界或 golden case 标准。
+- 不在本批次重写 `_DelegatedWorkflowExecutor` 与 specialist delegation 循环；该 API 入口继续作为 legacy control cohort。
 
 ## 3. 方案选择
 
@@ -64,6 +65,8 @@ flowchart LR
 ```
 
 `WorkflowRunSession` 保留当前 `WorkflowOrchestrator.run()` 的权威科学语义，但将其分解为 `start() -> execute_step(index) -> finish()` 生命周期。LangGraph 只决定节点推进；它不直接解析 SMILES、调用旧工具函数、生成 evidence 或组装最终答案。
+
+本批 canary 只适用于实现 `prepare()` 和 session driver 协议的直接 `WorkflowExecutor`，覆盖前台聊天 `Supervisor.execute()` 与科学验收 runner。`Supervisor.run()` 中现有 `_DelegatedWorkflowExecutor` 显式返回 `unsupported_delegated_executor`，继续走 legacy，不被意外选入 canary。在 LangGraph 成为默认后端前，delegated 路径必须通过后续独立设计收敛到同一 session 语义。
 
 ## 5. 核心组件
 
@@ -95,8 +98,9 @@ Graph state 只保留 `trace_digest`、`plan_fingerprint`、`visited_steps`、`s
 1. `AGENT_HARNESS_MODE` 不是 `langgraph_canary` 时使用已有 legacy/shadow 行为；
 2. LangGraph 依赖不可用时回到 legacy 并记录配置 warning；
 3. workflow 不在内置安全 allowlist 时使用 legacy；
-4. 使用 `idempotency_key` 或 `trace_id` 的 SHA-256 稳定分桶；
-5. bucket 小于 `AGENT_LANGGRAPH_CANARY_PERCENT` 时选择 LangGraph，否则选择 legacy。
+4. executor 不实现受支持的 prepare/session 协议时使用 legacy，记录 `unsupported_delegated_executor`；
+5. 使用 `idempotency_key` 或 `trace_id` 的 SHA-256 稳定分桶；
+6. bucket 小于 `AGENT_LANGGRAPH_CANARY_PERCENT` 时选择 LangGraph，否则选择 legacy。
 
 `AGENT_LANGGRAPH_CANARY_PERCENT` 只允许 `0–100` 的整数，默认为 `0`。非法值使 canary 禁用并记录 warning，不得意外开启全量。首批内置 allowlist 为：
 
@@ -160,15 +164,16 @@ TDD 至少覆盖：
 1. canary percent 非法时 fail closed，0% 永不选中，100% 对 allowlist 工作流始终选中。
 2. 同一 idempotency key 始终分到同一 bucket，报告不包含 key 原文。
 3. 非 allowlist 工作流在 100% 配置下仍走 legacy。
-4. legacy 重构前后的 ToolResult、AgentResult、事件序列和 checkpoint 恢复兼容。
-5. LangGraph 的单步、多步、required failure、optional failure 和语义门与 legacy fixture 一致。
-6. 每个工具最多调用一次；graph 节点重入被 session 拒绝。
-7. graph 在工具前失败可回退，工具后失败不回退且调用数仍为 1。
-8. 重启后已成功 checkpoint 可被 canary 复用，不重新调用工具。
-9. `harness_execution` 持久化失败不修改科学结果。
-10. metadata、日志和报告不包含 API key、Authorization、完整 prompt 或绝对 artifact 路径。
-11. contract 保持 34/34，canary 探针不改变旧 case 数。
-12. golden real 重复 3 轮无新 hard failure，低风险案例 backend/provenance/truth checks 完整。
+4. delegated executor 在 100% 配置下仍走 legacy，且不重复调用 specialist 工具。
+5. legacy 重构前后的 ToolResult、AgentResult、事件序列和 checkpoint 恢复兼容。
+6. LangGraph 的单步、多步、required failure、optional failure 和语义门与 legacy fixture 一致。
+7. 每个工具最多调用一次；graph 节点重入被 session 拒绝。
+8. graph 在工具前失败可回退，工具后失败不回退且调用数仍为 1。
+9. 重启后已成功 checkpoint 可被 canary 复用，不重新调用工具。
+10. `harness_execution` 持久化失败不修改科学结果。
+11. metadata、日志和报告不包含 API key、Authorization、完整 prompt 或绝对 artifact 路径。
+12. contract 保持 34/34，canary 探针不改变旧 case 数。
+13. golden real 重复 3 轮无新 hard failure，低风险案例 backend/provenance/truth checks 完整。
 
 ## 10. 配置、上线和回滚
 
@@ -186,7 +191,7 @@ AGENT_LANGGRAPH_CANARY_PERCENT=0
 阶段 2B 完成必须同时满足：
 
 - 默认 legacy 和公共契约完全兼容；
-- allowlist 工作流在 100% 测试 canary 下工具调用数与 legacy 基线一致；
+- 直接执行入口中的 allowlist 工作流在 100% 测试 canary 下工具调用数与 legacy 基线一致；
 - 终态事件、provenance 和 evidence-backed claim 完整率为 100%；
 - 重复工具调用、伪造科学结果和凭据泄漏均为 0；
 - contract、replay、real 与三轮稳定性验收无新 hard failure；
