@@ -88,6 +88,7 @@ class WorkflowRunSession:
         self.tools = tools
         self.continue_on_error = continue_on_error
         self.idempotency_key = idempotency_key
+        self._session_attempt_id = uuid4().hex
         self._started = False
         self._finished = False
         self._tool_attempt_count = 0
@@ -796,7 +797,12 @@ class WorkflowRunSession:
                 event=event,
                 message=message,
                 skill=context.active_skill,
-                event_id=self._stable_id("event", context.trace_id, key),
+                event_id=self._stable_id(
+                    "event",
+                    context.trace_id,
+                    self._session_attempt_id,
+                    key,
+                ),
                 **kwargs,
             )
         self._published_events.add(key)

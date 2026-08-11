@@ -839,12 +839,18 @@ def test_new_session_attempt_can_replace_failed_checkpoint_and_then_be_reused(
     trace_id = "cross-session-attempt"
     tool = OutcomeTool("property_calculator", success=False)
     steps = [WorkflowStep("properties", tool.name, "CCO")]
+    callback_events = []
+    event_bus = AgentEventBus(
+        state_store=store,
+        on_event=callback_events.append,
+    )
 
     first, _ = _make_session(
         steps=steps,
         tools={tool.name: tool},
         trace_id=trace_id,
         state_store=store,
+        event_bus=event_bus,
     )
     first.start()
     first.execute_step(0)
@@ -853,6 +859,9 @@ def test_new_session_attempt_can_replace_failed_checkpoint_and_then_be_reused(
     assert first_result.success is False
     assert len(store.get_tool_executions(trace_id)) == 1
     assert store.latest_checkpoint(trace_id, "properties")["status"] == "failed"
+    first_event_names = [event["event"] for event in store.get_events(trace_id)]
+    assert first_event_names.count("tool_failed") == 1
+    assert first_event_names.count("task_failed") == 1
 
     tool.success = True
     second, _ = _make_session(
@@ -860,6 +869,7 @@ def test_new_session_attempt_can_replace_failed_checkpoint_and_then_be_reused(
         tools={tool.name: tool},
         trace_id=trace_id,
         state_store=store,
+        event_bus=event_bus,
     )
     second.start()
     second.execute_step(0)
@@ -870,12 +880,18 @@ def test_new_session_attempt_can_replace_failed_checkpoint_and_then_be_reused(
     assert tool.calls == ["CCO", "CCO"]
     assert len(store.get_tool_executions(trace_id)) == 2
     assert store.latest_checkpoint(trace_id, "properties")["status"] == "succeeded"
+    second_event_names = [event["event"] for event in store.get_events(trace_id)]
+    assert second_event_names.count("tool_failed") == 1
+    assert second_event_names.count("task_failed") == 1
+    assert second_event_names.count("tool_completed") == 1
+    assert second_event_names.count("task_completed") == 1
 
     third, _ = _make_session(
         steps=steps,
         tools={tool.name: tool},
         trace_id=trace_id,
         state_store=store,
+        event_bus=event_bus,
     )
     third.start()
     advance = third.execute_step(0)
@@ -886,6 +902,17 @@ def test_new_session_attempt_can_replace_failed_checkpoint_and_then_be_reused(
     assert third.tool_attempt_count == 0
     assert tool.calls == ["CCO", "CCO"]
     assert third_result.metadata["reused_steps"] == ["properties"]
+    final_event_names = [event["event"] for event in store.get_events(trace_id)]
+    assert final_event_names.count("task_started") == 3
+    assert final_event_names.count("tool_started") == 3
+    assert final_event_names.count("tool_failed") == 1
+    assert final_event_names.count("task_failed") == 1
+    assert final_event_names.count("tool_completed") == 2
+    assert final_event_names.count("task_completed") == 2
+    memory_event_names = [event.event.value for event in event_bus.events]
+    callback_event_names = [event.event.value for event in callback_events]
+    assert memory_event_names == final_event_names
+    assert callback_event_names == final_event_names
 
 
 @pytest.mark.parametrize(
