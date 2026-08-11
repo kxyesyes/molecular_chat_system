@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import Any, Mapping
 
 from src.agent.contracts import (
     AgentContext,
@@ -20,9 +22,6 @@ from src.agent.planning import (
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.workflows import WorkflowPolicy
 
-if TYPE_CHECKING:
-    from src.agent.orchestrators import WorkflowOrchestrator
-
 
 @dataclass
 class WorkflowExecution:
@@ -31,19 +30,88 @@ class WorkflowExecution:
     events: list[dict[str, Any]]
 
 
+@dataclass
+class _PreflightCapture:
+    used: bool = False
+    compiled: CompiledPlan | None = None
+    failure: WorkflowExecution | None = None
+
+
+_ACTIVE_PREFLIGHT_CAPTURE: ContextVar[_PreflightCapture | None] = ContextVar(
+    "workflow_executor_preflight_capture",
+    default=None,
+)
+_PREPARED_INPUTS_ARE_SNAPSHOTS: ContextVar[bool] = ContextVar(
+    "prepared_workflow_inputs_are_snapshots",
+    default=False,
+)
+
+
 @dataclass(frozen=True)
 class PreparedWorkflow:
+    """Runtime-only snapshot; tool values retain identity, registry structure does not."""
+
     context: AgentContext
     policy: WorkflowPolicy
     plan: WorkflowPlan
     compiled: CompiledPlan
     tools: Mapping[str, Any]
-    orchestrator: WorkflowOrchestrator
+    orchestrator: Any
     event_bus: AgentEventBus
     idempotency_key: str | None = None
 
     def __post_init__(self) -> None:
+        if _PREPARED_INPUTS_ARE_SNAPSHOTS.get():
+            context = self.context
+            plan = self.plan
+        else:
+            context = _copy_boundary(self.context, "context")
+            plan = _copy_boundary(self.plan, "plan")
+        dependencies = MappingProxyType(
+            {
+                step_name: tuple(_copy_boundary(values, "compiled dependencies"))
+                for step_name, values in self.compiled.dependencies.items()
+            }
+        )
+
+        object.__setattr__(self, "context", context)
+        object.__setattr__(self, "plan", plan)
+        object.__setattr__(
+            self,
+            "compiled",
+            CompiledPlan(plan=plan, dependencies=dependencies),
+        )
+        # The registry is a request-scoped shallow copy by design. Tool objects
+        # are stateful runtime extensions and must preserve their identity.
         object.__setattr__(self, "tools", MappingProxyType(dict(self.tools)))
+
+    @classmethod
+    def _from_snapshot(
+        cls,
+        *,
+        context: AgentContext,
+        policy: WorkflowPolicy,
+        plan: WorkflowPlan,
+        compiled: CompiledPlan,
+        tools: Mapping[str, Any],
+        orchestrator: Any,
+        event_bus: AgentEventBus,
+        idempotency_key: str | None,
+    ) -> PreparedWorkflow:
+        token = _PREPARED_INPUTS_ARE_SNAPSHOTS.set(True)
+        try:
+            return cls(
+                context=context,
+                policy=policy,
+                plan=plan,
+                compiled=compiled,
+                tools=tools,
+                orchestrator=orchestrator,
+                event_bus=event_bus,
+                idempotency_key=idempotency_key,
+            )
+        finally:
+            _PREPARED_INPUTS_ARE_SNAPSHOTS.reset(token)
 
     def create_session(self):
         return self.orchestrator.create_session(
@@ -84,14 +152,41 @@ class WorkflowExecutor:
         idempotency_key: str | None = None,
         plan: WorkflowPlan | None = None,
     ) -> PreparedWorkflow | WorkflowExecution:
+        context_snapshot = _copy_boundary(context, "context")
+        all_tools_snapshot = dict(all_tools)
         if plan is None:
-            plan = self.planner.plan(context)
-        compiled, failure = self._preflight(
-            context=context,
-            policy=policy,
-            all_tools=all_tools,
-            plan=plan,
-        )
+            plan = self.planner.plan(context_snapshot)
+        plan_snapshot = _copy_boundary(plan, "plan")
+        if type(self).preflight is WorkflowExecutor.preflight:
+            compiled, failure = self._preflight(
+                context=context_snapshot,
+                policy=policy,
+                all_tools=all_tools_snapshot,
+                plan=plan_snapshot,
+            )
+        else:
+            capture = _PreflightCapture()
+            token = _ACTIVE_PREFLIGHT_CAPTURE.set(capture)
+            try:
+                override_failure = self.preflight(
+                    context=context_snapshot,
+                    policy=policy,
+                    all_tools=all_tools_snapshot,
+                    plan=plan_snapshot,
+                )
+            finally:
+                _ACTIVE_PREFLIGHT_CAPTURE.reset(token)
+            if override_failure is not None:
+                return override_failure
+            if capture.used:
+                compiled, failure = capture.compiled, capture.failure
+            else:
+                compiled, failure = self._preflight(
+                    context=context_snapshot,
+                    policy=policy,
+                    all_tools=all_tools_snapshot,
+                    plan=plan_snapshot,
+                )
         if failure is not None:
             return failure
         assert compiled is not None
@@ -99,7 +194,7 @@ class WorkflowExecutor:
         allowed = set(policy.allowed_tools)
         filtered_tools = {
             name: tool
-            for name, tool in all_tools.items()
+            for name, tool in all_tools_snapshot.items()
             if name in allowed
         }
         state_store = getattr(self.orchestrator, "state_store", None)
@@ -122,10 +217,10 @@ class WorkflowExecutor:
             from src.agent.orchestrators import WorkflowOrchestrator
 
             orchestrator = WorkflowOrchestrator(event_bus=event_bus)
-        return PreparedWorkflow(
-            context=context,
+        return PreparedWorkflow._from_snapshot(
+            context=context_snapshot,
             policy=policy,
-            plan=plan,
+            plan=plan_snapshot,
             compiled=compiled,
             tools=filtered_tools,
             orchestrator=orchestrator,
@@ -234,10 +329,26 @@ class WorkflowExecutor:
     ) -> WorkflowExecution | None:
         if plan is None:
             plan = self.planner.plan(context)
-        _, failure = self._preflight(
+        compiled, failure = self._preflight(
             context=context,
             policy=policy,
             all_tools=all_tools,
             plan=plan,
         )
+        capture = _ACTIVE_PREFLIGHT_CAPTURE.get()
+        if capture is not None:
+            capture.used = True
+            capture.compiled = compiled
+            capture.failure = failure
         return failure
+
+
+def _copy_boundary(value: Any, label: str) -> Any:
+    """Copy mutable request data or fail explicitly instead of retaining aliases."""
+
+    try:
+        return deepcopy(value)
+    except Exception as exc:
+        raise TypeError(
+            f"PreparedWorkflow {label} must be deep-copyable"
+        ) from exc

@@ -1,5 +1,10 @@
 from concurrent.futures import ThreadPoolExecutor
+import os
+from pathlib import Path
+import subprocess
+import sys
 from threading import Barrier, Lock
+from typing import get_type_hints
 
 import pytest
 
@@ -7,7 +12,7 @@ from src.agent.contracts import AgentContext, AgentErrorCode, AgentResult
 from src.agent.orchestrators import WorkflowOrchestrator
 from src.agent.orchestrators.base import WorkflowStep
 from src.agent.persistence import SQLiteAgentStateStore
-from src.agent.planning import PlanCompiler, WorkflowPlan
+from src.agent.planning import CompiledPlan, PlanCompiler, WorkflowPlan
 from src.agent import runtime as runtime_module
 from src.agent.runtime import workflow_executor as workflow_executor_module
 from src.agent.runtime.event_bus import AgentEventBus
@@ -21,6 +26,30 @@ FAKE_POLICY = WorkflowPolicy(
     description="test workflow",
     allowed_tools=("property_calculator",),
 )
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "from src.agent.planning import WorkflowPlan\n"
+        "from src.agent.runtime import PreparedWorkflow\n"
+        "assert WorkflowPlan and PreparedWorkflow\n",
+        "import src.agent.runtime as runtime\n"
+        "from src.agent.planning import WorkflowPlan\n"
+        "assert runtime.PreparedWorkflow and WorkflowPlan\n",
+    ],
+)
+def test_runtime_prepared_workflow_lazy_export_is_import_order_safe(script):
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[2],
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 class FakeTool:
@@ -84,10 +113,12 @@ class CountingPlanner(SingleStepPlanner):
 class CountingCompiler(PlanCompiler):
     def __init__(self):
         self.calls = 0
+        self.last_compiled = None
 
     def compile(self, plan, policy):
         self.calls += 1
-        return super().compile(plan, policy)
+        self.last_compiled = super().compile(plan, policy)
+        return self.last_compiled
 
 
 class ExplodingPreflightOrchestrator:
@@ -115,6 +146,27 @@ class ToolVisibilityOrchestrator(WorkflowOrchestrator):
         result = super().run(*args, **kwargs)
         result.metadata["visible_tools"] = sorted(kwargs["tools"])
         return result
+
+
+class BlockingPreflightExecutor(WorkflowExecutor):
+    def __init__(self, failure, **kwargs):
+        super().__init__(**kwargs)
+        self.failure = failure
+        self.preflight_calls = 0
+
+    def preflight(self, context, policy, all_tools, plan=None):
+        self.preflight_calls += 1
+        return self.failure
+
+
+class SuperCallingPreflightExecutor(WorkflowExecutor):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.preflight_calls = 0
+
+    def preflight(self, context, policy, all_tools, plan=None):
+        self.preflight_calls += 1
+        return super().preflight(context, policy, all_tools, plan)
 
 
 def test_prepare_returns_compiled_request_scoped_workflow():
@@ -235,6 +287,158 @@ def test_prepared_tools_are_defensive_and_read_only():
         prepared.tools["property_calculator"] = replacement
 
 
+def test_prepare_snapshots_tool_registry_before_preflight():
+    original = FakeTool("property_calculator")
+    replacement = FakeTool("property_calculator")
+    all_tools = {"property_calculator": original}
+
+    class RegistryMutatingCompiler(PlanCompiler):
+        def compile(self, plan, policy):
+            compiled = super().compile(plan, policy)
+            all_tools["property_calculator"] = replacement
+            return compiled
+
+    prepared = WorkflowExecutor(
+        planner=SingleStepPlanner(),
+        compiler=RegistryMutatingCompiler(),
+    ).prepare(
+        context=AgentContext(query="CCO", trace_id="tool-snapshot"),
+        policy=FAKE_POLICY,
+        all_tools=all_tools,
+    )
+
+    assert prepared.tools["property_calculator"] is original
+
+
+def test_prepare_freezes_context_plan_and_compilation_for_execution():
+    context = AgentContext(
+        query="original-query",
+        trace_id="original-trace",
+        memory=[{"turn": {"query": "remembered"}}],
+        metadata={
+            "request": {"source": "original"},
+            "path": Path("inputs/original.json"),
+        },
+    )
+    step = WorkflowStep(
+        name="snapshot-step",
+        tool_name="property_calculator",
+        input_data={"molecule": {"smiles": "CCO"}},
+        metadata={"labels": ["original"]},
+        preconditions=(),
+    )
+    plan = WorkflowPlan(
+        workflow_name="snapshot-plan",
+        steps=[step],
+        metadata={"planning": {"source": "original"}},
+    )
+    tool = FakeTool("property_calculator")
+    compiler = CountingCompiler()
+    prepared = WorkflowExecutor(compiler=compiler).prepare(
+        context=context,
+        policy=FAKE_POLICY,
+        all_tools={"property_calculator": tool},
+        plan=plan,
+    )
+
+    context.query = "mutated-query"
+    context.trace_id = "mutated-trace"
+    context.memory[0]["turn"]["query"] = "mutated-memory"
+    context.metadata["request"]["source"] = "mutated-context"
+    plan.workflow_name = "mutated-plan"
+    plan.metadata["planning"]["source"] = "mutated-plan-metadata"
+    step.input_data["molecule"]["smiles"] = "N"
+    step.metadata["labels"].append("mutated")
+    object.__setattr__(step, "preconditions", ("target_evidence",))
+    plan.steps.append(
+        WorkflowStep(name="unexpected", tool_name="property_calculator")
+    )
+    compiler.last_compiled.dependencies["snapshot-step"] = ("unexpected",)
+
+    result = prepared.orchestrator.run(
+        context=prepared.context,
+        steps=prepared.plan.steps,
+        tools=prepared.tools,
+        continue_on_error=False,
+        idempotency_key=prepared.idempotency_key,
+    )
+
+    assert prepared.context.query == "original-query"
+    assert prepared.context.trace_id == "original-trace"
+    assert prepared.context.memory == [{"turn": {"query": "remembered"}}]
+    assert prepared.context.metadata == {
+        "request": {"source": "original"},
+        "path": Path("inputs/original.json"),
+    }
+    assert prepared.plan.workflow_name == "snapshot-plan"
+    assert prepared.plan.metadata == {"planning": {"source": "original"}}
+    assert len(prepared.plan.steps) == 1
+    assert prepared.plan.steps[0].input_data == {
+        "molecule": {"smiles": "CCO"}
+    }
+    assert prepared.plan.steps[0].metadata == {"labels": ["original"]}
+    assert prepared.plan.steps[0].preconditions == ()
+    assert prepared.compiled.plan is prepared.plan
+    assert prepared.compiled.dependencies == {"snapshot-step": ()}
+    with pytest.raises(TypeError):
+        prepared.compiled.dependencies["snapshot-step"] = ("changed",)
+    assert prepared.tools["property_calculator"] is tool
+    assert tool.calls == [{"molecule": {"smiles": "CCO"}}]
+    assert result.trace_id == "original-trace"
+
+
+def test_direct_prepared_workflow_construction_takes_a_defensive_snapshot():
+    context = AgentContext(
+        query="direct",
+        trace_id="direct",
+        metadata={"nested": {"value": 1}},
+    )
+    plan = WorkflowPlan(
+        workflow_name="direct",
+        steps=[
+            WorkflowStep(
+                name="direct-step",
+                tool_name="property_calculator",
+                input_data={"nested": {"value": 1}},
+            )
+        ],
+        metadata={"nested": {"value": 1}},
+    )
+    dependencies = {"direct-step": []}
+    tool = FakeTool("property_calculator")
+    prepared = workflow_executor_module.PreparedWorkflow(
+        context=context,
+        policy=FAKE_POLICY,
+        plan=plan,
+        compiled=CompiledPlan(plan=plan, dependencies=dependencies),
+        tools={"property_calculator": tool},
+        orchestrator=SessionRecordingOrchestrator(),
+        event_bus=AgentEventBus(),
+    )
+
+    context.metadata["nested"]["value"] = 2
+    plan.metadata["nested"]["value"] = 2
+    plan.steps[0].input_data["nested"]["value"] = 2
+    dependencies["direct-step"].append("mutated")
+
+    assert prepared.context is not context
+    assert prepared.context.metadata == {"nested": {"value": 1}}
+    assert prepared.plan is not plan
+    assert prepared.plan.metadata == {"nested": {"value": 1}}
+    assert prepared.plan.steps[0].input_data == {"nested": {"value": 1}}
+    assert prepared.compiled.plan is prepared.plan
+    assert prepared.compiled.dependencies == {"direct-step": ()}
+    with pytest.raises(TypeError):
+        prepared.compiled.dependencies["direct-step"] = ()
+    assert prepared.tools["property_calculator"] is tool
+
+
+def test_prepared_workflow_type_hints_resolve_at_runtime():
+    hints = get_type_hints(workflow_executor_module.PreparedWorkflow)
+
+    assert "orchestrator" in hints
+
+
 def test_prepared_create_session_uses_preflight_inputs():
     context = AgentContext(query="CCO", trace_id="prepared-session")
     tool = FakeTool("property_calculator")
@@ -323,7 +527,7 @@ def test_prepare_with_plan_skips_planner_and_compiles_once():
         plan=plan,
     )
 
-    assert prepared.plan is plan
+    assert prepared.plan is not plan
     assert planner.calls == 0
     assert compiler.calls == 1
 
@@ -361,6 +565,55 @@ def test_prepare_returns_existing_preflight_failure_without_orchestrator(
     assert execution.result.error.code == expected_code
     assert execution.result.message == "Workflow plan failed execution preflight"
     assert execution.events == []
+
+
+def test_prepare_honors_public_preflight_override_block_exactly_once():
+    context = AgentContext(query="CCO", trace_id="override-block")
+    plan = SingleStepPlanner().plan(context)
+    failure = workflow_executor_module.WorkflowExecution(
+        plan=plan,
+        result=AgentResult(
+            trace_id=context.trace_id,
+            success=False,
+            message="blocked by extension",
+        ),
+        events=[],
+    )
+    compiler = CountingCompiler()
+    executor = BlockingPreflightExecutor(
+        failure,
+        compiler=compiler,
+        orchestrator=ExplodingPreflightOrchestrator(),
+    )
+
+    prepared = executor.prepare(
+        context=context,
+        policy=FAKE_POLICY,
+        all_tools={"property_calculator": FakeTool("property_calculator")},
+        plan=plan,
+    )
+
+    assert prepared is failure
+    assert executor.preflight_calls == 1
+    assert compiler.calls == 0
+
+
+def test_prepare_override_calling_super_compiles_only_once():
+    context = AgentContext(query="CCO", trace_id="override-super")
+    plan = SingleStepPlanner().plan(context)
+    compiler = CountingCompiler()
+    executor = SuperCallingPreflightExecutor(compiler=compiler)
+
+    prepared = executor.prepare(
+        context=context,
+        policy=FAKE_POLICY,
+        all_tools={"property_calculator": FakeTool("property_calculator")},
+        plan=plan,
+    )
+
+    assert isinstance(prepared, workflow_executor_module.PreparedWorkflow)
+    assert executor.preflight_calls == 1
+    assert compiler.calls == 1
 
 
 def test_execute_calls_prepare_once_and_consumes_prepared_workflow():
