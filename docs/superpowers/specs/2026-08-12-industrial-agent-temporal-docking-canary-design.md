@@ -1,8 +1,8 @@
 # MedChat 工业级 Agent 阶段 3A：Temporal 对接长任务 Canary 设计
 
-**日期：** 2026-08-12  
-**状态：** 已确认，待实施计划  
-**前置阶段：** `docs/superpowers/specs/2026-08-11-industrial-agent-langgraph-canary-design.md`  
+**日期：** 2026-08-12
+**状态：** 已确认，待实施计划
+**前置阶段：** `docs/superpowers/specs/2026-08-11-industrial-agent-langgraph-canary-design.md`
 **目标分支：** `codex/industrial-agent-temporal-docking-canary`
 
 ## 1. 背景与目标
