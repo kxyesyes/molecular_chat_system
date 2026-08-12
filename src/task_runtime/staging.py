@@ -52,6 +52,10 @@ _EXECUTIONS_NAME = "executions"
 _STAGE_PREFIX = ".stage-"
 _SNAPSHOT_PREFIX = ".snapshot-"
 _LEASE_SHARD_COUNT = 256
+_DEFAULT_EXECUTION_LEASE_TIMEOUT_SECONDS = 300.0
+_STAGE_LEASE_TIMEOUT_SECONDS = 5.0
+_LEASE_POLL_SECONDS = 0.02
+_MAX_LEASE_TIMEOUT_SECONDS = 3600.0
 _STALE_EXECUTION_SECONDS = 60 * 60
 _MAX_TASK_ID_LENGTH = 128
 _MAX_JSON_DEPTH = 16
@@ -97,6 +101,7 @@ _ERROR_CODES = frozenset(
         "manifest_task_mismatch",
         "manifest_integrity_failed",
         "manifest_conflict",
+        "manifest_busy",
         "manifest_cleanup_invalid",
         "manifest_io_error",
     }
@@ -106,6 +111,8 @@ _LOCK_REGISTRY_GUARD = threading.Lock()
 _ROOT_LOCKS: dict[str, threading.RLock] = {}
 _WINDOWS_SID_LOCK = threading.Lock()
 _WINDOWS_CURRENT_SID: str | None = None
+_LEASE_OWNERS_GUARD = threading.Lock()
+_LEASE_OWNERS: dict[str, int] = {}
 _TERMINAL_TASK_STATUSES = frozenset(
     {"succeeded", "failed", "canceled", "timed_out"}
 )
@@ -121,25 +128,44 @@ class ManifestError(ValueError):
 
 
 class _TaskLease:
-    """Non-blocking cross-process exclusive lease over one task shard."""
+    """Bounded-wait cross-process exclusive lease over one task shard."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        timeout_seconds: float = _DEFAULT_EXECUTION_LEASE_TIMEOUT_SECONDS,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> None:
         self._path = path
+        self._timeout_seconds = timeout_seconds
+        self._cancel_check = cancel_check
         self._handle: Any = None
+        self._owner_thread_id: int | None = None
         self.acquired = False
 
     def __enter__(self) -> "_TaskLease":
-        if not self.acquire():
-            raise ManifestError("manifest_io_error")
+        self.acquire(self._timeout_seconds, self._cancel_check)
         return self
 
     def __exit__(self, *args: Any) -> None:
         self.release()
 
-    def acquire(self) -> bool:
+    def acquire(
+        self,
+        timeout_seconds: float = _DEFAULT_EXECUTION_LEASE_TIMEOUT_SECONDS,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> bool:
         if self.acquired:
             return True
+        timeout = _normalize_lease_timeout(timeout_seconds)
+        if cancel_check is not None and not callable(cancel_check):
+            raise ManifestError("manifest_busy")
+        deadline = time.monotonic() + timeout
+        owner_thread_id = threading.get_ident()
+        lease_key = os.path.normcase(str(self._path)).casefold()
         descriptor: int | None = None
+        handle: Any = None
         try:
             flags = os.O_RDWR | os.O_CREAT
             flags |= getattr(os, "O_BINARY", 0)
@@ -155,17 +181,44 @@ class _TaskLease:
             _restrict_file(self._path)
             handle = os.fdopen(descriptor, "r+b", buffering=0)
             descriptor = None
-            try:
-                if _IS_WINDOWS:
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                handle.close()
-                return False
-            self._handle = handle
-            self.acquired = True
-            return True
+            while True:
+                if _lease_canceled(cancel_check):
+                    raise ManifestError("manifest_busy")
+                with _LEASE_OWNERS_GUARD:
+                    current_owner = _LEASE_OWNERS.get(lease_key)
+                if current_owner == owner_thread_id:
+                    raise ManifestError("manifest_busy")
+                locked = False
+                if current_owner is None:
+                    try:
+                        os.lseek(handle.fileno(), 0, os.SEEK_SET)
+                        if _IS_WINDOWS:
+                            msvcrt.locking(
+                                handle.fileno(),
+                                msvcrt.LK_NBLCK,
+                                1,
+                            )
+                        else:
+                            fcntl.flock(
+                                handle.fileno(),
+                                fcntl.LOCK_EX | fcntl.LOCK_NB,
+                            )
+                        locked = True
+                    except OSError:
+                        locked = False
+                if locked:
+                    with _LEASE_OWNERS_GUARD:
+                        if lease_key not in _LEASE_OWNERS:
+                            _LEASE_OWNERS[lease_key] = owner_thread_id
+                            self._handle = handle
+                            self._owner_thread_id = owner_thread_id
+                            self.acquired = True
+                            return True
+                    _unlock_lease_handle(handle)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ManifestError("manifest_busy")
+                time.sleep(min(_LEASE_POLL_SECONDS, remaining))
         except ManifestError:
             raise
         except (OSError, RuntimeError, ValueError):
@@ -176,24 +229,61 @@ class _TaskLease:
                     os.close(descriptor)
                 except OSError:
                     pass
+            if handle is not None and handle is not self._handle:
+                try:
+                    handle.close()
+                except OSError:
+                    pass
 
     def release(self) -> None:
         handle = self._handle
         self._handle = None
+        owner_thread_id = self._owner_thread_id
+        self._owner_thread_id = None
         if handle is None:
             self.acquired = False
             return
+        lease_key = os.path.normcase(str(self._path)).casefold()
         try:
-            os.lseek(handle.fileno(), 0, os.SEEK_SET)
-            if _IS_WINDOWS:
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        except OSError:
-            pass
+            _unlock_lease_handle(handle)
         finally:
-            handle.close()
-            self.acquired = False
+            try:
+                handle.close()
+            finally:
+                with _LEASE_OWNERS_GUARD:
+                    if _LEASE_OWNERS.get(lease_key) == owner_thread_id:
+                        _LEASE_OWNERS.pop(lease_key, None)
+                self.acquired = False
+
+
+def _normalize_lease_timeout(value: Any) -> float:
+    if (
+        type(value) not in (int, float)
+        or not math.isfinite(float(value))
+        or not 0 <= float(value) <= _MAX_LEASE_TIMEOUT_SECONDS
+    ):
+        raise ManifestError("manifest_busy")
+    return float(value)
+
+
+def _lease_canceled(cancel_check: Callable[[], bool] | None) -> bool:
+    if cancel_check is None:
+        return False
+    try:
+        return bool(cancel_check())
+    except Exception:
+        return True
+
+
+def _unlock_lease_handle(handle: Any) -> None:
+    try:
+        os.lseek(handle.fileno(), 0, os.SEEK_SET)
+        if _IS_WINDOWS:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
 
 
 @dataclass
@@ -329,6 +419,42 @@ class DockingInputStager:
             self._assert_root_safe()
             self._ensure_trash()
             self._ensure_leases()
+        lease = self._task_lease(
+            task_id,
+            timeout_seconds=_STAGE_LEASE_TIMEOUT_SECONDS,
+        )
+        lease.__enter__()
+        try:
+            return self._stage_under_lease(
+                task_id,
+                receptor_name,
+                receptor_bytes,
+                ligand_filename,
+                ligand_content,
+                ligand_mode,
+                canonical_config,
+                config_hash,
+                expected,
+            )
+        finally:
+            lease.__exit__(None, None, None)
+
+    def _stage_under_lease(
+        self,
+        task_id: str,
+        receptor_name: str,
+        receptor_bytes: bytes,
+        ligand_filename: str,
+        ligand_content: bytes,
+        ligand_mode: str,
+        canonical_config: Mapping[str, Any],
+        config_hash: str,
+        expected: Mapping[str, Any],
+    ) -> Path:
+        with self._lock:
+            self._assert_root_safe()
+            self._ensure_trash()
+            self._ensure_leases()
             task_root = self._root / task_id
             manifest_path = task_root / _MANIFEST_NAME
             _assert_practical_path(task_root, "manifest_invalid_task_id")
@@ -340,78 +466,76 @@ class DockingInputStager:
                 task_root / _INPUTS_NAME / ligand_filename,
                 "manifest_invalid_input_name",
             )
-            lease = self._task_lease(task_id)
-            with lease:
-                if task_root.exists() or task_root.is_symlink():
-                    return self._reuse_or_reject(task_id, manifest_path, expected)
+            if task_root.exists() or task_root.is_symlink():
+                return self._reuse_or_reject(task_id, manifest_path, expected)
 
-                temporary_root = self._root / f"{_STAGE_PREFIX}{uuid.uuid4().hex[:16]}"
-                published = False
+            temporary_root = self._root / f"{_STAGE_PREFIX}{uuid.uuid4().hex[:16]}"
+            published = False
+            try:
+                temporary_root.mkdir(mode=0o700)
+                _restrict_directory(temporary_root)
+                _write_ownership_marker(temporary_root)
+
+                inputs_root = temporary_root / _INPUTS_NAME
+                inputs_root.mkdir(mode=0o700)
+                _restrict_directory(inputs_root)
+                receptor_path = inputs_root / receptor_name
+                ligand_path = inputs_root / ligand_filename
+                _assert_practical_path(
+                    receptor_path,
+                    "manifest_invalid_input_name",
+                )
+                _assert_practical_path(
+                    ligand_path,
+                    "manifest_invalid_input_name",
+                )
+                _atomic_write(receptor_path, receptor_bytes)
+                _atomic_write(ligand_path, ligand_content)
+                _fsync_directory(inputs_root)
+
+                manifest = {
+                    "schema": _SCHEMA,
+                    "task_id": task_id,
+                    "type": _TASK_TYPE,
+                    "receptor": expected["receptor"],
+                    "ligand": expected["ligand"],
+                    "ligand_mode": ligand_mode,
+                    "config": canonical_config,
+                    "config_hash": config_hash,
+                    "created_at": _utc_now(),
+                }
+                _atomic_write(
+                    temporary_root / _MANIFEST_NAME,
+                    _canonical_json(manifest),
+                )
+                _fsync_directory(temporary_root)
+                self._assert_root_safe()
                 try:
-                    temporary_root.mkdir(mode=0o700)
-                    _restrict_directory(temporary_root)
-                    _write_ownership_marker(temporary_root)
-
-                    inputs_root = temporary_root / _INPUTS_NAME
-                    inputs_root.mkdir(mode=0o700)
-                    _restrict_directory(inputs_root)
-                    receptor_path = inputs_root / receptor_name
-                    ligand_path = inputs_root / ligand_filename
-                    _assert_practical_path(
-                        receptor_path,
-                        "manifest_invalid_input_name",
-                    )
-                    _assert_practical_path(
-                        ligand_path,
-                        "manifest_invalid_input_name",
-                    )
-                    _atomic_write(receptor_path, receptor_bytes)
-                    _atomic_write(ligand_path, ligand_content)
-                    _fsync_directory(inputs_root)
-
-                    manifest = {
-                        "schema": _SCHEMA,
-                        "task_id": task_id,
-                        "type": _TASK_TYPE,
-                        "receptor": expected["receptor"],
-                        "ligand": expected["ligand"],
-                        "ligand_mode": ligand_mode,
-                        "config": canonical_config,
-                        "config_hash": config_hash,
-                        "created_at": _utc_now(),
-                    }
-                    _atomic_write(
-                        temporary_root / _MANIFEST_NAME,
-                        _canonical_json(manifest),
-                    )
-                    _fsync_directory(temporary_root)
-                    self._assert_root_safe()
-                    try:
-                        if not _publish_directory(temporary_root, task_root):
-                            raise ManifestError("manifest_io_error")
-                    except ManifestError:
-                        if task_root.exists() or task_root.is_symlink():
-                            return self._reuse_or_reject(
-                                task_id,
-                                manifest_path,
-                                expected,
-                            )
-                        raise
-                    published = True
-                    self._assert_task_root(task_id, task_root)
-                    self.load_verified(task_id, manifest_path)
-                    return manifest_path
+                    if not _publish_directory(temporary_root, task_root):
+                        raise ManifestError("manifest_io_error")
                 except ManifestError:
-                    if published:
-                        self._quarantine_active(task_root, task_id)
+                    if task_root.exists() or task_root.is_symlink():
+                        return self._reuse_or_reject(
+                            task_id,
+                            manifest_path,
+                            expected,
+                        )
                     raise
-                except (MemoryError, OSError, RuntimeError, ValueError):
-                    if published:
-                        self._quarantine_active(task_root, task_id)
-                    raise ManifestError("manifest_io_error") from None
-                finally:
-                    if temporary_root.exists() and not temporary_root.is_symlink():
-                        self._dispose_temporary(temporary_root)
+                published = True
+                self._assert_task_root(task_id, task_root)
+                self.load_verified(task_id, manifest_path)
+                return manifest_path
+            except ManifestError:
+                if published:
+                    self._quarantine_active(task_root, task_id)
+                raise
+            except (MemoryError, OSError, RuntimeError, ValueError):
+                if published:
+                    self._quarantine_active(task_root, task_id)
+                raise ManifestError("manifest_io_error") from None
+            finally:
+                if temporary_root.exists() and not temporary_root.is_symlink():
+                    self._dispose_temporary(temporary_root)
 
     def load_verified(
         self,
@@ -428,6 +552,9 @@ class DockingInputStager:
         self,
         task_id: str,
         manifest_path: str | os.PathLike[str],
+        *,
+        lease_timeout_seconds: float = _DEFAULT_EXECUTION_LEASE_TIMEOUT_SECONDS,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> Iterator[VerifiedDockingInputs]:
         """Yield immutable execution-local inputs while holding a task lease."""
 
@@ -438,8 +565,13 @@ class DockingInputStager:
         with self._lock:
             self._assert_root_safe()
             self._ensure_leases()
-            lease = self._task_lease(task_id)
-            lease.__enter__()
+        lease = self._task_lease(
+            task_id,
+            timeout_seconds=lease_timeout_seconds,
+            cancel_check=cancel_check,
+        )
+        lease.__enter__()
+        with self._lock:
             try:
                 self._cleanup_execution_residue(
                     self._root / task_id,
@@ -621,12 +753,20 @@ class DockingInputStager:
         _write_ownership_marker(directory)
         _fsync_directory(directory.parent)
 
-    def _task_lease(self, task_id: str) -> _TaskLease:
+    def _task_lease(
+        self,
+        task_id: str,
+        *,
+        timeout_seconds: float = _DEFAULT_EXECUTION_LEASE_TIMEOUT_SECONDS,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> _TaskLease:
         _validate_task_id(task_id)
         digest = hashlib.sha256(task_id.encode("ascii")).digest()
         shard = digest[0] % _LEASE_SHARD_COUNT
         return _TaskLease(
-            self._root / _LEASES_NAME / f"lease-{shard:02x}.lock"
+            self._root / _LEASES_NAME / f"lease-{shard:02x}.lock",
+            timeout_seconds=timeout_seconds,
+            cancel_check=cancel_check,
         )
 
     def cleanup_expired(
@@ -640,8 +780,8 @@ class DockingInputStager:
 
         Production callers must supply ``status_check`` backed by TaskStore.
         Cleanup proceeds only when two reads under the task lease report an
-        immutable terminal state.  Without it, only the legacy static
-        ``protected`` snapshot guards deletion.
+        immutable terminal state.  Without it, cleanup returns an empty list
+        and performs no deletion; ``protected`` remains an additional guard.
         """
 
         if (
@@ -662,6 +802,8 @@ class DockingInputStager:
                 _validate_task_id(task_id)
             except ManifestError:
                 raise ManifestError("manifest_cleanup_invalid") from None
+        if status_check is None:
+            return []
 
         with self._lock:
             self._assert_root_safe()
@@ -701,8 +843,17 @@ class DockingInputStager:
                         continue
                     if task_id in protected_ids:
                         continue
-                    lease = self._task_lease(task_id)
-                    if not lease.acquire():
+                    lease = self._task_lease(
+                        task_id,
+                        timeout_seconds=0,
+                    )
+                    try:
+                        lease.acquire(timeout_seconds=0)
+                    except ManifestError as exc:
+                        if exc.reason_code == "manifest_busy":
+                            continue
+                        raise
+                    if not lease.acquired:
                         continue
                     try:
                         if task_id in protected_ids:

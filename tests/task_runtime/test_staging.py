@@ -5,6 +5,7 @@ import math
 import multiprocessing
 import os
 import stat
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
@@ -555,6 +556,7 @@ def test_cleanup_preserves_protected_and_new_directories_and_removes_old(
     removed = stager.cleanup_expired(
         cutoff_epoch=now - 100,
         protected={"running"},
+        status_check=lambda task_id: "succeeded",
     )
 
     assert removed == ["expired"]
@@ -574,6 +576,22 @@ def test_cleanup_rejects_invalid_protected_ids_without_deleting(tmp_path: Path) 
 
     _assert_safe_error(caught.value, forbidden=("../expired", str(tmp_path.resolve())))
     assert (tmp_path / "expired").is_dir()
+
+
+def test_cleanup_without_status_check_deletes_nothing(tmp_path: Path) -> None:
+    stager = DockingInputStager(tmp_path)
+    manifest = _stage_file(stager, "expired")
+    os.utime(manifest.parent, (1, 1))
+    residue = tmp_path / ".stage-abandoned"
+    residue.mkdir()
+    (residue / ".medchat-staging-owner").write_bytes(
+        b"MedChatTaskStaging@1\n"
+    )
+    os.utime(residue, (1, 1))
+
+    assert stager.cleanup_expired(time.time(), protected=set()) == []
+    assert manifest.parent.is_dir()
+    assert residue.is_dir()
 
 
 def test_cleanup_status_check_allows_only_terminal_state_at_final_check(
@@ -677,7 +695,11 @@ def test_cleanup_preserves_unowned_safe_named_directory(tmp_path: Path) -> None:
     marker.write_text("not a staged task", encoding="utf-8")
     os.utime(unowned, (1, 1))
 
-    removed = stager.cleanup_expired(cutoff_epoch=time.time(), protected=set())
+    removed = stager.cleanup_expired(
+        cutoff_epoch=time.time(),
+        protected=set(),
+        status_check=lambda task_id: "succeeded",
+    )
 
     assert removed == []
     assert marker.read_text(encoding="utf-8") == "not a staged task"
@@ -696,7 +718,11 @@ def test_cleanup_ignores_symlink_entries_without_following_them(tmp_path: Path) 
     os.utime(outside, (1, 1))
     stager = DockingInputStager(tmp_path)
 
-    assert stager.cleanup_expired(cutoff_epoch=time.time(), protected=set()) == []
+    assert stager.cleanup_expired(
+        cutoff_epoch=time.time(),
+        protected=set(),
+        status_check=lambda task_id: "succeeded",
+    ) == []
     assert marker.read_text(encoding="utf-8") == "keep"
 
 
@@ -810,7 +836,11 @@ def test_cleanup_preserves_old_task_with_nested_symlink(tmp_path: Path) -> None:
         pytest.skip(f"directory symlinks unavailable: {type(exc).__name__}")
     os.utime(path.parent, (1, 1))
 
-    removed = stager.cleanup_expired(cutoff_epoch=time.time(), protected=set())
+    removed = stager.cleanup_expired(
+        cutoff_epoch=time.time(),
+        protected=set(),
+        status_check=lambda task_id: "succeeded",
+    )
 
     assert removed == []
     assert path.parent.is_dir()
@@ -1337,14 +1367,22 @@ def test_active_execution_lease_blocks_cleanup_and_conflicting_stage(
 
     with stager.execution_snapshot("task-1", path):
         os.utime(path.parent, (1, 1))
-        assert stager.cleanup_expired(time.time(), protected=set()) == []
+        assert stager.cleanup_expired(
+            time.time(),
+            protected=set(),
+            status_check=lambda task_id: "succeeded",
+        ) == []
         assert path.parent.exists()
         with pytest.raises(ManifestError) as caught:
             _stage_file(DockingInputStager(tmp_path))
-        assert caught.value.reason_code in {"manifest_conflict", "manifest_io_error"}
+        assert caught.value.reason_code == "manifest_busy"
 
     os.utime(path.parent, (1, 1))
-    assert stager.cleanup_expired(time.time(), protected=set()) == ["task-1"]
+    assert stager.cleanup_expired(
+        time.time(),
+        protected=set(),
+        status_check=lambda task_id: "succeeded",
+    ) == ["task-1"]
 
 
 def test_execution_lease_acquisition_failure_is_fail_closed(
@@ -1363,7 +1401,11 @@ def test_execution_lease_acquisition_failure_is_fail_closed(
         def __exit__(self, *args: Any) -> None:
             return None
 
-    monkeypatch.setattr(stager, "_task_lease", lambda task_id: FailedLease())
+    monkeypatch.setattr(
+        stager,
+        "_task_lease",
+        lambda task_id, **kwargs: FailedLease(),
+    )
 
     with pytest.raises(ManifestError) as caught:
         with stager.execution_snapshot("task-1", path):
@@ -1389,10 +1431,14 @@ def test_cross_process_execution_lease_blocks_stage_and_cleanup(
     try:
         assert ready.wait(15)
         os.utime(path.parent, (1, 1))
-        assert stager.cleanup_expired(time.time(), protected=set()) == []
+        assert stager.cleanup_expired(
+            time.time(),
+            protected=set(),
+            status_check=lambda task_id: "succeeded",
+        ) == []
         with pytest.raises(ManifestError) as caught:
             _stage_file(stager)
-        assert caught.value.reason_code == "manifest_io_error"
+        assert caught.value.reason_code == "manifest_busy"
     finally:
         release.set()
         process.join(15)
@@ -1445,7 +1491,140 @@ def test_task_lease_shard_collision_serializes_distinct_tasks(tmp_path: Path) ->
 
     with stager._task_lease(first):
         contender = stager._task_lease(second)
-        assert contender.acquire() is False
+        with pytest.raises(ManifestError) as caught:
+            contender.acquire(timeout_seconds=0)
+    assert caught.value.reason_code == "manifest_busy"
+
+
+def test_colliding_execution_waits_then_starts_after_release(tmp_path: Path) -> None:
+    stager = DockingInputStager(tmp_path)
+    first = "task-0"
+    first_shard = stager._task_lease(first)._path
+    second = next(
+        f"task-{index}"
+        for index in range(1, 5000)
+        if stager._task_lease(f"task-{index}")._path == first_shard
+    )
+    first_manifest = _stage_file(stager, first)
+    second_manifest = _stage_file(stager, second)
+    entered = threading.Event()
+    waiting_started = threading.Event()
+    release = threading.Event()
+
+    def hold_first() -> None:
+        with stager.execution_snapshot(first, first_manifest):
+            entered.set()
+            assert release.wait(5)
+
+    def run_second() -> float:
+        started = time.monotonic()
+        waiting_started.set()
+        with stager.execution_snapshot(
+            second,
+            second_manifest,
+            lease_timeout_seconds=2,
+        ) as verified:
+            assert verified.verify_integrity() is True
+        return time.monotonic() - started
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        holder = pool.submit(hold_first)
+        assert entered.wait(5)
+        waiter = pool.submit(run_second)
+        assert waiting_started.wait(5)
+        time.sleep(0.15)
+        assert not waiter.done()
+        release.set()
+        waited = waiter.result(timeout=5)
+        holder.result(timeout=5)
+
+    assert waited >= 0.1
+
+
+def test_colliding_execution_timeout_is_safe_manifest_busy(tmp_path: Path) -> None:
+    stager = DockingInputStager(tmp_path)
+    first = "task-0"
+    first_shard = stager._task_lease(first)._path
+    second = next(
+        f"task-{index}"
+        for index in range(1, 5000)
+        if stager._task_lease(f"task-{index}")._path == first_shard
+    )
+    first_manifest = _stage_file(stager, first)
+    second_manifest = _stage_file(stager, second)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_first() -> None:
+        with stager.execution_snapshot(first, first_manifest):
+            entered.set()
+            assert release.wait(5)
+
+    def wait_second() -> str:
+        try:
+            with stager.execution_snapshot(
+                second,
+                second_manifest,
+                lease_timeout_seconds=0.05,
+            ):
+                pass
+        except ManifestError as exc:
+            return exc.reason_code
+        return "unexpected_success"
+
+    def cancel_second() -> str:
+        try:
+            with stager.execution_snapshot(
+                second,
+                second_manifest,
+                lease_timeout_seconds=2,
+                cancel_check=lambda: True,
+            ):
+                pass
+        except ManifestError as exc:
+            return exc.reason_code
+        return "unexpected_success"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        holder = pool.submit(hold_first)
+        assert entered.wait(5)
+        timeout_code = pool.submit(wait_second).result(timeout=5)
+        cancel_code = pool.submit(cancel_second).result(timeout=5)
+        release.set()
+        holder.result(timeout=5)
+
+    assert timeout_code == "manifest_busy"
+    assert cancel_code == "manifest_busy"
+    error = ManifestError(timeout_code)
+    _assert_safe_error(error, forbidden=(first, second, str(tmp_path.resolve())))
+
+
+def test_colliding_execution_same_thread_reentry_is_busy(
+    tmp_path: Path,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    first = "task-0"
+    first_shard = stager._task_lease(first)._path
+    second = next(
+        f"task-{index}"
+        for index in range(1, 5000)
+        if stager._task_lease(f"task-{index}")._path == first_shard
+    )
+    first_manifest = _stage_file(stager, first)
+    second_manifest = _stage_file(stager, second)
+
+    with stager.execution_snapshot(first, first_manifest):
+        started = time.monotonic()
+        with pytest.raises(ManifestError) as reentrant:
+            with stager.execution_snapshot(
+                second,
+                second_manifest,
+                lease_timeout_seconds=2,
+            ):
+                pass
+        assert time.monotonic() - started < 0.5
+
+    assert reentrant.value.reason_code == "manifest_busy"
 
 
 def test_stage_verifies_published_manifest_before_reporting_success(
@@ -1640,7 +1819,11 @@ def test_cleanup_removes_only_owned_expired_temp_and_quarantine_residue(
     for path in (abandoned, quarantined, unowned):
         os.utime(path, (1, 1))
 
-    removed = stager.cleanup_expired(cutoff_epoch=time.time(), protected=set())
+    removed = stager.cleanup_expired(
+        cutoff_epoch=time.time(),
+        protected=set(),
+        status_check=lambda task_id: "succeeded",
+    )
 
     assert removed == []
     assert not abandoned.exists()
@@ -1677,7 +1860,11 @@ def test_cleanup_quarantine_swap_preserves_fresh_original_name(
 
     monkeypatch.setattr(staging_module.shutil, "rmtree", replace_before_delete)
 
-    removed = stager.cleanup_expired(cutoff_epoch=time.time(), protected=set())
+    removed = stager.cleanup_expired(
+        cutoff_epoch=time.time(),
+        protected=set(),
+        status_check=lambda task_id: "succeeded",
+    )
 
     assert removed == ["expired"]
     assert (tmp_path / "expired" / "fresh.txt").read_text(encoding="utf-8") == "fresh"
@@ -1706,7 +1893,11 @@ def test_cleanup_rename_guard_restores_directory_swapped_after_validation(
 
     monkeypatch.setattr(staging_module, "_publish_directory", swap_before_publish)
 
-    removed = stager.cleanup_expired(cutoff_epoch=time.time(), protected=set())
+    removed = stager.cleanup_expired(
+        cutoff_epoch=time.time(),
+        protected=set(),
+        status_check=lambda task_id: "succeeded",
+    )
 
     assert removed == []
     assert (original / "fresh.txt").read_text(encoding="utf-8") == "fresh"
@@ -1725,7 +1916,11 @@ def test_cleanup_delete_failure_leaves_quarantine_and_does_not_claim_removed(
 
     monkeypatch.setattr(staging_module.shutil, "rmtree", fail_delete)
 
-    removed = stager.cleanup_expired(cutoff_epoch=time.time(), protected=set())
+    removed = stager.cleanup_expired(
+        cutoff_epoch=time.time(),
+        protected=set(),
+        status_check=lambda task_id: "succeeded",
+    )
 
     assert removed == []
     assert not (tmp_path / "expired").exists()
