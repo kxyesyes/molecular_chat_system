@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 import src.task_runtime.staging as staging_module
+from src.task_runtime.models import TaskStatus
 from src.task_runtime.staging import DockingInputStager, ManifestError
 
 
@@ -36,6 +37,32 @@ def _hold_execution_snapshot(
     with stager.execution_snapshot("task-1", manifest_path):
         ready.set()
         release.wait(15)
+
+
+def _hold_snapshot_until_killed(
+    root: str,
+    manifest_path: str,
+    ready: Any,
+) -> None:
+    stager = DockingInputStager(root)
+    with stager.execution_snapshot("task-1", manifest_path):
+        ready.set()
+        time.sleep(60)
+
+
+def _attempt_snapshot_mutation(path: str, action: str, result: Any) -> None:
+    target = Path(path)
+    try:
+        if action == "write":
+            target.write_bytes(b"TAMPER")
+        else:
+            replacement = target.with_name(f"{target.name}.replacement")
+            replacement.write_bytes(b"TAMPER")
+            os.replace(replacement, target)
+    except OSError:
+        result.put("denied")
+    else:
+        result.put("changed")
 
 
 def _stage_file(
@@ -549,45 +576,95 @@ def test_cleanup_rejects_invalid_protected_ids_without_deleting(tmp_path: Path) 
     assert (tmp_path / "expired").is_dir()
 
 
-def test_cleanup_dynamic_protected_check_is_re_read_before_quarantine(
+def test_cleanup_status_check_allows_only_terminal_state_at_final_check(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stager = DockingInputStager(tmp_path)
     path = _stage_file(stager, "changing")
     os.utime(path.parent, (1, 1))
-    state = {"protected": False}
+    state = {"status": "running"}
     real_load = stager._load_verified_unlocked
 
-    def protect_after_validation(task_id: str, manifest_path: Path) -> dict[str, Any]:
+    def finish_after_validation(task_id: str, manifest_path: Path) -> dict[str, Any]:
         manifest = real_load(task_id, manifest_path)
-        state["protected"] = True
+        state["status"] = "succeeded"
         return manifest
 
-    monkeypatch.setattr(stager, "_load_verified_unlocked", protect_after_validation)
+    monkeypatch.setattr(stager, "_load_verified_unlocked", finish_after_validation)
 
     removed = stager.cleanup_expired(
         time.time(),
         protected=set(),
-        protected_check=lambda task_id: state["protected"],
+        status_check=lambda task_id: state["status"],
     )
 
-    assert removed == []
-    assert path.parent.exists()
+    assert removed == ["changing"]
+    assert not path.parent.exists()
 
 
-def test_cleanup_protected_check_exception_fails_closed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("status", ["queued", "running", "cancel_requested", None])
+def test_cleanup_status_check_skips_nonterminal_and_missing(
+    tmp_path: Path,
+    status: str | None,
+) -> None:
     stager = DockingInputStager(tmp_path)
     path = _stage_file(stager, "protected")
     os.utime(path.parent, (1, 1))
 
-    def unavailable(task_id: str) -> bool:
+    assert stager.cleanup_expired(
+        time.time(),
+        protected=set(),
+        status_check=lambda task_id: status,
+    ) == []
+    assert path.parent.exists()
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["succeeded", "failed", "canceled", "timed_out", TaskStatus.SUCCEEDED],
+)
+def test_cleanup_status_check_accepts_terminal_states(
+    tmp_path: Path,
+    status: str | TaskStatus,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager, "terminal")
+    os.utime(path.parent, (1, 1))
+
+    assert stager.cleanup_expired(
+        time.time(),
+        protected=set(),
+        status_check=lambda task_id: status,
+    ) == ["terminal"]
+
+
+def test_cleanup_status_must_remain_terminal_at_second_read(tmp_path: Path) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager, "unstable")
+    os.utime(path.parent, (1, 1))
+    states = iter(("succeeded", "running"))
+
+    assert stager.cleanup_expired(
+        time.time(),
+        protected=set(),
+        status_check=lambda task_id: next(states),
+    ) == []
+    assert path.parent.exists()
+
+
+def test_cleanup_status_check_exception_fails_closed(tmp_path: Path) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager, "protected")
+    os.utime(path.parent, (1, 1))
+
+    def unavailable(task_id: str) -> str:
         raise RuntimeError("store unavailable")
 
     assert stager.cleanup_expired(
         time.time(),
         protected=set(),
-        protected_check=unavailable,
+        status_check=unavailable,
     ) == []
     assert path.parent.exists()
 
@@ -1062,6 +1139,143 @@ def test_execution_snapshot_is_unchanged_when_original_is_replaced(
         assert resolved.receptor_sha256 == staging_module.hashlib.sha256(b"ATOM\n").hexdigest()
 
 
+def test_execution_snapshot_is_read_only_and_verifiable(tmp_path: Path) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+
+    with stager.execution_snapshot("task-1", path) as resolved:
+        assert resolved.verify_integrity() is True
+        if os.name != "nt":
+            assert stat.S_IMODE(resolved.receptor_path.stat().st_mode) == 0o400
+            assert stat.S_IMODE(resolved.ligand_path.stat().st_mode) == 0o400
+
+
+@pytest.mark.parametrize("action", ["write", "replace"])
+def test_pinned_snapshot_denies_or_detects_child_mutation(
+    tmp_path: Path,
+    action: str,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+    context = multiprocessing.get_context("spawn")
+    outcome: str | None = None
+    exit_error: ManifestError | None = None
+
+    try:
+        with stager.execution_snapshot("task-1", path) as resolved:
+            result = context.Queue()
+            process = context.Process(
+                target=_attempt_snapshot_mutation,
+                args=(str(resolved.receptor_path), action, result),
+            )
+            process.start()
+            process.join(15)
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+                pytest.fail("snapshot mutation worker did not exit")
+            assert process.exitcode == 0
+            outcome = result.get(timeout=5)
+            if os.name == "nt":
+                assert outcome == "denied"
+            if outcome == "changed":
+                with pytest.raises(ManifestError) as caught:
+                    resolved.verify_integrity()
+                assert caught.value.reason_code == "manifest_integrity_failed"
+            else:
+                assert outcome == "denied"
+                assert resolved.verify_integrity() is True
+    except ManifestError as exc:
+        exit_error = exc
+
+    if outcome == "changed":
+        assert exit_error is not None
+        assert exit_error.reason_code == "manifest_integrity_failed"
+    else:
+        assert exit_error is None
+
+
+def test_execution_snapshot_integrity_error_does_not_mask_body_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+    real_verify = staging_module._verify_pinned_snapshot_file
+    calls = {"count": 0}
+
+    def fail_final_verify(pin: Any) -> bool:
+        calls["count"] += 1
+        if calls["count"] > 4:
+            raise ManifestError("manifest_integrity_failed")
+        return real_verify(pin)
+
+    monkeypatch.setattr(
+        staging_module,
+        "_verify_pinned_snapshot_file",
+        fail_final_verify,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="scientific tool failed"):
+        with stager.execution_snapshot("task-1", path):
+            raise RuntimeError("scientific tool failed")
+
+
+def test_execution_snapshot_final_verification_failure_is_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+    real_verify = staging_module._verify_pinned_snapshot_file
+    calls = {"count": 0}
+
+    def fail_final_verify(pin: Any) -> bool:
+        calls["count"] += 1
+        if calls["count"] > 4:
+            raise ManifestError("manifest_integrity_failed")
+        return real_verify(pin)
+
+    monkeypatch.setattr(
+        staging_module,
+        "_verify_pinned_snapshot_file",
+        fail_final_verify,
+    )
+
+    with pytest.raises(ManifestError) as caught:
+        with stager.execution_snapshot("task-1", path):
+            pass
+
+    assert caught.value.reason_code == "manifest_integrity_failed"
+
+
+def test_worker_kill_snapshot_residue_is_removed_by_next_execution(
+    tmp_path: Path,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    process = context.Process(
+        target=_hold_snapshot_until_killed,
+        args=(str(tmp_path), str(path), ready),
+    )
+    process.start()
+    assert ready.wait(15)
+    stale = list((path.parent / "executions").glob("snapshot-*"))
+    assert len(stale) == 1
+    process.terminate()
+    process.join(15)
+    assert process.exitcode is not None
+
+    with stager.execution_snapshot("task-1", path) as resolved:
+        active = resolved.receptor_path.parent
+        snapshots = list((path.parent / "executions").glob("snapshot-*"))
+        assert snapshots == [active]
+        assert stale[0] != active
+
+
 def test_execution_snapshot_exit_removes_snapshot_when_quarantine_move_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1186,6 +1400,52 @@ def test_cross_process_execution_lease_blocks_stage_and_cleanup(
             process.terminate()
             process.join(5)
     assert process.exitcode == 0
+
+
+def test_task_leases_use_bounded_secure_shards(tmp_path: Path) -> None:
+    stager = DockingInputStager(tmp_path)
+
+    leases = {}
+    for index in range(2048):
+        lease = stager._task_lease(f"task-{index}")
+        leases[str(lease._path)] = lease
+    assert 1 <= len(leases) <= 256
+    for lease in leases.values():
+        with lease:
+            pass
+
+    lease_root = tmp_path / ".leases"
+    shard_files = list(lease_root.glob("lease-*.lock"))
+    assert 1 <= len(shard_files) <= 256
+    assert (lease_root / ".medchat-staging-owner").is_file()
+    if os.name != "nt":
+        assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in shard_files)
+    before_cleanup = {path.name for path in shard_files}
+    manifest = _stage_file(stager, "expired")
+    os.utime(manifest.parent, (1, 1))
+    assert stager.cleanup_expired(
+        time.time(),
+        protected=set(),
+        status_check=lambda task_id: "succeeded",
+    ) == ["expired"]
+    assert before_cleanup.issubset(
+        {path.name for path in lease_root.glob("lease-*.lock")}
+    )
+
+
+def test_task_lease_shard_collision_serializes_distinct_tasks(tmp_path: Path) -> None:
+    stager = DockingInputStager(tmp_path)
+    first = "task-0"
+    first_shard = stager._task_lease(first)._path
+    second = next(
+        f"task-{index}"
+        for index in range(1, 5000)
+        if stager._task_lease(f"task-{index}")._path == first_shard
+    )
+
+    with stager._task_lease(first):
+        contender = stager._task_lease(second)
+        assert contender.acquire() is False
 
 
 def test_stage_verifies_published_manifest_before_reporting_success(

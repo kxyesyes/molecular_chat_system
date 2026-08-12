@@ -17,6 +17,7 @@ import shutil
 import stat
 import tempfile
 import threading
+import time
 import unicodedata
 import uuid
 from contextlib import contextmanager
@@ -50,6 +51,8 @@ _LEASES_NAME = ".leases"
 _EXECUTIONS_NAME = "executions"
 _STAGE_PREFIX = ".stage-"
 _SNAPSHOT_PREFIX = ".snapshot-"
+_LEASE_SHARD_COUNT = 256
+_STALE_EXECUTION_SECONDS = 60 * 60
 _MAX_TASK_ID_LENGTH = 128
 _MAX_JSON_DEPTH = 16
 _MAX_JSON_NODES = 256
@@ -103,6 +106,9 @@ _LOCK_REGISTRY_GUARD = threading.Lock()
 _ROOT_LOCKS: dict[str, threading.RLock] = {}
 _WINDOWS_SID_LOCK = threading.Lock()
 _WINDOWS_CURRENT_SID: str | None = None
+_TERMINAL_TASK_STATUSES = frozenset(
+    {"succeeded", "failed", "canceled", "timed_out"}
+)
 
 
 class ManifestError(ValueError):
@@ -115,7 +121,7 @@ class ManifestError(ValueError):
 
 
 class _TaskLease:
-    """Non-blocking cross-process exclusive lease over one task ID."""
+    """Non-blocking cross-process exclusive lease over one task shard."""
 
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -190,6 +196,32 @@ class _TaskLease:
             self.acquired = False
 
 
+@dataclass
+class _PinnedSnapshotFile:
+    path: Path = field(repr=False)
+    containment_root: Path = field(repr=False)
+    descriptor: int = field(repr=False)
+    expected_sha256: str
+    expected_size: int
+    identity: tuple[int, int, int, int]
+    closed: bool = field(default=False, repr=False)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        try:
+            if not _IS_WINDOWS:
+                fcntl.flock(self.descriptor, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            try:
+                os.close(self.descriptor)
+            except OSError:
+                pass
+            self.closed = True
+
+
 @dataclass(frozen=True)
 class VerifiedDockingInputs:
     """Short-lived, reverified docking paths for an execution consumer."""
@@ -205,6 +237,19 @@ class VerifiedDockingInputs:
     ligand_size: int
     config_hash: str
     config: Mapping[str, Any]
+    _receptor_pin: _PinnedSnapshotFile = field(repr=False, compare=False)
+    _ligand_pin: _PinnedSnapshotFile = field(repr=False, compare=False)
+
+    def verify_integrity(self) -> bool:
+        """Re-hash pinned execution inputs before accepting scientific output."""
+
+        _verify_pinned_snapshot_file(self._receptor_pin)
+        _verify_pinned_snapshot_file(self._ligand_pin)
+        return True
+
+    def _close(self) -> None:
+        self._ligand_pin.close()
+        self._receptor_pin.close()
 
 
 class DockingInputStager:
@@ -389,12 +434,18 @@ class DockingInputStager:
         _validate_task_id(task_id)
         lease: _TaskLease | None = None
         snapshot_root: Path | None = None
+        verified: VerifiedDockingInputs | None = None
         with self._lock:
             self._assert_root_safe()
             self._ensure_leases()
             lease = self._task_lease(task_id)
             lease.__enter__()
             try:
+                self._cleanup_execution_residue(
+                    self._root / task_id,
+                    cutoff_epoch=time.time(),
+                    remove_all=True,
+                )
                 verified, snapshot_root = self._create_execution_snapshot(
                     task_id,
                     manifest_path,
@@ -402,16 +453,31 @@ class DockingInputStager:
             except BaseException:
                 lease.__exit__(None, None, None)
                 raise
+        body_error: BaseException | None = None
         try:
+            assert verified is not None
             yield verified
+        except BaseException as exc:
+            body_error = exc
+            raise
         finally:
+            integrity_error: ManifestError | None = None
+            if verified is not None:
+                try:
+                    verified.verify_integrity()
+                except ManifestError as exc:
+                    integrity_error = exc
+                finally:
+                    verified._close()
             disposed = True
             with self._lock:
                 if snapshot_root is not None:
                     disposed = self._dispose_execution_snapshot(snapshot_root)
             if lease is not None:
                 lease.__exit__(None, None, None)
-            if not disposed:
+            if body_error is None and integrity_error is not None:
+                raise integrity_error
+            if body_error is None and not disposed:
                 raise ManifestError("manifest_io_error")
 
     def _create_execution_snapshot(
@@ -458,6 +524,8 @@ class DockingInputStager:
         self._ensure_owned_directory(executions_root)
         temporary_root = executions_root / f"{_SNAPSHOT_PREFIX}{uuid.uuid4().hex[:16]}"
         snapshot_root = executions_root / f"snapshot-{uuid.uuid4().hex[:16]}"
+        receptor_pin: _PinnedSnapshotFile | None = None
+        ligand_pin: _PinnedSnapshotFile | None = None
         try:
             temporary_root.mkdir(mode=0o700)
             _restrict_directory(temporary_root)
@@ -471,27 +539,20 @@ class DockingInputStager:
                 raise ManifestError("manifest_io_error")
             receptor_snapshot = snapshot_root / receptor_source.name
             ligand_snapshot = snapshot_root / ligand_source.name
-            _, snapshot_receptor_hash = _secure_read_file(
+            _make_snapshot_read_only(receptor_snapshot)
+            _make_snapshot_read_only(ligand_snapshot)
+            receptor_pin = _pin_snapshot_file(
                 receptor_snapshot,
-                max_bytes=MAX_DOCKING_INPUT_BYTES,
-                expected_size=receptor_record["size"],
-                collect=False,
-                reason_code="manifest_integrity_failed",
-                containment_root=snapshot_root,
+                snapshot_root,
+                receptor_record["size"],
+                receptor_record["sha256"],
             )
-            _, snapshot_ligand_hash = _secure_read_file(
+            ligand_pin = _pin_snapshot_file(
                 ligand_snapshot,
-                max_bytes=ligand_limit,
-                expected_size=ligand_record["size"],
-                collect=False,
-                reason_code="manifest_integrity_failed",
-                containment_root=snapshot_root,
+                snapshot_root,
+                ligand_record["size"],
+                ligand_record["sha256"],
             )
-            if (
-                snapshot_receptor_hash != receptor_record["sha256"]
-                or snapshot_ligand_hash != ligand_record["sha256"]
-            ):
-                raise ManifestError("manifest_integrity_failed")
             config = manifest["config"]
             frozen_config = MappingProxyType(
                 {
@@ -501,23 +562,31 @@ class DockingInputStager:
                     "num_modes": config["num_modes"],
                 }
             )
+            verified = VerifiedDockingInputs(
+                task_id=task_id,
+                manifest_path=task_root / _MANIFEST_NAME,
+                receptor_path=receptor_snapshot,
+                ligand_path=ligand_snapshot,
+                ligand_mode=manifest["ligand_mode"],
+                receptor_sha256=receptor_record["sha256"],
+                receptor_size=receptor_record["size"],
+                ligand_sha256=ligand_record["sha256"],
+                ligand_size=ligand_record["size"],
+                config_hash=manifest["config_hash"],
+                config=frozen_config,
+                _receptor_pin=receptor_pin,
+                _ligand_pin=ligand_pin,
+            )
+            verified.verify_integrity()
             return (
-                VerifiedDockingInputs(
-                    task_id=task_id,
-                    manifest_path=task_root / _MANIFEST_NAME,
-                    receptor_path=receptor_snapshot,
-                    ligand_path=ligand_snapshot,
-                    ligand_mode=manifest["ligand_mode"],
-                    receptor_sha256=receptor_record["sha256"],
-                    receptor_size=receptor_record["size"],
-                    ligand_sha256=ligand_record["sha256"],
-                    ligand_size=ligand_record["size"],
-                    config_hash=manifest["config_hash"],
-                    config=frozen_config,
-                ),
+                verified,
                 snapshot_root,
             )
         except BaseException:
+            if ligand_pin is not None:
+                ligand_pin.close()
+            if receptor_pin is not None:
+                receptor_pin.close()
             if snapshot_root.exists() and not snapshot_root.is_symlink():
                 self._dispose_execution_snapshot(snapshot_root)
             if temporary_root.exists() and not temporary_root.is_symlink():
@@ -554,21 +623,25 @@ class DockingInputStager:
 
     def _task_lease(self, task_id: str) -> _TaskLease:
         _validate_task_id(task_id)
-        self._ensure_leases()
-        return _TaskLease(self._root / _LEASES_NAME / f"{task_id}.lock")
+        digest = hashlib.sha256(task_id.encode("ascii")).digest()
+        shard = digest[0] % _LEASE_SHARD_COUNT
+        return _TaskLease(
+            self._root / _LEASES_NAME / f"lease-{shard:02x}.lock"
+        )
 
     def cleanup_expired(
         self,
         cutoff_epoch: float,
         protected: Iterable[str],
         *,
-        protected_check: Callable[[str], bool] | None = None,
+        status_check: Callable[[str], Any] | None = None,
     ) -> list[str]:
         """Quarantine and remove old owned directories without following links.
 
-        ``protected`` is a caller-provided snapshot of queued, running and
-        cancel-requested task IDs.  The snapshot is checked again immediately
-        before the in-process-serialized rename.
+        Production callers must supply ``status_check`` backed by TaskStore.
+        Cleanup proceeds only when two reads under the task lease report an
+        immutable terminal state.  Without it, only the legacy static
+        ``protected`` snapshot guards deletion.
         """
 
         if (
@@ -578,7 +651,7 @@ class DockingInputStager:
             raise ManifestError("manifest_cleanup_invalid")
         if isinstance(protected, (str, bytes)):
             raise ManifestError("manifest_cleanup_invalid")
-        if protected_check is not None and not callable(protected_check):
+        if status_check is not None and not callable(status_check):
             raise ManifestError("manifest_cleanup_invalid")
         try:
             protected_ids = set(protected)
@@ -634,13 +707,25 @@ class DockingInputStager:
                     try:
                         if task_id in protected_ids:
                             continue
-                        if protected_check is not None:
-                            try:
-                                if protected_check(task_id):
-                                    continue
-                            except Exception:
+                        if status_check is not None:
+                            if not _status_check_is_terminal(
+                                status_check,
+                                task_id,
+                            ):
                                 continue
+                            self._cleanup_execution_residue(
+                                task_root,
+                                cutoff_epoch=(
+                                    time.time() - _STALE_EXECUTION_SECONDS
+                                ),
+                                remove_all=False,
+                            )
                         if task_id in protected_ids:
+                            continue
+                        if status_check is not None and not _status_check_is_terminal(
+                            status_check,
+                            task_id,
+                        ):
                             continue
                         quarantined = self._quarantine_path(task_id)
                         if not _publish_directory(task_root, quarantined):
@@ -659,6 +744,47 @@ class DockingInputStager:
                 except OSError:
                     continue
             return removed
+
+    def _cleanup_execution_residue(
+        self,
+        task_root: Path,
+        *,
+        cutoff_epoch: float,
+        remove_all: bool,
+    ) -> None:
+        executions_root = task_root / _EXECUTIONS_NAME
+        if not executions_root.exists() and not executions_root.is_symlink():
+            return
+        self._ensure_owned_directory(executions_root)
+        try:
+            entries = list(os.scandir(executions_root))
+        except OSError:
+            raise ManifestError("manifest_io_error") from None
+        for entry in entries:
+            if entry.name == _OWNERSHIP_MARKER_NAME:
+                continue
+            if not (
+                entry.name.startswith("snapshot-")
+                or entry.name.startswith(_SNAPSHOT_PREFIX)
+            ):
+                continue
+            candidate = executions_root / entry.name
+            try:
+                status = entry.stat(follow_symlinks=False)
+                if entry.is_symlink() or _stat_is_reparse(status):
+                    raise ManifestError("manifest_integrity_failed")
+                if not entry.is_dir(follow_symlinks=False):
+                    raise ManifestError("manifest_integrity_failed")
+                if not remove_all and status.st_mtime >= cutoff_epoch:
+                    continue
+                if not _has_valid_ownership_marker(candidate):
+                    raise ManifestError("manifest_integrity_failed")
+                if not self._dispose_execution_snapshot(candidate):
+                    raise ManifestError("manifest_io_error")
+            except ManifestError:
+                raise
+            except (OSError, RuntimeError):
+                raise ManifestError("manifest_io_error") from None
 
     def _load_verified_unlocked(
         self,
@@ -900,6 +1026,18 @@ def _root_lock(root: Path) -> threading.RLock:
             lock = threading.RLock()
             _ROOT_LOCKS[key] = lock
         return lock
+
+
+def _status_check_is_terminal(
+    status_check: Callable[[str], Any],
+    task_id: str,
+) -> bool:
+    try:
+        status = status_check(task_id)
+        value = getattr(status, "value", status)
+    except Exception:
+        return False
+    return type(value) is str and value.strip().lower() in _TERMINAL_TASK_STATUSES
 
 
 def _normalize_ligand(
@@ -1438,6 +1576,161 @@ def _has_valid_ownership_marker(directory: Path) -> bool:
         return False
 
 
+def _make_snapshot_read_only(path: Path) -> None:
+    try:
+        path.chmod(0o400)
+        status = path.lstat()
+        _validate_regular_single_link(status, "manifest_integrity_failed")
+        if _IS_WINDOWS and status.st_mode & stat.S_IWRITE:
+            raise ManifestError("manifest_integrity_failed")
+        if not _IS_WINDOWS and stat.S_IMODE(status.st_mode) != 0o400:
+            raise ManifestError("manifest_integrity_failed")
+    except ManifestError:
+        raise
+    except (OSError, RuntimeError):
+        raise ManifestError("manifest_io_error") from None
+
+
+def _pin_snapshot_file(
+    path: Path,
+    containment_root: Path,
+    expected_size: int,
+    expected_sha256: str,
+) -> _PinnedSnapshotFile:
+    descriptor: int | None = None
+    raw_windows_handle: int | None = None
+    try:
+        _reject_link_components(path)
+        root_resolved = containment_root.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        if not _is_contained(root_resolved, resolved):
+            raise ManifestError("manifest_path_invalid")
+        before_path = path.lstat()
+        _validate_regular_single_link(before_path, "manifest_integrity_failed")
+        if _IS_WINDOWS:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            create_file = kernel32.CreateFileW
+            create_file.argtypes = [
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                ctypes.c_void_p,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                wintypes.HANDLE,
+            ]
+            create_file.restype = wintypes.HANDLE
+            handle = create_file(
+                str(path),
+                0x80000000,
+                0x00000001,
+                None,
+                3,
+                0x00000080 | 0x00200000,
+                None,
+            )
+            invalid_handle = ctypes.c_void_p(-1).value
+            raw_windows_handle = int(handle)
+            if raw_windows_handle == invalid_handle:
+                raise ManifestError("manifest_integrity_failed")
+            descriptor = msvcrt.open_osfhandle(
+                raw_windows_handle,
+                os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            )
+            raw_windows_handle = None
+        else:
+            flags = os.O_RDONLY
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            flags |= getattr(os, "O_CLOEXEC", 0)
+            descriptor = os.open(path, flags)
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        opened = os.fstat(descriptor)
+        _validate_regular_single_link(opened, "manifest_integrity_failed")
+        if _identity(before_path) != _identity(opened):
+            raise ManifestError("manifest_integrity_failed")
+        if opened.st_size != expected_size:
+            raise ManifestError("manifest_integrity_failed")
+        pin = _PinnedSnapshotFile(
+            path=path,
+            containment_root=containment_root,
+            descriptor=descriptor,
+            expected_sha256=expected_sha256,
+            expected_size=expected_size,
+            identity=_descriptor_identity(opened),
+        )
+        try:
+            _verify_pinned_snapshot_file(pin)
+        except BaseException:
+            pin.close()
+            descriptor = None
+            raise
+        descriptor = None
+        return pin
+    except ManifestError:
+        raise
+    except (MemoryError, OSError, RuntimeError, TypeError, ValueError):
+        raise ManifestError("manifest_integrity_failed") from None
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if raw_windows_handle is not None and os.name == "nt":
+            try:
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel32.CloseHandle(wintypes.HANDLE(raw_windows_handle))
+            except (AttributeError, OSError, ValueError):
+                pass
+
+
+def _verify_pinned_snapshot_file(pin: _PinnedSnapshotFile) -> bool:
+    if pin.closed:
+        raise ManifestError("manifest_integrity_failed")
+    try:
+        before = os.fstat(pin.descriptor)
+        _validate_regular_single_link(before, "manifest_integrity_failed")
+        if _descriptor_identity(before) != pin.identity:
+            raise ManifestError("manifest_integrity_failed")
+        if before.st_size != pin.expected_size:
+            raise ManifestError("manifest_integrity_failed")
+        os.lseek(pin.descriptor, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(pin.descriptor, min(1024 * 1024, pin.expected_size + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > pin.expected_size:
+                raise ManifestError("manifest_integrity_failed")
+            digest.update(chunk)
+        after = os.fstat(pin.descriptor)
+        if _descriptor_identity(before) != _descriptor_identity(after):
+            raise ManifestError("manifest_integrity_failed")
+        if total != pin.expected_size or digest.hexdigest() != pin.expected_sha256:
+            raise ManifestError("manifest_integrity_failed")
+        path_status = pin.path.lstat()
+        _validate_regular_single_link(path_status, "manifest_integrity_failed")
+        if _identity(path_status) != _identity(after):
+            raise ManifestError("manifest_integrity_failed")
+        _reject_link_components(pin.path)
+        if not _is_contained(
+            pin.containment_root.resolve(strict=True),
+            pin.path.resolve(strict=True),
+        ):
+            raise ManifestError("manifest_path_invalid")
+        if _IS_WINDOWS and path_status.st_mode & stat.S_IWRITE:
+            raise ManifestError("manifest_integrity_failed")
+        if not _IS_WINDOWS and stat.S_IMODE(path_status.st_mode) != 0o400:
+            raise ManifestError("manifest_integrity_failed")
+        return True
+    except ManifestError:
+        raise
+    except (MemoryError, OSError, RuntimeError, ValueError):
+        raise ManifestError("manifest_integrity_failed") from None
+
+
 def _secure_read_file(
     path: Path,
     *,
@@ -1769,11 +2062,25 @@ def _safe_delete_owned_tree(path: Path) -> bool:
             return False
         if not _tree_is_owned_without_links(path):
             return False
+        if _IS_WINDOWS:
+            _clear_windows_read_only_tree(path)
         shutil.rmtree(path)
         return not path.exists()
     except (OSError, RuntimeError):
         _restore_ownership_marker(path)
         return False
+
+
+def _clear_windows_read_only_tree(path: Path) -> None:
+    """Clear DOS read-only bits only after the complete tree was link-checked."""
+
+    for current_root, directories, files in os.walk(path, followlinks=False):
+        current_path = Path(current_root)
+        for name in files:
+            (current_path / name).chmod(0o600)
+        for name in directories:
+            (current_path / name).chmod(0o700)
+    path.chmod(0o700)
 
 
 def _restore_ownership_marker(path: Path) -> None:
