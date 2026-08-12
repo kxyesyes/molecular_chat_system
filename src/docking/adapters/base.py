@@ -11,6 +11,22 @@ from typing import List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
+_COMMAND_POLL_INTERVAL_SECONDS = 0.2
+
+
+class CommandCancelledError(RuntimeError):
+    """Raised after a controlled docking command is cooperatively cancelled."""
+
+    def __init__(self):
+        super().__init__("Docking command was cancelled")
+
+
+class CommandOwnershipUncertainError(RuntimeError):
+    """Raised when process-tree termination cannot be proven."""
+
+    def __init__(self):
+        super().__init__("Command process ownership is uncertain")
+
 
 if os.name == "nt":
     import ctypes
@@ -149,53 +165,79 @@ class CommandAdapter:
         args: List[str],
         cwd: Optional[str] = None,
         timeout: Optional[Union[int, float]] = None,
+        *,
+        cancel_event=None,
     ):
+        if cancel_event is not None and cancel_event.is_set():
+            raise CommandCancelledError()
         started_at = time.monotonic()
         deadline = None if timeout is None else started_at + float(timeout)
         if os.name == "nt":
-            return self._run_windows(args, cwd, timeout, deadline)
-        return self._run_posix(args, cwd, timeout, deadline)
-
-    def _run_windows(self, args, cwd, timeout, deadline):
-        windows_job = None
-        process = None
-        if deadline is None:
-            windows_job, process = self._create_windows_suspended(args, cwd)
-        else:
-            windows_job, process = self._create_windows_until_deadline(
+            return self._run_windows(
                 args,
                 cwd,
                 timeout,
                 deadline,
+                cancel_event,
+            )
+        return self._run_posix(args, cwd, timeout, deadline, cancel_event)
+
+    def _run_windows(self, args, cwd, timeout, deadline, cancel_event):
+        windows_job = None
+        process = None
+        if deadline is None and cancel_event is None:
+            windows_job, process = self._create_windows_suspended(args, cwd)
+        else:
+            windows_job, process = self._create_windows_until_control(
+                args,
+                cwd,
+                timeout,
+                deadline,
+                cancel_event,
             )
 
         try:
+            if cancel_event is not None and cancel_event.is_set():
+                self._cancel_windows_process(windows_job, process)
             try:
                 windows_job.resume(process)
             except Exception as error:
-                self._cleanup_windows_process(windows_job, process, assigned=True)
+                try:
+                    self._cleanup_windows_process(
+                        windows_job,
+                        process,
+                        assigned=True,
+                    )
+                except Exception as cleanup_error:
+                    raise CommandOwnershipUncertainError() from cleanup_error
                 raise RuntimeError(
                     "Failed to resume a command bound to a Windows Job Object"
                 ) from error
 
-            remaining = None if deadline is None else deadline - time.monotonic()
-            if remaining is not None and remaining <= 0:
-                stdout, stderr = self._cleanup_windows_process(
-                    windows_job,
-                    process,
-                    assigned=True,
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    self._cancel_windows_process(windows_job, process)
+                remaining = (
+                    None if deadline is None else deadline - time.monotonic()
                 )
-                raise self._timeout_error(timeout, stdout, stderr)
+                if remaining is not None and remaining <= 0:
+                    stdout, stderr = self._cleanup_windows_or_uncertain(
+                        windows_job,
+                        process,
+                    )
+                    raise self._timeout_error(timeout, stdout, stderr)
 
-            try:
-                stdout, stderr = process.communicate(timeout=remaining)
-            except subprocess.TimeoutExpired:
-                stdout, stderr = self._cleanup_windows_process(
-                    windows_job,
-                    process,
-                    assigned=True,
-                )
-                raise self._timeout_error(timeout, stdout, stderr) from None
+                wait_for = _COMMAND_POLL_INTERVAL_SECONDS
+                if remaining is not None:
+                    wait_for = min(wait_for, remaining)
+                try:
+                    stdout, stderr = process.communicate(timeout=wait_for)
+                except subprocess.TimeoutExpired:
+                    continue
+
+                if cancel_event is not None and cancel_event.is_set():
+                    self._cancel_windows_process(windows_job, process)
+                break
 
             return subprocess.CompletedProcess(
                 args=args,
@@ -205,9 +247,13 @@ class CommandAdapter:
             )
         finally:
             if windows_job is not None:
-                windows_job.close()
+                try:
+                    windows_job.close()
+                except Exception:
+                    if process is not None and process.poll() is None:
+                        raise CommandOwnershipUncertainError() from None
 
-    def _run_posix(self, args, cwd, timeout, deadline):
+    def _run_posix(self, args, cwd, timeout, deadline, cancel_event):
         process = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,
@@ -218,18 +264,23 @@ class CommandAdapter:
             cwd=cwd,
             start_new_session=True,
         )
-        remaining = None if deadline is None else deadline - time.monotonic()
-        if remaining is not None and remaining <= 0:
-            self._terminate_posix_process_group(process)
-            stdout, stderr = self._communicate_after_termination(process)
-            raise self._timeout_error(timeout, stdout, stderr)
-
-        try:
-            stdout, stderr = process.communicate(timeout=remaining)
-        except subprocess.TimeoutExpired:
-            self._terminate_posix_process_group(process)
-            stdout, stderr = self._communicate_after_termination(process)
-            raise self._timeout_error(timeout, stdout, stderr) from None
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                self._cancel_posix_process(process)
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                stdout, stderr = self._cleanup_posix_or_uncertain(process)
+                raise self._timeout_error(timeout, stdout, stderr)
+            wait_for = _COMMAND_POLL_INTERVAL_SECONDS
+            if remaining is not None:
+                wait_for = min(wait_for, remaining)
+            try:
+                stdout, stderr = process.communicate(timeout=wait_for)
+            except subprocess.TimeoutExpired:
+                continue
+            if cancel_event is not None and cancel_event.is_set():
+                self._cancel_posix_process(process)
+            break
 
         return subprocess.CompletedProcess(
             args=args,
@@ -287,7 +338,14 @@ class CommandAdapter:
             ) from error
 
     @classmethod
-    def _create_windows_until_deadline(cls, args, cwd, timeout, deadline):
+    def _create_windows_until_control(
+        cls,
+        args,
+        cwd,
+        timeout,
+        deadline,
+        cancel_event,
+    ):
         popen_factory = subprocess.Popen
         condition = threading.Condition()
         state = {
@@ -297,6 +355,8 @@ class CommandAdapter:
             "ready_at": None,
             "error": None,
             "error_at": None,
+            "cleanup_done": False,
+            "cleanup_error": None,
         }
 
         def spawn_worker():
@@ -341,6 +401,10 @@ class CommandAdapter:
                         "Windows spawn worker failed after deadline cancellation (%s)",
                         type(background_error).__name__,
                     )
+                with condition:
+                    state["cleanup_error"] = background_error
+                    state["cleanup_done"] = True
+                    condition.notify_all()
 
         worker = threading.Thread(
             target=spawn_worker,
@@ -350,27 +414,42 @@ class CommandAdapter:
         worker.start()
 
         timed_out = False
+        cancelled = False
         spawn_error = None
         ready = None
         with condition:
             while state["ready"] is None and state["error"] is None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                if cancel_event is not None and cancel_event.is_set():
+                    state["cancelled"] = True
+                    condition.notify_all()
+                    cancelled = True
+                    break
+                remaining = (
+                    None if deadline is None else deadline - time.monotonic()
+                )
+                if remaining is not None and remaining <= 0:
                     state["cancelled"] = True
                     condition.notify_all()
                     timed_out = True
                     break
-                condition.wait(timeout=remaining)
+                wait_for = _COMMAND_POLL_INTERVAL_SECONDS
+                if remaining is not None:
+                    wait_for = min(wait_for, remaining)
+                condition.wait(timeout=wait_for)
 
-            if not timed_out and state["error"] is not None:
-                if state["error_at"] <= deadline:
+            if not timed_out and not cancelled and state["error"] is not None:
+                if deadline is None or state["error_at"] <= deadline:
                     spawn_error = state["error"]
                 else:
                     state["cancelled"] = True
                     condition.notify_all()
                     timed_out = True
-            elif not timed_out and state["ready"] is not None:
-                if state["ready_at"] <= deadline:
+            elif not timed_out and not cancelled and state["ready"] is not None:
+                if cancel_event is not None and cancel_event.is_set():
+                    state["cancelled"] = True
+                    condition.notify_all()
+                    cancelled = True
+                elif deadline is None or state["ready_at"] <= deadline:
                     state["claimed"] = True
                     ready = state["ready"]
                     condition.notify_all()
@@ -379,6 +458,17 @@ class CommandAdapter:
                     condition.notify_all()
                     timed_out = True
 
+        if cancelled:
+            cleanup_deadline = time.monotonic() + 2.0
+            with condition:
+                while not state["cleanup_done"]:
+                    remaining = cleanup_deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    condition.wait(timeout=min(_COMMAND_POLL_INTERVAL_SECONDS, remaining))
+                if not state["cleanup_done"] or state["cleanup_error"] is not None:
+                    raise CommandOwnershipUncertainError()
+            raise CommandCancelledError()
         if timed_out:
             raise cls._timeout_error(timeout)
         if spawn_error is not None:
@@ -386,6 +476,48 @@ class CommandAdapter:
                 "Windows process creation or Job assignment failed before timeout"
             ) from spawn_error
         return ready
+
+    @classmethod
+    def _create_windows_until_deadline(cls, args, cwd, timeout, deadline):
+        return cls._create_windows_until_control(
+            args,
+            cwd,
+            timeout,
+            deadline,
+            None,
+        )
+
+    @classmethod
+    def _cleanup_windows_or_uncertain(cls, windows_job, process):
+        try:
+            return cls._cleanup_windows_process(
+                windows_job,
+                process,
+                assigned=True,
+            )
+        except Exception as error:
+            raise CommandOwnershipUncertainError() from error
+
+    @classmethod
+    def _cancel_windows_process(cls, windows_job, process):
+        cls._cleanup_windows_or_uncertain(windows_job, process)
+        raise CommandCancelledError()
+
+    @classmethod
+    def _cleanup_posix_or_uncertain(cls, process):
+        try:
+            cls._terminate_posix_process_group(process)
+            stdout, stderr = cls._communicate_after_termination(process)
+            if process.poll() is None:
+                raise RuntimeError("process still running")
+            return stdout, stderr
+        except Exception as error:
+            raise CommandOwnershipUncertainError() from error
+
+    @classmethod
+    def _cancel_posix_process(cls, process):
+        cls._cleanup_posix_or_uncertain(process)
+        raise CommandCancelledError()
 
     @classmethod
     def _cleanup_windows_process(

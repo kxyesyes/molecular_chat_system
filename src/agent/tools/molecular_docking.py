@@ -68,7 +68,14 @@ class MolecularDocking(BaseMolecularTool):
 
         return result
 
-    def execute(self, query: str | Dict[str, Any]) -> Dict[str, Any]:
+    def execute(
+        self,
+        query: str | Dict[str, Any],
+        *,
+        job_id=None,
+        progress_callback=None,
+        cancel_event=None,
+    ) -> Dict[str, Any]:
         """Run real docking only for structured requests with complete inputs."""
         result = self._create_base_result(query)
 
@@ -149,12 +156,20 @@ class MolecularDocking(BaseMolecularTool):
                     return result
                 ligand_input = str(ligand_path)
                 input_type = "file"
+            control = {}
+            if job_id is not None:
+                control["job_id"] = job_id
+            if progress_callback is not None:
+                control["progress_callback"] = progress_callback
+            if cancel_event is not None:
+                control["cancel_event"] = cancel_event
             docking_result = asyncio.run(
                 service.perform_docking(
                     receptor_file=str(receptor_path),
                     ligand_input=str(ligand_input),
                     config=config,
                     input_type=input_type,
+                    **control,
                 )
             )
             warnings = _normalize_warning_strings(docking_result.get("warnings"))
@@ -163,20 +178,31 @@ class MolecularDocking(BaseMolecularTool):
             result["success"] = bool(docking_result.get("success"))
             result["data"] = docking_data
             result["warnings"] = warnings
+            execution_status = (
+                "completed"
+                if result["success"]
+                else str(docking_result.get("error_code") or "failed")
+            )
             result["quality"] = {
-                "docking_inputs": {
+                "engine": "AutoDock Vina",
+                "real_execution": bool(result["success"]),
+                "execution_status": execution_status,
+            }
+            if result["success"]:
+                result["quality"]["docking_inputs"] = {
                     "receptor_path": str(receptor_path),
                     "ligand_input": str(ligand_input),
                     "center": list(center),
                     "size": list(size),
-                },
-                "engine": "AutoDock Vina",
-                "real_execution": True,
-            }
+                }
             result["message"] = (
                 "Real AutoDock Vina docking completed."
                 if result["success"]
-                else docking_result.get("error", "Docking failed.")
+                else (
+                    "Docking was cancelled before a scientific result was produced."
+                    if execution_status == "cancelled"
+                    else docking_result.get("error", "Docking failed.")
+                )
             )
             result["formatted"] = (
                 f"Docking job: {docking_result.get('job_id')}\n"
@@ -184,10 +210,14 @@ class MolecularDocking(BaseMolecularTool):
                 if result["success"]
                 else ""
             )
-            result["reasoning"] = "Results were parsed from an actual Vina output file."
+            result["reasoning"] = (
+                "Results were parsed from an actual Vina output file."
+                if result["success"]
+                else "No scientific docking result was accepted."
+            )
         except Exception as e:
-            logger.error(f"Molecular docking failed: {e}")
-            result["message"] = f"Docking failed: {str(e)}"
+            logger.error("Molecular docking failed (%s)", type(e).__name__)
+            result["message"] = "Docking failed before a scientific result was produced."
             result["reasoning"] = "The real docking pipeline raised an error."
 
         return result
