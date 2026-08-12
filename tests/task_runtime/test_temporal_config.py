@@ -307,6 +307,26 @@ def test_existing_file_staging_root_fails_closed(
     assert config.to_safe_dict()["staging_root_configured"] is False
 
 
+def test_child_of_existing_file_staging_root_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    staging_file = tmp_path / "not-a-directory"
+    staging_file.write_text("not staging", encoding="utf-8")
+    staging_root = staging_file / "future-child"
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "100")
+    monkeypatch.setenv("MEDCHAT_TASK_STAGING_ROOT", str(staging_root))
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert (config.backend, config.canary_percent) == ("local", 0)
+    assert config.staging_root == (PROJECT_ROOT / "scratch/task_inputs").resolve()
+    assert config.warnings == ("invalid_task_staging_root",)
+    assert config.to_safe_dict()["staging_root_configured"] is False
+
+
 def test_symlink_to_file_staging_root_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -329,6 +349,50 @@ def test_symlink_to_file_staging_root_fails_closed(
     assert config.staging_root == (PROJECT_ROOT / "scratch/task_inputs").resolve()
     assert config.warnings == ("invalid_task_staging_root",)
     assert config.to_safe_dict()["staging_root_configured"] is False
+
+
+def test_child_of_symlink_to_file_staging_root_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    target = tmp_path / "target-file"
+    target.write_text("not staging", encoding="utf-8")
+    staging_link = tmp_path / "staging-link"
+    try:
+        staging_link.symlink_to(target)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"file symlinks unavailable: {type(exc).__name__}")
+    staging_root = staging_link / "future-child"
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "100")
+    monkeypatch.setenv("MEDCHAT_TASK_STAGING_ROOT", str(staging_root))
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert (config.backend, config.canary_percent) == ("local", 0)
+    assert config.staging_root == (PROJECT_ROOT / "scratch/task_inputs").resolve()
+    assert config.warnings == ("invalid_task_staging_root",)
+    assert config.to_safe_dict()["staging_root_configured"] is False
+
+
+def test_nonexistent_nested_staging_root_with_directory_ancestor_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    staging_root = (tmp_path / "future" / "nested" / "staging").resolve()
+    assert not staging_root.exists()
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "100")
+    monkeypatch.setenv("MEDCHAT_TASK_STAGING_ROOT", str(staging_root))
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert (config.backend, config.canary_percent) == ("temporal_canary", 100)
+    assert config.staging_root == staging_root
+    assert config.warnings == ()
+    assert config.to_safe_dict()["staging_root_configured"] is True
 
 
 @pytest.mark.parametrize(
@@ -554,6 +618,40 @@ def test_direct_constructor_rejects_existing_file_staging_root(
 
     with pytest.raises(ValueError):
         _direct_config(staging_root=staging_file.resolve())
+
+
+def test_direct_constructor_rejects_child_of_existing_file(
+    tmp_path: Path,
+) -> None:
+    staging_file = tmp_path / "not-a-directory"
+    staging_file.write_text("not staging", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        _direct_config(staging_root=(staging_file / "future-child").resolve())
+
+
+def test_direct_constructor_rejects_child_of_symlink_to_file(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target-file"
+    target.write_text("not staging", encoding="utf-8")
+    staging_link = tmp_path / "staging-link"
+    try:
+        staging_link.symlink_to(target)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"file symlinks unavailable: {type(exc).__name__}")
+
+    with pytest.raises(ValueError):
+        _direct_config(staging_root=(staging_link / "future-child").resolve())
+
+
+def test_direct_constructor_accepts_nonexistent_nested_staging_root(
+    tmp_path: Path,
+) -> None:
+    staging_root = (tmp_path / "future" / "nested" / "staging").resolve()
+    assert not staging_root.exists()
+
+    assert _direct_config(staging_root=staging_root).staging_root == staging_root
 
 
 def test_direct_constructor_rejects_warning_on_active_canary() -> None:

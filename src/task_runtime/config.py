@@ -8,6 +8,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from ipaddress import IPv4Address, IPv6Address, ip_address
 from pathlib import Path
+from stat import S_ISDIR
 from typing import Any
 
 
@@ -94,9 +95,9 @@ def _is_safe_staging_root(value: object) -> bool:
         return False
     try:
         resolved = value.resolve()
-        if resolved.exists() and not resolved.is_dir():
-            return False
     except (OSError, RuntimeError):
+        return False
+    if not _nearest_existing_ancestor_is_directory(resolved):
         return False
     filesystem_root = Path(resolved.anchor)
     if (
@@ -108,6 +109,20 @@ def _is_safe_staging_root(value: object) -> bool:
     if PROJECT_ROOT in resolved.parents:
         return resolved != SCRATCH_ROOT and SCRATCH_ROOT in resolved.parents
     return True
+
+
+def _nearest_existing_ancestor_is_directory(value: Path) -> bool:
+    candidate = value
+    while True:
+        try:
+            return S_ISDIR(candidate.stat().st_mode)
+        except FileNotFoundError:
+            parent = candidate.parent
+            if parent == candidate:
+                return False
+            candidate = parent
+        except (OSError, RuntimeError):
+            return False
 
 
 def _has_dot_path_component(value: str) -> bool:
