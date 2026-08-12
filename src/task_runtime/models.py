@@ -6,6 +6,7 @@ import json
 import math
 import re
 from typing import Any
+from urllib.parse import unquote
 
 from src.agent.persistence.redaction import redact_sensitive
 
@@ -90,9 +91,13 @@ _FILE_URI_TEXT = re.compile(r"(?i)file://[^\s;,]+")
 _BEARER_TEXT = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _API_KEY_TEXT = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
 _SMILES_TEXT = re.compile(r"(?<![A-Za-z0-9])(?:(?:Cl|Br|[BCNOFPSI])){3,}(?![A-Za-z0-9])")
+_SMILES_CANDIDATE = re.compile(
+    r"(?<![A-Za-z0-9])(?:[A-Za-z0-9@+\-\[\]()=#$\\/.%]+)(?![A-Za-z0-9])"
+)
 _URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_ENCODED_PATH_SEMANTICS = re.compile(r"%(?:2e|2f|5c)", re.IGNORECASE)
 _SAFE_SOURCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}\Z")
-_SAFE_DIGEST = re.compile(r"[A-Fa-f0-9]{6,128}\Z")
+_SAFE_DIGEST = re.compile(r"[A-Fa-f0-9]{64}\Z")
 _DROP = object()
 STRICT_JSON_MAX_DEPTH = 64
 STRICT_JSON_MAX_ITEMS = 100_000
@@ -162,7 +167,19 @@ def sanitize_task_message(value: str) -> str:
     for pattern in (_FILE_URI_TEXT, _WINDOWS_PATH_TEXT, _UNC_PATH_TEXT, _POSIX_PATH_TEXT):
         message = pattern.sub("[PATH]", message)
     message = _SMILES_TEXT.sub("[PRIVATE]", message)
+    message = _SMILES_CANDIDATE.sub(_replace_smiles_candidate, message)
     return message[:TASK_WARNING_MESSAGE_MAX_LENGTH].strip()
+
+
+def _replace_smiles_candidate(match: re.Match[str]) -> str:
+    candidate = match.group(0)
+    if candidate in {"[PATH]", "[PRIVATE]", "[REDACTED]"}:
+        return candidate
+    has_atom = bool(re.search(r"[BCNOFPSIcnosp]", candidate))
+    has_structure = bool(re.search(r"[\d@\[\]()=#$]", candidate))
+    if len(candidate) >= 4 and has_atom and has_structure:
+        return "[PRIVATE]"
+    return candidate
 
 
 def _normalize_warning(value: Any, *, strict: bool) -> dict[str, str] | None:
@@ -180,7 +197,11 @@ def _normalize_warning(value: Any, *, strict: bool) -> dict[str, str] | None:
         if value in TASK_WARNING_CODES:
             return {"code": value}
         message = sanitize_task_message(value)
-        return {"code": "TOOL_WARNING", "message": message} if message else {"code": "TOOL_WARNING"}
+        if not message:
+            if strict:
+                raise ValueError("invalid warning message")
+            return None
+        return {"code": "TOOL_WARNING", "message": message}
     else:
         if strict:
             raise ValueError("invalid warning")
@@ -239,7 +260,7 @@ def _is_hash_key(value: str) -> bool:
 def _validate_digest(value: Any) -> str:
     if not isinstance(value, str) or not _SAFE_DIGEST.fullmatch(value):
         raise ValueError("invalid provenance digest")
-    return value
+    return value.lower()
 
 
 def sanitize_provenance(value: Any) -> dict[str, Any]:
@@ -250,7 +271,16 @@ def sanitize_provenance(value: Any) -> dict[str, Any]:
     for key, item in snapshot.items():
         normalized = key.lower()
         if _is_hash_key(normalized):
-            allowed[key] = _validate_digest(item)
+            allowed[normalized] = _validate_digest(item)
+            continue
+        if normalized == "hashes":
+            if not isinstance(item, dict):
+                raise ValueError("invalid provenance hashes")
+            allowed[normalized] = {
+                digest_key: _validate_digest(digest)
+                for digest_key, digest in item.items()
+                if isinstance(digest_key, str)
+            }
             continue
         if normalized not in PROVENANCE_KEYS and not (
             normalized.endswith("_hash") or normalized.endswith("_sha256")
@@ -258,7 +288,7 @@ def sanitize_provenance(value: Any) -> dict[str, Any]:
             continue
         sanitized = _sanitize_public_value(item, key=normalized)
         if sanitized is not _DROP:
-            allowed[key] = sanitized
+            allowed[normalized] = sanitized
     return redact_sensitive(allowed)
 
 
@@ -272,9 +302,21 @@ def sanitize_public_provenance(value: Any) -> dict[str, Any]:
         normalized = key.lower()
         if _is_hash_key(normalized):
             try:
-                allowed[key] = _validate_digest(item)
+                allowed[normalized] = _validate_digest(item)
             except ValueError:
                 pass
+            continue
+        if normalized == "hashes" and isinstance(item, dict):
+            hashes: dict[str, str] = {}
+            for digest_key, digest in item.items():
+                if not isinstance(digest_key, str):
+                    continue
+                try:
+                    hashes[digest_key] = _validate_digest(digest)
+                except ValueError:
+                    continue
+            if hashes:
+                allowed[normalized] = hashes
             continue
         if normalized not in PROVENANCE_KEYS and not (
             normalized.endswith("_hash") or normalized.endswith("_sha256")
@@ -282,7 +324,7 @@ def sanitize_public_provenance(value: Any) -> dict[str, Any]:
             continue
         sanitized = _sanitize_public_value(item, key=normalized)
         if sanitized is not _DROP:
-            allowed[key] = sanitized
+            allowed[normalized] = sanitized
     return redact_sensitive(allowed)
 
 
@@ -299,10 +341,37 @@ def is_safe_relative_artifact_path(value: Any) -> bool:
         return False
     if any(ord(character) < 32 or ord(character) == 127 for character in value):
         return False
-    if _URI_SCHEME.match(value) or _is_absolute_path(value):
+    if "?" in value or "#" in value or "\\" in value:
         return False
-    parts = re.split(r"[\\/]", value)
-    return bool(parts) and all(part not in {"", ".", ".."} for part in parts)
+    decoded = value
+    for _ in range(8):
+        if _ENCODED_PATH_SEMANTICS.search(decoded):
+            return False
+        try:
+            next_decoded = unquote(decoded, errors="strict")
+        except (UnicodeDecodeError, ValueError):
+            return False
+        if next_decoded == decoded:
+            break
+        decoded = next_decoded
+    else:
+        return False
+    if any(ord(character) < 32 or ord(character) == 127 for character in decoded):
+        return False
+    if "?" in decoded or "#" in decoded or "\\" in decoded:
+        return False
+    if (
+        _URI_SCHEME.match(value)
+        or _URI_SCHEME.match(decoded)
+        or _is_absolute_path(value)
+        or _is_absolute_path(decoded)
+    ):
+        return False
+    original_parts = value.split("/")
+    decoded_parts = decoded.split("/")
+    return bool(original_parts) and all(
+        part not in {"", ".", ".."} for part in (*original_parts, *decoded_parts)
+    )
 
 
 def _is_private_content_key(value: str) -> bool:
@@ -357,11 +426,57 @@ def sanitize_public_task_data(value: Any) -> Any:
     return {} if sanitized is _DROP else sanitized
 
 
+def _sanitize_public_result_value(value: Any, *, key: str | None = None) -> Any:
+    normalized_key = (key or "").lower()
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for child_key, child_value in value.items():
+            if not isinstance(child_key, str):
+                continue
+            sanitized = _sanitize_public_result_value(child_value, key=child_key)
+            if sanitized is not _DROP:
+                result[child_key] = sanitized
+        return redact_sensitive(result)
+    if isinstance(value, (list, tuple)):
+        result = []
+        for item in value:
+            sanitized = _sanitize_public_result_value(item)
+            if sanitized is not _DROP:
+                result.append(sanitized)
+        return redact_sensitive(result)
+    if isinstance(value, float) and not math.isfinite(value):
+        return _DROP
+    if isinstance(value, str):
+        if "smiles" not in normalized_key:
+            if (
+                _is_absolute_path(value)
+                or _FILE_URI_TEXT.search(value)
+                or _WINDOWS_PATH_TEXT.search(value)
+                or _UNC_PATH_TEXT.search(value)
+                or _POSIX_PATH_TEXT.search(value)
+                or _ENCODED_PATH_SEMANTICS.search(value)
+                or any(part in {"", ".", ".."} for part in re.split(r"[\\/]", value))
+            ):
+                return _DROP
+            if any(marker in normalized_key for marker in ("path", "file", "uri")):
+                if not is_safe_relative_artifact_path(value):
+                    return _DROP
+        return redact_sensitive(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _DROP
+
+
+def sanitize_public_result(value: Any) -> Any:
+    sanitized = _sanitize_public_result_value(value)
+    return None if sanitized is _DROP else sanitized
+
+
 def sanitize_public_artifacts(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     result: list[dict[str, Any]] = []
-    allowed_keys = {"name", "type", "path", "hash", "size", "status"}
+    allowed_keys = {"name", "type", "path", "hash", "sha256", "size", "status"}
     for artifact in value:
         if not isinstance(artifact, dict):
             continue
@@ -372,7 +487,13 @@ def sanitize_public_artifacts(value: Any) -> list[dict[str, Any]]:
             item = artifact[key]
             if key == "path":
                 if is_safe_relative_artifact_path(item):
-                    public[key] = item.replace("\\", "/")
+                    public[key] = item
+                continue
+            if key in {"hash", "sha256"}:
+                try:
+                    public[key] = _validate_digest(item)
+                except ValueError:
+                    pass
                 continue
             sanitized = _sanitize_public_value(item, key=key)
             if sanitized is not _DROP:
@@ -502,16 +623,28 @@ class TaskRecord:
 
     def to_public_dict(self) -> dict[str, Any]:
         public = self.to_dict()
-        public.pop("input", None)
-        public.pop("input_manifest_path", None)
+        for key in (
+            "input",
+            "input_manifest_path",
+            "provenance",
+            "warnings",
+            "artifacts",
+            "result",
+            "error",
+        ):
+            public.pop(key, None)
+        public = sanitize_public_task_data(public)
         public["provenance"] = sanitize_public_provenance(self.provenance or {})
         public["warnings"] = normalize_task_warnings(
             self.warnings or [], strict=False
         )
         public["artifacts"] = sanitize_public_artifacts(self.artifacts or [])
+        public["result"] = sanitize_public_result(self.result)
         if isinstance(self.error, str):
             public["error"] = sanitize_task_message(self.error)
-        return sanitize_public_task_data(public)
+        else:
+            public["error"] = None
+        return public
 
 
 @dataclass(frozen=True)

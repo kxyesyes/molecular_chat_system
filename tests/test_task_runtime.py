@@ -288,3 +288,27 @@ def test_manager_invalid_structured_warning_fails_without_orphan(tmp_path):
             break
         time.sleep(0.01)
     assert record.task_id not in manager._futures
+
+
+def test_manager_normalizes_one_warning_authority_in_result_and_record(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    record = manager.submit(
+        "unit_test",
+        {},
+        lambda _: {
+            "success": True,
+            "warnings": ["Conformer generation degraded", "projection_stale"],
+        },
+    )
+
+    finished = wait_for_terminal(manager, record.task_id)
+    expected = [
+        {
+            "code": "TOOL_WARNING",
+            "message": "Conformer generation degraded",
+        },
+        {"code": "projection_stale"},
+    ]
+    assert finished.status is TaskStatus.SUCCEEDED
+    assert finished.warnings == expected
+    assert finished.result["warnings"] == expected

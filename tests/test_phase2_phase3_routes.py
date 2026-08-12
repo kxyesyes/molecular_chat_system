@@ -17,7 +17,11 @@ class FakeSupervisor:
         return {
             "status": "succeeded",
             "query": kwargs["query"],
-            "artifacts": [{"path": "C:/private/result.json"}],
+            "smiles": "CCO",
+            "best_smiles": "c1ccccc1",
+            "artifacts": [
+                {"name": "pose", "path": "outputs/%2e%2e/private.pdbqt"}
+            ],
         }
 
 
@@ -94,6 +98,25 @@ def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
     assert "credential-marker" not in workflow_response.text
     assert "C:/private" not in workflow_response.text
     assert {"task_id", "task_type", "status", "backend"} <= workflow_data.keys()
+
+    workflow_task_id = workflow_data["task_id"]
+    for _ in range(50):
+        workflow_status_response = client.get(
+            f"/api/tasks/{workflow_task_id}", headers=admin_headers
+        )
+        workflow_status = workflow_status_response.json()["data"]
+        if workflow_status["status"] == "succeeded":
+            break
+        time.sleep(0.02)
+    else:
+        raise AssertionError("workflow task did not finish")
+
+    assert "input" not in workflow_status
+    assert "input_manifest_path" not in workflow_status
+    assert workflow_status["result"]["smiles"] == "CCO"
+    assert workflow_status["result"]["best_smiles"] == "c1ccccc1"
+    assert workflow_status["artifacts"] == [{"name": "pose"}]
+    assert "%2e%2e" not in workflow_status_response.text.lower()
 
     versions_response = client.get("/api/system/data-versions", headers=admin_headers)
     assert versions_response.status_code == 200

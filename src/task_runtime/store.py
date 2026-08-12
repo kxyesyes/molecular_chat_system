@@ -514,13 +514,23 @@ class TaskStore:
         timestamp = _as_timestamp(now)
         code = _error_code_value(error_code)
         safe_error = sanitize_task_message(error) if error is not None else None
-        safe_warnings = (
-            normalize_task_warnings(warnings) if warnings is not None else None
-        )
         safe_provenance = sanitize_provenance(provenance) if provenance is not None else None
         safe_result = (
             redact_sensitive(strict_json_snapshot(result)) if result is not None else None
         )
+        result_warnings = (
+            safe_result.get("warnings")
+            if isinstance(safe_result, dict) and "warnings" in safe_result
+            else None
+        )
+        warning_source = warnings if warnings is not None else result_warnings
+        safe_warnings = (
+            normalize_task_warnings(warning_source)
+            if warning_source is not None
+            else None
+        )
+        if isinstance(safe_result, dict) and warning_source is not None:
+            safe_result["warnings"] = safe_warnings
         safe_artifacts = redact_sensitive(strict_json_snapshot(artifacts or []))
         result_json = _json(safe_result) if safe_result is not None else None
         artifacts_json = _json(safe_artifacts)

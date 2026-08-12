@@ -459,11 +459,10 @@ def test_public_projection_excludes_private_input_and_redacts_nested_values():
     assert public["warnings"] == [{"code": "projection_stale"}]
     assert public["provenance"] == {"tool": "vina"}
     assert public["result"]["credentials"] == "[REDACTED]"
-    assert "query" not in public["result"]
+    assert public["result"]["query"] == "CCO"
     assert "db_path" not in public["result"]
     assert public["artifacts"][0]["path"] == "pose.pdbqt"
     assert public["artifacts"][1] == {}
-    assert "CCO" not in json.dumps(public)
     assert "C:/private" not in json.dumps(public)
     assert record.to_dict()["input"] == record.input
 
@@ -699,8 +698,8 @@ def test_persisted_provenance_is_operational_allowlist_only(tmp_path):
             "version": "1.2.3",
             "attempt": 1,
             "configured": True,
-            "artifact_hash": "abc123",
-            "input_hash": "a" * 64,
+            "artifact_hash": "A" * 64,
+            "input_hash": "A" * 64,
             "config_hash": "b" * 64,
             "pose_sha256": "c" * 64,
             "smiles": "CCO",
@@ -716,7 +715,7 @@ def test_persisted_provenance_is_operational_allowlist_only(tmp_path):
         "version": "1.2.3",
         "attempt": 1,
         "configured": True,
-        "artifact_hash": "abc123",
+        "artifact_hash": "a" * 64,
         "input_hash": "a" * 64,
         "config_hash": "b" * 64,
         "pose_sha256": "c" * 64,
@@ -786,7 +785,12 @@ def test_public_projection_omits_private_key_variants_and_posix_paths():
             "safe": "completed",
         },
     )
-    assert record.to_public_dict()["result"] == {"safe": "completed"}
+    assert record.to_public_dict()["result"] == {
+        "receptor_file": "receptor.pdb",
+        "ligand_source": "ligand.sdf",
+        "input_summary": "private",
+        "safe": "completed",
+    }
 
 
 def test_worker_health_rejects_far_future_heartbeat(tmp_path):
@@ -823,7 +827,10 @@ def test_scientific_warning_normalization_preserves_safe_meaning(tmp_path):
             ),
             {
                 "code": "TOOL_WARNING",
-                "message": "failed opening C:/private/model.bin with sk-secret-secret and CCO",
+                "message": (
+                    "failed opening C:/private/model.bin with sk-secret-secret, CCO, "
+                    "c1ccccc1 and C[C@H](O)C(=O)O"
+                ),
                 "source": "rdkit",
             },
         ],
@@ -845,6 +852,8 @@ def test_scientific_warning_normalization_preserves_safe_meaning(tmp_path):
     assert "C:/private" not in record.warnings[2]["message"]
     assert "sk-secret" not in record.warnings[2]["message"]
     assert "CCO" not in record.warnings[2]["message"]
+    assert "c1ccccc1" not in record.warnings[2]["message"]
+    assert "C[C@H]" not in record.warnings[2]["message"]
     heartbeat = [
         event for event in store.events("task-1") if event.event_type == "task_heartbeat"
     ][0]
@@ -872,6 +881,34 @@ def test_structured_warning_rejects_invalid_contract(tmp_path, warning):
         store.heartbeat("task-1", warnings=[warning])
 
 
+@pytest.mark.parametrize("warning", ["", " ", "\t\r\n"])
+def test_blank_warning_string_is_rejected(tmp_path, warning):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("task-1", "demo", {})
+    store.claim_running("task-1")
+    with pytest.raises(ValueError, match="warning"):
+        store.heartbeat("task-1", warnings=[warning])
+
+
+def test_direct_finish_replaces_result_warnings_with_normalized_authority(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("task-1", "demo", {})
+    store.claim_running("task-1")
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.SUCCEEDED,
+        result={"warnings": ["Conformer generation degraded"], "value": 1},
+        warnings=[TaskWarning(code="projection_stale", message="Projection delayed")],
+    )
+    record = store.get("task-1")
+    expected = [
+        {"code": "projection_stale", "message": "Projection delayed"}
+    ]
+    assert record.warnings == expected
+    assert record.result["warnings"] == expected
+
+
 @pytest.mark.parametrize(
     "key,value",
     [
@@ -886,6 +923,33 @@ def test_provenance_rejects_invalid_digest_values(tmp_path, key, value):
         store.create("task-1", "docking", {}, provenance={key: value})
 
 
+@pytest.mark.parametrize("length", [6, 63, 65])
+@pytest.mark.parametrize("key", ["hash", "input_hash", "config_hash", "pose_sha256", "artifact_sha256"])
+def test_provenance_digest_requires_exact_sha256_length(tmp_path, key, length):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    with pytest.raises(ValueError, match="provenance|digest"):
+        store.create("task-1", "docking", {}, provenance={key: "a" * length})
+
+
+def test_public_provenance_preserves_validated_input_hash_lowercase(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    record = store.create(
+        "task-1",
+        "docking",
+        {},
+        provenance={
+            "input_hash": "A" * 64,
+            "config_hash": "B" * 64,
+            "pose_sha256": "C" * 64,
+        },
+    )
+    assert record.to_public_dict()["provenance"] == {
+        "input_hash": "a" * 64,
+        "config_hash": "b" * 64,
+        "pose_sha256": "c" * 64,
+    }
+
+
 def test_public_artifact_path_accepts_only_safe_relative_logical_path():
     record = TaskRecord(
         task_id="task-1",
@@ -898,6 +962,7 @@ def test_public_artifact_path_accepts_only_safe_relative_logical_path():
                 "type": "pdbqt",
                 "path": "outputs/docking/task/pose.pdbqt",
                 "hash": "a" * 64,
+                "sha256": "B" * 64,
                 "size": 123,
                 "status": "ready",
                 "extra": "drop",
@@ -910,6 +975,13 @@ def test_public_artifact_path_accepts_only_safe_relative_logical_path():
             {"name": "dot", "path": "outputs/./pose.pdbqt"},
             {"name": "uri", "path": "file:///srv/private/pose.pdbqt"},
             {"name": "control", "path": "outputs/pose\n.pdbqt"},
+            {"name": "encoded-parent", "path": "outputs/%2e%2e/private.txt"},
+            {"name": "double-encoded-parent", "path": "outputs/%252e%252e/private.txt"},
+            {"name": "encoded-slash", "path": "outputs%2fprivate.txt"},
+            {"name": "double-encoded-slash", "path": "outputs%252fprivate.txt"},
+            {"name": "encoded-backslash", "path": "outputs%5cprivate.txt"},
+            {"name": "query", "path": "outputs/pose.pdbqt?download=1"},
+            {"name": "fragment", "path": "outputs/pose.pdbqt#section"},
         ],
     )
 
@@ -919,6 +991,7 @@ def test_public_artifact_path_accepts_only_safe_relative_logical_path():
             "type": "pdbqt",
             "path": "outputs/docking/task/pose.pdbqt",
             "hash": "a" * 64,
+            "sha256": "b" * 64,
             "size": 123,
             "status": "ready",
         },
@@ -930,7 +1003,49 @@ def test_public_artifact_path_accepts_only_safe_relative_logical_path():
         {"name": "dot"},
         {"name": "uri"},
         {"name": "control"},
+        {"name": "encoded-parent"},
+        {"name": "double-encoded-parent"},
+        {"name": "encoded-slash"},
+        {"name": "double-encoded-slash"},
+        {"name": "encoded-backslash"},
+        {"name": "query"},
+        {"name": "fragment"},
     ]
+
+
+@pytest.mark.parametrize("length", [6, 63, 65])
+@pytest.mark.parametrize("field", ["hash", "sha256"])
+def test_public_artifact_rejects_non_sha256_digest(field, length):
+    record = TaskRecord(
+        task_id="task-1",
+        task_type="docking",
+        status=TaskStatus.SUCCEEDED,
+        input={},
+        artifacts=[{"name": "pose", field: "a" * length}],
+    )
+    assert record.to_public_dict()["artifacts"] == [{"name": "pose"}]
+
+
+def test_public_result_retains_scientific_smiles_fields():
+    record = TaskRecord(
+        task_id="task-1",
+        task_type="molecular_design",
+        status=TaskStatus.SUCCEEDED,
+        input={"smiles": "private-input"},
+        result={
+            "smiles": "CCO",
+            "best_smiles": "c1ccccc1",
+            "candidate": {"smiles": "CCN", "score": 0.8},
+            "unsafe_path": "../../private.txt",
+        },
+    )
+    public = record.to_public_dict()
+    assert "input" not in public
+    assert public["result"] == {
+        "smiles": "CCO",
+        "best_smiles": "c1ccccc1",
+        "candidate": {"smiles": "CCN", "score": 0.8},
+    }
 
 
 def test_public_result_removes_traversal_and_embedded_paths():

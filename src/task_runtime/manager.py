@@ -134,6 +134,8 @@ class TaskManager:
             warnings = (
                 normalize_task_warnings(warnings) if warnings is not None else None
             )
+            if isinstance(result, dict) and warnings is not None:
+                result["warnings"] = warnings
         except Exception:
             completed = self._mark_finished(
                 task_id,
