@@ -4,14 +4,65 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+import unicodedata
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SCRATCH_ROOT = (PROJECT_ROOT / "scratch").resolve()
+DEFAULT_STAGING_ROOT = (SCRATCH_ROOT / "task_inputs").resolve()
+
+DEFAULT_TEMPORAL_ADDRESS = "127.0.0.1:7233"
+DEFAULT_TEMPORAL_NAMESPACE = "default"
+DEFAULT_DOCKING_QUEUE = "medchat-docking"
 
 _BACKENDS = frozenset({"local", "temporal_canary"})
 _CANONICAL_PERCENT = re.compile(r"(?:0|[1-9][0-9]?|100)\Z")
+_SAFE_LOGICAL_NAME = re.compile(r"[A-Za-z0-9._-]{1,255}\Z")
+_WARNING_ORDER = (
+    "invalid_task_backend",
+    "invalid_temporal_canary_percent",
+    "invalid_temporal_address",
+    "invalid_temporal_namespace",
+    "invalid_temporal_docking_queue",
+    "invalid_temporal_docking_concurrency",
+    "invalid_task_staging_root",
+)
+_WARNING_CODES = frozenset(_WARNING_ORDER)
+
+
+def _is_valid_address(value: object) -> bool:
+    return (
+        type(value) is str
+        and bool(value)
+        and not any(
+            character.isspace() or unicodedata.category(character) == "Cc"
+            for character in value
+        )
+    )
+
+
+def _is_valid_logical_name(value: object) -> bool:
+    return type(value) is str and _SAFE_LOGICAL_NAME.fullmatch(value) is not None
+
+
+def _is_safe_staging_root(value: object) -> bool:
+    if not isinstance(value, Path) or not value.is_absolute():
+        return False
+    try:
+        resolved = value.resolve()
+    except (OSError, RuntimeError):
+        return False
+    return resolved != SCRATCH_ROOT and SCRATCH_ROOT in resolved.parents
+
+
+def _read_environment(name: str, default: str) -> tuple[str, bool]:
+    value = os.environ.get(name)
+    if value is None:
+        return default, False
+    return value, True
 
 
 @dataclass(frozen=True)
@@ -20,30 +71,134 @@ class TaskRuntimeConfig:
 
     backend: str
     canary_percent: int
-    temporal_address: str
+    temporal_address: str = field(repr=False)
     temporal_namespace: str
     docking_queue: str
     docking_concurrency: int
-    staging_root: Path
+    staging_root: Path = field(repr=False)
     warnings: tuple[str, ...] = ()
+    _temporal_address_configured: bool = field(
+        default=False,
+        repr=False,
+        compare=False,
+    )
+    _staging_root_configured: bool = field(
+        default=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        if type(self.backend) is not str or self.backend not in _BACKENDS:
+            raise ValueError("invalid task runtime backend")
+        if (
+            type(self.canary_percent) is not int
+            or not 0 <= self.canary_percent <= 100
+            or (self.backend == "local" and self.canary_percent != 0)
+        ):
+            raise ValueError("invalid task runtime canary percent")
+        if not _is_valid_address(self.temporal_address):
+            raise ValueError("invalid Temporal address")
+        if not _is_valid_logical_name(self.temporal_namespace):
+            raise ValueError("invalid Temporal namespace")
+        if not _is_valid_logical_name(self.docking_queue):
+            raise ValueError("invalid Temporal docking queue")
+        if type(self.docking_concurrency) is not int or self.docking_concurrency != 1:
+            raise ValueError("invalid Temporal docking concurrency")
+        if not _is_safe_staging_root(self.staging_root):
+            raise ValueError("invalid task staging root")
+        if self.staging_root != self.staging_root.resolve():
+            raise ValueError("task staging root must be resolved")
+        if type(self.warnings) is not tuple or any(
+            type(code) is not str or code not in _WARNING_CODES
+            for code in self.warnings
+        ):
+            raise ValueError("invalid task runtime warnings")
+        warning_positions = tuple(_WARNING_ORDER.index(code) for code in self.warnings)
+        if warning_positions != tuple(sorted(set(warning_positions))):
+            raise ValueError("invalid task runtime warning order")
+        if type(self._temporal_address_configured) is not bool:
+            raise ValueError("invalid Temporal address configured flag")
+        if type(self._staging_root_configured) is not bool:
+            raise ValueError("invalid staging root configured flag")
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        """Return operational settings without serializing addresses or paths."""
+
+        return {
+            "backend": self.backend,
+            "canary_percent": self.canary_percent,
+            "temporal_namespace": self.temporal_namespace,
+            "docking_queue": self.docking_queue,
+            "docking_concurrency": self.docking_concurrency,
+            "warnings": self.warnings,
+            "temporal_address_configured": self._temporal_address_configured,
+            "staging_root_configured": self._staging_root_configured,
+        }
 
     @classmethod
     def from_env(cls) -> "TaskRuntimeConfig":
         backend_text = os.getenv("MEDCHAT_TASK_BACKEND", "local")
         percent_text = os.getenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "0")
         concurrency_text = os.getenv("MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY", "1")
+        address_text, address_configured = _read_environment(
+            "MEDCHAT_TEMPORAL_ADDRESS",
+            DEFAULT_TEMPORAL_ADDRESS,
+        )
+        namespace_text, _ = _read_environment(
+            "MEDCHAT_TEMPORAL_NAMESPACE",
+            DEFAULT_TEMPORAL_NAMESPACE,
+        )
+        queue_text, _ = _read_environment(
+            "MEDCHAT_TEMPORAL_DOCKING_QUEUE",
+            DEFAULT_DOCKING_QUEUE,
+        )
+        staging_text, staging_configured = _read_environment(
+            "MEDCHAT_TASK_STAGING_ROOT",
+            "scratch/task_inputs",
+        )
 
         warnings: list[str] = []
         backend_valid = backend_text in _BACKENDS
         percent_valid = _CANONICAL_PERCENT.fullmatch(percent_text) is not None
+        address_valid = _is_valid_address(address_text)
+        namespace_valid = _is_valid_logical_name(namespace_text)
+        queue_valid = _is_valid_logical_name(queue_text)
         concurrency_valid = concurrency_text == "1"
+
+        staging_valid = bool(staging_text.strip())
+        if staging_valid:
+            staging_root = Path(staging_text)
+            if not staging_root.is_absolute():
+                staging_root = PROJECT_ROOT / staging_root
+            try:
+                staging_root = staging_root.resolve()
+            except (OSError, RuntimeError):
+                staging_valid = False
+                staging_root = DEFAULT_STAGING_ROOT
+            else:
+                staging_valid = _is_safe_staging_root(staging_root)
+        else:
+            staging_root = DEFAULT_STAGING_ROOT
 
         if not backend_valid:
             warnings.append("invalid_task_backend")
         if not percent_valid:
             warnings.append("invalid_temporal_canary_percent")
+        if not address_valid:
+            warnings.append("invalid_temporal_address")
+            address_text = DEFAULT_TEMPORAL_ADDRESS
+        if not namespace_valid:
+            warnings.append("invalid_temporal_namespace")
+            namespace_text = DEFAULT_TEMPORAL_NAMESPACE
+        if not queue_valid:
+            warnings.append("invalid_temporal_docking_queue")
+            queue_text = DEFAULT_DOCKING_QUEUE
         if not concurrency_valid:
             warnings.append("invalid_temporal_docking_concurrency")
+        if not staging_valid:
+            warnings.append("invalid_task_staging_root")
+            staging_root = DEFAULT_STAGING_ROOT
 
         if warnings:
             backend = "local"
@@ -52,23 +207,15 @@ class TaskRuntimeConfig:
             backend = backend_text
             canary_percent = int(percent_text) if backend == "temporal_canary" else 0
 
-        staging_root = Path(
-            os.getenv("MEDCHAT_TASK_STAGING_ROOT", "scratch/task_inputs")
-        )
-        if not staging_root.is_absolute():
-            staging_root = PROJECT_ROOT / staging_root
-
         return cls(
             backend=backend,
             canary_percent=canary_percent,
-            temporal_address=os.getenv(
-                "MEDCHAT_TEMPORAL_ADDRESS", "127.0.0.1:7233"
-            ),
-            temporal_namespace=os.getenv("MEDCHAT_TEMPORAL_NAMESPACE", "default"),
-            docking_queue=os.getenv(
-                "MEDCHAT_TEMPORAL_DOCKING_QUEUE", "medchat-docking"
-            ),
+            temporal_address=address_text,
+            temporal_namespace=namespace_text,
+            docking_queue=queue_text,
             docking_concurrency=1,
-            staging_root=staging_root.resolve(),
+            staging_root=staging_root,
             warnings=tuple(warnings),
+            _temporal_address_configured=address_configured,
+            _staging_root_configured=staging_configured,
         )
