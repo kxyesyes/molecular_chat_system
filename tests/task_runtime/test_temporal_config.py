@@ -200,6 +200,36 @@ def test_relative_staging_root_is_resolved_from_project_root(
 
 @pytest.mark.parametrize(
     "value",
+    [
+        "../external-stage",
+        "scratch/../../external-stage",
+        r"..\external-stage",
+        r"scratch\..\..\external-stage",
+        "scratch/nested/../../../external-stage",
+        r"scratch\nested\..\..\..\external-stage",
+        "./scratch/task_inputs",
+        "scratch/./task_inputs",
+    ],
+)
+def test_relative_staging_paths_with_dot_components_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "100")
+    monkeypatch.setenv("MEDCHAT_TASK_STAGING_ROOT", value)
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert (config.backend, config.canary_percent) == ("local", 0)
+    assert config.staging_root == (PROJECT_ROOT / "scratch/task_inputs").resolve()
+    assert config.warnings == ("invalid_task_staging_root",)
+    assert config.to_safe_dict()["staging_root_configured"] is False
+
+
+@pytest.mark.parametrize(
+    "value",
     DANGEROUS_STAGING_ROOTS,
 )
 def test_unsafe_staging_roots_fail_closed(
@@ -237,6 +267,68 @@ def test_external_absolute_staging_root_is_accepted_without_existing(
     assert config.staging_root == staging_root
     assert config.warnings == ()
     assert str(staging_root) not in repr(config)
+
+
+def test_existing_external_staging_directory_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    staging_root = tmp_path / "existing-volume"
+    staging_root.mkdir()
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "100")
+    monkeypatch.setenv("MEDCHAT_TASK_STAGING_ROOT", str(staging_root))
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert (config.backend, config.canary_percent) == ("temporal_canary", 100)
+    assert config.staging_root == staging_root.resolve()
+    assert config.warnings == ()
+    assert config.to_safe_dict()["staging_root_configured"] is True
+
+
+def test_existing_file_staging_root_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    staging_file = tmp_path / "not-a-directory"
+    staging_file.write_text("not staging", encoding="utf-8")
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "100")
+    monkeypatch.setenv("MEDCHAT_TASK_STAGING_ROOT", str(staging_file))
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert (config.backend, config.canary_percent) == ("local", 0)
+    assert config.staging_root == (PROJECT_ROOT / "scratch/task_inputs").resolve()
+    assert config.warnings == ("invalid_task_staging_root",)
+    assert config.to_safe_dict()["staging_root_configured"] is False
+
+
+def test_symlink_to_file_staging_root_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    target = tmp_path / "target-file"
+    target.write_text("not staging", encoding="utf-8")
+    staging_link = tmp_path / "staging-link"
+    try:
+        staging_link.symlink_to(target)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"file symlinks unavailable: {type(exc).__name__}")
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "100")
+    monkeypatch.setenv("MEDCHAT_TASK_STAGING_ROOT", str(staging_link))
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert (config.backend, config.canary_percent) == ("local", 0)
+    assert config.staging_root == (PROJECT_ROOT / "scratch/task_inputs").resolve()
+    assert config.warnings == ("invalid_task_staging_root",)
+    assert config.to_safe_dict()["staging_root_configured"] is False
 
 
 @pytest.mark.parametrize(
@@ -452,6 +544,16 @@ def test_direct_constructor_accepts_safe_external_staging_root(
     assert not staging_root.exists()
 
     assert _direct_config(staging_root=staging_root).staging_root == staging_root
+
+
+def test_direct_constructor_rejects_existing_file_staging_root(
+    tmp_path: Path,
+) -> None:
+    staging_file = tmp_path / "not-a-directory"
+    staging_file.write_text("not staging", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        _direct_config(staging_root=staging_file.resolve())
 
 
 def test_direct_constructor_rejects_warning_on_active_canary() -> None:

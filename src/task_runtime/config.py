@@ -94,6 +94,8 @@ def _is_safe_staging_root(value: object) -> bool:
         return False
     try:
         resolved = value.resolve()
+        if resolved.exists() and not resolved.is_dir():
+            return False
     except (OSError, RuntimeError):
         return False
     filesystem_root = Path(resolved.anchor)
@@ -106,6 +108,10 @@ def _is_safe_staging_root(value: object) -> bool:
     if PROJECT_ROOT in resolved.parents:
         return resolved != SCRATCH_ROOT and SCRATCH_ROOT in resolved.parents
     return True
+
+
+def _has_dot_path_component(value: str) -> bool:
+    return any(component in {".", ".."} for component in re.split(r"[\\/]", value))
 
 
 def _read_environment(name: str, default: str) -> tuple[str, bool]:
@@ -222,16 +228,26 @@ class TaskRuntimeConfig:
 
         staging_valid = bool(staging_text.strip())
         if staging_valid:
-            staging_root = Path(staging_text)
-            if not staging_root.is_absolute():
-                staging_root = PROJECT_ROOT / staging_root
+            raw_staging_root = Path(staging_text)
+            staging_was_absolute = raw_staging_root.is_absolute()
+            if not staging_was_absolute and _has_dot_path_component(staging_text):
+                staging_valid = False
+            staging_root = raw_staging_root
+            if not staging_was_absolute:
+                staging_root = PROJECT_ROOT / raw_staging_root
             try:
                 staging_root = staging_root.resolve()
             except (OSError, RuntimeError):
                 staging_valid = False
                 staging_root = DEFAULT_STAGING_ROOT
             else:
-                staging_valid = _is_safe_staging_root(staging_root)
+                staging_valid = staging_valid and _is_safe_staging_root(staging_root)
+                if not staging_was_absolute:
+                    staging_valid = (
+                        staging_valid
+                        and staging_root != SCRATCH_ROOT
+                        and SCRATCH_ROOT in staging_root.parents
+                    )
         else:
             staging_root = DEFAULT_STAGING_ROOT
 
