@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import json
 import math
+import re
 from typing import Any
 
 from src.agent.persistence.redaction import redact_sensitive
@@ -18,6 +20,196 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
     CANCELED = "canceled"
     TIMED_OUT = "timed_out"
+
+
+class TaskPhase(str, Enum):
+    RUNNING = "running"
+    STAGING = "staging"
+    PREPARING = "preparing"
+    DOCKING = "docking"
+    VINA = "vina"
+    VALIDATING = "validating"
+    COMPLETING = "completing"
+    CANCELING = "canceling"
+
+
+CONFIG_WARNING_CODES = frozenset(
+    {
+        "invalid_task_backend",
+        "invalid_temporal_canary_percent",
+        "invalid_temporal_address",
+        "invalid_temporal_namespace",
+        "invalid_temporal_docking_queue",
+        "invalid_temporal_docking_concurrency",
+        "invalid_task_staging_root",
+    }
+)
+TASK_WARNING_CODES = frozenset(
+    CONFIG_WARNING_CODES
+    | {item.value for item in TaskErrorCode}
+    | {"projection_stale"}
+)
+
+PROVENANCE_KEYS = frozenset(
+    {
+        "provider",
+        "model",
+        "model_name",
+        "tool",
+        "tool_name",
+        "version",
+        "tool_version",
+        "sdk_version",
+        "backend",
+        "attempt",
+        "validator_status",
+        "configured",
+        "hash",
+        "hashes",
+    }
+)
+_PRIVATE_CONTENT_KEYS = frozenset(
+    {
+        "smiles",
+        "query",
+        "prompt",
+        "receptor",
+        "ligand",
+        "input",
+        "db_path",
+        "model_path",
+        "manifest",
+        "input_manifest_path",
+    }
+)
+_WINDOWS_ABSOLUTE_PATH = re.compile(r"[A-Za-z]:[\\/]")
+_DROP = object()
+
+
+def strict_json_snapshot(value: Any) -> Any:
+    """Return a detached JSON-compatible value and reject non-finite data."""
+
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("invalid JSON non-finite number")
+        return value
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError("invalid JSON object key")
+            result[key] = strict_json_snapshot(item)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [strict_json_snapshot(item) for item in value]
+    raise ValueError("invalid JSON value")
+
+
+def strict_json_roundtrip(value: Any) -> Any:
+    snapshot = strict_json_snapshot(value)
+    encoded = json.dumps(snapshot, ensure_ascii=False, allow_nan=False)
+    return json.loads(encoded)
+
+
+def normalize_warning_codes(values: Any) -> list[str]:
+    if not isinstance(values, (list, tuple)):
+        raise ValueError("invalid warning codes")
+    normalized: list[str] = []
+    for value in values:
+        code = value.value if isinstance(value, TaskErrorCode) else value
+        if not isinstance(code, str) or code not in TASK_WARNING_CODES:
+            raise ValueError("invalid warning code")
+        normalized.append(code)
+    return normalized
+
+
+def sanitize_provenance(value: Any) -> dict[str, Any]:
+    snapshot = strict_json_snapshot(value or {})
+    if not isinstance(snapshot, dict):
+        raise ValueError("invalid provenance")
+    allowed: dict[str, Any] = {}
+    for key, item in snapshot.items():
+        normalized = key.lower()
+        if normalized not in PROVENANCE_KEYS and not (
+            normalized.endswith("_hash") or normalized.endswith("_sha256")
+        ):
+            continue
+        sanitized = _sanitize_public_value(item, key=normalized)
+        if sanitized is not _DROP:
+            allowed[key] = sanitized
+    return redact_sensitive(allowed)
+
+
+def sanitize_public_provenance(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed: dict[str, Any] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            continue
+        normalized = key.lower()
+        if normalized not in PROVENANCE_KEYS and not (
+            normalized.endswith("_hash") or normalized.endswith("_sha256")
+        ):
+            continue
+        sanitized = _sanitize_public_value(item, key=normalized)
+        if sanitized is not _DROP:
+            allowed[key] = sanitized
+    return redact_sensitive(allowed)
+
+
+def _is_absolute_path(value: str) -> bool:
+    return (
+        bool(_WINDOWS_ABSOLUTE_PATH.search(value))
+        or value.startswith("/")
+        or value.startswith("\\\\")
+    )
+
+
+def _is_private_content_key(value: str) -> bool:
+    normalized = value.lower()
+    if normalized in _PRIVATE_CONTENT_KEYS or "manifest" in normalized:
+        return True
+    tokens = {token for token in re.split(r"[^a-z0-9]+", normalized) if token}
+    return bool(
+        tokens & {"smiles", "query", "prompt", "receptor", "ligand", "input"}
+    )
+
+
+def _sanitize_public_value(value: Any, *, key: str | None = None) -> Any:
+    normalized_key = (key or "").lower()
+    if _is_private_content_key(normalized_key):
+        return _DROP
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for child_key, child_value in value.items():
+            if not isinstance(child_key, str):
+                continue
+            sanitized = _sanitize_public_value(child_value, key=child_key)
+            if sanitized is not _DROP:
+                result[child_key] = sanitized
+        return redact_sensitive(result)
+    if isinstance(value, (list, tuple)):
+        result = []
+        for item in value:
+            sanitized = _sanitize_public_value(item)
+            if sanitized is not _DROP:
+                result.append(sanitized)
+        return redact_sensitive(result)
+    if isinstance(value, float) and not math.isfinite(value):
+        return _DROP
+    if isinstance(value, str) and _is_absolute_path(value):
+        return _DROP
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return redact_sensitive(value)
+    return _DROP
+
+
+def sanitize_public_task_data(value: Any) -> Any:
+    sanitized = _sanitize_public_value(value)
+    return {} if sanitized is _DROP else sanitized
 
 
 @dataclass
@@ -143,7 +335,8 @@ class TaskRecord:
         public = self.to_dict()
         public.pop("input", None)
         public.pop("input_manifest_path", None)
-        return redact_sensitive(public)
+        public["provenance"] = sanitize_public_provenance(self.provenance or {})
+        return sanitize_public_task_data(public)
 
 
 @dataclass(frozen=True)

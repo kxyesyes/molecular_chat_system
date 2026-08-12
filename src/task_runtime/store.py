@@ -12,7 +12,15 @@ from src.agent.persistence.redaction import redact_sensitive
 
 from .database import connection, init_db
 from .errors import TaskErrorCode
-from .models import TaskEvent, TaskRecord, TaskStatus
+from .models import (
+    TaskEvent,
+    TaskPhase,
+    TaskRecord,
+    TaskStatus,
+    normalize_warning_codes,
+    sanitize_provenance,
+    strict_json_snapshot,
+)
 
 
 TERMINAL_STATUSES = frozenset(
@@ -23,8 +31,8 @@ TERMINAL_STATUSES = frozenset(
         TaskStatus.TIMED_OUT,
     }
 )
-_WARNING_CODE = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 _SAFE_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
+WORKER_FUTURE_SKEW_SECONDS = 5.0
 
 
 def _normalize_datetime(value: datetime) -> datetime:
@@ -57,7 +65,9 @@ def _as_timestamp(value: datetime | str | None) -> str:
 
 
 def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False)
+    return json.dumps(
+        strict_json_snapshot(value), ensure_ascii=False, allow_nan=False
+    )
 
 
 def _validate_required_string(value: Any, name: str, max_length: int = 255) -> str:
@@ -91,6 +101,16 @@ def _validate_optional_code(value: Any, name: str) -> str | None:
     if value is None:
         return None
     return _validate_code(value, name)
+
+
+def _validate_phase(value: TaskPhase | str | None) -> str | None:
+    if value is None:
+        return None
+    candidate = value.value if isinstance(value, TaskPhase) else value
+    try:
+        return TaskPhase(candidate).value
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid phase") from exc
 
 
 def _validate_progress(value: Any) -> float | None:
@@ -138,17 +158,6 @@ def _error_code_value(value: TaskErrorCode | str | None) -> str | None:
         except ValueError as exc:
             raise ValueError("invalid error_code") from exc
     raise ValueError("invalid error_code")
-
-
-def _warning_codes(warnings: list[Any] | None) -> list[str]:
-    codes: list[str] = []
-    for warning in warnings or []:
-        candidate = warning if isinstance(warning, str) else None
-        if isinstance(warning, dict):
-            candidate = warning.get("code")
-        if isinstance(candidate, str) and _WARNING_CODE.fullmatch(candidate):
-            codes.append(candidate)
-    return codes
 
 
 class TaskStore:
@@ -216,7 +225,12 @@ class TaskStore:
         if input_manifest_path is not None:
             _validate_required_string(input_manifest_path, "input_manifest_path", 4096)
         timestamp = _as_timestamp(now)
-        safe_provenance = redact_sensitive(provenance or {})
+        payload_snapshot = strict_json_snapshot(payload)
+        if not isinstance(payload_snapshot, dict):
+            raise ValueError("invalid JSON task payload")
+        safe_provenance = sanitize_provenance(provenance)
+        payload_json = _json(payload_snapshot)
+        provenance_json = _json(safe_provenance)
         with connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
@@ -232,11 +246,11 @@ class TaskStore:
                     task_id,
                     task_type,
                     TaskStatus.QUEUED.value,
-                    _json(payload),
+                    payload_json,
                     backend,
                     external_workflow_id,
                     input_manifest_path,
-                    _json(safe_provenance),
+                    provenance_json,
                     timestamp,
                     timestamp,
                 ),
@@ -290,12 +304,12 @@ class TaskStore:
         self,
         task_id: str,
         *,
-        phase: str | None = "running",
+        phase: TaskPhase | str | None = TaskPhase.RUNNING,
         attempt: int | None = None,
         now: datetime | str | None = None,
     ) -> bool:
         task_id = _validate_required_string(task_id, "task_id")
-        phase = _validate_optional_code(phase, "phase")
+        phase = _validate_phase(phase)
         attempt = _validate_attempt(attempt)
         timestamp = _as_timestamp(now)
         with connection(self.db_path) as conn:
@@ -340,7 +354,7 @@ class TaskStore:
         self,
         task_id: str,
         *,
-        phase: str | None = None,
+        phase: TaskPhase | str | None = None,
         progress: float | None = None,
         attempt: int | None = None,
         warnings: list[Any] | None = None,
@@ -348,13 +362,17 @@ class TaskStore:
         now: datetime | str | None = None,
     ) -> bool:
         task_id = _validate_required_string(task_id, "task_id")
-        phase = _validate_optional_code(phase, "phase")
+        phase = _validate_phase(phase)
         progress = _validate_progress(progress)
         attempt = _validate_attempt(attempt)
         timestamp = _as_timestamp(now)
-        safe_warnings = redact_sensitive(warnings) if warnings is not None else None
-        safe_provenance = (
-            redact_sensitive(provenance) if provenance is not None else None
+        safe_warnings = (
+            normalize_warning_codes(warnings) if warnings is not None else None
+        )
+        safe_provenance = sanitize_provenance(provenance) if provenance is not None else None
+        warnings_json = _json(safe_warnings) if safe_warnings is not None else None
+        provenance_json = (
+            _json(safe_provenance) if safe_provenance is not None else None
         )
         event_payload: dict[str, Any] = {}
         if phase is not None:
@@ -363,9 +381,8 @@ class TaskStore:
             event_payload["progress"] = progress
         if attempt is not None:
             event_payload["attempt"] = attempt
-        warning_codes = _warning_codes(warnings)
-        if warning_codes:
-            event_payload["warning_codes"] = warning_codes
+        if safe_warnings:
+            event_payload["warning_codes"] = safe_warnings
 
         with connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -384,8 +401,8 @@ class TaskStore:
                     phase,
                     progress,
                     attempt,
-                    _json(safe_warnings) if safe_warnings is not None else None,
-                    _json(safe_provenance) if safe_provenance is not None else None,
+                    warnings_json,
+                    provenance_json,
                     timestamp,
                     timestamp,
                     task_id,
@@ -494,9 +511,19 @@ class TaskStore:
         timestamp = _as_timestamp(now)
         code = _error_code_value(error_code)
         safe_error = redact_sensitive(error) if error is not None else None
-        safe_warnings = redact_sensitive(warnings) if warnings is not None else None
-        safe_provenance = (
-            redact_sensitive(provenance) if provenance is not None else None
+        safe_warnings = (
+            normalize_warning_codes(warnings) if warnings is not None else None
+        )
+        safe_provenance = sanitize_provenance(provenance) if provenance is not None else None
+        safe_result = (
+            redact_sensitive(strict_json_snapshot(result)) if result is not None else None
+        )
+        safe_artifacts = redact_sensitive(strict_json_snapshot(artifacts or []))
+        result_json = _json(safe_result) if safe_result is not None else None
+        artifacts_json = _json(safe_artifacts)
+        warnings_json = _json(safe_warnings) if safe_warnings is not None else None
+        provenance_json = (
+            _json(safe_provenance) if safe_provenance is not None else None
         )
         source_values = tuple(item.value for item in source_statuses)
         placeholders = ", ".join("?" for _ in source_values)
@@ -514,12 +541,12 @@ class TaskStore:
                 """,
                 (
                     status.value,
-                    _json(result) if result is not None else None,
+                    result_json,
                     safe_error,
-                    _json(artifacts or []),
+                    artifacts_json,
                     code,
-                    _json(safe_warnings) if safe_warnings is not None else None,
-                    _json(safe_provenance) if safe_provenance is not None else None,
+                    warnings_json,
+                    provenance_json,
                     timestamp,
                     timestamp,
                     task_id,
@@ -578,14 +605,21 @@ class TaskStore:
         self,
         task_id: str,
         *,
+        error_code: TaskErrorCode = TaskErrorCode.TASK_BACKEND_UNAVAILABLE,
         now: datetime | str | None = None,
     ) -> bool:
+        messages = {
+            TaskErrorCode.TASK_BACKEND_UNAVAILABLE: "Task execution backend unavailable",
+            TaskErrorCode.TASK_PROJECTION_FAILED: "Task state projection failed",
+        }
+        if error_code not in messages:
+            raise ValueError("invalid queued failure error_code")
         return self._terminal_transition(
             task_id,
             TaskStatus.FAILED,
             (TaskStatus.QUEUED,),
-            error="Task execution backend unavailable",
-            error_code=TaskErrorCode.TASK_BACKEND_UNAVAILABLE,
+            error=messages[error_code],
+            error_code=error_code,
             now=now,
         )
 
@@ -673,7 +707,15 @@ class TaskStore:
             }
 
         current = _normalize_datetime(now or datetime.now(timezone.utc))
-        age = max(0.0, (current - updated).total_seconds())
+        raw_age = (current - updated).total_seconds()
+        if raw_age < -WORKER_FUTURE_SKEW_SECONDS:
+            return {
+                "available": False,
+                "status": "invalid",
+                "backend": backend,
+                "task_queue": task_queue,
+            }
+        age = max(0.0, raw_age)
         available = age <= stale_after
         return {
             "available": available,

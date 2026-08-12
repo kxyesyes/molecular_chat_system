@@ -11,7 +11,7 @@ import pytest
 
 from src.task_runtime.database import connect, connection, init_db
 from src.task_runtime.errors import TaskErrorCode
-from src.task_runtime.models import TaskEvent, TaskRecord, TaskStatus
+from src.task_runtime.models import TaskEvent, TaskPhase, TaskRecord, TaskStatus
 from src.task_runtime.store import TaskStore
 
 
@@ -166,7 +166,7 @@ def test_heartbeat_updates_live_record_but_cannot_mutate_terminal(tmp_path):
         phase="vina",
         progress=0.5,
         attempt=2,
-        warnings=["slow"],
+        warnings=["projection_stale"],
         provenance={"tool": "vina"},
     )
     live = store.get("task-1")
@@ -174,7 +174,7 @@ def test_heartbeat_updates_live_record_but_cannot_mutate_terminal(tmp_path):
     assert (live.phase, live.progress, live.attempt) == ("vina", 0.5, 2)
 
     assert store.finish("task-1", TaskStatus.SUCCEEDED, result={"ok": True})
-    assert not store.heartbeat("task-1", phase="late", progress=0.9, attempt=9)
+    assert not store.heartbeat("task-1", phase="validating", progress=0.9, attempt=9)
     finished = store.get("task-1")
     assert (finished.phase, finished.progress, finished.attempt) == ("vina", 0.5, 2)
 
@@ -199,8 +199,8 @@ def test_events_are_ordered_and_sequence_is_unique(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite")
     store.create("task-1", "docking", {})
     store.claim_running("task-1")
-    store.heartbeat("task-1", phase="prepare", progress=0.1)
-    store.heartbeat("task-1", phase="dock", progress=0.8)
+    store.heartbeat("task-1", phase="preparing", progress=0.1)
+    store.heartbeat("task-1", phase="docking", progress=0.8)
     store.finish("task-1", TaskStatus.TIMED_OUT, error_code=TaskErrorCode.TASK_HEARTBEAT_TIMEOUT)
 
     events = store.events("task-1")
@@ -344,12 +344,12 @@ def test_claim_running_is_atomic_and_emits_started_once(tmp_path):
 def test_heartbeat_does_not_claim_queued_or_update_cancel_requested(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite")
     store.create("queued", "docking", {})
-    assert not store.heartbeat("queued", phase="should-not-run")
+    assert not store.heartbeat("queued", phase="running")
     assert store.get("queued").status is TaskStatus.QUEUED
 
     store.create("cancel", "docking", {})
     store.request_cancel("cancel")
-    assert not store.heartbeat("cancel", phase="late", progress=0.5)
+    assert not store.heartbeat("cancel", phase="canceling", progress=0.5)
     canceled = store.get("cancel")
     assert canceled.status is TaskStatus.CANCEL_REQUESTED
     assert canceled.phase is None
@@ -420,10 +420,23 @@ def test_public_projection_excludes_private_input_and_redacts_nested_values():
         input={"smiles": "CCO", "api_key": "sk-secret-secret"},
         input_manifest_path="C:/private/manifest.json",
         error="Bearer abcdefghijklmnop",
-        warnings=[{"token": "private-token"}],
-        provenance={"api_key": "sk-secret-secret", "tool": "vina"},
-        result={"credentials": "private", "energy": -7.0},
-        artifacts=[{"token": "private-token", "path": "pose.pdbqt"}],
+        warnings=["projection_stale"],
+        provenance={
+            "api_key": "sk-secret-secret",
+            "tool": "vina",
+            "model_path": "C:/private/model.bin",
+            "smiles": "CCO",
+        },
+        result={
+            "credentials": "private",
+            "energy": -7.0,
+            "query": "CCO",
+            "db_path": "C:/private/db.sqlite",
+        },
+        artifacts=[
+            {"token": "private-token", "path": "pose.pdbqt"},
+            {"path": "C:/private/pose.pdbqt"},
+        ],
     )
 
     public = record.to_public_dict()
@@ -431,10 +444,16 @@ def test_public_projection_excludes_private_input_and_redacts_nested_values():
     assert "input" not in public
     assert "input_manifest_path" not in public
     assert public["error"] == "[REDACTED]"
-    assert public["warnings"] == [{"token": "[REDACTED]"}]
-    assert public["provenance"]["api_key"] == "[REDACTED]"
+    assert public["warnings"] == ["projection_stale"]
+    assert public["provenance"] == {"tool": "vina"}
     assert public["result"]["credentials"] == "[REDACTED]"
+    assert "query" not in public["result"]
+    assert "db_path" not in public["result"]
     assert public["artifacts"][0]["token"] == "[REDACTED]"
+    assert public["artifacts"][0]["path"] == "pose.pdbqt"
+    assert public["artifacts"][1] == {}
+    assert "CCO" not in json.dumps(public)
+    assert "C:/private" not in json.dumps(public)
     assert record.to_dict()["input"] == record.input
 
 
@@ -444,15 +463,20 @@ def test_events_allowlist_metadata_and_record_sensitive_fields_are_redacted(tmp_
         "task-1",
         "docking",
         {"smiles": "CCO", "api_key": "sk-secret-secret"},
-        provenance={"token": "private-token"},
+        provenance={
+            "provider": "temporal",
+            "token": "private-token",
+            "smiles": "CCO",
+            "model_path": "C:/private/model.bin",
+        },
     )
-    store.claim_running("task-1", phase="prepare", attempt=1)
+    store.claim_running("task-1", phase="preparing", attempt=1)
     store.heartbeat(
         "task-1",
         phase="vina",
         progress=0.5,
         attempt=1,
-        warnings=["SLOW_TOOL", {"code": "MODEL_WARNING", "token": "private-token"}],
+        warnings=["projection_stale", TaskErrorCode.TASK_HEARTBEAT_TIMEOUT],
         provenance={"api_key": "sk-secret-secret", "path": "C:/private/model.bin"},
     )
     store.request_cancel(
@@ -469,9 +493,9 @@ def test_events_allowlist_metadata_and_record_sensitive_fields_are_redacted(tmp_
     assert "C:/private" not in serialized_events
     assert "sk-secret" not in serialized_events
     assert "provenance" not in serialized_events
-    assert "MODEL_WARNING" in serialized_events
-    assert record.provenance["api_key"] == "[REDACTED]"
-    assert record.warnings[1]["token"] == "[REDACTED]"
+    assert "TASK_HEARTBEAT_TIMEOUT" in serialized_events
+    assert record.provenance == {}
+    assert record.warnings == ["projection_stale", "TASK_HEARTBEAT_TIMEOUT"]
     assert record.error == "[REDACTED]"
 
 
@@ -615,3 +639,147 @@ def test_event_metadata_fields_require_safe_codes(tmp_path, field, value):
         TaskStore(tmp_path / "tasks.sqlite").create(
             "task-1", values["task_type"], {}, backend=values["backend"]
         )
+
+
+def test_task_phase_has_exact_stage_3a_values():
+    assert {phase.value for phase in TaskPhase} == {
+        "running",
+        "staging",
+        "preparing",
+        "docking",
+        "vina",
+        "validating",
+        "completing",
+        "canceling",
+    }
+
+
+@pytest.mark.parametrize("phase", ["prepare", "dock", "unknown", "CCO"])
+def test_lifecycle_rejects_unregistered_phase(tmp_path, phase):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("task-1", "demo", {})
+    with pytest.raises(ValueError, match="phase"):
+        store.claim_running("task-1", phase=phase)
+
+
+@pytest.mark.parametrize("warning", ["slow", "MODEL_WARNING", {"code": "unknown"}])
+def test_heartbeat_rejects_unregistered_warning_code(tmp_path, warning):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("task-1", "demo", {})
+    store.claim_running("task-1")
+    with pytest.raises(ValueError, match="warning"):
+        store.heartbeat("task-1", warnings=[warning])
+
+
+def test_persisted_provenance_is_operational_allowlist_only(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    record = store.create(
+        "task-1",
+        "docking",
+        {"smiles": "CCO"},
+        provenance={
+            "provider": "temporal",
+            "tool_name": "vina",
+            "version": "1.2.3",
+            "attempt": 1,
+            "configured": True,
+            "artifact_hash": "abc123",
+            "smiles": "CCO",
+            "model_path": "C:/private/model.bin",
+            "token": "private-token",
+            "extra": "omit-me",
+        },
+    )
+
+    assert record.provenance == {
+        "provider": "temporal",
+        "tool_name": "vina",
+        "version": "1.2.3",
+        "attempt": 1,
+        "configured": True,
+        "artifact_hash": "abc123",
+    }
+    assert "CCO" not in json.dumps(record.to_public_dict())
+    assert "C:/private" not in json.dumps(record.to_public_dict())
+
+
+def test_strict_json_rejects_nonfinite_result_and_artifacts(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("task-1", "demo", {})
+    store.claim_running("task-1")
+    with pytest.raises(ValueError, match="JSON"):
+        store.finish("task-1", TaskStatus.SUCCEEDED, result={"score": math.nan})
+    with pytest.raises(ValueError, match="JSON"):
+        store.finish(
+            "task-1", TaskStatus.SUCCEEDED, artifacts=[{"size": math.inf}]
+        )
+    assert store.get("task-1").status is TaskStatus.RUNNING
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("warnings", [math.nan]), ("provenance", {"attempt": math.inf})],
+)
+def test_strict_json_rejects_nonfinite_heartbeat_projection(tmp_path, field, value):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("task-1", "demo", {})
+    store.claim_running("task-1")
+    with pytest.raises(ValueError, match="JSON|warning|provenance"):
+        store.heartbeat("task-1", **{field: value})
+    assert store.get("task-1").status is TaskStatus.RUNNING
+
+
+def test_public_projection_sanitizes_corrupt_legacy_nonfinite_values():
+    record = TaskRecord(
+        task_id="task-1",
+        task_type="demo",
+        status=TaskStatus.SUCCEEDED,
+        input={},
+        result={"score": math.nan, "valid": 1.0},
+        artifacts=[{"size": math.inf, "name": "pose"}],
+        warnings=[math.nan, "projection_stale"],
+        provenance={"attempt": math.nan, "tool": "vina"},
+        error="failed at C:/private/runtime.log",
+    )
+    public = record.to_public_dict()
+    assert public["result"] == {"valid": 1.0}
+    assert public["artifacts"] == [{"name": "pose"}]
+    assert public["warnings"] == ["projection_stale"]
+    assert public["provenance"] == {"tool": "vina"}
+    assert "C:/private" not in json.dumps(public)
+    json.dumps(public, allow_nan=False)
+
+
+def test_public_projection_omits_private_key_variants_and_posix_paths():
+    record = TaskRecord(
+        task_id="task-1",
+        task_type="docking",
+        status=TaskStatus.SUCCEEDED,
+        input={},
+        result={
+            "receptor_file": "receptor.pdb",
+            "ligand_source": "ligand.sdf",
+            "input_summary": "private",
+            "message": "/srv/private/result.json",
+            "safe": "completed",
+        },
+    )
+    assert record.to_public_dict()["result"] == {"safe": "completed"}
+
+
+def test_worker_health_rejects_far_future_heartbeat(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.record_worker_heartbeat(
+        "worker-1",
+        backend="temporal",
+        task_queue="medchat-docking",
+        concurrency=1,
+        now="2099-01-01T00:00:00Z",
+    )
+    health = store.worker_health(
+        "temporal",
+        "medchat-docking",
+        now=datetime(2026, 8, 12, tzinfo=timezone.utc),
+    )
+    assert health["available"] is False
+    assert health["status"] == "invalid"

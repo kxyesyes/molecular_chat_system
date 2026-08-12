@@ -55,4 +55,4 @@ def setup_agent_workflow_routes(
             },
             handler=handler,
         )
-        return api_success(record.to_dict(), message="Agent 工作流任务已提交")
+        return api_success(record.to_public_dict(), message="Agent 工作流任务已提交")

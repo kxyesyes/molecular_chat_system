@@ -1,6 +1,9 @@
 import time
+import math
 from concurrent.futures import Future
 from threading import Event
+
+import pytest
 
 from src.task_runtime import TaskManager, TaskStatus
 
@@ -169,3 +172,67 @@ def test_manager_submit_failure_compensates_queued_task_without_leaking_error(tm
     assert failed.error == "Task execution backend unavailable"
     assert "sk-secret" not in str(failed.to_public_dict())
     assert record.task_id not in manager._futures
+
+
+def test_manager_scientific_nan_result_fails_with_stable_code(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    record = manager.submit("unit_test", {}, lambda _: {"score": math.nan})
+
+    failed = wait_for_terminal(manager, record.task_id)
+    assert failed.status is TaskStatus.FAILED
+    assert failed.error_code == "SCIENTIFIC_VALIDATION_FAILED"
+    assert failed.error == "Scientific task result validation failed"
+    assert failed.result is None
+
+
+def test_manager_claim_exception_compensates_without_future_exception(tmp_path, monkeypatch):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    manager.executor.shutdown(wait=True)
+    manager.executor = ImmediateExecutor()
+    monkeypatch.setattr(
+        manager.store,
+        "claim_running",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("private db path")),
+    )
+
+    record = manager.submit("unit_test", {}, lambda _: {"should_not_run": True})
+    failed = manager.get(record.task_id)
+
+    assert failed.status is TaskStatus.FAILED
+    assert failed.error_code == "TASK_PROJECTION_FAILED"
+    assert failed.error == "Task state projection failed"
+    assert record.task_id not in manager._futures
+
+
+def test_manager_uses_deep_json_payload_snapshot(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    blocker_started = Event()
+    release = Event()
+    observed = []
+
+    def blocker(_payload):
+        blocker_started.set()
+        release.wait(timeout=5)
+        return {"ok": True}
+
+    first = manager.submit("unit_test", {}, blocker)
+    assert blocker_started.wait(timeout=2)
+    payload = {"nested": {"value": 1}, "items": [1, 2]}
+    second = manager.submit(
+        "unit_test", payload, lambda snapshot: observed.append(snapshot) or {"ok": True}
+    )
+    payload["nested"]["value"] = 99
+    payload["items"].append(3)
+    release.set()
+
+    wait_for_terminal(manager, first.task_id)
+    wait_for_terminal(manager, second.task_id)
+    assert observed == [{"nested": {"value": 1}, "items": [1, 2]}]
+    assert manager.get(second.task_id).input == observed[0]
+
+
+def test_manager_rejects_non_json_payload_before_task_creation(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    with pytest.raises(ValueError, match="JSON"):
+        manager.submit("unit_test", {"score": math.nan}, lambda _: {})
+    assert manager.list() == []

@@ -7,7 +7,13 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
-from .models import TaskRecord, TaskStatus
+from .errors import TaskErrorCode
+from .models import (
+    TaskRecord,
+    TaskStatus,
+    strict_json_roundtrip,
+    strict_json_snapshot,
+)
 from .store import TaskStore
 
 
@@ -46,10 +52,13 @@ class TaskManager:
         task_id: str | None = None,
     ) -> TaskRecord:
         task_id = task_id or str(uuid4())
-        self.store.create(task_id, task_type, payload)
+        snapshot = strict_json_roundtrip(payload)
+        if not isinstance(snapshot, dict):
+            raise ValueError("invalid JSON task payload")
+        self.store.create(task_id, task_type, snapshot)
 
         try:
-            future = self.executor.submit(self._run_task, task_id, handler, payload)
+            future = self.executor.submit(self._run_task, task_id, handler, snapshot)
         except Exception:
             self.store.fail_queued(task_id)
             return self.get(task_id)
@@ -77,7 +86,17 @@ class TaskManager:
         return self.store.list(limit=limit, status=status, task_type=task_type)
 
     def _run_task(self, task_id: str, handler: TaskHandler, payload: dict[str, Any]) -> None:
-        if not self._mark_running(task_id):
+        try:
+            claimed = self._mark_running(task_id)
+        except Exception:
+            try:
+                self.store.fail_queued(
+                    task_id, error_code=TaskErrorCode.TASK_PROJECTION_FAILED
+                )
+            except Exception:
+                pass
+            return
+        if not claimed:
             try:
                 record = self.store.get(task_id)
             except KeyError:
@@ -87,8 +106,16 @@ class TaskManager:
             return
         try:
             result = handler(payload)
+        except Exception as exc:  # pragma: no cover - exact failures are task-specific
+            completed = self._mark_finished(task_id, TaskStatus.FAILED, error=str(exc))
+            if not completed:
+                self._finish_requested_cancellation(task_id)
+            return
+
+        try:
             if result is None:
                 result = {}
+            result = strict_json_snapshot(result)
             artifacts = result.get("artifacts", []) if isinstance(result, dict) else []
             status, error = _terminal_state(result)
             completed = self._mark_finished(
@@ -96,8 +123,13 @@ class TaskManager:
             )
             if not completed:
                 self._finish_requested_cancellation(task_id)
-        except Exception as exc:  # pragma: no cover - exact failures are task-specific
-            completed = self._mark_finished(task_id, TaskStatus.FAILED, error=str(exc))
+        except (TypeError, ValueError):
+            completed = self._mark_finished(
+                task_id,
+                TaskStatus.FAILED,
+                error="Scientific task result validation failed",
+                error_code=TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED,
+            )
             if not completed:
                 self._finish_requested_cancellation(task_id)
 
@@ -119,6 +151,7 @@ class TaskManager:
         result: Any = None,
         error: str | None = None,
         artifacts: list[dict[str, Any]] | None = None,
+        error_code: TaskErrorCode | str | None = None,
     ) -> bool:
         return self.store.finish(
             task_id,
@@ -126,6 +159,7 @@ class TaskManager:
             result=result,
             error=error,
             artifacts=artifacts,
+            error_code=error_code,
         )
 
 
