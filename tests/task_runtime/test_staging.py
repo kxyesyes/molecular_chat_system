@@ -6,11 +6,13 @@ import os
 import stat
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import src.task_runtime.staging as staging_module
 from src.task_runtime.staging import DockingInputStager, ManifestError
 
 
@@ -680,3 +682,587 @@ def test_cleanup_preserves_old_task_with_nested_symlink(tmp_path: Path) -> None:
     assert removed == []
     assert path.parent.is_dir()
     assert marker.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.parametrize(
+    "task_id",
+    [
+        "task.",
+        "CON",
+        "con.txt",
+        "PRN.log",
+        "AUX.data",
+        "NUL.bin",
+        "CLOCK$",
+        "COM1.out",
+        "com9.anything",
+        "LPT1.txt",
+        "lpt9.log",
+    ],
+)
+def test_task_ids_reject_windows_ambiguous_names(
+    tmp_path: Path,
+    task_id: str,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+
+    with pytest.raises(ManifestError) as caught:
+        _stage_file(stager, task_id)
+
+    _assert_safe_error(caught.value, forbidden=(task_id, str(tmp_path.resolve())))
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "receptor.",
+        "CON.pdb",
+        "prn.sdf",
+        "AUX.mol2",
+        "NUL.pdbqt",
+        "CLOCK$",
+        "COM1.pdb",
+        "com9.sdf",
+        "LPT1.pdb",
+        "lpt9.sdf",
+        "a" * 101,
+    ],
+)
+def test_input_names_reject_windows_ambiguous_or_overlong_basenames(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+
+    with pytest.raises(ManifestError) as caught:
+        stager.stage(
+            "task-1",
+            name,
+            b"ATOM",
+            "ligand.sdf",
+            b"$$$$",
+            None,
+            DOCKING_CONFIG,
+        )
+
+    _assert_safe_error(caught.value, forbidden=(name, str(tmp_path.resolve())))
+
+
+def test_portable_100_byte_input_basename_is_accepted(tmp_path: Path) -> None:
+    stager = DockingInputStager(tmp_path)
+    receptor_name = f"{'r' * 96}.pdb"
+
+    path = stager.stage(
+        "task-1",
+        receptor_name,
+        b"ATOM",
+        "ligand.sdf",
+        b"$$$$",
+        None,
+        DOCKING_CONFIG,
+    )
+
+    assert stager.load_verified("task-1", path)["receptor"]["path"].endswith(
+        receptor_name
+    )
+
+
+def test_impractical_final_input_path_is_rejected_before_sensitive_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    real_atomic_write = staging_module._atomic_write
+    sensitive_writes: list[str] = []
+
+    def record_writes(path: Path, content: bytes) -> None:
+        if path.name in {"receptorx.pdb", "ligandxx.sdf", "smiles.txt"}:
+            sensitive_writes.append(path.name)
+        real_atomic_write(path, content)
+
+    monkeypatch.setattr(staging_module, "_atomic_write", record_writes)
+
+    with pytest.raises(ManifestError):
+        stager.stage(
+            "t" * 128,
+            "receptorx.pdb",
+            b"ATOM",
+            "ligandxx.sdf",
+            b"$$$$",
+            None,
+            DOCKING_CONFIG,
+        )
+
+    assert sensitive_writes == []
+
+
+def test_receptor_and_ligand_names_cannot_collide_portably(tmp_path: Path) -> None:
+    stager = DockingInputStager(tmp_path)
+
+    with pytest.raises(ManifestError) as caught:
+        stager.stage(
+            "task-1",
+            "Ligand.SDF",
+            b"ATOM",
+            "ligand.sdf",
+            b"$$$$",
+            None,
+            DOCKING_CONFIG,
+        )
+
+    _assert_safe_error(caught.value, forbidden=(str(tmp_path.resolve()),))
+
+
+def test_stage_rejects_26_mib_receptor_and_ligand_before_writing(
+    tmp_path: Path,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    oversized = b"x" * (26 * 1024 * 1024)
+
+    with pytest.raises(ManifestError):
+        stager.stage(
+            "large-receptor",
+            "receptor.pdb",
+            oversized,
+            "ligand.sdf",
+            b"$$$$",
+            None,
+            DOCKING_CONFIG,
+        )
+    with pytest.raises(ManifestError):
+        stager.stage(
+            "large-ligand",
+            "receptor.pdb",
+            b"ATOM",
+            "ligand.sdf",
+            oversized,
+            None,
+            DOCKING_CONFIG,
+        )
+
+    assert not (tmp_path / "large-receptor").exists()
+    assert not (tmp_path / "large-ligand").exists()
+
+
+def test_stage_rejects_smiles_larger_than_16_kib_before_writing(
+    tmp_path: Path,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    oversized = "C" * (16 * 1024 + 1)
+
+    with pytest.raises(ManifestError) as caught:
+        stager.stage(
+            "large-smiles",
+            "receptor.pdb",
+            b"ATOM",
+            None,
+            None,
+            oversized,
+            DOCKING_CONFIG,
+        )
+
+    _assert_safe_error(caught.value, forbidden=(oversized, str(tmp_path.resolve())))
+    assert not (tmp_path / "large-smiles").exists()
+
+
+def test_load_uses_descriptor_reads_not_path_read_helpers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+
+    def forbidden_path_read(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("path-based read is forbidden")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden_path_read)
+    monkeypatch.setattr(Path, "open", forbidden_path_read)
+
+    assert stager.load_verified("task-1", path)["task_id"] == "task-1"
+
+
+def test_load_rejects_hardlinked_input(tmp_path: Path) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+    receptor = path.parent / "inputs" / "receptor.pdb"
+    original = tmp_path / "original.pdb"
+    receptor.replace(original)
+    try:
+        os.link(original, receptor)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"hardlinks unavailable: {type(exc).__name__}")
+
+    with pytest.raises(ManifestError) as caught:
+        stager.load_verified("task-1", path)
+
+    _assert_safe_error(caught.value, forbidden=(str(original), str(tmp_path.resolve())))
+
+
+def test_load_rejects_descriptor_metadata_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+    real_fstat = staging_module.os.fstat
+    calls: dict[tuple[int, int, int], int] = {}
+
+    def unstable_fstat(descriptor: int) -> os.stat_result:
+        result = real_fstat(descriptor)
+        key = (result.st_dev, result.st_ino, result.st_size)
+        calls[key] = calls.get(key, 0) + 1
+        if result.st_size == 5 and calls[key] >= 2:
+            values = list(result)
+            values[6] = result.st_size + 1
+            return os.stat_result(values)
+        return result
+
+    monkeypatch.setattr(staging_module.os, "fstat", unstable_fstat)
+
+    with pytest.raises(ManifestError) as caught:
+        stager.load_verified("task-1", path)
+
+    _assert_safe_error(caught.value, forbidden=(str(tmp_path.resolve()),))
+
+
+def test_load_rejects_path_replacement_during_descriptor_read_when_supported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+    receptor = path.parent / "inputs" / "receptor.pdb"
+    receptor_identity = receptor.stat().st_ino
+    replacement = tmp_path / "replacement.pdb"
+    replacement.write_bytes(b"BTOM\n")
+    real_read = staging_module.os.read
+    swapped = False
+    unsupported: OSError | None = None
+
+    def swap_after_read(descriptor: int, size: int) -> bytes:
+        nonlocal swapped, unsupported
+        data = real_read(descriptor, size)
+        if not swapped and data and os.fstat(descriptor).st_ino == receptor_identity:
+            try:
+                os.replace(replacement, receptor)
+            except OSError as exc:
+                unsupported = exc
+            else:
+                swapped = True
+        return data
+
+    monkeypatch.setattr(staging_module.os, "read", swap_after_read)
+
+    caught_error: ManifestError | None = None
+    try:
+        stager.load_verified("task-1", path)
+    except ManifestError as exc:
+        caught_error = exc
+    if unsupported is not None:
+        pytest.skip(f"open-file replacement unavailable: {type(unsupported).__name__}")
+    assert swapped is True
+    assert caught_error is not None
+    _assert_safe_error(caught_error, forbidden=(str(tmp_path.resolve()),))
+
+
+def test_resolve_verified_inputs_reverifies_and_returns_frozen_paths(
+    tmp_path: Path,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+
+    resolved = stager.resolve_verified_inputs("task-1", path)
+
+    assert isinstance(resolved, staging_module.VerifiedDockingInputs)
+    assert resolved.task_id == "task-1"
+    assert resolved.receptor_path == path.parent / "inputs" / "receptor.pdb"
+    assert resolved.ligand_path == path.parent / "inputs" / "ligand.sdf"
+    assert resolved.ligand_mode == "file"
+    assert str(tmp_path.resolve()) not in repr(resolved)
+    with pytest.raises(FrozenInstanceError):
+        resolved.task_id = "changed"  # type: ignore[misc]
+
+
+def test_stage_verifies_published_manifest_before_reporting_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    calls: list[str] = []
+
+    def reject_publish(task_id: str, manifest_path: Path) -> dict[str, Any]:
+        calls.append(task_id)
+        raise ManifestError("manifest_integrity_failed")
+
+    monkeypatch.setattr(stager, "load_verified", reject_publish)
+
+    with pytest.raises(ManifestError) as caught:
+        _stage_file(stager)
+
+    assert calls == ["task-1"]
+    _assert_safe_error(caught.value, forbidden=(str(tmp_path.resolve()),))
+    assert not (tmp_path / "task-1").exists()
+
+
+@pytest.mark.parametrize("failure", [RecursionError(), MemoryError()])
+def test_json_resource_failures_are_reported_as_malformed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+
+    def fail_json(*args: Any, **kwargs: Any) -> Any:
+        raise failure
+
+    monkeypatch.setattr(staging_module.json, "loads", fail_json)
+
+    with pytest.raises(ManifestError) as caught:
+        stager.load_verified("task-1", path)
+
+    assert caught.value.reason_code == "manifest_malformed"
+
+
+def test_json_nesting_guard_rejects_deep_payload_as_malformed(tmp_path: Path) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+    payload = _manifest_payload(path)
+    nested: list[Any] = []
+    cursor = nested
+    for _ in range(40):
+        child: list[Any] = []
+        cursor.append(child)
+        cursor = child
+    payload["extra"] = nested
+    _replace_manifest(path, payload)
+
+    with pytest.raises(ManifestError) as caught:
+        stager.load_verified("task-1", path)
+
+    assert caught.value.reason_code == "manifest_malformed"
+
+
+def test_permission_restriction_failure_aborts_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    real_chmod = Path.chmod
+
+    def fail_inputs(self: Path, mode: int) -> None:
+        if self.name == "inputs":
+            raise OSError("permission denied")
+        real_chmod(self, mode)
+
+    monkeypatch.setattr(Path, "chmod", fail_inputs)
+
+    with pytest.raises(ManifestError) as caught:
+        _stage_file(stager)
+
+    _assert_safe_error(caught.value, forbidden=(str(tmp_path.resolve()),))
+    assert not (tmp_path / "task-1").exists()
+
+
+def test_failed_sensitive_stage_is_owned_or_quarantined(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    real_atomic_write = staging_module._atomic_write
+    real_rmtree = staging_module.shutil.rmtree
+
+    def fail_manifest(path: Path, content: bytes) -> None:
+        if path.name == "input_manifest.json":
+            raise ManifestError("manifest_io_error")
+        real_atomic_write(path, content)
+
+    def fail_stage_delete(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path).name.startswith(".stage-"):
+            marker = Path(path) / ".medchat-staging-owner"
+            if marker.exists():
+                marker.unlink()
+            raise OSError("simulated cleanup failure")
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(staging_module, "_atomic_write", fail_manifest)
+    monkeypatch.setattr(staging_module.shutil, "rmtree", fail_stage_delete)
+
+    with pytest.raises(ManifestError) as caught:
+        _stage_smiles(stager, "failed-smiles")
+
+    _assert_safe_error(caught.value, forbidden=(RAW_SMILES, str(tmp_path.resolve())))
+    assert not list(tmp_path.glob(".stage-*"))
+    quarantined = [path for path in (tmp_path / ".trash").iterdir() if path.is_dir()]
+    assert quarantined
+    assert all((path / ".medchat-staging-owner").is_file() for path in quarantined)
+
+
+def test_cleanup_removes_only_owned_expired_temp_and_quarantine_residue(
+    tmp_path: Path,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    marker_content = b"MedChatTaskStaging@1\n"
+    abandoned = tmp_path / ".stage-abandoned"
+    abandoned.mkdir()
+    (abandoned / ".medchat-staging-owner").write_bytes(marker_content)
+    (abandoned / "secret.txt").write_text("owned residue", encoding="utf-8")
+    trash = tmp_path / ".trash"
+    quarantined = trash / "quarantined-task"
+    quarantined.mkdir(parents=True, exist_ok=True)
+    (quarantined / ".medchat-staging-owner").write_bytes(marker_content)
+    unowned = tmp_path / ".stage-unowned"
+    unowned.mkdir()
+    for path in (abandoned, quarantined, unowned):
+        os.utime(path, (1, 1))
+
+    removed = stager.cleanup_expired(cutoff_epoch=time.time(), protected=set())
+
+    assert removed == []
+    assert not abandoned.exists()
+    assert not quarantined.exists()
+    assert unowned.exists()
+
+
+def test_cleanup_quarantine_swap_preserves_fresh_original_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    _stage_file(stager, "expired")
+    os.utime(tmp_path / "expired", (1, 1))
+    real_rmtree = staging_module.shutil.rmtree
+    swapped = False
+
+    def replace_before_delete(path: Any, *args: Any, **kwargs: Any) -> None:
+        nonlocal swapped
+        target = Path(path)
+        if not swapped:
+            swapped = True
+            original = tmp_path / "expired"
+            if original.exists():
+                displaced = tmp_path / ".displaced-old"
+                original.rename(displaced)
+                original.mkdir()
+                (original / "fresh.txt").write_text("fresh", encoding="utf-8")
+                real_rmtree(displaced)
+            else:
+                original.mkdir()
+                (original / "fresh.txt").write_text("fresh", encoding="utf-8")
+        real_rmtree(target, *args, **kwargs)
+
+    monkeypatch.setattr(staging_module.shutil, "rmtree", replace_before_delete)
+
+    removed = stager.cleanup_expired(cutoff_epoch=time.time(), protected=set())
+
+    assert removed == ["expired"]
+    assert (tmp_path / "expired" / "fresh.txt").read_text(encoding="utf-8") == "fresh"
+
+
+def test_cleanup_rename_guard_restores_directory_swapped_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    _stage_file(stager, "expired")
+    original = tmp_path / "expired"
+    os.utime(original, (1, 1))
+    displaced = tmp_path / ".displaced-old"
+    real_rename = Path.rename
+    swapped = False
+
+    def swap_before_rename(self: Path, target: Path) -> Path:
+        nonlocal swapped
+        if self == original and not swapped:
+            swapped = True
+            os.rename(original, displaced)
+            staging_module.shutil.copytree(displaced, original)
+            (original / "fresh.txt").write_text("fresh", encoding="utf-8")
+            os.rename(original, target)
+            return target
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", swap_before_rename)
+
+    removed = stager.cleanup_expired(cutoff_epoch=time.time(), protected=set())
+
+    assert removed == []
+    assert (original / "fresh.txt").read_text(encoding="utf-8") == "fresh"
+
+
+def test_cleanup_delete_failure_leaves_quarantine_and_does_not_claim_removed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    _stage_file(stager, "expired")
+    os.utime(tmp_path / "expired", (1, 1))
+
+    def fail_delete(path: Any, *args: Any, **kwargs: Any) -> None:
+        raise OSError("simulated delete failure")
+
+    monkeypatch.setattr(staging_module.shutil, "rmtree", fail_delete)
+
+    removed = stager.cleanup_expired(cutoff_epoch=time.time(), protected=set())
+
+    assert removed == []
+    assert not (tmp_path / "expired").exists()
+    quarantined = [path for path in (tmp_path / ".trash").iterdir() if path.is_dir()]
+    assert quarantined
+    assert all((path / ".medchat-staging-owner").is_file() for path in quarantined)
+
+
+def test_publish_fsyncs_inputs_temp_task_and_staging_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[Path] = []
+
+    def record_barrier(path: Path) -> None:
+        calls.append(path.resolve())
+
+    monkeypatch.setattr(staging_module, "_fsync_directory", record_barrier)
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+
+    assert path.parent.parent.resolve() in calls
+    assert any(item.name == "inputs" for item in calls)
+    assert any(item.name.startswith(".stage-") for item in calls)
+
+
+def test_post_publish_root_barrier_failure_quarantines_active_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    real_barrier = staging_module._fsync_directory
+
+    def fail_root_after_publish(path: Path) -> None:
+        if path.resolve() == tmp_path.resolve() and (tmp_path / "task-1").exists():
+            raise ManifestError("manifest_io_error")
+        real_barrier(path)
+
+    monkeypatch.setattr(staging_module, "_fsync_directory", fail_root_after_publish)
+
+    with pytest.raises(ManifestError) as caught:
+        _stage_file(stager)
+
+    assert caught.value.reason_code == "manifest_io_error"
+    assert not (tmp_path / "task-1").exists()
+
+
+def test_posix_directory_fsync_failure_is_not_silenced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(staging_module, "_IS_WINDOWS", False, raising=False)
+
+    def fail_open(*args: Any, **kwargs: Any) -> int:
+        raise OSError("fsync unavailable")
+
+    monkeypatch.setattr(staging_module.os, "open", fail_open)
+
+    with pytest.raises(ManifestError) as caught:
+        staging_module._fsync_directory(tmp_path)
+
+    assert caught.value.reason_code == "manifest_io_error"
