@@ -6,6 +6,7 @@ import os
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from ipaddress import IPv4Address, IPv6Address, ip_address
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,9 @@ DEFAULT_DOCKING_QUEUE = "medchat-docking"
 
 _BACKENDS = frozenset({"local", "temporal_canary"})
 _CANONICAL_PERCENT = re.compile(r"(?:0|[1-9][0-9]?|100)\Z")
+_CANONICAL_PORT = re.compile(r"[1-9][0-9]{0,4}\Z")
+_BRACKETED_TARGET = re.compile(r"\[([^\[\]]+)\]:([1-9][0-9]{0,4})\Z")
+_DNS_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 _SAFE_LOGICAL_NAME = re.compile(r"[A-Za-z0-9._-]{1,255}\Z")
 _WARNING_ORDER = (
     "invalid_task_backend",
@@ -34,14 +38,51 @@ _WARNING_CODES = frozenset(_WARNING_ORDER)
 
 
 def _is_valid_address(value: object) -> bool:
-    return (
-        type(value) is str
-        and bool(value)
-        and not any(
-            character.isspace() or unicodedata.category(character) == "Cc"
+    if (
+        type(value) is not str
+        or not value
+        or any(
+            character.isspace()
+            or unicodedata.category(character).startswith("C")
             for character in value
         )
-    )
+    ):
+        return False
+
+    bracketed = _BRACKETED_TARGET.fullmatch(value)
+    if bracketed is not None:
+        host, port = bracketed.groups()
+        if "%" in host or not _is_valid_port(port):
+            return False
+        try:
+            return isinstance(ip_address(host), IPv6Address)
+        except ValueError:
+            return False
+
+    if value.count(":") != 1:
+        return False
+    host, port = value.rsplit(":", 1)
+    if not host or not _is_valid_port(port):
+        return False
+
+    try:
+        parsed_ip = ip_address(host)
+    except ValueError:
+        return _is_valid_dns_name(host)
+    return isinstance(parsed_ip, IPv4Address)
+
+
+def _is_valid_port(value: str) -> bool:
+    return _CANONICAL_PORT.fullmatch(value) is not None and int(value) <= 65535
+
+
+def _is_valid_dns_name(value: str) -> bool:
+    if len(value) > 253:
+        return False
+    labels = value.split(".")
+    if len(labels) > 1 and all(label.isdecimal() for label in labels):
+        return False
+    return all(_DNS_LABEL.fullmatch(label) is not None for label in labels)
 
 
 def _is_valid_logical_name(value: object) -> bool:
@@ -55,7 +96,16 @@ def _is_safe_staging_root(value: object) -> bool:
         resolved = value.resolve()
     except (OSError, RuntimeError):
         return False
-    return resolved != SCRATCH_ROOT and SCRATCH_ROOT in resolved.parents
+    filesystem_root = Path(resolved.anchor)
+    if (
+        resolved == filesystem_root
+        or resolved == PROJECT_ROOT
+        or resolved in PROJECT_ROOT.parents
+    ):
+        return False
+    if PROJECT_ROOT in resolved.parents:
+        return resolved != SCRATCH_ROOT and SCRATCH_ROOT in resolved.parents
+    return True
 
 
 def _read_environment(name: str, default: str) -> tuple[str, bool]:
@@ -117,6 +167,10 @@ class TaskRuntimeConfig:
         warning_positions = tuple(_WARNING_ORDER.index(code) for code in self.warnings)
         if warning_positions != tuple(sorted(set(warning_positions))):
             raise ValueError("invalid task runtime warning order")
+        if self.warnings and (
+            self.backend != "local" or self.canary_percent != 0
+        ):
+            raise ValueError("task runtime warnings require local fail-closed mode")
         if type(self._temporal_address_configured) is not bool:
             raise ValueError("invalid Temporal address configured flag")
         if type(self._staging_root_configured) is not bool:
@@ -216,6 +270,6 @@ class TaskRuntimeConfig:
             docking_concurrency=1,
             staging_root=staging_root,
             warnings=tuple(warnings),
-            _temporal_address_configured=address_configured,
-            _staging_root_configured=staging_configured,
+            _temporal_address_configured=address_configured and address_valid,
+            _staging_root_configured=staging_configured and staging_valid,
         )

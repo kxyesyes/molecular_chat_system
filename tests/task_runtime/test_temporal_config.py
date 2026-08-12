@@ -19,6 +19,19 @@ ENVIRONMENT_VARIABLES = (
     "MEDCHAT_TASK_STAGING_ROOT",
 )
 
+DANGEROUS_STAGING_ROOTS = tuple(
+    dict.fromkeys(
+        (
+            "",
+            "   ",
+            ".",
+            "..",
+            str(PROJECT_ROOT),
+            *(str(parent) for parent in PROJECT_ROOT.parents),
+        )
+    )
+)
+
 
 def _clear_runtime_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ENVIRONMENT_VARIABLES:
@@ -187,15 +200,7 @@ def test_relative_staging_root_is_resolved_from_project_root(
 
 @pytest.mark.parametrize(
     "value",
-    [
-        "",
-        "   ",
-        ".",
-        "..",
-        str(PROJECT_ROOT),
-        str(PROJECT_ROOT.parent),
-        str(Path(PROJECT_ROOT.anchor)),
-    ],
+    DANGEROUS_STAGING_ROOTS,
 )
 def test_unsafe_staging_roots_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
@@ -215,24 +220,83 @@ def test_unsafe_staging_roots_fail_closed(
         assert value not in repr(config)
 
 
-def test_absolute_staging_root_outside_scratch_fails_closed(
+def test_external_absolute_staging_root_is_accepted_without_existing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     _clear_runtime_environment(monkeypatch)
+    staging_root = (tmp_path / "future-container-volume").resolve()
+    assert not staging_root.exists()
     monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
     monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "100")
-    monkeypatch.setenv("MEDCHAT_TASK_STAGING_ROOT", str(tmp_path))
+    monkeypatch.setenv("MEDCHAT_TASK_STAGING_ROOT", str(staging_root))
 
     config = TaskRuntimeConfig.from_env()
 
-    assert (config.backend, config.canary_percent) == ("local", 0)
-    assert config.staging_root == (PROJECT_ROOT / "scratch/task_inputs").resolve()
-    assert config.warnings == ("invalid_task_staging_root",)
-    assert str(tmp_path) not in repr(config)
+    assert (config.backend, config.canary_percent) == ("temporal_canary", 100)
+    assert config.staging_root == staging_root
+    assert config.warnings == ()
+    assert str(staging_root) not in repr(config)
 
 
-@pytest.mark.parametrize("value", ["", " ", "host name:7233", "host\tname", "host\nname"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "localhost:7233",
+        "temporal.internal:1",
+        "127.0.0.1:65535",
+        "[::1]:7233",
+        "[2001:db8::1]:443",
+    ],
+)
+def test_valid_temporal_targets_are_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "100")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_ADDRESS", value)
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert config.temporal_address == value
+    assert (config.backend, config.canary_percent) == ("temporal_canary", 100)
+    assert config.warnings == ()
+    assert config.to_safe_dict()["temporal_address_configured"] is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        " ",
+        "localhost",
+        "localhost:",
+        ":7233",
+        "http://localhost:7233",
+        "localhost:7233/path",
+        "localhost:7233?query=yes",
+        "user@localhost:7233",
+        "localhost:0",
+        "localhost:65536",
+        "localhost:07233",
+        "localhost:+1",
+        "localhost:1.0",
+        "::1:7233",
+        "[::1]7233",
+        "[::1]:",
+        "[not-ipv6]:7233",
+        "999.999.999.999:7233",
+        "bad_name:7233",
+        "-bad:7233",
+        "bad-:7233",
+        "host name:7233",
+        "host\tname:7233",
+        "host\nname:7233",
+        "host\x01name:7233",
+    ],
+)
 def test_invalid_temporal_address_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     value: str,
@@ -334,6 +398,69 @@ def test_safe_serialization_marks_unset_values_unconfigured(
 
     assert safe["temporal_address_configured"] is False
     assert safe["staging_root_configured"] is False
+
+
+def test_invalid_explicit_values_are_not_marked_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "100")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_ADDRESS", "not-a-target")
+    monkeypatch.setenv("MEDCHAT_TASK_STAGING_ROOT", "   ")
+
+    config = TaskRuntimeConfig.from_env()
+    safe = config.to_safe_dict()
+
+    assert (config.backend, config.canary_percent) == ("local", 0)
+    assert config.warnings == (
+        "invalid_temporal_address",
+        "invalid_task_staging_root",
+    )
+    assert safe["temporal_address_configured"] is False
+    assert safe["staging_root_configured"] is False
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["localhost:7233", "127.0.0.1:1", "[::1]:65535"],
+)
+def test_direct_constructor_accepts_valid_temporal_targets(value: str) -> None:
+    assert _direct_config(temporal_address=value).temporal_address == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "localhost",
+        "http://localhost:7233",
+        "localhost:0",
+        "localhost:07233",
+        "::1:7233",
+        "[::1]:65536",
+    ],
+)
+def test_direct_constructor_rejects_invalid_temporal_targets(value: str) -> None:
+    with pytest.raises(ValueError):
+        _direct_config(temporal_address=value)
+
+
+def test_direct_constructor_accepts_safe_external_staging_root(
+    tmp_path: Path,
+) -> None:
+    staging_root = (tmp_path / "not-created-yet").resolve()
+    assert not staging_root.exists()
+
+    assert _direct_config(staging_root=staging_root).staging_root == staging_root
+
+
+def test_direct_constructor_rejects_warning_on_active_canary() -> None:
+    with pytest.raises(ValueError):
+        _direct_config(
+            backend="temporal_canary",
+            canary_percent=25,
+            warnings=("invalid_temporal_address",),
+        )
 
 
 @pytest.mark.parametrize(
