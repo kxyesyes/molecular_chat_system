@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .database import connect, init_db
+from src.agent.persistence.redaction import redact_sensitive
+
+from .database import connection, init_db
 from .errors import TaskErrorCode
 from .models import TaskEvent, TaskRecord, TaskStatus
 
@@ -19,6 +23,25 @@ TERMINAL_STATUSES = frozenset(
         TaskStatus.TIMED_OUT,
     }
 )
+_WARNING_CODE = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
+_SAFE_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
+
+
+def _normalize_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _parse_timestamp(value: str) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("invalid timestamp")
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid timestamp") from exc
+    return _normalize_datetime(parsed)
 
 
 def utc_now() -> str:
@@ -29,20 +52,103 @@ def _as_timestamp(value: datetime | str | None) -> str:
     if value is None:
         return utc_now()
     if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc).isoformat()
-    return value
+        return _normalize_datetime(value).isoformat()
+    return _parse_timestamp(value).isoformat()
 
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _validate_required_string(value: Any, name: str, max_length: int = 255) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or value != value.strip()
+        or len(value) > max_length
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"invalid {name}")
+    return value
+
+
+def _validate_optional_string(
+    value: Any, name: str, max_length: int = 255
+) -> str | None:
+    if value is None:
+        return None
+    return _validate_required_string(value, name, max_length)
+
+
+def _validate_code(value: Any, name: str) -> str:
+    value = _validate_required_string(value, name, 128)
+    if not _SAFE_CODE.fullmatch(value):
+        raise ValueError(f"invalid {name}")
+    return value
+
+
+def _validate_optional_code(value: Any, name: str) -> str | None:
+    if value is None:
+        return None
+    return _validate_code(value, name)
+
+
+def _validate_progress(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("invalid progress")
+    parsed = float(value)
+    if not math.isfinite(parsed) or not 0.0 <= parsed <= 1.0:
+        raise ValueError("invalid progress")
+    return parsed
+
+
+def _validate_attempt(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("invalid attempt")
+    return value
+
+
+def _validate_positive_integer(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"invalid {name}")
+    return value
+
+
+def _validate_positive_number(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"invalid {name}")
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ValueError(f"invalid {name}")
+    return parsed
+
+
 def _error_code_value(value: TaskErrorCode | str | None) -> str | None:
+    if value is None:
+        return None
     if isinstance(value, TaskErrorCode):
         return value.value
-    return value
+    if isinstance(value, str):
+        try:
+            return TaskErrorCode(value).value
+        except ValueError as exc:
+            raise ValueError("invalid error_code") from exc
+    raise ValueError("invalid error_code")
+
+
+def _warning_codes(warnings: list[Any] | None) -> list[str]:
+    codes: list[str] = []
+    for warning in warnings or []:
+        candidate = warning if isinstance(warning, str) else None
+        if isinstance(warning, dict):
+            candidate = warning.get("code")
+        if isinstance(candidate, str) and _WARNING_CODE.fullmatch(candidate):
+            codes.append(candidate)
+    return codes
 
 
 class TaskStore:
@@ -83,7 +189,7 @@ class TaskStore:
                 task_id,
                 cls._next_sequence(conn, task_id),
                 event_type,
-                _json(payload),
+                _json(redact_sensitive(payload)),
                 int(is_terminal),
                 created_at,
             ),
@@ -101,8 +207,17 @@ class TaskStore:
         provenance: dict[str, Any] | None = None,
         now: datetime | str | None = None,
     ) -> TaskRecord:
+        task_id = _validate_required_string(task_id, "task_id")
+        task_type = _validate_code(task_type, "task_type")
+        backend = _validate_code(backend, "backend")
+        external_workflow_id = _validate_optional_string(
+            external_workflow_id, "external_workflow_id"
+        )
+        if input_manifest_path is not None:
+            _validate_required_string(input_manifest_path, "input_manifest_path", 4096)
         timestamp = _as_timestamp(now)
-        with connect(self.db_path) as conn:
+        safe_provenance = redact_sensitive(provenance or {})
+        with connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
@@ -121,7 +236,7 @@ class TaskStore:
                     backend,
                     external_workflow_id,
                     input_manifest_path,
-                    _json(provenance or {}),
+                    _json(safe_provenance),
                     timestamp,
                     timestamp,
                 ),
@@ -137,7 +252,7 @@ class TaskStore:
         return self.get(task_id)
 
     def get(self, task_id: str) -> TaskRecord:
-        with connect(self.db_path) as conn:
+        with connection(self.db_path) as conn:
             row = conn.execute(
                 "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
             ).fetchone()
@@ -163,13 +278,63 @@ class TaskStore:
             params.append(task_type)
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.extend((max(1, min(200, int(limit))), max(0, int(offset))))
-        with connect(self.db_path) as conn:
+        with connection(self.db_path) as conn:
             rows = conn.execute(
                 f"SELECT * FROM tasks {where_sql} "
                 "ORDER BY updated_at DESC, task_id DESC LIMIT ? OFFSET ?",
                 params,
             ).fetchall()
         return [TaskRecord.from_row(row) for row in rows]
+
+    def claim_running(
+        self,
+        task_id: str,
+        *,
+        phase: str | None = "running",
+        attempt: int | None = None,
+        now: datetime | str | None = None,
+    ) -> bool:
+        task_id = _validate_required_string(task_id, "task_id")
+        phase = _validate_optional_code(phase, "phase")
+        attempt = _validate_attempt(attempt)
+        timestamp = _as_timestamp(now)
+        with connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE tasks
+                SET status = ?, phase = COALESCE(?, phase),
+                    attempt = COALESCE(?, attempt), started_at = ?,
+                    heartbeat_at = ?, updated_at = ?
+                WHERE task_id = ? AND status = ?
+                """,
+                (
+                    TaskStatus.RUNNING.value,
+                    phase,
+                    attempt,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    task_id,
+                    TaskStatus.QUEUED.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return False
+            event_payload: dict[str, Any] = {}
+            if phase is not None:
+                event_payload["phase"] = phase
+            if attempt is not None:
+                event_payload["attempt"] = attempt
+            self._append_event(
+                conn,
+                task_id,
+                "task_started",
+                event_payload,
+                is_terminal=False,
+                created_at=timestamp,
+            )
+        return True
 
     def heartbeat(
         self,
@@ -182,48 +347,49 @@ class TaskStore:
         provenance: dict[str, Any] | None = None,
         now: datetime | str | None = None,
     ) -> bool:
+        task_id = _validate_required_string(task_id, "task_id")
+        phase = _validate_optional_code(phase, "phase")
+        progress = _validate_progress(progress)
+        attempt = _validate_attempt(attempt)
         timestamp = _as_timestamp(now)
-        event_payload = {
-            key: value
-            for key, value in {
-                "phase": phase,
-                "progress": progress,
-                "attempt": attempt,
-                "warnings": warnings,
-                "provenance": provenance,
-            }.items()
-            if value is not None
-        }
-        terminal_values = tuple(status.value for status in TERMINAL_STATUSES)
-        placeholders = ", ".join("?" for _ in terminal_values)
-        with connect(self.db_path) as conn:
+        safe_warnings = redact_sensitive(warnings) if warnings is not None else None
+        safe_provenance = (
+            redact_sensitive(provenance) if provenance is not None else None
+        )
+        event_payload: dict[str, Any] = {}
+        if phase is not None:
+            event_payload["phase"] = phase
+        if progress is not None:
+            event_payload["progress"] = progress
+        if attempt is not None:
+            event_payload["attempt"] = attempt
+        warning_codes = _warning_codes(warnings)
+        if warning_codes:
+            event_payload["warning_codes"] = warning_codes
+
+        with connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute(
-                f"""
+                """
                 UPDATE tasks
-                SET status = CASE WHEN status = ? THEN ? ELSE status END,
-                    phase = COALESCE(?, phase),
+                SET phase = COALESCE(?, phase),
                     progress = COALESCE(?, progress),
                     attempt = COALESCE(?, attempt),
                     warnings_json = COALESCE(?, warnings_json),
                     provenance_json = COALESCE(?, provenance_json),
-                    heartbeat_at = ?, updated_at = ?,
-                    started_at = COALESCE(started_at, ?)
-                WHERE task_id = ? AND status NOT IN ({placeholders})
+                    heartbeat_at = ?, updated_at = ?
+                WHERE task_id = ? AND status = ?
                 """,
                 (
-                    TaskStatus.QUEUED.value,
-                    TaskStatus.RUNNING.value,
                     phase,
                     progress,
                     attempt,
-                    _json(warnings) if warnings is not None else None,
-                    _json(provenance) if provenance is not None else None,
-                    timestamp,
+                    _json(safe_warnings) if safe_warnings is not None else None,
+                    _json(safe_provenance) if safe_provenance is not None else None,
                     timestamp,
                     timestamp,
                     task_id,
-                    *terminal_values,
+                    TaskStatus.RUNNING.value,
                 ),
             )
             if cursor.rowcount != 1:
@@ -245,10 +411,13 @@ class TaskStore:
         reason: str | None = None,
         now: datetime | str | None = None,
     ) -> TaskRecord:
+        task_id = _validate_required_string(task_id, "task_id")
+        if reason is not None and not isinstance(reason, str):
+            raise ValueError("invalid reason")
         timestamp = _as_timestamp(now)
         terminal_values = tuple(status.value for status in TERMINAL_STATUSES)
         placeholders = ", ".join("?" for _ in terminal_values)
-        with connect(self.db_path) as conn:
+        with connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             exists = conn.execute(
                 "SELECT task_id FROM tasks WHERE task_id = ?", (task_id,)
@@ -270,19 +439,18 @@ class TaskStore:
                 ),
             )
             if cursor.rowcount == 1:
-                payload = {"reason": reason} if reason is not None else {}
                 self._append_event(
                     conn,
                     task_id,
                     "task_cancel_requested",
-                    payload,
+                    {},
                     is_terminal=False,
                     created_at=timestamp,
                 )
         return self.get(task_id)
 
     def events(self, task_id: str) -> list[TaskEvent]:
-        with connect(self.db_path) as conn:
+        with connection(self.db_path) as conn:
             rows = conn.execute(
                 "SELECT * FROM task_events WHERE task_id = ? ORDER BY sequence ASC",
                 (task_id,),
@@ -301,17 +469,18 @@ class TaskStore:
                     task_id=row["task_id"],
                     sequence=int(row["sequence"]),
                     event_type=row["event_type"],
-                    payload=payload,
+                    payload=redact_sensitive(payload),
                     is_terminal=bool(row["is_terminal"]),
                     created_at=row["created_at"],
                 )
             )
         return result
 
-    def finish(
+    def _terminal_transition(
         self,
         task_id: str,
         status: TaskStatus,
+        source_statuses: tuple[TaskStatus, ...],
         *,
         result: Any = None,
         error: str | None = None,
@@ -321,13 +490,17 @@ class TaskStore:
         provenance: dict[str, Any] | None = None,
         now: datetime | str | None = None,
     ) -> bool:
-        if status not in TERMINAL_STATUSES:
-            raise ValueError("finish requires a terminal TaskStatus")
+        task_id = _validate_required_string(task_id, "task_id")
         timestamp = _as_timestamp(now)
         code = _error_code_value(error_code)
-        terminal_values = tuple(item.value for item in TERMINAL_STATUSES)
-        placeholders = ", ".join("?" for _ in terminal_values)
-        with connect(self.db_path) as conn:
+        safe_error = redact_sensitive(error) if error is not None else None
+        safe_warnings = redact_sensitive(warnings) if warnings is not None else None
+        safe_provenance = (
+            redact_sensitive(provenance) if provenance is not None else None
+        )
+        source_values = tuple(item.value for item in source_statuses)
+        placeholders = ", ".join("?" for _ in source_values)
+        with connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute(
                 f"""
@@ -337,20 +510,20 @@ class TaskStore:
                     warnings_json = COALESCE(?, warnings_json),
                     provenance_json = COALESCE(?, provenance_json),
                     updated_at = ?, finished_at = ?
-                WHERE task_id = ? AND status NOT IN ({placeholders})
+                WHERE task_id = ? AND status IN ({placeholders})
                 """,
                 (
                     status.value,
                     _json(result) if result is not None else None,
-                    error,
+                    safe_error,
                     _json(artifacts or []),
                     code,
-                    _json(warnings) if warnings is not None else None,
-                    _json(provenance) if provenance is not None else None,
+                    _json(safe_warnings) if safe_warnings is not None else None,
+                    _json(safe_provenance) if safe_provenance is not None else None,
                     timestamp,
                     timestamp,
                     task_id,
-                    *terminal_values,
+                    *source_values,
                 ),
             )
             if cursor.rowcount != 1:
@@ -368,6 +541,54 @@ class TaskStore:
             )
         return True
 
+    def finish(
+        self,
+        task_id: str,
+        status: TaskStatus,
+        *,
+        result: Any = None,
+        error: str | None = None,
+        artifacts: list[dict[str, Any]] | None = None,
+        error_code: TaskErrorCode | str | None = None,
+        warnings: list[Any] | None = None,
+        provenance: dict[str, Any] | None = None,
+        now: datetime | str | None = None,
+    ) -> bool:
+        if status not in TERMINAL_STATUSES:
+            raise ValueError("finish requires a terminal TaskStatus")
+        source_statuses = (
+            (TaskStatus.CANCEL_REQUESTED,)
+            if status is TaskStatus.CANCELED
+            else (TaskStatus.RUNNING,)
+        )
+        return self._terminal_transition(
+            task_id,
+            status,
+            source_statuses,
+            result=result,
+            error=error,
+            artifacts=artifacts,
+            error_code=error_code,
+            warnings=warnings,
+            provenance=provenance,
+            now=now,
+        )
+
+    def fail_queued(
+        self,
+        task_id: str,
+        *,
+        now: datetime | str | None = None,
+    ) -> bool:
+        return self._terminal_transition(
+            task_id,
+            TaskStatus.FAILED,
+            (TaskStatus.QUEUED,),
+            error="Task execution backend unavailable",
+            error_code=TaskErrorCode.TASK_BACKEND_UNAVAILABLE,
+            now=now,
+        )
+
     def record_worker_heartbeat(
         self,
         worker_id: str,
@@ -378,8 +599,13 @@ class TaskStore:
         sdk_version: str | None = None,
         now: datetime | str | None = None,
     ) -> None:
+        worker_id = _validate_required_string(worker_id, "worker_id")
+        backend = _validate_code(backend, "backend")
+        task_queue = _validate_code(task_queue, "task_queue")
+        concurrency = _validate_positive_integer(concurrency, "concurrency")
+        sdk_version = _validate_optional_string(sdk_version, "sdk_version")
         timestamp = _as_timestamp(now)
-        with connect(self.db_path) as conn:
+        with connection(self.db_path) as conn:
             conn.execute(
                 """
                 INSERT INTO task_worker_heartbeats (
@@ -397,7 +623,7 @@ class TaskStore:
                     worker_id,
                     backend,
                     task_queue,
-                    int(concurrency),
+                    concurrency,
                     sdk_version,
                     timestamp,
                 ),
@@ -411,7 +637,12 @@ class TaskStore:
         now: datetime | None = None,
         stale_after_seconds: float = 30.0,
     ) -> dict[str, Any]:
-        with connect(self.db_path) as conn:
+        backend = _validate_code(backend, "backend")
+        task_queue = _validate_code(task_queue, "task_queue")
+        stale_after = _validate_positive_number(
+            stale_after_seconds, "stale_after_seconds"
+        )
+        with connection(self.db_path) as conn:
             row = conn.execute(
                 """
                 SELECT * FROM task_worker_heartbeats
@@ -428,23 +659,31 @@ class TaskStore:
                 "task_queue": task_queue,
             }
 
-        current = now or datetime.now(timezone.utc)
-        if current.tzinfo is None:
-            current = current.replace(tzinfo=timezone.utc)
-        updated = datetime.fromisoformat(row["updated_at"])
-        if updated.tzinfo is None:
-            updated = updated.replace(tzinfo=timezone.utc)
-        age = max(0.0, (current.astimezone(timezone.utc) - updated).total_seconds())
-        available = age <= float(stale_after_seconds)
+        try:
+            updated = _parse_timestamp(row["updated_at"])
+            concurrency = _validate_positive_integer(
+                row["concurrency"], "concurrency"
+            )
+        except (TypeError, ValueError):
+            return {
+                "available": False,
+                "status": "invalid",
+                "backend": backend,
+                "task_queue": task_queue,
+            }
+
+        current = _normalize_datetime(now or datetime.now(timezone.utc))
+        age = max(0.0, (current - updated).total_seconds())
+        available = age <= stale_after
         return {
             "available": available,
             "status": "healthy" if available else "stale",
             "worker_id": row["worker_id"],
             "backend": row["backend"],
             "task_queue": row["task_queue"],
-            "concurrency": int(row["concurrency"]),
+            "concurrency": concurrency,
             "sdk_version": row["sdk_version"],
-            "updated_at": row["updated_at"],
+            "updated_at": updated.isoformat(),
             "age_seconds": age,
-            "stale_after_seconds": float(stale_after_seconds),
+            "stale_after_seconds": stale_after,
         }

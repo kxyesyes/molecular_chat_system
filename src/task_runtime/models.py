@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import math
 from typing import Any
+
+from src.agent.persistence.redaction import redact_sensitive
+
+from .errors import TaskErrorCode
 
 
 class TaskStatus(str, Enum):
@@ -61,6 +66,30 @@ class TaskRecord:
         except (TypeError, ValueError):
             status = TaskStatus.QUEUED
 
+        def parse_progress(value: Any) -> float:
+            if isinstance(value, bool):
+                return 0.0
+            try:
+                parsed = float(value or 0.0)
+            except (TypeError, ValueError, OverflowError):
+                return 0.0
+            if not math.isfinite(parsed) or not 0.0 <= parsed <= 1.0:
+                return 0.0
+            return parsed
+
+        def parse_attempt(value: Any) -> int:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                return 0
+            return value
+
+        def parse_error_code(value: Any) -> str | None:
+            if value is None:
+                return None
+            try:
+                return TaskErrorCode(value).value
+            except (TypeError, ValueError):
+                return None
+
         return cls(
             task_id=row["task_id"],
             task_type=row["task_type"],
@@ -69,10 +98,10 @@ class TaskRecord:
             backend=row.get("backend") or "local",
             external_workflow_id=row.get("external_workflow_id"),
             phase=row.get("phase"),
-            progress=float(row.get("progress") or 0.0),
-            attempt=int(row.get("attempt") or 0),
+            progress=parse_progress(row.get("progress")),
+            attempt=parse_attempt(row.get("attempt")),
             heartbeat_at=row.get("heartbeat_at"),
-            error_code=row.get("error_code"),
+            error_code=parse_error_code(row.get("error_code")),
             warnings=parse_json(row.get("warnings_json"), [], list),
             input_manifest_path=row.get("input_manifest_path"),
             provenance=parse_json(row.get("provenance_json"), {}, dict),
@@ -109,6 +138,12 @@ class TaskRecord:
             "updated_at": self.updated_at,
             "finished_at": self.finished_at,
         }
+
+    def to_public_dict(self) -> dict[str, Any]:
+        public = self.to_dict()
+        public.pop("input", None)
+        public.pop("input_manifest_path", None)
+        return redact_sensitive(public)
 
 
 @dataclass(frozen=True)

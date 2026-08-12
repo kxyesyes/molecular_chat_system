@@ -1,4 +1,6 @@
 import time
+from concurrent.futures import Future
+from threading import Event
 
 from src.task_runtime import TaskManager, TaskStatus
 
@@ -6,7 +8,7 @@ from src.task_runtime import TaskManager, TaskStatus
 def wait_for_terminal(manager: TaskManager, task_id: str):
     for _ in range(50):
         record = manager.get(task_id)
-        if record.status.value in {"succeeded", "failed"}:
+        if record.status.value in {"succeeded", "failed", "canceled", "timed_out"}:
             return record
         time.sleep(0.02)
     raise AssertionError("task did not finish")
@@ -89,3 +91,81 @@ def test_task_manager_preserves_non_mapping_json_result(tmp_path):
 
     assert finished.status is TaskStatus.SUCCEEDED
     assert finished.result == ["complete", 1]
+
+
+def test_manager_cancel_before_start_skips_handler_and_finishes_canceled(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    blocker_started = Event()
+    release_blocker = Event()
+    second_called = Event()
+
+    def blocker(_payload):
+        blocker_started.set()
+        release_blocker.wait(timeout=5)
+        return {"ok": True}
+
+    first = manager.submit("unit_test", {}, blocker)
+    assert blocker_started.wait(timeout=2)
+    second = manager.submit(
+        "unit_test", {}, lambda _payload: second_called.set() or {"ok": True}
+    )
+    manager.store.request_cancel(second.task_id, reason="test")
+    release_blocker.set()
+
+    assert wait_for_terminal(manager, first.task_id).status is TaskStatus.SUCCEEDED
+    canceled = wait_for_terminal(manager, second.task_id)
+    assert canceled.status is TaskStatus.CANCELED
+    assert not second_called.is_set()
+
+
+def test_manager_cancel_while_running_finishes_canceled(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    started = Event()
+    release = Event()
+
+    def handler(_payload):
+        started.set()
+        release.wait(timeout=5)
+        return {"ok": True}
+
+    record = manager.submit("unit_test", {}, handler)
+    assert started.wait(timeout=2)
+    manager.store.request_cancel(record.task_id, reason="user_request")
+    release.set()
+
+    assert wait_for_terminal(manager, record.task_id).status is TaskStatus.CANCELED
+
+
+class ImmediateExecutor:
+    def submit(self, function, *args, **kwargs):
+        future = Future()
+        try:
+            future.set_result(function(*args, **kwargs))
+        except BaseException as exc:
+            future.set_exception(exc)
+        return future
+
+
+def test_manager_immediate_executor_does_not_leave_stale_future(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    manager.executor.shutdown(wait=True)
+    manager.executor = ImmediateExecutor()
+
+    record = manager.submit("unit_test", {}, lambda _payload: {"ok": True})
+
+    assert manager.get(record.task_id).status is TaskStatus.SUCCEEDED
+    assert record.task_id not in manager._futures
+
+
+def test_manager_submit_failure_compensates_queued_task_without_leaking_error(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    manager.executor.shutdown(wait=True)
+
+    record = manager.submit("unit_test", {"api_key": "sk-secret-secret"}, lambda _: {})
+
+    failed = manager.get(record.task_id)
+    assert failed.status is TaskStatus.FAILED
+    assert failed.error_code == "TASK_BACKEND_UNAVAILABLE"
+    assert failed.error == "Task execution backend unavailable"
+    assert "sk-secret" not in str(failed.to_public_dict())
+    assert record.task_id not in manager._futures
