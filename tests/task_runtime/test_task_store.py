@@ -1048,6 +1048,145 @@ def test_public_result_retains_scientific_smiles_fields():
     }
 
 
+@pytest.mark.parametrize(
+    "key",
+    ["smiles", "canonical_smiles", "isomeric_smiles", "best_smiles"],
+)
+@pytest.mark.parametrize(
+    "unsafe_value",
+    [
+        "C:/private/ligand.sdf",
+        "../raw-input.sdf",
+        "outputs/%2e%2e/private.sdf",
+        "outputs/%252e%252e/private.sdf",
+        "outputs%252fprivate.sdf",
+        "file:///srv/private/ligand.sdf",
+    ],
+)
+def test_public_result_checks_paths_before_exact_smiles_allowance(key, unsafe_value):
+    record = TaskRecord(
+        task_id="task-1",
+        task_type="molecular_design",
+        status=TaskStatus.SUCCEEDED,
+        input={},
+        result={key: unsafe_value, "safe": "completed"},
+    )
+    assert record.to_public_dict()["result"] == {"safe": "completed"}
+
+
+@pytest.mark.parametrize("key", ["smiles_path", "smiles_file", "smiles_uri"])
+@pytest.mark.parametrize(
+    "unsafe_value",
+    [
+        "C:/private/ligand.sdf",
+        "../raw-input.sdf",
+        "outputs/%252e%252e/private.sdf",
+        "file:///srv/private/ligand.sdf",
+    ],
+)
+def test_public_result_smiles_substring_keys_do_not_bypass_path_checks(
+    key, unsafe_value
+):
+    record = TaskRecord(
+        task_id="task-1",
+        task_type="molecular_design",
+        status=TaskStatus.SUCCEEDED,
+        input={},
+        result={key: unsafe_value, "safe": "completed"},
+    )
+    assert record.to_public_dict()["result"] == {"safe": "completed"}
+
+
+def test_public_result_preserves_exact_smiles_in_candidate_and_molecule_lists():
+    record = TaskRecord(
+        task_id="task-1",
+        task_type="molecular_design",
+        status=TaskStatus.SUCCEEDED,
+        input={},
+        result={
+            "candidates": [
+                {"smiles": "CCO", "smiles_path": "outputs/%252e%252e/private.smi"}
+            ],
+            "molecules": [{"smiles": "CCN", "score": 0.7}],
+        },
+    )
+    assert record.to_public_dict()["result"] == {
+        "candidates": [{"smiles": "CCO"}],
+        "molecules": [{"smiles": "CCN", "score": 0.7}],
+    }
+
+
+@pytest.mark.parametrize(
+    "invalid_key",
+    [
+        "C:/private/ligand.sdf",
+        "../raw-input.sdf",
+        "%2e%2e%2fraw-input.sdf",
+        "raw%252finput",
+        "api_key",
+        "api-key",
+        "model_path",
+    ],
+)
+def test_persisted_provenance_hashes_rejects_unsafe_logical_keys(
+    tmp_path, invalid_key
+):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    with pytest.raises(ValueError, match="provenance|hash|identifier"):
+        store.create(
+            "task-1",
+            "docking",
+            {},
+            provenance={"hashes": {invalid_key: "a" * 64}},
+        )
+
+
+@pytest.mark.parametrize("length", [6, 63, 65])
+def test_persisted_provenance_hashes_requires_exact_sha256_values(tmp_path, length):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    with pytest.raises(ValueError, match="provenance|digest"):
+        store.create(
+            "task-1",
+            "docking",
+            {},
+            provenance={"hashes": {"receptor_sha256": "a" * length}},
+        )
+
+
+def test_provenance_hashes_accepts_safe_logical_key_and_normalizes_digest(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    record = store.create(
+        "task-1",
+        "docking",
+        {},
+        provenance={"hashes": {"receptor_sha256": "A" * 64}},
+    )
+    assert record.provenance == {"hashes": {"receptor_sha256": "a" * 64}}
+    assert record.to_public_dict()["provenance"] == record.provenance
+
+
+def test_public_provenance_hashes_drops_corrupt_legacy_entries():
+    record = TaskRecord(
+        task_id="task-1",
+        task_type="docking",
+        status=TaskStatus.SUCCEEDED,
+        input={},
+        provenance={
+            "hashes": {
+                "receptor_sha256": "A" * 64,
+                "C:/private/ligand.sdf": "b" * 64,
+                "../raw-input.sdf": "c" * 64,
+                "%2e%2e%2fraw-input.sdf": "d" * 64,
+                "api_key": "e" * 64,
+                "short_digest": "f" * 63,
+            }
+        },
+    )
+    assert record.to_public_dict()["provenance"] == {
+        "hashes": {"receptor_sha256": "a" * 64}
+    }
+
+
 def test_public_result_removes_traversal_and_embedded_paths():
     record = TaskRecord(
         task_id="task-1",

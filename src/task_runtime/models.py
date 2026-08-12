@@ -98,6 +98,23 @@ _URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _ENCODED_PATH_SEMANTICS = re.compile(r"%(?:2e|2f|5c)", re.IGNORECASE)
 _SAFE_SOURCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}\Z")
 _SAFE_DIGEST = re.compile(r"[A-Fa-f0-9]{64}\Z")
+_SAFE_DIGEST_IDENTIFIER = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
+_SCIENTIFIC_SMILES_KEYS = frozenset(
+    {"smiles", "canonical_smiles", "isomeric_smiles", "best_smiles"}
+)
+_SENSITIVE_IDENTIFIER_MARKERS = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "authorization",
+        "cookie",
+        "credential",
+        "credentials",
+        "password",
+        "secret",
+        "token",
+    }
+)
 _DROP = object()
 STRICT_JSON_MAX_DEPTH = 64
 STRICT_JSON_MAX_ITEMS = 100_000
@@ -263,6 +280,31 @@ def _validate_digest(value: Any) -> str:
     return value.lower()
 
 
+def _validate_digest_identifier(value: Any) -> str:
+    if not isinstance(value, str) or not _SAFE_DIGEST_IDENTIFIER.fullmatch(value):
+        raise ValueError("invalid provenance hash identifier")
+    normalized = value.lower()
+    if (
+        value in {".", ".."}
+        or value.startswith(".")
+        or value.endswith(".")
+        or ".." in value
+    ):
+        raise ValueError("invalid provenance hash identifier")
+    tokens = {token for token in re.split(r"[^a-z0-9]+", normalized) if token}
+    if "key" in tokens or tokens & _SENSITIVE_IDENTIFIER_MARKERS or any(
+        marker in normalized for marker in _SENSITIVE_IDENTIFIER_MARKERS
+    ):
+        raise ValueError("invalid provenance hash identifier")
+    is_digest_label = normalized.endswith(("_hash", "_sha256", "-hash", "-sha256"))
+    if not is_digest_label and (
+        _is_private_content_key(normalized)
+        or any(marker in normalized for marker in ("path", "file", "uri", "manifest"))
+    ):
+        raise ValueError("invalid provenance hash identifier")
+    return value
+
+
 def sanitize_provenance(value: Any) -> dict[str, Any]:
     snapshot = strict_json_snapshot(value or {})
     if not isinstance(snapshot, dict):
@@ -277,9 +319,8 @@ def sanitize_provenance(value: Any) -> dict[str, Any]:
             if not isinstance(item, dict):
                 raise ValueError("invalid provenance hashes")
             allowed[normalized] = {
-                digest_key: _validate_digest(digest)
+                _validate_digest_identifier(digest_key): _validate_digest(digest)
                 for digest_key, digest in item.items()
-                if isinstance(digest_key, str)
             }
             continue
         if normalized not in PROVENANCE_KEYS and not (
@@ -309,10 +350,9 @@ def sanitize_public_provenance(value: Any) -> dict[str, Any]:
         if normalized == "hashes" and isinstance(item, dict):
             hashes: dict[str, str] = {}
             for digest_key, digest in item.items():
-                if not isinstance(digest_key, str):
-                    continue
                 try:
-                    hashes[digest_key] = _validate_digest(digest)
+                    safe_key = _validate_digest_identifier(digest_key)
+                    hashes[safe_key] = _validate_digest(digest)
                 except ValueError:
                     continue
             if hashes:
@@ -426,6 +466,31 @@ def sanitize_public_task_data(value: Any) -> Any:
     return {} if sanitized is _DROP else sanitized
 
 
+def _has_unsafe_result_path_semantics(value: str) -> bool:
+    candidate = value
+    for _ in range(8):
+        if (
+            _is_absolute_path(candidate)
+            or _FILE_URI_TEXT.search(candidate)
+            or _WINDOWS_PATH_TEXT.search(candidate)
+            or _UNC_PATH_TEXT.search(candidate)
+            or _POSIX_PATH_TEXT.search(candidate)
+            or _ENCODED_PATH_SEMANTICS.search(candidate)
+            or any(
+                part in {"", ".", ".."} for part in re.split(r"[\\/]", candidate)
+            )
+        ):
+            return True
+        try:
+            decoded = unquote(candidate, errors="strict")
+        except (UnicodeDecodeError, ValueError):
+            return True
+        if decoded == candidate:
+            return False
+        candidate = decoded
+    return True
+
+
 def _sanitize_public_result_value(value: Any, *, key: str | None = None) -> Any:
     normalized_key = (key or "").lower()
     if isinstance(value, dict):
@@ -447,20 +512,13 @@ def _sanitize_public_result_value(value: Any, *, key: str | None = None) -> Any:
     if isinstance(value, float) and not math.isfinite(value):
         return _DROP
     if isinstance(value, str):
-        if "smiles" not in normalized_key:
-            if (
-                _is_absolute_path(value)
-                or _FILE_URI_TEXT.search(value)
-                or _WINDOWS_PATH_TEXT.search(value)
-                or _UNC_PATH_TEXT.search(value)
-                or _POSIX_PATH_TEXT.search(value)
-                or _ENCODED_PATH_SEMANTICS.search(value)
-                or any(part in {"", ".", ".."} for part in re.split(r"[\\/]", value))
-            ):
+        if _has_unsafe_result_path_semantics(value):
+            return _DROP
+        if normalized_key in _SCIENTIFIC_SMILES_KEYS:
+            return redact_sensitive(value)
+        if any(marker in normalized_key for marker in ("path", "file", "uri")):
+            if not is_safe_relative_artifact_path(value):
                 return _DROP
-            if any(marker in normalized_key for marker in ("path", "file", "uri")):
-                if not is_safe_relative_artifact_path(value):
-                    return _DROP
         return redact_sensitive(value)
     if value is None or isinstance(value, (bool, int, float)):
         return value

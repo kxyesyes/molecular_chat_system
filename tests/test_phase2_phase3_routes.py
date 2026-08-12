@@ -19,6 +19,8 @@ class FakeSupervisor:
             "query": kwargs["query"],
             "smiles": "CCO",
             "best_smiles": "c1ccccc1",
+            "canonical_smiles": "outputs/%252e%252e/private.smi",
+            "smiles_path": "file:///srv/private/source.smi",
             "artifacts": [
                 {"name": "pose", "path": "outputs/%2e%2e/private.pdbqt"}
             ],
@@ -115,6 +117,8 @@ def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
     assert "input_manifest_path" not in workflow_status
     assert workflow_status["result"]["smiles"] == "CCO"
     assert workflow_status["result"]["best_smiles"] == "c1ccccc1"
+    assert "canonical_smiles" not in workflow_status["result"]
+    assert "smiles_path" not in workflow_status["result"]
     assert workflow_status["artifacts"] == [{"name": "pose"}]
     assert "%2e%2e" not in workflow_status_response.text.lower()
 
