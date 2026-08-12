@@ -79,3 +79,13 @@ def test_task_manager_normalizes_returned_failed_status(tmp_path):
     assert finished.status is TaskStatus.FAILED
     assert finished.result == result
     assert finished.error == "Task returned a failed result"
+
+
+def test_task_manager_preserves_non_mapping_json_result(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+
+    record = manager.submit("unit_test", {}, lambda _payload: ["complete", 1])
+    finished = wait_for_terminal(manager, record.task_id)
+
+    assert finished.status is TaskStatus.SUCCEEDED
+    assert finished.result == ["complete", 1]

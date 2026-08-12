@@ -25,17 +25,18 @@ def dict_factory(cursor: sqlite3.Cursor, row: Iterable[Any]) -> dict[str, Any]:
 def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     path = get_task_db_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False)
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
     conn.row_factory = dict_factory
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
 def init_db(db_path: str | Path | None = None) -> Path:
     path = get_task_db_path(db_path)
     with connect(path) as conn:
-        conn.executescript(
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS tasks (
                 task_id TEXT PRIMARY KEY,
@@ -49,11 +50,63 @@ def init_db(db_path: str | Path | None = None) -> Path:
                 started_at TEXT,
                 updated_at TEXT NOT NULL,
                 finished_at TEXT
-            );
+            )
+            """
+        )
 
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        migrations = {
+            "result_json": "TEXT",
+            "error": "TEXT",
+            "artifacts_json": "TEXT",
+            "started_at": "TEXT",
+            "finished_at": "TEXT",
+            "backend": "TEXT NOT NULL DEFAULT 'local'",
+            "external_workflow_id": "TEXT",
+            "phase": "TEXT",
+            "progress": "REAL NOT NULL DEFAULT 0",
+            "attempt": "INTEGER NOT NULL DEFAULT 0",
+            "heartbeat_at": "TEXT",
+            "error_code": "TEXT",
+            "warnings_json": "TEXT NOT NULL DEFAULT '[]'",
+            "input_manifest_path": "TEXT",
+            "provenance_json": "TEXT NOT NULL DEFAULT '{}'",
+        }
+        for name, declaration in migrations.items():
+            if name not in columns:
+                conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {declaration}")
+
+        conn.executescript(
+            """
             CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
             CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(task_type);
             CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at);
+
+            CREATE TABLE IF NOT EXISTS task_events (
+                event_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                is_terminal INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                UNIQUE(task_id, sequence),
+                FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_task_events_one_terminal
+            ON task_events(task_id) WHERE is_terminal = 1;
+
+            CREATE TABLE IF NOT EXISTS task_worker_heartbeats (
+                worker_id TEXT PRIMARY KEY,
+                backend TEXT NOT NULL,
+                task_queue TEXT NOT NULL,
+                concurrency INTEGER NOT NULL,
+                sdk_version TEXT,
+                updated_at TEXT NOT NULL
+            );
             """
         )
     return path
