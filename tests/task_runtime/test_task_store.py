@@ -1187,6 +1187,75 @@ def test_public_provenance_hashes_drops_corrupt_legacy_entries():
     }
 
 
+@pytest.mark.parametrize(
+    "invalid_key",
+    [
+        "C:/private/receptor_hash",
+        "../ligand_hash",
+        "%2e%2e%2fligand_hash",
+        "private%252freceptor_sha256",
+        "model_path_hash",
+        "api_key_sha256",
+    ],
+)
+def test_persisted_top_level_dynamic_digest_rejects_unsafe_identifier(
+    tmp_path, invalid_key
+):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    with pytest.raises(ValueError, match="provenance|hash|identifier"):
+        store.create(
+            "task-1",
+            "docking",
+            {},
+            provenance={invalid_key: "a" * 64},
+        )
+
+
+def test_top_level_digest_identifiers_preserve_explicit_and_safe_dynamic_keys(
+    tmp_path,
+):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    record = store.create(
+        "task-1",
+        "docking",
+        {},
+        provenance={
+            "input_hash": "A" * 64,
+            "config_hash": "B" * 64,
+            "pose_sha256": "C" * 64,
+            "receptor_hash": "D" * 64,
+        },
+    )
+    assert record.provenance == {
+        "input_hash": "a" * 64,
+        "config_hash": "b" * 64,
+        "pose_sha256": "c" * 64,
+        "receptor_hash": "d" * 64,
+    }
+
+
+def test_public_provenance_drops_unsafe_top_level_dynamic_digest_keys():
+    record = TaskRecord(
+        task_id="task-1",
+        task_type="docking",
+        status=TaskStatus.SUCCEEDED,
+        input={},
+        provenance={
+            "input_hash": "A" * 64,
+            "receptor_hash": "B" * 64,
+            "C:/private/receptor_hash": "c" * 64,
+            "../ligand_hash": "d" * 64,
+            "%2e%2e%2fligand_hash": "e" * 64,
+            "model_path_hash": "f" * 64,
+            "api_key_sha256": "0" * 64,
+        },
+    )
+    assert record.to_public_dict()["provenance"] == {
+        "input_hash": "a" * 64,
+        "receptor_hash": "b" * 64,
+    }
+
+
 def test_public_result_removes_traversal_and_embedded_paths():
     record = TaskRecord(
         task_id="task-1",

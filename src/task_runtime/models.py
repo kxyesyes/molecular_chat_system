@@ -102,6 +102,9 @@ _SAFE_DIGEST_IDENTIFIER = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
 _SCIENTIFIC_SMILES_KEYS = frozenset(
     {"smiles", "canonical_smiles", "isomeric_smiles", "best_smiles"}
 )
+_EXPLICIT_PROVENANCE_DIGEST_KEYS = frozenset(
+    {"hash", "input_hash", "config_hash", "pose_sha256"}
+)
 _SENSITIVE_IDENTIFIER_MARKERS = frozenset(
     {
         "api_key",
@@ -296,11 +299,12 @@ def _validate_digest_identifier(value: Any) -> str:
         marker in normalized for marker in _SENSITIVE_IDENTIFIER_MARKERS
     ):
         raise ValueError("invalid provenance hash identifier")
+    if normalized in _EXPLICIT_PROVENANCE_DIGEST_KEYS:
+        return value
+    if any(marker in normalized for marker in ("path", "file", "uri", "manifest")):
+        raise ValueError("invalid provenance hash identifier")
     is_digest_label = normalized.endswith(("_hash", "_sha256", "-hash", "-sha256"))
-    if not is_digest_label and (
-        _is_private_content_key(normalized)
-        or any(marker in normalized for marker in ("path", "file", "uri", "manifest"))
-    ):
+    if not is_digest_label and _is_private_content_key(normalized):
         raise ValueError("invalid provenance hash identifier")
     return value
 
@@ -313,7 +317,8 @@ def sanitize_provenance(value: Any) -> dict[str, Any]:
     for key, item in snapshot.items():
         normalized = key.lower()
         if _is_hash_key(normalized):
-            allowed[normalized] = _validate_digest(item)
+            safe_key = _validate_digest_identifier(normalized)
+            allowed[safe_key] = _validate_digest(item)
             continue
         if normalized == "hashes":
             if not isinstance(item, dict):
@@ -343,7 +348,8 @@ def sanitize_public_provenance(value: Any) -> dict[str, Any]:
         normalized = key.lower()
         if _is_hash_key(normalized):
             try:
-                allowed[normalized] = _validate_digest(item)
+                safe_key = _validate_digest_identifier(normalized)
+                allowed[safe_key] = _validate_digest(item)
             except ValueError:
                 pass
             continue

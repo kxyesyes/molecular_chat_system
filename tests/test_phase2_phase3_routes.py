@@ -1,3 +1,5 @@
+import json
+import sqlite3
 import time
 
 from fastapi import FastAPI
@@ -121,6 +123,34 @@ def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
     assert "smiles_path" not in workflow_status["result"]
     assert workflow_status["artifacts"] == [{"name": "pose"}]
     assert "%2e%2e" not in workflow_status_response.text.lower()
+
+    with sqlite3.connect(tmp_path / "tasks.sqlite") as conn:
+        conn.execute(
+            "UPDATE tasks SET provenance_json = ? WHERE task_id = ?",
+            (
+                json.dumps(
+                    {
+                        "input_hash": "A" * 64,
+                        "receptor_hash": "B" * 64,
+                        "C:/private/receptor_hash": "c" * 64,
+                        "../ligand_hash": "d" * 64,
+                        "%2e%2e%2fligand_hash": "e" * 64,
+                        "model_path_hash": "f" * 64,
+                    }
+                ),
+                workflow_task_id,
+            ),
+        )
+    legacy_response = client.get(
+        f"/api/tasks/{workflow_task_id}", headers=admin_headers
+    )
+    assert legacy_response.status_code == 200
+    assert legacy_response.json()["data"]["provenance"] == {
+        "input_hash": "a" * 64,
+        "receptor_hash": "b" * 64,
+    }
+    assert "C:/private" not in legacy_response.text
+    assert "%2e%2e" not in legacy_response.text.lower()
 
     versions_response = client.get("/api/system/data-versions", headers=admin_headers)
     assert versions_response.status_code == 200
