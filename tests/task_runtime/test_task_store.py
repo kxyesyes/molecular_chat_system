@@ -11,7 +11,13 @@ import pytest
 
 from src.task_runtime.database import connect, connection, init_db
 from src.task_runtime.errors import TaskErrorCode
-from src.task_runtime.models import TaskEvent, TaskPhase, TaskRecord, TaskStatus
+from src.task_runtime.models import (
+    TaskEvent,
+    TaskPhase,
+    TaskRecord,
+    TaskStatus,
+    TaskWarning,
+)
 from src.task_runtime.store import TaskStore
 
 
@@ -123,7 +129,7 @@ def test_create_adds_sanitized_initial_event_and_sequence(tmp_path):
 def test_terminal_transition_and_event_are_single_writer(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite")
     store.create("task-1", "docking", {}, backend="temporal")
-    assert store.claim_running("task-1", phase="docking")
+    assert store.claim_running("task-1", phase="vina_running")
 
     assert store.finish("task-1", TaskStatus.SUCCEEDED, result={"ok": True})
     assert not store.finish("task-1", TaskStatus.FAILED, error="late")
@@ -163,7 +169,7 @@ def test_heartbeat_updates_live_record_but_cannot_mutate_terminal(tmp_path):
     assert store.claim_running("task-1")
     assert store.heartbeat(
         "task-1",
-        phase="vina",
+        phase="vina_running",
         progress=0.5,
         attempt=2,
         warnings=["projection_stale"],
@@ -171,12 +177,18 @@ def test_heartbeat_updates_live_record_but_cannot_mutate_terminal(tmp_path):
     )
     live = store.get("task-1")
     assert live.status is TaskStatus.RUNNING
-    assert (live.phase, live.progress, live.attempt) == ("vina", 0.5, 2)
+    assert (live.phase, live.progress, live.attempt) == ("vina_running", 0.5, 2)
 
     assert store.finish("task-1", TaskStatus.SUCCEEDED, result={"ok": True})
-    assert not store.heartbeat("task-1", phase="validating", progress=0.9, attempt=9)
+    assert not store.heartbeat(
+        "task-1", phase="scientific_validation", progress=0.9, attempt=9
+    )
     finished = store.get("task-1")
-    assert (finished.phase, finished.progress, finished.attempt) == ("vina", 0.5, 2)
+    assert (finished.phase, finished.progress, finished.attempt) == (
+        "vina_running",
+        0.5,
+        2,
+    )
 
 
 def test_cancel_is_idempotent_and_can_finish_as_canceled(tmp_path):
@@ -199,8 +211,8 @@ def test_events_are_ordered_and_sequence_is_unique(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite")
     store.create("task-1", "docking", {})
     store.claim_running("task-1")
-    store.heartbeat("task-1", phase="preparing", progress=0.1)
-    store.heartbeat("task-1", phase="docking", progress=0.8)
+    store.heartbeat("task-1", phase="receptor_preparation", progress=0.1)
+    store.heartbeat("task-1", phase="vina_running", progress=0.8)
     store.finish("task-1", TaskStatus.TIMED_OUT, error_code=TaskErrorCode.TASK_HEARTBEAT_TIMEOUT)
 
     events = store.events("task-1")
@@ -444,12 +456,11 @@ def test_public_projection_excludes_private_input_and_redacts_nested_values():
     assert "input" not in public
     assert "input_manifest_path" not in public
     assert public["error"] == "[REDACTED]"
-    assert public["warnings"] == ["projection_stale"]
+    assert public["warnings"] == [{"code": "projection_stale"}]
     assert public["provenance"] == {"tool": "vina"}
     assert public["result"]["credentials"] == "[REDACTED]"
     assert "query" not in public["result"]
     assert "db_path" not in public["result"]
-    assert public["artifacts"][0]["token"] == "[REDACTED]"
     assert public["artifacts"][0]["path"] == "pose.pdbqt"
     assert public["artifacts"][1] == {}
     assert "CCO" not in json.dumps(public)
@@ -470,10 +481,10 @@ def test_events_allowlist_metadata_and_record_sensitive_fields_are_redacted(tmp_
             "model_path": "C:/private/model.bin",
         },
     )
-    store.claim_running("task-1", phase="preparing", attempt=1)
+    store.claim_running("task-1", phase="ligand_preparation", attempt=1)
     store.heartbeat(
         "task-1",
-        phase="vina",
+        phase="vina_running",
         progress=0.5,
         attempt=1,
         warnings=["projection_stale", TaskErrorCode.TASK_HEARTBEAT_TIMEOUT],
@@ -495,7 +506,10 @@ def test_events_allowlist_metadata_and_record_sensitive_fields_are_redacted(tmp_
     assert "provenance" not in serialized_events
     assert "TASK_HEARTBEAT_TIMEOUT" in serialized_events
     assert record.provenance == {}
-    assert record.warnings == ["projection_stale", "TASK_HEARTBEAT_TIMEOUT"]
+    assert record.warnings == [
+        {"code": "projection_stale"},
+        {"code": "TASK_HEARTBEAT_TIMEOUT"},
+    ]
     assert record.error == "[REDACTED]"
 
 
@@ -645,16 +659,18 @@ def test_task_phase_has_exact_stage_3a_values():
     assert {phase.value for phase in TaskPhase} == {
         "running",
         "staging",
-        "preparing",
-        "docking",
-        "vina",
-        "validating",
+        "receptor_preparation",
+        "ligand_preparation",
+        "vina_running",
+        "scientific_validation",
         "completing",
         "canceling",
     }
 
 
-@pytest.mark.parametrize("phase", ["prepare", "dock", "unknown", "CCO"])
+@pytest.mark.parametrize(
+    "phase", ["prepare", "preparing", "dock", "docking", "vina", "validating", "unknown", "CCO"]
+)
 def test_lifecycle_rejects_unregistered_phase(tmp_path, phase):
     store = TaskStore(tmp_path / "tasks.sqlite")
     store.create("task-1", "demo", {})
@@ -662,7 +678,7 @@ def test_lifecycle_rejects_unregistered_phase(tmp_path, phase):
         store.claim_running("task-1", phase=phase)
 
 
-@pytest.mark.parametrize("warning", ["slow", "MODEL_WARNING", {"code": "unknown"}])
+@pytest.mark.parametrize("warning", [{"code": "unknown"}, 123, None])
 def test_heartbeat_rejects_unregistered_warning_code(tmp_path, warning):
     store = TaskStore(tmp_path / "tasks.sqlite")
     store.create("task-1", "demo", {})
@@ -684,6 +700,9 @@ def test_persisted_provenance_is_operational_allowlist_only(tmp_path):
             "attempt": 1,
             "configured": True,
             "artifact_hash": "abc123",
+            "input_hash": "a" * 64,
+            "config_hash": "b" * 64,
+            "pose_sha256": "c" * 64,
             "smiles": "CCO",
             "model_path": "C:/private/model.bin",
             "token": "private-token",
@@ -698,6 +717,9 @@ def test_persisted_provenance_is_operational_allowlist_only(tmp_path):
         "attempt": 1,
         "configured": True,
         "artifact_hash": "abc123",
+        "input_hash": "a" * 64,
+        "config_hash": "b" * 64,
+        "pose_sha256": "c" * 64,
     }
     assert "CCO" not in json.dumps(record.to_public_dict())
     assert "C:/private" not in json.dumps(record.to_public_dict())
@@ -744,7 +766,7 @@ def test_public_projection_sanitizes_corrupt_legacy_nonfinite_values():
     public = record.to_public_dict()
     assert public["result"] == {"valid": 1.0}
     assert public["artifacts"] == [{"name": "pose"}]
-    assert public["warnings"] == ["projection_stale"]
+    assert public["warnings"] == [{"code": "projection_stale"}]
     assert public["provenance"] == {"tool": "vina"}
     assert "C:/private" not in json.dumps(public)
     json.dumps(public, allow_nan=False)
@@ -783,3 +805,191 @@ def test_worker_health_rejects_far_future_heartbeat(tmp_path):
     )
     assert health["available"] is False
     assert health["status"] == "invalid"
+
+
+def test_scientific_warning_normalization_preserves_safe_meaning(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("task-1", "docking", {})
+    store.claim_running("task-1")
+
+    assert store.heartbeat(
+        "task-1",
+        warnings=[
+            "Conformer generation degraded",
+            TaskWarning(
+                code="projection_stale",
+                message="Projection is delayed",
+                source="temporal",
+            ),
+            {
+                "code": "TOOL_WARNING",
+                "message": "failed opening C:/private/model.bin with sk-secret-secret and CCO",
+                "source": "rdkit",
+            },
+        ],
+    )
+
+    record = store.get("task-1")
+    assert record.warnings[0] == {
+        "code": "TOOL_WARNING",
+        "message": "Conformer generation degraded",
+    }
+    assert record.warnings[1] == {
+        "code": "projection_stale",
+        "message": "Projection is delayed",
+        "source": "temporal",
+    }
+    assert record.warnings[2]["code"] == "TOOL_WARNING"
+    assert record.warnings[2]["source"] == "rdkit"
+    assert "[PATH]" in record.warnings[2]["message"]
+    assert "C:/private" not in record.warnings[2]["message"]
+    assert "sk-secret" not in record.warnings[2]["message"]
+    assert "CCO" not in record.warnings[2]["message"]
+    heartbeat = [
+        event for event in store.events("task-1") if event.event_type == "task_heartbeat"
+    ][0]
+    assert heartbeat.payload["warning_codes"] == [
+        "TOOL_WARNING",
+        "projection_stale",
+        "TOOL_WARNING",
+    ]
+    assert "message" not in heartbeat.payload
+
+
+@pytest.mark.parametrize(
+    "warning",
+    [
+        {"code": "unknown", "message": "safe"},
+        {"code": "TOOL_WARNING", "source": "bad source"},
+        {"code": "TOOL_WARNING", "message": {"nested": "invalid"}},
+    ],
+)
+def test_structured_warning_rejects_invalid_contract(tmp_path, warning):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("task-1", "demo", {})
+    store.claim_running("task-1")
+    with pytest.raises(ValueError, match="warning"):
+        store.heartbeat("task-1", warnings=[warning])
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("input_hash", "not-a-digest"),
+        ("config_hash", "g" * 64),
+        ("pose_sha256", "a" * 129),
+    ],
+)
+def test_provenance_rejects_invalid_digest_values(tmp_path, key, value):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    with pytest.raises(ValueError, match="provenance|hash|digest"):
+        store.create("task-1", "docking", {}, provenance={key: value})
+
+
+def test_public_artifact_path_accepts_only_safe_relative_logical_path():
+    record = TaskRecord(
+        task_id="task-1",
+        task_type="docking",
+        status=TaskStatus.SUCCEEDED,
+        input={},
+        artifacts=[
+            {
+                "name": "pose",
+                "type": "pdbqt",
+                "path": "outputs/docking/task/pose.pdbqt",
+                "hash": "a" * 64,
+                "size": 123,
+                "status": "ready",
+                "extra": "drop",
+            },
+            {"name": "windows", "path": "C:\\private\\pose.pdbqt"},
+            {"name": "posix", "path": "/srv/private/pose.pdbqt"},
+            {"name": "unc", "path": "\\\\server\\share\\pose.pdbqt"},
+            {"name": "parent", "path": "outputs/../private.txt"},
+            {"name": "back-parent", "path": "outputs\\..\\private.txt"},
+            {"name": "dot", "path": "outputs/./pose.pdbqt"},
+            {"name": "uri", "path": "file:///srv/private/pose.pdbqt"},
+            {"name": "control", "path": "outputs/pose\n.pdbqt"},
+        ],
+    )
+
+    assert record.to_public_dict()["artifacts"] == [
+        {
+            "name": "pose",
+            "type": "pdbqt",
+            "path": "outputs/docking/task/pose.pdbqt",
+            "hash": "a" * 64,
+            "size": 123,
+            "status": "ready",
+        },
+        {"name": "windows"},
+        {"name": "posix"},
+        {"name": "unc"},
+        {"name": "parent"},
+        {"name": "back-parent"},
+        {"name": "dot"},
+        {"name": "uri"},
+        {"name": "control"},
+    ]
+
+
+def test_public_result_removes_traversal_and_embedded_paths():
+    record = TaskRecord(
+        task_id="task-1",
+        task_type="docking",
+        status=TaskStatus.FAILED,
+        input={},
+        error="failed opening /srv/private/x; see C:\\private\\x and file:///tmp/x",
+        result={
+            "relative_escape": "../../private.txt",
+            "back_escape": "..\\..\\private.txt",
+            "message": "failed opening /srv/private/x",
+            "uri": "file:///tmp/x",
+            "safe": "calculation failed",
+        },
+    )
+
+    public = record.to_public_dict()
+    serialized = json.dumps(public)
+    assert "private" not in serialized
+    assert "file://" not in serialized
+    assert public["result"] == {"safe": "calculation failed"}
+    assert "[PATH]" in public["error"]
+
+
+def test_persisted_error_replaces_embedded_paths_and_credentials(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("task-1", "demo", {})
+    store.claim_running("task-1")
+    assert store.finish(
+        "task-1",
+        TaskStatus.FAILED,
+        error=(
+            "failed opening /srv/private/x; see C:\\private\\x, "
+            "file:///tmp/x and sk-secret-secret"
+        ),
+    )
+
+    error = store.get("task-1").error
+    assert error.count("[PATH]") == 3
+    assert "[REDACTED]" in error
+    assert "private" not in error
+    assert "file://" not in error
+
+
+def test_strict_json_rejects_cycles_and_excess_depth():
+    cyclic_dict = {}
+    cyclic_dict["self"] = cyclic_dict
+    cyclic_list = []
+    cyclic_list.append(cyclic_list)
+    deep = current = {}
+    for _ in range(80):
+        child = {}
+        current["child"] = child
+        current = child
+
+    for value in (cyclic_dict, cyclic_list, deep):
+        with pytest.raises(ValueError, match="JSON"):
+            from src.task_runtime.models import strict_json_snapshot
+
+            strict_json_snapshot(value)

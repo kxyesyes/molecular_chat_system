@@ -17,8 +17,9 @@ from .models import (
     TaskPhase,
     TaskRecord,
     TaskStatus,
-    normalize_warning_codes,
+    normalize_task_warnings,
     sanitize_provenance,
+    sanitize_task_message,
     strict_json_snapshot,
 )
 
@@ -367,7 +368,7 @@ class TaskStore:
         attempt = _validate_attempt(attempt)
         timestamp = _as_timestamp(now)
         safe_warnings = (
-            normalize_warning_codes(warnings) if warnings is not None else None
+            normalize_task_warnings(warnings) if warnings is not None else None
         )
         safe_provenance = sanitize_provenance(provenance) if provenance is not None else None
         warnings_json = _json(safe_warnings) if safe_warnings is not None else None
@@ -382,7 +383,9 @@ class TaskStore:
         if attempt is not None:
             event_payload["attempt"] = attempt
         if safe_warnings:
-            event_payload["warning_codes"] = safe_warnings
+            event_payload["warning_codes"] = [
+                warning["code"] for warning in safe_warnings
+            ]
 
         with connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -510,9 +513,9 @@ class TaskStore:
         task_id = _validate_required_string(task_id, "task_id")
         timestamp = _as_timestamp(now)
         code = _error_code_value(error_code)
-        safe_error = redact_sensitive(error) if error is not None else None
+        safe_error = sanitize_task_message(error) if error is not None else None
         safe_warnings = (
-            normalize_warning_codes(warnings) if warnings is not None else None
+            normalize_task_warnings(warnings) if warnings is not None else None
         )
         safe_provenance = sanitize_provenance(provenance) if provenance is not None else None
         safe_result = (

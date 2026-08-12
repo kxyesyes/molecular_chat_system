@@ -25,10 +25,10 @@ class TaskStatus(str, Enum):
 class TaskPhase(str, Enum):
     RUNNING = "running"
     STAGING = "staging"
-    PREPARING = "preparing"
-    DOCKING = "docking"
-    VINA = "vina"
-    VALIDATING = "validating"
+    RECEPTOR_PREPARATION = "receptor_preparation"
+    LIGAND_PREPARATION = "ligand_preparation"
+    VINA_RUNNING = "vina_running"
+    SCIENTIFIC_VALIDATION = "scientific_validation"
     COMPLETING = "completing"
     CANCELING = "canceling"
 
@@ -47,7 +47,7 @@ CONFIG_WARNING_CODES = frozenset(
 TASK_WARNING_CODES = frozenset(
     CONFIG_WARNING_CODES
     | {item.value for item in TaskErrorCode}
-    | {"projection_stale"}
+    | {"projection_stale", "TOOL_WARNING"}
 )
 
 PROVENANCE_KEYS = frozenset(
@@ -83,28 +83,70 @@ _PRIVATE_CONTENT_KEYS = frozenset(
     }
 )
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"[A-Za-z]:[\\/]")
+_WINDOWS_PATH_TEXT = re.compile(r"(?i)(?:[A-Z]:[\\/])[^\s;,]+")
+_UNC_PATH_TEXT = re.compile(r"\\\\[^\s\\/]+[\\/][^\s;,]+")
+_POSIX_PATH_TEXT = re.compile(r"(?<![A-Za-z0-9.])/(?:[^\s/;,]+/)*[^\s;,]+")
+_FILE_URI_TEXT = re.compile(r"(?i)file://[^\s;,]+")
+_BEARER_TEXT = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}")
+_API_KEY_TEXT = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
+_SMILES_TEXT = re.compile(r"(?<![A-Za-z0-9])(?:(?:Cl|Br|[BCNOFPSI])){3,}(?![A-Za-z0-9])")
+_URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_SAFE_SOURCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}\Z")
+_SAFE_DIGEST = re.compile(r"[A-Fa-f0-9]{6,128}\Z")
 _DROP = object()
+STRICT_JSON_MAX_DEPTH = 64
+STRICT_JSON_MAX_ITEMS = 100_000
+TASK_WARNING_MESSAGE_MAX_LENGTH = 512
+
+
+@dataclass(frozen=True)
+class TaskWarning:
+    code: str
+    message: str | None = None
+    source: str | None = None
 
 
 def strict_json_snapshot(value: Any) -> Any:
     """Return a detached JSON-compatible value and reject non-finite data."""
 
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("invalid JSON non-finite number")
-        return value
-    if isinstance(value, dict):
-        result: dict[str, Any] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise ValueError("invalid JSON object key")
-            result[key] = strict_json_snapshot(item)
-        return result
-    if isinstance(value, (list, tuple)):
-        return [strict_json_snapshot(item) for item in value]
-    raise ValueError("invalid JSON value")
+    active_containers: set[int] = set()
+    item_count = 0
+
+    def visit(item: Any, depth: int) -> Any:
+        nonlocal item_count
+        item_count += 1
+        if item_count > STRICT_JSON_MAX_ITEMS:
+            raise ValueError("invalid JSON size limit exceeded")
+        if depth > STRICT_JSON_MAX_DEPTH:
+            raise ValueError("invalid JSON depth limit exceeded")
+        if item is None or isinstance(item, (str, bool, int)):
+            return item
+        if isinstance(item, float):
+            if not math.isfinite(item):
+                raise ValueError("invalid JSON non-finite number")
+            return item
+        if isinstance(item, (dict, list, tuple)):
+            identity = id(item)
+            if identity in active_containers:
+                raise ValueError("invalid JSON cyclic container")
+            active_containers.add(identity)
+            try:
+                if isinstance(item, dict):
+                    result: dict[str, Any] = {}
+                    for key, child in item.items():
+                        if not isinstance(key, str):
+                            raise ValueError("invalid JSON object key")
+                        result[key] = visit(child, depth + 1)
+                    return result
+                return [visit(child, depth + 1) for child in item]
+            finally:
+                active_containers.remove(identity)
+        raise ValueError("invalid JSON value")
+
+    try:
+        return visit(value, 0)
+    except RecursionError as exc:
+        raise ValueError("invalid JSON recursion limit exceeded") from exc
 
 
 def strict_json_roundtrip(value: Any) -> Any:
@@ -113,16 +155,91 @@ def strict_json_roundtrip(value: Any) -> Any:
     return json.loads(encoded)
 
 
-def normalize_warning_codes(values: Any) -> list[str]:
-    if not isinstance(values, (list, tuple)):
-        raise ValueError("invalid warning codes")
-    normalized: list[str] = []
-    for value in values:
-        code = value.value if isinstance(value, TaskErrorCode) else value
-        if not isinstance(code, str) or code not in TASK_WARNING_CODES:
+def sanitize_task_message(value: str) -> str:
+    message = value
+    for pattern in (_BEARER_TEXT, _API_KEY_TEXT):
+        message = pattern.sub("[REDACTED]", message)
+    for pattern in (_FILE_URI_TEXT, _WINDOWS_PATH_TEXT, _UNC_PATH_TEXT, _POSIX_PATH_TEXT):
+        message = pattern.sub("[PATH]", message)
+    message = _SMILES_TEXT.sub("[PRIVATE]", message)
+    return message[:TASK_WARNING_MESSAGE_MAX_LENGTH].strip()
+
+
+def _normalize_warning(value: Any, *, strict: bool) -> dict[str, str] | None:
+    if isinstance(value, TaskErrorCode):
+        value = value.value
+    if isinstance(value, TaskWarning):
+        raw: dict[str, Any] = {
+            "code": value.code,
+            "message": value.message,
+            "source": value.source,
+        }
+    elif isinstance(value, dict):
+        raw = value
+    elif isinstance(value, str):
+        if value in TASK_WARNING_CODES:
+            return {"code": value}
+        message = sanitize_task_message(value)
+        return {"code": "TOOL_WARNING", "message": message} if message else {"code": "TOOL_WARNING"}
+    else:
+        if strict:
+            raise ValueError("invalid warning")
+        return None
+
+    code = raw.get("code")
+    if isinstance(code, TaskErrorCode):
+        code = code.value
+    if not isinstance(code, str) or code not in TASK_WARNING_CODES:
+        if strict:
             raise ValueError("invalid warning code")
-        normalized.append(code)
+        return None
+    normalized = {"code": code}
+    message = raw.get("message")
+    if message is not None:
+        if not isinstance(message, str):
+            if strict:
+                raise ValueError("invalid warning message")
+            return normalized
+        safe_message = sanitize_task_message(message)
+        if safe_message:
+            normalized["message"] = safe_message
+    source = raw.get("source")
+    if source is not None:
+        if not isinstance(source, str) or not _SAFE_SOURCE.fullmatch(source):
+            if strict:
+                raise ValueError("invalid warning source")
+        else:
+            normalized["source"] = source
     return normalized
+
+
+def normalize_task_warnings(values: Any, *, strict: bool = True) -> list[dict[str, str]]:
+    if not isinstance(values, (list, tuple)):
+        if strict:
+            raise ValueError("invalid warnings")
+        return []
+    normalized: list[dict[str, str]] = []
+    for value in values:
+        warning = _normalize_warning(value, strict=strict)
+        if warning is not None:
+            normalized.append(warning)
+    return normalized
+
+
+def normalize_warning_codes(values: Any) -> list[str]:
+    return [item["code"] for item in normalize_task_warnings(values)]
+
+
+def _is_hash_key(value: str) -> bool:
+    return value in {"hash", "input_hash", "config_hash", "pose_sha256"} or value.endswith(
+        ("_hash", "_sha256")
+    )
+
+
+def _validate_digest(value: Any) -> str:
+    if not isinstance(value, str) or not _SAFE_DIGEST.fullmatch(value):
+        raise ValueError("invalid provenance digest")
+    return value
 
 
 def sanitize_provenance(value: Any) -> dict[str, Any]:
@@ -132,6 +249,9 @@ def sanitize_provenance(value: Any) -> dict[str, Any]:
     allowed: dict[str, Any] = {}
     for key, item in snapshot.items():
         normalized = key.lower()
+        if _is_hash_key(normalized):
+            allowed[key] = _validate_digest(item)
+            continue
         if normalized not in PROVENANCE_KEYS and not (
             normalized.endswith("_hash") or normalized.endswith("_sha256")
         ):
@@ -150,6 +270,12 @@ def sanitize_public_provenance(value: Any) -> dict[str, Any]:
         if not isinstance(key, str):
             continue
         normalized = key.lower()
+        if _is_hash_key(normalized):
+            try:
+                allowed[key] = _validate_digest(item)
+            except ValueError:
+                pass
+            continue
         if normalized not in PROVENANCE_KEYS and not (
             normalized.endswith("_hash") or normalized.endswith("_sha256")
         ):
@@ -166,6 +292,17 @@ def _is_absolute_path(value: str) -> bool:
         or value.startswith("/")
         or value.startswith("\\\\")
     )
+
+
+def is_safe_relative_artifact_path(value: Any) -> bool:
+    if not isinstance(value, str) or not value or value != value.strip():
+        return False
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        return False
+    if _URI_SCHEME.match(value) or _is_absolute_path(value):
+        return False
+    parts = re.split(r"[\\/]", value)
+    return bool(parts) and all(part not in {"", ".", ".."} for part in parts)
 
 
 def _is_private_content_key(value: str) -> bool:
@@ -200,8 +337,16 @@ def _sanitize_public_value(value: Any, *, key: str | None = None) -> Any:
         return redact_sensitive(result)
     if isinstance(value, float) and not math.isfinite(value):
         return _DROP
-    if isinstance(value, str) and _is_absolute_path(value):
-        return _DROP
+    if isinstance(value, str):
+        if (
+            _is_absolute_path(value)
+            or _FILE_URI_TEXT.search(value)
+            or _WINDOWS_PATH_TEXT.search(value)
+            or _UNC_PATH_TEXT.search(value)
+            or _POSIX_PATH_TEXT.search(value)
+            or any(part in {".", ".."} for part in re.split(r"[\\/]", value))
+        ):
+            return _DROP
     if value is None or isinstance(value, (str, bool, int, float)):
         return redact_sensitive(value)
     return _DROP
@@ -210,6 +355,30 @@ def _sanitize_public_value(value: Any, *, key: str | None = None) -> Any:
 def sanitize_public_task_data(value: Any) -> Any:
     sanitized = _sanitize_public_value(value)
     return {} if sanitized is _DROP else sanitized
+
+
+def sanitize_public_artifacts(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    allowed_keys = {"name", "type", "path", "hash", "size", "status"}
+    for artifact in value:
+        if not isinstance(artifact, dict):
+            continue
+        public: dict[str, Any] = {}
+        for key in allowed_keys:
+            if key not in artifact:
+                continue
+            item = artifact[key]
+            if key == "path":
+                if is_safe_relative_artifact_path(item):
+                    public[key] = item.replace("\\", "/")
+                continue
+            sanitized = _sanitize_public_value(item, key=key)
+            if sanitized is not _DROP:
+                public[key] = sanitized
+        result.append(public)
+    return result
 
 
 @dataclass
@@ -336,6 +505,12 @@ class TaskRecord:
         public.pop("input", None)
         public.pop("input_manifest_path", None)
         public["provenance"] = sanitize_public_provenance(self.provenance or {})
+        public["warnings"] = normalize_task_warnings(
+            self.warnings or [], strict=False
+        )
+        public["artifacts"] = sanitize_public_artifacts(self.artifacts or [])
+        if isinstance(self.error, str):
+            public["error"] = sanitize_task_message(self.error)
         return sanitize_public_task_data(public)
 
 

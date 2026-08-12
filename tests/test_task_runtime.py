@@ -236,3 +236,55 @@ def test_manager_rejects_non_json_payload_before_task_creation(tmp_path):
     with pytest.raises(ValueError, match="JSON"):
         manager.submit("unit_test", {"score": math.nan}, lambda _: {})
     assert manager.list() == []
+
+
+@pytest.mark.parametrize("kind", ["cyclic_dict", "cyclic_list", "too_deep"])
+def test_manager_invalid_recursive_result_fails_and_cleans_future(tmp_path, kind):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+
+    def handler(_payload):
+        if kind == "cyclic_dict":
+            value = {}
+            value["self"] = value
+            return value
+        if kind == "cyclic_list":
+            value = []
+            value.append(value)
+            return value
+        value = current = {}
+        for _ in range(80):
+            child = {}
+            current["child"] = child
+            current = child
+        return value
+
+    record = manager.submit("unit_test", {}, handler)
+    failed = wait_for_terminal(manager, record.task_id)
+
+    assert failed.status is TaskStatus.FAILED
+    assert failed.error_code == "SCIENTIFIC_VALIDATION_FAILED"
+    assert failed.error == "Scientific task result validation failed"
+    for _ in range(50):
+        if record.task_id not in manager._futures:
+            break
+        time.sleep(0.01)
+    assert record.task_id not in manager._futures
+
+
+def test_manager_invalid_structured_warning_fails_without_orphan(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    record = manager.submit(
+        "unit_test",
+        {},
+        lambda _: {"success": True, "warnings": [{"code": "UNKNOWN_WARNING"}]},
+    )
+
+    failed = wait_for_terminal(manager, record.task_id)
+    assert failed.status is TaskStatus.FAILED
+    assert failed.error_code == "SCIENTIFIC_VALIDATION_FAILED"
+    assert failed.error == "Scientific task result validation failed"
+    for _ in range(50):
+        if record.task_id not in manager._futures:
+            break
+        time.sleep(0.01)
+    assert record.task_id not in manager._futures

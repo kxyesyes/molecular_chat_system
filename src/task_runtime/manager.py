@@ -11,6 +11,7 @@ from .errors import TaskErrorCode
 from .models import (
     TaskRecord,
     TaskStatus,
+    normalize_task_warnings,
     strict_json_roundtrip,
     strict_json_snapshot,
 )
@@ -116,14 +117,7 @@ class TaskManager:
             if result is None:
                 result = {}
             result = strict_json_snapshot(result)
-            artifacts = result.get("artifacts", []) if isinstance(result, dict) else []
-            status, error = _terminal_state(result)
-            completed = self._mark_finished(
-                task_id, status, result=result, error=error, artifacts=artifacts
-            )
-            if not completed:
-                self._finish_requested_cancellation(task_id)
-        except (TypeError, ValueError):
+        except Exception:
             completed = self._mark_finished(
                 task_id,
                 TaskStatus.FAILED,
@@ -132,6 +126,35 @@ class TaskManager:
             )
             if not completed:
                 self._finish_requested_cancellation(task_id)
+            return
+
+        artifacts = result.get("artifacts", []) if isinstance(result, dict) else []
+        warnings = result.get("warnings") if isinstance(result, dict) else None
+        try:
+            warnings = (
+                normalize_task_warnings(warnings) if warnings is not None else None
+            )
+        except Exception:
+            completed = self._mark_finished(
+                task_id,
+                TaskStatus.FAILED,
+                error="Scientific task result validation failed",
+                error_code=TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED,
+            )
+            if not completed:
+                self._finish_requested_cancellation(task_id)
+            return
+        status, error = _terminal_state(result)
+        completed = self._mark_finished(
+            task_id,
+            status,
+            result=result,
+            error=error,
+            artifacts=artifacts,
+            warnings=warnings,
+        )
+        if not completed:
+            self._finish_requested_cancellation(task_id)
 
     def _mark_running(self, task_id: str) -> bool:
         return self.store.claim_running(task_id, phase="running")
@@ -152,6 +175,7 @@ class TaskManager:
         error: str | None = None,
         artifacts: list[dict[str, Any]] | None = None,
         error_code: TaskErrorCode | str | None = None,
+        warnings: list[Any] | None = None,
     ) -> bool:
         return self.store.finish(
             task_id,
@@ -160,6 +184,7 @@ class TaskManager:
             error=error,
             artifacts=artifacts,
             error_code=error_code,
+            warnings=warnings,
         )
 
 
