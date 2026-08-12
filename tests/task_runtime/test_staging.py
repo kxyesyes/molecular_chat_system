@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import multiprocessing
 import os
 import stat
 import time
@@ -23,6 +24,18 @@ DOCKING_CONFIG = {
     "num_modes": 10,
 }
 RAW_SMILES = "CC(=O)Oc1ccccc1C(=O)O"
+
+
+def _hold_execution_snapshot(
+    root: str,
+    manifest_path: str,
+    ready: Any,
+    release: Any,
+) -> None:
+    stager = DockingInputStager(root)
+    with stager.execution_snapshot("task-1", manifest_path):
+        ready.set()
+        release.wait(15)
 
 
 def _stage_file(
@@ -536,6 +549,49 @@ def test_cleanup_rejects_invalid_protected_ids_without_deleting(tmp_path: Path) 
     assert (tmp_path / "expired").is_dir()
 
 
+def test_cleanup_dynamic_protected_check_is_re_read_before_quarantine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager, "changing")
+    os.utime(path.parent, (1, 1))
+    state = {"protected": False}
+    real_load = stager._load_verified_unlocked
+
+    def protect_after_validation(task_id: str, manifest_path: Path) -> dict[str, Any]:
+        manifest = real_load(task_id, manifest_path)
+        state["protected"] = True
+        return manifest
+
+    monkeypatch.setattr(stager, "_load_verified_unlocked", protect_after_validation)
+
+    removed = stager.cleanup_expired(
+        time.time(),
+        protected=set(),
+        protected_check=lambda task_id: state["protected"],
+    )
+
+    assert removed == []
+    assert path.parent.exists()
+
+
+def test_cleanup_protected_check_exception_fails_closed(tmp_path: Path) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager, "protected")
+    os.utime(path.parent, (1, 1))
+
+    def unavailable(task_id: str) -> bool:
+        raise RuntimeError("store unavailable")
+
+    assert stager.cleanup_expired(
+        time.time(),
+        protected=set(),
+        protected_check=unavailable,
+    ) == []
+    assert path.parent.exists()
+
+
 def test_cleanup_preserves_unowned_safe_named_directory(tmp_path: Path) -> None:
     stager = DockingInputStager(tmp_path)
     unowned = tmp_path / "looks-like-a-task"
@@ -965,22 +1021,171 @@ def test_load_rejects_path_replacement_during_descriptor_read_when_supported(
     _assert_safe_error(caught_error, forbidden=(str(tmp_path.resolve()),))
 
 
-def test_resolve_verified_inputs_reverifies_and_returns_frozen_paths(
+def test_execution_snapshot_reverifies_and_returns_frozen_metadata(
     tmp_path: Path,
 ) -> None:
     stager = DockingInputStager(tmp_path)
     path = _stage_file(stager)
 
-    resolved = stager.resolve_verified_inputs("task-1", path)
+    with stager.execution_snapshot("task-1", path) as resolved:
+        assert isinstance(resolved, staging_module.VerifiedDockingInputs)
+        assert resolved.task_id == "task-1"
+        assert resolved.receptor_path.parent == resolved.ligand_path.parent
+        assert "executions" in resolved.receptor_path.parts
+        assert resolved.receptor_path != path.parent / "inputs" / "receptor.pdb"
+        assert resolved.ligand_path != path.parent / "inputs" / "ligand.sdf"
+        assert resolved.ligand_mode == "file"
+        assert resolved.receptor_sha256 == _manifest_payload(path)["receptor"]["sha256"]
+        assert resolved.receptor_size == 5
+        assert resolved.ligand_sha256 == _manifest_payload(path)["ligand"]["sha256"]
+        assert resolved.ligand_size == 5
+        assert resolved.config_hash == _manifest_payload(path)["config_hash"]
+        assert resolved.config["center"] == (1.0, 2.0, 3.0)
+        assert str(tmp_path.resolve()) not in repr(resolved)
+        with pytest.raises(FrozenInstanceError):
+            resolved.task_id = "changed"  # type: ignore[misc]
+        snapshot_root = resolved.receptor_path.parent
 
-    assert isinstance(resolved, staging_module.VerifiedDockingInputs)
-    assert resolved.task_id == "task-1"
-    assert resolved.receptor_path == path.parent / "inputs" / "receptor.pdb"
-    assert resolved.ligand_path == path.parent / "inputs" / "ligand.sdf"
-    assert resolved.ligand_mode == "file"
-    assert str(tmp_path.resolve()) not in repr(resolved)
-    with pytest.raises(FrozenInstanceError):
-        resolved.task_id = "changed"  # type: ignore[misc]
+    assert not snapshot_root.exists()
+
+
+def test_execution_snapshot_is_unchanged_when_original_is_replaced(
+    tmp_path: Path,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+    original = path.parent / "inputs" / "receptor.pdb"
+
+    with stager.execution_snapshot("task-1", path) as resolved:
+        original.write_bytes(b"CHANGED")
+        assert resolved.receptor_path.read_bytes() == b"ATOM\n"
+        assert resolved.receptor_sha256 == staging_module.hashlib.sha256(b"ATOM\n").hexdigest()
+
+
+def test_execution_snapshot_exit_removes_snapshot_when_quarantine_move_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+    real_publish = staging_module._publish_directory
+
+    def fail_snapshot_quarantine(source: Path, destination: Path) -> bool:
+        if source.name.startswith("snapshot-") and destination.parent.name == ".trash":
+            return False
+        return real_publish(source, destination)
+
+    monkeypatch.setattr(staging_module, "_publish_directory", fail_snapshot_quarantine)
+
+    with stager.execution_snapshot("task-1", path) as resolved:
+        snapshot_root = resolved.receptor_path.parent
+        assert snapshot_root.exists()
+
+    assert not snapshot_root.exists()
+
+
+def test_execution_snapshot_cleanup_failure_is_reported_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+    real_publish = staging_module._publish_directory
+    real_delete = staging_module._safe_delete_owned_tree
+
+    def fail_snapshot_quarantine(source: Path, destination: Path) -> bool:
+        if source.name.startswith("snapshot-") and destination.parent.name == ".trash":
+            return False
+        return real_publish(source, destination)
+
+    def fail_snapshot_delete(candidate: Path) -> bool:
+        if candidate.name.startswith("snapshot-"):
+            return False
+        return real_delete(candidate)
+
+    monkeypatch.setattr(staging_module, "_publish_directory", fail_snapshot_quarantine)
+    monkeypatch.setattr(staging_module, "_safe_delete_owned_tree", fail_snapshot_delete)
+
+    with pytest.raises(ManifestError) as caught:
+        with stager.execution_snapshot("task-1", path) as resolved:
+            snapshot_root = resolved.receptor_path.parent
+
+    assert caught.value.reason_code == "manifest_io_error"
+    assert (snapshot_root / ".medchat-staging-owner").is_file()
+
+
+def test_active_execution_lease_blocks_cleanup_and_conflicting_stage(
+    tmp_path: Path,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+    os.utime(path.parent, (1, 1))
+
+    with stager.execution_snapshot("task-1", path):
+        os.utime(path.parent, (1, 1))
+        assert stager.cleanup_expired(time.time(), protected=set()) == []
+        assert path.parent.exists()
+        with pytest.raises(ManifestError) as caught:
+            _stage_file(DockingInputStager(tmp_path))
+        assert caught.value.reason_code in {"manifest_conflict", "manifest_io_error"}
+
+    os.utime(path.parent, (1, 1))
+    assert stager.cleanup_expired(time.time(), protected=set()) == ["task-1"]
+
+
+def test_execution_lease_acquisition_failure_is_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+
+    class FailedLease:
+        acquired = False
+
+        def __enter__(self) -> "FailedLease":
+            raise ManifestError("manifest_io_error")
+
+        def __exit__(self, *args: Any) -> None:
+            return None
+
+    monkeypatch.setattr(stager, "_task_lease", lambda task_id: FailedLease())
+
+    with pytest.raises(ManifestError) as caught:
+        with stager.execution_snapshot("task-1", path):
+            pass
+
+    assert caught.value.reason_code == "manifest_io_error"
+    assert not list(path.parent.glob("executions/*"))
+
+
+def test_cross_process_execution_lease_blocks_stage_and_cleanup(
+    tmp_path: Path,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    process = context.Process(
+        target=_hold_execution_snapshot,
+        args=(str(tmp_path), str(path), ready, release),
+    )
+    process.start()
+    try:
+        assert ready.wait(15)
+        os.utime(path.parent, (1, 1))
+        assert stager.cleanup_expired(time.time(), protected=set()) == []
+        with pytest.raises(ManifestError) as caught:
+            _stage_file(stager)
+        assert caught.value.reason_code == "manifest_io_error"
+    finally:
+        release.set()
+        process.join(15)
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+    assert process.exitcode == 0
 
 
 def test_stage_verifies_published_manifest_before_reporting_success(
@@ -1062,6 +1267,65 @@ def test_permission_restriction_failure_aborts_publish(
 
     _assert_safe_error(caught.value, forbidden=(str(tmp_path.resolve()),))
     assert not (tmp_path / "task-1").exists()
+
+
+def test_windows_acl_failure_is_fail_closed_before_sensitive_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(staging_module, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        staging_module,
+        "_harden_windows_acl",
+        lambda path, is_directory: False,
+        raising=False,
+    )
+
+    with pytest.raises(ManifestError) as caught:
+        DockingInputStager(tmp_path)
+
+    assert caught.value.reason_code in {"manifest_invalid_root", "manifest_io_error"}
+    assert not list(tmp_path.glob(".stage-*"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL capability test")
+def test_real_windows_acl_hardening_capability(tmp_path: Path) -> None:
+    protected = tmp_path / "protected"
+    protected.mkdir()
+    protected_file = protected / "input.dat"
+    protected_file.write_bytes(b"data")
+
+    assert staging_module._harden_windows_acl(protected, is_directory=True) is True
+    assert staging_module._harden_windows_acl(protected_file, is_directory=False) is True
+    assert staging_module._verify_windows_acl(protected, is_directory=True) is True
+    assert staging_module._verify_windows_acl(protected_file, is_directory=False) is True
+
+    root = tmp_path / "staging"
+    stager = DockingInputStager(root)
+    manifest = _stage_file(stager)
+    for directory in (
+        root,
+        root / ".trash",
+        root / ".leases",
+        manifest.parent,
+        manifest.parent / "inputs",
+    ):
+        assert staging_module._verify_windows_acl(directory, is_directory=True) is True
+    for staged_file in (
+        manifest,
+        manifest.parent / "inputs" / "receptor.pdb",
+        manifest.parent / "inputs" / "ligand.sdf",
+    ):
+        assert staging_module._verify_windows_acl(staged_file, is_directory=False) is True
+    with stager.execution_snapshot("task-1", manifest) as snapshot:
+        assert staging_module._verify_windows_acl(
+            snapshot.receptor_path.parent,
+            is_directory=True,
+        ) is True
+        assert staging_module._verify_windows_acl(
+            snapshot.receptor_path,
+            is_directory=False,
+        ) is True
 
 
 def test_failed_sensitive_stage_is_owned_or_quarantined(
@@ -1168,21 +1432,19 @@ def test_cleanup_rename_guard_restores_directory_swapped_after_validation(
     original = tmp_path / "expired"
     os.utime(original, (1, 1))
     displaced = tmp_path / ".displaced-old"
-    real_rename = Path.rename
+    real_publish = staging_module._publish_directory
     swapped = False
 
-    def swap_before_rename(self: Path, target: Path) -> Path:
+    def swap_before_publish(source: Path, target: Path) -> bool:
         nonlocal swapped
-        if self == original and not swapped:
+        if source == original and not swapped:
             swapped = True
             os.rename(original, displaced)
             staging_module.shutil.copytree(displaced, original)
             (original / "fresh.txt").write_text("fresh", encoding="utf-8")
-            os.rename(original, target)
-            return target
-        return real_rename(self, target)
+        return real_publish(source, target)
 
-    monkeypatch.setattr(Path, "rename", swap_before_rename)
+    monkeypatch.setattr(staging_module, "_publish_directory", swap_before_publish)
 
     removed = stager.cleanup_expired(cutoff_epoch=time.time(), protected=set())
 
@@ -1230,6 +1492,7 @@ def test_publish_fsyncs_inputs_temp_task_and_staging_root(
     assert any(item.name.startswith(".stage-") for item in calls)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX publication barrier test")
 def test_post_publish_root_barrier_failure_quarantines_active_task(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1249,6 +1512,72 @@ def test_post_publish_root_barrier_failure_quarantines_active_task(
 
     assert caught.value.reason_code == "manifest_io_error"
     assert not (tmp_path / "task-1").exists()
+
+
+def test_false_directory_barrier_fails_closed_on_posix_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(staging_module, "_IS_WINDOWS", False)
+    monkeypatch.setattr(
+        staging_module,
+        "_directory_barrier",
+        lambda path: False,
+        raising=False,
+    )
+
+    with pytest.raises(ManifestError) as caught:
+        staging_module._fsync_directory(tmp_path)
+
+    assert caught.value.reason_code == "manifest_io_error"
+
+
+def test_failed_windows_write_through_publish_never_reports_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    monkeypatch.setattr(staging_module, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        staging_module,
+        "_windows_move_write_through",
+        lambda source, destination: False,
+        raising=False,
+    )
+
+    with pytest.raises(ManifestError) as caught:
+        staging_module._publish_directory(source, destination)
+
+    assert caught.value.reason_code == "manifest_io_error"
+    assert source.is_dir()
+    assert not destination.exists()
+
+
+def test_false_windows_directory_validation_barrier_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(staging_module, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        staging_module,
+        "_windows_directory_barrier",
+        lambda path: False,
+    )
+
+    with pytest.raises(ManifestError) as caught:
+        staging_module._fsync_directory(tmp_path)
+
+    assert caught.value.reason_code == "manifest_io_error"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows write-through smoke test")
+def test_real_windows_write_through_stage_and_load(tmp_path: Path) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+
+    assert stager.load_verified("task-1", path)["task_id"] == "task-1"
 
 
 def test_posix_directory_fsync_failure_is_not_silenced(

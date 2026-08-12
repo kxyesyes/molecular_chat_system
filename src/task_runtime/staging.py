@@ -1,12 +1,13 @@
 """Durable, task-owned docking input staging with verified manifests.
 
-Consumers must call :meth:`DockingInputStager.resolve_verified_inputs`
-immediately before scientific execution.  A verified path is a short-lived
-capability, not a promise that another process cannot mutate the filesystem.
+Consumers must use :meth:`DockingInputStager.execution_snapshot` immediately
+around scientific execution.  The context owns immutable copied inputs and a
+cross-process task lease for its complete lifetime.
 """
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import math
@@ -18,10 +19,18 @@ import tempfile
 import threading
 import unicodedata
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Mapping
+from types import MappingProxyType
+from typing import Any, Callable, Iterable, Iterator, Mapping
+
+if os.name == "nt":
+    import msvcrt
+    from ctypes import wintypes
+else:
+    import fcntl
 
 
 MAX_DOCKING_INPUT_BYTES = 25 * 1024 * 1024
@@ -37,7 +46,10 @@ _SMILES_NAME = "smiles.txt"
 _OWNERSHIP_MARKER_NAME = ".medchat-staging-owner"
 _OWNERSHIP_MARKER = b"MedChatTaskStaging@1\n"
 _TRASH_NAME = ".trash"
+_LEASES_NAME = ".leases"
+_EXECUTIONS_NAME = "executions"
 _STAGE_PREFIX = ".stage-"
+_SNAPSHOT_PREFIX = ".snapshot-"
 _MAX_TASK_ID_LENGTH = 128
 _MAX_JSON_DEPTH = 16
 _MAX_JSON_NODES = 256
@@ -89,6 +101,8 @@ _ERROR_CODES = frozenset(
 
 _LOCK_REGISTRY_GUARD = threading.Lock()
 _ROOT_LOCKS: dict[str, threading.RLock] = {}
+_WINDOWS_SID_LOCK = threading.Lock()
+_WINDOWS_CURRENT_SID: str | None = None
 
 
 class ManifestError(ValueError):
@@ -100,6 +114,82 @@ class ManifestError(ValueError):
         super().__init__(safe_code)
 
 
+class _TaskLease:
+    """Non-blocking cross-process exclusive lease over one task ID."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._handle: Any = None
+        self.acquired = False
+
+    def __enter__(self) -> "_TaskLease":
+        if not self.acquire():
+            raise ManifestError("manifest_io_error")
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.release()
+
+    def acquire(self) -> bool:
+        if self.acquired:
+            return True
+        descriptor: int | None = None
+        try:
+            flags = os.O_RDWR | os.O_CREAT
+            flags |= getattr(os, "O_BINARY", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            flags |= getattr(os, "O_CLOEXEC", 0)
+            descriptor = os.open(self._path, flags, 0o600)
+            status = os.fstat(descriptor)
+            _validate_regular_single_link(status, "manifest_io_error")
+            if status.st_size == 0:
+                os.write(descriptor, b"\0")
+                os.fsync(descriptor)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            _restrict_file(self._path)
+            handle = os.fdopen(descriptor, "r+b", buffering=0)
+            descriptor = None
+            try:
+                if _IS_WINDOWS:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                handle.close()
+                return False
+            self._handle = handle
+            self.acquired = True
+            return True
+        except ManifestError:
+            raise
+        except (OSError, RuntimeError, ValueError):
+            raise ManifestError("manifest_io_error") from None
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+    def release(self) -> None:
+        handle = self._handle
+        self._handle = None
+        if handle is None:
+            self.acquired = False
+            return
+        try:
+            os.lseek(handle.fileno(), 0, os.SEEK_SET)
+            if _IS_WINDOWS:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            handle.close()
+            self.acquired = False
+
+
 @dataclass(frozen=True)
 class VerifiedDockingInputs:
     """Short-lived, reverified docking paths for an execution consumer."""
@@ -109,11 +199,12 @@ class VerifiedDockingInputs:
     receptor_path: Path = field(repr=False)
     ligand_path: Path = field(repr=False)
     ligand_mode: str
+    receptor_sha256: str
+    receptor_size: int
+    ligand_sha256: str
+    ligand_size: int
     config_hash: str
-    center: tuple[float, float, float]
-    size: tuple[float, float, float]
-    exhaustiveness: int
-    num_modes: int
+    config: Mapping[str, Any]
 
 
 class DockingInputStager:
@@ -144,6 +235,7 @@ class DockingInputStager:
         self._lock = _root_lock(resolved)
         with self._lock:
             self._ensure_trash()
+            self._ensure_leases()
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(root=<redacted>)"
@@ -191,6 +283,7 @@ class DockingInputStager:
         with self._lock:
             self._assert_root_safe()
             self._ensure_trash()
+            self._ensure_leases()
             task_root = self._root / task_id
             manifest_path = task_root / _MANIFEST_NAME
             _assert_practical_path(task_root, "manifest_invalid_task_id")
@@ -202,66 +295,78 @@ class DockingInputStager:
                 task_root / _INPUTS_NAME / ligand_filename,
                 "manifest_invalid_input_name",
             )
-            if task_root.exists() or task_root.is_symlink():
-                return self._reuse_or_reject(task_id, manifest_path, expected)
+            lease = self._task_lease(task_id)
+            with lease:
+                if task_root.exists() or task_root.is_symlink():
+                    return self._reuse_or_reject(task_id, manifest_path, expected)
 
-            temporary_root = self._root / f"{_STAGE_PREFIX}{uuid.uuid4().hex[:16]}"
-            published = False
-            try:
-                temporary_root.mkdir(mode=0o700)
-                _restrict_directory(temporary_root)
-                _write_ownership_marker(temporary_root)
-
-                inputs_root = temporary_root / _INPUTS_NAME
-                inputs_root.mkdir(mode=0o700)
-                _restrict_directory(inputs_root)
-                receptor_path = inputs_root / receptor_name
-                ligand_path = inputs_root / ligand_filename
-                _assert_practical_path(receptor_path, "manifest_invalid_input_name")
-                _assert_practical_path(ligand_path, "manifest_invalid_input_name")
-                _atomic_write(receptor_path, receptor_bytes)
-                _atomic_write(ligand_path, ligand_content)
-                _fsync_directory(inputs_root)
-
-                manifest = {
-                    "schema": _SCHEMA,
-                    "task_id": task_id,
-                    "type": _TASK_TYPE,
-                    "receptor": expected["receptor"],
-                    "ligand": expected["ligand"],
-                    "ligand_mode": ligand_mode,
-                    "config": canonical_config,
-                    "config_hash": config_hash,
-                    "created_at": _utc_now(),
-                }
-                _atomic_write(
-                    temporary_root / _MANIFEST_NAME,
-                    _canonical_json(manifest),
-                )
-                _fsync_directory(temporary_root)
-                self._assert_root_safe()
+                temporary_root = self._root / f"{_STAGE_PREFIX}{uuid.uuid4().hex[:16]}"
+                published = False
                 try:
-                    temporary_root.rename(task_root)
-                except (FileExistsError, OSError):
-                    if task_root.exists() or task_root.is_symlink():
-                        return self._reuse_or_reject(task_id, manifest_path, expected)
+                    temporary_root.mkdir(mode=0o700)
+                    _restrict_directory(temporary_root)
+                    _write_ownership_marker(temporary_root)
+
+                    inputs_root = temporary_root / _INPUTS_NAME
+                    inputs_root.mkdir(mode=0o700)
+                    _restrict_directory(inputs_root)
+                    receptor_path = inputs_root / receptor_name
+                    ligand_path = inputs_root / ligand_filename
+                    _assert_practical_path(
+                        receptor_path,
+                        "manifest_invalid_input_name",
+                    )
+                    _assert_practical_path(
+                        ligand_path,
+                        "manifest_invalid_input_name",
+                    )
+                    _atomic_write(receptor_path, receptor_bytes)
+                    _atomic_write(ligand_path, ligand_content)
+                    _fsync_directory(inputs_root)
+
+                    manifest = {
+                        "schema": _SCHEMA,
+                        "task_id": task_id,
+                        "type": _TASK_TYPE,
+                        "receptor": expected["receptor"],
+                        "ligand": expected["ligand"],
+                        "ligand_mode": ligand_mode,
+                        "config": canonical_config,
+                        "config_hash": config_hash,
+                        "created_at": _utc_now(),
+                    }
+                    _atomic_write(
+                        temporary_root / _MANIFEST_NAME,
+                        _canonical_json(manifest),
+                    )
+                    _fsync_directory(temporary_root)
+                    self._assert_root_safe()
+                    try:
+                        if not _publish_directory(temporary_root, task_root):
+                            raise ManifestError("manifest_io_error")
+                    except ManifestError:
+                        if task_root.exists() or task_root.is_symlink():
+                            return self._reuse_or_reject(
+                                task_id,
+                                manifest_path,
+                                expected,
+                            )
+                        raise
+                    published = True
+                    self._assert_task_root(task_id, task_root)
+                    self.load_verified(task_id, manifest_path)
+                    return manifest_path
+                except ManifestError:
+                    if published:
+                        self._quarantine_active(task_root, task_id)
                     raise
-                published = True
-                _fsync_directory(self._root)
-                self._assert_task_root(task_id, task_root)
-                self.load_verified(task_id, manifest_path)
-                return manifest_path
-            except ManifestError:
-                if published:
-                    self._quarantine_active(task_root, task_id)
-                raise
-            except (MemoryError, OSError, RuntimeError, ValueError):
-                if published:
-                    self._quarantine_active(task_root, task_id)
-                raise ManifestError("manifest_io_error") from None
-            finally:
-                if temporary_root.exists() and not temporary_root.is_symlink():
-                    self._dispose_temporary(temporary_root)
+                except (MemoryError, OSError, RuntimeError, ValueError):
+                    if published:
+                        self._quarantine_active(task_root, task_id)
+                    raise ManifestError("manifest_io_error") from None
+                finally:
+                    if temporary_root.exists() and not temporary_root.is_symlink():
+                        self._dispose_temporary(temporary_root)
 
     def load_verified(
         self,
@@ -273,36 +378,191 @@ class DockingInputStager:
         with self._lock:
             return self._load_verified_unlocked(task_id, manifest_path)
 
-    def resolve_verified_inputs(
+    @contextmanager
+    def execution_snapshot(
         self,
         task_id: str,
         manifest_path: str | os.PathLike[str],
-    ) -> VerifiedDockingInputs:
-        """Reverify and resolve inputs immediately before scientific execution."""
+    ) -> Iterator[VerifiedDockingInputs]:
+        """Yield immutable execution-local inputs while holding a task lease."""
 
+        _validate_task_id(task_id)
+        lease: _TaskLease | None = None
+        snapshot_root: Path | None = None
         with self._lock:
-            manifest = self._load_verified_unlocked(task_id, manifest_path)
-            task_root = self._root / task_id
-            receptor_path = _manifest_candidate(task_root, manifest["receptor"])
-            ligand_path = _manifest_candidate(task_root, manifest["ligand"])
-            config = manifest["config"]
-            return VerifiedDockingInputs(
-                task_id=task_id,
-                manifest_path=task_root / _MANIFEST_NAME,
-                receptor_path=receptor_path,
-                ligand_path=ligand_path,
-                ligand_mode=manifest["ligand_mode"],
-                config_hash=manifest["config_hash"],
-                center=tuple(config["center"]),
-                size=tuple(config["size"]),
-                exhaustiveness=config["exhaustiveness"],
-                num_modes=config["num_modes"],
+            self._assert_root_safe()
+            self._ensure_leases()
+            lease = self._task_lease(task_id)
+            lease.__enter__()
+            try:
+                verified, snapshot_root = self._create_execution_snapshot(
+                    task_id,
+                    manifest_path,
+                )
+            except BaseException:
+                lease.__exit__(None, None, None)
+                raise
+        try:
+            yield verified
+        finally:
+            disposed = True
+            with self._lock:
+                if snapshot_root is not None:
+                    disposed = self._dispose_execution_snapshot(snapshot_root)
+            if lease is not None:
+                lease.__exit__(None, None, None)
+            if not disposed:
+                raise ManifestError("manifest_io_error")
+
+    def _create_execution_snapshot(
+        self,
+        task_id: str,
+        manifest_path: str | os.PathLike[str],
+    ) -> tuple[VerifiedDockingInputs, Path]:
+        """Create and re-open a private copy while the caller holds the lease."""
+
+        manifest = self._load_verified_unlocked(task_id, manifest_path)
+        task_root = self._root / task_id
+        receptor_record = manifest["receptor"]
+        ligand_record = manifest["ligand"]
+        receptor_source = _manifest_candidate(task_root, receptor_record)
+        ligand_source = _manifest_candidate(task_root, ligand_record)
+        receptor_bytes, receptor_hash = _secure_read_file(
+            receptor_source,
+            max_bytes=MAX_DOCKING_INPUT_BYTES,
+            expected_size=receptor_record["size"],
+            collect=True,
+            reason_code="manifest_integrity_failed",
+            containment_root=task_root,
+        )
+        ligand_limit = (
+            MAX_SMILES_BYTES
+            if manifest["ligand_mode"] == "smiles"
+            else MAX_DOCKING_INPUT_BYTES
+        )
+        ligand_bytes, ligand_hash = _secure_read_file(
+            ligand_source,
+            max_bytes=ligand_limit,
+            expected_size=ligand_record["size"],
+            collect=True,
+            reason_code="manifest_integrity_failed",
+            containment_root=task_root,
+        )
+        if (
+            receptor_hash != receptor_record["sha256"]
+            or ligand_hash != ligand_record["sha256"]
+        ):
+            raise ManifestError("manifest_integrity_failed")
+
+        executions_root = task_root / _EXECUTIONS_NAME
+        self._ensure_owned_directory(executions_root)
+        temporary_root = executions_root / f"{_SNAPSHOT_PREFIX}{uuid.uuid4().hex[:16]}"
+        snapshot_root = executions_root / f"snapshot-{uuid.uuid4().hex[:16]}"
+        try:
+            temporary_root.mkdir(mode=0o700)
+            _restrict_directory(temporary_root)
+            _write_ownership_marker(temporary_root)
+            receptor_snapshot = temporary_root / receptor_source.name
+            ligand_snapshot = temporary_root / ligand_source.name
+            _atomic_write(receptor_snapshot, receptor_bytes)
+            _atomic_write(ligand_snapshot, ligand_bytes)
+            _fsync_directory(temporary_root)
+            if not _publish_directory(temporary_root, snapshot_root):
+                raise ManifestError("manifest_io_error")
+            receptor_snapshot = snapshot_root / receptor_source.name
+            ligand_snapshot = snapshot_root / ligand_source.name
+            _, snapshot_receptor_hash = _secure_read_file(
+                receptor_snapshot,
+                max_bytes=MAX_DOCKING_INPUT_BYTES,
+                expected_size=receptor_record["size"],
+                collect=False,
+                reason_code="manifest_integrity_failed",
+                containment_root=snapshot_root,
             )
+            _, snapshot_ligand_hash = _secure_read_file(
+                ligand_snapshot,
+                max_bytes=ligand_limit,
+                expected_size=ligand_record["size"],
+                collect=False,
+                reason_code="manifest_integrity_failed",
+                containment_root=snapshot_root,
+            )
+            if (
+                snapshot_receptor_hash != receptor_record["sha256"]
+                or snapshot_ligand_hash != ligand_record["sha256"]
+            ):
+                raise ManifestError("manifest_integrity_failed")
+            config = manifest["config"]
+            frozen_config = MappingProxyType(
+                {
+                    "center": tuple(config["center"]),
+                    "size": tuple(config["size"]),
+                    "exhaustiveness": config["exhaustiveness"],
+                    "num_modes": config["num_modes"],
+                }
+            )
+            return (
+                VerifiedDockingInputs(
+                    task_id=task_id,
+                    manifest_path=task_root / _MANIFEST_NAME,
+                    receptor_path=receptor_snapshot,
+                    ligand_path=ligand_snapshot,
+                    ligand_mode=manifest["ligand_mode"],
+                    receptor_sha256=receptor_record["sha256"],
+                    receptor_size=receptor_record["size"],
+                    ligand_sha256=ligand_record["sha256"],
+                    ligand_size=ligand_record["size"],
+                    config_hash=manifest["config_hash"],
+                    config=frozen_config,
+                ),
+                snapshot_root,
+            )
+        except BaseException:
+            if snapshot_root.exists() and not snapshot_root.is_symlink():
+                self._dispose_execution_snapshot(snapshot_root)
+            if temporary_root.exists() and not temporary_root.is_symlink():
+                self._dispose_temporary(temporary_root)
+            raise
+
+    def _dispose_execution_snapshot(self, snapshot_root: Path) -> bool:
+        if not snapshot_root.exists():
+            return True
+        if snapshot_root.is_symlink():
+            return False
+        if not _has_valid_ownership_marker(snapshot_root):
+            return False
+        try:
+            quarantined = self._quarantine_path("execution")
+            if not _publish_directory(snapshot_root, quarantined):
+                return _safe_delete_owned_tree(snapshot_root)
+            _safe_delete_owned_tree(quarantined)
+            return True
+        except (ManifestError, OSError, RuntimeError):
+            return _safe_delete_owned_tree(snapshot_root)
+
+    def _ensure_owned_directory(self, directory: Path) -> None:
+        if directory.exists() or directory.is_symlink():
+            _reject_link_components(directory)
+            if not directory.is_dir() or not _has_valid_ownership_marker(directory):
+                raise ManifestError("manifest_io_error")
+            _restrict_directory(directory)
+            return
+        directory.mkdir(mode=0o700)
+        _restrict_directory(directory)
+        _write_ownership_marker(directory)
+        _fsync_directory(directory.parent)
+
+    def _task_lease(self, task_id: str) -> _TaskLease:
+        _validate_task_id(task_id)
+        self._ensure_leases()
+        return _TaskLease(self._root / _LEASES_NAME / f"{task_id}.lock")
 
     def cleanup_expired(
         self,
         cutoff_epoch: float,
         protected: Iterable[str],
+        *,
+        protected_check: Callable[[str], bool] | None = None,
     ) -> list[str]:
         """Quarantine and remove old owned directories without following links.
 
@@ -318,6 +578,8 @@ class DockingInputStager:
             raise ManifestError("manifest_cleanup_invalid")
         if isinstance(protected, (str, bytes)):
             raise ManifestError("manifest_cleanup_invalid")
+        if protected_check is not None and not callable(protected_check):
+            raise ManifestError("manifest_cleanup_invalid")
         try:
             protected_ids = set(protected)
         except TypeError:
@@ -331,6 +593,7 @@ class DockingInputStager:
         with self._lock:
             self._assert_root_safe()
             self._ensure_trash()
+            self._ensure_leases()
             self._cleanup_internal_residue(float(cutoff_epoch))
             removed: list[str] = []
             try:
@@ -365,17 +628,32 @@ class DockingInputStager:
                         continue
                     if task_id in protected_ids:
                         continue
-                    quarantined = self._quarantine_path(task_id)
-                    task_root.rename(quarantined)
-                    _fsync_directory(self._root)
-                    moved = quarantined.stat(follow_symlinks=False)
-                    if _identity(after) != _identity(moved):
-                        if not task_root.exists() and not task_root.is_symlink():
-                            quarantined.rename(task_root)
-                            _fsync_directory(self._root)
+                    lease = self._task_lease(task_id)
+                    if not lease.acquire():
                         continue
-                    if _safe_delete_owned_tree(quarantined):
-                        removed.append(task_id)
+                    try:
+                        if task_id in protected_ids:
+                            continue
+                        if protected_check is not None:
+                            try:
+                                if protected_check(task_id):
+                                    continue
+                            except Exception:
+                                continue
+                        if task_id in protected_ids:
+                            continue
+                        quarantined = self._quarantine_path(task_id)
+                        if not _publish_directory(task_root, quarantined):
+                            continue
+                        moved = quarantined.stat(follow_symlinks=False)
+                        if _identity(after) != _identity(moved):
+                            if not task_root.exists() and not task_root.is_symlink():
+                                _publish_directory(quarantined, task_root)
+                            continue
+                        if _safe_delete_owned_tree(quarantined):
+                            removed.append(task_id)
+                    finally:
+                        lease.release()
                 except (FileNotFoundError, NotADirectoryError, ManifestError):
                     continue
                 except OSError:
@@ -530,6 +808,24 @@ class DockingInputStager:
         except (OSError, RuntimeError):
             raise ManifestError("manifest_invalid_root") from None
 
+    def _ensure_leases(self) -> None:
+        leases = self._root / _LEASES_NAME
+        try:
+            if leases.exists() or leases.is_symlink():
+                _reject_link_components(leases)
+                if not leases.is_dir() or not _has_valid_ownership_marker(leases):
+                    raise ManifestError("manifest_invalid_root")
+                _restrict_directory(leases)
+                return
+            leases.mkdir(mode=0o700)
+            _restrict_directory(leases)
+            _write_ownership_marker(leases)
+            _fsync_directory(self._root)
+        except ManifestError:
+            raise
+        except (OSError, RuntimeError):
+            raise ManifestError("manifest_invalid_root") from None
+
     def _quarantine_path(self, logical_name: str) -> Path:
         self._ensure_trash()
         safe_prefix = logical_name if _is_valid_task_id(logical_name) else "residue"
@@ -546,8 +842,8 @@ class DockingInputStager:
             if not _has_valid_ownership_marker(task_root):
                 return False
             quarantined = self._quarantine_path(task_id)
-            task_root.rename(quarantined)
-            _fsync_directory(self._root)
+            if not _publish_directory(task_root, quarantined):
+                return False
             return _safe_delete_owned_tree(quarantined)
         except (ManifestError, OSError, RuntimeError):
             return False
@@ -559,8 +855,8 @@ class DockingInputStager:
             if not _has_valid_ownership_marker(temporary_root):
                 return
             quarantined = self._quarantine_path("residue")
-            temporary_root.rename(quarantined)
-            _fsync_directory(self._root)
+            if not _publish_directory(temporary_root, quarantined):
+                return
         except (ManifestError, OSError, RuntimeError):
             return
 
@@ -577,8 +873,8 @@ class DockingInputStager:
                 continue
             try:
                 quarantined = self._quarantine_path("residue")
-                candidate.rename(quarantined)
-                _fsync_directory(self._root)
+                if not _publish_directory(candidate, quarantined):
+                    continue
                 _safe_delete_owned_tree(quarantined)
             except (ManifestError, OSError, RuntimeError):
                 continue
@@ -779,6 +1075,11 @@ def _restrict_file(path: Path) -> None:
         status = path.lstat()
     except OSError:
         raise ManifestError("manifest_io_error") from None
+    if _IS_WINDOWS:
+        if not _harden_windows_acl(path, is_directory=False):
+            raise ManifestError("manifest_io_error")
+        if not _verify_windows_acl(path, is_directory=False):
+            raise ManifestError("manifest_io_error")
     if not _IS_WINDOWS and stat.S_IMODE(status.st_mode) & 0o077:
         raise ManifestError("manifest_io_error")
 
@@ -789,8 +1090,246 @@ def _restrict_directory(path: Path) -> None:
         status = path.lstat()
     except OSError:
         raise ManifestError("manifest_io_error") from None
+    if _IS_WINDOWS:
+        if not _harden_windows_acl(path, is_directory=True):
+            raise ManifestError("manifest_io_error")
+        if not _verify_windows_acl(path, is_directory=True):
+            raise ManifestError("manifest_io_error")
     if not _IS_WINDOWS and stat.S_IMODE(status.st_mode) & 0o077:
         raise ManifestError("manifest_io_error")
+
+
+def _harden_windows_acl(path: Path, is_directory: bool) -> bool:
+    """Install a protected SID-based DACL without localized account names."""
+
+    if os.name != "nt":
+        return False
+    try:
+        sid = _windows_current_process_sid()
+        inheritance = "OICI" if is_directory else ""
+        sddl = (
+            f"D:P(A;{inheritance};FA;;;{sid})"
+            f"(A;{inheritance};FA;;;SY)(A;{inheritance};FA;;;BA)"
+        )
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        convert = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
+        convert.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.ULONG),
+        ]
+        convert.restype = wintypes.BOOL
+        get_dacl = advapi32.GetSecurityDescriptorDacl
+        get_dacl.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.BOOL),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.BOOL),
+        ]
+        get_dacl.restype = wintypes.BOOL
+        set_named = advapi32.SetNamedSecurityInfoW
+        set_named.argtypes = [
+            wintypes.LPWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        set_named.restype = wintypes.DWORD
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+
+        descriptor = ctypes.c_void_p()
+        if not convert(sddl, 1, ctypes.byref(descriptor), None):
+            return False
+        try:
+            present = wintypes.BOOL()
+            defaulted = wintypes.BOOL()
+            dacl = ctypes.c_void_p()
+            if not get_dacl(
+                descriptor,
+                ctypes.byref(present),
+                ctypes.byref(dacl),
+                ctypes.byref(defaulted),
+            ):
+                return False
+            if not present.value or not dacl.value:
+                return False
+            result = set_named(
+                str(path),
+                1,
+                0x00000004 | 0x80000000,
+                None,
+                None,
+                dacl,
+                None,
+            )
+            return result == 0
+        finally:
+            kernel32.LocalFree(descriptor)
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        return False
+
+
+def _verify_windows_acl(path: Path, is_directory: bool) -> bool:
+    """Verify the DACL is protected and contains only the approved SIDs."""
+
+    if os.name != "nt":
+        return False
+    try:
+        sid = _windows_current_process_sid()
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_named = advapi32.GetNamedSecurityInfoW
+        get_named.argtypes = [
+            wintypes.LPWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        get_named.restype = wintypes.DWORD
+        to_sddl = advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW
+        to_sddl.argtypes = [
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.c_wchar_p),
+            ctypes.POINTER(wintypes.ULONG),
+        ]
+        to_sddl.restype = wintypes.BOOL
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+
+        descriptor = ctypes.c_void_p()
+        dacl = ctypes.c_void_p()
+        result = get_named(
+            str(path),
+            1,
+            0x00000004,
+            None,
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(descriptor),
+        )
+        if result != 0 or not descriptor.value or not dacl.value:
+            return False
+        try:
+            rendered = ctypes.c_wchar_p()
+            if not to_sddl(
+                descriptor,
+                1,
+                0x00000004,
+                ctypes.byref(rendered),
+                None,
+            ):
+                return False
+            try:
+                value = rendered.value or ""
+            finally:
+                if rendered:
+                    kernel32.LocalFree(rendered)
+        finally:
+            kernel32.LocalFree(descriptor)
+
+        if not value.startswith("D:P"):
+            return False
+        if value.count("(A;") != 3:
+            return False
+        if any(token in value for token in (";;;WD)", ";;;AU)", ";;;BU)")):
+            return False
+        if not all(token in value for token in (f";;;{sid})", ";;;SY)", ";;;BA)")):
+            return False
+        if is_directory and value.count("(A;OICI;") != 3:
+            return False
+        if not is_directory and "OICI" in value:
+            return False
+        return True
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        return False
+
+
+def _windows_current_process_sid() -> str:
+    global _WINDOWS_CURRENT_SID
+    if _WINDOWS_CURRENT_SID is not None:
+        return _WINDOWS_CURRENT_SID
+    if os.name != "nt":
+        raise OSError("unsupported")
+    with _WINDOWS_SID_LOCK:
+        if _WINDOWS_CURRENT_SID is not None:
+            return _WINDOWS_CURRENT_SID
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        advapi32.OpenProcessToken.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.HANDLE),
+        ]
+        advapi32.OpenProcessToken.restype = wintypes.BOOL
+        advapi32.GetTokenInformation.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        advapi32.GetTokenInformation.restype = wintypes.BOOL
+        advapi32.ConvertSidToStringSidW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_wchar_p),
+        ]
+        advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+            raise OSError("token")
+        try:
+            required = wintypes.DWORD()
+            advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(required))
+            if not required.value:
+                raise OSError("token")
+            buffer = ctypes.create_string_buffer(required.value)
+            if not advapi32.GetTokenInformation(
+                token,
+                1,
+                buffer,
+                required,
+                ctypes.byref(required),
+            ):
+                raise OSError("token")
+
+            class SidAndAttributes(ctypes.Structure):
+                _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD)]
+
+            sid_pointer = ctypes.cast(buffer, ctypes.POINTER(SidAndAttributes)).contents.Sid
+            rendered = ctypes.c_wchar_p()
+            if not advapi32.ConvertSidToStringSidW(sid_pointer, ctypes.byref(rendered)):
+                raise OSError("token")
+            try:
+                value = rendered.value
+            finally:
+                if rendered:
+                    kernel32.LocalFree(rendered)
+            if not value or not value.startswith("S-"):
+                raise OSError("token")
+            _WINDOWS_CURRENT_SID = value
+            return value
+        finally:
+            kernel32.CloseHandle(token)
 
 
 def _fsync_directory(path: Path) -> None:
@@ -802,13 +1341,20 @@ def _fsync_directory(path: Path) -> None:
     """
 
     if _IS_WINDOWS:
-        _windows_directory_barrier(path)
+        if not _windows_directory_barrier(path):
+            raise ManifestError("manifest_io_error")
         return
+    if not _directory_barrier(path):
+        raise ManifestError("manifest_io_error")
+
+
+def _directory_barrier(path: Path) -> bool:
     descriptor: int | None = None
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     try:
         descriptor = os.open(path, flags)
         os.fsync(descriptor)
+        return True
     except OSError:
         raise ManifestError("manifest_io_error") from None
     finally:
@@ -817,7 +1363,13 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _windows_directory_barrier(path: Path) -> bool:
-    """Return False because stdlib exposes no portable Windows dir flush API."""
+    """Validate a Windows directory before a write-through publication.
+
+    Python exposes no portable directory-handle flush on Windows.  Returning
+    true here means only that the directory is an ordinary local directory;
+    publication durability is provided separately by ``MoveFileExW`` with
+    ``MOVEFILE_WRITE_THROUGH``.
+    """
 
     try:
         status = path.lstat()
@@ -825,7 +1377,45 @@ def _windows_directory_barrier(path: Path) -> bool:
         raise ManifestError("manifest_io_error") from None
     if not stat.S_ISDIR(status.st_mode) or _stat_is_reparse(status):
         raise ManifestError("manifest_io_error")
-    return False
+    return True
+
+
+def _publish_directory(source: Path, destination: Path) -> bool:
+    """Publish one directory atomically; Windows requests write-through."""
+
+    try:
+        if destination.exists() or destination.is_symlink():
+            return False
+        if source.parent != destination.parent and source.anchor != destination.anchor:
+            raise ManifestError("manifest_io_error")
+        if _IS_WINDOWS:
+            if not _windows_move_write_through(source, destination):
+                raise ManifestError("manifest_io_error")
+            return True
+        source.rename(destination)
+        _fsync_directory(destination.parent)
+        return True
+    except ManifestError:
+        raise
+    except (OSError, RuntimeError, ValueError):
+        raise ManifestError("manifest_io_error") from None
+
+
+def _windows_move_write_through(source: Path, destination: Path) -> bool:
+    if os.name != "nt" or destination.exists() or destination.is_symlink():
+        return False
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        move = kernel32.MoveFileExW
+        move.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+        move.restype = wintypes.BOOL
+        ctypes.set_last_error(0)
+        if move(str(source), str(destination), 0x00000008):
+            return True
+        ctypes.get_last_error()
+        return False
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        return False
 
 
 def _write_ownership_marker(directory: Path) -> None:
