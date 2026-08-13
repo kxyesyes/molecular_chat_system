@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -76,16 +77,26 @@ def _submission(
 
 
 def test_submission_and_health_are_frozen_snapshots_with_redacted_repr() -> None:
-    payload = {"backend": "local", "nested": {"attempt": 1}}
+    payload = {
+        "decision": {
+            "backend": "local",
+            "reason": "test",
+            "bucket": None,
+            "percent": 0,
+        },
+        "mode": "file",
+        "total_bytes": 1,
+        "config_hash": "a" * 64,
+    }
     details = {"running": 0, "configured": True}
     manifest = r"C:\private\staging\task-1\input_manifest.json"
     submission = TaskSubmission("task-1", "docking", payload, manifest)
     health = BackendHealth("local", True, "available", details)
 
-    payload["nested"]["attempt"] = 99
+    payload["decision"]["reason"] = "changed"
     details["running"] = 99
 
-    assert submission.payload == {"backend": "local", "nested": {"attempt": 1}}
+    assert submission.payload["decision"]["reason"] == "test"
     assert health.details == {"running": 0, "configured": True}
     with pytest.raises(FrozenInstanceError):
         submission.task_id = "changed"  # type: ignore[misc]
@@ -135,6 +146,19 @@ def test_submission_and_health_reject_invalid_or_sensitive_public_metadata(
 ) -> None:
     with pytest.raises(ValueError, match=match):
         factory()
+
+
+@pytest.mark.parametrize("private_value", ["CCO", "CCCC", "ClCCBr", "c1ccccc1"])
+def test_submission_rejects_short_or_ring_smiles_under_arbitrary_key(
+    private_value: str,
+) -> None:
+    with pytest.raises(ValueError, match="sensitive"):
+        TaskSubmission(
+            "task-1",
+            "unit",
+            {"value": private_value},
+            "manifest.json",
+        )
 
 
 def test_backend_protocol_has_async_temporal_extensible_contract() -> None:
@@ -225,6 +249,8 @@ async def test_local_backend_maps_handler_terminal_results(
                 "reason": "test",
                 "bucket": None,
                 "percent": 0,
+                "process_restart_recovery": False,
+                "durable_execution": False,
             }
     finally:
         await backend.close()
@@ -247,6 +273,90 @@ async def test_handler_exception_is_honest_failed_terminal(tmp_path: Path) -> No
         assert "C1=CC=CC=C1" not in serialized
     finally:
         await backend.close()
+
+
+@pytest.mark.anyio
+async def test_handler_result_never_persists_scientific_smiles(tmp_path: Path) -> None:
+    async def handler(submission, cancel_event, progress):
+        return {
+            "success": True,
+            "data": {
+                "canonical_smiles": "CCO",
+                "nested": {"best_smiles": "c1ccccc1", "score": 0.75},
+                "candidate": "ClCCBr",
+            },
+        }
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+    try:
+        await backend.submit(_submission())
+        record = await _wait_for_terminal(backend, "task-1")
+        serialized = json.dumps(record.to_dict())
+        assert record.status is TaskStatus.SUCCEEDED
+        assert "CCO" not in serialized
+        assert "c1ccccc1" not in serialized
+        assert "ClCCBr" not in serialized
+        assert record.result["data"]["nested"] == {"score": 0.75}
+    finally:
+        await backend.close()
+
+
+@pytest.mark.anyio
+async def test_handler_cannot_override_fixed_local_durability_provenance(
+    tmp_path: Path,
+) -> None:
+    async def handler(submission, cancel_event, progress):
+        progress(
+            "vina_running",
+            0.5,
+            provenance={
+                "backend": "temporal",
+                "process_restart_recovery": True,
+                "durable_execution": True,
+                "tool": "vina",
+            },
+        )
+        return {
+            "success": True,
+            "provenance": {
+                "backend": "temporal",
+                "process_restart_recovery": True,
+                "durable_execution": True,
+                "tool": "vina",
+            },
+        }
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+    try:
+        await backend.submit(_submission())
+        record = await _wait_for_terminal(backend, "task-1")
+        assert record.provenance["backend"] == "local"
+        assert record.provenance["process_restart_recovery"] is False
+        assert record.provenance["durable_execution"] is False
+        assert record.provenance["tool"] == "vina"
+    finally:
+        await backend.close()
+
+
+@pytest.mark.anyio
+async def test_local_health_has_fixed_recovery_contract(tmp_path: Path) -> None:
+    async def handler(submission, cancel_event, progress):
+        return {"success": True}
+
+    backend = LocalTaskBackend(
+        TaskStore(tmp_path / "tasks.sqlite"),
+        {"docking": handler},
+    )
+    health = await backend.health()
+    assert health.details == {
+        "running": 0,
+        "shutdown_pending": False,
+        "process_restart_recovery": False,
+        "durable_execution": False,
+    }
+    await backend.close()
 
 
 @pytest.mark.anyio
@@ -308,10 +418,12 @@ async def test_unknown_type_fails_before_task_creation(tmp_path: Path) -> None:
 async def test_duplicate_task_and_idempotency_key_do_not_double_execute(tmp_path: Path) -> None:
     calls = 0
     release = asyncio.Event()
+    started = asyncio.Event()
 
     async def handler(submission, cancel_event, progress):
         nonlocal calls
         calls += 1
+        started.set()
         await release.wait()
         return {"success": True}
 
@@ -323,13 +435,114 @@ async def test_duplicate_task_and_idempotency_key_do_not_double_execute(tmp_path
         duplicate_key = await backend.submit(
             _submission("task-2", idempotency_key="request-1")
         )
-        await asyncio.sleep(0)
+        await started.wait()
         assert first.task_id == duplicate_task.task_id == duplicate_key.task_id == "task-1"
         assert calls == 1
         with pytest.raises(KeyError):
             store.get("task-2")
         release.set()
         await _wait_for_terminal(backend, "task-1")
+    finally:
+        await backend.close()
+
+
+@pytest.mark.anyio
+async def test_idempotency_survives_backend_rebuild_and_concurrent_instances(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    async def handler(submission, cancel_event, progress):
+        calls.append(submission.task_id)
+        return {"success": True}
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    first_backend = LocalTaskBackend(store, {"docking": handler})
+    first = await first_backend.submit(
+        _submission("task-original", idempotency_key="durable-request")
+    )
+    await _wait_for_terminal(first_backend, first.task_id)
+    await first_backend.close()
+
+    rebuilt = LocalTaskBackend(TaskStore(store.db_path), {"docking": handler})
+    competing = LocalTaskBackend(TaskStore(store.db_path), {"docking": handler})
+    try:
+        rebuilt_result, competing_result = await asyncio.gather(
+            rebuilt.submit(
+                _submission("task-rebuilt", idempotency_key="durable-request")
+            ),
+            competing.submit(
+                _submission("task-competing", idempotency_key="durable-request")
+            ),
+        )
+        assert rebuilt_result.task_id == competing_result.task_id == "task-original"
+        assert calls == ["task-original"]
+        with pytest.raises(KeyError):
+            store.get("task-rebuilt")
+        with pytest.raises(KeyError):
+            store.get("task-competing")
+    finally:
+        await rebuilt.close()
+        await competing.close()
+
+
+@pytest.mark.anyio
+async def test_idempotency_task_type_or_backend_conflict_fails_closed(tmp_path: Path) -> None:
+    async def handler(submission, cancel_event, progress):
+        return {"success": True}
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler, "unit": handler})
+    try:
+        await backend.submit(_submission(idempotency_key="conflict-key"))
+        with pytest.raises(ValueError, match="idempotency conflict"):
+            await backend.submit(
+                _submission(
+                    "task-other-type",
+                    task_type="unit",
+                    idempotency_key="conflict-key",
+                )
+            )
+    finally:
+        await backend.close()
+
+    digest = LocalTaskBackend.idempotency_digest("backend-conflict-key")
+    store.create(
+        "task-temporal",
+        "docking",
+        {},
+        backend="temporal",
+        idempotency_digest=digest,
+    )
+    second = LocalTaskBackend(store, {"docking": handler})
+    try:
+        with pytest.raises(ValueError, match="idempotency conflict"):
+            await second.submit(
+                _submission(
+                    "task-local",
+                    idempotency_key="backend-conflict-key",
+                )
+            )
+    finally:
+        await second.close()
+
+
+@pytest.mark.anyio
+async def test_existing_task_id_type_or_backend_conflict_fails_closed(
+    tmp_path: Path,
+) -> None:
+    async def handler(submission, cancel_event, progress):
+        return {"success": True}
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("task-existing", "unit", {}, backend="local")
+    store.create("task-temporal", "docking", {}, backend="temporal")
+    backend = LocalTaskBackend(store, {"docking": handler, "unit": handler})
+    try:
+        with pytest.raises(ValueError, match="task id conflict"):
+            await backend.submit(_submission("task-existing", task_type="docking"))
+        with pytest.raises(ValueError, match="task id conflict"):
+            await backend.submit(_submission("task-temporal"))
     finally:
         await backend.close()
 
@@ -362,11 +575,103 @@ async def test_progress_is_canonical_and_terminal_event_is_exactly_one(tmp_path:
             "percent": 0,
             "tool": "vina",
             "attempt": 1,
+            "process_restart_recovery": False,
+            "durable_execution": False,
         }
         assert "private" not in json.dumps(record.warnings)
         events = store.events("task-1")
-        assert [event.event_type for event in events].count("task_heartbeat") == 2
+        assert [event.event_type for event in events].count("task_heartbeat") == 1
         assert sum(event.is_terminal for event in events) == 1
+    finally:
+        await backend.close()
+
+
+@pytest.mark.anyio
+async def test_async_store_calls_and_run_claim_do_not_block_event_loop(tmp_path: Path) -> None:
+    class SlowStore(TaskStore):
+        def _slow(self) -> None:
+            time.sleep(0.06)
+
+        def create(self, *args, **kwargs):
+            self._slow()
+            return super().create(*args, **kwargs)
+
+        def get(self, *args, **kwargs):
+            self._slow()
+            return super().get(*args, **kwargs)
+
+        def list(self, *args, **kwargs):
+            self._slow()
+            return super().list(*args, **kwargs)
+
+        def claim_running(self, *args, **kwargs):
+            self._slow()
+            return super().claim_running(*args, **kwargs)
+
+        def request_cancel(self, *args, **kwargs):
+            self._slow()
+            return super().request_cancel(*args, **kwargs)
+
+    release = asyncio.Event()
+
+    async def handler(submission, cancel_event, progress):
+        await release.wait()
+        return {"success": True}
+
+    store = SlowStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+    ticks: list[float] = []
+    ticking = True
+
+    async def ticker() -> None:
+        while ticking:
+            ticks.append(time.monotonic())
+            await asyncio.sleep(0.005)
+
+    ticker_task = asyncio.create_task(ticker())
+    try:
+        await backend.submit(_submission())
+        await asyncio.sleep(0.15)
+        await backend.get("task-1")
+        await backend.list(task_type="docking")
+        await backend.cancel("task-1", "probe")
+        release.set()
+        await _wait_for_terminal(backend, "task-1")
+    finally:
+        ticking = False
+        await ticker_task
+        await backend.close()
+
+    gaps = [right - left for left, right in zip(ticks, ticks[1:])]
+    assert len(ticks) >= 20
+    assert gaps and max(gaps) < 0.04
+
+
+@pytest.mark.anyio
+async def test_progress_projection_is_bounded_coalesced_and_flushed_before_terminal(
+    tmp_path: Path,
+) -> None:
+    async def handler(submission, cancel_event, progress):
+        for value in range(50):
+            progress("vina_running", value * 2)
+        return {"success": True}
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+    try:
+        await backend.submit(_submission())
+        record = await _wait_for_terminal(backend, "task-1")
+        events = store.events("task-1")
+        heartbeat_positions = [
+            index for index, event in enumerate(events) if event.event_type == "task_heartbeat"
+        ]
+        terminal_position = next(index for index, event in enumerate(events) if event.is_terminal)
+        assert record.progress == pytest.approx(0.98)
+        assert heartbeat_positions
+        assert len(heartbeat_positions) < 50
+        assert max(heartbeat_positions) < terminal_position
+        assert backend.progress_queue_capacity > 0
+        assert backend.progress_queue_size == 0
     finally:
         await backend.close()
 
@@ -377,7 +682,9 @@ async def test_health_list_get_and_shutdown_leave_no_background_tasks(tmp_path: 
 
     async def handler(submission, cancel_event, progress):
         started.set()
-        await asyncio.Event().wait()
+        while not cancel_event.is_set():
+            await asyncio.sleep(0.005)
+        return {"success": True}
 
     store = TaskStore(tmp_path / "private" / "tasks.sqlite")
     backend = LocalTaskBackend(store, {"docking": handler})
@@ -387,13 +694,224 @@ async def test_health_list_get_and_shutdown_leave_no_background_tasks(tmp_path: 
     assert len(await backend.list(task_type="docking")) == 1
     health = await backend.health()
     assert health.available is True
-    assert health.details == {"running": 1}
+    assert health.details == {
+        "running": 1,
+        "shutdown_pending": False,
+        "process_restart_recovery": False,
+        "durable_execution": False,
+    }
     assert "private" not in repr(health)
 
     await backend.close()
 
     assert backend.background_task_count == 0
     assert store.get("task-1").status is TaskStatus.CANCELED
+
+
+@pytest.mark.anyio
+async def test_close_waits_for_inflight_submission_then_cancels_worker(
+    tmp_path: Path,
+) -> None:
+    create_started = threading.Event()
+    release_create = threading.Event()
+
+    class BlockingCreateStore(TaskStore):
+        def create(self, *args, **kwargs):
+            create_started.set()
+            release_create.wait(2.0)
+            return super().create(*args, **kwargs)
+
+    async def handler(submission, cancel_event, progress):
+        while not cancel_event.is_set():
+            await asyncio.sleep(0.005)
+        return {"success": True}
+
+    store = BlockingCreateStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler}, shutdown_timeout=2.0)
+    submit_task = asyncio.create_task(backend.submit(_submission()))
+    await asyncio.to_thread(create_started.wait, 1.0)
+
+    close_task = asyncio.create_task(backend.close())
+    await asyncio.sleep(0.05)
+    assert close_task.done() is False
+
+    release_create.set()
+    await submit_task
+    await close_task
+
+    assert store.get("task-1").status is TaskStatus.CANCELED
+    assert backend.background_task_count == 0
+
+
+@pytest.mark.anyio
+async def test_close_waits_for_real_sync_worker_before_cancel_terminal(tmp_path: Path) -> None:
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    def sync_worker() -> dict[str, Any]:
+        worker_started.set()
+        release_worker.wait()
+        return {"success": True}
+
+    async def handler(submission, cancel_event, progress):
+        return await asyncio.to_thread(sync_worker)
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(
+        store,
+        {"docking": handler},
+        shutdown_timeout=2.0,
+    )
+    await backend.submit(_submission())
+    await asyncio.to_thread(worker_started.wait, 1.0)
+
+    close_task = asyncio.create_task(backend.close())
+    await asyncio.sleep(0.05)
+    assert not close_task.done()
+    assert store.get("task-1").status is TaskStatus.CANCEL_REQUESTED
+    assert not any(event.is_terminal for event in store.events("task-1"))
+
+    release_worker.set()
+    await close_task
+    assert store.get("task-1").status is TaskStatus.CANCELED
+    assert backend.background_task_count == 0
+
+
+@pytest.mark.anyio
+async def test_shutdown_timeout_preserves_worker_tracking_and_nonterminal_state(
+    tmp_path: Path,
+) -> None:
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    def sync_worker() -> dict[str, Any]:
+        worker_started.set()
+        release_worker.wait()
+        return {"success": True}
+
+    async def handler(submission, cancel_event, progress):
+        return await asyncio.to_thread(sync_worker)
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(
+        store,
+        {"docking": handler},
+        shutdown_timeout=0.05,
+    )
+    await backend.submit(_submission())
+    await asyncio.to_thread(worker_started.wait, 1.0)
+
+    try:
+        with pytest.raises(TimeoutError, match="shutdown pending"):
+            await backend.close()
+        record = store.get("task-1")
+        health = await backend.health()
+        assert record.status is TaskStatus.CANCEL_REQUESTED
+        assert not any(event.is_terminal for event in store.events("task-1"))
+        assert backend.background_task_count == 1
+        assert health.details["shutdown_pending"] is True
+        assert health.details["running"] == 1
+    finally:
+        release_worker.set()
+    await _wait_for_terminal(backend, "task-1")
+    await backend.close()
+    assert backend.background_task_count == 0
+
+
+@pytest.mark.anyio
+async def test_close_from_different_running_loop_uses_owner_loop(tmp_path: Path) -> None:
+    owner_ready = threading.Event()
+    handler_started = threading.Event()
+    state: dict[str, Any] = {}
+
+    async def handler(submission, cancel_event, progress):
+        handler_started.set()
+        while not cancel_event.is_set():
+            await asyncio.sleep(0.005)
+        return {"success": True}
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+
+    def owner_thread() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        state["loop"] = loop
+        owner_ready.set()
+        loop.run_forever()
+        loop.close()
+
+    thread = threading.Thread(target=owner_thread, daemon=True)
+    thread.start()
+    assert owner_ready.wait(1.0)
+    owner_loop = state["loop"]
+    submit_future = asyncio.run_coroutine_threadsafe(
+        backend.submit(_submission()), owner_loop
+    )
+    assert (await asyncio.wrap_future(submit_future)).accepted is True
+    assert await asyncio.to_thread(handler_started.wait, 1.0)
+
+    await backend.close()
+
+    assert store.get("task-1").status is TaskStatus.CANCELED
+    assert backend.background_task_count == 0
+    owner_loop.call_soon_threadsafe(owner_loop.stop)
+    await asyncio.to_thread(thread.join, 1.0)
+    assert not thread.is_alive()
+
+
+@pytest.mark.anyio
+async def test_closed_owner_loop_with_live_worker_fails_closed(tmp_path: Path) -> None:
+    owner_ready = threading.Event()
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    state: dict[str, Any] = {}
+
+    def sync_worker() -> dict[str, Any]:
+        worker_started.set()
+        release_worker.wait()
+        return {"success": True}
+
+    async def handler(submission, cancel_event, progress):
+        return await asyncio.to_thread(sync_worker)
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+
+    def owner_thread() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        state["loop"] = loop
+        owner_ready.set()
+        loop.run_forever()
+        for task in asyncio.all_tasks(loop):
+            task._log_destroy_pending = False
+        loop.close()
+
+    thread = threading.Thread(target=owner_thread, daemon=True)
+    thread.start()
+    assert owner_ready.wait(1.0)
+    owner_loop = state["loop"]
+    submitted = asyncio.run_coroutine_threadsafe(
+        backend.submit(_submission()), owner_loop
+    )
+    assert (await asyncio.wrap_future(submitted)).accepted is True
+    assert await asyncio.to_thread(worker_started.wait, 1.0)
+    owner_loop.call_soon_threadsafe(owner_loop.stop)
+    await asyncio.to_thread(thread.join, 1.0)
+    assert owner_loop.is_closed()
+
+    try:
+        with pytest.raises(RuntimeError, match="owner loop closed"):
+            await backend.close()
+        record = store.get("task-1")
+        health = await backend.health()
+        assert record.status is TaskStatus.RUNNING
+        assert not any(event.is_terminal for event in store.events("task-1"))
+        assert backend.background_task_count == 1
+        assert health.details["shutdown_pending"] is True
+    finally:
+        release_worker.set()
 
 
 @pytest.mark.anyio
@@ -567,6 +1085,8 @@ async def test_runtime_generates_task_id_before_staging_and_selects_local(tmp_pa
             "reason": "temporal_unavailable",
             "bucket": None,
             "percent": 0,
+            "process_restart_recovery": False,
+            "durable_execution": False,
         }
         serialized = json.dumps(record.to_dict())
         assert "C1=CC=CC=C1" not in serialized
@@ -663,8 +1183,12 @@ async def test_temporal_late_projection_during_fallback_is_detected_fail_closed(
         with pytest.raises(TaskBackendStartError, match="fallback projection"):
             await _submit_runtime(runtime)
         record = store.get("task-temporal-race")
-        assert record.status is TaskStatus.FAILED
+        assert record.status is TaskStatus.QUEUED
         assert record.backend == "temporal"
+        assert record.phase == TaskPhase.STAGING.value
+        assert record.warnings == [{"code": "temporal_start_ambiguous"}]
+        assert record.provenance["start_outcome"] == "ambiguous"
+        assert not any(event.is_terminal for event in store.events(record.task_id))
         assert len(local.submissions) == len(temporal.submissions) == 1
     finally:
         await runtime.close()
@@ -708,15 +1232,68 @@ async def test_temporal_ambiguous_exception_or_conflicting_rejection_fails_close
             await _submit_runtime(runtime)
         assert local.submissions == []
         record = store.get("task-temporal-uncertain")
-        assert record.status is TaskStatus.FAILED
-        assert record.error_code == TaskErrorCode.TEMPORAL_START_FAILED.value
+        assert record.status is TaskStatus.QUEUED
+        assert record.phase == TaskPhase.STAGING.value
+        assert record.error_code is None
+        assert record.warnings == [{"code": "temporal_start_ambiguous"}]
         assert record.provenance == {
             "backend": "temporal",
             "reason": "canary_selected",
             "bucket": 7,
             "percent": 100,
+            "start_outcome": "ambiguous",
         }
+        assert not any(event.is_terminal for event in store.events(record.task_id))
         assert "private" not in json.dumps(record.to_dict())
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.anyio
+async def test_temporal_create_then_exception_stays_reconcilable(tmp_path: Path) -> None:
+    store = TaskStore(tmp_path / "tasks.sqlite")
+
+    class CreateThenTimeout(_FakeBackend):
+        async def submit(self, submission: TaskSubmission) -> BackendSubmitResult:
+            self.submissions.append(submission)
+            self.store.create(
+                submission.task_id,
+                submission.task_type,
+                submission.payload,
+                backend="temporal",
+                phase=TaskPhase.STAGING,
+                provenance=submission.payload["decision"],
+            )
+            raise TimeoutError("start response timed out")
+
+    temporal = CreateThenTimeout(
+        store,
+        "temporal",
+        StartOutcome.AMBIGUOUS,
+        create=False,
+    )
+    local = _FakeBackend(store, "local", StartOutcome.ACCEPTED, create=True)
+    runtime = TaskRuntime(
+        config=_runtime_config(tmp_path),
+        store=store,
+        stager=_FakeStager(tmp_path / "private" / "input_manifest.json"),
+        selector=_FixedSelector(_temporal_decision()),
+        local_backend=local,
+        temporal_backend=temporal,
+        uuid_factory=lambda: "task-temporal-timeout",
+    )
+    try:
+        with pytest.raises(TaskBackendStartError, match="not confirmed"):
+            await _submit_runtime(runtime)
+        record = store.get("task-temporal-timeout")
+        assert record.status is TaskStatus.QUEUED
+        assert record.warnings == [{"code": "temporal_start_ambiguous"}]
+        assert not any(event.is_terminal for event in store.events(record.task_id))
+
+        assert store.claim_running(record.task_id, phase=TaskPhase.RUNNING, attempt=1)
+        assert store.heartbeat(record.task_id, progress=0.25)
+        assert store.get(record.task_id).status is TaskStatus.RUNNING
+        assert local.submissions == []
     finally:
         await runtime.close()
 
@@ -865,3 +1442,37 @@ async def test_concurrent_singleton_resets_close_old_runtime_once(monkeypatch) -
 
     assert old_runtime.close_calls == 1
     assert runtime_module._RUNTIME is None
+
+
+@pytest.mark.anyio
+async def test_runtime_close_can_retry_after_backend_shutdown_timeout(
+    tmp_path: Path,
+) -> None:
+    class RetryCloseBackend(_FakeBackend):
+        def __init__(self, store: TaskStore) -> None:
+            super().__init__(store, "local", StartOutcome.ACCEPTED, create=True)
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise TimeoutError("worker still running")
+            self.closed = True
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = RetryCloseBackend(store)
+    runtime = TaskRuntime(
+        config=_runtime_config(tmp_path, canary_percent=0),
+        store=store,
+        stager=_FakeStager(tmp_path / "manifest.json"),
+        selector=_FixedSelector(_local_decision()),
+        local_backend=backend,
+        temporal_backend=None,
+    )
+
+    with pytest.raises(TimeoutError, match="worker still running"):
+        await runtime.close()
+    await runtime.close()
+
+    assert backend.close_calls == 2
+    assert backend.closed is True

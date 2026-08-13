@@ -92,6 +92,7 @@ def _initialize_once(path: Path) -> None:
             "warnings_json": "TEXT NOT NULL DEFAULT '[]'",
             "input_manifest_path": "TEXT",
             "provenance_json": "TEXT NOT NULL DEFAULT '{}'",
+            "idempotency_digest": "TEXT",
         }
         for name, declaration in migrations.items():
             if name not in columns:
@@ -101,6 +102,8 @@ def _initialize_once(path: Path) -> None:
             "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(task_type)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at)",
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idempotency_digest
+            ON tasks(idempotency_digest) WHERE idempotency_digest IS NOT NULL""",
             """CREATE TABLE IF NOT EXISTS task_events (
                 event_id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,

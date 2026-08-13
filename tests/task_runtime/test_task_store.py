@@ -81,6 +81,10 @@ def test_schema_contains_projection_columns_tables_and_terminal_index(tmp_path):
             "SELECT sql FROM sqlite_master WHERE type = 'index' "
             "AND name = 'idx_task_events_one_terminal'"
         ).fetchone()
+        idempotency_index = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' "
+            "AND name = 'idx_tasks_idempotency_digest'"
+        ).fetchone()
 
     assert {
         "backend",
@@ -93,10 +97,65 @@ def test_schema_contains_projection_columns_tables_and_terminal_index(tmp_path):
         "warnings_json",
         "input_manifest_path",
         "provenance_json",
+        "idempotency_digest",
     } <= columns
     assert {"task_events", "task_worker_heartbeats"} <= tables
     assert index is not None
     assert "WHERE is_terminal = 1" in index["sql"]
+    assert idempotency_index is not None
+    assert "UNIQUE" in idempotency_index["sql"].upper()
+    assert "WHERE idempotency_digest IS NOT NULL" in idempotency_index["sql"]
+
+
+def test_store_atomically_claims_only_digest_and_finds_original_task(tmp_path):
+    path = tmp_path / "tasks.sqlite"
+    store = TaskStore(path)
+    digest = "a" * 64
+    raw_key = "raw-request-key-must-never-be-persisted"
+
+    store.create(
+        "task-1",
+        "docking",
+        {},
+        idempotency_digest=digest,
+    )
+
+    assert store.get_by_idempotency_digest(digest).task_id == "task-1"
+    with connect(path) as conn:
+        row = conn.execute(
+            "SELECT idempotency_digest FROM tasks WHERE task_id = 'task-1'"
+        ).fetchone()
+    assert row == {"idempotency_digest": digest}
+    assert raw_key.encode() not in path.read_bytes()
+    assert "idempotency" not in store.get("task-1").to_public_dict()
+
+
+def test_idempotency_digest_unique_claim_is_concurrent_and_restart_safe(tmp_path):
+    path = tmp_path / "tasks.sqlite"
+    digest = "b" * 64
+    barrier = threading.Barrier(8)
+
+    def create(index: int) -> str:
+        store = TaskStore(path)
+        barrier.wait()
+        try:
+            store.create(
+                f"task-{index}",
+                "docking",
+                {},
+                idempotency_digest=digest,
+            )
+        except sqlite3.IntegrityError:
+            return "duplicate"
+        return f"task-{index}"
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        outcomes = list(executor.map(create, range(8)))
+
+    winners = [outcome for outcome in outcomes if outcome != "duplicate"]
+    assert len(winners) == 1
+    assert outcomes.count("duplicate") == 7
+    assert TaskStore(path).get_by_idempotency_digest(digest).task_id == winners[0]
 
 
 def test_create_adds_sanitized_initial_event_and_sequence(tmp_path):
@@ -104,7 +163,7 @@ def test_create_adds_sanitized_initial_event_and_sequence(tmp_path):
     record = store.create(
         "task-1",
         "docking",
-        {"secret_input": "must-not-enter-event"},
+        {"summary_count": 1},
         backend="temporal",
         provenance={"provider": "vina"},
     )
@@ -459,7 +518,7 @@ def test_public_projection_excludes_private_input_and_redacts_nested_values():
     assert public["warnings"] == [{"code": "projection_stale"}]
     assert public["provenance"] == {"tool": "vina"}
     assert public["result"]["credentials"] == "[REDACTED]"
-    assert public["result"]["query"] == "CCO"
+    assert "query" not in public["result"]
     assert "db_path" not in public["result"]
     assert public["artifacts"][0]["path"] == "pose.pdbqt"
     assert public["artifacts"][1] == {}
@@ -472,7 +531,7 @@ def test_events_allowlist_metadata_and_record_sensitive_fields_are_redacted(tmp_
     store.create(
         "task-1",
         "docking",
-        {"smiles": "CCO", "api_key": "sk-secret-secret"},
+        {"summary_count": 1},
         provenance={
             "provider": "temporal",
             "token": "private-token",
@@ -691,7 +750,7 @@ def test_persisted_provenance_is_operational_allowlist_only(tmp_path):
     record = store.create(
         "task-1",
         "docking",
-        {"smiles": "CCO"},
+        {},
         provenance={
             "provider": "temporal",
             "tool_name": "vina",
@@ -1026,7 +1085,7 @@ def test_public_artifact_rejects_non_sha256_digest(field, length):
     assert record.to_public_dict()["artifacts"] == [{"name": "pose"}]
 
 
-def test_public_result_retains_scientific_smiles_fields():
+def test_public_result_can_render_legacy_generated_scientific_smiles():
     record = TaskRecord(
         task_id="task-1",
         task_type="molecular_design",
@@ -1097,7 +1156,7 @@ def test_public_result_smiles_substring_keys_do_not_bypass_path_checks(
     assert record.to_public_dict()["result"] == {"safe": "completed"}
 
 
-def test_public_result_preserves_exact_smiles_in_candidate_and_molecule_lists():
+def test_public_result_can_render_legacy_generated_smiles_lists():
     record = TaskRecord(
         task_id="task-1",
         task_type="molecular_design",
@@ -1114,6 +1173,44 @@ def test_public_result_preserves_exact_smiles_in_candidate_and_molecule_lists():
         "candidates": [{"smiles": "CCO"}],
         "molecules": [{"smiles": "CCN", "score": 0.7}],
     }
+
+
+@pytest.mark.parametrize("private_value", ["CCO", "CCCC", "ClCCBr", "c1ccccc1"])
+def test_store_create_rejects_scientific_input_under_arbitrary_key(
+    tmp_path,
+    private_value,
+):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    with pytest.raises(ValueError, match="sensitive"):
+        store.create("task-private", "unit", {"value": private_value})
+    with pytest.raises(KeyError):
+        store.get("task-private")
+    assert private_value.encode() not in store.db_path.read_bytes()
+
+
+def test_store_finish_sanitizes_nested_scientific_result_before_database(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("task-1", "unit", {})
+    store.claim_running("task-1")
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.SUCCEEDED,
+        result={
+            "canonical_smiles": "CCO",
+            "nested": {"smiles": "CCCC", "score": 1.0},
+            "candidate": "ClCCBr",
+        },
+    )
+
+    record = store.get("task-1")
+    assert record.result == {"nested": {"score": 1.0}}
+    with connect(store.db_path) as conn:
+        raw = conn.execute(
+            "SELECT input_json, result_json FROM tasks WHERE task_id = 'task-1'"
+        ).fetchone()
+    serialized = json.dumps(raw)
+    assert all(value not in serialized for value in ("CCO", "CCCC", "ClCCBr"))
 
 
 @pytest.mark.parametrize(

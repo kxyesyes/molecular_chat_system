@@ -171,6 +171,8 @@ def test_manager_submit_failure_compensates_queued_task_without_leaking_error(tm
     assert failed.error_code == "TASK_BACKEND_UNAVAILABLE"
     assert failed.error == "Task execution backend unavailable"
     assert "sk-secret" not in str(failed.to_public_dict())
+    assert "sk-secret" not in str(failed.to_dict())
+    assert failed.input == {"api_key": "[REDACTED]"}
     assert record.task_id not in manager._futures
 
 

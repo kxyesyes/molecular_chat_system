@@ -12,6 +12,7 @@ from .models import (
     TaskRecord,
     TaskStatus,
     normalize_task_warnings,
+    sanitize_public_task_data,
     strict_json_roundtrip,
     strict_json_snapshot,
 )
@@ -56,7 +57,10 @@ class TaskManager:
         snapshot = strict_json_roundtrip(payload)
         if not isinstance(snapshot, dict):
             raise ValueError("invalid JSON task payload")
-        self.store.create(task_id, task_type, snapshot)
+        projection = sanitize_public_task_data(snapshot)
+        if not isinstance(projection, dict):
+            projection = {}
+        self.store.create(task_id, task_type, projection)
 
         try:
             future = self.executor.submit(self._run_task, task_id, handler, snapshot)
@@ -154,6 +158,7 @@ class TaskManager:
             error=error,
             artifacts=artifacts,
             warnings=warnings,
+            legacy_result_projection=True,
         )
         if not completed:
             self._finish_requested_cancellation(task_id)
@@ -178,6 +183,7 @@ class TaskManager:
         artifacts: list[dict[str, Any]] | None = None,
         error_code: TaskErrorCode | str | None = None,
         warnings: list[Any] | None = None,
+        legacy_result_projection: bool = False,
     ) -> bool:
         return self.store.finish(
             task_id,
@@ -187,6 +193,7 @@ class TaskManager:
             artifacts=artifacts,
             error_code=error_code,
             warnings=warnings,
+            legacy_result_projection=legacy_result_projection,
         )
 
 

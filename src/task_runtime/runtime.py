@@ -148,7 +148,7 @@ class TaskRuntime:
             try:
                 return await self.local_backend.submit(submission)
             except Exception as exc:
-                self._project_start_failure(
+                await self._project_start_failure(
                     submission,
                     backend="local",
                     error_code=TaskErrorCode.TASK_BACKEND_UNAVAILABLE,
@@ -156,21 +156,13 @@ class TaskRuntime:
                 raise TaskBackendStartError("Local start failed") from exc
 
         if decision.backend != "temporal" or self.temporal_backend is None:
-            self._project_start_failure(
-                submission,
-                backend="temporal",
-                error_code=TaskErrorCode.TEMPORAL_START_FAILED,
-            )
+            await self._mark_temporal_ambiguous(submission)
             raise TaskBackendStartError("Temporal start was unavailable")
 
         try:
             temporal_result = await self.temporal_backend.submit(submission)
         except Exception as exc:
-            self._project_start_failure(
-                submission,
-                backend="temporal",
-                error_code=TaskErrorCode.TEMPORAL_START_FAILED,
-            )
+            await self._mark_temporal_ambiguous(submission)
             raise TaskBackendStartError(
                 "Temporal start was not confirmed; local fallback suppressed"
             ) from exc
@@ -180,37 +172,29 @@ class TaskRuntime:
             or temporal_result.task_id != task_id
             or temporal_result.backend != "temporal"
         ):
-            self._project_start_failure(
-                submission,
-                backend="temporal",
-                error_code=TaskErrorCode.TEMPORAL_START_FAILED,
-            )
+            await self._mark_temporal_ambiguous(submission)
             raise TaskBackendStartError(
                 "Temporal start returned an ambiguous result; local fallback suppressed"
             )
         if temporal_result.outcome is StartOutcome.ACCEPTED:
             return temporal_result
         if temporal_result.outcome is StartOutcome.REJECTED:
-            if self._projection_exists(task_id):
-                self._project_start_failure(
-                    submission,
-                    backend="temporal",
-                    error_code=TaskErrorCode.TEMPORAL_START_FAILED,
-                )
+            if await self._projection_exists(task_id):
+                await self._mark_temporal_ambiguous(submission)
                 raise TaskBackendStartError(
                     "Temporal start rejection conflicted with an existing projection"
                 )
             try:
                 local_result = await self.local_backend.submit(submission)
             except Exception as exc:
-                self._project_start_failure(
+                await self._project_start_failure(
                     submission,
                     backend="local",
                     error_code=TaskErrorCode.TASK_BACKEND_UNAVAILABLE,
                 )
                 raise TaskBackendStartError("Local fallback start failed") from exc
             try:
-                fallback_record = self.store.get(task_id)
+                fallback_record = await asyncio.to_thread(self.store.get, task_id)
             except KeyError:
                 fallback_record = None
             if (
@@ -221,27 +205,19 @@ class TaskRuntime:
                 or fallback_record is None
                 or fallback_record.backend != "local"
             ):
-                self._project_start_failure(
-                    submission,
-                    backend="temporal",
-                    error_code=TaskErrorCode.TEMPORAL_START_FAILED,
-                )
+                await self._mark_temporal_ambiguous(submission)
                 raise TaskBackendStartError(
                     "Temporal fallback projection conflict; local execution suppressed"
                 )
             return local_result
 
-        self._project_start_failure(
-            submission,
-            backend="temporal",
-            error_code=TaskErrorCode.TEMPORAL_START_FAILED,
-        )
+        await self._mark_temporal_ambiguous(submission)
         raise TaskBackendStartError(
             "Temporal start was ambiguous; local fallback suppressed"
         )
 
     async def get(self, task_id: str) -> TaskRecord:
-        return self.store.get(task_id)
+        return await asyncio.to_thread(self.store.get, task_id)
 
     async def list(
         self,
@@ -249,10 +225,15 @@ class TaskRuntime:
         status: str | TaskStatus | None = None,
         task_type: str | None = None,
     ) -> list[TaskRecord]:
-        return self.store.list(limit=limit, status=status, task_type=task_type)
+        return await asyncio.to_thread(
+            self.store.list,
+            limit=limit,
+            status=status,
+            task_type=task_type,
+        )
 
     async def cancel(self, task_id: str, reason: str | None = None) -> TaskRecord:
-        record = self.store.get(task_id)
+        record = await asyncio.to_thread(self.store.get, task_id)
         if record.backend == "temporal" and self.temporal_backend is not None:
             return await self.temporal_backend.cancel(task_id, reason)
         return await self.local_backend.cancel(task_id, reason)
@@ -266,7 +247,6 @@ class TaskRuntime:
     async def close(self) -> None:
         if self._closed:
             return
-        self._closed = True
         seen: set[int] = set()
         for backend in (self.local_backend, self.temporal_backend):
             if backend is None or id(backend) in seen:
@@ -280,6 +260,7 @@ class TaskRuntime:
             result = closer()
             if inspect.isawaitable(result):
                 await result
+        self._closed = True
 
     async def _temporal_health(self) -> BackendHealth:
         if self.temporal_backend is None:
@@ -307,7 +288,7 @@ class TaskRuntime:
             )
         return health
 
-    def _project_start_failure(
+    async def _project_start_failure(
         self,
         submission: TaskSubmission,
         *,
@@ -315,10 +296,11 @@ class TaskRuntime:
         error_code: TaskErrorCode,
     ) -> TaskRecord:
         try:
-            record = self.store.get(submission.task_id)
+            record = await asyncio.to_thread(self.store.get, submission.task_id)
         except KeyError:
             try:
-                record = self.store.create(
+                record = await asyncio.to_thread(
+                    self.store.create,
                     submission.task_id,
                     submission.task_type,
                     submission.payload,
@@ -326,17 +308,19 @@ class TaskRuntime:
                     provenance=submission.payload["decision"],
                 )
             except sqlite3.IntegrityError:
-                record = self.store.get(submission.task_id)
+                record = await asyncio.to_thread(self.store.get, submission.task_id)
 
         if record.status is TaskStatus.QUEUED:
-            self.store.claim_running(
+            await asyncio.to_thread(
+                self.store.claim_running,
                 submission.task_id,
                 phase=TaskPhase.STAGING,
                 attempt=0,
             )
-            record = self.store.get(submission.task_id)
+            record = await asyncio.to_thread(self.store.get, submission.task_id)
         if record.status is TaskStatus.RUNNING:
-            self.store.finish(
+            await asyncio.to_thread(
+                self.store.finish,
                 submission.task_id,
                 TaskStatus.FAILED,
                 error=(
@@ -348,12 +332,50 @@ class TaskRuntime:
                 provenance=submission.payload["decision"],
             )
         elif record.status is TaskStatus.CANCEL_REQUESTED:
-            self.store.finish(submission.task_id, TaskStatus.CANCELED)
-        return self.store.get(submission.task_id)
+            await asyncio.to_thread(
+                self.store.finish,
+                submission.task_id,
+                TaskStatus.CANCELED,
+            )
+        return await asyncio.to_thread(self.store.get, submission.task_id)
 
-    def _projection_exists(self, task_id: str) -> bool:
+    async def _mark_temporal_ambiguous(
+        self, submission: TaskSubmission
+    ) -> TaskRecord:
+        decision = submission.payload.get("decision", {})
+        provenance = {
+            **(decision if isinstance(decision, dict) else {}),
+            "start_outcome": "ambiguous",
+        }
+        warning = [{"code": "temporal_start_ambiguous"}]
         try:
-            self.store.get(task_id)
+            record = await asyncio.to_thread(self.store.get, submission.task_id)
+        except KeyError:
+            try:
+                return await asyncio.to_thread(
+                    self.store.create,
+                    submission.task_id,
+                    submission.task_type,
+                    submission.payload,
+                    backend="temporal",
+                    phase=TaskPhase.STAGING,
+                    warnings=warning,
+                    provenance=provenance,
+                )
+            except sqlite3.IntegrityError:
+                record = await asyncio.to_thread(self.store.get, submission.task_id)
+        await asyncio.to_thread(
+            self.store.annotate_nonterminal,
+            submission.task_id,
+            phase=TaskPhase.STAGING,
+            warnings=warning,
+            provenance=provenance,
+        )
+        return await asyncio.to_thread(self.store.get, submission.task_id)
+
+    async def _projection_exists(self, task_id: str) -> bool:
+        try:
+            await asyncio.to_thread(self.store.get, task_id)
         except KeyError:
             return False
         return True

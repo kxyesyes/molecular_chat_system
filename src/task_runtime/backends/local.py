@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import sqlite3
 import threading
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, TypeVar
 
 from ..errors import TaskErrorCode
 from ..models import (
@@ -16,7 +18,7 @@ from ..models import (
     normalize_task_warnings,
     sanitize_provenance,
     sanitize_public_artifacts,
-    sanitize_public_result,
+    sanitize_task_result_projection,
     sanitize_task_message,
     strict_json_snapshot,
 )
@@ -29,6 +31,7 @@ TaskHandler = Callable[
     [TaskSubmission, threading.Event, ProgressCallback],
     Awaitable[dict[str, Any]],
 ]
+T = TypeVar("T")
 
 _AGENT_ERROR_MAP = {
     "invalid_input": TaskErrorCode.TASK_INPUT_INVALID,
@@ -42,12 +45,67 @@ _AGENT_ERROR_MAP = {
     "provider_error": TaskErrorCode.DOCKING_PROCESS_FAILED,
     "internal_error": TaskErrorCode.DOCKING_PROCESS_FAILED,
 }
+_LOCAL_PROVENANCE = {
+    "backend": "local",
+    "process_restart_recovery": False,
+    "durable_execution": False,
+}
+
+
+@dataclass
+class _ProgressUpdate:
+    phase: TaskPhase
+    progress: float
+    attempt: int | None
+    warnings: list[Any] | None
+    provenance: dict[str, Any] | None
+
+
+class _ProgressSlot:
+    """One coalescing slot; callbacks never create unbounded asyncio tasks."""
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self.loop = loop
+        self.event = asyncio.Event()
+        self.lock = threading.Lock()
+        self.latest: _ProgressUpdate | None = None
+        self.stopping = False
+
+    def put(self, update: _ProgressUpdate) -> None:
+        with self.lock:
+            if self.stopping:
+                return
+            self.latest = update
+        self.loop.call_soon_threadsafe(self.event.set)
+
+    def take(self) -> tuple[_ProgressUpdate | None, bool]:
+        with self.lock:
+            update = self.latest
+            self.latest = None
+            return update, self.stopping
+
+    def stop(self) -> None:
+        with self.lock:
+            self.stopping = True
+        self.loop.call_soon_threadsafe(self.event.set)
+
+    def size(self) -> int:
+        with self.lock:
+            return int(self.latest is not None)
 
 
 class LocalTaskBackend:
-    """Async façade over in-process handlers with durable task projection."""
+    """Async local runner with durable projection and cooperative cancellation."""
 
-    def __init__(self, store: TaskStore, handlers: Mapping[str, TaskHandler]) -> None:
+    progress_queue_capacity = 1
+
+    def __init__(
+        self,
+        store: TaskStore,
+        handlers: Mapping[str, TaskHandler],
+        *,
+        shutdown_timeout: float | None = 30.0,
+    ) -> None:
         if not isinstance(store, TaskStore):
             raise TypeError("store must be a TaskStore")
         if not isinstance(handlers, Mapping):
@@ -59,76 +117,156 @@ class LocalTaskBackend:
             if not asyncio.iscoroutinefunction(handler):
                 raise TypeError("local task handlers must be async")
             checked[task_type] = handler
+        if shutdown_timeout is not None and (
+            isinstance(shutdown_timeout, bool)
+            or not isinstance(shutdown_timeout, (int, float))
+            or shutdown_timeout <= 0
+        ):
+            raise ValueError("invalid shutdown timeout")
         self.store = store
         self._handlers = checked
+        self._shutdown_timeout = (
+            None if shutdown_timeout is None else float(shutdown_timeout)
+        )
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._cancel_events: dict[str, threading.Event] = {}
-        self._idempotency: dict[str, str] = {}
+        self._progress_slots: dict[str, _ProgressSlot] = {}
+        self._submitting: dict[str, asyncio.Event] = {}
         self._lock = threading.RLock()
+        self._owner_loop: asyncio.AbstractEventLoop | None = None
         self._closed = False
+        self._closing = False
+        self._shutdown_pending = False
 
     @property
     def background_task_count(self) -> int:
         with self._lock:
             return sum(not task.done() for task in self._tasks.values())
 
+    @property
+    def progress_queue_size(self) -> int:
+        with self._lock:
+            return sum(slot.size() for slot in self._progress_slots.values())
+
     async def submit(self, submission: TaskSubmission) -> BackendSubmitResult:
+        return await self._dispatch(lambda: self._submit_owner(submission))
+
+    async def _submit_owner(self, submission: TaskSubmission) -> BackendSubmitResult:
         if not isinstance(submission, TaskSubmission):
             raise TypeError("submission must be a TaskSubmission")
         handler = self._handlers.get(submission.task_type)
         if handler is None:
             raise ValueError(f"unknown task_type: {submission.task_type}")
-
+        owns_submission = False
+        pending_submission: asyncio.Event | None = None
+        active_task = False
         with self._lock:
-            if self._closed:
+            if self._closed or self._closing:
                 raise RuntimeError("local backend is closed")
-            if submission.idempotency_key is not None:
-                prior_task_id = self._idempotency.get(submission.idempotency_key)
-                if prior_task_id is not None:
-                    return self._accepted(prior_task_id, "duplicate idempotency key")
-            if submission.task_id in self._tasks:
-                return self._accepted(submission.task_id, "duplicate task id")
+            active_task = submission.task_id in self._tasks
+            pending_submission = self._submitting.get(submission.task_id)
+            if not active_task and pending_submission is None:
+                pending_submission = asyncio.Event()
+                self._submitting[submission.task_id] = pending_submission
+                owns_submission = True
+
+        if not owns_submission:
+            if not active_task and pending_submission is not None:
+                await pending_submission.wait()
             try:
-                self.store.get(submission.task_id)
+                existing = await asyncio.to_thread(
+                    self.store.get,
+                    submission.task_id,
+                )
+            except KeyError as exc:
+                raise RuntimeError("prior task submission did not create a projection") from exc
+            return self._existing_task_result(existing, submission)
+
+        digest = (
+            self.idempotency_digest(submission.idempotency_key)
+            if submission.idempotency_key is not None
+            else None
+        )
+        try:
+            if digest is not None:
+                try:
+                    prior = await asyncio.to_thread(
+                        self.store.get_by_idempotency_digest, digest
+                    )
+                except KeyError:
+                    pass
+                else:
+                    return self._idempotent_result(prior, submission)
+            try:
+                existing = await asyncio.to_thread(self.store.get, submission.task_id)
             except KeyError:
                 pass
             else:
-                if submission.idempotency_key is not None:
-                    self._idempotency[submission.idempotency_key] = submission.task_id
-                return self._accepted(submission.task_id, "existing task projection")
+                return self._existing_task_result(existing, submission)
 
-            provenance = submission.payload.get("decision", submission.payload)
-            if not isinstance(provenance, dict):
-                provenance = {}
+            raw_provenance = submission.payload.get("decision", submission.payload)
+            provenance = self._merge_provenance(
+                raw_provenance if isinstance(raw_provenance, dict) else {}
+            )
             try:
-                self.store.create(
+                await asyncio.to_thread(
+                    self.store.create,
                     submission.task_id,
                     submission.task_type,
                     submission.payload,
                     backend="local",
                     provenance=provenance,
+                    idempotency_digest=digest,
                 )
             except sqlite3.IntegrityError:
+                if digest is not None:
+                    try:
+                        prior = await asyncio.to_thread(
+                            self.store.get_by_idempotency_digest, digest
+                        )
+                    except KeyError:
+                        pass
+                    else:
+                        return self._idempotent_result(prior, submission)
+                try:
+                    existing = await asyncio.to_thread(
+                        self.store.get, submission.task_id
+                    )
+                except KeyError:
+                    raise
+                if existing.task_type != submission.task_type or existing.backend != "local":
+                    raise ValueError("task id conflict")
                 return self._accepted(submission.task_id, "existing task projection")
 
             cancel_event = threading.Event()
-            task = asyncio.get_running_loop().create_task(
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(
                 self._run(submission, handler, cancel_event),
                 name=f"medchat-local-{submission.task_id}",
             )
-            self._cancel_events[submission.task_id] = cancel_event
-            self._tasks[submission.task_id] = task
-            if submission.idempotency_key is not None:
-                self._idempotency[submission.idempotency_key] = submission.task_id
+            with self._lock:
+                self._cancel_events[submission.task_id] = cancel_event
+                self._tasks[submission.task_id] = task
             task.add_done_callback(
                 lambda completed, task_id=submission.task_id: self._task_done(
                     task_id, completed
                 )
             )
-        return self._accepted(submission.task_id, "local task scheduled")
+            return self._accepted(submission.task_id, "local task scheduled")
+        finally:
+            if owns_submission:
+                with self._lock:
+                    completed_submission = self._submitting.pop(
+                        submission.task_id,
+                        None,
+                    )
+                if completed_submission is not None:
+                    completed_submission.set()
 
     async def get(self, task_id: str) -> TaskRecord:
-        return self.store.get(task_id)
+        return await self._dispatch(
+            lambda: asyncio.to_thread(self.store.get, task_id)
+        )
 
     async def list(
         self,
@@ -136,10 +274,28 @@ class LocalTaskBackend:
         status: str | TaskStatus | None = None,
         task_type: str | None = None,
     ) -> list[TaskRecord]:
-        return self.store.list(limit=limit, status=status, task_type=task_type)
+        return await self._dispatch(
+            lambda: asyncio.to_thread(
+                self.store.list,
+                limit=limit,
+                status=status,
+                task_type=task_type,
+            )
+        )
 
     async def cancel(self, task_id: str, reason: str | None = None) -> TaskRecord:
-        record = self.store.request_cancel(task_id, reason=reason)
+        return await self._dispatch(lambda: self._cancel_owner(task_id, reason))
+
+    async def _cancel_owner(
+        self,
+        task_id: str,
+        reason: str | None,
+    ) -> TaskRecord:
+        record = await asyncio.to_thread(
+            self.store.request_cancel,
+            task_id,
+            reason=reason,
+        )
         with self._lock:
             cancel_event = self._cancel_events.get(task_id)
             if cancel_event is not None:
@@ -148,48 +304,97 @@ class LocalTaskBackend:
 
     async def health(self) -> BackendHealth:
         with self._lock:
-            available = not self._closed
+            available = not self._closed and not self._closing
             running = sum(not task.done() for task in self._tasks.values())
+            shutdown_pending = self._shutdown_pending
         return BackendHealth(
             backend="local",
             available=available,
-            message="available" if available else "closed",
-            details={"running": running},
+            message=(
+                "shutdown pending"
+                if shutdown_pending
+                else ("available" if available else "closed")
+            ),
+            details={
+                "running": running,
+                "shutdown_pending": shutdown_pending,
+                "process_restart_recovery": False,
+                "durable_execution": False,
+            },
         )
 
     async def close(self) -> None:
+        await self._dispatch(self._close_owner, allow_closed_owner=False)
+
+    shutdown = close
+
+    async def _close_owner(self) -> None:
         with self._lock:
-            if self._closed and not self._tasks:
+            if self._closed and not self._tasks and not self._submitting:
                 return
-            self._closed = True
+            self._closing = True
+            submissions = list(self._submitting.values())
+
+        if submissions:
+            submission_waiter = asyncio.gather(
+                *(event.wait() for event in submissions),
+                return_exceptions=True,
+            )
+            try:
+                if self._shutdown_timeout is None:
+                    await submission_waiter
+                else:
+                    await asyncio.wait_for(
+                        asyncio.shield(submission_waiter),
+                        timeout=self._shutdown_timeout,
+                    )
+            except asyncio.TimeoutError:
+                with self._lock:
+                    self._shutdown_pending = True
+                raise TimeoutError("local backend shutdown pending") from None
+
+        with self._lock:
             pending = list(self._tasks.items())
 
         for task_id, task in pending:
             if task.done():
                 continue
             try:
-                record = self.store.request_cancel(task_id, reason="backend shutdown")
+                await asyncio.to_thread(
+                    self.store.request_cancel,
+                    task_id,
+                    reason="backend shutdown",
+                )
             except KeyError:
-                record = None
+                pass
             with self._lock:
                 cancel_event = self._cancel_events.get(task_id)
                 if cancel_event is not None:
                     cancel_event.set()
-            if record is not None and record.status not in TERMINAL_STATUSES:
-                task.cancel()
 
-        if pending:
-            await asyncio.gather(
-                *(task for _, task in pending),
-                return_exceptions=True,
-            )
-        for task_id, _ in pending:
-            self._finish_requested_cancellation(task_id)
+        active = [task for _, task in pending if not task.done()]
+        if active:
+            gathering = asyncio.gather(*active, return_exceptions=True)
+            try:
+                if self._shutdown_timeout is None:
+                    await gathering
+                else:
+                    await asyncio.wait_for(
+                        asyncio.shield(gathering),
+                        timeout=self._shutdown_timeout,
+                    )
+            except asyncio.TimeoutError:
+                with self._lock:
+                    self._shutdown_pending = True
+                raise TimeoutError("local backend shutdown pending") from None
+
         with self._lock:
+            self._shutdown_pending = False
+            self._closed = True
+            self._closing = False
             self._tasks.clear()
             self._cancel_events.clear()
-
-    shutdown = close
+            self._progress_slots.clear()
 
     async def _run(
         self,
@@ -199,42 +404,96 @@ class LocalTaskBackend:
     ) -> None:
         task_id = submission.task_id
         raw_decision = submission.payload.get("decision", submission.payload)
-        base_provenance = sanitize_provenance(
+        base_provenance = self._merge_provenance(
             raw_decision if isinstance(raw_decision, dict) else {}
         )
+        slot: _ProgressSlot | None = None
+        projector: asyncio.Task[None] | None = None
         try:
-            if not self.store.claim_running(
+            claimed = await asyncio.to_thread(
+                self.store.claim_running,
                 task_id,
                 phase=TaskPhase.RUNNING,
                 attempt=1,
-            ):
-                self._finish_requested_cancellation(task_id)
+            )
+            if not claimed:
+                await self._finish_requested_cancellation(task_id)
                 return
-            if cancel_event.is_set() or self._is_cancel_requested(task_id):
-                self._ensure_canceled(task_id)
+            if cancel_event.is_set() or await self._is_cancel_requested(task_id):
+                await self._ensure_canceled(task_id)
                 return
 
+            slot = _ProgressSlot(asyncio.get_running_loop())
+            with self._lock:
+                self._progress_slots[task_id] = slot
+            projector = asyncio.create_task(
+                self._project_progress(task_id, slot, base_provenance),
+                name=f"medchat-progress-{task_id}",
+            )
             result = await handler(
                 submission,
                 cancel_event,
-                self._progress_callback(task_id, base_provenance),
+                self._progress_callback(slot),
             )
-            self._project_result(task_id, result, cancel_event, base_provenance)
+            slot.stop()
+            await projector
+            projector = None
+            await self._project_result(task_id, result, cancel_event, base_provenance)
         except asyncio.CancelledError:
             cancel_event.set()
-            self._ensure_canceled(task_id)
+            if slot is not None:
+                slot.stop()
+            if projector is not None:
+                await asyncio.shield(projector)
+            await self._ensure_canceled(task_id)
             raise
         except Exception as exc:
-            if cancel_event.is_set() or self._is_cancel_requested(task_id):
-                self._ensure_canceled(task_id)
+            if slot is not None:
+                slot.stop()
+            if projector is not None:
+                await projector
+            if cancel_event.is_set() or await self._is_cancel_requested(task_id):
+                await self._ensure_canceled(task_id)
             else:
-                self._finish_failed(
+                await self._finish_failed(
                     task_id,
                     error=sanitize_task_message(str(exc) or "Task handler failed"),
                     error_code=TaskErrorCode.DOCKING_PROCESS_FAILED,
+                    provenance=base_provenance,
                 )
+        finally:
+            with self._lock:
+                self._progress_slots.pop(task_id, None)
 
-    def _project_result(
+    async def _project_progress(
+        self,
+        task_id: str,
+        slot: _ProgressSlot,
+        base_provenance: dict[str, Any],
+    ) -> None:
+        while True:
+            await slot.event.wait()
+            slot.event.clear()
+            update, stopping = slot.take()
+            if update is not None:
+                provenance = (
+                    self._merge_provenance(update.provenance, base_provenance)
+                    if update.provenance is not None
+                    else None
+                )
+                await asyncio.to_thread(
+                    self.store.heartbeat,
+                    task_id,
+                    phase=update.phase,
+                    progress=update.progress,
+                    attempt=update.attempt,
+                    warnings=update.warnings,
+                    provenance=provenance,
+                )
+            if stopping and slot.size() == 0:
+                return
+
+    async def _project_result(
         self,
         task_id: str,
         raw_result: Any,
@@ -246,13 +505,14 @@ class LocalTaskBackend:
         except ValueError:
             result = None
         if not isinstance(result, dict) or type(result.get("success")) is not bool:
-            if cancel_event.is_set() or self._is_cancel_requested(task_id):
-                self._ensure_canceled(task_id)
+            if cancel_event.is_set() or await self._is_cancel_requested(task_id):
+                await self._ensure_canceled(task_id)
                 return
-            self._finish_failed(
+            await self._finish_failed(
                 task_id,
                 error="Scientific task result validation failed",
                 error_code=TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED,
+                provenance=base_provenance,
             )
             return
 
@@ -260,19 +520,20 @@ class LocalTaskBackend:
         status_text = str(result.get("status", "")).strip().lower()
         if (
             cancel_event.is_set()
-            or self._is_cancel_requested(task_id)
+            or await self._is_cancel_requested(task_id)
             or raw_code == "cancelled"
             or status_text in {"cancelled", "canceled"}
         ):
-            self._ensure_canceled(task_id)
+            await self._ensure_canceled(task_id)
             return
 
-        safe_result = sanitize_public_result(result)
+        safe_result = sanitize_task_result_projection(result)
         if not isinstance(safe_result, dict):
-            self._finish_failed(
+            await self._finish_failed(
                 task_id,
                 error="Scientific task result validation failed",
                 error_code=TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED,
+                provenance=base_provenance,
             )
             return
         artifacts = sanitize_public_artifacts(result.get("artifacts", []))
@@ -283,23 +544,22 @@ class LocalTaskBackend:
                 else None
             )
             provenance = (
-                {
-                    **sanitize_provenance(result["provenance"]),
-                    **base_provenance,
-                }
+                self._merge_provenance(result["provenance"], base_provenance)
                 if "provenance" in result
                 else None
             )
         except ValueError:
-            self._finish_failed(
+            await self._finish_failed(
                 task_id,
                 error="Scientific task result validation failed",
                 error_code=TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED,
+                provenance=base_provenance,
             )
             return
 
         if result["success"] is True and status_text != "failed":
-            finished = self.store.finish(
+            finished = await asyncio.to_thread(
+                self.store.finish,
                 task_id,
                 TaskStatus.SUCCEEDED,
                 result=safe_result,
@@ -308,11 +568,11 @@ class LocalTaskBackend:
                 provenance=provenance,
             )
             if not finished:
-                self._finish_requested_cancellation(task_id)
+                await self._finish_requested_cancellation(task_id)
             return
 
         error = result.get("error") or result.get("message") or "Task returned a failed result"
-        self._finish_failed(
+        await self._finish_failed(
             task_id,
             result=safe_result,
             error=sanitize_task_message(str(error)),
@@ -322,11 +582,7 @@ class LocalTaskBackend:
             provenance=provenance,
         )
 
-    def _progress_callback(
-        self,
-        task_id: str,
-        base_provenance: dict[str, Any],
-    ) -> ProgressCallback:
+    def _progress_callback(self, slot: _ProgressSlot) -> ProgressCallback:
         def progress_callback(
             phase: TaskPhase | str,
             progress: float | int,
@@ -336,33 +592,26 @@ class LocalTaskBackend:
             provenance: dict[str, Any] | None = None,
         ) -> None:
             canonical_phase = phase if isinstance(phase, TaskPhase) else TaskPhase(phase)
-            canonical_progress: float
-            if (
-                type(progress) in {int, float}
-                and not isinstance(progress, bool)
-                and 1 < float(progress) <= 100
-            ):
-                canonical_progress = float(progress) / 100.0
-            else:
-                canonical_progress = float(progress)
-            merged_provenance = None
-            if provenance is not None:
-                merged_provenance = {
-                    **sanitize_provenance(provenance),
-                    **base_provenance,
-                }
-            self.store.heartbeat(
-                task_id,
-                phase=canonical_phase,
-                progress=canonical_progress,
-                attempt=attempt,
-                warnings=warnings,
-                provenance=merged_provenance,
+            if isinstance(progress, bool) or type(progress) not in {int, float}:
+                raise ValueError("invalid progress")
+            canonical_progress = float(progress)
+            if 1 < canonical_progress <= 100:
+                canonical_progress /= 100.0
+            if not 0 <= canonical_progress <= 1:
+                raise ValueError("invalid progress")
+            slot.put(
+                _ProgressUpdate(
+                    canonical_phase,
+                    canonical_progress,
+                    attempt,
+                    warnings,
+                    provenance,
+                )
             )
 
         return progress_callback
 
-    def _finish_failed(
+    async def _finish_failed(
         self,
         task_id: str,
         *,
@@ -373,7 +622,8 @@ class LocalTaskBackend:
         warnings: list[Any] | None = None,
         provenance: dict[str, Any] | None = None,
     ) -> None:
-        finished = self.store.finish(
+        finished = await asyncio.to_thread(
+            self.store.finish,
             task_id,
             TaskStatus.FAILED,
             result=result,
@@ -384,27 +634,36 @@ class LocalTaskBackend:
             provenance=provenance,
         )
         if not finished:
-            self._finish_requested_cancellation(task_id)
+            await self._finish_requested_cancellation(task_id)
 
-    def _is_cancel_requested(self, task_id: str) -> bool:
+    async def _is_cancel_requested(self, task_id: str) -> bool:
         try:
-            return self.store.get(task_id).status is TaskStatus.CANCEL_REQUESTED
+            record = await asyncio.to_thread(self.store.get, task_id)
         except KeyError:
             return False
+        return record.status is TaskStatus.CANCEL_REQUESTED
 
-    def _ensure_canceled(self, task_id: str) -> None:
+    async def _ensure_canceled(self, task_id: str) -> None:
         try:
-            record = self.store.get(task_id)
+            record = await asyncio.to_thread(self.store.get, task_id)
         except KeyError:
             return
         if record.status is TaskStatus.RUNNING:
-            record = self.store.request_cancel(task_id, reason="handler canceled")
+            record = await asyncio.to_thread(
+                self.store.request_cancel,
+                task_id,
+                reason="handler canceled",
+            )
         if record.status is TaskStatus.CANCEL_REQUESTED:
-            self.store.finish(task_id, TaskStatus.CANCELED)
+            await asyncio.to_thread(
+                self.store.finish, task_id, TaskStatus.CANCELED
+            )
 
-    def _finish_requested_cancellation(self, task_id: str) -> None:
-        if self._is_cancel_requested(task_id):
-            self.store.finish(task_id, TaskStatus.CANCELED)
+    async def _finish_requested_cancellation(self, task_id: str) -> None:
+        if await self._is_cancel_requested(task_id):
+            await asyncio.to_thread(
+                self.store.finish, task_id, TaskStatus.CANCELED
+            )
 
     def _task_done(self, task_id: str, task: asyncio.Task[None]) -> None:
         try:
@@ -415,6 +674,36 @@ class LocalTaskBackend:
             if self._tasks.get(task_id) is task:
                 self._tasks.pop(task_id, None)
                 self._cancel_events.pop(task_id, None)
+                self._progress_slots.pop(task_id, None)
+
+    async def _dispatch(
+        self,
+        factory: Callable[[], Awaitable[T]],
+        *,
+        allow_closed_owner: bool = True,
+    ) -> T:
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            owner = self._owner_loop
+            if owner is None:
+                self._owner_loop = loop
+                owner = loop
+            elif owner.is_closed():
+                if self._tasks:
+                    self._shutdown_pending = True
+                    raise RuntimeError("owner loop closed with workers still running")
+                if allow_closed_owner:
+                    self._owner_loop = loop
+                    owner = loop
+                else:
+                    self._owner_loop = loop
+                    owner = loop
+        if owner is loop:
+            return await factory()
+        if not owner.is_running():
+            raise RuntimeError("owner loop is not running")
+        concurrent_future = asyncio.run_coroutine_threadsafe(factory(), owner)
+        return await asyncio.wrap_future(concurrent_future)
 
     @staticmethod
     def _accepted(task_id: str, message: str) -> BackendSubmitResult:
@@ -424,6 +713,43 @@ class LocalTaskBackend:
             outcome=StartOutcome.ACCEPTED,
             message=message,
         )
+
+    @classmethod
+    def _existing_task_result(
+        cls,
+        record: TaskRecord,
+        submission: TaskSubmission,
+    ) -> BackendSubmitResult:
+        if record.task_type != submission.task_type or record.backend != "local":
+            raise ValueError("task id conflict")
+        return cls._accepted(submission.task_id, "existing task projection")
+
+    @staticmethod
+    def idempotency_digest(key: str) -> str:
+        if type(key) is not str or not key:
+            raise ValueError("invalid idempotency key")
+        return hashlib.sha256(
+            b"MedChatTaskIdempotency@1\x00" + key.encode("utf-8")
+        ).hexdigest()
+
+    @classmethod
+    def _idempotent_result(
+        cls,
+        record: TaskRecord,
+        submission: TaskSubmission,
+    ) -> BackendSubmitResult:
+        if record.task_type != submission.task_type or record.backend != "local":
+            raise ValueError("idempotency conflict")
+        return cls._accepted(record.task_id, "duplicate idempotency key")
+
+    @staticmethod
+    def _merge_provenance(
+        value: Any,
+        base: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        incoming = sanitize_provenance(value or {})
+        safe_base = sanitize_provenance(base or {})
+        return {**incoming, **safe_base, **_LOCAL_PROVENANCE}
 
     @staticmethod
     def _map_error_code(value: Any) -> TaskErrorCode:

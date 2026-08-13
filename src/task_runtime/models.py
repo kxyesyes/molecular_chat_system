@@ -48,7 +48,7 @@ CONFIG_WARNING_CODES = frozenset(
 TASK_WARNING_CODES = frozenset(
     CONFIG_WARNING_CODES
     | {item.value for item in TaskErrorCode}
-    | {"projection_stale", "TOOL_WARNING"}
+    | {"projection_stale", "temporal_start_ambiguous", "TOOL_WARNING"}
 )
 
 PROVENANCE_KEYS = frozenset(
@@ -68,6 +68,9 @@ PROVENANCE_KEYS = frozenset(
         "reason",
         "bucket",
         "percent",
+        "start_outcome",
+        "process_restart_recovery",
+        "durable_execution",
         "hash",
         "hashes",
     }
@@ -139,16 +142,12 @@ def _validate_runtime_code(value: Any, name: str) -> str:
 
 def _safe_runtime_metadata(value: Any, name: str) -> dict[str, Any]:
     try:
-        snapshot = strict_json_snapshot(value)
+        snapshot = validate_task_input_payload(value)
     except ValueError as exc:
-        raise ValueError(f"invalid JSON {name}") from exc
-    if not isinstance(snapshot, dict):
-        raise ValueError(f"invalid JSON {name}")
-    if (
-        sanitize_public_task_data(snapshot) != snapshot
-        or _runtime_metadata_contains_smiles(snapshot)
-    ):
-        raise ValueError(f"sensitive {name}")
+        message = str(exc)
+        if "JSON" in message:
+            raise ValueError(f"invalid JSON {name}") from exc
+        raise ValueError(f"sensitive {name}") from exc
     return snapshot
 
 
@@ -169,8 +168,48 @@ def _runtime_metadata_contains_smiles(value: Any, key: str | None = None) -> boo
         len(value) >= 3
         and _STRICT_SMILES_VALUE.fullmatch(value) is not None
         and re.search(r"[BCNOFPSIcnosp]", value) is not None
-        and re.search(r"[0-9@\[\]()=#$]", value) is not None
     )
+
+
+def _validate_submission_payload_schema(payload: dict[str, Any]) -> None:
+    if not payload:
+        return
+
+    def validate_decision(decision: Any) -> None:
+        if not isinstance(decision, dict) or set(decision) != {
+            "backend",
+            "reason",
+            "bucket",
+            "percent",
+        }:
+            raise ValueError("invalid task payload schema")
+        _validate_runtime_code(decision["backend"], "backend")
+        _validate_runtime_code(decision["reason"], "reason")
+        bucket = decision["bucket"]
+        if bucket is not None and (
+            type(bucket) is not int or not 0 <= bucket < 100
+        ):
+            raise ValueError("invalid task payload bucket")
+        percent = decision["percent"]
+        if type(percent) is not int or not 0 <= percent <= 100:
+            raise ValueError("invalid task payload percent")
+
+    direct_keys = {"backend", "reason", "bucket", "percent"}
+    if set(payload) == direct_keys:
+        validate_decision(payload)
+        return
+    if set(payload) != {"decision", "mode", "total_bytes", "config_hash"}:
+        raise ValueError("invalid task payload schema")
+    validate_decision(payload["decision"])
+    if payload["mode"] not in {"file", "smiles"}:
+        raise ValueError("invalid task payload mode")
+    if type(payload["total_bytes"]) is not int or payload["total_bytes"] < 0:
+        raise ValueError("invalid task payload total_bytes")
+    if (
+        type(payload["config_hash"]) is not str
+        or _SAFE_DIGEST.fullmatch(payload["config_hash"]) is None
+    ):
+        raise ValueError("invalid task payload config_hash")
 
 
 @dataclass(frozen=True)
@@ -211,6 +250,7 @@ class TaskSubmission:
             "payload",
             _safe_runtime_metadata(self.payload, "task payload"),
         )
+        _validate_submission_payload_schema(self.payload)
 
 
 @dataclass(frozen=True)
@@ -582,6 +622,21 @@ def sanitize_public_task_data(value: Any) -> Any:
     return {} if sanitized is _DROP else sanitized
 
 
+def validate_task_input_payload(value: Any) -> dict[str, Any]:
+    try:
+        snapshot = strict_json_snapshot(value)
+    except ValueError as exc:
+        raise ValueError("invalid JSON task payload") from exc
+    if not isinstance(snapshot, dict):
+        raise ValueError("invalid JSON task payload")
+    if (
+        sanitize_public_task_data(snapshot) != snapshot
+        or _runtime_metadata_contains_smiles(snapshot)
+    ):
+        raise ValueError("sensitive task payload")
+    return snapshot
+
+
 def _has_unsafe_result_path_semantics(value: str) -> bool:
     candidate = value
     for _ in range(8):
@@ -632,6 +687,8 @@ def _sanitize_public_result_value(value: Any, *, key: str | None = None) -> Any:
             return _DROP
         if normalized_key in _SCIENTIFIC_SMILES_KEYS:
             return redact_sensitive(value)
+        if _runtime_metadata_contains_smiles(value, normalized_key):
+            return _DROP
         if any(marker in normalized_key for marker in ("path", "file", "uri")):
             if not is_safe_relative_artifact_path(value):
                 return _DROP
@@ -643,6 +700,56 @@ def _sanitize_public_result_value(value: Any, *, key: str | None = None) -> Any:
 
 def sanitize_public_result(value: Any) -> Any:
     sanitized = _sanitize_public_result_value(value)
+    return None if sanitized is _DROP else sanitized
+
+
+def _sanitize_task_result_projection_value(
+    value: Any,
+    *,
+    key: str | None = None,
+) -> Any:
+    normalized_key = (key or "").lower()
+    if "smiles" in normalized_key:
+        return _DROP
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for child_key, child_value in value.items():
+            if not isinstance(child_key, str):
+                continue
+            sanitized = _sanitize_task_result_projection_value(
+                child_value,
+                key=child_key,
+            )
+            if sanitized is not _DROP:
+                result[child_key] = sanitized
+        return redact_sensitive(result)
+    if isinstance(value, (list, tuple)):
+        result = []
+        for item in value:
+            sanitized = _sanitize_task_result_projection_value(item)
+            if sanitized is not _DROP:
+                result.append(sanitized)
+        return redact_sensitive(result)
+    if isinstance(value, float) and not math.isfinite(value):
+        return _DROP
+    if isinstance(value, str):
+        if _has_unsafe_result_path_semantics(value):
+            return _DROP
+        if _runtime_metadata_contains_smiles(value, normalized_key):
+            return _DROP
+        if any(marker in normalized_key for marker in ("path", "file", "uri")):
+            if not is_safe_relative_artifact_path(value):
+                return _DROP
+        return redact_sensitive(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _DROP
+
+
+def sanitize_task_result_projection(value: Any) -> Any:
+    """Return the strict scientific task projection persisted by async backends."""
+
+    sanitized = _sanitize_task_result_projection_value(value)
     return None if sanitized is _DROP else sanitized
 
 

@@ -19,8 +19,12 @@ from .models import (
     TaskStatus,
     normalize_task_warnings,
     sanitize_provenance,
+    sanitize_public_artifacts,
+    sanitize_public_result,
+    sanitize_task_result_projection,
     sanitize_task_message,
     strict_json_snapshot,
+    validate_task_input_payload,
 )
 
 
@@ -33,6 +37,7 @@ TERMINAL_STATUSES = frozenset(
     }
 )
 _SAFE_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
+_SHA256_DIGEST = re.compile(r"[a-f0-9]{64}\Z")
 WORKER_FUTURE_SKEW_SECONDS = 5.0
 
 
@@ -215,6 +220,9 @@ class TaskStore:
         external_workflow_id: str | None = None,
         input_manifest_path: str | None = None,
         provenance: dict[str, Any] | None = None,
+        phase: TaskPhase | str | None = None,
+        warnings: list[Any] | None = None,
+        idempotency_digest: str | None = None,
         now: datetime | str | None = None,
     ) -> TaskRecord:
         task_id = _validate_required_string(task_id, "task_id")
@@ -225,13 +233,19 @@ class TaskStore:
         )
         if input_manifest_path is not None:
             _validate_required_string(input_manifest_path, "input_manifest_path", 4096)
+        phase = _validate_phase(phase)
+        if idempotency_digest is not None and (
+            type(idempotency_digest) is not str
+            or _SHA256_DIGEST.fullmatch(idempotency_digest) is None
+        ):
+            raise ValueError("invalid idempotency_digest")
         timestamp = _as_timestamp(now)
-        payload_snapshot = strict_json_snapshot(payload)
-        if not isinstance(payload_snapshot, dict):
-            raise ValueError("invalid JSON task payload")
+        payload_snapshot = validate_task_input_payload(payload)
         safe_provenance = sanitize_provenance(provenance)
+        safe_warnings = normalize_task_warnings(warnings or [])
         payload_json = _json(payload_snapshot)
         provenance_json = _json(safe_provenance)
+        warnings_json = _json(safe_warnings)
         with connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
@@ -239,9 +253,10 @@ class TaskStore:
                 INSERT INTO tasks (
                     task_id, task_type, status, input_json, backend,
                     external_workflow_id, progress, attempt,
-                    warnings_json, input_manifest_path, provenance_json,
+                    warnings_json, input_manifest_path, provenance_json, phase,
+                    idempotency_digest,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, '[]', ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -250,8 +265,11 @@ class TaskStore:
                     payload_json,
                     backend,
                     external_workflow_id,
+                    warnings_json,
                     input_manifest_path,
                     provenance_json,
+                    phase,
+                    idempotency_digest,
                     timestamp,
                     timestamp,
                 ),
@@ -260,11 +278,118 @@ class TaskStore:
                 conn,
                 task_id,
                 "task_created",
-                {"backend": backend, "task_type": task_type},
+                {
+                    "backend": backend,
+                    "task_type": task_type,
+                    **(
+                        {"warning_codes": [item["code"] for item in safe_warnings]}
+                        if safe_warnings
+                        else {}
+                    ),
+                },
                 is_terminal=False,
                 created_at=timestamp,
             )
         return self.get(task_id)
+
+    def get_by_idempotency_digest(self, digest: str) -> TaskRecord:
+        if type(digest) is not str or _SHA256_DIGEST.fullmatch(digest) is None:
+            raise ValueError("invalid idempotency_digest")
+        with connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM tasks WHERE idempotency_digest = ?",
+                (digest,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(digest)
+        return TaskRecord.from_row(row)
+
+    def annotate_nonterminal(
+        self,
+        task_id: str,
+        *,
+        phase: TaskPhase | str | None = None,
+        warnings: list[Any] | None = None,
+        provenance: dict[str, Any] | None = None,
+        now: datetime | str | None = None,
+    ) -> bool:
+        """CAS-merge safe reconciliation metadata without inventing a terminal state."""
+
+        task_id = _validate_required_string(task_id, "task_id")
+        phase = _validate_phase(phase)
+        incoming_warnings = (
+            normalize_task_warnings(warnings) if warnings is not None else []
+        )
+        incoming_provenance = (
+            sanitize_provenance(provenance) if provenance is not None else {}
+        )
+        timestamp = _as_timestamp(now)
+        terminal_values = tuple(status.value for status in TERMINAL_STATUSES)
+        placeholders = ", ".join("?" for _ in terminal_values)
+        with connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status, warnings_json, provenance_json FROM tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["status"] in terminal_values:
+                return False
+            try:
+                existing_warnings = json.loads(row["warnings_json"] or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                existing_warnings = []
+            merged_warnings = normalize_task_warnings(existing_warnings, strict=False)
+            for warning in incoming_warnings:
+                if warning not in merged_warnings:
+                    merged_warnings.append(warning)
+            try:
+                existing_provenance = json.loads(row["provenance_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                existing_provenance = {}
+            if not isinstance(existing_provenance, dict):
+                existing_provenance = {}
+            merged_provenance = sanitize_provenance(
+                {**existing_provenance, **incoming_provenance}
+            )
+            cursor = conn.execute(
+                f"""
+                UPDATE tasks
+                SET phase = CASE WHEN status = ? THEN COALESCE(?, phase) ELSE phase END,
+                    warnings_json = ?, provenance_json = ?, updated_at = ?
+                WHERE task_id = ? AND status NOT IN ({placeholders})
+                """,
+                (
+                    TaskStatus.QUEUED.value,
+                    phase,
+                    _json(merged_warnings),
+                    _json(merged_provenance),
+                    timestamp,
+                    task_id,
+                    *terminal_values,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return False
+            event_payload: dict[str, Any] = {}
+            if phase is not None and row["status"] == TaskStatus.QUEUED.value:
+                event_payload["phase"] = phase
+            if incoming_warnings:
+                event_payload["warning_codes"] = [
+                    item["code"] for item in incoming_warnings
+                ]
+            if incoming_provenance.get("start_outcome") is not None:
+                event_payload["start_outcome"] = incoming_provenance["start_outcome"]
+            self._append_event(
+                conn,
+                task_id,
+                "task_projection_updated",
+                event_payload,
+                is_terminal=False,
+                created_at=timestamp,
+            )
+        return True
 
     def get(self, task_id: str) -> TaskRecord:
         with connection(self.db_path) as conn:
@@ -508,6 +633,7 @@ class TaskStore:
         error_code: TaskErrorCode | str | None = None,
         warnings: list[Any] | None = None,
         provenance: dict[str, Any] | None = None,
+        legacy_result_projection: bool = False,
         now: datetime | str | None = None,
     ) -> bool:
         task_id = _validate_required_string(task_id, "task_id")
@@ -515,9 +641,16 @@ class TaskStore:
         code = _error_code_value(error_code)
         safe_error = sanitize_task_message(error) if error is not None else None
         safe_provenance = sanitize_provenance(provenance) if provenance is not None else None
-        safe_result = (
-            redact_sensitive(strict_json_snapshot(result)) if result is not None else None
-        )
+        if type(legacy_result_projection) is not bool:
+            raise ValueError("invalid legacy_result_projection")
+        safe_result = None
+        if result is not None:
+            result_snapshot = strict_json_snapshot(result)
+            safe_result = (
+                sanitize_public_result(result_snapshot)
+                if legacy_result_projection
+                else sanitize_task_result_projection(result_snapshot)
+            )
         result_warnings = (
             safe_result.get("warnings")
             if isinstance(safe_result, dict) and "warnings" in safe_result
@@ -531,7 +664,9 @@ class TaskStore:
         )
         if isinstance(safe_result, dict) and warning_source is not None:
             safe_result["warnings"] = safe_warnings
-        safe_artifacts = redact_sensitive(strict_json_snapshot(artifacts or []))
+        safe_artifacts = sanitize_public_artifacts(
+            strict_json_snapshot(artifacts or [])
+        )
         result_json = _json(safe_result) if safe_result is not None else None
         artifacts_json = _json(safe_artifacts)
         warnings_json = _json(safe_warnings) if safe_warnings is not None else None
@@ -592,6 +727,7 @@ class TaskStore:
         error_code: TaskErrorCode | str | None = None,
         warnings: list[Any] | None = None,
         provenance: dict[str, Any] | None = None,
+        legacy_result_projection: bool = False,
         now: datetime | str | None = None,
     ) -> bool:
         if status not in TERMINAL_STATUSES:
@@ -611,6 +747,7 @@ class TaskStore:
             error_code=error_code,
             warnings=warnings,
             provenance=provenance,
+            legacy_result_projection=legacy_result_projection,
             now=now,
         )
 
