@@ -65,20 +65,7 @@ class DockingExecution:
 
     @staticmethod
     def _execute_production_tool(payload: Mapping[str, Any], **control: Any) -> ToolResult:
-        result = execute_tool_compat(MolecularDocking(), payload, **control)
-        if (
-            isinstance(result, ToolResult)
-            and result.success
-            and result.provenance is None
-            and result.quality.get("real_execution") is True
-        ):
-            result.provenance = ToolProvenance(
-                tool_name="molecular_docking",
-                tool_version="1",
-                demo_mode=False,
-                fallback_used=False,
-            )
-        return result
+        return execute_tool_compat(MolecularDocking(), payload, **control)
 
     def run_verified(
         self,
@@ -306,23 +293,30 @@ class DockingExecution:
             pose_source=pose_source,
             sensitive_values=sensitive_values,
         )
-        return self._completions.prepare(
-            inputs.task_id,
-            input_hash=input_hash,
-            config_hash=config_hash,
-            tool_version=provenance.tool_version,
-            model_name=provenance.model_name,
-            model_version=provenance.model_version,
-            demo_mode=provenance.demo_mode,
-            fallback_used=provenance.fallback_used,
-            real_execution=True,
-            pose_source=pose_source,
-            pose_count=pose_count,
-            best_energy=best_energy,
-            validator_status="succeeded",
-            attempt=attempt,
-            result_metadata=result_metadata,
-        )
+        try:
+            return self._completions.prepare(
+                inputs.task_id,
+                input_hash=input_hash,
+                config_hash=config_hash,
+                tool_version=provenance.tool_version,
+                model_name=provenance.model_name,
+                model_version=provenance.model_version,
+                demo_mode=provenance.demo_mode,
+                fallback_used=provenance.fallback_used,
+                real_execution=True,
+                pose_source=pose_source,
+                pose_count=pose_count,
+                best_energy=best_energy,
+                validator_status="succeeded",
+                attempt=attempt,
+                result_metadata=result_metadata,
+            )
+        except BaseException:
+            self._completions.discard_additional_artifacts(
+                inputs.task_id,
+                result_metadata.artifacts,
+            )
+            raise
 
     def _safe_result_metadata(
         self,
@@ -336,7 +330,10 @@ class DockingExecution:
         evidence = _safe_evidence(result.evidence, sensitive_values)
         artifacts = []
         omitted_artifact = False
-        for artifact in result.artifacts[:9]:
+        for artifact_index, artifact in enumerate(result.artifacts[:9], start=1):
+            if len(artifacts) >= 8:
+                omitted_artifact = True
+                break
             try:
                 artifact_path = Path(artifact.path)
                 if artifact_path.resolve(strict=False) == pose_source.resolve(strict=False):
@@ -346,16 +343,10 @@ class DockingExecution:
                 continue
             record = self._completions.capture_additional_artifact(
                 inputs.task_id,
-                artifact_type=_sanitize_identifier(artifact.artifact_type, 64),
+                artifact_index=artifact_index,
                 path=artifact.path,
-                label=_sanitize_text(artifact.label, sensitive_values, 128),
-                mime_type=artifact.mime_type,
-                metadata=_safe_artifact_metadata(
-                    artifact.metadata,
-                    sensitive_values,
-                ),
             )
-            if record is None or len(artifacts) >= 8:
+            if record is None:
                 omitted_artifact = True
                 continue
             artifacts.append(record)
@@ -415,8 +406,16 @@ class DockingExecution:
                     "Docking execution was cancelled before artifact commit.",
                     status=ObservationStatus.CANCELLED,
                 )
-            completion = self._completions.finalize(prepared)
-            return _trusted_result(completion, reused=False)
+            completion, durability_synced = self._completions.finalize(prepared)
+            return _trusted_result(
+                completion,
+                reused=False,
+                extra_warnings=(
+                    []
+                    if durability_synced
+                    else ["completion_directory_sync_unconfirmed"]
+                ),
+            )
         except BaseException:
             self._completions.abort(prepared)
             raise
@@ -620,6 +619,11 @@ def _sanitize_text(value: Any, secrets: tuple[str, ...], limit: int) -> str:
         if secret:
             sanitized = sanitized.replace(secret, "[REDACTED]")
     sanitized = re.sub(
+        r"(?i)(?<![A-Za-z0-9])\\\\(?:\?\\UNC\\|\?\\|\.\\|[^\\\s;,]+\\)[^\s;,]*",
+        "[REDACTED]",
+        sanitized,
+    )
+    sanitized = re.sub(
         r"(?i)(?<![A-Za-z0-9])[A-Z]:[\\/][^\s;,]*",
         "[REDACTED]",
         sanitized,
@@ -647,15 +651,6 @@ def _safe_optional_text(
 ) -> str | None:
     sanitized = _sanitize_text(value, secrets, limit)
     return sanitized or None
-
-
-def _sanitize_identifier(value: Any, limit: int) -> str:
-    if not isinstance(value, str):
-        return "file"
-    sanitized = re.sub(r"[^A-Za-z0-9._:+-]", "_", value)[:limit]
-    if not sanitized or not sanitized[0].isalnum():
-        return "file"
-    return sanitized
 
 
 def _safe_warnings(values: Any, secrets: tuple[str, ...]) -> list[str]:
@@ -702,23 +697,6 @@ def _safe_evidence(values: Any, secrets: tuple[str, ...]) -> list[dict[str, Any]
     return evidence
 
 
-def _safe_artifact_metadata(
-    value: Any,
-    secrets: tuple[str, ...],
-) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    metadata: dict[str, Any] = {}
-    for key in ("kind", "method", "version"):
-        item = _sanitize_text(value.get(key), secrets, 128)
-        if item:
-            metadata[key] = item
-    sha256 = value.get("sha256")
-    if isinstance(sha256, str) and re.fullmatch(r"[0-9a-f]{64}", sha256):
-        metadata["sha256"] = sha256
-    return metadata
-
-
 def _safe_provenance_identifiers(
     provenance: ToolProvenance,
     secrets: tuple[str, ...],
@@ -754,6 +732,7 @@ def _trusted_result(
     completion: DockingCompletionManifest,
     *,
     reused: bool,
+    extra_warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     relative_pose = completion.pose.path
     metadata = completion.result_metadata
@@ -793,7 +772,7 @@ def _trusted_result(
         },
         formatted=metadata.formatted,
         elapsed_ms=metadata.elapsed_ms,
-        warnings=list(metadata.warnings),
+        warnings=list(dict.fromkeys([*metadata.warnings, *(extra_warnings or [])])),
         evidence=[dict(record) for record in metadata.evidence],
         artifacts=artifacts,
         quality={

@@ -4,6 +4,7 @@ import json
 import math
 import multiprocessing
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -360,6 +361,41 @@ def test_default_executor_uses_compat_boundary(
 
     assert result["success"] is True
     assert len(calls) == 1
+
+
+def test_default_executor_does_not_invent_missing_compat_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.docking_execution as execution_module
+
+    manifest = _stage(tmp_path)
+    raw = _executor(tmp_path, [], provenance=None)
+
+    monkeypatch.setattr(
+        execution_module,
+        "execute_tool_compat",
+        lambda _tool, payload, **control: raw(payload, **control),
+    )
+
+    result = DockingExecution(tmp_path).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert result["provenance"] is None
+    assert not _completion(tmp_path).exists()
+
+
+def test_injected_executor_missing_provenance_fails_closed(tmp_path: Path) -> None:
+    manifest = _stage(tmp_path)
+
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=_executor(tmp_path, [], provenance=None),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert result["provenance"] is None
+    assert not _completion(tmp_path).exists()
 
 
 @pytest.mark.parametrize("energy", [math.nan, math.inf, -math.inf, True])
@@ -879,11 +915,14 @@ def test_safe_validated_metadata_survives_first_result_and_reuse(
         assert result["quality"]["engine"] == "AutoDock Vina"
         assert result["quality"]["execution_status"] == "completed"
         assert result["provenance"]["model_name"] == "vina-scoring"
-        assert [item["path"] for item in result["artifacts"]] == [
-            "artifacts/docking_pose.pdbqt",
-            "reports/summary.json",
-        ]
-        assert result["artifacts"][1]["metadata"] == {"kind": "summary"}
+        assert result["artifacts"][0]["path"] == "artifacts/docking_pose.pdbqt"
+        assert re.fullmatch(
+            r"artifacts/extra-01-[0-9a-f]{12}\.json",
+            result["artifacts"][1]["path"],
+        )
+        assert result["artifacts"][1]["artifact_type"] == "generic_file"
+        assert result["artifacts"][1]["label"] == "Verified additional artifact"
+        assert result["artifacts"][1]["metadata"] == {}
         serialized = json.dumps(result)
         assert SECRET_SMILES not in serialized
         assert str(tmp_path.resolve()) not in serialized
@@ -918,6 +957,73 @@ def test_credential_shaped_metadata_is_redacted_before_completion(
         assert value["success"] is True
         assert credential not in json.dumps(value)
     assert credential not in _completion(tmp_path).read_text(encoding="utf-8")
+
+
+def test_extra_artifact_and_unc_metadata_use_fixed_safe_publication(
+    tmp_path: Path,
+) -> None:
+    manifest = DockingInputStager(tmp_path).stage(
+        "task-unc",
+        "receptor.pdb",
+        b"ATOM\n",
+        None,
+        None,
+        "CCO",
+        CONFIG,
+    )
+    source = tmp_path / "task-unc" / "reports" / "sk-12345678-CCO.log"
+    source.parent.mkdir()
+    source.write_text("verified report", encoding="utf-8")
+    unc = r"\\server\share\secret\CCO.txt"
+    extended = r"\\?\UNC\server\share\sk-12345678\CCO.log"
+    device = r"\\.\PhysicalDrive0"
+
+    def executor(payload: dict[str, Any], **_control: Any) -> ToolResult:
+        result = _executor(tmp_path, [])(payload)
+        result.formatted = f"paths {unc} {extended} {device}"
+        result.warnings = [f"unsafe UNC {unc}"]
+        result.evidence = [
+            {"source": "vina", "description": f"extended {extended}"}
+        ]
+        result.quality["engine"] = f"AutoDock Vina at {device}"
+        result.artifacts = [
+            WorkflowArtifact(
+                artifact_type="sk-12345678-CCO",
+                path=str(source),
+                label="sk-12345678 CCO report",
+                mime_type="text/plain",
+                metadata={"kind": "sk-12345678-CCO"},
+            )
+        ]
+        return result
+
+    runner = DockingExecution(tmp_path, raw_executor=executor)
+    first = runner.run_verified("task-unc", manifest)
+    reused = runner.run_verified("task-unc", manifest)
+
+    assert first["success"] is True
+    assert reused["success"] is True
+    assert first["artifacts"][1]["path"] == reused["artifacts"][1]["path"]
+    extra_path = first["artifacts"][1]["path"]
+    assert re.fullmatch(r"artifacts/extra-01-[0-9a-f]{12}\.log", extra_path)
+    for result in (first, reused):
+        extra = result["artifacts"][1]
+        assert extra["artifact_type"] == "generic_file"
+        assert extra["label"] == "Verified additional artifact"
+        serialized = json.dumps(result)
+        for secret in ("sk-12345678", "CCO", "server", "share", "PhysicalDrive0"):
+            assert secret not in serialized
+
+    completion_text = _completion(tmp_path, "task-unc").read_text(encoding="utf-8")
+    for secret in (
+        "reports",
+        "sk-12345678",
+        "CCO",
+        "server",
+        "share",
+        "PhysicalDrive0",
+    ):
+        assert secret not in completion_text
 
 
 def test_completion_rejects_excessive_cached_metadata(tmp_path: Path) -> None:
@@ -1032,7 +1138,7 @@ def test_atomic_write_failure_leaves_no_trusted_manifest(
     assert not list((tmp_path / "task-1").glob(".completion-*.tmp"))
 
 
-def test_post_publish_reverification_failure_revokes_manifest_and_pose(
+def test_post_publish_does_not_call_load_verified(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1040,6 +1146,7 @@ def test_post_publish_reverification_failure_revokes_manifest_and_pose(
 
     manifest = _stage(tmp_path)
     real_load = completion_module.DockingCompletionStore.load_verified
+    post_publish_calls: list[str] = []
 
     def fail_after_publish(
         store: Any,
@@ -1049,6 +1156,7 @@ def test_post_publish_reverification_failure_revokes_manifest_and_pose(
         config_hash: str,
     ) -> Any:
         if store.manifest_path(task_id).exists():
+            post_publish_calls.append(task_id)
             raise completion_module.CompletionError("completion_artifact_invalid")
         return real_load(
             store,
@@ -1067,6 +1175,64 @@ def test_post_publish_reverification_failure_revokes_manifest_and_pose(
         raw_executor=_executor(tmp_path, []),
     ).run_verified("task-1", manifest)
 
-    assert result["success"] is False
-    assert not _completion(tmp_path).exists()
-    assert not (tmp_path / "task-1" / "artifacts" / "docking_pose.pdbqt").exists()
+    assert result["success"] is True
+    assert post_publish_calls == []
+    assert _completion(tmp_path).exists()
+    assert (tmp_path / "task-1" / "artifacts" / "docking_pose.pdbqt").exists()
+
+
+def test_replace_success_then_exception_recovers_exact_trusted_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.completion as completion_module
+
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    real_replace = completion_module._replace_file
+
+    def replace_then_raise(source: Any, target: Any) -> None:
+        real_replace(source, target)
+        if Path(target).name == "completion_manifest.json":
+            raise OSError("ambiguous replace result")
+
+    monkeypatch.setattr(completion_module, "_replace_file", replace_then_raise)
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
+    first = runner.run_verified("task-1", manifest)
+    monkeypatch.setattr(completion_module, "_replace_file", real_replace)
+    reused = runner.run_verified("task-1", manifest)
+
+    assert first["success"] is True
+    assert "completion_directory_sync_unconfirmed" in first["warnings"]
+    assert reused["success"] is True
+    assert reused["reused_completion"] is True
+    assert len(calls) == 1
+
+
+def test_directory_fsync_failure_after_replace_is_success_with_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.completion as completion_module
+
+    manifest = _stage(tmp_path)
+    real_fsync_directory = completion_module._fsync_directory
+
+    def fail_post_commit_directory_sync(path: Path) -> None:
+        if path.name == "task-1" and _completion(tmp_path).exists():
+            raise OSError("directory sync failed")
+        real_fsync_directory(path)
+
+    monkeypatch.setattr(
+        completion_module,
+        "_fsync_directory",
+        fail_post_commit_directory_sync,
+    )
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=_executor(tmp_path, []),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is True
+    assert "completion_directory_sync_unconfirmed" in result["warnings"]
+    assert _completion(tmp_path).exists()

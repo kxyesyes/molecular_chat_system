@@ -1,5 +1,6 @@
-from src.agent.contracts import AgentErrorCode, ToolResult
+from src.agent.contracts import AgentErrorCode, ToolProvenance, ToolResult
 from src.agent.tools.base_tool import execute_tool_compat
+from src.agent.tools.molecular_docking import MolecularDocking
 
 
 class DummyLegacyTool:
@@ -74,6 +75,22 @@ class StructuredFailingLegacyTool:
         }
 
 
+class ProvenanceLegacyTool:
+    name = "molecular_docking"
+
+    def __init__(self, provenance):
+        self.provenance = provenance
+
+    def execute(self, query):
+        return {
+            "success": True,
+            "message": "real docking",
+            "data": {"total_poses": 1},
+            "quality": {"real_execution": True},
+            "provenance": self.provenance,
+        }
+
+
 def test_legacy_tool_is_wrapped_as_tool_result():
     wrapped = execute_tool_compat(DummyLegacyTool(), "CCO")
 
@@ -137,3 +154,87 @@ def test_failed_legacy_tool_accepts_string_error_field():
     assert wrapped.success is False
     assert wrapped.tool_name == "rag_search"
     assert wrapped.message == "RAG system not available globally"
+
+
+def test_legacy_tool_strictly_normalizes_complete_provenance():
+    raw = {
+        "tool_name": "molecular_docking",
+        "tool_version": "molecular-docking-adapter-1",
+        "model_name": "AutoDock Vina",
+        "model_version": None,
+        "demo_mode": False,
+        "fallback_used": False,
+        "input_digest": None,
+        "output_digest": None,
+    }
+
+    wrapped = execute_tool_compat(ProvenanceLegacyTool(raw), {})
+
+    assert wrapped.success is True
+    assert wrapped.provenance == ToolProvenance.from_dict(raw)
+
+
+def test_legacy_tool_invalid_present_provenance_fails_closed():
+    wrapped = execute_tool_compat(
+        ProvenanceLegacyTool(
+            {
+                "tool_name": "molecular_docking",
+                "tool_version": "molecular-docking-adapter-1",
+                "demo_mode": False,
+            }
+        ),
+        {},
+    )
+
+    assert wrapped.success is False
+    assert wrapped.error.code == AgentErrorCode.INVALID_OUTPUT
+    assert wrapped.provenance is None
+    assert "provenance" in wrapped.message.lower()
+
+
+def test_real_molecular_docking_success_provenance_survives_compat(
+    tmp_path,
+    monkeypatch,
+):
+    from src.docking import molecular_docking_service as service_module
+
+    receptor = tmp_path / "receptor.pdb"
+    ligand = tmp_path / "ligand.sdf"
+    receptor.write_text("ATOM\n", encoding="utf-8")
+    ligand.write_text("$$$$\n", encoding="utf-8")
+
+    class FakeService:
+        def __init__(self, config=None):
+            pass
+
+        def verify_environment(self):
+            return True
+
+        async def perform_docking(self, **kwargs):
+            return {
+                "success": True,
+                "job_id": "job-1",
+                "total_poses": 1,
+                "best_pose": {"binding_energy": -7.2},
+            }
+
+    monkeypatch.setattr(service_module, "MolecularDockingService", FakeService)
+
+    wrapped = execute_tool_compat(
+        MolecularDocking(),
+        {
+            "receptor_path": str(receptor),
+            "ligand_path": str(ligand),
+            "center": [1, 2, 3],
+            "size": [20, 20, 20],
+        },
+    )
+
+    assert wrapped.success is True
+    assert wrapped.provenance is not None
+    assert wrapped.provenance.tool_name == "molecular_docking"
+    assert wrapped.provenance.tool_version == "molecular-docking-adapter-1"
+    assert wrapped.provenance.model_name == "AutoDock Vina"
+    assert wrapped.provenance.model_version is None
+    assert wrapped.provenance.demo_mode is False
+    assert wrapped.provenance.fallback_used is False

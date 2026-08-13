@@ -12,7 +12,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Any, Callable
 
 
 MAX_COMPLETION_MANIFEST_BYTES = 64 * 1024
@@ -28,6 +28,22 @@ _MANIFEST_NAME = "completion_manifest.json"
 _ARTIFACT_DIRECTORY = "artifacts"
 _POSE_NAME = "docking_pose.pdbqt"
 _POSE_RELATIVE_PATH = f"{_ARTIFACT_DIRECTORY}/{_POSE_NAME}"
+_EXTRA_ARTIFACT_PATH = re.compile(
+    r"artifacts/extra-[0-9]{2}-[0-9a-f]{12}\.(?:bin|csv|json|log|mol2|pdb|pdbqt|sdf|txt)\Z"
+)
+_SAFE_EXTRA_EXTENSIONS = frozenset(
+    {".bin", ".csv", ".json", ".log", ".mol2", ".pdb", ".pdbqt", ".sdf", ".txt"}
+)
+_SAFE_EXTRA_MIME_TYPES = {
+    ".csv": "text/csv",
+    ".json": "application/json",
+    ".log": "text/plain",
+    ".mol2": "chemical/x-mol2",
+    ".pdb": "chemical/x-pdb",
+    ".pdbqt": "chemical/x-pdbqt",
+    ".sdf": "chemical/x-mdl-sdfile",
+    ".txt": "text/plain",
+}
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _TOOL_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\Z")
@@ -190,28 +206,32 @@ class DockingCompletionStore:
         return True
 
     def has_artifact_residue(self, task_id: str) -> bool:
-        path = self._task_root(task_id) / _ARTIFACT_DIRECTORY / _POSE_NAME
+        path = self._task_root(task_id) / _ARTIFACT_DIRECTORY
         try:
-            path.lstat()
+            status = path.lstat()
         except FileNotFoundError:
             return False
         except OSError:
             raise CompletionError("completion_io_error") from None
-        return True
+        if not stat.S_ISDIR(status.st_mode) or _is_reparse(status):
+            return True
+        try:
+            return any(path.iterdir())
+        except OSError:
+            raise CompletionError("completion_io_error") from None
 
     def capture_additional_artifact(
         self,
         task_id: str,
         *,
-        artifact_type: str,
+        artifact_index: int,
         path: str | os.PathLike[str],
-        label: str,
-        mime_type: str | None,
-        metadata: Mapping[str, Any],
     ) -> DockingArtifactRecord | None:
-        """Capture only an existing task-owned ordinary file."""
+        """Copy a task-owned file to a fixed, non-sensitive publication name."""
 
         try:
+            if type(artifact_index) is not int or not 1 <= artifact_index <= 99:
+                return None
             task_root = self._task_root(task_id)
             candidate = Path(path)
             if not candidate.is_absolute():
@@ -234,16 +254,29 @@ class DockingCompletionStore:
             )
             if not content:
                 return None
+            extension = resolved.suffix.lower()
+            if extension not in _SAFE_EXTRA_EXTENSIONS:
+                extension = ".bin"
+            artifact_root = task_root / _ARTIFACT_DIRECTORY
+            _ensure_private_directory(artifact_root, task_root)
+            published_name = (
+                f"extra-{artifact_index:02d}-{digest[:12]}{extension}"
+            )
+            published_path = artifact_root / published_name
+            _atomic_write_new(
+                published_path,
+                content,
+                artifact_root,
+                prefix=".extra-",
+            )
             return DockingArtifactRecord(
-                artifact_type=_bounded_identifier(artifact_type, 64),
-                path=PurePosixPath(*relative.parts).as_posix(),
-                label=_bounded_text(label, 128),
-                mime_type=(
-                    _bounded_mime(mime_type)
-                    if mime_type is not None
-                    else None
+                artifact_type="generic_file",
+                path=f"{_ARTIFACT_DIRECTORY}/{published_name}",
+                label="Verified additional artifact",
+                mime_type=_SAFE_EXTRA_MIME_TYPES.get(
+                    extension, "application/octet-stream"
                 ),
-                metadata=_validate_artifact_metadata(metadata),
+                metadata={},
                 size=len(content),
                 sha256=digest,
             )
@@ -313,6 +346,38 @@ class DockingCompletionStore:
                 raise CompletionError("completion_artifact_invalid")
         return completion
 
+    def discard_additional_artifacts(
+        self,
+        task_id: str,
+        artifacts: list[DockingArtifactRecord],
+    ) -> bool:
+        """Remove only exact unpublished extra-artifact copies."""
+
+        try:
+            if self.has_manifest(task_id):
+                return False
+            task_root = self._task_root(task_id)
+            paths: list[Path] = []
+            for artifact in artifacts:
+                artifact_path = _additional_artifact_path(task_root, artifact.path)
+                _, artifact_hash = _secure_read_regular(
+                    artifact_path,
+                    max_bytes=MAX_ADDITIONAL_ARTIFACT_BYTES,
+                    containment_root=task_root,
+                    expected_size=artifact.size,
+                    invalid_code="completion_artifact_invalid",
+                )
+                if artifact_hash != artifact.sha256:
+                    return False
+                paths.append(artifact_path)
+            for artifact_path in paths:
+                artifact_path.unlink()
+            if paths:
+                _fsync_directory(task_root / _ARTIFACT_DIRECTORY)
+            return not any(artifact_path.exists() for artifact_path in paths)
+        except (CompletionError, OSError, RuntimeError):
+            return False
+
     def prepare(
         self,
         task_id: str,
@@ -333,8 +398,6 @@ class DockingCompletionStore:
         result_metadata: DockingResultMetadata,
     ) -> PreparedDockingCompletion:
         task_root = self._task_root(task_id)
-        if self.has_manifest(task_id) or self.has_artifact_residue(task_id):
-            raise CompletionError("completion_conflict")
         _require_sha256(input_hash)
         _require_sha256(config_hash)
         if type(tool_version) is not str or _TOOL_VERSION.fullmatch(tool_version) is None:
@@ -357,6 +420,11 @@ class DockingCompletionStore:
         if type(attempt) is not int or attempt <= 0:
             raise CompletionError("completion_schema_invalid")
         normalized_metadata = _parse_result_metadata(asdict(result_metadata))
+        if self.has_manifest(task_id) or not self._matches_unpublished_extras(
+            task_root,
+            normalized_metadata.artifacts,
+        ):
+            raise CompletionError("completion_conflict")
 
         try:
             source = Path(pose_source)
@@ -402,7 +470,7 @@ class DockingCompletionStore:
     def finalize(
         self,
         prepared: PreparedDockingCompletion,
-    ) -> DockingCompletionManifest:
+    ) -> tuple[DockingCompletionManifest, bool]:
         if not isinstance(prepared, PreparedDockingCompletion):
             raise CompletionError("completion_schema_invalid")
         completion = _parse_manifest(
@@ -414,15 +482,30 @@ class DockingCompletionStore:
         expected_pose = _pose_path(task_root, completion.pose.path)
         if prepared.pose_path != expected_pose or self.has_manifest(completion.task_id):
             raise CompletionError("completion_conflict")
-        _, pose_hash = _secure_read_regular(
-            expected_pose,
-            max_bytes=MAX_DOCKING_POSE_BYTES,
-            containment_root=task_root,
-            expected_size=completion.pose.size,
-            invalid_code="completion_artifact_invalid",
-        )
-        if pose_hash != completion.pose.sha256:
-            raise CompletionError("completion_artifact_invalid")
+
+        def verify_artifacts() -> None:
+            _, pose_hash = _secure_read_regular(
+                expected_pose,
+                max_bytes=MAX_DOCKING_POSE_BYTES,
+                containment_root=task_root,
+                expected_size=completion.pose.size,
+                invalid_code="completion_artifact_invalid",
+            )
+            if pose_hash != completion.pose.sha256:
+                raise CompletionError("completion_artifact_invalid")
+            for artifact in completion.result_metadata.artifacts:
+                artifact_path = _additional_artifact_path(task_root, artifact.path)
+                _, artifact_hash = _secure_read_regular(
+                    artifact_path,
+                    max_bytes=MAX_ADDITIONAL_ARTIFACT_BYTES,
+                    containment_root=task_root,
+                    expected_size=artifact.size,
+                    invalid_code="completion_artifact_invalid",
+                )
+                if artifact_hash != artifact.sha256:
+                    raise CompletionError("completion_artifact_invalid")
+
+        verify_artifacts()
         encoded = json.dumps(
             completion.to_dict(),
             sort_keys=True,
@@ -432,31 +515,27 @@ class DockingCompletionStore:
         ).encode("utf-8")
         if len(encoded) > MAX_COMPLETION_MANIFEST_BYTES:
             raise CompletionError("completion_too_large")
-        published = False
         try:
-            _atomic_write_new(
-                manifest_path,
-                encoded,
-                task_root,
-                prefix=".completion-",
+            decoded = json.loads(
+                encoded.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_keys,
+                parse_constant=_reject_json_constant,
             )
-            published = True
-            return self.load_verified(
-                completion.task_id,
-                input_hash=completion.input_hash,
-                config_hash=completion.config_hash,
-            )
-        except BaseException:
-            if published:
-                try:
-                    manifest_path.unlink(missing_ok=True)
-                    _fsync_directory(task_root)
-                except OSError:
-                    pass
+            encoded_completion = _parse_manifest(decoded, completion.task_id)
+        except CompletionError:
             raise
+        except (UnicodeError, json.JSONDecodeError, ValueError):
+            raise CompletionError("completion_schema_invalid") from None
+        durability_synced = _publish_completion_manifest(
+            manifest_path,
+            encoded,
+            task_root,
+            verify_before_commit=verify_artifacts,
+        )
+        return encoded_completion, durability_synced
 
     def abort(self, prepared: PreparedDockingCompletion) -> bool:
-        """Remove only the exact unpublished pose; changed residue stays fail closed."""
+        """Remove only exact unpublished artifacts; changed residue stays fail closed."""
 
         if not isinstance(prepared, PreparedDockingCompletion):
             return False
@@ -477,9 +556,26 @@ class DockingCompletionStore:
             )
             if pose_hash != completion.pose.sha256:
                 return False
+            extra_paths: list[Path] = []
+            for artifact in completion.result_metadata.artifacts:
+                artifact_path = _additional_artifact_path(task_root, artifact.path)
+                _, artifact_hash = _secure_read_regular(
+                    artifact_path,
+                    max_bytes=MAX_ADDITIONAL_ARTIFACT_BYTES,
+                    containment_root=task_root,
+                    expected_size=artifact.size,
+                    invalid_code="completion_artifact_invalid",
+                )
+                if artifact_hash != artifact.sha256:
+                    return False
+                extra_paths.append(artifact_path)
+            for artifact_path in extra_paths:
+                artifact_path.unlink()
             expected_pose.unlink()
             _fsync_directory(expected_pose.parent)
-            return not expected_pose.exists()
+            return not expected_pose.exists() and not any(
+                artifact_path.exists() for artifact_path in extra_paths
+            )
         except (CompletionError, OSError, RuntimeError):
             return False
 
@@ -502,6 +598,37 @@ class DockingCompletionStore:
         except (OSError, RuntimeError):
             raise CompletionError("completion_invalid_task") from None
         return resolved
+
+    def _matches_unpublished_extras(
+        self,
+        task_root: Path,
+        artifacts: list[DockingArtifactRecord],
+    ) -> bool:
+        artifact_root = task_root / _ARTIFACT_DIRECTORY
+        try:
+            if not artifact_root.exists():
+                return not artifacts
+            _reject_link_components(artifact_root)
+            status = artifact_root.lstat()
+            if not stat.S_ISDIR(status.st_mode) or _is_reparse(status):
+                return False
+            actual = {entry.name for entry in artifact_root.iterdir()}
+            expected: set[str] = set()
+            for artifact in artifacts:
+                artifact_path = _additional_artifact_path(task_root, artifact.path)
+                _, artifact_hash = _secure_read_regular(
+                    artifact_path,
+                    max_bytes=MAX_ADDITIONAL_ARTIFACT_BYTES,
+                    containment_root=task_root,
+                    expected_size=artifact.size,
+                    invalid_code="completion_artifact_invalid",
+                )
+                if artifact_hash != artifact.sha256:
+                    return False
+                expected.add(artifact_path.name)
+            return actual == expected
+        except (CompletionError, OSError, RuntimeError):
+            return False
 
 
 def _parse_manifest(payload: Any, task_id: str) -> DockingCompletionManifest:
@@ -705,15 +832,7 @@ def _additional_artifact_path(task_root: Path, relative_text: str) -> Path:
 
 
 def _validate_additional_relative_path(value: Any) -> None:
-    if type(value) is not str or not value or "\\" in value or len(value) > 512:
-        raise CompletionError("completion_schema_invalid")
-    relative = PurePosixPath(value)
-    if (
-        relative.is_absolute()
-        or not relative.parts
-        or relative.parts[0] in {"inputs", "executions", "artifacts"}
-        or any(part in {".", ".."} or part.startswith(".") for part in relative.parts)
-    ):
+    if type(value) is not str or _EXTRA_ARTIFACT_PATH.fullmatch(value) is None:
         raise CompletionError("completion_schema_invalid")
 
 
@@ -893,6 +1012,104 @@ def _atomic_write_new(
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _publish_completion_manifest(
+    destination: Path,
+    content: bytes,
+    parent: Path,
+    *,
+    verify_before_commit: Callable[[], None],
+) -> bool:
+    """Publish exact validated bytes; return whether directory sync was confirmed."""
+
+    temporary = parent / f".completion-{uuid.uuid4().hex}.tmp"
+    descriptor: int | None = None
+    try:
+        try:
+            destination.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise CompletionError("completion_conflict")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(temporary, flags, 0o600)
+        view = memoryview(content)
+        written = 0
+        while written < len(view):
+            count = os.write(descriptor, view[written:])
+            if count <= 0:
+                raise OSError("short atomic write")
+            written += count
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        _fsync_directory(parent)
+        if not _exact_regular_file(temporary, content, parent):
+            raise CompletionError("completion_io_error")
+        verify_before_commit()
+        try:
+            _replace_file(temporary, destination)
+        except (OSError, RuntimeError, ValueError):
+            if _exact_regular_file(destination, content, parent):
+                try:
+                    verify_before_commit()
+                except CompletionError:
+                    _isolate_untrusted_manifest(destination, parent)
+                    raise
+                return False
+            _isolate_untrusted_manifest(destination, parent)
+            raise CompletionError("completion_io_error") from None
+        try:
+            _fsync_directory(parent)
+        except (OSError, RuntimeError):
+            return False
+        return True
+    except CompletionError:
+        raise
+    except (OSError, RuntimeError, ValueError):
+        raise CompletionError("completion_io_error") from None
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _exact_regular_file(path: Path, expected: bytes, parent: Path) -> bool:
+    try:
+        actual, _ = _secure_read_regular(
+            path,
+            max_bytes=MAX_COMPLETION_MANIFEST_BYTES,
+            containment_root=parent,
+            expected_size=len(expected),
+            invalid_code="completion_malformed",
+        )
+        return actual == expected
+    except CompletionError:
+        return False
+
+
+def _isolate_untrusted_manifest(path: Path, parent: Path) -> None:
+    """Best-effort quarantine; never unlink an ambiguous publication."""
+
+    try:
+        status = path.lstat()
+        _validate_regular_single_link(status, "completion_malformed")
+        quarantine = parent / f".invalid-completion-{uuid.uuid4().hex}"
+        os.replace(path, quarantine)
+        try:
+            _fsync_directory(parent)
+        except OSError:
+            pass
+    except (CompletionError, OSError, RuntimeError, ValueError):
+        return
 
 
 def _ensure_private_directory(path: Path, task_root: Path) -> None:

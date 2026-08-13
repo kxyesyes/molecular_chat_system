@@ -9,10 +9,12 @@ import logging
 import threading
 
 from src.agent.persistence.redaction import redact_sensitive
+from src.agent.contracts import ToolProvenance
 
 from .base_tool import BaseMolecularTool
 
 logger = logging.getLogger(__name__)
+MOLECULAR_DOCKING_ADAPTER_VERSION = "molecular-docking-adapter-1"
 
 
 def _run_coroutine_sync(factory: Callable[[], Any]) -> Any:
@@ -244,6 +246,14 @@ class MolecularDocking(BaseMolecularTool):
                 "execution_status": execution_status,
             }
             if result["success"]:
+                result["provenance"] = ToolProvenance(
+                    tool_name="molecular_docking",
+                    tool_version=MOLECULAR_DOCKING_ADAPTER_VERSION,
+                    model_name="AutoDock Vina",
+                    model_version=None,
+                    demo_mode=False,
+                    fallback_used=False,
+                ).to_dict()
                 result["quality"]["docking_inputs"] = {
                     "receptor_provided": True,
                     "ligand_provided": True,
