@@ -20,7 +20,7 @@ from src.agent.contracts import (
     ToolResult,
     WorkflowArtifact,
 )
-from src.task_runtime.docking_execution import DockingExecution
+from src.task_runtime.docking_execution import DockingExecution as _DockingExecution
 from src.task_runtime.staging import (
     DockingInputStager,
     ManifestError,
@@ -36,6 +36,44 @@ CONFIG = {
 }
 SECRET_SMILES = "CC(=O)Oc1ccccc1C(=O)O"
 _DEFAULT_PROVENANCE = object()
+
+
+def _vina_pdbqt(*energies: float) -> str:
+    return "".join(
+        f"MODEL {index}\n"
+        f"REMARK VINA RESULT: {energy:.3f} 0.000 0.000\n"
+        "ROOT\n"
+        "ATOM      1  C   LIG A   1       0.000   0.000   0.000  0.00  0.00    +0.000 C\n"
+        "ENDROOT\nTORSDOF 0\nENDMDL\n"
+        for index, energy in enumerate(energies, start=1)
+    )
+
+
+def _allowed_output_root(root: Path) -> Path:
+    return root / "allowed-docking-output"
+
+
+def _task_output_dir(root: Path, task_id: str = "task-1") -> Path:
+    output = _allowed_output_root(root) / f"docking_{task_id}"
+    output.mkdir(parents=True, exist_ok=True)
+    return output
+
+
+def DockingExecution(
+    root: Path,
+    raw_executor=None,
+    *,
+    allowed_output_root: Path | None = None,
+) -> _DockingExecution:
+    """Construct a test runner with an explicit fake-tool output authority."""
+
+    if raw_executor is not None and allowed_output_root is None:
+        allowed_output_root = _allowed_output_root(root)
+    return _DockingExecution(
+        root,
+        raw_executor=raw_executor,
+        allowed_output_root=allowed_output_root,
+    )
 
 
 def _stage(
@@ -69,8 +107,12 @@ def _executor(
         calls.append({"payload": dict(payload), "control": dict(control)})
         if delay:
             time.sleep(delay)
-        pose = root / f"raw-pose-{threading.get_ident()}.pdbqt"
-        pose.write_text("MODEL 1\nENDMDL\n", encoding="utf-8")
+        task_id = str(
+            control.get("job_id")
+            or Path(str(payload["receptor_path"])).parents[1].name
+        )
+        pose = _task_output_dir(root, task_id) / "result.pdbqt"
+        pose.write_text(_vina_pdbqt(float(energy)), encoding="utf-8")
         return ToolResult.success_result(
             "molecular_docking",
             message="done",
@@ -107,6 +149,23 @@ def _executor(
     return execute
 
 
+def _pose_result(path: Path, *, energy: Any = -7.2, pose_count: Any = 1) -> ToolResult:
+    return ToolResult.success_result(
+        "molecular_docking",
+        data={
+            "total_poses": pose_count,
+            "pose_file": str(path),
+            "best_pose": {"binding_energy": energy, "pose_file": str(path)},
+        },
+        quality={"real_execution": True},
+        provenance=ToolProvenance(
+            tool_name="molecular_docking",
+            tool_version="vina-test-1",
+            model_name="AutoDock Vina",
+        ),
+    )
+
+
 def _completion(root: Path, task_id: str = "task-1") -> Path:
     return root / task_id / "completion_manifest.json"
 
@@ -123,8 +182,8 @@ def _run_in_process(root: str, manifest: str, results: Any) -> None:
         finally:
             os.close(descriptor)
         time.sleep(0.1)
-        pose = root_path / f"process-pose-{os.getpid()}.pdbqt"
-        pose.write_text("MODEL 1\nENDMDL\n", encoding="utf-8")
+        pose = _task_output_dir(root_path) / "result.pdbqt"
+        pose.write_text(_vina_pdbqt(-7.2), encoding="utf-8")
         return ToolResult.success_result(
             "molecular_docking",
             data={
@@ -144,6 +203,11 @@ def _run_in_process(root: str, manifest: str, results: Any) -> None:
         manifest,
     )
     results.put((result["success"], result["reused_completion"]))
+
+
+def test_injected_executor_requires_explicit_output_authority(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="allowed output root"):
+        _DockingExecution(tmp_path, raw_executor=lambda _payload, **_control: None)
 
 
 @pytest.mark.parametrize(
@@ -214,6 +278,111 @@ def test_scientific_authority_requires_real_provenance_and_execution(
             provenance=provenance,
             quality=quality,
         ),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert not _completion(tmp_path).exists()
+
+
+@pytest.mark.parametrize(
+    ("content", "energy", "pose_count"),
+    [
+        ("ordinary text\n", -7.2, 1),
+        ("MODEL 1\nROOT\nENDROOT\nTORSDOF 0\nENDMDL\n", -7.2, 1),
+        (_vina_pdbqt(float("nan")), -7.2, 1),
+        (_vina_pdbqt(float("inf")), -7.2, 1),
+        (_vina_pdbqt(-7.2, -6.8), -7.2, 1),
+        (_vina_pdbqt(-7.2), -6.9, 1),
+    ],
+    ids=[
+        "ordinary-text",
+        "missing-vina-result",
+        "nan-energy",
+        "infinite-energy",
+        "pose-count-mismatch",
+        "best-energy-mismatch",
+    ],
+)
+def test_pose_pdbqt_must_match_reported_scientific_values(
+    tmp_path: Path,
+    content: str,
+    energy: float,
+    pose_count: int,
+) -> None:
+    manifest = _stage(tmp_path)
+    pose = _task_output_dir(tmp_path) / "result.pdbqt"
+    pose.write_text(content, encoding="utf-8")
+
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=lambda _payload, **_control: _pose_result(
+            pose,
+            energy=energy,
+            pose_count=pose_count,
+        ),
+        allowed_output_root=_allowed_output_root(tmp_path),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert not _completion(tmp_path).exists()
+
+
+@pytest.mark.parametrize("valid_pdbqt", [False, True], ids=["ordinary", "pdbqt"])
+def test_external_pose_file_is_never_authoritative(
+    tmp_path: Path,
+    valid_pdbqt: bool,
+) -> None:
+    manifest = _stage(tmp_path)
+    pose = tmp_path / "external-result.pdbqt"
+    pose.write_text(_vina_pdbqt(-7.2) if valid_pdbqt else "ordinary text\n")
+
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=lambda _payload, **_control: _pose_result(pose),
+        allowed_output_root=_allowed_output_root(tmp_path),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert not _completion(tmp_path).exists()
+
+
+def test_pose_from_different_job_below_allowed_root_is_rejected(
+    tmp_path: Path,
+) -> None:
+    manifest = _stage(tmp_path)
+    pose = _task_output_dir(tmp_path, "different-task") / "result.pdbqt"
+    pose.write_text(_vina_pdbqt(-7.2), encoding="utf-8")
+
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=lambda _payload, **_control: _pose_result(pose),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert not _completion(tmp_path).exists()
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+def test_linked_pose_in_allowed_job_directory_is_rejected(
+    tmp_path: Path,
+    link_kind: str,
+) -> None:
+    manifest = _stage(tmp_path)
+    external = tmp_path / "external-source.pdbqt"
+    external.write_text(_vina_pdbqt(-7.2), encoding="utf-8")
+    pose = _task_output_dir(tmp_path) / "result.pdbqt"
+    try:
+        if link_kind == "symlink":
+            pose.symlink_to(external)
+        else:
+            os.link(external, pose)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"{link_kind} unavailable: {exc}")
+
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=lambda _payload, **_control: _pose_result(pose),
+        allowed_output_root=_allowed_output_root(tmp_path),
     ).run_verified("task-1", manifest)
 
     assert result["success"] is False
@@ -349,12 +518,20 @@ def test_default_executor_uses_compat_boundary(
     calls: list[dict[str, Any]] = []
     sentinel_tool = object()
     raw = _executor(tmp_path, calls)
+    monkeypatch.chdir(tmp_path)
 
     monkeypatch.setattr(execution_module, "MolecularDocking", lambda: sentinel_tool)
 
     def compat(tool: Any, payload: dict[str, Any], **control: Any) -> ToolResult:
         assert tool is sentinel_tool
-        return raw(payload, **control)
+        result = raw(payload, **control)
+        source = Path(result.data["pose_file"])
+        pose = tmp_path / "temp_docking" / "docking_task-1" / "result.pdbqt"
+        pose.parent.mkdir(parents=True)
+        source.replace(pose)
+        result.data["pose_file"] = str(pose)
+        result.data["best_pose"]["pose_file"] = str(pose)
+        return result
 
     monkeypatch.setattr(execution_module, "execute_tool_compat", compat)
 
@@ -613,6 +790,47 @@ def test_concurrent_same_task_executes_once(tmp_path: Path) -> None:
     assert len(calls) == 1
 
 
+def test_long_concurrent_same_task_executes_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    runner = DockingExecution(
+        tmp_path,
+        raw_executor=_executor(tmp_path, calls, delay=5.2),
+    )
+    prepared = threading.Event()
+    allow_finalize = threading.Event()
+    real_finalize = runner._finalize_prepared
+
+    def gated_finalize(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        prepared.set()
+        assert allow_finalize.wait(10)
+        return real_finalize(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "_finalize_prepared", gated_finalize)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                runner.run_verified,
+                "task-1",
+                manifest,
+                lease_timeout_seconds=15,
+            )
+            for _ in range(2)
+        ]
+        assert prepared.wait(10)
+        time.sleep(0.1)
+        allow_finalize.set()
+        results = [future.result(timeout=20) for future in futures]
+
+    assert all(result["success"] is True for result in results)
+    assert sorted(result["reused_completion"] for result in results) == [False, True]
+    assert len(calls) == 1
+
+
 def test_concurrent_call_waits_for_prepared_completion_in_lease_gap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -760,7 +978,7 @@ def test_second_input_integrity_failure_after_tool_never_commits(
         return real_verify(inputs)
 
     def executor(payload: dict[str, Any], **_control: Any) -> ToolResult:
-        result = _executor(tmp_path, [])(payload)
+        result = _executor(tmp_path, [])(payload, **_control)
         executed["value"] = True
         return result
 
@@ -841,8 +1059,8 @@ def test_safe_validated_metadata_survives_first_result_and_reuse(
 
     def executor(payload: dict[str, Any], **control: Any) -> ToolResult:
         calls.append({"payload": dict(payload), "control": dict(control)})
-        pose = tmp_path / "metadata-pose.pdbqt"
-        pose.write_text("MODEL 1\nENDMDL\n", encoding="utf-8")
+        pose = _task_output_dir(tmp_path, "task-smiles") / "result.pdbqt"
+        pose.write_text(_vina_pdbqt(-7.2), encoding="utf-8")
         return ToolResult.success_result(
             "molecular_docking",
             message="raw message is not persisted",
@@ -927,13 +1145,133 @@ def test_safe_validated_metadata_survives_first_result_and_reuse(
         serialized = json.dumps(result)
         assert SECRET_SMILES not in serialized
         assert str(tmp_path.resolve()) not in serialized
-
     serialized_completion = _completion(tmp_path, "task-smiles").read_text(
         encoding="utf-8"
     )
     assert SECRET_SMILES not in serialized_completion
     assert str(tmp_path.resolve()) not in serialized_completion
 
+
+def test_additional_artifact_capture_exception_rolls_back_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _stage(tmp_path)
+    first_extra = tmp_path / "task-1" / "reports" / "first.json"
+    second_extra = tmp_path / "task-1" / "reports" / "second.json"
+    first_extra.parent.mkdir()
+    first_extra.write_text('{"first":true}', encoding="utf-8")
+    second_extra.write_text('{"second":true}', encoding="utf-8")
+    calls: list[dict[str, Any]] = []
+
+    def executor(payload: dict[str, Any], **control: Any) -> ToolResult:
+        result = _executor(tmp_path, calls)(payload, **control)
+        result.artifacts = [
+            WorkflowArtifact("report", str(first_extra), "first"),
+            WorkflowArtifact("report", str(second_extra), "second"),
+        ]
+        return result
+
+    runner = DockingExecution(tmp_path, raw_executor=executor)
+    real_capture = runner._completions.capture_additional_artifact
+    captures = {"count": 0}
+
+    def fail_second(*args: Any, **kwargs: Any) -> Any:
+        captures["count"] += 1
+        if captures["count"] == 2:
+            raise RuntimeError("malformed second artifact")
+        return real_capture(*args, **kwargs)
+
+    monkeypatch.setattr(runner._completions, "capture_additional_artifact", fail_second)
+    failed = runner.run_verified("task-1", manifest)
+
+    assert failed["success"] is False
+    assert not list((tmp_path / "task-1").glob(".completion-attempt-*"))
+    assert not (tmp_path / "task-1" / "artifacts").exists()
+
+    monkeypatch.setattr(runner._completions, "capture_additional_artifact", real_capture)
+    retried = runner.run_verified("task-1", manifest)
+    assert retried["success"] is True
+    assert len(calls) == 2
+
+
+def test_attempt_owner_write_failure_does_not_leave_unowned_residue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.completion as completion_module
+
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    real_atomic_write = completion_module._atomic_write_new
+
+    def fail_owner(destination: Path, *args: Any, **kwargs: Any) -> None:
+        if destination.name == ".completion-attempt-owner":
+            raise completion_module.CompletionError("completion_io_error")
+        real_atomic_write(destination, *args, **kwargs)
+
+    monkeypatch.setattr(completion_module, "_atomic_write_new", fail_owner)
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
+    failed = runner.run_verified("task-1", manifest)
+
+    assert failed["success"] is False
+    assert not list((tmp_path / "task-1").glob(".completion-attempt-*"))
+
+    monkeypatch.setattr(completion_module, "_atomic_write_new", real_atomic_write)
+    retried = runner.run_verified("task-1", manifest)
+    assert retried["success"] is True
+    assert len(calls) == 2
+
+
+def test_stale_owned_artifact_attempt_is_cleaned_before_retry(tmp_path: Path) -> None:
+    manifest = _stage(tmp_path)
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, []))
+    attempt = runner._completions.begin_artifact_attempt("task-1")
+    stale_root = attempt.root
+    (stale_root / "artifacts" / "extra-01-deadbeefdead.json").write_text(
+        "stale",
+        encoding="utf-8",
+    )
+
+    result = runner.run_verified("task-1", manifest)
+
+    assert result["success"] is True
+    assert not stale_root.exists()
+
+
+def test_stale_owned_attempt_after_artifact_move_is_recoverable(
+    tmp_path: Path,
+) -> None:
+    manifest = _stage(tmp_path)
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, []))
+    attempt = runner._completions.begin_artifact_attempt("task-1")
+    stale_artifacts = attempt.root / "artifacts"
+    (stale_artifacts / "docking_pose.pdbqt").write_text(
+        _vina_pdbqt(-7.2),
+        encoding="utf-8",
+    )
+    stale_artifacts.replace(tmp_path / "task-1" / "artifacts")
+
+    result = runner.run_verified("task-1", manifest)
+
+    assert result["success"] is True
+    assert not attempt.root.exists()
+
+
+def test_unowned_artifact_attempt_residue_is_fail_closed(tmp_path: Path) -> None:
+    manifest = _stage(tmp_path)
+    stale_root = tmp_path / "task-1" / ".completion-attempt-attacker"
+    stale_root.mkdir()
+    calls: list[dict[str, Any]] = []
+
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=_executor(tmp_path, calls),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert calls == []
+    assert stale_root.exists()
 
 def test_credential_shaped_metadata_is_redacted_before_completion(
     tmp_path: Path,
@@ -942,7 +1280,7 @@ def test_credential_shaped_metadata_is_redacted_before_completion(
     credential = "sk-12345678"
 
     def executor(payload: dict[str, Any], **_control: Any) -> ToolResult:
-        result = _executor(tmp_path, [])(payload)
+        result = _executor(tmp_path, [])(payload, **_control)
         result.formatted = f"Vina output using {credential}"
         result.warnings = [f"provider warning {credential}"]
         result.evidence = [
@@ -980,7 +1318,7 @@ def test_extra_artifact_and_unc_metadata_use_fixed_safe_publication(
     device = r"\\.\PhysicalDrive0"
 
     def executor(payload: dict[str, Any], **_control: Any) -> ToolResult:
-        result = _executor(tmp_path, [])(payload)
+        result = _executor(tmp_path, [])(payload, **_control)
         result.formatted = f"paths {unc} {extended} {device}"
         result.warnings = [f"unsafe UNC {unc}"]
         result.evidence = [
@@ -1049,7 +1387,7 @@ def test_aggregate_cached_metadata_over_limit_leaves_no_manifest(
     manifest = _stage(tmp_path)
 
     def executor(payload: dict[str, Any], **_control: Any) -> ToolResult:
-        result = _executor(tmp_path, [])(payload)
+        result = _executor(tmp_path, [])(payload, **_control)
         result.formatted = "f" * 2048
         result.warnings = [f"warning-{index}-" + "w" * 235 for index in range(32)]
         result.evidence = [
@@ -1238,6 +1576,48 @@ def test_directory_fsync_failure_after_replace_is_success_with_warning(
     assert result["success"] is True
     assert "completion_directory_sync_unconfirmed" in result["warnings"]
     assert _completion(tmp_path).exists()
+
+
+def test_windows_directory_fsync_uses_flush_file_buffers_wrapper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.completion as completion_module
+
+    calls: list[Path] = []
+    monkeypatch.setattr(completion_module, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        completion_module,
+        "_windows_flush_directory",
+        lambda path: calls.append(path),
+        raising=False,
+    )
+
+    completion_module._fsync_directory(tmp_path)
+
+    assert calls == [tmp_path]
+
+
+def test_windows_directory_flush_failure_is_not_reported_as_synced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.completion as completion_module
+
+    monkeypatch.setattr(completion_module, "_IS_WINDOWS", True)
+
+    def fail_flush(_path: Path) -> None:
+        raise OSError("FlushFileBuffers failed")
+
+    monkeypatch.setattr(
+        completion_module,
+        "_windows_flush_directory",
+        fail_flush,
+        raising=False,
+    )
+
+    with pytest.raises(OSError, match="FlushFileBuffers failed"):
+        completion_module._fsync_directory(tmp_path)
 
 
 def test_trusted_result_is_built_before_manifest_publication(

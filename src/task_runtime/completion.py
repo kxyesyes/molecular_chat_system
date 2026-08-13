@@ -27,6 +27,9 @@ _SCHEMA = "DockingCompletionManifest@1"
 _MANIFEST_NAME = "completion_manifest.json"
 _INVALID_MARKER_NAME = "completion_invalid.marker"
 _INVALID_MARKER_CONTENT = b"DockingCompletionInvalid@1\nownership_uncertain\n"
+_ATTEMPT_PREFIX = ".completion-attempt-"
+_ATTEMPT_OWNER_NAME = ".completion-attempt-owner"
+_ATTEMPT_OWNER_CONTENT = b"DockingCompletionAttempt@1\n"
 AUTHORITY_BLOCKED = "blocked"
 AUTHORITY_COMMITTED = "committed"
 AUTHORITY_COMMITTED_AMBIGUOUS = "committed_ambiguous"
@@ -177,6 +180,12 @@ class PreparedDockingCompletion:
     pose_path: Path = field(repr=False)
 
 
+@dataclass(frozen=True)
+class ArtifactCaptureAttempt:
+    task_id: str
+    root: Path = field(repr=False)
+
+
 class DockingCompletionStore:
     """Commit and revalidate one task-relative docking completion."""
 
@@ -239,9 +248,53 @@ class DockingCompletionStore:
         except OSError:
             raise CompletionError("completion_io_error") from None
 
+    def begin_artifact_attempt(self, task_id: str) -> ArtifactCaptureAttempt:
+        task_root = self._task_root(task_id)
+        attempt_root = task_root / f"{_ATTEMPT_PREFIX}{uuid.uuid4().hex}"
+        try:
+            _ensure_private_directory(attempt_root, task_root)
+            _atomic_write_new(
+                attempt_root / _ATTEMPT_OWNER_NAME,
+                _ATTEMPT_OWNER_CONTENT,
+                attempt_root,
+                prefix=".owner-",
+            )
+            artifact_root = attempt_root / _ARTIFACT_DIRECTORY
+            _ensure_private_directory(artifact_root, attempt_root)
+            _fsync_directory(attempt_root)
+            _fsync_directory(task_root)
+            return ArtifactCaptureAttempt(task_id=task_id, root=attempt_root)
+        except (CompletionError, OSError, RuntimeError, ValueError):
+            if not self._discard_attempt_path(attempt_root, task_root):
+                self._discard_empty_uninitialized_attempt(attempt_root, task_root)
+            raise CompletionError("completion_io_error") from None
+
+    def cleanup_stale_artifact_attempts(self, task_id: str) -> None:
+        task_root = self._task_root(task_id)
+        try:
+            candidates = [
+                candidate
+                for candidate in task_root.iterdir()
+                if candidate.name.startswith(_ATTEMPT_PREFIX)
+            ]
+        except OSError:
+            raise CompletionError("completion_io_error") from None
+        for candidate in candidates:
+            if not self._cleanup_stale_attempt_path(candidate, task_root):
+                raise CompletionError("completion_conflict")
+
+    def discard_artifact_attempt(self, attempt: ArtifactCaptureAttempt) -> bool:
+        if not isinstance(attempt, ArtifactCaptureAttempt):
+            return False
+        try:
+            task_root = self._task_root(attempt.task_id)
+        except CompletionError:
+            return False
+        return self._discard_attempt_path(attempt.root, task_root)
+
     def capture_additional_artifact(
         self,
-        task_id: str,
+        attempt: ArtifactCaptureAttempt,
         *,
         artifact_index: int,
         path: str | os.PathLike[str],
@@ -251,7 +304,11 @@ class DockingCompletionStore:
         try:
             if type(artifact_index) is not int or not 1 <= artifact_index <= 99:
                 return None
-            task_root = self._task_root(task_id)
+            if not isinstance(attempt, ArtifactCaptureAttempt):
+                return None
+            task_root = self._task_root(attempt.task_id)
+            if not self._validate_attempt_path(attempt.root, task_root):
+                return None
             candidate = Path(path)
             if not candidate.is_absolute():
                 candidate = task_root / candidate
@@ -276,8 +333,7 @@ class DockingCompletionStore:
             extension = resolved.suffix.lower()
             if extension not in _SAFE_EXTRA_EXTENSIONS:
                 extension = ".bin"
-            artifact_root = task_root / _ARTIFACT_DIRECTORY
-            _ensure_private_directory(artifact_root, task_root)
+            artifact_root = attempt.root / _ARTIFACT_DIRECTORY
             published_name = (
                 f"extra-{artifact_index:02d}-{digest[:12]}{extension}"
             )
@@ -301,6 +357,153 @@ class DockingCompletionStore:
             )
         except (CompletionError, OSError, RuntimeError, TypeError, ValueError):
             return None
+
+    def _validate_attempt_path(self, attempt_root: Path, task_root: Path) -> bool:
+        if not self._validate_attempt_owner(attempt_root, task_root):
+            return False
+        try:
+            artifact_root = attempt_root / _ARTIFACT_DIRECTORY
+            artifact_status = artifact_root.lstat()
+            return stat.S_ISDIR(artifact_status.st_mode) and not _is_reparse(
+                artifact_status
+            )
+        except (CompletionError, OSError, RuntimeError, ValueError):
+            return False
+
+    def _discard_empty_uninitialized_attempt(
+        self,
+        attempt_root: Path,
+        task_root: Path,
+    ) -> bool:
+        try:
+            if (
+                attempt_root.parent != task_root
+                or re.fullmatch(r"\.completion-attempt-[0-9a-f]{32}", attempt_root.name)
+                is None
+            ):
+                return False
+            _reject_link_components(attempt_root)
+            status = attempt_root.lstat()
+            if (
+                not stat.S_ISDIR(status.st_mode)
+                or _is_reparse(status)
+                or any(attempt_root.iterdir())
+            ):
+                return False
+            attempt_root.rmdir()
+            _fsync_directory(task_root)
+            return True
+        except (CompletionError, OSError, RuntimeError, ValueError):
+            return False
+
+    def _validate_attempt_owner(self, attempt_root: Path, task_root: Path) -> bool:
+        try:
+            if (
+                attempt_root.parent != task_root
+                or re.fullmatch(r"\.completion-attempt-[0-9a-f]{32}", attempt_root.name)
+                is None
+            ):
+                return False
+            _reject_link_components(attempt_root)
+            status = attempt_root.lstat()
+            if not stat.S_ISDIR(status.st_mode) or _is_reparse(status):
+                return False
+            owner, _ = _secure_read_regular(
+                attempt_root / _ATTEMPT_OWNER_NAME,
+                max_bytes=len(_ATTEMPT_OWNER_CONTENT),
+                containment_root=attempt_root,
+                expected_size=len(_ATTEMPT_OWNER_CONTENT),
+                invalid_code="completion_conflict",
+            )
+            return owner == _ATTEMPT_OWNER_CONTENT
+        except (CompletionError, OSError, RuntimeError, ValueError):
+            return False
+
+    def _cleanup_stale_attempt_path(
+        self,
+        attempt_root: Path,
+        task_root: Path,
+    ) -> bool:
+        if self._discard_attempt_path(attempt_root, task_root):
+            return True
+        if not self._validate_attempt_owner(attempt_root, task_root):
+            return False
+        attempt_artifacts = attempt_root / _ARTIFACT_DIRECTORY
+        try:
+            attempt_artifacts.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return False
+        else:
+            return False
+        try:
+            if not _path_present(task_root / _MANIFEST_NAME):
+                artifact_root = task_root / _ARTIFACT_DIRECTORY
+                status = artifact_root.lstat()
+                if not stat.S_ISDIR(status.st_mode) or _is_reparse(status):
+                    return False
+                entries = list(artifact_root.iterdir())
+                for candidate in entries:
+                    if not (
+                        candidate.name == _POSE_NAME
+                        or _EXTRA_ARTIFACT_PATH.fullmatch(
+                            f"{_ARTIFACT_DIRECTORY}/{candidate.name}"
+                        )
+                    ):
+                        return False
+                    _secure_read_regular(
+                        candidate,
+                        max_bytes=max(
+                            MAX_ADDITIONAL_ARTIFACT_BYTES,
+                            MAX_DOCKING_POSE_BYTES,
+                        ),
+                        containment_root=artifact_root,
+                        invalid_code="completion_conflict",
+                    )
+                for candidate in entries:
+                    candidate.unlink()
+                artifact_root.rmdir()
+            (attempt_root / _ATTEMPT_OWNER_NAME).unlink()
+            attempt_root.rmdir()
+            _fsync_directory(task_root)
+            return True
+        except (CompletionError, OSError, RuntimeError, ValueError):
+            return False
+
+    def _discard_attempt_path(self, attempt_root: Path, task_root: Path) -> bool:
+        if not self._validate_attempt_path(attempt_root, task_root):
+            return False
+        artifact_root = attempt_root / _ARTIFACT_DIRECTORY
+        try:
+            for candidate in artifact_root.iterdir():
+                if not (
+                    _EXTRA_ARTIFACT_PATH.fullmatch(
+                        f"{_ARTIFACT_DIRECTORY}/{candidate.name}"
+                    )
+                    or re.fullmatch(r"\.extra-[0-9a-f]{32}\.tmp", candidate.name)
+                    or candidate.name == _POSE_NAME
+                    or re.fullmatch(r"\.pose-[0-9a-f]{32}\.tmp", candidate.name)
+                ):
+                    return False
+                _secure_read_regular(
+                    candidate,
+                    max_bytes=max(
+                        MAX_ADDITIONAL_ARTIFACT_BYTES,
+                        MAX_DOCKING_POSE_BYTES,
+                    ),
+                    containment_root=artifact_root,
+                    invalid_code="completion_conflict",
+                )
+            for candidate in list(artifact_root.iterdir()):
+                candidate.unlink()
+            artifact_root.rmdir()
+            (attempt_root / _ATTEMPT_OWNER_NAME).unlink()
+            attempt_root.rmdir()
+            _fsync_directory(task_root)
+            return True
+        except (CompletionError, OSError, RuntimeError, ValueError):
+            return False
 
     def load_verified(
         self,
@@ -415,6 +618,28 @@ class DockingCompletionStore:
         except (CompletionError, OSError, RuntimeError):
             return False
 
+    def read_authoritative_pose(
+        self,
+        pose_source: str | os.PathLike[str],
+        *,
+        containment_root: str | os.PathLike[str],
+    ) -> tuple[bytes, str]:
+        """Read a prospective pose through a stable, contained descriptor."""
+
+        try:
+            source = Path(pose_source)
+            root_path = Path(containment_root)
+            _reject_link_components(root_path)
+            root = root_path.resolve(strict=True)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            raise CompletionError("completion_artifact_invalid") from None
+        return _secure_read_regular(
+            source,
+            max_bytes=MAX_DOCKING_POSE_BYTES,
+            containment_root=root,
+            invalid_code="completion_artifact_invalid",
+        )
+
     def prepare(
         self,
         task_id: str,
@@ -428,11 +653,14 @@ class DockingCompletionStore:
         fallback_used: bool,
         real_execution: bool,
         pose_source: str | os.PathLike[str],
+        pose_containment_root: str | os.PathLike[str],
+        expected_pose_sha256: str,
         pose_count: int,
         best_energy: int | float,
         validator_status: str,
         attempt: int,
         result_metadata: DockingResultMetadata,
+        artifact_attempt: ArtifactCaptureAttempt,
     ) -> PreparedDockingCompletion:
         task_root = self._task_root(task_id)
         _require_sha256(input_hash)
@@ -457,28 +685,38 @@ class DockingCompletionStore:
         if type(attempt) is not int or attempt <= 0:
             raise CompletionError("completion_schema_invalid")
         normalized_metadata = _parse_result_metadata(asdict(result_metadata))
-        if self.has_manifest(task_id) or not self._matches_unpublished_extras(
-            task_root,
-            normalized_metadata.artifacts,
+        if (
+            self.has_manifest(task_id)
+            or self.has_artifact_residue(task_id)
+            or not isinstance(artifact_attempt, ArtifactCaptureAttempt)
+            or artifact_attempt.task_id != task_id
+            or not self._matches_attempt_extras(
+                artifact_attempt,
+                task_root,
+                normalized_metadata.artifacts,
+            )
         ):
             raise CompletionError("completion_conflict")
 
         try:
             source = Path(pose_source)
+            containment_path = Path(pose_containment_root)
+            _reject_link_components(containment_path)
+            containment_root = containment_path.resolve(strict=True)
         except (TypeError, ValueError):
             raise CompletionError("completion_artifact_invalid") from None
+        except (OSError, RuntimeError):
+            raise CompletionError("completion_artifact_invalid") from None
+        _require_sha256(expected_pose_sha256)
         pose_bytes, pose_hash = _secure_read_regular(
             source,
             max_bytes=MAX_DOCKING_POSE_BYTES,
+            containment_root=containment_root,
             invalid_code="completion_artifact_invalid",
         )
-        if not pose_bytes:
+        if not pose_bytes or pose_hash != expected_pose_sha256:
             raise CompletionError("completion_artifact_invalid")
 
-        artifact_root = task_root / _ARTIFACT_DIRECTORY
-        _ensure_private_directory(artifact_root, task_root)
-        pose_path = artifact_root / _POSE_NAME
-        _atomic_write_new(pose_path, pose_bytes, artifact_root, prefix=".pose-")
         completion = DockingCompletionManifest(
             schema=_SCHEMA,
             task_id=task_id,
@@ -502,6 +740,34 @@ class DockingCompletionStore:
             completed_at=_utc_now(),
             result_metadata=normalized_metadata,
         )
+        attempt_artifact_root = artifact_attempt.root / _ARTIFACT_DIRECTORY
+        attempt_pose_path = attempt_artifact_root / _POSE_NAME
+        _atomic_write_new(
+            attempt_pose_path,
+            pose_bytes,
+            attempt_artifact_root,
+            prefix=".pose-",
+        )
+        _fsync_directory(attempt_artifact_root)
+        artifact_root = task_root / _ARTIFACT_DIRECTORY
+        try:
+            artifact_root.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise CompletionError("completion_conflict")
+        try:
+            _replace_file(attempt_artifact_root, artifact_root)
+            _fsync_directory(task_root)
+        except (OSError, RuntimeError, ValueError):
+            raise CompletionError("completion_io_error") from None
+        pose_path = artifact_root / _POSE_NAME
+        try:
+            (artifact_attempt.root / _ATTEMPT_OWNER_NAME).unlink()
+            artifact_attempt.root.rmdir()
+            _fsync_directory(task_root)
+        except OSError:
+            pass
         return PreparedDockingCompletion(completion=completion, pose_path=pose_path)
 
     def finalize(
@@ -610,6 +876,8 @@ class DockingCompletionStore:
                 artifact_path.unlink()
             expected_pose.unlink()
             _fsync_directory(expected_pose.parent)
+            expected_pose.parent.rmdir()
+            _fsync_directory(task_root)
             return not expected_pose.exists() and not any(
                 artifact_path.exists() for artifact_path in extra_paths
             )
@@ -636,27 +904,25 @@ class DockingCompletionStore:
             raise CompletionError("completion_invalid_task") from None
         return resolved
 
-    def _matches_unpublished_extras(
+    def _matches_attempt_extras(
         self,
+        attempt: ArtifactCaptureAttempt,
         task_root: Path,
         artifacts: list[DockingArtifactRecord],
     ) -> bool:
-        artifact_root = task_root / _ARTIFACT_DIRECTORY
+        if not self._validate_attempt_path(attempt.root, task_root):
+            return False
+        artifact_root = attempt.root / _ARTIFACT_DIRECTORY
         try:
-            if not artifact_root.exists():
-                return not artifacts
-            _reject_link_components(artifact_root)
-            status = artifact_root.lstat()
-            if not stat.S_ISDIR(status.st_mode) or _is_reparse(status):
-                return False
             actual = {entry.name for entry in artifact_root.iterdir()}
             expected: set[str] = set()
             for artifact in artifacts:
-                artifact_path = _additional_artifact_path(task_root, artifact.path)
+                relative = PurePosixPath(artifact.path)
+                artifact_path = artifact_root / relative.name
                 _, artifact_hash = _secure_read_regular(
                     artifact_path,
                     max_bytes=MAX_ADDITIONAL_ARTIFACT_BYTES,
-                    containment_root=task_root,
+                    containment_root=artifact_root,
                     expected_size=artifact.size,
                     invalid_code="completion_artifact_invalid",
                 )
@@ -1417,9 +1683,63 @@ def _reject_json_constant(_value: str) -> Any:
 
 def _fsync_directory(path: Path) -> None:
     if _IS_WINDOWS:
+        _windows_flush_directory(path)
         return
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _windows_flush_directory(path: Path) -> None:
+    """Flush a directory handle using the supported Win32 backup-semantics API."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    generic_read_write = 0x80000000 | 0x40000000
+    share_all = 0x00000001 | 0x00000002 | 0x00000004
+    open_existing = 3
+    backup_semantics = 0x02000000
+    invalid_handle = ctypes.c_void_p(-1).value
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    flush_file_buffers = kernel32.FlushFileBuffers
+    flush_file_buffers.argtypes = (wintypes.HANDLE,)
+    flush_file_buffers.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    handle = create_file(
+        str(path),
+        generic_read_write,
+        share_all,
+        None,
+        open_existing,
+        backup_semantics,
+        None,
+    )
+    if handle == invalid_handle:
+        error = ctypes.get_last_error()
+        raise OSError(error, "CreateFileW directory handle failed")
+    flush_error: int | None = None
+    if not flush_file_buffers(handle):
+        flush_error = ctypes.get_last_error()
+    close_ok = bool(close_handle(handle))
+    close_error = ctypes.get_last_error() if not close_ok else None
+    if flush_error is not None:
+        raise OSError(flush_error, "FlushFileBuffers directory failed")
+    if close_error is not None:
+        raise OSError(close_error, "CloseHandle directory failed")

@@ -342,6 +342,32 @@ class VerifiedDockingInputs:
         self._receptor_pin.close()
 
 
+class ExecutionLeaseTransaction:
+    """Opaque proof that this stager owns the active task lease on this thread."""
+
+    def __init__(
+        self,
+        stager: "DockingInputStager",
+        task_id: str,
+        lease: _TaskLease,
+    ) -> None:
+        self._stager = stager
+        self._task_id = task_id
+        self._lease = lease
+        self._owner_thread_id = threading.get_ident()
+        self._active = True
+
+    def _validate(self, stager: "DockingInputStager", task_id: str) -> None:
+        if (
+            self._stager is not stager
+            or self._task_id != task_id
+            or not self._active
+            or self._owner_thread_id != threading.get_ident()
+            or not self._lease.acquired
+        ):
+            raise ManifestError("manifest_busy")
+
+
 class DockingInputStager:
     """Atomically stage docking inputs below a task-owned directory."""
 
@@ -548,6 +574,33 @@ class DockingInputStager:
             return self._load_verified_unlocked(task_id, manifest_path)
 
     @contextmanager
+    def task_execution_lease(
+        self,
+        task_id: str,
+        *,
+        lease_timeout_seconds: float = _DEFAULT_EXECUTION_LEASE_TIMEOUT_SECONDS,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> Iterator[ExecutionLeaseTransaction]:
+        """Hold the public cross-process lease across one execution transaction."""
+
+        _validate_task_id(task_id)
+        with self._lock:
+            self._assert_root_safe()
+            self._ensure_leases()
+        lease = self._task_lease(
+            task_id,
+            timeout_seconds=lease_timeout_seconds,
+            cancel_check=cancel_check,
+        )
+        lease.__enter__()
+        transaction = ExecutionLeaseTransaction(self, task_id, lease)
+        try:
+            yield transaction
+        finally:
+            transaction._active = False
+            lease.__exit__(None, None, None)
+
+    @contextmanager
     def execution_snapshot(
         self,
         task_id: str,
@@ -555,6 +608,7 @@ class DockingInputStager:
         *,
         lease_timeout_seconds: float = _DEFAULT_EXECUTION_LEASE_TIMEOUT_SECONDS,
         cancel_check: Callable[[], bool] | None = None,
+        transaction: ExecutionLeaseTransaction | None = None,
     ) -> Iterator[VerifiedDockingInputs]:
         """Yield immutable execution-local inputs while holding a task lease."""
 
@@ -565,12 +619,15 @@ class DockingInputStager:
         with self._lock:
             self._assert_root_safe()
             self._ensure_leases()
-        lease = self._task_lease(
-            task_id,
-            timeout_seconds=lease_timeout_seconds,
-            cancel_check=cancel_check,
-        )
-        lease.__enter__()
+        if transaction is None:
+            lease = self._task_lease(
+                task_id,
+                timeout_seconds=lease_timeout_seconds,
+                cancel_check=cancel_check,
+            )
+            lease.__enter__()
+        else:
+            transaction._validate(self, task_id)
         with self._lock:
             try:
                 self._cleanup_execution_residue(
@@ -583,7 +640,8 @@ class DockingInputStager:
                     manifest_path,
                 )
             except BaseException:
-                lease.__exit__(None, None, None)
+                if lease is not None:
+                    lease.__exit__(None, None, None)
                 raise
         body_error: BaseException | None = None
         try:

@@ -1385,6 +1385,50 @@ def test_active_execution_lease_blocks_cleanup_and_conflicting_stage(
     ) == ["task-1"]
 
 
+def test_public_task_execution_lease_composes_with_snapshot(
+    tmp_path: Path,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+
+    with stager.task_execution_lease("task-1") as transaction:
+        with stager.execution_snapshot(
+            "task-1",
+            path,
+            transaction=transaction,
+        ) as resolved:
+            assert resolved.verify_integrity() is True
+        with pytest.raises(ManifestError, match="manifest_busy"):
+            _stage_file(DockingInputStager(tmp_path))
+
+    assert not [
+        candidate
+        for candidate in path.parent.glob("executions/*")
+        if candidate.name != ".medchat-staging-owner"
+    ]
+
+
+def test_public_lease_preserves_snapshot_setup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+
+    def fail_snapshot(*_args: object, **_kwargs: object) -> object:
+        raise ManifestError("manifest_integrity_failed")
+
+    monkeypatch.setattr(stager, "_create_execution_snapshot", fail_snapshot)
+    with pytest.raises(ManifestError, match="manifest_integrity_failed"):
+        with stager.task_execution_lease("task-1") as transaction:
+            with stager.execution_snapshot(
+                "task-1",
+                path,
+                transaction=transaction,
+            ):
+                pytest.fail("snapshot setup unexpectedly succeeded")
+
+
 def test_execution_lease_acquisition_failure_is_fail_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

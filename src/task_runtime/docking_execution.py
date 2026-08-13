@@ -29,6 +29,7 @@ from .completion import (
     AUTHORITY_BLOCKED,
     AUTHORITY_COMMITTED,
     AUTHORITY_COMMITTED_AMBIGUOUS,
+    ArtifactCaptureAttempt,
     CompletionError,
     DockingCompletionManifest,
     DockingCompletionStore,
@@ -45,6 +46,9 @@ from .staging import (
 
 RawExecutor = Callable[..., ToolResult]
 _PENDING_COMPLETION_WAIT_SECONDS = 5.0
+_VINA_RESULT = re.compile(
+    rb"^REMARK VINA RESULT:\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)\s*$"
+)
 
 
 class _PreparedCompletionPending(RuntimeError):
@@ -58,9 +62,19 @@ class DockingExecution:
         self,
         root: str | os.PathLike[str],
         raw_executor: RawExecutor | None = None,
+        *,
+        allowed_output_root: str | os.PathLike[str] | None = None,
     ) -> None:
         self._stager = DockingInputStager(root)
         self._completions = DockingCompletionStore(root)
+        if raw_executor is not None and allowed_output_root is None:
+            raise ValueError("injected docking executor requires an allowed output root")
+        output_root = (
+            Path.cwd() / "temp_docking"
+            if allowed_output_root is None
+            else Path(allowed_output_root)
+        )
+        self._allowed_output_root = Path(os.path.abspath(output_root))
         self.raw_executor = raw_executor or self._execute_production_tool
 
     def __repr__(self) -> str:
@@ -92,25 +106,30 @@ class DockingExecution:
                 AgentErrorCode.INVALID_INPUT,
                 "A docking input manifest path is required.",
             )
-        pending_deadline = time.monotonic() + _PENDING_COMPLETION_WAIT_SECONDS
+        pending_deadline: float | None = None
         while True:
-            context = self._stager.execution_snapshot(
+            lease_context = self._stager.task_execution_lease(
                 task_id,
-                input_manifest,
                 lease_timeout_seconds=lease_timeout_seconds,
                 cancel_check=_cancel_check(cancel_event),
             )
             prepared: PreparedDockingCompletion | None = None
             try:
-                with context as inputs:
-                    outcome = self._run_under_lease(
-                        inputs,
-                        attempt=attempt,
-                        progress_callback=progress_callback,
-                        cancel_event=cancel_event,
-                    )
-                    if isinstance(outcome, PreparedDockingCompletion):
-                        prepared = outcome
+                with lease_context as transaction:
+                    with self._stager.execution_snapshot(
+                        task_id,
+                        input_manifest,
+                        cancel_check=_cancel_check(cancel_event),
+                        transaction=transaction,
+                    ) as inputs:
+                        outcome = self._run_under_lease(
+                            inputs,
+                            attempt=attempt,
+                            progress_callback=progress_callback,
+                            cancel_event=cancel_event,
+                        )
+                        if isinstance(outcome, PreparedDockingCompletion):
+                            prepared = outcome
                 if prepared is not None:
                     return self._finalize_prepared(
                         task_id,
@@ -121,6 +140,10 @@ class DockingExecution:
                     )
                 return outcome
             except _PreparedCompletionPending:
+                if pending_deadline is None:
+                    pending_deadline = (
+                        time.monotonic() + _PENDING_COMPLETION_WAIT_SECONDS
+                    )
                 if _is_cancelled(cancel_event) or time.monotonic() >= pending_deadline:
                     return _failure(
                         AgentErrorCode.INVALID_OUTPUT,
@@ -191,6 +214,7 @@ class DockingExecution:
         inputs.verify_integrity()
         input_hash = _input_hash(inputs)
         config_hash = inputs.config_hash
+        self._completions.cleanup_stale_artifact_attempts(inputs.task_id)
 
         if self._completions.has_invalidation_marker(inputs.task_id):
             return _failure(
@@ -296,13 +320,25 @@ class DockingExecution:
         inputs.verify_integrity()
 
         pose_source, pose_count, best_energy = _validated_scientific_values(validated)
-        result_metadata = self._safe_result_metadata(
-            validated,
-            inputs,
-            pose_source=pose_source,
-            sensitive_values=sensitive_values,
+        pose_job_root = self._allowed_output_root / f"docking_{inputs.task_id}"
+        pose_bytes, pose_sha256 = self._completions.read_authoritative_pose(
+            pose_source,
+            containment_root=pose_job_root,
         )
+        _validate_vina_pose_bytes(
+            pose_bytes,
+            expected_pose_count=pose_count,
+            expected_best_energy=best_energy,
+        )
+        artifact_attempt = self._completions.begin_artifact_attempt(inputs.task_id)
         try:
+            result_metadata = self._safe_result_metadata(
+                validated,
+                inputs,
+                pose_source=pose_source,
+                sensitive_values=sensitive_values,
+                artifact_attempt=artifact_attempt,
+            )
             return self._completions.prepare(
                 inputs.task_id,
                 input_hash=input_hash,
@@ -314,18 +350,17 @@ class DockingExecution:
                 fallback_used=provenance.fallback_used,
                 real_execution=True,
                 pose_source=pose_source,
+                pose_containment_root=pose_job_root,
+                expected_pose_sha256=pose_sha256,
                 pose_count=pose_count,
                 best_energy=best_energy,
                 validator_status="succeeded",
                 attempt=attempt,
                 result_metadata=result_metadata,
+                artifact_attempt=artifact_attempt,
             )
-        except BaseException:
-            self._completions.discard_additional_artifacts(
-                inputs.task_id,
-                result_metadata.artifacts,
-            )
-            raise
+        finally:
+            self._completions.discard_artifact_attempt(artifact_attempt)
 
     def _safe_result_metadata(
         self,
@@ -334,6 +369,7 @@ class DockingExecution:
         *,
         pose_source: Path,
         sensitive_values: tuple[str, ...],
+        artifact_attempt: ArtifactCaptureAttempt,
     ) -> DockingResultMetadata:
         warnings = _safe_warnings(result.warnings, sensitive_values)
         evidence = _safe_evidence(result.evidence, sensitive_values)
@@ -351,7 +387,7 @@ class DockingExecution:
                 omitted_artifact = True
                 continue
             record = self._completions.capture_additional_artifact(
-                inputs.task_id,
+                artifact_attempt,
                 artifact_index=artifact_index,
                 path=artifact.path,
             )
@@ -395,12 +431,6 @@ class DockingExecution:
         lease_timeout_seconds: float,
         cancel_event: Any,
     ) -> dict[str, Any]:
-        lease = self._stager._task_lease(
-            task_id,
-            timeout_seconds=lease_timeout_seconds,
-            cancel_check=_cancel_check(cancel_event),
-        )
-        lease.__enter__()
         committed = False
         completion: DockingCompletionManifest | None = None
         durability_synced = False
@@ -410,21 +440,6 @@ class DockingExecution:
         authority_unavailable_variants: dict[tuple[bool, bool], dict[str, Any]] = {}
         authority_ambiguous_variants: dict[tuple[bool, bool], dict[str, Any]] = {}
         try:
-            manifest = self._stager.load_verified(task_id, input_manifest)
-            if (
-                _manifest_input_hash(manifest) != prepared.completion.input_hash
-                or manifest["config_hash"] != prepared.completion.config_hash
-            ):
-                raise ManifestError("manifest_integrity_failed")
-            if _is_cancelled(cancel_event):
-                self._completions.abort(prepared)
-                cancelled = _failure(
-                    AgentErrorCode.CANCELLED,
-                    "Docking execution was cancelled before artifact commit.",
-                    status=ObservationStatus.CANCELLED,
-                )
-                lease.__exit__(None, None, None)
-                return cancelled
             response_variants = {
                 (True, False): _trusted_result(
                     prepared.completion,
@@ -556,21 +571,31 @@ class DockingExecution:
                     },
                 ),
             }
-            completion, durability_synced, authority_state = (
-                self._completions.finalize(prepared)
-            )
-            committed = True
+            with self._stager.task_execution_lease(
+                task_id,
+                lease_timeout_seconds=lease_timeout_seconds,
+                cancel_check=_cancel_check(cancel_event),
+            ):
+                manifest = self._stager.load_verified(task_id, input_manifest)
+                if (
+                    _manifest_input_hash(manifest) != prepared.completion.input_hash
+                    or manifest["config_hash"] != prepared.completion.config_hash
+                ):
+                    raise ManifestError("manifest_integrity_failed")
+                if _is_cancelled(cancel_event):
+                    self._completions.abort(prepared)
+                    return _failure(
+                        AgentErrorCode.CANCELLED,
+                        "Docking execution was cancelled before artifact commit.",
+                        status=ObservationStatus.CANCELLED,
+                    )
+                completion, durability_synced, authority_state = (
+                    self._completions.finalize(prepared)
+                )
+                committed = True
         except BaseException:
-            self._completions.abort(prepared)
-            try:
-                lease.__exit__(None, None, None)
-            except Exception:
-                pass
-            raise
-        try:
-            lease.__exit__(None, None, None)
-        except Exception:
             if not committed or completion is None:
+                self._completions.abort(prepared)
                 raise
             if authority_state not in {
                 AUTHORITY_COMMITTED,
@@ -629,22 +654,14 @@ class DockingExecution:
         *,
         lease_timeout_seconds: float,
     ) -> None:
-        lease = None
         try:
-            lease = self._stager._task_lease(
+            with self._stager.task_execution_lease(
                 task_id,
-                timeout_seconds=lease_timeout_seconds,
-            )
-            lease.__enter__()
-            self._completions.abort(prepared)
+                lease_timeout_seconds=lease_timeout_seconds,
+            ):
+                self._completions.abort(prepared)
         except (ManifestError, CompletionError, OSError, RuntimeError):
             return
-        finally:
-            if lease is not None and lease.acquired:
-                try:
-                    lease.__exit__(None, None, None)
-                except (ManifestError, OSError, RuntimeError):
-                    pass
 
 
 def _build_payload(inputs: VerifiedDockingInputs) -> dict[str, Any]:
@@ -754,6 +771,66 @@ def _validated_scientific_values(result: ToolResult) -> tuple[Path, int, float]:
     if not isinstance(pose_value, (str, os.PathLike)):
         raise CompletionError("completion_artifact_invalid")
     return Path(pose_value), pose_count, float(energy)
+
+
+def _validate_vina_pose_bytes(
+    content: bytes,
+    *,
+    expected_pose_count: int,
+    expected_best_energy: float,
+) -> None:
+    try:
+        lines = content.splitlines()
+    except (AttributeError, MemoryError):
+        raise CompletionError("completion_artifact_invalid") from None
+    models = 0
+    energies: list[float] = []
+    in_model = False
+    model_has_atom = False
+    model_energy: float | None = None
+    for line in lines:
+        if line.startswith(b"MODEL"):
+            if in_model or line.split() != [b"MODEL", str(models + 1).encode("ascii")]:
+                raise CompletionError("completion_artifact_invalid")
+            models += 1
+            in_model = True
+            model_has_atom = False
+            model_energy = None
+            continue
+        if line == b"ENDMDL":
+            if not in_model or not model_has_atom or model_energy is None:
+                raise CompletionError("completion_artifact_invalid")
+            energies.append(model_energy)
+            in_model = False
+            continue
+        if not in_model:
+            if line.strip():
+                raise CompletionError("completion_artifact_invalid")
+            continue
+        match = _VINA_RESULT.fullmatch(line)
+        if match is not None:
+            if model_energy is not None:
+                raise CompletionError("completion_artifact_invalid")
+            try:
+                values = tuple(float(item) for item in match.groups())
+            except (OverflowError, ValueError):
+                raise CompletionError("completion_artifact_invalid") from None
+            if not all(math.isfinite(item) for item in values):
+                raise CompletionError("completion_artifact_invalid")
+            model_energy = values[0]
+        elif line.startswith((b"ATOM  ", b"HETATM")):
+            model_has_atom = True
+    if in_model or models == 0 or len(energies) != models:
+        raise CompletionError("completion_artifact_invalid")
+    if models != expected_pose_count:
+        raise CompletionError("completion_artifact_invalid")
+    if not math.isclose(
+        min(energies),
+        expected_best_energy,
+        rel_tol=0.0,
+        abs_tol=1e-3,
+    ):
+        raise CompletionError("completion_artifact_invalid")
 
 
 def _input_hash(inputs: VerifiedDockingInputs) -> str:
