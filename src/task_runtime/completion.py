@@ -361,7 +361,7 @@ class DockingCompletionStore:
                 raise CompletionError("completion_artifact_invalid")
         return completion
 
-    def invalidate_published(self, task_id: str) -> bool:
+    def invalidate_published(self, task_id: str) -> tuple[bool, bool]:
         """Persistently block reuse, then best-effort quarantine the manifest."""
 
         task_root = self._task_root(task_id)
@@ -371,11 +371,11 @@ class DockingCompletionStore:
         try:
             manifest_path.lstat()
         except FileNotFoundError:
-            return marker_persisted
+            return marker_persisted, True
         except OSError:
-            return False
+            return marker_persisted, False
         quarantined = _isolate_untrusted_manifest(manifest_path, task_root)
-        return quarantined
+        return marker_persisted, quarantined
 
     def discard_additional_artifacts(
         self,

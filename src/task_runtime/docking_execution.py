@@ -402,6 +402,7 @@ class DockingExecution:
         completion: DockingCompletionManifest | None = None
         durability_synced = False
         response_variants: dict[tuple[bool, bool], dict[str, Any]] = {}
+        unavailable_variants: dict[bool, dict[str, Any]] = {}
         try:
             manifest = self._stager.load_verified(task_id, input_manifest)
             if (
@@ -442,6 +443,27 @@ class DockingExecution:
                     ],
                 ),
             }
+            unavailable_variants = {
+                True: _trusted_result(
+                    prepared.completion,
+                    reused=False,
+                    extra_warnings=[
+                        "completion_post_commit_verification_unavailable",
+                        "completion_lease_release_unconfirmed",
+                    ],
+                    extra_quality={"completion_durability": "uncertain"},
+                ),
+                False: _trusted_result(
+                    prepared.completion,
+                    reused=False,
+                    extra_warnings=[
+                        "completion_directory_sync_unconfirmed",
+                        "completion_post_commit_verification_unavailable",
+                        "completion_lease_release_unconfirmed",
+                    ],
+                    extra_quality={"completion_durability": "uncertain"},
+                ),
+            }
             completion, durability_synced = self._completions.finalize(prepared)
             committed = True
         except BaseException:
@@ -466,20 +488,25 @@ class DockingExecution:
                     raise CompletionError("completion_schema_invalid")
             except Exception:
                 try:
-                    isolated = self._completions.invalidate_published(task_id)
+                    marker_persisted, quarantined = (
+                        self._completions.invalidate_published(task_id)
+                    )
                 except Exception:
-                    isolated = False
+                    marker_persisted = False
+                    quarantined = False
+                if not marker_persisted and not quarantined:
+                    return unavailable_variants[durability_synced]
                 return _failure(
                     AgentErrorCode.INVALID_OUTPUT,
                     (
                         "Docking completion ownership is uncertain."
-                        if not isolated
+                        if not quarantined
                         else "Docking completion could not be strictly reverified."
                     ),
                     details={
                         "reason": (
                             "ownership_uncertain"
-                            if not isolated
+                            if not quarantined
                             else "completion_invalidated"
                         )
                     },
@@ -801,6 +828,7 @@ def _trusted_result(
     *,
     reused: bool,
     extra_warnings: list[str] | None = None,
+    extra_quality: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     relative_pose = completion.pose.path
     metadata = completion.result_metadata
@@ -848,6 +876,7 @@ def _trusted_result(
             "validator_status": completion.validator_status,
             "completion_schema": completion.schema,
             "attempt": completion.attempt,
+            **(extra_quality or {}),
         },
         provenance=ToolProvenance(
             tool_name="molecular_docking",

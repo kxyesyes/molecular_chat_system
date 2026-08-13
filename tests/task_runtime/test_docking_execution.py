@@ -1405,3 +1405,73 @@ def test_unverifiable_commit_persists_tombstone_when_quarantine_fails(
     assert second["success"] is False
     assert second["reused_completion"] is False
     assert len(calls) == 1
+
+
+def test_confirmed_commit_remains_success_when_all_post_commit_storage_checks_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.completion as completion_module
+    import src.task_runtime.staging as staging_module
+
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    real_release = staging_module._TaskLease.release
+    real_load = completion_module.DockingCompletionStore.load_verified
+
+    def release_then_raise(lease: Any) -> None:
+        real_release(lease)
+        if _completion(tmp_path).exists():
+            raise OSError("lease release status unavailable")
+
+    def fail_published_load(
+        store: Any,
+        task_id: str,
+        *,
+        input_hash: str,
+        config_hash: str,
+    ) -> Any:
+        if store.manifest_path(task_id).exists():
+            raise completion_module.CompletionError("completion_io_error")
+        return real_load(
+            store,
+            task_id,
+            input_hash=input_hash,
+            config_hash=config_hash,
+        )
+
+    monkeypatch.setattr(staging_module._TaskLease, "release", release_then_raise)
+    monkeypatch.setattr(
+        completion_module.DockingCompletionStore,
+        "load_verified",
+        fail_published_load,
+    )
+    monkeypatch.setattr(
+        completion_module,
+        "_persist_invalidation_marker",
+        lambda _path, _parent: False,
+    )
+    monkeypatch.setattr(
+        completion_module,
+        "_isolate_untrusted_manifest",
+        lambda _path, _parent: False,
+    )
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
+    first = runner.run_verified("task-1", manifest)
+
+    monkeypatch.setattr(staging_module._TaskLease, "release", real_release)
+    monkeypatch.setattr(
+        completion_module.DockingCompletionStore,
+        "load_verified",
+        real_load,
+    )
+    reused = runner.run_verified("task-1", manifest)
+
+    assert first["success"] is True
+    assert first["reused_completion"] is False
+    assert "completion_post_commit_verification_unavailable" in first["warnings"]
+    assert "completion_lease_release_unconfirmed" in first["warnings"]
+    assert first["quality"]["completion_durability"] == "uncertain"
+    assert reused["success"] is True
+    assert reused["reused_completion"] is True
+    assert len(calls) == 1
