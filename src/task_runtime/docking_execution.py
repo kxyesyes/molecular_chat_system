@@ -7,8 +7,9 @@ import hashlib
 import json
 import math
 import os
+import re
 import stat
-from contextlib import nullcontext
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -19,6 +20,7 @@ from src.agent.contracts import (
     ToolResult,
     WorkflowArtifact,
 )
+from src.agent.persistence.redaction import looks_like_credential, redact_sensitive
 from src.agent.tools.base_tool import execute_tool_compat
 from src.agent.tools.molecular_docking import MolecularDocking
 from src.agent.validators.result_validator import AgentResultValidator
@@ -27,6 +29,8 @@ from .completion import (
     CompletionError,
     DockingCompletionManifest,
     DockingCompletionStore,
+    DockingResultMetadata,
+    PreparedDockingCompletion,
 )
 from .staging import (
     MAX_SMILES_BYTES,
@@ -37,6 +41,11 @@ from .staging import (
 
 
 RawExecutor = Callable[..., ToolResult]
+_PENDING_COMPLETION_WAIT_SECONDS = 5.0
+
+
+class _PreparedCompletionPending(RuntimeError):
+    pass
 
 
 class DockingExecution:
@@ -49,7 +58,6 @@ class DockingExecution:
     ) -> None:
         self._stager = DockingInputStager(root)
         self._completions = DockingCompletionStore(root)
-        self._root = self._stager._root
         self.raw_executor = raw_executor or self._execute_production_tool
 
     def __repr__(self) -> str:
@@ -57,12 +65,25 @@ class DockingExecution:
 
     @staticmethod
     def _execute_production_tool(payload: Mapping[str, Any], **control: Any) -> ToolResult:
-        return execute_tool_compat(MolecularDocking(), payload, **control)
+        result = execute_tool_compat(MolecularDocking(), payload, **control)
+        if (
+            isinstance(result, ToolResult)
+            and result.success
+            and result.provenance is None
+            and result.quality.get("real_execution") is True
+        ):
+            result.provenance = ToolProvenance(
+                tool_name="molecular_docking",
+                tool_version="1",
+                demo_mode=False,
+                fallback_used=False,
+            )
+        return result
 
     def run_verified(
         self,
         task_id: str,
-        input_manifest: str | os.PathLike[str] | VerifiedDockingInputs,
+        input_manifest: str | os.PathLike[str],
         *,
         attempt: int = 1,
         progress_callback: Callable[..., Any] | None = None,
@@ -76,65 +97,98 @@ class DockingExecution:
                 AgentErrorCode.INVALID_INPUT,
                 "Docking execution attempt is invalid.",
             )
-        if isinstance(input_manifest, VerifiedDockingInputs):
-            expected_manifest = self._root / task_id / "input_manifest.json"
-            if (
-                input_manifest.task_id != task_id
-                or input_manifest.manifest_path != expected_manifest
-            ):
-                return _failure(
-                    AgentErrorCode.INVALID_INPUT,
-                    "Docking input identity does not match the task.",
-                )
-            context = nullcontext(input_manifest)
-        elif isinstance(input_manifest, (str, os.PathLike)):
+        if not isinstance(input_manifest, (str, os.PathLike)):
+            return _failure(
+                AgentErrorCode.INVALID_INPUT,
+                "A docking input manifest path is required.",
+            )
+        pending_deadline = time.monotonic() + _PENDING_COMPLETION_WAIT_SECONDS
+        while True:
             context = self._stager.execution_snapshot(
                 task_id,
                 input_manifest,
                 lease_timeout_seconds=lease_timeout_seconds,
                 cancel_check=_cancel_check(cancel_event),
             )
-        else:
-            return _failure(
-                AgentErrorCode.INVALID_INPUT,
-                "A verified docking input manifest is required.",
-            )
-
-        try:
-            with context as inputs:
-                return self._run_under_lease(
-                    inputs,
-                    attempt=attempt,
-                    progress_callback=progress_callback,
-                    cancel_event=cancel_event,
+            prepared: PreparedDockingCompletion | None = None
+            try:
+                with context as inputs:
+                    outcome = self._run_under_lease(
+                        inputs,
+                        attempt=attempt,
+                        progress_callback=progress_callback,
+                        cancel_event=cancel_event,
+                    )
+                    if isinstance(outcome, PreparedDockingCompletion):
+                        prepared = outcome
+                if prepared is not None:
+                    return self._finalize_prepared(
+                        task_id,
+                        input_manifest,
+                        prepared,
+                        lease_timeout_seconds=lease_timeout_seconds,
+                        cancel_event=cancel_event,
+                    )
+                return outcome
+            except _PreparedCompletionPending:
+                if _is_cancelled(cancel_event) or time.monotonic() >= pending_deadline:
+                    return _failure(
+                        AgentErrorCode.INVALID_OUTPUT,
+                        "Docking completion verification failed.",
+                    )
+                time.sleep(0.02)
+                continue
+            except ManifestError:
+                if prepared is not None:
+                    self._abort_prepared(
+                        task_id,
+                        prepared,
+                        lease_timeout_seconds=lease_timeout_seconds,
+                    )
+                if _is_cancelled(cancel_event):
+                    return _failure(
+                        AgentErrorCode.CANCELLED,
+                        "Docking execution was cancelled before verification completed.",
+                        status=ObservationStatus.CANCELLED,
+                    )
+                return _failure(
+                    AgentErrorCode.INVALID_INPUT,
+                    "Docking input verification failed.",
                 )
-        except ManifestError:
-            if _is_cancelled(cancel_event):
+            except CompletionError:
+                if prepared is not None:
+                    self._abort_prepared(
+                        task_id,
+                        prepared,
+                        lease_timeout_seconds=lease_timeout_seconds,
+                    )
+                return _failure(
+                    AgentErrorCode.INVALID_OUTPUT,
+                    "Docking completion verification failed.",
+                )
+            except asyncio.CancelledError:
+                if prepared is not None:
+                    self._abort_prepared(
+                        task_id,
+                        prepared,
+                        lease_timeout_seconds=lease_timeout_seconds,
+                    )
                 return _failure(
                     AgentErrorCode.CANCELLED,
-                    "Docking execution was cancelled before verification completed.",
+                    "Docking execution was cancelled.",
                     status=ObservationStatus.CANCELLED,
                 )
-            return _failure(
-                AgentErrorCode.INVALID_INPUT,
-                "Docking input verification failed.",
-            )
-        except CompletionError:
-            return _failure(
-                AgentErrorCode.INVALID_OUTPUT,
-                "Docking completion verification failed.",
-            )
-        except asyncio.CancelledError:
-            return _failure(
-                AgentErrorCode.CANCELLED,
-                "Docking execution was cancelled.",
-                status=ObservationStatus.CANCELLED,
-            )
-        except Exception:
-            return _failure(
-                AgentErrorCode.INTERNAL_ERROR,
-                "Docking execution failed before a verified result was produced.",
-            )
+            except Exception:
+                if prepared is not None:
+                    self._abort_prepared(
+                        task_id,
+                        prepared,
+                        lease_timeout_seconds=lease_timeout_seconds,
+                    )
+                return _failure(
+                    AgentErrorCode.INTERNAL_ERROR,
+                    "Docking execution failed before a verified result was produced.",
+                )
 
     def _run_under_lease(
         self,
@@ -143,7 +197,7 @@ class DockingExecution:
         attempt: int,
         progress_callback: Callable[..., Any] | None,
         cancel_event: Any,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | PreparedDockingCompletion:
         inputs.verify_integrity()
         input_hash = _input_hash(inputs)
         config_hash = inputs.config_hash
@@ -155,9 +209,21 @@ class DockingExecution:
                 config_hash=config_hash,
             )
             inputs.verify_integrity()
+            reuse_payload = _build_payload(inputs)
+            try:
+                if not _safe_provenance_identifiers(
+                    _completion_provenance(completion),
+                    _sensitive_values(inputs, reuse_payload),
+                ):
+                    return _failure(
+                        AgentErrorCode.INVALID_OUTPUT,
+                        "Docking completion provenance failed verification.",
+                    )
+            finally:
+                reuse_payload.clear()
             return _trusted_result(completion, reused=True)
         if self._completions.has_artifact_residue(inputs.task_id):
-            raise CompletionError("completion_conflict")
+            raise _PreparedCompletionPending()
         if _is_cancelled(cancel_event):
             return _failure(
                 AgentErrorCode.CANCELLED,
@@ -166,6 +232,7 @@ class DockingExecution:
             )
 
         payload = _build_payload(inputs)
+        sensitive_values = _sensitive_values(inputs, payload)
         try:
             tool_result = self.raw_executor(
                 payload,
@@ -211,6 +278,19 @@ class DockingExecution:
                 AgentErrorCode.INVALID_OUTPUT,
                 "Docking evidence failed scientific validation.",
             )
+        provenance = validated.provenance
+        if (
+            provenance is None
+            or provenance.tool_name != "molecular_docking"
+            or provenance.demo_mode is not False
+            or provenance.fallback_used is not False
+            or validated.quality.get("real_execution") is not True
+            or not _safe_provenance_identifiers(provenance, sensitive_values)
+        ):
+            return _failure(
+                AgentErrorCode.INVALID_OUTPUT,
+                "Docking result lacks trusted real-execution provenance.",
+            )
         if _is_cancelled(cancel_event):
             return _failure(
                 AgentErrorCode.CANCELLED,
@@ -220,23 +300,149 @@ class DockingExecution:
         inputs.verify_integrity()
 
         pose_source, pose_count, best_energy = _validated_scientific_values(validated)
-        tool_version = (
-            validated.provenance.tool_version
-            if validated.provenance is not None
-            else "1"
+        result_metadata = self._safe_result_metadata(
+            validated,
+            inputs,
+            pose_source=pose_source,
+            sensitive_values=sensitive_values,
         )
-        completion = self._completions.commit(
+        return self._completions.prepare(
             inputs.task_id,
             input_hash=input_hash,
             config_hash=config_hash,
-            tool_version=tool_version,
+            tool_version=provenance.tool_version,
+            model_name=provenance.model_name,
+            model_version=provenance.model_version,
+            demo_mode=provenance.demo_mode,
+            fallback_used=provenance.fallback_used,
+            real_execution=True,
             pose_source=pose_source,
             pose_count=pose_count,
             best_energy=best_energy,
             validator_status="succeeded",
             attempt=attempt,
+            result_metadata=result_metadata,
         )
-        return _trusted_result(completion, reused=False)
+
+    def _safe_result_metadata(
+        self,
+        result: ToolResult,
+        inputs: VerifiedDockingInputs,
+        *,
+        pose_source: Path,
+        sensitive_values: tuple[str, ...],
+    ) -> DockingResultMetadata:
+        warnings = _safe_warnings(result.warnings, sensitive_values)
+        evidence = _safe_evidence(result.evidence, sensitive_values)
+        artifacts = []
+        omitted_artifact = False
+        for artifact in result.artifacts[:9]:
+            try:
+                artifact_path = Path(artifact.path)
+                if artifact_path.resolve(strict=False) == pose_source.resolve(strict=False):
+                    continue
+            except (OSError, RuntimeError, TypeError, ValueError):
+                omitted_artifact = True
+                continue
+            record = self._completions.capture_additional_artifact(
+                inputs.task_id,
+                artifact_type=_sanitize_identifier(artifact.artifact_type, 64),
+                path=artifact.path,
+                label=_sanitize_text(artifact.label, sensitive_values, 128),
+                mime_type=artifact.mime_type,
+                metadata=_safe_artifact_metadata(
+                    artifact.metadata,
+                    sensitive_values,
+                ),
+            )
+            if record is None or len(artifacts) >= 8:
+                omitted_artifact = True
+                continue
+            artifacts.append(record)
+        if omitted_artifact and "additional_artifact_omitted" not in warnings:
+            warnings = warnings[:31] + ["additional_artifact_omitted"]
+
+        elapsed_ms = result.elapsed_ms
+        if (
+            type(elapsed_ms) is not int
+            or not 0 <= elapsed_ms <= 7 * 24 * 60 * 60 * 1000
+        ):
+            elapsed_ms = None
+        return DockingResultMetadata(
+            elapsed_ms=elapsed_ms,
+            formatted=_sanitize_text(result.formatted, sensitive_values, 2048),
+            warnings=warnings,
+            evidence=evidence,
+            artifacts=artifacts,
+            quality={
+                "real_execution": True,
+                "engine": _safe_optional_text(
+                    result.quality.get("engine"), sensitive_values, 128
+                ),
+                "execution_status": _safe_optional_text(
+                    result.quality.get("execution_status"), sensitive_values, 128
+                ),
+                "validated": bool(result.quality.get("validated")),
+            },
+        )
+
+    def _finalize_prepared(
+        self,
+        task_id: str,
+        input_manifest: str | os.PathLike[str],
+        prepared: PreparedDockingCompletion,
+        *,
+        lease_timeout_seconds: float,
+        cancel_event: Any,
+    ) -> dict[str, Any]:
+        lease = self._stager._task_lease(
+            task_id,
+            timeout_seconds=lease_timeout_seconds,
+            cancel_check=_cancel_check(cancel_event),
+        )
+        lease.__enter__()
+        try:
+            manifest = self._stager.load_verified(task_id, input_manifest)
+            if (
+                _manifest_input_hash(manifest) != prepared.completion.input_hash
+                or manifest["config_hash"] != prepared.completion.config_hash
+            ):
+                raise ManifestError("manifest_integrity_failed")
+            if _is_cancelled(cancel_event):
+                self._completions.abort(prepared)
+                return _failure(
+                    AgentErrorCode.CANCELLED,
+                    "Docking execution was cancelled before artifact commit.",
+                    status=ObservationStatus.CANCELLED,
+                )
+            completion = self._completions.finalize(prepared)
+            return _trusted_result(completion, reused=False)
+        except BaseException:
+            self._completions.abort(prepared)
+            raise
+        finally:
+            lease.__exit__(None, None, None)
+
+    def _abort_prepared(
+        self,
+        task_id: str,
+        prepared: PreparedDockingCompletion,
+        *,
+        lease_timeout_seconds: float,
+    ) -> None:
+        lease = None
+        try:
+            lease = self._stager._task_lease(
+                task_id,
+                timeout_seconds=lease_timeout_seconds,
+            )
+            lease.__enter__()
+            self._completions.abort(prepared)
+        except (ManifestError, CompletionError, OSError, RuntimeError):
+            return
+        finally:
+            if lease is not None and lease.acquired:
+                lease.__exit__(None, None, None)
 
 
 def _build_payload(inputs: VerifiedDockingInputs) -> dict[str, Any]:
@@ -369,12 +575,207 @@ def _input_hash(inputs: VerifiedDockingInputs) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _manifest_input_hash(manifest: Mapping[str, Any]) -> str:
+    identity = {
+        "ligand": {
+            "mode": manifest["ligand_mode"],
+            "sha256": manifest["ligand"]["sha256"],
+            "size": manifest["ligand"]["size"],
+        },
+        "receptor": {
+            "sha256": manifest["receptor"]["sha256"],
+            "size": manifest["receptor"]["size"],
+        },
+    }
+    encoded = json.dumps(
+        identity,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _sensitive_values(
+    inputs: VerifiedDockingInputs,
+    payload: Mapping[str, Any],
+) -> tuple[str, ...]:
+    values = {
+        str(inputs.manifest_path),
+        str(inputs.manifest_path.parent),
+        str(inputs.receptor_path),
+        str(inputs.ligand_path),
+    }
+    smiles = payload.get("smiles")
+    if isinstance(smiles, str) and smiles:
+        values.add(smiles)
+    return tuple(sorted(values, key=len, reverse=True))
+
+
+def _sanitize_text(value: Any, secrets: tuple[str, ...], limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    sanitized = value
+    for secret in secrets:
+        if secret:
+            sanitized = sanitized.replace(secret, "[REDACTED]")
+    sanitized = re.sub(
+        r"(?i)(?<![A-Za-z0-9])[A-Z]:[\\/][^\s;,]*",
+        "[REDACTED]",
+        sanitized,
+    )
+    sanitized = re.sub(
+        r"(?<![A-Za-z0-9])/(?:[^/\s;,]+/)*[^/\s;,]*",
+        "[REDACTED]",
+        sanitized,
+    )
+    redacted = redact_sensitive(sanitized)
+    sanitized = redacted if isinstance(redacted, str) else "[REDACTED]"
+    sanitized = "".join(
+        character
+        if ord(character) >= 32 or character in "\n\t"
+        else " "
+        for character in sanitized
+    ).strip()
+    return sanitized[:limit]
+
+
+def _safe_optional_text(
+    value: Any,
+    secrets: tuple[str, ...],
+    limit: int,
+) -> str | None:
+    sanitized = _sanitize_text(value, secrets, limit)
+    return sanitized or None
+
+
+def _sanitize_identifier(value: Any, limit: int) -> str:
+    if not isinstance(value, str):
+        return "file"
+    sanitized = re.sub(r"[^A-Za-z0-9._:+-]", "_", value)[:limit]
+    if not sanitized or not sanitized[0].isalnum():
+        return "file"
+    return sanitized
+
+
+def _safe_warnings(values: Any, secrets: tuple[str, ...]) -> list[str]:
+    warnings: list[str] = []
+    for value in values if isinstance(values, list) else []:
+        warning = _sanitize_text(value, secrets, 256)
+        if warning and warning not in warnings:
+            warnings.append(warning)
+        if len(warnings) == 32:
+            break
+    return warnings
+
+
+def _safe_evidence(values: Any, secrets: tuple[str, ...]) -> list[dict[str, Any]]:
+    allowed = {
+        "source",
+        "description",
+        "method",
+        "version",
+        "identifier",
+        "type",
+        "label",
+        "sha256",
+    }
+    evidence: list[dict[str, Any]] = []
+    for value in values if isinstance(values, list) else []:
+        if not isinstance(value, dict):
+            continue
+        record: dict[str, Any] = {}
+        for key in allowed:
+            item = value.get(key)
+            if isinstance(item, str):
+                item = _sanitize_text(item, secrets, 256)
+                if item:
+                    record[key] = item
+            elif type(item) in (int, float) and math.isfinite(float(item)):
+                record[key] = item
+            elif type(item) is bool:
+                record[key] = item
+        if record:
+            evidence.append(record)
+        if len(evidence) == 32:
+            break
+    return evidence
+
+
+def _safe_artifact_metadata(
+    value: Any,
+    secrets: tuple[str, ...],
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    metadata: dict[str, Any] = {}
+    for key in ("kind", "method", "version"):
+        item = _sanitize_text(value.get(key), secrets, 128)
+        if item:
+            metadata[key] = item
+    sha256 = value.get("sha256")
+    if isinstance(sha256, str) and re.fullmatch(r"[0-9a-f]{64}", sha256):
+        metadata["sha256"] = sha256
+    return metadata
+
+
+def _safe_provenance_identifiers(
+    provenance: ToolProvenance,
+    secrets: tuple[str, ...],
+) -> bool:
+    for value in (
+        provenance.tool_version,
+        provenance.model_name,
+        provenance.model_version,
+    ):
+        if value is None:
+            continue
+        if looks_like_credential(value):
+            return False
+        if any(secret and secret in value for secret in secrets):
+            return False
+    return True
+
+
+def _completion_provenance(
+    completion: DockingCompletionManifest,
+) -> ToolProvenance:
+    return ToolProvenance(
+        tool_name="molecular_docking",
+        tool_version=completion.tool_version,
+        model_name=completion.model_name,
+        model_version=completion.model_version,
+        demo_mode=completion.demo_mode,
+        fallback_used=completion.fallback_used,
+    )
+
+
 def _trusted_result(
     completion: DockingCompletionManifest,
     *,
     reused: bool,
 ) -> dict[str, Any]:
     relative_pose = completion.pose.path
+    metadata = completion.result_metadata
+    artifacts = [
+        WorkflowArtifact(
+            artifact_type="docking_pose",
+            path=relative_pose,
+            label="Verified docking pose",
+            mime_type="chemical/x-pdbqt",
+            metadata={"sha256": completion.pose.sha256},
+        )
+    ]
+    artifacts.extend(
+        WorkflowArtifact(
+            artifact_type=artifact.artifact_type,
+            path=artifact.path,
+            label=artifact.label,
+            mime_type=artifact.mime_type,
+            metadata=dict(artifact.metadata),
+        )
+        for artifact in metadata.artifacts
+    )
     result = ToolResult.success_result(
         "molecular_docking",
         message=(
@@ -390,17 +791,13 @@ def _trusted_result(
                 "pose_file": relative_pose,
             },
         },
-        artifacts=[
-            WorkflowArtifact(
-                artifact_type="docking_pose",
-                path=relative_pose,
-                label="Verified docking pose",
-                mime_type="chemical/x-pdbqt",
-                metadata={"sha256": completion.pose.sha256},
-            )
-        ],
+        formatted=metadata.formatted,
+        elapsed_ms=metadata.elapsed_ms,
+        warnings=list(metadata.warnings),
+        evidence=[dict(record) for record in metadata.evidence],
+        artifacts=artifacts,
         quality={
-            "validated": True,
+            **metadata.quality,
             "validator_status": completion.validator_status,
             "completion_schema": completion.schema,
             "attempt": completion.attempt,
@@ -408,8 +805,10 @@ def _trusted_result(
         provenance=ToolProvenance(
             tool_name="molecular_docking",
             tool_version=completion.tool_version,
-            demo_mode=False,
-            fallback_used=False,
+            model_name=completion.model_name,
+            model_version=completion.model_version,
+            demo_mode=completion.demo_mode,
+            fallback_used=completion.fallback_used,
             input_digest=completion.input_hash,
             output_digest=completion.pose.sha256,
         ),

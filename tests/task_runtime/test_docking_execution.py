@@ -17,6 +17,7 @@ from src.agent.contracts import (
     ObservationStatus,
     ToolProvenance,
     ToolResult,
+    WorkflowArtifact,
 )
 from src.task_runtime.docking_execution import DockingExecution
 from src.task_runtime.staging import (
@@ -33,6 +34,7 @@ CONFIG = {
     "num_modes": 10,
 }
 SECRET_SMILES = "CC(=O)Oc1ccccc1C(=O)O"
+_DEFAULT_PROVENANCE = object()
 
 
 def _stage(
@@ -59,6 +61,7 @@ def _executor(
     energy: Any = -7.2,
     pose_count: Any = 1,
     quality: dict[str, Any] | None = None,
+    provenance: ToolProvenance | None | object = _DEFAULT_PROVENANCE,
     delay: float = 0.0,
 ):
     def execute(payload: dict[str, Any], **control: Any) -> ToolResult:
@@ -79,7 +82,9 @@ def _executor(
                 },
             },
             quality=quality
-            or {
+            if quality is not None
+            else {
+                "real_execution": True,
                 "docking_inputs": {
                     "receptor_provided": True,
                     "ligand_provided": True,
@@ -88,9 +93,13 @@ def _executor(
                     "size": [20, 20, 20],
                 }
             },
-            provenance=ToolProvenance(
-                tool_name="molecular_docking",
-                tool_version="vina-test-1",
+            provenance=(
+                ToolProvenance(
+                    tool_name="molecular_docking",
+                    tool_version="vina-test-1",
+                )
+                if provenance is _DEFAULT_PROVENANCE
+                else provenance
             ),
         )
 
@@ -122,6 +131,7 @@ def _run_in_process(root: str, manifest: str, results: Any) -> None:
                 "pose_file": str(pose),
                 "best_pose": {"binding_energy": -7.2, "pose_file": str(pose)},
             },
+            quality={"real_execution": True},
             provenance=ToolProvenance(
                 tool_name="molecular_docking",
                 tool_version="vina-test-1",
@@ -133,6 +143,167 @@ def _run_in_process(root: str, manifest: str, results: Any) -> None:
         manifest,
     )
     results.put((result["success"], result["reused_completion"]))
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [
+        ToolProvenance(
+            tool_name="molecular_docking",
+            tool_version="vina-test-1",
+            demo_mode=True,
+        ),
+        ToolProvenance(
+            tool_name="molecular_docking",
+            tool_version="vina-test-1",
+            fallback_used=True,
+        ),
+    ],
+    ids=["demo", "fallback"],
+)
+def test_demo_or_fallback_provenance_is_rejected_without_forgery(
+    tmp_path: Path,
+    provenance: ToolProvenance,
+) -> None:
+    manifest = _stage(tmp_path)
+
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=_executor(tmp_path, [], provenance=provenance),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert result["provenance"] is None
+    assert not _completion(tmp_path).exists()
+
+
+@pytest.mark.parametrize(
+    ("provenance", "quality"),
+    [
+        (None, {"real_execution": True}),
+        (
+            ToolProvenance(
+                tool_name="molecular_docking",
+                tool_version="vina-test-1",
+            ),
+            {},
+        ),
+        (
+            ToolProvenance(
+                tool_name="molecular_docking",
+                tool_version="vina-test-1",
+            ),
+            {"real_execution": False},
+        ),
+    ],
+    ids=["missing-provenance", "missing-real-execution", "false-real-execution"],
+)
+def test_scientific_authority_requires_real_provenance_and_execution(
+    tmp_path: Path,
+    provenance: ToolProvenance | None,
+    quality: dict[str, Any],
+) -> None:
+    manifest = _stage(tmp_path)
+
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=_executor(
+            tmp_path,
+            [],
+            provenance=provenance,
+            quality=quality,
+        ),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert not _completion(tmp_path).exists()
+
+
+def test_tool_and_model_provenance_survives_completion_reuse(tmp_path: Path) -> None:
+    manifest = _stage(tmp_path)
+    provenance = ToolProvenance(
+        tool_name="molecular_docking",
+        tool_version="vina-1.2.3",
+        model_name="vina-scoring",
+        model_version="2026.1",
+        demo_mode=False,
+        fallback_used=False,
+    )
+    runner = DockingExecution(
+        tmp_path,
+        raw_executor=_executor(tmp_path, [], provenance=provenance),
+    )
+
+    first = runner.run_verified("task-1", manifest)
+    reused = runner.run_verified("task-1", manifest)
+
+    assert first["success"] is True
+    assert reused["success"] is True
+    for result in (first, reused):
+        assert result["provenance"]["tool_version"] == "vina-1.2.3"
+        assert result["provenance"]["model_name"] == "vina-scoring"
+        assert result["provenance"]["model_version"] == "2026.1"
+        assert result["provenance"]["demo_mode"] is False
+        assert result["provenance"]["fallback_used"] is False
+
+
+@pytest.mark.parametrize("sensitive_identifier", ["CCO", "sk-12345678"])
+def test_sensitive_provenance_identifier_is_rejected(
+    tmp_path: Path,
+    sensitive_identifier: str,
+) -> None:
+    manifest = DockingInputStager(tmp_path).stage(
+        "task-sensitive",
+        "receptor.pdb",
+        b"ATOM\n",
+        None,
+        None,
+        "CCO",
+        CONFIG,
+    )
+    provenance = ToolProvenance(
+        tool_name="molecular_docking",
+        tool_version="vina-test-1",
+        model_name=sensitive_identifier,
+        demo_mode=False,
+        fallback_used=False,
+    )
+
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=_executor(tmp_path, [], provenance=provenance),
+    ).run_verified("task-sensitive", manifest)
+
+    assert result["success"] is False
+    assert sensitive_identifier not in json.dumps(result)
+    assert not _completion(tmp_path, "task-sensitive").exists()
+
+
+def test_reuse_rejects_manifest_provenance_matching_staged_smiles(
+    tmp_path: Path,
+) -> None:
+    manifest = DockingInputStager(tmp_path).stage(
+        "task-sensitive",
+        "receptor.pdb",
+        b"ATOM\n",
+        None,
+        None,
+        "CCO",
+        CONFIG,
+    )
+    calls: list[dict[str, Any]] = []
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
+    assert runner.run_verified("task-sensitive", manifest)["success"] is True
+    completion_path = _completion(tmp_path, "task-sensitive")
+    payload = json.loads(completion_path.read_text(encoding="utf-8"))
+    payload["model_name"] = "CCO"
+    completion_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = runner.run_verified("task-sensitive", manifest)
+
+    assert result["success"] is False
+    assert "CCO" not in json.dumps(result)
+    assert len(calls) == 1
 
 
 def test_verified_completion_is_committed_and_reused_without_second_call(
@@ -405,6 +576,41 @@ def test_concurrent_same_task_executes_once(tmp_path: Path) -> None:
     assert len(calls) == 1
 
 
+def test_concurrent_call_waits_for_prepared_completion_in_lease_gap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
+    prepared = threading.Event()
+    allow_finalize = threading.Event()
+    real_finalize = runner._finalize_prepared
+
+    def gated_finalize(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        prepared.set()
+        assert allow_finalize.wait(10)
+        return real_finalize(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "_finalize_prepared", gated_finalize)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(runner.run_verified, "task-1", manifest)
+        assert prepared.wait(10)
+        second_future = pool.submit(runner.run_verified, "task-1", manifest)
+        time.sleep(0.1)
+        allow_finalize.set()
+        first = first_future.result(timeout=10)
+        second = second_future.result(timeout=10)
+
+    assert first["success"] is True
+    assert second["success"] is True
+    assert sorted([first["reused_completion"], second["reused_completion"]]) == [
+        False,
+        True,
+    ]
+    assert len(calls) == 1
+
+
 def test_cross_process_same_task_executes_once(tmp_path: Path) -> None:
     manifest = _stage(tmp_path)
     context = multiprocessing.get_context("spawn")
@@ -466,6 +672,23 @@ def test_exception_or_cancellation_writes_no_completion(
     assert "secret" not in json.dumps(result)
 
 
+def test_non_tool_result_fails_without_completion(tmp_path: Path) -> None:
+    manifest = _stage(tmp_path)
+
+    def executor(_payload: dict[str, Any], **_control: Any) -> Any:
+        return {"success": True, "binding_energy": -99.0}
+
+    result = DockingExecution(tmp_path, raw_executor=executor).run_verified(
+        "task-1",
+        manifest,
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == AgentErrorCode.INVALID_OUTPUT.value
+    assert result["provenance"] is None
+    assert not _completion(tmp_path).exists()
+
+
 def test_input_snapshot_mutation_after_execution_is_rejected(
     tmp_path: Path,
 ) -> None:
@@ -515,6 +738,37 @@ def test_second_input_integrity_failure_after_tool_never_commits(
     assert not _completion(tmp_path).exists()
 
 
+def test_final_snapshot_exit_integrity_failure_revokes_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    real_verify = VerifiedDockingInputs.verify_integrity
+    verifications = {"count": 0}
+
+    def fail_fifth(inputs: VerifiedDockingInputs) -> bool:
+        verifications["count"] += 1
+        if verifications["count"] == 5:
+            raise ManifestError("manifest_integrity_failed")
+        return real_verify(inputs)
+
+    monkeypatch.setattr(VerifiedDockingInputs, "verify_integrity", fail_fifth)
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
+
+    result = runner.run_verified("task-1", manifest)
+
+    assert verifications["count"] == 5
+    assert result["success"] is False
+    assert not _completion(tmp_path).exists()
+
+    monkeypatch.undo()
+    retried = runner.run_verified("task-1", manifest)
+    assert retried["success"] is True
+    assert retried["reused_completion"] is False
+    assert len(calls) == 2
+
+
 def test_smiles_and_absolute_paths_do_not_enter_completion_or_result(
     tmp_path: Path,
 ) -> None:
@@ -537,13 +791,216 @@ def test_smiles_and_absolute_paths_do_not_enter_completion_or_result(
     assert result["provenance"]["input_digest"]
 
 
-def test_verified_identity_object_is_accepted(tmp_path: Path) -> None:
+def test_safe_validated_metadata_survives_first_result_and_reuse(
+    tmp_path: Path,
+) -> None:
+    manifest = _stage(tmp_path, task_id="task-smiles", smiles=True)
+    calls: list[dict[str, Any]] = []
+    safe_extra = tmp_path / "task-smiles" / "reports" / "summary.json"
+    safe_extra.parent.mkdir()
+    safe_extra.write_text('{"status":"verified"}', encoding="utf-8")
+    outside = tmp_path / "outside.log"
+    outside.write_text("outside", encoding="utf-8")
+
+    def executor(payload: dict[str, Any], **control: Any) -> ToolResult:
+        calls.append({"payload": dict(payload), "control": dict(control)})
+        pose = tmp_path / "metadata-pose.pdbqt"
+        pose.write_text("MODEL 1\nENDMDL\n", encoding="utf-8")
+        return ToolResult.success_result(
+            "molecular_docking",
+            message="raw message is not persisted",
+            data={
+                "total_poses": 1,
+                "pose_file": str(pose),
+                "best_pose": {"binding_energy": -7.2, "pose_file": str(pose)},
+            },
+            formatted=(
+                f"Binding energy -7.2 kcal/mol; source {tmp_path}; "
+                f"ligand {SECRET_SMILES}"
+            ),
+            elapsed_ms=321,
+            warnings=[
+                "Vina convergence warning",
+                f"unsafe path {tmp_path}",
+                f"unsafe ligand {SECRET_SMILES}",
+            ],
+            evidence=[
+                {
+                    "source": "vina",
+                    "description": "Parsed real Vina output",
+                    "path": str(tmp_path),
+                    "smiles": SECRET_SMILES,
+                }
+            ],
+            artifacts=[
+                WorkflowArtifact(
+                    artifact_type="docking_report",
+                    path=str(safe_extra),
+                    label="Docking summary",
+                    mime_type="application/json",
+                    metadata={"kind": "summary", "unsafe_path": str(tmp_path)},
+                ),
+                WorkflowArtifact(
+                    artifact_type="debug_log",
+                    path=str(outside),
+                    label="Outside log",
+                    mime_type="text/plain",
+                ),
+            ],
+            quality={
+                "real_execution": True,
+                "engine": "AutoDock Vina",
+                "execution_status": "completed",
+            },
+            provenance=ToolProvenance(
+                tool_name="molecular_docking",
+                tool_version="vina-1.2.3",
+                model_name="vina-scoring",
+                model_version="2026.1",
+                demo_mode=False,
+                fallback_used=False,
+            ),
+        )
+
+    runner = DockingExecution(tmp_path, raw_executor=executor)
+    first = runner.run_verified("task-smiles", manifest)
+    reused = runner.run_verified("task-smiles", manifest)
+
+    assert len(calls) == 1
+    for result in (first, reused):
+        assert result["success"] is True
+        assert result["elapsed_ms"] == 321
+        assert "Binding energy -7.2 kcal/mol" in result["formatted"]
+        assert "Vina convergence warning" in result["warnings"]
+        assert "additional_artifact_omitted" in result["warnings"]
+        assert result["evidence"] == [
+            {"source": "vina", "description": "Parsed real Vina output"}
+        ]
+        assert result["quality"]["engine"] == "AutoDock Vina"
+        assert result["quality"]["execution_status"] == "completed"
+        assert result["provenance"]["model_name"] == "vina-scoring"
+        assert [item["path"] for item in result["artifacts"]] == [
+            "artifacts/docking_pose.pdbqt",
+            "reports/summary.json",
+        ]
+        assert result["artifacts"][1]["metadata"] == {"kind": "summary"}
+        serialized = json.dumps(result)
+        assert SECRET_SMILES not in serialized
+        assert str(tmp_path.resolve()) not in serialized
+
+    serialized_completion = _completion(tmp_path, "task-smiles").read_text(
+        encoding="utf-8"
+    )
+    assert SECRET_SMILES not in serialized_completion
+    assert str(tmp_path.resolve()) not in serialized_completion
+
+
+def test_credential_shaped_metadata_is_redacted_before_completion(
+    tmp_path: Path,
+) -> None:
     manifest = _stage(tmp_path)
-    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, []))
+    credential = "sk-12345678"
+
+    def executor(payload: dict[str, Any], **_control: Any) -> ToolResult:
+        result = _executor(tmp_path, [])(payload)
+        result.formatted = f"Vina output using {credential}"
+        result.warnings = [f"provider warning {credential}"]
+        result.evidence = [
+            {"source": "vina", "description": f"credential {credential}"}
+        ]
+        return result
+
+    runner = DockingExecution(tmp_path, raw_executor=executor)
+    first = runner.run_verified("task-1", manifest)
+    reused = runner.run_verified("task-1", manifest)
+
+    for value in (first, reused):
+        assert value["success"] is True
+        assert credential not in json.dumps(value)
+    assert credential not in _completion(tmp_path).read_text(encoding="utf-8")
+
+
+def test_completion_rejects_excessive_cached_metadata(tmp_path: Path) -> None:
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
+    assert runner.run_verified("task-1", manifest)["success"] is True
+    completion_path = _completion(tmp_path)
+    payload = json.loads(completion_path.read_text(encoding="utf-8"))
+    payload["result_metadata"]["warnings"] = ["warning"] * 33
+    completion_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = runner.run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert len(calls) == 1
+
+
+def test_aggregate_cached_metadata_over_limit_leaves_no_manifest(
+    tmp_path: Path,
+) -> None:
+    manifest = _stage(tmp_path)
+
+    def executor(payload: dict[str, Any], **_control: Any) -> ToolResult:
+        result = _executor(tmp_path, [])(payload)
+        result.formatted = "f" * 2048
+        result.warnings = [f"warning-{index}-" + "w" * 235 for index in range(32)]
+        result.evidence = [
+            {
+                "source": f"source-{index}-" + "s" * 230,
+                "description": "d" * 250,
+                "method": "m" * 250,
+                "version": "v" * 250,
+                "identifier": "i" * 250,
+                "type": "t" * 250,
+                "label": "l" * 250,
+                "sha256": "a" * 64,
+            }
+            for index in range(32)
+        ]
+        return result
+
+    result = DockingExecution(tmp_path, raw_executor=executor).run_verified(
+        "task-1",
+        manifest,
+    )
+
+    assert result["success"] is False
+    assert not _completion(tmp_path).exists()
+
+
+def test_verified_identity_object_is_rejected(tmp_path: Path) -> None:
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
     with DockingInputStager(tmp_path).execution_snapshot("task-1", manifest) as inputs:
         result = runner.run_verified("task-1", inputs)
 
-    assert result["success"] is True
+    assert result["success"] is False
+    assert result["error"]["code"] == AgentErrorCode.INVALID_INPUT.value
+    assert calls == []
+
+
+def test_same_verified_identity_object_concurrently_executes_zero_tools(
+    tmp_path: Path,
+) -> None:
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    runner = DockingExecution(
+        tmp_path,
+        raw_executor=_executor(tmp_path, calls, delay=0.1),
+    )
+    with DockingInputStager(tmp_path).execution_snapshot("task-1", manifest) as inputs:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(
+                pool.map(
+                    lambda _: runner.run_verified("task-1", inputs),
+                    range(2),
+                )
+            )
+
+    assert all(result["success"] is False for result in results)
+    assert calls == []
 
 
 def test_atomic_write_failure_leaves_no_trusted_manifest(
@@ -573,3 +1030,43 @@ def test_atomic_write_failure_leaves_no_trusted_manifest(
     assert result["success"] is False
     assert not _completion(tmp_path).exists()
     assert not list((tmp_path / "task-1").glob(".completion-*.tmp"))
+
+
+def test_post_publish_reverification_failure_revokes_manifest_and_pose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.completion as completion_module
+
+    manifest = _stage(tmp_path)
+    real_load = completion_module.DockingCompletionStore.load_verified
+
+    def fail_after_publish(
+        store: Any,
+        task_id: str,
+        *,
+        input_hash: str,
+        config_hash: str,
+    ) -> Any:
+        if store.manifest_path(task_id).exists():
+            raise completion_module.CompletionError("completion_artifact_invalid")
+        return real_load(
+            store,
+            task_id,
+            input_hash=input_hash,
+            config_hash=config_hash,
+        )
+
+    monkeypatch.setattr(
+        completion_module.DockingCompletionStore,
+        "load_verified",
+        fail_after_publish,
+    )
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=_executor(tmp_path, []),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert not _completion(tmp_path).exists()
+    assert not (tmp_path / "task-1" / "artifacts" / "docking_pose.pdbqt").exists()

@@ -9,7 +9,7 @@ import os
 import re
 import stat
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
@@ -17,6 +17,11 @@ from typing import Any, Mapping
 
 MAX_COMPLETION_MANIFEST_BYTES = 64 * 1024
 MAX_DOCKING_POSE_BYTES = 256 * 1024 * 1024
+MAX_ADDITIONAL_ARTIFACT_BYTES = 64 * 1024 * 1024
+MAX_CACHED_WARNINGS = 32
+MAX_CACHED_EVIDENCE = 32
+MAX_CACHED_ARTIFACTS = 8
+MAX_CACHED_TEXT_CHARS = 2048
 
 _SCHEMA = "DockingCompletionManifest@1"
 _MANIFEST_NAME = "completion_manifest.json"
@@ -26,6 +31,7 @@ _POSE_RELATIVE_PATH = f"{_ARTIFACT_DIRECTORY}/{_POSE_NAME}"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _TOOL_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\Z")
+_MODEL_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._:+-]{0,127}\Z")
 _MANIFEST_KEYS = frozenset(
     {
         "schema",
@@ -33,15 +39,34 @@ _MANIFEST_KEYS = frozenset(
         "input_hash",
         "config_hash",
         "tool_version",
+        "model_name",
+        "model_version",
+        "demo_mode",
+        "fallback_used",
+        "real_execution",
         "pose",
         "pose_count",
         "best_energy",
         "validator_status",
         "attempt",
         "completed_at",
+        "result_metadata",
     }
 )
 _POSE_KEYS = frozenset({"path", "size", "sha256"})
+_RESULT_METADATA_KEYS = frozenset(
+    {"elapsed_ms", "formatted", "warnings", "evidence", "artifacts", "quality"}
+)
+_ARTIFACT_KEYS = frozenset(
+    {"artifact_type", "path", "label", "mime_type", "metadata", "size", "sha256"}
+)
+_QUALITY_KEYS = frozenset(
+    {"real_execution", "engine", "execution_status", "validated"}
+)
+_EVIDENCE_KEYS = frozenset(
+    {"source", "description", "method", "version", "identifier", "type", "label", "sha256"}
+)
+_ARTIFACT_METADATA_KEYS = frozenset({"kind", "method", "version", "sha256"})
 _IS_WINDOWS = os.name == "nt"
 
 
@@ -78,21 +103,56 @@ class DockingPoseRecord:
 
 
 @dataclass(frozen=True)
+class DockingArtifactRecord:
+    artifact_type: str
+    path: str
+    label: str
+    mime_type: str | None
+    metadata: dict[str, Any]
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class DockingResultMetadata:
+    elapsed_ms: int | None
+    formatted: str
+    warnings: list[str]
+    evidence: list[dict[str, Any]]
+    artifacts: list[DockingArtifactRecord]
+    quality: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class DockingCompletionManifest:
     schema: str
     task_id: str
     input_hash: str
     config_hash: str
     tool_version: str
+    model_name: str | None
+    model_version: str | None
+    demo_mode: bool
+    fallback_used: bool
+    real_execution: bool
     pose: DockingPoseRecord
     pose_count: int
     best_energy: float
     validator_status: str
     attempt: int
     completed_at: str
+    result_metadata: DockingResultMetadata
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class PreparedDockingCompletion:
+    """Unpublished pose reservation created under the staging task lease."""
+
+    completion: DockingCompletionManifest
+    pose_path: Path = field(repr=False)
 
 
 class DockingCompletionStore:
@@ -138,6 +198,57 @@ class DockingCompletionStore:
         except OSError:
             raise CompletionError("completion_io_error") from None
         return True
+
+    def capture_additional_artifact(
+        self,
+        task_id: str,
+        *,
+        artifact_type: str,
+        path: str | os.PathLike[str],
+        label: str,
+        mime_type: str | None,
+        metadata: Mapping[str, Any],
+    ) -> DockingArtifactRecord | None:
+        """Capture only an existing task-owned ordinary file."""
+
+        try:
+            task_root = self._task_root(task_id)
+            candidate = Path(path)
+            if not candidate.is_absolute():
+                candidate = task_root / candidate
+            resolved = candidate.resolve(strict=True)
+            if os.path.commonpath((str(task_root), str(resolved))) != str(task_root):
+                return None
+            relative = resolved.relative_to(task_root)
+            if (
+                not relative.parts
+                or relative.parts[0] in {"inputs", "executions", "artifacts"}
+                or any(part in {".", ".."} or part.startswith(".") for part in relative.parts)
+            ):
+                return None
+            content, digest = _secure_read_regular(
+                resolved,
+                max_bytes=MAX_ADDITIONAL_ARTIFACT_BYTES,
+                containment_root=task_root,
+                invalid_code="completion_artifact_invalid",
+            )
+            if not content:
+                return None
+            return DockingArtifactRecord(
+                artifact_type=_bounded_identifier(artifact_type, 64),
+                path=PurePosixPath(*relative.parts).as_posix(),
+                label=_bounded_text(label, 128),
+                mime_type=(
+                    _bounded_mime(mime_type)
+                    if mime_type is not None
+                    else None
+                ),
+                metadata=_validate_artifact_metadata(metadata),
+                size=len(content),
+                sha256=digest,
+            )
+        except (CompletionError, OSError, RuntimeError, TypeError, ValueError):
+            return None
 
     def load_verified(
         self,
@@ -189,28 +300,50 @@ class DockingCompletionStore:
         )
         if pose_hash != completion.pose.sha256:
             raise CompletionError("completion_artifact_invalid")
+        for artifact in completion.result_metadata.artifacts:
+            artifact_path = _additional_artifact_path(task_root, artifact.path)
+            _, artifact_hash = _secure_read_regular(
+                artifact_path,
+                max_bytes=MAX_ADDITIONAL_ARTIFACT_BYTES,
+                containment_root=task_root,
+                expected_size=artifact.size,
+                invalid_code="completion_artifact_invalid",
+            )
+            if artifact_hash != artifact.sha256:
+                raise CompletionError("completion_artifact_invalid")
         return completion
 
-    def commit(
+    def prepare(
         self,
         task_id: str,
         *,
         input_hash: str,
         config_hash: str,
         tool_version: str,
+        model_name: str | None,
+        model_version: str | None,
+        demo_mode: bool,
+        fallback_used: bool,
+        real_execution: bool,
         pose_source: str | os.PathLike[str],
         pose_count: int,
         best_energy: int | float,
         validator_status: str,
         attempt: int,
-    ) -> DockingCompletionManifest:
+        result_metadata: DockingResultMetadata,
+    ) -> PreparedDockingCompletion:
         task_root = self._task_root(task_id)
-        manifest_path = task_root / _MANIFEST_NAME
         if self.has_manifest(task_id) or self.has_artifact_residue(task_id):
             raise CompletionError("completion_conflict")
         _require_sha256(input_hash)
         _require_sha256(config_hash)
         if type(tool_version) is not str or _TOOL_VERSION.fullmatch(tool_version) is None:
+            raise CompletionError("completion_schema_invalid")
+        _validate_optional_model_identifier(model_name)
+        _validate_optional_model_identifier(model_version)
+        if demo_mode is not False or fallback_used is not False:
+            raise CompletionError("completion_schema_invalid")
+        if real_execution is not True:
             raise CompletionError("completion_schema_invalid")
         if type(pose_count) is not int or pose_count <= 0:
             raise CompletionError("completion_schema_invalid")
@@ -223,8 +356,8 @@ class DockingCompletionStore:
             raise CompletionError("completion_schema_invalid")
         if type(attempt) is not int or attempt <= 0:
             raise CompletionError("completion_schema_invalid")
+        normalized_metadata = _parse_result_metadata(asdict(result_metadata))
 
-        manifest_published = False
         try:
             source = Path(pose_source)
         except (TypeError, ValueError):
@@ -247,6 +380,11 @@ class DockingCompletionStore:
             input_hash=input_hash,
             config_hash=config_hash,
             tool_version=tool_version.strip(),
+            model_name=model_name,
+            model_version=model_version,
+            demo_mode=False,
+            fallback_used=False,
+            real_execution=True,
             pose=DockingPoseRecord(
                 path=_POSE_RELATIVE_PATH,
                 size=len(pose_bytes),
@@ -257,34 +395,93 @@ class DockingCompletionStore:
             validator_status=validator_status,
             attempt=attempt,
             completed_at=_utc_now(),
+            result_metadata=normalized_metadata,
         )
+        return PreparedDockingCompletion(completion=completion, pose_path=pose_path)
+
+    def finalize(
+        self,
+        prepared: PreparedDockingCompletion,
+    ) -> DockingCompletionManifest:
+        if not isinstance(prepared, PreparedDockingCompletion):
+            raise CompletionError("completion_schema_invalid")
+        completion = _parse_manifest(
+            prepared.completion.to_dict(),
+            prepared.completion.task_id,
+        )
+        task_root = self._task_root(completion.task_id)
+        manifest_path = task_root / _MANIFEST_NAME
+        expected_pose = _pose_path(task_root, completion.pose.path)
+        if prepared.pose_path != expected_pose or self.has_manifest(completion.task_id):
+            raise CompletionError("completion_conflict")
+        _, pose_hash = _secure_read_regular(
+            expected_pose,
+            max_bytes=MAX_DOCKING_POSE_BYTES,
+            containment_root=task_root,
+            expected_size=completion.pose.size,
+            invalid_code="completion_artifact_invalid",
+        )
+        if pose_hash != completion.pose.sha256:
+            raise CompletionError("completion_artifact_invalid")
+        encoded = json.dumps(
+            completion.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        if len(encoded) > MAX_COMPLETION_MANIFEST_BYTES:
+            raise CompletionError("completion_too_large")
+        published = False
         try:
-            encoded = json.dumps(
-                completion.to_dict(),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-                allow_nan=False,
-            ).encode("utf-8")
             _atomic_write_new(
                 manifest_path,
                 encoded,
                 task_root,
                 prefix=".completion-",
             )
-            manifest_published = True
+            published = True
             return self.load_verified(
-                task_id,
-                input_hash=input_hash,
-                config_hash=config_hash,
+                completion.task_id,
+                input_hash=completion.input_hash,
+                config_hash=completion.config_hash,
             )
-        except CompletionError:
-            if manifest_published:
+        except BaseException:
+            if published:
                 try:
                     manifest_path.unlink(missing_ok=True)
+                    _fsync_directory(task_root)
                 except OSError:
                     pass
             raise
+
+    def abort(self, prepared: PreparedDockingCompletion) -> bool:
+        """Remove only the exact unpublished pose; changed residue stays fail closed."""
+
+        if not isinstance(prepared, PreparedDockingCompletion):
+            return False
+        completion = prepared.completion
+        try:
+            if self.has_manifest(completion.task_id):
+                return False
+            task_root = self._task_root(completion.task_id)
+            expected_pose = _pose_path(task_root, completion.pose.path)
+            if prepared.pose_path != expected_pose:
+                return False
+            _, pose_hash = _secure_read_regular(
+                expected_pose,
+                max_bytes=MAX_DOCKING_POSE_BYTES,
+                containment_root=task_root,
+                expected_size=completion.pose.size,
+                invalid_code="completion_artifact_invalid",
+            )
+            if pose_hash != completion.pose.sha256:
+                return False
+            expected_pose.unlink()
+            _fsync_directory(expected_pose.parent)
+            return not expected_pose.exists()
+        except (CompletionError, OSError, RuntimeError):
+            return False
 
     def _task_root(self, task_id: str) -> Path:
         if type(task_id) is not str or _TASK_ID.fullmatch(task_id) is None:
@@ -320,6 +517,14 @@ def _parse_manifest(payload: Any, task_id: str) -> DockingCompletionManifest:
     tool_version = payload.get("tool_version")
     if type(tool_version) is not str or _TOOL_VERSION.fullmatch(tool_version) is None:
         raise CompletionError("completion_schema_invalid")
+    model_name = payload.get("model_name")
+    model_version = payload.get("model_version")
+    _validate_optional_model_identifier(model_name)
+    _validate_optional_model_identifier(model_version)
+    if payload.get("demo_mode") is not False or payload.get("fallback_used") is not False:
+        raise CompletionError("completion_schema_invalid")
+    if payload.get("real_execution") is not True:
+        raise CompletionError("completion_schema_invalid")
     if pose.get("path") != _POSE_RELATIVE_PATH:
         raise CompletionError("completion_schema_invalid")
     if type(pose.get("size")) is not int or pose["size"] <= 0:
@@ -337,12 +542,18 @@ def _parse_manifest(payload: Any, task_id: str) -> DockingCompletionManifest:
     if type(attempt) is not int or attempt <= 0:
         raise CompletionError("completion_schema_invalid")
     _validate_utc(payload.get("completed_at"))
+    result_metadata = _parse_result_metadata(payload.get("result_metadata"))
     return DockingCompletionManifest(
         schema=_SCHEMA,
         task_id=task_id,
         input_hash=payload["input_hash"],
         config_hash=payload["config_hash"],
         tool_version=tool_version,
+        model_name=model_name,
+        model_version=model_version,
+        demo_mode=False,
+        fallback_used=False,
+        real_execution=True,
         pose=DockingPoseRecord(
             path=pose["path"],
             size=pose["size"],
@@ -353,6 +564,104 @@ def _parse_manifest(payload: Any, task_id: str) -> DockingCompletionManifest:
         validator_status="succeeded",
         attempt=attempt,
         completed_at=payload["completed_at"],
+        result_metadata=result_metadata,
+    )
+
+
+def _parse_result_metadata(value: Any) -> DockingResultMetadata:
+    if type(value) is not dict or set(value) != _RESULT_METADATA_KEYS:
+        raise CompletionError("completion_schema_invalid")
+    elapsed_ms = value.get("elapsed_ms")
+    if elapsed_ms is not None and (
+        type(elapsed_ms) is not int or not 0 <= elapsed_ms <= 7 * 24 * 60 * 60 * 1000
+    ):
+        raise CompletionError("completion_schema_invalid")
+    formatted = value.get("formatted")
+    _validate_cached_text(formatted, MAX_CACHED_TEXT_CHARS, allow_empty=True)
+    warnings = value.get("warnings")
+    if type(warnings) is not list or len(warnings) > MAX_CACHED_WARNINGS:
+        raise CompletionError("completion_schema_invalid")
+    normalized_warnings: list[str] = []
+    for warning in warnings:
+        _validate_cached_text(warning, 256, allow_empty=False)
+        normalized_warnings.append(warning)
+
+    evidence = value.get("evidence")
+    if type(evidence) is not list or len(evidence) > MAX_CACHED_EVIDENCE:
+        raise CompletionError("completion_schema_invalid")
+    normalized_evidence: list[dict[str, Any]] = []
+    for record in evidence:
+        if (
+            type(record) is not dict
+            or not record
+            or not set(record).issubset(_EVIDENCE_KEYS)
+        ):
+            raise CompletionError("completion_schema_invalid")
+        normalized_record: dict[str, Any] = {}
+        for key, item in record.items():
+            if type(item) is str:
+                _validate_cached_text(item, 256, allow_empty=False)
+            elif type(item) in (int, float):
+                if not math.isfinite(float(item)):
+                    raise CompletionError("completion_schema_invalid")
+            elif type(item) is not bool:
+                raise CompletionError("completion_schema_invalid")
+            normalized_record[key] = item
+        normalized_evidence.append(normalized_record)
+
+    artifacts = value.get("artifacts")
+    if type(artifacts) is not list or len(artifacts) > MAX_CACHED_ARTIFACTS:
+        raise CompletionError("completion_schema_invalid")
+    normalized_artifacts: list[DockingArtifactRecord] = []
+    for record in artifacts:
+        if type(record) is not dict or set(record) != _ARTIFACT_KEYS:
+            raise CompletionError("completion_schema_invalid")
+        artifact_type = _bounded_identifier(record.get("artifact_type"), 64)
+        path = record.get("path")
+        _validate_additional_relative_path(path)
+        label = _bounded_text(record.get("label"), 128)
+        mime_type = record.get("mime_type")
+        if mime_type is not None:
+            mime_type = _bounded_mime(mime_type)
+        metadata = _validate_artifact_metadata(record.get("metadata"))
+        size = record.get("size")
+        if type(size) is not int or not 0 < size <= MAX_ADDITIONAL_ARTIFACT_BYTES:
+            raise CompletionError("completion_schema_invalid")
+        sha256 = record.get("sha256")
+        _require_sha256(sha256)
+        normalized_artifacts.append(
+            DockingArtifactRecord(
+                artifact_type=artifact_type,
+                path=path,
+                label=label,
+                mime_type=mime_type,
+                metadata=metadata,
+                size=size,
+                sha256=sha256,
+            )
+        )
+
+    quality = value.get("quality")
+    if type(quality) is not dict or set(quality) != _QUALITY_KEYS:
+        raise CompletionError("completion_schema_invalid")
+    if quality.get("real_execution") is not True or type(quality.get("validated")) is not bool:
+        raise CompletionError("completion_schema_invalid")
+    normalized_quality: dict[str, Any] = {
+        "real_execution": True,
+        "validated": quality["validated"],
+    }
+    for key in ("engine", "execution_status"):
+        item = quality.get(key)
+        if item is not None:
+            item = _bounded_text(item, 128)
+        normalized_quality[key] = item
+    return DockingResultMetadata(
+        elapsed_ms=elapsed_ms,
+        formatted=formatted,
+        warnings=normalized_warnings,
+        evidence=normalized_evidence,
+        artifacts=normalized_artifacts,
+        quality=normalized_quality,
     )
 
 
@@ -377,6 +686,80 @@ def _pose_path(task_root: Path, relative_text: str) -> Path:
     except (OSError, RuntimeError, ValueError):
         raise CompletionError("completion_artifact_invalid") from None
     return candidate
+
+
+def _additional_artifact_path(task_root: Path, relative_text: str) -> Path:
+    _validate_additional_relative_path(relative_text)
+    relative = PurePosixPath(relative_text)
+    candidate = task_root.joinpath(*relative.parts)
+    try:
+        _reject_link_components(candidate)
+        resolved = candidate.resolve(strict=True)
+        if os.path.commonpath((str(task_root), str(resolved))) != str(task_root):
+            raise CompletionError("completion_artifact_invalid")
+    except CompletionError:
+        raise
+    except (OSError, RuntimeError, ValueError):
+        raise CompletionError("completion_artifact_invalid") from None
+    return candidate
+
+
+def _validate_additional_relative_path(value: Any) -> None:
+    if type(value) is not str or not value or "\\" in value or len(value) > 512:
+        raise CompletionError("completion_schema_invalid")
+    relative = PurePosixPath(value)
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or relative.parts[0] in {"inputs", "executions", "artifacts"}
+        or any(part in {".", ".."} or part.startswith(".") for part in relative.parts)
+    ):
+        raise CompletionError("completion_schema_invalid")
+
+
+def _validate_cached_text(value: Any, limit: int, *, allow_empty: bool) -> None:
+    if type(value) is not str or len(value) > limit or (not allow_empty and not value):
+        raise CompletionError("completion_schema_invalid")
+    if any(ord(character) < 32 and character not in "\n\t" for character in value):
+        raise CompletionError("completion_schema_invalid")
+
+
+def _bounded_text(value: Any, limit: int) -> str:
+    _validate_cached_text(value, limit, allow_empty=False)
+    return value
+
+
+def _bounded_identifier(value: Any, limit: int) -> str:
+    if (
+        type(value) is not str
+        or not 1 <= len(value) <= limit
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:+-]*", value) is None
+    ):
+        raise CompletionError("completion_schema_invalid")
+    return value
+
+
+def _bounded_mime(value: Any) -> str:
+    if (
+        type(value) is not str
+        or len(value) > 128
+        or re.fullmatch(r"[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+", value) is None
+    ):
+        raise CompletionError("completion_schema_invalid")
+    return value
+
+
+def _validate_artifact_metadata(value: Any) -> dict[str, Any]:
+    if type(value) is not dict or not set(value).issubset(_ARTIFACT_METADATA_KEYS):
+        raise CompletionError("completion_schema_invalid")
+    normalized: dict[str, Any] = {}
+    for key, item in value.items():
+        if key == "sha256":
+            _require_sha256(item)
+        else:
+            _validate_cached_text(item, 128, allow_empty=False)
+        normalized[key] = item
+    return normalized
 
 
 def _secure_read_regular(
@@ -588,6 +971,13 @@ def _descriptor_identity(status: os.stat_result) -> tuple[int, int, int, int]:
 
 def _require_sha256(value: Any) -> None:
     if type(value) is not str or _SHA256.fullmatch(value) is None:
+        raise CompletionError("completion_schema_invalid")
+
+
+def _validate_optional_model_identifier(value: Any) -> None:
+    if value is not None and (
+        type(value) is not str or _MODEL_IDENTIFIER.fullmatch(value) is None
+    ):
         raise CompletionError("completion_schema_invalid")
 
 
