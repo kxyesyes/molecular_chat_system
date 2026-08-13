@@ -199,7 +199,10 @@ class DockingCompletionStore:
         return self._task_root(task_id) / _MANIFEST_NAME
 
     def has_manifest(self, task_id: str) -> bool:
-        path = self.manifest_path(task_id)
+        task_root = self._task_root(task_id)
+        if _path_present(task_root / _INVALID_MARKER_NAME):
+            raise CompletionError("completion_ownership_uncertain")
+        path = task_root / _MANIFEST_NAME
         try:
             path.lstat()
         except FileNotFoundError:
@@ -501,7 +504,7 @@ class DockingCompletionStore:
     def finalize(
         self,
         prepared: PreparedDockingCompletion,
-    ) -> tuple[DockingCompletionManifest, bool]:
+    ) -> tuple[DockingCompletionManifest, bool, bool]:
         if not isinstance(prepared, PreparedDockingCompletion):
             raise CompletionError("completion_schema_invalid")
         completion = _parse_manifest(
@@ -557,13 +560,13 @@ class DockingCompletionStore:
             raise
         except (UnicodeError, json.JSONDecodeError, ValueError):
             raise CompletionError("completion_schema_invalid") from None
-        durability_synced = _publish_completion_manifest(
+        durability_synced, authority_committed = _publish_completion_manifest(
             manifest_path,
             encoded,
             task_root,
             verify_before_commit=verify_artifacts,
         )
-        return encoded_completion, durability_synced
+        return encoded_completion, durability_synced, authority_committed
 
     def abort(self, prepared: PreparedDockingCompletion) -> bool:
         """Remove only exact unpublished artifacts; changed residue stays fail closed."""
@@ -1051,10 +1054,11 @@ def _publish_completion_manifest(
     parent: Path,
     *,
     verify_before_commit: Callable[[], None],
-) -> bool:
-    """Publish exact validated bytes; return whether directory sync was confirmed."""
+) -> tuple[bool, bool]:
+    """Publish behind a write-ahead marker; return durability and authority state."""
 
     temporary = parent / f".completion-{uuid.uuid4().hex}.tmp"
+    marker = parent / _INVALID_MARKER_NAME
     descriptor: int | None = None
     try:
         try:
@@ -1080,23 +1084,24 @@ def _publish_completion_manifest(
         if not _exact_regular_file(temporary, content, parent):
             raise CompletionError("completion_io_error")
         verify_before_commit()
+        if not _write_authority_marker(marker, parent):
+            raise CompletionError("completion_io_error")
         try:
             _replace_file(temporary, destination)
         except (OSError, RuntimeError, ValueError):
-            if _exact_regular_file(destination, content, parent):
-                try:
-                    verify_before_commit()
-                except CompletionError:
-                    _isolate_untrusted_manifest(destination, parent)
-                    raise
-                return False
             _isolate_untrusted_manifest(destination, parent)
             raise CompletionError("completion_io_error") from None
+        if not _exact_regular_file(destination, content, parent):
+            _isolate_untrusted_manifest(destination, parent)
+            raise CompletionError("completion_io_error")
+        verify_before_commit()
         try:
             _fsync_directory(parent)
         except (OSError, RuntimeError):
-            return False
-        return True
+            return False, False
+        if not _remove_authority_marker(marker, parent):
+            return True, False
+        return True, True
     except CompletionError:
         raise
     except (OSError, RuntimeError, ValueError):
@@ -1124,6 +1129,79 @@ def _exact_regular_file(path: Path, expected: bytes, parent: Path) -> bool:
         )
         return actual == expected
     except CompletionError:
+        return False
+
+
+def _path_present(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise CompletionError("completion_io_error") from None
+    return True
+
+
+def _write_authority_marker(path: Path, parent: Path) -> bool:
+    """Create and persist the fixed fail-closed marker before publication."""
+
+    descriptor: int | None = None
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(path, flags, 0o600)
+        view = memoryview(_INVALID_MARKER_CONTENT)
+        written = 0
+        while written < len(view):
+            count = os.write(descriptor, view[written:])
+            if count <= 0:
+                raise OSError("short authority marker write")
+            written += count
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        raw, _ = _secure_read_regular(
+            path,
+            max_bytes=len(_INVALID_MARKER_CONTENT),
+            containment_root=parent,
+            expected_size=len(_INVALID_MARKER_CONTENT),
+            invalid_code="completion_ownership_uncertain",
+        )
+        if raw != _INVALID_MARKER_CONTENT:
+            return False
+        _fsync_directory(parent)
+        return True
+    except (CompletionError, OSError, RuntimeError, ValueError):
+        return False
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _remove_authority_marker(path: Path, parent: Path) -> bool:
+    """Remove only the exact safe marker and persist that authority commit."""
+
+    try:
+        raw, _ = _secure_read_regular(
+            path,
+            max_bytes=len(_INVALID_MARKER_CONTENT),
+            containment_root=parent,
+            expected_size=len(_INVALID_MARKER_CONTENT),
+            invalid_code="completion_ownership_uncertain",
+        )
+        if raw != _INVALID_MARKER_CONTENT:
+            return False
+        path.unlink()
+        try:
+            _fsync_directory(parent)
+        except (OSError, RuntimeError):
+            _write_authority_marker(path, parent)
+            return False
+        return True
+    except (CompletionError, OSError, RuntimeError, ValueError):
         return False
 
 

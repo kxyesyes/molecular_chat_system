@@ -322,6 +322,7 @@ def test_verified_completion_is_committed_and_reused_without_second_call(
     assert second["success"] is True
     assert second["reused_completion"] is True
     assert len(calls) == 1
+    assert not (tmp_path / "task-1" / "completion_invalid.marker").exists()
     completion = json.loads(_completion(tmp_path).read_text(encoding="utf-8"))
     assert completion["schema"] == "DockingCompletionManifest@1"
     assert completion["task_id"] == "task-1"
@@ -1181,7 +1182,7 @@ def test_post_publish_does_not_call_load_verified(
     assert (tmp_path / "task-1" / "artifacts" / "docking_pose.pdbqt").exists()
 
 
-def test_replace_success_then_exception_recovers_exact_trusted_manifest(
+def test_replace_success_then_exception_remains_blocked_by_authority_marker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1200,12 +1201,13 @@ def test_replace_success_then_exception_recovers_exact_trusted_manifest(
     runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
     first = runner.run_verified("task-1", manifest)
     monkeypatch.setattr(completion_module, "_replace_file", real_replace)
-    reused = runner.run_verified("task-1", manifest)
+    blocked = runner.run_verified("task-1", manifest)
 
-    assert first["success"] is True
-    assert "completion_directory_sync_unconfirmed" in first["warnings"]
-    assert reused["success"] is True
-    assert reused["reused_completion"] is True
+    assert first["success"] is False
+    assert (tmp_path / "task-1" / "completion_invalid.marker").exists()
+    assert blocked["success"] is False
+    assert blocked["error"]["details"]["reason"] == "ownership_uncertain"
+    assert blocked["reused_completion"] is False
     assert len(calls) == 1
 
 
@@ -1475,3 +1477,171 @@ def test_confirmed_commit_remains_success_when_all_post_commit_storage_checks_fa
     assert reused["success"] is True
     assert reused["reused_completion"] is True
     assert len(calls) == 1
+
+
+def test_ambiguous_replace_failure_keeps_write_ahead_marker_and_blocks_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.completion as completion_module
+
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    real_replace = completion_module._replace_file
+    real_exact = completion_module._exact_regular_file
+    real_isolate = completion_module._isolate_untrusted_manifest
+
+    def replace_then_raise(source: Path, target: Path) -> None:
+        real_replace(source, target)
+        if Path(target).name == "completion_manifest.json":
+            raise OSError("ambiguous publication")
+
+    def target_reverification_unavailable(
+        path: Path,
+        expected: bytes,
+        parent: Path,
+    ) -> bool:
+        if Path(path).name == "completion_manifest.json":
+            return False
+        return real_exact(path, expected, parent)
+
+    monkeypatch.setattr(completion_module, "_replace_file", replace_then_raise)
+    monkeypatch.setattr(
+        completion_module,
+        "_exact_regular_file",
+        target_reverification_unavailable,
+    )
+    monkeypatch.setattr(
+        completion_module,
+        "_isolate_untrusted_manifest",
+        lambda _path, _parent: False,
+    )
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
+    first = runner.run_verified("task-1", manifest)
+
+    monkeypatch.setattr(completion_module, "_replace_file", real_replace)
+    monkeypatch.setattr(completion_module, "_exact_regular_file", real_exact)
+    monkeypatch.setattr(
+        completion_module,
+        "_isolate_untrusted_manifest",
+        real_isolate,
+    )
+    second = runner.run_verified("task-1", manifest)
+
+    assert first["success"] is False
+    assert (tmp_path / "task-1" / "completion_invalid.marker").exists()
+    assert second["success"] is False
+    assert second["error"]["details"]["reason"] == "ownership_uncertain"
+    assert second["reused_completion"] is False
+    assert len(calls) == 1
+
+
+def test_write_ahead_marker_failure_prevents_manifest_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.completion as completion_module
+
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    replace_targets: list[str] = []
+    real_replace = completion_module._replace_file
+
+    def track_replace(source: Path, target: Path) -> None:
+        replace_targets.append(Path(target).name)
+        real_replace(source, target)
+
+    monkeypatch.setattr(
+        completion_module,
+        "_write_authority_marker",
+        lambda _path, _parent: False,
+    )
+    monkeypatch.setattr(completion_module, "_replace_file", track_replace)
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=_executor(tmp_path, calls),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert "completion_manifest.json" not in replace_targets
+    assert not _completion(tmp_path).exists()
+    assert len(calls) == 1
+
+
+def test_marker_removal_failure_returns_uncertain_success_and_blocks_future_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.completion as completion_module
+
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        completion_module,
+        "_remove_authority_marker",
+        lambda _path, _parent: False,
+        raising=False,
+    )
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
+    first = runner.run_verified("task-1", manifest)
+    second = runner.run_verified("task-1", manifest)
+
+    assert first["success"] is True
+    assert "completion_authority_commit_unconfirmed" in first["warnings"]
+    assert first["quality"]["completion_durability"] == "uncertain"
+    marker = tmp_path / "task-1" / "completion_invalid.marker"
+    assert marker.is_file()
+    assert not marker.is_symlink()
+    assert marker.stat().st_nlink == 1
+    assert marker.read_bytes() == (
+        b"DockingCompletionInvalid@1\nownership_uncertain\n"
+    )
+    assert second["success"] is False
+    assert second["error"]["details"]["reason"] == "ownership_uncertain"
+    assert second["reused_completion"] is False
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("marker_kind", ["malformed", "directory", "symlink", "hardlink"])
+def test_untrusted_authority_marker_shape_blocks_execution(
+    tmp_path: Path,
+    marker_kind: str,
+) -> None:
+    from src.task_runtime.completion import CompletionError, DockingCompletionStore
+
+    manifest = _stage(tmp_path)
+    marker = tmp_path / "task-1" / "completion_invalid.marker"
+    source = tmp_path / "attacker-marker"
+    source.write_text("attacker-controlled", encoding="utf-8")
+    try:
+        if marker_kind == "malformed":
+            marker.write_text("not the authority schema", encoding="utf-8")
+        elif marker_kind == "directory":
+            marker.mkdir()
+        elif marker_kind == "symlink":
+            marker.symlink_to(source)
+        else:
+            os.link(source, marker)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"{marker_kind} is unavailable on this platform: {exc}")
+
+    store = DockingCompletionStore(tmp_path)
+    with pytest.raises(CompletionError, match="completion_ownership_uncertain"):
+        store.has_manifest("task-1")
+    with pytest.raises(CompletionError, match="completion_ownership_uncertain"):
+        store.load_verified(
+            "task-1",
+            input_hash="0" * 64,
+            config_hash="1" * 64,
+        )
+
+    calls: list[dict[str, Any]] = []
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=_executor(tmp_path, calls),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert result["error"]["details"]["reason"] == "ownership_uncertain"
+    assert result["reused_completion"] is False
+    assert calls == []

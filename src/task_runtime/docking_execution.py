@@ -401,8 +401,10 @@ class DockingExecution:
         committed = False
         completion: DockingCompletionManifest | None = None
         durability_synced = False
+        authority_committed = False
         response_variants: dict[tuple[bool, bool], dict[str, Any]] = {}
         unavailable_variants: dict[bool, dict[str, Any]] = {}
+        authority_unavailable_variants: dict[tuple[bool, bool], dict[str, Any]] = {}
         try:
             manifest = self._stager.load_verified(task_id, input_manifest)
             if (
@@ -464,7 +466,45 @@ class DockingExecution:
                     extra_quality={"completion_durability": "uncertain"},
                 ),
             }
-            completion, durability_synced = self._completions.finalize(prepared)
+            authority_unavailable_variants = {
+                (True, False): _trusted_result(
+                    prepared.completion,
+                    reused=False,
+                    extra_warnings=["completion_authority_commit_unconfirmed"],
+                    extra_quality={"completion_durability": "uncertain"},
+                ),
+                (False, False): _trusted_result(
+                    prepared.completion,
+                    reused=False,
+                    extra_warnings=[
+                        "completion_directory_sync_unconfirmed",
+                        "completion_authority_commit_unconfirmed",
+                    ],
+                    extra_quality={"completion_durability": "uncertain"},
+                ),
+                (True, True): _trusted_result(
+                    prepared.completion,
+                    reused=False,
+                    extra_warnings=[
+                        "completion_authority_commit_unconfirmed",
+                        "completion_lease_release_unconfirmed",
+                    ],
+                    extra_quality={"completion_durability": "uncertain"},
+                ),
+                (False, True): _trusted_result(
+                    prepared.completion,
+                    reused=False,
+                    extra_warnings=[
+                        "completion_directory_sync_unconfirmed",
+                        "completion_authority_commit_unconfirmed",
+                        "completion_lease_release_unconfirmed",
+                    ],
+                    extra_quality={"completion_durability": "uncertain"},
+                ),
+            }
+            completion, durability_synced, authority_committed = (
+                self._completions.finalize(prepared)
+            )
             committed = True
         except BaseException:
             self._completions.abort(prepared)
@@ -478,6 +518,8 @@ class DockingExecution:
         except Exception:
             if not committed or completion is None:
                 raise
+            if not authority_committed:
+                return authority_unavailable_variants[(durability_synced, True)]
             try:
                 verified = self._completions.load_verified(
                     task_id,
@@ -512,6 +554,8 @@ class DockingExecution:
                     },
                 )
             return response_variants[(durability_synced, True)]
+        if not authority_committed:
+            return authority_unavailable_variants[(durability_synced, False)]
         return response_variants[(durability_synced, False)]
 
     def _abort_prepared(
