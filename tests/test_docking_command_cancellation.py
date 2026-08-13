@@ -900,6 +900,7 @@ def test_tool_redacts_structured_inputs_and_success_provenance(tmp_path):
     assert secret_smiles not in serialized
     assert result["quality"]["docking_inputs"] == {
         "receptor_provided": True,
+        "ligand_provided": True,
         "ligand_mode": "smiles",
         "center": [1.0, 2.0, 3.0],
         "size": [20.0, 20.0, 20.0],

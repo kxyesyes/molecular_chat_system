@@ -246,6 +246,7 @@ class MolecularDocking(BaseMolecularTool):
             if result["success"]:
                 result["quality"]["docking_inputs"] = {
                     "receptor_provided": True,
+                    "ligand_provided": True,
                     "ligand_mode": input_type,
                     "center": list(center),
                     "size": list(size),

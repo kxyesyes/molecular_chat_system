@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +8,30 @@ from src.agent.contracts import ToolResult
 
 
 class DockingResultValidator:
+    @staticmethod
+    def _numeric_triplet(value: Any, *, positive: bool = False) -> bool:
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            return False
+        for item in value:
+            if type(item) not in (int, float) or not math.isfinite(float(item)):
+                return False
+            if positive and float(item) <= 0:
+                return False
+        return True
+
+    @classmethod
+    def _has_verified_inputs(cls, inputs: dict[str, Any]) -> bool:
+        has_box = cls._numeric_triplet(inputs.get("center")) and cls._numeric_triplet(
+            inputs.get("size"), positive=True
+        )
+        legacy = bool(inputs.get("receptor_path") and inputs.get("ligand_input"))
+        redacted = (
+            inputs.get("receptor_provided") is True
+            and inputs.get("ligand_provided") is True
+            and inputs.get("ligand_mode") in {"file", "smiles"}
+        )
+        return has_box and (legacy or redacted)
+
     def validate(self, result: ToolResult) -> str | None:
         if result.tool_name not in {
             "molecular_docking",
@@ -30,14 +55,16 @@ class DockingResultValidator:
             or best_pose.get("output_file")
             or data.get("pose_file")
         )
-        has_inputs = all(
-            inputs.get(key)
-            for key in ("receptor_path", "ligand_input", "center", "size")
-        )
+        has_inputs = self._has_verified_inputs(inputs)
         pose_exists = bool(pose_path and Path(str(pose_path)).is_file())
+        valid_energy = (
+            type(energy) in (int, float) and math.isfinite(float(energy))
+        )
+        pose_count = data.get("total_poses")
+        valid_pose_count = type(pose_count) is int and pose_count > 0
         if (
-            not isinstance(energy, (int, float))
-            or int(data.get("total_poses") or 0) < 1
+            not valid_energy
+            or not valid_pose_count
             or not has_inputs
             or not pose_exists
         ):

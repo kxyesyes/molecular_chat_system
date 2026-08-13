@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import math
 
 from src.agent.contracts import AgentErrorCode, ObservationStatus, ToolResult
 from src.agent.tools.admet_predictor import ADMETPredictor
@@ -23,6 +24,63 @@ def test_docking_validator_rejects_energy_without_execution_evidence():
     assert validated.error.code == AgentErrorCode.INVALID_OUTPUT
     assert validated.status == ObservationStatus.FAILED
     assert "docking evidence" in validated.message.lower()
+
+
+def test_docking_validator_accepts_redacted_verified_input_contract(tmp_path):
+    pose = tmp_path / "pose.pdbqt"
+    pose.write_text("MODEL 1\nENDMDL\n", encoding="utf-8")
+    result = ToolResult.success_result(
+        "molecular_docking",
+        data={
+            "total_poses": 1,
+            "pose_file": str(pose),
+            "best_pose": {"binding_energy": -7.2, "pose_file": str(pose)},
+        },
+        quality={
+            "docking_inputs": {
+                "receptor_provided": True,
+                "ligand_provided": True,
+                "ligand_mode": "file",
+                "center": [1.0, 2.0, 3.0],
+                "size": [20.0, 20.0, 20.0],
+            }
+        },
+    )
+
+    validated = AgentResultValidator().validate_tool_result(result)
+
+    assert validated.success is True
+
+
+def test_docking_validator_rejects_non_finite_or_boolean_science(tmp_path):
+    pose = tmp_path / "pose.pdbqt"
+    pose.write_text("MODEL 1\nENDMDL\n", encoding="utf-8")
+    quality = {
+        "docking_inputs": {
+            "receptor_provided": True,
+            "ligand_provided": True,
+            "ligand_mode": "file",
+            "center": [1.0, 2.0, 3.0],
+            "size": [20.0, 20.0, 20.0],
+        }
+    }
+    for energy, pose_count in ((math.nan, 1), (math.inf, 1), (True, 1), (-7.2, True)):
+        result = ToolResult.success_result(
+            "molecular_docking",
+            data={
+                "total_poses": pose_count,
+                "pose_file": str(pose),
+                "best_pose": {
+                    "binding_energy": energy,
+                    "pose_file": str(pose),
+                },
+            },
+            quality=quality,
+        )
+
+        validated = AgentResultValidator().validate_tool_result(result)
+
+        assert validated.success is False
 
 
 def test_activity_validator_rejects_pic50_without_real_model_provenance():
