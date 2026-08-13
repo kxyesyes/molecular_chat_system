@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import json
 import math
@@ -65,6 +65,9 @@ PROVENANCE_KEYS = frozenset(
         "attempt",
         "validator_status",
         "configured",
+        "reason",
+        "bucket",
+        "percent",
         "hash",
         "hashes",
     }
@@ -122,6 +125,52 @@ _DROP = object()
 STRICT_JSON_MAX_DEPTH = 64
 STRICT_JSON_MAX_ITEMS = 100_000
 TASK_WARNING_MESSAGE_MAX_LENGTH = 512
+_SAFE_RUNTIME_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
+_STRICT_SMILES_VALUE = re.compile(
+    r"(?:(?:Cl|Br)|[BCNOFPSIcnosp0-9@+\-\[\]()=#$\\/.%])+\Z"
+)
+
+
+def _validate_runtime_code(value: Any, name: str) -> str:
+    if type(value) is not str or _SAFE_RUNTIME_CODE.fullmatch(value) is None:
+        raise ValueError(f"invalid {name}")
+    return value
+
+
+def _safe_runtime_metadata(value: Any, name: str) -> dict[str, Any]:
+    try:
+        snapshot = strict_json_snapshot(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid JSON {name}") from exc
+    if not isinstance(snapshot, dict):
+        raise ValueError(f"invalid JSON {name}")
+    if (
+        sanitize_public_task_data(snapshot) != snapshot
+        or _runtime_metadata_contains_smiles(snapshot)
+    ):
+        raise ValueError(f"sensitive {name}")
+    return snapshot
+
+
+def _runtime_metadata_contains_smiles(value: Any, key: str | None = None) -> bool:
+    if isinstance(value, dict):
+        return any(
+            _runtime_metadata_contains_smiles(child, child_key)
+            for child_key, child in value.items()
+        )
+    if isinstance(value, list):
+        return any(_runtime_metadata_contains_smiles(child) for child in value)
+    if not isinstance(value, str):
+        return False
+    normalized_key = (key or "").lower()
+    if normalized_key.endswith(("_hash", "_sha256")) and _SAFE_DIGEST.fullmatch(value):
+        return False
+    return (
+        len(value) >= 3
+        and _STRICT_SMILES_VALUE.fullmatch(value) is not None
+        and re.search(r"[BCNOFPSIcnosp]", value) is not None
+        and re.search(r"[0-9@\[\]()=#$]", value) is not None
+    )
 
 
 @dataclass(frozen=True)
@@ -129,6 +178,67 @@ class TaskWarning:
     code: str
     message: str | None = None
     source: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskSubmission:
+    """Internal immutable hand-off; public metadata excludes scientific inputs."""
+
+    task_id: str
+    task_type: str
+    payload: dict[str, Any] = field(repr=False)
+    input_manifest_path: str = field(repr=False)
+    idempotency_key: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        _validate_runtime_code(self.task_id, "task_id")
+        _validate_runtime_code(self.task_type, "task_type")
+        if (
+            type(self.input_manifest_path) is not str
+            or not self.input_manifest_path
+            or self.input_manifest_path != self.input_manifest_path.strip()
+            or len(self.input_manifest_path) > 4096
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in self.input_manifest_path
+            )
+        ):
+            raise ValueError("invalid input_manifest_path")
+        if self.idempotency_key is not None:
+            _validate_runtime_code(self.idempotency_key, "idempotency_key")
+        object.__setattr__(
+            self,
+            "payload",
+            _safe_runtime_metadata(self.payload, "task payload"),
+        )
+
+
+@dataclass(frozen=True)
+class BackendHealth:
+    """Safe health projection suitable for API and event serialization."""
+
+    backend: str
+    available: bool
+    message: str
+    details: dict[str, Any] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        _validate_runtime_code(self.backend, "backend")
+        if type(self.available) is not bool:
+            raise ValueError("invalid backend availability")
+        if (
+            type(self.message) is not str
+            or not self.message
+            or self.message != self.message.strip()
+            or len(self.message) > TASK_WARNING_MESSAGE_MAX_LENGTH
+            or sanitize_task_message(self.message) != self.message
+        ):
+            raise ValueError("sensitive backend health message")
+        object.__setattr__(
+            self,
+            "details",
+            _safe_runtime_metadata(self.details, "backend health details"),
+        )
 
 
 def strict_json_snapshot(value: Any) -> Any:
