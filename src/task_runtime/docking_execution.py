@@ -189,6 +189,12 @@ class DockingExecution:
         input_hash = _input_hash(inputs)
         config_hash = inputs.config_hash
 
+        if self._completions.has_invalidation_marker(inputs.task_id):
+            return _failure(
+                AgentErrorCode.INVALID_OUTPUT,
+                "Docking completion ownership is uncertain.",
+                details={"reason": "ownership_uncertain"},
+            )
         if self._completions.has_manifest(inputs.task_id):
             completion = self._completions.load_verified(
                 inputs.task_id,
@@ -392,6 +398,10 @@ class DockingExecution:
             cancel_check=_cancel_check(cancel_event),
         )
         lease.__enter__()
+        committed = False
+        completion: DockingCompletionManifest | None = None
+        durability_synced = False
+        response_variants: dict[tuple[bool, bool], dict[str, Any]] = {}
         try:
             manifest = self._stager.load_verified(task_id, input_manifest)
             if (
@@ -401,26 +411,81 @@ class DockingExecution:
                 raise ManifestError("manifest_integrity_failed")
             if _is_cancelled(cancel_event):
                 self._completions.abort(prepared)
-                return _failure(
+                cancelled = _failure(
                     AgentErrorCode.CANCELLED,
                     "Docking execution was cancelled before artifact commit.",
                     status=ObservationStatus.CANCELLED,
                 )
-            completion, durability_synced = self._completions.finalize(prepared)
-            return _trusted_result(
-                completion,
-                reused=False,
-                extra_warnings=(
-                    []
-                    if durability_synced
-                    else ["completion_directory_sync_unconfirmed"]
+                lease.__exit__(None, None, None)
+                return cancelled
+            response_variants = {
+                (True, False): _trusted_result(
+                    prepared.completion,
+                    reused=False,
                 ),
-            )
+                (False, False): _trusted_result(
+                    prepared.completion,
+                    reused=False,
+                    extra_warnings=["completion_directory_sync_unconfirmed"],
+                ),
+                (True, True): _trusted_result(
+                    prepared.completion,
+                    reused=False,
+                    extra_warnings=["completion_lease_release_unconfirmed"],
+                ),
+                (False, True): _trusted_result(
+                    prepared.completion,
+                    reused=False,
+                    extra_warnings=[
+                        "completion_directory_sync_unconfirmed",
+                        "completion_lease_release_unconfirmed",
+                    ],
+                ),
+            }
+            completion, durability_synced = self._completions.finalize(prepared)
+            committed = True
         except BaseException:
             self._completions.abort(prepared)
+            try:
+                lease.__exit__(None, None, None)
+            except Exception:
+                pass
             raise
-        finally:
+        try:
             lease.__exit__(None, None, None)
+        except Exception:
+            if not committed or completion is None:
+                raise
+            try:
+                verified = self._completions.load_verified(
+                    task_id,
+                    input_hash=completion.input_hash,
+                    config_hash=completion.config_hash,
+                )
+                if verified != completion:
+                    raise CompletionError("completion_schema_invalid")
+            except Exception:
+                try:
+                    isolated = self._completions.invalidate_published(task_id)
+                except Exception:
+                    isolated = False
+                return _failure(
+                    AgentErrorCode.INVALID_OUTPUT,
+                    (
+                        "Docking completion ownership is uncertain."
+                        if not isolated
+                        else "Docking completion could not be strictly reverified."
+                    ),
+                    details={
+                        "reason": (
+                            "ownership_uncertain"
+                            if not isolated
+                            else "completion_invalidated"
+                        )
+                    },
+                )
+            return response_variants[(durability_synced, True)]
+        return response_variants[(durability_synced, False)]
 
     def _abort_prepared(
         self,
@@ -441,7 +506,10 @@ class DockingExecution:
             return
         finally:
             if lease is not None and lease.acquired:
-                lease.__exit__(None, None, None)
+                try:
+                    lease.__exit__(None, None, None)
+                except (ManifestError, OSError, RuntimeError):
+                    pass
 
 
 def _build_payload(inputs: VerifiedDockingInputs) -> dict[str, Any]:
@@ -802,11 +870,13 @@ def _failure(
     message: str,
     *,
     status: ObservationStatus = ObservationStatus.FAILED,
+    details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = ToolResult.error_result(
         "molecular_docking",
         code,
         message,
+        details=details,
         status=status,
     ).to_legacy_dict()
     result["completion"] = None

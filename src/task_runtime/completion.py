@@ -25,6 +25,8 @@ MAX_CACHED_TEXT_CHARS = 2048
 
 _SCHEMA = "DockingCompletionManifest@1"
 _MANIFEST_NAME = "completion_manifest.json"
+_INVALID_MARKER_NAME = "completion_invalid.marker"
+_INVALID_MARKER_CONTENT = b"DockingCompletionInvalid@1\nownership_uncertain\n"
 _ARTIFACT_DIRECTORY = "artifacts"
 _POSE_NAME = "docking_pose.pdbqt"
 _POSE_RELATIVE_PATH = f"{_ARTIFACT_DIRECTORY}/{_POSE_NAME}"
@@ -101,6 +103,7 @@ class CompletionError(ValueError):
             "completion_artifact_invalid",
             "completion_conflict",
             "completion_io_error",
+            "completion_ownership_uncertain",
         }
     )
 
@@ -205,6 +208,16 @@ class DockingCompletionStore:
             raise CompletionError("completion_io_error") from None
         return True
 
+    def has_invalidation_marker(self, task_id: str) -> bool:
+        path = self._task_root(task_id) / _INVALID_MARKER_NAME
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            raise CompletionError("completion_io_error") from None
+        return True
+
     def has_artifact_residue(self, task_id: str) -> bool:
         path = self._task_root(task_id) / _ARTIFACT_DIRECTORY
         try:
@@ -293,6 +306,8 @@ class DockingCompletionStore:
         _require_sha256(input_hash)
         _require_sha256(config_hash)
         task_root = self._task_root(task_id)
+        if self.has_invalidation_marker(task_id):
+            raise CompletionError("completion_ownership_uncertain")
         manifest_path = task_root / _MANIFEST_NAME
         try:
             raw, _ = _secure_read_regular(
@@ -345,6 +360,22 @@ class DockingCompletionStore:
             if artifact_hash != artifact.sha256:
                 raise CompletionError("completion_artifact_invalid")
         return completion
+
+    def invalidate_published(self, task_id: str) -> bool:
+        """Persistently block reuse, then best-effort quarantine the manifest."""
+
+        task_root = self._task_root(task_id)
+        marker_path = task_root / _INVALID_MARKER_NAME
+        marker_persisted = _persist_invalidation_marker(marker_path, task_root)
+        manifest_path = task_root / _MANIFEST_NAME
+        try:
+            manifest_path.lstat()
+        except FileNotFoundError:
+            return marker_persisted
+        except OSError:
+            return False
+        quarantined = _isolate_untrusted_manifest(manifest_path, task_root)
+        return quarantined
 
     def discard_additional_artifacts(
         self,
@@ -1096,7 +1127,52 @@ def _exact_regular_file(path: Path, expected: bytes, parent: Path) -> bool:
         return False
 
 
-def _isolate_untrusted_manifest(path: Path, parent: Path) -> None:
+def _persist_invalidation_marker(path: Path, parent: Path) -> bool:
+    """Atomically persist a fixed marker whose mere presence blocks reuse."""
+
+    temporary = parent / f".invalid-marker-{uuid.uuid4().hex}.tmp"
+    descriptor: int | None = None
+    try:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            return True
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(temporary, flags, 0o600)
+        written = os.write(descriptor, _INVALID_MARKER_CONTENT)
+        if written != len(_INVALID_MARKER_CONTENT):
+            return False
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.replace(temporary, path)
+        try:
+            _fsync_directory(parent)
+        except OSError:
+            pass
+        return True
+    except (OSError, RuntimeError, ValueError):
+        try:
+            path.lstat()
+        except OSError:
+            return False
+        return True
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _isolate_untrusted_manifest(path: Path, parent: Path) -> bool:
     """Best-effort quarantine; never unlink an ambiguous publication."""
 
     try:
@@ -1108,8 +1184,9 @@ def _isolate_untrusted_manifest(path: Path, parent: Path) -> None:
             _fsync_directory(parent)
         except OSError:
             pass
+        return True
     except (CompletionError, OSError, RuntimeError, ValueError):
-        return
+        return False
 
 
 def _ensure_private_directory(path: Path, task_root: Path) -> None:

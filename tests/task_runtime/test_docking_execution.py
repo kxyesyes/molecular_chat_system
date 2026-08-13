@@ -1236,3 +1236,172 @@ def test_directory_fsync_failure_after_replace_is_success_with_warning(
     assert result["success"] is True
     assert "completion_directory_sync_unconfirmed" in result["warnings"]
     assert _completion(tmp_path).exists()
+
+
+def test_trusted_result_is_built_before_manifest_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.docking_execution as execution_module
+
+    manifest = _stage(tmp_path)
+    real_trusted_result = execution_module._trusted_result
+    publication_states: list[bool] = []
+
+    def fail_if_already_published(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        published = _completion(tmp_path).exists()
+        publication_states.append(published)
+        if published:
+            raise RuntimeError("trusted response built after commit")
+        return real_trusted_result(*args, **kwargs)
+
+    monkeypatch.setattr(execution_module, "_trusted_result", fail_if_already_published)
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=_executor(tmp_path, []),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is True
+    assert publication_states and not any(publication_states)
+    assert _completion(tmp_path).exists()
+
+
+def test_trusted_result_preconstruction_failure_never_publishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.docking_execution as execution_module
+
+    manifest = _stage(tmp_path)
+
+    def fail_response_construction(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("response serialization failed")
+
+    monkeypatch.setattr(
+        execution_module,
+        "_trusted_result",
+        fail_response_construction,
+    )
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=_executor(tmp_path, []),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert not _completion(tmp_path).exists()
+    assert not (tmp_path / "task-1" / "artifacts" / "docking_pose.pdbqt").exists()
+
+
+def test_lease_release_failure_after_commit_returns_verified_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.staging as staging_module
+
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    real_release = staging_module._TaskLease.release
+
+    def release_then_raise(lease: Any) -> None:
+        real_release(lease)
+        if _completion(tmp_path).exists():
+            raise OSError("lease release status unavailable")
+
+    monkeypatch.setattr(staging_module._TaskLease, "release", release_then_raise)
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
+    first = runner.run_verified("task-1", manifest)
+    monkeypatch.setattr(staging_module._TaskLease, "release", real_release)
+    reused = runner.run_verified("task-1", manifest)
+
+    assert first["success"] is True
+    assert "completion_lease_release_unconfirmed" in first["warnings"]
+    assert reused["success"] is True
+    assert reused["reused_completion"] is True
+    assert len(calls) == 1
+
+
+def test_lease_release_failure_before_commit_is_not_reported_as_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.staging as staging_module
+
+    manifest = _stage(tmp_path)
+    real_release = staging_module._TaskLease.release
+
+    def release_then_raise(lease: Any) -> None:
+        real_release(lease)
+        raise OSError("lease release failed before commit")
+
+    monkeypatch.setattr(staging_module._TaskLease, "release", release_then_raise)
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=_executor(tmp_path, []),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert not _completion(tmp_path).exists()
+    assert not (tmp_path / "task-1" / "artifacts" / "docking_pose.pdbqt").exists()
+
+
+def test_unverifiable_commit_persists_tombstone_when_quarantine_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.completion as completion_module
+    import src.task_runtime.staging as staging_module
+
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    real_release = staging_module._TaskLease.release
+    real_load = completion_module.DockingCompletionStore.load_verified
+
+    def release_then_raise(lease: Any) -> None:
+        real_release(lease)
+        if _completion(tmp_path).exists():
+            raise OSError("lease release status unavailable")
+
+    def fail_published_load(
+        store: Any,
+        task_id: str,
+        *,
+        input_hash: str,
+        config_hash: str,
+    ) -> Any:
+        if store.manifest_path(task_id).exists():
+            raise completion_module.CompletionError("completion_artifact_invalid")
+        return real_load(
+            store,
+            task_id,
+            input_hash=input_hash,
+            config_hash=config_hash,
+        )
+
+    monkeypatch.setattr(staging_module._TaskLease, "release", release_then_raise)
+    monkeypatch.setattr(
+        completion_module.DockingCompletionStore,
+        "load_verified",
+        fail_published_load,
+    )
+    monkeypatch.setattr(
+        completion_module,
+        "_isolate_untrusted_manifest",
+        lambda _path, _parent: False,
+    )
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
+    first = runner.run_verified("task-1", manifest)
+
+    monkeypatch.setattr(staging_module._TaskLease, "release", real_release)
+    monkeypatch.setattr(
+        completion_module.DockingCompletionStore,
+        "load_verified",
+        real_load,
+    )
+    second = runner.run_verified("task-1", manifest)
+
+    assert first["success"] is False
+    assert first["error"]["details"]["reason"] == "ownership_uncertain"
+    assert (tmp_path / "task-1" / "completion_invalid.marker").exists()
+    assert second["success"] is False
+    assert second["reused_completion"] is False
+    assert len(calls) == 1
