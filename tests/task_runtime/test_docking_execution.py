@@ -831,7 +831,7 @@ def test_long_concurrent_same_task_executes_once(
     assert len(calls) == 1
 
 
-def test_concurrent_call_waits_for_prepared_completion_in_lease_gap(
+def test_concurrent_call_waits_while_prepared_completion_holds_lease(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -864,6 +864,59 @@ def test_concurrent_call_waits_for_prepared_completion_in_lease_gap(
         True,
     ]
     assert len(calls) == 1
+
+
+def test_owner_unlink_failure_cannot_expose_active_attempt_to_concurrent_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
+    finalize_entered = threading.Event()
+    allow_finalize = threading.Event()
+    real_finalize = runner._finalize_prepared
+    real_unlink = Path.unlink
+    owner_unlinks = {"count": 0}
+
+    def fail_first_attempt_owner_unlink(
+        path: Path,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        if (
+            path.name == ".completion-attempt-owner"
+            and owner_unlinks["count"] == 0
+        ):
+            owner_unlinks["count"] += 1
+            raise OSError("attempt owner unlink failed")
+        real_unlink(path, *args, **kwargs)
+
+    def gated_finalize(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        finalize_entered.set()
+        assert allow_finalize.wait(10)
+        return real_finalize(*args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_first_attempt_owner_unlink)
+    monkeypatch.setattr(runner, "_finalize_prepared", gated_finalize)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(runner.run_verified, "task-1", manifest)
+        assert finalize_entered.wait(10)
+        second_future = pool.submit(runner.run_verified, "task-1", manifest)
+        deadline = time.monotonic() + 2
+        while len(calls) == 1 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        allow_finalize.set()
+        results = [
+            first_future.result(timeout=10),
+            second_future.result(timeout=10),
+        ]
+
+    assert owner_unlinks["count"] == 1
+    assert len(calls) == 1
+    assert all(result["success"] is True for result in results)
+    assert sorted(result["reused_completion"] for result in results) == [False, True]
 
 
 def test_cross_process_same_task_executes_once(tmp_path: Path) -> None:
@@ -1715,10 +1768,13 @@ def test_lease_release_failure_before_commit_is_not_reported_as_success(
         real_release(lease)
         raise OSError("lease release failed before commit")
 
+    def fail_before_commit(_payload: dict[str, Any], **_control: Any) -> ToolResult:
+        raise RuntimeError("tool failed before completion preparation")
+
     monkeypatch.setattr(staging_module._TaskLease, "release", release_then_raise)
     result = DockingExecution(
         tmp_path,
-        raw_executor=_executor(tmp_path, []),
+        raw_executor=fail_before_commit,
     ).run_verified("task-1", manifest)
 
     assert result["success"] is False

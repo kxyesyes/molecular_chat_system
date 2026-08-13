@@ -10,6 +10,7 @@ import os
 import re
 import stat
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -38,6 +39,7 @@ from .completion import (
 )
 from .staging import (
     MAX_SMILES_BYTES,
+    DockingTaskExecution,
     DockingInputStager,
     ManifestError,
     VerifiedDockingInputs,
@@ -53,6 +55,24 @@ _VINA_RESULT = re.compile(
 
 class _PreparedCompletionPending(RuntimeError):
     pass
+
+
+@dataclass
+class _CompletionCommitState:
+    committed: bool = False
+    completion: DockingCompletionManifest | None = None
+    durability_synced: bool = False
+    authority_state: str = AUTHORITY_BLOCKED
+    response_variants: dict[tuple[bool, bool], dict[str, Any]] = field(
+        default_factory=dict
+    )
+    unavailable_variants: dict[bool, dict[str, Any]] = field(default_factory=dict)
+    authority_unavailable_variants: dict[
+        tuple[bool, bool], dict[str, Any]
+    ] = field(default_factory=dict)
+    authority_ambiguous_variants: dict[
+        tuple[bool, bool], dict[str, Any]
+    ] = field(default_factory=dict)
 
 
 class DockingExecution:
@@ -108,36 +128,39 @@ class DockingExecution:
             )
         pending_deadline: float | None = None
         while True:
-            lease_context = self._stager.task_execution_lease(
-                task_id,
-                lease_timeout_seconds=lease_timeout_seconds,
-                cancel_check=_cancel_check(cancel_event),
-            )
             prepared: PreparedDockingCompletion | None = None
+            commit_state: _CompletionCommitState | None = None
             try:
-                with lease_context as transaction:
-                    with self._stager.execution_snapshot(
-                        task_id,
-                        input_manifest,
-                        cancel_check=_cancel_check(cancel_event),
-                        transaction=transaction,
-                    ) as inputs:
-                        outcome = self._run_under_lease(
-                            inputs,
-                            attempt=attempt,
-                            progress_callback=progress_callback,
-                            cancel_event=cancel_event,
-                        )
-                        if isinstance(outcome, PreparedDockingCompletion):
-                            prepared = outcome
-                if prepared is not None:
-                    return self._finalize_prepared(
-                        task_id,
-                        input_manifest,
-                        prepared,
-                        lease_timeout_seconds=lease_timeout_seconds,
+                with self._stager.task_execution(
+                    task_id,
+                    input_manifest,
+                    lease_timeout_seconds=lease_timeout_seconds,
+                    cancel_check=_cancel_check(cancel_event),
+                ) as execution:
+                    outcome = self._run_under_lease(
+                        execution.inputs,
+                        attempt=attempt,
+                        progress_callback=progress_callback,
                         cancel_event=cancel_event,
                     )
+                    if isinstance(outcome, PreparedDockingCompletion):
+                        prepared = outcome
+                        commit_state = _CompletionCommitState()
+                        try:
+                            outcome = self._finalize_prepared(
+                                task_id,
+                                prepared,
+                                execution=execution,
+                                commit_state=commit_state,
+                                cancel_event=cancel_event,
+                            )
+                        except BaseException:
+                            if not commit_state.committed:
+                                self._completions.abort(prepared)
+                                prepared = None
+                            raise
+                        if not commit_state.committed:
+                            prepared = None
                 return outcome
             except _PreparedCompletionPending:
                 if pending_deadline is None:
@@ -152,11 +175,10 @@ class DockingExecution:
                 time.sleep(0.02)
                 continue
             except ManifestError:
-                if prepared is not None:
-                    self._abort_prepared(
+                if commit_state is not None and commit_state.committed:
+                    return self._resolve_post_commit_exception(
                         task_id,
-                        prepared,
-                        lease_timeout_seconds=lease_timeout_seconds,
+                        commit_state,
                     )
                 if _is_cancelled(cancel_event):
                     return _failure(
@@ -169,22 +191,20 @@ class DockingExecution:
                     "Docking input verification failed.",
                 )
             except CompletionError:
-                if prepared is not None:
-                    self._abort_prepared(
+                if commit_state is not None and commit_state.committed:
+                    return self._resolve_post_commit_exception(
                         task_id,
-                        prepared,
-                        lease_timeout_seconds=lease_timeout_seconds,
+                        commit_state,
                     )
                 return _failure(
                     AgentErrorCode.INVALID_OUTPUT,
                     "Docking completion verification failed.",
                 )
             except asyncio.CancelledError:
-                if prepared is not None:
-                    self._abort_prepared(
+                if commit_state is not None and commit_state.committed:
+                    return self._resolve_post_commit_exception(
                         task_id,
-                        prepared,
-                        lease_timeout_seconds=lease_timeout_seconds,
+                        commit_state,
                     )
                 return _failure(
                     AgentErrorCode.CANCELLED,
@@ -192,11 +212,10 @@ class DockingExecution:
                     status=ObservationStatus.CANCELLED,
                 )
             except Exception:
-                if prepared is not None:
-                    self._abort_prepared(
+                if commit_state is not None and commit_state.committed:
+                    return self._resolve_post_commit_exception(
                         task_id,
-                        prepared,
-                        lease_timeout_seconds=lease_timeout_seconds,
+                        commit_state,
                     )
                 return _failure(
                     AgentErrorCode.INTERNAL_ERROR,
@@ -425,22 +444,14 @@ class DockingExecution:
     def _finalize_prepared(
         self,
         task_id: str,
-        input_manifest: str | os.PathLike[str],
         prepared: PreparedDockingCompletion,
         *,
-        lease_timeout_seconds: float,
+        execution: DockingTaskExecution,
+        commit_state: _CompletionCommitState,
         cancel_event: Any,
     ) -> dict[str, Any]:
-        committed = False
-        completion: DockingCompletionManifest | None = None
-        durability_synced = False
-        authority_state = AUTHORITY_BLOCKED
-        response_variants: dict[tuple[bool, bool], dict[str, Any]] = {}
-        unavailable_variants: dict[bool, dict[str, Any]] = {}
-        authority_unavailable_variants: dict[tuple[bool, bool], dict[str, Any]] = {}
-        authority_ambiguous_variants: dict[tuple[bool, bool], dict[str, Any]] = {}
         try:
-            response_variants = {
+            commit_state.response_variants = {
                 (True, False): _trusted_result(
                     prepared.completion,
                     reused=False,
@@ -464,7 +475,7 @@ class DockingExecution:
                     ],
                 ),
             }
-            unavailable_variants = {
+            commit_state.unavailable_variants = {
                 True: _trusted_result(
                     prepared.completion,
                     reused=False,
@@ -485,7 +496,7 @@ class DockingExecution:
                     extra_quality={"completion_durability": "uncertain"},
                 ),
             }
-            authority_unavailable_variants = {
+            commit_state.authority_unavailable_variants = {
                 (True, False): _trusted_result(
                     prepared.completion,
                     reused=False,
@@ -521,7 +532,7 @@ class DockingExecution:
                     extra_quality={"completion_durability": "uncertain"},
                 ),
             }
-            authority_ambiguous_variants = {
+            commit_state.authority_ambiguous_variants = {
                 (True, False): _trusted_result(
                     prepared.completion,
                     reused=False,
@@ -571,98 +582,102 @@ class DockingExecution:
                     },
                 ),
             }
-            with self._stager.task_execution_lease(
-                task_id,
-                lease_timeout_seconds=lease_timeout_seconds,
-                cancel_check=_cancel_check(cancel_event),
+            manifest = execution.close_inputs_and_verify_manifest()
+            execution.assert_ready_to_finalize()
+            if (
+                _manifest_input_hash(manifest) != prepared.completion.input_hash
+                or manifest["config_hash"] != prepared.completion.config_hash
             ):
-                manifest = self._stager.load_verified(task_id, input_manifest)
-                if (
-                    _manifest_input_hash(manifest) != prepared.completion.input_hash
-                    or manifest["config_hash"] != prepared.completion.config_hash
-                ):
-                    raise ManifestError("manifest_integrity_failed")
-                if _is_cancelled(cancel_event):
-                    self._completions.abort(prepared)
-                    return _failure(
-                        AgentErrorCode.CANCELLED,
-                        "Docking execution was cancelled before artifact commit.",
-                        status=ObservationStatus.CANCELLED,
-                    )
-                completion, durability_synced, authority_state = (
-                    self._completions.finalize(prepared)
-                )
-                committed = True
-        except BaseException:
-            if not committed or completion is None:
+                raise ManifestError("manifest_integrity_failed")
+            if _is_cancelled(cancel_event):
                 self._completions.abort(prepared)
-                raise
-            if authority_state not in {
-                AUTHORITY_COMMITTED,
-                AUTHORITY_COMMITTED_AMBIGUOUS,
-            }:
-                return authority_unavailable_variants[(durability_synced, True)]
-            try:
-                verified = self._completions.load_verified(
-                    task_id,
-                    input_hash=completion.input_hash,
-                    config_hash=completion.config_hash,
-                )
-                if verified != completion:
-                    raise CompletionError("completion_schema_invalid")
-            except Exception:
-                try:
-                    marker_persisted, quarantined = (
-                        self._completions.invalidate_published(task_id)
-                    )
-                except Exception:
-                    marker_persisted = False
-                    quarantined = False
-                if not marker_persisted and not quarantined:
-                    return unavailable_variants[durability_synced]
                 return _failure(
-                    AgentErrorCode.INVALID_OUTPUT,
-                    (
-                        "Docking completion ownership is uncertain."
-                        if not quarantined
-                        else "Docking completion could not be strictly reverified."
-                    ),
-                    details={
-                        "reason": (
-                            "ownership_uncertain"
-                            if not quarantined
-                            else "completion_invalidated"
-                        )
-                    },
+                    AgentErrorCode.CANCELLED,
+                    "Docking execution was cancelled before artifact commit.",
+                    status=ObservationStatus.CANCELLED,
                 )
-            if authority_state == AUTHORITY_COMMITTED_AMBIGUOUS:
-                return authority_ambiguous_variants[(durability_synced, True)]
-            return response_variants[(durability_synced, True)]
-        if authority_state not in {
+            (
+                commit_state.completion,
+                commit_state.durability_synced,
+                commit_state.authority_state,
+            ) = self._completions.finalize(prepared)
+            commit_state.committed = True
+        except BaseException:
+            if not commit_state.committed:
+                self._completions.abort(prepared)
+            raise
+        if commit_state.authority_state not in {
             AUTHORITY_COMMITTED,
             AUTHORITY_COMMITTED_AMBIGUOUS,
         }:
-            return authority_unavailable_variants[(durability_synced, False)]
-        if authority_state == AUTHORITY_COMMITTED_AMBIGUOUS:
-            return authority_ambiguous_variants[(durability_synced, False)]
-        return response_variants[(durability_synced, False)]
+            return commit_state.authority_unavailable_variants[
+                (commit_state.durability_synced, False)
+            ]
+        if commit_state.authority_state == AUTHORITY_COMMITTED_AMBIGUOUS:
+            return commit_state.authority_ambiguous_variants[
+                (commit_state.durability_synced, False)
+            ]
+        return commit_state.response_variants[
+            (commit_state.durability_synced, False)
+        ]
 
-    def _abort_prepared(
+    def _resolve_post_commit_exception(
         self,
         task_id: str,
-        prepared: PreparedDockingCompletion,
-        *,
-        lease_timeout_seconds: float,
-    ) -> None:
+        commit_state: _CompletionCommitState,
+    ) -> dict[str, Any]:
+        completion = commit_state.completion
+        if not commit_state.committed or completion is None:
+            raise CompletionError("completion_io_error")
+        if commit_state.authority_state not in {
+            AUTHORITY_COMMITTED,
+            AUTHORITY_COMMITTED_AMBIGUOUS,
+        }:
+            return commit_state.authority_unavailable_variants[
+                (commit_state.durability_synced, True)
+            ]
         try:
-            with self._stager.task_execution_lease(
+            verified = self._completions.load_verified(
                 task_id,
-                lease_timeout_seconds=lease_timeout_seconds,
-            ):
-                self._completions.abort(prepared)
-        except (ManifestError, CompletionError, OSError, RuntimeError):
-            return
-
+                input_hash=completion.input_hash,
+                config_hash=completion.config_hash,
+            )
+            if verified != completion:
+                raise CompletionError("completion_schema_invalid")
+        except Exception:
+            try:
+                marker_persisted, quarantined = (
+                    self._completions.invalidate_published(task_id)
+                )
+            except Exception:
+                marker_persisted = False
+                quarantined = False
+            if not marker_persisted and not quarantined:
+                return commit_state.unavailable_variants[
+                    commit_state.durability_synced
+                ]
+            return _failure(
+                AgentErrorCode.INVALID_OUTPUT,
+                (
+                    "Docking completion ownership is uncertain."
+                    if not quarantined
+                    else "Docking completion could not be strictly reverified."
+                ),
+                details={
+                    "reason": (
+                        "ownership_uncertain"
+                        if not quarantined
+                        else "completion_invalidated"
+                    )
+                },
+            )
+        if commit_state.authority_state == AUTHORITY_COMMITTED_AMBIGUOUS:
+            return commit_state.authority_ambiguous_variants[
+                (commit_state.durability_synced, True)
+            ]
+        return commit_state.response_variants[
+            (commit_state.durability_synced, True)
+        ]
 
 def _build_payload(inputs: VerifiedDockingInputs) -> dict[str, Any]:
     config = inputs.config

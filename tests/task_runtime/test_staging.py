@@ -1429,6 +1429,25 @@ def test_public_lease_preserves_snapshot_setup_failure(
                 pytest.fail("snapshot setup unexpectedly succeeded")
 
 
+def test_task_execution_closes_inputs_but_keeps_exclusive_lease(
+    tmp_path: Path,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    path = _stage_file(stager)
+
+    with stager.task_execution("task-1", path) as transaction:
+        assert transaction.inputs.verify_integrity() is True
+        verified_manifest = transaction.close_inputs_and_verify_manifest()
+        assert verified_manifest["task_id"] == "task-1"
+        with pytest.raises(ManifestError, match="manifest_busy"):
+            _stage_file(DockingInputStager(tmp_path))
+        with pytest.raises(ManifestError, match="manifest_busy"):
+            _ = transaction.inputs
+
+    with pytest.raises(ManifestError, match="manifest_busy"):
+        transaction.close_inputs_and_verify_manifest()
+
+
 def test_execution_lease_acquisition_failure_is_fail_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

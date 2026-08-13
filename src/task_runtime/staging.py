@@ -1,8 +1,8 @@
 """Durable, task-owned docking input staging with verified manifests.
 
-Consumers must use :meth:`DockingInputStager.execution_snapshot` immediately
-around scientific execution.  The context owns immutable copied inputs and a
-cross-process task lease for its complete lifetime.
+Consumers that publish authoritative output must use
+:meth:`DockingInputStager.task_execution`; it keeps immutable copied inputs and
+the cross-process task lease alive through final input verification and commit.
 """
 
 from __future__ import annotations
@@ -368,6 +368,59 @@ class ExecutionLeaseTransaction:
             raise ManifestError("manifest_busy")
 
 
+class DockingTaskExecution:
+    """Lease-bound input transaction with an explicit final-verification gate."""
+
+    def __init__(
+        self,
+        stager: "DockingInputStager",
+        task_id: str,
+        manifest_path: str | os.PathLike[str],
+        lease_transaction: ExecutionLeaseTransaction,
+        inputs: VerifiedDockingInputs,
+        snapshot_root: Path,
+    ) -> None:
+        self._stager = stager
+        self._task_id = task_id
+        self._manifest_path = manifest_path
+        self._lease_transaction = lease_transaction
+        self._inputs = inputs
+        self._snapshot_root = snapshot_root
+        self._inputs_closed = False
+        self._manifest_verified = False
+        self._active = True
+
+    def _validate(self, *, inputs_open: bool | None = None) -> None:
+        self._lease_transaction._validate(self._stager, self._task_id)
+        if not self._active:
+            raise ManifestError("manifest_busy")
+        if inputs_open is True and self._inputs_closed:
+            raise ManifestError("manifest_busy")
+        if inputs_open is False and not self._inputs_closed:
+            raise ManifestError("manifest_busy")
+
+    @property
+    def inputs(self) -> VerifiedDockingInputs:
+        self._validate(inputs_open=True)
+        return self._inputs
+
+    def close_inputs_and_verify_manifest(self) -> dict[str, Any]:
+        """Finalize snapshot integrity while retaining the exclusive task lease."""
+
+        self._validate(inputs_open=True)
+        return self._stager._close_task_execution_inputs(
+            self,
+            verify_manifest=True,
+        )
+
+    def assert_ready_to_finalize(self) -> None:
+        """Prove this transaction still owns the lease after final input checks."""
+
+        self._validate(inputs_open=False)
+        if not self._manifest_verified:
+            raise ManifestError("manifest_integrity_failed")
+
+
 class DockingInputStager:
     """Atomically stage docking inputs below a task-owned directory."""
 
@@ -599,6 +652,90 @@ class DockingInputStager:
         finally:
             transaction._active = False
             lease.__exit__(None, None, None)
+
+    @contextmanager
+    def task_execution(
+        self,
+        task_id: str,
+        manifest_path: str | os.PathLike[str],
+        *,
+        lease_timeout_seconds: float = _DEFAULT_EXECUTION_LEASE_TIMEOUT_SECONDS,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> Iterator[DockingTaskExecution]:
+        """Own one lease from snapshot creation through completion publication."""
+
+        with self.task_execution_lease(
+            task_id,
+            lease_timeout_seconds=lease_timeout_seconds,
+            cancel_check=cancel_check,
+        ) as lease_transaction:
+            with self._lock:
+                self._cleanup_execution_residue(
+                    self._root / task_id,
+                    cutoff_epoch=time.time(),
+                    remove_all=True,
+                )
+                inputs, snapshot_root = self._create_execution_snapshot(
+                    task_id,
+                    manifest_path,
+                )
+            execution = DockingTaskExecution(
+                self,
+                task_id,
+                manifest_path,
+                lease_transaction,
+                inputs,
+                snapshot_root,
+            )
+            body_error: BaseException | None = None
+            try:
+                yield execution
+            except BaseException as exc:
+                body_error = exc
+                raise
+            finally:
+                close_error: ManifestError | None = None
+                if not execution._inputs_closed:
+                    try:
+                        self._close_task_execution_inputs(
+                            execution,
+                            verify_manifest=False,
+                        )
+                    except ManifestError as exc:
+                        close_error = exc
+                execution._active = False
+                if body_error is None and close_error is not None:
+                    raise close_error
+
+    def _close_task_execution_inputs(
+        self,
+        execution: DockingTaskExecution,
+        *,
+        verify_manifest: bool,
+    ) -> dict[str, Any]:
+        execution._validate(inputs_open=True)
+        integrity_error: ManifestError | None = None
+        try:
+            execution._inputs.verify_integrity()
+        except ManifestError as exc:
+            integrity_error = exc
+        finally:
+            execution._inputs._close()
+        with self._lock:
+            disposed = self._dispose_execution_snapshot(execution._snapshot_root)
+        execution._inputs_closed = True
+        if integrity_error is not None:
+            raise integrity_error
+        if not disposed:
+            raise ManifestError("manifest_io_error")
+        if not verify_manifest:
+            return {}
+        manifest = self.load_verified(
+            execution._task_id,
+            execution._manifest_path,
+        )
+        execution._manifest_verified = True
+        return manifest
 
     @contextmanager
     def execution_snapshot(
