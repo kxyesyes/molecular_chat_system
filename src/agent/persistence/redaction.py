@@ -6,21 +6,56 @@ from typing import Any
 
 
 REDACTED = "[REDACTED]"
+SANITIZED = "[redacted]"
 SENSITIVE_KEYS = {
+    "access_key",
+    "access_key_id",
     "api_key",
     "apikey",
     "authorization",
+    "client_secret",
     "cookie",
     "credential",
     "credentials",
+    "passwd",
     "password",
+    "pwd",
     "secret",
     "token",
 }
 _CREDENTIAL_PATTERNS = (
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"),
+    re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+    re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"),
 )
+_SENSITIVE_FIELD = (
+    r"api[_-]?key|access[_-]?key(?:[_-]?id)?|client[_-]?secret|"
+    r"authorization|password|passwd|pwd|secret|token"
+)
+_CONTEXT_SECRET = re.compile(
+    rf"(?i)(?<![A-Za-z0-9_])[\"']?(?:{_SENSITIVE_FIELD})[\"']?\s*(?:=|:)\s*"
+    r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;&}\]]+)"
+)
+_BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
+_AUTHORIZATION_HEADER = re.compile(
+    r"(?i)\bAuthorization\s*:\s*(?:Bearer|Basic)\s+[^\s,;]+"
+)
+_AWS_ACCESS_KEY = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
+_GITHUB_TOKEN = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
+)
+_OPENAI_TOKEN = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
+_URL = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>\"']+")
+_URL_SECRET_QUERY = re.compile(rf"(?i)(?:[?&])(?:{_SENSITIVE_FIELD})=")
+_WINDOWS_PATH = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:\\\\(?:\?\\UNC\\|\?\\|\.\\|"
+    r"[^\\\s;,]+\\)[^\s;,]*|[A-Z]:[\\/][^\s;,]*)"
+)
+_POSIX_PATH = re.compile(
+    r"(?<![A-Za-z0-9])/(?:[^/\s;,]+/)*[^/\s;,]+"
+)
+_MAX_SANITIZER_SCAN_CHARS = 16 * 1024
 
 
 def looks_like_credential(value: str) -> bool:
@@ -60,3 +95,120 @@ def contains_credential(value: Any) -> bool:
     if isinstance(value, (list, tuple)):
         return any(contains_credential(item) for item in value)
     return isinstance(value, str) and looks_like_credential(value)
+
+
+def sanitize_sensitive_text(
+    value: Any,
+    *,
+    max_chars: int,
+    sensitive_values: tuple[str, ...] = (),
+) -> tuple[str, bool]:
+    """Return bounded text with contextual secrets and absolute paths removed."""
+
+    if not isinstance(value, str) or type(max_chars) is not int or max_chars < 0:
+        return "", value not in (None, "")
+    scan_limit = min(
+        _MAX_SANITIZER_SCAN_CHARS,
+        max(1024, max_chars * 4 + 256),
+    )
+    text = value[:scan_limit]
+    changed = len(value) > scan_limit
+    for secret in sensitive_values:
+        if isinstance(secret, str) and secret and secret in text:
+            text = text.replace(secret, SANITIZED)
+            changed = True
+
+    def sanitize_url(match: re.Match[str]) -> str:
+        nonlocal changed
+        url = match.group(0)
+        authority = url.split("://", 1)[1].split("/", 1)[0]
+        if "@" in authority or _URL_SECRET_QUERY.search(url):
+            changed = True
+            return SANITIZED
+        return url
+
+    text = _URL.sub(sanitize_url, text)
+    for pattern in (
+        _AUTHORIZATION_HEADER,
+        _CONTEXT_SECRET,
+        _BEARER,
+        _AWS_ACCESS_KEY,
+        _GITHUB_TOKEN,
+        _OPENAI_TOKEN,
+        _WINDOWS_PATH,
+        _POSIX_PATH,
+    ):
+        text, count = pattern.subn(SANITIZED, text)
+        changed = changed or count > 0
+    cleaned = "".join(
+        character if ord(character) >= 32 or character in "\n\t" else " "
+        for character in text
+    ).strip()
+    changed = changed or cleaned != text
+    if len(cleaned) > max_chars:
+        cleaned = cleaned[:max_chars]
+        changed = True
+    return cleaned, changed
+
+
+def sanitize_bounded(
+    value: Any,
+    *,
+    max_depth: int = 4,
+    max_items: int = 64,
+    max_text_chars: int = 2048,
+    sensitive_values: tuple[str, ...] = (),
+) -> tuple[Any, bool]:
+    """Recursively sanitize metadata with fixed depth, item, and text bounds."""
+
+    fields = {key.casefold() for key in SENSITIVE_KEYS}
+
+    def visit(item: Any, depth: int) -> tuple[Any, bool]:
+        if isinstance(item, str):
+            return sanitize_sensitive_text(
+                item,
+                max_chars=max_text_chars,
+                sensitive_values=sensitive_values,
+            )
+        if isinstance(item, Mapping):
+            if depth >= max_depth:
+                return SANITIZED, True
+            output: dict[Any, Any] = {}
+            changed = len(item) > max_items
+            for index, (key, child) in enumerate(item.items()):
+                if index >= max_items:
+                    break
+                normalized = str(key).casefold().replace("-", "_")
+                if normalized in fields or any(
+                    marker in normalized
+                    for marker in (
+                        "api_key",
+                        "access_key",
+                        "client_secret",
+                        "password",
+                        "passwd",
+                        "secret",
+                        "token",
+                    )
+                ):
+                    output[key] = SANITIZED
+                    changed = True
+                else:
+                    output[key], child_changed = visit(child, depth + 1)
+                    changed = changed or child_changed
+            return output, changed
+        if isinstance(item, (list, tuple)):
+            if depth >= max_depth:
+                return SANITIZED, True
+            output = []
+            changed = len(item) > max_items or isinstance(item, tuple)
+            for child in item[:max_items]:
+                sanitized, child_changed = visit(child, depth + 1)
+                output.append(sanitized)
+                changed = changed or child_changed
+            return output, changed
+        if item is None or type(item) in (bool, int, float):
+            return item, False
+        return SANITIZED, True
+
+    return visit(value, 0)

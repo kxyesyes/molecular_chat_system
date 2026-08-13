@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from src.agent.persistence import SQLiteAgentStateStore, redact_sensitive
+from src.agent.persistence.redaction import sanitize_bounded, sanitize_sensitive_text
 
 
 def test_sqlite_store_round_trips_run_checkpoint_and_ordered_events(tmp_path):
@@ -82,6 +83,40 @@ def test_store_redacts_nested_secrets_before_persisting(tmp_path):
     assert "secret-value" not in (tmp_path / "agent_state.sqlite3").read_bytes().decode(
         "latin1", errors="ignore"
     )
+
+
+def test_bounded_sanitizer_uses_context_without_redacting_ordinary_short_words():
+    text, changed = sanitize_sensitive_text(
+        "token bucket is ordinary; api_key=abcd123456 password:hunter2",
+        max_chars=256,
+    )
+
+    assert changed is True
+    assert "token bucket is ordinary" in text
+    assert text.count("[redacted]") == 2
+    assert "abcd123456" not in text
+    assert "hunter2" not in text
+
+    sanitized, changed = sanitize_bounded(
+        {"safe": "value", "nested": {"client_secret": "short-secret"}},
+        max_depth=1,
+        max_items=8,
+        max_text_chars=32,
+    )
+    assert changed is True
+    assert sanitized == {"safe": "value", "nested": "[redacted]"}
+
+
+def test_text_sanitizer_redacts_json_like_credential_fields():
+    text, changed = sanitize_sensitive_text(
+        '{"api_key":"abcd123456","client_secret": "json-secret"}',
+        max_chars=256,
+    )
+
+    assert changed is True
+    assert "abcd123456" not in text
+    assert "json-secret" not in text
+    assert text.count("[redacted]") == 2
 
 
 def test_state_store_merges_shadow_metadata_without_losing_request_metadata(tmp_path):

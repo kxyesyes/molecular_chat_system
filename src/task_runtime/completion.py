@@ -14,6 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
+from src.agent.persistence.redaction import sanitize_sensitive_text
+
+
 
 MAX_COMPLETION_MANIFEST_BYTES = 64 * 1024
 MAX_DOCKING_POSE_BYTES = 256 * 1024 * 1024
@@ -22,6 +25,7 @@ MAX_CACHED_WARNINGS = 32
 MAX_CACHED_EVIDENCE = 32
 MAX_CACHED_ARTIFACTS = 8
 MAX_CACHED_TEXT_CHARS = 2048
+_STREAM_CHUNK_BYTES = 1024 * 1024
 
 _SCHEMA = "DockingCompletionManifest@1"
 _MANIFEST_NAME = "completion_manifest.json"
@@ -322,13 +326,13 @@ class DockingCompletionStore:
                 or any(part in {".", ".."} or part.startswith(".") for part in relative.parts)
             ):
                 return None
-            content, digest = _secure_read_regular(
+            size, digest = _secure_hash_regular(
                 resolved,
                 max_bytes=MAX_ADDITIONAL_ARTIFACT_BYTES,
                 containment_root=task_root,
                 invalid_code="completion_artifact_invalid",
             )
-            if not content:
+            if size == 0:
                 return None
             extension = resolved.suffix.lower()
             if extension not in _SAFE_EXTRA_EXTENSIONS:
@@ -338,10 +342,16 @@ class DockingCompletionStore:
                 f"extra-{artifact_index:02d}-{digest[:12]}{extension}"
             )
             published_path = artifact_root / published_name
-            _atomic_write_new(
+            # The first pass fixes the digest-derived public name; the second
+            # descriptor-bound pass copies and rechecks the exact source.
+            copied_size, copied_digest = _secure_copy_regular(
+                resolved,
                 published_path,
-                content,
                 artifact_root,
+                max_bytes=MAX_ADDITIONAL_ARTIFACT_BYTES,
+                containment_root=task_root,
+                expected_size=size,
+                expected_sha256=digest,
                 prefix=".extra-",
             )
             return DockingArtifactRecord(
@@ -352,8 +362,8 @@ class DockingCompletionStore:
                     extension, "application/octet-stream"
                 ),
                 metadata={},
-                size=len(content),
-                sha256=digest,
+                size=copied_size,
+                sha256=copied_digest,
             )
         except (CompletionError, OSError, RuntimeError, TypeError, ValueError):
             return None
@@ -452,7 +462,7 @@ class DockingCompletionStore:
                         )
                     ):
                         return False
-                    _secure_read_regular(
+                    _secure_hash_regular(
                         candidate,
                         max_bytes=max(
                             MAX_ADDITIONAL_ARTIFACT_BYTES,
@@ -486,7 +496,7 @@ class DockingCompletionStore:
                     or re.fullmatch(r"\.pose-[0-9a-f]{32}\.tmp", candidate.name)
                 ):
                     return False
-                _secure_read_regular(
+                _secure_hash_regular(
                     candidate,
                     max_bytes=max(
                         MAX_ADDITIONAL_ARTIFACT_BYTES,
@@ -548,7 +558,7 @@ class DockingCompletionStore:
         ):
             raise CompletionError("completion_identity_mismatch")
         pose_path = _pose_path(task_root, completion.pose.path)
-        _, pose_hash = _secure_read_regular(
+        _, pose_hash = _secure_hash_regular(
             pose_path,
             max_bytes=MAX_DOCKING_POSE_BYTES,
             containment_root=task_root,
@@ -559,7 +569,7 @@ class DockingCompletionStore:
             raise CompletionError("completion_artifact_invalid")
         for artifact in completion.result_metadata.artifacts:
             artifact_path = _additional_artifact_path(task_root, artifact.path)
-            _, artifact_hash = _secure_read_regular(
+            _, artifact_hash = _secure_hash_regular(
                 artifact_path,
                 max_bytes=MAX_ADDITIONAL_ARTIFACT_BYTES,
                 containment_root=task_root,
@@ -600,7 +610,7 @@ class DockingCompletionStore:
             paths: list[Path] = []
             for artifact in artifacts:
                 artifact_path = _additional_artifact_path(task_root, artifact.path)
-                _, artifact_hash = _secure_read_regular(
+                _, artifact_hash = _secure_hash_regular(
                     artifact_path,
                     max_bytes=MAX_ADDITIONAL_ARTIFACT_BYTES,
                     containment_root=task_root,
@@ -618,13 +628,14 @@ class DockingCompletionStore:
         except (CompletionError, OSError, RuntimeError):
             return False
 
-    def read_authoritative_pose(
+    def inspect_authoritative_pose(
         self,
         pose_source: str | os.PathLike[str],
         *,
         containment_root: str | os.PathLike[str],
-    ) -> tuple[bytes, str]:
-        """Read a prospective pose through a stable, contained descriptor."""
+        chunk_consumer: Callable[[bytes], None],
+    ) -> tuple[int, str]:
+        """Stream a prospective pose through a stable, contained descriptor."""
 
         try:
             source = Path(pose_source)
@@ -633,11 +644,12 @@ class DockingCompletionStore:
             root = root_path.resolve(strict=True)
         except (OSError, RuntimeError, TypeError, ValueError):
             raise CompletionError("completion_artifact_invalid") from None
-        return _secure_read_regular(
+        return _secure_stream_regular(
             source,
             max_bytes=MAX_DOCKING_POSE_BYTES,
             containment_root=root,
             invalid_code="completion_artifact_invalid",
+            chunk_consumer=chunk_consumer,
         )
 
     def prepare(
@@ -654,6 +666,7 @@ class DockingCompletionStore:
         real_execution: bool,
         pose_source: str | os.PathLike[str],
         pose_containment_root: str | os.PathLike[str],
+        expected_pose_size: int,
         expected_pose_sha256: str,
         pose_count: int,
         best_energy: int | float,
@@ -708,13 +721,25 @@ class DockingCompletionStore:
         except (OSError, RuntimeError):
             raise CompletionError("completion_artifact_invalid") from None
         _require_sha256(expected_pose_sha256)
-        pose_bytes, pose_hash = _secure_read_regular(
+        if type(expected_pose_size) is not int or not 0 < expected_pose_size <= MAX_DOCKING_POSE_BYTES:
+            raise CompletionError("completion_artifact_invalid")
+        attempt_artifact_root = artifact_attempt.root / _ARTIFACT_DIRECTORY
+        attempt_pose_path = attempt_artifact_root / _POSE_NAME
+        # This second descriptor pass is the authority copy checkpoint after
+        # scientific parsing; it rejects any source change between validation
+        # and publication without retaining pose bytes in memory.
+        pose_size, pose_hash = _secure_copy_regular(
             source,
+            attempt_pose_path,
+            attempt_artifact_root,
             max_bytes=MAX_DOCKING_POSE_BYTES,
             containment_root=containment_root,
+            expected_size=expected_pose_size,
+            expected_sha256=expected_pose_sha256,
+            prefix=".pose-",
             invalid_code="completion_artifact_invalid",
         )
-        if not pose_bytes or pose_hash != expected_pose_sha256:
+        if pose_size == 0 or pose_hash != expected_pose_sha256:
             raise CompletionError("completion_artifact_invalid")
 
         completion = DockingCompletionManifest(
@@ -730,7 +755,7 @@ class DockingCompletionStore:
             real_execution=True,
             pose=DockingPoseRecord(
                 path=_POSE_RELATIVE_PATH,
-                size=len(pose_bytes),
+                size=pose_size,
                 sha256=pose_hash,
             ),
             pose_count=pose_count,
@@ -739,14 +764,6 @@ class DockingCompletionStore:
             attempt=attempt,
             completed_at=_utc_now(),
             result_metadata=normalized_metadata,
-        )
-        attempt_artifact_root = artifact_attempt.root / _ARTIFACT_DIRECTORY
-        attempt_pose_path = attempt_artifact_root / _POSE_NAME
-        _atomic_write_new(
-            attempt_pose_path,
-            pose_bytes,
-            attempt_artifact_root,
-            prefix=".pose-",
         )
         _fsync_directory(attempt_artifact_root)
         artifact_root = task_root / _ARTIFACT_DIRECTORY
@@ -787,7 +804,7 @@ class DockingCompletionStore:
             raise CompletionError("completion_conflict")
 
         def verify_artifacts() -> None:
-            _, pose_hash = _secure_read_regular(
+            _, pose_hash = _secure_hash_regular(
                 expected_pose,
                 max_bytes=MAX_DOCKING_POSE_BYTES,
                 containment_root=task_root,
@@ -798,7 +815,7 @@ class DockingCompletionStore:
                 raise CompletionError("completion_artifact_invalid")
             for artifact in completion.result_metadata.artifacts:
                 artifact_path = _additional_artifact_path(task_root, artifact.path)
-                _, artifact_hash = _secure_read_regular(
+                _, artifact_hash = _secure_hash_regular(
                     artifact_path,
                     max_bytes=MAX_ADDITIONAL_ARTIFACT_BYTES,
                     containment_root=task_root,
@@ -808,7 +825,6 @@ class DockingCompletionStore:
                 if artifact_hash != artifact.sha256:
                     raise CompletionError("completion_artifact_invalid")
 
-        verify_artifacts()
         encoded = json.dumps(
             completion.to_dict(),
             sort_keys=True,
@@ -850,7 +866,7 @@ class DockingCompletionStore:
             expected_pose = _pose_path(task_root, completion.pose.path)
             if prepared.pose_path != expected_pose:
                 return False
-            _, pose_hash = _secure_read_regular(
+            _, pose_hash = _secure_hash_regular(
                 expected_pose,
                 max_bytes=MAX_DOCKING_POSE_BYTES,
                 containment_root=task_root,
@@ -862,7 +878,7 @@ class DockingCompletionStore:
             extra_paths: list[Path] = []
             for artifact in completion.result_metadata.artifacts:
                 artifact_path = _additional_artifact_path(task_root, artifact.path)
-                _, artifact_hash = _secure_read_regular(
+                _, artifact_hash = _secure_hash_regular(
                     artifact_path,
                     max_bytes=MAX_ADDITIONAL_ARTIFACT_BYTES,
                     containment_root=task_root,
@@ -919,7 +935,7 @@ class DockingCompletionStore:
             for artifact in artifacts:
                 relative = PurePosixPath(artifact.path)
                 artifact_path = artifact_root / relative.name
-                _, artifact_hash = _secure_read_regular(
+                _, artifact_hash = _secure_hash_regular(
                     artifact_path,
                     max_bytes=MAX_ADDITIONAL_ARTIFACT_BYTES,
                     containment_root=artifact_root,
@@ -1144,6 +1160,9 @@ def _validate_cached_text(value: Any, limit: int, *, allow_empty: bool) -> None:
         raise CompletionError("completion_schema_invalid")
     if any(ord(character) < 32 and character not in "\n\t" for character in value):
         raise CompletionError("completion_schema_invalid")
+    sanitized, changed = sanitize_sensitive_text(value, max_chars=limit)
+    if changed or sanitized != value:
+        raise CompletionError("completion_schema_invalid")
 
 
 def _bounded_text(value: Any, limit: int) -> str:
@@ -1193,6 +1212,50 @@ def _secure_read_regular(
     missing_code: str = "completion_artifact_invalid",
     invalid_code: str,
 ) -> tuple[bytes, str]:
+    content = bytearray()
+    size, digest = _secure_stream_regular(
+        path,
+        max_bytes=max_bytes,
+        containment_root=containment_root,
+        expected_size=expected_size,
+        missing_code=missing_code,
+        invalid_code=invalid_code,
+        chunk_consumer=content.extend,
+    )
+    if len(content) != size:
+        raise CompletionError(invalid_code)
+    return bytes(content), digest
+
+
+def _secure_hash_regular(
+    path: Path,
+    *,
+    max_bytes: int,
+    containment_root: Path | None = None,
+    expected_size: int | None = None,
+    missing_code: str = "completion_artifact_invalid",
+    invalid_code: str,
+) -> tuple[int, str]:
+    return _secure_stream_regular(
+        path,
+        max_bytes=max_bytes,
+        containment_root=containment_root,
+        expected_size=expected_size,
+        missing_code=missing_code,
+        invalid_code=invalid_code,
+    )
+
+
+def _secure_stream_regular(
+    path: Path,
+    *,
+    max_bytes: int,
+    containment_root: Path | None = None,
+    expected_size: int | None = None,
+    missing_code: str = "completion_artifact_invalid",
+    invalid_code: str,
+    chunk_consumer: Callable[[bytes], None] | None = None,
+) -> tuple[int, str]:
     descriptor: int | None = None
     try:
         _reject_link_components(path)
@@ -1219,18 +1282,21 @@ def _secure_read_regular(
             raise CompletionError(code)
         if expected_size is not None and before.st_size != expected_size:
             raise CompletionError(invalid_code)
-        chunks: list[bytes] = []
         digest = hashlib.sha256()
         total = 0
         while True:
-            chunk = os.read(descriptor, min(1024 * 1024, max_bytes + 1 - total))
+            chunk = os.read(
+                descriptor,
+                min(_STREAM_CHUNK_BYTES, max_bytes + 1 - total),
+            )
             if not chunk:
                 break
             total += len(chunk)
             if total > max_bytes:
                 raise CompletionError(invalid_code)
-            chunks.append(chunk)
             digest.update(chunk)
+            if chunk_consumer is not None:
+                chunk_consumer(chunk)
         after = os.fstat(descriptor)
         _validate_regular_single_link(after, invalid_code)
         if _descriptor_identity(before) != _descriptor_identity(after):
@@ -1259,7 +1325,82 @@ def _secure_read_regular(
         raise
     except OSError:
         raise CompletionError(invalid_code) from None
-    return b"".join(chunks), digest.hexdigest()
+    return total, digest.hexdigest()
+
+
+def _secure_copy_regular(
+    source: Path,
+    destination: Path,
+    destination_parent: Path,
+    *,
+    max_bytes: int,
+    containment_root: Path,
+    expected_size: int | None = None,
+    expected_sha256: str | None = None,
+    prefix: str,
+    invalid_code: str = "completion_artifact_invalid",
+) -> tuple[int, str]:
+    temporary = destination_parent / f"{prefix}{uuid.uuid4().hex}.tmp"
+    output_descriptor: int | None = None
+    published = False
+    try:
+        if destination.exists() or destination.is_symlink():
+            raise CompletionError("completion_conflict")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        output_descriptor = os.open(temporary, flags, 0o600)
+
+        def write_chunk(chunk: bytes) -> None:
+            assert output_descriptor is not None
+            view = memoryview(chunk)
+            written = 0
+            while written < len(view):
+                count = os.write(output_descriptor, view[written:])
+                if count <= 0:
+                    raise OSError("short streaming write")
+                written += count
+
+        size, digest = _secure_stream_regular(
+            source,
+            max_bytes=max_bytes,
+            containment_root=containment_root,
+            expected_size=expected_size,
+            invalid_code=invalid_code,
+            chunk_consumer=write_chunk,
+        )
+        if expected_sha256 is not None and digest != expected_sha256:
+            raise CompletionError(invalid_code)
+        os.fsync(output_descriptor)
+        os.close(output_descriptor)
+        output_descriptor = None
+        _replace_file(temporary, destination)
+        published = True
+        _fsync_directory(destination_parent)
+        return size, digest
+    except CompletionError:
+        if published:
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    except (OSError, RuntimeError, ValueError):
+        if published:
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise CompletionError("completion_io_error") from None
+    finally:
+        if output_descriptor is not None:
+            try:
+                os.close(output_descriptor)
+            except OSError:
+                pass
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _atomic_write_new(
@@ -1352,6 +1493,9 @@ def _publish_completion_manifest(
         _fsync_directory(parent)
         if not _exact_regular_file(temporary, content, parent):
             raise CompletionError("completion_io_error")
+        # This pass binds artifacts immediately before the write-ahead marker.
+        # A second pass after replacement detects mutation across publication;
+        # both stream with bounded memory and are authority checkpoints.
         verify_before_commit()
         if not _write_authority_marker(marker, parent):
             raise CompletionError("completion_io_error")

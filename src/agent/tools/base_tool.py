@@ -210,7 +210,7 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
             return AgentErrorCode.INTERNAL_ERROR
 
     def normalize_provenance(raw_result: dict[str, Any]) -> ToolProvenance | None:
-        if "provenance" not in raw_result:
+        if "provenance" not in raw_result or raw_result["provenance"] is None:
             return None
         try:
             provenance = ToolProvenance.from_dict(raw_result["provenance"])

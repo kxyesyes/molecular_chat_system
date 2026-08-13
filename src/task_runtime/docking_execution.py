@@ -21,7 +21,7 @@ from src.agent.contracts import (
     ToolResult,
     WorkflowArtifact,
 )
-from src.agent.persistence.redaction import looks_like_credential, redact_sensitive
+from src.agent.persistence.redaction import sanitize_sensitive_text
 from src.agent.tools.base_tool import execute_tool_compat
 from src.agent.tools.molecular_docking import MolecularDocking
 from src.agent.validators.result_validator import AgentResultValidator
@@ -51,6 +51,7 @@ _PENDING_COMPLETION_WAIT_SECONDS = 5.0
 _VINA_RESULT = re.compile(
     rb"^REMARK VINA RESULT:\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)\s*$"
 )
+_MAX_PDBQT_LINE_BYTES = 64 * 1024
 
 
 class _PreparedCompletionPending(RuntimeError):
@@ -340,15 +341,16 @@ class DockingExecution:
 
         pose_source, pose_count, best_energy = _validated_scientific_values(validated)
         pose_job_root = self._allowed_output_root / f"docking_{inputs.task_id}"
-        pose_bytes, pose_sha256 = self._completions.read_authoritative_pose(
-            pose_source,
-            containment_root=pose_job_root,
-        )
-        _validate_vina_pose_bytes(
-            pose_bytes,
+        pose_parser = _VinaPoseStreamValidator(
             expected_pose_count=pose_count,
             expected_best_energy=best_energy,
         )
+        pose_size, pose_sha256 = self._completions.inspect_authoritative_pose(
+            pose_source,
+            containment_root=pose_job_root,
+            chunk_consumer=pose_parser.feed,
+        )
+        pose_parser.finish()
         artifact_attempt = self._completions.begin_artifact_attempt(inputs.task_id)
         try:
             result_metadata = self._safe_result_metadata(
@@ -370,6 +372,7 @@ class DockingExecution:
                 real_execution=True,
                 pose_source=pose_source,
                 pose_containment_root=pose_job_root,
+                expected_pose_size=pose_size,
                 expected_pose_sha256=pose_sha256,
                 pose_count=pose_count,
                 best_energy=best_energy,
@@ -788,43 +791,78 @@ def _validated_scientific_values(result: ToolResult) -> tuple[Path, int, float]:
     return Path(pose_value), pose_count, float(energy)
 
 
-def _validate_vina_pose_bytes(
-    content: bytes,
-    *,
-    expected_pose_count: int,
-    expected_best_energy: float,
-) -> None:
-    try:
-        lines = content.splitlines()
-    except (AttributeError, MemoryError):
-        raise CompletionError("completion_artifact_invalid") from None
-    models = 0
-    energies: list[float] = []
-    in_model = False
-    model_has_atom = False
-    model_energy: float | None = None
-    for line in lines:
+class _VinaPoseStreamValidator:
+    def __init__(
+        self,
+        *,
+        expected_pose_count: int,
+        expected_best_energy: float,
+    ) -> None:
+        self._expected_pose_count = expected_pose_count
+        self._expected_best_energy = expected_best_energy
+        self._pending = bytearray()
+        self._models = 0
+        self._energy_count = 0
+        self._minimum_energy = math.inf
+        self._in_model = False
+        self._model_has_atom = False
+        self._model_energy: float | None = None
+
+    def feed(self, chunk: bytes) -> None:
+        if not isinstance(chunk, bytes) or not chunk:
+            raise CompletionError("completion_artifact_invalid")
+        self._pending.extend(chunk)
+        while True:
+            newline = self._pending.find(b"\n")
+            if newline < 0:
+                if len(self._pending) > _MAX_PDBQT_LINE_BYTES:
+                    raise CompletionError("completion_artifact_invalid")
+                return
+            if newline > _MAX_PDBQT_LINE_BYTES:
+                raise CompletionError("completion_artifact_invalid")
+            line = bytes(self._pending[:newline])
+            del self._pending[: newline + 1]
+            if line.endswith(b"\r"):
+                line = line[:-1]
+            self._consume_line(line)
+
+    def _consume_line(self, line: bytes) -> None:
+        try:
+            line.decode("ascii", errors="strict")
+        except UnicodeDecodeError:
+            raise CompletionError("completion_artifact_invalid") from None
         if line.startswith(b"MODEL"):
-            if in_model or line.split() != [b"MODEL", str(models + 1).encode("ascii")]:
+            if self._in_model or line.split() != [
+                b"MODEL",
+                str(self._models + 1).encode("ascii"),
+            ]:
                 raise CompletionError("completion_artifact_invalid")
-            models += 1
-            in_model = True
-            model_has_atom = False
-            model_energy = None
-            continue
+            self._models += 1
+            self._in_model = True
+            self._model_has_atom = False
+            self._model_energy = None
+            return
         if line == b"ENDMDL":
-            if not in_model or not model_has_atom or model_energy is None:
+            if (
+                not self._in_model
+                or not self._model_has_atom
+                or self._model_energy is None
+            ):
                 raise CompletionError("completion_artifact_invalid")
-            energies.append(model_energy)
-            in_model = False
-            continue
-        if not in_model:
+            self._energy_count += 1
+            self._minimum_energy = min(
+                self._minimum_energy,
+                self._model_energy,
+            )
+            self._in_model = False
+            return
+        if not self._in_model:
             if line.strip():
                 raise CompletionError("completion_artifact_invalid")
-            continue
+            return
         match = _VINA_RESULT.fullmatch(line)
         if match is not None:
-            if model_energy is not None:
+            if self._model_energy is not None:
                 raise CompletionError("completion_artifact_invalid")
             try:
                 values = tuple(float(item) for item in match.groups())
@@ -832,20 +870,32 @@ def _validate_vina_pose_bytes(
                 raise CompletionError("completion_artifact_invalid") from None
             if not all(math.isfinite(item) for item in values):
                 raise CompletionError("completion_artifact_invalid")
-            model_energy = values[0]
+            self._model_energy = values[0]
         elif line.startswith((b"ATOM  ", b"HETATM")):
-            model_has_atom = True
-    if in_model or models == 0 or len(energies) != models:
-        raise CompletionError("completion_artifact_invalid")
-    if models != expected_pose_count:
-        raise CompletionError("completion_artifact_invalid")
-    if not math.isclose(
-        min(energies),
-        expected_best_energy,
-        rel_tol=0.0,
-        abs_tol=1e-3,
-    ):
-        raise CompletionError("completion_artifact_invalid")
+            self._model_has_atom = True
+
+    def finish(self) -> None:
+        if len(self._pending) > _MAX_PDBQT_LINE_BYTES:
+            raise CompletionError("completion_artifact_invalid")
+        if self._pending:
+            line = bytes(self._pending)
+            self._pending.clear()
+            if line.endswith(b"\r"):
+                line = line[:-1]
+            self._consume_line(line)
+        if (
+            self._in_model
+            or self._models == 0
+            or self._energy_count != self._models
+            or self._models != self._expected_pose_count
+            or not math.isclose(
+                self._minimum_energy,
+                self._expected_best_energy,
+                rel_tol=0.0,
+                abs_tol=1e-3,
+            )
+        ):
+            raise CompletionError("completion_artifact_invalid")
 
 
 def _input_hash(inputs: VerifiedDockingInputs) -> str:
@@ -907,36 +957,12 @@ def _sensitive_values(
 
 
 def _sanitize_text(value: Any, secrets: tuple[str, ...], limit: int) -> str:
-    if not isinstance(value, str):
-        return ""
-    sanitized = value
-    for secret in secrets:
-        if secret:
-            sanitized = sanitized.replace(secret, "[REDACTED]")
-    sanitized = re.sub(
-        r"(?i)(?<![A-Za-z0-9])\\\\(?:\?\\UNC\\|\?\\|\.\\|[^\\\s;,]+\\)[^\s;,]*",
-        "[REDACTED]",
-        sanitized,
+    sanitized, _changed = sanitize_sensitive_text(
+        value,
+        max_chars=limit,
+        sensitive_values=secrets,
     )
-    sanitized = re.sub(
-        r"(?i)(?<![A-Za-z0-9])[A-Z]:[\\/][^\s;,]*",
-        "[REDACTED]",
-        sanitized,
-    )
-    sanitized = re.sub(
-        r"(?<![A-Za-z0-9])/(?:[^/\s;,]+/)*[^/\s;,]*",
-        "[REDACTED]",
-        sanitized,
-    )
-    redacted = redact_sensitive(sanitized)
-    sanitized = redacted if isinstance(redacted, str) else "[REDACTED]"
-    sanitized = "".join(
-        character
-        if ord(character) >= 32 or character in "\n\t"
-        else " "
-        for character in sanitized
-    ).strip()
-    return sanitized[:limit]
+    return sanitized
 
 
 def _safe_optional_text(
@@ -997,15 +1023,21 @@ def _safe_provenance_identifiers(
     secrets: tuple[str, ...],
 ) -> bool:
     for value in (
+        provenance.tool_name,
         provenance.tool_version,
         provenance.model_name,
         provenance.model_version,
+        provenance.input_digest,
+        provenance.output_digest,
     ):
         if value is None:
             continue
-        if looks_like_credential(value):
-            return False
-        if any(secret and secret in value for secret in secrets):
+        sanitized, changed = sanitize_sensitive_text(
+            value,
+            max_chars=max(1, len(value)),
+            sensitive_values=secrets,
+        )
+        if changed or sanitized != value:
             return False
     return True
 

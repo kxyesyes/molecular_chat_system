@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import inspect
 import math
 import multiprocessing
 import os
 import re
 import threading
 import time
+import tracemalloc
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -321,6 +323,112 @@ def test_pose_pdbqt_must_match_reported_scientific_values(
             pose_count=pose_count,
         ),
         allowed_output_root=_allowed_output_root(tmp_path),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert not _completion(tmp_path).exists()
+
+
+def test_large_pose_io_is_streamed_with_bounded_reads_and_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.completion as completion_module
+
+    manifest = _stage(tmp_path)
+    pose = _task_output_dir(tmp_path) / "result.pdbqt"
+    real_read = completion_module.os.read
+    read_sizes: list[int] = []
+
+    def observed_read(descriptor: int, size: int) -> bytes:
+        read_sizes.append(size)
+        assert 0 < size <= 1024 * 1024
+        return real_read(descriptor, size)
+
+    def executor(_payload: dict[str, Any], **_control: Any) -> ToolResult:
+        with pose.open("wb") as stream:
+            stream.write(
+                b"MODEL 1\nREMARK VINA RESULT: -7.200 0.000 0.000\n"
+                b"ATOM      1  C   LIG A   1       0.000   0.000   0.000  0.00  0.00    +0.000 C\n"
+            )
+            filler = b"REMARK bounded streaming padding 0123456789abcdef\n"
+            for _ in range(120_000):
+                stream.write(filler)
+            stream.write(b"ENDMDL\n")
+        return _pose_result(pose)
+
+    monkeypatch.setattr(completion_module.os, "read", observed_read)
+    tracemalloc.start()
+    try:
+        result = DockingExecution(
+            tmp_path,
+            raw_executor=executor,
+        ).run_verified("task-1", manifest)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert result["success"] is True
+    assert read_sizes
+    assert peak < 12 * 1024 * 1024
+    source = inspect.getsource(completion_module._secure_read_regular)
+    assert "chunks" not in source
+    assert ".join(" not in source
+
+
+def test_pose_and_extra_artifact_validation_never_collects_large_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.completion as completion_module
+
+    manifest = _stage(tmp_path)
+    report = tmp_path / "task-1" / "reports" / "large-report.bin"
+    report.parent.mkdir()
+    with report.open("wb") as stream:
+        block = b"bounded-extra-artifact\n" * 4096
+        for _ in range(32):
+            stream.write(block)
+    real_bounded_read = completion_module._secure_read_regular
+
+    def reject_large_collection(path: Path, **kwargs: Any) -> tuple[bytes, str]:
+        assert kwargs["max_bytes"] <= completion_module.MAX_COMPLETION_MANIFEST_BYTES
+        return real_bounded_read(path, **kwargs)
+
+    def executor(payload: dict[str, Any], **control: Any) -> ToolResult:
+        result = _executor(tmp_path, [])(payload, **control)
+        result.artifacts = [
+            WorkflowArtifact("report", str(report), "large report")
+        ]
+        return result
+
+    monkeypatch.setattr(
+        completion_module,
+        "_secure_read_regular",
+        reject_large_collection,
+    )
+    runner = DockingExecution(tmp_path, raw_executor=executor)
+    first = runner.run_verified("task-1", manifest)
+    reused = runner.run_verified("task-1", manifest)
+
+    assert first["success"] is True
+    assert reused["success"] is True
+    assert reused["reused_completion"] is True
+
+
+def test_pose_parser_rejects_unbounded_line(tmp_path: Path) -> None:
+    manifest = _stage(tmp_path)
+    pose = _task_output_dir(tmp_path) / "result.pdbqt"
+    pose.write_bytes(
+        b"MODEL 1\nREMARK VINA RESULT: -7.200 0.000 0.000\n"
+        b"REMARK " + b"x" * (128 * 1024) + b"\n"
+        b"ATOM      1  C   LIG A   1       0.000   0.000   0.000  0.00  0.00    +0.000 C\n"
+        b"ENDMDL\n"
+    )
+
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=lambda _payload, **_control: _pose_result(pose),
     ).run_verified("task-1", manifest)
 
     assert result["success"] is False
@@ -1349,6 +1457,104 @@ def test_credential_shaped_metadata_is_redacted_before_completion(
         assert value["success"] is True
         assert credential not in json.dumps(value)
     assert credential not in _completion(tmp_path).read_text(encoding="utf-8")
+
+
+def test_contextual_credentials_and_paths_are_sanitized_everywhere(
+    tmp_path: Path,
+) -> None:
+    manifest = _stage(tmp_path)
+    sensitive = [
+        "abcd123456",
+        "hunter2",
+        "AKIAIOSFODNN7EXAMPLE",
+        "github_pat_11AA22BB33CC44DD55EE66FF",
+        "url-secret-123",
+        "header-secret-456",
+        r"\\server\share\private\result.txt",
+        r"\\?\UNC\server\share\private\result.txt",
+        r"\\.\PhysicalDrive0",
+        "/srv/private/result.txt",
+    ]
+    metadata_text = (
+        "api_key=abcd123456 password: hunter2 "
+        'client_secret="url-secret-123" '
+        "AWS AKIAIOSFODNN7EXAMPLE "
+        "github_pat_11AA22BB33CC44DD55EE66FF "
+        "https://user:url-secret-123@example.test/report?token=url-secret-123 "
+        "Authorization: Bearer header-secret-456 "
+        r"\\server\share\private\result.txt "
+        r"\\?\UNC\server\share\private\result.txt "
+        r"\\.\PhysicalDrive0 /srv/private/result.txt"
+    )
+
+    def executor(payload: dict[str, Any], **control: Any) -> ToolResult:
+        result = _executor(tmp_path, [])(payload, **control)
+        result.formatted = metadata_text
+        result.warnings = [metadata_text]
+        result.evidence = [{"source": "vina", "description": metadata_text}]
+        result.quality["engine"] = metadata_text
+        result.quality["execution_status"] = "completed"
+        return result
+
+    runner = DockingExecution(tmp_path, raw_executor=executor)
+    first = runner.run_verified("task-1", manifest)
+    reused = runner.run_verified("task-1", manifest)
+    manifest_text = _completion(tmp_path).read_text(encoding="utf-8")
+
+    for value in (json.dumps(first), json.dumps(reused), manifest_text):
+        assert "[redacted]" in value
+        for secret in sensitive:
+            assert secret not in value
+
+
+def test_unsafe_cached_metadata_fails_closed_without_reexecution(
+    tmp_path: Path,
+) -> None:
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
+    assert runner.run_verified("task-1", manifest)["success"] is True
+    completion_path = _completion(tmp_path)
+    payload = json.loads(completion_path.read_text(encoding="utf-8"))
+    payload["result_metadata"]["warnings"] = ["api_key=abcd123456"]
+    completion_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = runner.run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert len(calls) == 1
+    assert "abcd123456" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    [
+        "api_key=abcd123456",
+        "password:hunter2",
+        "AKIAIOSFODNN7EXAMPLE",
+        r"\\server\share\vina",
+        "/opt/private/vina",
+    ],
+)
+def test_sensitive_provenance_identifier_is_rejected_without_rewriting(
+    tmp_path: Path,
+    identifier: str,
+) -> None:
+    manifest = _stage(tmp_path)
+    provenance = ToolProvenance(
+        tool_name="molecular_docking",
+        tool_version="vina-test-1",
+        model_name=identifier,
+    )
+
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=_executor(tmp_path, [], provenance=provenance),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert result["provenance"] is None
+    assert not _completion(tmp_path).exists()
 
 
 def test_extra_artifact_and_unc_metadata_use_fixed_safe_publication(

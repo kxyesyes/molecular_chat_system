@@ -192,6 +192,28 @@ def test_legacy_tool_invalid_present_provenance_fails_closed():
     assert "provenance" in wrapped.message.lower()
 
 
+def test_nullable_legacy_provenance_round_trips_as_unprovided():
+    legacy = ToolResult.success_result(
+        "legacy_scientific_tool",
+        data={"value": 1.0},
+        provenance=None,
+    ).to_legacy_dict()
+    assert "provenance" in legacy
+    assert legacy["provenance"] is None
+
+    class NullableProvenanceLegacyTool:
+        name = "legacy_scientific_tool"
+
+        def execute(self, _query):
+            return legacy
+
+    wrapped = execute_tool_compat(NullableProvenanceLegacyTool(), {})
+
+    assert wrapped.success is True
+    assert wrapped.data == {"value": 1.0}
+    assert wrapped.provenance is None
+
+
 def test_real_molecular_docking_success_provenance_survives_compat(
     tmp_path,
     monkeypatch,
