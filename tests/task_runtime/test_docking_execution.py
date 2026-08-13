@@ -1602,6 +1602,78 @@ def test_marker_removal_failure_returns_uncertain_success_and_blocks_future_reus
     assert len(calls) == 1
 
 
+def test_marker_unlink_after_delete_error_restores_barrier_and_blocks_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    real_unlink = Path.unlink
+
+    def unlink_then_raise(path: Path, *args: Any, **kwargs: Any) -> None:
+        real_unlink(path, *args, **kwargs)
+        if path.name == "completion_invalid.marker":
+            raise OSError("marker deletion outcome unavailable")
+
+    monkeypatch.setattr(Path, "unlink", unlink_then_raise)
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
+    first = runner.run_verified("task-1", manifest)
+    second = runner.run_verified("task-1", manifest)
+
+    marker = tmp_path / "task-1" / "completion_invalid.marker"
+    assert first["success"] is True
+    assert "completion_authority_commit_unconfirmed" in first["warnings"]
+    assert first["quality"]["completion_durability"] == "uncertain"
+    assert marker.exists()
+    assert second["success"] is False
+    assert second["error"]["details"]["reason"] == "ownership_uncertain"
+    assert second["reused_completion"] is False
+    assert len(calls) == 1
+
+
+def test_marker_unlink_ambiguity_without_recovery_is_explicitly_reusable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.completion as completion_module
+
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    real_unlink = Path.unlink
+    real_write_marker = completion_module._write_authority_marker
+    marker_writes = {"count": 0}
+
+    def unlink_then_raise(path: Path, *args: Any, **kwargs: Any) -> None:
+        real_unlink(path, *args, **kwargs)
+        if path.name == "completion_invalid.marker":
+            raise OSError("marker deletion outcome unavailable")
+
+    def fail_recovery_write(path: Path, parent: Path) -> bool:
+        marker_writes["count"] += 1
+        if marker_writes["count"] == 1:
+            return real_write_marker(path, parent)
+        return False
+
+    monkeypatch.setattr(Path, "unlink", unlink_then_raise)
+    monkeypatch.setattr(
+        completion_module,
+        "_write_authority_marker",
+        fail_recovery_write,
+    )
+    runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
+    first = runner.run_verified("task-1", manifest)
+    second = runner.run_verified("task-1", manifest)
+
+    assert first["success"] is True
+    assert "completion_authority_delete_ambiguous_reusable" in first["warnings"]
+    assert first["quality"]["completion_durability"] == "reusable"
+    assert first["quality"]["completion_authority"] == "committed"
+    assert not (tmp_path / "task-1" / "completion_invalid.marker").exists()
+    assert second["success"] is True
+    assert second["reused_completion"] is True
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("marker_kind", ["malformed", "directory", "symlink", "hardlink"])
 def test_untrusted_authority_marker_shape_blocks_execution(
     tmp_path: Path,

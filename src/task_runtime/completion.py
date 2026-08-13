@@ -27,6 +27,9 @@ _SCHEMA = "DockingCompletionManifest@1"
 _MANIFEST_NAME = "completion_manifest.json"
 _INVALID_MARKER_NAME = "completion_invalid.marker"
 _INVALID_MARKER_CONTENT = b"DockingCompletionInvalid@1\nownership_uncertain\n"
+AUTHORITY_BLOCKED = "blocked"
+AUTHORITY_COMMITTED = "committed"
+AUTHORITY_COMMITTED_AMBIGUOUS = "committed_ambiguous"
 _ARTIFACT_DIRECTORY = "artifacts"
 _POSE_NAME = "docking_pose.pdbqt"
 _POSE_RELATIVE_PATH = f"{_ARTIFACT_DIRECTORY}/{_POSE_NAME}"
@@ -504,7 +507,7 @@ class DockingCompletionStore:
     def finalize(
         self,
         prepared: PreparedDockingCompletion,
-    ) -> tuple[DockingCompletionManifest, bool, bool]:
+    ) -> tuple[DockingCompletionManifest, bool, str]:
         if not isinstance(prepared, PreparedDockingCompletion):
             raise CompletionError("completion_schema_invalid")
         completion = _parse_manifest(
@@ -560,13 +563,13 @@ class DockingCompletionStore:
             raise
         except (UnicodeError, json.JSONDecodeError, ValueError):
             raise CompletionError("completion_schema_invalid") from None
-        durability_synced, authority_committed = _publish_completion_manifest(
+        durability_synced, authority_state = _publish_completion_manifest(
             manifest_path,
             encoded,
             task_root,
             verify_before_commit=verify_artifacts,
         )
-        return encoded_completion, durability_synced, authority_committed
+        return encoded_completion, durability_synced, authority_state
 
     def abort(self, prepared: PreparedDockingCompletion) -> bool:
         """Remove only exact unpublished artifacts; changed residue stays fail closed."""
@@ -1054,7 +1057,7 @@ def _publish_completion_manifest(
     parent: Path,
     *,
     verify_before_commit: Callable[[], None],
-) -> tuple[bool, bool]:
+) -> tuple[bool, str]:
     """Publish behind a write-ahead marker; return durability and authority state."""
 
     temporary = parent / f".completion-{uuid.uuid4().hex}.tmp"
@@ -1098,10 +1101,8 @@ def _publish_completion_manifest(
         try:
             _fsync_directory(parent)
         except (OSError, RuntimeError):
-            return False, False
-        if not _remove_authority_marker(marker, parent):
-            return True, False
-        return True, True
+            return False, AUTHORITY_BLOCKED
+        return True, _remove_authority_marker(marker, parent)
     except CompletionError:
         raise
     except (OSError, RuntimeError, ValueError):
@@ -1181,7 +1182,7 @@ def _write_authority_marker(path: Path, parent: Path) -> bool:
                 pass
 
 
-def _remove_authority_marker(path: Path, parent: Path) -> bool:
+def _remove_authority_marker(path: Path, parent: Path) -> str:
     """Remove only the exact safe marker and persist that authority commit."""
 
     try:
@@ -1193,16 +1194,49 @@ def _remove_authority_marker(path: Path, parent: Path) -> bool:
             invalid_code="completion_ownership_uncertain",
         )
         if raw != _INVALID_MARKER_CONTENT:
-            return False
-        path.unlink()
+            return AUTHORITY_BLOCKED
+        try:
+            path.unlink()
+        except (OSError, RuntimeError, ValueError):
+            return _resolve_marker_deletion_ambiguity(path, parent)
         try:
             _fsync_directory(parent)
         except (OSError, RuntimeError):
-            _write_authority_marker(path, parent)
-            return False
-        return True
+            return _resolve_marker_deletion_ambiguity(path, parent)
+        return AUTHORITY_COMMITTED
     except (CompletionError, OSError, RuntimeError, ValueError):
-        return False
+        return _resolve_marker_deletion_ambiguity(path, parent)
+
+
+def _resolve_marker_deletion_ambiguity(path: Path, parent: Path) -> str:
+    """Restore a missing barrier or explicitly accept a reusable authority commit."""
+
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        if _write_authority_marker(path, parent):
+            try:
+                raw, _ = _secure_read_regular(
+                    path,
+                    max_bytes=len(_INVALID_MARKER_CONTENT),
+                    containment_root=parent,
+                    expected_size=len(_INVALID_MARKER_CONTENT),
+                    invalid_code="completion_ownership_uncertain",
+                )
+                if raw == _INVALID_MARKER_CONTENT:
+                    return AUTHORITY_BLOCKED
+            except CompletionError:
+                pass
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return AUTHORITY_COMMITTED_AMBIGUOUS
+        except OSError:
+            return AUTHORITY_BLOCKED
+        return AUTHORITY_BLOCKED
+    except OSError:
+        return AUTHORITY_BLOCKED
+    return AUTHORITY_BLOCKED
 
 
 def _persist_invalidation_marker(path: Path, parent: Path) -> bool:

@@ -26,6 +26,9 @@ from src.agent.tools.molecular_docking import MolecularDocking
 from src.agent.validators.result_validator import AgentResultValidator
 
 from .completion import (
+    AUTHORITY_BLOCKED,
+    AUTHORITY_COMMITTED,
+    AUTHORITY_COMMITTED_AMBIGUOUS,
     CompletionError,
     DockingCompletionManifest,
     DockingCompletionStore,
@@ -401,10 +404,11 @@ class DockingExecution:
         committed = False
         completion: DockingCompletionManifest | None = None
         durability_synced = False
-        authority_committed = False
+        authority_state = AUTHORITY_BLOCKED
         response_variants: dict[tuple[bool, bool], dict[str, Any]] = {}
         unavailable_variants: dict[bool, dict[str, Any]] = {}
         authority_unavailable_variants: dict[tuple[bool, bool], dict[str, Any]] = {}
+        authority_ambiguous_variants: dict[tuple[bool, bool], dict[str, Any]] = {}
         try:
             manifest = self._stager.load_verified(task_id, input_manifest)
             if (
@@ -502,7 +506,57 @@ class DockingExecution:
                     extra_quality={"completion_durability": "uncertain"},
                 ),
             }
-            completion, durability_synced, authority_committed = (
+            authority_ambiguous_variants = {
+                (True, False): _trusted_result(
+                    prepared.completion,
+                    reused=False,
+                    extra_warnings=[
+                        "completion_authority_delete_ambiguous_reusable"
+                    ],
+                    extra_quality={
+                        "completion_durability": "reusable",
+                        "completion_authority": "committed",
+                    },
+                ),
+                (False, False): _trusted_result(
+                    prepared.completion,
+                    reused=False,
+                    extra_warnings=[
+                        "completion_directory_sync_unconfirmed",
+                        "completion_authority_delete_ambiguous_reusable",
+                    ],
+                    extra_quality={
+                        "completion_durability": "uncertain",
+                        "completion_authority": "committed",
+                    },
+                ),
+                (True, True): _trusted_result(
+                    prepared.completion,
+                    reused=False,
+                    extra_warnings=[
+                        "completion_authority_delete_ambiguous_reusable",
+                        "completion_lease_release_unconfirmed",
+                    ],
+                    extra_quality={
+                        "completion_durability": "reusable",
+                        "completion_authority": "committed",
+                    },
+                ),
+                (False, True): _trusted_result(
+                    prepared.completion,
+                    reused=False,
+                    extra_warnings=[
+                        "completion_directory_sync_unconfirmed",
+                        "completion_authority_delete_ambiguous_reusable",
+                        "completion_lease_release_unconfirmed",
+                    ],
+                    extra_quality={
+                        "completion_durability": "uncertain",
+                        "completion_authority": "committed",
+                    },
+                ),
+            }
+            completion, durability_synced, authority_state = (
                 self._completions.finalize(prepared)
             )
             committed = True
@@ -518,7 +572,10 @@ class DockingExecution:
         except Exception:
             if not committed or completion is None:
                 raise
-            if not authority_committed:
+            if authority_state not in {
+                AUTHORITY_COMMITTED,
+                AUTHORITY_COMMITTED_AMBIGUOUS,
+            }:
                 return authority_unavailable_variants[(durability_synced, True)]
             try:
                 verified = self._completions.load_verified(
@@ -553,9 +610,16 @@ class DockingExecution:
                         )
                     },
                 )
+            if authority_state == AUTHORITY_COMMITTED_AMBIGUOUS:
+                return authority_ambiguous_variants[(durability_synced, True)]
             return response_variants[(durability_synced, True)]
-        if not authority_committed:
+        if authority_state not in {
+            AUTHORITY_COMMITTED,
+            AUTHORITY_COMMITTED_AMBIGUOUS,
+        }:
             return authority_unavailable_variants[(durability_synced, False)]
+        if authority_state == AUTHORITY_COMMITTED_AMBIGUOUS:
+            return authority_ambiguous_variants[(durability_synced, False)]
         return response_variants[(durability_synced, False)]
 
     def _abort_prepared(
