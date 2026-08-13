@@ -119,6 +119,45 @@ def test_text_sanitizer_redacts_json_like_credential_fields():
     assert text.count("[redacted]") == 2
 
 
+def test_text_sanitizer_consumes_authorization_and_spaced_absolute_paths():
+    sensitive = (
+        "header-secret-456",
+        "dXNlcjpwYXNz",
+        "Alice Doe/private",
+        "Doe/private",
+        r"Alice Doe\private",
+        r"Doe\private",
+    )
+    text, changed = sanitize_sensitive_text(
+        "Authorization = Bearer header-secret-456; "
+        "'authorization' : 'Basic dXNlcjpwYXNz'; "
+        'POSIX "/srv/Alice Doe/private/result.txt" keep-posix; '
+        r'DRIVE "C:\Users\Alice Doe\private\result.txt" keep-drive; '
+        r'UNC "\\server\share\Alice Doe\private\result.txt" keep-unc; '
+        r'DEVICE "\\?\C:\Users\Alice Doe\private\result.txt" keep-device',
+        max_chars=1024,
+    )
+
+    assert changed is True
+    for value in sensitive:
+        assert value not in text
+    assert text.count("[redacted]") == 6
+    for ordinary in (
+        "keep-posix",
+        "keep-drive",
+        "keep-unc",
+        "keep-device",
+    ):
+        assert ordinary in text
+
+    ordinary, ordinary_changed = sanitize_sensitive_text(
+        "Authorization design remains ordinary prose",
+        max_chars=128,
+    )
+    assert ordinary_changed is False
+    assert ordinary == "Authorization design remains ordinary prose"
+
+
 def test_state_store_merges_shadow_metadata_without_losing_request_metadata(tmp_path):
     store = SQLiteAgentStateStore(tmp_path / "state.sqlite3")
     store.start_run(

@@ -38,8 +38,12 @@ _CONTEXT_SECRET = re.compile(
     r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;&}\]]+)"
 )
 _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
-_AUTHORIZATION_HEADER = re.compile(
-    r"(?i)\bAuthorization\s*:\s*(?:Bearer|Basic)\s+[^\s,;]+"
+_AUTHORIZATION_CREDENTIAL = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])(?:\"authorization\"|'authorization'|authorization)"
+    r"\s*[:=]\s*(?:"
+    r'\"(?:Bearer|Basic)\s+[^\"\r\n]*\"|'
+    r"'(?:Bearer|Basic)\s+[^'\r\n]*'|"
+    r"(?:Bearer|Basic)\s+[^\s,;&}\]]+)"
 )
 _AWS_ACCESS_KEY = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
 _GITHUB_TOKEN = re.compile(
@@ -48,6 +52,11 @@ _GITHUB_TOKEN = re.compile(
 _OPENAI_TOKEN = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
 _URL = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>\"']+")
 _URL_SECRET_QUERY = re.compile(rf"(?i)(?:[?&])(?:{_SENSITIVE_FIELD})=")
+_QUOTED_ABSOLUTE_PATH = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:"
+    r'\"(?:[A-Z]:[\\/]|\\\\|/)[^\"\r\n]*\"|'
+    r"'(?:[A-Z]:[\\/]|\\\\|/)[^'\r\n]*')"
+)
 _WINDOWS_PATH = re.compile(
     r"(?i)(?<![A-Za-z0-9])(?:\\\\(?:\?\\UNC\\|\?\\|\.\\|"
     r"[^\\\s;,]+\\)[^\s;,]*|[A-Z]:[\\/][^\s;,]*)"
@@ -129,12 +138,13 @@ def sanitize_sensitive_text(
 
     text = _URL.sub(sanitize_url, text)
     for pattern in (
-        _AUTHORIZATION_HEADER,
+        _AUTHORIZATION_CREDENTIAL,
         _CONTEXT_SECRET,
         _BEARER,
         _AWS_ACCESS_KEY,
         _GITHUB_TOKEN,
         _OPENAI_TOKEN,
+        _QUOTED_ABSOLUTE_PATH,
         _WINDOWS_PATH,
         _POSIX_PATH,
     ):

@@ -800,7 +800,7 @@ class _VinaPoseStreamValidator:
     ) -> None:
         self._expected_pose_count = expected_pose_count
         self._expected_best_energy = expected_best_energy
-        self._pending = bytearray()
+        self._pending = b""
         self._models = 0
         self._energy_count = 0
         self._minimum_energy = math.inf
@@ -811,20 +811,37 @@ class _VinaPoseStreamValidator:
     def feed(self, chunk: bytes) -> None:
         if not isinstance(chunk, bytes) or not chunk:
             raise CompletionError("completion_artifact_invalid")
-        self._pending.extend(chunk)
-        while True:
-            newline = self._pending.find(b"\n")
+        cursor = 0
+        if self._pending:
+            newline = chunk.find(b"\n")
             if newline < 0:
-                if len(self._pending) > _MAX_PDBQT_LINE_BYTES:
+                if len(self._pending) + len(chunk) > _MAX_PDBQT_LINE_BYTES:
                     raise CompletionError("completion_artifact_invalid")
+                self._pending += chunk
                 return
-            if newline > _MAX_PDBQT_LINE_BYTES:
+            if len(self._pending) + newline > _MAX_PDBQT_LINE_BYTES:
                 raise CompletionError("completion_artifact_invalid")
-            line = bytes(self._pending[:newline])
-            del self._pending[: newline + 1]
-            if line.endswith(b"\r"):
-                line = line[:-1]
-            self._consume_line(line)
+            self._consume_complete_line(self._pending + chunk[:newline])
+            self._pending = b""
+            cursor = newline + 1
+
+        while True:
+            newline = chunk.find(b"\n", cursor)
+            if newline < 0:
+                tail = chunk[cursor:]
+                if len(tail) > _MAX_PDBQT_LINE_BYTES:
+                    raise CompletionError("completion_artifact_invalid")
+                self._pending = tail
+                return
+            if newline - cursor > _MAX_PDBQT_LINE_BYTES:
+                raise CompletionError("completion_artifact_invalid")
+            self._consume_complete_line(chunk[cursor:newline])
+            cursor = newline + 1
+
+    def _consume_complete_line(self, line: bytes) -> None:
+        if line.endswith(b"\r"):
+            line = line[:-1]
+        self._consume_line(line)
 
     def _consume_line(self, line: bytes) -> None:
         try:
@@ -878,11 +895,9 @@ class _VinaPoseStreamValidator:
         if len(self._pending) > _MAX_PDBQT_LINE_BYTES:
             raise CompletionError("completion_artifact_invalid")
         if self._pending:
-            line = bytes(self._pending)
-            self._pending.clear()
-            if line.endswith(b"\r"):
-                line = line[:-1]
-            self._consume_line(line)
+            line = self._pending
+            self._pending = b""
+            self._consume_complete_line(line)
         if (
             self._in_model
             or self._models == 0

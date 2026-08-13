@@ -376,6 +376,72 @@ def test_large_pose_io_is_streamed_with_bounded_reads_and_memory(
     assert ".join(" not in source
 
 
+def test_newline_dense_pose_parser_uses_partial_tail_not_front_deletion() -> None:
+    import src.task_runtime.docking_execution as docking_module
+
+    source = inspect.getsource(docking_module._VinaPoseStreamValidator.feed)
+    assert "del self._pending" not in source
+    assert "self._pending.extend" not in source
+
+    prefix = (
+        b"MODEL 1\r\n"
+        b"REMARK VINA RESULT: -7.200 0.000 0.000\r\n"
+        b"ATOM      1  C   LIG A   1       0.000   0.000   0.000  0.00  0.00    +0.000 C\r\n"
+    )
+    dense_line = b"REMARK dense newline payload\r\n"
+    suffix = b"ENDMDL\r\n"
+    repeat = (8 * 1024 * 1024 - len(prefix) - len(suffix)) // len(dense_line)
+    content = prefix + dense_line * repeat + suffix
+    parser = docking_module._VinaPoseStreamValidator(
+        expected_pose_count=1,
+        expected_best_energy=-7.2,
+    )
+
+    started = time.perf_counter()
+    tracemalloc.start()
+    try:
+        for offset in range(0, len(content), 1024 * 1024 - 17):
+            parser.feed(content[offset : offset + 1024 * 1024 - 17])
+            assert len(parser._pending) <= docking_module._MAX_PDBQT_LINE_BYTES
+        parser.finish()
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert time.perf_counter() - started < 10.0
+    assert peak < 4 * 1024 * 1024
+
+
+def test_pose_parser_enforces_cross_chunk_line_limit_and_crlf() -> None:
+    import src.task_runtime.docking_execution as docking_module
+
+    parser = docking_module._VinaPoseStreamValidator(
+        expected_pose_count=1,
+        expected_best_energy=-7.2,
+    )
+    valid = (
+        b"MODEL 1\r\n"
+        b"REMARK VINA RESULT: -7.200 0.000 0.000\r\n"
+        b"ATOM      1  C   LIG A   1       0.000   0.000   0.000  0.00  0.00    +0.000 C\r\n"
+        + b"R" * (64 * 1024 - 1)
+        + b"\r\nENDMDL\r\n"
+    )
+    for offset in range(0, len(valid), 8191):
+        parser.feed(valid[offset : offset + 8191])
+    parser.finish()
+
+    oversized = docking_module._VinaPoseStreamValidator(
+        expected_pose_count=1,
+        expected_best_energy=-7.2,
+    )
+    oversized.feed(b"MODEL 1\n" + b"X" * (32 * 1024))
+    with pytest.raises(
+        docking_module.CompletionError,
+        match="completion_artifact_invalid",
+    ):
+        oversized.feed(b"X" * (32 * 1024 + 1))
+
+
 def test_pose_and_extra_artifact_validation_never_collects_large_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1504,6 +1570,55 @@ def test_contextual_credentials_and_paths_are_sanitized_everywhere(
     for value in (json.dumps(first), json.dumps(reused), manifest_text):
         assert "[redacted]" in value
         for secret in sensitive:
+            assert secret not in value
+
+
+def test_reviewer_authorization_and_spaced_paths_are_sanitized_end_to_end(
+    tmp_path: Path,
+) -> None:
+    manifest = _stage(tmp_path)
+    metadata = (
+        "Authorization = Bearer header-secret-456; "
+        "'authorization': 'Basic dXNlcjpwYXNz'; "
+        'POSIX "/srv/Alice Doe/private/result.txt" keep-posix; '
+        r'DRIVE "C:\Users\Alice Doe\private\result.txt" keep-drive; '
+        r'UNC "\\server\share\Alice Doe\private\result.txt" keep-unc; '
+        r'EXTENDED "\\?\UNC\server\share\Alice Doe\private\result.txt" keep-extended'
+    )
+    calls: list[dict[str, Any]] = []
+
+    def executor(payload: dict[str, Any], **control: Any) -> ToolResult:
+        result = _executor(tmp_path, calls)(payload, **control)
+        result.formatted = metadata
+        result.warnings = [metadata]
+        result.evidence = [{"source": "vina", "description": metadata}]
+        result.quality["engine"] = metadata
+        result.quality["execution_status"] = "completed"
+        return result
+
+    runner = DockingExecution(tmp_path, raw_executor=executor)
+    first = runner.run_verified("task-1", manifest)
+    reused = runner.run_verified("task-1", manifest)
+    serialized = (
+        json.dumps(first),
+        json.dumps(reused),
+        _completion(tmp_path).read_text(encoding="utf-8"),
+    )
+
+    assert first["success"] is True
+    assert reused["success"] is True
+    assert reused["reused_completion"] is True
+    assert len(calls) == 1
+    for value in serialized:
+        assert "[redacted]" in value
+        for secret in (
+            "header-secret-456",
+            "dXNlcjpwYXNz",
+            "Alice Doe/private",
+            "Doe/private",
+            r"Alice Doe\private",
+            r"Doe\private",
+        ):
             assert secret not in value
 
 
