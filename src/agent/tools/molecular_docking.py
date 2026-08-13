@@ -4,14 +4,61 @@
 分子对接工具 - 用于蛋白质-配体分子对接预测
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, Callable
 import logging
+import threading
 
 from src.agent.persistence.redaction import redact_sensitive
 
 from .base_tool import BaseMolecularTool
 
 logger = logging.getLogger(__name__)
+
+
+def _run_coroutine_sync(factory: Callable[[], Any]) -> Any:
+    """Run an async service from sync tool code, including loop-owning callers."""
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(factory())
+
+    outcome: Dict[str, Any] = {}
+
+    def invoke() -> None:
+        try:
+            outcome["result"] = asyncio.run(factory())
+        except BaseException as error:
+            outcome["error"] = error
+
+    worker = threading.Thread(
+        target=invoke,
+        name="molecular-docking-async-bridge",
+        daemon=False,
+    )
+    worker.start()
+    worker.join()
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["result"]
+
+
+def _safe_environment_diagnostics(values: Any) -> Dict[str, Any]:
+    diagnostics = values if isinstance(values, dict) else {}
+    safe: Dict[str, Any] = {"ok": bool(diagnostics.get("ok"))}
+    for source, label in (
+        ("vina", "vina_available"),
+        ("adfr_prepare_receptor", "receptor_preparation_available"),
+        ("mk_prepare_ligand", "ligand_preparation_available"),
+    ):
+        item = diagnostics.get(source)
+        safe[label] = bool(item.get("exists")) if isinstance(item, dict) else False
+    python_env = diagnostics.get("python_env")
+    safe["rdkit_available"] = (
+        bool(python_env.get("has_rdkit")) if isinstance(python_env, dict) else False
+    )
+    return safe
 
 
 def _normalize_warning_strings(values: Any) -> list[str]:
@@ -77,7 +124,14 @@ class MolecularDocking(BaseMolecularTool):
         cancel_event=None,
     ) -> Dict[str, Any]:
         """Run real docking only for structured requests with complete inputs."""
-        result = self._create_base_result(query)
+        safe_query: Any = query
+        if isinstance(query, dict):
+            safe_query = {
+                "request_type": "structured_docking",
+                "receptor_provided": bool(query.get("receptor_path")),
+                "ligand_mode": "smiles" if query.get("smiles") else "file",
+            }
+        result = self._create_base_result(safe_query)
 
         if not isinstance(query, dict):
             result["message"] = (
@@ -104,7 +158,6 @@ class MolecularDocking(BaseMolecularTool):
             return result
 
         try:
-            import asyncio
             from pathlib import Path
 
             from src.docking.molecular_docking_service import (
@@ -115,8 +168,7 @@ class MolecularDocking(BaseMolecularTool):
             receptor_path = Path(str(query["receptor_path"])).expanduser().resolve()
             if not receptor_path.is_file():
                 result["message"] = (
-                    f"Receptor file does not exist: {receptor_path}. "
-                    "No binding energy was calculated."
+                    "Receptor file does not exist. No binding energy was calculated."
                 )
                 return result
             center = tuple(float(value) for value in query["center"])
@@ -142,7 +194,11 @@ class MolecularDocking(BaseMolecularTool):
                     "AutoDock Vina docking environment is unavailable. "
                     "No binding energy was calculated."
                 )
-                result["data"] = {"diagnostics": service.env_diagnostics()}
+                result["data"] = {
+                    "diagnostics": _safe_environment_diagnostics(
+                        service.env_diagnostics()
+                    )
+                }
                 return result
             ligand_input = query.get("smiles")
             input_type = "smiles"
@@ -150,8 +206,7 @@ class MolecularDocking(BaseMolecularTool):
                 ligand_path = Path(str(query["ligand_path"])).expanduser().resolve()
                 if not ligand_path.is_file():
                     result["message"] = (
-                        f"Ligand file does not exist: {ligand_path}. "
-                        "No binding energy was calculated."
+                        "Ligand file does not exist. No binding energy was calculated."
                     )
                     return result
                 ligand_input = str(ligand_path)
@@ -163,8 +218,8 @@ class MolecularDocking(BaseMolecularTool):
                 control["progress_callback"] = progress_callback
             if cancel_event is not None:
                 control["cancel_event"] = cancel_event
-            docking_result = asyncio.run(
-                service.perform_docking(
+            docking_result = _run_coroutine_sync(
+                lambda: service.perform_docking(
                     receptor_file=str(receptor_path),
                     ligand_input=str(ligand_input),
                     config=config,
@@ -190,8 +245,8 @@ class MolecularDocking(BaseMolecularTool):
             }
             if result["success"]:
                 result["quality"]["docking_inputs"] = {
-                    "receptor_path": str(receptor_path),
-                    "ligand_input": str(ligand_input),
+                    "receptor_provided": True,
+                    "ligand_mode": input_type,
                     "center": list(center),
                     "size": list(size),
                 }

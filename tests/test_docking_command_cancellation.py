@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+import warnings
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +16,7 @@ from src.docking.adapters.adfr_adapter import ADFRAdapter
 from src.docking.adapters.base import (
     CommandAdapter,
     CommandCancelledError,
+    CommandOutputLimitError,
     CommandOwnershipUncertainError,
 )
 from src.docking.adapters.meeko_adapter import MeekoAdapter
@@ -492,6 +494,40 @@ def test_service_cancellation_during_history_removes_completed_index(tmp_path):
     assert not (tmp_path / "docking_cancel-during-history").exists()
 
 
+def test_history_cleanup_failure_is_explicit_on_cancellation(tmp_path):
+    service, _calls = _successful_service(tmp_path)
+    cancel = threading.Event()
+
+    def write_then_cancel(*_args, **_kwargs):
+        cancel.set()
+
+    with (
+        patch(
+            "src.docking.history_index.upsert_history_record",
+            side_effect=write_then_cancel,
+        ),
+        patch(
+            "src.docking.history_index.remove_history_record",
+            side_effect=PermissionError("sensitive path"),
+        ),
+    ):
+        result = asyncio.run(
+            service.perform_docking(
+                "receptor.pdbqt",
+                "ligand.pdbqt",
+                DockingConfig(manual_center=True),
+                "file",
+                job_id="cancel-history-uncertain",
+                cancel_event=cancel,
+            )
+        )
+
+    assert result["error_code"] == "cancelled"
+    assert "Docking history cleanup could not be confirmed." in result["warnings"]
+    assert "sensitive path" not in repr(result)
+    assert "binding_energy" not in repr(result)
+
+
 @pytest.mark.parametrize(
     "job_id",
     ["", ".", "..", "../escape", r"..\escape", "has/slash", "has\\slash", "bad\nline", "a" * 129],
@@ -654,3 +690,259 @@ def test_tool_forwards_controls_and_does_not_claim_real_execution_on_cancel(tmp_
     assert str(receptor.resolve()) not in repr(result)
     assert str(ligand.resolve()) not in repr(result)
     assert "binding_energy" not in repr(result)
+
+
+@pytest.mark.parametrize("timeout", [-1, 0, float("nan"), float("inf")])
+def test_command_adapter_rejects_invalid_timeout_before_spawn(tmp_path, timeout):
+    adapter = CommandAdapter(sys.executable)
+
+    with patch("src.docking.adapters.base.subprocess.Popen") as popen:
+        with pytest.raises(ValueError, match="positive finite"):
+            adapter.run(
+                [sys.executable, "-c", "raise SystemExit(0)"],
+                cwd=str(tmp_path),
+                timeout=timeout,
+            )
+
+    popen.assert_not_called()
+
+
+def test_command_adapter_rejects_invalid_cancel_token_before_spawn(tmp_path):
+    adapter = CommandAdapter(sys.executable)
+
+    with patch("src.docking.adapters.base.subprocess.Popen") as popen:
+        with pytest.raises(TypeError, match="cancel_event"):
+            adapter.run(
+                [sys.executable, "-c", "raise SystemExit(0)"],
+                cwd=str(tmp_path),
+                timeout=1,
+                cancel_event=object(),
+            )
+
+    popen.assert_not_called()
+
+
+def test_command_adapter_stops_output_flood_at_fixed_limit(tmp_path):
+    adapter = CommandAdapter(sys.executable)
+
+    with pytest.raises(CommandOutputLimitError) as caught:
+        adapter.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.write('x' * 12000000); sys.stdout.flush()",
+            ],
+            cwd=str(tmp_path),
+            timeout=10,
+        )
+
+    assert str(caught.value) == "Docking command output exceeded the safe limit"
+    assert "xxxxxxxx" not in repr(caught.value)
+
+
+def test_failed_workflow_removes_partial_directory_and_allows_retry(tmp_path):
+    service, calls = _successful_service(tmp_path)
+    service.prepare_protein = lambda *_args, **_kwargs: False
+
+    first = asyncio.run(
+        service.perform_docking(
+            "receptor.pdbqt",
+            "ligand.pdbqt",
+            DockingConfig(manual_center=True),
+            "file",
+            job_id="retry-safe",
+        )
+    )
+    service.prepare_protein = lambda _source, output, **_kwargs: (
+        Path(output).write_text("ATOM\n", encoding="utf-8") is not None
+    )
+    second = asyncio.run(
+        service.perform_docking(
+            "receptor.pdbqt",
+            "ligand.pdbqt",
+            DockingConfig(manual_center=True),
+            "file",
+            job_id="retry-safe",
+        )
+    )
+
+    assert first["error_code"] == "receptor_preparation_failed"
+    assert second.get("error_code") != "job_conflict"
+    assert calls
+
+
+def test_service_rejects_windows_alias_job_id(tmp_path):
+    service, calls = _successful_service(tmp_path)
+
+    result = asyncio.run(
+        service.perform_docking(
+            "receptor.pdbqt",
+            "ligand.pdbqt",
+            DockingConfig(manual_center=True),
+            "file",
+            job_id="task.",
+        )
+    )
+
+    assert result["error_code"] == "invalid_job_id"
+    assert calls == []
+
+
+def test_async_progress_callback_is_rejected_without_unawaited_coroutine(tmp_path):
+    service, calls = _successful_service(tmp_path)
+
+    async def unsupported_callback(_phase, _progress):
+        return None
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = asyncio.run(
+            service.perform_docking(
+                "receptor.pdbqt",
+                "ligand.pdbqt",
+                DockingConfig(manual_center=True),
+                "file",
+                job_id="async-callback",
+                progress_callback=unsupported_callback,
+            )
+        )
+
+    assert result["error_code"] == "progress_callback_failed"
+    assert calls == []
+    assert not [warning for warning in caught if "never awaited" in str(warning.message)]
+
+
+def test_tool_execute_works_inside_existing_event_loop_without_coroutine_leak(tmp_path):
+    receptor = tmp_path / "receptor.pdbqt"
+    ligand = tmp_path / "ligand.pdbqt"
+    receptor.write_text("ATOM\n", encoding="utf-8")
+    ligand.write_text("ATOM\n", encoding="utf-8")
+
+    class FakeService:
+        def __init__(self, config=None):
+            pass
+
+        def verify_environment(self):
+            return True
+
+        async def perform_docking(self, **_kwargs):
+            return {
+                "success": False,
+                "error_code": "cancelled",
+                "error": "Docking was cancelled",
+            }
+
+    async def invoke():
+        with patch(
+            "src.docking.molecular_docking_service.MolecularDockingService",
+            FakeService,
+        ):
+            return MolecularDocking().execute(
+                {
+                    "receptor_path": str(receptor),
+                    "ligand_path": str(ligand),
+                    "center": [1, 2, 3],
+                    "size": [20, 20, 20],
+                }
+            )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = asyncio.run(invoke())
+
+    assert result["data"]["error_code"] == "cancelled"
+    assert not [warning for warning in caught if "never awaited" in str(warning.message)]
+
+
+def test_tool_redacts_structured_inputs_and_success_provenance(tmp_path):
+    receptor = tmp_path / "secret-receptor-name.pdbqt"
+    receptor.write_text("ATOM\n", encoding="utf-8")
+    secret_smiles = "CCOC(=O)SECRET"
+
+    class FakeService:
+        def __init__(self, config=None):
+            pass
+
+        def verify_environment(self):
+            return True
+
+        async def perform_docking(self, **_kwargs):
+            return {
+                "success": True,
+                "job_id": "task-safe",
+                "results": [{"pose": 1, "binding_energy": -7.0}],
+                "best_pose": {"pose": 1, "binding_energy": -7.0},
+                "pose_file": "safe-relative-pose.pdbqt",
+                "total_poses": 1,
+            }
+
+    with patch(
+        "src.docking.molecular_docking_service.MolecularDockingService",
+        FakeService,
+    ):
+        result = MolecularDocking().execute(
+            {
+                "receptor_path": str(receptor),
+                "smiles": secret_smiles,
+                "center": [1, 2, 3],
+                "size": [20, 20, 20],
+            }
+        )
+
+    serialized = repr(result)
+    assert result["success"] is True
+    assert result["query"] == {
+        "request_type": "structured_docking",
+        "receptor_provided": True,
+        "ligand_mode": "smiles",
+    }
+    assert str(receptor.resolve()) not in serialized
+    assert secret_smiles not in serialized
+    assert result["quality"]["docking_inputs"] == {
+        "receptor_provided": True,
+        "ligand_mode": "smiles",
+        "center": [1.0, 2.0, 3.0],
+        "size": [20.0, 20.0, 20.0],
+    }
+
+
+def test_receptor_preparation_never_uses_simplified_scientific_fallback(tmp_path):
+    receptor = tmp_path / "receptor.pdb"
+    output = tmp_path / "receptor.pdbqt"
+    receptor.write_text(
+        "ATOM      1  C   LIG A   1       1.000   2.000   3.000\n",
+        encoding="utf-8",
+    )
+    service = MolecularDockingService()
+    service._prepare_receptor_candidates = lambda: []
+
+    assert service.prepare_protein(str(receptor), str(output)) is False
+    assert not output.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group regression")
+def test_posix_normal_parent_exit_does_not_abandon_orphaned_child(tmp_path):
+    child = tmp_path / "child.py"
+    launcher = tmp_path / "launcher.py"
+    marker = tmp_path / "orphan.marker"
+    child.write_text(
+        "import sys,time\nfrom pathlib import Path\ntime.sleep(2)\n"
+        "Path(sys.argv[1]).write_text('survived')\n",
+        encoding="utf-8",
+    )
+    launcher.write_text(
+        "import subprocess,sys\n"
+        "subprocess.Popen([sys.executable,*sys.argv[1:]], "
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        CommandAdapter(sys.executable).run(
+            [sys.executable, str(launcher), str(child), str(marker)],
+            cwd=str(tmp_path),
+            timeout=0.3,
+        )
+
+    time.sleep(2.0)
+    assert not marker.exists()

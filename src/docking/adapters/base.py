@@ -1,6 +1,7 @@
 """Small command adapter primitives for docking command line tools."""
 
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -12,6 +13,7 @@ from typing import List, Optional, Union
 logger = logging.getLogger(__name__)
 
 _COMMAND_POLL_INTERVAL_SECONDS = 0.2
+_COMMAND_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024
 
 
 class CommandCancelledError(RuntimeError):
@@ -28,12 +30,32 @@ class CommandOwnershipUncertainError(RuntimeError):
         super().__init__("Command process ownership is uncertain")
 
 
+class CommandOutputLimitError(RuntimeError):
+    """Raised after a controlled command exceeds its bounded output budget."""
+
+    def __init__(self):
+        super().__init__("Docking command output exceeded the safe limit")
+
+
 if os.name == "nt":
     import ctypes
     from ctypes import wintypes
 
     _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+    _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS = 1
     _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+
+    class _BasicAccountingInformation(ctypes.Structure):
+        _fields_ = [
+            ("TotalUserTime", ctypes.c_longlong),
+            ("TotalKernelTime", ctypes.c_longlong),
+            ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+            ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+            ("TotalPageFaultCount", wintypes.DWORD),
+            ("TotalProcesses", wintypes.DWORD),
+            ("ActiveProcesses", wintypes.DWORD),
+            ("TotalTerminatedProcesses", wintypes.DWORD),
+        ]
 
     class _IOCounters(ctypes.Structure):
         _fields_ = [
@@ -83,6 +105,14 @@ if os.name == "nt":
     _kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
     _kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
     _kernel32.TerminateJobObject.restype = wintypes.BOOL
+    _kernel32.QueryInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _kernel32.QueryInformationJobObject.restype = wintypes.BOOL
     _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     _kernel32.CloseHandle.restype = wintypes.BOOL
     _ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
@@ -137,6 +167,19 @@ if os.name == "nt":
             if self.handle and not _kernel32.TerminateJobObject(self.handle, 1):
                 raise _windows_error("TerminateJobObject")
 
+        def has_active_processes(self) -> bool:
+            accounting = _BasicAccountingInformation()
+            returned = wintypes.DWORD()
+            if not _kernel32.QueryInformationJobObject(
+                self.handle,
+                _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS,
+                ctypes.byref(accounting),
+                ctypes.sizeof(accounting),
+                ctypes.byref(returned),
+            ):
+                raise _windows_error("QueryInformationJobObject")
+            return accounting.ActiveProcesses > 0
+
         def close(self) -> None:
             if self.handle:
                 handle = self.handle
@@ -168,6 +211,8 @@ class CommandAdapter:
         *,
         cancel_event=None,
     ):
+        timeout = self._validate_timeout(timeout)
+        self._validate_cancel_event(cancel_event)
         if cancel_event is not None and cancel_event.is_set():
             raise CommandCancelledError()
         started_at = time.monotonic()
@@ -181,6 +226,34 @@ class CommandAdapter:
                 cancel_event,
             )
         return self._run_posix(args, cwd, timeout, deadline, cancel_event)
+
+    @staticmethod
+    def _validate_timeout(timeout):
+        if timeout is None:
+            return None
+        if isinstance(timeout, bool):
+            raise ValueError("timeout must be a positive finite number")
+        try:
+            value = float(timeout)
+        except (TypeError, ValueError):
+            raise ValueError("timeout must be a positive finite number") from None
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("timeout must be a positive finite number")
+        return value
+
+    @staticmethod
+    def _validate_cancel_event(cancel_event) -> None:
+        if cancel_event is None:
+            return
+        is_set = getattr(cancel_event, "is_set", None)
+        if not callable(is_set):
+            raise TypeError("cancel_event must provide a callable is_set method")
+        try:
+            bool(is_set())
+        except Exception:
+            raise TypeError(
+                "cancel_event must provide a callable is_set method"
+            ) from None
 
     def _run_windows(self, args, cwd, timeout, deadline, cancel_event):
         windows_job = None
@@ -215,6 +288,14 @@ class CommandAdapter:
                 ) from error
 
             while True:
+                if process.poll() is not None:
+                    try:
+                        active_descendants = windows_job.has_active_processes()
+                    except Exception as error:
+                        self._cleanup_windows_or_uncertain(windows_job, process)
+                        raise CommandOwnershipUncertainError() from error
+                    if not active_descendants:
+                        break
                 if cancel_event is not None and cancel_event.is_set():
                     self._cancel_windows_process(windows_job, process)
                 remaining = (
@@ -226,18 +307,27 @@ class CommandAdapter:
                         process,
                     )
                     raise self._timeout_error(timeout, stdout, stderr)
+                if self._captured_output_exceeded(process):
+                    self._cleanup_windows_or_uncertain(windows_job, process)
+                    raise CommandOutputLimitError()
 
                 wait_for = _COMMAND_POLL_INTERVAL_SECONDS
                 if remaining is not None:
                     wait_for = min(wait_for, remaining)
                 try:
-                    stdout, stderr = process.communicate(timeout=wait_for)
+                    process.wait(timeout=wait_for)
                 except subprocess.TimeoutExpired:
                     continue
 
-                if cancel_event is not None and cancel_event.is_set():
-                    self._cancel_windows_process(windows_job, process)
-                break
+                continue
+
+            try:
+                stdout, stderr = self._take_captured_output(
+                    process,
+                    enforce_limit=True,
+                )
+            finally:
+                self._close_process_handle(process)
 
             return subprocess.CompletedProcess(
                 args=args,
@@ -258,29 +348,41 @@ class CommandAdapter:
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             cwd=cwd,
             start_new_session=True,
         )
+        self._attach_capture_readers(process)
         while True:
+            if process.poll() is not None and not self._posix_process_group_active(
+                process.pid
+            ):
+                break
             if cancel_event is not None and cancel_event.is_set():
                 self._cancel_posix_process(process)
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining <= 0:
                 stdout, stderr = self._cleanup_posix_or_uncertain(process)
                 raise self._timeout_error(timeout, stdout, stderr)
+            if self._captured_output_exceeded(process):
+                self._cleanup_posix_or_uncertain(process)
+                raise CommandOutputLimitError()
             wait_for = _COMMAND_POLL_INTERVAL_SECONDS
             if remaining is not None:
                 wait_for = min(wait_for, remaining)
             try:
-                stdout, stderr = process.communicate(timeout=wait_for)
+                process.wait(timeout=wait_for)
             except subprocess.TimeoutExpired:
                 continue
-            if cancel_event is not None and cancel_event.is_set():
-                self._cancel_posix_process(process)
+            if self._posix_process_group_active(process.pid):
+                time.sleep(wait_for)
+                continue
             break
+
+
+        stdout, stderr = self._take_captured_output(
+            process,
+            enforce_limit=True,
+        )
 
         return subprocess.CompletedProcess(
             args=args,
@@ -315,12 +417,10 @@ class CommandAdapter:
                 args,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 cwd=cwd,
                 creationflags=cls._windows_creationflags(),
             )
+            cls._attach_capture_readers(process)
             windows_job.assign(process)
             assigned = True
             return windows_job, process
@@ -553,6 +653,8 @@ class CommandAdapter:
                 stdout, stderr = cls._communicate_after_termination(process)
             except Exception as error:
                 errors.append(error)
+            finally:
+                cls._close_process_handle(process)
 
         if not job_closed:
             try:
@@ -570,12 +672,19 @@ class CommandAdapter:
         timeout: float = 2.0,
     ):
         try:
-            return process.communicate(timeout=timeout)
+            process.wait(timeout=timeout)
+            return CommandAdapter._take_captured_output(
+                process, enforce_limit=False
+            )
         except subprocess.TimeoutExpired as error:
             if process.poll() is None:
                 process.kill()
             try:
-                return process.communicate(timeout=1.0)
+                process.wait(timeout=1.0)
+                return CommandAdapter._take_captured_output(
+                    process,
+                    enforce_limit=False,
+                )
             except subprocess.TimeoutExpired:
                 for stream in (process.stdout, process.stderr):
                     if stream is not None:
@@ -587,6 +696,96 @@ class CommandAdapter:
                 ) from error
 
     @staticmethod
+    def _attach_capture_readers(process) -> None:
+        state = {
+            "lock": threading.Lock(),
+            "total": 0,
+            "buffers": {"stdout": bytearray(), "stderr": bytearray()},
+            "exceeded": threading.Event(),
+            "errors": [],
+            "threads": [],
+        }
+
+        def drain(name, stream) -> None:
+            try:
+                while True:
+                    chunk = stream.read(64 * 1024)
+                    if not chunk:
+                        break
+                    with state["lock"]:
+                        state["total"] += len(chunk)
+                        remaining = max(
+                            0,
+                            _COMMAND_OUTPUT_LIMIT_BYTES
+                            - sum(len(value) for value in state["buffers"].values()),
+                        )
+                        if remaining:
+                            state["buffers"][name].extend(chunk[:remaining])
+                        if state["total"] > _COMMAND_OUTPUT_LIMIT_BYTES:
+                            state["exceeded"].set()
+            except BaseException as error:
+                state["errors"].append(type(error).__name__)
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+        for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+            thread = threading.Thread(
+                target=drain,
+                args=(name, stream),
+                name=f"docking-command-{name}",
+                daemon=False,
+            )
+            state["threads"].append(thread)
+            thread.start()
+        process._medchat_capture_state = state
+        process._medchat_capture_taken = False
+
+    @staticmethod
+    def _close_process_handle(process) -> None:
+        handle = getattr(process, "_handle", None)
+        close = getattr(handle, "Close", None)
+        if callable(close):
+            close()
+            process._handle = None
+
+    @staticmethod
+    def _attach_capture_sinks(process, stdout_sink, stderr_sink) -> None:
+        process._medchat_stdout_sink = stdout_sink
+        process._medchat_stderr_sink = stderr_sink
+        process._medchat_capture_taken = False
+
+    @staticmethod
+    def _captured_output_exceeded(process) -> bool:
+        state = getattr(process, "_medchat_capture_state", None)
+        return bool(state is not None and state["exceeded"].is_set())
+
+    @staticmethod
+    def _take_captured_output(process, *, fallback=(None, None), enforce_limit):
+        if getattr(process, "_medchat_capture_taken", False):
+            return tuple(value or "" for value in fallback)
+        process._medchat_capture_taken = True
+        state = getattr(process, "_medchat_capture_state", None)
+        if state is None:
+            return tuple(value or "" for value in fallback)
+        for thread in state["threads"]:
+            thread.join(timeout=2.0)
+        if any(thread.is_alive() for thread in state["threads"]):
+            raise RuntimeError("Command output readers did not stop")
+        if state["errors"]:
+            raise RuntimeError("Command output capture failed")
+        exceeded = state["exceeded"].is_set()
+        process._medchat_capture_state = None
+        if enforce_limit and exceeded:
+            raise CommandOutputLimitError()
+        return tuple(
+            bytes(state["buffers"][name]).decode("utf-8", errors="replace")
+            for name in ("stdout", "stderr")
+        )
+
+    @staticmethod
     def _terminate_posix_process_group(process: subprocess.Popen) -> None:
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -595,3 +794,13 @@ class CommandAdapter:
         except OSError:
             if process.poll() is None:
                 process.kill()
+
+    @staticmethod
+    def _posix_process_group_active(process_group_id: int) -> bool:
+        try:
+            os.killpg(process_group_id, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
