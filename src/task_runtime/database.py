@@ -93,6 +93,7 @@ def _initialize_once(path: Path) -> None:
             "input_manifest_path": "TEXT",
             "provenance_json": "TEXT NOT NULL DEFAULT '{}'",
             "idempotency_digest": "TEXT",
+            "submission_digest": "TEXT",
         }
         for name, declaration in migrations.items():
             if name not in columns:

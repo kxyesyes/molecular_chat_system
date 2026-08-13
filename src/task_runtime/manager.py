@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -12,7 +14,6 @@ from .models import (
     TaskRecord,
     TaskStatus,
     normalize_task_warnings,
-    sanitize_public_task_data,
     strict_json_roundtrip,
     strict_json_snapshot,
 )
@@ -57,9 +58,19 @@ class TaskManager:
         snapshot = strict_json_roundtrip(payload)
         if not isinstance(snapshot, dict):
             raise ValueError("invalid JSON task payload")
-        projection = sanitize_public_task_data(snapshot)
-        if not isinstance(projection, dict):
-            projection = {}
+        encoded = json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        projection = {
+            "payload_digest": hashlib.sha256(
+                b"medchat-legacy-task-payload-v1\x00" + encoded
+            ).hexdigest(),
+            "field_count": len(snapshot),
+        }
         self.store.create(task_id, task_type, projection)
 
         try:
@@ -158,7 +169,6 @@ class TaskManager:
             error=error,
             artifacts=artifacts,
             warnings=warnings,
-            legacy_result_projection=True,
         )
         if not completed:
             self._finish_requested_cancellation(task_id)
@@ -183,7 +193,6 @@ class TaskManager:
         artifacts: list[dict[str, Any]] | None = None,
         error_code: TaskErrorCode | str | None = None,
         warnings: list[Any] | None = None,
-        legacy_result_projection: bool = False,
     ) -> bool:
         return self.store.finish(
             task_id,
@@ -193,7 +202,6 @@ class TaskManager:
             artifacts=artifacts,
             error_code=error_code,
             warnings=warnings,
-            legacy_result_projection=legacy_result_projection,
         )
 
 

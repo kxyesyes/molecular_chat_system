@@ -16,7 +16,7 @@ from .backends.base import (
     TaskRuntimeBackend,
     assert_async_backend_contract,
 )
-from .backends.local import LocalTaskBackend
+from .backends.local import LocalTaskBackend, TaskIdempotencyConflictError
 from .config import PROJECT_ROOT, TaskRuntimeConfig
 from .docking_execution import DockingExecution
 from .errors import TaskErrorCode
@@ -114,6 +114,12 @@ class TaskRuntime:
             smiles,
             config_snapshot,
         )
+        verified_manifest = await asyncio.to_thread(
+            self.stager.load_verified,
+            task_id,
+            manifest_path,
+        )
+        request_digest = self._docking_request_digest(verified_manifest)
 
         temporal_health = await self._temporal_health()
         decision = self.selector.select(
@@ -126,15 +132,8 @@ class TaskRuntime:
             "decision": decision_payload,
             "mode": "file" if ligand_bytes is not None else "smiles",
             "total_bytes": len(receptor_bytes) + (len(ligand_bytes) if ligand_bytes else 0),
-            "config_hash": hashlib.sha256(
-                json.dumps(
-                    config_snapshot,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    allow_nan=False,
-                ).encode("utf-8")
-            ).hexdigest(),
+            "config_hash": verified_manifest["config_hash"],
+            "request_digest": request_digest,
         }
         submission = TaskSubmission(
             task_id=task_id,
@@ -142,11 +141,14 @@ class TaskRuntime:
             payload=payload,
             input_manifest_path=str(manifest_path),
             idempotency_key=idempotency_key,
+            request_digest=request_digest,
         )
 
         if decision.backend == "local":
             try:
                 return await self.local_backend.submit(submission)
+            except TaskIdempotencyConflictError:
+                raise
             except Exception as exc:
                 await self._project_start_failure(
                     submission,
@@ -186,6 +188,8 @@ class TaskRuntime:
                 )
             try:
                 local_result = await self.local_backend.submit(submission)
+            except TaskIdempotencyConflictError:
+                raise
             except Exception as exc:
                 await self._project_start_failure(
                     submission,
@@ -218,6 +222,38 @@ class TaskRuntime:
 
     async def get(self, task_id: str) -> TaskRecord:
         return await asyncio.to_thread(self.store.get, task_id)
+
+    @staticmethod
+    def _docking_request_digest(manifest: Mapping[str, Any]) -> str:
+        try:
+            authority = {
+                "config_hash": manifest["config_hash"],
+                "ligand_mode": manifest["ligand_mode"],
+                "ligand_sha256": manifest["ligand"]["sha256"],
+                "receptor_sha256": manifest["receptor"]["sha256"],
+            }
+        except (KeyError, TypeError) as exc:
+            raise ValueError("verified manifest missing digest authority") from exc
+        for key in ("config_hash", "ligand_sha256", "receptor_sha256"):
+            value = authority[key]
+            if (
+                type(value) is not str
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError("verified manifest has invalid digest authority")
+        if authority["ligand_mode"] not in {"file", "smiles"}:
+            raise ValueError("verified manifest has invalid ligand mode")
+        canonical = json.dumps(
+            authority,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(
+            b"medchat-task-submission-v1\x00" + canonical
+        ).hexdigest()
 
     async def list(
         self,
@@ -306,6 +342,8 @@ class TaskRuntime:
                     submission.payload,
                     backend=backend,
                     provenance=submission.payload["decision"],
+                    idempotency_digest=self._submission_idempotency_digest(submission),
+                    submission_digest=submission.request_digest,
                 )
             except sqlite3.IntegrityError:
                 record = await asyncio.to_thread(self.store.get, submission.task_id)
@@ -361,6 +399,8 @@ class TaskRuntime:
                     phase=TaskPhase.STAGING,
                     warnings=warning,
                     provenance=provenance,
+                    idempotency_digest=self._submission_idempotency_digest(submission),
+                    submission_digest=submission.request_digest,
                 )
             except sqlite3.IntegrityError:
                 record = await asyncio.to_thread(self.store.get, submission.task_id)
@@ -379,6 +419,14 @@ class TaskRuntime:
         except KeyError:
             return False
         return True
+
+    @staticmethod
+    def _submission_idempotency_digest(
+        submission: TaskSubmission,
+    ) -> str | None:
+        if submission.idempotency_key is None:
+            return None
+        return LocalTaskBackend.idempotency_digest(submission.idempotency_key)
 
     def _new_task_id(self) -> str:
         value = self._uuid_factory()

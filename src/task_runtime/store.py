@@ -20,9 +20,7 @@ from .models import (
     normalize_task_warnings,
     sanitize_provenance,
     sanitize_public_artifacts,
-    sanitize_public_result,
     sanitize_task_result_projection,
-    sanitize_task_message,
     strict_json_snapshot,
     validate_task_input_payload,
 )
@@ -39,6 +37,21 @@ TERMINAL_STATUSES = frozenset(
 _SAFE_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 _SHA256_DIGEST = re.compile(r"[a-f0-9]{64}\Z")
 WORKER_FUTURE_SKEW_SECONDS = 5.0
+_ERROR_MESSAGES = {
+    TaskErrorCode.TASK_INPUT_INVALID.value: "Task input invalid",
+    TaskErrorCode.TASK_INPUT_HASH_MISMATCH.value: "Task input hash mismatch",
+    TaskErrorCode.TASK_BACKEND_UNAVAILABLE.value: "Task execution backend unavailable",
+    TaskErrorCode.TEMPORAL_START_FAILED.value: "Temporal start failed",
+    TaskErrorCode.TEMPORAL_WORKER_UNAVAILABLE.value: "Temporal worker unavailable",
+    TaskErrorCode.TASK_HEARTBEAT_TIMEOUT.value: "Task heartbeat timed out",
+    TaskErrorCode.TASK_CANCEL_TIMEOUT.value: "Task cancellation timed out",
+    TaskErrorCode.DOCKING_ENVIRONMENT_UNAVAILABLE.value: "Docking environment unavailable",
+    TaskErrorCode.DOCKING_PROCESS_FAILED.value: "Docking process failed",
+    TaskErrorCode.DOCKING_PROCESS_OWNERSHIP_UNCERTAIN.value: "Docking process ownership uncertain",
+    TaskErrorCode.DOCKING_ARTIFACT_INVALID.value: "Docking artifact invalid",
+    TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value: "Scientific task result validation failed",
+    TaskErrorCode.TASK_PROJECTION_FAILED.value: "Task state projection failed",
+}
 
 
 def _normalize_datetime(value: datetime) -> datetime:
@@ -223,6 +236,7 @@ class TaskStore:
         phase: TaskPhase | str | None = None,
         warnings: list[Any] | None = None,
         idempotency_digest: str | None = None,
+        submission_digest: str | None = None,
         now: datetime | str | None = None,
     ) -> TaskRecord:
         task_id = _validate_required_string(task_id, "task_id")
@@ -239,6 +253,13 @@ class TaskStore:
             or _SHA256_DIGEST.fullmatch(idempotency_digest) is None
         ):
             raise ValueError("invalid idempotency_digest")
+        if submission_digest is not None and (
+            type(submission_digest) is not str
+            or _SHA256_DIGEST.fullmatch(submission_digest) is None
+        ):
+            raise ValueError("invalid submission_digest")
+        if idempotency_digest is not None and submission_digest is None:
+            raise ValueError("submission_digest required for idempotency")
         timestamp = _as_timestamp(now)
         payload_snapshot = validate_task_input_payload(payload)
         safe_provenance = sanitize_provenance(provenance)
@@ -254,9 +275,9 @@ class TaskStore:
                     task_id, task_type, status, input_json, backend,
                     external_workflow_id, progress, attempt,
                     warnings_json, input_manifest_path, provenance_json, phase,
-                    idempotency_digest,
+                    idempotency_digest, submission_digest,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -270,6 +291,7 @@ class TaskStore:
                     provenance_json,
                     phase,
                     idempotency_digest,
+                    submission_digest,
                     timestamp,
                     timestamp,
                 ),
@@ -293,6 +315,13 @@ class TaskStore:
         return self.get(task_id)
 
     def get_by_idempotency_digest(self, digest: str) -> TaskRecord:
+        record, _ = self.get_idempotency_authority(digest)
+        return record
+
+    def get_idempotency_authority(
+        self,
+        digest: str,
+    ) -> tuple[TaskRecord, str | None]:
         if type(digest) is not str or _SHA256_DIGEST.fullmatch(digest) is None:
             raise ValueError("invalid idempotency_digest")
         with connection(self.db_path) as conn:
@@ -302,7 +331,18 @@ class TaskStore:
             ).fetchone()
         if row is None:
             raise KeyError(digest)
-        return TaskRecord.from_row(row)
+        return TaskRecord.from_row(row), row["submission_digest"]
+
+    def get_submission_digest(self, task_id: str) -> str | None:
+        task_id = _validate_required_string(task_id, "task_id")
+        with connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT submission_digest FROM tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(task_id)
+        return row["submission_digest"]
 
     def annotate_nonterminal(
         self,
@@ -633,37 +673,34 @@ class TaskStore:
         error_code: TaskErrorCode | str | None = None,
         warnings: list[Any] | None = None,
         provenance: dict[str, Any] | None = None,
-        legacy_result_projection: bool = False,
         now: datetime | str | None = None,
     ) -> bool:
         task_id = _validate_required_string(task_id, "task_id")
         timestamp = _as_timestamp(now)
         code = _error_code_value(error_code)
-        safe_error = sanitize_task_message(error) if error is not None else None
-        safe_provenance = sanitize_provenance(provenance) if provenance is not None else None
-        if type(legacy_result_projection) is not bool:
-            raise ValueError("invalid legacy_result_projection")
-        safe_result = None
-        if result is not None:
-            result_snapshot = strict_json_snapshot(result)
-            safe_result = (
-                sanitize_public_result(result_snapshot)
-                if legacy_result_projection
-                else sanitize_task_result_projection(result_snapshot)
-            )
-        result_warnings = (
-            safe_result.get("warnings")
-            if isinstance(safe_result, dict) and "warnings" in safe_result
+        safe_error = (
+            _ERROR_MESSAGES.get(code, "Task failed")
+            if error is not None or status is TaskStatus.FAILED
             else None
         )
-        warning_source = warnings if warnings is not None else result_warnings
+        safe_provenance = sanitize_provenance(provenance) if provenance is not None else None
+        safe_result = None
+        raw_result_warnings = None
+        if result is not None:
+            result_snapshot = strict_json_snapshot(result)
+            if isinstance(result_snapshot, dict):
+                raw_result_warnings = result_snapshot.get("warnings")
+            safe_result = sanitize_task_result_projection(result_snapshot)
+        warning_source = warnings if warnings is not None else raw_result_warnings
         safe_warnings = (
             normalize_task_warnings(warning_source)
             if warning_source is not None
             else None
         )
         if isinstance(safe_result, dict) and warning_source is not None:
-            safe_result["warnings"] = safe_warnings
+            safe_result["warnings"] = [
+                {"code": warning["code"]} for warning in safe_warnings
+            ]
         safe_artifacts = sanitize_public_artifacts(
             strict_json_snapshot(artifacts or [])
         )
@@ -727,7 +764,6 @@ class TaskStore:
         error_code: TaskErrorCode | str | None = None,
         warnings: list[Any] | None = None,
         provenance: dict[str, Any] | None = None,
-        legacy_result_projection: bool = False,
         now: datetime | str | None = None,
     ) -> bool:
         if status not in TERMINAL_STATUSES:
@@ -747,7 +783,6 @@ class TaskStore:
             error_code=error_code,
             warnings=warnings,
             provenance=provenance,
-            legacy_result_projection=legacy_result_projection,
             now=now,
         )
 

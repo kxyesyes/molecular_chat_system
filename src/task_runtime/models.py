@@ -132,6 +132,16 @@ _SAFE_RUNTIME_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 _STRICT_SMILES_VALUE = re.compile(
     r"(?:(?:Cl|Br)|[BCNOFPSIcnosp0-9@+\-\[\]()=#$\\/.%])+\Z"
 )
+_BACKEND_DECISION_REASONS = frozenset(
+    {
+        "invalid_canary_percent",
+        "task_type_not_allowlisted",
+        "temporal_unavailable",
+        "invalid_task_id",
+        "canary_selected",
+        "canary_not_selected",
+    }
+)
 
 
 def _validate_runtime_code(value: Any, name: str) -> str:
@@ -183,8 +193,10 @@ def _validate_submission_payload_schema(payload: dict[str, Any]) -> None:
             "percent",
         }:
             raise ValueError("invalid task payload schema")
-        _validate_runtime_code(decision["backend"], "backend")
-        _validate_runtime_code(decision["reason"], "reason")
+        if decision["backend"] not in {"local", "temporal"}:
+            raise ValueError("invalid task payload backend")
+        if decision["reason"] not in _BACKEND_DECISION_REASONS:
+            raise ValueError("invalid task payload reason")
         bucket = decision["bucket"]
         if bucket is not None and (
             type(bucket) is not int or not 0 <= bucket < 100
@@ -194,11 +206,23 @@ def _validate_submission_payload_schema(payload: dict[str, Any]) -> None:
         if type(percent) is not int or not 0 <= percent <= 100:
             raise ValueError("invalid task payload percent")
 
-    direct_keys = {"backend", "reason", "bucket", "percent"}
-    if set(payload) == direct_keys:
-        validate_decision(payload)
+    generic_keys = {"payload_digest", "field_count"}
+    if set(payload) == generic_keys:
+        if (
+            type(payload["payload_digest"]) is not str
+            or _SAFE_DIGEST.fullmatch(payload["payload_digest"]) is None
+            or type(payload["field_count"]) is not int
+            or payload["field_count"] < 0
+        ):
+            raise ValueError("invalid generic task payload")
         return
-    if set(payload) != {"decision", "mode", "total_bytes", "config_hash"}:
+    if set(payload) != {
+        "decision",
+        "mode",
+        "total_bytes",
+        "config_hash",
+        "request_digest",
+    }:
         raise ValueError("invalid task payload schema")
     validate_decision(payload["decision"])
     if payload["mode"] not in {"file", "smiles"}:
@@ -210,6 +234,11 @@ def _validate_submission_payload_schema(payload: dict[str, Any]) -> None:
         or _SAFE_DIGEST.fullmatch(payload["config_hash"]) is None
     ):
         raise ValueError("invalid task payload config_hash")
+    if (
+        type(payload["request_digest"]) is not str
+        or _SAFE_DIGEST.fullmatch(payload["request_digest"]) is None
+    ):
+        raise ValueError("invalid task payload request_digest")
 
 
 @dataclass(frozen=True)
@@ -228,6 +257,7 @@ class TaskSubmission:
     payload: dict[str, Any] = field(repr=False)
     input_manifest_path: str = field(repr=False)
     idempotency_key: str | None = field(default=None, repr=False)
+    request_digest: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         _validate_runtime_code(self.task_id, "task_id")
@@ -245,12 +275,23 @@ class TaskSubmission:
             raise ValueError("invalid input_manifest_path")
         if self.idempotency_key is not None:
             _validate_runtime_code(self.idempotency_key, "idempotency_key")
+        if self.request_digest is not None and (
+            type(self.request_digest) is not str
+            or _SAFE_DIGEST.fullmatch(self.request_digest) is None
+        ):
+            raise ValueError("invalid request_digest")
         object.__setattr__(
             self,
             "payload",
             _safe_runtime_metadata(self.payload, "task payload"),
         )
         _validate_submission_payload_schema(self.payload)
+        payload_request_digest = self.payload.get("request_digest")
+        if payload_request_digest is not None and (
+            self.request_digest is None
+            or payload_request_digest != self.request_digest
+        ):
+            raise ValueError("request_digest mismatch")
 
 
 @dataclass(frozen=True)
@@ -277,8 +318,33 @@ class BackendHealth:
         object.__setattr__(
             self,
             "details",
-            _safe_runtime_metadata(self.details, "backend health details"),
+            _safe_health_details(self.details),
         )
+
+
+def _safe_health_details(value: Any) -> dict[str, Any]:
+    try:
+        snapshot = strict_json_snapshot(value)
+    except ValueError as exc:
+        raise ValueError("invalid JSON backend health details") from exc
+    if not isinstance(snapshot, dict):
+        raise ValueError("invalid backend health details")
+    allowed = {
+        "configured",
+        "durable_execution",
+        "process_restart_recovery",
+        "running",
+        "shutdown_pending",
+    }
+    if not set(snapshot) <= allowed:
+        raise ValueError("sensitive backend health details")
+    for key, item in snapshot.items():
+        if key == "running":
+            if type(item) is not int or item < 0:
+                raise ValueError("invalid backend health details")
+        elif type(item) is not bool:
+            raise ValueError("invalid backend health details")
+    return snapshot
 
 
 def strict_json_snapshot(value: Any) -> Any:
@@ -629,11 +695,10 @@ def validate_task_input_payload(value: Any) -> dict[str, Any]:
         raise ValueError("invalid JSON task payload") from exc
     if not isinstance(snapshot, dict):
         raise ValueError("invalid JSON task payload")
-    if (
-        sanitize_public_task_data(snapshot) != snapshot
-        or _runtime_metadata_contains_smiles(snapshot)
-    ):
-        raise ValueError("sensitive task payload")
+    try:
+        _validate_submission_payload_schema(snapshot)
+    except ValueError as exc:
+        raise ValueError("invalid task payload schema") from exc
     return snapshot
 
 
@@ -703,13 +768,39 @@ def sanitize_public_result(value: Any) -> Any:
     return None if sanitized is _DROP else sanitized
 
 
+_RESULT_STATUS_VALUES = frozenset(
+    {"succeeded", "failed", "cancelled", "canceled", "timed_out"}
+)
+_RESULT_ENUM_VALUES = frozenset(
+    {
+        "validated",
+        "passed",
+        "rejected",
+        "available",
+        "unavailable",
+        "committed",
+        "committed_ambiguous",
+        "strict",
+        "real",
+    }
+)
+
+
 def _sanitize_task_result_projection_value(
     value: Any,
     *,
     key: str | None = None,
 ) -> Any:
     normalized_key = (key or "").lower()
-    if "smiles" in normalized_key:
+    if normalized_key in {
+        "artifacts",
+        "error",
+        "error_code",
+        "evidence",
+        "provenance",
+    }:
+        return _DROP
+    if _is_private_content_key(normalized_key) or "smiles" in normalized_key:
         return _DROP
     if isinstance(value, dict):
         result: dict[str, Any] = {}
@@ -722,25 +813,32 @@ def _sanitize_task_result_projection_value(
             )
             if sanitized is not _DROP:
                 result[child_key] = sanitized
-        return redact_sensitive(result)
+        return result
     if isinstance(value, (list, tuple)):
         result = []
         for item in value:
             sanitized = _sanitize_task_result_projection_value(item)
             if sanitized is not _DROP:
                 result.append(sanitized)
-        return redact_sensitive(result)
+        return result
     if isinstance(value, float) and not math.isfinite(value):
         return _DROP
     if isinstance(value, str):
-        if _has_unsafe_result_path_semantics(value):
-            return _DROP
-        if _runtime_metadata_contains_smiles(value, normalized_key):
-            return _DROP
-        if any(marker in normalized_key for marker in ("path", "file", "uri")):
-            if not is_safe_relative_artifact_path(value):
-                return _DROP
-        return redact_sensitive(value)
+        lowered = value.strip().lower()
+        if normalized_key == "status" and lowered in _RESULT_STATUS_VALUES:
+            return lowered
+        if normalized_key in {
+            "quality",
+            "validator_status",
+            "authority_state",
+        } and lowered in _RESULT_ENUM_VALUES:
+            return lowered
+        if (
+            normalized_key.endswith(("digest", "hash", "sha256"))
+            and _SAFE_DIGEST.fullmatch(value) is not None
+        ):
+            return value.lower()
+        return _DROP
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return _DROP

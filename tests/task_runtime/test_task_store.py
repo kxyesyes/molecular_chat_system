@@ -98,6 +98,7 @@ def test_schema_contains_projection_columns_tables_and_terminal_index(tmp_path):
         "input_manifest_path",
         "provenance_json",
         "idempotency_digest",
+        "submission_digest",
     } <= columns
     assert {"task_events", "task_worker_heartbeats"} <= tables
     assert index is not None
@@ -118,16 +119,22 @@ def test_store_atomically_claims_only_digest_and_finds_original_task(tmp_path):
         "docking",
         {},
         idempotency_digest=digest,
+        submission_digest="c" * 64,
     )
 
     assert store.get_by_idempotency_digest(digest).task_id == "task-1"
     with connect(path) as conn:
         row = conn.execute(
-            "SELECT idempotency_digest FROM tasks WHERE task_id = 'task-1'"
+            "SELECT idempotency_digest, submission_digest FROM tasks WHERE task_id = 'task-1'"
         ).fetchone()
-    assert row == {"idempotency_digest": digest}
+    assert row == {
+        "idempotency_digest": digest,
+        "submission_digest": "c" * 64,
+    }
     assert raw_key.encode() not in path.read_bytes()
-    assert "idempotency" not in store.get("task-1").to_public_dict()
+    public = store.get("task-1").to_public_dict()
+    assert "idempotency_digest" not in public
+    assert "submission_digest" not in public
 
 
 def test_idempotency_digest_unique_claim_is_concurrent_and_restart_safe(tmp_path):
@@ -144,6 +151,7 @@ def test_idempotency_digest_unique_claim_is_concurrent_and_restart_safe(tmp_path
                 "docking",
                 {},
                 idempotency_digest=digest,
+                submission_digest="d" * 64,
             )
         except sqlite3.IntegrityError:
             return "duplicate"
@@ -158,12 +166,23 @@ def test_idempotency_digest_unique_claim_is_concurrent_and_restart_safe(tmp_path
     assert TaskStore(path).get_by_idempotency_digest(digest).task_id == winners[0]
 
 
+def test_store_rejects_idempotency_without_private_submission_digest(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    with pytest.raises(ValueError, match="submission_digest"):
+        store.create(
+            "task-1",
+            "docking",
+            {},
+            idempotency_digest="a" * 64,
+        )
+
+
 def test_create_adds_sanitized_initial_event_and_sequence(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite")
     record = store.create(
         "task-1",
         "docking",
-        {"summary_count": 1},
+        {"payload_digest": "a" * 64, "field_count": 1},
         backend="temporal",
         provenance={"provider": "vina"},
     )
@@ -531,7 +550,7 @@ def test_events_allowlist_metadata_and_record_sensitive_fields_are_redacted(tmp_
     store.create(
         "task-1",
         "docking",
-        {"summary_count": 1},
+        {"payload_digest": "a" * 64, "field_count": 1},
         provenance={
             "provider": "temporal",
             "token": "private-token",
@@ -568,7 +587,7 @@ def test_events_allowlist_metadata_and_record_sensitive_fields_are_redacted(tmp_
         {"code": "projection_stale"},
         {"code": "TASK_HEARTBEAT_TIMEOUT"},
     ]
-    assert record.error == "[REDACTED]"
+    assert record.error == "Task failed"
 
 
 @pytest.mark.parametrize("timestamp", ["", "not-a-time", "2026-99-99T10:00:00"])
@@ -965,7 +984,31 @@ def test_direct_finish_replaces_result_warnings_with_normalized_authority(tmp_pa
         {"code": "projection_stale", "message": "Projection delayed"}
     ]
     assert record.warnings == expected
-    assert record.result["warnings"] == expected
+    assert record.result["warnings"] == [{"code": "projection_stale"}]
+
+
+def test_direct_finish_retains_registered_result_warning_code_only(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("task-1", "demo", {})
+    store.claim_running("task-1")
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.SUCCEEDED,
+        result={
+            "success": True,
+            "warnings": [
+                {"code": "projection_stale", "message": "message best ligand CCO"}
+            ],
+        },
+    )
+
+    record = store.get("task-1")
+    assert record.warnings == [
+        {"code": "projection_stale", "message": "message best ligand [PRIVATE]"}
+    ]
+    assert record.result["warnings"] == [{"code": "projection_stale"}]
+    assert b"message best ligand CCO" not in store.db_path.read_bytes()
 
 
 @pytest.mark.parametrize(
@@ -1181,7 +1224,7 @@ def test_store_create_rejects_scientific_input_under_arbitrary_key(
     private_value,
 ):
     store = TaskStore(tmp_path / "tasks.sqlite")
-    with pytest.raises(ValueError, match="sensitive"):
+    with pytest.raises(ValueError, match="payload"):
         store.create("task-private", "unit", {"value": private_value})
     with pytest.raises(KeyError):
         store.get("task-private")
@@ -1211,6 +1254,102 @@ def test_store_finish_sanitizes_nested_scientific_result_before_database(tmp_pat
         ).fetchone()
     serialized = json.dumps(raw)
     assert all(value not in serialized for value in ("CCO", "CCCC", "ClCCBr"))
+
+
+def test_store_input_accepts_only_registered_typed_projection(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    private_values = [
+        "CO",
+        "CCO",
+        "CCCC",
+        "ClCCBr",
+        "[Na+].[Cl-]",
+        "N[C@@H](C)C(=O)O",
+        "message best ligand CCO",
+    ]
+    for index, private_value in enumerate(private_values):
+        with pytest.raises(ValueError, match="payload"):
+            store.create(f"task-private-{index}", "unit", {"value": private_value})
+
+    payload = {"payload_digest": "a" * 64, "field_count": 7}
+    record = store.create("task-safe", "unit", payload)
+    assert record.input == payload
+    raw = store.db_path.read_bytes()
+    assert all(value.encode() not in raw for value in private_values)
+
+
+def test_store_terminal_projection_drops_all_free_text_but_keeps_typed_science(
+    tmp_path,
+):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("task-1", "docking", {})
+    store.claim_running("task-1")
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.FAILED,
+        result={
+            "success": False,
+            "status": "failed",
+            "reused_completion": True,
+            "energy": -7.25,
+            "pose_count": 3,
+            "quality": "validated",
+            "message": "message best ligand CCO",
+            "formatted": "CO",
+            "candidate": "[Na+].[Cl-]",
+            "completion": {
+                "best_energy": -7.25,
+                "pose_count": 3,
+                "quality": "validated",
+                "digest": "b" * 64,
+                "note": "N[C@@H](C)C(=O)O",
+            },
+        },
+        error="ClCCBr",
+        error_code=TaskErrorCode.DOCKING_PROCESS_FAILED,
+        artifacts=[{"name": "pose", "path": "pose.pdbqt"}],
+        warnings=[{"code": "projection_stale"}],
+        provenance={"backend": "local", "tool": "vina"},
+    )
+
+    record = store.get("task-1")
+    assert record.result == {
+        "success": False,
+        "status": "failed",
+        "reused_completion": True,
+        "energy": -7.25,
+        "pose_count": 3,
+        "quality": "validated",
+        "completion": {
+            "best_energy": -7.25,
+            "pose_count": 3,
+            "quality": "validated",
+            "digest": "b" * 64,
+        },
+        "warnings": [{"code": "projection_stale"}],
+    }
+    assert record.error == "Docking process failed"
+    assert record.artifacts == [{"name": "pose", "path": "pose.pdbqt"}]
+    assert record.warnings == [{"code": "projection_stale"}]
+    assert record.provenance == {"backend": "local", "tool": "vina"}
+
+    with connect(store.db_path) as conn:
+        row = conn.execute(
+            "SELECT input_json, result_json, error FROM tasks WHERE task_id = ?",
+            ("task-1",),
+        ).fetchone()
+    serialized = json.dumps(row)
+    forbidden = [
+        "CO",
+        "CCO",
+        "CCCC",
+        "ClCCBr",
+        "[Na+].[Cl-]",
+        "N[C@@H](C)C(=O)O",
+        "message best ligand CCO",
+    ]
+    assert all(value not in serialized for value in forbidden)
 
 
 @pytest.mark.parametrize(
@@ -1391,10 +1530,7 @@ def test_persisted_error_replaces_embedded_paths_and_credentials(tmp_path):
     )
 
     error = store.get("task-1").error
-    assert error.count("[PATH]") == 3
-    assert "[REDACTED]" in error
-    assert "private" not in error
-    assert "file://" not in error
+    assert error == "Task failed"
 
 
 def test_strict_json_rejects_cycles_and_excess_depth():

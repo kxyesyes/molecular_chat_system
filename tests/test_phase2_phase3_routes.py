@@ -117,8 +117,8 @@ def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
 
     assert "input" not in workflow_status
     assert "input_manifest_path" not in workflow_status
-    assert workflow_status["result"]["smiles"] == "CCO"
-    assert workflow_status["result"]["best_smiles"] == "c1ccccc1"
+    assert "smiles" not in workflow_status["result"]
+    assert "best_smiles" not in workflow_status["result"]
     assert "canonical_smiles" not in workflow_status["result"]
     assert "smiles_path" not in workflow_status["result"]
     assert workflow_status["artifacts"] == [{"name": "pose"}]

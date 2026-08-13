@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import sqlite3
 import threading
 from collections.abc import Awaitable, Callable, Mapping
@@ -50,6 +51,10 @@ _LOCAL_PROVENANCE = {
     "process_restart_recovery": False,
     "durable_execution": False,
 }
+
+
+class TaskIdempotencyConflictError(ValueError):
+    """A durable idempotency authority does not match this submission."""
 
 
 @dataclass
@@ -174,35 +179,58 @@ class LocalTaskBackend:
             if not active_task and pending_submission is not None:
                 await pending_submission.wait()
             try:
-                existing = await asyncio.to_thread(
-                    self.store.get,
+                existing, existing_request_digest = await asyncio.to_thread(
+                    self._task_authority,
                     submission.task_id,
                 )
             except KeyError as exc:
                 raise RuntimeError("prior task submission did not create a projection") from exc
-            return self._existing_task_result(existing, submission)
+            return self._existing_task_result(
+                existing,
+                existing_request_digest,
+                submission,
+                submission.request_digest
+                or self.submission_digest(submission.task_type, submission.payload),
+            )
 
         digest = (
             self.idempotency_digest(submission.idempotency_key)
             if submission.idempotency_key is not None
             else None
         )
+        request_digest = submission.request_digest or self.submission_digest(
+            submission.task_type,
+            submission.payload,
+        )
         try:
             if digest is not None:
                 try:
-                    prior = await asyncio.to_thread(
-                        self.store.get_by_idempotency_digest, digest
+                    prior, prior_request_digest = await asyncio.to_thread(
+                        self.store.get_idempotency_authority, digest
                     )
                 except KeyError:
                     pass
                 else:
-                    return self._idempotent_result(prior, submission)
+                    return self._idempotent_result(
+                        prior,
+                        prior_request_digest,
+                        submission,
+                        request_digest,
+                    )
             try:
-                existing = await asyncio.to_thread(self.store.get, submission.task_id)
+                existing, existing_request_digest = await asyncio.to_thread(
+                    self._task_authority,
+                    submission.task_id,
+                )
             except KeyError:
                 pass
             else:
-                return self._existing_task_result(existing, submission)
+                return self._existing_task_result(
+                    existing,
+                    existing_request_digest,
+                    submission,
+                    request_digest,
+                )
 
             raw_provenance = submission.payload.get("decision", submission.payload)
             provenance = self._merge_provenance(
@@ -217,26 +245,36 @@ class LocalTaskBackend:
                     backend="local",
                     provenance=provenance,
                     idempotency_digest=digest,
+                    submission_digest=request_digest,
                 )
             except sqlite3.IntegrityError:
                 if digest is not None:
                     try:
-                        prior = await asyncio.to_thread(
-                            self.store.get_by_idempotency_digest, digest
+                        prior, prior_request_digest = await asyncio.to_thread(
+                            self.store.get_idempotency_authority, digest
                         )
                     except KeyError:
                         pass
                     else:
-                        return self._idempotent_result(prior, submission)
+                        return self._idempotent_result(
+                            prior,
+                            prior_request_digest,
+                            submission,
+                            request_digest,
+                        )
                 try:
-                    existing = await asyncio.to_thread(
-                        self.store.get, submission.task_id
+                    existing, existing_request_digest = await asyncio.to_thread(
+                        self._task_authority,
+                        submission.task_id,
                     )
                 except KeyError:
                     raise
-                if existing.task_type != submission.task_type or existing.backend != "local":
-                    raise ValueError("task id conflict")
-                return self._accepted(submission.task_id, "existing task projection")
+                return self._existing_task_result(
+                    existing,
+                    existing_request_digest,
+                    submission,
+                    request_digest,
+                )
 
             cancel_event = threading.Event()
             loop = asyncio.get_running_loop()
@@ -571,11 +609,10 @@ class LocalTaskBackend:
                 await self._finish_requested_cancellation(task_id)
             return
 
-        error = result.get("error") or result.get("message") or "Task returned a failed result"
         await self._finish_failed(
             task_id,
             result=safe_result,
-            error=sanitize_task_message(str(error)),
+            error="Task failed",
             artifacts=artifacts,
             error_code=self._map_error_code(raw_code),
             warnings=warnings,
@@ -718,11 +755,18 @@ class LocalTaskBackend:
     def _existing_task_result(
         cls,
         record: TaskRecord,
+        stored_request_digest: str | None,
         submission: TaskSubmission,
+        request_digest: str,
     ) -> BackendSubmitResult:
         if record.task_type != submission.task_type or record.backend != "local":
             raise ValueError("task id conflict")
+        if stored_request_digest is None or stored_request_digest != request_digest:
+            raise ValueError("task id request conflict")
         return cls._accepted(submission.task_id, "existing task projection")
+
+    def _task_authority(self, task_id: str) -> tuple[TaskRecord, str | None]:
+        return self.store.get(task_id), self.store.get_submission_digest(task_id)
 
     @staticmethod
     def idempotency_digest(key: str) -> str:
@@ -732,14 +776,35 @@ class LocalTaskBackend:
             b"MedChatTaskIdempotency@1\x00" + key.encode("utf-8")
         ).hexdigest()
 
+    @staticmethod
+    def submission_digest(task_type: str, payload: dict[str, Any]) -> str:
+        canonical = json.dumps(
+            {"payload": payload, "task_type": task_type},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(
+            b"medchat-local-task-submission-v1\x00" + canonical
+        ).hexdigest()
+
     @classmethod
     def _idempotent_result(
         cls,
         record: TaskRecord,
+        stored_request_digest: str | None,
         submission: TaskSubmission,
+        request_digest: str,
     ) -> BackendSubmitResult:
         if record.task_type != submission.task_type or record.backend != "local":
-            raise ValueError("idempotency conflict")
+            raise TaskIdempotencyConflictError("idempotency authority conflict")
+        if stored_request_digest is None:
+            raise TaskIdempotencyConflictError(
+                "idempotency legacy authority conflict"
+            )
+        if stored_request_digest != request_digest:
+            raise TaskIdempotencyConflictError("idempotency request conflict")
         return cls._accepted(record.task_id, "duplicate idempotency key")
 
     @staticmethod

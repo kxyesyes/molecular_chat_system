@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import FrozenInstanceError
+import hashlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -61,18 +63,16 @@ def _submission(
     *,
     task_type: str = "docking",
     idempotency_key: str | None = None,
+    request_digest: str | None = None,
+    payload_digest: str = "a" * 64,
 ) -> TaskSubmission:
     return TaskSubmission(
         task_id=task_id,
         task_type=task_type,
-        payload={
-            "backend": "local",
-            "reason": "test",
-            "bucket": None,
-            "percent": 0,
-        },
+        payload={"payload_digest": payload_digest, "field_count": 0},
         input_manifest_path=str(Path("C:/private/staging") / task_id / "input_manifest.json"),
         idempotency_key=idempotency_key,
+        request_digest=request_digest,
     )
 
 
@@ -80,23 +80,26 @@ def test_submission_and_health_are_frozen_snapshots_with_redacted_repr() -> None
     payload = {
         "decision": {
             "backend": "local",
-            "reason": "test",
+            "reason": "temporal_unavailable",
             "bucket": None,
             "percent": 0,
         },
         "mode": "file",
         "total_bytes": 1,
         "config_hash": "a" * 64,
+        "request_digest": "b" * 64,
     }
     details = {"running": 0, "configured": True}
     manifest = r"C:\private\staging\task-1\input_manifest.json"
-    submission = TaskSubmission("task-1", "docking", payload, manifest)
+    submission = TaskSubmission(
+        "task-1", "docking", payload, manifest, request_digest="b" * 64
+    )
     health = BackendHealth("local", True, "available", details)
 
-    payload["decision"]["reason"] = "changed"
+    payload["decision"]["reason"] = "canary_not_selected"
     details["running"] = 99
 
-    assert submission.payload["decision"]["reason"] == "test"
+    assert submission.payload["decision"]["reason"] == "temporal_unavailable"
     assert health.details == {"running": 0, "configured": True}
     with pytest.raises(FrozenInstanceError):
         submission.task_id = "changed"  # type: ignore[misc]
@@ -108,6 +111,7 @@ def test_submission_and_health_are_frozen_snapshots_with_redacted_repr() -> None
     assert "private" not in rendered
     assert "input_manifest" not in rendered
     assert "C1=CC=CC=C1" not in rendered
+    assert "b" * 64 not in rendered
     assert "details" not in repr(health)
 
 
@@ -158,6 +162,26 @@ def test_submission_rejects_short_or_ring_smiles_under_arbitrary_key(
             "unit",
             {"value": private_value},
             "manifest.json",
+        )
+
+
+@pytest.mark.parametrize(
+    "private_value",
+    ["CO", "[Na+].[Cl-]", "N[C@@H](C)C(=O)O", "message best ligand CCO"],
+)
+def test_submission_rejects_every_unregistered_free_string(private_value: str) -> None:
+    with pytest.raises(ValueError, match="payload"):
+        TaskSubmission("task-1", "unit", {"value": private_value}, "manifest.json")
+
+
+def test_submission_requires_valid_matching_private_request_digest() -> None:
+    with pytest.raises(ValueError, match="request_digest"):
+        TaskSubmission(
+            "task-1",
+            "docking",
+            {"payload_digest": "a" * 64, "field_count": 0},
+            "manifest.json",
+            request_digest="not-a-digest",
         )
 
 
@@ -246,9 +270,6 @@ async def test_local_backend_maps_handler_terminal_results(
             assert record.provenance == {
                 **result["provenance"],
                 "backend": "local",
-                "reason": "test",
-                "bucket": None,
-                "percent": 0,
                 "process_restart_recovery": False,
                 "durable_execution": False,
             }
@@ -271,6 +292,60 @@ async def test_handler_exception_is_honest_failed_terminal(tmp_path: Path) -> No
         serialized = json.dumps(record.to_dict())
         assert "private" not in serialized
         assert "C1=CC=CC=C1" not in serialized
+    finally:
+        await backend.close()
+
+
+@pytest.mark.anyio
+async def test_local_terminal_database_contains_no_handler_free_text(
+    tmp_path: Path,
+) -> None:
+    async def handler(submission, cancel_event, progress):
+        return {
+            "success": False,
+            "status": "failed",
+            "energy": -8.5,
+            "pose_count": 4,
+            "message": "message best ligand CCO",
+            "candidate": "[Na+].[Cl-]",
+            "amino": "N[C@@H](C)C(=O)O",
+            "artifacts": [{"name": "pose", "path": "pose.pdbqt"}],
+            "warnings": [{"code": "projection_stale"}],
+            "provenance": {"tool": "vina"},
+            "error_code": "provider_error",
+        }
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+    try:
+        await backend.submit(_submission())
+        record = await _wait_for_terminal(backend, "task-1")
+        assert record.result["energy"] == -8.5
+        assert record.result["pose_count"] == 4
+        assert record.result["status"] == "failed"
+        assert "artifacts" not in record.result
+        assert "provenance" not in record.result
+        assert "error_code" not in record.result
+        assert record.error == "Docking process failed"
+        assert record.artifacts == [{"name": "pose", "path": "pose.pdbqt"}]
+        assert record.warnings == [{"code": "projection_stale"}]
+        assert record.provenance["tool"] == "vina"
+        with sqlite3.connect(store.db_path) as conn:
+            row = conn.execute(
+                "SELECT input_json, result_json, error FROM tasks WHERE task_id = ?",
+                ("task-1",),
+            ).fetchone()
+        serialized = json.dumps(row)
+        assert all(
+            value not in serialized
+            for value in (
+                "CO",
+                "CCO",
+                "[Na+].[Cl-]",
+                "N[C@@H](C)C(=O)O",
+                "message best ligand CCO",
+            )
+        )
     finally:
         await backend.close()
 
@@ -477,6 +552,7 @@ async def test_idempotency_survives_backend_rebuild_and_concurrent_instances(
         )
         assert rebuilt_result.task_id == competing_result.task_id == "task-original"
         assert calls == ["task-original"]
+        assert b"durable-request" not in store.db_path.read_bytes()
         with pytest.raises(KeyError):
             store.get("task-rebuilt")
         with pytest.raises(KeyError):
@@ -484,6 +560,71 @@ async def test_idempotency_survives_backend_rebuild_and_concurrent_instances(
     finally:
         await rebuilt.close()
         await competing.close()
+
+
+@pytest.mark.anyio
+async def test_same_idempotency_key_with_different_request_digest_fails_closed(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    async def handler(submission, cancel_event, progress):
+        calls.append(submission.task_id)
+        return {"success": True}
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    first = LocalTaskBackend(store, {"docking": handler})
+    await first.submit(
+        _submission(
+            "task-first",
+            idempotency_key="bound-key",
+            request_digest="1" * 64,
+        )
+    )
+    await _wait_for_terminal(first, "task-first")
+    await first.close()
+
+    rebuilt = LocalTaskBackend(TaskStore(store.db_path), {"docking": handler})
+    try:
+        with pytest.raises(ValueError, match="idempotency.*request"):
+            await rebuilt.submit(
+                _submission(
+                    "task-second",
+                    idempotency_key="bound-key",
+                    request_digest="2" * 64,
+                )
+            )
+        with pytest.raises(KeyError):
+            store.get("task-second")
+        assert calls == ["task-first"]
+    finally:
+        await rebuilt.close()
+
+
+@pytest.mark.anyio
+async def test_legacy_idempotency_row_without_request_digest_fails_closed(
+    tmp_path: Path,
+) -> None:
+    async def handler(submission, cancel_event, progress):
+        return {"success": True}
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    digest = LocalTaskBackend.idempotency_digest("legacy-key")
+    store.create("legacy-task", "docking", {})
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            "UPDATE tasks SET idempotency_digest = ? WHERE task_id = ?",
+            (digest, "legacy-task"),
+        )
+
+    backend = LocalTaskBackend(store, {"docking": handler})
+    try:
+        with pytest.raises(ValueError, match="legacy authority conflict"):
+            await backend.submit(
+                _submission("new-task", idempotency_key="legacy-key")
+            )
+    finally:
+        await backend.close()
 
 
 @pytest.mark.anyio
@@ -495,7 +636,7 @@ async def test_idempotency_task_type_or_backend_conflict_fails_closed(tmp_path: 
     backend = LocalTaskBackend(store, {"docking": handler, "unit": handler})
     try:
         await backend.submit(_submission(idempotency_key="conflict-key"))
-        with pytest.raises(ValueError, match="idempotency conflict"):
+        with pytest.raises(ValueError, match="idempotency authority conflict"):
             await backend.submit(
                 _submission(
                     "task-other-type",
@@ -513,10 +654,11 @@ async def test_idempotency_task_type_or_backend_conflict_fails_closed(tmp_path: 
         {},
         backend="temporal",
         idempotency_digest=digest,
+        submission_digest="f" * 64,
     )
     second = LocalTaskBackend(store, {"docking": handler})
     try:
-        with pytest.raises(ValueError, match="idempotency conflict"):
+        with pytest.raises(ValueError, match="idempotency authority conflict"):
             await second.submit(
                 _submission(
                     "task-local",
@@ -548,6 +690,36 @@ async def test_existing_task_id_type_or_backend_conflict_fails_closed(
 
 
 @pytest.mark.anyio
+async def test_existing_task_id_request_digest_conflict_fails_closed(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    async def handler(submission, cancel_event, progress):
+        nonlocal calls
+        calls += 1
+        return {"success": True}
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    first = LocalTaskBackend(store, {"docking": handler})
+    await first.submit(
+        _submission("task-bound", request_digest="1" * 64)
+    )
+    await _wait_for_terminal(first, "task-bound")
+    await first.close()
+
+    rebuilt = LocalTaskBackend(TaskStore(store.db_path), {"docking": handler})
+    try:
+        with pytest.raises(ValueError, match="task id request conflict"):
+            await rebuilt.submit(
+                _submission("task-bound", request_digest="2" * 64)
+            )
+        assert calls == 1
+    finally:
+        await rebuilt.close()
+
+
+@pytest.mark.anyio
 async def test_progress_is_canonical_and_terminal_event_is_exactly_one(tmp_path: Path) -> None:
     async def handler(submission, cancel_event, progress):
         progress(TaskPhase.VINA_RUNNING, 60, attempt=1)
@@ -570,9 +742,6 @@ async def test_progress_is_canonical_and_terminal_event_is_exactly_one(tmp_path:
         assert record.attempt == 1
         assert record.provenance == {
             "backend": "local",
-            "reason": "test",
-            "bucket": None,
-            "percent": 0,
             "tool": "vina",
             "attempt": 1,
             "process_restart_recovery": False,
@@ -953,6 +1122,28 @@ class _FakeStager:
         )
         return self.manifest
 
+    def load_verified(self, task_id: str, manifest_path: Path) -> dict[str, Any]:
+        call = next(item for item in reversed(self.calls) if item["task_id"] == task_id)
+        ligand_bytes = call["ligand_bytes"]
+        ligand_material = (
+            ligand_bytes
+            if ligand_bytes is not None
+            else call["smiles"].encode("utf-8")
+        )
+        config_bytes = json.dumps(
+            call["config"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return {
+            "receptor": {"sha256": hashlib.sha256(call["receptor_bytes"]).hexdigest()},
+            "ligand": {"sha256": hashlib.sha256(ligand_material).hexdigest()},
+            "ligand_mode": "file" if ligand_bytes is not None else "smiles",
+            "config_hash": hashlib.sha256(config_bytes).hexdigest(),
+        }
+
 
 class _FixedSelector:
     def __init__(self, decision: BackendDecision) -> None:
@@ -994,6 +1185,12 @@ class _FakeBackend:
                 submission.payload,
                 backend=self.backend,
                 provenance=decision,
+                idempotency_digest=(
+                    LocalTaskBackend.idempotency_digest(submission.idempotency_key)
+                    if submission.idempotency_key is not None
+                    else None
+                ),
+                submission_digest=submission.request_digest,
             )
         return BackendSubmitResult(
             task_id=submission.task_id,
@@ -1050,6 +1247,31 @@ async def _submit_runtime(runtime: TaskRuntime):
     )
 
 
+async def _submit_runtime_input(
+    runtime: TaskRuntime,
+    *,
+    receptor_bytes: bytes = b"ATOM receptor A",
+    ligand_bytes: bytes | None = b"ligand A",
+    smiles: str | None = None,
+    exhaustiveness: int = 8,
+    idempotency_key: str = "scientific-request",
+):
+    return await runtime.submit_docking(
+        receptor_name="receptor.pdb",
+        receptor_bytes=receptor_bytes,
+        ligand_name="ligand.sdf" if ligand_bytes is not None else None,
+        ligand_bytes=ligand_bytes,
+        smiles=smiles,
+        config={
+            "center": [0.0, 0.0, 0.0],
+            "size": [20.0, 20.0, 20.0],
+            "exhaustiveness": exhaustiveness,
+            "num_modes": 9,
+        },
+        idempotency_key=idempotency_key,
+    )
+
+
 @pytest.mark.anyio
 async def test_runtime_generates_task_id_before_staging_and_selects_local(tmp_path: Path) -> None:
     order: list[str] = []
@@ -1094,6 +1316,66 @@ async def test_runtime_generates_task_id_before_staging_and_selects_local(tmp_pa
         assert str(stager.manifest) not in json.dumps(record.to_public_dict())
     finally:
         await runtime.close()
+
+
+@pytest.mark.anyio
+async def test_runtime_idempotency_digest_binds_verified_scientific_inputs(
+    tmp_path: Path,
+) -> None:
+    ids = iter([f"task-bind-{index}" for index in range(6)])
+    calls: list[str] = []
+
+    async def handler(submission, cancel_event, progress):
+        calls.append(submission.task_id)
+        return {"success": True}
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+    runtime = TaskRuntime(
+        config=_runtime_config(tmp_path, canary_percent=0),
+        store=store,
+        stager=_FakeStager(tmp_path / "manifest.json"),
+        selector=_FixedSelector(_local_decision()),
+        local_backend=backend,
+        temporal_backend=None,
+        uuid_factory=lambda: next(ids),
+    )
+    try:
+        first = await _submit_runtime_input(runtime)
+        await _wait_for_terminal(backend, first.task_id)
+        reused = await _submit_runtime_input(runtime)
+        assert reused.task_id == first.task_id
+        assert calls == [first.task_id]
+
+        variants = [
+            {"receptor_bytes": b"ATOM receptor B"},
+            {"ligand_bytes": b"ligand B"},
+            {"exhaustiveness": 9},
+            {"ligand_bytes": None, "smiles": "CC"},
+        ]
+        for variant in variants:
+            with pytest.raises(ValueError, match="idempotency request conflict"):
+                await _submit_runtime_input(runtime, **variant)
+        assert calls == [first.task_id]
+    finally:
+        await runtime.close()
+
+
+def test_runtime_scientific_digest_excludes_task_and_backend_decision() -> None:
+    manifest = {
+        "receptor": {"sha256": "a" * 64},
+        "ligand": {"sha256": "b" * 64},
+        "config_hash": "c" * 64,
+        "ligand_mode": "file",
+    }
+    digest = TaskRuntime._docking_request_digest(manifest)
+    decorated = {
+        **manifest,
+        "task_id": "different-task",
+        "decision": {"backend": "temporal", "reason": "canary_selected"},
+        "manifest_path": r"C:\private\manifest.json",
+    }
+    assert TaskRuntime._docking_request_digest(decorated) == digest
 
 
 @pytest.mark.anyio
@@ -1161,6 +1443,7 @@ async def test_temporal_late_projection_during_fallback_is_detected_fail_closed(
                 submission.payload,
                 backend="temporal",
                 provenance=submission.payload["decision"],
+                submission_digest=submission.request_digest,
             )
             return BackendSubmitResult(
                 submission.task_id,
@@ -1263,6 +1546,7 @@ async def test_temporal_create_then_exception_stays_reconcilable(tmp_path: Path)
                 backend="temporal",
                 phase=TaskPhase.STAGING,
                 provenance=submission.payload["decision"],
+                submission_digest=submission.request_digest,
             )
             raise TimeoutError("start response timed out")
 

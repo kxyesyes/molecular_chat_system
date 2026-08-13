@@ -42,7 +42,7 @@ def test_task_manager_persists_failed_task(tmp_path):
     finished = wait_for_terminal(manager, record.task_id)
 
     assert finished.status.value == "failed"
-    assert "boom" in finished.error
+    assert finished.error == "Task failed"
 
 
 def test_task_manager_preserves_returned_status_failure(tmp_path):
@@ -57,8 +57,8 @@ def test_task_manager_preserves_returned_status_failure(tmp_path):
     finished = wait_for_terminal(manager, record.task_id)
 
     assert finished.status is TaskStatus.FAILED
-    assert finished.result == result
-    assert finished.error == "tool unavailable"
+    assert finished.result == {"status": "failed"}
+    assert finished.error == "Task failed"
     assert finished.artifacts == result["artifacts"]
 
 
@@ -70,8 +70,8 @@ def test_task_manager_preserves_returned_success_false_failure(tmp_path):
     finished = wait_for_terminal(manager, record.task_id)
 
     assert finished.status is TaskStatus.FAILED
-    assert finished.result == result
-    assert finished.error == "invalid input"
+    assert finished.result == {"success": False}
+    assert finished.error == "Task failed"
 
 
 def test_task_manager_normalizes_returned_failed_status(tmp_path):
@@ -82,8 +82,8 @@ def test_task_manager_normalizes_returned_failed_status(tmp_path):
     finished = wait_for_terminal(manager, record.task_id)
 
     assert finished.status is TaskStatus.FAILED
-    assert finished.result == result
-    assert finished.error == "Task returned a failed result"
+    assert finished.result == {"status": "failed"}
+    assert finished.error == "Task failed"
 
 
 def test_task_manager_preserves_non_mapping_json_result(tmp_path):
@@ -93,7 +93,7 @@ def test_task_manager_preserves_non_mapping_json_result(tmp_path):
     finished = wait_for_terminal(manager, record.task_id)
 
     assert finished.status is TaskStatus.SUCCEEDED
-    assert finished.result == ["complete", 1]
+    assert finished.result == [1]
 
 
 def test_manager_cancel_before_start_skips_handler_and_finishes_canceled(tmp_path):
@@ -172,7 +172,8 @@ def test_manager_submit_failure_compensates_queued_task_without_leaking_error(tm
     assert failed.error == "Task execution backend unavailable"
     assert "sk-secret" not in str(failed.to_public_dict())
     assert "sk-secret" not in str(failed.to_dict())
-    assert failed.input == {"api_key": "[REDACTED]"}
+    assert failed.input["field_count"] == 1
+    assert len(failed.input["payload_digest"]) == 64
     assert record.task_id not in manager._futures
 
 
@@ -230,7 +231,9 @@ def test_manager_uses_deep_json_payload_snapshot(tmp_path):
     wait_for_terminal(manager, first.task_id)
     wait_for_terminal(manager, second.task_id)
     assert observed == [{"nested": {"value": 1}, "items": [1, 2]}]
-    assert manager.get(second.task_id).input == observed[0]
+    projection = manager.get(second.task_id).input
+    assert projection["field_count"] == 2
+    assert len(projection["payload_digest"]) == 64
 
 
 def test_manager_rejects_non_json_payload_before_task_creation(tmp_path):
@@ -313,4 +316,7 @@ def test_manager_normalizes_one_warning_authority_in_result_and_record(tmp_path)
     ]
     assert finished.status is TaskStatus.SUCCEEDED
     assert finished.warnings == expected
-    assert finished.result["warnings"] == expected
+    assert finished.result["warnings"] == [
+        {"code": "TOOL_WARNING"},
+        {"code": "projection_stale"},
+    ]
