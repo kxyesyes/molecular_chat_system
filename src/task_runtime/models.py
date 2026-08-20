@@ -30,10 +30,14 @@ class TaskStatus(str, Enum):
 class TaskPhase(str, Enum):
     RUNNING = "running"
     STAGING = "staging"
+    ENVIRONMENT_CHECK = "environment_check"
+    INPUT_VERIFICATION = "input_verification"
     RECEPTOR_PREPARATION = "receptor_preparation"
     LIGAND_PREPARATION = "ligand_preparation"
     VINA_RUNNING = "vina_running"
+    RESULT_PARSING = "result_parsing"
     SCIENTIFIC_VALIDATION = "scientific_validation"
+    ARTIFACT_COMMIT = "artifact_commit"
     COMPLETING = "completing"
     CANCELING = "canceling"
 

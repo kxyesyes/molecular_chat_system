@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import math
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -14,12 +16,23 @@ from temporalio.exceptions import ApplicationError
 
 from src.task_runtime.docking_execution import DockingExecution
 from src.task_runtime.errors import TaskErrorCode
-from src.task_runtime.models import ResultProjectionPolicy, TaskPhase, TaskStatus
+from src.agent.persistence.redaction import contains_sensitive_text
+from src.task_runtime.models import (
+    ResultProjectionPolicy,
+    TaskPhase,
+    TaskStatus,
+    contains_prefixed_scientific_identifier,
+    contains_scientific_structure,
+    sanitize_provenance,
+    sanitize_public_artifacts,
+)
+from src.task_runtime.staging import DockingInputStager, ManifestError
 from src.task_runtime.store import TaskStore
 
 
 DOCKING_ACTIVITY_NAME = "run_docking_activity"
 PROJECTION_ACTIVITY_NAME = "project_task_activity"
+VERIFY_MANIFEST_ACTIVITY_NAME = "verify_manifest_activity"
 
 _CONTROLLED_PHASES = frozenset(item.value for item in TaskPhase)
 _ERROR_CODE_MAP = {
@@ -33,7 +46,22 @@ _ERROR_CODE_MAP = {
     "provider_error": TaskErrorCode.DOCKING_PROCESS_FAILED.value,
     "internal_error": TaskErrorCode.DOCKING_PROCESS_FAILED.value,
 }
+_REASON_CODE_MAP = {
+    "ownership_uncertain": TaskErrorCode.DOCKING_PROCESS_OWNERSHIP_UNCERTAIN.value,
+    "validator_rejected": TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value,
+    "evidence_rejected": TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value,
+    "provenance_rejected": TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value,
+    "artifact_invalid": TaskErrorCode.DOCKING_ARTIFACT_INVALID.value,
+    "completion_invalid": TaskErrorCode.DOCKING_ARTIFACT_INVALID.value,
+    "pose_invalid": TaskErrorCode.DOCKING_ARTIFACT_INVALID.value,
+    "input_hash_mismatch": TaskErrorCode.TASK_INPUT_HASH_MISMATCH.value,
+    "environment_unavailable": TaskErrorCode.DOCKING_ENVIRONMENT_UNAVAILABLE.value,
+}
 _SAFE_PROVENANCE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_UUID4 = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
+)
+_MANIFEST_LOCATOR = "input_manifest.json"
 
 
 @dataclass
@@ -73,19 +101,19 @@ def _validate_docking_payload(payload: Any) -> tuple[str, str]:
         raise ValueError("invalid docking activity payload")
     task_id = payload["task_id"]
     manifest_locator = payload["manifest_locator"]
-    if not isinstance(task_id, str) or not task_id or len(task_id) > 128:
+    if not isinstance(task_id, str) or _UUID4.fullmatch(task_id) is None:
         raise ValueError("invalid task_id")
-    if (
-        not isinstance(manifest_locator, str)
-        or not manifest_locator
-        or len(manifest_locator) > 4096
-    ):
+    if manifest_locator != _MANIFEST_LOCATOR:
         raise ValueError("invalid manifest locator")
     return task_id, manifest_locator
 
 
 def _structured_error_code(result: dict[str, Any]) -> str:
     error = result.get("error")
+    details = error.get("details") if isinstance(error, dict) else None
+    reason = details.get("reason") if isinstance(details, dict) else None
+    if isinstance(reason, str) and reason in _REASON_CODE_MAP:
+        return _REASON_CODE_MAP[reason]
     code = error.get("code") if isinstance(error, dict) else None
     if isinstance(code, str):
         return _ERROR_CODE_MAP.get(code, TaskErrorCode.DOCKING_PROCESS_FAILED.value)
@@ -93,23 +121,7 @@ def _structured_error_code(result: dict[str, Any]) -> str:
 
 
 def _safe_artifacts(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    safe: list[dict[str, Any]] = []
-    for item in value:
-        if not isinstance(item, dict):
-            continue
-        path = item.get("path")
-        artifact_type = item.get("type") or item.get("artifact_type")
-        if not _is_safe_relative_path(path) or not isinstance(artifact_type, str):
-            continue
-        record: dict[str, Any] = {"type": artifact_type, "path": path}
-        metadata = item.get("metadata")
-        digest = metadata.get("sha256") if isinstance(metadata, dict) else None
-        if isinstance(digest, str):
-            record["metadata"] = {"sha256": digest}
-        safe.append(record)
-    return safe
+    return sanitize_public_artifacts(value)
 
 
 def _is_safe_relative_path(value: Any) -> bool:
@@ -119,26 +131,55 @@ def _is_safe_relative_path(value: Any) -> bool:
     if normalized.startswith("/") or ":" in normalized:
         return False
     parts = normalized.split("/")
-    return all(part not in {"", ".", ".."} for part in parts)
+    return all(
+        part not in {"", ".", ".."}
+        and not contains_sensitive_text(part)
+        and not contains_scientific_structure(part.rsplit(".", 1)[0])
+        and not contains_prefixed_scientific_identifier(part)
+        for part in parts
+    )
 
 
-def _safe_provenance(value: Any, attempt: int) -> dict[str, Any]:
-    source = value if isinstance(value, dict) else {}
+def _safe_provenance(value: Any, attempt: int) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    source = value
+    if (
+        source.get("tool_name") != "molecular_docking"
+        or source.get("demo_mode") is not False
+        or source.get("fallback_used") is not False
+    ):
+        return None
     result: dict[str, Any] = {
         "tool": "molecular_docking",
         "attempt": attempt,
     }
     for key in ("tool_name", "tool_version", "model_name", "model_version"):
         candidate = source.get(key)
+        if candidate is None:
+            continue
         if (
-            isinstance(candidate, str)
-            and _SAFE_PROVENANCE_IDENTIFIER.fullmatch(candidate) is not None
+            not isinstance(candidate, str)
+            or _SAFE_PROVENANCE_IDENTIFIER.fullmatch(candidate) is None
+            or contains_sensitive_text(candidate)
+            or contains_scientific_structure(candidate)
+            or contains_prefixed_scientific_identifier(candidate)
         ):
-            result[key] = candidate
+            return None
+        result[key] = candidate
     for key in ("demo_mode", "fallback_used"):
         candidate = source.get(key)
         if isinstance(candidate, bool):
             result[key] = candidate
+    try:
+        sanitized = sanitize_provenance(result)
+    except ValueError:
+        return None
+    if any(
+        key in result and key not in sanitized
+        for key in ("tool", "tool_name", "tool_version", "model_name", "model_version")
+    ):
+        return None
     return result
 
 
@@ -188,6 +229,41 @@ def _summarize_docking_result(
             "status": TaskStatus.FAILED.value,
             "error_code": TaskErrorCode.DOCKING_ARTIFACT_INVALID.value,
         }
+    artifacts = _safe_artifacts(result.get("artifacts"))
+    raw_artifacts = result.get("artifacts")
+    artifacts_valid = isinstance(raw_artifacts, list) and len(artifacts) == len(
+        raw_artifacts
+    )
+    if artifacts_valid:
+        for source, projected in zip(raw_artifacts, artifacts):
+            artifact_type = (
+                source.get("type") or source.get("artifact_type")
+                if isinstance(source, dict)
+                else None
+            )
+            if (
+                not isinstance(source, dict)
+                or projected.get("path") != source.get("path")
+                or projected.get("type", projected.get("artifact_type"))
+                != artifact_type
+            ):
+                artifacts_valid = False
+                break
+    if not artifacts_valid:
+        return {
+            "task_id": task_id,
+            "attempt": attempt,
+            "status": TaskStatus.FAILED.value,
+            "error_code": TaskErrorCode.DOCKING_ARTIFACT_INVALID.value,
+        }
+    provenance = _safe_provenance(result.get("provenance"), attempt)
+    if provenance is None:
+        return {
+            "task_id": task_id,
+            "attempt": attempt,
+            "status": TaskStatus.FAILED.value,
+            "error_code": TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value,
+        }
     return {
         "task_id": task_id,
         "attempt": attempt,
@@ -197,9 +273,9 @@ def _summarize_docking_result(
             "best_energy": float(best_energy),
             "pose_file": pose_file,
         },
-        "artifacts": _safe_artifacts(result.get("artifacts")),
+        "artifacts": artifacts,
         "warnings": ([{"code": "TOOL_WARNING"}] if result.get("warnings") else []),
-        "provenance": _safe_provenance(result.get("provenance"), attempt),
+        "provenance": provenance,
     }
 
 
@@ -210,6 +286,8 @@ async def _run_docking_in_thread(
     attempt: int,
     heartbeat: Callable[[dict[str, Any]], None],
     heartbeat_interval: float = 1.0,
+    cleanup_timeout: float = 30.0,
+    heartbeat_projection: Callable[[dict[str, Any]], Any] | None = None,
 ) -> dict[str, Any]:
     """Run one verified docking call and cooperatively join it on cancellation."""
 
@@ -218,8 +296,11 @@ async def _run_docking_in_thread(
         raise ValueError("invalid activity attempt")
     if not isinstance(heartbeat_interval, (int, float)) or heartbeat_interval <= 0:
         raise ValueError("invalid heartbeat interval")
+    if not isinstance(cleanup_timeout, (int, float)) or cleanup_timeout <= 0:
+        raise ValueError("invalid cleanup timeout")
     cancel_event = threading.Event()
     progress = _ProgressSlot()
+    started_at = time.monotonic()
 
     work = asyncio.create_task(
         asyncio.to_thread(
@@ -233,33 +314,168 @@ async def _run_docking_in_thread(
     )
     try:
         while not work.done():
-            heartbeat({**progress.snapshot(), "attempt": attempt})
+            heartbeat_payload = {
+                **progress.snapshot(),
+                "attempt": attempt,
+                "elapsed_time": max(0.0, time.monotonic() - started_at),
+            }
+            heartbeat(heartbeat_payload)
+            if heartbeat_projection is not None:
+                try:
+                    projected = heartbeat_projection(dict(heartbeat_payload))
+                    if inspect.isawaitable(projected):
+                        await projected
+                except Exception:
+                    pass
             await asyncio.sleep(float(heartbeat_interval))
         raw_result = await work
         return _summarize_docking_result(raw_result, task_id=task_id, attempt=attempt)
     except asyncio.CancelledError:
         cancel_event.set()
-        try:
-            await asyncio.shield(work)
-        except Exception:
-            pass
+        cleanup_started = asyncio.get_running_loop().time()
+        while not work.done():
+            try:
+                await asyncio.shield(work)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if work.done() and not work.cancelled():
+            try:
+                work.result()
+            except Exception:
+                pass
+        if asyncio.get_running_loop().time() - cleanup_started > cleanup_timeout:
+            raise ApplicationError(
+                "Docking cancellation cleanup exceeded its deadline",
+                type=TaskErrorCode.TASK_CANCEL_TIMEOUT.value,
+                non_retryable=True,
+            )
         raise
 
 
 class TemporalDockingActivities:
     """Bound Activity set with explicit worker-owned dependencies."""
 
-    def __init__(self, store: TaskStore, docking_execution: DockingExecution) -> None:
+    def __init__(
+        self,
+        store: TaskStore,
+        docking_execution: DockingExecution,
+        *,
+        stager: DockingInputStager | None = None,
+    ) -> None:
         self.store = store
         self.docking_execution = docking_execution
+        self.stager = stager or getattr(docking_execution, "_stager", None)
+
+    @activity.defn(name=VERIFY_MANIFEST_ACTIVITY_NAME)
+    async def verify_manifest_activity(self, payload: dict[str, Any]) -> dict[str, Any]:
+        task_id, manifest_locator = _validate_docking_payload(payload)
+        if self.stager is None:
+            raise ApplicationError(
+                "manifest stager is unavailable",
+                type=TaskErrorCode.TASK_BACKEND_UNAVAILABLE.value,
+                non_retryable=True,
+            )
+        try:
+            await asyncio.to_thread(
+                self.stager.load_verified_locator,
+                task_id,
+                manifest_locator,
+            )
+        except ManifestError as exc:
+            if exc.reason_code == "manifest_integrity_failed":
+                error_type = TaskErrorCode.TASK_INPUT_HASH_MISMATCH.value
+                non_retryable = True
+            elif exc.reason_code in {"manifest_busy", "manifest_io_error"}:
+                error_type = "MANIFEST_TRANSIENT"
+                non_retryable = False
+            else:
+                error_type = TaskErrorCode.TASK_INPUT_INVALID.value
+                non_retryable = True
+            raise ApplicationError(
+                "Docking input manifest verification failed",
+                type=error_type,
+                non_retryable=non_retryable,
+            ) from None
+        return {"verified": True}
 
     @activity.defn(name=DOCKING_ACTIVITY_NAME)
     async def run_docking_activity(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await _run_docking_in_thread(
-            self.docking_execution,
+        return await self._run_docking_activity(
             payload,
             attempt=activity.info().attempt,
             heartbeat=activity.heartbeat,
+            worker_shutdown_waiter=activity.wait_for_worker_shutdown,
+        )
+
+    async def _run_docking_activity(
+        self,
+        payload: dict[str, Any],
+        *,
+        attempt: int,
+        heartbeat: Callable[[dict[str, Any]], None],
+        worker_shutdown_waiter: Callable[[], Any],
+        heartbeat_interval: float = 1.0,
+        cleanup_timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        task_id, _ = _validate_docking_payload(payload)
+        run_task = asyncio.create_task(
+            _run_docking_in_thread(
+                self.docking_execution,
+                payload,
+                attempt=attempt,
+                heartbeat=heartbeat,
+                heartbeat_interval=heartbeat_interval,
+                cleanup_timeout=cleanup_timeout,
+                heartbeat_projection=lambda update: self._project_live_heartbeat(
+                    task_id,
+                    update,
+                ),
+            )
+        )
+        shutdown_task = asyncio.create_task(worker_shutdown_waiter())
+        try:
+            done, _ = await asyncio.wait(
+                {run_task, shutdown_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if shutdown_task in done and not run_task.done():
+                run_task.cancel()
+            return await asyncio.shield(run_task)
+        except asyncio.CancelledError:
+            if not run_task.done():
+                run_task.cancel()
+            while not run_task.done():
+                try:
+                    await asyncio.shield(run_task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not run_task.cancelled():
+                error = run_task.exception()
+                if (
+                    isinstance(error, ApplicationError)
+                    and error.type == TaskErrorCode.TASK_CANCEL_TIMEOUT.value
+                ):
+                    raise error
+            raise
+        finally:
+            shutdown_task.cancel()
+            await asyncio.gather(shutdown_task, return_exceptions=True)
+
+    async def _project_live_heartbeat(
+        self,
+        task_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        await asyncio.to_thread(
+            self.store.heartbeat,
+            task_id,
+            phase=payload["phase"],
+            progress=payload["progress"],
+            attempt=payload["attempt"],
         )
 
     @activity.defn(name=PROJECTION_ACTIVITY_NAME)
@@ -353,5 +569,6 @@ def _projection_conflict() -> ApplicationError:
 __all__ = [
     "DOCKING_ACTIVITY_NAME",
     "PROJECTION_ACTIVITY_NAME",
+    "VERIFY_MANIFEST_ACTIVITY_NAME",
     "TemporalDockingActivities",
 ]

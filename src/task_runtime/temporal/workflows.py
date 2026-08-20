@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import re
 from datetime import timedelta
 from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, CancelledError as TemporalCancelledError
-from temporalio.exceptions import TimeoutError
+from temporalio.exceptions import ApplicationError, TimeoutError, TimeoutType
 
 
 DOCKING_ACTIVITY_NAME = "run_docking_activity"
 PROJECTION_ACTIVITY_NAME = "project_task_activity"
+VERIFY_MANIFEST_ACTIVITY_NAME = "verify_manifest_activity"
 
 _STATUS_FAILED = "failed"
 _STATUS_SUCCEEDED = "succeeded"
@@ -24,6 +26,7 @@ _CODE_INPUT_INVALID = "TASK_INPUT_INVALID"
 _CODE_PROJECTION_FAILED = "TASK_PROJECTION_FAILED"
 _CODE_PROCESS_FAILED = "DOCKING_PROCESS_FAILED"
 _CODE_HEARTBEAT_TIMEOUT = "TASK_HEARTBEAT_TIMEOUT"
+_CODE_BACKEND_UNAVAILABLE = "TASK_BACKEND_UNAVAILABLE"
 _TERMINAL_STATUSES = {
     _STATUS_SUCCEEDED,
     _STATUS_FAILED,
@@ -48,19 +51,35 @@ _ERROR_CODES = {
 
 _PROJECTION_RETRY = RetryPolicy(maximum_attempts=5)
 _DOCKING_RETRY = RetryPolicy(maximum_attempts=1)
+_VERIFY_RETRY = RetryPolicy(maximum_attempts=5)
+_UUID4 = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
+)
+_MANIFEST_LOCATOR = "input_manifest.json"
+
+
+def validate_temporal_workflow_input(payload: Any) -> dict[str, str]:
+    """Validate the only safe payload Task 8 may place in Temporal history."""
+
+    if not isinstance(payload, dict) or set(payload) != {
+        "task_id",
+        "manifest_locator",
+    }:
+        raise ValueError("invalid Temporal workflow input")
+    task_id = payload.get("task_id")
+    if not isinstance(task_id, str) or _UUID4.fullmatch(task_id) is None:
+        raise ValueError("invalid Temporal task id")
+    if payload.get("manifest_locator") != _MANIFEST_LOCATOR:
+        raise ValueError("invalid Temporal manifest locator")
+    return {"task_id": task_id, "manifest_locator": _MANIFEST_LOCATOR}
 
 
 def _valid_input(payload: Any) -> bool:
-    return (
-        isinstance(payload, dict)
-        and set(payload) == {"task_id", "manifest_locator"}
-        and isinstance(payload.get("task_id"), str)
-        and bool(payload["task_id"])
-        and len(payload["task_id"]) <= 128
-        and isinstance(payload.get("manifest_locator"), str)
-        and bool(payload["manifest_locator"])
-        and len(payload["manifest_locator"]) <= 4096
-    )
+    try:
+        validate_temporal_workflow_input(payload)
+    except ValueError:
+        return False
+    return True
 
 
 @workflow.defn(name="medchat-docking-workflow")
@@ -120,6 +139,29 @@ class DockingWorkflow:
 
         self._snapshot.update({"status": "running", "phase": "running"})
         try:
+            await workflow.execute_activity(
+                VERIFY_MANIFEST_ACTIVITY_NAME,
+                {
+                    "task_id": task_id,
+                    "manifest_locator": payload["manifest_locator"],
+                },
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=_VERIFY_RETRY,
+            )
+        except asyncio.CancelledError:
+            return await self._finish_canceled(task_id)
+        except ActivityError as exc:
+            if isinstance(exc.cause, TemporalCancelledError):
+                return await self._finish_canceled(task_id)
+            code = _manifest_failure_code(exc.cause)
+            return await self._finish_pre_docking_failure(task_id, code)
+        except Exception:
+            return await self._finish_pre_docking_failure(
+                task_id,
+                _CODE_BACKEND_UNAVAILABLE,
+            )
+
+        try:
             outcome = await workflow.execute_activity(
                 DOCKING_ACTIVITY_NAME,
                 {
@@ -140,7 +182,19 @@ class DockingWorkflow:
             if isinstance(cause, TimeoutError):
                 outcome = {
                     "status": _STATUS_TIMED_OUT,
-                    "error_code": _CODE_HEARTBEAT_TIMEOUT,
+                    "error_code": (
+                        _CODE_HEARTBEAT_TIMEOUT
+                        if cause.type is TimeoutType.HEARTBEAT
+                        else _CODE_PROCESS_FAILED
+                    ),
+                }
+            elif (
+                isinstance(cause, ApplicationError)
+                and cause.type == "TASK_CANCEL_TIMEOUT"
+            ):
+                outcome = {
+                    "status": _STATUS_TIMED_OUT,
+                    "error_code": "TASK_CANCEL_TIMEOUT",
                 }
             else:
                 outcome = {
@@ -169,6 +223,12 @@ class DockingWorkflow:
         projection_pending = False
         try:
             await self._project(terminal_payload)
+        except asyncio.CancelledError:
+            return await self._finish_canceled(task_id)
+        except ActivityError as exc:
+            if isinstance(exc.cause, TemporalCancelledError):
+                return await self._finish_canceled(task_id)
+            projection_pending = True
         except Exception:
             projection_pending = True
         return self._terminal(
@@ -191,6 +251,9 @@ class DockingWorkflow:
             await self._project(
                 {"operation": "cancel_requested", "task_id": task_id}
             )
+        except BaseException:
+            projection_pending = True
+        try:
             await self._project(
                 {
                     "operation": "terminal",
@@ -198,10 +261,40 @@ class DockingWorkflow:
                     "status": _STATUS_CANCELED,
                 }
             )
+        except BaseException:
+            projection_pending = True
+        self._terminal(
+            _STATUS_CANCELED,
+            projection_pending=projection_pending,
+        )
+        raise asyncio.CancelledError()
+
+    async def _finish_pre_docking_failure(
+        self,
+        task_id: str,
+        error_code: str,
+    ) -> dict[str, Any]:
+        projection_pending = False
+        try:
+            await self._project(
+                {
+                    "operation": "terminal",
+                    "task_id": task_id,
+                    "status": _STATUS_FAILED,
+                    "error_code": error_code,
+                }
+            )
+        except asyncio.CancelledError:
+            return await self._finish_canceled(task_id)
+        except ActivityError as exc:
+            if isinstance(exc.cause, TemporalCancelledError):
+                return await self._finish_canceled(task_id)
+            projection_pending = True
         except Exception:
             projection_pending = True
         return self._terminal(
-            _STATUS_CANCELED,
+            _STATUS_FAILED,
+            error_code=error_code,
             projection_pending=projection_pending,
         )
 
@@ -242,5 +335,19 @@ class DockingWorkflow:
 __all__ = [
     "DOCKING_ACTIVITY_NAME",
     "PROJECTION_ACTIVITY_NAME",
+    "VERIFY_MANIFEST_ACTIVITY_NAME",
     "DockingWorkflow",
+    "validate_temporal_workflow_input",
 ]
+
+
+def _manifest_failure_code(cause: BaseException | None) -> str:
+    if isinstance(cause, ApplicationError):
+        if cause.type in {
+            "TASK_INPUT_INVALID",
+            "TASK_INPUT_HASH_MISMATCH",
+        }:
+            return cause.type
+        if cause.type == "MANIFEST_TRANSIENT":
+            return _CODE_BACKEND_UNAVAILABLE
+    return _CODE_BACKEND_UNAVAILABLE

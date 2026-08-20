@@ -4,6 +4,7 @@ import asyncio
 import ast
 import importlib.util
 import inspect
+import json
 import subprocess
 import sys
 import threading
@@ -13,40 +14,75 @@ from types import SimpleNamespace
 
 import pytest
 from temporalio import activity, workflow
+from temporalio.client import WorkflowExecutionStatus, WorkflowFailureError
+from temporalio.exceptions import CancelledError as TemporalCancelledError
+from temporalio.exceptions import ActivityError, TimeoutError, TimeoutType
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Worker
+from temporalio.worker import Replayer, Worker
 from temporalio.exceptions import ApplicationError
 
 from src.task_runtime.errors import TaskErrorCode
 from src.task_runtime.models import ResultProjectionPolicy, TaskPhase, TaskStatus
 from src.task_runtime.store import TaskStore
+from src.task_runtime.staging import ManifestError
 from src.task_runtime.temporal.activities import (
     TemporalDockingActivities,
     _ProgressSlot,
     _run_docking_in_thread,
+    _summarize_docking_result,
 )
 from src.task_runtime.temporal.worker import (
     WorkerSettings,
     build_temporal_worker,
-    build_workflow_runner,
     run_worker_heartbeat,
 )
 from src.task_runtime.temporal.workflows import (
     DOCKING_ACTIVITY_NAME,
     PROJECTION_ACTIVITY_NAME,
+    VERIFY_MANIFEST_ACTIVITY_NAME,
     DockingWorkflow,
+    validate_temporal_workflow_input,
 )
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+TASK_ID = "00000000-0000-4000-8000-000000000001"
+CANCEL_TASK_ID = "00000000-0000-4000-8000-000000000002"
+MANIFEST_LOCATOR = "input_manifest.json"
 
 
-def _create_task(store: TaskStore, task_id: str = "task-1") -> None:
+def _create_task(store: TaskStore, task_id: str = TASK_ID) -> None:
     store.create(
         task_id=task_id,
         task_type="docking",
         payload={},
     )
+
+
+def _activity_error(cause: BaseException) -> ActivityError:
+    error = ActivityError(
+        "controlled activity failure",
+        scheduled_event_id=1,
+        started_event_id=2,
+        identity="worker",
+        activity_type="activity",
+        activity_id="activity-1",
+        retry_state=None,
+    )
+    error.__cause__ = cause
+    return error
+
+
+class _FakeStager:
+    def __init__(self, *, reason: str | None = None) -> None:
+        self.reason = reason
+        self.calls: list[tuple[str, str]] = []
+
+    def load_verified_locator(self, task_id: str, locator: str) -> dict:
+        self.calls.append((task_id, locator))
+        if self.reason is not None:
+            raise ManifestError(self.reason)
+        return {"private": "manifest content must not be returned"}
 
 
 class _FakeDockingExecution:
@@ -128,7 +164,7 @@ def test_docking_activity_keeps_event_loop_responsive_and_bounds_heartbeats():
         ticker_task = asyncio.create_task(ticker())
         result = await _run_docking_in_thread(
             docking,
-            {"task_id": "task-1", "manifest_locator": "manifest.json"},
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
             attempt=2,
             heartbeat=heartbeats.append,
             heartbeat_interval=0.01,
@@ -136,12 +172,17 @@ def test_docking_activity_keeps_event_loop_responsive_and_bounds_heartbeats():
         await ticker_task
 
         assert result["status"] == "succeeded"
-        assert result["task_id"] == "task-1"
+        assert result["task_id"] == TASK_ID
         assert result["attempt"] == 2
         assert "message" not in result
         assert ticks > 1
         assert heartbeats
-        assert all(set(item) == {"phase", "progress", "attempt"} for item in heartbeats)
+        assert all(
+            set(item) == {"phase", "progress", "attempt", "elapsed_time"}
+            for item in heartbeats
+        )
+        assert all(item["attempt"] == 2 for item in heartbeats)
+        assert all(item["elapsed_time"] >= 0 for item in heartbeats)
         assert heartbeats[-1]["phase"] == TaskPhase.VINA_RUNNING.value
         assert heartbeats[-1]["progress"] == 0.6
         assert len(docking.calls) == 1
@@ -155,7 +196,7 @@ def test_docking_activity_waits_for_sync_cleanup_before_propagating_cancel():
         activity_task = asyncio.create_task(
             _run_docking_in_thread(
                 docking,
-                {"task_id": "task-1", "manifest_locator": "manifest.json"},
+                {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
                 attempt=1,
                 heartbeat=lambda _: None,
                 heartbeat_interval=0.01,
@@ -173,6 +214,136 @@ def test_docking_activity_waits_for_sync_cleanup_before_propagating_cancel():
     asyncio.run(scenario())
 
 
+def test_docking_activity_resists_second_cancel_until_sync_cleanup_finishes():
+    async def scenario() -> None:
+        docking = _FakeDockingExecution(_success_result(), delay=0.15)
+        task = asyncio.create_task(
+            _run_docking_in_thread(
+                docking,
+                {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
+                attempt=1,
+                heartbeat=lambda _: None,
+                heartbeat_interval=0.01,
+            )
+        )
+        assert await asyncio.to_thread(docking.started.wait, 1.0)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert docking.stopped.is_set()
+        assert docking.calls[0]["cancel_event"].is_set()
+        assert len(docking.calls) == 1
+
+    asyncio.run(scenario())
+
+
+def test_cleanup_timeout_joins_worker_then_raises_structured_timeout():
+    class SlowCleanupDocking(_FakeDockingExecution):
+        def run_verified(self, task_id, manifest_path, **kwargs):
+            self.calls.append({"cancel_event": kwargs["cancel_event"]})
+            self.started.set()
+            time.sleep(0.08)
+            self.stopped.set()
+            return _success_result()
+
+    async def scenario() -> None:
+        docking = SlowCleanupDocking(_success_result())
+        task = asyncio.create_task(
+            _run_docking_in_thread(
+                docking,
+                {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
+                attempt=1,
+                heartbeat=lambda _: None,
+                heartbeat_interval=0.01,
+                cleanup_timeout=0.01,
+            )
+        )
+        assert await asyncio.to_thread(docking.started.wait, 1.0)
+        task.cancel()
+        with pytest.raises(ApplicationError) as failure:
+            await task
+
+        assert docking.stopped.is_set()
+        assert failure.value.type == TaskErrorCode.TASK_CANCEL_TIMEOUT.value
+        assert failure.value.non_retryable is True
+
+    asyncio.run(scenario())
+
+
+def test_activity_wrapper_preserves_structured_cleanup_timeout(tmp_path):
+    class SlowCleanupDocking(_FakeDockingExecution):
+        def run_verified(self, task_id, manifest_path, **kwargs):
+            self.calls.append({"cancel_event": kwargs["cancel_event"]})
+            self.started.set()
+            time.sleep(0.08)
+            self.stopped.set()
+            return _success_result()
+
+    async def scenario() -> None:
+        docking = SlowCleanupDocking(_success_result())
+        activities = TemporalDockingActivities(
+            TaskStore(tmp_path / "tasks.sqlite"),
+            docking,
+        )
+
+        async def never_shutdown() -> None:
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(
+            activities._run_docking_activity(
+                {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
+                attempt=1,
+                heartbeat=lambda _: None,
+                worker_shutdown_waiter=never_shutdown,
+                heartbeat_interval=0.01,
+                cleanup_timeout=0.01,
+            )
+        )
+        assert await asyncio.to_thread(docking.started.wait, 1.0)
+        task.cancel()
+        with pytest.raises(ApplicationError) as failure:
+            await task
+
+        assert failure.value.type == TaskErrorCode.TASK_CANCEL_TIMEOUT.value
+        assert docking.stopped.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_worker_shutdown_uses_same_cooperative_join_path(tmp_path):
+    async def scenario() -> None:
+        docking = _FakeDockingExecution(_success_result(), delay=5.0)
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        activities = TemporalDockingActivities(store, docking)
+        shutdown = asyncio.Event()
+
+        async def wait_for_shutdown() -> None:
+            await shutdown.wait()
+
+        task = asyncio.create_task(
+            activities._run_docking_activity(
+                {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
+                attempt=1,
+                heartbeat=lambda _: None,
+                worker_shutdown_waiter=wait_for_shutdown,
+                heartbeat_interval=0.01,
+            )
+        )
+        assert await asyncio.to_thread(docking.started.wait, 1.0)
+        shutdown.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert docking.stopped.is_set()
+        assert docking.calls[0]["cancel_event"].is_set()
+        assert len(docking.calls) == 1
+
+    asyncio.run(scenario())
+
+
 def test_docking_activity_rejects_absolute_artifact_path_from_history():
     result = _success_result()
     result["data"]["pose_file"] = "C:/private/pose.pdbqt"
@@ -183,7 +354,7 @@ def test_docking_activity_rejects_absolute_artifact_path_from_history():
     outcome = asyncio.run(
         _run_docking_in_thread(
             docking,
-            {"task_id": "task-1", "manifest_locator": "manifest.json"},
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
             attempt=1,
             heartbeat=lambda _: None,
             heartbeat_interval=0.01,
@@ -191,14 +362,14 @@ def test_docking_activity_rejects_absolute_artifact_path_from_history():
     )
 
     assert outcome == {
-        "task_id": "task-1",
+        "task_id": TASK_ID,
         "attempt": 1,
         "status": TaskStatus.FAILED.value,
         "error_code": TaskErrorCode.DOCKING_ARTIFACT_INVALID.value,
     }
 
 
-def test_docking_activity_drops_unsafe_provenance_identifiers_from_history():
+def test_docking_activity_rejects_unsafe_provenance_identifiers_from_history():
     result = _success_result()
     result["provenance"]["model_name"] = "C:/private/model.bin"
     result["provenance"]["tool_version"] = "1\nsecret"
@@ -207,16 +378,150 @@ def test_docking_activity_drops_unsafe_provenance_identifiers_from_history():
     outcome = asyncio.run(
         _run_docking_in_thread(
             docking,
-            {"task_id": "task-1", "manifest_locator": "manifest.json"},
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
             attempt=1,
             heartbeat=lambda _: None,
             heartbeat_interval=0.01,
         )
     )
 
-    assert outcome["status"] == TaskStatus.SUCCEEDED.value
-    assert "model_name" not in outcome["provenance"]
-    assert "tool_version" not in outcome["provenance"]
+    assert outcome["status"] == TaskStatus.FAILED.value
+    assert outcome["error_code"] == TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_code"),
+    [
+        ("ownership_uncertain", TaskErrorCode.DOCKING_PROCESS_OWNERSHIP_UNCERTAIN.value),
+        ("validator_rejected", TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value),
+        ("evidence_rejected", TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value),
+        ("provenance_rejected", TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value),
+        ("artifact_invalid", TaskErrorCode.DOCKING_ARTIFACT_INVALID.value),
+        ("completion_invalid", TaskErrorCode.DOCKING_ARTIFACT_INVALID.value),
+        ("pose_invalid", TaskErrorCode.DOCKING_ARTIFACT_INVALID.value),
+        ("input_hash_mismatch", TaskErrorCode.TASK_INPUT_HASH_MISMATCH.value),
+        ("environment_unavailable", TaskErrorCode.DOCKING_ENVIRONMENT_UNAVAILABLE.value),
+    ],
+)
+def test_docking_failure_uses_structured_reason(reason, expected_code):
+    outcome = _summarize_docking_result(
+        {
+            "success": False,
+            "status": "failed",
+            "error": {
+                "code": "invalid_output",
+                "message": "ignored free text",
+                "details": {"reason": reason},
+            },
+        },
+        task_id=TASK_ID,
+        attempt=1,
+    )
+    assert outcome["status"] == TaskStatus.FAILED.value
+    assert outcome["error_code"] == expected_code
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_code"),
+    [
+        (
+            lambda result: result["data"].update(
+                {
+                    "pose_file": "artifacts/CCO.pdbqt",
+                    "best_pose": {
+                        "binding_energy": -7.5,
+                        "pose_file": "artifacts/CCO.pdbqt",
+                    },
+                }
+            ),
+            TaskErrorCode.DOCKING_ARTIFACT_INVALID.value,
+        ),
+        (
+            lambda result: result["artifacts"][0].update({"type": "CCO"}),
+            TaskErrorCode.DOCKING_ARTIFACT_INVALID.value,
+        ),
+        (
+            lambda result: result["artifacts"][0].update(
+                {"path": "C:/private/pose.pdbqt"}
+            ),
+            TaskErrorCode.DOCKING_ARTIFACT_INVALID.value,
+        ),
+        (
+            lambda result: result["provenance"].update({"tool_name": "CCO"}),
+            TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value,
+        ),
+        (
+            lambda result: result["provenance"].update({"model_name": "CCO"}),
+            TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value,
+        ),
+        (
+            lambda result: result["provenance"].update({"demo_mode": True}),
+            TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value,
+        ),
+    ],
+)
+def test_history_summary_fails_closed_on_scientific_identifiers(mutate, expected_code):
+    result = _success_result()
+    mutate(result)
+    outcome = _summarize_docking_result(result, task_id=TASK_ID, attempt=1)
+    assert outcome["status"] == TaskStatus.FAILED.value
+    assert outcome["error_code"] == expected_code
+
+
+def test_activity_heartbeat_best_effort_refreshes_sqlite(tmp_path):
+    async def scenario() -> None:
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        _create_task(store)
+        assert store.claim_running(TASK_ID, attempt=1)
+        docking = _FakeDockingExecution(_success_result(), delay=0.05)
+        activities = TemporalDockingActivities(store, docking)
+
+        async def never_shutdown() -> None:
+            await asyncio.Event().wait()
+
+        heartbeats: list[dict] = []
+        outcome = await activities._run_docking_activity(
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
+            attempt=1,
+            heartbeat=heartbeats.append,
+            worker_shutdown_waiter=never_shutdown,
+            heartbeat_interval=0.01,
+        )
+        record = store.get(TASK_ID)
+        assert outcome["status"] == TaskStatus.SUCCEEDED.value
+        assert record.phase == TaskPhase.VINA_RUNNING.value
+        assert record.progress == pytest.approx(0.6)
+        assert record.heartbeat_at is not None
+
+    asyncio.run(scenario())
+
+
+def test_activity_sqlite_heartbeat_failure_does_not_fail_science(tmp_path, monkeypatch):
+    async def scenario() -> None:
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        docking = _FakeDockingExecution(_success_result(), delay=0.03)
+        activities = TemporalDockingActivities(store, docking)
+        monkeypatch.setattr(
+            store,
+            "heartbeat",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError("C:/private/CCO sk-secret-value")
+            ),
+        )
+
+        async def never_shutdown() -> None:
+            await asyncio.Event().wait()
+
+        outcome = await activities._run_docking_activity(
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
+            attempt=1,
+            heartbeat=lambda _: None,
+            worker_shutdown_waiter=never_shutdown,
+            heartbeat_interval=0.01,
+        )
+        assert outcome["status"] == TaskStatus.SUCCEEDED.value
+
+    asyncio.run(scenario())
 
 
 def test_progress_slot_accepts_only_real_controlled_phases_and_latest_value():
@@ -247,7 +552,7 @@ def test_running_projection_failure_prevents_docking(tmp_path, monkeypatch):
     )
     result = asyncio.run(
         DockingWorkflow().run(
-            {"task_id": "task-1", "manifest_locator": "manifest.json"}
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
         )
     )
 
@@ -258,10 +563,172 @@ def test_running_projection_failure_prevents_docking(tmp_path, monkeypatch):
     assert result["terminal_event_count"] == 1
 
 
+def test_workflow_verifies_manifest_before_docking(monkeypatch):
+    calls: list[str] = []
+
+    async def execute_activity(name, payload, **kwargs):
+        calls.append(name)
+        if name == DOCKING_ACTIVITY_NAME:
+            return {
+                "task_id": TASK_ID,
+                "attempt": 1,
+                "status": TaskStatus.FAILED.value,
+                "error_code": TaskErrorCode.DOCKING_PROCESS_FAILED.value,
+            }
+        return {"applied": True, "verified": True}
+
+    monkeypatch.setattr(
+        "src.task_runtime.temporal.workflows.workflow.execute_activity",
+        execute_activity,
+    )
+    asyncio.run(
+        DockingWorkflow().run(
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
+        )
+    )
+
+    assert calls == [
+        PROJECTION_ACTIVITY_NAME,
+        VERIFY_MANIFEST_ACTIVITY_NAME,
+        DOCKING_ACTIVITY_NAME,
+        PROJECTION_ACTIVITY_NAME,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_type", "non_retryable"),
+    [
+        ("manifest_schema_invalid", TaskErrorCode.TASK_INPUT_INVALID.value, True),
+        ("manifest_path_invalid", TaskErrorCode.TASK_INPUT_INVALID.value, True),
+        ("manifest_integrity_failed", TaskErrorCode.TASK_INPUT_HASH_MISMATCH.value, True),
+        ("manifest_busy", "MANIFEST_TRANSIENT", False),
+        ("manifest_io_error", "MANIFEST_TRANSIENT", False),
+    ],
+)
+def test_manifest_verification_uses_structured_reason_codes(
+    tmp_path,
+    reason,
+    expected_type,
+    non_retryable,
+):
+    stager = _FakeStager(reason=reason)
+    activities = TemporalDockingActivities(
+        TaskStore(tmp_path / "tasks.sqlite"),
+        _FakeDockingExecution(_success_result()),
+        stager=stager,
+    )
+
+    with pytest.raises(ApplicationError) as failure:
+        asyncio.run(
+            activities.verify_manifest_activity(
+                {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
+            )
+        )
+
+    assert failure.value.type == expected_type
+    assert failure.value.non_retryable is non_retryable
+    assert stager.calls == [(TASK_ID, MANIFEST_LOCATOR)]
+
+
+def test_manifest_verification_returns_tiny_ack_only(tmp_path):
+    stager = _FakeStager()
+    activities = TemporalDockingActivities(
+        TaskStore(tmp_path / "tasks.sqlite"),
+        _FakeDockingExecution(_success_result()),
+        stager=stager,
+    )
+    result = asyncio.run(
+        activities.verify_manifest_activity(
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
+        )
+    )
+    assert result == {"verified": True}
+    assert "private" not in repr(result)
+
+
+def test_manifest_verification_failure_prevents_docking(monkeypatch):
+    calls: list[str] = []
+    terminal: list[dict] = []
+
+    async def execute_activity(name, payload, **kwargs):
+        calls.append(name)
+        if name == VERIFY_MANIFEST_ACTIVITY_NAME:
+            raise _activity_error(
+                ApplicationError(
+                    "ignored text",
+                    type=TaskErrorCode.TASK_INPUT_HASH_MISMATCH.value,
+                    non_retryable=True,
+                )
+            )
+        if name == PROJECTION_ACTIVITY_NAME and payload.get("operation") == "terminal":
+            terminal.append(payload)
+        return {"applied": True}
+
+    monkeypatch.setattr(
+        "src.task_runtime.temporal.workflows.workflow.execute_activity",
+        execute_activity,
+    )
+    result = asyncio.run(
+        DockingWorkflow().run(
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
+        )
+    )
+
+    assert DOCKING_ACTIVITY_NAME not in calls
+    assert result["status"] == TaskStatus.FAILED.value
+    assert result["error_code"] == TaskErrorCode.TASK_INPUT_HASH_MISMATCH.value
+    assert len(terminal) == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"task_id": "CCO", "manifest_locator": MANIFEST_LOCATOR},
+        {"task_id": "task-private", "manifest_locator": MANIFEST_LOCATOR},
+        {"task_id": TASK_ID, "manifest_locator": "C:/private/input_manifest.json"},
+        {"task_id": TASK_ID, "manifest_locator": "../input_manifest.json"},
+        {"task_id": TASK_ID, "manifest_locator": "manifest.json"},
+    ],
+)
+def test_pre_start_validator_rejects_unsafe_history_input(payload):
+    with pytest.raises(ValueError):
+        validate_temporal_workflow_input(payload)
+
+
+def test_pre_start_validator_returns_detached_safe_input():
+    payload = {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
+    validated = validate_temporal_workflow_input(payload)
+    assert validated == payload
+    assert validated is not payload
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"task_id": "CCO", "manifest_locator": MANIFEST_LOCATOR},
+        {"task_id": TASK_ID, "manifest_locator": "../input_manifest.json"},
+        {"task_id": TASK_ID, "manifest_locator": "C:/private/input_manifest.json"},
+    ],
+)
+def test_activity_boundary_rejects_unsafe_history_identifiers(payload):
+    with pytest.raises(ValueError):
+        asyncio.run(
+            _run_docking_in_thread(
+                _FakeDockingExecution(_success_result()),
+                payload,
+                attempt=1,
+                heartbeat=lambda _: None,
+                heartbeat_interval=0.01,
+            )
+        )
+
+
 def test_cancel_during_running_projection_uses_controlled_cancel_path(monkeypatch):
     sequence: list[str] = []
 
     async def execute_activity(name, payload, **kwargs):
+        if name == VERIFY_MANIFEST_ACTIVITY_NAME:
+            return {"verified": True}
         sequence.append(payload["operation"])
         if payload["operation"] == "running":
             raise asyncio.CancelledError()
@@ -271,15 +738,17 @@ def test_cancel_during_running_projection_uses_controlled_cancel_path(monkeypatc
         "src.task_runtime.temporal.workflows.workflow.execute_activity",
         execute_activity,
     )
-    result = asyncio.run(
-        DockingWorkflow().run(
-            {"task_id": "task-1", "manifest_locator": "manifest.json"}
+    instance = DockingWorkflow()
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            instance.run(
+                {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
+            )
         )
-    )
 
     assert sequence == ["running", "cancel_requested", "terminal"]
-    assert result["status"] == TaskStatus.CANCELED.value
-    assert result["terminal_event_count"] == 1
+    assert instance.task_snapshot()["status"] == TaskStatus.CANCELED.value
+    assert instance.task_snapshot()["terminal_event_count"] == 1
 
 
 def test_workflow_success_projects_exactly_one_terminal(monkeypatch):
@@ -289,7 +758,7 @@ def test_workflow_success_projects_exactly_one_terminal(monkeypatch):
         calls.append((name, payload))
         if name == DOCKING_ACTIVITY_NAME:
             return {
-                "task_id": "task-1",
+                "task_id": TASK_ID,
                 "attempt": 1,
                 "status": "succeeded",
                 "result": {"pose_count": 2, "best_energy": -7.5},
@@ -306,13 +775,14 @@ def test_workflow_success_projects_exactly_one_terminal(monkeypatch):
     instance = DockingWorkflow()
     result = asyncio.run(
         instance.run(
-            {"task_id": "task-1", "manifest_locator": "manifest.json"}
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
         )
     )
 
     terminal = [payload for name, payload in calls if payload.get("operation") == "terminal"]
     assert [name for name, _ in calls] == [
         PROJECTION_ACTIVITY_NAME,
+        VERIFY_MANIFEST_ACTIVITY_NAME,
         DOCKING_ACTIVITY_NAME,
         PROJECTION_ACTIVITY_NAME,
     ]
@@ -328,10 +798,12 @@ def test_workflow_uses_required_docking_timeout_retry_and_cancellation_options(m
     docking_options = {}
 
     async def execute_activity(name, payload, **kwargs):
+        if name == VERIFY_MANIFEST_ACTIVITY_NAME:
+            return {"verified": True}
         if name == DOCKING_ACTIVITY_NAME:
             docking_options.update(kwargs)
             return {
-                "task_id": "task-1",
+                "task_id": TASK_ID,
                 "attempt": 1,
                 "status": "failed",
                 "error_code": TaskErrorCode.DOCKING_PROCESS_FAILED.value,
@@ -344,7 +816,7 @@ def test_workflow_uses_required_docking_timeout_retry_and_cancellation_options(m
     )
     asyncio.run(
         DockingWorkflow().run(
-            {"task_id": "task-1", "manifest_locator": "manifest.json"}
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
         )
     )
 
@@ -361,6 +833,8 @@ def test_workflow_cancellation_projects_request_before_terminal(monkeypatch):
     sequence: list[str] = []
 
     async def execute_activity(name, payload, **kwargs):
+        if name == VERIFY_MANIFEST_ACTIVITY_NAME:
+            return {"verified": True}
         if name == DOCKING_ACTIVITY_NAME:
             sequence.append("docking_cleanup_confirmed")
             raise asyncio.CancelledError()
@@ -371,11 +845,13 @@ def test_workflow_cancellation_projects_request_before_terminal(monkeypatch):
         "src.task_runtime.temporal.workflows.workflow.execute_activity",
         execute_activity,
     )
-    result = asyncio.run(
-        DockingWorkflow().run(
-            {"task_id": "task-1", "manifest_locator": "manifest.json"}
+    instance = DockingWorkflow()
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            instance.run(
+                {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
+            )
         )
-    )
 
     assert sequence == [
         "running",
@@ -383,16 +859,18 @@ def test_workflow_cancellation_projects_request_before_terminal(monkeypatch):
         "cancel_requested",
         "terminal",
     ]
-    assert result["status"] == TaskStatus.CANCELED.value
-    assert result["terminal_event_count"] == 1
+    assert instance.task_snapshot()["status"] == TaskStatus.CANCELED.value
+    assert instance.task_snapshot()["terminal_event_count"] == 1
 
 
 def test_structured_canceled_outcome_projects_request_before_terminal(monkeypatch):
     sequence: list[str] = []
 
     async def execute_activity(name, payload, **kwargs):
+        if name == VERIFY_MANIFEST_ACTIVITY_NAME:
+            return {"verified": True}
         if name == DOCKING_ACTIVITY_NAME:
-            return {"task_id": "task-1", "attempt": 1, "status": "canceled"}
+            return {"task_id": TASK_ID, "attempt": 1, "status": "canceled"}
         sequence.append(payload["operation"])
         return {"applied": True}
 
@@ -400,14 +878,16 @@ def test_structured_canceled_outcome_projects_request_before_terminal(monkeypatc
         "src.task_runtime.temporal.workflows.workflow.execute_activity",
         execute_activity,
     )
-    result = asyncio.run(
-        DockingWorkflow().run(
-            {"task_id": "task-1", "manifest_locator": "manifest.json"}
+    instance = DockingWorkflow()
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            instance.run(
+                {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
+            )
         )
-    )
 
     assert sequence == ["running", "cancel_requested", "terminal"]
-    assert result["status"] == TaskStatus.CANCELED.value
+    assert instance.task_snapshot()["status"] == TaskStatus.CANCELED.value
 
 
 def test_workflow_rejects_scientific_payload_from_history(monkeypatch):
@@ -424,8 +904,8 @@ def test_workflow_rejects_scientific_payload_from_history(monkeypatch):
     result = asyncio.run(
         DockingWorkflow().run(
             {
-                "task_id": "task-1",
-                "manifest_locator": "manifest.json",
+                "task_id": TASK_ID,
+                "manifest_locator": MANIFEST_LOCATOR,
                 "smiles": "CCO",
             }
         )
@@ -440,9 +920,11 @@ def test_structured_tool_failure_maps_code_without_message_guessing(monkeypatch)
     projected: list[dict] = []
 
     async def execute_activity(name, payload, **kwargs):
+        if name == VERIFY_MANIFEST_ACTIVITY_NAME:
+            return {"verified": True}
         if name == DOCKING_ACTIVITY_NAME:
             return {
-                "task_id": "task-1",
+                "task_id": TASK_ID,
                 "attempt": 1,
                 "status": "failed",
                 "error_code": TaskErrorCode.DOCKING_ENVIRONMENT_UNAVAILABLE.value,
@@ -456,7 +938,7 @@ def test_structured_tool_failure_maps_code_without_message_guessing(monkeypatch)
     )
     result = asyncio.run(
         DockingWorkflow().run(
-            {"task_id": "task-1", "manifest_locator": "manifest.json"}
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
         )
     )
 
@@ -465,11 +947,88 @@ def test_structured_tool_failure_maps_code_without_message_guessing(monkeypatch)
     assert len([item for item in projected if item.get("operation") == "terminal"]) == 1
 
 
+@pytest.mark.parametrize(
+    ("timeout_type", "expected_code"),
+    [
+        (TimeoutType.HEARTBEAT, TaskErrorCode.TASK_HEARTBEAT_TIMEOUT.value),
+        (TimeoutType.START_TO_CLOSE, TaskErrorCode.DOCKING_PROCESS_FAILED.value),
+        (TimeoutType.SCHEDULE_TO_CLOSE, TaskErrorCode.DOCKING_PROCESS_FAILED.value),
+        (TimeoutType.SCHEDULE_TO_START, TaskErrorCode.DOCKING_PROCESS_FAILED.value),
+    ],
+)
+def test_workflow_maps_structured_timeout_type(timeout_type, expected_code, monkeypatch):
+    projected: list[dict] = []
+
+    async def execute_activity(name, payload, **kwargs):
+        if name == VERIFY_MANIFEST_ACTIVITY_NAME:
+            return {"verified": True}
+        if name == DOCKING_ACTIVITY_NAME:
+            raise _activity_error(
+                TimeoutError(
+                    "ignored human text",
+                    type=timeout_type,
+                    last_heartbeat_details=[],
+                )
+            )
+        projected.append(payload)
+        return {"applied": True}
+
+    monkeypatch.setattr(
+        "src.task_runtime.temporal.workflows.workflow.execute_activity",
+        execute_activity,
+    )
+    result = asyncio.run(
+        DockingWorkflow().run(
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
+        )
+    )
+
+    assert result["status"] == TaskStatus.TIMED_OUT.value
+    assert result["error_code"] == expected_code
+    terminal = [item for item in projected if item.get("operation") == "terminal"]
+    assert len(terminal) == 1
+    assert terminal[0]["status"] == TaskStatus.TIMED_OUT.value
+    assert terminal[0]["error_code"] == expected_code
+
+
+def test_workflow_maps_cleanup_timeout_to_cancel_timeout_not_canceled(monkeypatch):
+    projected: list[dict] = []
+
+    async def execute_activity(name, payload, **kwargs):
+        if name == VERIFY_MANIFEST_ACTIVITY_NAME:
+            return {"verified": True}
+        if name == DOCKING_ACTIVITY_NAME:
+            raise _activity_error(
+                ApplicationError(
+                    "ignored human text",
+                    type=TaskErrorCode.TASK_CANCEL_TIMEOUT.value,
+                    non_retryable=True,
+                )
+            )
+        projected.append(payload)
+        return {"applied": True}
+
+    monkeypatch.setattr(
+        "src.task_runtime.temporal.workflows.workflow.execute_activity",
+        execute_activity,
+    )
+    result = asyncio.run(
+        DockingWorkflow().run(
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
+        )
+    )
+
+    assert result["status"] == TaskStatus.TIMED_OUT.value
+    assert result["error_code"] == TaskErrorCode.TASK_CANCEL_TIMEOUT.value
+
+
 def test_terminal_projection_outage_preserves_scientific_outcome(monkeypatch):
     async def execute_activity(name, payload, **kwargs):
+        if name == VERIFY_MANIFEST_ACTIVITY_NAME:
+            return {"verified": True}
         if name == DOCKING_ACTIVITY_NAME:
             return {
-                "task_id": "task-1",
+                "task_id": TASK_ID,
                 "attempt": 1,
                 "status": "succeeded",
                 "result": {"pose_count": 1, "best_energy": -6.0},
@@ -487,13 +1046,59 @@ def test_terminal_projection_outage_preserves_scientific_outcome(monkeypatch):
     )
     result = asyncio.run(
         DockingWorkflow().run(
-            {"task_id": "task-1", "manifest_locator": "manifest.json"}
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
         )
     )
 
     assert result["status"] == TaskStatus.SUCCEEDED.value
     assert result["projection_pending"] is True
     assert result["terminal_event_count"] == 1
+
+
+def test_cancel_during_terminal_projection_uses_controlled_cancel_terminal(monkeypatch):
+    operations: list[tuple[str, str | None]] = []
+    canceled_once = False
+
+    async def execute_activity(name, payload, **kwargs):
+        nonlocal canceled_once
+        if name == VERIFY_MANIFEST_ACTIVITY_NAME:
+            return {"verified": True}
+        if name == DOCKING_ACTIVITY_NAME:
+            return {
+                "task_id": TASK_ID,
+                "attempt": 1,
+                "status": TaskStatus.SUCCEEDED.value,
+                "result": {"pose_count": 1, "best_energy": -7.0},
+                "artifacts": [],
+                "warnings": [],
+                "provenance": {"tool": "molecular_docking"},
+            }
+        operations.append((payload["operation"], payload.get("status")))
+        if payload["operation"] == "terminal" and not canceled_once:
+            canceled_once = True
+            raise asyncio.CancelledError()
+        return {"applied": True}
+
+    monkeypatch.setattr(
+        "src.task_runtime.temporal.workflows.workflow.execute_activity",
+        execute_activity,
+    )
+    instance = DockingWorkflow()
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            instance.run(
+                {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
+            )
+        )
+
+    assert operations == [
+        ("running", None),
+        ("terminal", TaskStatus.SUCCEEDED.value),
+        ("cancel_requested", None),
+        ("terminal", TaskStatus.CANCELED.value),
+    ]
+    assert instance.task_snapshot()["status"] == TaskStatus.CANCELED.value
+    assert instance.task_snapshot()["terminal_event_count"] == 1
 
 
 def test_projection_is_strict_and_duplicate_terminal_is_idempotent(tmp_path):
@@ -504,13 +1109,13 @@ def test_projection_is_strict_and_duplicate_terminal_is_idempotent(tmp_path):
 
         assert (await activities.project_task_activity({
             "operation": "running",
-            "task_id": "task-1",
+            "task_id": TASK_ID,
             "attempt": 1,
             "phase": TaskPhase.RUNNING.value,
         }))["applied"] is True
         terminal_payload = {
             "operation": "terminal",
-            "task_id": "task-1",
+            "task_id": TASK_ID,
             "status": TaskStatus.SUCCEEDED.value,
             "result": {
                 "pose_count": 1,
@@ -526,9 +1131,9 @@ def test_projection_is_strict_and_duplicate_terminal_is_idempotent(tmp_path):
 
         assert first["applied"] is True
         assert second == {"applied": False, "idempotent": True, "status": "succeeded"}
-        record = store.get("task-1")
+        record = store.get(TASK_ID)
         assert "smiles" not in record.result
-        terminal_events = [event for event in store.events("task-1") if event.is_terminal]
+        terminal_events = [event for event in store.events(TASK_ID) if event.is_terminal]
         assert len(terminal_events) == 1
 
     asyncio.run(scenario())
@@ -538,9 +1143,9 @@ def test_conflicting_terminal_projection_fails_closed(tmp_path):
     async def scenario() -> None:
         store = TaskStore(tmp_path / "tasks.sqlite")
         _create_task(store)
-        assert store.claim_running("task-1")
+        assert store.claim_running(TASK_ID)
         assert store.finish(
-            "task-1",
+            TASK_ID,
             TaskStatus.SUCCEEDED,
             result={"pose_count": 1},
             projection_policy=ResultProjectionPolicy.SCIENTIFIC_STRICT,
@@ -551,7 +1156,7 @@ def test_conflicting_terminal_projection_fails_closed(tmp_path):
             await activities.project_task_activity(
                 {
                     "operation": "terminal",
-                    "task_id": "task-1",
+                    "task_id": TASK_ID,
                     "status": TaskStatus.FAILED.value,
                     "error_code": TaskErrorCode.DOCKING_PROCESS_FAILED.value,
                 }
@@ -560,7 +1165,7 @@ def test_conflicting_terminal_projection_fails_closed(tmp_path):
         assert error.value.non_retryable is True
         assert error.value.type == "TASK_PROJECTION_CONFLICT"
 
-        assert len([event for event in store.events("task-1") if event.is_terminal]) == 1
+        assert len([event for event in store.events(TASK_ID) if event.is_terminal]) == 1
 
     asyncio.run(scenario())
 
@@ -591,6 +1196,13 @@ def test_workflow_module_is_deterministic_and_has_no_scientific_or_io_imports():
     assert "TaskStore" not in source
 
 
+def test_temporal_package_init_has_no_eager_heavy_imports():
+    path = PROJECT_ROOT / "src" / "task_runtime" / "temporal" / "__init__.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    imports = [node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
+    assert not any(node.module in {"activities", "workflows"} for node in imports)
+
+
 def test_worker_registers_only_task7_components_and_safe_limits(monkeypatch, tmp_path):
     captured = {}
 
@@ -607,12 +1219,14 @@ def test_worker_registers_only_task7_components_and_safe_limits(monkeypatch, tmp
 
     assert captured["workflows"] == [DockingWorkflow]
     assert captured["activities"] == [
+        activities.verify_manifest_activity,
         activities.run_docking_activity,
         activities.project_task_activity,
     ]
     assert captured["max_concurrent_activities"] == 1
     assert captured["max_heartbeat_throttle_interval"].total_seconds() <= 5
     assert 0 < captured["graceful_shutdown_timeout"].total_seconds() <= 60
+    assert "workflow_runner" not in captured
 
 
 def test_worker_heartbeat_stops_without_a_dangling_task(tmp_path):
@@ -638,6 +1252,32 @@ def test_worker_heartbeat_stops_without_a_dangling_task(tmp_path):
         assert task.done()
 
     asyncio.run(scenario())
+
+
+def test_worker_heartbeat_log_does_not_disclose_store_exception(caplog):
+    class BrokenStore:
+        def record_worker_heartbeat(self, *args, **kwargs):
+            raise RuntimeError("C:/private/CCO sk-secret-value")
+
+    async def scenario() -> None:
+        stop = asyncio.Event()
+        asyncio.get_running_loop().call_later(0.02, stop.set)
+        await run_worker_heartbeat(
+            BrokenStore(),
+            worker_id="worker-1",
+            task_queue="medchat-docking",
+            sdk_version="1.30.0",
+            stop=stop,
+            interval=0.01,
+        )
+
+    with caplog.at_level("ERROR", logger="src.task_runtime.temporal.worker"):
+        asyncio.run(scenario())
+    text = caplog.text
+    assert "worker_heartbeat_failed code=TASK_PROJECTION_FAILED" in text
+    assert "private" not in text
+    assert "CCO" not in text
+    assert "sk-secret" not in text
 
 
 @pytest.mark.parametrize(
@@ -675,6 +1315,10 @@ def test_temporal_scripts_are_importable_when_launched_outside_repo(tmp_path, sc
 
 
 def test_temporal_sdk_sandbox_executes_success_workflow_once():
+    @activity.defn(name=VERIFY_MANIFEST_ACTIVITY_NAME)
+    async def fake_verify_manifest(payload: dict) -> dict:
+        return {"verified": True}
+
     @activity.defn(name=DOCKING_ACTIVITY_NAME)
     async def fake_docking(payload: dict) -> dict:
         return {
@@ -692,43 +1336,65 @@ def test_temporal_sdk_sandbox_executes_success_workflow_once():
         return {"applied": True, "operation": payload["operation"]}
 
     async def scenario() -> None:
-        try:
-            environment = await WorkflowEnvironment.start_time_skipping()
-        except Exception as exc:
-            pytest.skip(f"Temporal test server unavailable: {type(exc).__name__}")
+        environment = await WorkflowEnvironment.start_time_skipping()
         async with environment:
             worker = Worker(
                 environment.client,
                 task_queue="test-docking",
                 workflows=[DockingWorkflow],
-                activities=[fake_docking, fake_projection],
-                workflow_runner=build_workflow_runner(),
+                activities=[fake_verify_manifest, fake_docking, fake_projection],
             )
             async with worker:
-                result = await environment.client.execute_workflow(
+                handle = await environment.client.start_workflow(
                     DockingWorkflow.run,
-                    {"task_id": "task-1", "manifest_locator": "manifest.json"},
+                    {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
                     id="medchat-docking-test-task-1",
                     task_queue="test-docking",
                 )
+                result = await handle.result()
+                history = await handle.fetch_history()
+            replay = await Replayer(workflows=[DockingWorkflow]).replay_workflow(history)
         assert result["status"] == TaskStatus.SUCCEEDED.value
         assert result["terminal_event_count"] == 1
         assert result["projection_pending"] is False
+        assert replay.replay_failure is None
+        history_text = json.dumps(history.to_json_dict(), ensure_ascii=False)
+        assert "CCO" not in history_text
+        assert "C:/private" not in history_text
+        assert "D:\\\\private" not in history_text
 
     asyncio.run(scenario())
 
 
-def test_temporal_sdk_cancel_waits_for_activity_cleanup_before_canceled_projection():
+def test_temporal_sdk_cancel_is_authoritative_and_projects_domain_once(tmp_path):
     started = threading.Event()
     cleaned = threading.Event()
     projections: list[str] = []
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    _create_task(store, CANCEL_TASK_ID)
+    bound_activities = TemporalDockingActivities(
+        store,
+        _FakeDockingExecution(_success_result()),
+    )
+
+    @activity.defn(name=VERIFY_MANIFEST_ACTIVITY_NAME)
+    async def fake_verify_manifest(payload: dict) -> dict:
+        return {"verified": True}
 
     @activity.defn(name=DOCKING_ACTIVITY_NAME)
     async def blocking_docking(payload: dict) -> dict:
         started.set()
+        started_at = time.monotonic()
         try:
             while True:
-                activity.heartbeat({"phase": "vina_running", "attempt": 1})
+                activity.heartbeat(
+                    {
+                        "phase": "vina_running",
+                        "attempt": 1,
+                        "elapsed_time": time.monotonic() - started_at,
+                        "progress": 0.6,
+                    }
+                )
                 await asyncio.sleep(0.01)
         finally:
             cleaned.set()
@@ -738,35 +1404,43 @@ def test_temporal_sdk_cancel_waits_for_activity_cleanup_before_canceled_projecti
         if payload["operation"] == "terminal":
             assert cleaned.is_set()
         projections.append(payload["operation"])
-        return {"applied": True}
+        return await bound_activities.project_task_activity(payload)
 
     async def scenario() -> None:
-        try:
-            environment = await WorkflowEnvironment.start_time_skipping()
-        except Exception as exc:
-            pytest.skip(f"Temporal test server unavailable: {type(exc).__name__}")
+        environment = await WorkflowEnvironment.start_time_skipping()
         async with environment:
             worker = Worker(
                 environment.client,
                 task_queue="test-docking-cancel",
                 workflows=[DockingWorkflow],
-                activities=[blocking_docking, recording_projection],
-                workflow_runner=build_workflow_runner(),
+                activities=[fake_verify_manifest, blocking_docking, recording_projection],
             )
             async with worker:
                 handle = await environment.client.start_workflow(
                     DockingWorkflow.run,
-                    {"task_id": "task-cancel", "manifest_locator": "manifest.json"},
+                    {"task_id": CANCEL_TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
                     id="medchat-docking-test-task-cancel",
                     task_queue="test-docking-cancel",
                 )
                 assert await asyncio.to_thread(started.wait, 2.0)
                 await handle.cancel()
-                result = await handle.result()
+                with pytest.raises(WorkflowFailureError) as failure:
+                    await handle.result()
+                description = await handle.describe()
 
         assert cleaned.is_set()
         assert projections == ["running", "cancel_requested", "terminal"]
-        assert result["status"] == TaskStatus.CANCELED.value
-        assert result["terminal_event_count"] == 1
+        assert isinstance(failure.value.cause, TemporalCancelledError)
+        assert description.status is WorkflowExecutionStatus.CANCELED
+        record = store.get(CANCEL_TASK_ID)
+        assert record.status is TaskStatus.CANCELED
+        events = store.events(CANCEL_TASK_ID)
+        assert [event.event_type for event in events] == [
+            "task_created",
+            "task_started",
+            "task_cancel_requested",
+            "task_canceled",
+        ]
+        assert len([event for event in events if event.is_terminal]) == 1
 
     asyncio.run(scenario())

@@ -127,6 +127,7 @@ class DockingExecution:
                 AgentErrorCode.INVALID_INPUT,
                 "A docking input manifest path is required.",
             )
+        _emit_progress(progress_callback, "environment_check", 2)
         pending_deadline: float | None = None
         while True:
             prepared: PreparedDockingCompletion | None = None
@@ -138,6 +139,7 @@ class DockingExecution:
                     lease_timeout_seconds=lease_timeout_seconds,
                     cancel_check=_cancel_check(cancel_event),
                 ) as execution:
+                    _emit_progress(progress_callback, "input_verification", 5)
                     outcome = self._run_under_lease(
                         execution.inputs,
                         attempt=attempt,
@@ -172,10 +174,11 @@ class DockingExecution:
                     return _failure(
                         AgentErrorCode.INVALID_OUTPUT,
                         "Docking completion verification failed.",
+                        details={"reason": "completion_invalid"},
                     )
                 time.sleep(0.02)
                 continue
-            except ManifestError:
+            except ManifestError as exc:
                 if commit_state is not None and commit_state.committed:
                     return self._resolve_post_commit_exception(
                         task_id,
@@ -190,6 +193,13 @@ class DockingExecution:
                 return _failure(
                     AgentErrorCode.INVALID_INPUT,
                     "Docking input verification failed.",
+                    details={
+                        "reason": (
+                            "input_hash_mismatch"
+                            if exc.reason_code == "manifest_integrity_failed"
+                            else "input_invalid"
+                        )
+                    },
                 )
             except CompletionError:
                 if commit_state is not None and commit_state.committed:
@@ -200,6 +210,7 @@ class DockingExecution:
                 return _failure(
                     AgentErrorCode.INVALID_OUTPUT,
                     "Docking completion verification failed.",
+                    details={"reason": "completion_invalid"},
                 )
             except asyncio.CancelledError:
                 if commit_state is not None and commit_state.committed:
@@ -221,6 +232,7 @@ class DockingExecution:
                 return _failure(
                     AgentErrorCode.INTERNAL_ERROR,
                     "Docking execution failed before a verified result was produced.",
+                    details={"reason": "process_failed"},
                 )
 
     def _run_under_lease(
@@ -258,6 +270,7 @@ class DockingExecution:
                     return _failure(
                         AgentErrorCode.INVALID_OUTPUT,
                         "Docking completion provenance failed verification.",
+                        details={"reason": "provenance_rejected"},
                     )
             finally:
                 reuse_payload.clear()
@@ -286,14 +299,17 @@ class DockingExecution:
             return _failure(
                 AgentErrorCode.INTERNAL_ERROR,
                 "Docking tool execution failed before a scientific result was produced.",
+                details={"reason": "process_failed"},
             )
         finally:
             payload.clear()
 
+        _emit_progress(progress_callback, "result_parsing", 75)
         if not isinstance(tool_result, ToolResult):
             return _failure(
                 AgentErrorCode.INVALID_OUTPUT,
                 "Docking tool returned an invalid result contract.",
+                details={"reason": "completion_invalid"},
             )
         if not tool_result.success:
             if (
@@ -308,15 +324,22 @@ class DockingExecution:
             return _failure(
                 tool_result.error.code if tool_result.error else AgentErrorCode.INTERNAL_ERROR,
                 "Docking tool did not produce a verified scientific result.",
+                details={
+                    "reason": _tool_failure_reason(
+                        tool_result.error.code if tool_result.error else None
+                    )
+                },
             )
 
         inputs.verify_integrity()
         _attach_verified_input_evidence(tool_result, inputs)
+        _emit_progress(progress_callback, "scientific_validation", 90)
         validated = AgentResultValidator().validate_tool_result(tool_result)
         if not validated.success or validated.status != ObservationStatus.SUCCEEDED:
             return _failure(
                 AgentErrorCode.INVALID_OUTPUT,
                 "Docking evidence failed scientific validation.",
+                details={"reason": "validator_rejected"},
             )
         provenance = validated.provenance
         if (
@@ -330,6 +353,7 @@ class DockingExecution:
             return _failure(
                 AgentErrorCode.INVALID_OUTPUT,
                 "Docking result lacks trusted real-execution provenance.",
+                details={"reason": "provenance_rejected"},
             )
         if _is_cancelled(cancel_event):
             return _failure(
@@ -351,6 +375,7 @@ class DockingExecution:
             chunk_consumer=pose_parser.feed,
         )
         pose_parser.finish()
+        _emit_progress(progress_callback, "artifact_commit", 98)
         artifact_attempt = self._completions.begin_artifact_attempt(inputs.task_id)
         try:
             result_metadata = self._safe_result_metadata(
@@ -1158,6 +1183,35 @@ def _failure(
     result["completion"] = None
     result["reused_completion"] = False
     return result
+
+
+def _emit_progress(
+    callback: Callable[..., Any] | None,
+    phase: str,
+    progress: float,
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(phase, progress)
+    except Exception:
+        pass
+
+
+def _tool_failure_reason(code: AgentErrorCode | None) -> str:
+    if code in {
+        AgentErrorCode.TOOL_UNAVAILABLE,
+        AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE,
+        AgentErrorCode.MODEL_UNAVAILABLE,
+    }:
+        return "environment_unavailable"
+    if code is AgentErrorCode.INVALID_INPUT:
+        return "input_invalid"
+    if code is AgentErrorCode.VALIDATION_ERROR:
+        return "validator_rejected"
+    if code in {AgentErrorCode.INVALID_OUTPUT, AgentErrorCode.EMPTY_RESULT}:
+        return "artifact_invalid"
+    return "process_failed"
 
 
 def _cancel_check(cancel_event: Any) -> Callable[[], bool] | None:

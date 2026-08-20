@@ -773,14 +773,18 @@ def test_event_metadata_fields_require_safe_codes(tmp_path, field, value):
         )
 
 
-def test_task_phase_has_exact_stage_3a_values():
+def test_task_phase_has_exact_runtime_values():
     assert {phase.value for phase in TaskPhase} == {
         "running",
         "staging",
+        "environment_check",
+        "input_verification",
         "receptor_preparation",
         "ligand_preparation",
         "vina_running",
+        "result_parsing",
         "scientific_validation",
+        "artifact_commit",
         "completing",
         "canceling",
     }

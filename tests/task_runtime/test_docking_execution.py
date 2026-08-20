@@ -283,6 +283,7 @@ def test_scientific_authority_requires_real_provenance_and_execution(
     ).run_verified("task-1", manifest)
 
     assert result["success"] is False
+    assert result["error"]["details"]["reason"] == "provenance_rejected"
     assert not _completion(tmp_path).exists()
 
 
@@ -840,6 +841,7 @@ def test_validator_failure_never_commits(
     result = runner.run_verified("task-1", manifest)
 
     assert result["success"] is False
+    assert result["error"]["details"]["reason"] == "validator_rejected"
     assert "docking evidence" in result["message"].lower()
     assert not _completion(tmp_path).exists()
 
@@ -1152,6 +1154,8 @@ def test_exception_or_cancellation_writes_no_completion(
     assert result["success"] is False
     assert not _completion(tmp_path).exists()
     assert "secret" not in json.dumps(result)
+    if mode == "failure":
+        assert result["error"]["details"]["reason"] == "environment_unavailable"
 
 
 def test_non_tool_result_fails_without_completion(tmp_path: Path) -> None:
@@ -1167,6 +1171,7 @@ def test_non_tool_result_fails_without_completion(tmp_path: Path) -> None:
 
     assert result["success"] is False
     assert result["error"]["code"] == AgentErrorCode.INVALID_OUTPUT.value
+    assert result["error"]["details"]["reason"] == "completion_invalid"
     assert result["provenance"] is None
     assert not _completion(tmp_path).exists()
 
@@ -1189,6 +1194,36 @@ def test_input_snapshot_mutation_after_execution_is_rejected(
 
     assert result["success"] is False
     assert not _completion(tmp_path).exists()
+
+
+def test_verified_execution_reports_only_real_phase_boundaries(tmp_path: Path) -> None:
+    manifest = _stage(tmp_path)
+    phases: list[str] = []
+
+    def executor(payload: dict[str, Any], **control: Any) -> ToolResult:
+        callback = control["progress_callback"]
+        callback("receptor_preparation", 10)
+        callback("ligand_preparation", 35)
+        callback("vina_running", 60)
+        return _executor(tmp_path, [])(payload, **control)
+
+    result = DockingExecution(tmp_path, raw_executor=executor).run_verified(
+        "task-1",
+        manifest,
+        progress_callback=lambda phase, _progress: phases.append(phase),
+    )
+
+    assert result["success"] is True
+    assert phases == [
+        "environment_check",
+        "input_verification",
+        "receptor_preparation",
+        "ligand_preparation",
+        "vina_running",
+        "result_parsing",
+        "scientific_validation",
+        "artifact_commit",
+    ]
 
 
 def test_second_input_integrity_failure_after_tool_never_commits(
@@ -1217,6 +1252,7 @@ def test_second_input_integrity_failure_after_tool_never_commits(
     )
 
     assert result["success"] is False
+    assert result["error"]["details"]["reason"] == "input_hash_mismatch"
     assert not _completion(tmp_path).exists()
 
 

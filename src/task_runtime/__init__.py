@@ -1,5 +1,19 @@
-from .manager import TaskManager, get_task_manager
-from .models import BackendHealth, TaskRecord, TaskStatus, TaskSubmission
+from typing import Any
+
+
+_MODEL_EXPORTS = {"BackendHealth", "TaskRecord", "TaskStatus", "TaskSubmission"}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _MODEL_EXPORTS:
+        from . import models
+
+        return getattr(models, name)
+    if name in {"TaskManager", "get_task_manager"}:
+        from .manager import TaskManager, get_task_manager
+
+        return TaskManager if name == "TaskManager" else get_task_manager
+    raise AttributeError(name)
 
 
 def get_task_runtime():

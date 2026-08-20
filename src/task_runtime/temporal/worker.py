@@ -9,10 +9,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from temporalio.worker import Worker
-from temporalio.worker.workflow_sandbox import (
-    SandboxedWorkflowRunner,
-    SandboxRestrictions,
-)
 
 from src.task_runtime.store import TaskStore
 
@@ -55,6 +51,7 @@ def build_temporal_worker(
         task_queue=settings.task_queue,
         workflows=[DockingWorkflow],
         activities=[
+            activities.verify_manifest_activity,
             activities.run_docking_activity,
             activities.project_task_activity,
         ],
@@ -64,19 +61,7 @@ def build_temporal_worker(
         graceful_shutdown_timeout=timedelta(
             seconds=settings.graceful_shutdown_seconds
         ),
-        workflow_runner=build_workflow_runner(),
     )
-
-
-def build_workflow_runner() -> SandboxedWorkflowRunner:
-    """Pass through I/O-heavy parent initializers, not the workflow module itself."""
-
-    restrictions = SandboxRestrictions.default.with_passthrough_modules(
-        "src",
-        "src.task_runtime",
-        "src.task_runtime.temporal",
-    )
-    return SandboxedWorkflowRunner(restrictions=restrictions)
 
 
 async def run_worker_heartbeat(
@@ -162,7 +147,6 @@ async def run_temporal_worker(
 __all__ = [
     "WorkerSettings",
     "build_temporal_worker",
-    "build_workflow_runner",
     "run_temporal_worker",
     "run_worker_heartbeat",
 ]

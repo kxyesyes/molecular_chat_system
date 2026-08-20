@@ -19,6 +19,7 @@ from temporalio.client import Client
 from src.task_runtime.config import TaskRuntimeConfig
 from src.task_runtime.docking_execution import DockingExecution
 from src.task_runtime.store import TaskStore
+from src.task_runtime.staging import DockingInputStager
 from src.task_runtime.temporal.activities import TemporalDockingActivities
 from src.task_runtime.temporal.worker import (
     WorkerSettings,
@@ -51,6 +52,7 @@ async def main() -> None:
     activities = TemporalDockingActivities(
         store,
         DockingExecution(config.staging_root),
+        stager=DockingInputStager(config.staging_root),
     )
     settings = WorkerSettings(
         task_queue=config.docking_queue,
