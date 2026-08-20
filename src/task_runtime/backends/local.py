@@ -12,6 +12,7 @@ from typing import Any, TypeVar
 from ..errors import TaskErrorCode
 from ..models import (
     BackendHealth,
+    ResultProjectionPolicy,
     TaskPhase,
     TaskRecord,
     TaskStatus,
@@ -379,6 +380,7 @@ class LocalTaskBackend:
                 self.store.finish,
                 task_id,
                 TaskStatus.CANCELED,
+                projection_policy=ResultProjectionPolicy.SCIENTIFIC_STRICT,
             )
 
     async def get(self, task_id: str) -> TaskRecord:
@@ -640,6 +642,7 @@ class LocalTaskBackend:
                     self.store.finish,
                     task_id,
                     TaskStatus.CANCELED,
+                    projection_policy=ResultProjectionPolicy.SCIENTIFIC_STRICT,
                 )
             elif record.status is TaskStatus.RUNNING:
                 finished = await asyncio.to_thread(
@@ -649,6 +652,7 @@ class LocalTaskBackend:
                     error="Task state projection failed",
                     error_code=TaskErrorCode.TASK_PROJECTION_FAILED,
                     provenance=provenance,
+                    projection_policy=ResultProjectionPolicy.SCIENTIFIC_STRICT,
                 )
             else:
                 return
@@ -757,6 +761,7 @@ class LocalTaskBackend:
                 artifacts=artifacts,
                 warnings=warnings,
                 provenance=provenance,
+                projection_policy=ResultProjectionPolicy.SCIENTIFIC_STRICT,
             )
             if not finished:
                 await self._finish_requested_cancellation(task_id)
@@ -822,6 +827,7 @@ class LocalTaskBackend:
             error_code=error_code,
             warnings=warnings,
             provenance=provenance,
+            projection_policy=ResultProjectionPolicy.SCIENTIFIC_STRICT,
         )
         if not finished:
             await self._finish_requested_cancellation(task_id)
@@ -846,13 +852,19 @@ class LocalTaskBackend:
             )
         if record.status is TaskStatus.CANCEL_REQUESTED:
             await asyncio.to_thread(
-                self.store.finish, task_id, TaskStatus.CANCELED
+                self.store.finish,
+                task_id,
+                TaskStatus.CANCELED,
+                projection_policy=ResultProjectionPolicy.SCIENTIFIC_STRICT,
             )
 
     async def _finish_requested_cancellation(self, task_id: str) -> None:
         if await self._is_cancel_requested(task_id):
             await asyncio.to_thread(
-                self.store.finish, task_id, TaskStatus.CANCELED
+                self.store.finish,
+                task_id,
+                TaskStatus.CANCELED,
+                projection_policy=ResultProjectionPolicy.SCIENTIFIC_STRICT,
             )
 
     def _task_done(self, task_id: str, task: asyncio.Task[None]) -> None:

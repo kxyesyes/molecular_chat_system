@@ -13,14 +13,16 @@ from src.agent.persistence.redaction import redact_sensitive
 from .database import connection, init_db
 from .errors import TaskErrorCode
 from .models import (
+    ResultProjectionPolicy,
     TaskEvent,
     TaskPhase,
     TaskRecord,
     TaskStatus,
     normalize_task_warnings,
+    project_task_result,
     sanitize_provenance,
     sanitize_public_artifacts,
-    sanitize_task_result_projection,
+    sanitize_task_message,
     strict_json_snapshot,
     validate_task_input_payload,
 )
@@ -673,16 +675,25 @@ class TaskStore:
         error_code: TaskErrorCode | str | None = None,
         warnings: list[Any] | None = None,
         provenance: dict[str, Any] | None = None,
+        projection_policy: ResultProjectionPolicy,
         now: datetime | str | None = None,
     ) -> bool:
         task_id = _validate_required_string(task_id, "task_id")
+        if not isinstance(projection_policy, ResultProjectionPolicy):
+            raise ValueError("invalid result projection policy")
         timestamp = _as_timestamp(now)
         code = _error_code_value(error_code)
-        safe_error = (
-            _ERROR_MESSAGES.get(code, "Task failed")
-            if error is not None or status is TaskStatus.FAILED
-            else None
-        )
+        safe_error = None
+        if error is not None or status is TaskStatus.FAILED:
+            fixed_error = _ERROR_MESSAGES.get(code) if code is not None else None
+            if fixed_error is not None:
+                safe_error = fixed_error
+            elif projection_policy is ResultProjectionPolicy.SCIENTIFIC_STRICT:
+                safe_error = "Task failed"
+            elif error is not None:
+                safe_error = sanitize_task_message(error) or "Task failed"
+            else:
+                safe_error = "Task failed"
         safe_provenance = sanitize_provenance(provenance) if provenance is not None else None
         safe_result = None
         raw_result_warnings = None
@@ -690,7 +701,7 @@ class TaskStore:
             result_snapshot = strict_json_snapshot(result)
             if isinstance(result_snapshot, dict):
                 raw_result_warnings = result_snapshot.get("warnings")
-            safe_result = sanitize_task_result_projection(result_snapshot)
+            safe_result = project_task_result(result_snapshot, projection_policy)
         warning_source = warnings if warnings is not None else raw_result_warnings
         safe_warnings = (
             normalize_task_warnings(warning_source)
@@ -764,8 +775,11 @@ class TaskStore:
         error_code: TaskErrorCode | str | None = None,
         warnings: list[Any] | None = None,
         provenance: dict[str, Any] | None = None,
+        projection_policy: ResultProjectionPolicy = ResultProjectionPolicy.GENERIC_SAFE,
         now: datetime | str | None = None,
     ) -> bool:
+        if not isinstance(projection_policy, ResultProjectionPolicy):
+            raise ValueError("invalid result projection policy")
         if status not in TERMINAL_STATUSES:
             raise ValueError("finish requires a terminal TaskStatus")
         source_statuses = (
@@ -783,6 +797,7 @@ class TaskStore:
             error_code=error_code,
             warnings=warnings,
             provenance=provenance,
+            projection_policy=projection_policy,
             now=now,
         )
 
@@ -805,6 +820,7 @@ class TaskStore:
             (TaskStatus.QUEUED,),
             error=messages[error_code],
             error_code=error_code,
+            projection_policy=ResultProjectionPolicy.GENERIC_SAFE,
             now=now,
         )
 

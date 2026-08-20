@@ -1,3 +1,4 @@
+import json
 import time
 import math
 from concurrent.futures import Future
@@ -42,7 +43,7 @@ def test_task_manager_persists_failed_task(tmp_path):
     finished = wait_for_terminal(manager, record.task_id)
 
     assert finished.status.value == "failed"
-    assert finished.error == "Task failed"
+    assert finished.error == "boom"
 
 
 def test_task_manager_preserves_returned_status_failure(tmp_path):
@@ -57,8 +58,8 @@ def test_task_manager_preserves_returned_status_failure(tmp_path):
     finished = wait_for_terminal(manager, record.task_id)
 
     assert finished.status is TaskStatus.FAILED
-    assert finished.result == {"status": "failed"}
-    assert finished.error == "Task failed"
+    assert finished.result == {"status": "failed", "message": "tool unavailable"}
+    assert finished.error == "tool unavailable"
     assert finished.artifacts == result["artifacts"]
 
 
@@ -71,7 +72,7 @@ def test_task_manager_preserves_returned_success_false_failure(tmp_path):
 
     assert finished.status is TaskStatus.FAILED
     assert finished.result == {"success": False}
-    assert finished.error == "Task failed"
+    assert finished.error == "invalid input"
 
 
 def test_task_manager_normalizes_returned_failed_status(tmp_path):
@@ -83,7 +84,7 @@ def test_task_manager_normalizes_returned_failed_status(tmp_path):
 
     assert finished.status is TaskStatus.FAILED
     assert finished.result == {"status": "failed"}
-    assert finished.error == "Task failed"
+    assert finished.error == "Task returned a failed result"
 
 
 def test_task_manager_preserves_non_mapping_json_result(tmp_path):
@@ -93,7 +94,52 @@ def test_task_manager_preserves_non_mapping_json_result(tmp_path):
     finished = wait_for_terminal(manager, record.task_id)
 
     assert finished.status is TaskStatus.SUCCEEDED
-    assert finished.result == [1]
+    assert finished.result == ["complete", 1]
+
+
+def test_task_manager_generic_projection_preserves_safe_status_text(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    result = {
+        "message": "demo task completed",
+        "workflow": "workflow completed",
+        "description": "任务已安全完成",
+        "items": ["complete", 1],
+    }
+
+    record = manager.submit("unit_test", {}, lambda _payload: result)
+    finished = wait_for_terminal(manager, record.task_id)
+
+    assert finished.result == result
+
+
+def test_task_manager_generic_projection_drops_unsafe_dynamic_keys(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    result = {
+        "message": "workflow completed",
+        "CCO": "dynamic-key-leak",
+        "C:/private/receptor.pdb": "absolute-key-leak",
+        "sk-token": "credential-key-leak",
+        "best ligand CCO": "scientific-key-leak",
+        "location": "C:/private/receptor.pdb",
+        "detail": "sk-secret-secret",
+        "summary": "best ligand CCO",
+    }
+
+    record = manager.submit("unit_test", {}, lambda _payload: result)
+    finished = wait_for_terminal(manager, record.task_id)
+    serialized = json.dumps(finished.result)
+
+    assert finished.result["message"] == "workflow completed"
+    for attack in (
+        "dynamic-key-leak",
+        "absolute-key-leak",
+        "credential-key-leak",
+        "scientific-key-leak",
+        "C:/private/receptor.pdb",
+        "sk-secret-secret",
+        "best ligand CCO",
+    ):
+        assert attack not in serialized
 
 
 def test_manager_cancel_before_start_skips_handler_and_finishes_canceled(tmp_path):

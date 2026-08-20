@@ -391,7 +391,65 @@ async def test_handler_result_never_persists_scientific_smiles(tmp_path: Path) -
         assert "CCO" not in serialized
         assert "c1ccccc1" not in serialized
         assert "ClCCBr" not in serialized
-        assert record.result["data"]["nested"] == {"score": 0.75}
+        assert record.result == {"success": True, "data": {}}
+    finally:
+        await backend.close()
+
+
+@pytest.mark.anyio
+async def test_local_backend_uses_strict_projection_for_dynamic_keys_and_artifacts(
+    tmp_path: Path,
+) -> None:
+    async def handler(submission, cancel_event, progress):
+        return {
+            "success": True,
+            "status": "succeeded",
+            "pose_count": 2,
+            "best_energy": -7.1,
+            "message": "workflow completed",
+            "CCO": "dynamic-key-leak",
+            "C:/private/receptor.pdb": "absolute-key-leak",
+            "sk-token": "credential-key-leak",
+            "best ligand CCO": "scientific-key-leak",
+            "artifacts": [
+                {
+                    "name": "pose",
+                    "type": "pose",
+                    "path": "poses/best.pdbqt",
+                    "sha256": "a" * 64,
+                },
+                {"name": "CCO", "type": "CCO", "path": "C:/private/a"},
+            ],
+        }
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+    try:
+        await backend.submit(_submission())
+        record = await _wait_for_terminal(backend, "task-1")
+        assert record.result == {
+            "success": True,
+            "status": "succeeded",
+            "pose_count": 2,
+            "best_energy": -7.1,
+        }
+        assert record.artifacts[0] == {
+            "name": "pose",
+            "type": "pose",
+            "path": "poses/best.pdbqt",
+            "sha256": "a" * 64,
+        }
+        serialized = json.dumps(record.to_dict())
+        for attack in (
+            "dynamic-key-leak",
+            "absolute-key-leak",
+            "credential-key-leak",
+            "scientific-key-leak",
+            "C:/private/receptor.pdb",
+            "CCO",
+        ):
+            assert attack not in serialized
+        assert sum(event.is_terminal for event in store.events("task-1")) == 1
     finally:
         await backend.close()
 

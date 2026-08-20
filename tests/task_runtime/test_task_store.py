@@ -12,6 +12,7 @@ import pytest
 from src.task_runtime.database import connect, connection, init_db
 from src.task_runtime.errors import TaskErrorCode
 from src.task_runtime.models import (
+    ResultProjectionPolicy,
     TaskEvent,
     TaskPhase,
     TaskRecord,
@@ -587,7 +588,7 @@ def test_events_allowlist_metadata_and_record_sensitive_fields_are_redacted(tmp_
         {"code": "projection_stale"},
         {"code": "TASK_HEARTBEAT_TIMEOUT"},
     ]
-    assert record.error == "Task failed"
+    assert record.error == "[REDACTED]"
 
 
 @pytest.mark.parametrize("timestamp", ["", "not-a-time", "2026-99-99T10:00:00"])
@@ -1244,10 +1245,11 @@ def test_store_finish_sanitizes_nested_scientific_result_before_database(tmp_pat
             "nested": {"smiles": "CCCC", "score": 1.0},
             "candidate": "ClCCBr",
         },
+        projection_policy=ResultProjectionPolicy.SCIENTIFIC_STRICT,
     )
 
     record = store.get("task-1")
-    assert record.result == {"nested": {"score": 1.0}}
+    assert record.result == {}
     with connect(store.db_path) as conn:
         raw = conn.execute(
             "SELECT input_json, result_json FROM tasks WHERE task_id = 'task-1'"
@@ -1311,6 +1313,7 @@ def test_store_terminal_projection_drops_all_free_text_but_keeps_typed_science(
         artifacts=[{"name": "pose", "path": "pose.pdbqt"}],
         warnings=[{"code": "projection_stale"}],
         provenance={"backend": "local", "tool": "vina"},
+        projection_policy=ResultProjectionPolicy.SCIENTIFIC_STRICT,
     )
 
     record = store.get("task-1")
@@ -1530,7 +1533,9 @@ def test_persisted_error_replaces_embedded_paths_and_credentials(tmp_path):
     )
 
     error = store.get("task-1").error
-    assert error == "Task failed"
+    assert error == (
+        "failed opening [PATH]; see [PATH], [PATH] and [REDACTED]"
+    )
 
 
 def test_strict_json_rejects_cycles_and_excess_depth():
@@ -1549,3 +1554,247 @@ def test_strict_json_rejects_cycles_and_excess_depth():
             from src.task_runtime.models import strict_json_snapshot
 
             strict_json_snapshot(value)
+
+
+def _projection_attack_result():
+    return {
+        "success": True,
+        "status": "succeeded",
+        "reused_completion": False,
+        "pose_count": 2,
+        "best_energy": -7.1,
+        "attempt": 1,
+        "elapsed_ms": 25,
+        "progress": 1.0,
+        "message": "workflow completed",
+        "items": ["complete", 1],
+        "location": "C:/private/receptor.pdb",
+        "detail": "sk-secret-secret",
+        "summary": "best ligand CCO",
+        "CCO": "dynamic-key-leak",
+        "C:/private/receptor.pdb": "absolute-key-leak",
+        "sk-token": "credential-key-leak",
+        "best ligand CCO": "scientific-key-leak",
+        "completion": {
+            "pose_count": 2,
+            "best_energy": -7.1,
+            "attempt": 1,
+            "input_hash": "a" * 64,
+            "config_hash": "b" * 64,
+            "CCO": 9,
+        },
+        "quality": {
+            "validator_status": "validated",
+            "real_execution": True,
+            "CCO": False,
+        },
+        "data": {
+            "total_poses": 2,
+            "best_pose": {"binding_energy": -7.1, "CCO": 8},
+            "dynamic": {"score": 99},
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        ResultProjectionPolicy.SCIENTIFIC_STRICT,
+        ResultProjectionPolicy.GENERIC_SAFE,
+    ],
+)
+def test_terminal_projection_policies_reject_same_dynamic_key_attack_matrix(
+    tmp_path,
+    policy,
+):
+    store = TaskStore(tmp_path / f"{policy.value}.sqlite")
+    store.create("task-1", "docking", {})
+    store.claim_running("task-1")
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.SUCCEEDED,
+        result=_projection_attack_result(),
+        projection_policy=policy,
+    )
+
+    record = store.get("task-1")
+    serialized = json.dumps(record.result)
+    raw = store.db_path.read_bytes()
+    for attack in (
+        "dynamic-key-leak",
+        "absolute-key-leak",
+        "credential-key-leak",
+        "scientific-key-leak",
+        "C:/private/receptor.pdb",
+        "sk-secret-secret",
+        "best ligand CCO",
+    ):
+        assert attack not in serialized
+        assert attack.encode() not in raw
+    assert b'"CCO"' not in raw
+    assert sum(event.is_terminal for event in store.events("task-1")) == 1
+
+    if policy is ResultProjectionPolicy.SCIENTIFIC_STRICT:
+        assert record.result == {
+            "success": True,
+            "status": "succeeded",
+            "reused_completion": False,
+            "pose_count": 2,
+            "best_energy": -7.1,
+            "attempt": 1,
+            "elapsed_ms": 25,
+            "progress": 1.0,
+            "completion": {
+                "pose_count": 2,
+                "best_energy": -7.1,
+                "attempt": 1,
+                "input_hash": "a" * 64,
+                "config_hash": "b" * 64,
+            },
+            "quality": {
+                "validator_status": "validated",
+                "real_execution": True,
+            },
+            "data": {
+                "total_poses": 2,
+                "best_pose": {"binding_energy": -7.1},
+            },
+        }
+    else:
+        assert record.result["message"] == "workflow completed"
+        assert record.result["items"] == ["complete", 1]
+        assert "[PATH]" in record.result["location"]
+        assert record.result["detail"] == "[REDACTED]"
+        assert "CCO" not in record.result["summary"]
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        ResultProjectionPolicy.SCIENTIFIC_STRICT,
+        ResultProjectionPolicy.GENERIC_SAFE,
+    ],
+)
+def test_terminal_projection_policies_validate_artifact_metadata(
+    tmp_path,
+    policy,
+):
+    store = TaskStore(tmp_path / f"artifacts-{policy.value}.sqlite")
+    store.create("task-1", "docking", {})
+    store.claim_running("task-1")
+    artifacts = [
+        {
+            "name": "pose",
+            "type": "pose",
+            "status": "succeeded",
+            "path": "poses/best.pdbqt",
+            "sha256": "A" * 64,
+        },
+        {"name": "CCO", "path": "poses/name.pdbqt"},
+        {"type": "CCO", "path": "poses/type.pdbqt"},
+        {"status": "CCO", "path": "poses/status.pdbqt"},
+        {"C:/private/receptor.pdb": "secret", "path": "poses/key.pdbqt"},
+        {"name": "sk-token", "path": "C:/private/receptor.pdb"},
+    ]
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.SUCCEEDED,
+        result={"success": True},
+        artifacts=artifacts,
+        projection_policy=policy,
+    )
+
+    record = store.get("task-1")
+    assert record.artifacts[0] == {
+        "name": "pose",
+        "type": "pose",
+        "status": "succeeded",
+        "path": "poses/best.pdbqt",
+        "sha256": "a" * 64,
+    }
+    serialized = json.dumps(record.artifacts)
+    for attack in ("CCO", "C:/private/receptor.pdb", "sk-token", "secret"):
+        assert attack not in serialized
+    assert b'"CCO"' not in store.db_path.read_bytes()
+
+
+def test_direct_finish_defaults_to_generic_safe_and_rejects_string_policy(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("task-1", "demo", {})
+    store.claim_running("task-1")
+    with pytest.raises(ValueError, match="projection policy"):
+        store.finish(
+            "task-1",
+            TaskStatus.SUCCEEDED,
+            result={"message": "workflow completed"},
+            projection_policy="generic_safe",
+        )
+    assert store.get("task-1").status is TaskStatus.RUNNING
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.SUCCEEDED,
+        result={"message": "demo task completed", "items": ["complete", 1]},
+    )
+    assert store.get("task-1").result == {
+        "message": "demo task completed",
+        "items": ["complete", 1],
+    }
+
+
+def test_projection_policy_controls_persisted_error_semantics(tmp_path):
+    generic = TaskStore(tmp_path / "generic.sqlite")
+    generic.create("generic", "demo", {})
+    generic.claim_running("generic")
+    assert generic.finish(
+        "generic",
+        TaskStatus.FAILED,
+        error=(
+            "workflow failed at C:/private/receptor.pdb with "
+            "sk-secret-secret and best ligand CCO"
+        ),
+        projection_policy=ResultProjectionPolicy.GENERIC_SAFE,
+    )
+    generic_error = generic.get("generic").error
+    assert generic_error.startswith("workflow failed at [PATH]")
+    assert "sk-secret-secret" not in generic_error
+    assert "CCO" not in generic_error
+
+    scientific = TaskStore(tmp_path / "scientific.sqlite")
+    scientific.create("scientific", "docking", {})
+    scientific.claim_running("scientific")
+    assert scientific.finish(
+        "scientific",
+        TaskStatus.FAILED,
+        error="workflow failed",
+        error_code=TaskErrorCode.DOCKING_PROCESS_FAILED,
+        projection_policy=ResultProjectionPolicy.SCIENTIFIC_STRICT,
+    )
+    assert scientific.get("scientific").error == "Docking process failed"
+
+
+def test_generic_projection_bounds_items_depth_and_text(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("task-1", "demo", {})
+    store.claim_running("task-1")
+    deep = current = {}
+    for index in range(12):
+        child = {}
+        current[f"level_{index}"] = child
+        current = child
+    result = {
+        "message": "x" * 2_000,
+        "many": {f"field_{index}": index for index in range(400)},
+        "deep": deep,
+    }
+
+    assert store.finish("task-1", TaskStatus.SUCCEEDED, result=result)
+
+    projection = store.get("task-1").result
+    assert len(projection["message"]) == 512
+    assert len(projection["many"]) < 256
+    serialized = json.dumps(projection)
+    assert "level_11" not in serialized
+    assert len(serialized) < 10_000

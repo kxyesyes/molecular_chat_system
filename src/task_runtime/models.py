@@ -34,6 +34,11 @@ class TaskPhase(str, Enum):
     CANCELING = "canceling"
 
 
+class ResultProjectionPolicy(str, Enum):
+    SCIENTIFIC_STRICT = "scientific_strict"
+    GENERIC_SAFE = "generic_safe"
+
+
 CONFIG_WARNING_CODES = frozenset(
     {
         "invalid_task_backend",
@@ -782,34 +787,234 @@ _RESULT_ENUM_VALUES = frozenset(
         "committed_ambiguous",
         "strict",
         "real",
+        "succeeded",
+        "completed",
+        "uncertain",
+        "reusable",
     }
 )
 
+RESULT_PROJECTION_MAX_DEPTH = 8
+RESULT_PROJECTION_MAX_ITEMS = 256
+RESULT_PROJECTION_MAX_TEXT_LENGTH = 512
+_SAFE_GENERIC_RESULT_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}\Z")
+_SAFE_ARTIFACT_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:+-]{0,127}\Z")
+_RESULT_RESERVED_KEYS = frozenset(
+    {"artifacts", "error", "error_code", "evidence", "provenance", "warnings"}
+)
+_STRICT_NUMERIC_RESULT_KEYS = frozenset(
+    {
+        "attempt",
+        "best_energy",
+        "binding_energy",
+        "elapsed",
+        "elapsed_ms",
+        "energy",
+        "pose_count",
+        "progress",
+        "score",
+        "total_poses",
+    }
+)
+_STRICT_BOOLEAN_RESULT_KEYS = frozenset(
+    {"success", "reused_completion", "real_execution", "validated"}
+)
+_STRICT_DIGEST_RESULT_KEYS = frozenset(
+    {
+        "config_hash",
+        "digest",
+        "hash",
+        "input_hash",
+        "output_hash",
+        "pose_sha256",
+        "sha256",
+    }
+)
+_STRICT_ENUM_RESULT_KEYS = frozenset(
+    {
+        "authority_state",
+        "completion_authority",
+        "completion_durability",
+        "execution_status",
+        "quality",
+        "validator_status",
+    }
+)
+_STRICT_RESULT_OBJECT_SCHEMAS: dict[str, frozenset[str]] = {
+    "root": frozenset(
+        {
+            "success",
+            "status",
+            "reused_completion",
+            "attempt",
+            "best_energy",
+            "binding_energy",
+            "elapsed",
+            "elapsed_ms",
+            "energy",
+            "pose_count",
+            "progress",
+            "score",
+            "total_poses",
+            "completion",
+            "data",
+            "quality",
+            "validator_status",
+        }
+    ),
+    "completion": frozenset(
+        {
+            "attempt",
+            "best_energy",
+            "binding_energy",
+            "elapsed",
+            "elapsed_ms",
+            "pose_count",
+            "progress",
+            "total_poses",
+            "config_hash",
+            "digest",
+            "hash",
+            "input_hash",
+            "output_hash",
+            "pose_sha256",
+            "quality",
+            "sha256",
+            "validator_status",
+        }
+    ),
+    "data": frozenset(
+        {
+            "attempt",
+            "best_energy",
+            "binding_energy",
+            "elapsed",
+            "elapsed_ms",
+            "pose_count",
+            "progress",
+            "score",
+            "total_poses",
+            "best_pose",
+        }
+    ),
+    "best_pose": frozenset(
+        {"best_energy", "binding_energy", "pose_count", "score"}
+    ),
+    "quality": frozenset(
+        {
+            "attempt",
+            "authority_state",
+            "completion_authority",
+            "completion_durability",
+            "execution_status",
+            "progress",
+            "real_execution",
+            "score",
+            "validated",
+            "validator_status",
+        }
+    ),
+}
 
-def _sanitize_task_result_projection_value(
+
+def _sanitize_scientific_result_object(
     value: Any,
     *,
-    key: str | None = None,
+    schema_name: str,
+    depth: int,
+    budget: list[int],
 ) -> Any:
-    normalized_key = (key or "").lower()
-    if normalized_key in {
-        "artifacts",
-        "error",
-        "error_code",
-        "evidence",
-        "provenance",
-    }:
+    if value is None and schema_name == "completion":
+        return None
+    if not isinstance(value, dict) or depth > RESULT_PROJECTION_MAX_DEPTH:
         return _DROP
-    if _is_private_content_key(normalized_key) or "smiles" in normalized_key:
+    allowed_keys = _STRICT_RESULT_OBJECT_SCHEMAS[schema_name]
+    result: dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        if budget[0] >= RESULT_PROJECTION_MAX_ITEMS:
+            break
+        budget[0] += 1
+        if not isinstance(raw_key, str):
+            continue
+        key = raw_key.lower()
+        if key not in allowed_keys:
+            continue
+        sanitized: Any = _DROP
+        if key in _STRICT_BOOLEAN_RESULT_KEYS:
+            if type(raw_value) is bool:
+                sanitized = raw_value
+        elif key in _STRICT_NUMERIC_RESULT_KEYS:
+            if type(raw_value) in {int, float} and (
+                not isinstance(raw_value, float) or math.isfinite(raw_value)
+            ):
+                sanitized = raw_value
+        elif key in _STRICT_DIGEST_RESULT_KEYS:
+            if isinstance(raw_value, str) and _SAFE_DIGEST.fullmatch(raw_value):
+                sanitized = raw_value.lower()
+        elif key == "status":
+            if isinstance(raw_value, str):
+                lowered = raw_value.strip().lower()
+                if lowered in _RESULT_STATUS_VALUES:
+                    sanitized = lowered
+        elif key in _STRICT_ENUM_RESULT_KEYS:
+            if key == "quality" and isinstance(raw_value, dict):
+                sanitized = _sanitize_scientific_result_object(
+                    raw_value,
+                    schema_name="quality",
+                    depth=depth + 1,
+                    budget=budget,
+                )
+            elif isinstance(raw_value, str):
+                lowered = raw_value.strip().lower()
+                if lowered in _RESULT_ENUM_VALUES:
+                    sanitized = lowered
+        elif key in {"completion", "data", "best_pose"}:
+            sanitized = _sanitize_scientific_result_object(
+                raw_value,
+                schema_name=key,
+                depth=depth + 1,
+                budget=budget,
+            )
+        if sanitized is not _DROP:
+            result[key] = sanitized
+    return result
+
+
+def _is_safe_generic_result_key(value: Any) -> bool:
+    if not isinstance(value, str) or _SAFE_GENERIC_RESULT_KEY.fullmatch(value) is None:
+        return False
+    normalized = value.lower()
+    if normalized in _RESULT_RESERVED_KEYS or _is_private_content_key(normalized):
+        return False
+    if any(marker in normalized for marker in _SENSITIVE_IDENTIFIER_MARKERS):
+        return False
+    if any(marker in normalized for marker in ("manifest", "path", "uri")):
+        return False
+    return not _runtime_metadata_contains_smiles(value)
+
+
+def _sanitize_generic_result_value(
+    value: Any,
+    *,
+    key: str | None,
+    depth: int,
+    budget: list[int],
+) -> Any:
+    if depth > RESULT_PROJECTION_MAX_DEPTH:
         return _DROP
     if isinstance(value, dict):
         result: dict[str, Any] = {}
         for child_key, child_value in value.items():
-            if not isinstance(child_key, str):
+            if budget[0] >= RESULT_PROJECTION_MAX_ITEMS:
+                break
+            budget[0] += 1
+            if not _is_safe_generic_result_key(child_key):
                 continue
-            sanitized = _sanitize_task_result_projection_value(
+            sanitized = _sanitize_generic_result_value(
                 child_value,
                 key=child_key,
+                depth=depth + 1,
+                budget=budget,
             )
             if sanitized is not _DROP:
                 result[child_key] = sanitized
@@ -817,29 +1022,32 @@ def _sanitize_task_result_projection_value(
     if isinstance(value, (list, tuple)):
         result = []
         for item in value:
-            sanitized = _sanitize_task_result_projection_value(item)
+            if budget[0] >= RESULT_PROJECTION_MAX_ITEMS:
+                break
+            budget[0] += 1
+            sanitized = _sanitize_generic_result_value(
+                item,
+                key=None,
+                depth=depth + 1,
+                budget=budget,
+            )
             if sanitized is not _DROP:
                 result.append(sanitized)
         return result
     if isinstance(value, float) and not math.isfinite(value):
         return _DROP
     if isinstance(value, str):
-        lowered = value.strip().lower()
-        if normalized_key == "status" and lowered in _RESULT_STATUS_VALUES:
-            return lowered
-        if normalized_key in {
-            "quality",
-            "validator_status",
-            "authority_state",
-        } and lowered in _RESULT_ENUM_VALUES:
-            return lowered
-        if (
-            normalized_key.endswith(("digest", "hash", "sha256"))
-            and _SAFE_DIGEST.fullmatch(value) is not None
-        ):
-            return value.lower()
-        return _DROP
-    if value is None or isinstance(value, (bool, int, float)):
+        if value.strip() == "CO":
+            return "[PRIVATE]"
+        sanitized = sanitize_task_message(value)[:RESULT_PROJECTION_MAX_TEXT_LENGTH]
+        if not sanitized:
+            return _DROP
+        if key is not None and key.lower() == "status":
+            lowered = sanitized.strip().lower()
+            if lowered in _RESULT_STATUS_VALUES:
+                return lowered
+        return sanitized
+    if value is None or type(value) in {bool, int, float}:
         return value
     return _DROP
 
@@ -847,15 +1055,49 @@ def _sanitize_task_result_projection_value(
 def sanitize_task_result_projection(value: Any) -> Any:
     """Return the strict scientific task projection persisted by async backends."""
 
-    sanitized = _sanitize_task_result_projection_value(value)
+    sanitized = _sanitize_scientific_result_object(
+        value,
+        schema_name="root",
+        depth=0,
+        budget=[0],
+    )
     return None if sanitized is _DROP else sanitized
+
+
+def sanitize_generic_task_result_projection(value: Any) -> Any:
+    """Return a bounded, redacted projection for legacy non-scientific tasks."""
+
+    sanitized = _sanitize_generic_result_value(
+        value,
+        key=None,
+        depth=0,
+        budget=[0],
+    )
+    return None if sanitized is _DROP else sanitized
+
+
+def project_task_result(value: Any, policy: ResultProjectionPolicy) -> Any:
+    if not isinstance(policy, ResultProjectionPolicy):
+        raise ValueError("invalid result projection policy")
+    if policy is ResultProjectionPolicy.SCIENTIFIC_STRICT:
+        return sanitize_task_result_projection(value)
+    return sanitize_generic_task_result_projection(value)
 
 
 def sanitize_public_artifacts(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     result: list[dict[str, Any]] = []
-    allowed_keys = {"name", "type", "path", "hash", "sha256", "size", "status"}
+    allowed_keys = (
+        "artifact_type",
+        "name",
+        "type",
+        "path",
+        "hash",
+        "sha256",
+        "size",
+        "status",
+    )
     for artifact in value:
         if not isinstance(artifact, dict):
             continue
@@ -874,9 +1116,30 @@ def sanitize_public_artifacts(value: Any) -> list[dict[str, Any]]:
                 except ValueError:
                     pass
                 continue
-            sanitized = _sanitize_public_value(item, key=key)
-            if sanitized is not _DROP:
-                public[key] = sanitized
+            if key in {"artifact_type", "name", "type", "status"}:
+                if (
+                    isinstance(item, str)
+                    and _SAFE_ARTIFACT_CODE.fullmatch(item) is not None
+                    and not any(
+                        marker in item.lower()
+                        for marker in _SENSITIVE_IDENTIFIER_MARKERS
+                    )
+                    and not _runtime_metadata_contains_smiles(item)
+                    and sanitize_task_message(item) == item
+                ):
+                    public[key] = item
+                continue
+            if key == "size":
+                if type(item) in {int, float} and item >= 0 and (
+                    not isinstance(item, float) or math.isfinite(item)
+                ):
+                    public[key] = item
+        metadata = artifact.get("metadata")
+        if "sha256" not in public and isinstance(metadata, dict):
+            try:
+                public["sha256"] = _validate_digest(metadata.get("sha256"))
+            except ValueError:
+                pass
         result.append(public)
     return result
 

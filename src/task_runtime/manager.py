@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from .errors import TaskErrorCode
 from .models import (
+    ResultProjectionPolicy,
     TaskRecord,
     TaskStatus,
     normalize_task_warnings,
@@ -118,7 +119,11 @@ class TaskManager:
             except KeyError:
                 return
             if record.status is TaskStatus.CANCEL_REQUESTED:
-                self.store.finish(task_id, TaskStatus.CANCELED)
+                self.store.finish(
+                    task_id,
+                    TaskStatus.CANCELED,
+                    projection_policy=ResultProjectionPolicy.GENERIC_SAFE,
+                )
             return
         try:
             result = handler(payload)
@@ -182,7 +187,11 @@ class TaskManager:
         except KeyError:
             return
         if record.status is TaskStatus.CANCEL_REQUESTED:
-            self.store.finish(task_id, TaskStatus.CANCELED)
+            self.store.finish(
+                task_id,
+                TaskStatus.CANCELED,
+                projection_policy=ResultProjectionPolicy.GENERIC_SAFE,
+            )
 
     def _mark_finished(
         self,
@@ -202,6 +211,7 @@ class TaskManager:
             artifacts=artifacts,
             error_code=error_code,
             warnings=warnings,
+            projection_policy=ResultProjectionPolicy.GENERIC_SAFE,
         )
 
 
