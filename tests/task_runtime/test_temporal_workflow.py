@@ -50,8 +50,8 @@ from src.task_runtime.temporal.workflows import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TASK_ID = "00000000-0000-4000-8000-000000000001"
 CANCEL_TASK_ID = "00000000-0000-4000-8000-000000000002"
-COMMIT_RACE_TASK_ID = "00000000-0000-4000-8000-000000000003"
 PRECOMMIT_RACE_TASK_ID = "00000000-0000-4000-8000-000000000004"
+ACK_RETRY_RACE_TASK_ID = "00000000-0000-4000-8000-000000000005"
 MANIFEST_LOCATOR = "input_manifest.json"
 HEARTBEAT_PHASES = {
     "environment_check",
@@ -1184,8 +1184,11 @@ def test_terminal_projection_outage_preserves_scientific_outcome(monkeypatch):
     assert result["terminal_event_count"] == 1
 
 
-def test_cancel_during_terminal_projection_uses_controlled_cancel_terminal(monkeypatch):
+def test_cancel_after_terminal_projection_scheduled_preserves_scientific_outcome(
+    monkeypatch,
+):
     operations: list[tuple[str, str | None]] = []
+    projection_cancellation_types = []
     canceled_once = False
 
     async def execute_activity(name, payload, **kwargs):
@@ -1203,6 +1206,7 @@ def test_cancel_during_terminal_projection_uses_controlled_cancel_terminal(monke
                 "provenance": {"tool": "molecular_docking"},
             }
         operations.append((payload["operation"], payload.get("status")))
+        projection_cancellation_types.append(kwargs.get("cancellation_type"))
         if payload["operation"] == "terminal" and not canceled_once:
             canceled_once = True
             raise asyncio.CancelledError()
@@ -1213,21 +1217,25 @@ def test_cancel_during_terminal_projection_uses_controlled_cancel_terminal(monke
         execute_activity,
     )
     instance = DockingWorkflow()
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(
-            instance.run(
-                {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
-            )
+    result = asyncio.run(
+        instance.run(
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
         )
+    )
 
     assert operations == [
         ("running", None),
         ("terminal", TaskStatus.SUCCEEDED.value),
-        ("inspect_terminal", None),
-        ("cancel_requested", None),
-        ("terminal", TaskStatus.CANCELED.value),
+        ("terminal", TaskStatus.SUCCEEDED.value),
     ]
-    assert instance.task_snapshot()["status"] == TaskStatus.CANCELED.value
+    assert projection_cancellation_types == [
+        workflow.ActivityCancellationType.TRY_CANCEL,
+        workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+        workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+    ]
+    assert result["status"] == TaskStatus.SUCCEEDED.value
+    assert result["projection_pending"] is False
+    assert instance.task_snapshot()["status"] == TaskStatus.SUCCEEDED.value
     assert instance.task_snapshot()["terminal_event_count"] == 1
 
 
@@ -1544,7 +1552,9 @@ def test_temporal_sdk_sandbox_executes_success_workflow_once():
     asyncio.run(scenario())
 
 
-def test_temporal_sdk_cancel_is_authoritative_and_projects_domain_once(tmp_path):
+def test_temporal_cancel_before_terminal_projection_is_authoritative_once(
+    tmp_path,
+):
     started = threading.Event()
     cleaned = threading.Event()
     projections: list[str] = []
@@ -1629,10 +1639,14 @@ def test_temporal_sdk_cancel_is_authoritative_and_projects_domain_once(tmp_path)
     asyncio.run(scenario())
 
 
-def test_temporal_terminal_commit_before_ack_is_success_wins(tmp_path):
+def test_temporal_terminal_commit_retry_receipt_wins_when_inspect_unavailable(
+    tmp_path,
+):
     committed = threading.Event()
+    terminal_attempts = 0
+    inspect_attempts = 0
     store = TaskStore(tmp_path / "tasks.sqlite")
-    _create_task(store, COMMIT_RACE_TASK_ID)
+    _create_task(store, ACK_RETRY_RACE_TASK_ID)
     bound = TemporalDockingActivities(
         store,
         _FakeDockingExecution(_success_result()),
@@ -1654,53 +1668,85 @@ def test_temporal_terminal_commit_before_ack_is_success_wins(tmp_path):
             "provenance": {"tool": "molecular_docking"},
         }
 
-    @activity.defn(name=PROJECTION_ACTIVITY_NAME)
-    async def commit_then_delay_ack(payload: dict) -> dict:
-        ack = await bound.project_task_activity(payload)
-        if (
-            payload.get("operation") == "terminal"
-            and payload.get("status") == TaskStatus.SUCCEEDED.value
-        ):
-            committed.set()
-            await activity.wait_for_cancelled()
-            raise asyncio.CancelledError()
-        return ack
-
     async def scenario() -> None:
+        release_first_ack = asyncio.Event()
+
+        @activity.defn(name=PROJECTION_ACTIVITY_NAME)
+        async def commit_then_lose_first_ack(payload: dict) -> dict:
+            nonlocal inspect_attempts, terminal_attempts
+            if payload.get("operation") == "inspect_terminal":
+                inspect_attempts += 1
+                raise ApplicationError(
+                    "inspect unavailable",
+                    type="INSPECT_UNAVAILABLE",
+                    non_retryable=True,
+                )
+            ack = await bound.project_task_activity(payload)
+            if (
+                payload.get("operation") == "terminal"
+                and payload.get("status") == TaskStatus.SUCCEEDED.value
+            ):
+                terminal_attempts += 1
+                if terminal_attempts == 1:
+                    committed.set()
+                    await release_first_ack.wait()
+                    raise ApplicationError(
+                        "terminal acknowledgement unavailable",
+                        type="TERMINAL_ACK_UNAVAILABLE",
+                        non_retryable=False,
+                    )
+            return ack
+
         environment = await WorkflowEnvironment.start_time_skipping()
         async with environment:
             worker = Worker(
                 environment.client,
-                task_queue="test-terminal-commit-race",
+                task_queue="test-terminal-ack-retry-race",
                 workflows=[DockingWorkflow],
-                activities=[fake_verify_manifest, fake_docking, commit_then_delay_ack],
+                activities=[
+                    fake_verify_manifest,
+                    fake_docking,
+                    commit_then_lose_first_ack,
+                ],
             )
             async with worker:
                 handle = await environment.client.start_workflow(
                     DockingWorkflow.run,
                     {
-                        "task_id": COMMIT_RACE_TASK_ID,
+                        "task_id": ACK_RETRY_RACE_TASK_ID,
                         "manifest_locator": MANIFEST_LOCATOR,
                     },
-                    id="medchat-terminal-commit-race",
-                    task_queue="test-terminal-commit-race",
+                    id="medchat-terminal-ack-retry-race",
+                    task_queue="test-terminal-ack-retry-race",
                 )
                 assert await asyncio.to_thread(committed.wait, 2.0)
                 await handle.cancel()
+                release_first_ack.set()
                 result = await handle.result()
                 description = await handle.describe()
 
         assert result["status"] == TaskStatus.SUCCEEDED.value
         assert result["terminal_event_count"] == 1
+        assert result["projection_pending"] is False
         assert description.status is WorkflowExecutionStatus.COMPLETED
-        record = store.get(COMMIT_RACE_TASK_ID)
+        record = store.get(ACK_RETRY_RACE_TASK_ID)
         assert record.status is TaskStatus.SUCCEEDED
-        assert len([event for event in store.events(COMMIT_RACE_TASK_ID) if event.is_terminal]) == 1
+        assert terminal_attempts == 2
+        assert inspect_attempts == 0
+        assert len(
+            [
+                event
+                for event in store.events(ACK_RETRY_RACE_TASK_ID)
+                if event.is_terminal
+            ]
+        ) == 1
 
     asyncio.run(scenario())
 
 
-def test_temporal_terminal_submit_before_commit_is_cancel_wins(tmp_path):
+def test_temporal_terminal_scheduled_before_commit_is_scientific_status_wins(
+    tmp_path,
+):
     submitted = threading.Event()
     store = TaskStore(tmp_path / "tasks.sqlite")
     _create_task(store, PRECOMMIT_RACE_TASK_ID)
@@ -1725,18 +1771,19 @@ def test_temporal_terminal_submit_before_commit_is_cancel_wins(tmp_path):
             "provenance": {"tool": "molecular_docking"},
         }
 
-    @activity.defn(name=PROJECTION_ACTIVITY_NAME)
-    async def delay_before_commit(payload: dict) -> dict:
-        if (
-            payload.get("operation") == "terminal"
-            and payload.get("status") == TaskStatus.SUCCEEDED.value
-        ):
-            submitted.set()
-            await activity.wait_for_cancelled()
-            raise asyncio.CancelledError()
-        return await bound.project_task_activity(payload)
-
     async def scenario() -> None:
+        release_commit = asyncio.Event()
+
+        @activity.defn(name=PROJECTION_ACTIVITY_NAME)
+        async def delay_before_commit(payload: dict) -> dict:
+            if (
+                payload.get("operation") == "terminal"
+                and payload.get("status") == TaskStatus.SUCCEEDED.value
+            ):
+                submitted.set()
+                await release_commit.wait()
+            return await bound.project_task_activity(payload)
+
         environment = await WorkflowEnvironment.start_time_skipping()
         async with environment:
             worker = Worker(
@@ -1757,14 +1804,22 @@ def test_temporal_terminal_submit_before_commit_is_cancel_wins(tmp_path):
                 )
                 assert await asyncio.to_thread(submitted.wait, 2.0)
                 await handle.cancel()
-                with pytest.raises(WorkflowFailureError) as failure:
-                    await handle.result()
+                release_commit.set()
+                result = await handle.result()
                 description = await handle.describe()
 
-        assert isinstance(failure.value.cause, TemporalCancelledError)
-        assert description.status is WorkflowExecutionStatus.CANCELED
+        assert result["status"] == TaskStatus.SUCCEEDED.value
+        assert result["terminal_event_count"] == 1
+        assert result["projection_pending"] is False
+        assert description.status is WorkflowExecutionStatus.COMPLETED
         record = store.get(PRECOMMIT_RACE_TASK_ID)
-        assert record.status is TaskStatus.CANCELED
-        assert len([event for event in store.events(PRECOMMIT_RACE_TASK_ID) if event.is_terminal]) == 1
+        assert record.status is TaskStatus.SUCCEEDED
+        assert len(
+            [
+                event
+                for event in store.events(PRECOMMIT_RACE_TASK_ID)
+                if event.is_terminal
+            ]
+        ) == 1
 
     asyncio.run(scenario())

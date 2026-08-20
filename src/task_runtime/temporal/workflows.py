@@ -220,17 +220,9 @@ class DockingWorkflow:
         for key in ("result", "artifacts", "warnings", "provenance"):
             if key in outcome:
                 terminal_payload[key] = outcome[key]
-        projection_pending = False
-        try:
-            await self._project(terminal_payload)
-        except asyncio.CancelledError:
-            return await self._finish_canceled(task_id)
-        except ActivityError as exc:
-            if isinstance(exc.cause, TemporalCancelledError):
-                return await self._finish_canceled(task_id)
-            projection_pending = True
-        except Exception:
-            projection_pending = True
+        projection_pending = not await self._project_terminal_receipt(
+            terminal_payload
+        )
         return self._terminal(
             status,
             error_code=error_code,
@@ -238,13 +230,41 @@ class DockingWorkflow:
         )
 
     async def _project(self, payload: dict[str, Any]) -> dict[str, Any]:
+        cancellation_type = workflow.ActivityCancellationType.TRY_CANCEL
+        if payload.get("operation") == "terminal":
+            cancellation_type = (
+                workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED
+            )
         return await workflow.execute_activity(
             PROJECTION_ACTIVITY_NAME,
             payload,
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=_PROJECTION_RETRY,
-            cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+            cancellation_type=cancellation_type,
         )
+
+    async def _project_terminal_receipt(
+        self,
+        payload: dict[str, Any],
+    ) -> bool:
+        """Obtain the receipt for one already-selected scientific terminal."""
+
+        try:
+            await self._project(payload)
+            return True
+        except asyncio.CancelledError:
+            pass
+        except ActivityError as exc:
+            if not isinstance(exc.cause, TemporalCancelledError):
+                return False
+        except Exception:
+            return False
+
+        try:
+            await self._project(payload)
+            return True
+        except BaseException:
+            return False
 
     async def _finish_canceled(self, task_id: str) -> dict[str, Any]:
         existing = await self._inspect_terminal(task_id)
@@ -331,24 +351,14 @@ class DockingWorkflow:
         task_id: str,
         error_code: str,
     ) -> dict[str, Any]:
-        projection_pending = False
-        try:
-            await self._project(
-                {
-                    "operation": "terminal",
-                    "task_id": task_id,
-                    "status": _STATUS_FAILED,
-                    "error_code": error_code,
-                }
-            )
-        except asyncio.CancelledError:
-            return await self._finish_canceled(task_id)
-        except ActivityError as exc:
-            if isinstance(exc.cause, TemporalCancelledError):
-                return await self._finish_canceled(task_id)
-            projection_pending = True
-        except Exception:
-            projection_pending = True
+        projection_pending = not await self._project_terminal_receipt(
+            {
+                "operation": "terminal",
+                "task_id": task_id,
+                "status": _STATUS_FAILED,
+                "error_code": error_code,
+            }
+        )
         return self._terminal(
             _STATUS_FAILED,
             error_code=error_code,
