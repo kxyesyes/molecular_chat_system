@@ -98,6 +98,9 @@ _PRIVATE_CONTENT_KEYS = frozenset(
         "input_manifest_path",
     }
 )
+_PRIVATE_SCIENTIFIC_PREFIXES = frozenset(
+    {"smiles", "ligand", "receptor", "input", "query", "prompt"}
+)
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"[A-Za-z]:[\\/]")
 _WINDOWS_PATH_TEXT = re.compile(r"(?i)(?:[A-Z]:[\\/])[^\s;,]+")
 _UNC_PATH_TEXT = re.compile(r"\\\\[^\s\\/]+[\\/][^\s;,]+")
@@ -516,7 +519,7 @@ def _validate_digest_identifier(value: Any) -> str:
     if any(marker in normalized for marker in ("path", "file", "uri", "manifest")):
         raise ValueError("invalid provenance hash identifier")
     is_digest_label = normalized.endswith(("_hash", "_sha256", "-hash", "-sha256"))
-    if not is_digest_label and _is_private_content_key(normalized):
+    if not is_digest_label and _is_private_content_key(value):
         raise ValueError("invalid provenance hash identifier")
     return value
 
@@ -642,6 +645,8 @@ def _is_private_content_key(value: str) -> bool:
     normalized = value.lower()
     if normalized in _PRIVATE_CONTENT_KEYS or "manifest" in normalized:
         return True
+    if contains_prefixed_scientific_identifier(value):
+        return True
     tokens = {token for token in re.split(r"[^a-z0-9]+", normalized) if token}
     return bool(
         tokens & {"smiles", "query", "prompt", "receptor", "ligand", "input"}
@@ -650,7 +655,7 @@ def _is_private_content_key(value: str) -> bool:
 
 def _sanitize_public_value(value: Any, *, key: str | None = None) -> Any:
     normalized_key = (key or "").lower()
-    if _is_private_content_key(normalized_key):
+    if _is_private_content_key(key or ""):
         return _DROP
     if isinstance(value, dict):
         result: dict[str, Any] = {}
@@ -1017,7 +1022,7 @@ def _is_safe_generic_result_key(value: Any) -> bool:
     if not isinstance(value, str) or _SAFE_GENERIC_RESULT_KEY.fullmatch(value) is None:
         return False
     normalized = value.lower()
-    if normalized in _RESULT_RESERVED_KEYS or _is_private_content_key(normalized):
+    if normalized in _RESULT_RESERVED_KEYS or _is_private_content_key(value):
         return False
     if any(marker in normalized for marker in _SENSITIVE_IDENTIFIER_MARKERS):
         return False
@@ -1117,6 +1122,24 @@ def contains_scientific_structure(value: Any) -> bool:
     """Return whether text contains a reliable molecular atomic subsequence."""
 
     return isinstance(value, str) and bool(_scientific_structure_spans(value))
+
+
+def contains_prefixed_scientific_identifier(value: Any) -> bool:
+    """Return whether an identifier prefixes a scientific suffix with private semantics."""
+
+    if not isinstance(value, str):
+        return False
+    normalized = value.lower()
+    for index in range(len(normalized)):
+        if index > 0 and _is_ascii_alphanumeric(normalized[index - 1]):
+            continue
+        for prefix in _PRIVATE_SCIENTIFIC_PREFIXES:
+            if not normalized.startswith(prefix, index):
+                continue
+            suffix_start = index + len(prefix)
+            if contains_scientific_structure(value[suffix_start:]):
+                return True
+    return False
 
 
 def _redact_scientific_structures(value: str) -> str:
@@ -1278,6 +1301,7 @@ def sanitize_public_artifacts(value: Any) -> list[dict[str, Any]]:
                 if any(
                     contains_sensitive_text(candidate)
                     or contains_scientific_structure(candidate)
+                    or contains_prefixed_scientific_identifier(candidate)
                     for candidate in {segment, basename}
                 ):
                     path_is_sensitive = True
@@ -1301,6 +1325,7 @@ def sanitize_public_artifacts(value: Any) -> list[dict[str, Any]]:
                     _SAFE_ARTIFACT_CODE.fullmatch(item) is not None
                     and not contains_sensitive_text(item)
                     and not contains_scientific_structure(item)
+                    and not contains_prefixed_scientific_identifier(item)
                 )
             if not valid:
                 invalid_identity = True

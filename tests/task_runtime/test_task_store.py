@@ -2327,3 +2327,75 @@ def test_artifact_projection_preserves_engineering_words_and_drops_short_smiles(
     for private in ("poses/C=O.txt", "C-O"):
         assert private.encode() not in raw
         assert private not in public
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        ResultProjectionPolicy.SCIENTIFIC_STRICT,
+        ResultProjectionPolicy.GENERIC_SAFE,
+    ],
+)
+def test_projection_blocks_prefixed_scientific_identifiers_without_false_positives(
+    tmp_path, policy
+):
+    store = TaskStore(tmp_path / f"prefixed-scientific-{policy.value}.sqlite")
+    store.create("task-1", "docking", {})
+    store.claim_running("task-1")
+    key_attacks = {
+        "smilesCCO": "smiles-key-leak",
+        "ligandC-O": "ligand-bond-key-leak",
+        "ligandC1C": "ligand-ring-key-leak",
+        "receptorC=O": "receptor-key-leak",
+        "inputC1C": "input-key-leak",
+        "queryCCO": "query-key-leak",
+        "promptC-O": "prompt-key-leak",
+    }
+    path_attacks = (
+        "poses/smilesCCO.txt",
+        "poses/ligandC=O.txt",
+        "poses/ligandC-O.txt",
+        "poses/ligandC1C.txt",
+    )
+    safe_artifacts = [
+        {
+            "name": "CSV-summary",
+            "type": "report",
+            "path": "reports/CSV-summary.txt",
+        },
+        {
+            "name": "ligand-pose",
+            "type": "docking_pose",
+            "path": "poses/ligand_pose.pdbqt",
+        },
+    ]
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.SUCCEEDED,
+        result={"success": True, "status": "succeeded", **key_attacks},
+        artifacts=[
+            *safe_artifacts,
+            *[
+                {"name": f"private-{index}", "type": "file", "path": path}
+                for index, path in enumerate(path_attacks)
+            ],
+        ],
+        projection_policy=policy,
+    )
+
+    record = store.get("task-1")
+    assert record.artifacts == safe_artifacts
+    public = json.dumps(record.to_public_dict())
+    raw = store.db_path.read_bytes()
+    for safe in (
+        "CSV-summary",
+        "reports/CSV-summary.txt",
+        "ligand-pose",
+        "poses/ligand_pose.pdbqt",
+    ):
+        assert safe.encode() in raw
+        assert safe in public
+    for private in (*key_attacks.keys(), *key_attacks.values(), *path_attacks):
+        assert private.encode() not in raw
+        assert private not in public
