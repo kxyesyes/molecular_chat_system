@@ -34,7 +34,17 @@ DOCKING_ACTIVITY_NAME = "run_docking_activity"
 PROJECTION_ACTIVITY_NAME = "project_task_activity"
 VERIFY_MANIFEST_ACTIVITY_NAME = "verify_manifest_activity"
 
-_CONTROLLED_PHASES = frozenset(item.value for item in TaskPhase)
+_HEARTBEAT_PHASES = (
+    TaskPhase.ENVIRONMENT_CHECK.value,
+    TaskPhase.INPUT_VERIFICATION.value,
+    TaskPhase.RECEPTOR_PREPARATION.value,
+    TaskPhase.LIGAND_PREPARATION.value,
+    TaskPhase.VINA_RUNNING.value,
+    TaskPhase.RESULT_PARSING.value,
+    TaskPhase.SCIENTIFIC_VALIDATION.value,
+    TaskPhase.ARTIFACT_COMMIT.value,
+)
+_CONTROLLED_PHASES = frozenset(_HEARTBEAT_PHASES)
 _ERROR_CODE_MAP = {
     "invalid_input": TaskErrorCode.TASK_INPUT_INVALID.value,
     "invalid_output": TaskErrorCode.DOCKING_ARTIFACT_INVALID.value,
@@ -68,7 +78,7 @@ _MANIFEST_LOCATOR = "input_manifest.json"
 class _ProgressSlot:
     """A bounded latest-value slot shared with one synchronous worker thread."""
 
-    _phase: str = TaskPhase.RUNNING.value
+    _phase: str = TaskPhase.ENVIRONMENT_CHECK.value
     _progress: float = 0.0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -304,7 +314,7 @@ async def _run_docking_in_thread(
 
     work = asyncio.create_task(
         asyncio.to_thread(
-            docking_execution.run_verified,
+            docking_execution.run_verified_locator,
             task_id,
             manifest_locator,
             attempt=attempt,
@@ -312,24 +322,36 @@ async def _run_docking_in_thread(
             cancel_event=cancel_event,
         )
     )
+
+    async def flush_heartbeat() -> None:
+        heartbeat_payload = {
+            **progress.snapshot(),
+            "attempt": attempt,
+            "elapsed_time": max(0.0, time.monotonic() - started_at),
+        }
+        heartbeat(heartbeat_payload)
+        if heartbeat_projection is not None:
+            try:
+                projected = heartbeat_projection(dict(heartbeat_payload))
+                if inspect.isawaitable(projected):
+                    await projected
+            except Exception:
+                pass
+
     try:
         while not work.done():
-            heartbeat_payload = {
-                **progress.snapshot(),
-                "attempt": attempt,
-                "elapsed_time": max(0.0, time.monotonic() - started_at),
-            }
-            heartbeat(heartbeat_payload)
-            if heartbeat_projection is not None:
-                try:
-                    projected = heartbeat_projection(dict(heartbeat_payload))
-                    if inspect.isawaitable(projected):
-                        await projected
-                except Exception:
-                    pass
+            await flush_heartbeat()
             await asyncio.sleep(float(heartbeat_interval))
         raw_result = await work
-        return _summarize_docking_result(raw_result, task_id=task_id, attempt=attempt)
+        outcome = _summarize_docking_result(
+            raw_result,
+            task_id=task_id,
+            attempt=attempt,
+        )
+        if outcome.get("status") == TaskStatus.SUCCEEDED.value:
+            progress.update(TaskPhase.ARTIFACT_COMMIT.value, 1.0)
+        await flush_heartbeat()
+        return outcome
     except asyncio.CancelledError:
         cancel_event.set()
         cleanup_started = asyncio.get_running_loop().time()
@@ -352,6 +374,25 @@ async def _run_docking_in_thread(
                 non_retryable=True,
             )
         raise
+
+
+async def _to_thread_completion_safe(
+    function: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Wait for one sync state mutation even if its Activity is canceled."""
+
+    work = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        while not work.done():
+            try:
+                await asyncio.shield(work)
+            except asyncio.CancelledError:
+                continue
+        return work.result()
 
 
 class TemporalDockingActivities:
@@ -512,6 +553,22 @@ class TemporalDockingActivities:
             if record.status is not TaskStatus.CANCEL_REQUESTED:
                 raise _projection_conflict()
             return {"applied": True, "status": TaskStatus.CANCEL_REQUESTED.value}
+        if operation == "inspect_terminal":
+            record = await _to_thread_completion_safe(self.store.get, task_id)
+            if record.status in {
+                TaskStatus.SUCCEEDED,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELED,
+                TaskStatus.TIMED_OUT,
+            }:
+                response: dict[str, Any] = {
+                    "terminal": True,
+                    "status": record.status.value,
+                }
+                if record.error_code is not None:
+                    response["error_code"] = record.error_code
+                return response
+            return {"terminal": False, "status": record.status.value}
         if operation == "terminal":
             return await self._project_terminal(payload)
         raise RuntimeError("invalid projection operation")
@@ -539,7 +596,7 @@ class TemporalDockingActivities:
         }:
             raise RuntimeError("invalid terminal projection")
         error_code = payload.get("error_code")
-        applied = await asyncio.to_thread(
+        applied = await _to_thread_completion_safe(
             self.store.finish,
             payload["task_id"],
             status,
@@ -552,7 +609,10 @@ class TemporalDockingActivities:
         )
         if applied:
             return {"applied": True, "status": status.value}
-        record = await asyncio.to_thread(self.store.get, payload["task_id"])
+        record = await _to_thread_completion_safe(
+            self.store.get,
+            payload["task_id"],
+        )
         if record.status is status:
             return {"applied": False, "idempotent": True, "status": status.value}
         raise _projection_conflict()

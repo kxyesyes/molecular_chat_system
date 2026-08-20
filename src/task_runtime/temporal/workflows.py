@@ -243,15 +243,36 @@ class DockingWorkflow:
             payload,
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=_PROJECTION_RETRY,
+            cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
         )
 
     async def _finish_canceled(self, task_id: str) -> dict[str, Any]:
+        existing = await self._inspect_terminal(task_id)
+        if existing is not None:
+            return self._terminal(
+                existing[0],
+                error_code=existing[1],
+                projection_pending=False,
+            )
         projection_pending = False
         try:
             await self._project(
                 {"operation": "cancel_requested", "task_id": task_id}
             )
-        except BaseException:
+        except BaseException as exc:
+            if _is_projection_conflict(exc):
+                existing = await self._inspect_terminal(task_id)
+                if existing is not None:
+                    return self._terminal(
+                        existing[0],
+                        error_code=existing[1],
+                        projection_pending=False,
+                    )
+                return self._terminal(
+                    _STATUS_FAILED,
+                    error_code=_CODE_PROJECTION_FAILED,
+                    projection_pending=True,
+                )
             projection_pending = True
         try:
             await self._project(
@@ -261,13 +282,49 @@ class DockingWorkflow:
                     "status": _STATUS_CANCELED,
                 }
             )
-        except BaseException:
+        except BaseException as exc:
+            if _is_projection_conflict(exc):
+                existing = await self._inspect_terminal(task_id)
+                if existing is not None:
+                    return self._terminal(
+                        existing[0],
+                        error_code=existing[1],
+                        projection_pending=False,
+                    )
+                return self._terminal(
+                    _STATUS_FAILED,
+                    error_code=_CODE_PROJECTION_FAILED,
+                    projection_pending=True,
+                )
             projection_pending = True
         self._terminal(
             _STATUS_CANCELED,
             projection_pending=projection_pending,
         )
         raise asyncio.CancelledError()
+
+    async def _inspect_terminal(
+        self,
+        task_id: str,
+    ) -> tuple[str, str | None] | None:
+        try:
+            result = await self._project(
+                {"operation": "inspect_terminal", "task_id": task_id}
+            )
+        except BaseException:
+            return None
+        if not isinstance(result, dict) or result.get("terminal") is not True:
+            return None
+        status = result.get("status")
+        if status not in _TERMINAL_STATUSES:
+            return None
+        error_code = result.get("error_code")
+        if status in {_STATUS_FAILED, _STATUS_TIMED_OUT}:
+            if error_code not in _ERROR_CODES:
+                error_code = _CODE_PROCESS_FAILED
+        else:
+            error_code = None
+        return status, error_code
 
     async def _finish_pre_docking_failure(
         self,
@@ -351,3 +408,11 @@ def _manifest_failure_code(cause: BaseException | None) -> str:
         if cause.type == "MANIFEST_TRANSIENT":
             return _CODE_BACKEND_UNAVAILABLE
     return _CODE_BACKEND_UNAVAILABLE
+
+
+def _is_projection_conflict(error: BaseException) -> bool:
+    return (
+        isinstance(error, ActivityError)
+        and isinstance(error.cause, ApplicationError)
+        and error.cause.type == "TASK_PROJECTION_CONFLICT"
+    )

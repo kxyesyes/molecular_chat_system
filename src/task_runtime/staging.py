@@ -633,13 +633,22 @@ class DockingInputStager:
     ) -> dict[str, Any]:
         """Resolve the one public logical manifest name inside worker-local staging."""
 
+        return self.load_verified(
+            task_id,
+            self.resolve_manifest_locator(task_id, manifest_locator),
+        )
+
+    def resolve_manifest_locator(
+        self,
+        task_id: str,
+        manifest_locator: str,
+    ) -> Path:
+        """Return a worker-local path for the sole public manifest locator."""
+
         _validate_task_id(task_id)
         if manifest_locator != _MANIFEST_NAME:
             raise ManifestError("manifest_path_invalid")
-        return self.load_verified(
-            task_id,
-            self._root / task_id / _MANIFEST_NAME,
-        )
+        return self._root / task_id / _MANIFEST_NAME
 
     @contextmanager
     def task_execution_lease(

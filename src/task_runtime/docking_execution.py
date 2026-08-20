@@ -235,6 +235,33 @@ class DockingExecution:
                     details={"reason": "process_failed"},
                 )
 
+    def run_verified_locator(
+        self,
+        task_id: str,
+        manifest_locator: str,
+        **control: Any,
+    ) -> dict[str, Any]:
+        """Resolve a safe logical locator locally, then run verified docking."""
+
+        try:
+            manifest_path = self._stager.resolve_manifest_locator(
+                task_id,
+                manifest_locator,
+            )
+        except ManifestError as exc:
+            return _failure(
+                AgentErrorCode.INVALID_INPUT,
+                "Docking input locator is invalid.",
+                details={
+                    "reason": (
+                        "input_hash_mismatch"
+                        if exc.reason_code == "manifest_integrity_failed"
+                        else "input_invalid"
+                    )
+                },
+            )
+        return self.run_verified(task_id, manifest_path, **control)
+
     def _run_under_lease(
         self,
         inputs: VerifiedDockingInputs,
