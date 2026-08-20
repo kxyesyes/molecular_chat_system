@@ -113,6 +113,9 @@ _URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _ENCODED_PATH_SEMANTICS = re.compile(r"%(?:2e|2f|5c)", re.IGNORECASE)
 _SAFE_SOURCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}\Z")
 _SAFE_DIGEST = re.compile(r"[A-Fa-f0-9]{64}\Z")
+_SAFE_DIGEST_TEXT = re.compile(
+    r"(?<![A-Fa-f0-9])[A-Fa-f0-9]{64}(?![A-Fa-f0-9])"
+)
 _SAFE_DIGEST_IDENTIFIER = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
 _SCIENTIFIC_SMILES_KEYS = frozenset(
     {"smiles", "canonical_smiles", "isomeric_smiles", "best_smiles"}
@@ -607,42 +610,48 @@ def _is_absolute_path(value: str) -> bool:
     )
 
 
-def is_safe_relative_artifact_path(value: Any) -> bool:
+def _decode_relative_artifact_path(value: Any) -> str | None:
     if not isinstance(value, str) or not value or value != value.strip():
-        return False
+        return None
     if any(ord(character) < 32 or ord(character) == 127 for character in value):
-        return False
+        return None
     if "?" in value or "#" in value or "\\" in value:
-        return False
+        return None
     decoded = value
     for _ in range(8):
         if _ENCODED_PATH_SEMANTICS.search(decoded):
-            return False
+            return None
         try:
             next_decoded = unquote(decoded, errors="strict")
         except (UnicodeDecodeError, ValueError):
-            return False
+            return None
         if next_decoded == decoded:
             break
         decoded = next_decoded
     else:
-        return False
+        return None
     if any(ord(character) < 32 or ord(character) == 127 for character in decoded):
-        return False
+        return None
     if "?" in decoded or "#" in decoded or "\\" in decoded:
-        return False
+        return None
     if (
         _URI_SCHEME.match(value)
         or _URI_SCHEME.match(decoded)
         or _is_absolute_path(value)
         or _is_absolute_path(decoded)
     ):
-        return False
+        return None
     original_parts = value.split("/")
     decoded_parts = decoded.split("/")
-    return bool(original_parts) and all(
-        part not in {"", ".", ".."} for part in (*original_parts, *decoded_parts)
-    )
+    if not original_parts or any(
+        part in {"", ".", ".."} for part in (*original_parts, *decoded_parts)
+    ):
+        return None
+    return decoded
+
+
+def is_safe_relative_artifact_path(value: Any) -> bool:
+    return _decode_relative_artifact_path(value) is not None
 
 
 def _is_private_content_key(value: str) -> bool:
@@ -1057,11 +1066,22 @@ def _looks_like_reliable_smiles_token(value: str) -> bool:
 
 
 def _contains_reliable_scientific_token(value: str) -> bool:
-    return any(
-        _looks_like_reliable_smiles_token(part)
-        for part in re.split(r"[._]", value)
-        if part
-    )
+    without_digests = _SAFE_DIGEST_TEXT.sub("digest", value)
+    if _looks_like_reliable_smiles_token(without_digests):
+        return True
+    for chunk in re.split(r"[=:/\\\s._]+", without_digests):
+        if not chunk:
+            continue
+        hyphen_parts = [part for part in chunk.split("-") if part]
+        candidates = [chunk, *hyphen_parts]
+        candidates.extend(
+            "-".join(hyphen_parts[start:end])
+            for start in range(len(hyphen_parts))
+            for end in range(start + 2, len(hyphen_parts) + 1)
+        )
+        if any(_looks_like_reliable_smiles_token(item) for item in candidates):
+            return True
+    return False
 
 
 def _replace_reliable_smiles_candidate(match: re.Match[str]) -> str:
@@ -1091,6 +1111,8 @@ def _sanitize_generic_result_text(value: str) -> str:
             else "[REDACTED]"
         )
         sanitized = sanitized.replace("[redacted]", marker)
+    if _contains_reliable_scientific_token(sanitized):
+        return "[PRIVATE]"
     return _SMILES_CANDIDATE.sub(
         _replace_reliable_smiles_candidate,
         sanitized,
@@ -1207,13 +1229,53 @@ def sanitize_public_artifacts(value: Any) -> list[dict[str, Any]]:
     for artifact in value:
         if not isinstance(artifact, dict):
             continue
+        path = artifact.get("path")
+        decoded_path = (
+            _decode_relative_artifact_path(path) if "path" in artifact else None
+        )
+        if decoded_path is not None:
+            path_is_sensitive = False
+            for segment in decoded_path.split("/"):
+                basename = segment.rsplit(".", 1)[0]
+                if any(
+                    contains_sensitive_text(candidate)
+                    or _contains_reliable_scientific_token(candidate)
+                    for candidate in {segment, basename}
+                ):
+                    path_is_sensitive = True
+                    break
+            if path_is_sensitive:
+                continue
+        invalid_identity = False
+        for identity_key in ("artifact_type", "name", "type", "status"):
+            if identity_key not in artifact:
+                continue
+            item = artifact[identity_key]
+            if not isinstance(item, str):
+                invalid_identity = True
+                break
+            if identity_key in {"artifact_type", "type"}:
+                valid = item in _ARTIFACT_TYPES
+            elif identity_key == "status":
+                valid = item in _ARTIFACT_STATUSES
+            else:
+                valid = (
+                    _SAFE_ARTIFACT_CODE.fullmatch(item) is not None
+                    and not contains_sensitive_text(item)
+                    and not _contains_reliable_scientific_token(item)
+                )
+            if not valid:
+                invalid_identity = True
+                break
+        if invalid_identity:
+            continue
         public: dict[str, Any] = {}
         for key in allowed_keys:
             if key not in artifact:
                 continue
             item = artifact[key]
             if key == "path":
-                if is_safe_relative_artifact_path(item):
+                if decoded_path is not None:
                     public[key] = item
                 continue
             if key in {"hash", "sha256"}:
@@ -1223,22 +1285,7 @@ def sanitize_public_artifacts(value: Any) -> list[dict[str, Any]]:
                     pass
                 continue
             if key in {"artifact_type", "name", "type", "status"}:
-                if not isinstance(item, str):
-                    continue
-                if key in {"artifact_type", "type"}:
-                    if item in _ARTIFACT_TYPES:
-                        public[key] = item
-                    continue
-                if key == "status":
-                    if item in _ARTIFACT_STATUSES:
-                        public[key] = item
-                    continue
-                if (
-                    _SAFE_ARTIFACT_CODE.fullmatch(item) is not None
-                    and not contains_sensitive_text(item)
-                    and not _contains_reliable_scientific_token(item)
-                ):
-                    public[key] = item
+                public[key] = item
                 continue
             if key == "size":
                 if type(item) in {int, float} and item >= 0 and (

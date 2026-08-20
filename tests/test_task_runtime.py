@@ -383,3 +383,33 @@ def test_manager_normalizes_one_warning_authority_in_result_and_record(tmp_path)
         {"code": "TOOL_WARNING"},
         {"code": "projection_stale"},
     ]
+
+
+def test_task_manager_redacts_delimiter_bound_scientific_text(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    safe = {
+        "trace_id": "123e4567-e89b-12d3-a456-426614174000",
+        "task_label": "Task6",
+        "phase": "Phase2 completed",
+        "run_id": "run-123",
+        "message": "workflow completed normally",
+    }
+    attacks = {
+        "mol-CCO": "dynamic-key-leak",
+        "candidate": "candidate=CCO and mol-CCO",
+        "hyphenated": "mol-C-C-O",
+        "slash": "prefix/CCO",
+    }
+
+    record = manager.submit(
+        "unit_test", {}, lambda _payload: {**safe, **attacks}
+    )
+    finished = wait_for_terminal(manager, record.task_id)
+    public = json.dumps(manager.get(record.task_id).to_public_dict())
+    raw = manager.store.db_path.read_bytes()
+
+    assert {key: finished.result[key] for key in safe} == safe
+    assert "mol-CCO" not in finished.result
+    for attack in ("mol-CCO", *attacks.values()):
+        assert attack.encode() not in raw
+        assert attack not in public

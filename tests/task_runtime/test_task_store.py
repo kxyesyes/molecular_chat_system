@@ -1958,3 +1958,113 @@ def test_generic_projection_distinguishes_operational_ids_from_molecular_tokens(
     serialized = json.dumps(record.to_public_dict())
     for private_value in private_values:
         assert private_value not in serialized
+
+
+def test_generic_projection_rejects_delimiter_bound_scientific_text(tmp_path):
+    store = TaskStore(tmp_path / "delimiter-bound.sqlite")
+    store.create("task-1", "demo", {})
+    store.claim_running("task-1")
+    attacks = (
+        "mol-CCO",
+        "candidate=CCO and mol-CCO",
+        "mol-C-C-O",
+        "prefix/CCO",
+        "prefix\\CCO",
+        "prefix CCO",
+        "prefix:CCO",
+    )
+    safe = {
+        "task_label": "Task6",
+        "phase": "Phase2 completed",
+        "run_id": "run-123",
+        "trace_id": "123e4567-e89b-12d3-a456-426614174000",
+        "message": "workflow completed normally",
+    }
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.SUCCEEDED,
+        result={
+            "mol-CCO": "dynamic-key-leak",
+            "candidate": attacks[1],
+            "hyphenated": attacks[2],
+            "slash": attacks[3],
+            "backslash": attacks[4],
+            "spaced": attacks[5],
+            "colon": attacks[6],
+            **safe,
+        },
+        projection_policy=ResultProjectionPolicy.GENERIC_SAFE,
+    )
+
+    record = store.get("task-1")
+    public = json.dumps(record.to_public_dict())
+    raw = store.db_path.read_bytes()
+    assert {key: record.result[key] for key in safe} == safe
+    assert "mol-CCO" not in record.result
+    for attack in attacks:
+        assert attack.encode() not in raw
+        assert attack not in public
+    assert b"dynamic-key-leak" not in raw
+    assert "dynamic-key-leak" not in public
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        ResultProjectionPolicy.SCIENTIFIC_STRICT,
+        ResultProjectionPolicy.GENERIC_SAFE,
+    ],
+)
+def test_artifact_projection_rejects_sensitive_relative_path_segments(
+    tmp_path, policy
+):
+    store = TaskStore(tmp_path / f"artifact-path-segments-{policy.value}.sqlite")
+    store.create("task-1", "docking", {})
+    store.claim_running("task-1")
+    digest = "c" * 64
+    rejected_paths = (
+        "poses/CCO.pdbqt",
+        "poses/AKIAABCDEFGHIJKLMNOP.pdbqt",
+        "poses/mol-C-C-O.log",
+        "poses/%2543%2543%254f.pdbqt",
+    )
+    artifacts = [
+        {
+            "name": "docking-pose",
+            "type": "docking_pose",
+            "status": "verified",
+            "path": "artifacts/docking_pose.pdbqt",
+        },
+        {
+            "name": "extra-log",
+            "type": "log",
+            "status": "completed",
+            "path": f"extra-01-{digest}.log",
+        },
+        *[
+            {
+                "name": f"rejected-{index}",
+                "type": "file",
+                "status": "ready",
+                "path": path,
+            }
+            for index, path in enumerate(rejected_paths)
+        ],
+    ]
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.SUCCEEDED,
+        result={"success": True},
+        artifacts=artifacts,
+        projection_policy=policy,
+    )
+
+    record = store.get("task-1")
+    assert record.artifacts == artifacts[:2]
+    public = json.dumps(record.to_public_dict())
+    raw = store.db_path.read_bytes()
+    for path in rejected_paths:
+        assert path.encode() not in raw
+        assert path not in public

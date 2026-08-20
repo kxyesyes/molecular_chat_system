@@ -3120,3 +3120,72 @@ async def test_singleton_reset_retains_old_runtime_until_close_finishes(
     old_runtime.release_close.set()
     await reset
     assert runtime_module._RUNTIME is None
+
+
+@pytest.mark.anyio
+async def test_local_backend_drops_sensitive_relative_artifact_path(
+    tmp_path: Path,
+) -> None:
+    digest = "c" * 64
+
+    async def handler(submission, cancel_event, progress):
+        return {
+            "success": True,
+            "status": "succeeded",
+            "artifacts": [
+                {
+                    "name": "pose",
+                    "type": "docking_pose",
+                    "status": "verified",
+                    "path": "artifacts/docking_pose.pdbqt",
+                },
+                {
+                    "name": "extra-log",
+                    "type": "log",
+                    "status": "completed",
+                    "path": f"extra-01-{digest}.log",
+                },
+                {
+                    "name": "sensitive-scientific",
+                    "type": "file",
+                    "status": "ready",
+                    "path": "poses/mol-C-C-O.log",
+                },
+                {
+                    "name": "sensitive-credential",
+                    "type": "file",
+                    "status": "ready",
+                    "path": "poses/AKIAABCDEFGHIJKLMNOP.pdbqt",
+                },
+            ],
+        }
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+    try:
+        await backend.submit(_submission())
+        record = await _wait_for_terminal(backend, "task-1")
+        assert record.artifacts == [
+            {
+                "name": "pose",
+                "type": "docking_pose",
+                "status": "verified",
+                "path": "artifacts/docking_pose.pdbqt",
+            },
+            {
+                "name": "extra-log",
+                "type": "log",
+                "status": "completed",
+                "path": f"extra-01-{digest}.log",
+            },
+        ]
+        public = json.dumps(record.to_public_dict())
+        raw = store.db_path.read_bytes()
+        for attack in (
+            "poses/mol-C-C-O.log",
+            "poses/AKIAABCDEFGHIJKLMNOP.pdbqt",
+        ):
+            assert attack.encode() not in raw
+            assert attack not in public
+    finally:
+        await backend.close()
