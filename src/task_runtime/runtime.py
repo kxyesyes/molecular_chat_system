@@ -37,6 +37,11 @@ class TaskBackendStartError(RuntimeError):
     """A backend start was not safely accepted and must not be retried blindly."""
 
 
+_IDEMPOTENT_REUSE_MESSAGE = (
+    "existing idempotent task reused; staged input retained"
+)
+
+
 class TaskRuntime:
     """Async backend façade for safely staged scientific tasks."""
 
@@ -121,6 +126,15 @@ class TaskRuntime:
         )
         request_digest = self._docking_request_digest(verified_manifest)
 
+        if idempotency_key is not None:
+            existing = await self._global_idempotency_result(
+                idempotency_key,
+                request_digest,
+                task_type="docking",
+            )
+            if existing is not None:
+                return existing
+
         temporal_health = await self._temporal_health()
         decision = self.selector.select(
             "docking",
@@ -146,7 +160,7 @@ class TaskRuntime:
 
         if decision.backend == "local":
             try:
-                return await self.local_backend.submit(submission)
+                local_result = await self.local_backend.submit(submission)
             except TaskIdempotencyConflictError:
                 raise
             except Exception as exc:
@@ -156,6 +170,7 @@ class TaskRuntime:
                     error_code=TaskErrorCode.TASK_BACKEND_UNAVAILABLE,
                 )
                 raise TaskBackendStartError("Local start failed") from exc
+            return await self._validated_local_result(submission, local_result)
 
         if decision.backend != "temporal" or self.temporal_backend is None:
             await self._mark_temporal_ambiguous(submission)
@@ -198,22 +213,17 @@ class TaskRuntime:
                 )
                 raise TaskBackendStartError("Local fallback start failed") from exc
             try:
-                fallback_record = await asyncio.to_thread(self.store.get, task_id)
-            except KeyError:
-                fallback_record = None
-            if (
-                not isinstance(local_result, BackendSubmitResult)
-                or local_result.task_id != task_id
-                or local_result.backend != "local"
-                or local_result.outcome is not StartOutcome.ACCEPTED
-                or fallback_record is None
-                or fallback_record.backend != "local"
-            ):
-                await self._mark_temporal_ambiguous(submission)
-                raise TaskBackendStartError(
-                    "Temporal fallback projection conflict; local execution suppressed"
+                return await self._validated_local_result(
+                    submission,
+                    local_result,
                 )
-            return local_result
+            except TaskBackendStartError as exc:
+                if await self._projection_exists(task_id):
+                    await self._mark_temporal_ambiguous(submission)
+                    raise TaskBackendStartError(
+                        "Temporal fallback projection has conflicting authority"
+                    ) from exc
+                raise
 
         await self._mark_temporal_ambiguous(submission)
         raise TaskBackendStartError(
@@ -323,6 +333,146 @@ class TaskRuntime:
                 {"running": 0},
             )
         return health
+
+    async def _global_idempotency_result(
+        self,
+        idempotency_key: str,
+        request_digest: str,
+        *,
+        task_type: str,
+    ) -> BackendSubmitResult | None:
+        digest = LocalTaskBackend.idempotency_digest(idempotency_key)
+        try:
+            record, stored_request_digest = await asyncio.to_thread(
+                self.store.get_idempotency_authority,
+                digest,
+            )
+        except KeyError:
+            return None
+        except Exception as exc:
+            raise TaskIdempotencyConflictError(
+                "idempotency authority conflict"
+            ) from exc
+        return self._authority_result(
+            record,
+            stored_request_digest,
+            request_digest=request_digest,
+            task_type=task_type,
+            allowed_backends={"local", "temporal"},
+        )
+
+    @staticmethod
+    def _authority_result(
+        record: TaskRecord,
+        stored_request_digest: str | None,
+        *,
+        request_digest: str,
+        task_type: str,
+        allowed_backends: set[str],
+    ) -> BackendSubmitResult:
+        if stored_request_digest is None:
+            raise TaskIdempotencyConflictError(
+                "idempotency legacy authority conflict"
+            )
+        if stored_request_digest != request_digest:
+            raise TaskIdempotencyConflictError("idempotency request conflict")
+        if (
+            not isinstance(record, TaskRecord)
+            or record.task_type != task_type
+            or record.backend not in allowed_backends
+            or not isinstance(record.status, TaskStatus)
+        ):
+            raise TaskIdempotencyConflictError(
+                "idempotency authority conflict"
+            )
+        try:
+            return BackendSubmitResult(
+                task_id=record.task_id,
+                backend=record.backend,
+                outcome=StartOutcome.ACCEPTED,
+                message=_IDEMPOTENT_REUSE_MESSAGE,
+            )
+        except ValueError as exc:
+            raise TaskIdempotencyConflictError(
+                "idempotency authority conflict"
+            ) from exc
+
+    async def _validated_local_result(
+        self,
+        submission: TaskSubmission,
+        result: BackendSubmitResult,
+    ) -> BackendSubmitResult:
+        if (
+            not isinstance(result, BackendSubmitResult)
+            or result.backend != "local"
+            or result.outcome is not StartOutcome.ACCEPTED
+        ):
+            raise TaskBackendStartError(
+                "Local start result has no matching authority"
+            )
+
+        if submission.idempotency_key is not None:
+            digest = LocalTaskBackend.idempotency_digest(
+                submission.idempotency_key
+            )
+            try:
+                record, stored_request_digest = await asyncio.to_thread(
+                    self.store.get_idempotency_authority,
+                    digest,
+                )
+            except (KeyError, ValueError, TypeError) as exc:
+                raise TaskBackendStartError(
+                    "Local start result has no matching authority"
+                ) from exc
+            try:
+                authority = self._authority_result(
+                    record,
+                    stored_request_digest,
+                    request_digest=submission.request_digest or "",
+                    task_type=submission.task_type,
+                    allowed_backends={"local"},
+                )
+            except TaskIdempotencyConflictError as exc:
+                raise TaskBackendStartError(
+                    "Local start result has conflicting authority"
+                ) from exc
+            if (
+                authority.task_id != result.task_id
+                or authority.backend != result.backend
+            ):
+                raise TaskBackendStartError(
+                    "Local start result has conflicting authority"
+                )
+            return result
+
+        if result.task_id != submission.task_id:
+            raise TaskBackendStartError(
+                "Local start result has no matching authority"
+            )
+        try:
+            record, stored_request_digest = await asyncio.to_thread(
+                self._task_authority,
+                result.task_id,
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            raise TaskBackendStartError(
+                "Local start result has no matching authority"
+            ) from exc
+        if (
+            record.task_type != submission.task_type
+            or record.backend != "local"
+            or stored_request_digest != submission.request_digest
+        ):
+            raise TaskBackendStartError(
+                "Local start result has conflicting authority"
+            )
+        return result
+
+    def _task_authority(
+        self,
+        task_id: str,
+    ) -> tuple[TaskRecord, str | None]:
+        return self.store.get(task_id), self.store.get_submission_digest(task_id)
 
     async def _project_start_failure(
         self,

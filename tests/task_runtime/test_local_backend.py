@@ -21,7 +21,10 @@ from src.task_runtime.backends.base import (
     StartOutcome,
     TaskRuntimeBackend,
 )
-from src.task_runtime.backends.local import LocalTaskBackend
+from src.task_runtime.backends.local import (
+    LocalTaskBackend,
+    TaskIdempotencyConflictError,
+)
 from src.task_runtime.errors import TaskErrorCode
 from src.task_runtime.models import (
     BackendHealth,
@@ -1171,6 +1174,7 @@ class _FakeBackend:
         self.create = create
         self.exception = exception
         self.submissions: list[TaskSubmission] = []
+        self.health_calls = 0
         self.closed = False
 
     async def submit(self, submission: TaskSubmission) -> BackendSubmitResult:
@@ -1209,6 +1213,7 @@ class _FakeBackend:
         return self.store.request_cancel(task_id, reason=reason)
 
     async def health(self):
+        self.health_calls += 1
         return BackendHealth(self.backend, True, "available", {"running": 0})
 
     async def close(self):
@@ -1376,6 +1381,278 @@ def test_runtime_scientific_digest_excludes_task_and_backend_decision() -> None:
         "manifest_path": r"C:\private\manifest.json",
     }
     assert TaskRuntime._docking_request_digest(decorated) == digest
+
+
+@pytest.mark.anyio
+async def test_runtime_reuses_existing_local_authority_before_temporal_selection(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    async def handler(submission, cancel_event, progress):
+        calls.append(submission.task_id)
+        return {"success": True}
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    first_local = LocalTaskBackend(store, {"docking": handler})
+    first_runtime = TaskRuntime(
+        config=_runtime_config(tmp_path, canary_percent=0),
+        store=store,
+        stager=_FakeStager(tmp_path / "first-manifest.json"),
+        selector=_FixedSelector(_local_decision()),
+        local_backend=first_local,
+        temporal_backend=None,
+        uuid_factory=lambda: "original-local",
+    )
+    first = await _submit_runtime_input(first_runtime, idempotency_key="K")
+    await _wait_for_terminal(first_local, first.task_id)
+    await first_runtime.close()
+
+    temporal = _FakeBackend(store, "temporal", StartOutcome.REJECTED, create=False)
+    local = _FakeBackend(store, "local", StartOutcome.ACCEPTED, create=True)
+    selector = _FixedSelector(_temporal_decision())
+    stager = _FakeStager(tmp_path / "retry-manifest.json")
+    retry_runtime = TaskRuntime(
+        config=_runtime_config(tmp_path),
+        store=store,
+        stager=stager,
+        selector=selector,
+        local_backend=local,
+        temporal_backend=temporal,
+        uuid_factory=lambda: "new-temporal",
+    )
+    try:
+        reused = await _submit_runtime_input(retry_runtime, idempotency_key="K")
+        assert reused.task_id == "original-local"
+        assert reused.backend == "local"
+        assert reused.outcome is StartOutcome.ACCEPTED
+        assert reused.message == "existing idempotent task reused; staged input retained"
+        assert calls == ["original-local"]
+        assert selector.calls == []
+        assert temporal.health_calls == 0
+        assert temporal.submissions == local.submissions == []
+        with pytest.raises(KeyError):
+            store.get("new-temporal")
+        assert stager.calls[-1]["task_id"] == "new-temporal"
+    finally:
+        await retry_runtime.close()
+
+
+@pytest.mark.anyio
+async def test_runtime_reuses_existing_temporal_global_authority(tmp_path: Path) -> None:
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    temporal = _FakeBackend(store, "temporal", StartOutcome.ACCEPTED, create=True)
+    local = _FakeBackend(store, "local", StartOutcome.ACCEPTED, create=True)
+    first_runtime = TaskRuntime(
+        config=_runtime_config(tmp_path),
+        store=store,
+        stager=_FakeStager(tmp_path / "first.json"),
+        selector=_FixedSelector(_temporal_decision()),
+        local_backend=local,
+        temporal_backend=temporal,
+        uuid_factory=lambda: "original-temporal",
+    )
+    await _submit_runtime_input(first_runtime, idempotency_key="temporal-K")
+    await first_runtime.close()
+
+    retry_temporal = _FakeBackend(
+        store, "temporal", StartOutcome.REJECTED, create=False
+    )
+    retry_local = _FakeBackend(store, "local", StartOutcome.ACCEPTED, create=True)
+    retry_selector = _FixedSelector(_local_decision())
+    retry_runtime = TaskRuntime(
+        config=_runtime_config(tmp_path, canary_percent=0),
+        store=store,
+        stager=_FakeStager(tmp_path / "retry.json"),
+        selector=retry_selector,
+        local_backend=retry_local,
+        temporal_backend=retry_temporal,
+        uuid_factory=lambda: "new-local",
+    )
+    try:
+        reused = await _submit_runtime_input(
+            retry_runtime, idempotency_key="temporal-K"
+        )
+        assert (reused.task_id, reused.backend) == (
+            "original-temporal",
+            "temporal",
+        )
+        assert retry_selector.calls == []
+        assert retry_temporal.health_calls == 0
+        assert retry_temporal.submissions == retry_local.submissions == []
+        with pytest.raises(KeyError):
+            store.get("new-local")
+    finally:
+        await retry_runtime.close()
+
+
+@pytest.mark.anyio
+async def test_runtime_global_authority_digest_conflict_calls_no_backend(
+    tmp_path: Path,
+) -> None:
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    digest = LocalTaskBackend.idempotency_digest("conflict-K")
+    store.create(
+        "existing",
+        "docking",
+        {},
+        backend="local",
+        idempotency_digest=digest,
+        submission_digest="f" * 64,
+    )
+    temporal = _FakeBackend(store, "temporal", StartOutcome.REJECTED, create=False)
+    local = _FakeBackend(store, "local", StartOutcome.ACCEPTED, create=True)
+    selector = _FixedSelector(_temporal_decision())
+    runtime = TaskRuntime(
+        config=_runtime_config(tmp_path),
+        store=store,
+        stager=_FakeStager(tmp_path / "conflict.json"),
+        selector=selector,
+        local_backend=local,
+        temporal_backend=temporal,
+        uuid_factory=lambda: "new-conflict",
+    )
+    try:
+        with pytest.raises(TaskIdempotencyConflictError, match="request conflict"):
+            await _submit_runtime_input(runtime, idempotency_key="conflict-K")
+        assert selector.calls == []
+        assert temporal.health_calls == 0
+        assert temporal.submissions == local.submissions == []
+        with pytest.raises(KeyError):
+            store.get("new-conflict")
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.anyio
+async def test_runtime_accepts_fallback_authority_created_after_precheck(
+    tmp_path: Path,
+) -> None:
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    temporal = _FakeBackend(store, "temporal", StartOutcome.REJECTED, create=False)
+
+    class RacingLocal(_FakeBackend):
+        async def submit(self, submission: TaskSubmission) -> BackendSubmitResult:
+            self.submissions.append(submission)
+            self.store.create(
+                "raced-original",
+                submission.task_type,
+                submission.payload,
+                backend="local",
+                idempotency_digest=LocalTaskBackend.idempotency_digest(
+                    submission.idempotency_key
+                ),
+                submission_digest=submission.request_digest,
+            )
+            return BackendSubmitResult(
+                "raced-original", "local", StartOutcome.ACCEPTED, "existing task"
+            )
+
+    local = RacingLocal(store, "local", StartOutcome.ACCEPTED, create=False)
+    runtime = TaskRuntime(
+        config=_runtime_config(tmp_path),
+        store=store,
+        stager=_FakeStager(tmp_path / "race.json"),
+        selector=_FixedSelector(_temporal_decision()),
+        local_backend=local,
+        temporal_backend=temporal,
+        uuid_factory=lambda: "new-race",
+    )
+    try:
+        result = await _submit_runtime_input(runtime, idempotency_key="race-K")
+        assert result.task_id == "raced-original"
+        assert result.backend == "local"
+        assert len(temporal.submissions) == len(local.submissions) == 1
+        with pytest.raises(KeyError):
+            store.get("new-race")
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.anyio
+async def test_runtime_accepts_direct_local_authority_created_after_precheck(
+    tmp_path: Path,
+) -> None:
+    store = TaskStore(tmp_path / "tasks.sqlite")
+
+    class RacingLocal(_FakeBackend):
+        async def submit(self, submission: TaskSubmission) -> BackendSubmitResult:
+            self.submissions.append(submission)
+            self.store.create(
+                "raced-direct-original",
+                submission.task_type,
+                submission.payload,
+                backend="local",
+                idempotency_digest=LocalTaskBackend.idempotency_digest(
+                    submission.idempotency_key
+                ),
+                submission_digest=submission.request_digest,
+            )
+            return BackendSubmitResult(
+                "raced-direct-original",
+                "local",
+                StartOutcome.ACCEPTED,
+                "existing task",
+            )
+
+    local = RacingLocal(store, "local", StartOutcome.ACCEPTED, create=False)
+    runtime = TaskRuntime(
+        config=_runtime_config(tmp_path, canary_percent=0),
+        store=store,
+        stager=_FakeStager(tmp_path / "direct-race.json"),
+        selector=_FixedSelector(_local_decision()),
+        local_backend=local,
+        temporal_backend=None,
+        uuid_factory=lambda: "new-direct-race",
+    )
+    try:
+        result = await _submit_runtime_input(
+            runtime,
+            idempotency_key="direct-race-K",
+        )
+        assert (result.task_id, result.backend) == (
+            "raced-direct-original",
+            "local",
+        )
+        assert len(local.submissions) == 1
+        with pytest.raises(KeyError):
+            store.get("new-direct-race")
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.anyio
+async def test_runtime_bogus_local_old_task_id_fails_without_projection_or_keyerror(
+    tmp_path: Path,
+) -> None:
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    temporal = _FakeBackend(store, "temporal", StartOutcome.REJECTED, create=False)
+
+    class BogusLocal(_FakeBackend):
+        async def submit(self, submission: TaskSubmission) -> BackendSubmitResult:
+            self.submissions.append(submission)
+            return BackendSubmitResult(
+                "bogus-old", "local", StartOutcome.ACCEPTED, "existing task"
+            )
+
+    local = BogusLocal(store, "local", StartOutcome.ACCEPTED, create=False)
+    runtime = TaskRuntime(
+        config=_runtime_config(tmp_path),
+        store=store,
+        stager=_FakeStager(tmp_path / "bogus.json"),
+        selector=_FixedSelector(_temporal_decision()),
+        local_backend=local,
+        temporal_backend=temporal,
+        uuid_factory=lambda: "new-bogus",
+    )
+    try:
+        with pytest.raises(TaskBackendStartError, match="authority"):
+            await _submit_runtime_input(runtime, idempotency_key="bogus-K")
+        for task_id in ("new-bogus", "bogus-old"):
+            with pytest.raises(KeyError):
+                store.get(task_id)
+    finally:
+        await runtime.close()
 
 
 @pytest.mark.anyio
