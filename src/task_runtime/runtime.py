@@ -123,7 +123,7 @@ class TaskRuntime:
         config_snapshot = strict_json_snapshot(config)
         if not isinstance(config_snapshot, dict):
             raise ValueError("invalid docking config")
-        manifest_path, verified_manifest = await self._stage_verified(
+        manifest_path, verified_manifest, request_digest = await self._stage_verified(
             task_id=task_id,
             receptor_name=receptor_name,
             receptor_bytes=receptor_bytes,
@@ -133,8 +133,6 @@ class TaskRuntime:
             config=config_snapshot,
         )
         try:
-            request_digest = self._docking_request_digest(verified_manifest)
-
             if idempotency_key is not None:
                 existing = await self._global_idempotency_result(
                     idempotency_key,
@@ -301,7 +299,8 @@ class TaskRuntime:
         ligand_bytes: bytes | None,
         smiles: str | None,
         config: Mapping[str, Any],
-    ) -> tuple[Path, dict[str, Any]]:
+    ) -> tuple[Path, dict[str, Any], str]:
+        manifest_path: Path | None = None
         stage_task = asyncio.create_task(
             asyncio.to_thread(
                 self.stager.stage,
@@ -316,39 +315,47 @@ class TaskRuntime:
             name=f"medchat-stage-{task_id}",
         )
         try:
-            manifest_path = await asyncio.shield(stage_task)
-        except asyncio.CancelledError:
-            manifest_path = None
             try:
-                manifest_path = await self._await_task_outcome(stage_task)
-            except Exception:
-                pass
+                staged_path = await asyncio.shield(stage_task)
+            except asyncio.CancelledError:
+                try:
+                    staged_path = await self._await_task_outcome(stage_task)
+                    manifest_path = Path(staged_path)
+                except Exception:
+                    pass
+                raise
+            manifest_path = Path(staged_path)
+            verify_task = asyncio.create_task(
+                asyncio.to_thread(
+                    self.stager.load_verified,
+                    task_id,
+                    manifest_path,
+                ),
+                name=f"medchat-verify-stage-{task_id}",
+            )
+            try:
+                verified = await asyncio.shield(verify_task)
+            except asyncio.CancelledError:
+                try:
+                    await self._await_task_outcome(verify_task)
+                except Exception:
+                    pass
+                raise
+            if not isinstance(verified, dict):
+                raise ValueError("invalid verified manifest")
+            request_digest = self._docking_request_digest(verified)
+            return manifest_path, verified, request_digest
+        except asyncio.CancelledError:
             if manifest_path is not None:
                 await self._discard_staging_after_cancellation(
                     task_id,
-                    Path(manifest_path),
+                    manifest_path,
                 )
             raise
-        verify_task = asyncio.create_task(
-            asyncio.to_thread(
-                self.stager.load_verified,
-                task_id,
-                manifest_path,
-            ),
-            name=f"medchat-verify-stage-{task_id}",
-        )
-        try:
-            verified = await asyncio.shield(verify_task)
-        except asyncio.CancelledError:
-            try:
-                await self._await_task_outcome(verify_task)
-            except Exception:
-                pass
-            await self._discard_staging_after_cancellation(task_id, manifest_path)
+        except Exception:
+            if manifest_path is not None:
+                await self._discard_staging(task_id, manifest_path)
             raise
-        if not isinstance(verified, dict):
-            raise ValueError("invalid verified manifest")
-        return Path(manifest_path), verified
 
     @staticmethod
     async def _await_task_outcome(task: asyncio.Task[Any]) -> Any:

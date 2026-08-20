@@ -620,32 +620,41 @@ class LocalTaskBackend:
         cancel_event: threading.Event,
         provenance: dict[str, Any],
     ) -> None:
-        try:
-            record = await asyncio.to_thread(self.store.get, task_id)
-        except KeyError:
-            return
-        if cancel_event.is_set() and record.status is TaskStatus.RUNNING:
-            record = await asyncio.to_thread(
-                self.store.request_cancel,
-                task_id,
-                reason="projection failed after cancellation",
-            )
-        if record.status is TaskStatus.CANCEL_REQUESTED:
-            await asyncio.to_thread(
-                self.store.finish,
-                task_id,
-                TaskStatus.CANCELED,
-            )
-            return
-        if record.status is TaskStatus.RUNNING:
-            await asyncio.to_thread(
-                self.store.finish,
-                task_id,
-                TaskStatus.FAILED,
-                error="Task state projection failed",
-                error_code=TaskErrorCode.TASK_PROJECTION_FAILED,
-                provenance=provenance,
-            )
+        for _ in range(3):
+            try:
+                record = await asyncio.to_thread(self.store.get, task_id)
+            except KeyError:
+                return
+            if record.status in TERMINAL_STATUSES:
+                return
+            if cancel_event.is_set() and record.status is TaskStatus.RUNNING:
+                record = await asyncio.to_thread(
+                    self.store.request_cancel,
+                    task_id,
+                    reason="projection failed after cancellation",
+                )
+                if record.status in TERMINAL_STATUSES:
+                    return
+            if record.status is TaskStatus.CANCEL_REQUESTED:
+                finished = await asyncio.to_thread(
+                    self.store.finish,
+                    task_id,
+                    TaskStatus.CANCELED,
+                )
+            elif record.status is TaskStatus.RUNNING:
+                finished = await asyncio.to_thread(
+                    self.store.finish,
+                    task_id,
+                    TaskStatus.FAILED,
+                    error="Task state projection failed",
+                    error_code=TaskErrorCode.TASK_PROJECTION_FAILED,
+                    provenance=provenance,
+                )
+            else:
+                return
+            if finished:
+                return
+        raise RuntimeError("projection terminal reconciliation incomplete")
 
     async def _project_progress(
         self,

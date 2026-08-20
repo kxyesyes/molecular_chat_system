@@ -1156,6 +1156,52 @@ async def test_projector_failure_honors_concurrent_cancellation(tmp_path: Path) 
 
 
 @pytest.mark.anyio
+async def test_projection_failed_cas_reconciles_concurrent_cancel(
+    tmp_path: Path,
+) -> None:
+    projection_attempted = threading.Event()
+    failed_finish_started = threading.Event()
+    release_failed_finish = threading.Event()
+
+    class BarrierProjectionStore(TaskStore):
+        def heartbeat(self, *args, **kwargs):
+            projection_attempted.set()
+            raise RuntimeError("projection database unavailable")
+
+        def finish(self, task_id, status, **kwargs):
+            if (
+                status is TaskStatus.FAILED
+                and kwargs.get("error_code")
+                is TaskErrorCode.TASK_PROJECTION_FAILED
+            ):
+                failed_finish_started.set()
+                release_failed_finish.wait(2.0)
+            return super().finish(task_id, status, **kwargs)
+
+    async def handler(submission, cancel_event, progress):
+        progress(TaskPhase.RUNNING, 0.5)
+        assert await asyncio.to_thread(projection_attempted.wait, 1.0)
+        return {"success": True}
+
+    store = BarrierProjectionStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+    try:
+        await backend.submit(_submission())
+        assert await asyncio.to_thread(failed_finish_started.wait, 1.0)
+        canceled = await backend.cancel("task-1", "projection race")
+        assert canceled.status is TaskStatus.CANCEL_REQUESTED
+        release_failed_finish.set()
+        await _wait_for_background_tasks(backend, 0)
+
+        record = store.get("task-1")
+        assert record.status is TaskStatus.CANCELED
+        assert sum(event.is_terminal for event in store.events("task-1")) == 1
+    finally:
+        release_failed_finish.set()
+        await backend.close()
+
+
+@pytest.mark.anyio
 async def test_done_callback_retries_transient_projection_terminal_failure(
     tmp_path: Path,
 ) -> None:
@@ -1833,6 +1879,174 @@ async def test_runtime_cancellation_after_stage_discards_unprojected_inputs(
     with pytest.raises(KeyError):
         store.get("canceled-stage")
     await runtime.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure_mode", ["raises", "non_dict", "missing_authority"])
+async def test_runtime_verify_failure_discards_unprojected_stage(
+    tmp_path: Path,
+    failure_mode: str,
+) -> None:
+    class SecondVerifyFails(DockingInputStager):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.verify_calls = 0
+
+        def load_verified(self, task_id, manifest_path):
+            self.verify_calls += 1
+            verified = super().load_verified(task_id, manifest_path)
+            if self.verify_calls == 1:
+                return verified
+            if failure_mode == "raises":
+                raise RuntimeError("runtime verification failed")
+            if failure_mode == "non_dict":
+                return []
+            return {"config_hash": verified["config_hash"]}
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    runtime = TaskRuntime(
+        config=_runtime_config(tmp_path, canary_percent=0),
+        store=store,
+        stager=SecondVerifyFails(tmp_path / "stage"),
+        selector=_FixedSelector(_local_decision()),
+        local_backend=_FakeBackend(
+            store, "local", StartOutcome.ACCEPTED, create=True
+        ),
+        temporal_backend=None,
+        uuid_factory=lambda: f"verify-{failure_mode}",
+    )
+    task_id = f"verify-{failure_mode}"
+    try:
+        with pytest.raises((RuntimeError, ValueError)):
+            await _submit_runtime(runtime)
+        assert not (tmp_path / "stage" / task_id).exists()
+        assert store.list(limit=10) == []
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.anyio
+async def test_runtime_verify_cancellation_discards_unprojected_stage(
+    tmp_path: Path,
+) -> None:
+    verify_started = threading.Event()
+    release_verify = threading.Event()
+
+    class PausingSecondVerify(DockingInputStager):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.verify_calls = 0
+
+        def load_verified(self, task_id, manifest_path):
+            self.verify_calls += 1
+            verified = super().load_verified(task_id, manifest_path)
+            if self.verify_calls == 2:
+                verify_started.set()
+                release_verify.wait(2.0)
+            return verified
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    runtime = TaskRuntime(
+        config=_runtime_config(tmp_path, canary_percent=0),
+        store=store,
+        stager=PausingSecondVerify(tmp_path / "stage"),
+        selector=_FixedSelector(_local_decision()),
+        local_backend=_FakeBackend(
+            store, "local", StartOutcome.ACCEPTED, create=True
+        ),
+        temporal_backend=None,
+        uuid_factory=lambda: "verify-canceled",
+    )
+    submit = asyncio.create_task(_submit_runtime(runtime))
+    assert await asyncio.to_thread(verify_started.wait, 1.0)
+    submit.cancel()
+    release_verify.set()
+    with pytest.raises(asyncio.CancelledError):
+        await submit
+    assert not (tmp_path / "stage" / "verify-canceled").exists()
+    assert store.list(limit=10) == []
+    await runtime.close()
+
+
+@pytest.mark.anyio
+async def test_runtime_verify_failure_preserves_stage_when_projection_appears(
+    tmp_path: Path,
+) -> None:
+    store = TaskStore(tmp_path / "tasks.sqlite")
+
+    class ProjectingSecondVerify(DockingInputStager):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.verify_calls = 0
+
+        def load_verified(self, task_id, manifest_path):
+            self.verify_calls += 1
+            verified = super().load_verified(task_id, manifest_path)
+            if self.verify_calls == 2:
+                store.create(task_id, "docking", {}, backend="temporal")
+                raise RuntimeError("runtime verification failed")
+            return verified
+
+    runtime = TaskRuntime(
+        config=_runtime_config(tmp_path, canary_percent=0),
+        store=store,
+        stager=ProjectingSecondVerify(tmp_path / "stage"),
+        selector=_FixedSelector(_local_decision()),
+        local_backend=_FakeBackend(
+            store, "local", StartOutcome.ACCEPTED, create=True
+        ),
+        temporal_backend=None,
+        uuid_factory=lambda: "verify-projected",
+    )
+    try:
+        with pytest.raises(RuntimeError, match="verification failed"):
+            await _submit_runtime(runtime)
+        assert store.get("verify-projected").backend == "temporal"
+        assert (tmp_path / "stage" / "verify-projected").is_dir()
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.anyio
+async def test_runtime_verify_failure_preserves_stage_when_db_check_fails(
+    tmp_path: Path,
+) -> None:
+    class UnavailableGetStore(TaskStore):
+        def get(self, task_id: str):
+            raise RuntimeError("projection store unavailable")
+
+    class RaisingSecondVerify(DockingInputStager):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.verify_calls = 0
+
+        def load_verified(self, task_id, manifest_path):
+            self.verify_calls += 1
+            verified = super().load_verified(task_id, manifest_path)
+            if self.verify_calls == 2:
+                raise RuntimeError("runtime verification failed")
+            return verified
+
+    path = tmp_path / "tasks.sqlite"
+    store = UnavailableGetStore(path)
+    runtime = TaskRuntime(
+        config=_runtime_config(tmp_path, canary_percent=0),
+        store=store,
+        stager=RaisingSecondVerify(tmp_path / "stage"),
+        selector=_FixedSelector(_local_decision()),
+        local_backend=_FakeBackend(
+            store, "local", StartOutcome.ACCEPTED, create=True
+        ),
+        temporal_backend=None,
+        uuid_factory=lambda: "verify-db-unknown",
+    )
+    try:
+        with pytest.raises(RuntimeError, match="verification failed"):
+            await _submit_runtime(runtime)
+        assert TaskStore(path).list(limit=10) == []
+        assert (tmp_path / "stage" / "verify-db-unknown").is_dir()
+    finally:
+        await runtime.close()
 
 
 @pytest.mark.anyio
