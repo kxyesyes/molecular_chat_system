@@ -2350,12 +2350,19 @@ def test_projection_blocks_prefixed_scientific_identifiers_without_false_positiv
         "inputC1C": "input-key-leak",
         "queryCCO": "query-key-leak",
         "promptC-O": "prompt-key-leak",
+        "xsmilesCCO": "embedded-smiles-key-leak",
+        "run1ligandC-O": "embedded-ligand-bond-key-leak",
+        "prefixligandC1C": "embedded-ligand-ring-key-leak",
     }
     path_attacks = (
         "poses/smilesCCO.txt",
         "poses/ligandC=O.txt",
         "poses/ligandC-O.txt",
         "poses/ligandC1C.txt",
+        "poses/xsmilesCCO.txt",
+        "poses/run1ligandC=O.txt",
+        "poses/prefixligandC-O.txt",
+        "poses/run1ligandC1C.txt",
     )
     safe_artifacts = [
         {

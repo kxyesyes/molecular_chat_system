@@ -1131,8 +1131,6 @@ def contains_prefixed_scientific_identifier(value: Any) -> bool:
         return False
     normalized = value.lower()
     for index in range(len(normalized)):
-        if index > 0 and _is_ascii_alphanumeric(normalized[index - 1]):
-            continue
         for prefix in _PRIVATE_SCIENTIFIC_PREFIXES:
             if not normalized.startswith(prefix, index):
                 continue
