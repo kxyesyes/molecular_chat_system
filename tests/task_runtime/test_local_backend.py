@@ -3189,3 +3189,46 @@ async def test_local_backend_drops_sensitive_relative_artifact_path(
             assert attack not in public
     finally:
         await backend.close()
+
+
+@pytest.mark.anyio
+async def test_local_backend_drops_boundary_independent_scientific_artifacts(
+    tmp_path: Path,
+) -> None:
+    attacks = ("mol+CCO", "poses/candidate(CCO).log", "poses/candidate+CCO.log")
+
+    async def handler(submission, cancel_event, progress):
+        return {
+            "success": True,
+            "status": "succeeded",
+            "artifacts": [
+                {
+                    "name": "pose",
+                    "type": "docking_pose",
+                    "path": "artifacts/docking_pose.pdbqt",
+                },
+                {"name": attacks[0], "type": "file", "path": "poses/safe.log"},
+                {"name": "report", "type": "log", "path": attacks[1]},
+                {"name": "report", "type": "log", "path": attacks[2]},
+            ],
+        }
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+    try:
+        await backend.submit(_submission())
+        record = await _wait_for_terminal(backend, "task-1")
+        assert record.artifacts == [
+            {
+                "name": "pose",
+                "type": "docking_pose",
+                "path": "artifacts/docking_pose.pdbqt",
+            }
+        ]
+        public = json.dumps(record.to_public_dict())
+        raw = store.db_path.read_bytes()
+        for attack in attacks:
+            assert attack.encode() not in raw
+            assert attack not in public
+    finally:
+        await backend.close()

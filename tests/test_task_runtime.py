@@ -413,3 +413,33 @@ def test_task_manager_redacts_delimiter_bound_scientific_text(tmp_path):
     for attack in ("mol-CCO", *attacks.values()):
         assert attack.encode() not in raw
         assert attack not in public
+
+
+def test_task_manager_redacts_boundary_independent_scientific_text(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    attacks = {
+        "candidateCCO": "dynamic-key-leak",
+        "plus": "candidate+CCO",
+        "parentheses": "candidate(CCO)",
+        "hash": "candidate#CCO",
+    }
+
+    record = manager.submit(
+        "unit_test",
+        {},
+        lambda _payload: {
+            **attacks,
+            "task_label": "Task6",
+            "phase": "Phase2 completed",
+            "run_id": "run-123",
+        },
+    )
+    finished = wait_for_terminal(manager, record.task_id)
+    assert finished.result["task_label"] == "Task6"
+    assert finished.result["phase"] == "Phase2 completed"
+    assert finished.result["run_id"] == "run-123"
+    public = json.dumps(manager.get(record.task_id).to_public_dict())
+    raw = manager.store.db_path.read_bytes()
+    for attack in ("candidateCCO", *attacks.values()):
+        assert attack.encode() not in raw
+        assert attack not in public

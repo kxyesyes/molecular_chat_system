@@ -18,6 +18,7 @@ from src.task_runtime.models import (
     TaskRecord,
     TaskStatus,
     TaskWarning,
+    contains_scientific_structure,
 )
 from src.task_runtime.store import TaskStore
 
@@ -37,6 +38,34 @@ ERROR_CODES = {
     "SCIENTIFIC_VALIDATION_FAILED",
     "TASK_PROJECTION_FAILED",
 }
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("CCO", True),
+        ("CCCC", True),
+        ("ClCCBr", True),
+        ("C-C-O", True),
+        ("candidate+CCO", True),
+        ("candidate(CCO)", True),
+        ("candidate#CCO", True),
+        ("candidateCCO", True),
+        ("c1ccccc1", True),
+        ("[Na+].[Cl-]", True),
+        ("N[C@@H](C)C(=O)O", True),
+        ("C", False),
+        ("Na", False),
+        ("Task6", False),
+        ("Phase2", False),
+        ("run-123", False),
+        ("123e4567-e89b-12d3-a456-426614174000", False),
+        ("workflow completed normally", False),
+        ("CCxO ordinary identifier", False),
+    ],
+)
+def test_contains_scientific_structure_scans_atomic_subsequences(value, expected):
+    assert contains_scientific_structure(value) is expected
 
 
 def _create_legacy_database(path):
@@ -2068,3 +2097,133 @@ def test_artifact_projection_rejects_sensitive_relative_path_segments(
     for path in rejected_paths:
         assert path.encode() not in raw
         assert path not in public
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "candidate+{}",
+        "candidate({})",
+        "candidate#{}",
+        "mol+{}",
+        "candidate,{}",
+        "candidate;{}",
+        "candidate!{}",
+        "candidate?{}",
+        "candidate|{}",
+        "candidate^{}",
+        "candidate&{}",
+        "candidate*{}",
+        "candidate~{}",
+    ],
+)
+def test_generic_projection_rejects_embedded_structure_after_any_boundary(
+    tmp_path, template
+):
+    store = TaskStore(tmp_path / "atomic-subsequence.sqlite")
+    store.create("task-1", "demo", {})
+    store.claim_running("task-1")
+    attack = template.format("CCO")
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.SUCCEEDED,
+        result={
+            "message": attack,
+            "candidateCCO": "dynamic-key-leak",
+            "task_label": "Task6",
+            "phase": "Phase2 completed",
+            "run_id": "run-123",
+            "trace_id": "123e4567-e89b-12d3-a456-426614174000",
+            "status_text": "workflow completed normally",
+        },
+        projection_policy=ResultProjectionPolicy.GENERIC_SAFE,
+    )
+
+    record = store.get("task-1")
+    assert record.result["task_label"] == "Task6"
+    assert record.result["phase"] == "Phase2 completed"
+    assert record.result["run_id"] == "run-123"
+    assert record.result["trace_id"] == "123e4567-e89b-12d3-a456-426614174000"
+    assert record.result["status_text"] == "workflow completed normally"
+    assert "candidateCCO" not in record.result
+    public = json.dumps(record.to_public_dict())
+    raw = store.db_path.read_bytes()
+    for private in (attack, "dynamic-key-leak"):
+        assert private.encode() not in raw
+        assert private not in public
+
+
+@pytest.mark.parametrize(
+    "structure",
+    [
+        "CCO",
+        "CCCC",
+        "ClCCBr",
+        "C-C-O",
+        "c1ccccc1",
+        "[Na+].[Cl-]",
+        "N[C@@H](C)C(=O)O",
+    ],
+)
+def test_generic_projection_rejects_reliable_atomic_subsequences(
+    tmp_path, structure
+):
+    store = TaskStore(tmp_path / "atomic-structures.sqlite")
+    store.create("task-1", "demo", {})
+    store.claim_running("task-1")
+    attack = f"candidate+{structure}"
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.SUCCEEDED,
+        result={"message": attack},
+        projection_policy=ResultProjectionPolicy.GENERIC_SAFE,
+    )
+
+    public = json.dumps(store.get("task-1").to_public_dict())
+    raw = store.db_path.read_bytes()
+    assert attack.encode() not in raw
+    assert attack not in public
+
+
+def test_artifact_projection_rejects_embedded_atomic_subsequences(tmp_path):
+    store = TaskStore(tmp_path / "atomic-artifacts.sqlite")
+    store.create("task-1", "docking", {})
+    store.claim_running("task-1")
+    attacks = (
+        "mol+CCO",
+        "poses/candidate(CCO).log",
+        "poses/candidate+CCO.log",
+    )
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.SUCCEEDED,
+        result={"success": True},
+        artifacts=[
+            {
+                "name": "docking-pose",
+                "type": "docking_pose",
+                "path": "artifacts/docking_pose.pdbqt",
+            },
+            {"name": attacks[0], "type": "file", "path": "poses/safe.log"},
+            {"name": "report", "type": "log", "path": attacks[1]},
+            {"name": "report", "type": "log", "path": attacks[2]},
+        ],
+        projection_policy=ResultProjectionPolicy.SCIENTIFIC_STRICT,
+    )
+
+    record = store.get("task-1")
+    assert record.artifacts == [
+        {
+            "name": "docking-pose",
+            "type": "docking_pose",
+            "path": "artifacts/docking_pose.pdbqt",
+        }
+    ]
+    public = json.dumps(record.to_public_dict())
+    raw = store.db_path.read_bytes()
+    for attack in attacks:
+        assert attack.encode() not in raw
+        assert attack not in public

@@ -105,10 +105,6 @@ _POSIX_PATH_TEXT = re.compile(r"(?<![A-Za-z0-9.])/(?:[^\s/;,]+/)*[^\s;,]+")
 _FILE_URI_TEXT = re.compile(r"(?i)file://[^\s;,]+")
 _BEARER_TEXT = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _API_KEY_TEXT = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
-_SMILES_TEXT = re.compile(r"(?<![A-Za-z0-9])(?:(?:Cl|Br|[BCNOFPSI])){3,}(?![A-Za-z0-9])")
-_SMILES_CANDIDATE = re.compile(
-    r"(?<![A-Za-z0-9])(?:[A-Za-z0-9@+\-\[\]()=#$\\/.%]+)(?![A-Za-z0-9])"
-)
 _URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _ENCODED_PATH_SEMANTICS = re.compile(r"%(?:2e|2f|5c)", re.IGNORECASE)
 _SAFE_SOURCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}\Z")
@@ -414,20 +410,8 @@ def sanitize_task_message(value: str) -> str:
         message = pattern.sub("[REDACTED]", message)
     for pattern in (_FILE_URI_TEXT, _WINDOWS_PATH_TEXT, _UNC_PATH_TEXT, _POSIX_PATH_TEXT):
         message = pattern.sub("[PATH]", message)
-    message = _SMILES_TEXT.sub("[PRIVATE]", message)
-    message = _SMILES_CANDIDATE.sub(_replace_smiles_candidate, message)
+    message = _redact_scientific_structures(message)
     return message[:TASK_WARNING_MESSAGE_MAX_LENGTH].strip()
-
-
-def _replace_smiles_candidate(match: re.Match[str]) -> str:
-    candidate = match.group(0)
-    if candidate in {"[PATH]", "[PRIVATE]", "[REDACTED]"}:
-        return candidate
-    has_atom = bool(re.search(r"[BCNOFPSIcnosp]", candidate))
-    has_structure = bool(re.search(r"[\d@\[\]()=#$]", candidate))
-    if len(candidate) >= 4 and has_atom and has_structure:
-        return "[PRIVATE]"
-    return candidate
 
 
 def _normalize_warning(value: Any, *, strict: bool) -> dict[str, str] | None:
@@ -812,9 +796,6 @@ RESULT_PROJECTION_MAX_ITEMS = 256
 RESULT_PROJECTION_MAX_TEXT_LENGTH = 512
 _SAFE_GENERIC_RESULT_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}\Z")
 _SAFE_ARTIFACT_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:+-]{0,127}\Z")
-_SMILES_TOKEN_PART = re.compile(
-    r"Cl|Br|[A-Z][a-z]?|[bcnops]|\d+|[@+\-\[\]()=#$\\/.%]"
-)
 _ELEMENT_SYMBOLS = frozenset(
     (
         "H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe "
@@ -825,6 +806,8 @@ _ELEMENT_SYMBOLS = frozenset(
     ).split()
     + ["b", "c", "n", "o", "p", "s"]
 )
+_AROMATIC_ATOMS = frozenset({"b", "c", "n", "o", "p", "s"})
+_SMILES_STRUCTURE_CHARACTERS = frozenset("@+-[]()=#$%.\\/:")
 _ARTIFACT_TYPES = frozenset(
     {"docking_pose", "file", "generic_file", "log", "pdbqt", "pose", "report"}
 )
@@ -1039,56 +1022,96 @@ def _is_safe_generic_result_key(value: Any) -> bool:
         return False
     if ".." in value or contains_sensitive_text(value):
         return False
-    return not _contains_reliable_scientific_token(value)
+    return not contains_scientific_structure(value)
 
 
-def _looks_like_reliable_smiles_token(value: str) -> bool:
-    candidate = value.strip()
-    if len(candidate) < 3 or any(character.isspace() for character in candidate):
-        return False
-    position = 0
-    atom_count = 0
-    has_structure = False
-    for match in _SMILES_TOKEN_PART.finditer(candidate):
-        if match.start() != position:
-            return False
-        token = match.group(0)
-        position = match.end()
-        if re.fullmatch(r"Cl|Br|[A-Z][a-z]?|[bcnops]", token):
-            if token not in _ELEMENT_SYMBOLS:
-                return False
-            atom_count += 1
-        elif re.search(r"\d|[@+\-\[\]()=#$\\/.%]", token):
-            has_structure = True
-    return position == len(candidate) and (
-        atom_count >= 3 or (atom_count >= 2 and has_structure)
+def _atom_token_at(value: str, index: int) -> tuple[int, bool] | None:
+    character = value[index]
+    if character in _AROMATIC_ATOMS:
+        return index + 1, True
+    if not character.isupper():
+        return None
+    if index + 1 < len(value) and value[index + 1].islower():
+        symbol = value[index : index + 2]
+        if symbol in _ELEMENT_SYMBOLS:
+            return index + 2, False
+    if character in _ELEMENT_SYMBOLS:
+        return index + 1, False
+    return None
+
+
+def _scan_scientific_structure(value: str, start: int) -> int | None:
+    atom = _atom_token_at(value, start)
+    if atom is None:
+        return None
+    cursor, aromatic = atom
+    atom_count = 1
+    has_aromatic = aromatic
+    structure_characters: set[str] = set()
+    last_atom_end = cursor
+    while cursor < len(value):
+        while cursor < len(value) and (
+            value[cursor].isdigit()
+            or value[cursor] in _SMILES_STRUCTURE_CHARACTERS
+        ):
+            structure_characters.add(value[cursor])
+            cursor += 1
+        if cursor >= len(value):
+            break
+        atom = _atom_token_at(value, cursor)
+        if atom is None:
+            break
+        cursor, aromatic = atom
+        atom_count += 1
+        has_aromatic = has_aromatic or aromatic
+        last_atom_end = cursor
+    reliable_chain = atom_count >= 3 and (
+        not has_aromatic or bool(structure_characters)
     )
+    reliable_bracket_salt = (
+        atom_count >= 2
+        and "." in structure_characters
+        and "[" in structure_characters
+        and "]" in structure_characters
+        and bool({"+", "-"} & structure_characters)
+    )
+    return last_atom_end if reliable_chain or reliable_bracket_salt else None
 
 
-def _contains_reliable_scientific_token(value: str) -> bool:
-    without_digests = _SAFE_DIGEST_TEXT.sub("digest", value)
-    if _looks_like_reliable_smiles_token(without_digests):
-        return True
-    for chunk in re.split(r"[=:/\\\s._]+", without_digests):
-        if not chunk:
+def _scientific_structure_spans(value: str) -> list[tuple[int, int]]:
+    protected = _SAFE_DIGEST_TEXT.sub(
+        lambda match: "x" * len(match.group(0)),
+        value,
+    )
+    spans: list[tuple[int, int]] = []
+    index = 0
+    while index < len(protected):
+        end = _scan_scientific_structure(protected, index)
+        if end is None:
+            index += 1
             continue
-        hyphen_parts = [part for part in chunk.split("-") if part]
-        candidates = [chunk, *hyphen_parts]
-        candidates.extend(
-            "-".join(hyphen_parts[start:end])
-            for start in range(len(hyphen_parts))
-            for end in range(start + 2, len(hyphen_parts) + 1)
-        )
-        if any(_looks_like_reliable_smiles_token(item) for item in candidates):
-            return True
-    return False
+        spans.append((index, end))
+        index = end
+    return spans
 
 
-def _replace_reliable_smiles_candidate(match: re.Match[str]) -> str:
-    value = match.group(0)
-    if value in {"[PATH]", "[PRIVATE]", "[REDACTED]"}:
+def contains_scientific_structure(value: Any) -> bool:
+    """Return whether text contains a reliable molecular atomic subsequence."""
+
+    return isinstance(value, str) and bool(_scientific_structure_spans(value))
+
+
+def _redact_scientific_structures(value: str) -> str:
+    spans = _scientific_structure_spans(value)
+    if not spans:
         return value
-    return "[PRIVATE]" if _looks_like_reliable_smiles_token(value) else value
+    result: list[str] = []
+    previous_end = 0
+    for start, end in spans:
+        result.extend((value[previous_end:start], "[PRIVATE]"))
+        previous_end = end
+    result.append(value[previous_end:])
+    return "".join(result)
 
 
 def _sanitize_generic_result_text(value: str) -> str:
@@ -1111,12 +1134,9 @@ def _sanitize_generic_result_text(value: str) -> str:
             else "[REDACTED]"
         )
         sanitized = sanitized.replace("[redacted]", marker)
-    if _contains_reliable_scientific_token(sanitized):
+    if contains_scientific_structure(sanitized):
         return "[PRIVATE]"
-    return _SMILES_CANDIDATE.sub(
-        _replace_reliable_smiles_candidate,
-        sanitized,
-    ).strip()
+    return sanitized.strip()
 
 
 def _sanitize_generic_result_value(
@@ -1239,7 +1259,7 @@ def sanitize_public_artifacts(value: Any) -> list[dict[str, Any]]:
                 basename = segment.rsplit(".", 1)[0]
                 if any(
                     contains_sensitive_text(candidate)
-                    or _contains_reliable_scientific_token(candidate)
+                    or contains_scientific_structure(candidate)
                     for candidate in {segment, basename}
                 ):
                     path_is_sensitive = True
@@ -1262,7 +1282,7 @@ def sanitize_public_artifacts(value: Any) -> list[dict[str, Any]]:
                 valid = (
                     _SAFE_ARTIFACT_CODE.fullmatch(item) is not None
                     and not contains_sensitive_text(item)
-                    and not _contains_reliable_scientific_token(item)
+                    and not contains_scientific_structure(item)
                 )
             if not valid:
                 invalid_identity = True
