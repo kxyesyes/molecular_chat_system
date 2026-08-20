@@ -1,0 +1,246 @@
+"""Deterministic Temporal workflow for one verified docking execution."""
+
+from __future__ import annotations
+
+import asyncio
+import copy
+from datetime import timedelta
+from typing import Any
+
+from temporalio import workflow
+from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError, CancelledError as TemporalCancelledError
+from temporalio.exceptions import TimeoutError
+
+
+DOCKING_ACTIVITY_NAME = "run_docking_activity"
+PROJECTION_ACTIVITY_NAME = "project_task_activity"
+
+_STATUS_FAILED = "failed"
+_STATUS_SUCCEEDED = "succeeded"
+_STATUS_CANCELED = "canceled"
+_STATUS_TIMED_OUT = "timed_out"
+_CODE_INPUT_INVALID = "TASK_INPUT_INVALID"
+_CODE_PROJECTION_FAILED = "TASK_PROJECTION_FAILED"
+_CODE_PROCESS_FAILED = "DOCKING_PROCESS_FAILED"
+_CODE_HEARTBEAT_TIMEOUT = "TASK_HEARTBEAT_TIMEOUT"
+_TERMINAL_STATUSES = {
+    _STATUS_SUCCEEDED,
+    _STATUS_FAILED,
+    _STATUS_CANCELED,
+    _STATUS_TIMED_OUT,
+}
+_ERROR_CODES = {
+    "TASK_INPUT_INVALID",
+    "TASK_INPUT_HASH_MISMATCH",
+    "TASK_BACKEND_UNAVAILABLE",
+    "TEMPORAL_START_FAILED",
+    "TEMPORAL_WORKER_UNAVAILABLE",
+    "TASK_HEARTBEAT_TIMEOUT",
+    "TASK_CANCEL_TIMEOUT",
+    "DOCKING_ENVIRONMENT_UNAVAILABLE",
+    "DOCKING_PROCESS_FAILED",
+    "DOCKING_PROCESS_OWNERSHIP_UNCERTAIN",
+    "DOCKING_ARTIFACT_INVALID",
+    "SCIENTIFIC_VALIDATION_FAILED",
+    "TASK_PROJECTION_FAILED",
+}
+
+_PROJECTION_RETRY = RetryPolicy(maximum_attempts=5)
+_DOCKING_RETRY = RetryPolicy(maximum_attempts=1)
+
+
+def _valid_input(payload: Any) -> bool:
+    return (
+        isinstance(payload, dict)
+        and set(payload) == {"task_id", "manifest_locator"}
+        and isinstance(payload.get("task_id"), str)
+        and bool(payload["task_id"])
+        and len(payload["task_id"]) <= 128
+        and isinstance(payload.get("manifest_locator"), str)
+        and bool(payload["manifest_locator"])
+        and len(payload["manifest_locator"]) <= 4096
+    )
+
+
+@workflow.defn(name="medchat-docking-workflow")
+class DockingWorkflow:
+    """Run one non-retried scientific Activity with independently retried projection."""
+
+    def __init__(self) -> None:
+        self._snapshot: dict[str, Any] = {
+            "task_id": None,
+            "status": "queued",
+            "phase": "running",
+            "attempt": 0,
+            "error_code": None,
+            "projection_pending": False,
+            "terminal_event_count": 0,
+        }
+
+    @workflow.query
+    def task_snapshot(self) -> dict[str, Any]:
+        return copy.deepcopy(self._snapshot)
+
+    @workflow.run
+    async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not _valid_input(payload):
+            return self._terminal(
+                _STATUS_FAILED,
+                error_code=_CODE_INPUT_INVALID,
+                projection_pending=True,
+            )
+
+        task_id = payload["task_id"]
+        self._snapshot.update({"task_id": task_id, "attempt": 1})
+        running_projection = {
+            "operation": "running",
+            "task_id": task_id,
+            "attempt": 1,
+            "phase": "running",
+        }
+        try:
+            await self._project(running_projection)
+        except asyncio.CancelledError:
+            return await self._finish_canceled(task_id)
+        except ActivityError as exc:
+            if isinstance(exc.cause, TemporalCancelledError):
+                return await self._finish_canceled(task_id)
+            return self._terminal(
+                _STATUS_FAILED,
+                error_code=_CODE_PROJECTION_FAILED,
+                projection_pending=True,
+            )
+        except Exception:
+            return self._terminal(
+                _STATUS_FAILED,
+                error_code=_CODE_PROJECTION_FAILED,
+                projection_pending=True,
+            )
+
+        self._snapshot.update({"status": "running", "phase": "running"})
+        try:
+            outcome = await workflow.execute_activity(
+                DOCKING_ACTIVITY_NAME,
+                {
+                    "task_id": task_id,
+                    "manifest_locator": payload["manifest_locator"],
+                },
+                start_to_close_timeout=timedelta(minutes=30),
+                heartbeat_timeout=timedelta(seconds=15),
+                retry_policy=_DOCKING_RETRY,
+                cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+            )
+        except asyncio.CancelledError:
+            return await self._finish_canceled(task_id)
+        except ActivityError as exc:
+            cause = exc.cause
+            if isinstance(cause, TemporalCancelledError):
+                return await self._finish_canceled(task_id)
+            if isinstance(cause, TimeoutError):
+                outcome = {
+                    "status": _STATUS_TIMED_OUT,
+                    "error_code": _CODE_HEARTBEAT_TIMEOUT,
+                }
+            else:
+                outcome = {
+                    "status": _STATUS_FAILED,
+                    "error_code": _CODE_PROCESS_FAILED,
+                }
+        except Exception:
+            outcome = {
+                "status": _STATUS_FAILED,
+                "error_code": _CODE_PROCESS_FAILED,
+            }
+
+        status, error_code = self._controlled_outcome(outcome)
+        if status == _STATUS_CANCELED:
+            return await self._finish_canceled(task_id)
+        terminal_payload: dict[str, Any] = {
+            "operation": "terminal",
+            "task_id": task_id,
+            "status": status,
+        }
+        if error_code is not None:
+            terminal_payload["error_code"] = error_code
+        for key in ("result", "artifacts", "warnings", "provenance"):
+            if key in outcome:
+                terminal_payload[key] = outcome[key]
+        projection_pending = False
+        try:
+            await self._project(terminal_payload)
+        except Exception:
+            projection_pending = True
+        return self._terminal(
+            status,
+            error_code=error_code,
+            projection_pending=projection_pending,
+        )
+
+    async def _project(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await workflow.execute_activity(
+            PROJECTION_ACTIVITY_NAME,
+            payload,
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=_PROJECTION_RETRY,
+        )
+
+    async def _finish_canceled(self, task_id: str) -> dict[str, Any]:
+        projection_pending = False
+        try:
+            await self._project(
+                {"operation": "cancel_requested", "task_id": task_id}
+            )
+            await self._project(
+                {
+                    "operation": "terminal",
+                    "task_id": task_id,
+                    "status": _STATUS_CANCELED,
+                }
+            )
+        except Exception:
+            projection_pending = True
+        return self._terminal(
+            _STATUS_CANCELED,
+            projection_pending=projection_pending,
+        )
+
+    @staticmethod
+    def _controlled_outcome(outcome: Any) -> tuple[str, str | None]:
+        if not isinstance(outcome, dict):
+            return _STATUS_FAILED, _CODE_PROCESS_FAILED
+        status = outcome.get("status")
+        if status not in _TERMINAL_STATUSES:
+            return _STATUS_FAILED, _CODE_PROCESS_FAILED
+        error_code = outcome.get("error_code")
+        if status in {_STATUS_FAILED, _STATUS_TIMED_OUT}:
+            if error_code not in _ERROR_CODES:
+                error_code = _CODE_PROCESS_FAILED
+        else:
+            error_code = None
+        return status, error_code
+
+    def _terminal(
+        self,
+        status: str,
+        *,
+        error_code: str | None = None,
+        projection_pending: bool,
+    ) -> dict[str, Any]:
+        if self._snapshot["terminal_event_count"] == 0:
+            self._snapshot.update(
+                {
+                    "status": status,
+                    "error_code": error_code,
+                    "projection_pending": projection_pending,
+                    "terminal_event_count": 1,
+                }
+            )
+        return copy.deepcopy(self._snapshot)
+
+
+__all__ = [
+    "DOCKING_ACTIVITY_NAME",
+    "PROJECTION_ACTIVITY_NAME",
+    "DockingWorkflow",
+]
