@@ -1091,6 +1091,144 @@ class DockingInputStager:
                     continue
             return removed
 
+    def discard_unprojected(
+        self,
+        task_id: str,
+        manifest_path: str | os.PathLike[str],
+        *,
+        projection_check: Callable[[str], Any],
+    ) -> bool:
+        """Remove one verified owned stage only when durable projection is absent."""
+
+        try:
+            _validate_task_id(task_id)
+        except ManifestError:
+            return False
+        if not callable(projection_check):
+            raise ManifestError("manifest_cleanup_invalid")
+        with self._lock:
+            try:
+                self._assert_root_safe()
+                self._ensure_trash()
+                self._ensure_leases()
+            except ManifestError:
+                return False
+        lease = self._task_lease(task_id, timeout_seconds=0)
+        try:
+            lease.acquire(timeout_seconds=0)
+        except ManifestError:
+            return False
+        if not lease.acquired:
+            return False
+        try:
+            with self._lock:
+                task_root = self._root / task_id
+                expected_manifest = task_root / _MANIFEST_NAME
+                try:
+                    supplied = _coerce_absolute_path(
+                        manifest_path,
+                        "manifest_path_invalid",
+                    )
+                    if supplied != expected_manifest:
+                        return False
+                    before = task_root.stat(follow_symlinks=False)
+                    if (
+                        task_root.is_symlink()
+                        or _stat_is_reparse(before)
+                        or not task_root.is_dir()
+                        or not _has_valid_ownership_marker(task_root)
+                    ):
+                        return False
+                    self._load_verified_unlocked(task_id, expected_manifest)
+                    if not _tree_is_owned_without_links(task_root):
+                        return False
+                    after = task_root.stat(follow_symlinks=False)
+                    if _identity(before) != _identity(after):
+                        return False
+                    if not _projection_check_is_absent(
+                        projection_check,
+                        task_id,
+                    ):
+                        return False
+                    quarantined = self._quarantine_path(task_id)
+                    if not _publish_directory(task_root, quarantined):
+                        return False
+                    moved = quarantined.stat(follow_symlinks=False)
+                    if _identity(after) != _identity(moved):
+                        if not task_root.exists() and not task_root.is_symlink():
+                            _publish_directory(quarantined, task_root)
+                        return False
+                    if not _projection_check_is_absent(
+                        projection_check,
+                        task_id,
+                    ):
+                        if not task_root.exists() and not task_root.is_symlink():
+                            _publish_directory(quarantined, task_root)
+                        return False
+                    return _safe_delete_owned_tree(quarantined)
+                except (FileNotFoundError, NotADirectoryError, ManifestError):
+                    return False
+                except (OSError, RuntimeError, ValueError):
+                    return False
+        finally:
+            lease.release()
+
+    def cleanup_unprojected_expired(
+        self,
+        cutoff_epoch: float,
+        *,
+        projection_check: Callable[[str], Any],
+        limit: int = 16,
+    ) -> list[str]:
+        """Bound one pass over old stages and discard only DB-confirmed orphans."""
+
+        if (
+            type(cutoff_epoch) not in (int, float)
+            or not math.isfinite(float(cutoff_epoch))
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 256
+            or not callable(projection_check)
+        ):
+            raise ManifestError("manifest_cleanup_invalid")
+        candidates: list[tuple[str, Path]] = []
+        with self._lock:
+            self._assert_root_safe()
+            self._ensure_trash()
+            self._ensure_leases()
+            try:
+                entries = sorted(os.scandir(self._root), key=lambda item: item.name)
+            except OSError:
+                raise ManifestError("manifest_io_error") from None
+            for entry in entries:
+                if len(candidates) >= limit:
+                    break
+                if not _is_valid_task_id(entry.name):
+                    continue
+                try:
+                    status = entry.stat(follow_symlinks=False)
+                    if (
+                        entry.is_symlink()
+                        or _stat_is_reparse(status)
+                        or not entry.is_dir(follow_symlinks=False)
+                        or status.st_mtime >= float(cutoff_epoch)
+                    ):
+                        continue
+                except OSError:
+                    continue
+                candidates.append(
+                    (entry.name, self._root / entry.name / _MANIFEST_NAME)
+                )
+        removed: list[str] = []
+        for task_id, manifest in candidates:
+            if self.discard_unprojected(
+                task_id,
+                manifest,
+                projection_check=projection_check,
+            ):
+                removed.append(task_id)
+        return removed
+
     def _cleanup_execution_residue(
         self,
         task_root: Path,
@@ -1384,6 +1522,16 @@ def _status_check_is_terminal(
     except Exception:
         return False
     return type(value) is str and value.strip().lower() in _TERMINAL_TASK_STATUSES
+
+
+def _projection_check_is_absent(
+    projection_check: Callable[[str], Any],
+    task_id: str,
+) -> bool:
+    try:
+        return projection_check(task_id) is False
+    except Exception:
+        return False
 
 
 def _normalize_ligand(

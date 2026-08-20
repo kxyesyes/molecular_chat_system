@@ -594,6 +594,86 @@ def test_cleanup_without_status_check_deletes_nothing(tmp_path: Path) -> None:
     assert residue.is_dir()
 
 
+def test_discard_unprojected_quarantines_owned_verified_task(tmp_path: Path) -> None:
+    stager = DockingInputStager(tmp_path)
+    manifest = _stage_file(stager, "orphan")
+
+    removed = stager.discard_unprojected(
+        "orphan",
+        manifest,
+        projection_check=lambda task_id: False,
+    )
+
+    assert removed is True
+    assert not manifest.parent.exists()
+    assert not [
+        path
+        for path in (tmp_path / ".trash").iterdir()
+        if path.name != ".medchat-staging-owner"
+    ]
+
+
+@pytest.mark.parametrize("projection_result", [True, RuntimeError("db unavailable")])
+def test_discard_unprojected_preserves_on_projection_or_db_error(
+    tmp_path: Path,
+    projection_result: bool | Exception,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+    manifest = _stage_file(stager, "protected")
+
+    def projection_check(task_id: str) -> bool:
+        if isinstance(projection_result, Exception):
+            raise projection_result
+        return projection_result
+
+    assert stager.discard_unprojected(
+        "protected",
+        manifest,
+        projection_check=projection_check,
+    ) is False
+    assert stager.load_verified("protected", manifest)["task_id"] == "protected"
+
+
+def test_discard_unprojected_rejects_unowned_or_wrong_manifest(tmp_path: Path) -> None:
+    stager = DockingInputStager(tmp_path)
+    manifest = _stage_file(stager, "owned")
+    unowned = tmp_path / "unowned"
+    unowned.mkdir()
+    keep = unowned / "keep.txt"
+    keep.write_text("keep", encoding="utf-8")
+
+    assert stager.discard_unprojected(
+        "unowned",
+        unowned / "input_manifest.json",
+        projection_check=lambda task_id: False,
+    ) is False
+    assert stager.discard_unprojected(
+        "owned",
+        manifest.parent / "other.json",
+        projection_check=lambda task_id: False,
+    ) is False
+    assert keep.read_text(encoding="utf-8") == "keep"
+    assert manifest.exists()
+
+
+def test_cleanup_unprojected_expired_is_bounded_and_fail_closed(tmp_path: Path) -> None:
+    stager = DockingInputStager(tmp_path)
+    first = _stage_file(stager, "orphan-a")
+    second = _stage_file(stager, "orphan-b")
+    os.utime(first.parent, (1, 1))
+    os.utime(second.parent, (1, 1))
+
+    removed = stager.cleanup_unprojected_expired(
+        time.time(),
+        projection_check=lambda task_id: False,
+        limit=1,
+    )
+
+    assert len(removed) == 1
+    assert set(removed) <= {"orphan-a", "orphan-b"}
+    assert sum(path.exists() for path in (first.parent, second.parent)) == 1
+
+
 def test_cleanup_status_check_allows_only_terminal_state_at_final_check(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

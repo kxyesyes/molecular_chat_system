@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import Future
 import hashlib
 import inspect
 import json
 from pathlib import Path
 import sqlite3
 import threading
+import time
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
@@ -40,6 +42,12 @@ class TaskBackendStartError(RuntimeError):
 _IDEMPOTENT_REUSE_MESSAGE = (
     "existing idempotent task reused; staged input retained"
 )
+_IDEMPOTENT_REUSE_DISCARDED_MESSAGE = (
+    "existing idempotent task reused; staged input discarded"
+)
+_STAGING_CLEANUP_INTERVAL_SECONDS = 300.0
+_STAGING_ORPHAN_TTL_SECONDS = 24 * 60 * 60.0
+_STAGING_CLEANUP_LIMIT = 16
 
 
 class TaskRuntime:
@@ -91,6 +99,11 @@ class TaskRuntime:
             assert_async_backend_contract(local_backend)
         self.local_backend = local_backend
         self._closed = False
+        self._close_lock = threading.Lock()
+        self._close_future: Future[None] | None = None
+        self._close_runner: asyncio.Task[None] | None = None
+        self._staging_cleanup_lock = threading.Lock()
+        self._last_staging_cleanup = 0.0
 
     async def submit_docking(
         self,
@@ -105,62 +118,83 @@ class TaskRuntime:
     ) -> BackendSubmitResult:
         if self._closed:
             raise RuntimeError("task runtime is closed")
+        await self._maybe_cleanup_staging()
         task_id = self._new_task_id()
         config_snapshot = strict_json_snapshot(config)
         if not isinstance(config_snapshot, dict):
             raise ValueError("invalid docking config")
-        manifest_path = await asyncio.to_thread(
-            self.stager.stage,
-            task_id,
-            receptor_name,
-            receptor_bytes,
-            ligand_name,
-            ligand_bytes,
-            smiles,
-            config_snapshot,
-        )
-        verified_manifest = await asyncio.to_thread(
-            self.stager.load_verified,
-            task_id,
-            manifest_path,
-        )
-        request_digest = self._docking_request_digest(verified_manifest)
-
-        if idempotency_key is not None:
-            existing = await self._global_idempotency_result(
-                idempotency_key,
-                request_digest,
-                task_type="docking",
-            )
-            if existing is not None:
-                return existing
-
-        temporal_health = await self._temporal_health()
-        decision = self.selector.select(
-            "docking",
-            task_id,
-            temporal_health.available,
-        )
-        decision_payload = self._decision_payload(decision)
-        payload = {
-            "decision": decision_payload,
-            "mode": "file" if ligand_bytes is not None else "smiles",
-            "total_bytes": len(receptor_bytes) + (len(ligand_bytes) if ligand_bytes else 0),
-            "config_hash": verified_manifest["config_hash"],
-            "request_digest": request_digest,
-        }
-        submission = TaskSubmission(
+        manifest_path, verified_manifest = await self._stage_verified(
             task_id=task_id,
-            task_type="docking",
-            payload=payload,
-            input_manifest_path=str(manifest_path),
-            idempotency_key=idempotency_key,
-            request_digest=request_digest,
+            receptor_name=receptor_name,
+            receptor_bytes=receptor_bytes,
+            ligand_name=ligand_name,
+            ligand_bytes=ligand_bytes,
+            smiles=smiles,
+            config=config_snapshot,
         )
+        try:
+            request_digest = self._docking_request_digest(verified_manifest)
+
+            if idempotency_key is not None:
+                existing = await self._global_idempotency_result(
+                    idempotency_key,
+                    request_digest,
+                    task_type="docking",
+                )
+                if existing is not None:
+                    discarded = await self._discard_staging(
+                        task_id,
+                        manifest_path,
+                    )
+                    return BackendSubmitResult(
+                        existing.task_id,
+                        existing.backend,
+                        existing.outcome,
+                        (
+                            _IDEMPOTENT_REUSE_DISCARDED_MESSAGE
+                            if discarded
+                            else _IDEMPOTENT_REUSE_MESSAGE
+                        ),
+                    )
+
+            temporal_health = await self._temporal_health()
+            decision = self.selector.select(
+                "docking",
+                task_id,
+                temporal_health.available,
+            )
+            decision_payload = self._decision_payload(decision)
+            payload = {
+                "decision": decision_payload,
+                "mode": "file" if ligand_bytes is not None else "smiles",
+                "total_bytes": len(receptor_bytes) + (len(ligand_bytes) if ligand_bytes else 0),
+                "config_hash": verified_manifest["config_hash"],
+                "request_digest": request_digest,
+            }
+            submission = TaskSubmission(
+                task_id=task_id,
+                task_type="docking",
+                payload=payload,
+                input_manifest_path=str(manifest_path),
+                idempotency_key=idempotency_key,
+                request_digest=request_digest,
+            )
+        except asyncio.CancelledError:
+            await self._discard_staging_after_cancellation(task_id, manifest_path)
+            raise
+        except Exception:
+            await self._discard_staging(task_id, manifest_path)
+            raise
 
         if decision.backend == "local":
             try:
                 local_result = await self.local_backend.submit(submission)
+            except asyncio.CancelledError:
+                await self._discard_staging_after_cancellation(
+                    task_id,
+                    manifest_path,
+                )
+                raise
             except TaskIdempotencyConflictError:
                 raise
             except Exception as exc:
@@ -170,7 +204,11 @@ class TaskRuntime:
                     error_code=TaskErrorCode.TASK_BACKEND_UNAVAILABLE,
                 )
                 raise TaskBackendStartError("Local start failed") from exc
-            return await self._validated_local_result(submission, local_result)
+            try:
+                return await self._validated_local_result(submission, local_result)
+            except TaskBackendStartError:
+                await self._discard_staging(task_id, manifest_path)
+                raise
 
         if decision.backend != "temporal" or self.temporal_backend is None:
             await self._mark_temporal_ambiguous(submission)
@@ -178,6 +216,9 @@ class TaskRuntime:
 
         try:
             temporal_result = await self.temporal_backend.submit(submission)
+        except asyncio.CancelledError:
+            await self._mark_temporal_ambiguous_after_cancellation(submission)
+            raise
         except Exception as exc:
             await self._mark_temporal_ambiguous(submission)
             raise TaskBackendStartError(
@@ -194,7 +235,17 @@ class TaskRuntime:
                 "Temporal start returned an ambiguous result; local fallback suppressed"
             )
         if temporal_result.outcome is StartOutcome.ACCEPTED:
-            return temporal_result
+            try:
+                return await self._validated_temporal_result(
+                    submission,
+                    temporal_result,
+                )
+            except asyncio.CancelledError:
+                await self._mark_temporal_ambiguous_after_cancellation(submission)
+                raise
+            except TaskBackendStartError:
+                await self._mark_temporal_ambiguous(submission)
+                raise
         if temporal_result.outcome is StartOutcome.REJECTED:
             if await self._projection_exists(task_id):
                 await self._mark_temporal_ambiguous(submission)
@@ -203,6 +254,12 @@ class TaskRuntime:
                 )
             try:
                 local_result = await self.local_backend.submit(submission)
+            except asyncio.CancelledError:
+                await self._discard_staging_after_cancellation(
+                    task_id,
+                    manifest_path,
+                )
+                raise
             except TaskIdempotencyConflictError:
                 raise
             except Exception as exc:
@@ -223,6 +280,7 @@ class TaskRuntime:
                     raise TaskBackendStartError(
                         "Temporal fallback projection has conflicting authority"
                     ) from exc
+                await self._discard_staging(task_id, manifest_path)
                 raise
 
         await self._mark_temporal_ambiguous(submission)
@@ -232,6 +290,160 @@ class TaskRuntime:
 
     async def get(self, task_id: str) -> TaskRecord:
         return await asyncio.to_thread(self.store.get, task_id)
+
+    async def _stage_verified(
+        self,
+        *,
+        task_id: str,
+        receptor_name: str,
+        receptor_bytes: bytes,
+        ligand_name: str | None,
+        ligand_bytes: bytes | None,
+        smiles: str | None,
+        config: Mapping[str, Any],
+    ) -> tuple[Path, dict[str, Any]]:
+        stage_task = asyncio.create_task(
+            asyncio.to_thread(
+                self.stager.stage,
+                task_id,
+                receptor_name,
+                receptor_bytes,
+                ligand_name,
+                ligand_bytes,
+                smiles,
+                config,
+            ),
+            name=f"medchat-stage-{task_id}",
+        )
+        try:
+            manifest_path = await asyncio.shield(stage_task)
+        except asyncio.CancelledError:
+            manifest_path = None
+            try:
+                manifest_path = await self._await_task_outcome(stage_task)
+            except Exception:
+                pass
+            if manifest_path is not None:
+                await self._discard_staging_after_cancellation(
+                    task_id,
+                    Path(manifest_path),
+                )
+            raise
+        verify_task = asyncio.create_task(
+            asyncio.to_thread(
+                self.stager.load_verified,
+                task_id,
+                manifest_path,
+            ),
+            name=f"medchat-verify-stage-{task_id}",
+        )
+        try:
+            verified = await asyncio.shield(verify_task)
+        except asyncio.CancelledError:
+            try:
+                await self._await_task_outcome(verify_task)
+            except Exception:
+                pass
+            await self._discard_staging_after_cancellation(task_id, manifest_path)
+            raise
+        if not isinstance(verified, dict):
+            raise ValueError("invalid verified manifest")
+        return Path(manifest_path), verified
+
+    @staticmethod
+    async def _await_task_outcome(task: asyncio.Task[Any]) -> Any:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        return task.result()
+
+    async def _discard_staging_after_cancellation(
+        self,
+        task_id: str,
+        manifest_path: Path,
+    ) -> None:
+        cleanup = asyncio.create_task(
+            self._discard_staging(task_id, manifest_path),
+            name=f"medchat-discard-stage-{task_id}",
+        )
+        try:
+            await self._await_task_outcome(cleanup)
+        except Exception:
+            pass
+
+    async def _mark_temporal_ambiguous_after_cancellation(
+        self,
+        submission: TaskSubmission,
+    ) -> None:
+        marker = asyncio.create_task(
+            self._mark_temporal_ambiguous(submission),
+            name=f"medchat-mark-temporal-ambiguous-{submission.task_id}",
+        )
+        try:
+            await self._await_task_outcome(marker)
+        except Exception:
+            pass
+
+    async def _discard_staging(
+        self,
+        task_id: str,
+        manifest_path: Path,
+    ) -> bool:
+        discard = getattr(self.stager, "discard_unprojected", None)
+        if discard is None:
+            return False
+        try:
+            return bool(
+                await asyncio.to_thread(
+                    discard,
+                    task_id,
+                    manifest_path,
+                    projection_check=self._projection_exists_sync,
+                )
+            )
+        except Exception:
+            return False
+
+    def _projection_exists_sync(self, task_id: str) -> bool:
+        try:
+            self.store.get(task_id)
+        except KeyError:
+            return False
+        return True
+
+    async def cleanup_staging_once(
+        self,
+        *,
+        cutoff_epoch: float | None = None,
+        limit: int = _STAGING_CLEANUP_LIMIT,
+    ) -> list[str]:
+        cleanup = getattr(self.stager, "cleanup_unprojected_expired", None)
+        if cleanup is None:
+            return []
+        cutoff = (
+            time.time() - _STAGING_ORPHAN_TTL_SECONDS
+            if cutoff_epoch is None
+            else cutoff_epoch
+        )
+        return await asyncio.to_thread(
+            cleanup,
+            cutoff,
+            projection_check=self._projection_exists_sync,
+            limit=limit,
+        )
+
+    async def _maybe_cleanup_staging(self) -> None:
+        now = time.monotonic()
+        with self._staging_cleanup_lock:
+            if now - self._last_staging_cleanup < _STAGING_CLEANUP_INTERVAL_SECONDS:
+                return
+            self._last_staging_cleanup = now
+        try:
+            await self.cleanup_staging_once()
+        except Exception:
+            return
 
     @staticmethod
     def _docking_request_digest(manifest: Mapping[str, Any]) -> str:
@@ -291,8 +503,38 @@ class TaskRuntime:
         }
 
     async def close(self) -> None:
-        if self._closed:
+        with self._close_lock:
+            if self._closed:
+                return
+            shared = self._close_future
+            if shared is None:
+                shared = Future()
+                self._close_future = shared
+                self._close_runner = asyncio.create_task(
+                    self._close_once(shared),
+                    name="medchat-task-runtime-close",
+                )
+        await asyncio.shield(asyncio.wrap_future(shared))
+
+    async def _close_once(self, shared: Future[None]) -> None:
+        try:
+            await self._close_backends()
+        except BaseException as exc:
+            with self._close_lock:
+                if self._close_future is shared:
+                    self._close_future = None
+                    self._close_runner = None
+            if not shared.done():
+                shared.set_exception(exc)
             return
+        with self._close_lock:
+            self._closed = True
+            if self._close_future is shared:
+                self._close_runner = None
+        if not shared.done():
+            shared.set_result(None)
+
+    async def _close_backends(self) -> None:
         seen: set[int] = set()
         for backend in (self.local_backend, self.temporal_backend):
             if backend is None or id(backend) in seen:
@@ -306,7 +548,6 @@ class TaskRuntime:
             result = closer()
             if inspect.isawaitable(result):
                 await result
-        self._closed = True
 
     async def _temporal_health(self) -> BackendHealth:
         if self.temporal_backend is None:
@@ -468,6 +709,53 @@ class TaskRuntime:
             )
         return result
 
+    async def _validated_temporal_result(
+        self,
+        submission: TaskSubmission,
+        result: BackendSubmitResult,
+    ) -> BackendSubmitResult:
+        try:
+            record, stored_request_digest = await asyncio.to_thread(
+                self._task_authority,
+                result.task_id,
+            )
+        except Exception as exc:
+            raise TaskBackendStartError(
+                "Temporal accepted start has no matching authority"
+            ) from exc
+        if (
+            record.task_id != result.task_id
+            or record.task_type != submission.task_type
+            or record.backend != "temporal"
+            or stored_request_digest != submission.request_digest
+        ):
+            raise TaskBackendStartError(
+                "Temporal accepted start has conflicting authority"
+            )
+        if submission.idempotency_key is not None:
+            digest = LocalTaskBackend.idempotency_digest(
+                submission.idempotency_key
+            )
+            try:
+                authority, authority_request_digest = await asyncio.to_thread(
+                    self.store.get_idempotency_authority,
+                    digest,
+                )
+            except Exception as exc:
+                raise TaskBackendStartError(
+                    "Temporal accepted start has no matching authority"
+                ) from exc
+            if (
+                authority.task_id != result.task_id
+                or authority.task_type != submission.task_type
+                or authority.backend != "temporal"
+                or authority_request_digest != submission.request_digest
+            ):
+                raise TaskBackendStartError(
+                    "Temporal accepted start has conflicting authority"
+                )
+        return result
+
     def _task_authority(
         self,
         task_id: str,
@@ -600,20 +888,57 @@ class TaskRuntime:
 
 _RUNTIME: TaskRuntime | None = None
 _RUNTIME_LOCK = threading.Lock()
+_RUNTIME_RESET_FUTURE: Future[None] | None = None
+_RUNTIME_RESET_RUNNER: asyncio.Task[None] | None = None
 
 
 def get_task_runtime() -> TaskRuntime:
     global _RUNTIME
     with _RUNTIME_LOCK:
+        if _RUNTIME_RESET_FUTURE is not None:
+            raise RuntimeError("task runtime reset is in progress")
         if _RUNTIME is None:
             _RUNTIME = TaskRuntime()
         return _RUNTIME
 
 
 async def reset_task_runtime_for_tests() -> None:
-    global _RUNTIME
+    global _RUNTIME_RESET_FUTURE, _RUNTIME_RESET_RUNNER
     with _RUNTIME_LOCK:
         runtime = _RUNTIME
-        _RUNTIME = None
-    if runtime is not None:
+        if runtime is None:
+            return
+        shared = _RUNTIME_RESET_FUTURE
+        if shared is None:
+            shared = Future()
+            _RUNTIME_RESET_FUTURE = shared
+            _RUNTIME_RESET_RUNNER = asyncio.create_task(
+                _reset_runtime_once(runtime, shared),
+                name="medchat-task-runtime-reset",
+            )
+    await asyncio.shield(asyncio.wrap_future(shared))
+
+
+async def _reset_runtime_once(
+    runtime: TaskRuntime,
+    shared: Future[None],
+) -> None:
+    global _RUNTIME, _RUNTIME_RESET_FUTURE, _RUNTIME_RESET_RUNNER
+    try:
         await runtime.close()
+    except BaseException as exc:
+        with _RUNTIME_LOCK:
+            if _RUNTIME_RESET_FUTURE is shared:
+                _RUNTIME_RESET_FUTURE = None
+                _RUNTIME_RESET_RUNNER = None
+        if not shared.done():
+            shared.set_exception(exc)
+        return
+    with _RUNTIME_LOCK:
+        if _RUNTIME is runtime:
+            _RUNTIME = None
+        if _RUNTIME_RESET_FUTURE is shared:
+            _RUNTIME_RESET_FUTURE = None
+            _RUNTIME_RESET_RUNNER = None
+    if not shared.done():
+        shared.set_result(None)

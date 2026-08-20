@@ -51,6 +51,7 @@ _LOCAL_PROVENANCE = {
     "process_restart_recovery": False,
     "durable_execution": False,
 }
+_MAX_PROGRESS_WARNINGS = 32
 
 
 class TaskIdempotencyConflictError(ValueError):
@@ -74,13 +75,53 @@ class _ProgressSlot:
         self.event = asyncio.Event()
         self.lock = threading.Lock()
         self.latest: _ProgressUpdate | None = None
+        self.attempt: int | None = None
+        self.warnings: list[Any] = []
+        self.invalid_warnings: Any = None
+        self.provenance: dict[str, Any] = {}
+        self.invalid_provenance: Any = None
         self.stopping = False
 
     def put(self, update: _ProgressUpdate) -> None:
         with self.lock:
             if self.stopping:
                 return
-            self.latest = update
+            if update.attempt is not None:
+                self.attempt = update.attempt
+            if update.warnings is not None:
+                try:
+                    incoming_warnings = normalize_task_warnings(update.warnings)
+                except ValueError:
+                    self.invalid_warnings = update.warnings
+                else:
+                    for warning in incoming_warnings:
+                        if warning in self.warnings:
+                            continue
+                        if len(self.warnings) >= _MAX_PROGRESS_WARNINGS:
+                            break
+                        self.warnings.append(warning)
+            if update.provenance is not None:
+                try:
+                    incoming_provenance = sanitize_provenance(update.provenance)
+                except ValueError:
+                    self.invalid_provenance = update.provenance
+                else:
+                    self.provenance.update(incoming_provenance)
+            self.latest = _ProgressUpdate(
+                update.phase,
+                update.progress,
+                self.attempt,
+                (
+                    self.invalid_warnings
+                    if self.invalid_warnings is not None
+                    else (list(self.warnings) if self.warnings else None)
+                ),
+                (
+                    self.invalid_provenance
+                    if self.invalid_provenance is not None
+                    else (dict(self.provenance) if self.provenance else None)
+                ),
+            )
         self.loop.call_soon_threadsafe(self.event.set)
 
     def take(self) -> tuple[_ProgressUpdate | None, bool]:
@@ -236,8 +277,8 @@ class LocalTaskBackend:
             provenance = self._merge_provenance(
                 raw_provenance if isinstance(raw_provenance, dict) else {}
             )
-            try:
-                await asyncio.to_thread(
+            create_task = asyncio.create_task(
+                asyncio.to_thread(
                     self.store.create,
                     submission.task_id,
                     submission.task_type,
@@ -246,7 +287,21 @@ class LocalTaskBackend:
                     provenance=provenance,
                     idempotency_digest=digest,
                     submission_digest=request_digest,
-                )
+                ),
+                name=f"medchat-create-{submission.task_id}",
+            )
+            try:
+                await asyncio.shield(create_task)
+            except asyncio.CancelledError:
+                created = False
+                try:
+                    await self._await_task_outcome(create_task)
+                    created = True
+                except Exception:
+                    pass
+                if created:
+                    await self._cancel_unstarted_submission(submission.task_id)
+                raise
             except sqlite3.IntegrityError:
                 if digest is not None:
                     try:
@@ -300,6 +355,31 @@ class LocalTaskBackend:
                     )
                 if completed_submission is not None:
                     completed_submission.set()
+
+    @staticmethod
+    async def _await_task_outcome(task: asyncio.Task[T]) -> T:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        return task.result()
+
+    async def _cancel_unstarted_submission(self, task_id: str) -> None:
+        try:
+            record = await asyncio.to_thread(
+                self.store.request_cancel,
+                task_id,
+                reason="submission canceled",
+            )
+        except KeyError:
+            return
+        if record.status is TaskStatus.CANCEL_REQUESTED:
+            await asyncio.to_thread(
+                self.store.finish,
+                task_id,
+                TaskStatus.CANCELED,
+            )
 
     async def get(self, task_id: str) -> TaskRecord:
         return await self._dispatch(
@@ -447,6 +527,7 @@ class LocalTaskBackend:
         )
         slot: _ProgressSlot | None = None
         projector: asyncio.Task[None] | None = None
+        projection_failure_detected = False
         try:
             claimed = await asyncio.to_thread(
                 self.store.claim_running,
@@ -474,22 +555,52 @@ class LocalTaskBackend:
                 self._progress_callback(slot),
             )
             slot.stop()
-            await projector
-            projector = None
+            try:
+                await projector
+            except Exception:
+                projector = None
+                projection_failure_detected = True
+                await self._finish_projection_failure(
+                    task_id,
+                    cancel_event,
+                    base_provenance,
+                )
+                return
+            else:
+                projector = None
             await self._project_result(task_id, result, cancel_event, base_provenance)
         except asyncio.CancelledError:
             cancel_event.set()
             if slot is not None:
                 slot.stop()
             if projector is not None:
-                await asyncio.shield(projector)
+                try:
+                    await asyncio.shield(projector)
+                except Exception:
+                    projector = None
+                    await self._finish_projection_failure(
+                        task_id,
+                        cancel_event,
+                        base_provenance,
+                    )
             await self._ensure_canceled(task_id)
             raise
         except Exception as exc:
+            if projection_failure_detected:
+                raise
             if slot is not None:
                 slot.stop()
             if projector is not None:
-                await projector
+                try:
+                    await projector
+                except Exception:
+                    projector = None
+                    await self._finish_projection_failure(
+                        task_id,
+                        cancel_event,
+                        base_provenance,
+                    )
+                    return
             if cancel_event.is_set() or await self._is_cancel_requested(task_id):
                 await self._ensure_canceled(task_id)
             else:
@@ -502,6 +613,39 @@ class LocalTaskBackend:
         finally:
             with self._lock:
                 self._progress_slots.pop(task_id, None)
+
+    async def _finish_projection_failure(
+        self,
+        task_id: str,
+        cancel_event: threading.Event,
+        provenance: dict[str, Any],
+    ) -> None:
+        try:
+            record = await asyncio.to_thread(self.store.get, task_id)
+        except KeyError:
+            return
+        if cancel_event.is_set() and record.status is TaskStatus.RUNNING:
+            record = await asyncio.to_thread(
+                self.store.request_cancel,
+                task_id,
+                reason="projection failed after cancellation",
+            )
+        if record.status is TaskStatus.CANCEL_REQUESTED:
+            await asyncio.to_thread(
+                self.store.finish,
+                task_id,
+                TaskStatus.CANCELED,
+            )
+            return
+        if record.status is TaskStatus.RUNNING:
+            await asyncio.to_thread(
+                self.store.finish,
+                task_id,
+                TaskStatus.FAILED,
+                error="Task state projection failed",
+                error_code=TaskErrorCode.TASK_PROJECTION_FAILED,
+                provenance=provenance,
+            )
 
     async def _project_progress(
         self,
@@ -703,11 +847,54 @@ class LocalTaskBackend:
             )
 
     def _task_done(self, task_id: str, task: asyncio.Task[None]) -> None:
+        failure: BaseException | None = None
         try:
-            task.exception()
-        except (asyncio.CancelledError, Exception):
-            pass
+            failure = task.exception()
+        except asyncio.CancelledError:
+            failure = None
+        if failure is not None:
+            recovery = task.get_loop().create_task(
+                self._recover_unexpected_task_failure(task_id),
+                name=f"medchat-recover-{task_id}",
+            )
+            with self._lock:
+                if self._tasks.get(task_id) is task:
+                    self._tasks[task_id] = recovery
+            recovery.add_done_callback(
+                lambda completed, recovered_task_id=task_id: self._recovery_done(
+                    recovered_task_id,
+                    completed,
+                )
+            )
+            return
         with self._lock:
+            if self._tasks.get(task_id) is task:
+                self._tasks.pop(task_id, None)
+                self._cancel_events.pop(task_id, None)
+                self._progress_slots.pop(task_id, None)
+
+    async def _recover_unexpected_task_failure(self, task_id: str) -> None:
+        with self._lock:
+            cancel_event = self._cancel_events.get(task_id)
+        await self._finish_projection_failure(
+            task_id,
+            cancel_event or threading.Event(),
+            dict(_LOCAL_PROVENANCE),
+        )
+
+    def _recovery_done(
+        self,
+        task_id: str,
+        task: asyncio.Task[None],
+    ) -> None:
+        failed = False
+        try:
+            failed = task.exception() is not None
+        except asyncio.CancelledError:
+            failed = True
+        with self._lock:
+            if failed:
+                self._shutdown_pending = True
             if self._tasks.get(task_id) is task:
                 self._tasks.pop(task_id, None)
                 self._cancel_events.pop(task_id, None)
@@ -738,6 +925,9 @@ class LocalTaskBackend:
         if owner is loop:
             return await factory()
         if not owner.is_running():
+            with self._lock:
+                if self._tasks:
+                    self._shutdown_pending = True
             raise RuntimeError("owner loop is not running")
         concurrent_future = asyncio.run_coroutine_threadsafe(factory(), owner)
         return await asyncio.wrap_future(concurrent_future)
