@@ -418,7 +418,6 @@ def test_task_manager_redacts_delimiter_bound_scientific_text(tmp_path):
 def test_task_manager_redacts_boundary_independent_scientific_text(tmp_path):
     manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
     attacks = {
-        "candidateCCO": "dynamic-key-leak",
         "plus": "candidate+CCO",
         "parentheses": "candidate(CCO)",
         "hash": "candidate#CCO",
@@ -432,14 +431,50 @@ def test_task_manager_redacts_boundary_independent_scientific_text(tmp_path):
             "task_label": "Task6",
             "phase": "Phase2 completed",
             "run_id": "run-123",
+            "candidateCCO": "engineering identifier",
         },
     )
     finished = wait_for_terminal(manager, record.task_id)
     assert finished.result["task_label"] == "Task6"
     assert finished.result["phase"] == "Phase2 completed"
     assert finished.result["run_id"] == "run-123"
+    assert finished.result["candidateCCO"] == "engineering identifier"
     public = json.dumps(manager.get(record.task_id).to_public_dict())
     raw = manager.store.db_path.read_bytes()
-    for attack in ("candidateCCO", *attacks.values()):
+    for attack in attacks.values():
         assert attack.encode() not in raw
         assert attack not in public
+
+
+def test_task_manager_classifies_short_smiles_without_redacting_engineering_words(
+    tmp_path,
+):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    safe = {
+        "CSV": "CSV export completed",
+        "JSON": "JSON result ready",
+        "CPU": "CPU usage normal",
+        "COVID": "COVID report",
+        "SUCCESS": "SUCCESS",
+    }
+    private = {
+        "carbonyl": "C=O",
+        "single_bond": "C-O",
+        "nitrile": "C#N",
+        "nitrosyl": "N=O",
+        "ring": "C1C",
+    }
+
+    record = manager.submit(
+        "unit_test", {}, lambda _payload: {**safe, **private}
+    )
+    finished = wait_for_terminal(manager, record.task_id)
+    assert {key: finished.result[key] for key in safe} == safe
+    public = json.dumps(manager.get(record.task_id).to_public_dict())
+    raw = manager.store.db_path.read_bytes()
+    for value in (*safe.keys(), *safe.values()):
+        assert value.encode() in raw
+        assert value in public
+    for value in private.values():
+        assert value.encode() not in raw
+        assert value not in public

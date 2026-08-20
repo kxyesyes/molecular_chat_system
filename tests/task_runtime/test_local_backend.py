@@ -3232,3 +3232,46 @@ async def test_local_backend_drops_boundary_independent_scientific_artifacts(
             assert attack not in public
     finally:
         await backend.close()
+
+
+@pytest.mark.anyio
+async def test_local_backend_classifies_short_smiles_artifact_paths(
+    tmp_path: Path,
+) -> None:
+    safe_artifact = {
+        "name": "CSV-summary",
+        "type": "report",
+        "status": "completed",
+        "path": "reports/CSV-summary.txt",
+    }
+
+    async def handler(submission, cancel_event, progress):
+        return {
+            "success": True,
+            "status": "succeeded",
+            "artifacts": [
+                safe_artifact,
+                {
+                    "name": "carbonyl-report",
+                    "type": "file",
+                    "path": "poses/C=O.txt",
+                },
+                {"name": "C-O", "type": "file", "path": "poses/safe.txt"},
+            ],
+        }
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+    try:
+        await backend.submit(_submission())
+        record = await _wait_for_terminal(backend, "task-1")
+        assert record.artifacts == [safe_artifact]
+        public = json.dumps(record.to_public_dict())
+        raw = store.db_path.read_bytes()
+        assert b"reports/CSV-summary.txt" in raw
+        assert "reports/CSV-summary.txt" in public
+        for private in ("poses/C=O.txt", "C-O"):
+            assert private.encode() not in raw
+            assert private not in public
+    finally:
+        await backend.close()

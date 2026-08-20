@@ -47,10 +47,15 @@ ERROR_CODES = {
         ("CCCC", True),
         ("ClCCBr", True),
         ("C-C-O", True),
+        ("C=O", True),
+        ("C-O", True),
+        ("C#N", True),
+        ("N=O", True),
+        ("C1C", True),
         ("candidate+CCO", True),
         ("candidate(CCO)", True),
         ("candidate#CCO", True),
-        ("candidateCCO", True),
+        ("candidateCCO", False),
         ("c1ccccc1", True),
         ("[Na+].[Cl-]", True),
         ("N[C@@H](C)C(=O)O", True),
@@ -62,6 +67,12 @@ ERROR_CODES = {
         ("123e4567-e89b-12d3-a456-426614174000", False),
         ("workflow completed normally", False),
         ("CCxO ordinary identifier", False),
+        ("CSV export completed", False),
+        ("JSON result ready", False),
+        ("CPU usage normal", False),
+        ("COVID report", False),
+        ("SUCCESS", False),
+        ("reports/CSV-summary.txt", False),
     ],
 )
 def test_contains_scientific_structure_scans_atomic_subsequences(value, expected):
@@ -2130,7 +2141,7 @@ def test_generic_projection_rejects_embedded_structure_after_any_boundary(
         TaskStatus.SUCCEEDED,
         result={
             "message": attack,
-            "candidateCCO": "dynamic-key-leak",
+            "candidateCCO": "engineering identifier",
             "task_label": "Task6",
             "phase": "Phase2 completed",
             "run_id": "run-123",
@@ -2146,10 +2157,10 @@ def test_generic_projection_rejects_embedded_structure_after_any_boundary(
     assert record.result["run_id"] == "run-123"
     assert record.result["trace_id"] == "123e4567-e89b-12d3-a456-426614174000"
     assert record.result["status_text"] == "workflow completed normally"
-    assert "candidateCCO" not in record.result
+    assert record.result["candidateCCO"] == "engineering identifier"
     public = json.dumps(record.to_public_dict())
     raw = store.db_path.read_bytes()
-    for private in (attack, "dynamic-key-leak"):
+    for private in (attack,):
         assert private.encode() not in raw
         assert private not in public
 
@@ -2227,3 +2238,92 @@ def test_artifact_projection_rejects_embedded_atomic_subsequences(tmp_path):
     for attack in attacks:
         assert attack.encode() not in raw
         assert attack not in public
+
+
+def test_generic_projection_classifies_short_structures_and_engineering_words(
+    tmp_path,
+):
+    store = TaskStore(tmp_path / "structured-classification.sqlite")
+    store.create("task-1", "demo", {})
+    store.claim_running("task-1")
+    private_values = ("C=O", "C-O", "C#N", "N=O", "C1C")
+    safe = {
+        "CSV": "CSV export completed",
+        "JSON": "JSON result ready",
+        "CPU": "CPU usage normal",
+        "COVID": "COVID report",
+        "SUCCESS": "SUCCESS",
+    }
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.SUCCEEDED,
+        result={
+            **safe,
+            "carbonyl": private_values[0],
+            "single_bond": private_values[1],
+            "nitrile": private_values[2],
+            "nitrosyl": private_values[3],
+            "ring": private_values[4],
+            "C-O": "dynamic-short-structure",
+            "C1C": "dynamic-ring-structure",
+        },
+        projection_policy=ResultProjectionPolicy.GENERIC_SAFE,
+    )
+
+    record = store.get("task-1")
+    assert {key: record.result[key] for key in safe} == safe
+    assert "C-O" not in record.result
+    assert "C1C" not in record.result
+    public = json.dumps(record.to_public_dict())
+    raw = store.db_path.read_bytes()
+    for value in (*safe.keys(), *safe.values()):
+        assert value.encode() in raw
+        assert value in public
+    for private in (
+        *private_values,
+        "dynamic-short-structure",
+        "dynamic-ring-structure",
+    ):
+        assert private.encode() not in raw
+        assert private not in public
+
+
+def test_artifact_projection_preserves_engineering_words_and_drops_short_smiles(
+    tmp_path,
+):
+    store = TaskStore(tmp_path / "structured-artifacts.sqlite")
+    store.create("task-1", "docking", {})
+    store.claim_running("task-1")
+    safe_artifact = {
+        "name": "CSV-summary",
+        "type": "report",
+        "status": "completed",
+        "path": "reports/CSV-summary.txt",
+    }
+    private_artifacts = (
+        {
+            "name": "carbonyl-report",
+            "type": "file",
+            "path": "poses/C=O.txt",
+        },
+        {"name": "C-O", "type": "file", "path": "poses/safe.txt"},
+    )
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.SUCCEEDED,
+        result={"success": True},
+        artifacts=[safe_artifact, *private_artifacts],
+        projection_policy=ResultProjectionPolicy.SCIENTIFIC_STRICT,
+    )
+
+    record = store.get("task-1")
+    assert record.artifacts == [safe_artifact]
+    public = json.dumps(record.to_public_dict())
+    raw = store.db_path.read_bytes()
+    assert b"reports/CSV-summary.txt" in raw
+    assert "reports/CSV-summary.txt" in public
+    for private in ("poses/C=O.txt", "C-O"):
+        assert private.encode() not in raw
+        assert private not in public

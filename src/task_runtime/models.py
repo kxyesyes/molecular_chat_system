@@ -807,6 +807,9 @@ _ELEMENT_SYMBOLS = frozenset(
     + ["b", "c", "n", "o", "p", "s"]
 )
 _AROMATIC_ATOMS = frozenset({"b", "c", "n", "o", "p", "s"})
+_ORGANIC_SMILES_ATOMS = frozenset(
+    {"B", "C", "N", "O", "P", "S", "F", "I", "Cl", "Br"}
+)
 _SMILES_STRUCTURE_CHARACTERS = frozenset("@+-[]()=#$%.\\/:")
 _ARTIFACT_TYPES = frozenset(
     {"docking_pose", "file", "generic_file", "log", "pdbqt", "pose", "report"}
@@ -1025,18 +1028,22 @@ def _is_safe_generic_result_key(value: Any) -> bool:
     return not contains_scientific_structure(value)
 
 
-def _atom_token_at(value: str, index: int) -> tuple[int, bool] | None:
+def _is_ascii_alphanumeric(value: str) -> bool:
+    return value.isascii() and value.isalnum()
+
+
+def _atom_token_at(value: str, index: int) -> tuple[int, bool, bool] | None:
     character = value[index]
     if character in _AROMATIC_ATOMS:
-        return index + 1, True
+        return index + 1, True, True
     if not character.isupper():
         return None
     if index + 1 < len(value) and value[index + 1].islower():
         symbol = value[index : index + 2]
         if symbol in _ELEMENT_SYMBOLS:
-            return index + 2, False
+            return index + 2, False, symbol in _ORGANIC_SMILES_ATOMS
     if character in _ELEMENT_SYMBOLS:
-        return index + 1, False
+        return index + 1, False, character in _ORGANIC_SMILES_ATOMS
     return None
 
 
@@ -1044,38 +1051,46 @@ def _scan_scientific_structure(value: str, start: int) -> int | None:
     atom = _atom_token_at(value, start)
     if atom is None:
         return None
-    cursor, aromatic = atom
+    cursor, aromatic, organic = atom
     atom_count = 1
     has_aromatic = aromatic
-    structure_characters: set[str] = set()
-    last_atom_end = cursor
-    while cursor < len(value):
+    all_organic = organic
+    has_explicit_structure = False
+    qualified_end: int | None = None
+    while True:
+        if cursor == len(value) or not _is_ascii_alphanumeric(value[cursor]):
+            pure_chain = (
+                atom_count >= 3 and all_organic and not has_aromatic
+            )
+            structured = atom_count >= 2 and has_explicit_structure
+            if pure_chain or structured:
+                qualified_end = cursor
+        if cursor >= len(value):
+            break
         while cursor < len(value) and (
             value[cursor].isdigit()
             or value[cursor] in _SMILES_STRUCTURE_CHARACTERS
         ):
-            structure_characters.add(value[cursor])
+            has_explicit_structure = True
             cursor += 1
-        if cursor >= len(value):
+        if cursor == len(value):
+            if atom_count >= 2 and has_explicit_structure:
+                qualified_end = cursor
             break
         atom = _atom_token_at(value, cursor)
         if atom is None:
+            if (
+                atom_count >= 2
+                and has_explicit_structure
+                and not _is_ascii_alphanumeric(value[cursor])
+            ):
+                qualified_end = cursor
             break
-        cursor, aromatic = atom
+        cursor, aromatic, organic = atom
         atom_count += 1
         has_aromatic = has_aromatic or aromatic
-        last_atom_end = cursor
-    reliable_chain = atom_count >= 3 and (
-        not has_aromatic or bool(structure_characters)
-    )
-    reliable_bracket_salt = (
-        atom_count >= 2
-        and "." in structure_characters
-        and "[" in structure_characters
-        and "]" in structure_characters
-        and bool({"+", "-"} & structure_characters)
-    )
-    return last_atom_end if reliable_chain or reliable_bracket_salt else None
+        all_organic = all_organic and organic
+    return qualified_end
 
 
 def _scientific_structure_spans(value: str) -> list[tuple[int, int]]:
@@ -1086,6 +1101,9 @@ def _scientific_structure_spans(value: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     index = 0
     while index < len(protected):
+        if index > 0 and _is_ascii_alphanumeric(protected[index - 1]):
+            index += 1
+            continue
         end = _scan_scientific_structure(protected, index)
         if end is None:
             index += 1
