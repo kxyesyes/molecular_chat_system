@@ -713,6 +713,19 @@ class LocalTaskBackend:
 
         raw_code = result.get("error_code")
         status_text = str(result.get("status", "")).strip().lower()
+        safe_result = sanitize_task_result_projection(result)
+        if not self._terminal_projection_matches_result(
+            result,
+            safe_result,
+            status_text,
+        ):
+            await self._finish_failed(
+                task_id,
+                error="Scientific task result validation failed",
+                error_code=TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED,
+                provenance=base_provenance,
+            )
+            return
         if (
             cancel_event.is_set()
             or await self._is_cancel_requested(task_id)
@@ -722,15 +735,6 @@ class LocalTaskBackend:
             await self._ensure_canceled(task_id)
             return
 
-        safe_result = sanitize_task_result_projection(result)
-        if not isinstance(safe_result, dict):
-            await self._finish_failed(
-                task_id,
-                error="Scientific task result validation failed",
-                error_code=TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED,
-                provenance=base_provenance,
-            )
-            return
         artifacts = sanitize_public_artifacts(result.get("artifacts", []))
         try:
             warnings = (
@@ -776,6 +780,28 @@ class LocalTaskBackend:
             warnings=warnings,
             provenance=provenance,
         )
+
+    @staticmethod
+    def _terminal_projection_matches_result(
+        raw_result: dict[str, Any],
+        projected_result: Any,
+        status_text: str,
+    ) -> bool:
+        if not isinstance(projected_result, dict):
+            return False
+        raw_success = raw_result.get("success")
+        if projected_result.get("success") is not raw_success:
+            return False
+        if "status" in raw_result:
+            if not isinstance(raw_result["status"], str):
+                return False
+            if projected_result.get("status") != status_text:
+                return False
+        elif "status" in projected_result:
+            return False
+        if raw_success is True:
+            return status_text in {"", "succeeded"}
+        return status_text in {"", "failed", "cancelled", "canceled"}
 
     def _progress_callback(self, slot: _ProgressSlot) -> ProgressCallback:
         def progress_callback(

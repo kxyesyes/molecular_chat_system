@@ -8,7 +8,11 @@ import re
 from typing import Any
 from urllib.parse import unquote
 
-from src.agent.persistence.redaction import redact_sensitive
+from src.agent.persistence.redaction import (
+    contains_sensitive_text,
+    redact_sensitive,
+    sanitize_sensitive_text,
+)
 
 from .errors import TaskErrorCode
 
@@ -799,6 +803,26 @@ RESULT_PROJECTION_MAX_ITEMS = 256
 RESULT_PROJECTION_MAX_TEXT_LENGTH = 512
 _SAFE_GENERIC_RESULT_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}\Z")
 _SAFE_ARTIFACT_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:+-]{0,127}\Z")
+_SMILES_TOKEN_PART = re.compile(
+    r"Cl|Br|[A-Z][a-z]?|[bcnops]|\d+|[@+\-\[\]()=#$\\/.%]"
+)
+_ELEMENT_SYMBOLS = frozenset(
+    (
+        "H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe "
+        "Co Ni Cu Zn Ga Ge As Se Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In "
+        "Sn Sb Te I Xe Cs Ba La Ce Pr Nd Pm Sm Eu Gd Tb Dy Ho Er Tm Yb Lu Hf "
+        "Ta W Re Os Ir Pt Au Hg Tl Pb Bi Po At Rn Fr Ra Ac Th Pa U Np Pu Am Cm "
+        "Bk Cf Es Fm Md No Lr Rf Db Sg Bh Hs Mt Ds Rg Cn Nh Fl Mc Lv Ts Og"
+    ).split()
+    + ["b", "c", "n", "o", "p", "s"]
+)
+_ARTIFACT_TYPES = frozenset(
+    {"docking_pose", "file", "generic_file", "log", "pdbqt", "pose", "report"}
+)
+_ARTIFACT_STATUSES = frozenset(
+    {"available", "completed", "failed", "partial", "ready", "succeeded", "verified"}
+)
+_PROJECTION_CONFLICT = object()
 _RESULT_RESERVED_KEYS = frozenset(
     {"artifacts", "error", "error_code", "evidence", "provenance", "warnings"}
 )
@@ -929,6 +953,16 @@ def _sanitize_scientific_result_object(
     if not isinstance(value, dict) or depth > RESULT_PROJECTION_MAX_DEPTH:
         return _DROP
     allowed_keys = _STRICT_RESULT_OBJECT_SCHEMAS[schema_name]
+    seen_keys: set[str] = set()
+    for raw_key in value:
+        if not isinstance(raw_key, str):
+            continue
+        canonical = raw_key.lower()
+        if canonical not in allowed_keys:
+            continue
+        if canonical in seen_keys:
+            return _PROJECTION_CONFLICT
+        seen_keys.add(canonical)
     result: dict[str, Any] = {}
     for raw_key, raw_value in value.items():
         if budget[0] >= RESULT_PROJECTION_MAX_ITEMS:
@@ -936,7 +970,7 @@ def _sanitize_scientific_result_object(
         budget[0] += 1
         if not isinstance(raw_key, str):
             continue
-        key = raw_key.lower()
+        key = raw_key
         if key not in allowed_keys:
             continue
         sanitized: Any = _DROP
@@ -964,6 +998,8 @@ def _sanitize_scientific_result_object(
                     depth=depth + 1,
                     budget=budget,
                 )
+                if sanitized is _PROJECTION_CONFLICT:
+                    return _PROJECTION_CONFLICT
             elif isinstance(raw_value, str):
                 lowered = raw_value.strip().lower()
                 if lowered in _RESULT_ENUM_VALUES:
@@ -975,6 +1011,8 @@ def _sanitize_scientific_result_object(
                 depth=depth + 1,
                 budget=budget,
             )
+            if sanitized is _PROJECTION_CONFLICT:
+                return _PROJECTION_CONFLICT
         if sanitized is not _DROP:
             result[key] = sanitized
     return result
@@ -990,7 +1028,73 @@ def _is_safe_generic_result_key(value: Any) -> bool:
         return False
     if any(marker in normalized for marker in ("manifest", "path", "uri")):
         return False
-    return not _runtime_metadata_contains_smiles(value)
+    if ".." in value or contains_sensitive_text(value):
+        return False
+    return not _contains_reliable_scientific_token(value)
+
+
+def _looks_like_reliable_smiles_token(value: str) -> bool:
+    candidate = value.strip()
+    if len(candidate) < 3 or any(character.isspace() for character in candidate):
+        return False
+    position = 0
+    atom_count = 0
+    has_structure = False
+    for match in _SMILES_TOKEN_PART.finditer(candidate):
+        if match.start() != position:
+            return False
+        token = match.group(0)
+        position = match.end()
+        if re.fullmatch(r"Cl|Br|[A-Z][a-z]?|[bcnops]", token):
+            if token not in _ELEMENT_SYMBOLS:
+                return False
+            atom_count += 1
+        elif re.search(r"\d|[@+\-\[\]()=#$\\/.%]", token):
+            has_structure = True
+    return position == len(candidate) and (
+        atom_count >= 3 or (atom_count >= 2 and has_structure)
+    )
+
+
+def _contains_reliable_scientific_token(value: str) -> bool:
+    return any(
+        _looks_like_reliable_smiles_token(part)
+        for part in re.split(r"[._]", value)
+        if part
+    )
+
+
+def _replace_reliable_smiles_candidate(match: re.Match[str]) -> str:
+    value = match.group(0)
+    if value in {"[PATH]", "[PRIVATE]", "[REDACTED]"}:
+        return value
+    return "[PRIVATE]" if _looks_like_reliable_smiles_token(value) else value
+
+
+def _sanitize_generic_result_text(value: str) -> str:
+    sanitized, changed = sanitize_sensitive_text(
+        value,
+        max_chars=RESULT_PROJECTION_MAX_TEXT_LENGTH,
+    )
+    if changed:
+        marker = (
+            "[PATH]"
+            if any(
+                pattern.search(value)
+                for pattern in (
+                    _FILE_URI_TEXT,
+                    _WINDOWS_PATH_TEXT,
+                    _UNC_PATH_TEXT,
+                    _POSIX_PATH_TEXT,
+                )
+            )
+            else "[REDACTED]"
+        )
+        sanitized = sanitized.replace("[redacted]", marker)
+    return _SMILES_CANDIDATE.sub(
+        _replace_reliable_smiles_candidate,
+        sanitized,
+    ).strip()
 
 
 def _sanitize_generic_result_value(
@@ -1037,9 +1141,7 @@ def _sanitize_generic_result_value(
     if isinstance(value, float) and not math.isfinite(value):
         return _DROP
     if isinstance(value, str):
-        if value.strip() == "CO":
-            return "[PRIVATE]"
-        sanitized = sanitize_task_message(value)[:RESULT_PROJECTION_MAX_TEXT_LENGTH]
+        sanitized = _sanitize_generic_result_text(value)
         if not sanitized:
             return _DROP
         if key is not None and key.lower() == "status":
@@ -1061,7 +1163,11 @@ def sanitize_task_result_projection(value: Any) -> Any:
         depth=0,
         budget=[0],
     )
-    return None if sanitized is _DROP else sanitized
+    return (
+        None
+        if sanitized is _DROP or sanitized is _PROJECTION_CONFLICT
+        else sanitized
+    )
 
 
 def sanitize_generic_task_result_projection(value: Any) -> Any:
@@ -1117,15 +1223,20 @@ def sanitize_public_artifacts(value: Any) -> list[dict[str, Any]]:
                     pass
                 continue
             if key in {"artifact_type", "name", "type", "status"}:
+                if not isinstance(item, str):
+                    continue
+                if key in {"artifact_type", "type"}:
+                    if item in _ARTIFACT_TYPES:
+                        public[key] = item
+                    continue
+                if key == "status":
+                    if item in _ARTIFACT_STATUSES:
+                        public[key] = item
+                    continue
                 if (
-                    isinstance(item, str)
-                    and _SAFE_ARTIFACT_CODE.fullmatch(item) is not None
-                    and not any(
-                        marker in item.lower()
-                        for marker in _SENSITIVE_IDENTIFIER_MARKERS
-                    )
-                    and not _runtime_metadata_contains_smiles(item)
-                    and sanitize_task_message(item) == item
+                    _SAFE_ARTIFACT_CODE.fullmatch(item) is not None
+                    and not contains_sensitive_text(item)
+                    and not _contains_reliable_scientific_token(item)
                 ):
                     public[key] = item
                 continue

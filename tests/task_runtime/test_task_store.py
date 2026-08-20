@@ -1798,3 +1798,163 @@ def test_generic_projection_bounds_items_depth_and_text(tmp_path):
     serialized = json.dumps(projection)
     assert "level_11" not in serialized
     assert len(serialized) < 10_000
+
+
+def test_generic_projection_drops_complete_sensitive_and_scientific_key_attacks(
+    tmp_path,
+):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("task-1", "demo", {})
+    store.claim_running("task-1")
+    attacks = {
+        "mol.CCO": "molecular-key-leak",
+        "sk-proj-secret": "openai-key-leak",
+        "AKIAABCDEFGHIJKLMNOP": "aws-key-leak",
+        "ASIAABCDEFGHIJKLMNOP": "aws-session-key-leak",
+        "ghp_abcdefghijklmnopqrstuvwxyz": "github-key-leak",
+        "github_pat_abcdefghijklmnopqrstuvwxyz": "github-pat-leak",
+        "Bearer-private": "bearer-key-leak",
+        "prefix_sk-proj_suffix": "embedded-openai-key-leak",
+        "prefixAKIAABCDEFGHIJKLMNOPsuffix": "embedded-aws-key-leak",
+        "prefixASIAABCDEFGHIJKLMNOPsuffix": "embedded-aws-session-key-leak",
+        "prefixghp_abcdefghijklmnopqrstuvwxyz": "embedded-github-key-leak",
+        "prefixBearer-private": "embedded-bearer-key-leak",
+        "api_key=private": "assignment-key-leak",
+        "C:/private/receptor.pdb": "path-key-leak",
+    }
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.SUCCEEDED,
+        result={"message": "workflow completed", **attacks},
+        projection_policy=ResultProjectionPolicy.GENERIC_SAFE,
+    )
+
+    record = store.get("task-1")
+    assert record.result == {"message": "workflow completed"}
+    raw = store.db_path.read_bytes()
+    public = json.dumps(record.to_public_dict())
+    for key, value in attacks.items():
+        assert key.encode() not in raw
+        assert value.encode() not in raw
+        assert key not in public
+        assert value not in public
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        ResultProjectionPolicy.SCIENTIFIC_STRICT,
+        ResultProjectionPolicy.GENERIC_SAFE,
+    ],
+)
+def test_artifact_projection_rejects_field_specific_attack_values(tmp_path, policy):
+    store = TaskStore(tmp_path / f"artifact-attacks-{policy.value}.sqlite")
+    store.create("task-1", "docking", {})
+    store.claim_running("task-1")
+    attacks = (
+        "mol.C-C-O",
+        "AKIAABCDEFGHIJKLMNOP",
+        "ghp_abcdefghijklmnopqrstuvwxyz",
+        "prefixAKIAABCDEFGHIJKLMNOPsuffix",
+        "prefixghp_abcdefghijklmnopqrstuvwxyz",
+    )
+    artifacts = [
+        {
+            "name": "verified-pose",
+            "type": "docking_pose",
+            "status": "verified",
+            "path": "poses/best.pdbqt",
+            "sha256": "a" * 64,
+        },
+        {"name": attacks[0], "type": "file", "status": "ready"},
+        {"name": attacks[1], "type": "file", "status": "ready"},
+        {"name": attacks[2], "type": "file", "status": "ready"},
+        {"name": "report", "type": attacks[0], "status": "ready"},
+        {"name": "report", "type": attacks[1], "status": "ready"},
+        {"name": "report", "type": attacks[2], "status": "ready"},
+        {"name": "report", "type": "report", "status": attacks[0]},
+        {"name": "report", "type": "report", "status": attacks[1]},
+        {"name": "report", "type": "report", "status": attacks[2]},
+        {
+            "name": "report",
+            "type": "report",
+            "status": "completed",
+            "metadata": {
+                attacks[0]: attacks[0],
+                attacks[1]: attacks[1],
+                attacks[2]: attacks[2],
+            },
+        },
+    ]
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.SUCCEEDED,
+        result={"success": True},
+        artifacts=artifacts,
+        projection_policy=policy,
+    )
+
+    record = store.get("task-1")
+    assert record.artifacts[0] == {
+        "name": "verified-pose",
+        "type": "docking_pose",
+        "status": "verified",
+        "path": "poses/best.pdbqt",
+        "sha256": "a" * 64,
+    }
+    raw = store.db_path.read_bytes()
+    public = json.dumps(record.to_public_dict())
+    for attack in attacks:
+        assert attack.encode() not in raw
+        assert attack not in public
+
+
+def test_generic_projection_distinguishes_operational_ids_from_molecular_tokens(
+    tmp_path,
+):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("task-1", "demo", {})
+    store.claim_running("task-1")
+    safe_values = [
+        "123e4567-e89b-12d3-a456-426614174000",
+        "Task6",
+        "Phase2 completed",
+        "run-123",
+        "任务已安全完成",
+    ]
+    private_values = [
+        "CCO",
+        "CCCC",
+        "ClCCBr",
+        "[Na+].[Cl-]",
+        "N[C@@H](C)C(=O)O",
+        "c1ccccc1",
+    ]
+
+    assert store.finish(
+        "task-1",
+        TaskStatus.SUCCEEDED,
+        result={
+            "trace_id": safe_values[0],
+            "task_id": safe_values[1],
+            "phase": safe_values[2],
+            "run_id": safe_values[3],
+            "message": safe_values[4],
+            "candidates": private_values,
+        },
+        projection_policy=ResultProjectionPolicy.GENERIC_SAFE,
+    )
+
+    record = store.get("task-1")
+    assert [
+        record.result["trace_id"],
+        record.result["task_id"],
+        record.result["phase"],
+        record.result["run_id"],
+        record.result["message"],
+    ] == safe_values
+    serialized = json.dumps(record.to_public_dict())
+    for private_value in private_values:
+        assert private_value not in serialized

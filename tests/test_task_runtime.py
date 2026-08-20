@@ -112,6 +112,23 @@ def test_task_manager_generic_projection_preserves_safe_status_text(tmp_path):
     assert finished.result == result
 
 
+def test_task_manager_preserves_operational_identifiers_and_phase_text(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    result = {
+        "trace_id": "123e4567-e89b-12d3-a456-426614174000",
+        "task_label": "Task6",
+        "phase": "Phase2 completed",
+        "run_id": "run-123",
+        "message": "任务已安全完成",
+    }
+
+    record = manager.submit("unit_test", {}, lambda _payload: result)
+    finished = wait_for_terminal(manager, record.task_id)
+
+    assert finished.result == result
+    assert manager.get(record.task_id).to_public_dict()["result"] == result
+
+
 def test_task_manager_generic_projection_drops_unsafe_dynamic_keys(tmp_path):
     manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
     result = {

@@ -455,6 +455,108 @@ async def test_local_backend_uses_strict_projection_for_dynamic_keys_and_artifac
 
 
 @pytest.mark.anyio
+async def test_local_backend_rejects_case_colliding_scientific_authority(
+    tmp_path: Path,
+) -> None:
+    async def handler(submission, cancel_event, progress):
+        return {
+            "success": True,
+            "SUCCESS": False,
+            "status": "succeeded",
+            "STATUS": "failed",
+            "pose_count": 1,
+        }
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+    try:
+        await backend.submit(_submission())
+        record = await _wait_for_terminal(backend, "task-1")
+        assert record.status is TaskStatus.FAILED
+        assert record.error_code == TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value
+        assert record.result is None
+        assert sum(event.is_terminal for event in store.events("task-1")) == 1
+    finally:
+        await backend.close()
+
+
+@pytest.mark.anyio
+async def test_local_backend_drops_noncanonical_scientific_keys_without_aliasing(
+    tmp_path: Path,
+) -> None:
+    async def handler(submission, cancel_event, progress):
+        return {
+            "success": True,
+            "Status": "failed",
+            "pose_count": 1,
+        }
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+    try:
+        await backend.submit(_submission())
+        record = await _wait_for_terminal(backend, "task-1")
+        assert record.status is TaskStatus.SUCCEEDED
+        assert record.result == {"success": True, "pose_count": 1}
+    finally:
+        await backend.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"success": True, "status": "failed"},
+        {"success": False, "status": "succeeded"},
+    ],
+)
+async def test_local_backend_rejects_contradictory_canonical_terminal_authority(
+    tmp_path: Path,
+    result: dict[str, Any],
+) -> None:
+    async def handler(submission, cancel_event, progress):
+        return result
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+    try:
+        await backend.submit(_submission())
+        record = await _wait_for_terminal(backend, "task-1")
+        assert record.status is TaskStatus.FAILED
+        assert record.error_code == TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value
+        assert record.result is None
+    finally:
+        await backend.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "nested",
+    [
+        {"quality": {"score": 1.0, "SCORE": 2.0}},
+        {"completion": {"pose_count": 1, "POSE_COUNT": 2}},
+    ],
+)
+async def test_local_backend_rejects_nested_case_collisions(
+    tmp_path: Path,
+    nested: dict[str, Any],
+) -> None:
+    async def handler(submission, cancel_event, progress):
+        return {"success": True, "status": "succeeded", **nested}
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+    try:
+        await backend.submit(_submission())
+        record = await _wait_for_terminal(backend, "task-1")
+        assert record.status is TaskStatus.FAILED
+        assert record.error_code == TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value
+        assert record.result is None
+    finally:
+        await backend.close()
+
+
+@pytest.mark.anyio
 async def test_handler_cannot_override_fixed_local_durability_provenance(
     tmp_path: Path,
 ) -> None:

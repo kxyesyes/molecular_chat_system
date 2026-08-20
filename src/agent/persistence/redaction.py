@@ -50,6 +50,19 @@ _GITHUB_TOKEN = re.compile(
     r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
 )
 _OPENAI_TOKEN = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
+_CREDENTIAL_PREFIX_TOKEN = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])(?:"
+    r"sk-[A-Za-z0-9_-]+|"
+    r"(?:AKIA|ASIA)[A-Z0-9]+|"
+    r"gh[pousr]_[A-Za-z0-9_]+|"
+    r"github_pat_[A-Za-z0-9_]+|"
+    r"Bearer(?:[\s_.:+-]+[A-Za-z0-9._~+/=-]*)?"
+    r")(?![A-Za-z0-9_])"
+)
+_SENSITIVE_IDENTIFIER_FRAGMENT = re.compile(
+    r"sk-|AKIA|ASIA|gh[pousr]_|github_pat_|Bearer",
+    re.IGNORECASE,
+)
 _URL = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>\"']+")
 _URL_SECRET_QUERY = re.compile(rf"(?i)(?:[?&])(?:{_SENSITIVE_FIELD})=")
 _QUOTED_ABSOLUTE_PATH = re.compile(
@@ -106,6 +119,20 @@ def contains_credential(value: Any) -> bool:
     return isinstance(value, str) and looks_like_credential(value)
 
 
+def contains_sensitive_text(value: Any) -> bool:
+    """Return whether text contains credentials, secret assignments, or paths."""
+
+    if not isinstance(value, str):
+        return False
+    if _SENSITIVE_IDENTIFIER_FRAGMENT.search(value) or _CONTEXT_SECRET.search(value):
+        return True
+    _, changed = sanitize_sensitive_text(
+        value,
+        max_chars=max(1, min(len(value), _MAX_SANITIZER_SCAN_CHARS)),
+    )
+    return changed
+
+
 def sanitize_sensitive_text(
     value: Any,
     *,
@@ -144,6 +171,7 @@ def sanitize_sensitive_text(
         _AWS_ACCESS_KEY,
         _GITHUB_TOKEN,
         _OPENAI_TOKEN,
+        _CREDENTIAL_PREFIX_TOKEN,
         _QUOTED_ABSOLUTE_PATH,
         _WINDOWS_PATH,
         _POSIX_PATH,
