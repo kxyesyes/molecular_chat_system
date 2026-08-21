@@ -135,12 +135,15 @@ def _aware_utc(value: object, name: str) -> datetime:
     if type(value) is not datetime:
         raise ValueError(name)
     try:
+        if value.tzinfo is None:
+            raise ValueError
         offset = value.utcoffset()
-    except (OverflowError, ValueError):
+        if offset is None:
+            raise ValueError
+        normalized = value.astimezone(timezone.utc)
+    except (OSError, OverflowError, TypeError, ValueError):
         raise ValueError(name) from None
-    if value.tzinfo is None or offset is None:
-        raise ValueError(name)
-    return value.astimezone(timezone.utc)
+    return normalized
 
 
 def _fingerprint(value: object) -> str:

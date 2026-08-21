@@ -480,6 +480,47 @@ def test_report_rejects_naive_generated_at() -> None:
         _report(generated_at=datetime(2026, 8, 21, 12, 1))
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        (
+            "window_start",
+            datetime.min.replace(tzinfo=timezone(timedelta(hours=14))),
+            "invalid observation window",
+        ),
+        (
+            "window_end",
+            datetime.max.replace(tzinfo=timezone(-timedelta(hours=12))),
+            "invalid observation window",
+        ),
+        (
+            "generated_at",
+            datetime.max.replace(tzinfo=timezone(-timedelta(hours=12))),
+            "invalid generated_at",
+        ),
+    ],
+)
+def test_fixed_offset_datetime_overflow_is_generic(
+    field: str, value: datetime, message: str
+) -> None:
+    with pytest.raises(ValueError, match=rf"^{message}$") as error:
+        _report(**{field: value})
+
+    assert str(value) not in str(error.value)
+
+
+def test_valid_extreme_utc_datetimes_remain_supported() -> None:
+    start = datetime.min.replace(tzinfo=timezone.utc)
+    end = datetime.max.replace(tzinfo=timezone.utc)
+
+    report = _report(window_start=start, window_end=end, generated_at=end)
+
+    assert report["status"] == "passed"
+    assert report["window_start"] == start.isoformat()
+    assert report["window_end"] == end.isoformat()
+    assert report["generated_at"] == end.isoformat()
+
+
 def test_generated_at_equal_to_window_end_is_valid_across_timezones() -> None:
     report = _report(
         generated_at=datetime(2026, 8, 21, 20, 0, tzinfo=timezone(timedelta(hours=8)))
