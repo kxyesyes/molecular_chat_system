@@ -178,28 +178,30 @@ def _validate_top_level_shape(payload: dict[object, object]) -> None:
 
 
 def _validate_json_structure(payload: object) -> None:
-    stack: list[tuple[object, int]] = [(payload, 0)]
-    seen_containers: set[int] = set()
-    nodes = 0
+    frames: list[tuple[object, int, int]] = []
+    active_containers: set[int] = set()
+    nodes = 1
     raw_string_bytes = 0
+    value = payload
+    depth = 0
 
-    while stack:
-        value, depth = stack.pop()
-        nodes += 1
+    while True:
         if nodes > MAX_EVIDENCE_NODES or depth > MAX_EVIDENCE_DEPTH:
             raise EvidenceError("invalid evidence payload")
 
         value_type = type(value)
         if value_type is dict:
-            identity = id(value)
-            if identity in seen_containers:
+            child_count = len(value)
+            direct_nodes = child_count * 2
+            if direct_nodes > MAX_EVIDENCE_NODES - nodes:
                 raise EvidenceError("invalid evidence payload")
-            seen_containers.add(identity)
-            for key, child in value.items():
+            if child_count and depth >= MAX_EVIDENCE_DEPTH:
+                raise EvidenceError("invalid evidence payload")
+            identity = id(value)
+            if identity in active_containers:
+                raise EvidenceError("invalid evidence payload")
+            for key in value:
                 if type(key) is not str:
-                    raise EvidenceError("invalid evidence payload")
-                nodes += 1
-                if nodes > MAX_EVIDENCE_NODES:
                     raise EvidenceError("invalid evidence payload")
                 try:
                     raw_string_bytes += len(key.encode("utf-8"))
@@ -207,28 +209,46 @@ def _validate_json_structure(payload: object) -> None:
                     raise EvidenceError("invalid evidence payload") from None
                 if raw_string_bytes > MAX_EVIDENCE_BYTES:
                     raise EvidenceError("invalid evidence payload")
-                stack.append((child, depth + 1))
-            continue
-        if value_type is list:
-            identity = id(value)
-            if identity in seen_containers:
+            nodes += direct_nodes
+            active_containers.add(identity)
+            frames.append((iter(value.values()), depth + 1, identity))
+        elif value_type is list:
+            child_count = len(value)
+            if child_count > MAX_EVIDENCE_NODES - nodes:
                 raise EvidenceError("invalid evidence payload")
-            seen_containers.add(identity)
-            stack.extend((child, depth + 1) for child in value)
-            continue
-        if value_type is str:
+            if child_count and depth >= MAX_EVIDENCE_DEPTH:
+                raise EvidenceError("invalid evidence payload")
+            identity = id(value)
+            if identity in active_containers:
+                raise EvidenceError("invalid evidence payload")
+            nodes += child_count
+            active_containers.add(identity)
+            frames.append((iter(value), depth + 1, identity))
+        elif value_type is str:
             try:
                 raw_string_bytes += len(value.encode("utf-8"))
             except (MemoryError, UnicodeError):
                 raise EvidenceError("invalid evidence payload") from None
             if raw_string_bytes > MAX_EVIDENCE_BYTES:
                 raise EvidenceError("invalid evidence payload")
-            continue
-        if value is None or value_type in {bool, int}:
-            continue
-        if value_type is float and math.isfinite(value):
-            continue
-        raise EvidenceError("invalid evidence payload")
+        elif value is None or value_type in {bool, int}:
+            pass
+        elif value_type is float and math.isfinite(value):
+            pass
+        else:
+            raise EvidenceError("invalid evidence payload")
+
+        while frames:
+            iterator, child_depth, container_id = frames[-1]
+            try:
+                value = next(iterator)
+                depth = child_depth
+                break
+            except StopIteration:
+                frames.pop()
+                active_containers.remove(container_id)
+        else:
+            return
 
 
 def _canonical_payload(payload: object) -> bytes:

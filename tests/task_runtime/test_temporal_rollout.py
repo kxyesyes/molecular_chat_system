@@ -287,6 +287,54 @@ def test_report_with_excessive_nodes_is_rejected_before_serialization():
     _assert_generic_payload_error(payload)
 
 
+@pytest.mark.parametrize(
+    "container,node_budget",
+    [
+        ([{}, {}], 2),
+        ({"first": {}, "second": {}}, 4),
+    ],
+    ids=["list-values", "dict-keys-and-values"],
+)
+def test_container_child_budget_is_checked_before_child_traversal(
+    monkeypatch,
+    container,
+    node_budget,
+):
+    child_ids = {
+        id(value)
+        for value in (
+            container if isinstance(container, list) else container.values()
+        )
+    }
+    real_id = id
+    real_len = len
+    checked_container_length = False
+    visited_children: list[int] = []
+
+    def recording_id(value):
+        identity = real_id(value)
+        if identity in child_ids:
+            visited_children.append(identity)
+        return identity
+
+    def recording_len(value):
+        nonlocal checked_container_length
+        if value is container:
+            checked_container_length = True
+        return real_len(value)
+
+    monkeypatch.setattr(rollout, "MAX_EVIDENCE_NODES", node_budget)
+    monkeypatch.setattr(rollout, "id", recording_id, raising=False)
+    monkeypatch.setattr(rollout, "len", recording_len, raising=False)
+
+    with pytest.raises(EvidenceError) as failure:
+        rollout._validate_json_structure(container)
+
+    assert str(failure.value) == "invalid evidence payload"
+    assert checked_container_length is True
+    assert visited_children == []
+
+
 def test_oversized_canonical_report_is_rejected_generically():
     payload = _observation_payload()
     payload["infrastructure"] = {"summary": "x" * (5 * 1024 * 1024)}
