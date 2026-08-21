@@ -179,6 +179,62 @@ def test_reparse_default_backup_root_fails_closed_without_resolved_fallback(
         runtime_config.read_temporal_backup_state(config.backup_state_path)
     with pytest.raises(ValueError):
         _direct_config(backup_state_path=lexical_state)
+    with pytest.raises(ValueError):
+        _direct_config(
+            backup_state_path=lexical_state,
+            warnings=("invalid_temporal_backup_state",),
+        )
+
+
+def test_unsafe_default_backup_with_other_invalid_env_still_validates_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    lexical_root = tmp_path / "trusted-root"
+    lexical_root.mkdir()
+    lexical_state = lexical_root / "latest-verified.json"
+    monkeypatch.setattr(runtime_config, "TEMPORAL_BACKUP_ROOT", lexical_root)
+    monkeypatch.setattr(runtime_config, "DEFAULT_BACKUP_STATE_PATH", lexical_state)
+    original_reparse_check = runtime_config._has_reparse_component
+    monkeypatch.setattr(
+        runtime_config,
+        "_has_reparse_component",
+        lambda value: value == lexical_state or original_reparse_check(value),
+    )
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "25")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_ADDRESS", "not-an-address")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY", "true")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_WORKER_METRICS_ADDRESS", "0.0.0.0")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_WORKER_METRICS_PORT", "0")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BASELINE_P95_SECONDS", "nan")
+
+    config = TaskRuntimeConfig.from_env()
+    safe = config.to_safe_dict()
+
+    assert (config.backend, config.canary_percent) == ("local", 0)
+    assert config.temporal_address == "127.0.0.1:7233"
+    assert config.docking_concurrency == 1
+    assert config.worker_metrics_address == "127.0.0.1"
+    assert config.worker_metrics_port == 9465
+    assert config.baseline_p95_seconds == 40.0
+    assert type(config.baseline_p95_seconds) is float
+    assert config.backup_state_path == lexical_state
+    assert config.warnings == (
+        "invalid_temporal_address",
+        "invalid_temporal_docking_concurrency",
+        "invalid_worker_metrics_address",
+        "invalid_worker_metrics_port",
+        "invalid_temporal_baseline_p95",
+        "invalid_temporal_backup_state",
+    )
+    assert safe["worker_metrics_address_configured"] is False
+    assert safe["backup_state_path_configured"] is False
+    assert type(safe["worker_metrics_address_configured"]) is bool
+    assert type(safe["backup_state_path_configured"]) is bool
+    with pytest.raises(ValueError):
+        runtime_config.read_temporal_backup_state(config.backup_state_path)
 
 
 @pytest.mark.parametrize(

@@ -7,7 +7,7 @@ import os
 import re
 import stat
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dataclass_fields
 from ipaddress import IPv4Address, IPv6Address, ip_address
 from pathlib import Path
 from stat import S_ISDIR, S_ISREG
@@ -434,6 +434,9 @@ class TaskRuntimeConfig:
     )
 
     def __post_init__(self) -> None:
+        self._validate()
+
+    def _validate(self, *, allow_internal_fail_closed_backup: bool = False) -> None:
         if type(self.backend) is not str or self.backend not in _BACKENDS:
             raise ValueError("invalid task runtime backend")
         if (
@@ -475,7 +478,8 @@ class TaskRuntimeConfig:
         object.__setattr__(self, "baseline_p95_seconds", normalized_baseline)
         backup_path_valid = _is_safe_backup_state_path(self.backup_state_path)
         fail_closed_lexical_default = (
-            not backup_path_valid
+            allow_internal_fail_closed_backup
+            and not backup_path_valid
             and self.backup_state_path == DEFAULT_BACKUP_STATE_PATH
             and self.backend == "local"
             and self.canary_percent == 0
@@ -674,25 +678,33 @@ class TaskRuntimeConfig:
             backend = backend_text
             canary_percent = int(percent_text) if backend == "temporal_canary" else 0
 
-        return cls(
-            backend=backend,
-            canary_percent=canary_percent,
-            temporal_address=address_text,
-            temporal_namespace=namespace_text,
-            docking_queue=queue_text,
-            docking_concurrency=1,
-            staging_root=staging_root,
-            worker_metrics_address=metrics_address_text,
-            worker_metrics_port=int(metrics_port_text),
-            baseline_p95_seconds=baseline_p95_seconds,
-            backup_state_path=backup_state_path,
-            warnings=tuple(warnings),
-            _temporal_address_configured=address_configured and address_valid,
-            _staging_root_configured=staging_configured and staging_valid,
-            _worker_metrics_address_configured=(
+        values: dict[str, object] = {
+            "backend": backend,
+            "canary_percent": canary_percent,
+            "temporal_address": address_text,
+            "temporal_namespace": namespace_text,
+            "docking_queue": queue_text,
+            "docking_concurrency": 1,
+            "staging_root": staging_root,
+            "warnings": tuple(warnings),
+            "_temporal_address_configured": address_configured and address_valid,
+            "_staging_root_configured": staging_configured and staging_valid,
+            "worker_metrics_address": metrics_address_text,
+            "worker_metrics_port": int(metrics_port_text),
+            "baseline_p95_seconds": baseline_p95_seconds,
+            "backup_state_path": backup_state_path,
+            "_worker_metrics_address_configured": (
                 metrics_address_configured and metrics_address_valid
             ),
-            _backup_state_path_configured=(
+            "_backup_state_path_configured": (
                 backup_state_configured and backup_state_valid
             ),
-        )
+        }
+        expected_fields = {definition.name for definition in dataclass_fields(cls)}
+        if set(values) != expected_fields:
+            raise RuntimeError("incomplete task runtime environment projection")
+        instance = object.__new__(cls)
+        for name, value in values.items():
+            object.__setattr__(instance, name, value)
+        instance._validate(allow_internal_fail_closed_backup=True)
+        return instance
