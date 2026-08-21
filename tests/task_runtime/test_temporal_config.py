@@ -117,6 +117,70 @@ def test_defaults_are_local_and_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.warnings == ()
 
 
+def test_backup_defaults_are_built_without_resolving(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path_type = type(tmp_path)
+
+    def forbidden_resolve(_value: Path, *args: object, **kwargs: object) -> Path:
+        raise AssertionError("backup defaults must preserve lexical paths")
+
+    monkeypatch.setattr(path_type, "resolve", forbidden_resolve)
+
+    backup_root, backup_state = runtime_config._backup_state_defaults(tmp_path)
+
+    assert backup_root == tmp_path / "scratch/temporal_backups"
+    assert backup_state == backup_root / "latest-verified.json"
+
+
+def test_reparse_default_backup_root_fails_closed_without_resolved_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    lexical_root = tmp_path / "trusted-root"
+    lexical_root.mkdir()
+    lexical_state = lexical_root / "latest-verified.json"
+    external_root = tmp_path / "external-target"
+    external_root.mkdir()
+    external_state = external_root / "latest-verified.json"
+    external_state.write_bytes(b'{"must_not_be_read":true}')
+
+    monkeypatch.setattr(runtime_config, "TEMPORAL_BACKUP_ROOT", lexical_root)
+    monkeypatch.setattr(runtime_config, "DEFAULT_BACKUP_STATE_PATH", lexical_state)
+    original_reparse_check = runtime_config._has_reparse_component
+    monkeypatch.setattr(
+        runtime_config,
+        "_has_reparse_component",
+        lambda value: value == lexical_state or original_reparse_check(value),
+    )
+    path_type = type(tmp_path)
+    original_resolve = path_type.resolve
+
+    def simulated_reparse_resolve(
+        value: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> Path:
+        if value == lexical_state:
+            return external_state
+        return original_resolve(value, *args, **kwargs)
+
+    monkeypatch.setattr(path_type, "resolve", simulated_reparse_resolve)
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert (config.backend, config.canary_percent) == ("local", 0)
+    assert config.warnings == ("invalid_temporal_backup_state",)
+    assert config.backup_state_path == lexical_state
+    assert config.backup_state_path != external_state
+    with pytest.raises(ValueError):
+        runtime_config.read_temporal_backup_state(config.backup_state_path)
+    with pytest.raises(ValueError):
+        _direct_config(backup_state_path=lexical_state)
+
+
 @pytest.mark.parametrize(
     "value",
     ["-1", "101", "1.5", "true", "", "+1", "01", " 1", "1 "],

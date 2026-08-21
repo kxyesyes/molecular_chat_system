@@ -15,6 +15,13 @@ from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _backup_state_defaults(project_root: Path) -> tuple[Path, Path]:
+    backup_root = project_root / "scratch" / "temporal_backups"
+    return backup_root, backup_root / "latest-verified.json"
+
+
 SCRATCH_ROOT = (PROJECT_ROOT / "scratch").resolve()
 DEFAULT_STAGING_ROOT = (SCRATCH_ROOT / "task_inputs").resolve()
 
@@ -24,8 +31,7 @@ DEFAULT_DOCKING_QUEUE = "medchat-docking"
 DEFAULT_WORKER_METRICS_ADDRESS = "127.0.0.1"
 DEFAULT_WORKER_METRICS_PORT = 9465
 DEFAULT_BASELINE_P95_SECONDS = 40.0
-TEMPORAL_BACKUP_ROOT = (SCRATCH_ROOT / "temporal_backups").resolve()
-DEFAULT_BACKUP_STATE_PATH = (TEMPORAL_BACKUP_ROOT / "latest-verified.json").resolve()
+TEMPORAL_BACKUP_ROOT, DEFAULT_BACKUP_STATE_PATH = _backup_state_defaults(PROJECT_ROOT)
 MAX_BACKUP_STATE_BYTES = 1024 * 1024
 
 _FILE_ATTRIBUTE_REPARSE_POINT = getattr(
@@ -467,9 +473,21 @@ class TaskRuntimeConfig:
         ):
             raise ValueError("invalid Temporal baseline p95")
         object.__setattr__(self, "baseline_p95_seconds", normalized_baseline)
-        if not _is_safe_backup_state_path(self.backup_state_path):
+        backup_path_valid = _is_safe_backup_state_path(self.backup_state_path)
+        fail_closed_lexical_default = (
+            not backup_path_valid
+            and self.backup_state_path == DEFAULT_BACKUP_STATE_PATH
+            and self.backend == "local"
+            and self.canary_percent == 0
+            and type(self.warnings) is tuple
+            and "invalid_temporal_backup_state" in self.warnings
+        )
+        if not backup_path_valid and not fail_closed_lexical_default:
             raise ValueError("invalid Temporal backup state")
-        if self.backup_state_path != self.backup_state_path.resolve():
+        if (
+            backup_path_valid
+            and self.backup_state_path != self.backup_state_path.resolve()
+        ):
             raise ValueError("Temporal backup state path must be resolved")
         if type(self.warnings) is not tuple or any(
             type(code) is not str or code not in _WARNING_CODES
@@ -547,7 +565,7 @@ class TaskRuntimeConfig:
         )
         backup_state_text, backup_state_configured = _read_environment(
             "MEDCHAT_TEMPORAL_BACKUP_STATE",
-            "scratch/temporal_backups/latest-verified.json",
+            str(DEFAULT_BACKUP_STATE_PATH),
         )
 
         warnings: list[str] = []
@@ -610,11 +628,11 @@ class TaskRuntimeConfig:
             backup_state_valid = backup_state_valid and _is_safe_backup_state_path(
                 backup_state_path
             )
-            try:
-                backup_state_path = backup_state_path.resolve()
-            except (OSError, RuntimeError):
-                backup_state_valid = False
-                backup_state_path = DEFAULT_BACKUP_STATE_PATH
+            if backup_state_valid:
+                try:
+                    backup_state_path = backup_state_path.resolve()
+                except (OSError, RuntimeError):
+                    backup_state_valid = False
         else:
             backup_state_path = DEFAULT_BACKUP_STATE_PATH
 
