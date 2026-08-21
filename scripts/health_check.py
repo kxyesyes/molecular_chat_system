@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import importlib
 import json
 import os
@@ -337,6 +338,63 @@ def check_task_runtime() -> tuple[bool, str]:
         return False, f"Task runtime check failed: {exc}"
 
 
+def check_temporal_runtime(
+    *,
+    config_factory=None,
+    backend_factory=None,
+) -> tuple[bool, str]:
+    """Check strict Temporal config, service reachability, and worker freshness."""
+
+    try:
+        from src.task_runtime.config import TaskRuntimeConfig
+
+        config = (config_factory or TaskRuntimeConfig.from_env)()
+        safe = config.to_safe_dict()
+    except Exception:
+        return False, "Temporal configuration is invalid"
+    warnings = tuple(safe.get("warnings") or ())
+    configured = safe.get("temporal_address_configured") is True
+    if warnings:
+        return False, f"Temporal configuration warnings={','.join(warnings)}; configured={str(configured).lower()}"
+    if config.backend == "local":
+        return True, f"local default; Temporal configured={str(configured).lower()}"
+
+    if backend_factory is None:
+        try:
+            import temporalio  # noqa: F401
+            from src.task_runtime.backends.temporal import TemporalTaskBackend
+            from src.task_runtime.store import TaskStore
+        except Exception:
+            return False, "Temporal SDK unavailable; configured=true"
+
+        backend = TemporalTaskBackend(
+            TaskStore(),
+            address=config.temporal_address,
+            namespace=config.temporal_namespace,
+            task_queue=config.docking_queue,
+        )
+    else:
+        backend = backend_factory(config)
+
+    async def probe():
+        try:
+            return await backend.health()
+        finally:
+            await backend.close()
+
+    try:
+        health = asyncio.run(probe())
+    except Exception:
+        return False, (
+            "Temporal health unavailable; configured=true; "
+            f"namespace={config.temporal_namespace}; queue={config.docking_queue}"
+        )
+    return health.available, (
+        f"{health.message}; configured=true; namespace={config.temporal_namespace}; "
+        f"queue={config.docking_queue}"
+    )
+
+
 def check_supervisor_agent() -> tuple[bool, str]:
     try:
         from src.agent.supervisor import SupervisorAgent
@@ -503,6 +561,7 @@ def run_checks(strict: bool) -> int:
         ("Agent Components", check_agent_components),
         ("Agent Platform", check_agent_platform),
         ("Task Runtime", check_task_runtime),
+        ("Temporal Runtime", check_temporal_runtime),
         ("Supervisor Agent", check_supervisor_agent),
         ("Reverse Target Data", check_reverse_target_data),
         ("Activity Models", check_activity_models),

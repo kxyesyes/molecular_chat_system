@@ -48,6 +48,64 @@ def test_agent_platform_health_check_exercises_persistence_and_evaluation():
     assert "evaluation" in detail
 
 
+def test_temporal_health_local_default_is_safe_and_non_blocking(monkeypatch):
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "local")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_ADDRESS", "temporal.internal:7233")
+
+    ok, detail = health_check.check_temporal_runtime()
+
+    assert ok is True
+    assert "local" in detail
+    assert "temporal.internal" not in detail
+    assert "configured=" in detail
+
+
+def test_temporal_health_requires_reachable_service_and_fresh_worker():
+    from src.task_runtime.models import BackendHealth
+
+    class _Config:
+        backend = "temporal_canary"
+        warnings = ()
+        temporal_address = "private.temporal.internal:7233"
+        temporal_namespace = "science"
+        docking_queue = "medchat-docking"
+
+        def to_safe_dict(self):
+            return {
+                "backend": self.backend,
+                "warnings": self.warnings,
+                "temporal_address_configured": True,
+            }
+
+    class _Backend:
+        async def health(self):
+            return BackendHealth(
+                "temporal",
+                False,
+                "worker unavailable",
+                {
+                    "configured": True,
+                    "durable_execution": True,
+                    "process_restart_recovery": True,
+                    "running": 0,
+                },
+            )
+
+        async def close(self):
+            return None
+
+    ok, detail = health_check.check_temporal_runtime(
+        config_factory=lambda: _Config(),
+        backend_factory=lambda _config: _Backend(),
+    )
+
+    assert ok is False
+    assert "worker unavailable" in detail
+    assert "science" in detail
+    assert "medchat-docking" in detail
+    assert "private.temporal.internal" not in detail
+
+
 def test_superseded_runtime_implementations_are_absent_and_unimported():
     superseded_files = {
         PROJECT_ROOT / "src" / "web" / "rag_service.py",
