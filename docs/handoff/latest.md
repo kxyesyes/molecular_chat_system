@@ -1,5 +1,66 @@
 # 最新任务交接
 
+## 2026-08-21 Temporal docking canary Stage 3A
+
+### 状态与范围
+
+- 分支：`codex/industrial-agent-temporal-docking-canary`，位于隔离 worktree；原始混杂工作树未被修改、回退或清理，未直接修改或合并 `main`。
+- 默认仍为 `MEDCHAT_TASK_BACKEND=local`、`MEDCHAT_TEMPORAL_CANARY_PERCENT=0`；Temporal 仅承接 deterministic docking canary，现有同步 `/api/docking/submit` 保持兼容。
+- 本阶段完成 Temporal workflow/activity、独立单并发 worker、进程树取消、completion authority、SQLite 查询投影、异步管理 API、事件/取消、健康检查、指标和 contract/real 发布门禁。
+- 未使用或记录外部 API key；Temporal/Vina 验收不需要主聊天模型。报告和日志未保存 receptor、ligand、SMILES、manifest 内容、环境变量值、绝对路径或凭据。
+
+### 本阶段提交
+
+```text
+032bdb5 feat(runtime): execute docking with temporal
+01775d7 fix(runtime): harden temporal workflow semantics
+bc35e2c fix(runtime): close temporal execution races
+ec2f267 fix(runtime): make terminal projection completion safe
+551477c fix(runtime): isolate temporal docking processes
+b809032 feat(runtime): route docking through temporal canary
+01aeb49 feat(web): expose durable docking task API
+e931bda test(runtime): gate temporal docking canary
+63c3399 fix(runtime): preserve verified docking provenance
+```
+
+### 真实 Temporal/Vina 验收
+
+- 使用本地 Temporal SDK 开发服务器、独立 worker、仓库 `MAGL_5zun.pdb`、`5.sdf` 和固定 docking box，最终 `repeat=3` 为 `3/3 passed`。
+- 三次均为一个 Vina attempt、一个终态事件、10 个 pose；最佳能量分别为 `-3.5`、`-3.6`、`-3.5`，均来自真实 Vina 产物。
+- artifact 文件存在且 SHA-256 重算一致；tool/model provenance 完整，`demo_mode=false`、`fallback_used=false`；重复执行数和终态冲突数均为 0。
+- 最终 p50 为 `27611 ms`，p95 为 `30464 ms`。报告位于本地忽略路径 `outputs/agent_evaluation/temporal_docking_acceptance.json`，不提交 Git。
+- 预验收曾如实失败两轮：第一轮真实工具完成后，`AutoDock Vina` 显示名被过严 provenance 规则拒绝；第二轮任务 3/3 succeeded，但验收器未从严格 artifact 投影解析 pose，且持久化层丢失非 demo/fallback 标志。均先补失败测试，再修复根因并重跑。
+- 安全复审进一步关闭了空格拆分科学结构、非布尔科学模式标志、大小写键碰撞和 artifact 类型别名冲突；独立审查最终结论为 `APPROVED`。
+
+### 最终验证
+
+```text
+tests/agent：647 passed, 1 skipped
+反幻觉、平台健康、real checks：48 passed
+task runtime + docking + routes：1029 passed, 14 skipped, 9 subtests passed
+Temporal workflow/store/acceptance 聚焦：389 passed
+python -m compileall -q src scripts：passed
+run_agent_acceptance.py --mode contract：passed
+Temporal docking contract repeat 3：passed，raw executor calls=3，duplicate Vina=0
+Temporal docking real repeat 3：passed，3/3
+git diff --check：passed
+```
+
+现有 5 条 warning 为 SWIG 类型和 FastAPI `on_event` 弃用提示；本阶段没有 RuntimeWarning。skip 均为已有环境/平台条件测试，不是伪造成功。
+
+`scripts/health_check.py --strict` 实际为 `20/23`，未通过项是本地缺少 reverse-target ChEMBL 表、activity model 文件和 RAG FAISS index；Temporal Runtime、Vina、ADFRsuite、配体准备、Ollama、任务运行时和样例资产均通过。这 3 项不是本阶段伪装成成功的依赖，也不影响上述真实 docking 证据。仓库长凭据形状正则命中 1 个正常任务名中的 `task-runtime` 子串，人工脱敏核验为误报；未发现真实密钥值。
+
+### 发布与回滚
+
+- 固定晋级顺序：`0% -> 5% -> 10% -> 25%`；每档至少 20 个已接受任务或一个完整观察窗。
+- 晋级硬门禁：无重复 Vina、无多终态、无 artifact/hash 失配、取消可追踪、worker heartbeat 新鲜、p95 无显著退化。
+- 任一硬门禁失败，将 `MEDCHAT_TASK_BACKEND` 改回 `local`、比例设为 `0`，停止新流量；已接受 Temporal workflow 继续到终态，不得在 local 重放。
+- 不删除 SQLite、staging completion、Temporal history 或 artifact。生产 Temporal 服务、备份与高可用方式仍为“待确认”。
+
+### Stage 3B 明确排除
+
+PostgreSQL、Redis、NATS、对象存储、Kubernetes、多 worker/多节点调度、完整 Agent workflow 或 LangGraph state 迁移、人工审批、删除同步 docking API、长期双写，以及 Vina 算法/参数/评分重写均未包含在本阶段。后续必须单独设计和评审。
+
 ## 2026-08-11 LangGraph 权威 canary 执行阶段
 
 ### 状态与范围

@@ -444,6 +444,77 @@ GitHub 分支保护和必需审批人数为“待确认”。
 - 不在文档中写真实密钥原文、个人隐私或本机绝对凭据路径；如需记录测试凭据状态，只能使用脱敏形式；
 - 文档 PR 同样遵守独立分支、审查和不直接合并规则。
 
+## 18. Temporal docking canary 运行规范
+
+Temporal 是 docking 长任务的可选执行后端，不是全局默认，也不替代现有科学工具、Validator 或同步 API。默认配置必须保持：
+
+```powershell
+$env:MEDCHAT_TASK_BACKEND = "local"
+$env:MEDCHAT_TEMPORAL_CANARY_PERCENT = "0"
+```
+
+### 18.1 安装与本地验证
+
+可选依赖来自 `requirements-agent-temporal.txt`：
+
+```powershell
+python -m pip install -r requirements-agent-temporal.txt
+```
+
+本地开发可分别启动 SDK 开发服务器和单并发 docking worker：
+
+```powershell
+python scripts/run_temporal_dev_server.py
+
+$env:MEDCHAT_TASK_BACKEND = "temporal_canary"
+$env:MEDCHAT_TEMPORAL_CANARY_PERCENT = "100"
+$env:MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY = "1"
+python scripts/run_temporal_docking_worker.py
+```
+
+`run_temporal_dev_server.py` 仅用于开发和验收。生产 Temporal 服务的部署、备份和高可用方式为“待确认”，不得把开发服务器作为生产依赖。worker 必须独立于 Web 进程运行，且 docking 并发固定为 1；非法配置必须 fail closed 到 `local`、0%。
+
+### 18.2 API 与兼容边界
+
+- 异步入口 `POST /api/docking/tasks`、事件查询和取消接口需要管理鉴权；
+- 现有同步 `/api/docking/submit` 保持原响应契约，不通过 Temporal；
+- Temporal workflow/history 只保存任务控制信息、相对 artifact 标识、hash、状态码和脱敏 provenance，不保存 receptor、ligand、SMILES、manifest 内容、凭据或绝对路径；
+- SQLite 是当前查询投影，Temporal 是已接收 Temporal 任务的执行权威；不得长期扩展为 SQLite 与其他数据库双写；
+- 成功必须同时满足：一次 Vina 执行、一个终态事件、数值能量、有效 pose、artifact SHA-256 一致，以及 `demo_mode=false`、`fallback_used=false` 的真实 provenance。
+
+### 18.3 验收与健康检查
+
+```powershell
+python scripts/health_check.py --strict
+python scripts/run_temporal_docking_acceptance.py --mode contract --repeat 3 --output outputs/agent_evaluation/temporal_docking_contract.json
+python scripts/run_temporal_docking_acceptance.py --mode real --repeat 3 --output outputs/agent_evaluation/temporal_docking_acceptance.json
+```
+
+`contract` 使用受控 fake 验证生命周期，不是科学结果；报告必须标记 `scientific_execution=false`。`real` 使用仓库 MAGL 样例和真实 Vina，任何依赖、pose、hash、provenance、终态或执行次数异常都必须失败。报告只允许安全逻辑标识、版本、耗时、相对路径和 hash；不得记录输入载荷、环境变量值或凭据。
+
+### 18.4 发布、晋级与回滚
+
+生产流量只能按固定顺序晋级：
+
+```text
+0% -> 5% -> 10% -> 25%
+```
+
+每一档至少观察 20 个已接受任务或一个完整发布观察窗。只有同时满足“无重复 Vina、无多终态、无 artifact/hash 失配、取消可追踪、heartbeat 新鲜、p95 无显著退化”才可晋级。任一硬门禁失败立即把新流量降为 0%；已由 Temporal 接受的 workflow 继续收敛到终态，不得回退后在 local 重放同一科学任务。
+
+回滚新流量：
+
+```powershell
+$env:MEDCHAT_TASK_BACKEND = "local"
+$env:MEDCHAT_TEMPORAL_CANARY_PERCENT = "0"
+```
+
+随后停止专用 worker，并确认同步 docking 和本地任务回归通过。回滚不得删除 task SQLite、staging completion、Temporal history 或 pose 证据。
+
+### 18.5 Stage 3B 边界
+
+本阶段明确不包含 PostgreSQL、Redis、NATS、对象存储、Kubernetes、多节点/多 worker 调度、完整 Agent workflow 迁移、LangGraph state 迁移、人工审批平台、删除同步 docking API，以及 Vina 算法或评分逻辑重写。这些内容必须单独设计、评审和迁移，不能通过扩大 canary 比例顺带引入。
+
 ## 待确认事项汇总
 
 1. Python 3.11 是否纳入正式支持范围。
