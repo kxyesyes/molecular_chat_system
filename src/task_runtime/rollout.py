@@ -27,6 +27,7 @@ _EVIDENCE_FIELDS = frozenset(
 )
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _STAGES = frozenset({"preflight", "observation"})
+_VALIDATED_EVIDENCE_SEAL = object()
 _PROMOTIONS = {
     (0, 5): "preflight",
     (5, 10): "observation",
@@ -113,7 +114,7 @@ class RolloutEvidence:
         if gates.get("all_required_gates") != "passed":
             raise EvidenceError("required gates did not pass")
 
-        return cls(
+        evidence = cls(
             schema_version=1,
             stage=stage,
             status="passed",
@@ -122,6 +123,12 @@ class RolloutEvidence:
             gates=gates,
             sha256=actual_sha256,
         )
+        object.__setattr__(
+            evidence,
+            "_validated_evidence_seal",
+            _VALIDATED_EVIDENCE_SEAL,
+        )
+        return evidence
 
 
 @dataclass(frozen=True)
@@ -158,6 +165,11 @@ def validate_transition(
         raise EvidenceError("invalid rollout transition")
     if type(evidence) is not RolloutEvidence:
         raise EvidenceError("rollout evidence is required")
+    if (
+        getattr(evidence, "_validated_evidence_seal", None)
+        is not _VALIDATED_EVIDENCE_SEAL
+    ):
+        raise EvidenceError("rollout evidence is not trusted")
     if evidence.current_level != current_level:
         raise EvidenceError("rollout evidence level mismatch")
     if evidence.stage != required_stage:

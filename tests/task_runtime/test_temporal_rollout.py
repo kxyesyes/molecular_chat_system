@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from copy import copy
+from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
+import pickle
 from types import MappingProxyType
 
 import pytest
@@ -272,6 +274,100 @@ def test_public_value_contracts_are_frozen():
         evidence.current_level = 10  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
         decision.allowed = False  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "current,target,stage",
+    [(0, 5, "preflight"), (5, 10, "observation"), (10, 25, "observation")],
+)
+def test_direct_forged_evidence_cannot_authorize_any_promotion(
+    current,
+    target,
+    stage,
+):
+    forged = RolloutEvidence(
+        schema_version=999,
+        stage=stage,
+        status="failed",
+        current_level=current,
+        generated_at=GENERATED_AT,
+        gates={"all_required_gates": "failed"},
+        sha256="invalid",
+    )
+
+    with pytest.raises(EvidenceError):
+        validate_transition(current, target, forged, now=GENERATED_AT)
+
+
+def test_direct_valid_looking_evidence_is_not_trusted_without_payload_validation():
+    payload = _payload(5, "observation")
+    direct = RolloutEvidence(
+        schema_version=1,
+        stage="observation",
+        status="passed",
+        current_level=5,
+        generated_at=GENERATED_AT,
+        gates={"all_required_gates": "passed"},
+        sha256=_digest(payload),
+    )
+
+    with pytest.raises(EvidenceError):
+        validate_transition(5, 10, direct, now=GENERATED_AT)
+
+
+def test_dataclass_replacement_cannot_transfer_trust_to_modified_evidence():
+    trusted = _evidence(5, "observation")
+    forged = replace(
+        trusted,
+        schema_version=999,
+        status="failed",
+        gates={"all_required_gates": "failed"},
+        sha256="invalid",
+    )
+
+    with pytest.raises(EvidenceError):
+        validate_transition(5, 10, forged, now=GENERATED_AT)
+
+
+def test_copying_untrusted_evidence_cannot_fabricate_trust():
+    forged = RolloutEvidence(
+        schema_version=999,
+        stage="observation",
+        status="failed",
+        current_level=5,
+        generated_at=GENERATED_AT,
+        gates={"all_required_gates": "failed"},
+        sha256="invalid",
+    )
+
+    with pytest.raises(EvidenceError):
+        validate_transition(5, 10, copy(forged), now=GENERATED_AT)
+
+
+def test_copying_validated_immutable_evidence_preserves_safe_use_and_value_semantics():
+    trusted = _evidence(5, "observation")
+    copied = copy(trusted)
+
+    decision = validate_transition(5, 10, copied, now=GENERATED_AT)
+
+    assert decision.allowed is True
+    assert copied == trusted
+    assert repr(copied) == repr(trusted)
+    with pytest.raises(TypeError):
+        copied.gates["all_required_gates"] = "failed"  # type: ignore[index]
+
+
+def test_pickling_evidence_cannot_create_a_trusted_promotion_credential():
+    trusted = _evidence(5, "observation")
+
+    try:
+        serialized = pickle.dumps(trusted)
+    except (EvidenceError, pickle.PicklingError, TypeError):
+        return
+
+    restored = pickle.loads(serialized)
+    with pytest.raises(EvidenceError):
+        validate_transition(5, 10, restored, now=GENERATED_AT)
 
 
 @pytest.mark.parametrize(
