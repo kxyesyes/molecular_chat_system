@@ -91,6 +91,159 @@ def _create_legacy_database(path):
         )
 
 
+def _finish_observation_task(
+    store: TaskStore,
+    task_id: str,
+    *,
+    finished_at: datetime,
+    backend: str = "temporal",
+    task_type: str = "docking",
+    status: TaskStatus = TaskStatus.SUCCEEDED,
+) -> None:
+    started_at = finished_at - timedelta(seconds=10)
+    store.create(
+        task_id,
+        task_type,
+        {},
+        backend=backend,
+        now=started_at - timedelta(seconds=1),
+    )
+    assert store.claim_running(task_id, attempt=1, now=started_at)
+    if backend == "temporal":
+        assert store.project_temporal_terminal(task_id, status, now=finished_at)
+    else:
+        assert store.finish(task_id, status, now=finished_at)
+
+
+def test_list_temporal_observation_filters_closed_open_window_and_orders(tmp_path):
+    store = TaskStore(tmp_path / "observation.sqlite")
+    start = datetime(2026, 8, 21, 10, 0, tzinfo=timezone.utc)
+    end = start + timedelta(hours=1)
+    _finish_observation_task(store, "before", finished_at=start - timedelta(microseconds=1))
+    _finish_observation_task(store, "tie-b", finished_at=start + timedelta(minutes=30))
+    _finish_observation_task(store, "at-start", finished_at=start)
+    _finish_observation_task(store, "tie-a", finished_at=start + timedelta(minutes=30))
+    _finish_observation_task(store, "at-end", finished_at=end)
+    _finish_observation_task(
+        store, "local", finished_at=start + timedelta(minutes=1), backend="local"
+    )
+    _finish_observation_task(
+        store, "celery", finished_at=start + timedelta(minutes=2), backend="celery"
+    )
+    _finish_observation_task(
+        store,
+        "other-type",
+        finished_at=start + timedelta(minutes=3),
+        task_type="molecular_design",
+    )
+    store.create("queued", "docking", {}, backend="temporal", now=start)
+    store.create("corrupt-running", "docking", {}, backend="temporal", now=start)
+    assert store.claim_running("corrupt-running", now=start + timedelta(seconds=1))
+    with connection(store.db_path) as conn:
+        conn.execute(
+            "UPDATE tasks SET finished_at = ? WHERE task_id = ?",
+            ((start + timedelta(minutes=4)).isoformat(), "corrupt-running"),
+        )
+
+    records = store.list_temporal_observation(start, end)
+
+    assert [record.task_id for record in records] == ["at-start", "tie-a", "tie-b"]
+    assert all(
+        record.backend == "temporal"
+        and record.task_type == "docking"
+        and record.status
+        in {
+            TaskStatus.SUCCEEDED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELED,
+            TaskStatus.TIMED_OUT,
+        }
+        for record in records
+    )
+
+
+def test_list_temporal_observation_accepts_aware_iso_offsets_and_z(tmp_path):
+    store = TaskStore(tmp_path / "observation-offset.sqlite")
+    finished = datetime(2026, 8, 21, 10, 30, tzinfo=timezone.utc)
+    _finish_observation_task(store, "included", finished_at=finished)
+
+    records = store.list_temporal_observation(
+        "2026-08-21T18:00:00+08:00", "2026-08-21T11:00:00Z"
+    )
+
+    assert [record.task_id for record in records] == ["included"]
+
+
+def test_list_temporal_observation_enforces_limit(tmp_path):
+    store = TaskStore(tmp_path / "observation-limit.sqlite")
+    start = datetime(2026, 8, 21, 10, 0, tzinfo=timezone.utc)
+    for index in range(3):
+        _finish_observation_task(
+            store,
+            f"task-{index}",
+            finished_at=start + timedelta(minutes=index + 1),
+        )
+
+    records = store.list_temporal_observation(
+        start, start + timedelta(hours=1), limit=2
+    )
+
+    assert [record.task_id for record in records] == ["task-0", "task-1"]
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        (datetime(2026, 8, 21, 10), datetime(2026, 8, 21, 11, tzinfo=timezone.utc)),
+        (datetime(2026, 8, 21, 10, tzinfo=timezone.utc), datetime(2026, 8, 21, 11)),
+        ("2026-08-21T10:00:00", "2026-08-21T11:00:00+00:00"),
+        ("not-a-time", "2026-08-21T11:00:00+00:00"),
+        ("2026-08-21T10:00:00+00:00", "2026-08-21T10:00:00+00:00"),
+        ("2026-08-21T11:00:00+00:00", "2026-08-21T10:00:00+00:00"),
+        (None, "2026-08-21T11:00:00+00:00"),
+    ],
+)
+def test_list_temporal_observation_rejects_invalid_windows(tmp_path, start, end):
+    store = TaskStore(tmp_path / "observation-invalid-window.sqlite")
+
+    with pytest.raises(ValueError, match="observation window"):
+        store.list_temporal_observation(start, end)
+
+
+@pytest.mark.parametrize("limit", [True, False, 0, -1, 10001, 1.0, "10", None])
+def test_list_temporal_observation_rejects_invalid_limits(tmp_path, limit):
+    store = TaskStore(tmp_path / "observation-invalid-limit.sqlite")
+    start = datetime(2026, 8, 21, 10, tzinfo=timezone.utc)
+
+    with pytest.raises(ValueError, match="observation limit"):
+        store.list_temporal_observation(start, start + timedelta(hours=1), limit=limit)
+
+
+def test_list_temporal_observation_does_not_mutate_store(tmp_path):
+    store = TaskStore(tmp_path / "observation-read-only.sqlite")
+    start = datetime(2026, 8, 21, 10, tzinfo=timezone.utc)
+    _finish_observation_task(
+        store, "task-1", finished_at=start + timedelta(minutes=1)
+    )
+    with connection(store.db_path) as conn:
+        before_tasks = conn.execute(
+            "SELECT * FROM tasks ORDER BY task_id"
+        ).fetchall()
+        before_events = conn.execute(
+            "SELECT * FROM task_events ORDER BY task_id, sequence"
+        ).fetchall()
+
+    store.list_temporal_observation(start, start + timedelta(hours=1))
+
+    with connection(store.db_path) as conn:
+        after_tasks = conn.execute("SELECT * FROM tasks ORDER BY task_id").fetchall()
+        after_events = conn.execute(
+            "SELECT * FROM task_events ORDER BY task_id, sequence"
+        ).fetchall()
+    assert after_tasks == before_tasks
+    assert after_events == before_events
+
+
 def test_existing_database_is_migrated_without_row_loss_and_idempotently(tmp_path):
     path = tmp_path / "tasks.sqlite"
     _create_legacy_database(path)

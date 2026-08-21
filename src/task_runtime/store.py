@@ -85,6 +85,22 @@ def _as_timestamp(value: datetime | str | None) -> str:
     return _parse_timestamp(value).isoformat()
 
 
+def _as_observation_timestamp(value: datetime | str) -> str:
+    try:
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, str) and value.strip():
+            normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+            parsed = datetime.fromisoformat(normalized)
+        else:
+            raise ValueError
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError
+        return parsed.astimezone(timezone.utc).isoformat()
+    except (OverflowError, TypeError, ValueError):
+        raise ValueError("invalid observation window") from None
+
+
 def _json(value: Any) -> str:
     return json.dumps(
         strict_json_snapshot(value), ensure_ascii=False, allow_nan=False
@@ -599,6 +615,47 @@ class TaskStore:
                 f"SELECT * FROM tasks {where_sql} "
                 "ORDER BY updated_at DESC, task_id DESC LIMIT ? OFFSET ?",
                 params,
+            ).fetchall()
+        return [TaskRecord.from_row(row) for row in rows]
+
+    def list_temporal_observation(
+        self,
+        window_start: datetime | str,
+        window_end: datetime | str,
+        *,
+        limit: int = 10000,
+    ) -> list[TaskRecord]:
+        """Read a bounded closed-open slice of terminal Temporal docking tasks."""
+
+        start = _as_observation_timestamp(window_start)
+        end = _as_observation_timestamp(window_end)
+        if start >= end:
+            raise ValueError("invalid observation window")
+        if type(limit) is not int or not 1 <= limit <= 10000:
+            raise ValueError("invalid observation limit")
+        terminal_values = (
+            TaskStatus.SUCCEEDED.value,
+            TaskStatus.FAILED.value,
+            TaskStatus.CANCELED.value,
+            TaskStatus.TIMED_OUT.value,
+        )
+        with connection(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM tasks
+                WHERE backend = ? AND task_type = ?
+                  AND status IN (?, ?, ?, ?)
+                  AND finished_at >= ? AND finished_at < ?
+                ORDER BY finished_at ASC, task_id ASC LIMIT ?
+                """,
+                (
+                    "temporal",
+                    "docking",
+                    *terminal_values,
+                    start,
+                    end,
+                    limit,
+                ),
             ).fetchall()
         return [TaskRecord.from_row(row) for row in rows]
 
