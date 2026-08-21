@@ -41,6 +41,62 @@ def _payload(
     }
 
 
+def _observation_payload() -> dict[str, object]:
+    payload = _payload(5, "observation")
+    payload.update(
+        {
+            "window_start": "2026-08-21T08:00:00+00:00",
+            "window_end": "2026-08-21T10:00:00+00:00",
+            "sample_count": 20,
+            "counts": {"succeeded": 20, "failed": 0},
+            "rates": {"failure": 0.0},
+            "latency_seconds": {"p50": 30.0, "p95": 40.0},
+            "error_code_distribution": {},
+            "worker_health": {"available": True, "age_seconds": 5.0},
+            "infrastructure": {
+                "temporal": True,
+                "namespace": True,
+                "queue": True,
+            },
+            "blocking_alerts": [],
+            "backup_verified": True,
+            "tasks": [
+                {
+                    "task_fingerprint": "task-01",
+                    "workflow_fingerprint": "workflow-01",
+                    "status": "succeeded",
+                    "latency_seconds": 30.0,
+                }
+            ],
+        }
+    )
+    return payload
+
+
+def _preflight_payload() -> dict[str, object]:
+    payload = _payload(0, "preflight")
+    payload.update(
+        {
+            "deployment": {"status": "passed"},
+            "contract": {"status": "passed", "run_count": 3},
+            "real": {
+                "status": "passed",
+                "run_count": 3,
+                "scientific_execution": True,
+            },
+            "infrastructure": {
+                "temporal": True,
+                "namespace": True,
+                "queue": True,
+                "worker": True,
+            },
+            "blocking_alerts": [],
+            "backup": {"status": "passed"},
+        }
+    )
+    return payload
+
+
 def _digest(payload: dict[str, object]) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -141,6 +197,118 @@ def test_evidence_rejects_unknown_top_level_fields():
     payload = _payload()
     payload["debug_path"] = "C:/private/evidence.json"
     _assert_rejected(payload, _digest(payload))
+
+
+def test_full_observation_report_is_hashed_in_full_and_authorizes_observation():
+    payload = _observation_payload()
+
+    evidence = RolloutEvidence.from_payload(payload, _digest(payload))
+    decision = validate_transition(5, 10, evidence, now=GENERATED_AT)
+
+    assert decision.allowed is True
+
+
+def test_observation_extra_fields_are_integrity_protected():
+    payload = _observation_payload()
+    expected_sha256 = _digest(payload)
+    rates = payload["rates"]
+    assert isinstance(rates, dict)
+    rates["failure"] = 0.5
+
+    _assert_rejected(payload, expected_sha256)
+
+
+def test_full_preflight_report_authorizes_only_zero_to_five():
+    payload = _preflight_payload()
+    evidence = RolloutEvidence.from_payload(payload, _digest(payload))
+
+    decision = validate_transition(0, 5, evidence, now=GENERATED_AT)
+
+    assert decision.allowed is True
+    with pytest.raises(EvidenceError):
+        validate_transition(5, 10, evidence, now=GENERATED_AT)
+
+
+def test_preflight_extra_fields_are_integrity_protected():
+    payload = _preflight_payload()
+    expected_sha256 = _digest(payload)
+    deployment = payload["deployment"]
+    assert isinstance(deployment, dict)
+    deployment["status"] = "failed"
+
+    _assert_rejected(payload, expected_sha256)
+
+
+@pytest.mark.parametrize(
+    "payload_factory",
+    [_observation_payload, _preflight_payload],
+)
+def test_each_stage_rejects_unknown_top_level_report_fields(payload_factory):
+    payload = payload_factory()
+    payload["future_unplanned_section"] = {"status": "passed"}
+
+    _assert_rejected(payload, _digest(payload))
+
+
+def _assert_generic_payload_error(payload: dict[str, object]) -> None:
+    with pytest.raises(EvidenceError) as failure:
+        RolloutEvidence.from_payload(payload, "0" * 64)
+    assert str(failure.value) == "invalid evidence payload"
+
+
+def test_deeply_nested_report_is_normalized_to_generic_evidence_error():
+    payload = _observation_payload()
+    nested: dict[str, object] = {}
+    payload["infrastructure"] = nested
+    for _ in range(1000):
+        child: dict[str, object] = {}
+        nested["child"] = child
+        nested = child
+
+    _assert_generic_payload_error(payload)
+
+
+def test_deeply_nested_list_is_normalized_to_generic_evidence_error():
+    payload = _observation_payload()
+    nested: list[object] = []
+    payload["blocking_alerts"] = nested
+    for _ in range(1000):
+        child: list[object] = []
+        nested.append(child)
+        nested = child
+
+    _assert_generic_payload_error(payload)
+
+
+def test_report_with_excessive_nodes_is_rejected_before_serialization():
+    payload = _observation_payload()
+    payload["blocking_alerts"] = [None] * 200_001
+
+    _assert_generic_payload_error(payload)
+
+
+def test_oversized_canonical_report_is_rejected_generically():
+    payload = _observation_payload()
+    payload["infrastructure"] = {"summary": "x" * (5 * 1024 * 1024)}
+
+    _assert_generic_payload_error(payload)
+
+
+@pytest.mark.parametrize(
+    "nested_value",
+    [
+        {1: "not-a-string-key"},
+        ("tuple-is-not-a-json-list",),
+        {"value": float("nan")},
+        {"value": float("inf")},
+        {"value": float("-inf")},
+    ],
+)
+def test_invalid_nested_json_shapes_raise_generic_evidence_error(nested_value):
+    payload = _observation_payload()
+    payload["infrastructure"] = nested_value
+
+    _assert_generic_payload_error(payload)
 
 
 @pytest.mark.parametrize("schema_version", [True, False, 1.0, "1", 0, 2, None])

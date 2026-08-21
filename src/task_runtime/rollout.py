@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
+import math
 import re
 import secrets
 from types import MappingProxyType
@@ -16,7 +17,11 @@ from types import MappingProxyType
 ALLOWED_LEVELS = (0, 5, 10, 25)
 MAX_EVIDENCE_AGE = timedelta(hours=1)
 
-_EVIDENCE_FIELDS = frozenset(
+MAX_EVIDENCE_DEPTH = 32
+MAX_EVIDENCE_NODES = 100_000
+MAX_EVIDENCE_BYTES = 4 * 1024 * 1024
+
+_COMMON_EVIDENCE_FIELDS = frozenset(
     {
         "schema_version",
         "stage",
@@ -26,12 +31,44 @@ _EVIDENCE_FIELDS = frozenset(
         "gates",
     }
 )
+# Planned report sections stay explicit here. Add future report fields to the
+# relevant stage allowlist so unknown top-level data continues to fail closed.
+_OBSERVATION_REPORT_FIELDS = frozenset(
+    {
+        "window_start",
+        "window_end",
+        "sample_count",
+        "counts",
+        "rates",
+        "latency_seconds",
+        "error_code_distribution",
+        "worker_health",
+        "infrastructure",
+        "blocking_alerts",
+        "backup_verified",
+        "tasks",
+    }
+)
+_PREFLIGHT_REPORT_FIELDS = frozenset(
+    {
+        "deployment",
+        "contract",
+        "real",
+        "infrastructure",
+        "blocking_alerts",
+        "backup",
+    }
+)
+_STAGE_EVIDENCE_FIELDS = {
+    "observation": _COMMON_EVIDENCE_FIELDS | _OBSERVATION_REPORT_FIELDS,
+    "preflight": _COMMON_EVIDENCE_FIELDS | _PREFLIGHT_REPORT_FIELDS,
+}
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _STAGES = frozenset({"preflight", "observation"})
 _MAPPING_PROXY_TYPE = type(MappingProxyType({}))
 _PROVENANCE_KEY = secrets.token_bytes(32)
+_CANONICAL_PAYLOAD_ATTRIBUTE = "_validated_canonical_payload"
 _CONTENT_SEAL_ATTRIBUTE = "_validated_content_seal"
-_SOURCE_TIMESTAMP_ATTRIBUTE = "_validated_source_timestamp"
 _PROMOTIONS = {
     (0, 5): "preflight",
     (5, 10): "observation",
@@ -68,20 +105,17 @@ class RolloutEvidence:
             raise EvidenceError("invalid evidence hash")
 
         try:
-            canonical = json.dumps(
-                payload,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode("utf-8")
-        except (TypeError, ValueError):
+            _validate_top_level_shape(payload)
+            _validate_json_structure(payload)
+            canonical = _canonical_payload(payload)
+        except EvidenceError:
+            raise
+        except (MemoryError, OverflowError, RecursionError):
             raise EvidenceError("invalid evidence payload") from None
 
         actual_sha256 = hashlib.sha256(canonical).hexdigest()
         if not hmac.compare_digest(actual_sha256, expected_sha256):
             raise EvidenceError("evidence hash mismatch")
-        if set(payload) != _EVIDENCE_FIELDS:
-            raise EvidenceError("invalid evidence payload")
 
         schema_version = payload["schema_version"]
         if type(schema_version) is not int or schema_version != 1:
@@ -127,8 +161,96 @@ class RolloutEvidence:
             gates=gates,
             sha256=actual_sha256,
         )
-        _seal_validated_evidence(evidence, generated_at, canonical)
+        _seal_validated_evidence(evidence, canonical)
         return evidence
+
+
+def _validate_top_level_shape(payload: dict[object, object]) -> None:
+    if not all(type(key) is str for key in payload):
+        raise EvidenceError("invalid evidence payload")
+    if not _COMMON_EVIDENCE_FIELDS.issubset(payload):
+        raise EvidenceError("invalid evidence payload")
+    stage = payload.get("stage")
+    if type(stage) is not str or stage not in _STAGE_EVIDENCE_FIELDS:
+        raise EvidenceError("invalid evidence payload")
+    if not set(payload).issubset(_STAGE_EVIDENCE_FIELDS[stage]):
+        raise EvidenceError("invalid evidence payload")
+
+
+def _validate_json_structure(payload: object) -> None:
+    stack: list[tuple[object, int]] = [(payload, 0)]
+    seen_containers: set[int] = set()
+    nodes = 0
+    raw_string_bytes = 0
+
+    while stack:
+        value, depth = stack.pop()
+        nodes += 1
+        if nodes > MAX_EVIDENCE_NODES or depth > MAX_EVIDENCE_DEPTH:
+            raise EvidenceError("invalid evidence payload")
+
+        value_type = type(value)
+        if value_type is dict:
+            identity = id(value)
+            if identity in seen_containers:
+                raise EvidenceError("invalid evidence payload")
+            seen_containers.add(identity)
+            for key, child in value.items():
+                if type(key) is not str:
+                    raise EvidenceError("invalid evidence payload")
+                nodes += 1
+                if nodes > MAX_EVIDENCE_NODES:
+                    raise EvidenceError("invalid evidence payload")
+                try:
+                    raw_string_bytes += len(key.encode("utf-8"))
+                except (MemoryError, UnicodeError):
+                    raise EvidenceError("invalid evidence payload") from None
+                if raw_string_bytes > MAX_EVIDENCE_BYTES:
+                    raise EvidenceError("invalid evidence payload")
+                stack.append((child, depth + 1))
+            continue
+        if value_type is list:
+            identity = id(value)
+            if identity in seen_containers:
+                raise EvidenceError("invalid evidence payload")
+            seen_containers.add(identity)
+            stack.extend((child, depth + 1) for child in value)
+            continue
+        if value_type is str:
+            try:
+                raw_string_bytes += len(value.encode("utf-8"))
+            except (MemoryError, UnicodeError):
+                raise EvidenceError("invalid evidence payload") from None
+            if raw_string_bytes > MAX_EVIDENCE_BYTES:
+                raise EvidenceError("invalid evidence payload")
+            continue
+        if value is None or value_type in {bool, int}:
+            continue
+        if value_type is float and math.isfinite(value):
+            continue
+        raise EvidenceError("invalid evidence payload")
+
+
+def _canonical_payload(payload: object) -> bytes:
+    try:
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (
+        MemoryError,
+        OverflowError,
+        RecursionError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+    ):
+        raise EvidenceError("invalid evidence payload") from None
+    if len(canonical) > MAX_EVIDENCE_BYTES:
+        raise EvidenceError("invalid evidence payload")
+    return canonical
 
 
 def _validated_public_snapshot(evidence: RolloutEvidence) -> dict[str, object]:
@@ -171,31 +293,6 @@ def _validated_public_snapshot(evidence: RolloutEvidence) -> dict[str, object]:
     }
 
 
-def _report_payload(
-    evidence: RolloutEvidence,
-    source_timestamp: object,
-) -> dict[str, object]:
-    if type(source_timestamp) is not str:
-        raise EvidenceError("rollout evidence is not trusted")
-    try:
-        parsed_source = datetime.fromisoformat(source_timestamp)
-    except ValueError:
-        raise EvidenceError("rollout evidence is not trusted") from None
-    if parsed_source.tzinfo is None or parsed_source.utcoffset() is None:
-        raise EvidenceError("rollout evidence is not trusted")
-    if parsed_source.isoformat() != evidence.generated_at.isoformat():
-        raise EvidenceError("rollout evidence is not trusted")
-
-    return {
-        "schema_version": evidence.schema_version,
-        "stage": evidence.stage,
-        "status": evidence.status,
-        "current_level": evidence.current_level,
-        "generated_at": source_timestamp,
-        "gates": dict(evidence.gates),
-    }
-
-
 def _canonical_json(payload: object) -> bytes:
     try:
         return json.dumps(
@@ -214,7 +311,6 @@ def _provenance_message(report: bytes, public_snapshot: bytes) -> bytes:
 
 def _seal_validated_evidence(
     evidence: RolloutEvidence,
-    source_timestamp: str,
     canonical_report: bytes,
 ) -> None:
     public_snapshot = _canonical_json(_validated_public_snapshot(evidence))
@@ -223,18 +319,54 @@ def _seal_validated_evidence(
         _provenance_message(canonical_report, public_snapshot),
         hashlib.sha256,
     ).hexdigest()
-    object.__setattr__(evidence, _SOURCE_TIMESTAMP_ATTRIBUTE, source_timestamp)
+    object.__setattr__(evidence, _CANONICAL_PAYLOAD_ATTRIBUTE, canonical_report)
     object.__setattr__(evidence, _CONTENT_SEAL_ATTRIBUTE, seal)
+
+
+def _payload_matches_public_evidence(
+    payload: dict[object, object],
+    evidence: RolloutEvidence,
+) -> bool:
+    generated_at = payload.get("generated_at")
+    if type(generated_at) is not str:
+        return False
+    try:
+        parsed_generated_at = datetime.fromisoformat(generated_at)
+    except ValueError:
+        return False
+    if (
+        parsed_generated_at.tzinfo is None
+        or parsed_generated_at.utcoffset() is None
+        or parsed_generated_at.isoformat() != evidence.generated_at.isoformat()
+    ):
+        return False
+    gates = payload.get("gates")
+    return (
+        type(payload.get("schema_version")) is int
+        and payload["schema_version"] == evidence.schema_version
+        and type(payload.get("stage")) is str
+        and payload["stage"] == evidence.stage
+        and type(payload.get("status")) is str
+        and payload["status"] == evidence.status
+        and type(payload.get("current_level")) is int
+        and payload["current_level"] == evidence.current_level
+        and type(gates) is dict
+        and gates == dict(evidence.gates)
+    )
 
 
 def _verify_evidence_provenance(evidence: RolloutEvidence) -> None:
     public_snapshot = _canonical_json(_validated_public_snapshot(evidence))
-    source_timestamp = getattr(evidence, _SOURCE_TIMESTAMP_ATTRIBUTE, None)
+    canonical_report = getattr(evidence, _CANONICAL_PAYLOAD_ATTRIBUTE, None)
     content_seal = getattr(evidence, _CONTENT_SEAL_ATTRIBUTE, None)
-    if type(content_seal) is not str or _SHA256.fullmatch(content_seal) is None:
+    if (
+        type(canonical_report) is not bytes
+        or len(canonical_report) > MAX_EVIDENCE_BYTES
+        or type(content_seal) is not str
+        or _SHA256.fullmatch(content_seal) is None
+    ):
         raise EvidenceError("rollout evidence is not trusted")
 
-    canonical_report = _canonical_json(_report_payload(evidence, source_timestamp))
     actual_sha256 = hashlib.sha256(canonical_report).hexdigest()
     if not hmac.compare_digest(actual_sha256, evidence.sha256):
         raise EvidenceError("rollout evidence is not trusted")
@@ -245,6 +377,27 @@ def _verify_evidence_provenance(evidence: RolloutEvidence) -> None:
         hashlib.sha256,
     ).hexdigest()
     if not hmac.compare_digest(expected_seal, content_seal):
+        raise EvidenceError("rollout evidence is not trusted")
+
+    try:
+        payload = json.loads(canonical_report)
+        if type(payload) is not dict:
+            raise EvidenceError("rollout evidence is not trusted")
+        _validate_top_level_shape(payload)
+        _validate_json_structure(payload)
+    except EvidenceError:
+        raise EvidenceError("rollout evidence is not trusted") from None
+    except (
+        json.JSONDecodeError,
+        MemoryError,
+        OverflowError,
+        RecursionError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+    ):
+        raise EvidenceError("rollout evidence is not trusted") from None
+    if not _payload_matches_public_evidence(payload, evidence):
         raise EvidenceError("rollout evidence is not trusted")
 
 
