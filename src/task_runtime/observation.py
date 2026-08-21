@@ -154,7 +154,7 @@ def _strict_int(value: object) -> int:
 
 
 def _strict_attempt(value: object) -> int:
-    if type(value) is not int or not 0 <= value <= 1:
+    if type(value) is not int or value < 0:
         raise ValueError("invalid observation sample")
     return value
 
@@ -349,7 +349,8 @@ def build_observation_report(
     gates = {
         "single_vina_attempt": _gate(
             all(
-                sample["status"] != "succeeded" or sample["attempt"] == 1
+                sample["attempt"] <= 1
+                and (sample["status"] != "succeeded" or sample["attempt"] == 1)
                 for sample in projected
             )
         ),

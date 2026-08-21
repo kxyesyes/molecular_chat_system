@@ -15,7 +15,7 @@ from src.task_runtime.observation import (
     build_observation_report,
     percentile,
 )
-from src.task_runtime.rollout import RolloutEvidence
+from src.task_runtime.rollout import EvidenceError, RolloutEvidence
 
 
 END = datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc)
@@ -122,7 +122,7 @@ def test_incomplete_sample_evidence_is_partial(
 @pytest.mark.parametrize(
     ("sample_update", "gate"),
     [
-        ({"attempt": 0}, "single_vina_attempt"),
+        ({"attempt": 2}, "single_vina_attempt"),
         ({"terminal_event_count": 2}, "single_terminal_event"),
         ({"pose_count": 0}, "successful_pose"),
         ({"binding_energy_valid": False}, "finite_binding_energy"),
@@ -247,8 +247,38 @@ def test_unsuccessful_task_allows_zero_or_one_vina_attempt(attempt: int) -> None
     assert report["rates"] == {"failure": 0.05}
 
 
-@pytest.mark.parametrize("attempt", [True, False, -1, 2, 100])
-def test_attempt_outside_exact_zero_or_one_integer_is_rejected(attempt: object) -> None:
+def test_succeeded_zero_attempt_is_single_vina_attempt_failure() -> None:
+    samples = [_sample(index) for index in range(20)]
+    samples[0]["attempt"] = 0
+
+    report = _report(samples)
+
+    assert report["status"] == "failed"
+    assert report["gates"]["single_vina_attempt"] == "failed"
+
+
+@pytest.mark.parametrize("attempt", [2, 17])
+def test_duplicate_vina_attempts_produce_hashed_failed_report(attempt: int) -> None:
+    samples = [_sample(index) for index in range(20)]
+    samples[0]["attempt"] = attempt
+
+    report = _report(samples)
+
+    assert report["status"] == "failed"
+    assert report["gates"]["single_vina_attempt"] == "failed"
+    assert report["gates"]["all_required_gates"] == "failed"
+    payload = dict(report)
+    digest = payload.pop("sha256")
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    assert digest == hashlib.sha256(canonical).hexdigest()
+    with pytest.raises(EvidenceError, match="evidence is not passed"):
+        RolloutEvidence.from_payload(payload, digest)
+
+
+@pytest.mark.parametrize("attempt", [True, False, -1, 1.0, "2", None])
+def test_invalid_attempt_type_or_negative_is_rejected(attempt: object) -> None:
     sample = _sample(0)
     sample["attempt"] = attempt
 
