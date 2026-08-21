@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import unicodedata
 from dataclasses import dataclass, field
 from ipaddress import IPv4Address, IPv6Address, ip_address
 from pathlib import Path
-from stat import S_ISDIR
+from stat import S_ISDIR, S_ISREG
 from typing import Any
 
 
@@ -19,6 +20,11 @@ DEFAULT_STAGING_ROOT = (SCRATCH_ROOT / "task_inputs").resolve()
 DEFAULT_TEMPORAL_ADDRESS = "127.0.0.1:7233"
 DEFAULT_TEMPORAL_NAMESPACE = "default"
 DEFAULT_DOCKING_QUEUE = "medchat-docking"
+DEFAULT_WORKER_METRICS_ADDRESS = "127.0.0.1"
+DEFAULT_WORKER_METRICS_PORT = 9465
+DEFAULT_BASELINE_P95_SECONDS = 40.0
+TEMPORAL_BACKUP_ROOT = (SCRATCH_ROOT / "temporal_backups").resolve()
+DEFAULT_BACKUP_STATE_PATH = (TEMPORAL_BACKUP_ROOT / "latest-verified.json").resolve()
 
 _BACKENDS = frozenset({"local", "temporal_canary"})
 _CANONICAL_PERCENT = re.compile(r"(?:0|[1-9][0-9]?|100)\Z")
@@ -34,6 +40,10 @@ _WARNING_ORDER = (
     "invalid_temporal_docking_queue",
     "invalid_temporal_docking_concurrency",
     "invalid_task_staging_root",
+    "invalid_worker_metrics_address",
+    "invalid_worker_metrics_port",
+    "invalid_temporal_baseline_p95",
+    "invalid_temporal_backup_state",
 )
 _WARNING_CODES = frozenset(_WARNING_ORDER)
 
@@ -125,6 +135,49 @@ def _nearest_existing_ancestor_is_directory(value: Path) -> bool:
             return False
 
 
+def _has_symlink_component(value: Path) -> bool:
+    if not value.is_absolute():
+        return True
+    parts = value.parts
+    if not parts:
+        return True
+    candidate = Path(parts[0])
+    for component in parts[1:]:
+        candidate /= component
+        try:
+            if candidate.is_symlink():
+                return True
+        except (OSError, RuntimeError):
+            return True
+    return False
+
+
+def _is_safe_backup_state_path(value: object) -> bool:
+    if not isinstance(value, Path) or not value.is_absolute():
+        return False
+    if value.name != "latest-verified.json" or any(
+        component in {".", ".."} for component in value.parts
+    ):
+        return False
+    if _has_symlink_component(value):
+        return False
+    try:
+        resolved = value.resolve()
+    except (OSError, RuntimeError):
+        return False
+    filesystem_root = Path(resolved.anchor)
+    if resolved in {filesystem_root, PROJECT_ROOT}:
+        return False
+    if PROJECT_ROOT in resolved.parents and TEMPORAL_BACKUP_ROOT not in resolved.parents:
+        return False
+    try:
+        return S_ISREG(resolved.stat().st_mode)
+    except FileNotFoundError:
+        return _nearest_existing_ancestor_is_directory(resolved)
+    except (OSError, RuntimeError):
+        return False
+
+
 def _has_dot_path_component(value: str) -> bool:
     return any(component in {".", ".."} for component in re.split(r"[\\/]", value))
 
@@ -147,6 +200,16 @@ class TaskRuntimeConfig:
     docking_queue: str
     docking_concurrency: int
     staging_root: Path = field(repr=False)
+    worker_metrics_address: str = field(
+        default=DEFAULT_WORKER_METRICS_ADDRESS,
+        repr=False,
+    )
+    worker_metrics_port: int = DEFAULT_WORKER_METRICS_PORT
+    baseline_p95_seconds: float = DEFAULT_BASELINE_P95_SECONDS
+    backup_state_path: Path = field(
+        default=DEFAULT_BACKUP_STATE_PATH,
+        repr=False,
+    )
     warnings: tuple[str, ...] = ()
     _temporal_address_configured: bool = field(
         default=False,
@@ -154,6 +217,16 @@ class TaskRuntimeConfig:
         compare=False,
     )
     _staging_root_configured: bool = field(
+        default=False,
+        repr=False,
+        compare=False,
+    )
+    _worker_metrics_address_configured: bool = field(
+        default=False,
+        repr=False,
+        compare=False,
+    )
+    _backup_state_path_configured: bool = field(
         default=False,
         repr=False,
         compare=False,
@@ -180,6 +253,26 @@ class TaskRuntimeConfig:
             raise ValueError("invalid task staging root")
         if self.staging_root != self.staging_root.resolve():
             raise ValueError("task staging root must be resolved")
+        if (
+            type(self.worker_metrics_address) is not str
+            or self.worker_metrics_address not in {"127.0.0.1", "::1"}
+        ):
+            raise ValueError("invalid worker metrics address")
+        if (
+            type(self.worker_metrics_port) is not int
+            or not 1 <= self.worker_metrics_port <= 65535
+        ):
+            raise ValueError("invalid worker metrics port")
+        if (
+            type(self.baseline_p95_seconds) is not float
+            or not math.isfinite(self.baseline_p95_seconds)
+            or not 0 < self.baseline_p95_seconds <= 60
+        ):
+            raise ValueError("invalid Temporal baseline p95")
+        if not _is_safe_backup_state_path(self.backup_state_path):
+            raise ValueError("invalid Temporal backup state")
+        if self.backup_state_path != self.backup_state_path.resolve():
+            raise ValueError("Temporal backup state path must be resolved")
         if type(self.warnings) is not tuple or any(
             type(code) is not str or code not in _WARNING_CODES
             for code in self.warnings
@@ -196,6 +289,10 @@ class TaskRuntimeConfig:
             raise ValueError("invalid Temporal address configured flag")
         if type(self._staging_root_configured) is not bool:
             raise ValueError("invalid staging root configured flag")
+        if type(self._worker_metrics_address_configured) is not bool:
+            raise ValueError("invalid worker metrics address configured flag")
+        if type(self._backup_state_path_configured) is not bool:
+            raise ValueError("invalid backup state path configured flag")
 
     def to_safe_dict(self) -> dict[str, Any]:
         """Return operational settings without serializing addresses or paths."""
@@ -209,6 +306,12 @@ class TaskRuntimeConfig:
             "warnings": self.warnings,
             "temporal_address_configured": self._temporal_address_configured,
             "staging_root_configured": self._staging_root_configured,
+            "worker_metrics_port": self.worker_metrics_port,
+            "baseline_p95_seconds": self.baseline_p95_seconds,
+            "worker_metrics_address_configured": (
+                self._worker_metrics_address_configured
+            ),
+            "backup_state_path_configured": self._backup_state_path_configured,
         }
 
     @classmethod
@@ -232,6 +335,22 @@ class TaskRuntimeConfig:
             "MEDCHAT_TASK_STAGING_ROOT",
             "scratch/task_inputs",
         )
+        metrics_address_text, metrics_address_configured = _read_environment(
+            "MEDCHAT_TEMPORAL_WORKER_METRICS_ADDRESS",
+            DEFAULT_WORKER_METRICS_ADDRESS,
+        )
+        metrics_port_text = os.getenv(
+            "MEDCHAT_TEMPORAL_WORKER_METRICS_PORT",
+            str(DEFAULT_WORKER_METRICS_PORT),
+        )
+        baseline_text = os.getenv(
+            "MEDCHAT_TEMPORAL_BASELINE_P95_SECONDS",
+            "40",
+        )
+        backup_state_text, backup_state_configured = _read_environment(
+            "MEDCHAT_TEMPORAL_BACKUP_STATE",
+            "scratch/temporal_backups/latest-verified.json",
+        )
 
         warnings: list[str] = []
         backend_valid = backend_text in _BACKENDS
@@ -240,6 +359,21 @@ class TaskRuntimeConfig:
         namespace_valid = _is_valid_logical_name(namespace_text)
         queue_valid = _is_valid_logical_name(queue_text)
         concurrency_valid = concurrency_text == "1"
+        metrics_address_valid = metrics_address_text in {"127.0.0.1", "::1"}
+        metrics_port_valid = (
+            _CANONICAL_PORT.fullmatch(metrics_port_text) is not None
+            and int(metrics_port_text) <= 65535
+        )
+        try:
+            baseline_p95_seconds = float(baseline_text)
+        except (TypeError, ValueError, OverflowError):
+            baseline_p95_seconds = DEFAULT_BASELINE_P95_SECONDS
+            baseline_valid = False
+        else:
+            baseline_valid = (
+                math.isfinite(baseline_p95_seconds)
+                and 0 < baseline_p95_seconds <= 60
+            )
 
         staging_valid = bool(staging_text.strip())
         if staging_valid:
@@ -266,6 +400,26 @@ class TaskRuntimeConfig:
         else:
             staging_root = DEFAULT_STAGING_ROOT
 
+        backup_state_valid = bool(backup_state_text.strip())
+        if backup_state_valid:
+            raw_backup_state = Path(backup_state_text)
+            backup_was_absolute = raw_backup_state.is_absolute()
+            if _has_dot_path_component(backup_state_text):
+                backup_state_valid = False
+            backup_state_path = raw_backup_state
+            if not backup_was_absolute:
+                backup_state_path = PROJECT_ROOT / raw_backup_state
+            backup_state_valid = backup_state_valid and _is_safe_backup_state_path(
+                backup_state_path
+            )
+            try:
+                backup_state_path = backup_state_path.resolve()
+            except (OSError, RuntimeError):
+                backup_state_valid = False
+                backup_state_path = DEFAULT_BACKUP_STATE_PATH
+        else:
+            backup_state_path = DEFAULT_BACKUP_STATE_PATH
+
         if not backend_valid:
             warnings.append("invalid_task_backend")
         if not percent_valid:
@@ -284,6 +438,18 @@ class TaskRuntimeConfig:
         if not staging_valid:
             warnings.append("invalid_task_staging_root")
             staging_root = DEFAULT_STAGING_ROOT
+        if not metrics_address_valid:
+            warnings.append("invalid_worker_metrics_address")
+            metrics_address_text = DEFAULT_WORKER_METRICS_ADDRESS
+        if not metrics_port_valid:
+            warnings.append("invalid_worker_metrics_port")
+            metrics_port_text = str(DEFAULT_WORKER_METRICS_PORT)
+        if not baseline_valid:
+            warnings.append("invalid_temporal_baseline_p95")
+            baseline_p95_seconds = DEFAULT_BASELINE_P95_SECONDS
+        if not backup_state_valid:
+            warnings.append("invalid_temporal_backup_state")
+            backup_state_path = DEFAULT_BACKUP_STATE_PATH
 
         if warnings:
             backend = "local"
@@ -300,7 +466,17 @@ class TaskRuntimeConfig:
             docking_queue=queue_text,
             docking_concurrency=1,
             staging_root=staging_root,
+            worker_metrics_address=metrics_address_text,
+            worker_metrics_port=int(metrics_port_text),
+            baseline_p95_seconds=baseline_p95_seconds,
+            backup_state_path=backup_state_path,
             warnings=tuple(warnings),
             _temporal_address_configured=address_configured and address_valid,
             _staging_root_configured=staging_configured and staging_valid,
+            _worker_metrics_address_configured=(
+                metrics_address_configured and metrics_address_valid
+            ),
+            _backup_state_path_configured=(
+                backup_state_configured and backup_state_valid
+            ),
         )

@@ -16,6 +16,10 @@ ENVIRONMENT_VARIABLES = (
     "MEDCHAT_TEMPORAL_NAMESPACE",
     "MEDCHAT_TEMPORAL_DOCKING_QUEUE",
     "MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY",
+    "MEDCHAT_TEMPORAL_WORKER_METRICS_ADDRESS",
+    "MEDCHAT_TEMPORAL_WORKER_METRICS_PORT",
+    "MEDCHAT_TEMPORAL_BASELINE_P95_SECONDS",
+    "MEDCHAT_TEMPORAL_BACKUP_STATE",
     "MEDCHAT_TASK_STAGING_ROOT",
 )
 
@@ -47,6 +51,12 @@ def _direct_config(**overrides: Any) -> TaskRuntimeConfig:
         "docking_queue": "medchat-docking",
         "docking_concurrency": 1,
         "staging_root": (PROJECT_ROOT / "scratch" / "task_inputs").resolve(),
+        "worker_metrics_address": "127.0.0.1",
+        "worker_metrics_port": 9465,
+        "baseline_p95_seconds": 40.0,
+        "backup_state_path": (
+            PROJECT_ROOT / "scratch/temporal_backups/latest-verified.json"
+        ).resolve(),
         "warnings": (),
     }
     values.update(overrides)
@@ -65,6 +75,12 @@ def test_defaults_are_local_and_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.docking_queue == "medchat-docking"
     assert config.docking_concurrency == 1
     assert config.staging_root == (PROJECT_ROOT / "scratch" / "task_inputs").resolve()
+    assert config.worker_metrics_address == "127.0.0.1"
+    assert config.worker_metrics_port == 9465
+    assert config.baseline_p95_seconds == 40.0
+    assert config.backup_state_path == (
+        PROJECT_ROOT / "scratch/temporal_backups/latest-verified.json"
+    ).resolve()
     assert config.warnings == ()
 
 
@@ -166,6 +182,40 @@ def test_multiple_invalid_values_have_stable_warning_order(
     assert "secret" not in repr(config)
 
 
+def test_all_invalid_values_have_stable_warning_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "unsafe")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "01")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_ADDRESS", "not-an-address")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_NAMESPACE", "bad namespace")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_DOCKING_QUEUE", "bad queue")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY", "2")
+    monkeypatch.setenv("MEDCHAT_TASK_STAGING_ROOT", "..")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_WORKER_METRICS_ADDRESS", "0.0.0.0")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_WORKER_METRICS_PORT", "09465")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BASELINE_P95_SECONDS", "nan")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BACKUP_STATE", "../latest-verified.json")
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert (config.backend, config.canary_percent) == ("local", 0)
+    assert config.warnings == (
+        "invalid_task_backend",
+        "invalid_temporal_canary_percent",
+        "invalid_temporal_address",
+        "invalid_temporal_namespace",
+        "invalid_temporal_docking_queue",
+        "invalid_temporal_docking_concurrency",
+        "invalid_task_staging_root",
+        "invalid_worker_metrics_address",
+        "invalid_worker_metrics_port",
+        "invalid_temporal_baseline_p95",
+        "invalid_temporal_backup_state",
+    )
+
+
 def test_runtime_fields_and_safe_absolute_staging_root_are_preserved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -246,7 +296,7 @@ def test_unsafe_staging_roots_fail_closed(
     assert (config.backend, config.canary_percent) == ("local", 0)
     assert config.staging_root == (PROJECT_ROOT / "scratch/task_inputs").resolve()
     assert config.warnings == ("invalid_task_staging_root",)
-    if value.strip():
+    if value.strip() and value != ".":
         assert value not in repr(config)
 
 
@@ -523,6 +573,13 @@ def test_safe_serialization_redacts_address_and_staging_root(
     monkeypatch.setenv("MEDCHAT_TEMPORAL_NAMESPACE", "medchat.canary")
     monkeypatch.setenv("MEDCHAT_TEMPORAL_DOCKING_QUEUE", "docking_canary-1")
     monkeypatch.setenv("MEDCHAT_TASK_STAGING_ROOT", str(staging_root))
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_WORKER_METRICS_ADDRESS", "::1")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_WORKER_METRICS_PORT", "9466")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BASELINE_P95_SECONDS", "39.5")
+    backup_state = (
+        PROJECT_ROOT / "scratch/temporal_backups/private/latest-verified.json"
+    ).resolve()
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BACKUP_STATE", str(backup_state))
 
     config = TaskRuntimeConfig.from_env()
     safe = config.to_safe_dict()
@@ -536,13 +593,26 @@ def test_safe_serialization_redacts_address_and_staging_root(
         "warnings",
         "temporal_address_configured",
         "staging_root_configured",
+        "worker_metrics_port",
+        "baseline_p95_seconds",
+        "worker_metrics_address_configured",
+        "backup_state_path_configured",
     }
     assert safe["temporal_address_configured"] is True
     assert safe["staging_root_configured"] is True
+    assert safe["worker_metrics_port"] == 9466
+    assert safe["baseline_p95_seconds"] == 39.5
+    assert safe["worker_metrics_address_configured"] is True
+    assert safe["backup_state_path_configured"] is True
+    assert "worker_metrics_address" not in safe
+    assert "backup_state_path" not in safe
     assert address not in repr(config)
     assert str(staging_root) not in repr(config)
+    assert "::1" not in repr(config)
+    assert str(backup_state) not in repr(config)
     assert address not in str(safe)
     assert str(staging_root) not in str(safe)
+    assert str(backup_state) not in str(safe)
 
 
 def test_safe_serialization_marks_unset_values_unconfigured(
@@ -554,6 +624,8 @@ def test_safe_serialization_marks_unset_values_unconfigured(
 
     assert safe["temporal_address_configured"] is False
     assert safe["staging_root_configured"] is False
+    assert safe["worker_metrics_address_configured"] is False
+    assert safe["backup_state_path_configured"] is False
 
 
 def test_invalid_explicit_values_are_not_marked_configured(
@@ -564,6 +636,8 @@ def test_invalid_explicit_values_are_not_marked_configured(
     monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "100")
     monkeypatch.setenv("MEDCHAT_TEMPORAL_ADDRESS", "not-a-target")
     monkeypatch.setenv("MEDCHAT_TASK_STAGING_ROOT", "   ")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_WORKER_METRICS_ADDRESS", "localhost")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BACKUP_STATE", "   ")
 
     config = TaskRuntimeConfig.from_env()
     safe = config.to_safe_dict()
@@ -572,9 +646,274 @@ def test_invalid_explicit_values_are_not_marked_configured(
     assert config.warnings == (
         "invalid_temporal_address",
         "invalid_task_staging_root",
+        "invalid_worker_metrics_address",
+        "invalid_temporal_backup_state",
     )
     assert safe["temporal_address_configured"] is False
     assert safe["staging_root_configured"] is False
+    assert safe["worker_metrics_address_configured"] is False
+    assert safe["backup_state_path_configured"] is False
+
+
+@pytest.mark.parametrize("value", ["127.0.0.1", "::1"])
+def test_worker_metrics_address_accepts_only_loopback_literals(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_WORKER_METRICS_ADDRESS", value)
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert config.worker_metrics_address == value
+    assert config.warnings == ()
+    assert config.to_safe_dict()["worker_metrics_address_configured"] is True
+    assert value not in repr(config)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["0.0.0.0", "10.0.0.1", "192.168.1.2", "localhost", "metrics.internal", ""],
+)
+def test_invalid_worker_metrics_address_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "25")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_WORKER_METRICS_ADDRESS", value)
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert (config.backend, config.canary_percent) == ("local", 0)
+    assert config.worker_metrics_address == "127.0.0.1"
+    assert config.warnings == ("invalid_worker_metrics_address",)
+    assert config.to_safe_dict()["worker_metrics_address_configured"] is False
+
+
+@pytest.mark.parametrize("value", ["1", "9465", "65535"])
+def test_canonical_worker_metrics_ports_are_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_WORKER_METRICS_PORT", value)
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert config.worker_metrics_port == int(value)
+    assert config.warnings == ()
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["0", "65536", "09465", "+1", "1.0", "-1", " 1", "1 ", "", "true"],
+)
+def test_noncanonical_worker_metrics_port_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "25")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_WORKER_METRICS_PORT", value)
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert (config.backend, config.canary_percent) == ("local", 0)
+    assert config.worker_metrics_port == 9465
+    assert config.warnings == ("invalid_worker_metrics_port",)
+
+
+@pytest.mark.parametrize("value", ["0.001", "40", "40.5", "60"])
+def test_finite_bounded_baseline_p95_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BASELINE_P95_SECONDS", value)
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert config.baseline_p95_seconds == float(value)
+    assert config.warnings == ()
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["nan", "NaN", "inf", "-inf", "0", "-0.1", "60.0001", "61", "", "value"],
+)
+def test_invalid_baseline_p95_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "25")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BASELINE_P95_SECONDS", value)
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert (config.backend, config.canary_percent) == ("local", 0)
+    assert config.baseline_p95_seconds == 40.0
+    assert config.warnings == ("invalid_temporal_baseline_p95",)
+
+
+def test_relative_backup_state_is_resolved_from_project_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    relative = "scratch/temporal_backups/nested/latest-verified.json"
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BACKUP_STATE", relative)
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert config.backup_state_path == (PROJECT_ROOT / relative).resolve()
+    assert config.warnings == ()
+    assert config.to_safe_dict()["backup_state_path_configured"] is True
+
+
+def test_nonexistent_external_absolute_backup_state_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    backup_state = (tmp_path / "future/nested/latest-verified.json").resolve()
+    assert not backup_state.exists()
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BACKUP_STATE", str(backup_state))
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert config.backup_state_path == backup_state
+    assert config.warnings == ()
+    assert config.to_safe_dict()["backup_state_path_configured"] is True
+    assert str(backup_state) not in repr(config)
+
+
+def test_existing_regular_backup_state_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    backup_state = tmp_path / "latest-verified.json"
+    backup_state.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BACKUP_STATE", str(backup_state))
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert config.backup_state_path == backup_state.resolve()
+    assert config.warnings == ()
+    assert config.to_safe_dict()["backup_state_path_configured"] is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "   ",
+        ".",
+        "..",
+        "scratch/temporal_backups/../latest-verified.json",
+        "./scratch/temporal_backups/latest-verified.json",
+        "scratch/temporal_backups/latest.json",
+        "scratch/latest-verified.json",
+        "src/latest-verified.json",
+    ],
+)
+def test_unsafe_relative_backup_states_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "25")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BACKUP_STATE", value)
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert (config.backend, config.canary_percent) == ("local", 0)
+    assert config.backup_state_path == (
+        PROJECT_ROOT / "scratch/temporal_backups/latest-verified.json"
+    ).resolve()
+    assert config.warnings == ("invalid_temporal_backup_state",)
+    assert config.to_safe_dict()["backup_state_path_configured"] is False
+
+
+@pytest.mark.parametrize(
+    "value",
+    [str(PROJECT_ROOT), str(Path(PROJECT_ROOT.anchor))],
+)
+def test_repository_and_filesystem_root_backup_states_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BACKUP_STATE", value)
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert config.warnings == ("invalid_temporal_backup_state",)
+    assert config.to_safe_dict()["backup_state_path_configured"] is False
+
+
+def test_existing_directory_backup_state_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    backup_state = tmp_path / "latest-verified.json"
+    backup_state.mkdir()
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BACKUP_STATE", str(backup_state))
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert config.warnings == ("invalid_temporal_backup_state",)
+
+
+def test_symlink_backup_state_file_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target = target_dir / "latest-verified.json"
+    target.write_text("{}", encoding="utf-8")
+    link_dir = tmp_path / "link"
+    link_dir.mkdir()
+    link = link_dir / "latest-verified.json"
+    try:
+        link.symlink_to(target)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"file symlinks unavailable: {type(exc).__name__}")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BACKUP_STATE", str(link))
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert config.warnings == ("invalid_temporal_backup_state",)
+    assert config.to_safe_dict()["backup_state_path_configured"] is False
+
+
+def test_symlink_directory_in_backup_state_path_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    link_dir = tmp_path / "linked-directory"
+    try:
+        link_dir.symlink_to(target_dir, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symlinks unavailable: {type(exc).__name__}")
+    backup_state = link_dir / "latest-verified.json"
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BACKUP_STATE", str(backup_state))
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert config.warnings == ("invalid_temporal_backup_state",)
+    assert config.to_safe_dict()["backup_state_path_configured"] is False
 
 
 @pytest.mark.parametrize(
@@ -663,6 +1002,74 @@ def test_direct_constructor_rejects_warning_on_active_canary() -> None:
         )
 
 
+def test_direct_constructor_accepts_production_runtime_boundaries(
+    tmp_path: Path,
+) -> None:
+    backup_state = (tmp_path / "future/latest-verified.json").resolve()
+
+    config = _direct_config(
+        worker_metrics_address="::1",
+        worker_metrics_port=65535,
+        baseline_p95_seconds=60.0,
+        backup_state_path=backup_state,
+        _worker_metrics_address_configured=True,
+        _backup_state_path_configured=True,
+    )
+
+    assert config.worker_metrics_address == "::1"
+    assert config.worker_metrics_port == 65535
+    assert config.baseline_p95_seconds == 60.0
+    assert config.backup_state_path == backup_state
+    assert config.to_safe_dict()["worker_metrics_address_configured"] is True
+    assert config.to_safe_dict()["backup_state_path_configured"] is True
+
+
+def test_direct_constructor_accepts_existing_regular_backup_state(
+    tmp_path: Path,
+) -> None:
+    backup_state = tmp_path / "latest-verified.json"
+    backup_state.write_text("{}", encoding="utf-8")
+
+    assert _direct_config(backup_state_path=backup_state).backup_state_path == backup_state
+
+
+def test_direct_constructor_rejects_backup_dot_component(tmp_path: Path) -> None:
+    backup_state = tmp_path / "future" / ".." / "latest-verified.json"
+
+    with pytest.raises(ValueError):
+        _direct_config(backup_state_path=backup_state)
+
+
+def test_direct_constructor_rejects_symlink_backup_path(tmp_path: Path) -> None:
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    link_dir = tmp_path / "linked-directory"
+    try:
+        link_dir.symlink_to(target_dir, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symlinks unavailable: {type(exc).__name__}")
+
+    with pytest.raises(ValueError):
+        _direct_config(backup_state_path=link_dir / "latest-verified.json")
+
+
+def test_direct_constructor_rejects_misordered_or_duplicate_warnings() -> None:
+    with pytest.raises(ValueError):
+        _direct_config(
+            warnings=(
+                "invalid_temporal_backup_state",
+                "invalid_worker_metrics_address",
+            )
+        )
+    with pytest.raises(ValueError):
+        _direct_config(
+            warnings=(
+                "invalid_worker_metrics_address",
+                "invalid_worker_metrics_address",
+            )
+        )
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -678,6 +1085,23 @@ def test_direct_constructor_rejects_warning_on_active_canary() -> None:
         {"docking_concurrency": True},
         {"staging_root": PROJECT_ROOT},
         {"staging_root": PROJECT_ROOT.parent},
+        {"worker_metrics_address": "localhost"},
+        {"worker_metrics_address": "0.0.0.0"},
+        {"worker_metrics_port": 0},
+        {"worker_metrics_port": 65536},
+        {"worker_metrics_port": True},
+        {"worker_metrics_port": 9465.0},
+        {"baseline_p95_seconds": True},
+        {"baseline_p95_seconds": 40},
+        {"baseline_p95_seconds": float("nan")},
+        {"baseline_p95_seconds": float("inf")},
+        {"baseline_p95_seconds": 0.0},
+        {"baseline_p95_seconds": 60.1},
+        {"backup_state_path": PROJECT_ROOT},
+        {"backup_state_path": PROJECT_ROOT / "scratch/latest-verified.json"},
+        {"backup_state_path": Path("scratch/temporal_backups/latest-verified.json")},
+        {"_worker_metrics_address_configured": 1},
+        {"_backup_state_path_configured": 1},
         {"warnings": ("raw-invalid-value",)},
     ],
 )
@@ -694,3 +1118,6 @@ def test_config_is_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(FrozenInstanceError):
         config.backend = "temporal_canary"  # type: ignore[misc]
+
+    with pytest.raises(FrozenInstanceError):
+        config.worker_metrics_port = 9466  # type: ignore[misc]
