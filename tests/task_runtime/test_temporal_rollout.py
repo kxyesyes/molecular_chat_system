@@ -315,6 +315,58 @@ def test_direct_valid_looking_evidence_is_not_trusted_without_payload_validation
         validate_transition(5, 10, direct, now=GENERATED_AT)
 
 
+@pytest.mark.parametrize(
+    "field,value,current,target",
+    [
+        ("schema_version", 999, 5, 10),
+        ("stage", type("ObservationStage", (str,), {})("observation"), 5, 10),
+        ("status", "failed", 5, 10),
+        ("current_level", 10, 10, 25),
+        ("generated_at", GENERATED_AT + timedelta(minutes=1), 5, 10),
+        ("gates", {"all_required_gates": "passed"}, 5, 10),
+        ("sha256", "0" * 64, 5, 10),
+    ],
+)
+def test_validated_evidence_rejects_security_critical_field_tampering(
+    field,
+    value,
+    current,
+    target,
+):
+    evidence = _evidence(5, "observation")
+    object.__setattr__(evidence, field, value)
+
+    with pytest.raises(EvidenceError):
+        validate_transition(
+            current,
+            target,
+            evidence,
+            now=GENERATED_AT + timedelta(minutes=5),
+        )
+
+
+def test_copying_private_provenance_marker_to_direct_forgery_is_rejected():
+    trusted = _evidence(5, "observation")
+    forged = RolloutEvidence(
+        schema_version=999,
+        stage="observation",
+        status="failed",
+        current_level=5,
+        generated_at=GENERATED_AT,
+        gates={"all_required_gates": "failed"},
+        sha256="invalid",
+    )
+    private_state = {
+        name: value for name, value in vars(trusted).items() if name.startswith("_")
+    }
+    assert private_state
+    for name, value in private_state.items():
+        object.__setattr__(forged, name, value)
+
+    with pytest.raises(EvidenceError):
+        validate_transition(5, 10, forged, now=GENERATED_AT)
+
+
 def test_dataclass_replacement_cannot_transfer_trust_to_modified_evidence():
     trusted = _evidence(5, "observation")
     forged = replace(
@@ -342,6 +394,35 @@ def test_copying_untrusted_evidence_cannot_fabricate_trust():
 
     with pytest.raises(EvidenceError):
         validate_transition(5, 10, copy(forged), now=GENERATED_AT)
+
+
+def test_tampering_a_copy_of_validated_evidence_invalidates_provenance():
+    copied = copy(_evidence(5, "observation"))
+    object.__setattr__(copied, "status", "failed")
+
+    with pytest.raises(EvidenceError):
+        validate_transition(5, 10, copied, now=GENERATED_AT)
+
+
+def test_transition_constant_time_verifies_public_digest_and_internal_content_seal(
+    monkeypatch,
+):
+    evidence = _evidence(5, "observation")
+    calls: list[tuple[str, str]] = []
+    real_compare_digest = hmac.compare_digest
+
+    def recording_compare_digest(actual: str, expected: str) -> bool:
+        calls.append((actual, expected))
+        return real_compare_digest(actual, expected)
+
+    monkeypatch.setattr(rollout.hmac, "compare_digest", recording_compare_digest)
+
+    decision = validate_transition(5, 10, evidence, now=GENERATED_AT)
+
+    assert decision.allowed is True
+    assert len(calls) == 2
+    assert calls[0] == (evidence.sha256, evidence.sha256)
+    assert calls[1][0] == calls[1][1]
 
 
 def test_copying_validated_immutable_evidence_preserves_safe_use_and_value_semantics():

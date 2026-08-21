@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import re
+import secrets
 from types import MappingProxyType
 
 
@@ -27,7 +28,10 @@ _EVIDENCE_FIELDS = frozenset(
 )
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _STAGES = frozenset({"preflight", "observation"})
-_VALIDATED_EVIDENCE_SEAL = object()
+_MAPPING_PROXY_TYPE = type(MappingProxyType({}))
+_PROVENANCE_KEY = secrets.token_bytes(32)
+_CONTENT_SEAL_ATTRIBUTE = "_validated_content_seal"
+_SOURCE_TIMESTAMP_ATTRIBUTE = "_validated_source_timestamp"
 _PROMOTIONS = {
     (0, 5): "preflight",
     (5, 10): "observation",
@@ -123,12 +127,125 @@ class RolloutEvidence:
             gates=gates,
             sha256=actual_sha256,
         )
-        object.__setattr__(
-            evidence,
-            "_validated_evidence_seal",
-            _VALIDATED_EVIDENCE_SEAL,
-        )
+        _seal_validated_evidence(evidence, generated_at, canonical)
         return evidence
+
+
+def _validated_public_snapshot(evidence: RolloutEvidence) -> dict[str, object]:
+    if type(evidence.schema_version) is not int or evidence.schema_version != 1:
+        raise EvidenceError("rollout evidence is not trusted")
+    if type(evidence.stage) is not str or evidence.stage not in _STAGES:
+        raise EvidenceError("rollout evidence is not trusted")
+    if type(evidence.status) is not str or evidence.status != "passed":
+        raise EvidenceError("rollout evidence is not trusted")
+    if (
+        type(evidence.current_level) is not int
+        or evidence.current_level not in ALLOWED_LEVELS
+    ):
+        raise EvidenceError("rollout evidence is not trusted")
+    if type(evidence.generated_at) is not datetime:
+        raise EvidenceError("rollout evidence is not trusted")
+    if (
+        evidence.generated_at.tzinfo is None
+        or evidence.generated_at.utcoffset() is None
+    ):
+        raise EvidenceError("rollout evidence is not trusted")
+    if type(evidence.gates) is not _MAPPING_PROXY_TYPE or not all(
+        type(key) is str and type(value) is str
+        for key, value in evidence.gates.items()
+    ):
+        raise EvidenceError("rollout evidence is not trusted")
+    if evidence.gates.get("all_required_gates") != "passed":
+        raise EvidenceError("rollout evidence is not trusted")
+    if type(evidence.sha256) is not str or _SHA256.fullmatch(evidence.sha256) is None:
+        raise EvidenceError("rollout evidence is not trusted")
+
+    return {
+        "schema_version": evidence.schema_version,
+        "stage": evidence.stage,
+        "status": evidence.status,
+        "current_level": evidence.current_level,
+        "generated_at": evidence.generated_at.isoformat(),
+        "gates": dict(evidence.gates),
+        "sha256": evidence.sha256,
+    }
+
+
+def _report_payload(
+    evidence: RolloutEvidence,
+    source_timestamp: object,
+) -> dict[str, object]:
+    if type(source_timestamp) is not str:
+        raise EvidenceError("rollout evidence is not trusted")
+    try:
+        parsed_source = datetime.fromisoformat(source_timestamp)
+    except ValueError:
+        raise EvidenceError("rollout evidence is not trusted") from None
+    if parsed_source.tzinfo is None or parsed_source.utcoffset() is None:
+        raise EvidenceError("rollout evidence is not trusted")
+    if parsed_source.isoformat() != evidence.generated_at.isoformat():
+        raise EvidenceError("rollout evidence is not trusted")
+
+    return {
+        "schema_version": evidence.schema_version,
+        "stage": evidence.stage,
+        "status": evidence.status,
+        "current_level": evidence.current_level,
+        "generated_at": source_timestamp,
+        "gates": dict(evidence.gates),
+    }
+
+
+def _canonical_json(payload: object) -> bytes:
+    try:
+        return json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        raise EvidenceError("rollout evidence is not trusted") from None
+
+
+def _provenance_message(report: bytes, public_snapshot: bytes) -> bytes:
+    return len(report).to_bytes(8, "big") + report + public_snapshot
+
+
+def _seal_validated_evidence(
+    evidence: RolloutEvidence,
+    source_timestamp: str,
+    canonical_report: bytes,
+) -> None:
+    public_snapshot = _canonical_json(_validated_public_snapshot(evidence))
+    seal = hmac.new(
+        _PROVENANCE_KEY,
+        _provenance_message(canonical_report, public_snapshot),
+        hashlib.sha256,
+    ).hexdigest()
+    object.__setattr__(evidence, _SOURCE_TIMESTAMP_ATTRIBUTE, source_timestamp)
+    object.__setattr__(evidence, _CONTENT_SEAL_ATTRIBUTE, seal)
+
+
+def _verify_evidence_provenance(evidence: RolloutEvidence) -> None:
+    public_snapshot = _canonical_json(_validated_public_snapshot(evidence))
+    source_timestamp = getattr(evidence, _SOURCE_TIMESTAMP_ATTRIBUTE, None)
+    content_seal = getattr(evidence, _CONTENT_SEAL_ATTRIBUTE, None)
+    if type(content_seal) is not str or _SHA256.fullmatch(content_seal) is None:
+        raise EvidenceError("rollout evidence is not trusted")
+
+    canonical_report = _canonical_json(_report_payload(evidence, source_timestamp))
+    actual_sha256 = hashlib.sha256(canonical_report).hexdigest()
+    if not hmac.compare_digest(actual_sha256, evidence.sha256):
+        raise EvidenceError("rollout evidence is not trusted")
+
+    expected_seal = hmac.new(
+        _PROVENANCE_KEY,
+        _provenance_message(canonical_report, public_snapshot),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected_seal, content_seal):
+        raise EvidenceError("rollout evidence is not trusted")
 
 
 @dataclass(frozen=True)
@@ -165,11 +282,7 @@ def validate_transition(
         raise EvidenceError("invalid rollout transition")
     if type(evidence) is not RolloutEvidence:
         raise EvidenceError("rollout evidence is required")
-    if (
-        getattr(evidence, "_validated_evidence_seal", None)
-        is not _VALIDATED_EVIDENCE_SEAL
-    ):
-        raise EvidenceError("rollout evidence is not trusted")
+    _verify_evidence_provenance(evidence)
     if evidence.current_level != current_level:
         raise EvidenceError("rollout evidence level mismatch")
     if evidence.stage != required_stage:
