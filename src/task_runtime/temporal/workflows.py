@@ -196,6 +196,14 @@ class DockingWorkflow:
                     "status": _STATUS_TIMED_OUT,
                     "error_code": "TASK_CANCEL_TIMEOUT",
                 }
+            elif (
+                isinstance(cause, ApplicationError)
+                and cause.type == "DOCKING_PROCESS_OWNERSHIP_UNCERTAIN"
+            ):
+                outcome = {
+                    "status": _STATUS_FAILED,
+                    "error_code": "DOCKING_PROCESS_OWNERSHIP_UNCERTAIN",
+                }
             else:
                 outcome = {
                     "status": _STATUS_FAILED,

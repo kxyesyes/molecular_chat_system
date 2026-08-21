@@ -28,6 +28,7 @@ from src.task_runtime.models import (
 )
 from src.task_runtime.staging import DockingInputStager, ManifestError
 from src.task_runtime.store import TaskStore
+from src.task_runtime.temporal.process_runner import ManagedDockingProcessRunner
 
 
 DOCKING_ACTIVITY_NAME = "run_docking_activity"
@@ -289,25 +290,22 @@ def _summarize_docking_result(
     }
 
 
-async def _run_docking_in_thread(
+async def _run_docking_in_test_thread(
     docking_execution: DockingExecution,
     payload: dict[str, Any],
     *,
     attempt: int,
     heartbeat: Callable[[dict[str, Any]], None],
     heartbeat_interval: float = 1.0,
-    cleanup_timeout: float = 30.0,
     heartbeat_projection: Callable[[dict[str, Any]], Any] | None = None,
 ) -> dict[str, Any]:
-    """Run one verified docking call and cooperatively join it on cancellation."""
+    """Run an injected test executor and cooperatively join it on cancellation."""
 
     task_id, manifest_locator = _validate_docking_payload(payload)
     if type(attempt) is not int or attempt <= 0:
         raise ValueError("invalid activity attempt")
     if not isinstance(heartbeat_interval, (int, float)) or heartbeat_interval <= 0:
         raise ValueError("invalid heartbeat interval")
-    if not isinstance(cleanup_timeout, (int, float)) or cleanup_timeout <= 0:
-        raise ValueError("invalid cleanup timeout")
     cancel_event = threading.Event()
     progress = _ProgressSlot()
     started_at = time.monotonic()
@@ -354,7 +352,6 @@ async def _run_docking_in_thread(
         return outcome
     except asyncio.CancelledError:
         cancel_event.set()
-        cleanup_started = asyncio.get_running_loop().time()
         while not work.done():
             try:
                 await asyncio.shield(work)
@@ -367,12 +364,77 @@ async def _run_docking_in_thread(
                 work.result()
             except Exception:
                 pass
-        if asyncio.get_running_loop().time() - cleanup_started > cleanup_timeout:
-            raise ApplicationError(
-                "Docking cancellation cleanup exceeded its deadline",
-                type=TaskErrorCode.TASK_CANCEL_TIMEOUT.value,
-                non_retryable=True,
-            )
+        raise
+
+
+async def _run_docking_in_process(
+    process_runner: ManagedDockingProcessRunner,
+    payload: dict[str, Any],
+    *,
+    attempt: int,
+    heartbeat: Callable[[dict[str, Any]], None],
+    heartbeat_interval: float = 1.0,
+    heartbeat_projection: Callable[[dict[str, Any]], Any] | None = None,
+) -> dict[str, Any]:
+    """Run docking behind an owned process while emitting bounded heartbeats."""
+
+    task_id, _ = _validate_docking_payload(payload)
+    if type(attempt) is not int or attempt <= 0:
+        raise ValueError("invalid activity attempt")
+    if not isinstance(heartbeat_interval, (int, float)) or heartbeat_interval <= 0:
+        raise ValueError("invalid heartbeat interval")
+    progress = _ProgressSlot()
+    started_at = time.monotonic()
+    work = asyncio.create_task(
+        process_runner.run(
+            payload,
+            attempt=attempt,
+            progress_callback=progress.update,
+        )
+    )
+
+    async def flush_heartbeat() -> None:
+        heartbeat_payload = {
+            **progress.snapshot(),
+            "attempt": attempt,
+            "elapsed_time": max(0.0, time.monotonic() - started_at),
+        }
+        heartbeat(heartbeat_payload)
+        if heartbeat_projection is not None:
+            try:
+                projected = heartbeat_projection(dict(heartbeat_payload))
+                if inspect.isawaitable(projected):
+                    await projected
+            except Exception:
+                pass
+
+    try:
+        while not work.done():
+            await flush_heartbeat()
+            await asyncio.sleep(float(heartbeat_interval))
+        raw_result = await work
+        outcome = _summarize_docking_result(
+            raw_result,
+            task_id=task_id,
+            attempt=attempt,
+        )
+        if outcome.get("status") == TaskStatus.SUCCEEDED.value:
+            progress.update(TaskPhase.ARTIFACT_COMMIT.value, 1.0)
+        await flush_heartbeat()
+        return outcome
+    except asyncio.CancelledError:
+        work.cancel()
+        while not work.done():
+            try:
+                await asyncio.shield(work)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not work.cancelled():
+            error = work.exception()
+            if isinstance(error, ApplicationError):
+                raise error
         raise
 
 
@@ -404,13 +466,40 @@ class TemporalDockingActivities:
         docking_execution: DockingExecution,
         *,
         stager: DockingInputStager | None = None,
+        process_runner: ManagedDockingProcessRunner | None = None,
     ) -> None:
+        if (
+            process_runner is None
+            and getattr(docking_execution, "raw_executor", None)
+            is DockingExecution._execute_production_tool
+        ):
+            raise ValueError(
+                "production Temporal docking requires a managed process runner"
+            )
         self.store = store
         self.docking_execution = docking_execution
         self.stager = stager or getattr(docking_execution, "_stager", None)
+        self.process_runner = process_runner
 
     @activity.defn(name=VERIFY_MANIFEST_ACTIVITY_NAME)
     async def verify_manifest_activity(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await self._verify_manifest_activity(payload)
+        except asyncio.CancelledError:
+            raise
+        except ApplicationError:
+            raise
+        except Exception:
+            raise ApplicationError(
+                "Docking input manifest verification is unavailable",
+                type="MANIFEST_TRANSIENT",
+                non_retryable=False,
+            ) from None
+
+    async def _verify_manifest_activity(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
         task_id, manifest_locator = _validate_docking_payload(payload)
         if self.stager is None:
             raise ApplicationError(
@@ -443,12 +532,23 @@ class TemporalDockingActivities:
 
     @activity.defn(name=DOCKING_ACTIVITY_NAME)
     async def run_docking_activity(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self._run_docking_activity(
-            payload,
-            attempt=activity.info().attempt,
-            heartbeat=activity.heartbeat,
-            worker_shutdown_waiter=activity.wait_for_worker_shutdown,
-        )
+        try:
+            return await self._run_docking_activity(
+                payload,
+                attempt=activity.info().attempt,
+                heartbeat=activity.heartbeat,
+                worker_shutdown_waiter=activity.wait_for_worker_shutdown,
+            )
+        except asyncio.CancelledError:
+            raise
+        except ApplicationError:
+            raise
+        except Exception:
+            raise ApplicationError(
+                "Docking process failed",
+                type=TaskErrorCode.DOCKING_PROCESS_FAILED.value,
+                non_retryable=True,
+            ) from None
 
     async def _run_docking_activity(
         self,
@@ -458,22 +558,35 @@ class TemporalDockingActivities:
         heartbeat: Callable[[dict[str, Any]], None],
         worker_shutdown_waiter: Callable[[], Any],
         heartbeat_interval: float = 1.0,
-        cleanup_timeout: float = 30.0,
     ) -> dict[str, Any]:
         task_id, _ = _validate_docking_payload(payload)
-        run_task = asyncio.create_task(
-            _run_docking_in_thread(
-                self.docking_execution,
+        docking_call = (
+            _run_docking_in_process(
+                self.process_runner,
                 payload,
                 attempt=attempt,
                 heartbeat=heartbeat,
                 heartbeat_interval=heartbeat_interval,
-                cleanup_timeout=cleanup_timeout,
                 heartbeat_projection=lambda update: self._project_live_heartbeat(
                     task_id,
                     update,
                 ),
             )
+            if self.process_runner is not None
+            else _run_docking_in_test_thread(
+                self.docking_execution,
+                payload,
+                attempt=attempt,
+                heartbeat=heartbeat,
+                heartbeat_interval=heartbeat_interval,
+                heartbeat_projection=lambda update: self._project_live_heartbeat(
+                    task_id,
+                    update,
+                ),
+            )
+        )
+        run_task = asyncio.create_task(
+            docking_call
         )
         shutdown_task = asyncio.create_task(worker_shutdown_waiter())
         try:
@@ -496,10 +609,7 @@ class TemporalDockingActivities:
                     break
             if not run_task.cancelled():
                 error = run_task.exception()
-                if (
-                    isinstance(error, ApplicationError)
-                    and error.type == TaskErrorCode.TASK_CANCEL_TIMEOUT.value
-                ):
+                if isinstance(error, ApplicationError):
                     raise error
             raise
         finally:
@@ -521,6 +631,20 @@ class TemporalDockingActivities:
 
     @activity.defn(name=PROJECTION_ACTIVITY_NAME)
     async def project_task_activity(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await self._project_task_activity(payload)
+        except asyncio.CancelledError:
+            raise
+        except ApplicationError:
+            raise
+        except Exception:
+            raise ApplicationError(
+                "Task projection failed",
+                type=TaskErrorCode.TASK_PROJECTION_FAILED.value,
+                non_retryable=False,
+            ) from None
+
+    async def _project_task_activity(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise RuntimeError("invalid projection payload")
         operation = payload.get("operation")

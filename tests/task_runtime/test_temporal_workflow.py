@@ -5,6 +5,7 @@ import ast
 import importlib.util
 import inspect
 import json
+import logging
 import subprocess
 import sys
 import threading
@@ -30,7 +31,7 @@ from src.task_runtime.staging import DockingInputStager, ManifestError
 from src.task_runtime.temporal.activities import (
     TemporalDockingActivities,
     _ProgressSlot,
-    _run_docking_in_thread,
+    _run_docking_in_test_thread,
     _summarize_docking_result,
 )
 from src.task_runtime.temporal.worker import (
@@ -179,7 +180,7 @@ def test_docking_activity_keeps_event_loop_responsive_and_bounds_heartbeats():
                 await asyncio.sleep(0)
 
         ticker_task = asyncio.create_task(ticker())
-        result = await _run_docking_in_thread(
+        result = await _run_docking_in_test_thread(
             docking,
             {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
             attempt=2,
@@ -212,7 +213,7 @@ def test_docking_activity_waits_for_sync_cleanup_before_propagating_cancel():
     async def scenario() -> None:
         docking = _FakeDockingExecution(_success_result(), delay=5.0)
         activity_task = asyncio.create_task(
-            _run_docking_in_thread(
+            _run_docking_in_test_thread(
                 docking,
                 {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
                 attempt=1,
@@ -236,7 +237,7 @@ def test_docking_activity_resists_second_cancel_until_sync_cleanup_finishes():
     async def scenario() -> None:
         docking = _FakeDockingExecution(_success_result(), delay=0.15)
         task = asyncio.create_task(
-            _run_docking_in_thread(
+            _run_docking_in_test_thread(
                 docking,
                 {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
                 attempt=1,
@@ -258,77 +259,55 @@ def test_docking_activity_resists_second_cancel_until_sync_cleanup_finishes():
     asyncio.run(scenario())
 
 
-def test_cleanup_timeout_joins_worker_then_raises_structured_timeout():
-    class SlowCleanupDocking(_FakeDockingExecution):
-        def run_verified(self, task_id, manifest_path, **kwargs):
-            self.calls.append({"cancel_event": kwargs["cancel_event"]})
-            self.started.set()
-            time.sleep(0.08)
-            self.stopped.set()
+def test_activity_uses_injected_managed_process_runner(tmp_path):
+    class FakeProcessRunner:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def run(self, payload, *, attempt, progress_callback):
+            self.calls.append((payload, attempt))
+            progress_callback(TaskPhase.VINA_RUNNING.value, 0.6)
+            await asyncio.sleep(0.02)
             return _success_result()
 
     async def scenario() -> None:
-        docking = SlowCleanupDocking(_success_result())
-        task = asyncio.create_task(
-            _run_docking_in_thread(
-                docking,
-                {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
-                attempt=1,
-                heartbeat=lambda _: None,
-                heartbeat_interval=0.01,
-                cleanup_timeout=0.01,
-            )
-        )
-        assert await asyncio.to_thread(docking.started.wait, 1.0)
-        task.cancel()
-        with pytest.raises(ApplicationError) as failure:
-            await task
-
-        assert docking.stopped.is_set()
-        assert failure.value.type == TaskErrorCode.TASK_CANCEL_TIMEOUT.value
-        assert failure.value.non_retryable is True
-
-    asyncio.run(scenario())
-
-
-def test_activity_wrapper_preserves_structured_cleanup_timeout(tmp_path):
-    class SlowCleanupDocking(_FakeDockingExecution):
-        def run_verified(self, task_id, manifest_path, **kwargs):
-            self.calls.append({"cancel_event": kwargs["cancel_event"]})
-            self.started.set()
-            time.sleep(0.08)
-            self.stopped.set()
-            return _success_result()
-
-    async def scenario() -> None:
-        docking = SlowCleanupDocking(_success_result())
+        process_runner = FakeProcessRunner()
+        docking = _FakeDockingExecution(_success_result())
         activities = TemporalDockingActivities(
             TaskStore(tmp_path / "tasks.sqlite"),
             docking,
+            process_runner=process_runner,
         )
 
         async def never_shutdown() -> None:
             await asyncio.Event().wait()
 
-        task = asyncio.create_task(
-            activities._run_docking_activity(
-                {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
-                attempt=1,
-                heartbeat=lambda _: None,
-                worker_shutdown_waiter=never_shutdown,
-                heartbeat_interval=0.01,
-                cleanup_timeout=0.01,
-            )
+        heartbeats = []
+        result = await activities._run_docking_activity(
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
+            attempt=2,
+            heartbeat=heartbeats.append,
+            worker_shutdown_waiter=never_shutdown,
+            heartbeat_interval=0.005,
         )
-        assert await asyncio.to_thread(docking.started.wait, 1.0)
-        task.cancel()
-        with pytest.raises(ApplicationError) as failure:
-            await task
 
-        assert failure.value.type == TaskErrorCode.TASK_CANCEL_TIMEOUT.value
-        assert docking.stopped.is_set()
+        assert result["status"] == TaskStatus.SUCCEEDED.value
+        assert process_runner.calls == [
+            ({"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}, 2)
+        ]
+        assert docking.calls == []
+        assert heartbeats[-1]["phase"] == TaskPhase.ARTIFACT_COMMIT.value
+        assert heartbeats[-1]["progress"] == 1.0
 
     asyncio.run(scenario())
+
+
+def test_activity_rejects_production_docking_without_process_boundary(tmp_path):
+    with pytest.raises(ValueError, match="managed process runner"):
+        TemporalDockingActivities(
+            TaskStore(tmp_path / "tasks.sqlite"),
+            DockingExecution(tmp_path / "staging"),
+        )
 
 
 def test_worker_shutdown_uses_same_cooperative_join_path(tmp_path):
@@ -370,7 +349,7 @@ def test_docking_activity_rejects_absolute_artifact_path_from_history():
     docking = _FakeDockingExecution(result)
 
     outcome = asyncio.run(
-        _run_docking_in_thread(
+        _run_docking_in_test_thread(
             docking,
             {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
             attempt=1,
@@ -394,7 +373,7 @@ def test_docking_activity_rejects_unsafe_provenance_identifiers_from_history():
     docking = _FakeDockingExecution(result)
 
     outcome = asyncio.run(
-        _run_docking_in_thread(
+        _run_docking_in_test_thread(
             docking,
             {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
             attempt=1,
@@ -564,7 +543,7 @@ def test_progress_slot_accepts_only_real_controlled_phases_and_latest_value():
 def test_fast_success_flushes_final_controlled_heartbeat():
     async def scenario() -> None:
         heartbeats: list[dict] = []
-        result = await _run_docking_in_thread(
+        result = await _run_docking_in_test_thread(
             _FakeDockingExecution(_success_result()),
             {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
             attempt=1,
@@ -691,6 +670,31 @@ def test_manifest_verification_returns_tiny_ack_only(tmp_path):
     )
     assert result == {"verified": True}
     assert "private" not in repr(result)
+
+
+def test_manifest_activity_sanitizes_unexpected_stager_exception(tmp_path):
+    class BrokenStager:
+        def load_verified_locator(self, *args, **kwargs):
+            raise RuntimeError("D:/private/manifest.json CCO sk-secret-value")
+
+    activities = TemporalDockingActivities(
+        TaskStore(tmp_path / "tasks.sqlite"),
+        _FakeDockingExecution(_success_result()),
+        stager=BrokenStager(),
+    )
+
+    with pytest.raises(ApplicationError) as failure:
+        asyncio.run(
+            activities.verify_manifest_activity(
+                {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
+            )
+        )
+
+    assert failure.value.type == "MANIFEST_TRANSIENT"
+    assert failure.value.non_retryable is False
+    assert "private" not in str(failure.value)
+    assert "CCO" not in str(failure.value)
+    assert "sk-secret" not in str(failure.value)
 
 
 def test_real_locator_chain_reaches_scientific_executor_once(tmp_path):
@@ -841,7 +845,7 @@ def test_pre_start_validator_returns_detached_safe_input():
 def test_activity_boundary_rejects_unsafe_history_identifiers(payload):
     with pytest.raises(ValueError):
         asyncio.run(
-            _run_docking_in_thread(
+            _run_docking_in_test_thread(
                 _FakeDockingExecution(_success_result()),
                 payload,
                 attempt=1,
@@ -1149,6 +1153,49 @@ def test_workflow_maps_cleanup_timeout_to_cancel_timeout_not_canceled(monkeypatc
 
     assert result["status"] == TaskStatus.TIMED_OUT.value
     assert result["error_code"] == TaskErrorCode.TASK_CANCEL_TIMEOUT.value
+
+
+def test_workflow_preserves_process_ownership_uncertain_error(monkeypatch):
+    projected: list[dict] = []
+
+    async def execute_activity(name, payload, **kwargs):
+        if name == VERIFY_MANIFEST_ACTIVITY_NAME:
+            return {"verified": True}
+        if name == DOCKING_ACTIVITY_NAME:
+            raise _activity_error(
+                ApplicationError(
+                    "ignored human text",
+                    type=(
+                        TaskErrorCode.DOCKING_PROCESS_OWNERSHIP_UNCERTAIN.value
+                    ),
+                    non_retryable=True,
+                )
+            )
+        projected.append(payload)
+        return {"applied": True}
+
+    monkeypatch.setattr(
+        "src.task_runtime.temporal.workflows.workflow.execute_activity",
+        execute_activity,
+    )
+    result = asyncio.run(
+        DockingWorkflow().run(
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}
+        )
+    )
+
+    expected = TaskErrorCode.DOCKING_PROCESS_OWNERSHIP_UNCERTAIN.value
+    assert result["status"] == TaskStatus.FAILED.value
+    assert result["error_code"] == expected
+    terminal = [item for item in projected if item.get("operation") == "terminal"]
+    assert terminal == [
+        {
+            "operation": "terminal",
+            "task_id": TASK_ID,
+            "status": TaskStatus.FAILED.value,
+            "error_code": expected,
+        }
+    ]
 
 
 def test_terminal_projection_outage_preserves_scientific_outcome(monkeypatch):
@@ -1466,6 +1513,146 @@ def test_worker_heartbeat_log_does_not_disclose_store_exception(caplog):
     assert "sk-secret" not in text
 
 
+def test_projection_activity_sanitizes_unexpected_store_exception(tmp_path):
+    class BrokenStore:
+        def claim_running(self, *args, **kwargs):
+            raise RuntimeError("C:/private/probe.sqlite CCO sk-fake-secret-value")
+
+    async def scenario() -> None:
+        activities = TemporalDockingActivities(
+            BrokenStore(),
+            _FakeDockingExecution(_success_result()),
+        )
+        with pytest.raises(ApplicationError) as failure:
+            await activities.project_task_activity(
+                {
+                    "operation": "running",
+                    "task_id": TASK_ID,
+                    "attempt": 1,
+                    "phase": TaskPhase.RUNNING.value,
+                }
+            )
+
+        assert failure.value.type == TaskErrorCode.TASK_PROJECTION_FAILED.value
+        assert failure.value.non_retryable is False
+        assert "Task projection failed" in str(failure.value)
+        assert "private" not in str(failure.value)
+        assert "sk-fake" not in str(failure.value)
+        assert failure.value.__cause__ is None
+
+    asyncio.run(scenario())
+
+
+def test_real_temporal_history_and_worker_logs_redact_projection_exception(caplog):
+    marker = "C:/private/probe.sqlite CCO sk-fake-secret-value"
+
+    class BrokenStore:
+        attempts = 0
+
+        def claim_running(self, *args, **kwargs):
+            self.attempts += 1
+            raise RuntimeError(marker)
+
+    broken_store = BrokenStore()
+    activities = TemporalDockingActivities(
+        broken_store,
+        _FakeDockingExecution(_success_result()),
+    )
+
+    async def scenario() -> tuple[str, WorkflowExecutionStatus]:
+        environment = await WorkflowEnvironment.start_time_skipping()
+        async with environment:
+            worker = Worker(
+                environment.client,
+                task_queue="test-projection-redaction",
+                workflows=[DockingWorkflow],
+                activities=[
+                    activities.verify_manifest_activity,
+                    activities.run_docking_activity,
+                    activities.project_task_activity,
+                ],
+            )
+            async with worker:
+                handle = await environment.client.start_workflow(
+                    DockingWorkflow.run,
+                    {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
+                    id="medchat-projection-redaction",
+                    task_queue="test-projection-redaction",
+                )
+                result = await handle.result()
+                history = await handle.fetch_history()
+                description = await handle.describe()
+        assert result["status"] == TaskStatus.FAILED.value
+        return json.dumps(history.to_json_dict(), ensure_ascii=False), description.status
+
+    with caplog.at_level(logging.WARNING):
+        history_text, status = asyncio.run(scenario())
+
+    combined = history_text + caplog.text
+    assert broken_store.attempts == 5
+    assert status is WorkflowExecutionStatus.COMPLETED
+    assert TaskErrorCode.TASK_PROJECTION_FAILED.value in history_text
+    assert marker not in combined
+    assert "C:/private" not in combined
+    assert "CCO" not in combined
+    assert "sk-fake-secret-value" not in combined
+
+
+def test_real_temporal_history_and_worker_logs_redact_docking_exception(
+    tmp_path,
+    caplog,
+):
+    marker = "D:/private/vina.exe CCO sk-fake-secret-value"
+
+    class BrokenDocking(_FakeDockingExecution):
+        def run_verified_locator(self, *args, **kwargs):
+            raise RuntimeError(marker)
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    _create_task(store)
+    activities = TemporalDockingActivities(
+        store,
+        BrokenDocking(_success_result()),
+        stager=_FakeStager(),
+    )
+
+    async def scenario() -> str:
+        environment = await WorkflowEnvironment.start_time_skipping()
+        async with environment:
+            worker = Worker(
+                environment.client,
+                task_queue="test-docking-redaction",
+                workflows=[DockingWorkflow],
+                activities=[
+                    activities.verify_manifest_activity,
+                    activities.run_docking_activity,
+                    activities.project_task_activity,
+                ],
+            )
+            async with worker:
+                handle = await environment.client.start_workflow(
+                    DockingWorkflow.run,
+                    {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
+                    id="medchat-docking-redaction",
+                    task_queue="test-docking-redaction",
+                )
+                result = await handle.result()
+                history = await handle.fetch_history()
+        assert result["status"] == TaskStatus.FAILED.value
+        assert result["error_code"] == TaskErrorCode.DOCKING_PROCESS_FAILED.value
+        return json.dumps(history.to_json_dict(), ensure_ascii=False)
+
+    with caplog.at_level(logging.WARNING):
+        history_text = asyncio.run(scenario())
+
+    combined = history_text + caplog.text
+    assert TaskErrorCode.DOCKING_PROCESS_FAILED.value in history_text
+    assert marker not in combined
+    assert "D:/private" not in combined
+    assert "CCO" not in combined
+    assert "sk-fake-secret-value" not in combined
+
+
 @pytest.mark.parametrize(
     "script",
     ["run_temporal_dev_server.py", "run_temporal_docking_worker.py"],
@@ -1477,6 +1664,15 @@ def test_temporal_scripts_import_without_side_effects(script):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert inspect.iscoroutinefunction(module.main)
+
+
+def test_production_worker_cli_installs_managed_process_boundary():
+    source = (
+        PROJECT_ROOT / "scripts" / "run_temporal_docking_worker.py"
+    ).read_text(encoding="utf-8")
+    assert "DockingProcessConfig" in source
+    assert "ManagedDockingProcessRunner" in source
+    assert "process_runner=" in source
 
 
 @pytest.mark.parametrize(

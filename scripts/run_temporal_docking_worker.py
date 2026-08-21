@@ -21,6 +21,10 @@ from src.task_runtime.docking_execution import DockingExecution
 from src.task_runtime.store import TaskStore
 from src.task_runtime.staging import DockingInputStager
 from src.task_runtime.temporal.activities import TemporalDockingActivities
+from src.task_runtime.temporal.process_runner import (
+    DockingProcessConfig,
+    ManagedDockingProcessRunner,
+)
 from src.task_runtime.temporal.worker import (
     WorkerSettings,
     run_temporal_worker,
@@ -53,6 +57,12 @@ async def main() -> None:
         store,
         DockingExecution(config.staging_root),
         stager=DockingInputStager(config.staging_root),
+        process_runner=ManagedDockingProcessRunner(
+            DockingProcessConfig(
+                staging_root=config.staging_root,
+                allowed_output_root=(PROJECT_ROOT / "temp_docking").resolve(),
+            )
+        ),
     )
     settings = WorkerSettings(
         task_queue=config.docking_queue,
