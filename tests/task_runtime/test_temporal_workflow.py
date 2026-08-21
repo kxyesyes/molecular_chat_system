@@ -388,6 +388,64 @@ def test_docking_activity_rejects_unsafe_provenance_identifiers_from_history():
     assert outcome["error_code"] == TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value
 
 
+def test_docking_history_accepts_real_vina_provenance_with_display_name():
+    result = _success_result()
+    result["provenance"].update(
+        {
+            "tool_version": "molecular-docking-adapter-1",
+            "model_name": "AutoDock Vina",
+        }
+    )
+
+    outcome = _summarize_docking_result(result, task_id=TASK_ID, attempt=1)
+
+    assert outcome["status"] == TaskStatus.SUCCEEDED.value
+    assert outcome["provenance"]["model_name"] == "AutoDock Vina"
+
+
+@pytest.mark.parametrize("model_name", ["C C O", "C N C", "ligand C C O"])
+def test_docking_history_rejects_whitespace_split_scientific_provenance(model_name):
+    result = _success_result()
+    result["provenance"]["model_name"] = model_name
+
+    outcome = _summarize_docking_result(result, task_id=TASK_ID, attempt=1)
+
+    assert outcome == {
+        "task_id": TASK_ID,
+        "attempt": 1,
+        "status": TaskStatus.FAILED.value,
+        "error_code": TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value,
+    }
+
+
+@pytest.mark.parametrize(
+    ("artifact_type", "legacy_type"),
+    [("docking_pose", "log"), ("log", "docking_pose")],
+)
+def test_docking_history_rejects_conflicting_artifact_type_aliases(
+    artifact_type,
+    legacy_type,
+):
+    result = _success_result()
+    result["artifacts"][0].update(
+        {"artifact_type": artifact_type, "type": legacy_type}
+    )
+
+    outcome = _summarize_docking_result(result, task_id=TASK_ID, attempt=1)
+
+    assert outcome["status"] == TaskStatus.FAILED.value
+    assert outcome["error_code"] == TaskErrorCode.DOCKING_ARTIFACT_INVALID.value
+
+
+def test_docking_history_accepts_matching_artifact_type_aliases():
+    result = _success_result()
+    result["artifacts"][0]["artifact_type"] = "docking_pose"
+
+    outcome = _summarize_docking_result(result, task_id=TASK_ID, attempt=1)
+
+    assert outcome["status"] == TaskStatus.SUCCEEDED.value
+
+
 @pytest.mark.parametrize(
     ("reason", "expected_code"),
     [

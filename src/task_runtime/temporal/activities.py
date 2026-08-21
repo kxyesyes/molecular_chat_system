@@ -20,6 +20,7 @@ from src.agent.persistence.redaction import contains_sensitive_text
 from src.task_runtime.models import (
     TaskPhase,
     TaskStatus,
+    canonical_artifact_type,
     contains_prefixed_scientific_identifier,
     contains_scientific_structure,
     sanitize_provenance,
@@ -67,7 +68,7 @@ _REASON_CODE_MAP = {
     "input_hash_mismatch": TaskErrorCode.TASK_INPUT_HASH_MISMATCH.value,
     "environment_unavailable": TaskErrorCode.DOCKING_ENVIRONMENT_UNAVAILABLE.value,
 }
-_SAFE_PROVENANCE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_SAFE_PROVENANCE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._:-]{0,127}\Z")
 _UUID4 = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
@@ -168,12 +169,14 @@ def _safe_provenance(value: Any, attempt: int) -> dict[str, Any] | None:
         candidate = source.get(key)
         if candidate is None:
             continue
+        if not isinstance(candidate, str):
+            return None
+        compact_candidate = re.sub(r"\s+", "", candidate)
         if (
-            not isinstance(candidate, str)
-            or _SAFE_PROVENANCE_IDENTIFIER.fullmatch(candidate) is None
+            _SAFE_PROVENANCE_IDENTIFIER.fullmatch(candidate) is None
             or contains_sensitive_text(candidate)
-            or contains_scientific_structure(candidate)
-            or contains_prefixed_scientific_identifier(candidate)
+            or contains_scientific_structure(compact_candidate)
+            or contains_prefixed_scientific_identifier(compact_candidate)
         ):
             return None
         result[key] = candidate
@@ -246,19 +249,25 @@ def _summarize_docking_result(
     )
     if artifacts_valid:
         for source, projected in zip(raw_artifacts, artifacts):
-            artifact_type = (
-                source.get("type") or source.get("artifact_type")
-                if isinstance(source, dict)
-                else None
-            )
+            artifact_type = canonical_artifact_type(source)
             if (
                 not isinstance(source, dict)
+                or artifact_type is None
                 or projected.get("path") != source.get("path")
-                or projected.get("type", projected.get("artifact_type"))
-                != artifact_type
+                or canonical_artifact_type(projected) != artifact_type
             ):
                 artifacts_valid = False
                 break
+    if artifacts_valid:
+        pose_artifacts = [
+            artifact
+            for artifact in raw_artifacts
+            if canonical_artifact_type(artifact) == "docking_pose"
+        ]
+        artifacts_valid = (
+            len(pose_artifacts) == 1
+            and pose_artifacts[0].get("path") == pose_file
+        )
     if not artifacts_valid:
         return {
             "task_id": task_id,

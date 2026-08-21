@@ -178,6 +178,101 @@ def test_real_projection_rehashes_pose_and_requires_matching_terminal_event(tmp_
     assert "terminal_event_mismatch" in report["runs"][0]["failures"]
 
 
+def test_real_projection_resolves_pose_from_strict_artifact_record(tmp_path):
+    from scripts.run_temporal_docking_acceptance import _project_real_record, summarize_runs
+
+    task_id = "00000000-0000-4000-8000-000000000010"
+    relative = "artifacts/docking_pose.pdbqt"
+    pose = tmp_path / task_id / relative
+    pose.parent.mkdir(parents=True)
+    pose.write_bytes(b"REMARK VINA RESULT: -7.0 0.0 0.0\n")
+    import hashlib
+
+    digest = hashlib.sha256(pose.read_bytes()).hexdigest()
+    record = SimpleNamespace(
+        status=SimpleNamespace(value="succeeded"),
+        backend="temporal",
+        external_workflow_id=f"medchat-docking-{task_id}",
+        attempt=1,
+        result={"pose_count": 1, "best_energy": -7.0},
+        artifacts=[
+            {
+                "artifact_type": "docking_pose",
+                "path": relative,
+                "sha256": digest,
+            }
+        ],
+        provenance={
+            "tool_name": "molecular_docking",
+            "tool_version": "molecular-docking-adapter-1",
+            "model_name": "AutoDock Vina",
+            "demo_mode": False,
+            "fallback_used": False,
+        },
+        warnings=[],
+    )
+    events = [SimpleNamespace(is_terminal=True, event_type="task_succeeded")]
+
+    run = _project_real_record(
+        record,
+        events,
+        staging_root=tmp_path,
+        task_id=task_id,
+        latency_ms=10,
+    )
+    report = summarize_runs([run], expected_backend="temporal")
+
+    assert report["status"] == "passed"
+    assert report["runs"][0]["artifact_path"] == relative
+    assert report["runs"][0]["artifact_sha256"] == digest
+
+
+def test_real_projection_rejects_conflicting_artifact_type_aliases(tmp_path):
+    from scripts.run_temporal_docking_acceptance import _project_real_record, summarize_runs
+
+    task_id = "00000000-0000-4000-8000-000000000011"
+    relative = "artifacts/docking_pose.pdbqt"
+    pose = tmp_path / task_id / relative
+    pose.parent.mkdir(parents=True)
+    pose.write_bytes(b"REMARK VINA RESULT: -7.0 0.0 0.0\n")
+    digest = __import__("hashlib").sha256(pose.read_bytes()).hexdigest()
+    record = SimpleNamespace(
+        status=SimpleNamespace(value="succeeded"),
+        backend="temporal",
+        external_workflow_id=f"medchat-docking-{task_id}",
+        attempt=1,
+        result={"pose_count": 1, "best_energy": -7.0},
+        artifacts=[
+            {
+                "artifact_type": "docking_pose",
+                "type": "log",
+                "path": relative,
+                "sha256": digest,
+            }
+        ],
+        provenance={
+            "tool_name": "molecular_docking",
+            "tool_version": "molecular-docking-adapter-1",
+            "model_name": "AutoDock Vina",
+            "demo_mode": False,
+            "fallback_used": False,
+        },
+        warnings=[],
+    )
+
+    run = _project_real_record(
+        record,
+        [SimpleNamespace(is_terminal=True, event_type="task_succeeded")],
+        staging_root=tmp_path,
+        task_id=task_id,
+        latency_ms=10,
+    )
+    report = summarize_runs([run], expected_backend="temporal")
+
+    assert report["status"] == "failed"
+    assert "artifact_integrity_invalid" in report["runs"][0]["failures"]
+
+
 def test_metric_payload_contains_only_fixed_safe_dimensions():
     from src.task_runtime.metrics import TaskMetrics
 

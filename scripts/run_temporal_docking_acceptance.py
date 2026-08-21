@@ -25,6 +25,7 @@ from src.agent.persistence.redaction import (
     contains_credential,
     sanitize_sensitive_text,
 )
+from src.task_runtime.models import canonical_artifact_type
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _SAFE_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}\Z")
@@ -415,21 +416,22 @@ def _project_real_record(
     latency_ms: int,
 ) -> dict[str, Any]:
     result = record.result if isinstance(record.result, dict) else {}
-    pose_rel = result.get("pose_file")
+    pose_artifacts = [
+        item
+        for item in (record.artifacts or [])
+        if isinstance(item, dict)
+        and canonical_artifact_type(item) == "docking_pose"
+    ]
+    artifact = pose_artifacts[0] if len(pose_artifacts) == 1 else {}
+    pose_rel = result.get("pose_file") or artifact.get("path")
     safe_pose_rel = _safe_relative_path(pose_rel)
     pose_path = (
         staging_root / task_id / safe_pose_rel
         if safe_pose_rel is not None
         else None
     )
-    artifact = next(
-        (
-            item
-            for item in (record.artifacts or [])
-            if isinstance(item, dict) and item.get("path") == pose_rel
-        ),
-        {},
-    )
+    if artifact.get("path") != pose_rel:
+        artifact = {}
     artifact_type = artifact.get("artifact_type") or artifact.get("type")
     artifact_status = artifact.get("status")
     stored_digest = artifact.get("sha256") or (

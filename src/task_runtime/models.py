@@ -84,10 +84,13 @@ PROVENANCE_KEYS = frozenset(
         "start_outcome",
         "process_restart_recovery",
         "durable_execution",
+        "demo_mode",
+        "fallback_used",
         "hash",
         "hashes",
     }
 )
+_PROVENANCE_BOOLEAN_KEYS = frozenset({"demo_mode", "fallback_used"})
 _PRIVATE_CONTENT_KEYS = frozenset(
     {
         "smiles",
@@ -533,8 +536,17 @@ def sanitize_provenance(value: Any) -> dict[str, Any]:
     if not isinstance(snapshot, dict):
         raise ValueError("invalid provenance")
     allowed: dict[str, Any] = {}
+    seen_normalized_keys: set[str] = set()
     for key, item in snapshot.items():
         normalized = key.lower()
+        if normalized in seen_normalized_keys:
+            raise ValueError("invalid provenance duplicate key")
+        seen_normalized_keys.add(normalized)
+        if normalized in _PROVENANCE_BOOLEAN_KEYS:
+            if type(item) is not bool:
+                raise ValueError("invalid provenance boolean")
+            allowed[normalized] = item
+            continue
         if _is_hash_key(normalized):
             safe_key = _validate_digest_identifier(normalized)
             allowed[safe_key] = _validate_digest(item)
@@ -561,10 +573,21 @@ def sanitize_public_provenance(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     allowed: dict[str, Any] = {}
+    normalized_counts: dict[str, int] = {}
+    for key in value:
+        if isinstance(key, str):
+            normalized = key.lower()
+            normalized_counts[normalized] = normalized_counts.get(normalized, 0) + 1
     for key, item in value.items():
         if not isinstance(key, str):
             continue
         normalized = key.lower()
+        if normalized_counts.get(normalized, 0) != 1:
+            continue
+        if normalized in _PROVENANCE_BOOLEAN_KEYS:
+            if type(item) is bool:
+                allowed[normalized] = item
+            continue
         if _is_hash_key(normalized):
             try:
                 safe_key = _validate_digest_identifier(normalized)
@@ -826,6 +849,21 @@ _ARTIFACT_TYPES = frozenset(
 _ARTIFACT_STATUSES = frozenset(
     {"available", "completed", "failed", "partial", "ready", "succeeded", "verified"}
 )
+
+
+def canonical_artifact_type(value: Any) -> str | None:
+    """Resolve legacy/current artifact type aliases without precedence ambiguity."""
+
+    if not isinstance(value, dict):
+        return None
+    current = value.get("artifact_type")
+    legacy = value.get("type")
+    if current is not None and legacy is not None and current != legacy:
+        return None
+    candidate = current if current is not None else legacy
+    return candidate if isinstance(candidate, str) and candidate in _ARTIFACT_TYPES else None
+
+
 _PROJECTION_CONFLICT = object()
 _RESULT_RESERVED_KEYS = frozenset(
     {"artifacts", "error", "error_code", "evidence", "provenance", "warnings"}
@@ -1291,6 +1329,9 @@ def sanitize_public_artifacts(value: Any) -> list[dict[str, Any]]:
     )
     for artifact in value:
         if not isinstance(artifact, dict):
+            continue
+        has_type_alias = "artifact_type" in artifact or "type" in artifact
+        if has_type_alias and canonical_artifact_type(artifact) is None:
             continue
         path = artifact.get("path")
         decoded_path = (

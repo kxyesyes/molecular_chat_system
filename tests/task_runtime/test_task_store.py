@@ -821,6 +821,8 @@ def test_persisted_provenance_is_operational_allowlist_only(tmp_path):
             "version": "1.2.3",
             "attempt": 1,
             "configured": True,
+            "demo_mode": False,
+            "fallback_used": False,
             "artifact_hash": "A" * 64,
             "input_hash": "A" * 64,
             "config_hash": "b" * 64,
@@ -838,6 +840,8 @@ def test_persisted_provenance_is_operational_allowlist_only(tmp_path):
         "version": "1.2.3",
         "attempt": 1,
         "configured": True,
+        "demo_mode": False,
+        "fallback_used": False,
         "artifact_hash": "a" * 64,
         "input_hash": "a" * 64,
         "config_hash": "b" * 64,
@@ -845,6 +849,68 @@ def test_persisted_provenance_is_operational_allowlist_only(tmp_path):
     }
     assert "CCO" not in json.dumps(record.to_public_dict())
     assert "C:/private" not in json.dumps(record.to_public_dict())
+
+
+@pytest.mark.parametrize("value", ["false", 0, {}, [False], None])
+@pytest.mark.parametrize("field", ["demo_mode", "fallback_used"])
+def test_persisted_scientific_mode_flags_require_strict_bool(tmp_path, field, value):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+
+    with pytest.raises(ValueError, match="provenance"):
+        store.create("task-1", "docking", {}, provenance={field: value})
+
+
+def test_public_provenance_drops_non_boolean_scientific_mode_flags():
+    record = TaskRecord(
+        task_id="task-1",
+        task_type="docking",
+        status=TaskStatus.SUCCEEDED,
+        input={},
+        provenance={
+            "provider": "temporal",
+            "demo_mode": "false",
+            "fallback_used": 0,
+        },
+    )
+
+    assert record.to_public_dict()["provenance"] == {"provider": "temporal"}
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [
+        {"demo_mode": False, "DEMO_MODE": True},
+        {"DEMO_MODE": True, "demo_mode": False},
+        {"fallback_used": False, "FALLBACK_USED": True},
+        {"FALLBACK_USED": True, "fallback_used": False},
+    ],
+)
+def test_persisted_provenance_rejects_normalized_key_collisions(
+    tmp_path,
+    provenance,
+):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+
+    with pytest.raises(ValueError, match="provenance"):
+        store.create("task-1", "docking", {}, provenance=provenance)
+
+
+def test_public_provenance_omits_normalized_key_collisions():
+    record = TaskRecord(
+        task_id="task-1",
+        task_type="docking",
+        status=TaskStatus.SUCCEEDED,
+        input={},
+        provenance={
+            "provider": "temporal",
+            "demo_mode": False,
+            "DEMO_MODE": True,
+            "fallback_used": True,
+            "FALLBACK_USED": False,
+        },
+    )
+
+    assert record.to_public_dict()["provenance"] == {"provider": "temporal"}
 
 
 def test_strict_json_rejects_nonfinite_result_and_artifacts(tmp_path):
@@ -1171,6 +1237,25 @@ def test_public_artifact_rejects_non_sha256_digest(field, length):
         artifacts=[{"name": "pose", field: "a" * length}],
     )
     assert record.to_public_dict()["artifacts"] == [{"name": "pose"}]
+
+
+def test_public_artifact_drops_conflicting_type_aliases():
+    record = TaskRecord(
+        task_id="task-1",
+        task_type="docking",
+        status=TaskStatus.SUCCEEDED,
+        input={},
+        artifacts=[
+            {
+                "artifact_type": "docking_pose",
+                "type": "log",
+                "path": "artifacts/docking_pose.pdbqt",
+                "sha256": "a" * 64,
+            }
+        ],
+    )
+
+    assert record.to_public_dict()["artifacts"] == []
 
 
 def test_public_result_can_render_legacy_generated_scientific_smiles():
