@@ -419,6 +419,13 @@ def _artifact_evidence(
         claimed_pose_artifacts[0]
     ) != "docking_pose":
         return False, False
+    source_artifact = claimed_pose_artifacts[0]
+    expected_size: int | None = None
+    if "size" in source_artifact:
+        candidate_size = source_artifact["size"]
+        if type(candidate_size) is not int or candidate_size < 0:
+            return False, False
+        expected_size = candidate_size
     safe_artifacts = sanitize_public_artifacts(artifacts)
     pose_artifacts = [
         artifact
@@ -441,9 +448,9 @@ def _artifact_evidence(
 
     artifact_digests: list[str] = []
     for key in ("sha256", "hash"):
-        if key not in artifact:
+        if key not in source_artifact:
             continue
-        value = artifact[key]
+        value = source_artifact[key]
         if type(value) is not str or _ARTIFACT_SHA256.fullmatch(value) is None:
             return False, False
         artifact_digests.append(value.lower())
@@ -476,8 +483,7 @@ def _artifact_evidence(
     if any(value != digest for value in result_digests):
         return False, False
 
-    expected_size = artifact.get("size")
-    if type(expected_size) is not int or expected_size < 0:
+    if expected_size is not None and artifact.get("size") != expected_size:
         return False, False
     root = _normalized_path(staging_root)
     artifact_file = root / task_id / Path(*artifact_path.split("/"))
@@ -488,7 +494,7 @@ def _artifact_evidence(
     # Stable metadata guards the read; the digest detects same-size in-place
     # content changes that filesystem version fields alone cannot authenticate.
     actual = hashlib.sha256(snapshot.content).hexdigest()
-    size_matches = len(snapshot.content) == expected_size
+    size_matches = expected_size is None or len(snapshot.content) == expected_size
     return True, actual == digest and size_matches
 
 

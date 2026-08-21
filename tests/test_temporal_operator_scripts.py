@@ -960,7 +960,6 @@ def _observer_fixture(tmp_path: Path, now: datetime) -> tuple[_FakeStore, Path, 
                         "artifact_type": "docking_pose",
                         "path": relative,
                         "sha256": digest,
-                        "size": pose.stat().st_size,
                     }
                 ],
                 error="RAW_TASK_ERROR_CANARY C:/private/path",
@@ -986,6 +985,8 @@ def test_observer_accepts_strict_temporal_result_with_artifact_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from src.task_runtime.temporal.activities import _summarize_docking_result
+
     now = datetime.now(timezone.utc)
     started = now - timedelta(minutes=2)
     task_id = "strict-temporal-task"
@@ -1008,38 +1009,63 @@ def test_observer_accepts_strict_temporal_result_with_artifact_authority(
         now=started - timedelta(seconds=1),
     )
     assert store.claim_running(task_id, attempt=1, now=started)
+    activity_terminal = _summarize_docking_result(
+        {
+            "success": True,
+            "status": "succeeded",
+            "data": {
+                "total_poses": 1,
+                "pose_file": relative,
+                "best_pose": {
+                    "binding_energy": -7.0,
+                    "pose_file": relative,
+                },
+            },
+            "artifacts": [
+                {
+                    "artifact_type": "docking_pose",
+                    "path": relative,
+                    "metadata": {"sha256": digest},
+                }
+            ],
+            "provenance": {
+                "tool_name": "molecular_docking",
+                "tool_version": "vina-1.2.5",
+                "demo_mode": False,
+                "fallback_used": False,
+            },
+        },
+        task_id=task_id,
+        attempt=1,
+    )
+    assert activity_terminal["artifacts"] == [
+        {
+            "artifact_type": "docking_pose",
+            "path": relative,
+            "sha256": digest,
+        }
+    ]
+    assert "size" not in activity_terminal["artifacts"][0]
     assert store.project_temporal_terminal(
         task_id,
         TaskStatus.SUCCEEDED,
-        result={
-            "pose_count": 1,
-            "best_energy": -7.0,
-            "pose_file": relative,
-            "completion": {"pose_sha256": digest},
-        },
-        artifacts=[
-            {
-                "artifact_type": "docking_pose",
-                "path": relative,
-                "sha256": digest,
-                "hash": digest,
-                "size": len(content),
-            }
-        ],
-        provenance={
-            "tool_name": "molecular_docking",
-            "tool_version": "vina-1.2.5",
-            "demo_mode": False,
-            "fallback_used": False,
-        },
+        result=activity_terminal["result"],
+        artifacts=activity_terminal["artifacts"],
+        provenance=activity_terminal["provenance"],
         now=now - timedelta(minutes=1),
     )
 
     persisted = store.get(task_id)
+    assert persisted.artifacts == [
+        {
+            "artifact_type": "docking_pose",
+            "path": relative,
+            "sha256": digest,
+        }
+    ]
     assert persisted.result == {
         "pose_count": 1,
         "best_energy": -7.0,
-        "completion": {"pose_sha256": digest},
     }
     with ReadOnlyTemporalObservationStore(database) as reader:
         observed = reader.list_temporal_observation(
@@ -1195,8 +1221,10 @@ def test_observer_writes_failed_terminal_samples_with_unknown_provenance(
         "type_alias_conflict",
         "hash_alias_conflict",
         "completion_digest_conflict",
-        "missing_size",
         "size_mismatch",
+        "negative_size",
+        "boolean_size",
+        "float_size",
         "malformed_size",
         "unsafe_path",
     ],
@@ -1219,10 +1247,14 @@ def test_observer_succeeded_artifact_requires_authoritative_matching_metadata(
         artifact["hash"] = "b" * 64
     elif mutation == "completion_digest_conflict":
         record.result["completion"] = {"pose_sha256": "b" * 64}
-    elif mutation == "missing_size":
-        artifact.pop("size")
     elif mutation == "size_mismatch":
         artifact["size"] = pose_path.stat().st_size + 1
+    elif mutation == "negative_size":
+        artifact["size"] = -1
+    elif mutation == "boolean_size":
+        artifact["size"] = True
+    elif mutation == "float_size":
+        artifact["size"] = float(pose_path.stat().st_size)
     elif mutation == "malformed_size":
         artifact["size"] = "RAW_SIZE_CANARY"
     else:
@@ -1246,6 +1278,20 @@ def test_observer_succeeded_artifact_requires_authoritative_matching_metadata(
     assert report["sample_count"] == 20
     assert report["gates"]["artifact_integrity"] == "failed"
     assert "RAW_SIZE_CANARY" not in json.dumps(report)
+
+
+def test_observer_accepts_optional_exact_artifact_size(tmp_path: Path) -> None:
+    now = datetime.now(timezone.utc)
+    store, staging, _marker = _observer_fixture(tmp_path, now)
+    record = store.records[0]
+    pose = staging / record.task_id / record.artifacts[0]["path"]
+    record.artifacts[0]["size"] = pose.stat().st_size
+
+    assert observer._artifact_evidence(
+        record,
+        record.result,
+        staging_root=staging,
+    ) == (True, True)
 
 
 def test_observer_artifact_hash_rejects_same_size_content_mutation(
