@@ -327,6 +327,104 @@ def test_list_temporal_observation_does_not_mutate_store(tmp_path):
     assert after_events == before_events
 
 
+def _database_file_state(path):
+    metadata = path.stat()
+    sidecars = tuple(
+        suffix
+        for suffix in ("-wal", "-shm", "-journal")
+        if type(path)(str(path) + suffix).exists()
+    )
+    return path.read_bytes(), metadata.st_size, metadata.st_mtime_ns, sidecars
+
+
+def test_read_only_observation_rejects_empty_schema_without_mutating_files(tmp_path):
+    from src.task_runtime.store import ReadOnlyTemporalObservationStore
+
+    path = tmp_path / "empty.sqlite"
+    sqlite3.connect(path).close()
+    before = _database_file_state(path)
+
+    with pytest.raises(ValueError, match=r"^temporal observation unavailable$"):
+        with ReadOnlyTemporalObservationStore(path) as reader:
+            reader.list_temporal_observation(
+                datetime(2026, 8, 21, 10, tzinfo=timezone.utc),
+                datetime(2026, 8, 21, 11, tzinfo=timezone.utc),
+            )
+
+    assert _database_file_state(path) == before
+
+
+def test_read_only_observation_keeps_idle_database_and_sidecars_unchanged(tmp_path):
+    from src.task_runtime.store import ReadOnlyTemporalObservationStore
+
+    path = tmp_path / "read-only.sqlite"
+    store = TaskStore(path)
+    start = datetime(2026, 8, 21, 10, tzinfo=timezone.utc)
+    _finish_observation_task(
+        store, "task-1", finished_at=start + timedelta(minutes=1)
+    )
+    before = _database_file_state(path)
+
+    with ReadOnlyTemporalObservationStore(path) as reader:
+        records = reader.list_temporal_observation(start, start + timedelta(hours=1))
+        terminal_count = reader.terminal_event_count("task-1")
+
+    assert [record.task_id for record in records] == ["task-1"]
+    assert terminal_count == 1
+    assert _database_file_state(path) == before
+
+
+def test_read_only_observation_sees_committed_live_wal_state(tmp_path):
+    from src.task_runtime.store import ReadOnlyTemporalObservationStore
+
+    path = tmp_path / "live-wal.sqlite"
+    TaskStore(path)
+    start = datetime(2026, 8, 21, 10, tzinfo=timezone.utc)
+    writer = connect(path)
+    try:
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        finished = start + timedelta(minutes=1)
+        writer.execute(
+            """
+            INSERT INTO tasks (
+                task_id, task_type, status, input_json, backend,
+                external_workflow_id, attempt, created_at, started_at,
+                updated_at, finished_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "wal-task", "docking", "succeeded", "{}", "temporal",
+                "wal-workflow", 1, start.isoformat(), start.isoformat(),
+                finished.isoformat(), finished.isoformat(),
+            ),
+        )
+        writer.execute(
+            """
+            INSERT INTO task_events (
+                event_id, task_id, sequence, event_type,
+                payload_json, is_terminal, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "wal-event", "wal-task", 1, "task_succeeded",
+                "{}", 1, finished.isoformat(),
+            ),
+        )
+        writer.commit()
+        assert type(path)(str(path) + "-wal").exists()
+
+        with ReadOnlyTemporalObservationStore(path) as reader:
+            records = reader.list_temporal_observation(
+                start, start + timedelta(hours=1)
+            )
+            terminal_count = reader.terminal_event_count("wal-task")
+
+        assert [record.task_id for record in records] == ["wal-task"]
+        assert terminal_count == 1
+    finally:
+        writer.close()
+
+
 def test_existing_database_is_migrated_without_row_loss_and_idempotently(tmp_path):
     path = tmp_path / "tasks.sqlite"
     _create_legacy_database(path)

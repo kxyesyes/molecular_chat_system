@@ -41,7 +41,7 @@ ROLLOUT_LEVELS = frozenset({0, 5, 10, 25})
 MAX_ROLLOUT_BYTES = 1024 * 1024
 MAX_EVIDENCE_FILE_BYTES = MAX_EVIDENCE_BYTES + 4096
 MAX_REASON_BYTES = 512
-_ASSIGNMENT = re.compile(r"(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*=.*\Z")
+_ASSIGNMENT = re.compile(r"(?:export )?[A-Za-z_][A-Za-z0-9_]*=.*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _SAFE_REASON_PUNCTUATION = frozenset(" .,:;_()-")
 
@@ -194,8 +194,9 @@ def _decode_rollout(snapshot: _SafeSnapshot) -> tuple[list[str], int]:
             continue
         if _ASSIGNMENT.fullmatch(core) is None:
             raise ValueError("invalid rollout config")
-        if core.startswith(ROLLOUT_PREFIX):
-            matches.append(core)
+        assignment = core.removeprefix("export ")
+        if assignment.startswith(ROLLOUT_PREFIX):
+            matches.append(assignment)
     if len(matches) != 1:
         raise ValueError("rollout percent must appear exactly once")
     raw = matches[0].split("=", 1)[1].strip()
@@ -307,8 +308,12 @@ def _render_level(lines: list[str], target: int) -> bytes:
     for line in lines:
         core = line.rstrip("\r\n")
         ending = line[len(core) :]
-        if core.startswith(ROLLOUT_PREFIX):
-            rendered.append(f"{ROLLOUT_PREFIX}{target}{ending}")
+        export_prefix = "export " if core.startswith("export ") else ""
+        assignment = core.removeprefix(export_prefix)
+        if assignment.startswith(ROLLOUT_PREFIX):
+            rendered.append(
+                f"{export_prefix}{ROLLOUT_PREFIX}{target}{ending}"
+            )
             replacements += 1
         else:
             rendered.append(line)

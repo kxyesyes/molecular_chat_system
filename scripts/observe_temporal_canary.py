@@ -49,7 +49,9 @@ from src.task_runtime.observation import (  # noqa: E402
     ObservationPolicy,
     build_observation_report,
 )
-from src.task_runtime.store import TaskStore  # noqa: E402
+from src.task_runtime.store import (  # noqa: E402
+    ReadOnlyTemporalObservationStore,
+)
 
 
 MAX_PROMETHEUS_BYTES = 1024 * 1024
@@ -449,10 +451,9 @@ def _project_record(record: object, store: object, *, staging_root: Path) -> dic
     latency = (finished - started).total_seconds()
     if latency < 0 or not math.isfinite(latency):
         raise ValueError("invalid task observation")
-    events = store.events(task_id)
-    if not isinstance(events, list):
+    terminal_count = store.terminal_event_count(task_id)
+    if type(terminal_count) is not int or terminal_count < 0:
         raise ValueError("invalid task observation")
-    terminal_count = sum(getattr(event, "is_terminal", None) is True for event in events)
 
     pose_count = result.get("pose_count")
     if type(pose_count) is not int or pose_count < 0:
@@ -517,7 +518,9 @@ def collect_observation(
     backup_state: Path,
     baseline_p95_seconds: float,
     now: datetime | None = None,
-    task_store_factory: Callable[[Path], object] = TaskStore,
+    observation_store_factory: Callable[[Path], object] = (
+        ReadOnlyTemporalObservationStore
+    ),
     prometheus_fetcher: Callable[[str, str | None], dict[str, object]] | None = None,
 ) -> dict[str, object]:
     generated = _aware_utc(now or datetime.now(timezone.utc), "invalid observation clock")
@@ -537,18 +540,18 @@ def collect_observation(
     try:
         store_path = (
             _safe_existing_database(db_path)
-            if task_store_factory is TaskStore
+            if observation_store_factory is ReadOnlyTemporalObservationStore
             else _normalized_path(db_path)
         )
-        store = task_store_factory(store_path)
-        records = store.list_temporal_observation(start, end, limit=10_000)
-        if not isinstance(records, list):
-            raise ValueError("task evidence unavailable")
-        staging_root = _task_staging_root()
-        samples = [
-            _project_record(record, store, staging_root=staging_root)
-            for record in records
-        ]
+        with observation_store_factory(store_path) as store:
+            records = store.list_temporal_observation(start, end, limit=10_000)
+            if not isinstance(records, list):
+                raise ValueError("task evidence unavailable")
+            staging_root = _task_staging_root()
+            samples = [
+                _project_record(record, store, staging_root=staging_root)
+                for record in records
+            ]
     except Exception:
         samples = []
 

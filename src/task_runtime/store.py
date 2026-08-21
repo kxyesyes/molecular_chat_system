@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ from uuid import uuid4
 
 from src.agent.persistence.redaction import redact_sensitive
 
-from .database import connection, init_db
+from .database import connection, dict_factory, get_task_db_path, init_db
 from .errors import TaskErrorCode
 from .models import (
     ResultProjectionPolicy,
@@ -99,6 +100,59 @@ def _as_observation_timestamp(value: datetime | str) -> str:
         return parsed.astimezone(timezone.utc).isoformat()
     except (OverflowError, TypeError, ValueError):
         raise ValueError("invalid observation window") from None
+
+
+def _observation_query_parameters(
+    window_start: datetime | str,
+    window_end: datetime | str,
+    limit: int,
+) -> tuple[str, str, int]:
+    start = _as_observation_timestamp(window_start)
+    end = _as_observation_timestamp(window_end)
+    if start >= end:
+        raise ValueError("invalid observation window")
+    if type(limit) is not int or not 1 <= limit <= 10000:
+        raise ValueError("invalid observation limit")
+    return start, end, limit
+
+
+def _query_temporal_observation_rows(
+    conn: sqlite3.Connection,
+    start: str,
+    end: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    terminal_values = (
+        TaskStatus.SUCCEEDED.value,
+        TaskStatus.FAILED.value,
+        TaskStatus.CANCELED.value,
+        TaskStatus.TIMED_OUT.value,
+    )
+    return conn.execute(
+        """
+        SELECT * FROM tasks
+        WHERE backend = ? AND task_type = ?
+          AND status IN (?, ?, ?, ?)
+          AND finished_at >= ? AND finished_at < ?
+        ORDER BY finished_at ASC, task_id ASC LIMIT ?
+        """,
+        (
+            "temporal",
+            "docking",
+            *terminal_values,
+            start,
+            end,
+            limit + 1,
+        ),
+    ).fetchall()
+
+
+def _observation_records(
+    rows: list[dict[str, Any]], limit: int
+) -> list[TaskRecord]:
+    if len(rows) > limit:
+        raise ValueError("observation result exceeds limit")
+    return [TaskRecord.from_row(row) for row in rows]
 
 
 def _json(value: Any) -> str:
@@ -195,6 +249,122 @@ def _error_code_value(value: TaskErrorCode | str | None) -> str | None:
         except ValueError as exc:
             raise ValueError("invalid error_code") from exc
     raise ValueError("invalid error_code")
+
+
+class ReadOnlyTemporalObservationStore:
+    """Read observation projections without initializing or mutating SQLite."""
+
+    def __init__(self, db_path: str | Path):
+        try:
+            self.db_path = get_task_db_path(db_path)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            raise ValueError("temporal observation unavailable") from None
+        self._connection: sqlite3.Connection | None = None
+        self._immutable_snapshot = False
+
+    def _has_transaction_sidecar(self) -> bool:
+        return any(
+            Path(f"{self.db_path}{suffix}").exists()
+            for suffix in ("-wal", "-shm", "-journal")
+        )
+
+    def _ensure_snapshot_compatible(self) -> None:
+        if self._immutable_snapshot and self._has_transaction_sidecar():
+            raise ValueError("temporal observation unavailable")
+
+    def __enter__(self) -> "ReadOnlyTemporalObservationStore":
+        if self._connection is not None:
+            raise ValueError("temporal observation unavailable")
+        conn: sqlite3.Connection | None = None
+        try:
+            self._immutable_snapshot = not self._has_transaction_sidecar()
+            immutable = "&immutable=1" if self._immutable_snapshot else ""
+            uri = f"{self.db_path.as_uri()}?mode=ro{immutable}"
+            conn = sqlite3.connect(
+                uri,
+                uri=True,
+                check_same_thread=False,
+                timeout=30,
+            )
+            conn.row_factory = dict_factory
+            self._ensure_snapshot_compatible()
+        except (OSError, RuntimeError, sqlite3.Error, ValueError):
+            if conn is not None:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+            raise ValueError("temporal observation unavailable") from None
+        self._connection = conn
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        conn = self._connection
+        self._connection = None
+        if conn is not None:
+            unavailable = False
+            if exc_type is None:
+                try:
+                    self._ensure_snapshot_compatible()
+                except (OSError, ValueError):
+                    unavailable = True
+            try:
+                conn.close()
+            except sqlite3.Error:
+                unavailable = True
+            if unavailable and exc_type is None:
+                raise ValueError("temporal observation unavailable") from None
+
+    def _active_connection(self) -> sqlite3.Connection:
+        if self._connection is None:
+            raise ValueError("temporal observation unavailable")
+        return self._connection
+
+    def list_temporal_observation(
+        self,
+        window_start: datetime | str,
+        window_end: datetime | str,
+        *,
+        limit: int = 10000,
+    ) -> list[TaskRecord]:
+        start, end, bounded_limit = _observation_query_parameters(
+            window_start,
+            window_end,
+            limit,
+        )
+        try:
+            self._ensure_snapshot_compatible()
+            rows = _query_temporal_observation_rows(
+                self._active_connection(),
+                start,
+                end,
+                bounded_limit,
+            )
+            records = _observation_records(rows, bounded_limit)
+            self._ensure_snapshot_compatible()
+            return records
+        except ValueError as exc:
+            if str(exc) == "observation result exceeds limit":
+                raise
+            raise ValueError("temporal observation unavailable") from None
+        except (KeyError, OSError, RuntimeError, sqlite3.Error, TypeError):
+            raise ValueError("temporal observation unavailable") from None
+
+    def terminal_event_count(self, task_id: str) -> int:
+        try:
+            safe_task_id = _validate_required_string(task_id, "task_id")
+            self._ensure_snapshot_compatible()
+            row = self._active_connection().execute(
+                "SELECT COUNT(*) AS count FROM task_events "
+                "WHERE task_id = ? AND is_terminal = 1",
+                (safe_task_id,),
+            ).fetchone()
+            if type(row) is not dict or type(row.get("count")) is not int:
+                raise ValueError
+            self._ensure_snapshot_compatible()
+            return row["count"]
+        except (KeyError, OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+            raise ValueError("temporal observation unavailable") from None
 
 
 class TaskStore:
@@ -627,39 +797,19 @@ class TaskStore:
     ) -> list[TaskRecord]:
         """Read a complete bounded slice of terminal Temporal docking tasks."""
 
-        start = _as_observation_timestamp(window_start)
-        end = _as_observation_timestamp(window_end)
-        if start >= end:
-            raise ValueError("invalid observation window")
-        if type(limit) is not int or not 1 <= limit <= 10000:
-            raise ValueError("invalid observation limit")
-        terminal_values = (
-            TaskStatus.SUCCEEDED.value,
-            TaskStatus.FAILED.value,
-            TaskStatus.CANCELED.value,
-            TaskStatus.TIMED_OUT.value,
+        start, end, bounded_limit = _observation_query_parameters(
+            window_start,
+            window_end,
+            limit,
         )
         with connection(self.db_path) as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM tasks
-                WHERE backend = ? AND task_type = ?
-                  AND status IN (?, ?, ?, ?)
-                  AND finished_at >= ? AND finished_at < ?
-                ORDER BY finished_at ASC, task_id ASC LIMIT ?
-                """,
-                (
-                    "temporal",
-                    "docking",
-                    *terminal_values,
-                    start,
-                    end,
-                    limit + 1,
-                ),
-            ).fetchall()
-        if len(rows) > limit:
-            raise ValueError("observation result exceeds limit")
-        return [TaskRecord.from_row(row) for row in rows]
+            rows = _query_temporal_observation_rows(
+                conn,
+                start,
+                end,
+                bounded_limit,
+            )
+        return _observation_records(rows, bounded_limit)
 
     def list_temporal_reconcilable(
         self,

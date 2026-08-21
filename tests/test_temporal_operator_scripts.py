@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -144,6 +145,82 @@ def test_manager_rejects_duplicate_missing_unsupported_or_malformed_env(
     assert result.returncode != 0
     assert "Traceback" not in result.stderr
     assert str(env_file) not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        (
+            b"MEDCHAT_TEMPORAL_CANARY_PERCENT=5\n"
+            b"export MEDCHAT_TEMPORAL_CANARY_PERCENT=10\n"
+        ),
+        (
+            b"export MEDCHAT_TEMPORAL_CANARY_PERCENT=5\n"
+            b"MEDCHAT_TEMPORAL_CANARY_PERCENT=10\n"
+        ),
+        (
+            b"export MEDCHAT_TEMPORAL_CANARY_PERCENT=5\n"
+            b"export MEDCHAT_TEMPORAL_CANARY_PERCENT=10\n"
+        ),
+    ],
+)
+def test_manager_rejects_semantic_direct_and_export_duplicates(
+    tmp_path: Path, content: bytes
+) -> None:
+    env_file = tmp_path / "duplicate.env"
+    env_file.write_bytes(content)
+
+    result = _run_manage("status", "--env-file", str(env_file))
+
+    assert result.returncode != 0
+    assert "Traceback" not in result.stderr
+
+
+def test_manager_promotes_single_export_assignment_without_corrupting_layout(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "export.env"
+    env_file.write_bytes(
+        b"# retained comment\r\n"
+        b"export MEDCHAT_TEMPORAL_CANARY_PERCENT=5\r\n"
+        b"SAFE_UNRELATED=retained\r\n"
+    )
+    evidence = _write_evidence(tmp_path)
+
+    result = _run_manage(
+        "promote", "--env-file", str(env_file), "--to", "10",
+        "--evidence", str(evidence), "--reason", "export rollout",
+    )
+
+    assert result.returncode == 0
+    assert env_file.read_bytes() == (
+        b"# retained comment\r\n"
+        b"export MEDCHAT_TEMPORAL_CANARY_PERCENT=10\r\n"
+        b"SAFE_UNRELATED=retained\r\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        b" MEDCHAT_TEMPORAL_CANARY_PERCENT=5\n",
+        b"\tMEDCHAT_TEMPORAL_CANARY_PERCENT=5\n",
+        b" export MEDCHAT_TEMPORAL_CANARY_PERCENT=5\n",
+        b"export  MEDCHAT_TEMPORAL_CANARY_PERCENT=5\n",
+        b"export\tMEDCHAT_TEMPORAL_CANARY_PERCENT=5\n",
+        b"export MEDCHAT_TEMPORAL_CANARY_PERCENT=5 # inline comments unsupported\n",
+    ],
+)
+def test_manager_rejects_ambiguous_rollout_assignment_whitespace(
+    tmp_path: Path, assignment: bytes
+) -> None:
+    env_file = tmp_path / "ambiguous.env"
+    env_file.write_bytes(assignment)
+
+    result = _run_manage("status", "--env-file", str(env_file))
+
+    assert result.returncode != 0
+    assert "Traceback" not in result.stderr
 
 
 def test_manager_rejects_oversized_env_and_symlink(tmp_path: Path) -> None:
@@ -353,8 +430,14 @@ class _FakeStore:
         self.list_calls += 1
         return self.records
 
-    def events(self, task_id: str):
-        return [SimpleNamespace(is_terminal=True, event_type="task_succeeded", task_id=task_id)]
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return None
+
+    def terminal_event_count(self, task_id: str):
+        return 1
 
 
 def _observer_fixture(tmp_path: Path, now: datetime) -> tuple[_FakeStore, Path, Path]:
@@ -422,7 +505,7 @@ def test_observer_builds_passed_rollout_evidence_from_safe_projections(
         backup_state=marker,
         baseline_p95_seconds=40.0,
         now=now,
-        task_store_factory=lambda _path: store,
+        observation_store_factory=lambda _path: store,
         prometheus_fetcher=_passed_prometheus,
     )
 
@@ -455,7 +538,7 @@ def test_observer_prometheus_unavailable_is_partial_not_failed(
         window_start=now - timedelta(hours=2), window_end=now - timedelta(minutes=1),
         prometheus_url="http://127.0.0.1:9090", backup_state=marker,
         baseline_p95_seconds=40.0, now=now,
-        task_store_factory=lambda _path: store, prometheus_fetcher=unavailable,
+        observation_store_factory=lambda _path: store, prometheus_fetcher=unavailable,
     )
 
     assert report["status"] == "partial"
@@ -484,7 +567,7 @@ def test_observer_firing_allowlisted_alert_is_failed(
         window_start=now - timedelta(hours=2), window_end=now - timedelta(minutes=1),
         prometheus_url="http://127.0.0.1:9090", backup_state=marker,
         baseline_p95_seconds=40.0, now=now,
-        task_store_factory=lambda _path: store, prometheus_fetcher=firing,
+        observation_store_factory=lambda _path: store, prometheus_fetcher=firing,
     )
 
     assert report["status"] == "failed"
@@ -509,7 +592,7 @@ def test_observer_explicit_worker_unhealthy_is_failed(
         window_start=now - timedelta(hours=2), window_end=now - timedelta(minutes=1),
         prometheus_url="http://127.0.0.1:9090", backup_state=marker,
         baseline_p95_seconds=40.0, now=now,
-        task_store_factory=lambda _path: store, prometheus_fetcher=unhealthy,
+        observation_store_factory=lambda _path: store, prometheus_fetcher=unhealthy,
     )
 
     assert report["status"] == "failed"
@@ -668,12 +751,92 @@ def test_unavailable_or_truncated_taskstore_cannot_pass(
         window_start=now - timedelta(hours=24), window_end=now - timedelta(minutes=1),
         prometheus_url="http://127.0.0.1:9090", backup_state=marker,
         baseline_p95_seconds=40.0, now=now,
-        task_store_factory=broken, prometheus_fetcher=_passed_prometheus,
+        observation_store_factory=broken, prometheus_fetcher=_passed_prometheus,
     )
 
     assert report["status"] == "partial"
     assert report["sample_count"] == 0
     assert "PRIVATE_DB_ERROR_CANARY" not in json.dumps(report)
+
+
+def _database_files_state(path: Path) -> tuple[bytes, int, int, tuple[str, ...]]:
+    metadata = path.stat()
+    sidecars = tuple(
+        suffix
+        for suffix in ("-wal", "-shm", "-journal")
+        if Path(str(path) + suffix).exists()
+    )
+    return path.read_bytes(), metadata.st_size, metadata.st_mtime_ns, sidecars
+
+
+def test_observer_does_not_initialize_empty_non_medchat_database(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "PRIVATE_EMPTY_DB_CANARY.sqlite"
+    sqlite3.connect(db_path).close()
+    before = _database_files_state(db_path)
+    now = datetime.now(timezone.utc)
+    output = tmp_path / "report.json"
+
+    result = subprocess.run(
+        [
+            PYTHON, str(OBSERVE_SCRIPT), "--db-path", str(db_path),
+            "--level", "5",
+            "--window-start", (now - timedelta(hours=24)).isoformat(),
+            "--window-end", (now - timedelta(minutes=1)).isoformat(),
+            "--prometheus-url", "http://127.0.0.1:1",
+            "--backup-state", str(tmp_path / "latest-verified.json"),
+            "--baseline-p95-seconds", "40", "--output", str(output),
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode in {0, 1}
+    assert _database_files_state(db_path) == before
+    assert "PRIVATE_EMPTY_DB_CANARY" not in result.stdout + result.stderr
+    assert str(db_path) not in result.stdout + result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_observer_leaves_idle_initialized_database_files_unchanged(
+    tmp_path: Path,
+) -> None:
+    from src.task_runtime.store import TaskStore
+
+    db_path = tmp_path / "tasks.sqlite"
+    TaskStore(db_path)
+    before = _database_files_state(db_path)
+    now = datetime.now(timezone.utc)
+    marker = tmp_path / "latest-verified.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "sha256": "a" * 64,
+                "verified_at": now.isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = observer.collect_observation(
+        db_path=db_path,
+        current_level=5,
+        window_start=now - timedelta(hours=24),
+        window_end=now - timedelta(minutes=1),
+        prometheus_url="http://127.0.0.1:9090",
+        backup_state=marker,
+        baseline_p95_seconds=40.0,
+        now=now,
+        prometheus_fetcher=_passed_prometheus,
+    )
+
+    assert report["status"] == "partial"
+    assert _database_files_state(db_path) == before
 
 
 def test_taskstore_slice_overflow_is_partial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -682,6 +845,12 @@ def test_taskstore_slice_overflow_is_partial(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setattr(observer, "_task_staging_root", lambda: staging)
 
     class OverflowStore:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return None
+
         def list_temporal_observation(self, *_args, **_kwargs):
             raise ValueError("observation result exceeds limit PRIVATE_TASK_CANARY")
 
@@ -690,7 +859,7 @@ def test_taskstore_slice_overflow_is_partial(tmp_path: Path, monkeypatch: pytest
         window_start=now - timedelta(hours=24), window_end=now - timedelta(minutes=1),
         prometheus_url="http://127.0.0.1:9090", backup_state=marker,
         baseline_p95_seconds=40.0, now=now,
-        task_store_factory=lambda _path: OverflowStore(),
+        observation_store_factory=lambda _path: OverflowStore(),
         prometheus_fetcher=_passed_prometheus,
     )
 
