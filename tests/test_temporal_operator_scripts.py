@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 from datetime import datetime, timedelta, timezone
 import errno
 import hashlib
@@ -278,6 +279,30 @@ def test_manager_rejects_semantic_direct_and_export_duplicates(
     assert "Traceback" not in result.stderr
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"SAFE_UNRELATED=one\nSAFE_UNRELATED=two\nMEDCHAT_TEMPORAL_CANARY_PERCENT=5\n",
+        b"SAFE_UNRELATED=one\nexport SAFE_UNRELATED=two\nMEDCHAT_TEMPORAL_CANARY_PERCENT=5\n",
+        b"export SAFE_UNRELATED=one\nSAFE_UNRELATED=two\nMEDCHAT_TEMPORAL_CANARY_PERCENT=5\n",
+        b"export SAFE_UNRELATED=one\nexport SAFE_UNRELATED=two\nMEDCHAT_TEMPORAL_CANARY_PERCENT=5\n",
+    ],
+)
+def test_manager_rejects_duplicate_unrelated_assignment_names(
+    tmp_path: Path,
+    content: bytes,
+) -> None:
+    env_file = tmp_path / "duplicate-unrelated.env"
+    env_file.write_bytes(content)
+
+    result = _run_manage("status", "--env-file", str(env_file))
+
+    assert result.returncode != 0
+    assert "one" not in result.stdout + result.stderr
+    assert "two" not in result.stdout + result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_manager_promotes_single_export_assignment_without_corrupting_layout(
     tmp_path: Path,
 ) -> None:
@@ -381,7 +406,279 @@ def test_manager_rejects_group_or_world_writable_env_and_lock(tmp_path: Path) ->
     lock = env_file.with_name(env_file.name + ".lock")
     lock.write_bytes(b"")
     lock.chmod(0o666)
-    assert _run_manage("status", "--env-file", str(env_file)).returncode != 0
+    evidence = _write_evidence(tmp_path)
+    result = _run_manage(
+        "promote",
+        "--env-file",
+        str(env_file),
+        "--to",
+        "10",
+        "--evidence",
+        str(evidence),
+        "--reason",
+        "unsafe lock",
+    )
+    assert result.returncode != 0
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX trust boundary")
+def test_promotion_rejects_trusted_file_in_writable_evidence_parent(
+    tmp_path: Path,
+) -> None:
+    env_parent = tmp_path / "env"
+    evidence_parent = tmp_path / "evidence"
+    env_parent.mkdir(mode=0o700)
+    evidence_parent.mkdir(mode=0o700)
+    env_file = _write_env(env_parent)
+    evidence = _write_evidence(evidence_parent)
+    evidence.chmod(0o600)
+    evidence_parent.chmod(0o777)
+    try:
+        result = _run_manage(
+            "promote",
+            "--env-file",
+            str(env_file),
+            "--to",
+            "10",
+            "--evidence",
+            str(evidence),
+            "--reason",
+            "trusted evidence",
+        )
+    finally:
+        evidence_parent.chmod(0o700)
+
+    assert result.returncode != 0
+    assert b"MEDCHAT_TEMPORAL_CANARY_PERCENT=5" in env_file.read_bytes()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX trust boundary")
+def test_backup_and_output_reject_writable_parent(tmp_path: Path) -> None:
+    parent = tmp_path / "hostile"
+    parent.mkdir(mode=0o700)
+    marker = parent / "latest-verified.json"
+    now = datetime.now(timezone.utc)
+    marker.write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "sha256": "a" * 64,
+                "verified_at": now.isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    parent.chmod(0o777)
+    try:
+        assert observer.read_backup_verification(marker, now=now) is None
+        with pytest.raises(ValueError):
+            observer.write_report_atomic(parent / "report.json", {"status": "partial"})
+    finally:
+        parent.chmod(0o700)
+
+
+def test_evidence_swap_back_race_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = _write_env(tmp_path)
+    evidence = _write_evidence(tmp_path)
+    held = tmp_path / "held-evidence.json"
+    intruder = tmp_path / "intruder-evidence.json"
+    intruder.write_text("{}", encoding="utf-8")
+    original = manager._strict_json_object
+
+    def swap_back(content):
+        os.replace(evidence, held)
+        os.replace(intruder, evidence)
+        os.replace(evidence, intruder)
+        os.replace(held, evidence)
+        return original(content)
+
+    monkeypatch.setattr(manager, "_strict_json_object", swap_back)
+
+    code = manager.main(
+        [
+            "promote",
+            "--env-file",
+            str(env_file),
+            "--to",
+            "10",
+            "--evidence",
+            str(evidence),
+            "--reason",
+            "evidence race",
+        ]
+    )
+
+    assert code == 1
+    assert b"MEDCHAT_TEMPORAL_CANARY_PERCENT=5" in env_file.read_bytes()
+
+
+def test_backup_swap_back_race_is_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    marker = tmp_path / "latest-verified.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "sha256": "a" * 64,
+                "verified_at": now.isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    held = tmp_path / "held-marker.json"
+    intruder = tmp_path / "intruder-marker.json"
+    intruder.write_text("{}", encoding="utf-8")
+    original = observer.read_temporal_backup_state
+
+    def swap_back(path):
+        content = original(path)
+        os.replace(marker, held)
+        os.replace(intruder, marker)
+        os.replace(marker, intruder)
+        os.replace(held, marker)
+        return content
+
+    monkeypatch.setattr(observer, "read_temporal_backup_state", swap_back)
+
+    assert observer.read_backup_verification(marker, now=now) is None
+
+
+def test_output_swap_back_race_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "report.json"
+    output.write_text("{}", encoding="utf-8")
+    original_replace = os.replace
+
+    def swap_back(source, destination, *args, **kwargs):
+        original_replace(source, destination, *args, **kwargs)
+        if Path(destination) == output:
+            held = tmp_path / "held-report.json"
+            original_replace(output, held)
+            original_replace(held, output)
+
+    monkeypatch.setattr(observer.os, "replace", swap_back)
+
+    with pytest.raises(ValueError):
+        observer.write_report_atomic(output, {"status": "partial"})
+
+
+def _allow_ace(
+    ace_type: int,
+    mask: int,
+    *,
+    inherited: bool = False,
+    object_flags: int = 0,
+) -> bytes:
+    class AceHeader(ctypes.LittleEndianStructure):
+        _pack_ = 1
+        _fields_ = [
+            ("ace_type", ctypes.c_ubyte),
+            ("ace_flags", ctypes.c_ubyte),
+            ("ace_size", ctypes.c_uint16),
+        ]
+
+    class AccessMask(ctypes.LittleEndianStructure):
+        _pack_ = 1
+        _fields_ = [("mask", ctypes.c_uint32)]
+
+    body = bytes(AccessMask(mask))
+    if ace_type in {5, 11}:
+        body += bytes(AccessMask(object_flags))
+        if object_flags & 1:
+            body += b"O" * 16
+        if object_flags & 2:
+            body += b"I" * 16
+    body += b"SID"
+    size = 4 + len(body)
+    return bytes(AceHeader(ace_type, 0x10 if inherited else 0, size)) + body
+
+
+@pytest.mark.parametrize("ace_type", [0, 5, 9, 11])
+@pytest.mark.parametrize("inherited", [False, True])
+def test_windows_allow_ace_rejects_untrusted_writer_layouts(
+    ace_type: int,
+    inherited: bool,
+) -> None:
+    ace = _allow_ace(
+        ace_type,
+        0x40000000,
+        inherited=inherited,
+        object_flags=3 if ace_type in {5, 11} else 0,
+    )
+
+    assert not manager._windows_allow_ace_is_trusted(
+        ace,
+        {"S-1-5-18"},
+        sid_decoder=lambda _ace, _offset: "S-1-1-0",
+    )
+    assert manager._windows_allow_ace_is_trusted(
+        ace,
+        {"S-1-5-18"},
+        sid_decoder=lambda _ace, _offset: "S-1-5-18",
+    )
+
+
+def test_windows_unknown_allow_ace_and_malformed_object_ace_fail_closed() -> None:
+    compound = _allow_ace(4, 0x00040000)
+    malformed_object = _allow_ace(5, 0x00000002, object_flags=3)[:-10]
+
+    assert not manager._windows_allow_ace_is_trusted(
+        compound,
+        {"S-1-5-18"},
+        sid_decoder=lambda _ace, _offset: "S-1-5-18",
+    )
+    assert not manager._windows_allow_ace_is_trusted(
+        malformed_object,
+        {"S-1-5-18"},
+        sid_decoder=lambda _ace, _offset: "S-1-5-18",
+    )
+
+
+@pytest.mark.parametrize(
+    "mask",
+    [
+        0x00000002,
+        0x00010000,
+        0x00040000,
+        0x00080000,
+        0x10000000,
+        0x40000000,
+    ],
+)
+def test_windows_dacl_rejects_every_sensitive_write_mask(mask: int) -> None:
+    ace = _allow_ace(0, mask)
+
+    assert not manager._windows_allow_ace_is_trusted(
+        ace,
+        {"S-1-5-18"},
+        sid_decoder=lambda _ace, _offset: "S-1-5-32-545",
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL boundary")
+def test_windows_live_security_descriptor_roundtrip(tmp_path: Path) -> None:
+    source = tmp_path / "source.txt"
+    replacement = tmp_path / "replacement.txt"
+    source.write_text("source", encoding="utf-8")
+    replacement.write_text("replacement", encoding="utf-8")
+    security = manager._capture_windows_security(source)
+
+    assert security.trusted_dacl
+    manager._apply_windows_security(replacement, security)
+    applied = manager._capture_windows_security(replacement)
+    assert applied.owner_sid == security.owner_sid
+    assert applied.dacl == security.dacl
+    assert applied.dacl_protected == security.dacl_protected
+
+
 
 
 def test_manager_rejects_force_and_has_stable_status_output(tmp_path: Path) -> None:

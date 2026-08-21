@@ -7,6 +7,7 @@ import re
 import sqlite3
 import stat
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,12 @@ from uuid import uuid4
 
 from src.agent.persistence.redaction import redact_sensitive
 
-from .config import _is_reparse_point, _stat_identity, _stat_version
+from .config import (
+    _absolute_path_components,
+    _is_reparse_point,
+    _stat_identity,
+    _stat_version,
+)
 from .database import PROJECT_ROOT, connection, dict_factory, init_db
 from .errors import TaskErrorCode
 from .models import (
@@ -160,7 +166,24 @@ def _observation_records(
 
 
 _DATABASE_SIDECARS = ("-wal", "-shm", "-journal")
-_OBSERVATION_SNAPSHOT_ATTEMPTS = 2
+_OBSERVATION_SNAPSHOT_ATTEMPTS = 3
+_OBSERVATION_SNAPSHOT_MAX_BYTES = 512 * 1024 * 1024
+_OBSERVATION_COPY_CHUNK_BYTES = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class _DatabaseComponentSnapshot:
+    suffix: str
+    identity: tuple[int, int, int, int]
+    version: tuple[int, ...]
+    size: int
+
+
+@dataclass(frozen=True)
+class _DatabaseSnapshot:
+    path_chain: tuple[tuple[int, int, int, int], ...]
+    parent_version: tuple[int, ...]
+    components: tuple[_DatabaseComponentSnapshot, ...]
 
 
 class _ObservationSnapshotChanged(RuntimeError):
@@ -171,10 +194,17 @@ class _ObservationSnapshotChanged(RuntimeError):
 
 def _database_component_snapshot(
     path: Path,
-) -> tuple[tuple[str, tuple[int, int, int, int], tuple[int, ...]], ...]:
-    components: list[
-        tuple[str, tuple[int, int, int, int], tuple[int, ...]]
-    ] = []
+) -> _DatabaseSnapshot:
+    path_chain = []
+    for component in _absolute_path_components(path.parent):
+        try:
+            metadata = component.lstat()
+        except (OSError, RuntimeError):
+            raise ValueError("temporal observation unavailable") from None
+        if _is_reparse_point(metadata) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("temporal observation unavailable")
+        path_chain.append(_stat_identity(metadata))
+    components: list[_DatabaseComponentSnapshot] = []
     for suffix in ("", *_DATABASE_SIDECARS):
         candidate = path if not suffix else Path(f"{path}{suffix}")
         try:
@@ -188,106 +218,140 @@ def _database_component_snapshot(
         if _is_reparse_point(metadata) or not stat.S_ISREG(metadata.st_mode):
             raise ValueError("temporal observation unavailable")
         components.append(
-            (suffix, _stat_identity(metadata), _stat_version(metadata))
+            _DatabaseComponentSnapshot(
+                suffix=suffix,
+                identity=_stat_identity(metadata),
+                version=_stat_version(metadata),
+                size=metadata.st_size,
+            )
         )
-    return tuple(components)
-
-
-def _snapshot_has_sidecars(snapshot: object) -> bool:
-    return isinstance(snapshot, tuple) and any(
-        isinstance(item, tuple) and len(item) == 3 and item[0]
-        for item in snapshot
+    return _DatabaseSnapshot(
+        tuple(path_chain),
+        _stat_version(path.parent.lstat()),
+        tuple(components),
     )
 
 
 def _database_identity_changed(before: object, after: object) -> bool:
-    if (
-        not isinstance(before, tuple)
-        or not isinstance(after, tuple)
-        or not before
-        or not after
-        or not isinstance(before[0], tuple)
-        or not isinstance(after[0], tuple)
-        or len(before[0]) != 3
-        or len(after[0]) != 3
+    if not isinstance(before, _DatabaseSnapshot) or not isinstance(
+        after, _DatabaseSnapshot
     ):
         return False
-    return before[0][0] != "" or after[0][0] != "" or before[0][1] != after[0][1]
+    if before.path_chain != after.path_chain:
+        return True
+    before_components = {item.suffix: item for item in before.components}
+    after_components = {item.suffix: item for item in after.components}
+    main_before = before_components.get("")
+    main_after = after_components.get("")
+    if (
+        main_before is None
+        or main_after is None
+        or main_before.identity != main_after.identity
+    ):
+        return True
+    if any(
+        suffix in after_components
+        and item.identity != after_components[suffix].identity
+        for suffix, item in before_components.items()
+    ):
+        return True
+    if set(before_components) != set(after_components):
+        return False
+    return before.parent_version != after.parent_version
 
 
 def _expected_database_metadata(
     snapshot: object,
-) -> tuple[tuple[int, int, int, int], tuple[int, ...]] | None:
-    if (
-        isinstance(snapshot, tuple)
-        and snapshot
-        and isinstance(snapshot[0], tuple)
-        and len(snapshot[0]) == 3
-        and snapshot[0][0] == ""
-    ):
-        return snapshot[0][1], snapshot[0][2]
-    return None
+) -> dict[str, _DatabaseComponentSnapshot]:
+    if not isinstance(snapshot, _DatabaseSnapshot):
+        raise _ObservationSnapshotChanged(identity_changed=True)
+    return {item.suffix: item for item in snapshot.components}
 
 
 def _copy_database_snapshot(source: Path, destination: Path, snapshot: object) -> None:
     expected = _expected_database_metadata(snapshot)
-    source_descriptor: int | None = None
-    destination_descriptor: int | None = None
-    try:
-        source_descriptor = os.open(
-            source,
-            os.O_RDONLY
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_CLOEXEC", 0),
-        )
-        opened = os.fstat(source_descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or _is_reparse_point(opened)
-            or (
-                expected is not None
-                and (
-                    _stat_identity(opened) != expected[0]
-                    or _stat_version(opened) != expected[1]
-                )
+    copied_suffixes = ("", "-wal", "-journal")
+    expected_total = sum(
+        item.size for suffix, item in expected.items() if suffix in copied_suffixes
+    )
+    if expected_total > _OBSERVATION_SNAPSHOT_MAX_BYTES:
+        raise ValueError("temporal observation unavailable")
+    total = 0
+    source_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    if os.name == "posix":
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            raise ValueError("temporal observation unavailable")
+        source_flags |= no_follow
+    destination_flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    if os.name == "posix":
+        destination_flags |= getattr(os, "O_NOFOLLOW", 0)
+
+    for suffix in copied_suffixes:
+        component = expected.get(suffix)
+        if component is None:
+            continue
+        source_path = source if not suffix else Path(f"{source}{suffix}")
+        destination_path = destination if not suffix else Path(f"{destination}{suffix}")
+        source_descriptor: int | None = None
+        destination_descriptor: int | None = None
+        try:
+            source_descriptor = os.open(source_path, source_flags)
+            opened = os.fstat(source_descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or _is_reparse_point(opened)
+                or _stat_identity(opened) != component.identity
+            ):
+                raise _ObservationSnapshotChanged(identity_changed=True)
+            if (
+                _stat_version(opened) != component.version
+                or opened.st_size != component.size
+            ):
+                raise _ObservationSnapshotChanged()
+            destination_descriptor = os.open(
+                destination_path, destination_flags, 0o600
             )
-        ):
-            raise _ObservationSnapshotChanged(
-                identity_changed=(
-                    expected is not None
-                    and _stat_identity(opened) != expected[0]
-                )
-            )
-        destination_descriptor = os.open(
-            destination,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_CLOEXEC", 0),
-            0o600,
+            while True:
+                chunk = os.read(source_descriptor, _OBSERVATION_COPY_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _OBSERVATION_SNAPSHOT_MAX_BYTES:
+                    raise ValueError("temporal observation unavailable")
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(destination_descriptor, view)
+                    if written <= 0:
+                        raise OSError("short snapshot write")
+                    view = view[written:]
+            after = os.fstat(source_descriptor)
+            if _stat_identity(after) != component.identity:
+                raise _ObservationSnapshotChanged(identity_changed=True)
+            if _stat_version(after) != component.version:
+                raise _ObservationSnapshotChanged()
+            os.fsync(destination_descriptor)
+        finally:
+            if destination_descriptor is not None:
+                os.close(destination_descriptor)
+            if source_descriptor is not None:
+                os.close(source_descriptor)
+
+    after_copy = _database_component_snapshot(source)
+    if after_copy != snapshot:
+        raise _ObservationSnapshotChanged(
+            identity_changed=_database_identity_changed(snapshot, after_copy)
         )
-        while True:
-            chunk = os.read(source_descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            view = memoryview(chunk)
-            while view:
-                written = os.write(destination_descriptor, view)
-                if written <= 0:
-                    raise OSError("short snapshot write")
-                view = view[written:]
-        after = os.fstat(source_descriptor)
-        if _stat_identity(opened) != _stat_identity(after):
-            raise _ObservationSnapshotChanged(identity_changed=True)
-        if _stat_version(opened) != _stat_version(after):
-            raise _ObservationSnapshotChanged()
-        os.fsync(destination_descriptor)
-    finally:
-        if destination_descriptor is not None:
-            os.close(destination_descriptor)
-        if source_descriptor is not None:
-            os.close(source_descriptor)
 
 
 def _query_read_only_observation_snapshot(
@@ -501,21 +565,18 @@ class ReadOnlyTemporalObservationStore:
             for attempt in range(_OBSERVATION_SNAPSHOT_ATTEMPTS):
                 before = _database_component_snapshot(self.db_path)
                 try:
-                    if _snapshot_has_sidecars(before):
-                        rows, counts = _query_read_only_observation_snapshot(
-                            self.db_path, start, end, bounded_limit
+                    with tempfile.TemporaryDirectory(
+                        prefix="medchat-observation-"
+                    ) as directory:
+                        private_directory = Path(directory)
+                        os.chmod(private_directory, 0o700)
+                        snapshot_path = private_directory / "tasks.sqlite"
+                        _copy_database_snapshot(
+                            self.db_path, snapshot_path, before
                         )
-                    else:
-                        with tempfile.TemporaryDirectory(
-                            prefix="medchat-observation-"
-                        ) as directory:
-                            snapshot_path = Path(directory) / "tasks.sqlite"
-                            _copy_database_snapshot(
-                                self.db_path, snapshot_path, before
-                            )
-                            rows, counts = _query_read_only_observation_snapshot(
-                                snapshot_path, start, end, bounded_limit
-                            )
+                        rows, counts = _query_read_only_observation_snapshot(
+                            snapshot_path, start, end, bounded_limit
+                        )
                     after = _database_component_snapshot(self.db_path)
                 except _ObservationSnapshotChanged as exc:
                     if exc.identity_changed:

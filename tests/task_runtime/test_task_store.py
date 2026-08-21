@@ -378,7 +378,10 @@ def test_read_only_observation_keeps_idle_database_and_sidecars_unchanged(tmp_pa
     assert _database_file_state(path) == before
 
 
-def test_read_only_observation_sees_committed_live_wal_state(tmp_path):
+def test_read_only_observation_sees_committed_live_wal_state_without_copying_shm(
+    tmp_path,
+    monkeypatch,
+):
     from src.task_runtime.store import ReadOnlyTemporalObservationStore
 
     path = tmp_path / "live-wal.sqlite"
@@ -416,6 +419,23 @@ def test_read_only_observation_sees_committed_live_wal_state(tmp_path):
         )
         writer.commit()
         assert type(path)(str(path) + "-wal").exists()
+        before = _database_file_state(path)
+        original_connect = sqlite3.connect
+        opened = []
+
+        def private_connect(database, *args, **kwargs):
+            uri = str(database)
+            opened.append(uri)
+            lexical = uri.removeprefix("file:").split("?", 1)[0]
+            if os.name == "nt":
+                lexical = lexical.lstrip("/")
+            private_path = Path(lexical)
+            assert private_path != path
+            assert Path(str(private_path) + "-wal").exists()
+            assert not Path(str(private_path) + "-shm").exists()
+            return original_connect(database, *args, **kwargs)
+
+        monkeypatch.setattr(runtime_store.sqlite3, "connect", private_connect)
 
         with ReadOnlyTemporalObservationStore(path) as reader:
             records = reader.list_temporal_observation(
@@ -425,6 +445,8 @@ def test_read_only_observation_sees_committed_live_wal_state(tmp_path):
 
         assert [record.task_id for record in records] == ["wal-task"]
         assert terminal_count == 1
+        assert opened
+        assert _database_file_state(path) == before
     finally:
         writer.close()
 
@@ -467,6 +489,7 @@ def test_read_only_observation_uses_ro_query_transaction_and_batched_counts(
 
     normalized = [statement.strip().upper() for statement in statements]
     assert uris and all("mode=ro" in uri and "immutable" not in uri for uri in uris)
+    assert all(str(path) not in uri for uri in uris)
     assert any(statement.startswith("PRAGMA QUERY_ONLY") for statement in normalized)
     assert sum(statement == "BEGIN" for statement in normalized) == 1
     assert sum("FROM TASK_EVENTS" in statement for statement in normalized) == 1
@@ -509,6 +532,84 @@ def test_read_only_observation_detects_database_path_swap_before_open(
             )
 
 
+def test_read_only_observation_detects_source_replace_query_restore(
+    tmp_path,
+    monkeypatch,
+):
+    from src.task_runtime.store import ReadOnlyTemporalObservationStore
+
+    path = tmp_path / "tasks.sqlite"
+    replacement = tmp_path / "replacement.sqlite"
+    held = tmp_path / "held.sqlite"
+    start = datetime(2026, 8, 21, 10, tzinfo=timezone.utc)
+    _finish_observation_task(
+        TaskStore(path), "original-task", finished_at=start + timedelta(minutes=1)
+    )
+    _finish_observation_task(
+        TaskStore(replacement),
+        "replacement-task",
+        finished_at=start + timedelta(minutes=1),
+    )
+    original_query = runtime_store._query_read_only_observation_snapshot
+
+    def replace_query_restore(private_path, *args, **kwargs):
+        os.replace(path, held)
+        os.replace(replacement, path)
+        try:
+            return original_query(private_path, *args, **kwargs)
+        finally:
+            os.replace(path, replacement)
+            os.replace(held, path)
+
+    monkeypatch.setattr(
+        runtime_store,
+        "_query_read_only_observation_snapshot",
+        replace_query_restore,
+    )
+
+    with pytest.raises(ValueError, match=r"^temporal observation unavailable$"):
+        with ReadOnlyTemporalObservationStore(path) as reader:
+            reader.list_temporal_observation(start, start + timedelta(hours=1))
+
+
+def test_read_only_observation_snapshot_cap_cleans_private_directory(
+    tmp_path,
+    monkeypatch,
+):
+    from src.task_runtime.store import ReadOnlyTemporalObservationStore
+
+    path = tmp_path / "capped.sqlite"
+    TaskStore(path)
+    start = datetime(2026, 8, 21, 10, tzinfo=timezone.utc)
+    created = []
+    original_temporary_directory = runtime_store.tempfile.TemporaryDirectory
+
+    def tracked_temporary_directory(*args, **kwargs):
+        kwargs["dir"] = tmp_path
+        context = original_temporary_directory(*args, **kwargs)
+        created.append(Path(context.name))
+        return context
+
+    monkeypatch.setattr(
+        runtime_store,
+        "_OBSERVATION_SNAPSHOT_MAX_BYTES",
+        1,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_store.tempfile,
+        "TemporaryDirectory",
+        tracked_temporary_directory,
+    )
+
+    with pytest.raises(ValueError, match=r"^temporal observation unavailable$"):
+        with ReadOnlyTemporalObservationStore(path) as reader:
+            reader.list_temporal_observation(start, start + timedelta(hours=1))
+
+    assert created
+    assert all(not directory.exists() for directory in created)
+
+
 def _task_store_symlink_or_skip(link: Path, target: Path) -> None:
     try:
         link.symlink_to(target)
@@ -545,7 +646,7 @@ def test_read_only_observation_rejects_reparse_sidecar(tmp_path):
     assert target.read_bytes() == b"PRIVATE_WAL_CANARY"
 
 
-def test_read_only_observation_retries_one_transient_component_change(
+def test_read_only_observation_retries_one_transient_sidecar_race(
     tmp_path,
     monkeypatch,
 ):
@@ -557,19 +658,24 @@ def test_read_only_observation_retries_one_transient_component_change(
     _finish_observation_task(
         store, "task-1", finished_at=start + timedelta(minutes=1)
     )
-    snapshots = iter(("first", "changed", "stable", "stable"))
     calls = []
+    original_copy = runtime_store._copy_database_snapshot
+    journal = Path(str(path) + "-journal")
 
-    def transient(_path):
-        value = next(snapshots)
-        calls.append(value)
-        return value
+    def transient(*args, **kwargs):
+        calls.append("copy")
+        if len(calls) == 1:
+            journal.write_bytes(b"transient journal")
+            try:
+                return original_copy(*args, **kwargs)
+            finally:
+                journal.unlink(missing_ok=True)
+        return original_copy(*args, **kwargs)
 
     monkeypatch.setattr(
         runtime_store,
-        "_database_component_snapshot",
+        "_copy_database_snapshot",
         transient,
-        raising=False,
     )
 
     with ReadOnlyTemporalObservationStore(path) as reader:
@@ -578,7 +684,7 @@ def test_read_only_observation_retries_one_transient_component_change(
         )
 
     assert [record.task_id for record in records] == ["task-1"]
-    assert calls == ["first", "changed", "stable", "stable"]
+    assert calls == ["copy", "copy"]
 
 
 def test_read_only_observation_is_consistent_with_concurrent_wal_commit(

@@ -70,6 +70,17 @@ class _WindowsSecurityDescriptor:
     trusted_dacl: bool
 
 
+@dataclass(frozen=True)
+class _TrustedPathBoundary:
+    exists: bool
+    file_identity: tuple[int, int, int, int] | None
+    file_version: tuple[int, ...] | None
+    file_security: object | None
+    parent_identity: tuple[int, int, int, int]
+    parent_version: tuple[int, ...]
+    parent_security: object | None
+
+
 def _normalized_path(value: Path | str) -> Path:
     path = Path(value)
     if not path.parts or any(part in {".", ".."} for part in path.parts):
@@ -207,6 +218,7 @@ def _decode_rollout(snapshot: _SafeSnapshot) -> tuple[list[str], int]:
     if text and not lines:
         raise ValueError("invalid rollout config")
     matches: list[str] = []
+    assignment_names: set[str] = set()
     for line in lines:
         core = line.rstrip("\r\n")
         if "\r" in core or "\n" in core:
@@ -217,6 +229,10 @@ def _decode_rollout(snapshot: _SafeSnapshot) -> tuple[list[str], int]:
         if _ASSIGNMENT.fullmatch(core) is None:
             raise ValueError("invalid rollout config")
         assignment = core.removeprefix("export ")
+        name = assignment.split("=", 1)[0]
+        if name in assignment_names:
+            raise ValueError("duplicate rollout config assignment")
+        assignment_names.add(name)
         if assignment.startswith(ROLLOUT_PREFIX):
             matches.append(assignment)
     if len(matches) != 1:
@@ -325,6 +341,85 @@ def _windows_current_user_sid() -> str:
         kernel32.CloseHandle(token)
 
 
+_WINDOWS_WRITE_ACCESS_MASK = (
+    0x00000002  # FILE_WRITE_DATA / FILE_ADD_FILE
+    | 0x00000004  # FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY
+    | 0x00000010  # FILE_WRITE_EA
+    | 0x00000040  # FILE_DELETE_CHILD
+    | 0x00000100  # FILE_WRITE_ATTRIBUTES
+    | 0x00010000  # DELETE
+    | 0x00040000  # WRITE_DAC
+    | 0x00080000  # WRITE_OWNER
+    | 0x10000000  # GENERIC_ALL
+    | 0x40000000  # GENERIC_WRITE
+)
+_WINDOWS_ALLOW_ACE_TYPES = frozenset({0, 5, 9, 11})
+_WINDOWS_UNKNOWN_ALLOW_ACE_TYPES = frozenset({4})
+_WINDOWS_KNOWN_NON_ALLOW_ACE_TYPES = frozenset(
+    {1, 2, 3, 6, 7, 8, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21}
+)
+
+
+def _windows_trusted_sids() -> frozenset[str]:
+    return frozenset(
+        {
+            _windows_current_user_sid(),
+            "S-1-5-18",  # LocalSystem
+            "S-1-5-32-544",  # Builtin Administrators
+            "S-1-3-4",  # OWNER RIGHTS, bound to the separately validated owner
+        }
+    )
+
+
+def _windows_allow_ace_is_trusted(
+    ace: bytes,
+    trusted_sids: set[str] | frozenset[str],
+    *,
+    sid_decoder=None,
+) -> bool:
+    """Reject any writable allow ACE whose SID is outside the trusted set."""
+
+    if not isinstance(ace, bytes) or len(ace) < 8:
+        return False
+    ace_type = ace[0]
+    ace_size = int.from_bytes(ace[2:4], "little")
+    if ace_size != len(ace):
+        return False
+    mask = int.from_bytes(ace[4:8], "little")
+    if ace_type in _WINDOWS_UNKNOWN_ALLOW_ACE_TYPES:
+        return False
+    if ace_type not in _WINDOWS_ALLOW_ACE_TYPES:
+        return ace_type in _WINDOWS_KNOWN_NON_ALLOW_ACE_TYPES
+    if not mask & _WINDOWS_WRITE_ACCESS_MASK:
+        return True
+    sid_offset = 8
+    if ace_type in {5, 11}:
+        if len(ace) < 12:
+            return False
+        object_flags = int.from_bytes(ace[8:12], "little")
+        if object_flags & ~0x3:
+            return False
+        sid_offset = 12 + (16 if object_flags & 1 else 0) + (
+            16 if object_flags & 2 else 0
+        )
+    if sid_offset >= len(ace):
+        return False
+    try:
+        if sid_decoder is None:
+            import ctypes
+            from ctypes import wintypes
+
+            buffer = ctypes.create_string_buffer(ace)
+            sid = _windows_sid_string(
+                wintypes.LPVOID(ctypes.addressof(buffer) + sid_offset)
+            )
+        else:
+            sid = sid_decoder(ace, sid_offset)
+    except Exception:
+        return False
+    return type(sid) is str and sid in trusted_sids
+
+
 def _capture_windows_security(path: Path) -> _WindowsSecurityDescriptor:
     import ctypes
     from ctypes import wintypes
@@ -373,21 +468,17 @@ def _capture_windows_security(path: Path) -> _WindowsSecurityDescriptor:
         dacl, ctypes.byref(acl_info), ctypes.sizeof(acl_info), 2
     ):
         raise ValueError("unsafe rollout trust boundary")
-    broad_sids = {"S-1-1-0", "S-1-5-11", "S-1-5-32-545"}
-    write_mask = 0x500D0116
+    trusted_sids = _windows_trusted_sids()
     trusted_dacl = True
     for index in range(acl_info.ace_count):
         ace = wintypes.LPVOID()
         if not advapi32.GetAce(dacl, index, ctypes.byref(ace)):
             raise ValueError("unsafe rollout trust boundary")
         ace_address = int(ace.value)
-        ace_type = ctypes.c_ubyte.from_address(ace_address).value
-        mask = ctypes.c_uint32.from_address(ace_address + 4).value
-        if ace_type == 0 and mask & write_mask:
-            sid_value = _windows_sid_string(wintypes.LPVOID(ace_address + 8))
-            if sid_value in broad_sids:
-                trusted_dacl = False
-        elif ace_type in {5, 9} and mask & write_mask:
+        ace_size = ctypes.c_uint16.from_address(ace_address + 2).value
+        if ace_size < 4 or not _windows_allow_ace_is_trusted(
+            ctypes.string_at(ace_address, ace_size), trusted_sids
+        ):
             trusted_dacl = False
 
     control = wintypes.WORD()
@@ -419,14 +510,14 @@ def _validate_windows_mutation_boundary(path: Path) -> _WindowsSecurityDescripto
         or not stat.S_ISDIR(parent.st_mode)
     ):
         raise ValueError("unsafe rollout trust boundary")
-    current_sid = _windows_current_user_sid()
+    trusted_sids = _windows_trusted_sids()
     source_security = _capture_windows_security(path)
     parent_security = _capture_windows_security(path.parent)
-    # Production mutation is limited to the current service identity; SYSTEM is
-    # naturally accepted when the service itself runs as LocalSystem.
+    # Production mutation is limited to the validated service owner or Windows
+    # service administrators, with writable ACEs restricted separately below.
     if (
-        source_security.owner_sid != current_sid
-        or parent_security.owner_sid != current_sid
+        source_security.owner_sid not in trusted_sids
+        or parent_security.owner_sid not in trusted_sids
         or not source_security.trusted_dacl
         or not parent_security.trusted_dacl
     ):
@@ -443,7 +534,7 @@ def _apply_windows_security(
         raise ValueError("unsafe rollout security")
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     descriptor = ctypes.create_string_buffer(security.descriptor)
-    information = 0x00000004 | (
+    information = 0x00000001 | 0x00000004 | (
         0x80000000 if security.dacl_protected else 0x20000000
     )
     if not advapi32.SetFileSecurityW(str(path), information, descriptor):
@@ -465,6 +556,85 @@ def _validate_mutation_boundary(path: Path) -> object | None:
         return None
     except Exception:
         raise ValueError("unsafe rollout trust boundary") from None
+
+
+def _capture_trusted_path_boundary(
+    value: Path | str,
+    *,
+    require_file: bool = True,
+) -> _TrustedPathBoundary:
+    path = _normalized_path(value)
+    _path_identities(path, include_final=False)
+    try:
+        parent = path.parent.lstat()
+    except (OSError, RuntimeError):
+        raise ValueError("unsafe file trust boundary") from None
+    if _is_reparse_point(parent) or not stat.S_ISDIR(parent.st_mode):
+        raise ValueError("unsafe file trust boundary")
+    parent_security: object | None = None
+    if os.name == "posix":
+        if (
+            not _posix_expected_owner(parent)
+            or parent.st_mode & 0o022
+            or parent.st_mode & stat.S_ISVTX
+        ):
+            raise ValueError("unsafe file trust boundary")
+        parent_security = (
+            parent.st_uid,
+            parent.st_gid,
+            stat.S_IMODE(parent.st_mode),
+        )
+    else:
+        parent_security = _capture_windows_security(path.parent)
+        if (
+            parent_security.owner_sid not in _windows_trusted_sids()
+            or not parent_security.trusted_dacl
+        ):
+            raise ValueError("unsafe file trust boundary")
+
+    try:
+        source = path.lstat()
+    except FileNotFoundError:
+        if require_file:
+            raise ValueError("unsafe file trust boundary") from None
+        return _TrustedPathBoundary(
+            False,
+            None,
+            None,
+            None,
+            _stat_identity(parent),
+            _stat_version(parent),
+            parent_security,
+        )
+    except (OSError, RuntimeError):
+        raise ValueError("unsafe file trust boundary") from None
+    if _is_reparse_point(source) or not stat.S_ISREG(source.st_mode):
+        raise ValueError("unsafe file trust boundary")
+    file_security: object | None = None
+    if os.name == "posix":
+        if not _posix_expected_owner(source) or source.st_mode & 0o022:
+            raise ValueError("unsafe file trust boundary")
+        file_security = (
+            source.st_uid,
+            source.st_gid,
+            stat.S_IMODE(source.st_mode),
+        )
+    else:
+        file_security = _capture_windows_security(path)
+        if (
+            file_security.owner_sid not in _windows_trusted_sids()
+            or not file_security.trusted_dacl
+        ):
+            raise ValueError("unsafe file trust boundary")
+    return _TrustedPathBoundary(
+        True,
+        _stat_identity(source),
+        _stat_version(source),
+        file_security,
+        _stat_identity(parent),
+        _stat_version(parent),
+        parent_security,
+    )
 
 
 def _validate_lock_target(path: Path) -> None:
@@ -760,12 +930,15 @@ def _strict_json_object(content: bytes) -> dict[str, object]:
 
 
 def _load_evidence(path: Path) -> tuple[RolloutEvidence, str]:
+    boundary = _capture_trusted_path_boundary(path)
     snapshot = _safe_read_snapshot(
         path,
         MAX_EVIDENCE_FILE_BYTES,
         reject_posix_writable=True,
     )
     payload = _strict_json_object(snapshot.content)
+    if _capture_trusted_path_boundary(path) != boundary:
+        raise ValueError("invalid evidence report")
     digest = payload.pop("sha256", None)
     if type(digest) is not str or _SHA256.fullmatch(digest) is None:
         raise ValueError("invalid evidence report")
