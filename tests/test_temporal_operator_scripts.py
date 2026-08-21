@@ -27,6 +27,32 @@ OBSERVE_SCRIPT = PROJECT_ROOT / "scripts" / "observe_temporal_canary.py"
 PYTHON = sys.executable
 
 
+class _StatProxy:
+    def __init__(self, metadata: object, **overrides: int):
+        self._metadata = metadata
+        self._overrides = overrides
+
+    def __getattr__(self, name: str):
+        if name in self._overrides:
+            return self._overrides[name]
+        return getattr(self._metadata, name)
+
+
+def _shift_windows_handle_ctime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_fstat = os.fstat
+
+    def shifted(file_descriptor: int):
+        metadata = original_fstat(file_descriptor)
+        return _StatProxy(
+            metadata,
+            st_ctime_ns=metadata.st_ctime_ns + 1_000_000_000,
+        )
+
+    monkeypatch.setattr(os, "fstat", shifted)
+
+
 def _write_env(tmp_path: Path, level: int = 5, *, newline: str = "\n") -> Path:
     path = tmp_path / "medchat.env"
     path.write_bytes(
@@ -121,6 +147,64 @@ def test_promote_updates_only_percent_atomically_and_preserves_crlf(tmp_path: Pa
     assert "SAFE_UNRELATED" not in result.stdout
     assert "secret-canary" not in result.stdout + result.stderr
     assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows metadata regression")
+def test_windows_export_promotion_accepts_handle_path_ctime_difference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = tmp_path / "export.env"
+    env_file.write_bytes(
+        b"# retained\r\n"
+        b"export MEDCHAT_TEMPORAL_CANARY_PERCENT=5\r\n"
+    )
+    evidence = _write_evidence(tmp_path)
+    _shift_windows_handle_ctime(monkeypatch)
+
+    code = manager.main(
+        [
+            "promote",
+            "--env-file",
+            str(env_file),
+            "--to",
+            "10",
+            "--evidence",
+            str(evidence),
+            "--reason",
+            "stable windows identity",
+        ]
+    )
+
+    assert code == 0
+    assert env_file.read_bytes() == (
+        b"# retained\r\n"
+        b"export MEDCHAT_TEMPORAL_CANARY_PERCENT=10\r\n"
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows metadata regression")
+def test_windows_repeated_real_file_reads_keep_valid_evidence_and_artifacts(
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(timezone.utc)
+    env_file = tmp_path / "export.env"
+    env_file.write_text(
+        "export MEDCHAT_TEMPORAL_CANARY_PERCENT=5\n",
+        encoding="utf-8",
+    )
+    evidence = _write_evidence(tmp_path)
+    store, staging, _marker = _observer_fixture(tmp_path, now)
+    record = store.records[0]
+
+    for _ in range(100):
+        assert manager.read_rollout_config(env_file)[1] == 5
+        assert manager._load_evidence(evidence)[0].status == "passed"
+        assert observer._artifact_evidence(
+            record,
+            record.result,
+            staging_root=staging,
+        ) == (True, True)
 
 
 @pytest.mark.parametrize(
@@ -383,6 +467,74 @@ def test_identity_change_before_replace_fails_closed_and_cleans_temp(
     assert not list(tmp_path.glob("*.tmp"))
 
 
+@pytest.mark.parametrize("mutation", ["size", "mtime", "replacement"])
+def test_rollout_snapshot_rejects_file_version_or_identity_mutation(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    env_file = _write_env(tmp_path)
+    snapshot = manager._safe_read_snapshot(env_file, manager.MAX_ROLLOUT_BYTES)
+
+    if mutation == "size":
+        env_file.write_bytes(env_file.read_bytes() + b"# changed\n")
+    elif mutation == "mtime":
+        metadata = env_file.stat()
+        os.utime(
+            env_file,
+            ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1_000_000_000),
+        )
+    else:
+        replacement = tmp_path / "replacement.env"
+        replacement.write_bytes(env_file.read_bytes())
+        os.replace(replacement, env_file)
+
+    with pytest.raises(ValueError, match="identity changed"):
+        manager._assert_unchanged(env_file, snapshot)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows metadata regression")
+def test_windows_rollout_snapshot_rejects_same_size_content_mutation(
+    tmp_path: Path,
+) -> None:
+    env_file = _write_env(tmp_path)
+    snapshot = manager._safe_read_snapshot(env_file, manager.MAX_ROLLOUT_BYTES)
+    metadata = env_file.stat()
+    changed = env_file.read_bytes().replace(b"secret-canary", b"secret-canaru")
+    assert len(changed) == len(snapshot.content)
+    env_file.write_bytes(changed)
+    os.utime(env_file, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+
+    with pytest.raises(ValueError, match="identity changed"):
+        manager._assert_unchanged(env_file, snapshot)
+
+
+@pytest.mark.parametrize("field", ["st_size", "st_mtime_ns"])
+def test_safe_reader_rejects_handle_version_change_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    env_file = _write_env(tmp_path)
+    original_fstat = os.fstat
+    calls = 0
+
+    def changed(file_descriptor: int):
+        nonlocal calls
+        metadata = original_fstat(file_descriptor)
+        calls += 1
+        if calls == 2:
+            return _StatProxy(
+                metadata,
+                **{field: getattr(metadata, field) + 1},
+            )
+        return metadata
+
+    monkeypatch.setattr(os, "fstat", changed)
+
+    with pytest.raises(ValueError, match="changed while reading"):
+        manager._safe_read_snapshot(env_file, manager.MAX_ROLLOUT_BYTES)
+
+
 def test_rollback_never_loads_evidence_or_task_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -521,6 +673,53 @@ def test_observer_builds_passed_rollout_evidence_from_safe_projections(
         "C:/private/path", str(tmp_path),
     ):
         assert canary not in encoded
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows metadata regression")
+def test_windows_observer_accepts_valid_artifact_with_handle_path_ctime_difference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    store, staging, marker = _observer_fixture(tmp_path, now)
+    monkeypatch.setattr(observer, "_task_staging_root", lambda: staging)
+    _shift_windows_handle_ctime(monkeypatch)
+
+    report = observer.collect_observation(
+        db_path=tmp_path / "tasks.sqlite",
+        current_level=5,
+        window_start=now - timedelta(hours=2),
+        window_end=now - timedelta(minutes=1),
+        prometheus_url="http://127.0.0.1:9090",
+        backup_state=marker,
+        baseline_p95_seconds=40.0,
+        now=now,
+        observation_store_factory=lambda _path: store,
+        prometheus_fetcher=_passed_prometheus,
+    )
+
+    assert report["status"] == "passed"
+    assert report["sample_count"] == 20
+    assert report["gates"]["artifact_integrity"] == "passed"
+
+
+def test_observer_artifact_hash_rejects_same_size_content_mutation(
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(timezone.utc)
+    store, staging, _marker = _observer_fixture(tmp_path, now)
+    record = store.records[0]
+    artifact = staging / record.task_id / record.result["pose_file"]
+    metadata = artifact.stat()
+    original = artifact.read_bytes()
+    artifact.write_bytes(b"X" * len(original))
+    os.utime(artifact, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+
+    assert observer._artifact_evidence(
+        record,
+        record.result,
+        staging_root=staging,
+    ) == (True, False)
 
 
 def test_observer_prometheus_unavailable_is_partial_not_failed(

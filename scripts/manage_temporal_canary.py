@@ -291,13 +291,19 @@ def _rollout_lock(env_path: Path) -> Iterator[None]:
 
 def _assert_unchanged(path: Path, snapshot: _SafeSnapshot) -> None:
     try:
-        current = path.lstat()
-    except (OSError, RuntimeError):
+        current = _safe_read_snapshot(
+            path,
+            MAX_ROLLOUT_BYTES,
+            reject_posix_writable=True,
+        )
+    except (OSError, RuntimeError, ValueError):
         raise ValueError("rollout config identity changed") from None
+    # The adjacent lock serializes managers, while this exact-content reread
+    # catches same-size rewrites whose mtime was restored before replacement.
     if (
-        _is_reparse_point(current)
-        or _stat_version(current) != snapshot.path_version
-        or _path_identities(path) != snapshot.path_identities
+        current.path_identities != snapshot.path_identities
+        or current.path_version != snapshot.path_version
+        or current.content != snapshot.content
     ):
         raise ValueError("rollout config identity changed")
 
@@ -415,6 +421,8 @@ def _load_evidence(path: Path) -> tuple[RolloutEvidence, str]:
     digest = payload.pop("sha256", None)
     if type(digest) is not str or _SHA256.fullmatch(digest) is None:
         raise ValueError("invalid evidence report")
+    # Metadata checks close read races; RolloutEvidence binds authorization to
+    # the canonical payload hash even if content metadata could be preserved.
     return RolloutEvidence.from_payload(payload, digest), digest
 
 

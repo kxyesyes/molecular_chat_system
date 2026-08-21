@@ -194,11 +194,15 @@ def _stat_identity(metadata: object) -> tuple[int, int, int, int]:
 
 
 def _stat_version(metadata: object) -> tuple[int, ...]:
-    return _stat_identity(metadata) + (
+    version = (
         int(getattr(metadata, "st_size", -1)),
         int(getattr(metadata, "st_mtime_ns", -1)),
-        int(getattr(metadata, "st_ctime_ns", -1)),
     )
+    if os.name == "posix":
+        return version + (int(getattr(metadata, "st_ctime_ns", -1)),)
+    # Windows may expose different creation-time values through fstat/lstat for
+    # one file. Stable identity is checked separately; hashes authenticate data.
+    return version
 
 
 def _path_identity_snapshot(value: Path) -> tuple[tuple[int, int, int, int], ...]:

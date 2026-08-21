@@ -429,6 +429,8 @@ def _artifact_evidence(
         snapshot = _safe_read_snapshot(artifact_file, MAX_ARTIFACT_BYTES)
     except ValueError:
         return False, False
+    # Stable metadata guards the read; the digest detects same-size in-place
+    # content changes that filesystem version fields alone cannot authenticate.
     actual = hashlib.sha256(snapshot.content).hexdigest()
     return True, actual == digest
 

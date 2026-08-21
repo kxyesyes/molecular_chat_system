@@ -1165,6 +1165,43 @@ def test_safe_backup_state_reader_returns_bytes(tmp_path: Path) -> None:
     assert content == b'{"status":"passed"}'
 
 
+def test_stat_identity_and_version_use_distinct_platform_stable_fields() -> None:
+    base = SimpleNamespace(
+        st_dev=1,
+        st_ino=2,
+        st_mode=stat.S_IFREG,
+        st_file_attributes=0,
+        st_size=10,
+        st_mtime_ns=20,
+        st_ctime_ns=30,
+    )
+    identity_changed = SimpleNamespace(**{**vars(base), "st_ino": 3})
+    ctime_changed = SimpleNamespace(**{**vars(base), "st_ctime_ns": 31})
+    size_changed = SimpleNamespace(**{**vars(base), "st_size": 11})
+    mtime_changed = SimpleNamespace(**{**vars(base), "st_mtime_ns": 21})
+
+    assert runtime_config._stat_identity(base) != runtime_config._stat_identity(
+        identity_changed
+    )
+    assert runtime_config._stat_version(base) == runtime_config._stat_version(
+        identity_changed
+    )
+    if os.name == "posix":
+        assert runtime_config._stat_version(base) != runtime_config._stat_version(
+            ctime_changed
+        )
+    else:
+        assert runtime_config._stat_version(base) == runtime_config._stat_version(
+            ctime_changed
+        )
+    assert runtime_config._stat_version(base) != runtime_config._stat_version(
+        size_changed
+    )
+    assert runtime_config._stat_version(base) != runtime_config._stat_version(
+        mtime_changed
+    )
+
+
 def test_safe_backup_state_reader_rejects_final_symlink(tmp_path: Path) -> None:
     target_dir = tmp_path / "target"
     target_dir.mkdir()
