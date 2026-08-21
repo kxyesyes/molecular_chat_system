@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import errno
+import os
+import stat
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+import src.task_runtime.config as runtime_config
 from src.task_runtime.config import PROJECT_ROOT, TaskRuntimeConfig
 
 
@@ -40,6 +45,34 @@ DANGEROUS_STAGING_ROOTS = tuple(
 def _clear_runtime_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ENVIRONMENT_VARIABLES:
         monkeypatch.delenv(name, raising=False)
+
+
+def _symlink_or_skip(
+    link: Path,
+    target: Path,
+    *,
+    target_is_directory: bool = False,
+) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except NotImplementedError:
+        if os.name == "nt":
+            pytest.skip("Windows symlinks are not supported")
+        raise
+    except OSError as exc:
+        unsupported_errnos = {errno.EACCES, errno.EPERM}
+        unsupported_errnos.update(
+            getattr(errno, name)
+            for name in ("ENOTSUP", "EOPNOTSUPP")
+            if hasattr(errno, name)
+        )
+        unsupported_winerrors = {1, 50, 1314}
+        if os.name == "nt" and (
+            exc.errno in unsupported_errnos
+            or getattr(exc, "winerror", None) in unsupported_winerrors
+        ):
+            pytest.skip("Windows symlink privilege or support is unavailable")
+        raise
 
 
 def _direct_config(**overrides: Any) -> TaskRuntimeConfig:
@@ -385,10 +418,7 @@ def test_symlink_to_file_staging_root_fails_closed(
     target = tmp_path / "target-file"
     target.write_text("not staging", encoding="utf-8")
     staging_link = tmp_path / "staging-link"
-    try:
-        staging_link.symlink_to(target)
-    except (NotImplementedError, OSError) as exc:
-        pytest.skip(f"file symlinks unavailable: {type(exc).__name__}")
+    _symlink_or_skip(staging_link, target)
     monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
     monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "100")
     monkeypatch.setenv("MEDCHAT_TASK_STAGING_ROOT", str(staging_link))
@@ -409,10 +439,7 @@ def test_child_of_symlink_to_file_staging_root_fails_closed(
     target = tmp_path / "target-file"
     target.write_text("not staging", encoding="utf-8")
     staging_link = tmp_path / "staging-link"
-    try:
-        staging_link.symlink_to(target)
-    except (NotImplementedError, OSError) as exc:
-        pytest.skip(f"file symlinks unavailable: {type(exc).__name__}")
+    _symlink_or_skip(staging_link, target)
     staging_root = staging_link / "future-child"
     monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
     monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "100")
@@ -883,10 +910,7 @@ def test_symlink_backup_state_file_fails_closed(
     link_dir = tmp_path / "link"
     link_dir.mkdir()
     link = link_dir / "latest-verified.json"
-    try:
-        link.symlink_to(target)
-    except (NotImplementedError, OSError) as exc:
-        pytest.skip(f"file symlinks unavailable: {type(exc).__name__}")
+    _symlink_or_skip(link, target)
     monkeypatch.setenv("MEDCHAT_TEMPORAL_BACKUP_STATE", str(link))
 
     config = TaskRuntimeConfig.from_env()
@@ -903,10 +927,7 @@ def test_symlink_directory_in_backup_state_path_fails_closed(
     target_dir = tmp_path / "target"
     target_dir.mkdir()
     link_dir = tmp_path / "linked-directory"
-    try:
-        link_dir.symlink_to(target_dir, target_is_directory=True)
-    except (NotImplementedError, OSError) as exc:
-        pytest.skip(f"directory symlinks unavailable: {type(exc).__name__}")
+    _symlink_or_skip(link_dir, target_dir, target_is_directory=True)
     backup_state = link_dir / "latest-verified.json"
     monkeypatch.setenv("MEDCHAT_TEMPORAL_BACKUP_STATE", str(backup_state))
 
@@ -914,6 +935,157 @@ def test_symlink_directory_in_backup_state_path_fails_closed(
 
     assert config.warnings == ("invalid_temporal_backup_state",)
     assert config.to_safe_dict()["backup_state_path_configured"] is False
+
+
+def test_windows_junction_reparse_attribute_is_detected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    metadata = SimpleNamespace(
+        st_file_attributes=reparse_attribute,
+        st_mode=stat.S_IFDIR,
+    )
+    component = SimpleNamespace(lstat=lambda: metadata)
+
+    assert runtime_config._is_reparse_point(metadata) is True
+    monkeypatch.setattr(
+        runtime_config,
+        "_absolute_path_components",
+        lambda _value: (component,),
+    )
+    assert runtime_config._has_reparse_component(Path("C:/junction")) is True
+
+
+def test_backup_state_rejects_injected_reparse_component(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    backup_state = tmp_path / "latest-verified.json"
+    backup_state.write_bytes(b"{}")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BACKUP_STATE", str(backup_state))
+    original = runtime_config._has_reparse_component
+    monkeypatch.setattr(
+        runtime_config,
+        "_has_reparse_component",
+        lambda value: value == backup_state or original(value),
+    )
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert config.warnings == ("invalid_temporal_backup_state",)
+
+
+def test_safe_backup_state_reader_returns_bytes(tmp_path: Path) -> None:
+    backup_state = tmp_path / "latest-verified.json"
+    backup_state.write_bytes(b'{"status":"passed"}')
+
+    content = runtime_config.read_temporal_backup_state(backup_state)
+
+    assert content == b'{"status":"passed"}'
+
+
+def test_safe_backup_state_reader_rejects_final_symlink(tmp_path: Path) -> None:
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target = target_dir / "latest-verified.json"
+    target.write_bytes(b"{}")
+    link_dir = tmp_path / "link"
+    link_dir.mkdir()
+    link = link_dir / "latest-verified.json"
+    _symlink_or_skip(link, target)
+
+    with pytest.raises(ValueError) as exc_info:
+        runtime_config.read_temporal_backup_state(link)
+
+    assert str(link) not in str(exc_info.value)
+
+
+def test_safe_backup_state_reader_rejects_injected_final_reparse(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_state = tmp_path / "latest-verified.json"
+    backup_state.write_bytes(b"{}")
+    original = runtime_config._is_reparse_point
+
+    def final_component_is_reparse(metadata: object) -> bool:
+        return stat.S_ISREG(getattr(metadata, "st_mode", 0)) or original(metadata)
+
+    monkeypatch.setattr(
+        runtime_config,
+        "_is_reparse_point",
+        final_component_is_reparse,
+    )
+
+    with pytest.raises(ValueError):
+        runtime_config.read_temporal_backup_state(backup_state)
+
+
+def test_safe_backup_state_reader_rejects_parent_identity_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_state = tmp_path / "latest-verified.json"
+    backup_state.write_bytes(b"{}")
+    original = runtime_config._path_identity_snapshot
+    initial = original(backup_state)
+    replacements = iter(
+        (
+            initial,
+            initial[:-2] + (("replacement-parent",),) + initial[-1:],
+        )
+    )
+    monkeypatch.setattr(
+        runtime_config,
+        "_path_identity_snapshot",
+        lambda _path: next(replacements),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        runtime_config.read_temporal_backup_state(backup_state)
+
+    assert str(backup_state) not in str(exc_info.value)
+
+
+def test_safe_backup_state_reader_rejects_file_identity_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_state = tmp_path / "latest-verified.json"
+    backup_state.write_bytes(b"{}")
+    original = runtime_config._path_identity_snapshot
+    initial = original(backup_state)
+    replacements = iter(
+        (
+            initial,
+            initial[:-1] + (("replacement-file",),),
+        )
+    )
+    monkeypatch.setattr(
+        runtime_config,
+        "_path_identity_snapshot",
+        lambda _path: next(replacements),
+    )
+
+    with pytest.raises(ValueError):
+        runtime_config.read_temporal_backup_state(backup_state)
+
+
+def test_safe_backup_state_reader_rejects_oversized_file(tmp_path: Path) -> None:
+    backup_state = tmp_path / "latest-verified.json"
+    backup_state.write_bytes(b"x" * (runtime_config.MAX_BACKUP_STATE_BYTES + 1))
+
+    with pytest.raises(ValueError):
+        runtime_config.read_temporal_backup_state(backup_state)
+
+
+def test_safe_backup_state_reader_rejects_non_regular_file(tmp_path: Path) -> None:
+    backup_state = tmp_path / "latest-verified.json"
+    backup_state.mkdir()
+
+    with pytest.raises(ValueError):
+        runtime_config.read_temporal_backup_state(backup_state)
 
 
 @pytest.mark.parametrize(
@@ -975,10 +1147,7 @@ def test_direct_constructor_rejects_child_of_symlink_to_file(
     target = tmp_path / "target-file"
     target.write_text("not staging", encoding="utf-8")
     staging_link = tmp_path / "staging-link"
-    try:
-        staging_link.symlink_to(target)
-    except (NotImplementedError, OSError) as exc:
-        pytest.skip(f"file symlinks unavailable: {type(exc).__name__}")
+    _symlink_or_skip(staging_link, target)
 
     with pytest.raises(ValueError):
         _direct_config(staging_root=(staging_link / "future-child").resolve())
@@ -1024,6 +1193,37 @@ def test_direct_constructor_accepts_production_runtime_boundaries(
     assert config.to_safe_dict()["backup_state_path_configured"] is True
 
 
+def test_direct_constructor_preserves_legacy_positional_arguments() -> None:
+    config = TaskRuntimeConfig(
+        "local",
+        0,
+        "127.0.0.1:7233",
+        "default",
+        "medchat-docking",
+        1,
+        (PROJECT_ROOT / "scratch/task_inputs").resolve(),
+        ("invalid_temporal_address",),
+        True,
+        True,
+    )
+
+    assert config.warnings == ("invalid_temporal_address",)
+    assert config.to_safe_dict()["temporal_address_configured"] is True
+    assert config.to_safe_dict()["staging_root_configured"] is True
+    assert config.worker_metrics_address == "127.0.0.1"
+    assert config.worker_metrics_port == 9465
+
+
+@pytest.mark.parametrize("value", [1, 40, 60, 40.5])
+def test_direct_constructor_normalizes_numeric_baseline_to_float(
+    value: int | float,
+) -> None:
+    config = _direct_config(baseline_p95_seconds=value)
+
+    assert config.baseline_p95_seconds == float(value)
+    assert type(config.baseline_p95_seconds) is float
+
+
 def test_direct_constructor_accepts_existing_regular_backup_state(
     tmp_path: Path,
 ) -> None:
@@ -1044,10 +1244,7 @@ def test_direct_constructor_rejects_symlink_backup_path(tmp_path: Path) -> None:
     target_dir = tmp_path / "target"
     target_dir.mkdir()
     link_dir = tmp_path / "linked-directory"
-    try:
-        link_dir.symlink_to(target_dir, target_is_directory=True)
-    except (NotImplementedError, OSError) as exc:
-        pytest.skip(f"directory symlinks unavailable: {type(exc).__name__}")
+    _symlink_or_skip(link_dir, target_dir, target_is_directory=True)
 
     with pytest.raises(ValueError):
         _direct_config(backup_state_path=link_dir / "latest-verified.json")
@@ -1092,7 +1289,7 @@ def test_direct_constructor_rejects_misordered_or_duplicate_warnings() -> None:
         {"worker_metrics_port": True},
         {"worker_metrics_port": 9465.0},
         {"baseline_p95_seconds": True},
-        {"baseline_p95_seconds": 40},
+        {"baseline_p95_seconds": "40"},
         {"baseline_p95_seconds": float("nan")},
         {"baseline_p95_seconds": float("inf")},
         {"baseline_p95_seconds": 0.0},

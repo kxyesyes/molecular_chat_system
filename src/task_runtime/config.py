@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import stat
 import unicodedata
 from dataclasses import dataclass, field
 from ipaddress import IPv4Address, IPv6Address, ip_address
@@ -25,6 +26,14 @@ DEFAULT_WORKER_METRICS_PORT = 9465
 DEFAULT_BASELINE_P95_SECONDS = 40.0
 TEMPORAL_BACKUP_ROOT = (SCRATCH_ROOT / "temporal_backups").resolve()
 DEFAULT_BACKUP_STATE_PATH = (TEMPORAL_BACKUP_ROOT / "latest-verified.json").resolve()
+MAX_BACKUP_STATE_BYTES = 1024 * 1024
+
+_FILE_ATTRIBUTE_REPARSE_POINT = getattr(
+    stat,
+    "FILE_ATTRIBUTE_REPARSE_POINT",
+    0x0400,
+)
+_UNSAFE_BACKUP_STATE = "unsafe Temporal backup state"
 
 _BACKENDS = frozenset({"local", "temporal_canary"})
 _CANONICAL_PERCENT = re.compile(r"(?:0|[1-9][0-9]?|100)\Z")
@@ -135,21 +144,71 @@ def _nearest_existing_ancestor_is_directory(value: Path) -> bool:
             return False
 
 
-def _has_symlink_component(value: Path) -> bool:
-    if not value.is_absolute():
-        return True
+def _is_reparse_point(metadata: object) -> bool:
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    mode = getattr(metadata, "st_mode", 0)
+    return bool(attributes & _FILE_ATTRIBUTE_REPARSE_POINT) or stat.S_ISLNK(mode)
+
+
+def _absolute_path_components(value: Path) -> tuple[Path, ...]:
     parts = value.parts
-    if not parts:
-        return True
+    if not value.is_absolute() or not parts:
+        return ()
     candidate = Path(parts[0])
+    components = [candidate]
     for component in parts[1:]:
         candidate /= component
+        components.append(candidate)
+    return tuple(components)
+
+
+def _has_reparse_component(value: Path) -> bool:
+    components = _absolute_path_components(value)
+    if not components:
+        return True
+    for candidate in components:
         try:
-            if candidate.is_symlink():
-                return True
+            metadata = candidate.lstat()
+        except FileNotFoundError:
+            continue
         except (OSError, RuntimeError):
             return True
+        if _is_reparse_point(metadata):
+            return True
     return False
+
+
+def _stat_identity(metadata: object) -> tuple[int, int, int, int]:
+    return (
+        int(getattr(metadata, "st_dev", 0)),
+        int(getattr(metadata, "st_ino", 0)),
+        stat.S_IFMT(int(getattr(metadata, "st_mode", 0))),
+        int(getattr(metadata, "st_file_attributes", 0)),
+    )
+
+
+def _stat_version(metadata: object) -> tuple[int, ...]:
+    return _stat_identity(metadata) + (
+        int(getattr(metadata, "st_size", -1)),
+        int(getattr(metadata, "st_mtime_ns", -1)),
+        int(getattr(metadata, "st_ctime_ns", -1)),
+    )
+
+
+def _path_identity_snapshot(value: Path) -> tuple[tuple[int, int, int, int], ...]:
+    identities: list[tuple[int, int, int, int]] = []
+    components = _absolute_path_components(value)
+    if not components:
+        raise ValueError(_UNSAFE_BACKUP_STATE)
+    for candidate in components:
+        try:
+            metadata = candidate.lstat()
+        except (OSError, RuntimeError):
+            raise ValueError(_UNSAFE_BACKUP_STATE) from None
+        if _is_reparse_point(metadata):
+            raise ValueError(_UNSAFE_BACKUP_STATE)
+        identities.append(_stat_identity(metadata))
+    return tuple(identities)
 
 
 def _is_safe_backup_state_path(value: object) -> bool:
@@ -159,7 +218,7 @@ def _is_safe_backup_state_path(value: object) -> bool:
         component in {".", ".."} for component in value.parts
     ):
         return False
-    if _has_symlink_component(value):
+    if _has_reparse_component(value):
         return False
     try:
         resolved = value.resolve()
@@ -176,6 +235,142 @@ def _is_safe_backup_state_path(value: object) -> bool:
         return _nearest_existing_ancestor_is_directory(resolved)
     except (OSError, RuntimeError):
         return False
+
+
+def _read_limited_fd(file_descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = MAX_BACKUP_STATE_BYTES + 1
+    while remaining > 0:
+        chunk = os.read(file_descriptor, min(64 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    content = b"".join(chunks)
+    if len(content) > MAX_BACKUP_STATE_BYTES:
+        raise ValueError(_UNSAFE_BACKUP_STATE)
+    return content
+
+
+def _read_backup_state_posix(
+    value: Path,
+    expected_identities: tuple[tuple[int, int, int, int], ...],
+) -> bytes:
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if no_follow is None or directory_flag is None:
+        raise ValueError(_UNSAFE_BACKUP_STATE)
+    close_on_exec = getattr(os, "O_CLOEXEC", 0)
+    directory_flags = os.O_RDONLY | directory_flag | no_follow | close_on_exec
+    file_flags = os.O_RDONLY | no_follow | close_on_exec
+    directory_descriptors: list[int] = []
+    file_descriptor: int | None = None
+    try:
+        root_descriptor = os.open(value.anchor, directory_flags)
+        directory_descriptors.append(root_descriptor)
+        if _stat_identity(os.fstat(root_descriptor)) != expected_identities[0]:
+            raise ValueError(_UNSAFE_BACKUP_STATE)
+
+        for index, component in enumerate(value.parts[1:-1], start=1):
+            descriptor = os.open(
+                component,
+                directory_flags,
+                dir_fd=directory_descriptors[-1],
+            )
+            directory_descriptors.append(descriptor)
+            if _stat_identity(os.fstat(descriptor)) != expected_identities[index]:
+                raise ValueError(_UNSAFE_BACKUP_STATE)
+
+        file_descriptor = os.open(
+            value.name,
+            file_flags,
+            dir_fd=directory_descriptors[-1],
+        )
+        before = os.fstat(file_descriptor)
+        if (
+            not S_ISREG(before.st_mode)
+            or _stat_identity(before) != expected_identities[-1]
+            or before.st_size > MAX_BACKUP_STATE_BYTES
+        ):
+            raise ValueError(_UNSAFE_BACKUP_STATE)
+        content = _read_limited_fd(file_descriptor)
+        after = os.fstat(file_descriptor)
+        if _stat_version(before) != _stat_version(after):
+            raise ValueError(_UNSAFE_BACKUP_STATE)
+        path_metadata = os.stat(
+            value.name,
+            dir_fd=directory_descriptors[-1],
+            follow_symlinks=False,
+        )
+        if (
+            _is_reparse_point(path_metadata)
+            or _stat_identity(path_metadata) != _stat_identity(after)
+        ):
+            raise ValueError(_UNSAFE_BACKUP_STATE)
+        return content
+    finally:
+        if file_descriptor is not None:
+            os.close(file_descriptor)
+        for descriptor in reversed(directory_descriptors):
+            os.close(descriptor)
+
+
+def _read_backup_state_windows(
+    value: Path,
+    expected_identities: tuple[tuple[int, int, int, int], ...],
+) -> bytes:
+    file_descriptor = os.open(
+        value,
+        os.O_RDONLY | getattr(os, "O_BINARY", 0),
+    )
+    try:
+        before = os.fstat(file_descriptor)
+        if (
+            not S_ISREG(before.st_mode)
+            or _is_reparse_point(before)
+            or _stat_identity(before) != expected_identities[-1]
+            or before.st_size > MAX_BACKUP_STATE_BYTES
+        ):
+            raise ValueError(_UNSAFE_BACKUP_STATE)
+        content = _read_limited_fd(file_descriptor)
+        after = os.fstat(file_descriptor)
+        if _stat_version(before) != _stat_version(after):
+            raise ValueError(_UNSAFE_BACKUP_STATE)
+        return content
+    finally:
+        os.close(file_descriptor)
+
+
+def read_temporal_backup_state(value: Path) -> bytes:
+    """Read a verified backup-state file without exposing its path.
+
+    POSIX traversal is descriptor-anchored and uses ``openat``-style ``dir_fd``
+    calls with ``O_NOFOLLOW`` for every component. Windows' standard library
+    cannot no-follow every directory handle, so the strongest available check
+    rejects reparse points before and after opening, compares every component's
+    identity, and verifies the opened file handle stayed unchanged while read.
+    A replacement that occurs and restores indistinguishable filesystem
+    identities entirely between snapshots is outside this stdlib-only boundary.
+    """
+
+    try:
+        if (
+            not isinstance(value, Path)
+            or not _is_safe_backup_state_path(value)
+            or value != value.resolve()
+        ):
+            raise ValueError(_UNSAFE_BACKUP_STATE)
+        before = _path_identity_snapshot(value)
+        if os.name == "posix":
+            content = _read_backup_state_posix(value, before)
+        else:
+            content = _read_backup_state_windows(value, before)
+        after = _path_identity_snapshot(value)
+        if before != after:
+            raise ValueError(_UNSAFE_BACKUP_STATE)
+        return content
+    except (OSError, RuntimeError, TypeError, ValueError):
+        raise ValueError(_UNSAFE_BACKUP_STATE) from None
 
 
 def _has_dot_path_component(value: str) -> bool:
@@ -200,16 +395,6 @@ class TaskRuntimeConfig:
     docking_queue: str
     docking_concurrency: int
     staging_root: Path = field(repr=False)
-    worker_metrics_address: str = field(
-        default=DEFAULT_WORKER_METRICS_ADDRESS,
-        repr=False,
-    )
-    worker_metrics_port: int = DEFAULT_WORKER_METRICS_PORT
-    baseline_p95_seconds: float = DEFAULT_BASELINE_P95_SECONDS
-    backup_state_path: Path = field(
-        default=DEFAULT_BACKUP_STATE_PATH,
-        repr=False,
-    )
     warnings: tuple[str, ...] = ()
     _temporal_address_configured: bool = field(
         default=False,
@@ -220,6 +405,16 @@ class TaskRuntimeConfig:
         default=False,
         repr=False,
         compare=False,
+    )
+    worker_metrics_address: str = field(
+        default=DEFAULT_WORKER_METRICS_ADDRESS,
+        repr=False,
+    )
+    worker_metrics_port: int = DEFAULT_WORKER_METRICS_PORT
+    baseline_p95_seconds: float = DEFAULT_BASELINE_P95_SECONDS
+    backup_state_path: Path = field(
+        default=DEFAULT_BACKUP_STATE_PATH,
+        repr=False,
     )
     _worker_metrics_address_configured: bool = field(
         default=False,
@@ -263,12 +458,15 @@ class TaskRuntimeConfig:
             or not 1 <= self.worker_metrics_port <= 65535
         ):
             raise ValueError("invalid worker metrics port")
+        if type(self.baseline_p95_seconds) not in {int, float}:
+            raise ValueError("invalid Temporal baseline p95")
+        normalized_baseline = float(self.baseline_p95_seconds)
         if (
-            type(self.baseline_p95_seconds) is not float
-            or not math.isfinite(self.baseline_p95_seconds)
-            or not 0 < self.baseline_p95_seconds <= 60
+            not math.isfinite(normalized_baseline)
+            or not 0 < normalized_baseline <= 60
         ):
             raise ValueError("invalid Temporal baseline p95")
+        object.__setattr__(self, "baseline_p95_seconds", normalized_baseline)
         if not _is_safe_backup_state_path(self.backup_state_path):
             raise ValueError("invalid Temporal backup state")
         if self.backup_state_path != self.backup_state_path.resolve():
