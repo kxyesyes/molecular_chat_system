@@ -50,6 +50,14 @@ def _positive_int(value: object, name: str) -> int:
     return value
 
 
+def _is_representable_finite_number(value: object) -> bool:
+    try:
+        _finite_number(value, "invalid observation sample")
+    except (OverflowError, ValueError):
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class ObservationPolicy:
     baseline_p95_seconds: float
@@ -189,8 +197,7 @@ def _project_sample(sample: object) -> dict[str, object]:
         raise ValueError("invalid observation sample")
     binding_energy = source.get("binding_energy")
     binding_energy_complete = status != "succeeded" or (
-        type(binding_energy) in {int, float}
-        and math.isfinite(float(binding_energy))
+        _is_representable_finite_number(binding_energy)
         and source.get("binding_energy_valid") is True
     )
     try:

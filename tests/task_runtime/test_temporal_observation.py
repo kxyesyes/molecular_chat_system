@@ -317,6 +317,35 @@ def test_succeeded_task_requires_actual_finite_binding_energy_and_validity(
     json.dumps(report, allow_nan=False)
 
 
+@pytest.mark.parametrize("binding_energy", [10**1000, -(10**1000)])
+def test_unrepresentable_binding_energy_produces_hashed_failed_report(
+    binding_energy: int,
+) -> None:
+    samples = [_sample(index) for index in range(20)]
+    samples[0]["binding_energy"] = binding_energy
+
+    report = _report(samples)
+
+    assert report["status"] == "failed"
+    assert report["gates"]["finite_binding_energy"] == "failed"
+    payload = dict(report)
+    digest = payload.pop("sha256")
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    assert digest == hashlib.sha256(canonical).hexdigest()
+
+
+def test_normal_finite_integer_binding_energy_passes() -> None:
+    samples = [_sample(index) for index in range(20)]
+    samples[0]["binding_energy"] = -8
+
+    report = _report(samples)
+
+    assert report["status"] == "passed"
+    assert report["gates"]["finite_binding_energy"] == "passed"
+
+
 @pytest.mark.parametrize("status", ["failed", "canceled", "timed_out"])
 def test_unsuccessful_task_energy_is_not_required_or_exposed(status: str) -> None:
     samples = [_sample(index) for index in range(20)]
@@ -489,6 +518,30 @@ def test_report_rejects_invalid_sample_numeric_values(field: str, value: object)
 
     with pytest.raises(ValueError, match="observation sample"):
         _report([sample])
+
+
+def test_huge_latency_is_normalized_to_generic_value_error() -> None:
+    sample = _sample(0)
+    sample["latency_seconds"] = 10**1000
+
+    with pytest.raises(ValueError, match=r"^invalid observation sample$") as error:
+        _report([sample])
+
+    assert "1000" not in str(error.value)
+
+
+def test_huge_worker_age_is_normalized_to_generic_value_error() -> None:
+    with pytest.raises(ValueError, match=r"^invalid worker health$") as error:
+        _report(worker_health={"available": True, "age_seconds": 10**1000})
+
+    assert "1000" not in str(error.value)
+
+
+def test_huge_policy_number_is_normalized_to_generic_value_error() -> None:
+    with pytest.raises(ValueError, match=r"^invalid observation policy$") as error:
+        ObservationPolicy(10**1000)
+
+    assert "1000" not in str(error.value)
 
 
 def test_report_redacts_unknown_nested_data_and_fingerprints_identifiers() -> None:
