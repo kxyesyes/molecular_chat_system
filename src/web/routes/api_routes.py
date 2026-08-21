@@ -8,11 +8,12 @@ import asyncio
 import inspect
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Optional
-from fastapi import Depends, UploadFile, File, Form, HTTPException, Response, Body, Query
+from fastapi import Depends, UploadFile, File, Form, Header, HTTPException, Response, Body, Query
 from starlette.concurrency import run_in_threadpool
 
 from src.agent.persistence.redaction import redact_sensitive
 from src.web.admin_auth import require_admin
+from src.web.api_response import api_success
 
 logger = logging.getLogger(__name__)
 
@@ -173,11 +174,106 @@ def _build_pharm3d_fallback(candidates: List[Dict[str, Any]], error: str = "") -
     return fallback
 
 
-def setup_api_routes(app, docking_service=None):
-    """设置 API 路由"""
+def setup_api_routes(app, docking_service=None, task_runtime=None):
+    """设置 API 路由。"""
+
+    def current_task_runtime():
+        if task_runtime is None:
+            return None
+        return task_runtime() if callable(task_runtime) else task_runtime
 
     # ==================== 分子对接 API ====================
     
+    @app.post(
+        "/api/docking/tasks",
+        status_code=202,
+        dependencies=[Depends(require_admin)],
+    )
+    async def submit_durable_docking_task(
+        protein_file: UploadFile = File(...),
+        ligand_file: UploadFile = File(None),
+        smiles: str = Form(None),
+        center_x: float = Form(0.0),
+        center_y: float = Form(0.0),
+        center_z: float = Form(0.0),
+        size_x: float = Form(20.0),
+        size_y: float = Form(20.0),
+        size_z: float = Form(20.0),
+        exhaustiveness: int = Form(8),
+        num_modes: int = Form(10),
+        energy_range: float = Form(3.0),
+        manual_center: bool = Form(False),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ):
+        try:
+            runtime = current_task_runtime()
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Task runtime unavailable") from exc
+        if runtime is None:
+            raise HTTPException(status_code=503, detail="Task runtime unavailable")
+        clean_smiles = (smiles or "").strip() or None
+        if ligand_file is None and clean_smiles is None:
+            raise HTTPException(status_code=400, detail="Provide a ligand file or SMILES")
+        if ligand_file is not None and clean_smiles is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide either a ligand file or SMILES, not both",
+            )
+        clean_idempotency_key = (idempotency_key or "").strip() or None
+        if clean_idempotency_key is not None and len(clean_idempotency_key) > 256:
+            raise HTTPException(status_code=422, detail="Idempotency-Key is too long")
+        _validate_docking_limits(
+            size_x=size_x,
+            size_y=size_y,
+            size_z=size_z,
+            exhaustiveness=exhaustiveness,
+            num_modes=num_modes,
+            energy_range=energy_range,
+        )
+        if not manual_center:
+            raise HTTPException(
+                status_code=422,
+                detail="Durable docking requires an explicit manual center",
+            )
+        if energy_range != 3.0:
+            raise HTTPException(
+                status_code=422,
+                detail="Durable docking currently supports energy_range=3 only",
+            )
+        receptor_bytes = await _read_upload_limited(protein_file, "protein file")
+        ligand_bytes = (
+            await _read_upload_limited(ligand_file, "ligand file")
+            if ligand_file is not None
+            else None
+        )
+        config = {
+            "center": [center_x, center_y, center_z],
+            "size": [size_x, size_y, size_z],
+            "exhaustiveness": exhaustiveness,
+            "num_modes": num_modes,
+        }
+        try:
+            receipt = await runtime.submit_docking(
+                receptor_name=protein_file.filename or "protein.pdb",
+                receptor_bytes=receptor_bytes,
+                ligand_name=(ligand_file.filename if ligand_file is not None else None),
+                ligand_bytes=ligand_bytes,
+                smiles=clean_smiles,
+                config=config,
+                idempotency_key=clean_idempotency_key,
+            )
+            record = await runtime.get(receipt.task_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Invalid docking task input") from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error("Durable docking task submission failed")
+            raise HTTPException(status_code=503, detail="Task submission unavailable") from exc
+        data = record.to_public_dict()
+        data["start_outcome"] = receipt.outcome.value
+        return api_success(data, message="Docking task submitted")
+
     @app.post("/api/docking/submit")
     async def submit_docking_job(
         protein_file: UploadFile = File(...),

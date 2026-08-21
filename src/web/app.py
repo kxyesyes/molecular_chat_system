@@ -876,7 +876,20 @@ class MolecularChatApp:
         from .routes.api_routes import setup_api_routes
         from ..docking import docking_service
         docking_service.configure(docking_config)
-        setup_api_routes(self.app, docking_service)
+        task_runtime = None
+        try:
+            from src.task_runtime import TaskRuntimeBinding
+
+            task_runtime = TaskRuntimeBinding()
+            task_runtime.install(self.app, logger)
+        except Exception:
+            logger.warning("Durable task runtime initialization failed")
+        self.task_runtime_binding = task_runtime
+        setup_api_routes(
+            self.app,
+            docking_service,
+            task_runtime=task_runtime,
+        )
 
         # Register molecular design routes
         try:
@@ -899,7 +912,7 @@ class MolecularChatApp:
             from .routes.agent_workflow_routes import setup_agent_workflow_routes
             from .routes.system_routes import setup_system_routes
 
-            setup_task_routes(self.app)
+            setup_task_routes(self.app, task_runtime=task_runtime)
             setup_agent_workflow_routes(
                 self.app,
                 supervisor_factory=self._create_supervisor_agent,

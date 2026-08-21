@@ -356,6 +356,10 @@ class TaskRuntime:
             return await self.temporal_backend.get(task_id)
         return record
 
+    async def events(self, task_id: str):
+        await asyncio.to_thread(self.store.get, task_id)
+        return await asyncio.to_thread(self.store.events, task_id)
+
     async def _stage_verified(
         self,
         *,
@@ -1036,19 +1040,138 @@ _RUNTIME: TaskRuntime | None = None
 _RUNTIME_LOCK = threading.Lock()
 _RUNTIME_RESET_FUTURE: Future[None] | None = None
 _RUNTIME_RESET_RUNNER: asyncio.Task[None] | None = None
+_RUNTIME_BINDING_COUNT = 0
+_RUNTIME_POISONED = False
+
+
+class TaskRuntimeBinding:
+    """Bind the process singleton to an application lifecycle."""
+
+    _IDLE = "idle"
+    _ACTIVE = "active"
+    _CLOSING = "closing"
+    _POISONED = "poisoned"
+
+    def __init__(self, *, factory=None, shutdown=None) -> None:
+        self._factory = factory or acquire_task_runtime
+        self._shutdown = shutdown or release_task_runtime
+        self._runtime = None
+        self._state = self._IDLE
+        self._lock = threading.Lock()
+        self._close_future: Future[None] | None = None
+        self._close_runner: asyncio.Task[None] | None = None
+
+    def start(self):
+        with self._lock:
+            if self._state == self._ACTIVE:
+                return self._runtime
+            if self._state in {self._CLOSING, self._POISONED}:
+                raise RuntimeError("task runtime unavailable")
+            runtime = self._factory()
+            self._runtime = runtime
+            self._state = self._ACTIVE
+            return self._runtime
+
+    def __call__(self):
+        return self.start()
+
+    def install(self, app, logger) -> None:
+        async def startup() -> None:
+            try:
+                self.start()
+            except Exception:
+                logger.warning("Durable task runtime initialization failed")
+
+        async def shutdown() -> None:
+            try:
+                await self.close()
+            except Exception:
+                logger.warning("Durable task runtime shutdown failed")
+
+        app.router.add_event_handler("startup", startup)
+        app.router.add_event_handler("shutdown", shutdown)
+
+    async def close(self) -> None:
+        with self._lock:
+            if self._state == self._IDLE:
+                return
+            runtime = self._runtime
+            shared = self._close_future
+            if self._state != self._CLOSING or shared is None:
+                shared = Future()
+                self._close_future = shared
+                self._state = self._CLOSING
+                self._close_runner = asyncio.create_task(
+                    self._close_once(runtime, shared),
+                    name="medchat-task-runtime-binding-close",
+                )
+        await asyncio.shield(asyncio.wrap_future(shared))
+
+    async def _close_once(self, runtime, shared: Future[None]) -> None:
+        try:
+            await self._shutdown(runtime)
+        except BaseException as exc:
+            with self._lock:
+                if self._close_future is shared:
+                    self._state = self._POISONED
+                    self._close_future = None
+                    self._close_runner = None
+            if not shared.done():
+                shared.set_exception(exc)
+            return
+        with self._lock:
+            if self._close_future is shared and self._runtime is runtime:
+                self._runtime = None
+                self._state = self._IDLE
+                self._close_future = None
+                self._close_runner = None
+        if not shared.done():
+            shared.set_result(None)
 
 
 def get_task_runtime() -> TaskRuntime:
     global _RUNTIME
     with _RUNTIME_LOCK:
-        if _RUNTIME_RESET_FUTURE is not None:
-            raise RuntimeError("task runtime reset is in progress")
+        if _RUNTIME_RESET_FUTURE is not None or _RUNTIME_POISONED:
+            raise RuntimeError("task runtime unavailable")
         if _RUNTIME is None:
             _RUNTIME = TaskRuntime()
         return _RUNTIME
 
 
-async def reset_task_runtime_for_tests() -> None:
+def acquire_task_runtime() -> TaskRuntime:
+    global _RUNTIME, _RUNTIME_BINDING_COUNT
+    with _RUNTIME_LOCK:
+        if _RUNTIME_RESET_FUTURE is not None or _RUNTIME_POISONED:
+            raise RuntimeError("task runtime unavailable")
+        if _RUNTIME is None:
+            _RUNTIME = TaskRuntime()
+        _RUNTIME_BINDING_COUNT += 1
+        return _RUNTIME
+
+
+async def release_task_runtime(expected_runtime: TaskRuntime) -> None:
+    global _RUNTIME_BINDING_COUNT, _RUNTIME_RESET_FUTURE, _RUNTIME_RESET_RUNNER
+    with _RUNTIME_LOCK:
+        if _RUNTIME is not expected_runtime:
+            return
+        shared = _RUNTIME_RESET_FUTURE
+        if shared is None:
+            if _RUNTIME_BINDING_COUNT > 1:
+                _RUNTIME_BINDING_COUNT -= 1
+                return
+            if _RUNTIME_BINDING_COUNT <= 0:
+                return
+            shared = Future()
+            _RUNTIME_RESET_FUTURE = shared
+            _RUNTIME_RESET_RUNNER = asyncio.create_task(
+                _reset_runtime_once(expected_runtime, shared),
+                name="medchat-task-runtime-release",
+            )
+    await asyncio.shield(asyncio.wrap_future(shared))
+
+
+async def shutdown_task_runtime() -> None:
     global _RUNTIME_RESET_FUTURE, _RUNTIME_RESET_RUNNER
     with _RUNTIME_LOCK:
         runtime = _RUNTIME
@@ -1065,11 +1188,16 @@ async def reset_task_runtime_for_tests() -> None:
     await asyncio.shield(asyncio.wrap_future(shared))
 
 
+async def reset_task_runtime_for_tests() -> None:
+    await shutdown_task_runtime()
+
+
 async def _reset_runtime_once(
     runtime: TaskRuntime,
     shared: Future[None],
 ) -> None:
-    global _RUNTIME, _RUNTIME_RESET_FUTURE, _RUNTIME_RESET_RUNNER
+    global _RUNTIME, _RUNTIME_BINDING_COUNT, _RUNTIME_POISONED
+    global _RUNTIME_RESET_FUTURE, _RUNTIME_RESET_RUNNER
     try:
         await runtime.close()
     except BaseException as exc:
@@ -1077,12 +1205,16 @@ async def _reset_runtime_once(
             if _RUNTIME_RESET_FUTURE is shared:
                 _RUNTIME_RESET_FUTURE = None
                 _RUNTIME_RESET_RUNNER = None
+                if _RUNTIME is runtime:
+                    _RUNTIME_POISONED = True
         if not shared.done():
             shared.set_exception(exc)
         return
     with _RUNTIME_LOCK:
         if _RUNTIME is runtime:
             _RUNTIME = None
+            _RUNTIME_BINDING_COUNT = 0
+            _RUNTIME_POISONED = False
         if _RUNTIME_RESET_FUTURE is shared:
             _RUNTIME_RESET_FUTURE = None
             _RUNTIME_RESET_RUNNER = None
