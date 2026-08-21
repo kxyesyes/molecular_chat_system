@@ -70,6 +70,18 @@ class TaskRuntime:
         self.stager = stager or DockingInputStager(self.config.staging_root)
         self.selector = selector or TemporalDockingSelector(self.config.canary_percent)
         self._uuid_factory = uuid_factory or uuid4
+        if (
+            temporal_backend is None
+            and self.config.backend == "temporal_canary"
+        ):
+            from .backends.temporal import TemporalTaskBackend
+
+            temporal_backend = TemporalTaskBackend(
+                self.store,
+                address=self.config.temporal_address,
+                namespace=self.config.temporal_namespace,
+                task_queue=self.config.docking_queue,
+            )
         self.temporal_backend = temporal_backend
         if temporal_backend is not None:
             assert_async_backend_contract(temporal_backend)
@@ -194,6 +206,13 @@ class TaskRuntime:
                 )
                 raise
             except TaskIdempotencyConflictError:
+                recovered = await self._recover_idempotency_race(
+                    submission,
+                    task_id,
+                    manifest_path,
+                )
+                if recovered is not None:
+                    return recovered
                 raise
             except Exception as exc:
                 await self._project_start_failure(
@@ -217,6 +236,15 @@ class TaskRuntime:
         except asyncio.CancelledError:
             await self._mark_temporal_ambiguous_after_cancellation(submission)
             raise
+        except TaskIdempotencyConflictError:
+            recovered = await self._recover_idempotency_race(
+                submission,
+                task_id,
+                manifest_path,
+            )
+            if recovered is not None:
+                return recovered
+            raise
         except Exception as exc:
             await self._mark_temporal_ambiguous(submission)
             raise TaskBackendStartError(
@@ -225,8 +253,11 @@ class TaskRuntime:
 
         if (
             not isinstance(temporal_result, BackendSubmitResult)
-            or temporal_result.task_id != task_id
             or temporal_result.backend != "temporal"
+            or (
+                temporal_result.task_id != task_id
+                and idempotency_key is None
+            )
         ):
             await self._mark_temporal_ambiguous(submission)
             raise TaskBackendStartError(
@@ -234,15 +265,31 @@ class TaskRuntime:
             )
         if temporal_result.outcome is StartOutcome.ACCEPTED:
             try:
-                return await self._validated_temporal_result(
+                validated = await self._validated_temporal_result(
                     submission,
                     temporal_result,
                 )
+                if validated.task_id != task_id:
+                    discarded = await self._discard_staging(task_id, manifest_path)
+                    return BackendSubmitResult(
+                        validated.task_id,
+                        validated.backend,
+                        validated.outcome,
+                        (
+                            _IDEMPOTENT_REUSE_DISCARDED_MESSAGE
+                            if discarded
+                            else _IDEMPOTENT_REUSE_MESSAGE
+                        ),
+                    )
+                return validated
             except asyncio.CancelledError:
                 await self._mark_temporal_ambiguous_after_cancellation(submission)
                 raise
             except TaskBackendStartError:
-                await self._mark_temporal_ambiguous(submission)
+                if temporal_result.task_id == task_id:
+                    await self._mark_temporal_ambiguous(submission)
+                else:
+                    await self._discard_staging(task_id, manifest_path)
                 raise
         if temporal_result.outcome is StartOutcome.REJECTED:
             if await self._projection_exists(task_id):
@@ -281,13 +328,33 @@ class TaskRuntime:
                 await self._discard_staging(task_id, manifest_path)
                 raise
 
+        if temporal_result.task_id != task_id and idempotency_key is not None:
+            try:
+                await self._validated_temporal_result(submission, temporal_result)
+            except TaskBackendStartError:
+                await self._discard_staging(task_id, manifest_path)
+                raise
+            discarded = await self._discard_staging(task_id, manifest_path)
+            return BackendSubmitResult(
+                temporal_result.task_id,
+                temporal_result.backend,
+                StartOutcome.AMBIGUOUS,
+                (
+                    _IDEMPOTENT_REUSE_DISCARDED_MESSAGE
+                    if discarded
+                    else _IDEMPOTENT_REUSE_MESSAGE
+                ),
+            )
         await self._mark_temporal_ambiguous(submission)
         raise TaskBackendStartError(
             "Temporal start was ambiguous; local fallback suppressed"
         )
 
     async def get(self, task_id: str) -> TaskRecord:
-        return await asyncio.to_thread(self.store.get, task_id)
+        record = await asyncio.to_thread(self.store.get, task_id)
+        if record.backend == "temporal" and self.temporal_backend is not None:
+            return await self.temporal_backend.get(task_id)
+        return record
 
     async def _stage_verified(
         self,
@@ -609,6 +676,49 @@ class TaskRuntime:
             allowed_backends={"local", "temporal"},
         )
 
+    async def _recover_idempotency_race(
+        self,
+        submission: TaskSubmission,
+        loser_task_id: str,
+        manifest_path: Path,
+    ) -> BackendSubmitResult | None:
+        """Resolve a backend create race against the global idempotency authority."""
+
+        if submission.idempotency_key is None or submission.request_digest is None:
+            await self._discard_staging(loser_task_id, manifest_path)
+            return None
+        try:
+            authority = await self._global_idempotency_result(
+                submission.idempotency_key,
+                submission.request_digest,
+                task_type=submission.task_type,
+            )
+            discarded = await self._discard_staging(
+                loser_task_id,
+                manifest_path,
+            )
+        except asyncio.CancelledError:
+            await self._discard_staging_after_cancellation(
+                loser_task_id,
+                manifest_path,
+            )
+            raise
+        except Exception:
+            await self._discard_staging(loser_task_id, manifest_path)
+            raise
+        if authority is None:
+            return None
+        return BackendSubmitResult(
+            authority.task_id,
+            authority.backend,
+            authority.outcome,
+            (
+                _IDEMPOTENT_REUSE_DISCARDED_MESSAGE
+                if discarded
+                else _IDEMPOTENT_REUSE_MESSAGE
+            ),
+        )
+
     @staticmethod
     def _authority_result(
         record: TaskRecord,
@@ -634,10 +744,16 @@ class TaskRuntime:
                 "idempotency authority conflict"
             )
         try:
+            outcome = StartOutcome.ACCEPTED
+            if (
+                record.backend == "temporal"
+                and (record.provenance or {}).get("start_outcome") != "accepted"
+            ):
+                outcome = StartOutcome.AMBIGUOUS
             return BackendSubmitResult(
                 task_id=record.task_id,
                 backend=record.backend,
-                outcome=StartOutcome.ACCEPTED,
+                outcome=outcome,
                 message=_IDEMPOTENT_REUSE_MESSAGE,
             )
         except ValueError as exc:
@@ -791,7 +907,25 @@ class TaskRuntime:
                     submission_digest=submission.request_digest,
                 )
             except sqlite3.IntegrityError:
-                record = await asyncio.to_thread(self.store.get, submission.task_id)
+                if submission.idempotency_key is None:
+                    record = await asyncio.to_thread(
+                        self.store.get,
+                        submission.task_id,
+                    )
+                else:
+                    digest = self._submission_idempotency_digest(submission)
+                    record, stored_request_digest = await asyncio.to_thread(
+                        self.store.get_idempotency_authority,
+                        digest,
+                    )
+                    if (
+                        record.backend != "temporal"
+                        or record.task_type != submission.task_type
+                        or stored_request_digest != submission.request_digest
+                    ):
+                        raise TaskIdempotencyConflictError(
+                            "idempotency authority conflict"
+                        )
 
         if record.status is TaskStatus.QUEUED:
             await asyncio.to_thread(
@@ -841,6 +975,9 @@ class TaskRuntime:
                     submission.task_type,
                     submission.payload,
                     backend="temporal",
+                    external_workflow_id=(
+                        f"medchat-docking-{submission.task_id}"
+                    ),
                     phase=TaskPhase.STAGING,
                     warnings=warning,
                     provenance=provenance,
@@ -849,12 +986,14 @@ class TaskRuntime:
                 )
             except sqlite3.IntegrityError:
                 record = await asyncio.to_thread(self.store.get, submission.task_id)
+        if record.backend != "temporal":
+            raise TaskBackendStartError(
+                "Temporal ambiguity conflicts with existing task authority"
+            )
         await asyncio.to_thread(
-            self.store.annotate_nonterminal,
+            self.store.mark_temporal_start_outcome,
             submission.task_id,
-            phase=TaskPhase.STAGING,
-            warnings=warning,
-            provenance=provenance,
+            "ambiguous",
         )
         return await asyncio.to_thread(self.store.get, submission.task_id)
 

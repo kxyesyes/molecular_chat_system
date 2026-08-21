@@ -433,6 +433,140 @@ class TaskStore:
             )
         return True
 
+    def mark_temporal_start_outcome(
+        self,
+        task_id: str,
+        outcome: str,
+        *,
+        now: datetime | str | None = None,
+    ) -> bool:
+        """CAS-project a monotonic Temporal start state into existing authority."""
+
+        task_id = _validate_required_string(task_id, "task_id")
+        if outcome not in {"accepted", "ambiguous"}:
+            raise ValueError("invalid Temporal start outcome")
+        timestamp = _as_timestamp(now)
+        terminal_values = tuple(status.value for status in TERMINAL_STATUSES)
+        placeholders = ", ".join("?" for _ in terminal_values)
+        with connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT status, backend, warnings_json, provenance_json
+                FROM tasks WHERE task_id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["backend"] != "temporal" or row["status"] in terminal_values:
+                return False
+            try:
+                provenance = json.loads(row["provenance_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                provenance = {}
+            if not isinstance(provenance, dict):
+                provenance = {}
+            current = provenance.get("start_outcome")
+            if current == "accepted" or current == outcome:
+                return False
+            provenance["start_outcome"] = outcome
+            safe_provenance = sanitize_provenance(provenance)
+            try:
+                warnings = json.loads(row["warnings_json"] or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                warnings = []
+            safe_warnings = normalize_task_warnings(warnings, strict=False)
+            ambiguous_warning = {"code": "temporal_start_ambiguous"}
+            if outcome == "ambiguous":
+                if ambiguous_warning not in safe_warnings:
+                    safe_warnings.append(ambiguous_warning)
+            else:
+                safe_warnings = [
+                    warning
+                    for warning in safe_warnings
+                    if warning.get("code") != "temporal_start_ambiguous"
+                ]
+            cursor = conn.execute(
+                f"""
+                UPDATE tasks
+                SET phase = CASE WHEN status = ? THEN ? ELSE phase END,
+                    warnings_json = ?, provenance_json = ?, updated_at = ?
+                WHERE task_id = ? AND backend = 'temporal'
+                AND status NOT IN ({placeholders})
+                """,
+                (
+                    TaskStatus.QUEUED.value,
+                    TaskPhase.STAGING.value,
+                    _json(safe_warnings),
+                    _json(safe_provenance),
+                    timestamp,
+                    task_id,
+                    *terminal_values,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return False
+            self._append_event(
+                conn,
+                task_id,
+                "task_projection_updated",
+                {"start_outcome": outcome},
+                is_terminal=False,
+                created_at=timestamp,
+            )
+        return True
+
+    def mark_projection_stale_once(
+        self,
+        task_id: str,
+        *,
+        now: datetime | str | None = None,
+    ) -> bool:
+        """Append the projection-stale warning and event at most once."""
+
+        task_id = _validate_required_string(task_id, "task_id")
+        timestamp = _as_timestamp(now)
+        terminal_values = tuple(status.value for status in TERMINAL_STATUSES)
+        placeholders = ", ".join("?" for _ in terminal_values)
+        with connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status, backend, warnings_json FROM tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["backend"] != "temporal" or row["status"] in terminal_values:
+                return False
+            try:
+                warnings = json.loads(row["warnings_json"] or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                warnings = []
+            safe_warnings = normalize_task_warnings(warnings, strict=False)
+            if any(item.get("code") == "projection_stale" for item in safe_warnings):
+                return False
+            safe_warnings.append({"code": "projection_stale"})
+            cursor = conn.execute(
+                f"""
+                UPDATE tasks SET warnings_json = ?, updated_at = ?
+                WHERE task_id = ? AND backend = 'temporal'
+                AND status NOT IN ({placeholders})
+                """,
+                (_json(safe_warnings), timestamp, task_id, *terminal_values),
+            )
+            if cursor.rowcount != 1:
+                return False
+            self._append_event(
+                conn,
+                task_id,
+                "task_projection_updated",
+                {"warning_codes": ["projection_stale"]},
+                is_terminal=False,
+                created_at=timestamp,
+            )
+        return True
+
     def get(self, task_id: str) -> TaskRecord:
         with connection(self.db_path) as conn:
             row = conn.execute(
@@ -467,6 +601,124 @@ class TaskStore:
                 params,
             ).fetchall()
         return [TaskRecord.from_row(row) for row in rows]
+
+    def list_temporal_reconcilable(
+        self,
+        *,
+        limit: int = 100,
+        after_task_id: str | None = None,
+    ) -> list[TaskRecord]:
+        """List only nonterminal Temporal authorities using a stable keyset."""
+
+        if after_task_id is not None:
+            after_task_id = _validate_required_string(after_task_id, "after_task_id")
+        terminal_values = tuple(status.value for status in TERMINAL_STATUSES)
+        placeholders = ", ".join("?" for _ in terminal_values)
+        keyset_clause = " AND task_id > ?" if after_task_id is not None else ""
+        params: list[Any] = [*terminal_values]
+        if after_task_id is not None:
+            params.append(after_task_id)
+        params.append(max(1, min(1000, int(limit))))
+        with connection(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM tasks
+                WHERE backend = 'temporal'
+                AND status NOT IN ({placeholders}){keyset_clause}
+                ORDER BY task_id ASC LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [TaskRecord.from_row(row) for row in rows]
+
+    def project_temporal_running(
+        self,
+        task_id: str,
+        *,
+        phase: TaskPhase | str | None = None,
+        attempt: int | None = None,
+        now: datetime | str | None = None,
+    ) -> bool:
+        """Project Temporal lifecycle state without inventing an Activity heartbeat."""
+
+        task_id = _validate_required_string(task_id, "task_id")
+        phase = _validate_phase(phase)
+        attempt = _validate_attempt(attempt)
+        timestamp = _as_timestamp(now)
+        with connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT status, backend, phase, attempt
+                FROM tasks WHERE task_id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["backend"] != "temporal" or row["status"] not in {
+                TaskStatus.QUEUED.value,
+                TaskStatus.RUNNING.value,
+            }:
+                return False
+            next_phase = phase if phase is not None else row["phase"]
+            next_attempt = attempt if attempt is not None else int(row["attempt"])
+            if (
+                row["status"] == TaskStatus.RUNNING.value
+                and row["phase"] == next_phase
+                and int(row["attempt"]) == next_attempt
+            ):
+                return False
+            if row["status"] == TaskStatus.QUEUED.value:
+                cursor = conn.execute(
+                    """
+                    UPDATE tasks
+                    SET status = ?, phase = ?, attempt = ?, started_at = ?,
+                        updated_at = ?
+                    WHERE task_id = ? AND backend = 'temporal' AND status = ?
+                    """,
+                    (
+                        TaskStatus.RUNNING.value,
+                        next_phase,
+                        next_attempt,
+                        timestamp,
+                        timestamp,
+                        task_id,
+                        TaskStatus.QUEUED.value,
+                    ),
+                )
+                event_type = "task_started"
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE tasks SET phase = ?, attempt = ?, updated_at = ?
+                    WHERE task_id = ? AND backend = 'temporal' AND status = ?
+                    """,
+                    (
+                        next_phase,
+                        next_attempt,
+                        timestamp,
+                        task_id,
+                        TaskStatus.RUNNING.value,
+                    ),
+                )
+                event_type = "task_projection_updated"
+            if cursor.rowcount != 1:
+                return False
+            event_payload: dict[str, Any] = {}
+            if next_phase is not None:
+                event_payload["phase"] = next_phase
+            if attempt is not None:
+                event_payload["attempt"] = next_attempt
+            self._append_event(
+                conn,
+                task_id,
+                event_type,
+                event_payload,
+                is_terminal=False,
+                created_at=timestamp,
+            )
+        return True
 
     def claim_running(
         self,
@@ -676,6 +928,7 @@ class TaskStore:
         warnings: list[Any] | None = None,
         provenance: dict[str, Any] | None = None,
         projection_policy: ResultProjectionPolicy,
+        required_backend: str | None = None,
         now: datetime | str | None = None,
     ) -> bool:
         task_id = _validate_required_string(task_id, "task_id")
@@ -723,6 +976,8 @@ class TaskStore:
         )
         source_values = tuple(item.value for item in source_statuses)
         placeholders = ", ".join("?" for _ in source_values)
+        backend_clause = " AND backend = ?" if required_backend is not None else ""
+        backend_params = (required_backend,) if required_backend is not None else ()
         with connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute(
@@ -733,7 +988,7 @@ class TaskStore:
                     warnings_json = COALESCE(?, warnings_json),
                     provenance_json = COALESCE(?, provenance_json),
                     updated_at = ?, finished_at = ?
-                WHERE task_id = ? AND status IN ({placeholders})
+                WHERE task_id = ? AND status IN ({placeholders}){backend_clause}
                 """,
                 (
                     status.value,
@@ -747,6 +1002,7 @@ class TaskStore:
                     timestamp,
                     task_id,
                     *source_values,
+                    *backend_params,
                 ),
             )
             if cursor.rowcount != 1:
@@ -798,6 +1054,43 @@ class TaskStore:
             warnings=warnings,
             provenance=provenance,
             projection_policy=projection_policy,
+            now=now,
+        )
+
+    def project_temporal_terminal(
+        self,
+        task_id: str,
+        status: TaskStatus,
+        *,
+        result: Any = None,
+        error: str | None = None,
+        artifacts: list[dict[str, Any]] | None = None,
+        error_code: TaskErrorCode | str | None = None,
+        warnings: list[Any] | None = None,
+        provenance: dict[str, Any] | None = None,
+        now: datetime | str | None = None,
+    ) -> bool:
+        """Project a Temporal-selected terminal without weakening local CAS rules."""
+
+        if status not in TERMINAL_STATUSES:
+            raise ValueError("project_temporal_terminal requires a terminal TaskStatus")
+        source_statuses = (
+            (TaskStatus.CANCEL_REQUESTED,)
+            if status is TaskStatus.CANCELED
+            else (TaskStatus.RUNNING, TaskStatus.CANCEL_REQUESTED)
+        )
+        return self._terminal_transition(
+            task_id,
+            status,
+            source_statuses,
+            result=result,
+            error=error,
+            artifacts=artifacts,
+            error_code=error_code,
+            warnings=warnings,
+            provenance=provenance,
+            projection_policy=ResultProjectionPolicy.SCIENTIFIC_STRICT,
+            required_backend="temporal",
             now=now,
         )
 

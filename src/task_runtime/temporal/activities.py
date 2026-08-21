@@ -18,7 +18,6 @@ from src.task_runtime.docking_execution import DockingExecution
 from src.task_runtime.errors import TaskErrorCode
 from src.agent.persistence.redaction import contains_sensitive_text
 from src.task_runtime.models import (
-    ResultProjectionPolicy,
     TaskPhase,
     TaskStatus,
     contains_prefixed_scientific_identifier,
@@ -721,7 +720,7 @@ class TemporalDockingActivities:
             raise RuntimeError("invalid terminal projection")
         error_code = payload.get("error_code")
         applied = await _to_thread_completion_safe(
-            self.store.finish,
+            self.store.project_temporal_terminal,
             payload["task_id"],
             status,
             result=payload.get("result"),
@@ -729,7 +728,6 @@ class TemporalDockingActivities:
             error_code=error_code,
             warnings=payload.get("warnings"),
             provenance=payload.get("provenance"),
-            projection_policy=ResultProjectionPolicy.SCIENTIFIC_STRICT,
         )
         if applied:
             return {"applied": True, "status": status.value}

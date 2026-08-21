@@ -95,6 +95,7 @@ class DockingWorkflow:
             "error_code": None,
             "projection_pending": False,
             "terminal_event_count": 0,
+            "terminal_projection": None,
         }
 
     @workflow.query
@@ -257,6 +258,19 @@ class DockingWorkflow:
     ) -> bool:
         """Obtain the receipt for one already-selected scientific terminal."""
 
+        self._snapshot["terminal_projection"] = {
+            key: copy.deepcopy(payload[key])
+            for key in (
+                "status",
+                "result",
+                "artifacts",
+                "warnings",
+                "provenance",
+                "error_code",
+            )
+            if key in payload
+        }
+
         try:
             await self._project(payload)
             return True
@@ -303,12 +317,16 @@ class DockingWorkflow:
                 )
             projection_pending = True
         try:
+            terminal_payload = {
+                "operation": "terminal",
+                "task_id": task_id,
+                "status": _STATUS_CANCELED,
+            }
+            self._snapshot["terminal_projection"] = {
+                "status": _STATUS_CANCELED,
+            }
             await self._project(
-                {
-                    "operation": "terminal",
-                    "task_id": task_id,
-                    "status": _STATUS_CANCELED,
-                }
+                terminal_payload
             )
         except BaseException as exc:
             if _is_projection_conflict(exc):
@@ -396,6 +414,14 @@ class DockingWorkflow:
         projection_pending: bool,
     ) -> dict[str, Any]:
         if self._snapshot["terminal_event_count"] == 0:
+            if (
+                self._snapshot.get("task_id") is not None
+                and self._snapshot.get("terminal_projection") is None
+            ):
+                projection = {"status": status}
+                if error_code is not None:
+                    projection["error_code"] = error_code
+                self._snapshot["terminal_projection"] = projection
             self._snapshot.update(
                 {
                     "status": status,

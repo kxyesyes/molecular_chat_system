@@ -71,6 +71,8 @@ def _create_task(store: TaskStore, task_id: str = TASK_ID) -> None:
         task_id=task_id,
         task_type="docking",
         payload={},
+        backend="temporal",
+        external_workflow_id=f"medchat-docking-{task_id}",
     )
 
 
@@ -587,6 +589,10 @@ def test_running_projection_failure_prevents_docking(tmp_path, monkeypatch):
     assert result["error_code"] == TaskErrorCode.TASK_PROJECTION_FAILED.value
     assert result["projection_pending"] is True
     assert result["terminal_event_count"] == 1
+    assert result["terminal_projection"] == {
+        "status": TaskStatus.FAILED.value,
+        "error_code": TaskErrorCode.TASK_PROJECTION_FAILED.value,
+    }
 
 
 def test_workflow_verifies_manifest_before_docking(monkeypatch):
@@ -1365,14 +1371,14 @@ def test_terminal_projection_joins_submitted_sqlite_commit_on_cancel(
         assert store.claim_running(TASK_ID)
         entered = threading.Event()
         release = threading.Event()
-        real_finish = store.finish
+        real_finish = store.project_temporal_terminal
 
         def delayed_finish(*args, **kwargs):
             entered.set()
             assert release.wait(2.0)
             return real_finish(*args, **kwargs)
 
-        monkeypatch.setattr(store, "finish", delayed_finish)
+        monkeypatch.setattr(store, "project_temporal_terminal", delayed_finish)
         activities = TemporalDockingActivities(
             store,
             _FakeDockingExecution(_success_result()),
