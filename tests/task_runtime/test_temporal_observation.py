@@ -21,6 +21,7 @@ from src.task_runtime.rollout import EvidenceError, RolloutEvidence
 END = datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc)
 GENERATED_AT = datetime(2026, 8, 21, 12, 1, tzinfo=timezone.utc)
 BLOCKING_ALERT = "TemporalArtifactValidationFailure"
+_DEFAULT_ALERTS = object()
 
 
 def _sample(index: int, latency: float = 30.0) -> dict[str, object]:
@@ -51,8 +52,8 @@ def _report(
     window_end: datetime = END,
     worker_health: dict[str, object] | None = None,
     infrastructure: dict[str, object] | None = None,
-    blocking_alerts: list[object] | None = None,
-    backup_verified: bool = True,
+    blocking_alerts: list[object] | None | object = _DEFAULT_ALERTS,
+    backup_verified: bool | None = True,
     policy: ObservationPolicy | None = None,
     generated_at: datetime = GENERATED_AT,
 ) -> dict[str, object]:
@@ -64,7 +65,9 @@ def _report(
         worker_health=worker_health or {"available": True, "age_seconds": 5.0},
         infrastructure=infrastructure
         or {"temporal": True, "namespace": True, "queue": True},
-        blocking_alerts=blocking_alerts or [],
+        blocking_alerts=(
+            [] if blocking_alerts is _DEFAULT_ALERTS else blocking_alerts
+        ),
         backup_verified=backup_verified,
         policy=policy or ObservationPolicy(baseline_p95_seconds=40.0),
         generated_at=generated_at,
@@ -176,6 +179,34 @@ def test_operational_violation_fails_before_sample_insufficiency(
     assert report["status"] == "failed"
     assert report["gates"][gate] == "failed"
     assert report["gates"]["sample_window"] == "insufficient_evidence"
+
+
+def test_unknown_operational_evidence_is_partial_without_fabricating_failure() -> None:
+    report = _report(
+        worker_health={"available": None, "age_seconds": None},
+        infrastructure={"temporal": None, "namespace": None, "queue": None},
+        blocking_alerts=None,
+        backup_verified=None,
+    )
+
+    assert report["status"] == "partial"
+    assert report["worker_health"] == {"available": None, "age_seconds": None}
+    assert report["infrastructure"] == {
+        "temporal": None,
+        "namespace": None,
+        "queue": None,
+    }
+    assert report["blocking_alerts"] is None
+    assert report["backup_verified"] is None
+    for gate in (
+        "worker_health",
+        "temporal_available",
+        "namespace_available",
+        "queue_available",
+        "blocking_alerts",
+        "backup_verified",
+    ):
+        assert report["gates"][gate] == "insufficient_evidence"
 
 
 def test_failure_rate_equality_passes_and_just_over_fails() -> None:

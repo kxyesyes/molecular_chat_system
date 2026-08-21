@@ -234,29 +234,35 @@ def _project_sample(sample: object) -> dict[str, object]:
 def _worker_summary(value: object) -> dict[str, object]:
     source = _copy_mapping(value, "invalid worker health")
     available = source.get("available")
-    if type(available) is not bool:
+    if available is not None and type(available) is not bool:
         raise ValueError("invalid worker health")
-    try:
-        age = _finite_number(
-            source.get("age_seconds"), "invalid worker health", minimum=0.0
-        )
-    except (OverflowError, ValueError):
-        raise ValueError("invalid worker health") from None
+    raw_age = source.get("age_seconds")
+    if raw_age is None:
+        age = None
+    else:
+        try:
+            age = _finite_number(
+                raw_age, "invalid worker health", minimum=0.0
+            )
+        except (OverflowError, ValueError):
+            raise ValueError("invalid worker health") from None
     return {"available": available, "age_seconds": age}
 
 
-def _infrastructure_summary(value: object) -> dict[str, bool]:
+def _infrastructure_summary(value: object) -> dict[str, bool | None]:
     source = _copy_mapping(value, "invalid infrastructure")
-    summary: dict[str, bool] = {}
+    summary: dict[str, bool | None] = {}
     for name in ("temporal", "namespace", "queue"):
         item = source.get(name)
-        if type(item) is not bool:
+        if item is not None and type(item) is not bool:
             raise ValueError("invalid infrastructure")
         summary[name] = item
     return summary
 
 
-def _safe_blocking_alerts(value: object) -> list[str]:
+def _safe_blocking_alerts(value: object) -> list[str] | None:
+    if value is None:
+        return None
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise ValueError("invalid blocking alerts")
     return sorted(
@@ -270,6 +276,12 @@ def _safe_blocking_alerts(value: object) -> list[str]:
 
 def _gate(condition: bool) -> str:
     return "passed" if condition else "failed"
+
+
+def _evidence_gate(condition: bool | None) -> str:
+    if condition is None:
+        return "insufficient_evidence"
+    return _gate(condition)
 
 
 def _canonical_sha256(payload: Mapping[str, Any]) -> str:
@@ -290,8 +302,8 @@ def build_observation_report(
     window_end: datetime,
     worker_health: Mapping[str, object],
     infrastructure: Mapping[str, object],
-    blocking_alerts: Sequence[object],
-    backup_verified: bool,
+    blocking_alerts: Sequence[object] | None,
+    backup_verified: bool | None,
     policy: ObservationPolicy,
     generated_at: datetime | None = None,
 ) -> dict[str, object]:
@@ -319,7 +331,7 @@ def build_observation_report(
     worker = _worker_summary(worker_health)
     infra = _infrastructure_summary(infrastructure)
     alerts = _safe_blocking_alerts(blocking_alerts)
-    if type(backup_verified) is not bool:
+    if backup_verified is not None and type(backup_verified) is not bool:
         raise ValueError("invalid backup status")
 
     counts_counter = Counter(str(sample["status"]) for sample in projected)
@@ -392,15 +404,22 @@ def build_observation_report(
         ),
         "failure_rate": _gate(failure_rate <= policy.max_failure_rate),
         "latency_p95": _gate(p95 is None or p95 <= latency_limit),
-        "worker_health": _gate(
-            worker["available"] is True
-            and float(worker["age_seconds"]) <= policy.worker_stale_seconds
+        "worker_health": _evidence_gate(
+            False
+            if worker["available"] is False
+            or (
+                worker["age_seconds"] is not None
+                and float(worker["age_seconds"]) > policy.worker_stale_seconds
+            )
+            else True
+            if worker["available"] is True and worker["age_seconds"] is not None
+            else None
         ),
-        "temporal_available": _gate(infra["temporal"] is True),
-        "namespace_available": _gate(infra["namespace"] is True),
-        "queue_available": _gate(infra["queue"] is True),
-        "blocking_alerts": _gate(not alerts),
-        "backup_verified": _gate(backup_verified),
+        "temporal_available": _evidence_gate(infra["temporal"]),
+        "namespace_available": _evidence_gate(infra["namespace"]),
+        "queue_available": _evidence_gate(infra["queue"]),
+        "blocking_alerts": _evidence_gate(None if alerts is None else not alerts),
+        "backup_verified": _evidence_gate(backup_verified),
         "sample_window": "passed" if quantity_sufficient else "insufficient_evidence",
     }
     overall = (
