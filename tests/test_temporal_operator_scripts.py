@@ -20,6 +20,7 @@ from scripts import observe_temporal_canary as observer
 from src.task_runtime.models import TaskStatus
 from src.task_runtime.observation import ObservationPolicy, build_observation_report
 from src.task_runtime.rollout import RolloutEvidence
+from src.task_runtime.store import ReadOnlyTemporalObservationStore, TaskStore
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -941,7 +942,11 @@ def _observer_fixture(tmp_path: Path, now: datetime) -> tuple[_FakeStore, Path, 
                 finished_at=(now - timedelta(minutes=2)).isoformat(),
                 error_code=None,
                 input={"smiles": "DB_SMILES_CANARY", "prompt": "DB_PROMPT_CANARY"},
-                result={"pose_count": 1, "best_energy": -7.0, "pose_file": relative},
+                result={
+                    "pose_count": 1,
+                    "best_energy": -7.0,
+                    "completion": {"pose_sha256": digest},
+                },
                 provenance={
                     "tool_name": "molecular_docking",
                     "tool_version": "vina-1.2.5",
@@ -950,7 +955,14 @@ def _observer_fixture(tmp_path: Path, now: datetime) -> tuple[_FakeStore, Path, 
                     "dsn": "postgres://private-dsn",
                     "environment": "ENV_SECRET_CANARY",
                 },
-                artifacts=[{"artifact_type": "docking_pose", "path": relative, "sha256": digest}],
+                artifacts=[
+                    {
+                        "artifact_type": "docking_pose",
+                        "path": relative,
+                        "sha256": digest,
+                        "size": pose.stat().st_size,
+                    }
+                ],
                 error="RAW_TASK_ERROR_CANARY C:/private/path",
             )
         )
@@ -968,6 +980,103 @@ def _passed_prometheus(endpoint: str, query: str | None = None) -> dict[str, obj
     if query == observer.PROMETHEUS_QUERIES["worker_age_seconds"]:
         return _prom_scalar(5)
     return _prom_scalar(1)
+
+
+def test_observer_accepts_strict_temporal_result_with_artifact_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    started = now - timedelta(minutes=2)
+    task_id = "strict-temporal-task"
+    workflow_id = "strict-temporal-workflow"
+    relative = "artifacts/docking_pose.pdbqt"
+    staging = tmp_path / "staging"
+    pose = staging / task_id / relative
+    pose.parent.mkdir(parents=True)
+    content = b"REMARK VINA RESULT: -7.0 0.0 0.0\n"
+    pose.write_bytes(content)
+    digest = hashlib.sha256(content).hexdigest()
+    database = tmp_path / "tasks.sqlite"
+    store = TaskStore(database)
+    store.create(
+        task_id,
+        "docking",
+        {},
+        backend="temporal",
+        external_workflow_id=workflow_id,
+        now=started - timedelta(seconds=1),
+    )
+    assert store.claim_running(task_id, attempt=1, now=started)
+    assert store.project_temporal_terminal(
+        task_id,
+        TaskStatus.SUCCEEDED,
+        result={
+            "pose_count": 1,
+            "best_energy": -7.0,
+            "pose_file": relative,
+            "completion": {"pose_sha256": digest},
+        },
+        artifacts=[
+            {
+                "artifact_type": "docking_pose",
+                "path": relative,
+                "sha256": digest,
+                "hash": digest,
+                "size": len(content),
+            }
+        ],
+        provenance={
+            "tool_name": "molecular_docking",
+            "tool_version": "vina-1.2.5",
+            "demo_mode": False,
+            "fallback_used": False,
+        },
+        now=now - timedelta(minutes=1),
+    )
+
+    persisted = store.get(task_id)
+    assert persisted.result == {
+        "pose_count": 1,
+        "best_energy": -7.0,
+        "completion": {"pose_sha256": digest},
+    }
+    with ReadOnlyTemporalObservationStore(database) as reader:
+        observed = reader.list_temporal_observation(
+            now - timedelta(hours=1), now
+        )
+    assert len(observed) == 1
+    assert "pose_file" not in observed[0].result
+
+    marker = tmp_path / "latest-verified.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "sha256": "a" * 64,
+                "verified_at": now.isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(observer, "_task_staging_root", lambda: staging)
+    report = observer.collect_observation(
+        db_path=database,
+        current_level=5,
+        window_start=now - timedelta(hours=1),
+        window_end=now,
+        prometheus_url="http://127.0.0.1:9090",
+        backup_state=marker,
+        baseline_p95_seconds=40.0,
+        now=now,
+        prometheus_fetcher=_passed_prometheus,
+    )
+
+    assert report["sample_count"] == 1
+    assert report["gates"]["artifact_integrity"] == "passed"
+    encoded = json.dumps(report)
+    assert relative not in encoded
+    assert str(pose) not in encoded
 
 
 def test_observer_builds_passed_rollout_evidence_from_safe_projections(
@@ -1082,13 +1191,14 @@ def test_observer_writes_failed_terminal_samples_with_unknown_provenance(
 @pytest.mark.parametrize(
     "mutation",
     [
-        "missing_pose_file",
-        "path_mismatch",
+        "extra_pose_artifact",
+        "type_alias_conflict",
         "hash_alias_conflict",
-        "result_digest_conflict",
         "completion_digest_conflict",
+        "missing_size",
         "size_mismatch",
         "malformed_size",
+        "unsafe_path",
     ],
 )
 def test_observer_succeeded_artifact_requires_authoritative_matching_metadata(
@@ -1100,21 +1210,23 @@ def test_observer_succeeded_artifact_requires_authoritative_matching_metadata(
     store, staging, marker = _observer_fixture(tmp_path, now)
     record = store.records[0]
     artifact = record.artifacts[0]
-    pose_path = staging / record.task_id / record.result["pose_file"]
-    if mutation == "missing_pose_file":
-        record.result.pop("pose_file")
-    elif mutation == "path_mismatch":
-        record.result["pose_file"] = "artifacts/other_pose.pdbqt"
+    pose_path = staging / record.task_id / artifact["path"]
+    if mutation == "extra_pose_artifact":
+        record.artifacts.append(dict(artifact))
+    elif mutation == "type_alias_conflict":
+        artifact["type"] = "log"
     elif mutation == "hash_alias_conflict":
         artifact["hash"] = "b" * 64
-    elif mutation == "result_digest_conflict":
-        record.result["pose_sha256"] = "b" * 64
     elif mutation == "completion_digest_conflict":
         record.result["completion"] = {"pose_sha256": "b" * 64}
+    elif mutation == "missing_size":
+        artifact.pop("size")
     elif mutation == "size_mismatch":
         artifact["size"] = pose_path.stat().st_size + 1
-    else:
+    elif mutation == "malformed_size":
         artifact["size"] = "RAW_SIZE_CANARY"
+    else:
+        artifact["path"] = "../RAW_PATH_CANARY/pose.pdbqt"
     monkeypatch.setattr(observer, "_task_staging_root", lambda: staging)
 
     report = observer.collect_observation(
@@ -1142,7 +1254,7 @@ def test_observer_artifact_hash_rejects_same_size_content_mutation(
     now = datetime.now(timezone.utc)
     store, staging, _marker = _observer_fixture(tmp_path, now)
     record = store.records[0]
-    artifact = staging / record.task_id / record.result["pose_file"]
+    artifact = staging / record.task_id / record.artifacts[0]["path"]
     metadata = artifact.stat()
     original = artifact.read_bytes()
     artifact.write_bytes(b"X" * len(original))

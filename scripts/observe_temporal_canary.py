@@ -41,6 +41,7 @@ from src.task_runtime.models import (  # noqa: E402
     TaskStatus,
     canonical_artifact_type,
     is_safe_relative_artifact_path,
+    sanitize_public_artifacts,
     sanitize_public_provenance,
     sanitize_task_result_projection,
 )
@@ -405,23 +406,36 @@ def _artifact_evidence(
     artifacts = getattr(record, "artifacts", None)
     if not isinstance(artifacts, list):
         return False, False
-    pose_artifacts = [
+    claimed_pose_artifacts = [
         artifact
         for artifact in artifacts
         if isinstance(artifact, dict)
-        and canonical_artifact_type(artifact) == "docking_pose"
+        and (
+            artifact.get("artifact_type") == "docking_pose"
+            or artifact.get("type") == "docking_pose"
+        )
+    ]
+    if len(claimed_pose_artifacts) != 1 or canonical_artifact_type(
+        claimed_pose_artifacts[0]
+    ) != "docking_pose":
+        return False, False
+    safe_artifacts = sanitize_public_artifacts(artifacts)
+    pose_artifacts = [
+        artifact
+        for artifact in safe_artifacts
+        if canonical_artifact_type(artifact) == "docking_pose"
     ]
     if len(pose_artifacts) != 1:
         return False, False
     artifact = pose_artifacts[0]
     if not isinstance(raw_result, Mapping):
         return False, False
-    result_path = raw_result.get("pose_file")
+    # SCIENTIFIC_STRICT intentionally drops pose_file; the persisted, sanitized
+    # docking_pose artifact is the only path authority available to observation.
     artifact_path = artifact.get("path")
     if (
-        type(result_path) is not str
-        or not is_safe_relative_artifact_path(result_path)
-        or artifact_path != result_path
+        type(artifact_path) is not str
+        or not is_safe_relative_artifact_path(artifact_path)
     ):
         return False, False
 
@@ -439,18 +453,18 @@ def _artifact_evidence(
 
     result_digests: list[str] = []
     completion = raw_result.get("completion")
-    scopes = [raw_result]
     if completion is not None:
         if not isinstance(completion, Mapping):
             return False, False
-        scopes.append(completion)
+        scopes = [completion]
+    else:
+        scopes = []
     for scope in scopes:
         for key in (
             "pose_sha256",
             "sha256",
             "hash",
             "output_hash",
-            "output_digest",
             "digest",
         ):
             if key not in scope:
@@ -463,12 +477,10 @@ def _artifact_evidence(
         return False, False
 
     expected_size = artifact.get("size")
-    if expected_size is not None and (
-        type(expected_size) is not int or expected_size < 0
-    ):
+    if type(expected_size) is not int or expected_size < 0:
         return False, False
     root = _normalized_path(staging_root)
-    artifact_file = root / task_id / Path(*result_path.split("/"))
+    artifact_file = root / task_id / Path(*artifact_path.split("/"))
     try:
         snapshot = _safe_read_snapshot(artifact_file, MAX_ARTIFACT_BYTES)
     except ValueError:
@@ -476,7 +488,7 @@ def _artifact_evidence(
     # Stable metadata guards the read; the digest detects same-size in-place
     # content changes that filesystem version fields alone cannot authenticate.
     actual = hashlib.sha256(snapshot.content).hexdigest()
-    size_matches = expected_size is None or len(snapshot.content) == expected_size
+    size_matches = len(snapshot.content) == expected_size
     return True, actual == digest and size_matches
 
 
