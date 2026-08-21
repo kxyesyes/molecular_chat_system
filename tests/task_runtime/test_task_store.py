@@ -109,6 +109,8 @@ def _finish_observation_task(
         now=started_at - timedelta(seconds=1),
     )
     assert store.claim_running(task_id, attempt=1, now=started_at)
+    if status is TaskStatus.CANCELED:
+        store.request_cancel(task_id, now=started_at + timedelta(seconds=1))
     if backend == "temporal":
         assert store.project_temporal_terminal(task_id, status, now=finished_at)
     else:
@@ -122,8 +124,26 @@ def test_list_temporal_observation_filters_closed_open_window_and_orders(tmp_pat
     _finish_observation_task(store, "before", finished_at=start - timedelta(microseconds=1))
     _finish_observation_task(store, "tie-b", finished_at=start + timedelta(minutes=30))
     _finish_observation_task(store, "at-start", finished_at=start)
+    _finish_observation_task(
+        store,
+        "terminal-failed",
+        finished_at=start + timedelta(minutes=10),
+        status=TaskStatus.FAILED,
+    )
+    _finish_observation_task(
+        store,
+        "terminal-canceled",
+        finished_at=start + timedelta(minutes=20),
+        status=TaskStatus.CANCELED,
+    )
     _finish_observation_task(store, "tie-a", finished_at=start + timedelta(minutes=30))
     _finish_observation_task(store, "at-end", finished_at=end)
+    _finish_observation_task(
+        store,
+        "terminal-timed-out",
+        finished_at=start + timedelta(minutes=40),
+        status=TaskStatus.TIMED_OUT,
+    )
     _finish_observation_task(
         store, "local", finished_at=start + timedelta(minutes=1), backend="local"
     )
@@ -136,18 +156,32 @@ def test_list_temporal_observation_filters_closed_open_window_and_orders(tmp_pat
         finished_at=start + timedelta(minutes=3),
         task_type="molecular_design",
     )
-    store.create("queued", "docking", {}, backend="temporal", now=start)
-    store.create("corrupt-running", "docking", {}, backend="temporal", now=start)
-    assert store.claim_running("corrupt-running", now=start + timedelta(seconds=1))
+    for task_id in ("queued", "running", "cancel-requested"):
+        store.create(task_id, "docking", {}, backend="temporal", now=start)
+    assert store.claim_running("running", now=start + timedelta(seconds=1))
+    assert store.claim_running("cancel-requested", now=start + timedelta(seconds=1))
+    store.request_cancel("cancel-requested", now=start + timedelta(seconds=2))
     with connection(store.db_path) as conn:
         conn.execute(
-            "UPDATE tasks SET finished_at = ? WHERE task_id = ?",
-            ((start + timedelta(minutes=4)).isoformat(), "corrupt-running"),
+            "UPDATE tasks SET finished_at = ? WHERE task_id IN (?, ?, ?)",
+            (
+                (start + timedelta(minutes=4)).isoformat(),
+                "queued",
+                "running",
+                "cancel-requested",
+            ),
         )
 
     records = store.list_temporal_observation(start, end)
 
-    assert [record.task_id for record in records] == ["at-start", "tie-a", "tie-b"]
+    assert [record.task_id for record in records] == [
+        "at-start",
+        "terminal-failed",
+        "terminal-canceled",
+        "tie-a",
+        "tie-b",
+        "terminal-timed-out",
+    ]
     assert all(
         record.backend == "temporal"
         and record.task_type == "docking"
@@ -184,11 +218,60 @@ def test_list_temporal_observation_enforces_limit(tmp_path):
             finished_at=start + timedelta(minutes=index + 1),
         )
 
+    with pytest.raises(ValueError, match=r"^observation result exceeds limit$"):
+        store.list_temporal_observation(start, start + timedelta(hours=1), limit=2)
+
+
+def test_list_temporal_observation_returns_exact_limit_without_overflow(tmp_path):
+    store = TaskStore(tmp_path / "observation-exact-limit.sqlite")
+    start = datetime(2026, 8, 21, 10, 0, tzinfo=timezone.utc)
+    for index in range(2):
+        _finish_observation_task(
+            store,
+            f"task-{index}",
+            finished_at=start + timedelta(minutes=index + 1),
+        )
+
     records = store.list_temporal_observation(
         start, start + timedelta(hours=1), limit=2
     )
 
     assert [record.task_id for record in records] == ["task-0", "task-1"]
+
+
+def test_observation_overflow_fails_closed_when_omitted_row_is_failed(tmp_path):
+    store = TaskStore(tmp_path / "observation-overflow.sqlite")
+    start = datetime(2026, 8, 21, 10, 0, tzinfo=timezone.utc)
+    rows = []
+    for index in range(10_001):
+        finished = start + timedelta(microseconds=index)
+        rows.append(
+            (
+                f"private-task-{index:05d}",
+                "docking",
+                "failed" if index == 10_000 else "succeeded",
+                "{}",
+                "temporal",
+                start.isoformat(),
+                finished.isoformat(),
+                finished.isoformat(),
+            )
+        )
+    with connection(store.db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO tasks (
+                task_id, task_type, status, input_json, backend,
+                created_at, updated_at, finished_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+
+    with pytest.raises(ValueError, match=r"^observation result exceeds limit$") as error:
+        store.list_temporal_observation(start, start + timedelta(hours=1))
+
+    assert "private-task" not in str(error.value)
 
 
 @pytest.mark.parametrize(
@@ -279,6 +362,36 @@ def test_schema_contains_projection_columns_tables_and_terminal_index(tmp_path):
             "SELECT sql FROM sqlite_master WHERE type = 'index' "
             "AND name = 'idx_tasks_idempotency_digest'"
         ).fetchone()
+        task_indexes = {
+            row["name"] for row in conn.execute("PRAGMA index_list(tasks)").fetchall()
+        }
+        observation_index_columns = [
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA index_info(idx_tasks_temporal_observation)"
+            ).fetchall()
+        ]
+        observation_plan = conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT * FROM tasks
+            WHERE backend = ? AND task_type = ?
+              AND status IN (?, ?, ?, ?)
+              AND finished_at >= ? AND finished_at < ?
+            ORDER BY finished_at ASC, task_id ASC LIMIT ?
+            """,
+            (
+                "temporal",
+                "docking",
+                "succeeded",
+                "failed",
+                "canceled",
+                "timed_out",
+                "2026-08-21T10:00:00+00:00",
+                "2026-08-21T11:00:00+00:00",
+                10_001,
+            ),
+        ).fetchall()
 
     assert {
         "backend",
@@ -300,6 +413,17 @@ def test_schema_contains_projection_columns_tables_and_terminal_index(tmp_path):
     assert idempotency_index is not None
     assert "UNIQUE" in idempotency_index["sql"].upper()
     assert "WHERE idempotency_digest IS NOT NULL" in idempotency_index["sql"]
+    assert "idx_tasks_temporal_observation" in task_indexes
+    assert observation_index_columns == [
+        "backend",
+        "task_type",
+        "finished_at",
+        "task_id",
+    ]
+    assert any(
+        "USING INDEX idx_tasks_temporal_observation" in row["detail"]
+        for row in observation_plan
+    )
 
 
 def test_store_atomically_claims_only_digest_and_finds_original_task(tmp_path):

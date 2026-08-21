@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import math
+from collections.abc import Iterator, Mapping
+from types import MappingProxyType
 
 import pytest
 
@@ -120,7 +122,7 @@ def test_incomplete_sample_evidence_is_partial(
 @pytest.mark.parametrize(
     ("sample_update", "gate"),
     [
-        ({"attempt": 2}, "single_vina_attempt"),
+        ({"attempt": 0}, "single_vina_attempt"),
         ({"terminal_event_count": 2}, "single_terminal_event"),
         ({"pose_count": 0}, "successful_pose"),
         ({"binding_energy_valid": False}, "finite_binding_energy"),
@@ -220,6 +222,91 @@ def test_unsuccessful_tasks_do_not_require_success_artifacts() -> None:
     assert report["gates"]["successful_pose"] == "passed"
     assert report["gates"]["finite_binding_energy"] == "passed"
     assert report["gates"]["artifact_integrity"] == "passed"
+
+
+@pytest.mark.parametrize("attempt", [0, 1])
+def test_unsuccessful_task_allows_zero_or_one_vina_attempt(attempt: int) -> None:
+    samples = [_sample(index) for index in range(20)]
+    samples[0].update(
+        {
+            "status": "failed",
+            "attempt": attempt,
+            "pose_count": 0,
+            "binding_energy": None,
+            "binding_energy_valid": False,
+            "artifact_exists": False,
+            "artifact_hash_matches": False,
+            "error_code": "DOCKING_PROCESS_FAILED",
+        }
+    )
+
+    report = _report(samples)
+
+    assert report["status"] == "passed"
+    assert report["gates"]["single_vina_attempt"] == "passed"
+    assert report["rates"] == {"failure": 0.05}
+
+
+@pytest.mark.parametrize("attempt", [True, False, -1, 2, 100])
+def test_attempt_outside_exact_zero_or_one_integer_is_rejected(attempt: object) -> None:
+    sample = _sample(0)
+    sample["attempt"] = attempt
+
+    with pytest.raises(ValueError, match="invalid observation sample"):
+        _report([sample])
+
+
+@pytest.mark.parametrize(
+    ("energy_present", "energy", "validity"),
+    [
+        (False, None, True),
+        (True, None, True),
+        (True, "-7.5", True),
+        (True, True, True),
+        (True, math.nan, True),
+        (True, math.inf, True),
+        (True, -7.5, False),
+        (True, -7.5, 1),
+    ],
+)
+def test_succeeded_task_requires_actual_finite_binding_energy_and_validity(
+    energy_present: bool, energy: object, validity: object
+) -> None:
+    samples = [_sample(index) for index in range(20)]
+    if energy_present:
+        samples[0]["binding_energy"] = energy
+    else:
+        samples[0].pop("binding_energy")
+    samples[0]["binding_energy_valid"] = validity
+
+    report = _report(samples)
+
+    assert report["status"] == "failed"
+    assert report["gates"]["finite_binding_energy"] == "failed"
+    assert all("binding_energy" not in task for task in report["tasks"])
+    json.dumps(report, allow_nan=False)
+
+
+@pytest.mark.parametrize("status", ["failed", "canceled", "timed_out"])
+def test_unsuccessful_task_energy_is_not_required_or_exposed(status: str) -> None:
+    samples = [_sample(index) for index in range(20)]
+    samples[0].update(
+        {
+            "status": status,
+            "attempt": 0,
+            "pose_count": 0,
+            "binding_energy": "private-energy-value",
+            "binding_energy_valid": {"private": "value"},
+            "artifact_exists": False,
+            "artifact_hash_matches": False,
+        }
+    )
+
+    report = _report(samples)
+
+    assert report["status"] == "passed"
+    assert report["gates"]["finite_binding_energy"] == "passed"
+    assert "private-energy-value" not in json.dumps(report)
 
 
 def test_latency_and_worker_threshold_equality_passes() -> None:
@@ -334,6 +421,25 @@ def test_report_rejects_naive_generated_at() -> None:
         _report(generated_at=datetime(2026, 8, 21, 12, 1))
 
 
+def test_generated_at_equal_to_window_end_is_valid_across_timezones() -> None:
+    report = _report(
+        generated_at=datetime(2026, 8, 21, 20, 0, tzinfo=timezone(timedelta(hours=8)))
+    )
+
+    assert report["status"] == "passed"
+    assert report["generated_at"] == END.isoformat()
+
+
+def test_generated_at_one_microsecond_before_window_end_is_rejected() -> None:
+    with pytest.raises(ValueError, match="generated_at"):
+        _report(generated_at=END - timedelta(microseconds=1))
+
+
+def test_future_window_cannot_produce_passed_evidence() -> None:
+    with pytest.raises(ValueError, match="generated_at"):
+        _report(window_end=END + timedelta(hours=1), generated_at=END)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -341,7 +447,6 @@ def test_report_rejects_naive_generated_at() -> None:
         ("latency_seconds", math.nan),
         ("latency_seconds", math.inf),
         ("latency_seconds", -0.1),
-        ("binding_energy", math.nan),
         ("pose_count", True),
         ("pose_count", 1.5),
         ("attempt", False),
@@ -431,6 +536,49 @@ def test_report_redacts_unknown_nested_data_and_fingerprints_identifiers() -> No
         "TemporalWorkerHeartbeatStale",
     ):
         assert forbidden not in serialized
+
+
+class _ExplodingMapping(Mapping[str, object]):
+    def __getitem__(self, key: str) -> object:
+        raise RuntimeError("C:/private/raw-task-id")
+
+    def __iter__(self) -> Iterator[str]:
+        raise RuntimeError("C:/private/raw-task-id")
+
+    def __len__(self) -> int:
+        return 1
+
+
+def test_sample_accepts_read_only_mapping_and_projects_immediately() -> None:
+    samples = [MappingProxyType(_sample(index)) for index in range(20)]
+
+    report = _report(samples)  # type: ignore[arg-type]
+
+    assert report["status"] == "passed"
+    assert report["sample_count"] == 20
+
+
+def test_malicious_mapping_failure_is_generic_and_does_not_reflect_data() -> None:
+    with pytest.raises(ValueError, match=r"^invalid observation sample$") as error:
+        _report([_ExplodingMapping()])  # type: ignore[list-item]
+
+    assert "private" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("worker_health", "invalid worker health"),
+        ("infrastructure", "invalid infrastructure"),
+    ],
+)
+def test_malicious_summary_mapping_failure_is_generic(
+    field: str, message: str
+) -> None:
+    with pytest.raises(ValueError, match=rf"^{message}$") as error:
+        _report(**{field: _ExplodingMapping()})
+
+    assert "private" not in str(error.value)
 
 
 def test_report_has_exact_rollout_allowlist_stable_hash_and_evidence_compatibility() -> None:

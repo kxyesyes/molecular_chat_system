@@ -153,6 +153,12 @@ def _strict_int(value: object) -> int:
     return value
 
 
+def _strict_attempt(value: object) -> int:
+    if type(value) is not int or not 0 <= value <= 1:
+        raise ValueError("invalid observation sample")
+    return value
+
+
 def _strict_bool(value: object) -> bool:
     if type(value) is not bool:
         raise ValueError("invalid observation sample")
@@ -167,55 +173,62 @@ def _safe_error_code(value: object) -> str | None:
     return value if value in _KNOWN_ERROR_CODES else "UNKNOWN"
 
 
+def _copy_mapping(value: object, message: str) -> dict[object, object]:
+    if not isinstance(value, Mapping):
+        raise ValueError(message)
+    try:
+        return dict(value)
+    except Exception:
+        raise ValueError(message) from None
+
+
 def _project_sample(sample: object) -> dict[str, object]:
-    if type(sample) is not dict:
-        raise ValueError("invalid observation sample")
-    status = sample.get("status")
+    source = _copy_mapping(sample, "invalid observation sample")
+    status = source.get("status")
     if type(status) is not str or status not in _TERMINAL_STATUSES:
         raise ValueError("invalid observation sample")
-    binding_energy = sample.get("binding_energy")
-    if binding_energy is not None:
-        try:
-            _finite_number(binding_energy, "invalid observation sample")
-        except (OverflowError, ValueError):
-            raise ValueError("invalid observation sample") from None
+    binding_energy = source.get("binding_energy")
+    binding_energy_complete = status != "succeeded" or (
+        type(binding_energy) in {int, float}
+        and math.isfinite(float(binding_energy))
+        and source.get("binding_energy_valid") is True
+    )
     try:
         latency = _finite_number(
-            sample.get("latency_seconds"),
+            source.get("latency_seconds"),
             "invalid observation sample",
             minimum=0.0,
         )
     except (OverflowError, ValueError):
         raise ValueError("invalid observation sample") from None
     return {
-        "task_fingerprint": _fingerprint(sample.get("task_fingerprint")),
-        "workflow_fingerprint": _fingerprint(sample.get("workflow_fingerprint")),
+        "task_fingerprint": _fingerprint(source.get("task_fingerprint")),
+        "workflow_fingerprint": _fingerprint(source.get("workflow_fingerprint")),
         "status": status,
-        "attempt": _strict_int(sample.get("attempt")),
-        "terminal_event_count": _strict_int(sample.get("terminal_event_count")),
-        "pose_count": _strict_int(sample.get("pose_count")),
-        "binding_energy_valid": _strict_bool(sample.get("binding_energy_valid")),
-        "artifact_exists": _strict_bool(sample.get("artifact_exists")),
+        "attempt": _strict_attempt(source.get("attempt")),
+        "terminal_event_count": _strict_int(source.get("terminal_event_count")),
+        "pose_count": _strict_int(source.get("pose_count")),
+        "binding_energy_complete": binding_energy_complete,
+        "artifact_exists": _strict_bool(source.get("artifact_exists")),
         "artifact_hash_matches": _strict_bool(
-            sample.get("artifact_hash_matches")
+            source.get("artifact_hash_matches")
         ),
-        "provenance_complete": _strict_bool(sample.get("provenance_complete")),
-        "demo_mode": _strict_bool(sample.get("demo_mode")),
-        "fallback_used": _strict_bool(sample.get("fallback_used")),
+        "provenance_complete": _strict_bool(source.get("provenance_complete")),
+        "demo_mode": _strict_bool(source.get("demo_mode")),
+        "fallback_used": _strict_bool(source.get("fallback_used")),
         "latency_seconds": latency,
-        "error_code": _safe_error_code(sample.get("error_code")),
+        "error_code": _safe_error_code(source.get("error_code")),
     }
 
 
 def _worker_summary(value: object) -> dict[str, object]:
-    if not isinstance(value, Mapping):
-        raise ValueError("invalid worker health")
-    available = value.get("available")
+    source = _copy_mapping(value, "invalid worker health")
+    available = source.get("available")
     if type(available) is not bool:
         raise ValueError("invalid worker health")
     try:
         age = _finite_number(
-            value.get("age_seconds"), "invalid worker health", minimum=0.0
+            source.get("age_seconds"), "invalid worker health", minimum=0.0
         )
     except (OverflowError, ValueError):
         raise ValueError("invalid worker health") from None
@@ -223,11 +236,10 @@ def _worker_summary(value: object) -> dict[str, object]:
 
 
 def _infrastructure_summary(value: object) -> dict[str, bool]:
-    if not isinstance(value, Mapping):
-        raise ValueError("invalid infrastructure")
+    source = _copy_mapping(value, "invalid infrastructure")
     summary: dict[str, bool] = {}
     for name in ("temporal", "namespace", "queue"):
-        item = value.get(name)
+        item = source.get(name)
         if type(item) is not bool:
             raise ValueError("invalid infrastructure")
         summary[name] = item
@@ -287,6 +299,8 @@ def build_observation_report(
         generated_at if generated_at is not None else datetime.now(timezone.utc),
         "invalid generated_at",
     )
+    if generated < end:
+        raise ValueError("invalid generated_at")
     if isinstance(samples, (str, bytes)) or not isinstance(samples, Sequence):
         raise ValueError("invalid observation samples")
     if len(samples) > _MAX_SAMPLES:
@@ -334,7 +348,10 @@ def build_observation_report(
     )
     gates = {
         "single_vina_attempt": _gate(
-            all(sample["attempt"] == 1 for sample in projected)
+            all(
+                sample["status"] != "succeeded" or sample["attempt"] == 1
+                for sample in projected
+            )
         ),
         "single_terminal_event": _gate(
             all(sample["terminal_event_count"] == 1 for sample in projected)
@@ -343,7 +360,7 @@ def build_observation_report(
             all(int(sample["pose_count"]) > 0 for sample in succeeded)
         ),
         "finite_binding_energy": _gate(
-            all(sample["binding_energy_valid"] is True for sample in succeeded)
+            all(sample["binding_energy_complete"] is True for sample in succeeded)
         ),
         "artifact_integrity": _gate(
             all(

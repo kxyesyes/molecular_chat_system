@@ -625,7 +625,7 @@ class TaskStore:
         *,
         limit: int = 10000,
     ) -> list[TaskRecord]:
-        """Read a bounded closed-open slice of terminal Temporal docking tasks."""
+        """Read a complete bounded slice of terminal Temporal docking tasks."""
 
         start = _as_observation_timestamp(window_start)
         end = _as_observation_timestamp(window_end)
@@ -654,9 +654,11 @@ class TaskStore:
                     *terminal_values,
                     start,
                     end,
-                    limit,
+                    limit + 1,
                 ),
             ).fetchall()
+        if len(rows) > limit:
+            raise ValueError("observation result exceeds limit")
         return [TaskRecord.from_row(row) for row in rows]
 
     def list_temporal_reconcilable(
