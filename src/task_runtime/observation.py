@@ -176,6 +176,12 @@ def _strict_bool(value: object) -> bool:
     return value
 
 
+def _strict_optional_bool(value: object) -> bool | None:
+    if value is None:
+        return None
+    return _strict_bool(value)
+
+
 def _safe_error_code(value: object) -> str | None:
     if value is None:
         return None
@@ -223,9 +229,11 @@ def _project_sample(sample: object) -> dict[str, object]:
         "artifact_hash_matches": _strict_bool(
             source.get("artifact_hash_matches")
         ),
-        "provenance_complete": _strict_bool(source.get("provenance_complete")),
-        "demo_mode": _strict_bool(source.get("demo_mode")),
-        "fallback_used": _strict_bool(source.get("fallback_used")),
+        "provenance_complete": _strict_optional_bool(
+            source.get("provenance_complete")
+        ),
+        "demo_mode": _strict_optional_bool(source.get("demo_mode")),
+        "fallback_used": _strict_optional_bool(source.get("fallback_used")),
         "latency_seconds": latency,
         "error_code": _safe_error_code(source.get("error_code")),
     }

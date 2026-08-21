@@ -150,6 +150,23 @@ def test_sample_violation_fails_even_when_quantity_is_insufficient(
     assert report["gates"]["all_required_gates"] == "failed"
 
 
+def test_unknown_provenance_booleans_are_preserved_and_fail_closed() -> None:
+    samples = [_sample(index) for index in range(20)]
+    samples[0].update(
+        {
+            "provenance_complete": None,
+            "demo_mode": None,
+            "fallback_used": None,
+        }
+    )
+
+    report = _report(samples)
+
+    assert report["status"] == "failed"
+    assert report["gates"]["provenance_complete"] == "failed"
+    assert report["gates"]["real_execution"] == "failed"
+
+
 @pytest.mark.parametrize(
     ("kwargs", "gate"),
     [

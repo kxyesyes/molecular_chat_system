@@ -41,7 +41,6 @@ from src.task_runtime.models import (  # noqa: E402
     TaskStatus,
     canonical_artifact_type,
     is_safe_relative_artifact_path,
-    sanitize_public_artifacts,
     sanitize_public_provenance,
     sanitize_task_result_projection,
 )
@@ -60,6 +59,7 @@ MAX_REPORT_BYTES = 4 * 1024 * 1024 + 4096
 PROMETHEUS_TIMEOUT_SECONDS = 5.0
 BACKUP_MAX_AGE = timedelta(hours=24)
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_ARTIFACT_SHA256 = re.compile(r"[0-9A-Fa-f]{64}\Z")
 _SAFE_TASK_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,254}\Z")
 _BLOCKING_ALERT_NAMES = frozenset(
     {
@@ -395,36 +395,80 @@ def _safe_status(value: object) -> str:
 
 def _artifact_evidence(
     record: object,
-    result: Mapping[str, object],
+    raw_result: object,
     *,
     staging_root: Path,
 ) -> tuple[bool, bool]:
     task_id = getattr(record, "task_id", None)
     if type(task_id) is not str or _SAFE_TASK_COMPONENT.fullmatch(task_id) is None:
         return False, False
-    artifacts = sanitize_public_artifacts(getattr(record, "artifacts", None) or [])
+    artifacts = getattr(record, "artifacts", None)
+    if not isinstance(artifacts, list):
+        return False, False
     pose_artifacts = [
         artifact
         for artifact in artifacts
-        if canonical_artifact_type(artifact) == "docking_pose"
+        if isinstance(artifact, dict)
+        and canonical_artifact_type(artifact) == "docking_pose"
     ]
     if len(pose_artifacts) != 1:
         return False, False
     artifact = pose_artifacts[0]
-    result_path = result.get("pose_file")
+    if not isinstance(raw_result, Mapping):
+        return False, False
+    result_path = raw_result.get("pose_file")
     artifact_path = artifact.get("path")
-    relative = result_path if result_path is not None else artifact_path
     if (
-        type(relative) is not str
-        or not is_safe_relative_artifact_path(relative)
-        or artifact_path != relative
+        type(result_path) is not str
+        or not is_safe_relative_artifact_path(result_path)
+        or artifact_path != result_path
     ):
         return False, False
-    digest = artifact.get("sha256") or artifact.get("hash")
-    if type(digest) is not str or _SHA256.fullmatch(digest) is None:
+
+    artifact_digests: list[str] = []
+    for key in ("sha256", "hash"):
+        if key not in artifact:
+            continue
+        value = artifact[key]
+        if type(value) is not str or _ARTIFACT_SHA256.fullmatch(value) is None:
+            return False, False
+        artifact_digests.append(value.lower())
+    if not artifact_digests or len(set(artifact_digests)) != 1:
+        return False, False
+    digest = artifact_digests[0]
+
+    result_digests: list[str] = []
+    completion = raw_result.get("completion")
+    scopes = [raw_result]
+    if completion is not None:
+        if not isinstance(completion, Mapping):
+            return False, False
+        scopes.append(completion)
+    for scope in scopes:
+        for key in (
+            "pose_sha256",
+            "sha256",
+            "hash",
+            "output_hash",
+            "output_digest",
+            "digest",
+        ):
+            if key not in scope:
+                continue
+            value = scope[key]
+            if type(value) is not str or _ARTIFACT_SHA256.fullmatch(value) is None:
+                return False, False
+            result_digests.append(value.lower())
+    if any(value != digest for value in result_digests):
+        return False, False
+
+    expected_size = artifact.get("size")
+    if expected_size is not None and (
+        type(expected_size) is not int or expected_size < 0
+    ):
         return False, False
     root = _normalized_path(staging_root)
-    artifact_file = root / task_id / Path(*relative.split("/"))
+    artifact_file = root / task_id / Path(*result_path.split("/"))
     try:
         snapshot = _safe_read_snapshot(artifact_file, MAX_ARTIFACT_BYTES)
     except ValueError:
@@ -432,7 +476,8 @@ def _artifact_evidence(
     # Stable metadata guards the read; the digest detects same-size in-place
     # content changes that filesystem version fields alone cannot authenticate.
     actual = hashlib.sha256(snapshot.content).hexdigest()
-    return True, actual == digest
+    size_matches = expected_size is None or len(snapshot.content) == expected_size
+    return True, actual == digest and size_matches
 
 
 def _project_record(record: object, store: object, *, staging_root: Path) -> dict[str, object]:
@@ -441,10 +486,12 @@ def _project_record(record: object, store: object, *, staging_root: Path) -> dic
     if type(task_id) is not str or type(workflow_id) is not str:
         raise ValueError("invalid task observation")
     status_value = _safe_status(getattr(record, "status", None))
-    result = sanitize_task_result_projection(getattr(record, "result", None))
+    raw_result = getattr(record, "result", None)
+    result = sanitize_task_result_projection(raw_result)
     if not isinstance(result, dict):
         result = {}
-    provenance = sanitize_public_provenance(getattr(record, "provenance", None) or {})
+    raw_provenance = getattr(record, "provenance", None)
+    provenance = sanitize_public_provenance(raw_provenance)
     attempt = getattr(record, "attempt", None)
     if type(attempt) is not int or attempt < 0:
         raise ValueError("invalid task observation")
@@ -468,15 +515,28 @@ def _project_record(record: object, store: object, *, staging_root: Path) -> dic
         except (OverflowError, TypeError, ValueError):
             energy_valid = False
     artifact_exists, artifact_hash_matches = _artifact_evidence(
-        record, result, staging_root=staging_root
+        record, raw_result, staging_root=staging_root
     )
-    provenance_complete = (
-        provenance.get("tool_name") == "molecular_docking"
-        and type(provenance.get("tool_version")) is str
-        and bool(provenance.get("tool_version"))
-        and provenance.get("demo_mode") is False
-        and provenance.get("fallback_used") is False
+    provenance_available = isinstance(raw_provenance, dict) and (
+        type(raw_provenance.get("tool_name")) is str
+        and type(raw_provenance.get("tool_version")) is str
+        and type(raw_provenance.get("demo_mode")) is bool
+        and type(raw_provenance.get("fallback_used")) is bool
     )
+    if provenance_available:
+        provenance_complete: bool | None = (
+            provenance.get("tool_name") == "molecular_docking"
+            and type(provenance.get("tool_version")) is str
+            and bool(provenance.get("tool_version"))
+            and provenance.get("demo_mode") is False
+            and provenance.get("fallback_used") is False
+        )
+        demo_mode = provenance.get("demo_mode")
+        fallback_used = provenance.get("fallback_used")
+    else:
+        provenance_complete = None
+        demo_mode = None
+        fallback_used = None
     error_code = getattr(record, "error_code", None)
     if hasattr(error_code, "value"):
         error_code = error_code.value
@@ -492,8 +552,8 @@ def _project_record(record: object, store: object, *, staging_root: Path) -> dic
         "artifact_exists": artifact_exists,
         "artifact_hash_matches": artifact_hash_matches,
         "provenance_complete": provenance_complete,
-        "demo_mode": provenance.get("demo_mode"),
-        "fallback_used": provenance.get("fallback_used"),
+        "demo_mode": demo_mode,
+        "fallback_used": fallback_used,
         "latency_seconds": latency,
         "error_code": error_code,
     }

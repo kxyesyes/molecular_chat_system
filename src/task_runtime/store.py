@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import sqlite3
+import stat
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -11,7 +14,8 @@ from uuid import uuid4
 
 from src.agent.persistence.redaction import redact_sensitive
 
-from .database import connection, dict_factory, get_task_db_path, init_db
+from .config import _is_reparse_point, _stat_identity, _stat_version
+from .database import PROJECT_ROOT, connection, dict_factory, init_db
 from .errors import TaskErrorCode
 from .models import (
     ResultProjectionPolicy,
@@ -155,6 +159,207 @@ def _observation_records(
     return [TaskRecord.from_row(row) for row in rows]
 
 
+_DATABASE_SIDECARS = ("-wal", "-shm", "-journal")
+_OBSERVATION_SNAPSHOT_ATTEMPTS = 2
+
+
+class _ObservationSnapshotChanged(RuntimeError):
+    def __init__(self, *, identity_changed: bool = False):
+        super().__init__("observation snapshot changed")
+        self.identity_changed = identity_changed
+
+
+def _database_component_snapshot(
+    path: Path,
+) -> tuple[tuple[str, tuple[int, int, int, int], tuple[int, ...]], ...]:
+    components: list[
+        tuple[str, tuple[int, int, int, int], tuple[int, ...]]
+    ] = []
+    for suffix in ("", *_DATABASE_SIDECARS):
+        candidate = path if not suffix else Path(f"{path}{suffix}")
+        try:
+            metadata = candidate.lstat()
+        except FileNotFoundError:
+            if not suffix:
+                raise ValueError("temporal observation unavailable") from None
+            continue
+        except (OSError, RuntimeError):
+            raise ValueError("temporal observation unavailable") from None
+        if _is_reparse_point(metadata) or not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("temporal observation unavailable")
+        components.append(
+            (suffix, _stat_identity(metadata), _stat_version(metadata))
+        )
+    return tuple(components)
+
+
+def _snapshot_has_sidecars(snapshot: object) -> bool:
+    return isinstance(snapshot, tuple) and any(
+        isinstance(item, tuple) and len(item) == 3 and item[0]
+        for item in snapshot
+    )
+
+
+def _database_identity_changed(before: object, after: object) -> bool:
+    if (
+        not isinstance(before, tuple)
+        or not isinstance(after, tuple)
+        or not before
+        or not after
+        or not isinstance(before[0], tuple)
+        or not isinstance(after[0], tuple)
+        or len(before[0]) != 3
+        or len(after[0]) != 3
+    ):
+        return False
+    return before[0][0] != "" or after[0][0] != "" or before[0][1] != after[0][1]
+
+
+def _expected_database_metadata(
+    snapshot: object,
+) -> tuple[tuple[int, int, int, int], tuple[int, ...]] | None:
+    if (
+        isinstance(snapshot, tuple)
+        and snapshot
+        and isinstance(snapshot[0], tuple)
+        and len(snapshot[0]) == 3
+        and snapshot[0][0] == ""
+    ):
+        return snapshot[0][1], snapshot[0][2]
+    return None
+
+
+def _copy_database_snapshot(source: Path, destination: Path, snapshot: object) -> None:
+    expected = _expected_database_metadata(snapshot)
+    source_descriptor: int | None = None
+    destination_descriptor: int | None = None
+    try:
+        source_descriptor = os.open(
+            source,
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(source_descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse_point(opened)
+            or (
+                expected is not None
+                and (
+                    _stat_identity(opened) != expected[0]
+                    or _stat_version(opened) != expected[1]
+                )
+            )
+        ):
+            raise _ObservationSnapshotChanged(
+                identity_changed=(
+                    expected is not None
+                    and _stat_identity(opened) != expected[0]
+                )
+            )
+        destination_descriptor = os.open(
+            destination,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        while True:
+            chunk = os.read(source_descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination_descriptor, view)
+                if written <= 0:
+                    raise OSError("short snapshot write")
+                view = view[written:]
+        after = os.fstat(source_descriptor)
+        if _stat_identity(opened) != _stat_identity(after):
+            raise _ObservationSnapshotChanged(identity_changed=True)
+        if _stat_version(opened) != _stat_version(after):
+            raise _ObservationSnapshotChanged()
+        os.fsync(destination_descriptor)
+    finally:
+        if destination_descriptor is not None:
+            os.close(destination_descriptor)
+        if source_descriptor is not None:
+            os.close(source_descriptor)
+
+
+def _query_read_only_observation_snapshot(
+    path: Path,
+    start: str,
+    end: str,
+    limit: int,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    terminal_values = (
+        TaskStatus.SUCCEEDED.value,
+        TaskStatus.FAILED.value,
+        TaskStatus.CANCELED.value,
+        TaskStatus.TIMED_OUT.value,
+    )
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(
+            f"{path.as_uri()}?mode=ro",
+            uri=True,
+            check_same_thread=False,
+            timeout=30,
+            isolation_level=None,
+        )
+        conn.row_factory = dict_factory
+        conn.execute("PRAGMA query_only=ON")
+        query_only = conn.execute("PRAGMA query_only").fetchone()
+        if not isinstance(query_only, dict) or query_only.get("query_only") != 1:
+            raise ValueError("temporal observation unavailable")
+        conn.execute("BEGIN")
+        rows = conn.execute(
+            """
+            SELECT t.*, COALESCE(events.terminal_event_count, 0)
+                AS _terminal_event_count
+            FROM tasks AS t
+            LEFT JOIN (
+                SELECT task_id, COUNT(*) AS terminal_event_count
+                FROM task_events
+                WHERE is_terminal = 1
+                GROUP BY task_id
+            ) AS events ON events.task_id = t.task_id
+            WHERE t.backend = ? AND t.task_type = ?
+              AND t.status IN (?, ?, ?, ?)
+              AND t.finished_at >= ? AND t.finished_at < ?
+            ORDER BY t.finished_at ASC, t.task_id ASC LIMIT ?
+            """,
+            (
+                "temporal",
+                "docking",
+                *terminal_values,
+                start,
+                end,
+                limit + 1,
+            ),
+        ).fetchall()
+        counts: dict[str, int] = {}
+        for row in rows:
+            task_id = row.get("task_id")
+            count = row.pop("_terminal_event_count", None)
+            if type(task_id) is not str or type(count) is not int or count < 0:
+                raise ValueError("temporal observation unavailable")
+            counts[task_id] = count
+        conn.rollback()
+        return rows, counts
+    finally:
+        if conn is not None:
+            try:
+                if conn.in_transaction:
+                    conn.rollback()
+            finally:
+                conn.close()
+
+
 def _json(value: Any) -> str:
     return json.dumps(
         strict_json_snapshot(value), ensure_ascii=False, allow_nan=False
@@ -256,69 +461,28 @@ class ReadOnlyTemporalObservationStore:
 
     def __init__(self, db_path: str | Path):
         try:
-            self.db_path = get_task_db_path(db_path)
+            candidate = Path(db_path).expanduser()
+            if not candidate.is_absolute():
+                candidate = PROJECT_ROOT / candidate
+            self.db_path = Path(os.path.abspath(candidate))
         except (OSError, RuntimeError, TypeError, ValueError):
             raise ValueError("temporal observation unavailable") from None
-        self._connection: sqlite3.Connection | None = None
-        self._immutable_snapshot = False
-
-    def _has_transaction_sidecar(self) -> bool:
-        return any(
-            Path(f"{self.db_path}{suffix}").exists()
-            for suffix in ("-wal", "-shm", "-journal")
-        )
-
-    def _ensure_snapshot_compatible(self) -> None:
-        if self._immutable_snapshot and self._has_transaction_sidecar():
-            raise ValueError("temporal observation unavailable")
+        self._entered = False
+        self._terminal_counts: dict[str, int] | None = None
 
     def __enter__(self) -> "ReadOnlyTemporalObservationStore":
-        if self._connection is not None:
+        if self._entered:
             raise ValueError("temporal observation unavailable")
-        conn: sqlite3.Connection | None = None
-        try:
-            self._immutable_snapshot = not self._has_transaction_sidecar()
-            immutable = "&immutable=1" if self._immutable_snapshot else ""
-            uri = f"{self.db_path.as_uri()}?mode=ro{immutable}"
-            conn = sqlite3.connect(
-                uri,
-                uri=True,
-                check_same_thread=False,
-                timeout=30,
-            )
-            conn.row_factory = dict_factory
-            self._ensure_snapshot_compatible()
-        except (OSError, RuntimeError, sqlite3.Error, ValueError):
-            if conn is not None:
-                try:
-                    conn.close()
-                except sqlite3.Error:
-                    pass
-            raise ValueError("temporal observation unavailable") from None
-        self._connection = conn
+        self._entered = True
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
-        conn = self._connection
-        self._connection = None
-        if conn is not None:
-            unavailable = False
-            if exc_type is None:
-                try:
-                    self._ensure_snapshot_compatible()
-                except (OSError, ValueError):
-                    unavailable = True
-            try:
-                conn.close()
-            except sqlite3.Error:
-                unavailable = True
-            if unavailable and exc_type is None:
-                raise ValueError("temporal observation unavailable") from None
+        self._entered = False
+        self._terminal_counts = None
 
-    def _active_connection(self) -> sqlite3.Connection:
-        if self._connection is None:
+    def _require_entered(self) -> None:
+        if not self._entered:
             raise ValueError("temporal observation unavailable")
-        return self._connection
 
     def list_temporal_observation(
         self,
@@ -333,16 +497,42 @@ class ReadOnlyTemporalObservationStore:
             limit,
         )
         try:
-            self._ensure_snapshot_compatible()
-            rows = _query_temporal_observation_rows(
-                self._active_connection(),
-                start,
-                end,
-                bounded_limit,
-            )
-            records = _observation_records(rows, bounded_limit)
-            self._ensure_snapshot_compatible()
-            return records
+            self._require_entered()
+            for attempt in range(_OBSERVATION_SNAPSHOT_ATTEMPTS):
+                before = _database_component_snapshot(self.db_path)
+                try:
+                    if _snapshot_has_sidecars(before):
+                        rows, counts = _query_read_only_observation_snapshot(
+                            self.db_path, start, end, bounded_limit
+                        )
+                    else:
+                        with tempfile.TemporaryDirectory(
+                            prefix="medchat-observation-"
+                        ) as directory:
+                            snapshot_path = Path(directory) / "tasks.sqlite"
+                            _copy_database_snapshot(
+                                self.db_path, snapshot_path, before
+                            )
+                            rows, counts = _query_read_only_observation_snapshot(
+                                snapshot_path, start, end, bounded_limit
+                            )
+                    after = _database_component_snapshot(self.db_path)
+                except _ObservationSnapshotChanged as exc:
+                    if exc.identity_changed:
+                        raise ValueError("temporal observation unavailable") from None
+                    if attempt + 1 >= _OBSERVATION_SNAPSHOT_ATTEMPTS:
+                        raise ValueError("temporal observation unavailable") from None
+                    continue
+                if before != after:
+                    if _database_identity_changed(before, after):
+                        raise ValueError("temporal observation unavailable")
+                    if attempt + 1 >= _OBSERVATION_SNAPSHOT_ATTEMPTS:
+                        raise ValueError("temporal observation unavailable")
+                    continue
+                records = _observation_records(rows, bounded_limit)
+                self._terminal_counts = counts
+                return records
+            raise ValueError("temporal observation unavailable")
         except ValueError as exc:
             if str(exc) == "observation result exceeds limit":
                 raise
@@ -353,16 +543,10 @@ class ReadOnlyTemporalObservationStore:
     def terminal_event_count(self, task_id: str) -> int:
         try:
             safe_task_id = _validate_required_string(task_id, "task_id")
-            self._ensure_snapshot_compatible()
-            row = self._active_connection().execute(
-                "SELECT COUNT(*) AS count FROM task_events "
-                "WHERE task_id = ? AND is_terminal = 1",
-                (safe_task_id,),
-            ).fetchone()
-            if type(row) is not dict or type(row.get("count")) is not int:
+            self._require_entered()
+            if self._terminal_counts is None or safe_task_id not in self._terminal_counts:
                 raise ValueError
-            self._ensure_snapshot_compatible()
-            return row["count"]
+            return self._terminal_counts[safe_task_id]
         except (KeyError, OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
             raise ValueError("temporal observation unavailable") from None
 

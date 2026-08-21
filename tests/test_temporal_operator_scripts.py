@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import errno
 import hashlib
 import json
 import os
@@ -51,6 +52,22 @@ def _shift_windows_handle_ctime(
         )
 
     monkeypatch.setattr(os, "fstat", shifted)
+
+
+def _create_symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target)
+    except NotImplementedError:
+        if os.name == "nt":
+            pytest.skip("Windows symlinks unsupported")
+        raise
+    except OSError as exc:
+        if os.name == "nt" and (
+            exc.errno in {errno.EPERM, errno.EACCES}
+            or getattr(exc, "winerror", None) == 1314
+        ):
+            pytest.skip("Windows symlink privilege unavailable")
+        raise
 
 
 def _write_env(tmp_path: Path, level: int = 5, *, newline: str = "\n") -> Path:
@@ -307,6 +324,39 @@ def test_manager_rejects_ambiguous_rollout_assignment_whitespace(
     assert "Traceback" not in result.stderr
 
 
+@pytest.mark.parametrize(
+    "separator",
+    [
+        "\u2028",
+        "\u2029",
+        "\u0085",
+        "\u000b",
+        "\u000c",
+        "\u001c",
+        "\u001d",
+        "\u001e",
+        "\r",
+    ],
+)
+def test_manager_rejects_noncanonical_line_separators_without_mutation(
+    tmp_path: Path,
+    separator: str,
+) -> None:
+    env_file = tmp_path / "separators.env"
+    original = (
+        "MEDCHAT_TEMPORAL_CANARY_PERCENT=5"
+        f"{separator}SAFE_UNRELATED=retained\n"
+    ).encode("utf-8")
+    env_file.write_bytes(original)
+
+    result = _run_manage("status", "--env-file", str(env_file))
+
+    assert result.returncode != 0
+    assert env_file.read_bytes() == original
+    assert not env_file.with_name(env_file.name + ".lock").exists()
+    assert "Traceback" not in result.stderr
+
+
 def test_manager_rejects_oversized_env_and_symlink(tmp_path: Path) -> None:
     oversized = tmp_path / "oversized.env"
     oversized.write_bytes(
@@ -314,10 +364,7 @@ def test_manager_rejects_oversized_env_and_symlink(tmp_path: Path) -> None:
     )
     target = _write_env(tmp_path)
     link = tmp_path / "linked.env"
-    try:
-        link.symlink_to(target)
-    except (OSError, NotImplementedError):
-        pytest.skip("symlinks unavailable")
+    _create_symlink_or_skip(link, target)
 
     assert _run_manage("status", "--env-file", str(oversized)).returncode != 0
     assert _run_manage("status", "--env-file", str(link)).returncode != 0
@@ -345,6 +392,259 @@ def test_manager_rejects_force_and_has_stable_status_output(tmp_path: Path) -> N
     assert status_result.stdout == "status=passed current_level=5\n"
     assert force_result.returncode == 2
     assert "Traceback" not in force_result.stderr
+
+
+def test_manager_status_never_creates_or_modifies_lock_or_temp_files(
+    tmp_path: Path,
+) -> None:
+    env_file = _write_env(tmp_path)
+    lock = env_file.with_name(env_file.name + ".lock")
+    before = _database_files_state(env_file)[:3]
+
+    result = _run_manage("status", "--env-file", str(env_file))
+
+    assert result.returncode == 0
+    assert _database_files_state(env_file)[:3] == before
+    assert not lock.exists()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_manager_status_does_not_open_existing_lock(tmp_path: Path) -> None:
+    env_file = _write_env(tmp_path)
+    lock = env_file.with_name(env_file.name + ".lock")
+    lock.write_bytes(b"LOCK_SENTINEL")
+    before = _database_files_state(lock)[:3]
+
+    result = _run_manage("status", "--env-file", str(env_file))
+
+    assert result.returncode == 0
+    assert _database_files_state(lock)[:3] == before
+    assert lock.read_bytes() == b"LOCK_SENTINEL"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX trust boundary")
+@pytest.mark.parametrize("mode", [0o777, 0o1777])
+def test_manager_mutation_rejects_writable_or_sticky_parent(
+    tmp_path: Path,
+    mode: int,
+) -> None:
+    parent = tmp_path / "hostile"
+    parent.mkdir()
+    env_file = _write_env(parent)
+    evidence = _write_evidence(parent)
+    parent.chmod(mode)
+    try:
+        result = _run_manage(
+            "promote",
+            "--env-file",
+            str(env_file),
+            "--to",
+            "10",
+            "--evidence",
+            str(evidence),
+            "--reason",
+            "trusted boundary",
+        )
+    finally:
+        parent.chmod(0o700)
+
+    assert result.returncode != 0
+    assert b"MEDCHAT_TEMPORAL_CANARY_PERCENT=5" in env_file.read_bytes()
+    assert not env_file.with_name(env_file.name + ".lock").exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX ownership boundary")
+def test_manager_mutation_rejects_unexpected_file_owner_where_permitted(
+    tmp_path: Path,
+) -> None:
+    if os.geteuid() != 0:
+        pytest.skip("changing file ownership requires root")
+    env_file = _write_env(tmp_path)
+    evidence = _write_evidence(tmp_path)
+    os.chown(env_file, 1, env_file.stat().st_gid)
+
+    result = _run_manage(
+        "promote",
+        "--env-file",
+        str(env_file),
+        "--to",
+        "10",
+        "--evidence",
+        str(evidence),
+        "--reason",
+        "trusted owner",
+    )
+
+    assert result.returncode != 0
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL boundary")
+def test_windows_promotion_preserves_validated_security_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = _write_env(tmp_path)
+    evidence = _write_evidence(tmp_path)
+    security = object()
+    applied: list[tuple[Path, object]] = []
+    monkeypatch.setattr(
+        manager,
+        "_validate_windows_mutation_boundary",
+        lambda _path: security,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_apply_windows_security",
+        lambda path, value: applied.append((path, value)),
+        raising=False,
+    )
+
+    code = manager.main(
+        [
+            "promote",
+            "--env-file",
+            str(env_file),
+            "--to",
+            "10",
+            "--evidence",
+            str(evidence),
+            "--reason",
+            "preserve security",
+        ]
+    )
+
+    assert code == 0
+    assert len(applied) == 1
+    assert applied[0][1] is security
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL boundary")
+def test_windows_promotion_fails_closed_when_security_cannot_be_preserved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = _write_env(tmp_path)
+    evidence = _write_evidence(tmp_path)
+    monkeypatch.setattr(
+        manager,
+        "_validate_windows_mutation_boundary",
+        lambda _path: object(),
+        raising=False,
+    )
+
+    def unavailable(*_args, **_kwargs):
+        raise ValueError("PRIVATE_ACL_CANARY")
+
+    monkeypatch.setattr(
+        manager,
+        "_apply_windows_security",
+        unavailable,
+        raising=False,
+    )
+
+    code = manager.main(
+        [
+            "promote",
+            "--env-file",
+            str(env_file),
+            "--to",
+            "10",
+            "--evidence",
+            str(evidence),
+            "--reason",
+            "preserve security",
+        ]
+    )
+
+    assert code == 1
+    assert b"MEDCHAT_TEMPORAL_CANARY_PERCENT=5" in env_file.read_bytes()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL boundary")
+def test_windows_promotion_rejects_untrusted_owner_or_parent_before_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = _write_env(tmp_path)
+    evidence = _write_evidence(tmp_path)
+
+    def untrusted(_path):
+        raise ValueError("PRIVATE_OWNER_CANARY")
+
+    monkeypatch.setattr(
+        manager,
+        "_validate_windows_mutation_boundary",
+        untrusted,
+    )
+
+    code = manager.main(
+        [
+            "promote",
+            "--env-file",
+            str(env_file),
+            "--to",
+            "10",
+            "--evidence",
+            str(evidence),
+            "--reason",
+            "trusted owner",
+        ]
+    )
+
+    assert code == 1
+    assert not env_file.with_name(env_file.name + ".lock").exists()
+    assert b"MEDCHAT_TEMPORAL_CANARY_PERCENT=5" in env_file.read_bytes()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL boundary")
+@pytest.mark.parametrize("stage", ["validation", "application"])
+def test_windows_acl_unexpected_errors_are_normalized_without_leakage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stage: str,
+) -> None:
+    env_file = _write_env(tmp_path)
+    evidence = _write_evidence(tmp_path)
+    secret = "PRIVATE_WINDOWS_ACL_ERROR_CANARY"
+
+    def unexpected(*_args, **_kwargs):
+        raise Exception(secret)
+
+    if stage == "validation":
+        monkeypatch.setattr(
+            manager,
+            "_validate_windows_mutation_boundary",
+            unexpected,
+        )
+    else:
+        monkeypatch.setattr(
+            manager,
+            "_validate_windows_mutation_boundary",
+            lambda _path: object(),
+        )
+        monkeypatch.setattr(manager, "_apply_windows_security", unexpected)
+
+    code = manager.main(
+        [
+            "promote",
+            "--env-file",
+            str(env_file),
+            "--to",
+            "10",
+            "--evidence",
+            str(evidence),
+            "--reason",
+            "normalized acl error",
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert code == 1
+    assert secret not in output.out + output.err
+    assert "Traceback" not in output.err
 
 
 def test_manager_rejects_secret_like_reason_without_reflecting_it(tmp_path: Path) -> None:
@@ -408,14 +708,9 @@ def test_promotion_rejects_malformed_oversized_and_linked_evidence(tmp_path: Pat
     oversized.write_bytes(b"{" + b"x" * (manager.MAX_EVIDENCE_FILE_BYTES + 1))
     target = _write_evidence(tmp_path)
     linked = tmp_path / "linked-evidence.json"
-    try:
-        linked.symlink_to(target)
-    except (OSError, NotImplementedError):
-        linked = None
+    _create_symlink_or_skip(linked, target)
 
-    paths = [malformed, oversized]
-    if linked is not None:
-        paths.append(linked)
+    paths = [malformed, oversized, linked]
     for evidence in paths:
         result = _run_manage(
             "promote", "--env-file", str(env_file), "--to", "10",
@@ -464,6 +759,40 @@ def test_identity_change_before_replace_fails_closed_and_cleans_temp(
 
     assert code == 1
     assert "MEDCHAT_TEMPORAL_CANARY_PERCENT=5" in env_file.read_text(encoding="utf-8")
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_manager_detects_final_swap_after_atomic_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = _write_env(tmp_path)
+    evidence = _write_evidence(tmp_path)
+    original_replace = os.replace
+
+    def swapped(source, destination, *args, **kwargs):
+        original_replace(source, destination, *args, **kwargs)
+        intruder = tmp_path / "intruder.env"
+        intruder.write_bytes(b"MEDCHAT_TEMPORAL_CANARY_PERCENT=25\n")
+        original_replace(intruder, env_file)
+
+    monkeypatch.setattr(manager.os, "replace", swapped)
+
+    code = manager.main(
+        [
+            "promote",
+            "--env-file",
+            str(env_file),
+            "--to",
+            "10",
+            "--evidence",
+            str(evidence),
+            "--reason",
+            "swap race",
+        ]
+    )
+
+    assert code == 1
     assert not list(tmp_path.glob("*.tmp"))
 
 
@@ -703,6 +1032,110 @@ def test_windows_observer_accepts_valid_artifact_with_handle_path_ctime_differen
     assert report["gates"]["artifact_integrity"] == "passed"
 
 
+@pytest.mark.parametrize(
+    "status",
+    [TaskStatus.FAILED, TaskStatus.CANCELED, TaskStatus.TIMED_OUT],
+)
+@pytest.mark.parametrize(
+    "provenance",
+    [
+        None,
+        "RAW_PROVENANCE_ERROR_CANARY",
+        {"demo_mode": "RAW_PROVENANCE_ERROR_CANARY"},
+    ],
+)
+def test_observer_writes_failed_terminal_samples_with_unknown_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: TaskStatus,
+    provenance: object,
+) -> None:
+    now = datetime.now(timezone.utc)
+    store, staging, marker = _observer_fixture(tmp_path, now)
+    for record in store.records:
+        record.status = status
+        record.provenance = provenance
+        record.result = {}
+        record.artifacts = []
+    monkeypatch.setattr(observer, "_task_staging_root", lambda: staging)
+
+    report = observer.collect_observation(
+        db_path=tmp_path / "tasks.sqlite",
+        current_level=5,
+        window_start=now - timedelta(hours=2),
+        window_end=now - timedelta(minutes=1),
+        prometheus_url="http://127.0.0.1:9090",
+        backup_state=marker,
+        baseline_p95_seconds=40.0,
+        now=now,
+        observation_store_factory=lambda _path: store,
+        prometheus_fetcher=_passed_prometheus,
+    )
+
+    assert report["status"] == "failed"
+    assert report["sample_count"] == 20
+    assert report["gates"]["provenance_complete"] == "failed"
+    assert report["gates"]["real_execution"] == "failed"
+    assert "RAW_PROVENANCE_ERROR_CANARY" not in json.dumps(report)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_pose_file",
+        "path_mismatch",
+        "hash_alias_conflict",
+        "result_digest_conflict",
+        "completion_digest_conflict",
+        "size_mismatch",
+        "malformed_size",
+    ],
+)
+def test_observer_succeeded_artifact_requires_authoritative_matching_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+    store, staging, marker = _observer_fixture(tmp_path, now)
+    record = store.records[0]
+    artifact = record.artifacts[0]
+    pose_path = staging / record.task_id / record.result["pose_file"]
+    if mutation == "missing_pose_file":
+        record.result.pop("pose_file")
+    elif mutation == "path_mismatch":
+        record.result["pose_file"] = "artifacts/other_pose.pdbqt"
+    elif mutation == "hash_alias_conflict":
+        artifact["hash"] = "b" * 64
+    elif mutation == "result_digest_conflict":
+        record.result["pose_sha256"] = "b" * 64
+    elif mutation == "completion_digest_conflict":
+        record.result["completion"] = {"pose_sha256": "b" * 64}
+    elif mutation == "size_mismatch":
+        artifact["size"] = pose_path.stat().st_size + 1
+    else:
+        artifact["size"] = "RAW_SIZE_CANARY"
+    monkeypatch.setattr(observer, "_task_staging_root", lambda: staging)
+
+    report = observer.collect_observation(
+        db_path=tmp_path / "tasks.sqlite",
+        current_level=5,
+        window_start=now - timedelta(hours=2),
+        window_end=now - timedelta(minutes=1),
+        prometheus_url="http://127.0.0.1:9090",
+        backup_state=marker,
+        baseline_p95_seconds=40.0,
+        now=now,
+        observation_store_factory=lambda _path: store,
+        prometheus_fetcher=_passed_prometheus,
+    )
+
+    assert report["status"] == "failed"
+    assert report["sample_count"] == 20
+    assert report["gates"]["artifact_integrity"] == "failed"
+    assert "RAW_SIZE_CANARY" not in json.dumps(report)
+
+
 def test_observer_artifact_hash_rejects_same_size_content_mutation(
     tmp_path: Path,
 ) -> None:
@@ -928,10 +1361,7 @@ def test_backup_marker_rejects_stale_future_and_symlink(tmp_path: Path) -> None:
     link_dir = tmp_path / "links"
     link_dir.mkdir()
     link = link_dir / "latest-verified.json"
-    try:
-        link.symlink_to(target)
-    except (OSError, NotImplementedError):
-        pytest.skip("symlinks unavailable")
+    _create_symlink_or_skip(link, target)
     assert observer.read_backup_verification(link, now=now) is None
 
 
@@ -1077,10 +1507,7 @@ def test_observer_atomic_output_rejects_symlink_and_stdout_is_sanitized(
     target = tmp_path / "target.json"
     target.write_text("do not replace", encoding="utf-8")
     linked = tmp_path / "report.json"
-    try:
-        linked.symlink_to(target)
-    except (OSError, NotImplementedError):
-        pytest.skip("symlinks unavailable")
+    _create_symlink_or_skip(linked, target)
     with pytest.raises(ValueError):
         observer.write_report_atomic(linked, report)
     assert target.read_text(encoding="utf-8") == "do not replace"

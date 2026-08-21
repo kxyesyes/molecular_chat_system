@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import errno
 import json
 import math
+import os
+from pathlib import Path
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -21,6 +24,7 @@ from src.task_runtime.models import (
     contains_scientific_structure,
 )
 from src.task_runtime.store import TaskStore
+import src.task_runtime.store as runtime_store
 
 
 ERROR_CODES = {
@@ -423,6 +427,238 @@ def test_read_only_observation_sees_committed_live_wal_state(tmp_path):
         assert terminal_count == 1
     finally:
         writer.close()
+
+
+def test_read_only_observation_uses_ro_query_transaction_and_batched_counts(
+    tmp_path,
+    monkeypatch,
+):
+    from src.task_runtime.store import ReadOnlyTemporalObservationStore
+
+    path = tmp_path / "batched.sqlite"
+    store = TaskStore(path)
+    start = datetime(2026, 8, 21, 10, tzinfo=timezone.utc)
+    for index in range(3):
+        _finish_observation_task(
+            store,
+            f"task-{index}",
+            finished_at=start + timedelta(minutes=index + 1),
+        )
+    statements = []
+    uris = []
+    original_connect = sqlite3.connect
+
+    def traced(database, *args, **kwargs):
+        uris.append(str(database))
+        conn = original_connect(database, *args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(runtime_store.sqlite3, "connect", traced)
+
+    with ReadOnlyTemporalObservationStore(path) as reader:
+        records = reader.list_temporal_observation(
+            start, start + timedelta(hours=1)
+        )
+        counts = {
+            record.task_id: reader.terminal_event_count(record.task_id)
+            for record in records
+        }
+
+    normalized = [statement.strip().upper() for statement in statements]
+    assert uris and all("mode=ro" in uri and "immutable" not in uri for uri in uris)
+    assert any(statement.startswith("PRAGMA QUERY_ONLY") for statement in normalized)
+    assert sum(statement == "BEGIN" for statement in normalized) == 1
+    assert sum("FROM TASK_EVENTS" in statement for statement in normalized) == 1
+    assert counts == {"task-0": 1, "task-1": 1, "task-2": 1}
+
+
+def test_read_only_observation_detects_database_path_swap_before_open(
+    tmp_path,
+    monkeypatch,
+):
+    from src.task_runtime.store import ReadOnlyTemporalObservationStore
+
+    path = tmp_path / "tasks.sqlite"
+    replacement = tmp_path / "replacement.sqlite"
+    start = datetime(2026, 8, 21, 10, tzinfo=timezone.utc)
+    _finish_observation_task(
+        TaskStore(path), "original-task", finished_at=start + timedelta(minutes=1)
+    )
+    _finish_observation_task(
+        TaskStore(replacement),
+        "replacement-task",
+        finished_at=start + timedelta(minutes=1),
+    )
+    original_connect = sqlite3.connect
+    swapped = False
+
+    def swap_then_connect(database, *args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            os.replace(replacement, path)
+        return original_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(runtime_store.sqlite3, "connect", swap_then_connect)
+
+    with pytest.raises(ValueError, match=r"^temporal observation unavailable$"):
+        with ReadOnlyTemporalObservationStore(path) as reader:
+            reader.list_temporal_observation(
+                start, start + timedelta(hours=1)
+            )
+
+
+def _task_store_symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target)
+    except NotImplementedError:
+        if os.name == "nt":
+            pytest.skip("Windows symlinks unsupported")
+        raise
+    except OSError as exc:
+        if os.name == "nt" and (
+            exc.errno in {errno.EPERM, errno.EACCES}
+            or getattr(exc, "winerror", None) == 1314
+        ):
+            pytest.skip("Windows symlink privilege unavailable")
+        raise
+
+
+def test_read_only_observation_rejects_reparse_sidecar(tmp_path):
+    from src.task_runtime.store import ReadOnlyTemporalObservationStore
+
+    path = tmp_path / "tasks.sqlite"
+    TaskStore(path)
+    target = tmp_path / "outside-wal"
+    target.write_bytes(b"PRIVATE_WAL_CANARY")
+    sidecar = Path(str(path) + "-wal")
+    _task_store_symlink_or_skip(sidecar, target)
+
+    with pytest.raises(ValueError, match=r"^temporal observation unavailable$"):
+        with ReadOnlyTemporalObservationStore(path) as reader:
+            reader.list_temporal_observation(
+                datetime(2026, 8, 21, 10, tzinfo=timezone.utc),
+                datetime(2026, 8, 21, 11, tzinfo=timezone.utc),
+            )
+
+    assert target.read_bytes() == b"PRIVATE_WAL_CANARY"
+
+
+def test_read_only_observation_retries_one_transient_component_change(
+    tmp_path,
+    monkeypatch,
+):
+    from src.task_runtime.store import ReadOnlyTemporalObservationStore
+
+    path = tmp_path / "transient.sqlite"
+    store = TaskStore(path)
+    start = datetime(2026, 8, 21, 10, tzinfo=timezone.utc)
+    _finish_observation_task(
+        store, "task-1", finished_at=start + timedelta(minutes=1)
+    )
+    snapshots = iter(("first", "changed", "stable", "stable"))
+    calls = []
+
+    def transient(_path):
+        value = next(snapshots)
+        calls.append(value)
+        return value
+
+    monkeypatch.setattr(
+        runtime_store,
+        "_database_component_snapshot",
+        transient,
+        raising=False,
+    )
+
+    with ReadOnlyTemporalObservationStore(path) as reader:
+        records = reader.list_temporal_observation(
+            start, start + timedelta(hours=1)
+        )
+
+    assert [record.task_id for record in records] == ["task-1"]
+    assert calls == ["first", "changed", "stable", "stable"]
+
+
+def test_read_only_observation_is_consistent_with_concurrent_wal_commit(
+    tmp_path,
+    monkeypatch,
+):
+    from src.task_runtime.store import ReadOnlyTemporalObservationStore
+
+    path = tmp_path / "concurrent.sqlite"
+    TaskStore(path)
+    start = datetime(2026, 8, 21, 10, tzinfo=timezone.utc)
+    finished = start + timedelta(minutes=1)
+    writer = connect(path)
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("BEGIN IMMEDIATE")
+    writer.execute(
+        """
+        INSERT INTO tasks (
+            task_id, task_type, status, input_json, backend,
+            external_workflow_id, attempt, created_at, started_at,
+            updated_at, finished_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "concurrent-task", "docking", "succeeded", "{}", "temporal",
+            "concurrent-workflow", 1, start.isoformat(), start.isoformat(),
+            finished.isoformat(), finished.isoformat(),
+        ),
+    )
+    writer.execute(
+        """
+        INSERT INTO task_events (
+            event_id, task_id, sequence, event_type,
+            payload_json, is_terminal, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "concurrent-event", "concurrent-task", 1, "task_succeeded",
+            "{}", 1, finished.isoformat(),
+        ),
+    )
+    select_started = threading.Event()
+    continue_select = threading.Event()
+    original_connect = sqlite3.connect
+
+    def coordinated(database, *args, **kwargs):
+        conn = original_connect(database, *args, **kwargs)
+
+        def trace(statement):
+            if "SELECT t.*" in statement:
+                select_started.set()
+                assert continue_select.wait(timeout=5)
+
+        conn.set_trace_callback(trace)
+        return conn
+
+    monkeypatch.setattr(runtime_store.sqlite3, "connect", coordinated)
+
+    def observe():
+        with ReadOnlyTemporalObservationStore(path) as reader:
+            records = reader.list_temporal_observation(
+                start, start + timedelta(hours=1)
+            )
+            return [
+                (record.task_id, reader.terminal_event_count(record.task_id))
+                for record in records
+            ]
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(observe)
+            assert select_started.wait(timeout=5)
+            writer.commit()
+            continue_select.set()
+            observed = future.result(timeout=10)
+    finally:
+        continue_select.set()
+        writer.close()
+
+    assert observed == [("concurrent-task", 1)]
 
 
 def test_existing_database_is_migrated_without_row_loss_and_idempotently(tmp_path):

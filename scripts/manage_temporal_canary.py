@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 import sys
 import tempfile
@@ -58,6 +59,15 @@ class _SafeSnapshot:
     metadata: os.stat_result
     path_identities: tuple[tuple[int, int, int, int], ...]
     path_version: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _WindowsSecurityDescriptor:
+    descriptor: bytes
+    owner_sid: str
+    dacl: bytes
+    dacl_protected: bool
+    trusted_dacl: bool
 
 
 def _normalized_path(value: Path | str) -> Path:
@@ -174,13 +184,25 @@ def _decode_rollout(snapshot: _SafeSnapshot) -> tuple[list[str], int]:
         text = snapshot.content.decode("utf-8")
     except UnicodeError:
         raise ValueError("invalid rollout config") from None
-    if "\x00" in text or any(
-        unicodedata.category(character).startswith("C")
-        and character not in {"\t", "\r", "\n"}
-        for character in text
-    ):
-        raise ValueError("invalid rollout config")
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character == "\r":
+            if index + 1 >= len(text) or text[index + 1] != "\n":
+                raise ValueError("invalid rollout config")
+            index += 2
+            continue
+        if character == "\n":
+            index += 1
+            continue
+        if character != "\t" and (
+            character in {"\u2028", "\u2029"}
+            or unicodedata.category(character).startswith("C")
+        ):
+            raise ValueError("invalid rollout config")
+        index += 1
 
+    # splitlines is safe only after excluding every non-LF/CRLF separator.
     lines = text.splitlines(keepends=True)
     if text and not lines:
         raise ValueError("invalid rollout config")
@@ -213,6 +235,238 @@ def read_rollout_config(path: Path) -> tuple[list[str], int]:
     )
 
 
+def _posix_expected_owner(metadata: os.stat_result) -> bool:
+    # Root-owned deployment files are service-safe when every writable boundary
+    # is otherwise closed; all other owners must match the running service uid.
+    effective_uid = os.geteuid()
+    return metadata.st_uid in {effective_uid, 0}
+
+
+def _validate_posix_mutation_boundary(path: Path) -> None:
+    _path_identities(path)
+    try:
+        source = path.lstat()
+        parent = path.parent.lstat()
+    except (OSError, RuntimeError):
+        raise ValueError("unsafe rollout trust boundary") from None
+    if (
+        _is_reparse_point(source)
+        or _is_reparse_point(parent)
+        or not stat.S_ISREG(source.st_mode)
+        or not stat.S_ISDIR(parent.st_mode)
+        or not _posix_expected_owner(source)
+        or not _posix_expected_owner(parent)
+        or source.st_mode & 0o022
+        or parent.st_mode & 0o022
+        or parent.st_mode & stat.S_ISVTX
+    ):
+        raise ValueError("unsafe rollout trust boundary")
+
+
+def _windows_sid_string(sid: object) -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    converted = wintypes.LPWSTR()
+    function = advapi32.ConvertSidToStringSidW
+    function.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.LPWSTR)]
+    function.restype = wintypes.BOOL
+    if not function(sid, ctypes.byref(converted)):
+        raise ValueError("unsafe rollout trust boundary")
+    try:
+        return str(converted.value)
+    finally:
+        kernel32.LocalFree(converted)
+
+
+def _windows_current_user_sid() -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(
+        kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)
+    ):
+        raise ValueError("unsafe rollout trust boundary")
+    try:
+        needed = wintypes.DWORD()
+        advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
+        if needed.value <= 0:
+            raise ValueError("unsafe rollout trust boundary")
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not advapi32.GetTokenInformation(
+            token, 1, buffer, needed.value, ctypes.byref(needed)
+        ):
+            raise ValueError("unsafe rollout trust boundary")
+        sid = ctypes.cast(buffer, ctypes.POINTER(wintypes.LPVOID))[0]
+        return _windows_sid_string(sid)
+    finally:
+        kernel32.CloseHandle(token)
+
+
+def _capture_windows_security(path: Path) -> _WindowsSecurityDescriptor:
+    import ctypes
+    from ctypes import wintypes
+
+    owner_information = 0x00000001
+    dacl_information = 0x00000004
+    requested = owner_information | dacl_information
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    needed = wintypes.DWORD()
+    advapi32.GetFileSecurityW(str(path), requested, None, 0, ctypes.byref(needed))
+    if needed.value <= 0:
+        raise ValueError("unsafe rollout trust boundary")
+    buffer = ctypes.create_string_buffer(needed.value)
+    if not advapi32.GetFileSecurityW(
+        str(path), requested, buffer, needed, ctypes.byref(needed)
+    ):
+        raise ValueError("unsafe rollout trust boundary")
+
+    owner = wintypes.LPVOID()
+    owner_defaulted = wintypes.BOOL()
+    if not advapi32.GetSecurityDescriptorOwner(
+        buffer, ctypes.byref(owner), ctypes.byref(owner_defaulted)
+    ) or not owner:
+        raise ValueError("unsafe rollout trust boundary")
+
+    dacl_present = wintypes.BOOL()
+    dacl_defaulted = wintypes.BOOL()
+    dacl = wintypes.LPVOID()
+    if not advapi32.GetSecurityDescriptorDacl(
+        buffer,
+        ctypes.byref(dacl_present),
+        ctypes.byref(dacl),
+        ctypes.byref(dacl_defaulted),
+    ) or not dacl_present or not dacl:
+        raise ValueError("unsafe rollout trust boundary")
+
+    class _AclSizeInformation(ctypes.Structure):
+        _fields_ = [
+            ("ace_count", wintypes.DWORD),
+            ("bytes_in_use", wintypes.DWORD),
+            ("bytes_free", wintypes.DWORD),
+        ]
+
+    acl_info = _AclSizeInformation()
+    if not advapi32.GetAclInformation(
+        dacl, ctypes.byref(acl_info), ctypes.sizeof(acl_info), 2
+    ):
+        raise ValueError("unsafe rollout trust boundary")
+    broad_sids = {"S-1-1-0", "S-1-5-11", "S-1-5-32-545"}
+    write_mask = 0x500D0116
+    trusted_dacl = True
+    for index in range(acl_info.ace_count):
+        ace = wintypes.LPVOID()
+        if not advapi32.GetAce(dacl, index, ctypes.byref(ace)):
+            raise ValueError("unsafe rollout trust boundary")
+        ace_address = int(ace.value)
+        ace_type = ctypes.c_ubyte.from_address(ace_address).value
+        mask = ctypes.c_uint32.from_address(ace_address + 4).value
+        if ace_type == 0 and mask & write_mask:
+            sid_value = _windows_sid_string(wintypes.LPVOID(ace_address + 8))
+            if sid_value in broad_sids:
+                trusted_dacl = False
+        elif ace_type in {5, 9} and mask & write_mask:
+            trusted_dacl = False
+
+    control = wintypes.WORD()
+    revision = wintypes.DWORD()
+    if not advapi32.GetSecurityDescriptorControl(
+        buffer, ctypes.byref(control), ctypes.byref(revision)
+    ):
+        raise ValueError("unsafe rollout trust boundary")
+    return _WindowsSecurityDescriptor(
+        descriptor=bytes(buffer.raw[: needed.value]),
+        owner_sid=_windows_sid_string(owner),
+        dacl=ctypes.string_at(dacl, acl_info.bytes_in_use),
+        dacl_protected=bool(control.value & 0x1000),
+        trusted_dacl=trusted_dacl,
+    )
+
+
+def _validate_windows_mutation_boundary(path: Path) -> _WindowsSecurityDescriptor:
+    _path_identities(path)
+    try:
+        source = path.lstat()
+        parent = path.parent.lstat()
+    except (OSError, RuntimeError):
+        raise ValueError("unsafe rollout trust boundary") from None
+    if (
+        _is_reparse_point(source)
+        or _is_reparse_point(parent)
+        or not stat.S_ISREG(source.st_mode)
+        or not stat.S_ISDIR(parent.st_mode)
+    ):
+        raise ValueError("unsafe rollout trust boundary")
+    current_sid = _windows_current_user_sid()
+    source_security = _capture_windows_security(path)
+    parent_security = _capture_windows_security(path.parent)
+    # Production mutation is limited to the current service identity; SYSTEM is
+    # naturally accepted when the service itself runs as LocalSystem.
+    if (
+        source_security.owner_sid != current_sid
+        or parent_security.owner_sid != current_sid
+        or not source_security.trusted_dacl
+        or not parent_security.trusted_dacl
+    ):
+        raise ValueError("unsafe rollout trust boundary")
+    return source_security
+
+
+def _apply_windows_security(
+    path: Path, security: _WindowsSecurityDescriptor
+) -> None:
+    import ctypes
+
+    if not isinstance(security, _WindowsSecurityDescriptor):
+        raise ValueError("unsafe rollout security")
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    descriptor = ctypes.create_string_buffer(security.descriptor)
+    information = 0x00000004 | (
+        0x80000000 if security.dacl_protected else 0x20000000
+    )
+    if not advapi32.SetFileSecurityW(str(path), information, descriptor):
+        raise ValueError("unsafe rollout security")
+    applied = _capture_windows_security(path)
+    if (
+        applied.owner_sid != security.owner_sid
+        or applied.dacl != security.dacl
+        or applied.dacl_protected != security.dacl_protected
+    ):
+        raise ValueError("unsafe rollout security")
+
+
+def _validate_mutation_boundary(path: Path) -> object | None:
+    try:
+        if os.name == "nt":
+            return _validate_windows_mutation_boundary(path)
+        _validate_posix_mutation_boundary(path)
+        return None
+    except Exception:
+        raise ValueError("unsafe rollout trust boundary") from None
+
+
 def _validate_lock_target(path: Path) -> None:
     _path_identities(path, include_final=False)
     try:
@@ -223,8 +477,20 @@ def _validate_lock_target(path: Path) -> None:
         raise ValueError("unsafe lock target") from None
     if _is_reparse_point(metadata) or not stat.S_ISREG(metadata.st_mode):
         raise ValueError("unsafe lock target")
-    if os.name == "posix" and metadata.st_mode & 0o022:
-        raise ValueError("unsafe lock target")
+    if os.name == "posix":
+        if metadata.st_mode & 0o022 or not _posix_expected_owner(metadata):
+            raise ValueError("unsafe lock target")
+    else:
+        try:
+            security = _capture_windows_security(path)
+            trusted = (
+                security.owner_sid == _windows_current_user_sid()
+                and security.trusted_dacl
+            )
+        except Exception:
+            raise ValueError("unsafe lock target") from None
+        if not trusted:
+            raise ValueError("unsafe lock target")
 
 
 @contextmanager
@@ -342,14 +608,55 @@ def _fsync_directory(path: Path) -> None:
 def _atomic_replace_rollout(snapshot: _SafeSnapshot, content: bytes) -> None:
     parent = snapshot.path.parent
     parent_identities = _path_identities(snapshot.path, include_final=False)
+    parent_metadata = parent.lstat()
+    parent_identity = _stat_identity(parent_metadata)
+    source_security = _validate_mutation_boundary(snapshot.path)
+    parent_descriptor: int | None = None
     descriptor: int | None = None
     temporary: Path | None = None
+    temporary_name: str | None = None
     try:
-        descriptor, name = tempfile.mkstemp(
-            prefix=f".{snapshot.path.name}.", suffix=".tmp", dir=parent
-        )
-        temporary = Path(name)
-        os.chmod(temporary, 0o600)
+        if os.name == "posix":
+            directory_flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            if not getattr(os, "O_DIRECTORY", 0) or not getattr(os, "O_NOFOLLOW", 0):
+                raise ValueError("safe parent anchoring unavailable")
+            parent_descriptor = os.open(parent, directory_flags)
+            if _stat_identity(os.fstat(parent_descriptor)) != parent_identity:
+                raise ValueError("rollout parent identity changed")
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | os.O_NOFOLLOW
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            for _ in range(8):
+                candidate = f".{snapshot.path.name}.{secrets.token_hex(12)}.tmp"
+                try:
+                    descriptor = os.open(
+                        candidate,
+                        flags,
+                        0o600,
+                        dir_fd=parent_descriptor,
+                    )
+                except FileExistsError:
+                    continue
+                temporary_name = candidate
+                temporary = parent / candidate
+                break
+            if descriptor is None:
+                raise ValueError("safe temporary unavailable")
+        else:
+            descriptor, name = tempfile.mkstemp(
+                prefix=f".{snapshot.path.name}.", suffix=".tmp", dir=parent
+            )
+            temporary = Path(name)
+            os.chmod(temporary, 0o600)
         view = memoryview(content)
         while view:
             written = os.write(descriptor, view)
@@ -362,19 +669,55 @@ def _atomic_replace_rollout(snapshot: _SafeSnapshot, content: bytes) -> None:
         if hasattr(os, "fchmod"):
             os.fchmod(descriptor, stat.S_IMODE(snapshot.metadata.st_mode))
         os.fsync(descriptor)
+        if os.name == "nt":
+            try:
+                _apply_windows_security(temporary, source_security)
+            except Exception:
+                raise ValueError("unsafe rollout security") from None
         temporary_identity = _stat_identity(os.fstat(descriptor))
         os.close(descriptor)
         descriptor = None
 
         _assert_unchanged(snapshot.path, snapshot)
-        if _path_identities(snapshot.path, include_final=False) != parent_identities:
+        if (
+            _path_identities(snapshot.path, include_final=False) != parent_identities
+            or _stat_identity(parent.lstat()) != parent_identity
+            or (
+                parent_descriptor is not None
+                and _stat_identity(os.fstat(parent_descriptor)) != parent_identity
+            )
+        ):
             raise ValueError("rollout parent identity changed")
-        os.replace(temporary, snapshot.path)
+        if parent_descriptor is not None:
+            os.replace(
+                temporary_name,
+                snapshot.path.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+        else:
+            os.replace(temporary, snapshot.path)
         temporary = None
-        final = snapshot.path.lstat()
+        temporary_name = None
+        final = (
+            os.stat(
+                snapshot.path.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if parent_descriptor is not None
+            else snapshot.path.lstat()
+        )
         if _is_reparse_point(final) or _stat_identity(final) != temporary_identity:
             raise ValueError("rollout replacement identity changed")
-        if _path_identities(snapshot.path, include_final=False) != parent_identities:
+        if (
+            _path_identities(snapshot.path, include_final=False) != parent_identities
+            or _stat_identity(parent.lstat()) != parent_identity
+            or (
+                parent_descriptor is not None
+                and _stat_identity(os.fstat(parent_descriptor)) != parent_identity
+            )
+        ):
             raise ValueError("rollout parent identity changed")
         _fsync_directory(parent)
     except (OSError, RuntimeError):
@@ -384,9 +727,14 @@ def _atomic_replace_rollout(snapshot: _SafeSnapshot, content: bytes) -> None:
             os.close(descriptor)
         if temporary is not None:
             try:
-                temporary.unlink()
+                if parent_descriptor is not None and temporary_name is not None:
+                    os.unlink(temporary_name, dir_fd=parent_descriptor)
+                else:
+                    temporary.unlink()
             except FileNotFoundError:
                 pass
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
 
 
 def _strict_json_object(content: bytes) -> dict[str, object]:
@@ -464,6 +812,20 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = _parser().parse_args(argv)
         env_path = _normalized_path(args.env_file)
+        if args.command == "status":
+            snapshot = _safe_read_snapshot(
+                env_path,
+                MAX_ROLLOUT_BYTES,
+                reject_posix_writable=True,
+            )
+            _lines, current_level = _decode_rollout(snapshot)
+            _assert_unchanged(env_path, snapshot)
+            print(f"status=passed current_level={current_level}")
+            return 0
+
+        # Mutation trust is established before creating/opening the adjacent
+        # lock and is revalidated inside the lock immediately before replace.
+        _validate_mutation_boundary(env_path)
         with _rollout_lock(env_path):
             snapshot = _safe_read_snapshot(
                 env_path,
@@ -471,9 +833,6 @@ def main(argv: list[str] | None = None) -> int:
                 reject_posix_writable=True,
             )
             lines, current_level = _decode_rollout(snapshot)
-            if args.command == "status":
-                print(f"status=passed current_level={current_level}")
-                return 0
 
             reason = _safe_reason(args.reason)
             if args.command == "promote":
