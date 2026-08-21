@@ -237,6 +237,66 @@ def test_unsafe_default_backup_with_other_invalid_env_still_validates_fields(
         runtime_config.read_temporal_backup_state(config.backup_state_path)
 
 
+def test_repository_relative_backup_cannot_resolve_as_external_absolute(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_runtime_environment(monkeypatch)
+    relative = "scratch/temporal_backups/latest-verified.json"
+    lexical_state = PROJECT_ROOT / relative
+    external_state = tmp_path / "latest-verified.json"
+    external_state.write_bytes(b'{"outside":true}')
+    path_type = type(tmp_path)
+    original_resolve = path_type.resolve
+
+    def escaping_resolve(
+        value: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> Path:
+        if value == lexical_state:
+            return external_state
+        return original_resolve(value, *args, **kwargs)
+
+    monkeypatch.setattr(path_type, "resolve", escaping_resolve)
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "temporal_canary")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_CANARY_PERCENT", "25")
+    monkeypatch.setenv("MEDCHAT_TEMPORAL_BACKUP_STATE", relative)
+
+    config = TaskRuntimeConfig.from_env()
+
+    assert (config.backend, config.canary_percent) == ("local", 0)
+    assert config.warnings == ("invalid_temporal_backup_state",)
+    assert config.backup_state_path == runtime_config.DEFAULT_BACKUP_STATE_PATH
+    assert config.backup_state_path != external_state
+    assert config.to_safe_dict()["backup_state_path_configured"] is False
+    with pytest.raises(ValueError):
+        runtime_config.read_temporal_backup_state(config.backup_state_path)
+
+
+def test_backup_config_rejects_component_identity_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_state = tmp_path / "latest-verified.json"
+    backup_state.write_bytes(b"{}")
+    original = runtime_config._existing_path_identity_snapshot
+    initial = original(backup_state)
+    snapshots = iter((initial, initial[:-1] + ((-1, -1, -1, -1),)))
+    monkeypatch.setattr(
+        runtime_config,
+        "_existing_path_identity_snapshot",
+        lambda _value: next(snapshots),
+    )
+
+    resolved = runtime_config._resolve_safe_backup_state_path(
+        backup_state,
+        repository_relative=False,
+    )
+
+    assert resolved is None
+
+
 @pytest.mark.parametrize(
     "value",
     ["-1", "101", "1.5", "true", "", "+1", "01", " 1", "1 "],
@@ -1291,6 +1351,14 @@ def test_direct_constructor_rejects_warning_on_active_canary() -> None:
         )
 
 
+@pytest.mark.parametrize("warning", runtime_config._WARNING_ORDER)
+def test_direct_constructor_rejects_environment_warning_provenance(
+    warning: str,
+) -> None:
+    with pytest.raises(ValueError):
+        _direct_config(warnings=(warning,))
+
+
 def test_direct_constructor_accepts_production_runtime_boundaries(
     tmp_path: Path,
 ) -> None:
@@ -1322,12 +1390,12 @@ def test_direct_constructor_preserves_legacy_positional_arguments() -> None:
         "medchat-docking",
         1,
         (PROJECT_ROOT / "scratch/task_inputs").resolve(),
-        ("invalid_temporal_address",),
+        (),
         True,
         True,
     )
 
-    assert config.warnings == ("invalid_temporal_address",)
+    assert config.warnings == ()
     assert config.to_safe_dict()["temporal_address_configured"] is True
     assert config.to_safe_dict()["staging_root_configured"] is True
     assert config.worker_metrics_address == "127.0.0.1"

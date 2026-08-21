@@ -217,30 +217,84 @@ def _path_identity_snapshot(value: Path) -> tuple[tuple[int, int, int, int], ...
     return tuple(identities)
 
 
-def _is_safe_backup_state_path(value: object) -> bool:
+def _existing_path_identity_snapshot(
+    value: Path,
+) -> tuple[tuple[int, int, int, int], ...] | None:
+    """Snapshot every existing lexical component without following links."""
+
+    identities: list[tuple[int, int, int, int]] = []
+    components = _absolute_path_components(value)
+    if not components:
+        return None
+    for candidate in components:
+        try:
+            metadata = candidate.lstat()
+        except FileNotFoundError:
+            break
+        except (OSError, RuntimeError):
+            return None
+        if _is_reparse_point(metadata):
+            return None
+        identities.append(_stat_identity(metadata))
+    return tuple(identities)
+
+
+def _resolve_safe_backup_state_path(
+    value: object,
+    *,
+    repository_relative: bool,
+) -> Path | None:
     if not isinstance(value, Path) or not value.is_absolute():
-        return False
+        return None
     if value.name != "latest-verified.json" or any(
         component in {".", ".."} for component in value.parts
     ):
-        return False
+        return None
+    if repository_relative and TEMPORAL_BACKUP_ROOT not in value.parents:
+        return None
     if _has_reparse_component(value):
-        return False
+        return None
+    before = _existing_path_identity_snapshot(value)
+    if before is None:
+        return None
     try:
         resolved = value.resolve()
     except (OSError, RuntimeError):
-        return False
+        return None
+    after = _existing_path_identity_snapshot(value)
+    if after is None or before != after:
+        return None
+    if repository_relative and TEMPORAL_BACKUP_ROOT not in resolved.parents:
+        return None
     filesystem_root = Path(resolved.anchor)
     if resolved in {filesystem_root, PROJECT_ROOT}:
-        return False
+        return None
     if PROJECT_ROOT in resolved.parents and TEMPORAL_BACKUP_ROOT not in resolved.parents:
-        return False
+        return None
     try:
-        return S_ISREG(resolved.stat().st_mode)
+        if not S_ISREG(resolved.stat().st_mode):
+            return None
     except FileNotFoundError:
-        return _nearest_existing_ancestor_is_directory(resolved)
+        if not _nearest_existing_ancestor_is_directory(resolved):
+            return None
     except (OSError, RuntimeError):
-        return False
+        return None
+    return resolved
+
+
+def _is_safe_backup_state_path(value: object) -> bool:
+    repository_relative = (
+        isinstance(value, Path)
+        and value.is_absolute()
+        and PROJECT_ROOT in value.parents
+    )
+    return (
+        _resolve_safe_backup_state_path(
+            value,
+            repository_relative=repository_relative,
+        )
+        is not None
+    )
 
 
 def _read_limited_fd(file_descriptor: int) -> bytes:
@@ -360,11 +414,16 @@ def read_temporal_backup_state(value: Path) -> bytes:
     """
 
     try:
-        if (
-            not isinstance(value, Path)
-            or not _is_safe_backup_state_path(value)
-            or value != value.resolve()
-        ):
+        repository_relative = (
+            isinstance(value, Path)
+            and value.is_absolute()
+            and PROJECT_ROOT in value.parents
+        )
+        resolved = _resolve_safe_backup_state_path(
+            value,
+            repository_relative=repository_relative,
+        )
+        if resolved is None or value != resolved:
             raise ValueError(_UNSAFE_BACKUP_STATE)
         before = _path_identity_snapshot(value)
         if os.name == "posix":
@@ -434,9 +493,12 @@ class TaskRuntimeConfig:
     )
 
     def __post_init__(self) -> None:
-        self._validate()
+        self._validate_projected_fields()
+        if self.warnings:
+            raise ValueError("task runtime warnings require environment provenance")
+        self._validate_backup_state_path()
 
-    def _validate(self, *, allow_internal_fail_closed_backup: bool = False) -> None:
+    def _validate_projected_fields(self) -> None:
         if type(self.backend) is not str or self.backend not in _BACKENDS:
             raise ValueError("invalid task runtime backend")
         if (
@@ -476,23 +538,6 @@ class TaskRuntimeConfig:
         ):
             raise ValueError("invalid Temporal baseline p95")
         object.__setattr__(self, "baseline_p95_seconds", normalized_baseline)
-        backup_path_valid = _is_safe_backup_state_path(self.backup_state_path)
-        fail_closed_lexical_default = (
-            allow_internal_fail_closed_backup
-            and not backup_path_valid
-            and self.backup_state_path == DEFAULT_BACKUP_STATE_PATH
-            and self.backend == "local"
-            and self.canary_percent == 0
-            and type(self.warnings) is tuple
-            and "invalid_temporal_backup_state" in self.warnings
-        )
-        if not backup_path_valid and not fail_closed_lexical_default:
-            raise ValueError("invalid Temporal backup state")
-        if (
-            backup_path_valid
-            and self.backup_state_path != self.backup_state_path.resolve()
-        ):
-            raise ValueError("Temporal backup state path must be resolved")
         if type(self.warnings) is not tuple or any(
             type(code) is not str or code not in _WARNING_CODES
             for code in self.warnings
@@ -513,6 +558,21 @@ class TaskRuntimeConfig:
             raise ValueError("invalid worker metrics address configured flag")
         if type(self._backup_state_path_configured) is not bool:
             raise ValueError("invalid backup state path configured flag")
+
+    def _validate_backup_state_path(self) -> None:
+        repository_relative = (
+            isinstance(self.backup_state_path, Path)
+            and self.backup_state_path.is_absolute()
+            and PROJECT_ROOT in self.backup_state_path.parents
+        )
+        resolved = _resolve_safe_backup_state_path(
+            self.backup_state_path,
+            repository_relative=repository_relative,
+        )
+        if resolved is None:
+            raise ValueError("invalid Temporal backup state")
+        if self.backup_state_path != resolved:
+            raise ValueError("Temporal backup state path must be resolved")
 
     def to_safe_dict(self) -> dict[str, Any]:
         """Return operational settings without serializing addresses or paths."""
@@ -624,19 +684,28 @@ class TaskRuntimeConfig:
         if backup_state_valid:
             raw_backup_state = Path(backup_state_text)
             backup_was_absolute = raw_backup_state.is_absolute()
+            repository_relative_backup = (
+                not backup_was_absolute
+                or not backup_state_configured
+                or (
+                    backup_was_absolute
+                    and PROJECT_ROOT in raw_backup_state.parents
+                )
+            )
             if _has_dot_path_component(backup_state_text):
                 backup_state_valid = False
             backup_state_path = raw_backup_state
             if not backup_was_absolute:
                 backup_state_path = PROJECT_ROOT / raw_backup_state
-            backup_state_valid = backup_state_valid and _is_safe_backup_state_path(
-                backup_state_path
-            )
             if backup_state_valid:
-                try:
-                    backup_state_path = backup_state_path.resolve()
-                except (OSError, RuntimeError):
+                resolved_backup_state = _resolve_safe_backup_state_path(
+                    backup_state_path,
+                    repository_relative=repository_relative_backup,
+                )
+                if resolved_backup_state is None:
                     backup_state_valid = False
+                else:
+                    backup_state_path = resolved_backup_state
         else:
             backup_state_path = DEFAULT_BACKUP_STATE_PATH
 
@@ -706,5 +775,15 @@ class TaskRuntimeConfig:
         instance = object.__new__(cls)
         for name, value in values.items():
             object.__setattr__(instance, name, value)
-        instance._validate(allow_internal_fail_closed_backup=True)
+        instance._validate_projected_fields()
+        if backup_state_valid:
+            instance._validate_backup_state_path()
+        elif not (
+            instance.backend == "local"
+            and instance.canary_percent == 0
+            and instance.backup_state_path == DEFAULT_BACKUP_STATE_PATH
+            and "invalid_temporal_backup_state" in instance.warnings
+            and instance._backup_state_path_configured is False
+        ):
+            raise RuntimeError("invalid fail-closed backup-state projection")
         return instance
