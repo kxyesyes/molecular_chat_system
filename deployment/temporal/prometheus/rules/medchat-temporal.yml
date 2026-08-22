@@ -1,0 +1,115 @@
+groups:
+  - name: medchat-temporal-release-blockers
+    rules:
+      - alert: TemporalWorkerHeartbeatStale
+        expr: |
+          time() - medchat_temporal_worker_last_heartbeat_timestamp_seconds > 60
+          or absent(medchat_temporal_worker_last_heartbeat_timestamp_seconds)
+        for: 60s
+        labels:
+          severity: critical
+          release_blocker: "true"
+        annotations:
+          summary: Temporal worker heartbeat is stale
+          description: The docking worker heartbeat is missing or older than sixty seconds.
+
+      - alert: TemporalQueueBacklogGrowing
+        expr: deriv(approximate_backlog_count[10m]) > 0
+        for: 10m
+        labels:
+          severity: critical
+          release_blocker: "true"
+        annotations:
+          summary: Temporal queue backlog is growing
+          description: The official Temporal queue backlog gauge has increased over ten minutes.
+
+      - alert: TemporalWorkflowStartFailures
+        expr: increase(service_errors{operation="StartWorkflowExecution"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          release_blocker: "true"
+        annotations:
+          summary: Temporal workflow starts are failing
+          description: Temporal reported one or more workflow start RPC failures.
+
+      - alert: TemporalDuplicateVinaExecution
+        expr: increase(medchat_temporal_duplicate_vina_execution_total[15m]) > 0
+        labels:
+          severity: critical
+          release_blocker: "true"
+        annotations:
+          summary: Duplicate Vina execution detected
+          description: The docking worker detected more than one Vina process attempt.
+
+      - alert: TemporalMultipleTerminalEvents
+        expr: increase(medchat_temporal_terminal_invariant_violation_total[15m]) > 0
+        labels:
+          severity: critical
+          release_blocker: "true"
+        annotations:
+          summary: Multiple terminal projections detected
+          description: A docking task violated the single terminal projection invariant.
+
+      - alert: TemporalArtifactValidationFailure
+        expr: increase(medchat_temporal_artifact_validation_failure_total[15m]) > 0
+        labels:
+          severity: critical
+          release_blocker: "true"
+        annotations:
+          summary: Docking artifact validation failed
+          description: One or more generated docking artifacts failed validation.
+
+      - alert: TemporalDockingP95TooHigh
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(medchat_temporal_task_duration_seconds_bucket[15m])))
+            > medchat_temporal_baseline_p95_seconds * 1.5
+          or
+          histogram_quantile(0.95, sum by (le) (rate(medchat_temporal_task_duration_seconds_bucket[15m]))) > 60
+        for: 10m
+        labels:
+          severity: critical
+          release_blocker: "true"
+        annotations:
+          summary: Temporal docking p95 latency is too high
+          description: Docking p95 exceeds the release baseline or the absolute latency ceiling.
+
+      - alert: TemporalRuntimeFailureRateHigh
+        expr: |
+          sum(increase(medchat_temporal_task_terminal_total{status!="succeeded"}[10m]))
+          /
+          clamp_min(sum(increase(medchat_temporal_task_terminal_total[10m])), 1)
+          > 0.05
+        for: 10m
+        labels:
+          severity: critical
+          release_blocker: "true"
+        annotations:
+          summary: Temporal docking failure rate is high
+          description: Non-successful terminal outcomes exceed five percent of terminal outcomes.
+
+      - alert: TemporalPostgresUnavailable
+        expr: |
+          absent(up{job="temporal-server"})
+          or up{job="temporal-server"} != 1
+          or absent(up{job="temporal-postgres"})
+          or up{job="temporal-postgres"} != 1
+        labels:
+          severity: critical
+          release_blocker: "true"
+        annotations:
+          summary: Temporal or PostgreSQL metrics are unavailable
+          description: The Temporal server or PostgreSQL exporter scrape is missing or unhealthy.
+
+      - alert: TemporalBackupVerificationStale
+        expr: |
+          absent(medchat_temporal_backup_verified_timestamp_seconds)
+          or medchat_temporal_backup_verified_timestamp_seconds == 0
+          or time() - medchat_temporal_backup_verified_timestamp_seconds > 86400
+        for: 15m
+        labels:
+          severity: critical
+          release_blocker: "true"
+        annotations:
+          summary: Temporal backup verification is stale
+          description: Verified backup evidence is missing, unset, or older than one day.

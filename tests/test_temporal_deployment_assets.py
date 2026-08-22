@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import json
 import os
 import re
 import shutil
@@ -23,6 +24,19 @@ ROTATE_SCRIPT = DEPLOY / "scripts" / "rotate-exporter-password.sh"
 PLAN = ROOT / "docs/superpowers/plans/2026-08-21-temporal-production-canary-readiness.md"
 DESIGN = ROOT / "docs/superpowers/specs/2026-08-21-temporal-production-canary-readiness-design.md"
 INTEGRATION_TEST = ROOT / "tests/test_temporal_deployment_integration.py"
+PROMETHEUS_CONFIG = DEPLOY / "prometheus" / "prometheus.yml"
+PROMETHEUS_RULES = (
+    DEPLOY / "prometheus" / "rules" / "medchat-temporal.yml"
+)
+GRAFANA_DATASOURCE = (
+    DEPLOY / "grafana" / "provisioning" / "datasources" / "prometheus.yml"
+)
+GRAFANA_PROVIDER = (
+    DEPLOY / "grafana" / "provisioning" / "dashboards" / "dashboard.yml"
+)
+GRAFANA_DASHBOARD = (
+    DEPLOY / "grafana" / "dashboards" / "medchat-temporal-docking.json"
+)
 
 LONG_RUNNING = {
     "postgres", "postgres-exporter", "temporal", "temporal-ui", "prometheus", "grafana"
@@ -58,8 +72,8 @@ NETWORKS = {
     "temporal-exporter-role-sync": {"database"},
     "postgres-exporter": {"database", "postgres-metrics"},
     "temporal-ui": {"temporal"},
-    "prometheus": {"temporal-metrics", "postgres-metrics", "prometheus-grafana"},
-    "grafana": {"prometheus-grafana"},
+    "prometheus": {"temporal-metrics", "postgres-metrics", "grafana-prometheus"},
+    "grafana": {"grafana-prometheus"},
 }
 MOUNTS = {
     "postgres": ["temporal-postgres-data:/var/lib/postgresql/data"],
@@ -320,7 +334,7 @@ def test_named_networks_segment_database_temporal_and_monitoring() -> None:
         "temporal": None,
         "temporal-metrics": None,
         "postgres-metrics": None,
-        "prometheus-grafana": None,
+        "grafana-prometheus": None,
     }
     assert all("name" not in (configuration or {})
                for configuration in compose["networks"].values())
@@ -923,3 +937,264 @@ def test_task6_documentation_matches_runtime_contracts() -> None:
         assert contract in task6
     assert "0600" not in task6
     assert "0600" not in boundary
+
+
+def test_monitoring_asset_files_exist() -> None:
+    for path in (
+        PROMETHEUS_CONFIG,
+        PROMETHEUS_RULES,
+        GRAFANA_DATASOURCE,
+        GRAFANA_PROVIDER,
+        GRAFANA_DASHBOARD,
+    ):
+        assert path.is_file(), path.relative_to(ROOT)
+
+
+def test_prometheus_intervals_rules_and_scrape_targets_are_fixed() -> None:
+    config = load_yaml(PROMETHEUS_CONFIG)
+    assert config["global"] == {
+        "scrape_interval": "15s",
+        "evaluation_interval": "15s",
+    }
+    assert config["rule_files"] == ["/etc/prometheus/rules/*.yml"]
+    jobs = {job["job_name"]: job for job in config["scrape_configs"]}
+    expected_targets = {
+        "prometheus": ["prometheus:9090"],
+        "temporal-server": ["temporal:8000"],
+        "temporal-postgres": ["postgres-exporter:9187"],
+        "medchat-temporal-worker": ["host.docker.internal:9465"],
+    }
+    assert set(jobs) == set(expected_targets)
+    for name, targets in expected_targets.items():
+        assert jobs[name]["static_configs"] == [{"targets": targets}]
+
+
+def test_compose_exposes_metrics_only_over_segmented_monitoring_networks() -> None:
+    compose = load_yaml(COMPOSE)
+    services = compose["services"]
+    assert env_map(services["temporal"])["PROMETHEUS_ENDPOINT"] == "0.0.0.0:8000"
+    assert all(not str(port).endswith(":8000") for port in services["temporal"]["ports"])
+    assert services["prometheus"]["extra_hosts"] == [
+        "host.docker.internal:host-gateway"
+    ]
+    assert set(services["prometheus"]["networks"]) == {
+        "temporal-metrics",
+        "postgres-metrics",
+        "grafana-prometheus",
+    }
+    assert set(services["grafana"]["networks"]) == {"grafana-prometheus"}
+    assert "temporal-metrics" in services["temporal"]["networks"]
+    assert "grafana-prometheus" not in services["temporal"]["networks"]
+    assert "monitoring" not in compose["networks"]
+    assert all("name" not in (value or {}) for value in compose["networks"].values())
+
+
+def _alert_rules() -> dict[str, dict[str, Any]]:
+    rules = load_yaml(PROMETHEUS_RULES)
+    assert isinstance(rules.get("groups"), list) and rules["groups"]
+    flattened = [rule for group in rules["groups"] for rule in group["rules"]]
+    assert len(flattened) == 10
+    return {rule["alert"]: rule for rule in flattened}
+
+
+def _compact_promql(expression: Any) -> str:
+    return re.sub(r"\s+", "", str(expression))
+
+
+def test_release_blocking_alerts_have_exact_names_safe_metadata_and_durations() -> None:
+    alerts = _alert_rules()
+    expected_for = {
+        "TemporalWorkerHeartbeatStale": "60s",
+        "TemporalQueueBacklogGrowing": "10m",
+        "TemporalWorkflowStartFailures": "5m",
+        "TemporalDuplicateVinaExecution": None,
+        "TemporalMultipleTerminalEvents": None,
+        "TemporalArtifactValidationFailure": None,
+        "TemporalDockingP95TooHigh": "10m",
+        "TemporalRuntimeFailureRateHigh": "10m",
+        "TemporalPostgresUnavailable": None,
+        "TemporalBackupVerificationStale": "15m",
+    }
+    assert set(alerts) == set(expected_for)
+    forbidden = (
+        "task_id", "trace_id", "workflow_id", "prompt", "smiles", "secret",
+        "password", "file_path", "c:\\", "/home/", "/users/",
+    )
+    for name, rule in alerts.items():
+        assert rule["labels"] == {"severity": "critical", "release_blocker": "true"}
+        assert set(rule["annotations"]) == {"summary", "description"}
+        assert all(str(value).strip() for value in rule["annotations"].values())
+        serialized = json.dumps(rule, ensure_ascii=True).lower()
+        assert all(word not in serialized for word in forbidden)
+        if expected_for[name] is None:
+            assert "for" not in rule
+        else:
+            assert rule["for"] == expected_for[name]
+
+
+def test_alert_promql_uses_pinned_temporal_and_task5_metrics_correctly() -> None:
+    alerts = _alert_rules()
+
+    heartbeat = _compact_promql(alerts["TemporalWorkerHeartbeatStale"]["expr"])
+    heartbeat_metric = "medchat_temporal_worker_last_heartbeat_timestamp_seconds"
+    assert f"time()-{heartbeat_metric}>60" in heartbeat
+    assert f"absent({heartbeat_metric})" in heartbeat
+
+    # Temporal v1.29.7 source evidence:
+    # https://github.com/temporalio/temporal/blob/v1.29.7/common/metrics/metric_defs.go
+    backlog = _compact_promql(alerts["TemporalQueueBacklogGrowing"]["expr"])
+    assert "deriv(approximate_backlog_count[10m])>0" in backlog
+    assert "increase(approximate_backlog_count" not in backlog
+    starts = _compact_promql(alerts["TemporalWorkflowStartFailures"]["expr"])
+    assert 'increase(service_errors{operation="StartWorkflowExecution"}[5m])>0' in starts
+
+    hard_invariants = {
+        "TemporalDuplicateVinaExecution": (
+            "medchat_temporal_duplicate_vina_execution_total"
+        ),
+        "TemporalMultipleTerminalEvents": (
+            "medchat_temporal_terminal_invariant_violation_total"
+        ),
+        "TemporalArtifactValidationFailure": (
+            "medchat_temporal_artifact_validation_failure_total"
+        ),
+    }
+    for name, metric in hard_invariants.items():
+        assert f"increase({metric}[15m])>0" in _compact_promql(alerts[name]["expr"])
+
+    p95 = _compact_promql(alerts["TemporalDockingP95TooHigh"]["expr"])
+    quantile = (
+        "histogram_quantile(0.95,sumby(le)(rate("
+        "medchat_temporal_task_duration_seconds_bucket[15m])))"
+    )
+    assert f"{quantile}>medchat_temporal_baseline_p95_seconds*1.5" in p95
+    assert f"{quantile}>60" in p95
+    assert "or" in p95
+
+    failure_rate = _compact_promql(alerts["TemporalRuntimeFailureRateHigh"]["expr"])
+    assert 'medchat_temporal_task_terminal_total{status!="succeeded"}' in failure_rate
+    assert "medchat_temporal_task_terminal_total[10m]" in failure_rate
+    assert "clamp_min(" in failure_rate and ",1)" in failure_rate
+    assert ">0.05" in failure_rate
+
+    unavailable = _compact_promql(alerts["TemporalPostgresUnavailable"]["expr"])
+    for job in ("temporal-server", "temporal-postgres"):
+        assert f'absent(up{{job="{job}"}})' in unavailable
+        assert f'up{{job="{job}"}}!=1' in unavailable
+
+    backup = _compact_promql(alerts["TemporalBackupVerificationStale"]["expr"])
+    backup_metric = "medchat_temporal_backup_verified_timestamp_seconds"
+    assert f"absent({backup_metric})" in backup
+    assert f"{backup_metric}==0" in backup
+    assert f"time()-{backup_metric}>86400" in backup
+
+
+def test_grafana_provisioning_is_stable_read_only_and_prometheus_backed() -> None:
+    datasource = load_yaml(GRAFANA_DATASOURCE)
+    assert datasource["apiVersion"] == 1
+    assert datasource.get("deleteDatasources", []) == []
+    assert datasource["datasources"] == [{
+        "name": "Prometheus",
+        "type": "prometheus",
+        "uid": "medchat-prometheus",
+        "access": "proxy",
+        "url": "http://prometheus:9090",
+        "isDefault": True,
+        "editable": False,
+    }]
+    provider = load_yaml(GRAFANA_PROVIDER)
+    assert provider["apiVersion"] == 1
+    assert provider["providers"] == [{
+        "name": "medchat-temporal",
+        "orgId": 1,
+        "folder": "MedChat",
+        "type": "file",
+        "disableDeletion": True,
+        "editable": False,
+        "updateIntervalSeconds": 30,
+        "options": {
+            "path": "/var/lib/grafana/dashboards",
+            "foldersFromFilesStructure": False,
+        },
+    }]
+
+
+def test_dashboard_has_complete_panels_real_metrics_and_no_sensitive_fields() -> None:
+    dashboard = json.loads(GRAFANA_DASHBOARD.read_text(encoding="utf-8"))
+    assert dashboard["uid"] == "medchat-temporal-docking"
+    assert dashboard["refresh"] == "15s"
+    assert dashboard["schemaVersion"] >= 39
+    assert dashboard["editable"] is False
+    panels = dashboard["panels"]
+    expected_titles = {
+        "Canary level",
+        "Worker readiness",
+        "Worker heartbeat",
+        "Queue backlog",
+        "Temporal accepted count",
+        "Terminal distribution",
+        "p50 / p95 latency",
+        "Vina attempts",
+        "Duplicate prevention",
+        "Terminal invariants",
+        "Artifact validation",
+        "Provenance gate",
+        "Scientific gates",
+        "Firing release blockers",
+    }
+    assert {panel["title"] for panel in panels} == expected_titles
+    queries = [target["expr"] for panel in panels for target in panel["targets"]]
+    assert all(target.get("datasource", {}).get("uid") == "medchat-prometheus"
+               for panel in panels for target in panel["targets"])
+    allowed_metrics = {
+        "approximate_backlog_count",
+        "service_requests",
+        "ALERTS",
+        "medchat_temporal_worker_ready",
+        "medchat_temporal_worker_last_heartbeat_timestamp_seconds",
+        "medchat_temporal_canary_percent",
+        "medchat_temporal_task_terminal_total",
+        "medchat_temporal_task_duration_seconds_bucket",
+        "medchat_temporal_docking_process_attempts_total",
+        "medchat_temporal_duplicate_vina_execution_total",
+        "medchat_temporal_terminal_invariant_violation_total",
+        "medchat_temporal_artifact_validation_failure_total",
+        "medchat_temporal_provenance_validation_failure_total",
+    }
+    query_text = "\n".join(queries)
+    metric_like = set(re.findall(r"\b[A-Za-z][A-Za-z0-9_:]*_[A-Za-z0-9_:]+\b", query_text))
+    promql_words = {
+        "alertstate", "histogram_quantile", "release_blocker", "task_type",
+    }
+    assert metric_like - promql_words <= allowed_metrics
+    assert allowed_metrics <= set(re.findall(
+        r"\b(?:ALERTS|[A-Za-z][A-Za-z0-9_:]*_[A-Za-z0-9_:]+)\b",
+        query_text,
+    ))
+    serialized = json.dumps(dashboard, ensure_ascii=True).lower()
+    for forbidden in (
+        "smiles", "prompt", "user_id", "task_id", "trace_id", "workflow_id",
+        "file_path", "secret", "password", "c:\\", "/home/", "/users/",
+    ):
+        assert forbidden not in serialized
+
+
+def test_monitoring_assets_parse_without_embedded_credentials_or_host_paths() -> None:
+    for path in (PROMETHEUS_CONFIG, PROMETHEUS_RULES, GRAFANA_DATASOURCE, GRAFANA_PROVIDER):
+        assert isinstance(load_yaml(path), dict)
+    assert isinstance(json.loads(GRAFANA_DASHBOARD.read_text(encoding="utf-8")), dict)
+    combined = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            PROMETHEUS_CONFIG,
+            PROMETHEUS_RULES,
+            GRAFANA_DATASOURCE,
+            GRAFANA_PROVIDER,
+            GRAFANA_DASHBOARD,
+        )
+    ).lower()
+    for forbidden in (
+        "password:", "api_key", "apikey", "bearer_token", "client_secret",
+        "c:\\users\\", "/home/", "/users/",
+    ):
+        assert forbidden not in combined

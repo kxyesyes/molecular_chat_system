@@ -75,6 +75,7 @@ services:
       - VISIBILITY_DBNAME=${TEMPORAL_POSTGRES_VISIBILITY_DB:-temporal_visibility}
       - BIND_ON_IP=0.0.0.0
       - TEMPORAL_ADDRESS=temporal:7233
+      - PROMETHEUS_ENDPOINT=0.0.0.0:8000
     entrypoint:
       - /opt/medchat/temporal-server-entrypoint.sh
     ports:
@@ -201,13 +202,15 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:${PROMETHEUS_HOST_PORT:-9090}:9090"
+    extra_hosts:
+      - host.docker.internal:host-gateway
     volumes:
       - prometheus-data:/prometheus
       - ./prometheus:/etc/prometheus:ro
     networks:
       - temporal-metrics
       - postgres-metrics
-      - prometheus-grafana
+      - grafana-prometheus
     healthcheck:
       test: ["CMD-SHELL", "wget --spider --quiet http://127.0.0.1:9090/-/healthy"]
       interval: 15s
@@ -236,7 +239,7 @@ services:
       - source: grafana_admin_password
         target: grafana_admin_password
     networks:
-      - prometheus-grafana
+      - grafana-prometheus
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:3000/api/health"]
       interval: 15s
@@ -255,7 +258,7 @@ networks:
   temporal:
   temporal-metrics:
   postgres-metrics:
-  prometheus-grafana:
+  grafana-prometheus:
 
 secrets:
   temporal_postgres_password:
