@@ -851,10 +851,13 @@ def test_postgres_exporter_role_is_runtime_secret_and_read_only():
     assert "set -eu" in script
     assert "set -x" not in script
     assert "/run/secrets/temporal_postgres_exporter_password" in script
+    assert "DROP ROLE IF EXISTS temporal_exporter" in script
     assert "GRANT pg_monitor TO temporal_exporter" in script
     assert "NOBYPASSRLS" in script
-    assert "pg_auth_members" in script
-    assert "aclexplode" in script
+    assert "REASSIGN OWNED" not in script
+    assert "DROP OWNED" not in script
+    assert "pg_auth_members" not in script
+    assert "aclexplode" not in script
 ```
 
 - [ ] **Step 2: Verify RED**
@@ -894,12 +897,16 @@ namespace job depends on healthy Temporal, idempotently creates or confirms
 `default`, then always runs `temporal operator namespace update --retention` so
 configured retention drift converges. The role-sync job is an explicit one-shot
 available on every deployment after PostgreSQL is healthy; it validates both
-database names and the administrator role, creates `temporal_exporter` as
-`NOLOGIN` only when absent, and fails closed
-if the role has unexpected membership, object ownership, or dangerous explicit
-grants in either database. Only after a clean audit does it apply `ALTER ROLE`
-with `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, grant
-`pg_monitor`, and grant CONNECT to both databases. `postgres-exporter` starts only
+database names and the administrator role, then runs `DROP ROLE IF EXISTS
+temporal_exporter` without `REASSIGN OWNED` or `DROP OWNED`. PostgreSQL's own
+cluster-wide dependency check is the only fail-closed ownership/ACL gate: any
+remaining object or privilege dependency aborts the job with a stable error,
+while role memberships are removed by DROP ROLE. A successful reset creates the
+fixed login role with `NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
+NOREPLICATION NOBYPASSRLS`, then grants only `pg_monitor` with membership options
+`INHERIT TRUE`, `SET FALSE`, and `ADMIN FALSE`. The stack relies on PostgreSQL's
+default PUBLIC database CONNECT, avoiding a self-created ACL dependency that
+would block the next reset. `postgres-exporter` starts only
 after role-sync succeeds and uses the dynamic `${TEMPORAL_POSTGRES_DB:-temporal}`
 database. Its healthcheck fetches metrics with a finite timeout and requires
 `pg_up 1`; an HTTP 200 alone is not healthy.

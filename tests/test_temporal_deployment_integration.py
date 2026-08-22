@@ -120,6 +120,16 @@ def test_exporter_role_audit_health_and_supported_rotation(tmp_path: Path) -> No
             "--dbname", database, "--command", sql,
         )
 
+    def scalar(database: str, sql: str) -> str:
+        result = compose(
+            "exec", "-T", "postgres", "psql", "--no-psqlrc", "--quiet",
+            "--tuples-only", "--no-align", "--set=ON_ERROR_STOP=1",
+            "--username", "temporal_it", "--dbname", database,
+            "--command", sql,
+        )
+        assert result.returncode == 0
+        return result.stdout.strip()
+
     def role_sync() -> subprocess.CompletedProcess[str]:
         return compose("run", "--rm", "temporal-exporter-role-sync")
 
@@ -142,37 +152,71 @@ def test_exporter_role_audit_health_and_supported_rotation(tmp_path: Path) -> No
         ).returncode == 0
         assert role_sync().returncode == 0
 
+        first_oid = scalar(
+            "postgres", "SELECT oid FROM pg_roles WHERE rolname = 'temporal_exporter'"
+        )
+        exporter_secret.write_text(
+            secrets.token_urlsafe(24), encoding="utf-8", newline=""
+        )
+        assert role_sync().returncode == 0
+        second_oid = scalar(
+            "postgres", "SELECT oid FROM pg_roles WHERE rolname = 'temporal_exporter'"
+        )
+        assert first_oid != second_oid
+
         assert psql("postgres", "CREATE ROLE forbidden_membership").returncode == 0
         assert psql(
-            "postgres", "GRANT forbidden_membership TO temporal_exporter"
+            "postgres", "GRANT pg_monitor TO temporal_exporter WITH ADMIN OPTION; "
+            "GRANT forbidden_membership TO temporal_exporter WITH ADMIN OPTION"
         ).returncode == 0
-        assert role_sync().returncode != 0
+        assert role_sync().returncode == 0
+        assert scalar(
+            "postgres",
+            "SELECT count(*) FROM pg_auth_members membership "
+            "JOIN pg_roles granted_role ON granted_role.oid = membership.roleid "
+            "WHERE membership.member = ("
+            "SELECT oid FROM pg_roles WHERE rolname = 'temporal_exporter') "
+            "AND granted_role.rolname <> 'pg_monitor'",
+        ) == "0"
+        assert scalar(
+            "postgres",
+            "SELECT concat_ws(',', admin_option, inherit_option, set_option) "
+            "FROM pg_auth_members membership "
+            "JOIN pg_roles granted_role ON granted_role.oid = membership.roleid "
+            "WHERE membership.member = ("
+            "SELECT oid FROM pg_roles WHERE rolname = 'temporal_exporter') "
+            "AND granted_role.rolname = 'pg_monitor'",
+        ) == "f,t,f"
         assert psql(
-            "postgres", "REVOKE forbidden_membership FROM temporal_exporter; "
-            "DROP ROLE forbidden_membership"
-        ).returncode == 0
-
-        assert psql(
-            "temporal_visibility_it",
-            "CREATE TABLE exporter_owned(id integer); "
-            "ALTER TABLE exporter_owned OWNER TO temporal_exporter",
-        ).returncode == 0
-        assert role_sync().returncode != 0
-        assert psql(
-            "temporal_visibility_it",
-            "ALTER TABLE exporter_owned OWNER TO temporal_it; DROP TABLE exporter_owned",
+            "postgres", "DROP ROLE forbidden_membership"
         ).returncode == 0
 
         assert psql(
             "temporal_it",
-            "CREATE TABLE exporter_write_grant(id integer); "
-            "GRANT INSERT ON exporter_write_grant TO temporal_exporter",
+            "CREATE TABLE exporter_column_acl(id integer, payload integer); "
+            "GRANT UPDATE (payload) ON exporter_column_acl TO temporal_exporter",
         ).returncode == 0
-        assert role_sync().returncode != 0
+        column_acl_sync = role_sync()
+        assert column_acl_sync.returncode != 0
+        assert "ERROR E_EXPORTER_RESET" in column_acl_sync.stderr
         assert psql(
             "temporal_it",
-            "REVOKE INSERT ON exporter_write_grant FROM temporal_exporter; "
-            "DROP TABLE exporter_write_grant",
+            "REVOKE UPDATE (payload) ON exporter_column_acl FROM temporal_exporter; "
+            "DROP TABLE exporter_column_acl",
+        ).returncode == 0
+
+        assert psql(
+            "temporal_visibility_it",
+            "CREATE COLLATION exporter_owned_collation (provider = libc, locale = 'C'); "
+            "ALTER COLLATION exporter_owned_collation OWNER TO temporal_exporter",
+        ).returncode == 0
+        omitted_object_sync = role_sync()
+        assert omitted_object_sync.returncode != 0
+        assert "ERROR E_EXPORTER_RESET" in omitted_object_sync.stderr
+        assert psql(
+            "temporal_visibility_it",
+            "ALTER COLLATION exporter_owned_collation OWNER TO temporal_it; "
+            "DROP COLLATION exporter_owned_collation",
         ).returncode == 0
         assert role_sync().returncode == 0
 

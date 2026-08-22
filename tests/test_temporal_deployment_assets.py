@@ -709,29 +709,34 @@ exit 92
         assert result.stderr == "ERROR E_NAMESPACE_RETENTION\n"
 
 
-def test_role_sync_rotates_existing_role_without_exporter_password_argv() -> None:
+def test_role_sync_drop_recreates_role_and_delegates_dependency_audit_to_postgres() -> None:
     script = ROLE_SCRIPT.read_text(encoding="utf-8")
     assert script.startswith("#!/bin/sh\n") and "set -eu" in script
     assert "/run/secrets/temporal_postgres_password" in script
     assert "/run/secrets/temporal_postgres_exporter_password" in script
     assert "\\getenv exporter_password TEMPORAL_EXPORTER_PASSWORD" in script
-    assert "WHERE NOT EXISTS" in script and "CREATE ROLE temporal_exporter NOLOGIN" in script
-    assert "ALTER ROLE temporal_exporter WITH LOGIN PASSWORD" in script
-    assert "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS" in script
-    assert "GRANT pg_monitor TO temporal_exporter" in script
-    assert "GRANT CONNECT ON DATABASE" in script
+    assert "DROP ROLE IF EXISTS temporal_exporter" in script
+    assert "CREATE ROLE temporal_exporter WITH LOGIN PASSWORD" in script
+    assert re.search(
+        r"NOSUPERUSER\s+NOCREATEDB\s+NOCREATEROLE\s+NOINHERIT\s+"
+        r"NOREPLICATION\s+NOBYPASSRLS",
+        script,
+    )
+    for membership_option in ("INHERIT TRUE", "SET FALSE", "ADMIN FALSE"):
+        assert (
+            "GRANT pg_monitor TO temporal_exporter "
+            f"WITH {membership_option}"
+        ) in script
+    assert "GRANT CONNECT ON DATABASE" not in script
+    assert script.index("DROP ROLE IF EXISTS") < script.index("CREATE ROLE temporal_exporter")
+    assert "REASSIGN OWNED" not in script
+    assert "DROP OWNED" not in script
     for catalog in (
-        "pg_auth_members", "pg_database", "pg_namespace", "pg_class",
-        "pg_proc", "pg_type", "pg_default_acl",
+        "pg_shdepend", "pg_auth_members", "pg_database", "pg_namespace",
+        "pg_class", "pg_proc", "pg_type", "pg_default_acl", "aclexplode",
     ):
-        assert catalog in script
-    assert "aclexplode" in script
-    for privilege in (
-        "CREATE", "TEMPORARY", "INSERT", "UPDATE", "DELETE", "TRUNCATE",
-        "REFERENCES", "TRIGGER", "USAGE", "EXECUTE",
-    ):
-        assert privilege in script
-    assert "fail E_EXPORTER_AUDIT" in script
+        assert catalog not in script
+    assert "fail E_EXPORTER_RESET" in script
     assert "--set=exporter_password" not in script
     psql_argv = script.split("psql", 1)[1].split("<<'SQL'", 1)[0]
     assert "exporter_password" not in psql_argv
@@ -830,6 +835,6 @@ def test_task6_documentation_matches_runtime_contracts() -> None:
     assert "database" in boundary and "temporal-metrics" in boundary
     for contract in (
         "rotate-exporter-password.sh", ">= 2.17", "pg_up",
-        "namespace update", "NOBYPASSRLS", "project",
+        "namespace update", "NOBYPASSRLS", "DROP ROLE", "project",
     ):
         assert contract in task6

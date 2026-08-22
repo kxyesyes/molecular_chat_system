@@ -72,151 +72,19 @@ if ! psql \
     --port "$PGPORT" \
     --username "$PGUSER" \
     --dbname postgres >/dev/null 2>&1 <<'SQL'
-SELECT 'CREATE ROLE temporal_exporter NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
-WHERE NOT EXISTS (
-    SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'temporal_exporter'
-)
-\gexec
-SQL
-then
-    fail E_EXPORTER_PREPARE
-fi
-
-if ! psql \
-    --no-psqlrc \
-    --quiet \
-    --set=ON_ERROR_STOP=1 \
-    --host "$PGHOST" \
-    --port "$PGPORT" \
-    --username "$PGUSER" \
-    --dbname postgres >/dev/null 2>&1 <<'SQL'
-DO $audit$
-DECLARE
-    exporter_oid oid := (
-        SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'temporal_exporter'
-    );
-BEGIN
-    IF exporter_oid IS NULL OR EXISTS (
-        SELECT 1
-        FROM pg_catalog.pg_auth_members membership
-        JOIN pg_catalog.pg_roles granted_role
-          ON granted_role.oid = membership.roleid
-        WHERE membership.member = exporter_oid
-          AND granted_role.rolname <> 'pg_monitor'
-    ) OR EXISTS (
-        SELECT 1 FROM pg_catalog.pg_database WHERE datdba = exporter_oid
-    ) OR EXISTS (
-        SELECT 1
-        FROM pg_catalog.pg_database database_object
-        CROSS JOIN LATERAL pg_catalog.aclexplode(database_object.datacl) privilege
-        WHERE privilege.grantee = exporter_oid
-          AND privilege.privilege_type IN ('CREATE', 'TEMPORARY')
-    ) OR EXISTS (
-        SELECT 1 FROM pg_catalog.pg_default_acl WHERE defaclrole = exporter_oid
-    ) THEN
-        RAISE EXCEPTION 'exporter audit rejected';
-    END IF;
-END
-$audit$;
-SQL
-then
-    fail E_EXPORTER_AUDIT
-fi
-
-audit_database() {
-    database_name=$1
-    if ! psql \
-        --no-psqlrc \
-        --quiet \
-        --set=ON_ERROR_STOP=1 \
-        --host "$PGHOST" \
-        --port "$PGPORT" \
-        --username "$PGUSER" \
-        --dbname "$database_name" >/dev/null 2>&1 <<'SQL'
-DO $audit$
-DECLARE
-    exporter_oid oid := (
-        SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'temporal_exporter'
-    );
-BEGIN
-    IF exporter_oid IS NULL OR EXISTS (
-        SELECT 1 FROM pg_catalog.pg_namespace WHERE nspowner = exporter_oid
-    ) OR EXISTS (
-        SELECT 1 FROM pg_catalog.pg_class WHERE relowner = exporter_oid
-    ) OR EXISTS (
-        SELECT 1 FROM pg_catalog.pg_proc WHERE proowner = exporter_oid
-    ) OR EXISTS (
-        SELECT 1 FROM pg_catalog.pg_type WHERE typowner = exporter_oid
-    ) OR EXISTS (
-        SELECT 1 FROM pg_catalog.pg_largeobject_metadata WHERE lomowner = exporter_oid
-    ) OR EXISTS (
-        SELECT 1
-        FROM pg_catalog.pg_namespace schema_object
-        CROSS JOIN LATERAL pg_catalog.aclexplode(schema_object.nspacl) privilege
-        WHERE privilege.grantee = exporter_oid
-          AND privilege.privilege_type = 'CREATE'
-    ) OR EXISTS (
-        SELECT 1
-        FROM pg_catalog.pg_class relation_object
-        CROSS JOIN LATERAL pg_catalog.aclexplode(relation_object.relacl) privilege
-        WHERE privilege.grantee = exporter_oid
-          AND (
-              (relation_object.relkind = 'S'
-               AND privilege.privilege_type IN ('UPDATE', 'USAGE'))
-              OR
-              (relation_object.relkind <> 'S'
-               AND privilege.privilege_type IN (
-                   'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'
-               ))
-          )
-    ) OR EXISTS (
-        SELECT 1
-        FROM pg_catalog.pg_proc function_object
-        CROSS JOIN LATERAL pg_catalog.aclexplode(function_object.proacl) privilege
-        WHERE privilege.grantee = exporter_oid
-          AND privilege.privilege_type = 'EXECUTE'
-    ) OR EXISTS (
-        SELECT 1
-        FROM pg_catalog.pg_type type_object
-        CROSS JOIN LATERAL pg_catalog.aclexplode(type_object.typacl) privilege
-        WHERE privilege.grantee = exporter_oid
-          AND privilege.privilege_type = 'USAGE'
-    ) THEN
-        RAISE EXCEPTION 'exporter audit rejected';
-    END IF;
-END
-$audit$;
-SQL
-    then
-        fail E_EXPORTER_AUDIT
-    fi
-}
-
-audit_database "$PGDATABASE"
-audit_database "$VISIBILITY_DBNAME"
-
-if ! psql \
-    --no-psqlrc \
-    --quiet \
-    --set=ON_ERROR_STOP=1 \
-    --host "$PGHOST" \
-    --port "$PGPORT" \
-    --username "$PGUSER" \
-    --dbname postgres \
-    --set=temporal_database="$PGDATABASE" \
-    --set=visibility_database="$VISIBILITY_DBNAME" >/dev/null 2>&1 <<'SQL'
 \getenv exporter_password TEMPORAL_EXPORTER_PASSWORD
-ALTER ROLE temporal_exporter WITH LOGIN PASSWORD :'exporter_password'
-    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-GRANT pg_monitor TO temporal_exporter;
-SELECT format(
-    'GRANT CONNECT ON DATABASE %I TO temporal_exporter', database_name
-)
-FROM (VALUES (:'temporal_database'), (:'visibility_database')) databases(database_name)
-\gexec
+BEGIN;
+DROP ROLE IF EXISTS temporal_exporter;
+CREATE ROLE temporal_exporter WITH LOGIN PASSWORD :'exporter_password'
+    NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
+    NOREPLICATION NOBYPASSRLS;
+GRANT pg_monitor TO temporal_exporter WITH INHERIT TRUE;
+GRANT pg_monitor TO temporal_exporter WITH SET FALSE;
+GRANT pg_monitor TO temporal_exporter WITH ADMIN FALSE;
+COMMIT;
 SQL
 then
-    fail E_EXPORTER_SYNC
+    fail E_EXPORTER_RESET
 fi
 
 unset PGPASSWORD TEMPORAL_EXPORTER_PASSWORD

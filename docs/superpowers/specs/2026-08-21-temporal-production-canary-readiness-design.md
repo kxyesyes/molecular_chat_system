@@ -133,7 +133,7 @@ docs/runbooks/
 - Temporal 内部 PostgreSQL 使用独立数据库和账号，不复用 MedChat SQLite；
 - 长期运行的 Temporal 使用固定版本 `temporalio/server`，不得使用已弃用的 `temporalio/auto-setup`；
 - 使用匹配版本的 `temporalio/admin-tools` one-shot job 管理主库/visibility schema，并由独立 one-shot job 幂等创建或确认 namespace 后收敛 retention；
-- schema 和 role-sync 在执行数据库客户端前验证 ASCII PostgreSQL identifier；exporter role-sync 审计额外 membership、对象 ownership 与危险显式授权并 fail closed，仅在审计通过后收敛 `NOBYPASSRLS` 等属性、密码、`pg_monitor` 和双库 CONNECT；
+- schema 和 role-sync 在执行数据库客户端前验证 ASCII PostgreSQL identifier；exporter role-sync 不维护易漏的 catalog allowlist，而是直接 `DROP ROLE IF EXISTS temporal_exporter`，且禁止 `REASSIGN OWNED`/`DROP OWNED`，由 PostgreSQL 的集群级 dependency 检查对任何残留 ownership/ACL fail closed；成功后重建固定 `NOINHERIT` 登录角色，并仅授予 `pg_monitor` 的 `INHERIT TRUE`、`SET FALSE`、`ADMIN FALSE` membership；
 - exporter 密码轮换只允许通过受测运维脚本重跑 role-sync 并 force-recreate exporter；最低 Docker Compose 版本为 `>= 2.17`；
 - exporter healthcheck 必须在有限超时内读取 metrics 并确认 `pg_up 1`，不能仅把 HTTP 200 视为健康；
 - 密码、Grafana 管理凭据和其他 secret 只通过 Docker Compose file secret 注入；`env.example` 仅声明空的 `*_FILE` 路径键，不声明值型密码；
