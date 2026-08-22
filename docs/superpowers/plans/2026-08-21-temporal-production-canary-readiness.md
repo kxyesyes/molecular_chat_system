@@ -863,7 +863,7 @@ def test_postgres_exporter_role_is_runtime_secret_and_read_only():
 - [ ] **Step 2: Verify RED**
 
 ```powershell
-C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\test_temporal_deployment_assets.py -q -p no:cacheprovider
+C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\test_temporal_metrics_relay.py tests\test_temporal_deployment_assets.py -q -p no:cacheprovider
 ```
 
 Expected: the previous six-service stack fails the server/admin-tools job, file-secret,
@@ -980,48 +980,59 @@ git commit -m "fix(deploy): close temporal production safety gaps"
 ## Task 7: Provision Prometheus alerts and Grafana dashboard
 
 **Files:**
-- Create: `deployment/temporal/prometheus/prometheus.yml`
-- Create: `deployment/temporal/prometheus/rules/medchat-temporal.yml`
-- Create: `deployment/temporal/grafana/provisioning/datasources/prometheus.yml`
-- Create: `deployment/temporal/grafana/provisioning/dashboards/dashboard.yml`
-- Create: `deployment/temporal/grafana/dashboards/medchat-temporal-docking.json`
+- Create: `deployment/nginx-medchat-temporal-metrics.conf.template`
+- Create: `deployment/temporal/prometheus/tests/medchat-temporal.test.yml`
+- Create: `scripts/configure_temporal_metrics_relay.py`
+- Create: `tests/test_temporal_metrics_relay.py`
+- Modify: `deployment/temporal/docker-compose.yml`
+- Modify: `deployment/temporal/env.example`
+- Modify: `deployment/temporal/prometheus/prometheus.yml`
+- Modify: `deployment/temporal/prometheus/rules/medchat-temporal.yml`
+- Modify: `deployment/temporal/grafana/dashboards/medchat-temporal-docking.json`
 - Modify: `tests/test_temporal_deployment_assets.py`
+- Modify: `tests/test_temporal_deployment_integration.py`
 
-- [ ] **Step 1: Write failing monitoring-asset tests**
+- [ ] **Step 1: Write failing relay contract tests**
 
 ```python
-def test_prometheus_scrapes_worker_temporal_and_itself():
-    config = load_yaml("deployment/temporal/prometheus/prometheus.yml")
-    jobs = {job["job_name"]: job for job in config["scrape_configs"]}
-    assert {"prometheus", "temporal-server", "temporal-postgres", "medchat-temporal-worker"} <= jobs.keys()
-    assert jobs["medchat-temporal-worker"]["static_configs"][0]["targets"] == ["host.docker.internal:9465"]
-    assert jobs["temporal-postgres"]["static_configs"][0]["targets"] == ["postgres-exporter:9187"]
+def test_worker_scrape_uses_file_sd_and_dedicated_network():
+    compose = load_yaml(COMPOSE)
+    prometheus = compose["services"]["prometheus"]
+    assert "extra_hosts" not in prometheus
+    assert "worker-metrics-scrape" in prometheus["networks"]
+    network = compose["networks"]["worker-metrics-scrape"]
+    assert network["internal"] is True
+    jobs = {job["job_name"]: job for job in load_yaml(PROMETHEUS_CONFIG)["scrape_configs"]}
+    assert jobs["medchat-temporal-worker"]["file_sd_configs"] == [{
+        "files": ["/etc/prometheus/file_sd/worker-targets.json"],
+        "refresh_interval": "30s",
+    }]
+    assert "host.docker.internal:9465" not in PROMETHEUS_CONFIG.read_text(encoding="utf-8")
 
 
-def test_blocking_rules_cover_release_invariants():
-    rules = load_yaml("deployment/temporal/prometheus/rules/medchat-temporal.yml")
-    names = {rule["alert"] for group in rules["groups"] for rule in group["rules"]}
-    assert names == {
-        "TemporalWorkerHeartbeatStale",
-        "TemporalQueueBacklogGrowing",
-        "TemporalWorkflowStartFailures",
-        "TemporalDuplicateVinaExecution",
-        "TemporalMultipleTerminalEvents",
-        "TemporalArtifactValidationFailure",
-        "TemporalDockingP95TooHigh",
-        "TemporalRuntimeFailureRateHigh",
-        "TemporalPostgresUnavailable",
-        "TemporalBackupVerificationStale",
-    }
+def test_nginx_relay_has_exact_path_acl_and_loopback_upstream():
+    template = RELAY_TEMPLATE.read_text(encoding="utf-8")
+    assert "listen ${RELAY_GATEWAY}:${RELAY_PORT};" in template
+    assert "location = /metrics" in template
+    assert "allow ${PROMETHEUS_ADDRESS};" in template
+    assert "deny all;" in template
+    assert "proxy_pass http://127.0.0.1:9465/metrics;" in template
+    assert "proxy_connect_timeout 2s;" in template
+    assert "proxy_read_timeout 5s;" in template
+    assert "location / { return 404; }" in template
 
 
-def test_dashboard_contains_required_panels_and_no_sensitive_queries():
-    dashboard = json.loads(Path(DASHBOARD).read_text(encoding="utf-8"))
-    titles = {panel["title"] for panel in dashboard["panels"]}
-    assert {"Canary level", "Worker readiness", "Queue backlog", "p50 / p95 latency", "Scientific gates"} <= titles
-    serialized = json.dumps(dashboard).lower()
-    for forbidden in ("smiles", "prompt", "user_id", "task_id", "file_path"):
-        assert forbidden not in serialized
+def test_renderer_writes_one_coherent_configuration_group(tmp_path):
+    env_file = write_default_relay_env(tmp_path)
+    result = run_cli(env_file, tmp_path / "generated", tmp_path / "relay.conf")
+    assert result.returncode == 0
+    override = load_yaml(tmp_path / "generated" / "compose.override.yml")
+    assert override["services"]["prometheus"]["networks"]["worker-metrics-scrape"]["ipv4_address"] == "172.30.95.2"
+    targets = json.loads((tmp_path / "generated" / "worker-targets.json").read_text())
+    assert targets == [{"targets": ["172.30.95.1:9466"]}]
+    relay = (tmp_path / "relay.conf").read_text(encoding="utf-8")
+    assert "listen 172.30.95.1:9466;" in relay
+    assert "allow 172.30.95.2;" in relay
 ```
 
 - [ ] **Step 2: Verify RED**
@@ -1030,42 +1041,111 @@ def test_dashboard_contains_required_panels_and_no_sensitive_queries():
 C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\test_temporal_deployment_assets.py -q -p no:cacheprovider
 ```
 
-Expected: monitoring files are absent.
+Expected: FAIL because the dedicated bridge, relay template, renderer and file-SD contract do not exist.
 
-- [ ] **Step 3: Add scrape and alert contracts**
+- [ ] **Step 3: Implement the fail-closed relay configuration generator**
 
-Use 15-second scrape/evaluation intervals. Configure `rule_files: ["/etc/prometheus/rules/*.yml"]`. Alert expressions must use only fixed metric names and include `for` durations so one missed scrape does not page: heartbeat 60 seconds, backlog 10 minutes, start failures 5 minutes, p95 10 minutes, failure rate 10 minutes, and backup stale 15 minutes. Duplicate Vina, multi-terminal, and artifact invalid alerts have no grace period because they are hard scientific invariants.
+Implement `RelayConfig` with Python `ipaddress`. Accept only private IPv4, prefix `/24` through `/29`, gateway and Prometheus addresses inside the subnet, distinct non-network/non-broadcast addresses, and relay ports `1024..65535`. Reject duplicate keys, malformed lines, symlink env files and partial relay groups.
 
-Map the hard alerts to the counters from Task 5 using `increase(...[15m]) > 0`. Compute runtime failure rate from `medchat_temporal_task_terminal_total{status!="succeeded"}` divided by all terminal statuses, and use `time() - medchat_temporal_backup_verified_timestamp_seconds > 86400` for stale backup detection. Queue backlog and workflow-start failures use Temporal Server's official Prometheus metrics; tests assert the configured expressions reference metrics exposed by the pinned Temporal image. Add `extra_hosts: ["host.docker.internal:host-gateway"]` to the Prometheus service so the host-native worker is reachable on Linux.
+Expose these exact pure, independently tested boundaries: immutable `RelayConfig(subnet: IPv4Network, gateway: IPv4Address, prometheus_address: IPv4Address, port: int)` and `DockerNetwork(name: str, subnet: IPv4Network, labels: Mapping[str, str])`; `parse_relay_config(values: Mapping[str, str]) -> RelayConfig`; `find_conflicts(config: RelayConfig, routes: Iterable[IPv4Network], docker_networks: Iterable[DockerNetwork], expected_project: str) -> list[str]`; `render_compose_override(config) -> str`; `render_worker_targets(config) -> str`; `render_nginx_config(config, template) -> str`; and `atomic_write(path, content, mode=0o640) -> None`. Parsing and rendering functions must not execute subprocesses or inspect global environment state.
 
-The latency alert uses both conditions:
+The CLI requires `--env-file`, `--output-dir` and `--nginx-output`. Optional `--check-host-conflicts` executes bounded `ip -json route` and `docker network ls/inspect`; exact pre-existing project network labels are allowed, all other overlap fails with stable `E_RELAY_*` errors. Render all outputs before atomically replacing `compose.override.yml`, `worker-targets.json` and nginx config. A failed render or write preserves prior files.
+
+Use this exact template boundary:
+
+```nginx
+server {
+    listen ${RELAY_GATEWAY}:${RELAY_PORT};
+    server_name _;
+    access_log off;
+    location = /metrics {
+        allow ${PROMETHEUS_ADDRESS};
+        deny all;
+        proxy_pass http://127.0.0.1:9465/metrics;
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 5s;
+        proxy_set_header Authorization "";
+        proxy_set_header Cookie "";
+    }
+    location / { return 404; }
+}
+```
+
+Add the four non-secret relay defaults to `env.example`. The generated Compose override adds only the dedicated internal network, Prometheus static address and read-only file-SD mount. The base Compose removes `host.docker.internal` and publishes no relay port.
+
+- [ ] **Step 4: Test invalid groups, conflicts and atomic preservation**
+
+```python
+@pytest.mark.parametrize("values", invalid_relay_groups())
+def test_invalid_relay_groups_fail_closed(values):
+    with pytest.raises(RelayConfigurationError):
+        parse_relay_config(values)
+
+def test_route_or_unowned_docker_overlap_is_rejected():
+    config = default_config()
+    assert find_conflicts(config, [ip_network("172.30.95.0/24")], [], "medchat")
+    foreign = DockerNetwork("foreign", ip_network("172.30.95.0/28"), {})
+    assert find_conflicts(config, [], [foreign], "medchat")
+
+def test_failed_generation_preserves_previous_files(tmp_path, monkeypatch):
+    target = tmp_path / "relay.conf"
+    target.write_text("known-good", encoding="utf-8")
+    monkeypatch.setattr(relay.os, "replace", raising_replace)
+    with pytest.raises(OSError):
+        relay.atomic_write(target, "new")
+    assert target.read_text(encoding="utf-8") == "known-good"
+```
+
+Run:
+
+```powershell
+C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\test_temporal_metrics_relay.py tests\test_temporal_deployment_assets.py -q -p no:cacheprovider
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Write failing PromQL semantics tests**
+
+Require these contracts in `tests/test_temporal_deployment_assets.py`:
 
 ```promql
+deriv(approximate_backlog_count{namespace="default",task_queue="medchat-docking"}[10m]) > 0
+increase(service_errors{service_name="frontend",namespace="default",operation="StartWorkflowExecution"}[15m]) > 0
 histogram_quantile(0.95, sum by (le) (rate(medchat_temporal_task_duration_seconds_bucket[15m])))
-  > medchat_temporal_baseline_p95_seconds * 1.5
-or
-histogram_quantile(0.95, sum by (le) (rate(medchat_temporal_task_duration_seconds_bucket[15m]))) > 60
+  > scalar(max(medchat_temporal_baseline_p95_seconds)) * 1.5
 ```
 
-- [ ] **Step 4: Add provisioned Grafana assets**
+Require start unexpected errors `[15m]` with `for: 5m`, runtime failures `[30m]` with `for: 10m`, availability `for: 60s`, and no `for` on hard scientific invariants. Rename the alert to `TemporalWorkflowStartUnexpectedErrors`. Rename the panel to `Workflow start requests`, scope backlog/start queries, and require `count(ALERTS{alertstate="firing",release_blocker="true"}) or vector(0)`.
 
-Provision a default Prometheus datasource at `http://prometheus:9090`. Dashboard JSON uses a stable UID `medchat-temporal-docking`, a 15-second refresh, and panels for canary level, worker readiness/heartbeat, queue backlog, Temporal accepted count, terminal distribution, p50/p95, Vina attempts, duplicate prevention, terminal violations, artifact validation, provenance gate, and firing release blockers.
+- [ ] **Step 6: Verify RED, then fix rules and dashboard**
 
-- [ ] **Step 5: Validate assets**
+Run `python -m pytest tests/test_temporal_deployment_assets.py -q -p no:cacheprovider` before and after implementation. Expected RED reasons are unscoped queries, empty-vector baseline comparison, short lookbacks, absent availability grace and misleading panel title; expected GREEN is PASS.
+
+- [ ] **Step 7: Add executable promtool rule fixtures**
+
+Create concrete `input_series` and `alert_rule_test` cases proving labeled baseline p95 fires, unrelated queues do not fire backlog, the docking queue does fire, low-frequency start/runtime failures survive their `for` durations, one missing scrape does not fire availability, and sustained unavailability does. Zero-alert cases use `exp_alerts: []`.
+
+- [ ] **Step 8: Add opt-in Linux end-to-end scrape test**
+
+Gate on `MEDCHAT_RUN_TEMPORAL_DEPLOYMENT_INTEGRATION=1`, Linux, root, Docker and nginx. Start a loopback metrics server, render configs, create only test-labeled bridge resources, validate/reload a temporary nginx config, start Prometheus and poll `up{job="medchat-temporal-worker"} == 1`. Verify a non-Prometheus container is denied and `127.0.0.1:9466` is not a listener. Cleanup restores nginx and removes only resources carrying the test project label.
+
+- [ ] **Step 9: Validate the complete Task 7 slice**
 
 ```powershell
-C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\test_temporal_deployment_assets.py -q -p no:cacheprovider
+C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\test_temporal_metrics_relay.py tests\test_temporal_deployment_assets.py tests\test_temporal_deployment_integration.py -q -p no:cacheprovider
 promtool check config deployment/temporal/prometheus/prometheus.yml
 promtool check rules deployment/temporal/prometheus/rules/medchat-temporal.yml
+promtool test rules deployment/temporal/prometheus/tests/medchat-temporal.test.yml
+C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\task_runtime tests\test_temporal_docking_routes.py -q -p no:cacheprovider
 ```
 
-Expected: pytest passes. `promtool` results are reported separately; absence of `promtool` is a truthful skip and blocks production-readiness status.
+Expected: pytest and all three promtool commands pass. Docker/nginx integration may skip only when the explicit opt-in or host tools are absent; a skip blocks production-readiness status but does not falsify unit success.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 10: Commit**
 
 ```powershell
-git add -- deployment/temporal/prometheus deployment/temporal/grafana tests/test_temporal_deployment_assets.py
-git commit -m "feat(deploy): monitor temporal docking canary"
+git add -- deployment/nginx-medchat-temporal-metrics.conf.template deployment/temporal/docker-compose.yml deployment/temporal/env.example deployment/temporal/prometheus deployment/temporal/grafana/dashboards/medchat-temporal-docking.json scripts/configure_temporal_metrics_relay.py tests/test_temporal_metrics_relay.py tests/test_temporal_deployment_assets.py tests/test_temporal_deployment_integration.py
+git commit -m "fix(deploy): secure temporal worker metrics scrape"
 ```
 
 ## Task 8: Add hardened systemd service boundaries
