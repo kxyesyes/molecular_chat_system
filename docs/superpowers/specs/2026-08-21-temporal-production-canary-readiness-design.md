@@ -4,7 +4,7 @@
 **状态：** 已确认，待实施计划
 **前置阶段：** `docs/superpowers/specs/2026-08-12-industrial-agent-temporal-docking-canary-design.md`
 **目标分支：** `codex/temporal-production-canary-readiness`
-**修订：** 2026-08-22 增加宿主机 worker 指标安全中继，并收敛 Prometheus 查询契约
+**修订：** 2026-08-22 增加宿主机 worker 指标安全中继，收敛 Prometheus 查询契约，并加固 systemd worker 生命周期
 
 ## 1. 背景与目标
 
@@ -116,13 +116,17 @@ deployment/
 │       └── dashboards/medchat-temporal-docking.json
 ├── medchat.service
 ├── medchat-temporal-worker.service
+├── medchat-temporal-worker.tmpfiles
 └── nginx-medchat-temporal-metrics.conf.template
 scripts/
 ├── manage_temporal_canary.py
 ├── observe_temporal_canary.py
 ├── configure_temporal_metrics_relay.py
+├── validate_temporal_worker_production.py
 ├── backup_temporal_postgres.py
 └── restore_temporal_postgres.py
+src/task_runtime/
+└── production_worker.py
 docs/runbooks/
 └── temporal_docking_canary.md
 ```
@@ -160,13 +164,40 @@ docs/runbooks/
 - 运行 `scripts/run_temporal_docking_worker.py`；
 - 从权限受控的 `/etc/medchat/medchat.env` 读取非提交配置；
 - 固定 `MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY=1`；
-- 设置独立工作目录、服务用户、明确的 restart policy 和启动超时；
-- 优雅处理 SIGTERM：停止接收新任务，等待安全退出；若 Activity 正运行则沿用阶段 3A 的受控子进程清理语义；
+- 设置独立工作目录、服务用户、明确的 restart policy 和启动超时；使用 `ProtectSystem=strict`、`UMask=0077`，只允许写入受控的 `scratch` 与 `temp_docking` 运行目录；
+- 使用 `KillMode=mixed` 和 `TimeoutStopSec=90`：systemd 先只向 worker 主进程发送 SIGTERM，使 Temporal worker 停止 poll 并沿用阶段 3A 的受控 Vina 子进程清理；仅在超时后才由 systemd 强制清理同一 cgroup 的剩余进程；
 - 不在命令行参数、状态输出或日志中暴露密码、API key、完整 prompt、SMILES 或绝对用户路径；
-- 启动前执行最小配置校验，但不得在 `ExecStartPre` 运行 Vina 或修改 TaskStore；
+- 启动前执行严格生产配置校验，但不得在 `ExecStartPre` 运行 Vina、连接 Temporal、启动指标服务或修改 TaskStore；
 - 与 Web 服务相互独立，worker 重启不能触发 Web 重启。
 
 现有 `deployment/medchat.service` 仅在需要补充环境和依赖顺序时做最小修改，不改变 Web 的科学或 API 行为。
+
+#### 5.3.1 生产配置门禁
+
+生产 worker 使用共享、显式的校验器，例如 `src/task_runtime/production_worker.py`；`scripts/validate_temporal_worker_production.py` 只是其无副作用 CLI。校验器不得使用 Python `assert`，因此在 `PYTHONOPTIMIZE=1` 或 `python -O` 下仍必须 fail closed。它必须同时由 systemd `ExecStartPre` 和 `scripts/run_temporal_docking_worker.py` 调用，worker 入口必须在启动 metrics、连接 Temporal 或创建运行产物前完成复验，避免直接执行脚本绕过 systemd 门禁。
+
+校验通过必须同时满足：
+
+- backend 明确配置为 `temporal_canary`，docking concurrency 为 `1`；
+- namespace 明确为 `default`，docking queue 明确为 `medchat-docking`；
+- Temporal address、staging root、loopback worker metrics address 和 backup state path 均由生产环境显式配置，不得接受代码默认值冒充部署确认；
+- TaskStore、staging、backup 和 docking 输出路径解析后均位于批准的可写根目录内，不得通过 `..`、符号链接或路径别名逃逸；
+- 配置解析没有 warning；任何 fallback、local backend、空环境、非法端口或冲突路径均拒绝启动。
+
+`/etc/medchat/medchat.env` 是必需部署资产，必须为 root:root 持有的 regular file、非符号链接、权限 `0600`。由于普通 `medchat` 服务用户不应直接读取该文件元数据或内容，service 使用一个范围最小的特权 `ExecStartPre=+... --check-environment-file /etc/medchat/medchat.env` 只验证 owner、mode、类型和 symlink 状态；该检查不得读取、打印或复制变量值。systemd manager 以 root 读取 `EnvironmentFile` 后，后续非特权 `ExecStartPre` 和 worker 仅验证已注入的配置值。
+
+#### 5.3.2 运行目录引导与服务依赖
+
+`deployment/medchat-temporal-worker.tmpfiles` 负责在 worker 启动前创建：
+
+- `scratch`；
+- `scratch/task_inputs`；
+- `scratch/temporal_backups`；
+- `temp_docking`。
+
+这些目录固定由 `medchat:medchat` 持有并使用 `0700`。tmpfiles 配置只创建目录，不创建空的 `/etc/medchat/medchat.env`，也不改写未知已有文件。安装/runbook 必须先验证服务用户、仓库部署根目录、环境文件和目录权限，再启动 worker。
+
+Docker/Compose 基础设施由运维流程管理并先于 worker 启动；worker unit 可以声明网络和 Docker 服务顺序依赖，但不得调用 Docker、自动执行 Compose 或修改基础设施状态。Temporal 不可达时 worker 应由受控 restart policy 重试，不能启动 local worker 代替。
 
 ## 6. 配置与密钥
 
@@ -293,7 +324,7 @@ worker target 必须通过第 7.3 节的 nginx 中继抓取。Prometheus 配置�
 
 规则必须满足以下查询契约：
 
-- Temporal backlog 查询同时限定 `namespace` 和 docking `task_queue`；Temporal start 查询同时限定 frontend `service_name`、`namespace` 与 `operation="StartWorkflowExecution"`；若固定版本导出的 label 名不同，实施时以真实 `/metrics` 样本为准更新规则和测试，不允许取消作用域；
+- Temporal backlog 查询同时限定 `namespace` 和 docking `taskqueue`；Temporal start 查询同时限定 frontend `service_name`、`namespace` 与 `operation="StartWorkflowExecution"`；若固定版本导出的 label 名不同，实施时以真实 `/metrics` 样本为准更新规则和测试，不允许取消作用域；
 - `service_requests` 只表示 start RPC 请求量，不表示 workflow 已被 Temporal 接受。dashboard 面板必须命名为“Workflow start requests”；真实 accepted 数继续由 observation report 的 history/TaskStore 证据提供；
 - `service_errors` 只表示 unexpected service errors，告警名称和说明不得泛化为所有 start failure；需要细分错误时使用固定版本实际导出的 `service_error_with_type`，不得推断不存在的标签；
 - p95 相对基线比较把基线规约为单一 scalar（例如 `scalar(max(medchat_temporal_baseline_p95_seconds))`），或显式统一标签后再比较，禁止无标签 histogram 与带 `job`/`instance` 的 gauge 做空向量匹配；
@@ -474,6 +505,8 @@ Temporal PostgreSQL 必须使用官方 `pg_dump`/`pg_restore` 能力或等价的
 - 报告脱敏和低基数 label 约束；
 - p50/p95、失败率、最小样本和 24 小时窗口计算；
 - 监控不可用导致 promotion blocked，而不是篡改科学状态。
+- 生产 worker 配置校验在空环境、local backend、默认值冒充显式配置、warning、路径逃逸和 `PYTHONOPTIMIZE=1` 下均 fail closed；
+- 直接运行 worker 入口与 systemd `ExecStartPre` 使用同一校验器，且失败发生在 metrics、Temporal 连接和文件副作用之前；
 
 ### 14.2 静态部署测试
 
@@ -487,6 +520,8 @@ Temporal PostgreSQL 必须使用官方 `pg_dump`/`pg_restore` 能力或等价的
 
 静态测试还必须验证 worker 仍只允许 loopback、Prometheus 不再引用 `host.docker.internal:9465`、只有 Prometheus 加入 `worker-metrics-scrape` 网络，以及 nginx 中继仅开放 `/metrics` 并带 allow/deny ACL。
 
+systemd 部署测试还必须验证 `ProtectSystem=strict`、`UMask=0077`、`KillMode=mixed`、`TimeoutStopSec=90`、受限 `ReadWritePaths` 和两层 `ExecStartPre` 门禁；在 Linux 上使用 `systemd-analyze verify` 检查真实 unit。tmpfiles 测试必须证明四个运行目录可以从空部署状态创建为 `medchat:medchat`、`0700`，且不会创建或改写环境文件。环境文件元数据测试必须覆盖缺失文件、symlink、错误 owner、宽松 mode 和合法 root:root `0600`。
+
 ### 14.3 本地 Temporal 集成测试
 
 - 启动本地 Temporal dev server 或 Compose；
@@ -496,6 +531,8 @@ Temporal PostgreSQL 必须使用官方 `pg_dump`/`pg_restore` 能力或等价的
 - worker restart 后任务由 Temporal 恢复；
 - 已接受任务不回落 local；
 - 每任务 Vina attempt/terminal invariant 保持成立。
+
+在 opt-in Linux systemd 集成测试中，使用可控的 worker/子进程 fixture 验证停止语义：SIGTERM 先到达 worker 主进程并触发协作式清理；正常清理窗口内不应同时终止 Vina 子进程；若 fixture 故意超时，systemd 最终必须清除同一 cgroup 内全部后代。测试结束后不得残留 worker 或科学工具进程。缺少 systemd/cgroup 权限时应明确 skip，不能以字符串断言替代该生产证据。
 
 ### 14.4 真实科学验收
 
@@ -527,7 +564,10 @@ Temporal PostgreSQL 必须使用官方 `pg_dump`/`pg_restore` 能力或等价的
 7. 真实 MAGL/Vina repeat 3 继续通过，且每任务 Vina attempt ≤ 1、terminal event = 1；
 8. 所有新增输出完成脱敏，没有 secret、用户数据、SMILES、完整 prompt 或绝对机器路径；
 9. 默认配置仍为 canary 0%，没有自动切换真实生产流量；
-10. runbook 能由部署人员完成启动、检查、晋级、回滚、备份和恢复验证。
+10. production worker 在空环境、local backend、隐式默认、warning 或非法路径下拒绝启动，且 `python -O` 无法绕过；
+11. worker 运行时文件系统为严格只读边界，新增文件默认私有，只有 tmpfiles 创建的四个 `medchat:medchat`、`0700` 目录可写；
+12. systemd 停止先允许 worker 协作式清理，超时后清除整个 cgroup，测试后无 Vina 或 worker 后代残留；
+13. runbook 能由部署人员完成环境文件校验、目录引导、Compose 先行启动、worker 启动、检查、晋级、回滚、备份和恢复验证。
 
 ## 16. 实施顺序
 
