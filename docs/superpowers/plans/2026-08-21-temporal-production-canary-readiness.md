@@ -23,6 +23,7 @@
 - Modify `src/task_runtime/temporal/activities.py`: report process attempts and terminal outcomes to the optional metrics sink without changing docking results.
 - Modify `src/task_runtime/temporal/worker.py`: report readiness, heartbeat, and clean shutdown to the metrics sink.
 - Modify `scripts/run_temporal_docking_worker.py`: start the metrics endpoint, inject the metrics sink, and fail startup when production metrics cannot bind.
+- Create `src/task_runtime/production_worker.py`: enforce the production-only worker configuration and approved writable-path contract without side effects.
 
 ### Operator commands
 
@@ -32,6 +33,7 @@
 - Create `scripts/backup_temporal_postgres.py`: produce an atomic logical dump plus SHA-256 manifest without exposing credentials.
 - Create `scripts/restore_temporal_postgres.py`: verify and restore a dump only into an explicitly different verification database.
 - Create `scripts/validate_temporal_deployment.py`: statically validate Compose, systemd, Prometheus, Grafana, environment examples, and secret/path policy on Windows or Linux.
+- Create `scripts/validate_temporal_worker_production.py`: expose environment-file metadata and injected-runtime validation as a redacted, side-effect-free CLI.
 
 ### Deployment and operations
 
@@ -44,6 +46,7 @@
 - Create `deployment/temporal/grafana/provisioning/dashboards/dashboard.yml`: provision the dashboard directory.
 - Create `deployment/temporal/grafana/dashboards/medchat-temporal-docking.json`: show rollout, health, latency, execution, terminal, artifact, and provenance gates without scientific payloads.
 - Create `deployment/medchat-temporal-worker.service`: run exactly one host-native docking worker.
+- Create `deployment/medchat-temporal-worker.tmpfiles`: bootstrap only the four private worker runtime directories.
 - Modify `deployment/medchat.service`: use the controlled `/etc/medchat/medchat.env` boundary while preserving the existing Web command.
 - Create `docs/runbooks/temporal_docking_canary.md`: document installation, startup, preflight, promotion, observation, rollback, backup, recovery, and incident handling.
 - Modify `docs/PROJECT_STANDARDS.md`: add Stage 3B deployment and release rules.
@@ -58,6 +61,8 @@
 - Create `tests/test_temporal_operator_scripts.py`: CLI behavior for observe, manage, preflight, backup, and restore.
 - Create `tests/test_temporal_deployment_assets.py`: Compose/systemd/Prometheus/Grafana/static security contract.
 - Modify `tests/task_runtime/test_temporal_acceptance.py`: production evidence projection and no-regression checks.
+- Create `tests/task_runtime/test_production_worker.py`: production gate, path confinement, optimization-mode, metadata, and entrypoint-order tests.
+- Create `tests/test_temporal_systemd_integration.py`: opt-in Linux verification of mixed stop semantics and descendant cleanup.
 
 This plan does not modify molecular docking algorithms, `MolecularDockingService`, Vina parameters, Validator rules, non-docking Agent workflows, frontend behavior, or the MedChat TaskStore database engine.
 
@@ -1109,7 +1114,7 @@ Expected: PASS.
 Require these contracts in `tests/test_temporal_deployment_assets.py`:
 
 ```promql
-deriv(approximate_backlog_count{namespace="default",task_queue="medchat-docking"}[10m]) > 0
+deriv(approximate_backlog_count{namespace="default",taskqueue="medchat-docking"}[10m]) > 0
 increase(service_errors{service_name="frontend",namespace="default",operation="StartWorkflowExecution"}[15m]) > 0
 histogram_quantile(0.95, sum by (le) (rate(medchat_temporal_task_duration_seconds_bucket[15m])))
   > scalar(max(medchat_temporal_baseline_p95_seconds)) * 1.5
@@ -1148,53 +1153,363 @@ git add -- deployment/nginx-medchat-temporal-metrics.conf.template deployment/te
 git commit -m "fix(deploy): secure temporal worker metrics scrape"
 ```
 
-## Task 8: Add hardened systemd service boundaries
+## Task 8: Harden the systemd worker configuration and process lifecycle
+
+The first Task 8 implementation isolated the worker but its `assert`-based preflight,
+`ProtectSystem=full`, and `KillMode=control-group` do not satisfy the approved
+production contract. Replace those assumptions through the following corrective TDD
+steps; preserve the already-correct Web `EnvironmentFile` change.
 
 **Files:**
-- Create: `deployment/medchat-temporal-worker.service`
-- Modify: `deployment/medchat.service`
+- Create: `src/task_runtime/production_worker.py`
+- Create: `scripts/validate_temporal_worker_production.py`
+- Modify: `scripts/run_temporal_docking_worker.py`
+- Modify: `deployment/medchat-temporal-worker.service`
+- Create: `deployment/medchat-temporal-worker.tmpfiles`
+- Inspect only: `deployment/medchat.service`
 - Modify: `tests/test_temporal_deployment_assets.py`
+- Create: `tests/task_runtime/test_production_worker.py`
+- Create: `tests/test_temporal_systemd_integration.py`
 
-- [ ] **Step 1: Write failing systemd tests**
+- [ ] **Step 1: Write failing production-gate tests**
+
+Create `tests/task_runtime/test_production_worker.py` with an autouse fixture that
+removes all `MEDCHAT_TASK_*` and `MEDCHAT_TEMPORAL_*` variables, plus this explicit
+valid environment factory:
 
 ```python
-def test_worker_service_is_single_process_host_native_and_restart_safe():
-    unit = parse_systemd("deployment/medchat-temporal-worker.service")
-    service = unit["Service"]
-    assert service["User"] == "medchat"
-    assert service["EnvironmentFile"] == "/etc/medchat/medchat.env"
-    assert service["ExecStart"] == "/opt/conda/envs/medchat/bin/python scripts/run_temporal_docking_worker.py"
-    assert service["Restart"] == "on-failure"
-    assert service["TimeoutStopSec"] == "45"
-    assert service["KillMode"] == "control-group"
-    assert "MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY=1" in service["Environment"]
+PRODUCTION_ENV = {
+    "MEDCHAT_TASK_BACKEND": "temporal_canary",
+    "MEDCHAT_TEMPORAL_CANARY_PERCENT": "0",
+    "MEDCHAT_TEMPORAL_ADDRESS": "127.0.0.1:7233",
+    "MEDCHAT_TEMPORAL_NAMESPACE": "default",
+    "MEDCHAT_TEMPORAL_DOCKING_QUEUE": "medchat-docking",
+    "MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY": "1",
+    "MEDCHAT_TASK_STAGING_ROOT": "scratch/task_inputs",
+    "MEDCHAT_TASK_DB_PATH": "scratch/tasks.sqlite",
+    "MEDCHAT_TEMPORAL_WORKER_METRICS_ADDRESS": "127.0.0.1",
+    "MEDCHAT_TEMPORAL_WORKER_METRICS_PORT": "9465",
+    "MEDCHAT_TEMPORAL_BASELINE_P95_SECONDS": "40",
+    "MEDCHAT_TEMPORAL_BACKUP_STATE": "scratch/temporal_backups/latest-verified.json",
+}
 
 
-def test_web_and_worker_are_independent_units():
-    web = parse_systemd("deployment/medchat.service")
-    worker = parse_systemd("deployment/medchat-temporal-worker.service")
-    assert web["Service"]["ExecStart"] != worker["Service"]["ExecStart"]
-    assert "medchat-temporal-worker.service" not in web.get("Unit", {}).get("Requires", "")
+@pytest.fixture(autouse=True)
+def clear_runtime_environment(monkeypatch):
+    for name in set(PRODUCTION_ENV) | {"PYTHONOPTIMIZE"}:
+        monkeypatch.delenv(name, raising=False)
+
+
+def apply_production_env(monkeypatch, **overrides: str) -> TaskRuntimeConfig:
+    values = {**PRODUCTION_ENV, **overrides}
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    return TaskRuntimeConfig.from_env()
+
+
+def test_production_gate_accepts_only_explicit_temporal_worker(monkeypatch):
+    config = apply_production_env(monkeypatch)
+    validate_production_worker_config(config)
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "code"),
+    [
+        ("MEDCHAT_TASK_BACKEND", "local", "backend_not_temporal_canary"),
+        ("MEDCHAT_TEMPORAL_NAMESPACE", "other", "namespace_not_default"),
+        ("MEDCHAT_TEMPORAL_DOCKING_QUEUE", "other", "queue_not_medchat_docking"),
+        ("MEDCHAT_TEMPORAL_WORKER_METRICS_ADDRESS", "0.0.0.0", "runtime_warnings"),
+        ("MEDCHAT_TASK_DB_PATH", "../outside.sqlite", "task_db_outside_scratch"),
+    ],
+)
+def test_production_gate_rejects_unsafe_runtime(monkeypatch, name, value, code):
+    config = apply_production_env(monkeypatch, **{name: value})
+    with pytest.raises(ProductionWorkerValidationError) as error:
+        validate_production_worker_config(config)
+    assert code in error.value.codes
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "MEDCHAT_TEMPORAL_ADDRESS",
+        "MEDCHAT_TASK_STAGING_ROOT",
+        "MEDCHAT_TEMPORAL_WORKER_METRICS_ADDRESS",
+        "MEDCHAT_TEMPORAL_BACKUP_STATE",
+    ],
+)
+def test_production_gate_rejects_implicit_defaults(monkeypatch, missing):
+    values = dict(PRODUCTION_ENV)
+    values.pop(missing)
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(ProductionWorkerValidationError) as error:
+        validate_production_worker_config(TaskRuntimeConfig.from_env())
+    assert "required_setting_not_explicit" in error.value.codes
 ```
 
-- [ ] **Step 2: Verify RED**
+Add a subprocess test that runs the future CLI with `PYTHONOPTIMIZE=1` and
+`MEDCHAT_TASK_BACKEND=local`; require a nonzero exit, the stable code
+`backend_not_temporal_canary`, and no environment value or filesystem path in stdout
+or stderr. This proves optimization cannot remove the gate.
+
+- [ ] **Step 2: Run the focused tests to verify RED**
 
 ```powershell
-C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\test_temporal_deployment_assets.py -q -p no:cacheprovider
+C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\task_runtime\test_production_worker.py -q -p no:cacheprovider
 ```
 
-Expected: worker unit is absent and Web still uses the repository `.env`.
+Expected: collection fails because `src.task_runtime.production_worker` and the
+validator CLI do not exist.
 
-- [ ] **Step 3: Create worker unit and narrow Web environment loading**
+- [ ] **Step 3: Implement the shared side-effect-free production validator**
 
-Use this service contract:
+Create `src/task_runtime/production_worker.py` with this public contract:
+
+```python
+class ProductionWorkerValidationError(ValueError):
+    def __init__(self, *codes: str) -> None:
+        normalized = tuple(sorted(set(codes)))
+        self.codes = normalized or ("production_worker_configuration_invalid",)
+        super().__init__("production worker configuration rejected: " + ",".join(self.codes))
+
+
+def validate_production_worker_config(
+    config: TaskRuntimeConfig,
+    *,
+    project_root: Path = PROJECT_ROOT,
+    task_db_path: Path | None = None,
+    docking_output_root: Path | None = None,
+) -> None:
+    scratch_root = project_root / "scratch"
+    output_root = project_root / "temp_docking"
+    actual_db = task_db_path or get_task_db_path()
+    actual_output = docking_output_root or output_root
+    codes: list[str] = []
+    if config.backend != "temporal_canary":
+        codes.append("backend_not_temporal_canary")
+    if config.canary_percent not in {0, 5, 10, 25}:
+        codes.append("illegal_canary_level")
+    if config.temporal_namespace != "default":
+        codes.append("namespace_not_default")
+    if config.docking_queue != "medchat-docking":
+        codes.append("queue_not_medchat_docking")
+    if config.docking_concurrency != 1:
+        codes.append("concurrency_not_one")
+    if config.warnings:
+        codes.append("runtime_warnings")
+    if not all((
+        config._temporal_address_configured,
+        config._staging_root_configured,
+        config._worker_metrics_address_configured,
+        config._backup_state_path_configured,
+    )):
+        codes.append("required_setting_not_explicit")
+    if config.worker_metrics_address not in {"127.0.0.1", "::1"}:
+        codes.append("metrics_not_loopback")
+    codes.extend(_validate_worker_paths(
+        scratch_root=scratch_root,
+        output_root=output_root,
+        task_db_path=actual_db,
+        staging_root=config.staging_root,
+        backup_state_path=config.backup_state_path,
+        docking_output_root=actual_output,
+    ))
+    if codes:
+        raise ProductionWorkerValidationError(*codes)
+```
+
+Implement `_validate_worker_paths()` with `Path.resolve(strict=False)` and these exact
+containment checks. The approved roots themselves must resolve to their lexical
+absolute paths; the TaskStore DB, staging directory, and backup marker must remain
+under `scratch`, while docking output remains under `temp_docking`:
+
+```python
+def _absolute(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _inside(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def _validate_worker_paths(
+    *, scratch_root: Path, output_root: Path,
+    task_db_path: Path, staging_root: Path, backup_state_path: Path,
+    docking_output_root: Path,
+) -> tuple[str, ...]:
+    scratch_lexical = _absolute(scratch_root)
+    output_lexical = _absolute(output_root)
+    scratch_resolved = scratch_lexical.resolve(strict=False)
+    output_resolved = output_lexical.resolve(strict=False)
+    codes: list[str] = []
+    if scratch_lexical != scratch_resolved:
+        codes.append("scratch_root_is_alias")
+    if output_lexical != output_resolved:
+        codes.append("output_root_is_alias")
+    checks = (
+        (task_db_path, scratch_resolved, "task_db_outside_scratch"),
+        (staging_root, scratch_resolved, "staging_outside_scratch"),
+        (backup_state_path, scratch_resolved, "backup_state_outside_scratch"),
+        (docking_output_root, output_resolved, "docking_output_outside_root"),
+    )
+    for candidate, approved_root, code in checks:
+        if not _inside(_absolute(candidate).resolve(strict=False), approved_root):
+            codes.append(code)
+    return tuple(codes)
+```
+
+Return only the stable codes shown above; never include a path in an exception or log
+message.
+
+Create `scripts/validate_temporal_worker_production.py` with two explicit modes:
+
+```python
+def validate_environment_file_metadata(path: Path) -> None:
+    metadata = os.lstat(path)
+    mode = stat.S_IMODE(metadata.st_mode)
+    codes = []
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        codes.append("environment_file_not_regular")
+    if metadata.st_uid != 0 or metadata.st_gid != 0:
+        codes.append("environment_file_wrong_owner")
+    if mode != 0o600:
+        codes.append("environment_file_wrong_mode")
+    if codes:
+        raise ProductionWorkerValidationError(*codes)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    modes = parser.add_mutually_exclusive_group(required=True)
+    modes.add_argument("--check-config", action="store_true")
+    modes.add_argument("--check-environment-file", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        if args.check_environment_file is not None:
+            validate_environment_file_metadata(args.check_environment_file)
+        else:
+            validate_production_worker_config(TaskRuntimeConfig.from_env())
+    except (OSError, ProductionWorkerValidationError) as exc:
+        code = exc.codes[0] if isinstance(exc, ProductionWorkerValidationError) else "environment_file_unavailable"
+        print(f"temporal_worker_production_validation=failed code={code}", file=sys.stderr)
+        return 1
+    print("temporal_worker_production_validation=passed")
+    return 0
+```
+
+The CLI must not open the environment file or print its path/content. Add mocked
+`os.lstat` tests for regular root:root `0600`, missing file, symlink, wrong owner, and
+wide mode. Run the focused test file and expect all cases to pass.
+
+- [ ] **Step 4: Write a failing worker-entrypoint ordering test**
+
+Add this async test to `tests/task_runtime/test_production_worker.py`:
+
+```python
+@pytest.mark.asyncio
+async def test_worker_revalidates_before_metrics_temporal_or_files(monkeypatch):
+    module = importlib.import_module("scripts.run_temporal_docking_worker")
+    config = apply_production_env(monkeypatch)
+    events: list[str] = []
+    monkeypatch.setattr(module.TaskRuntimeConfig, "from_env", lambda: config)
+
+    def reject(_config, **_kwargs):
+        events.append("validate")
+        raise ProductionWorkerValidationError("backend_not_temporal_canary")
+
+    monkeypatch.setattr(module, "validate_production_worker_config", reject)
+    monkeypatch.setattr(module, "TemporalWorkerMetrics", lambda: events.append("metrics"))
+    monkeypatch.setattr(module.Client, "connect", lambda *a, **k: events.append("connect"))
+    with pytest.raises(ProductionWorkerValidationError):
+        await module.main()
+    assert events == ["validate"]
+```
+
+Run the single test and expect RED because the worker entrypoint does not import or
+call the shared validator.
+
+- [ ] **Step 5: Revalidate in the worker before any side effect**
+
+In `scripts/run_temporal_docking_worker.py`, import
+`validate_production_worker_config` and make the start of `main()` exactly ordered as:
+
+```python
+config = TaskRuntimeConfig.from_env()
+validate_production_worker_config(
+    config,
+    project_root=PROJECT_ROOT,
+    docking_output_root=(PROJECT_ROOT / "temp_docking").resolve(),
+)
+metrics = TemporalWorkerMetrics()
+```
+
+Do not catch the validation exception inside `main()`; `_run_cli()` may retain its
+redacted `WORKER_RUNTIME_FAILED` output. Run the complete production-worker test file
+and expect GREEN.
+
+- [ ] **Step 6: Write failing unit and tmpfiles deployment tests**
+
+Update `tests/test_temporal_deployment_assets.py` so its systemd parser preserves
+repeated directives:
+
+```python
+def parse_systemd_directives(path: Path) -> dict[str, dict[str, list[str]]]:
+    parsed: dict[str, dict[str, list[str]]] = {}
+    section: str | None = None
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            parsed.setdefault(section, {})
+            continue
+        assert section is not None and "=" in line
+        name, value = line.split("=", 1)
+        parsed[section].setdefault(name, []).append(value)
+    return parsed
+```
+
+Then assert this exact hardened subset:
+
+```python
+service = parse_systemd_directives(WORKER_SYSTEMD_UNIT)["Service"]
+assert service["ExecStartPre"] == [
+    "+/usr/bin/systemd-tmpfiles --create /opt/medchat/molecular_chat_system/deployment/medchat-temporal-worker.tmpfiles",
+    "+/opt/conda/envs/medchat/bin/python scripts/validate_temporal_worker_production.py --check-environment-file /etc/medchat/medchat.env",
+    "/opt/conda/envs/medchat/bin/python scripts/validate_temporal_worker_production.py --check-config",
+]
+assert service["ProtectSystem"] == ["strict"]
+assert service["UMask"] == ["0077"]
+assert service["KillMode"] == ["mixed"]
+assert service["KillSignal"] == ["SIGTERM"]
+assert service["SendSIGKILL"] == ["yes"]
+assert service["TimeoutStopSec"] == ["90"]
+assert service["ReadWritePaths"] == [
+    "/opt/medchat/molecular_chat_system/scratch /opt/medchat/molecular_chat_system/temp_docking"
+]
+```
+
+Assert `deployment/medchat-temporal-worker.tmpfiles` contains exactly these four
+non-comment records and contains neither `/etc/medchat` nor a file-creation directive:
+
+```text
+d /opt/medchat/molecular_chat_system/scratch 0700 medchat medchat -
+d /opt/medchat/molecular_chat_system/scratch/task_inputs 0700 medchat medchat -
+d /opt/medchat/molecular_chat_system/scratch/temporal_backups 0700 medchat medchat -
+d /opt/medchat/molecular_chat_system/temp_docking 0700 medchat medchat -
+```
+
+Keep the existing exact Web-unit assertion unchanged. Run the deployment asset test
+and expect failures for the old `assert`, protection, timeout, kill mode, and missing
+tmpfiles asset.
+
+- [ ] **Step 7: Replace the unsafe service contract**
+
+Change the worker unit's `[Service]` section to:
 
 ```ini
-[Unit]
-Description=MedChat Temporal Docking Worker
-After=network-online.target docker.service
-Wants=network-online.target
-
 [Service]
 Type=simple
 User=medchat
@@ -1202,38 +1517,79 @@ Group=medchat
 WorkingDirectory=/opt/medchat/molecular_chat_system
 EnvironmentFile=/etc/medchat/medchat.env
 Environment=MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY=1
-ExecStartPre=/opt/conda/envs/medchat/bin/python -c "from src.task_runtime.config import TaskRuntimeConfig; c=TaskRuntimeConfig.from_env(); assert not c.warnings and c.docking_concurrency == 1"
+ExecStartPre=+/usr/bin/systemd-tmpfiles --create /opt/medchat/molecular_chat_system/deployment/medchat-temporal-worker.tmpfiles
+ExecStartPre=+/opt/conda/envs/medchat/bin/python scripts/validate_temporal_worker_production.py --check-environment-file /etc/medchat/medchat.env
+ExecStartPre=/opt/conda/envs/medchat/bin/python scripts/validate_temporal_worker_production.py --check-config
 ExecStart=/opt/conda/envs/medchat/bin/python scripts/run_temporal_docking_worker.py
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=60
-TimeoutStopSec=45
-KillMode=control-group
+TimeoutStopSec=90
+KillMode=mixed
+KillSignal=SIGTERM
+SendSIGKILL=yes
+UMask=0077
 PrivateTmp=true
 NoNewPrivileges=true
-ProtectSystem=full
+ProtectSystem=strict
 ReadWritePaths=/opt/medchat/molecular_chat_system/scratch /opt/medchat/molecular_chat_system/temp_docking
-
-[Install]
-WantedBy=multi-user.target
 ```
 
-Change only `EnvironmentFile` in `deployment/medchat.service` to `/etc/medchat/medchat.env`; preserve its `ExecStart`, working directory, user, restart, and timeout behavior.
+Create the exact four-line tmpfiles asset from Step 6. Do not add Docker/Compose
+commands to the unit; `After=docker.service` remains ordering metadata only. Run the
+deployment asset and production-worker tests and expect GREEN.
 
-- [ ] **Step 4: Validate units**
+- [ ] **Step 8: Add the opt-in real Linux process-tree test**
+
+Create `tests/test_temporal_systemd_integration.py`. Skip unless Linux is booted with
+systemd, the effective UID is zero, `systemd-run`/`systemctl` are available, and
+`MEDCHAT_RUN_TEMPORAL_SYSTEMD_INTEGRATION=1`. The test must create a temporary Python
+fixture whose parent appends one JSON object per line when it receives SIGTERM, waits
+0.5 seconds, then terminates and waits for its child. Start it with a transient system
+unit using `KillMode=mixed`,
+`KillSignal=SIGTERM`, `SendSIGKILL=yes`, and `TimeoutStopSec=3s`; stop it and assert:
+
+```python
+events = [json.loads(line) for line in event_file.read_text(encoding="utf-8").splitlines()]
+assert events[0]["event"] == "parent_sigterm"
+assert events[1]["event"] == "child_sigterm"
+assert events[1]["monotonic"] - events[0]["monotonic"] >= 0.4
+assert systemctl_show(unit, "ActiveState") == "inactive"
+assert not process_exists(parent_pid)
+assert not process_exists(child_pid)
+```
+
+Run a second fixture mode whose parent and child ignore SIGTERM. After `systemctl
+stop`, require both PIDs to disappear after systemd's timeout escalation. Put cleanup
+in `finally`: `systemctl stop`, `systemctl reset-failed`, and a last PID check; fail if
+any descendant remains. The transient unit validates real cgroup semantics, while the
+static test proves the committed service uses the same lifecycle directives.
+
+- [ ] **Step 9: Validate GREEN on Windows and Linux**
 
 ```powershell
-C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\test_temporal_deployment_assets.py -q -p no:cacheprovider
+C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\task_runtime\test_production_worker.py tests\test_temporal_deployment_assets.py tests\test_temporal_systemd_integration.py -q -p no:cacheprovider
+C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\task_runtime\test_temporal_config.py tests\task_runtime\test_temporal_prometheus.py tests\task_runtime\test_temporal_workflow.py -q -p no:cacheprovider
+C:\Users\xkx52\.conda\envs\MedChat\python.exe -m compileall -q src scripts
+```
+
+Expected on Windows: all unit/static tests pass and only the explicitly labeled Linux
+systemd integration tests skip. Expected on the Linux production candidate:
+
+```bash
+python -m pytest tests/test_temporal_systemd_integration.py -q -p no:cacheprovider
 systemd-analyze verify deployment/medchat.service deployment/medchat-temporal-worker.service
 ```
 
-Expected: pytest passes. `systemd-analyze` is run on Linux; on Windows its absence is recorded as a truthful skip and remains a production-host validation requirement.
+Both commands must pass with `MEDCHAT_RUN_TEMPORAL_SYSTEMD_INTEGRATION=1`; a skip or
+missing systemd tool remains a production-readiness blocker. Docker/Compose is started
+and checked separately by the operator runbook before enabling the worker.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 10: Commit the corrective hardening**
 
 ```powershell
-git add -- deployment/medchat.service deployment/medchat-temporal-worker.service tests/test_temporal_deployment_assets.py
-git commit -m "feat(deploy): isolate temporal docking worker"
+git add -- src/task_runtime/production_worker.py scripts/validate_temporal_worker_production.py scripts/run_temporal_docking_worker.py deployment/medchat-temporal-worker.service deployment/medchat-temporal-worker.tmpfiles tests/task_runtime/test_production_worker.py tests/test_temporal_deployment_assets.py tests/test_temporal_systemd_integration.py
+git commit -m "fix(deploy): harden temporal worker lifecycle"
 ```
 
 ## Task 9: Add atomic PostgreSQL backup and isolated restore verification
