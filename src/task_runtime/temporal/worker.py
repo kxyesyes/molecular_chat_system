@@ -21,6 +21,7 @@ from .workflows import DockingWorkflow
 
 logger = logging.getLogger(__name__)
 _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}\Z")
+_WORKER_READINESS_POLL_INTERVAL_SECONDS = 0.05
 
 
 def _best_effort_metric(
@@ -237,7 +238,11 @@ async def run_temporal_worker(
                 if cleanup_error is not None:
                     raise cleanup_error from None
                 return
-            await asyncio.sleep(0)
+            await asyncio.wait(
+                {worker_task, shutdown_task},
+                timeout=_WORKER_READINESS_POLL_INTERVAL_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
         if worker_task.done():
             await worker_task
         _best_effort_metric(metrics, "set_ready", True)

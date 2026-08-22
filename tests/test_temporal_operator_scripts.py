@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import errno
 import hashlib
@@ -477,25 +478,23 @@ def test_backup_and_output_reject_writable_parent(tmp_path: Path) -> None:
         parent.chmod(0o700)
 
 
-def test_evidence_swap_back_race_is_rejected(
+def test_evidence_boundary_change_after_safe_read_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     env_file = _write_env(tmp_path)
     evidence = _write_evidence(tmp_path)
-    held = tmp_path / "held-evidence.json"
-    intruder = tmp_path / "intruder-evidence.json"
-    intruder.write_text("{}", encoding="utf-8")
-    original = manager._strict_json_object
-
-    def swap_back(content):
-        os.replace(evidence, held)
-        os.replace(intruder, evidence)
-        os.replace(evidence, intruder)
-        os.replace(held, evidence)
-        return original(content)
-
-    monkeypatch.setattr(manager, "_strict_json_object", swap_back)
+    boundary = manager._capture_trusted_path_boundary(evidence)
+    changed = replace(
+        boundary,
+        file_version=(*boundary.file_version, 1),
+    )
+    captures = iter((boundary, changed))
+    monkeypatch.setattr(
+        manager,
+        "_capture_trusted_path_boundary",
+        lambda _path: next(captures),
+    )
 
     code = manager.main(
         [
@@ -515,7 +514,7 @@ def test_evidence_swap_back_race_is_rejected(
     assert b"MEDCHAT_TEMPORAL_CANARY_PERCENT=5" in env_file.read_bytes()
 
 
-def test_backup_swap_back_race_is_unknown(
+def test_backup_boundary_change_after_safe_read_is_unknown(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -531,43 +530,48 @@ def test_backup_swap_back_race_is_unknown(
         ),
         encoding="utf-8",
     )
-    held = tmp_path / "held-marker.json"
-    intruder = tmp_path / "intruder-marker.json"
-    intruder.write_text("{}", encoding="utf-8")
-    original = observer.read_temporal_backup_state
-
-    def swap_back(path):
-        content = original(path)
-        os.replace(marker, held)
-        os.replace(intruder, marker)
-        os.replace(marker, intruder)
-        os.replace(held, marker)
-        return content
-
-    monkeypatch.setattr(observer, "read_temporal_backup_state", swap_back)
+    boundary = observer._capture_trusted_path_boundary(marker)
+    changed = replace(
+        boundary,
+        file_version=(*boundary.file_version, 1),
+    )
+    captures = iter((boundary, changed))
+    monkeypatch.setattr(
+        observer,
+        "_capture_trusted_path_boundary",
+        lambda _path: next(captures),
+    )
 
     assert observer.read_backup_verification(marker, now=now) is None
 
 
-def test_output_swap_back_race_is_rejected(
+def test_output_final_boundary_change_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     output = tmp_path / "report.json"
     output.write_text("{}", encoding="utf-8")
-    original_replace = os.replace
-
-    def swap_back(source, destination, *args, **kwargs):
-        original_replace(source, destination, *args, **kwargs)
-        if Path(destination) == output:
-            held = tmp_path / "held-report.json"
-            original_replace(output, held)
-            original_replace(held, output)
-
-    monkeypatch.setattr(observer.os, "replace", swap_back)
+    boundary = observer._capture_trusted_path_boundary(
+        output,
+        require_file=False,
+    )
+    changed = replace(
+        boundary,
+        parent_identity=(
+            *boundary.parent_identity[:-1],
+            boundary.parent_identity[-1] + 1,
+        ),
+    )
+    captures = iter((boundary, boundary, boundary, changed))
+    monkeypatch.setattr(
+        observer,
+        "_capture_trusted_path_boundary",
+        lambda _path, **_kwargs: next(captures),
+    )
 
     with pytest.raises(ValueError):
         observer.write_report_atomic(output, {"status": "partial"})
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def _allow_ace(

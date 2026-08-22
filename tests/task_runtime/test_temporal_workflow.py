@@ -34,6 +34,7 @@ from src.task_runtime.temporal.activities import (
     _run_docking_in_test_thread,
     _summarize_docking_result,
 )
+from src.task_runtime.temporal import worker as temporal_worker_module
 from src.task_runtime.temporal.worker import (
     WorkerSettings,
     build_temporal_worker,
@@ -146,6 +147,7 @@ class _RecordingMetrics:
         self.finished: list[tuple[str, float]] = []
         self.terminals: list[tuple[str, str]] = []
         self.ready_transitions: list[bool] = []
+        self._ready = asyncio.Event()
         self.heartbeats = 0
         self.backup_refreshes: list[Path] = []
         self.terminal_violations = 0
@@ -175,6 +177,11 @@ class _RecordingMetrics:
 
     def set_ready(self, ready: bool) -> None:
         self.ready_transitions.append(ready)
+        if ready:
+            self._ready.set()
+
+    async def wait_until_ready(self) -> None:
+        await asyncio.wait_for(self._ready.wait(), timeout=1.0)
 
     def record_worker_heartbeat(self) -> None:
         self.heartbeats += 1
@@ -1922,6 +1929,7 @@ def test_worker_readiness_is_true_only_during_polling_and_false_after_shutdown(
             )
         )
         assert await asyncio.wait_for(fake_worker.polling.wait(), timeout=1.0)
+        await metrics.wait_until_ready()
         assert metrics.ready_transitions == [True]
         shutdown.set()
         await asyncio.wait_for(running, timeout=1.0)
@@ -1981,12 +1989,84 @@ def test_worker_waits_for_public_running_signal_before_readiness(
         assert metrics.ready_transitions == []
 
         fake_worker.is_running = True
-        for _ in range(100):
-            if metrics.ready_transitions:
-                break
-            await asyncio.sleep(0)
+        await metrics.wait_until_ready()
         assert metrics.ready_transitions == [True]
 
+        shutdown.set()
+        await asyncio.wait_for(running, timeout=1.0)
+        assert metrics.ready_transitions == [True, False]
+
+    asyncio.run(scenario())
+
+
+def test_worker_readiness_wait_does_not_busy_poll_delayed_sdk_start(
+    tmp_path,
+    monkeypatch,
+):
+    class DelayedWorker:
+        def __init__(self) -> None:
+            self.entered = asyncio.Event()
+            self.stop = asyncio.Event()
+            self.running = False
+            self.stopped = False
+            self.running_checks = 0
+
+        @property
+        def is_running(self) -> bool:
+            self.running_checks += 1
+            return (
+                not self.stopped
+                and self.running
+            )
+
+        async def run(self) -> None:
+            self.entered.set()
+            try:
+                await self.stop.wait()
+            finally:
+                self.stopped = True
+
+        async def shutdown(self) -> None:
+            self.stop.set()
+
+    async def scenario() -> None:
+        fake_worker = DelayedWorker()
+        metrics = _RecordingMetrics()
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        shutdown = asyncio.Event()
+        monkeypatch.setattr(
+            temporal_worker_module,
+            "_WORKER_READINESS_POLL_INTERVAL_SECONDS",
+            0.005,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            temporal_worker_module,
+            "build_temporal_worker",
+            lambda *_args: fake_worker,
+        )
+        running = asyncio.create_task(
+            run_temporal_worker(
+                object(),
+                TemporalDockingActivities(
+                    store,
+                    _FakeDockingExecution(_success_result()),
+                ),
+                store,
+                WorkerSettings(task_queue="medchat-docking", namespace="default"),
+                worker_id="worker-1",
+                sdk_version="1.30.0",
+                shutdown=shutdown,
+                metrics=metrics,
+            )
+        )
+        assert await asyncio.wait_for(fake_worker.entered.wait(), timeout=1.0)
+        await asyncio.to_thread(threading.Event().wait, 0.05)
+        fake_worker.running = True
+        await metrics.wait_until_ready()
+
+        assert metrics.ready_transitions == [True]
+        assert fake_worker.running_checks <= 30
         shutdown.set()
         await asyncio.wait_for(running, timeout=1.0)
         assert metrics.ready_transitions == [True, False]
@@ -2158,10 +2238,7 @@ def test_worker_waits_for_cancel_resistant_polling_task_to_really_finish(
             )
         )
         assert await asyncio.wait_for(fake_worker.polling.wait(), timeout=1.0)
-        for _ in range(100):
-            if metrics.ready_transitions:
-                break
-            await asyncio.sleep(0)
+        await metrics.wait_until_ready()
         assert metrics.ready_transitions == [True]
 
         shutdown.set()
@@ -2231,6 +2308,7 @@ def test_worker_outer_cancellation_joins_polling_task_without_leaking(
             )
         )
         assert await asyncio.wait_for(fake_worker.polling.wait(), timeout=1.0)
+        await metrics.wait_until_ready()
         try:
             running.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -2306,6 +2384,7 @@ def test_worker_shutdown_failure_cancels_and_joins_pending_polling_task(
             )
         )
         assert await asyncio.wait_for(fake_worker.polling.wait(), timeout=1.0)
+        await metrics.wait_until_ready()
         try:
             shutdown.set()
             with pytest.raises(RuntimeError, match="^Temporal worker shutdown failed$") as failure:
@@ -2384,6 +2463,7 @@ def test_worker_cancellation_preserves_primary_over_shutdown_failure(
             )
         )
         assert await asyncio.wait_for(fake_worker.polling.wait(), timeout=1.0)
+        await metrics.wait_until_ready()
         running.cancel()
         assert await asyncio.wait_for(fake_worker.shutdown_entered.wait(), timeout=1.0)
         running.cancel()
@@ -2465,6 +2545,7 @@ def test_worker_run_exception_preserves_primary_over_shutdown_failure(
             )
         )
         assert await asyncio.wait_for(fake_worker.polling.wait(), timeout=1.0)
+        await metrics.wait_until_ready()
         shutdown.set()
         with pytest.raises(PrimaryRunError, match="primary polling failure"):
             await asyncio.wait_for(running, timeout=1.0)

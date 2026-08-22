@@ -532,15 +532,12 @@ def test_read_only_observation_detects_database_path_swap_before_open(
             )
 
 
-def test_read_only_observation_detects_source_replace_query_restore(
+def test_observation_copy_rejects_source_replacement_between_capture_and_open(
     tmp_path,
     monkeypatch,
 ):
-    from src.task_runtime.store import ReadOnlyTemporalObservationStore
-
     path = tmp_path / "tasks.sqlite"
     replacement = tmp_path / "replacement.sqlite"
-    held = tmp_path / "held.sqlite"
     start = datetime(2026, 8, 21, 10, tzinfo=timezone.utc)
     _finish_observation_task(
         TaskStore(path), "original-task", finished_at=start + timedelta(minutes=1)
@@ -550,26 +547,26 @@ def test_read_only_observation_detects_source_replace_query_restore(
         "replacement-task",
         finished_at=start + timedelta(minutes=1),
     )
-    original_query = runtime_store._query_read_only_observation_snapshot
+    captured = runtime_store._database_component_snapshot(path)
+    original_open = os.open
+    swapped = False
 
-    def replace_query_restore(private_path, *args, **kwargs):
-        os.replace(path, held)
-        os.replace(replacement, path)
-        try:
-            return original_query(private_path, *args, **kwargs)
-        finally:
-            os.replace(path, replacement)
-            os.replace(held, path)
+    def replace_then_open(source, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and Path(source) == path:
+            swapped = True
+            os.replace(replacement, path)
+        return original_open(source, *args, **kwargs)
 
-    monkeypatch.setattr(
-        runtime_store,
-        "_query_read_only_observation_snapshot",
-        replace_query_restore,
-    )
+    monkeypatch.setattr(runtime_store.os, "open", replace_then_open)
 
-    with pytest.raises(ValueError, match=r"^temporal observation unavailable$"):
-        with ReadOnlyTemporalObservationStore(path) as reader:
-            reader.list_temporal_observation(start, start + timedelta(hours=1))
+    destination = tmp_path / "snapshot.sqlite"
+    with pytest.raises(runtime_store._ObservationSnapshotChanged) as failure:
+        runtime_store._copy_database_snapshot(path, destination, captured)
+
+    assert swapped
+    assert failure.value.identity_changed is True
+    assert not destination.exists()
 
 
 def test_read_only_observation_snapshot_cap_cleans_private_directory(
