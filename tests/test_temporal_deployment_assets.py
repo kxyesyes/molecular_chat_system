@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import configparser
 import errno
 import json
 import os
@@ -42,6 +43,8 @@ GRAFANA_DASHBOARD = (
 )
 RELAY_TEMPLATE = ROOT / "deployment" / "nginx-medchat-temporal-metrics.conf.template"
 RELAY_SCRIPT = ROOT / "scripts" / "configure_temporal_metrics_relay.py"
+WEB_SYSTEMD_UNIT = ROOT / "deployment" / "medchat.service"
+WORKER_SYSTEMD_UNIT = ROOT / "deployment" / "medchat-temporal-worker.service"
 
 LONG_RUNNING = {
     "postgres", "postgres-exporter", "temporal", "temporal-ui", "prometheus", "grafana"
@@ -106,6 +109,123 @@ MOUNTS = {
         "./grafana/dashboards:/var/lib/grafana/dashboards:ro",
     ],
 }
+
+
+def parse_systemd_unit(path: Path) -> dict[str, dict[str, str]]:
+    parser = configparser.ConfigParser(
+        interpolation=None,
+        strict=True,
+        delimiters=("=",),
+        comment_prefixes=("#", ";"),
+        inline_comment_prefixes=None,
+        empty_lines_in_values=False,
+    )
+    parser.optionxform = str
+    with path.open(encoding="utf-8") as stream:
+        parser.read_file(stream)
+    return {
+        section: dict(parser.items(section, raw=True))
+        for section in parser.sections()
+    }
+
+
+def test_temporal_worker_systemd_unit_has_full_hardened_contract() -> None:
+    assert parse_systemd_unit(WORKER_SYSTEMD_UNIT) == {
+        "Unit": {
+            "Description": "MedChat Temporal Docking Worker",
+            "After": "network-online.target docker.service",
+            "Wants": "network-online.target",
+        },
+        "Service": {
+            "Type": "simple",
+            "User": "medchat",
+            "Group": "medchat",
+            "WorkingDirectory": "/opt/medchat/molecular_chat_system",
+            "EnvironmentFile": "/etc/medchat/medchat.env",
+            "Environment": "MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY=1",
+            "ExecStartPre": (
+                "/opt/conda/envs/medchat/bin/python -c \"from "
+                "src.task_runtime.config import TaskRuntimeConfig; "
+                "c=TaskRuntimeConfig.from_env(); assert not c.warnings and "
+                "c.docking_concurrency == 1\""
+            ),
+            "ExecStart": (
+                "/opt/conda/envs/medchat/bin/python "
+                "scripts/run_temporal_docking_worker.py"
+            ),
+            "Restart": "on-failure",
+            "RestartSec": "5",
+            "TimeoutStartSec": "60",
+            "TimeoutStopSec": "45",
+            "KillMode": "control-group",
+            "PrivateTmp": "true",
+            "NoNewPrivileges": "true",
+            "ProtectSystem": "full",
+            "ReadWritePaths": (
+                "/opt/medchat/molecular_chat_system/scratch "
+                "/opt/medchat/molecular_chat_system/temp_docking"
+            ),
+        },
+        "Install": {"WantedBy": "multi-user.target"},
+    }
+
+
+def test_web_systemd_unit_preserves_behavior_with_narrow_environment_source() -> None:
+    assert parse_systemd_unit(WEB_SYSTEMD_UNIT) == {
+        "Unit": {
+            "Description": "MedChat Web Service",
+            "After": "network.target",
+        },
+        "Service": {
+            "Type": "simple",
+            "User": "medchat",
+            "Group": "medchat",
+            "WorkingDirectory": "/opt/medchat/molecular_chat_system",
+            "EnvironmentFile": "/etc/medchat/medchat.env",
+            "ExecStart": "/opt/conda/envs/medchat/bin/python main.py --no-reload",
+            "Restart": "always",
+            "RestartSec": "3",
+            "TimeoutStartSec": "120",
+            "TimeoutStopSec": "30",
+        },
+        "Install": {"WantedBy": "multi-user.target"},
+    }
+
+
+def test_web_and_temporal_worker_systemd_units_are_independent_processes() -> None:
+    web = parse_systemd_unit(WEB_SYSTEMD_UNIT)
+    worker = parse_systemd_unit(WORKER_SYSTEMD_UNIT)
+    for unit in (web, worker):
+        assert "Requires" not in unit["Unit"]
+        assert "PartOf" not in unit["Unit"]
+    assert web["Service"]["ExecStart"] != worker["Service"]["ExecStart"]
+
+
+def test_systemd_units_have_no_shell_interpolation_or_embedded_credentials() -> None:
+    units = (WEB_SYSTEMD_UNIT, WORKER_SYSTEMD_UNIT)
+    embedded_credential = re.compile(
+        r"(?i)(?:https?|postgres(?:ql)?|mysql|redis)://[^/\s:@]+:[^/\s@]+@"
+    )
+    secret_assignment = re.compile(
+        r"(?i)(?:api[_-]?key|password|secret|token)\s*=\s*[^\s\"']+"
+    )
+    shell_interpolation = re.compile(
+        r"(?:\$\(|\$\{|`|(?:^|\s)(?:/bin/)?(?:ba)?sh\s+-c(?:\s|$))"
+    )
+    for path in units:
+        text = path.read_text(encoding="utf-8")
+        parsed = parse_systemd_unit(path)
+        executable_values = [
+            value
+            for key, value in parsed["Service"].items()
+            if key.startswith("Exec")
+        ]
+        assert not embedded_credential.search(text), path.name
+        assert not secret_assignment.search(text), path.name
+        assert all(not shell_interpolation.search(value) for value in executable_values)
+        environment = parsed["Service"].get("Environment")
+        if environment is not None:
+            assert environment == "MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY=1"
 
 
 def shell_executable() -> Path:

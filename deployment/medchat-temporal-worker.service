@@ -1,0 +1,26 @@
+[Unit]
+Description=MedChat Temporal Docking Worker
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=medchat
+Group=medchat
+WorkingDirectory=/opt/medchat/molecular_chat_system
+EnvironmentFile=/etc/medchat/medchat.env
+Environment=MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY=1
+ExecStartPre=/opt/conda/envs/medchat/bin/python -c "from src.task_runtime.config import TaskRuntimeConfig; c=TaskRuntimeConfig.from_env(); assert not c.warnings and c.docking_concurrency == 1"
+ExecStart=/opt/conda/envs/medchat/bin/python scripts/run_temporal_docking_worker.py
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=45
+KillMode=control-group
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/opt/medchat/molecular_chat_system/scratch /opt/medchat/molecular_chat_system/temp_docking
+
+[Install]
+WantedBy=multi-user.target
