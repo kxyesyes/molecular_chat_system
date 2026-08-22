@@ -147,7 +147,14 @@ async def run_temporal_worker(
     worker_task = asyncio.create_task(worker.run())
     shutdown_task = asyncio.create_task(shutdown.wait())
     ready_announced = False
+    ready_cleared = False
     polling_cleanup_task: asyncio.Task | None = None
+
+    def clear_readiness() -> None:
+        nonlocal ready_cleared
+        if ready_announced and not ready_cleared:
+            _best_effort_metric(metrics, "set_ready", False)
+            ready_cleared = True
 
     async def stop_polling() -> tuple[BaseException | None, RuntimeError | None]:
         cleanup_error: RuntimeError | None = None
@@ -168,12 +175,19 @@ async def run_temporal_worker(
             if not done:
                 cleanup_error = RuntimeError("Temporal worker shutdown failed")
                 worker_task.cancel()
-                done, _ = await asyncio.wait(
-                    {worker_task},
-                    timeout=settings.graceful_shutdown_seconds,
-                )
-                if not done:
-                    cleanup_error = RuntimeError("Temporal worker shutdown failed")
+
+        # A process supervisor owns hard escalation. This inner lifecycle must
+        # not return while SDK polling (or a cancellation-resistant fake) is
+        # still executing in this event loop.
+        while not worker_task.done():
+            try:
+                await asyncio.shield(worker_task)
+            except asyncio.CancelledError:
+                if worker_task.done():
+                    break
+                continue
+            except BaseException:
+                break
 
         primary_error: BaseException | None = None
         if worker_task.done() and not worker_task.cancelled():
@@ -205,7 +219,25 @@ async def run_temporal_worker(
         sdk_version,
     )
     try:
-        await asyncio.sleep(0)
+        while not worker.is_running:
+            if worker_task.done():
+                await worker_task
+            if shutdown_task.done():
+                clear_readiness()
+                primary_error, cleanup_error = await asyncio.shield(
+                    begin_polling_cleanup()
+                )
+                if primary_error is not None:
+                    if cleanup_error is not None:
+                        logger.error(
+                            "temporal_worker_shutdown_failed "
+                            "code=WORKER_SHUTDOWN_FAILED"
+                        )
+                    raise primary_error
+                if cleanup_error is not None:
+                    raise cleanup_error from None
+                return
+            await asyncio.sleep(0)
         if worker_task.done():
             await worker_task
         _best_effort_metric(metrics, "set_ready", True)
@@ -217,6 +249,7 @@ async def run_temporal_worker(
         if worker_task in done:
             await worker_task
             return
+        clear_readiness()
         primary_error, cleanup_error = await asyncio.shield(
             begin_polling_cleanup()
         )
@@ -229,11 +262,13 @@ async def run_temporal_worker(
         if cleanup_error is not None:
             raise cleanup_error from None
     except asyncio.CancelledError:
+        clear_readiness()
         _, cleanup_error = await finish_polling_cleanup()
         if cleanup_error is not None:
             logger.error("temporal_worker_shutdown_failed code=WORKER_SHUTDOWN_FAILED")
         raise
     except BaseException:
+        clear_readiness()
         if not worker_task.done():
             _, cleanup_error = await finish_polling_cleanup()
             if cleanup_error is not None:
@@ -242,8 +277,7 @@ async def run_temporal_worker(
                 )
         raise
     finally:
-        if ready_announced:
-            _best_effort_metric(metrics, "set_ready", False)
+        clear_readiness()
         shutdown_task.cancel()
         await asyncio.gather(shutdown_task, return_exceptions=True)
         heartbeat_stop.set()

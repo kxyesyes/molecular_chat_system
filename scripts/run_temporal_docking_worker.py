@@ -101,7 +101,11 @@ async def main() -> None:
 def _run_cli() -> int:
     try:
         asyncio.run(main())
-    except OSError:
+    except Exception:
+        print(
+            "temporal_worker_failed code=WORKER_RUNTIME_FAILED",
+            file=sys.stderr,
+        )
         return 1
     return 0
 

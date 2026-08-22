@@ -1882,10 +1882,15 @@ def test_worker_readiness_is_true_only_during_polling_and_false_after_shutdown(
         def __init__(self) -> None:
             self.polling = asyncio.Event()
             self.stopped = asyncio.Event()
+            self.is_running = False
 
         async def run(self) -> None:
+            self.is_running = True
             self.polling.set()
-            await self.stopped.wait()
+            try:
+                await self.stopped.wait()
+            finally:
+                self.is_running = False
 
         async def shutdown(self) -> None:
             self.stopped.set()
@@ -1926,11 +1931,140 @@ def test_worker_readiness_is_true_only_during_polling_and_false_after_shutdown(
     asyncio.run(scenario())
 
 
+def test_worker_waits_for_public_running_signal_before_readiness(
+    tmp_path,
+    monkeypatch,
+):
+    class DelayedWorker:
+        def __init__(self) -> None:
+            self.entered = asyncio.Event()
+            self.stop = asyncio.Event()
+            self.is_running = False
+
+        async def run(self) -> None:
+            self.entered.set()
+            try:
+                await self.stop.wait()
+            finally:
+                self.is_running = False
+
+        async def shutdown(self) -> None:
+            self.stop.set()
+
+    async def scenario() -> None:
+        fake_worker = DelayedWorker()
+        metrics = _RecordingMetrics()
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        shutdown = asyncio.Event()
+        monkeypatch.setattr(
+            "src.task_runtime.temporal.worker.build_temporal_worker",
+            lambda *_args: fake_worker,
+        )
+        running = asyncio.create_task(
+            run_temporal_worker(
+                object(),
+                TemporalDockingActivities(
+                    store,
+                    _FakeDockingExecution(_success_result()),
+                ),
+                store,
+                WorkerSettings(task_queue="medchat-docking", namespace="default"),
+                worker_id="worker-1",
+                sdk_version="1.30.0",
+                shutdown=shutdown,
+                metrics=metrics,
+            )
+        )
+        assert await asyncio.wait_for(fake_worker.entered.wait(), timeout=1.0)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert metrics.ready_transitions == []
+
+        fake_worker.is_running = True
+        for _ in range(100):
+            if metrics.ready_transitions:
+                break
+            await asyncio.sleep(0)
+        assert metrics.ready_transitions == [True]
+
+        shutdown.set()
+        await asyncio.wait_for(running, timeout=1.0)
+        assert metrics.ready_transitions == [True, False]
+
+    asyncio.run(scenario())
+
+
+def test_worker_cancellation_while_waiting_for_readiness_cleans_up_unready(
+    tmp_path,
+    monkeypatch,
+):
+    class ValidatingWorker:
+        def __init__(self) -> None:
+            self.entered = asyncio.Event()
+            self.stop = asyncio.Event()
+            self.cleaned = asyncio.Event()
+            self.shutdown_calls = 0
+            self.is_running = False
+
+        async def run(self) -> None:
+            self.entered.set()
+            try:
+                await self.stop.wait()
+            finally:
+                self.cleaned.set()
+
+        async def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            self.stop.set()
+
+    async def scenario() -> None:
+        fake_worker = ValidatingWorker()
+        metrics = _RecordingMetrics()
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        monkeypatch.setattr(
+            "src.task_runtime.temporal.worker.build_temporal_worker",
+            lambda *_args: fake_worker,
+        )
+        running = asyncio.create_task(
+            run_temporal_worker(
+                object(),
+                TemporalDockingActivities(
+                    store,
+                    _FakeDockingExecution(_success_result()),
+                ),
+                store,
+                WorkerSettings(task_queue="medchat-docking", namespace="default"),
+                worker_id="worker-1",
+                sdk_version="1.30.0",
+                shutdown=asyncio.Event(),
+                metrics=metrics,
+            )
+        )
+        assert await asyncio.wait_for(fake_worker.entered.wait(), timeout=1.0)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+
+        assert fake_worker.shutdown_calls == 1
+        assert fake_worker.cleaned.is_set()
+        assert metrics.ready_transitions == []
+        assert not any(
+            not task.done()
+            and task is not asyncio.current_task()
+            and "run_temporal_worker" in repr(task.get_coro())
+            for task in asyncio.all_tasks()
+        )
+
+    asyncio.run(scenario())
+
+
 def test_worker_immediate_failure_never_announces_readiness_and_cleans_heartbeat(
     tmp_path,
     monkeypatch,
 ):
     class BrokenWorker:
+        is_running = False
+
         async def run(self) -> None:
             raise RuntimeError("polling failed")
 
@@ -1970,6 +2104,84 @@ def test_worker_immediate_failure_never_announces_readiness_and_cleans_heartbeat
     asyncio.run(scenario())
 
 
+def test_worker_waits_for_cancel_resistant_polling_task_to_really_finish(
+    tmp_path,
+    monkeypatch,
+):
+    class CancelResistantWorker:
+        def __init__(self) -> None:
+            self.polling = asyncio.Event()
+            self.cancel_swallowed = asyncio.Event()
+            self.release = asyncio.Event()
+            self.is_running = False
+
+        async def run(self) -> None:
+            self.is_running = True
+            self.polling.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancel_swallowed.set()
+                await self.release.wait()
+            finally:
+                self.is_running = False
+
+        async def shutdown(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        fake_worker = CancelResistantWorker()
+        metrics = _RecordingMetrics()
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        shutdown = asyncio.Event()
+        monkeypatch.setattr(
+            "src.task_runtime.temporal.worker.build_temporal_worker",
+            lambda *_args: fake_worker,
+        )
+        running = asyncio.create_task(
+            run_temporal_worker(
+                object(),
+                TemporalDockingActivities(
+                    store,
+                    _FakeDockingExecution(_success_result()),
+                ),
+                store,
+                WorkerSettings(
+                    task_queue="medchat-docking",
+                    namespace="default",
+                    graceful_shutdown_seconds=0.01,
+                ),
+                worker_id="worker-1",
+                sdk_version="1.30.0",
+                shutdown=shutdown,
+                metrics=metrics,
+            )
+        )
+        assert await asyncio.wait_for(fake_worker.polling.wait(), timeout=1.0)
+        for _ in range(100):
+            if metrics.ready_transitions:
+                break
+            await asyncio.sleep(0)
+        assert metrics.ready_transitions == [True]
+
+        shutdown.set()
+        assert await asyncio.wait_for(fake_worker.cancel_swallowed.wait(), timeout=1.0)
+        assert not running.done()
+        assert metrics.ready_transitions == [True, False]
+
+        fake_worker.release.set()
+        with pytest.raises(RuntimeError, match="^Temporal worker shutdown failed$"):
+            await asyncio.wait_for(running, timeout=1.0)
+        assert not any(
+            not task.done()
+            and task is not asyncio.current_task()
+            and "run_temporal_worker" in repr(task.get_coro())
+            for task in asyncio.all_tasks()
+        )
+
+    asyncio.run(scenario())
+
+
 def test_worker_outer_cancellation_joins_polling_task_without_leaking(
     tmp_path,
     monkeypatch,
@@ -1980,12 +2192,15 @@ def test_worker_outer_cancellation_joins_polling_task_without_leaking(
             self.stop = asyncio.Event()
             self.cleaned = asyncio.Event()
             self.shutdown_calls = 0
+            self.is_running = False
 
         async def run(self) -> None:
+            self.is_running = True
             self.polling.set()
             try:
                 await self.stop.wait()
             finally:
+                self.is_running = False
                 self.cleaned.set()
 
         async def shutdown(self) -> None:
@@ -2047,12 +2262,15 @@ def test_worker_shutdown_failure_cancels_and_joins_pending_polling_task(
             self.stop = asyncio.Event()
             self.cleaned = asyncio.Event()
             self.shutdown_calls = 0
+            self.is_running = False
 
         async def run(self) -> None:
+            self.is_running = True
             self.polling.set()
             try:
                 await self.stop.wait()
             finally:
+                self.is_running = False
                 self.cleaned.set()
 
         async def shutdown(self) -> None:
@@ -2121,12 +2339,15 @@ def test_worker_cancellation_preserves_primary_over_shutdown_failure(
             self.shutdown_entered = asyncio.Event()
             self.release_shutdown = asyncio.Event()
             self.shutdown_calls = 0
+            self.is_running = False
 
         async def run(self) -> None:
+            self.is_running = True
             self.polling.set()
             try:
                 await asyncio.Event().wait()
             finally:
+                self.is_running = False
                 self.cleaned.set()
 
         async def shutdown(self) -> None:
@@ -2197,13 +2418,16 @@ def test_worker_run_exception_preserves_primary_over_shutdown_failure(
             self.release = asyncio.Event()
             self.cleaned = asyncio.Event()
             self.shutdown_calls = 0
+            self.is_running = False
 
         async def run(self) -> None:
+            self.is_running = True
             self.polling.set()
             try:
                 await self.release.wait()
                 raise PrimaryRunError("primary polling failure")
             finally:
+                self.is_running = False
                 self.cleaned.set()
 
         async def shutdown(self) -> None:

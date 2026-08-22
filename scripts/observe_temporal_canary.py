@@ -27,12 +27,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.manage_temporal_canary import (  # noqa: E402
     _StableArgumentParser,
-    _apply_windows_security,
-    _capture_trusted_path_boundary,
     _fsync_directory,
     _is_reparse_point,
-    _normalized_path,
-    _path_identities,
     _safe_read_snapshot,
     _stat_identity,
 )
@@ -54,6 +50,12 @@ from src.task_runtime.observation import (  # noqa: E402
 )
 from src.task_runtime.store import (  # noqa: E402
     ReadOnlyTemporalObservationStore,
+)
+from src.task_runtime.trusted_files import (  # noqa: E402
+    _apply_windows_security,
+    _capture_trusted_path_boundary,
+    _normalized_path,
+    _path_identities,
 )
 
 

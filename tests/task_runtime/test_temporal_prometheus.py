@@ -13,7 +13,11 @@ import pytest
 from prometheus_client import CollectorRegistry, generate_latest
 from prometheus_client.parser import text_string_to_metric_families
 
-from src.task_runtime.prometheus_metrics import TemporalWorkerMetrics
+from src.task_runtime import prometheus_metrics
+from src.task_runtime.prometheus_metrics import (
+    MetricsServerHandle,
+    TemporalWorkerMetrics,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -307,6 +311,98 @@ def test_backup_refresh_uses_trusted_reader_and_resets_on_invalid_state(tmp_path
     ) == 0.0
 
 
+def test_backup_refresh_rejects_duplicate_json_keys(tmp_path):
+    clock = _MutableUtcClock(datetime(2026, 8, 22, 4, 0, tzinfo=timezone.utc))
+    metrics = TemporalWorkerMetrics(CollectorRegistry(), utc_now=clock)
+    marker = (tmp_path / "latest-verified.json").resolve()
+    marker.write_text(
+        '{"status":"passed","status":"passed","sha256":"'
+        + "a" * 64
+        + '","verified_at":"2026-08-22T03:55:00+00:00"}',
+        encoding="utf-8",
+    )
+
+    assert metrics.refresh_backup_verification(marker) is False
+    assert _sample_value(
+        metrics,
+        "medchat_temporal_backup_verified_timestamp_seconds",
+    ) == 0.0
+
+
+def test_backup_refresh_rejects_trust_boundary_race(tmp_path, monkeypatch):
+    clock = _MutableUtcClock(datetime(2026, 8, 22, 4, 0, tzinfo=timezone.utc))
+    metrics = TemporalWorkerMetrics(CollectorRegistry(), utc_now=clock)
+    marker = (tmp_path / "latest-verified.json").resolve()
+    marker.write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "sha256": "a" * 64,
+                "verified_at": "2026-08-22T03:55:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    boundaries = iter((object(), object()))
+    monkeypatch.setattr(
+        prometheus_metrics,
+        "capture_trusted_path_boundary",
+        lambda _path: next(boundaries),
+    )
+
+    assert metrics.refresh_backup_verification(marker) is False
+    assert _sample_value(
+        metrics,
+        "medchat_temporal_backup_verified_timestamp_seconds",
+    ) == 0.0
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX trust boundary")
+def test_backup_refresh_rejects_writable_file_or_parent(tmp_path):
+    clock = _MutableUtcClock(datetime(2026, 8, 22, 4, 0, tzinfo=timezone.utc))
+    metrics = TemporalWorkerMetrics(CollectorRegistry(), utc_now=clock)
+    parent = tmp_path / "backup"
+    parent.mkdir(mode=0o700)
+    marker = (parent / "latest-verified.json").resolve()
+    marker.write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "sha256": "a" * 64,
+                "verified_at": "2026-08-22T03:55:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    marker.chmod(0o666)
+    assert metrics.refresh_backup_verification(marker) is False
+    marker.chmod(0o600)
+    parent.chmod(0o777)
+    try:
+        assert metrics.refresh_backup_verification(marker) is False
+    finally:
+        parent.chmod(0o700)
+
+
+@pytest.mark.skipif(__import__("os").name != "nt", reason="Windows ACL boundary")
+def test_backup_refresh_accepts_live_trusted_windows_dacl(tmp_path):
+    clock = _MutableUtcClock(datetime(2026, 8, 22, 4, 0, tzinfo=timezone.utc))
+    metrics = TemporalWorkerMetrics(CollectorRegistry(), utc_now=clock)
+    marker = (tmp_path / "latest-verified.json").resolve()
+    marker.write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "sha256": "a" * 64,
+                "verified_at": "2026-08-22T03:55:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert metrics.refresh_backup_verification(marker) is True
+
+
 def _unused_loopback_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -351,6 +447,96 @@ def test_metrics_server_lifecycle_shuts_down_and_propagates_port_conflicts():
     replacement_thread = replacement._thread
     replacement.shutdown()
     assert not replacement_thread.is_alive()
+
+
+class _InjectedMetricsServer:
+    def __init__(self, *, fail_shutdown=False, fail_close_once=False) -> None:
+        self.fail_shutdown = fail_shutdown
+        self.fail_close_once = fail_close_once
+        self.shutdown_calls = 0
+        self.close_calls = 0
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+        if self.fail_shutdown:
+            raise RuntimeError("PRIVATE_SHUTDOWN_CANARY")
+
+    def server_close(self) -> None:
+        self.close_calls += 1
+        if self.fail_close_once and self.close_calls == 1:
+            raise RuntimeError("PRIVATE_CLOSE_CANARY")
+
+
+class _InjectedMetricsThread:
+    def __init__(self, *, stuck=False) -> None:
+        self.stuck = stuck
+        self.alive = True
+        self.join_calls = 0
+
+    def join(self, timeout=None) -> None:
+        self.join_calls += 1
+        if not self.stuck:
+            self.alive = False
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+
+def _owned_metrics_handle(server, thread, endpoint):
+    with prometheus_metrics._ENDPOINT_LOCK:
+        prometheus_metrics._BOUND_ENDPOINTS.add(endpoint)
+    return MetricsServerHandle(server, thread, endpoint)
+
+
+def test_metrics_handle_always_closes_and_joins_after_shutdown_failure():
+    endpoint = ("127.0.0.1", _unused_loopback_port())
+    server = _InjectedMetricsServer(fail_shutdown=True)
+    thread = _InjectedMetricsThread()
+    handle = _owned_metrics_handle(server, thread, endpoint)
+
+    handle.shutdown()
+
+    assert server.shutdown_calls == 1
+    assert server.close_calls == 1
+    assert thread.join_calls == 1
+    assert not thread.is_alive()
+    assert endpoint not in prometheus_metrics._BOUND_ENDPOINTS
+
+
+def test_metrics_handle_close_failure_is_generic_and_retryable():
+    endpoint = ("127.0.0.1", _unused_loopback_port())
+    server = _InjectedMetricsServer(fail_close_once=True)
+    thread = _InjectedMetricsThread()
+    handle = _owned_metrics_handle(server, thread, endpoint)
+
+    with pytest.raises(RuntimeError, match="^Temporal metrics server shutdown failed$") as failure:
+        handle.shutdown()
+    assert failure.value.__cause__ is None
+    assert server.shutdown_calls == 1
+    assert server.close_calls == 1
+    assert thread.join_calls == 1
+    assert endpoint in prometheus_metrics._BOUND_ENDPOINTS
+
+    handle.shutdown()
+    assert server.close_calls == 2
+    assert endpoint not in prometheus_metrics._BOUND_ENDPOINTS
+
+
+def test_metrics_handle_stuck_thread_retains_endpoint_until_successful_retry():
+    endpoint = ("127.0.0.1", _unused_loopback_port())
+    server = _InjectedMetricsServer()
+    thread = _InjectedMetricsThread(stuck=True)
+    handle = _owned_metrics_handle(server, thread, endpoint)
+
+    with pytest.raises(RuntimeError, match="^Temporal metrics server shutdown failed$"):
+        handle.shutdown()
+    assert endpoint in prometheus_metrics._BOUND_ENDPOINTS
+    assert thread.is_alive()
+
+    thread.stuck = False
+    handle.shutdown()
+    assert not thread.is_alive()
+    assert endpoint not in prometheus_metrics._BOUND_ENDPOINTS
 
 
 def _load_worker_script():
@@ -463,16 +649,53 @@ def test_worker_script_bind_failure_prevents_connect_polling_and_science(tmp_pat
     assert "sk-secret" not in output.out + output.err
 
 
-def test_worker_script_cli_silences_bind_error_details(monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("C:/private/CCO bind detail"),
+        ConnectionError("PRIVATE_CONNECT_CANARY"),
+        RuntimeError("PRIVATE_POLL_OR_SHUTDOWN_CANARY"),
+    ],
+)
+def test_worker_script_cli_redacts_expected_runtime_failures(
+    monkeypatch,
+    capsys,
+    failure,
+):
     module = _load_worker_script()
 
-    def fail_bind(_coroutine):
+    def fail_runtime(_coroutine):
         _coroutine.close()
-        raise OSError("C:/private/CCO sk-secret bind detail")
+        raise failure
 
-    monkeypatch.setattr(module.asyncio, "run", fail_bind)
+    monkeypatch.setattr(module.asyncio, "run", fail_runtime)
 
     assert module._run_cli() == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "temporal_worker_failed code=WORKER_RUNTIME_FAILED\n"
+    assert "private" not in output.err.lower()
+    assert "cco" not in output.err.lower()
+
+
+@pytest.mark.parametrize("failure", [KeyboardInterrupt(), SystemExit(7)])
+def test_worker_script_cli_preserves_process_control_exceptions(
+    monkeypatch,
+    capsys,
+    failure,
+):
+    module = _load_worker_script()
+
+    def interrupt(_coroutine):
+        _coroutine.close()
+        raise failure
+
+    monkeypatch.setattr(module.asyncio, "run", interrupt)
+
+    with pytest.raises(type(failure)) as raised:
+        module._run_cli()
+    if isinstance(failure, SystemExit):
+        assert raised.value.code == 7
     output = capsys.readouterr()
     assert output.out == ""
     assert output.err == ""

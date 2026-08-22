@@ -19,6 +19,7 @@ from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 from prometheus_client import start_http_server
 
 from src.task_runtime.config import read_temporal_backup_state
+from src.task_runtime.trusted_files import capture_trusted_path_boundary
 
 
 TASK_TYPES = frozenset({"docking"})
@@ -86,12 +87,28 @@ class MetricsServerHandle:
         with self._lock:
             if self._closed:
                 return
+            socket_closed = False
+            try:
+                self._server.shutdown()
+            except Exception:
+                pass
+            try:
+                self._server.server_close()
+                socket_closed = True
+            except Exception:
+                pass
+            try:
+                self._thread.join(timeout=5.0)
+                thread_stopped = not self._thread.is_alive()
+            except Exception:
+                thread_stopped = False
+            if not socket_closed or not thread_stopped:
+                raise RuntimeError(
+                    "Temporal metrics server shutdown failed"
+                ) from None
             self._closed = True
-        self._server.shutdown()
-        self._server.server_close()
-        self._thread.join(timeout=5.0)
-        with _ENDPOINT_LOCK:
-            _BOUND_ENDPOINTS.discard(self._endpoint)
+            with _ENDPOINT_LOCK:
+                _BOUND_ENDPOINTS.discard(self._endpoint)
 
 
 class TemporalWorkerMetrics:
@@ -237,9 +254,26 @@ class TemporalWorkerMetrics:
         try:
             if not isinstance(path, Path):
                 raise ValueError("invalid backup marker")
+            boundary = capture_trusted_path_boundary(path)
             content = read_temporal_backup_state(path)
-            payload = json.loads(content.decode("utf-8"))
-            if not isinstance(payload, dict) or payload.get("status") != "passed":
+            if capture_trusted_path_boundary(path) != boundary:
+                raise ValueError("invalid backup marker")
+
+            def unique_object(
+                pairs: list[tuple[str, object]],
+            ) -> dict[str, object]:
+                result: dict[str, object] = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError("invalid backup marker")
+                    result[key] = value
+                return result
+
+            payload = json.loads(
+                content.decode("utf-8"),
+                object_pairs_hook=unique_object,
+            )
+            if type(payload) is not dict or payload.get("status") != "passed":
                 raise ValueError("invalid backup marker")
             digest = payload.get("sha256")
             verified_at = payload.get("verified_at")
@@ -262,14 +296,7 @@ class TemporalWorkerMetrics:
             if verified_timestamp > checked_timestamp:
                 raise ValueError("invalid backup marker")
             valid = True
-        except (
-            json.JSONDecodeError,
-            OSError,
-            RuntimeError,
-            TypeError,
-            UnicodeDecodeError,
-            ValueError,
-        ):
+        except Exception:
             verified_timestamp = 0.0
         self.backup_verified.set(verified_timestamp)
         return valid
