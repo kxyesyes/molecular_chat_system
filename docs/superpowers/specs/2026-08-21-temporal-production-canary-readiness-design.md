@@ -131,10 +131,15 @@ docs/runbooks/
 - 使用固定大版本或不可变镜像标签，不使用 `latest`；
 - PostgreSQL、Temporal gRPC、Temporal UI、Prometheus 和 Grafana 默认只绑定 `127.0.0.1`；
 - Temporal 内部 PostgreSQL 使用独立数据库和账号，不复用 MedChat SQLite；
-- 密码、Grafana 管理凭据和其他 secret 只从 `/etc/medchat/temporal.env` 或 Docker secret 等运行时来源读取；
+- 长期运行的 Temporal 使用固定版本 `temporalio/server`，不得使用已弃用的 `temporalio/auto-setup`；
+- 使用匹配版本的 `temporalio/admin-tools` one-shot job 管理主库/visibility schema，并由独立 one-shot job 幂等创建或确认 namespace；
+- exporter role-sync 作为每次部署都可运行的 one-shot job；已有角色必须执行 `ALTER ROLE` 以支持密码轮换，再由 exporter 依赖其成功完成；
+- 密码、Grafana 管理凭据和其他 secret 只通过 Docker Compose file secret 注入；`env.example` 仅声明空的 `*_FILE` 路径键，不声明值型密码；
+- PostgreSQL 使用 `POSTGRES_PASSWORD_FILE`，Grafana 使用 `GF_SECURITY_ADMIN_PASSWORD__FILE`；不原生支持 file secret 的镜像只允许在容器 entrypoint 内读取并导出，禁止写入 Compose service environment、命令参数或日志；
 - 仓库只提交 `env.example`，不得包含真实凭据或机器绝对路径；
 - PostgreSQL、Temporal、Prometheus 和 Grafana 数据使用命名 volume；
-- 服务必须配置 healthcheck 和合理 restart policy；
+- 使用命名 `database`、`temporal`、`monitoring` 网络分段，database 网络为 internal，不使用默认全共享网络平面；
+- 所有服务使用有上限的 `json-file` 日志轮换；长期运行服务配置 healthcheck 和 `unless-stopped`，one-shot job 使用有限 `on-failure:N` 并通过 `service_completed_successfully` 串联；
 - Temporal schema 初始化采用官方支持的启动流程，不由 MedChat Web 执行；
 - Compose 不挂载整个仓库，也不授予 Docker socket；
 - 停止监控服务不得中断 Temporal workflow；停止 Temporal 服务不得导致 Web 在已接受任务上本地重跑。
@@ -161,7 +166,7 @@ docs/runbooks/
 
 生产配置分为：
 
-- Compose 基础设施配置：`/etc/medchat/temporal.env`；
+- Compose 基础设施配置：`/etc/medchat/temporal.env`，其中 secret 仅记录受保护 secret 文件的 `*_FILE` 路径，不记录 secret 值；
 - MedChat Web/worker 配置：`/etc/medchat/medchat.env`；
 - 仓库示例：不含 secret 的 `deployment/temporal/env.example`。
 
@@ -183,7 +188,7 @@ MEDCHAT_TEMPORAL_BASELINE_P95_SECONDS=40
 
 ### 6.2 安全规则
 
-- 真实 API key、数据库密码和 Grafana 密码不得写入仓库、报告或日志；
+- 真实 API key、数据库密码和 Grafana 密码不得写入仓库、环境值、命令参数、报告或日志；对应 secret 文件由部署者创建并限制读取权限；
 - 运行报告只允许记录 `credential_present: true/false`，不得记录掩码前后缀以外的密钥内容；
 - 配置检查输出逻辑地址、namespace、queue 和端口，不输出数据库 DSN；
 - artifact、SQLite 路径和工作目录对外只使用 repo-relative 或逻辑标识；

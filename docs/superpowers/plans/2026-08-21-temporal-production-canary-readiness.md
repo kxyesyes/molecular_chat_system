@@ -6,7 +6,7 @@
 
 **Architecture:** Keep MedChat Web and the scientific docking worker host-native under systemd, while Temporal Server, its dedicated PostgreSQL, Temporal UI, Prometheus, and Grafana run in Docker Compose. Add a strict rollout domain and a read-only observation projector over the existing SQLite task/event/artifact records; promotion consumes only hashed, current, sanitized evidence, and rollback changes only new traffic.
 
-**Tech Stack:** Python 3.10+, SQLite, Temporal Python SDK 1.30.0, prometheus-client 0.26.0, Docker Compose, Temporal Server auto-setup 1.29.7, PostgreSQL 16.14, postgres-exporter 0.20.1, Prometheus 3.13.2, Grafana 12.4.8, systemd, pytest/pytest-asyncio, AutoDock Vina.
+**Tech Stack:** Python 3.10+, SQLite, Temporal Python SDK 1.30.0, prometheus-client 0.26.0, Docker Compose, Temporal Server 1.29.7, Temporal admin-tools 1.29.7, PostgreSQL 16.14, postgres-exporter 0.20.1, Prometheus 3.13.2, Grafana 12.4.8, systemd, pytest/pytest-asyncio, AutoDock Vina.
 
 ---
 
@@ -804,6 +804,9 @@ git commit -m "feat(runtime): expose temporal worker metrics"
 - Create: `deployment/temporal/docker-compose.yml`
 - Create: `deployment/temporal/env.example`
 - Create: `deployment/temporal/postgres-init/010-exporter.sh`
+- Create: `deployment/temporal/scripts/temporal-schema-setup.sh`
+- Create: `deployment/temporal/scripts/temporal-server-entrypoint.sh`
+- Create: `deployment/temporal/scripts/temporal-namespace-setup.sh`
 - Create: `tests/test_temporal_deployment_assets.py`
 
 - [ ] **Step 1: Write failing Compose security tests**
@@ -814,22 +817,29 @@ def test_compose_uses_pinned_images_loopback_ports_and_healthchecks():
     services = compose["services"]
     assert services["postgres"]["image"] == "postgres:16.14-alpine3.23"
     assert services["postgres-exporter"]["image"] == "ghcr.io/prometheus-community/postgres-exporter:v0.20.1"
-    assert services["temporal"]["image"] == "temporalio/auto-setup:1.29.7"
+    assert services["temporal"]["image"] == "temporalio/server:1.29.7"
+    assert services["temporal-schema"]["image"] == "temporalio/admin-tools:1.29.7"
+    assert services["temporal-namespace"]["image"] == "temporalio/admin-tools:1.29.7"
     assert services["temporal-ui"]["image"] == "temporalio/ui:2.53.1"
     assert services["prometheus"]["image"] == "prom/prometheus:v3.13.2"
     assert services["grafana"]["image"] == "grafana/grafana:12.4.8-ubuntu"
-    for service in services.values():
+    for name, service in services.items():
         assert not service["image"].endswith(":latest")
-        assert "healthcheck" in service
-        assert service.get("restart") == "unless-stopped"
+        if name in {"temporal-schema", "temporal-namespace", "temporal-exporter-role-sync"}:
+            assert service.get("restart", "").startswith("on-failure:")
+        else:
+            assert "healthcheck" in service
+            assert service.get("restart") == "unless-stopped"
         for mapping in service.get("ports", []):
             assert str(mapping).startswith("127.0.0.1:")
 
 
 def test_compose_has_no_embedded_secret_or_repo_wide_mount():
     text = Path("deployment/temporal/docker-compose.yml").read_text(encoding="utf-8")
-    assert "password:" not in text.lower()
-    assert "POSTGRES_PASSWORD=${TEMPORAL_POSTGRES_PASSWORD:?required}" in text
+    assert "POSTGRES_PASSWORD=${" not in text
+    assert "POSTGRES_PWD=${" not in text
+    assert "POSTGRES_PASSWORD_FILE=/run/secrets/temporal_postgres_password" in text
+    assert "GF_SECURITY_ADMIN_PASSWORD__FILE=/run/secrets/grafana_admin_password" in text
     assert "/var/run/docker.sock" not in text
     assert "../..:/" not in text
 
@@ -849,11 +859,19 @@ def test_postgres_exporter_role_is_runtime_secret_and_read_only():
 C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\test_temporal_deployment_assets.py -q -p no:cacheprovider
 ```
 
-Expected: deployment files are absent.
+Expected: the previous six-service stack fails the server/admin-tools job, file-secret,
+network-segmentation, rotation, and bounded-logging contracts.
 
 - [ ] **Step 3: Create the pinned Compose stack**
 
-Define exactly six services named `postgres`, `postgres-exporter`, `temporal`, `temporal-ui`, `prometheus`, and `grafana`. Use named volumes `temporal-postgres-data`, `prometheus-data`, and `grafana-data`. Bind host ports as:
+Define nine services: six long-running services named `postgres`,
+`postgres-exporter`, `temporal`, `temporal-ui`, `prometheus`, and
+`grafana`, plus one-shot jobs named `temporal-schema`,
+`temporal-namespace`, and `temporal-exporter-role-sync`. Pin the Temporal
+server to `temporalio/server:1.29.7` and both Temporal administrative jobs to
+`temporalio/admin-tools:1.29.7`. Use named volumes
+`temporal-postgres-data`, `prometheus-data`, and `grafana-data`. Bind host
+ports as:
 
 ```yaml
 ports:
@@ -864,26 +882,50 @@ ports:
   - "127.0.0.1:3000:3000"   # Grafana
 ```
 
-Temporal uses PostgreSQL persistence and depends on a healthy database. UI depends on healthy Temporal. The exporter depends on healthy PostgreSQL, uses `DATA_SOURCE_URI=postgres:5432/temporal?sslmode=disable`, a fixed `temporal_exporter` username, and `DATA_SOURCE_PASS_FILE=/run/secrets/temporal_postgres_exporter_password`; its port remains Compose-internal. Mount `postgres-init/010-exporter.sh` read-only into `/docker-entrypoint-initdb.d/010-exporter.sh`; the script reads the same secret file, creates only the login role when absent, and grants built-in `pg_monitor` without superuser, database ownership, or write grants. Prometheus mounts only its configuration directories read-only. Grafana mounts only provisioning/dashboard directories read-only. `env.example` declares names without values for `TEMPORAL_POSTGRES_PASSWORD`, `TEMPORAL_POSTGRES_EXPORTER_PASSWORD_FILE`, and `GRAFANA_ADMIN_PASSWORD`, plus non-secret defaults for database/user/ports; it contains no assignment that supplies a real secret.
+The schema job depends on healthy PostgreSQL, creates missing databases
+idempotently, and runs the matching main and visibility schema migrations.
+The server starts only after that job completes successfully. The namespace
+job depends on healthy Temporal and idempotently creates or confirms
+`default`. The role-sync job runs on every deployment after PostgreSQL is
+healthy, creates `temporal_exporter` only when absent, always applies
+`ALTER ROLE` for password rotation, and grants only `pg_monitor`.
+`postgres-exporter` starts only after role-sync succeeds and uses the dynamic
+`${TEMPORAL_POSTGRES_DB:-temporal}` database.
+
+PostgreSQL, Grafana, server, schema, and role-sync credentials come only from
+Compose secret files. PostgreSQL uses `POSTGRES_PASSWORD_FILE`; Grafana uses
+`GF_SECURITY_ADMIN_PASSWORD__FILE`; wrappers read secrets inside the
+container when an image lacks native file support. No password is present in a
+Compose service environment value or psql argv. Segment services across named
+`database`, `temporal`, and `monitoring` networks; make the database
+network internal. Every service uses bounded `json-file` logging. Long-running
+services use `unless-stopped` plus healthchecks; one-shot jobs use bounded
+`on-failure:N` restart and `service_completed_successfully` dependencies.
+Prometheus and Grafana retain only their exact read-only configuration mounts.
+`env.example` declares empty `*_FILE` path keys and non-secret defaults.
 
 - [ ] **Step 4: Verify GREEN and Compose rendering when Docker is available**
 
 ```powershell
 C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\test_temporal_deployment_assets.py -q -p no:cacheprovider
-$env:TEMPORAL_POSTGRES_PASSWORD = "compose-validation-only"
-$env:GRAFANA_ADMIN_PASSWORD = "compose-validation-only"
-$env:TEMPORAL_POSTGRES_EXPORTER_PASSWORD_FILE = "deployment/temporal/env.example"
+$env:TEMPORAL_POSTGRES_PASSWORD_FILE = "<temporary non-secret file outside the repository>"
+$env:TEMPORAL_POSTGRES_EXPORTER_PASSWORD_FILE = "<temporary non-secret file outside the repository>"
+$env:GRAFANA_ADMIN_PASSWORD_FILE = "<temporary non-secret file outside the repository>"
 docker compose --env-file deployment/temporal/env.example -f deployment/temporal/docker-compose.yml config --quiet
-Remove-Item Env:TEMPORAL_POSTGRES_PASSWORD,Env:GRAFANA_ADMIN_PASSWORD,Env:TEMPORAL_POSTGRES_EXPORTER_PASSWORD_FILE
+Remove-Item Env:TEMPORAL_POSTGRES_PASSWORD_FILE,Env:TEMPORAL_POSTGRES_EXPORTER_PASSWORD_FILE,Env:GRAFANA_ADMIN_PASSWORD_FILE
 ```
 
-Expected: pytest passes. `env.example` is used only as an existing non-secret file for Compose rendering; no container is started by `config --quiet`. The Compose command is recorded as skipped when Docker is unavailable; it must never be reported as passed without execution. The validation-only values are cleared from the shell after the command.
+Expected: pytest passes. Compose rendering uses temporary non-secret files
+outside tracked paths and never starts or pulls a container. Record
+`docker compose config` as skipped when Docker is unavailable; never infer
+runtime readiness from static tests. Clear process environment and temporary
+files after rendering.
 
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add -- deployment/temporal/docker-compose.yml deployment/temporal/env.example deployment/temporal/postgres-init/010-exporter.sh tests/test_temporal_deployment_assets.py
-git commit -m "feat(deploy): add temporal production stack"
+git add -- deployment/temporal/docker-compose.yml deployment/temporal/env.example deployment/temporal/postgres-init/010-exporter.sh deployment/temporal/scripts/temporal-schema-setup.sh deployment/temporal/scripts/temporal-server-entrypoint.sh deployment/temporal/scripts/temporal-namespace-setup.sh tests/test_temporal_deployment_assets.py
+git commit -m "fix(deploy): harden temporal production bootstrap"
 ```
 
 ## Task 7: Provision Prometheus alerts and Grafana dashboard
