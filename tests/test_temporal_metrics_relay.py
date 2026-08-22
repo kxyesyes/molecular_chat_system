@@ -28,6 +28,11 @@ DEFAULT_VALUES = {
     "MEDCHAT_TEMPORAL_PROMETHEUS_SCRAPE_ADDRESS": "172.30.95.2",
     "MEDCHAT_TEMPORAL_METRICS_RELAY_PORT": "9466",
 }
+POSIX_ROOT = (
+    os.name == "posix"
+    and hasattr(os, "geteuid")
+    and os.geteuid() == 0
+)
 
 
 def load_relay() -> ModuleType:
@@ -556,6 +561,30 @@ def test_cli_rejects_symlink_env_without_disclosing_target(tmp_path: Path) -> No
     assert "PRIVATE_ENV_TARGET" not in result.stderr
 
 
+def test_cli_rejects_symlink_env_parent_as_path_error(tmp_path: Path) -> None:
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    env_file = write_env(real_parent / "relay.env")
+    linked_parent = tmp_path / "linked"
+    try:
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+    except OSError as error:
+        if os.name == "nt" and (
+            error.errno in {errno.EPERM, errno.EACCES}
+            or getattr(error, "winerror", None) == 1314
+        ):
+            pytest.skip("Windows symlink privilege unavailable")
+        raise
+    result = run_cli(
+        linked_parent / env_file.name,
+        tmp_path / "generated",
+        tmp_path / "relay.conf",
+    )
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "ERROR E_RELAY_PATH\n"
+
+
 def test_production_paths_reject_non_posix_activation() -> None:
     relay = load_relay()
     with pytest.raises(relay.RelayConfigurationError) as error:
@@ -680,6 +709,40 @@ def test_descriptor_directory_open_rejects_non_root_fstat(
     assert error.value.code == "E_RELAY_PATH"
 
 
+@pytest.mark.skipif(not POSIX_ROOT, reason="Linux nginx executable identity contract")
+def test_held_nginx_descriptor_rejects_replaced_executable_identity(
+    tmp_path: Path,
+) -> None:
+    relay = load_relay()
+    sbin = tmp_path / "sbin"
+    sbin.mkdir(mode=0o755)
+    nginx = sbin / "nginx"
+    nginx.write_text("original", encoding="utf-8")
+    os.chmod(nginx, 0o755)
+    sbin_fd = os.open(sbin, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    binary_fd = os.open("nginx", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=sbin_fd)
+    context = relay.ProductionContext(
+        medchat_fd=-1,
+        generated_fd=-1,
+        nginx_parent_fd=-1,
+        nginx_sbin_fd=sbin_fd,
+        nginx_binary_fd=binary_fd,
+        _owned_fds=(),
+    )
+    context.verify_nginx_executable_identity()
+    replacement = sbin / "replacement"
+    replacement.write_text("replacement", encoding="utf-8")
+    os.chmod(replacement, 0o755)
+    os.replace(replacement, nginx)
+    try:
+        with pytest.raises(relay.RelayConfigurationError) as error:
+            context.verify_nginx_executable_identity()
+    finally:
+        os.close(binary_fd)
+        os.close(sbin_fd)
+    assert error.value.code == "E_RELAY_PATH"
+
+
 def test_trusted_path_rejects_parent_symlink(tmp_path: Path) -> None:
     relay = load_relay()
     trusted_root = tmp_path / "trusted"
@@ -763,6 +826,187 @@ def render_test_generation(relay: ModuleType, root: Path, port: int = 9466):
         taskqueue="medchat-docking",
         nginx_template=TEMPLATE.read_text(encoding="utf-8"),
     )
+
+
+def open_root_owned_descriptor_tree(tmp_path: Path) -> tuple[Path, Path, int, int]:
+    generated = tmp_path / "generated"
+    nginx_parent = tmp_path / "nginx"
+    generated.mkdir(mode=0o750)
+    nginx_parent.mkdir(mode=0o755)
+    os.chmod(generated, 0o750)
+    os.chmod(nginx_parent, 0o755)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    return (
+        generated,
+        nginx_parent,
+        os.open(generated, flags),
+        os.open(nginx_parent, flags),
+    )
+
+
+def activate_descriptor_generation(
+    relay: ModuleType,
+    generated_fd: int,
+    nginx_fd: int,
+    generation_id: str,
+    *,
+    nginx_reload=lambda: True,
+) -> None:
+    relay.activate_generation_descriptor(
+        generated_root_fd=generated_fd,
+        generation_id=generation_id,
+        nginx_parent_fd=nginx_fd,
+        recheck_host_conflicts=lambda: None,
+        bridge_ready=lambda: True,
+        nginx_validate=lambda _path: True,
+        nginx_reload=nginx_reload,
+    )
+
+
+@pytest.mark.skipif(not POSIX_ROOT, reason="Linux root descriptor mode contract")
+def test_descriptor_stage_repairs_file_sd_mode_under_restrictive_umask_and_is_container_readable(
+    tmp_path: Path,
+) -> None:
+    relay = load_relay()
+    generated, _nginx_parent, generated_fd, nginx_fd = (
+        open_root_owned_descriptor_tree(tmp_path)
+    )
+    live = generated / "live"
+    file_sd = live / "file_sd"
+    live.mkdir(mode=0o750)
+    file_sd.mkdir(mode=0o700)
+    os.chmod(file_sd, 0o700)
+    generation = render_test_generation(relay, generated)
+    previous_umask = os.umask(0o077)
+    try:
+        relay.stage_generation_descriptor(generation, generated_fd)
+        activate_descriptor_generation(
+            relay,
+            generated_fd,
+            nginx_fd,
+            generation.generation_id,
+        )
+    finally:
+        os.umask(previous_umask)
+        os.close(nginx_fd)
+        os.close(generated_fd)
+    target = file_sd / "worker-targets.json"
+    assert stat.S_IMODE(file_sd.stat().st_mode) == 0o755
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+    file_sd_fd = os.open(file_sd, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    child = os.fork()
+    if child == 0:
+        try:
+            os.fchdir(file_sd_fd)
+            os.setgroups([])
+            os.setgid(65534)
+            os.setuid(65534)
+            with open("worker-targets.json", "rb") as stream:
+                valid = b"172.30.95.1:9466" in stream.read()
+            os._exit(0 if valid else 2)
+        except BaseException:
+            os._exit(3)
+    os.close(file_sd_fd)
+    _, status = os.waitpid(child, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
+
+
+@pytest.mark.skipif(not POSIX_ROOT, reason="Linux root descriptor behavior")
+def test_descriptor_stage_rejects_non_allowlisted_payload_without_writing(
+    tmp_path: Path,
+) -> None:
+    relay = load_relay()
+    generated, _nginx_parent, generated_fd, nginx_fd = (
+        open_root_owned_descriptor_tree(tmp_path)
+    )
+    generation = render_test_generation(relay, generated)
+    malformed_files = dict(generation.files)
+    malformed_files["../escape"] = "unexpected"
+    malformed = relay.RenderedGeneration(generation.generation_id, malformed_files)
+    try:
+        with pytest.raises(relay.RelayConfigurationError) as error:
+            relay.stage_generation_descriptor(malformed, generated_fd)
+    finally:
+        os.close(nginx_fd)
+        os.close(generated_fd)
+    assert error.value.code == "E_RELAY_MANIFEST"
+    assert not (tmp_path / "escape").exists()
+
+
+@pytest.mark.skipif(not POSIX_ROOT, reason="Linux root descriptor behavior")
+def test_descriptor_activation_rejects_same_id_payload_and_hash_tamper(
+    tmp_path: Path,
+) -> None:
+    relay = load_relay()
+    generated, _nginx_parent, generated_fd, nginx_fd = (
+        open_root_owned_descriptor_tree(tmp_path)
+    )
+    generation = render_test_generation(relay, generated)
+    relay.stage_generation_descriptor(generation, generated_fd)
+    generation_root = generated / "generations" / generation.generation_id
+    payload_path = generation_root / "nginx.conf"
+    tampered = payload_path.read_text("utf-8") + "# same-id tamper\n"
+    payload_path.write_text(tampered, encoding="utf-8", newline="\n")
+    os.chmod(payload_path, 0o640)
+    manifest_path = generation_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text("utf-8"))
+    manifest["sha256"]["nginx.conf"] = hashlib.sha256(
+        tampered.encode("utf-8")
+    ).hexdigest()
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    os.chmod(manifest_path, 0o640)
+    try:
+        with pytest.raises(relay.RelayConfigurationError) as error:
+            activate_descriptor_generation(
+                relay,
+                generated_fd,
+                nginx_fd,
+                generation.generation_id,
+            )
+    finally:
+        os.close(nginx_fd)
+        os.close(generated_fd)
+    assert error.value.code == "E_RELAY_MANIFEST"
+
+
+@pytest.mark.skipif(not POSIX_ROOT, reason="Linux root descriptor behavior")
+def test_atomic_descriptor_group_restores_prior_and_removes_new_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    relay = load_relay()
+    output = tmp_path / "outputs"
+    output.mkdir(mode=0o750)
+    first = output / "first.yml"
+    first.write_text("known-good", encoding="utf-8")
+    os.chmod(first, 0o640)
+    output_fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    real_write = relay._atomic_write_at
+    failed = False
+
+    def fail_second_once(parent_fd: int, name: str, content: str, mode: int) -> None:
+        nonlocal failed
+        if name == "second.json" and not failed:
+            failed = True
+            raise OSError("descriptor group fault")
+        real_write(parent_fd, name, content, mode)
+
+    monkeypatch.setattr(relay, "_atomic_write_at", fail_second_once)
+    try:
+        with pytest.raises(OSError):
+            relay._atomic_write_group_at([
+                (output_fd, "first.yml", "new-first", 0o640),
+                (output_fd, "second.json", "new-second", 0o644),
+            ])
+    finally:
+        os.close(output_fd)
+    assert first.read_text("utf-8") == "known-good"
+    assert not (output / "second.json").exists()
 
 
 def test_render_stages_versioned_generation_without_exposing_live_target(
@@ -1040,6 +1284,171 @@ def test_target_publish_failure_restores_live_files_and_reloads_old_nginx(
     assert {path: path.read_bytes() for path in live_paths} == old_live
 
 
+@pytest.mark.skipif(not POSIX_ROOT, reason="Linux root descriptor activation")
+def test_descriptor_reload_false_after_apply_restores_and_reloads_old_config(
+    tmp_path: Path,
+) -> None:
+    relay = load_relay()
+    generated, nginx_parent, generated_fd, nginx_fd = (
+        open_root_owned_descriptor_tree(tmp_path)
+    )
+    first = render_test_generation(relay, generated, 9466)
+    relay.stage_generation_descriptor(first, generated_fd)
+    activate_descriptor_generation(
+        relay, generated_fd, nginx_fd, first.generation_id
+    )
+    old_nginx = (nginx_parent / relay.PRODUCTION_NGINX_OUTPUT.name).read_bytes()
+    second = render_test_generation(relay, generated, 9467)
+    relay.stage_generation_descriptor(second, generated_fd)
+    reloads: list[str] = []
+
+    def ambiguous_reload() -> bool:
+        reloads.append("reload")
+        return len(reloads) > 1
+
+    try:
+        with pytest.raises(relay.RelayConfigurationError) as error:
+            activate_descriptor_generation(
+                relay,
+                generated_fd,
+                nginx_fd,
+                second.generation_id,
+                nginx_reload=ambiguous_reload,
+            )
+    finally:
+        os.close(nginx_fd)
+        os.close(generated_fd)
+    assert error.value.code == "E_RELAY_ACTIVATION"
+    assert reloads == ["reload", "reload"]
+    assert (nginx_parent / relay.PRODUCTION_NGINX_OUTPUT.name).read_bytes() == old_nginx
+    active = json.loads((generated / "live" / "manifest.json").read_text("utf-8"))
+    assert active["generation_id"] == first.generation_id
+
+
+@pytest.mark.skipif(not POSIX_ROOT, reason="Linux root descriptor activation")
+def test_descriptor_target_publish_failure_restores_every_live_file_and_nginx(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    relay = load_relay()
+    generated, nginx_parent, generated_fd, nginx_fd = (
+        open_root_owned_descriptor_tree(tmp_path)
+    )
+    first = render_test_generation(relay, generated, 9466)
+    relay.stage_generation_descriptor(first, generated_fd)
+    activate_descriptor_generation(
+        relay, generated_fd, nginx_fd, first.generation_id
+    )
+    live_paths = (
+        generated / "live" / "compose.override.yml",
+        generated / "live" / "manifest.json",
+        generated / "live" / "file_sd" / "worker-targets.json",
+    )
+    old_live = {path: path.read_bytes() for path in live_paths}
+    old_nginx = (nginx_parent / relay.PRODUCTION_NGINX_OUTPUT.name).read_bytes()
+    file_sd_metadata = (generated / "live" / "file_sd").stat()
+    file_sd_identity = (file_sd_metadata.st_dev, file_sd_metadata.st_ino)
+    second = render_test_generation(relay, generated, 9467)
+    relay.stage_generation_descriptor(second, generated_fd)
+    real_write = relay._atomic_write_at
+    failed = False
+
+    def fail_target_once(parent_fd: int, name: str, content: str, mode: int) -> None:
+        nonlocal failed
+        metadata = os.fstat(parent_fd)
+        if (
+            (metadata.st_dev, metadata.st_ino) == file_sd_identity
+            and name == "worker-targets.json"
+            and not failed
+        ):
+            failed = True
+            raise OSError("descriptor target publish fault")
+        real_write(parent_fd, name, content, mode)
+
+    monkeypatch.setattr(relay, "_atomic_write_at", fail_target_once)
+    reloads: list[str] = []
+    try:
+        with pytest.raises(relay.RelayConfigurationError) as error:
+            activate_descriptor_generation(
+                relay,
+                generated_fd,
+                nginx_fd,
+                second.generation_id,
+                nginx_reload=lambda: reloads.append("reload") or True,
+            )
+    finally:
+        os.close(nginx_fd)
+        os.close(generated_fd)
+    assert error.value.code == "E_RELAY_WRITE"
+    assert reloads == ["reload", "reload"]
+    assert {path: path.read_bytes() for path in live_paths} == old_live
+    assert (nginx_parent / relay.PRODUCTION_NGINX_OUTPUT.name).read_bytes() == old_nginx
+
+
+@pytest.mark.skipif(not POSIX_ROOT, reason="Linux root descriptor activation")
+def test_descriptor_rollback_reload_failure_is_stable_rollback_error(
+    tmp_path: Path,
+) -> None:
+    relay = load_relay()
+    generated, _nginx_parent, generated_fd, nginx_fd = (
+        open_root_owned_descriptor_tree(tmp_path)
+    )
+    first = render_test_generation(relay, generated, 9466)
+    relay.stage_generation_descriptor(first, generated_fd)
+    activate_descriptor_generation(
+        relay, generated_fd, nginx_fd, first.generation_id
+    )
+    second = render_test_generation(relay, generated, 9467)
+    relay.stage_generation_descriptor(second, generated_fd)
+    reloads: list[str] = []
+    try:
+        with pytest.raises(relay.RelayConfigurationError) as error:
+            activate_descriptor_generation(
+                relay,
+                generated_fd,
+                nginx_fd,
+                second.generation_id,
+                nginx_reload=lambda: reloads.append("reload") or False,
+            )
+    finally:
+        os.close(nginx_fd)
+        os.close(generated_fd)
+    assert error.value.code == "E_RELAY_ROLLBACK"
+    assert reloads == ["reload", "reload"]
+
+
+@pytest.mark.skipif(not POSIX_ROOT, reason="Linux root descriptor retention")
+def test_descriptor_retention_keeps_active_and_newest_four_valid_generations(
+    tmp_path: Path,
+) -> None:
+    relay = load_relay()
+    generated, _nginx_parent, generated_fd, nginx_fd = (
+        open_root_owned_descriptor_tree(tmp_path)
+    )
+    generations = [
+        render_test_generation(relay, generated, 9466 + index)
+        for index in range(7)
+    ]
+    relay.stage_generation_descriptor(generations[0], generated_fd)
+    activate_descriptor_generation(
+        relay, generated_fd, nginx_fd, generations[0].generation_id
+    )
+    for generation in generations[1:]:
+        time.sleep(0.01)
+        relay.stage_generation_descriptor(generation, generated_fd)
+    os.close(nginx_fd)
+    os.close(generated_fd)
+    retained = {
+        path.name
+        for path in (generated / "generations").iterdir()
+        if path.is_dir()
+    }
+    assert retained == {
+        generations[0].generation_id,
+        *(generation.generation_id for generation in generations[-4:]),
+    }
+
+
 def test_generation_lock_serializes_concurrent_activation(tmp_path: Path) -> None:
     relay = load_relay()
     root = tmp_path / "generated"
@@ -1221,7 +1630,7 @@ def test_atomic_write_failure_preserves_prior_file(tmp_path: Path, monkeypatch) 
     target = tmp_path / "relay.conf"
     target.write_text("known-good", encoding="utf-8")
 
-    def fail_replace(_source: object, _target: object) -> None:
+    def fail_replace(_source: object, _target: object, **_kwargs) -> None:
         raise OSError("PRIVATE_REPLACE_CANARY")
 
     monkeypatch.setattr(relay.os, "replace", fail_replace)
@@ -1241,10 +1650,15 @@ def test_atomic_group_failure_restores_every_prior_output(
         path.write_text(f"known-good-{path.name}", encoding="utf-8")
     real_replace = relay.os.replace
 
-    def fail_second(source: object, target: object) -> None:
-        if Path(target) == paths[1] and Path(source).name.endswith(".tmp"):
+    def fail_second(source: object, target: object, **kwargs) -> None:
+        target_path = (
+            paths[0].parent / Path(target)
+            if kwargs.get("dst_dir_fd") is not None
+            else Path(target)
+        )
+        if target_path == paths[1] and Path(source).name.endswith(".tmp"):
             raise OSError("PRIVATE_GROUP_REPLACE_CANARY")
-        real_replace(source, target)
+        real_replace(source, target, **kwargs)
 
     monkeypatch.setattr(relay.os, "replace", fail_second)
     with pytest.raises(OSError):
@@ -1270,20 +1684,33 @@ def test_atomic_group_rolls_back_after_post_swap_directory_fsync_failure(
     untouched = tmp_path / "relay.conf"
     replaced.write_text("known-good-targets", encoding="utf-8")
     untouched.write_text("known-good-relay", encoding="utf-8")
-    fsync_calls = 0
+    if os.name == "posix":
+        real_fsync = relay.os.fsync
+        directory_fsync_calls = 0
 
-    def fail_second_directory_fsync(_parent: Path) -> None:
-        nonlocal fsync_calls
-        fsync_calls += 1
-        if fsync_calls == 2:
-            raise OSError("PRIVATE_POST_SWAP_FSYNC_CANARY")
+        def fail_second_directory_fsync(descriptor: int) -> None:
+            nonlocal directory_fsync_calls
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                directory_fsync_calls += 1
+                if directory_fsync_calls == 2:
+                    raise OSError("PRIVATE_POST_SWAP_FSYNC_CANARY")
+            real_fsync(descriptor)
 
-    monkeypatch.setattr(
-        relay,
-        "_fsync_parent_directory",
-        fail_second_directory_fsync,
-        raising=False,
-    )
+        monkeypatch.setattr(relay.os, "fsync", fail_second_directory_fsync)
+    else:
+        parent_fsync_calls = 0
+
+        def fail_second_parent_fsync(_parent: Path) -> None:
+            nonlocal parent_fsync_calls
+            parent_fsync_calls += 1
+            if parent_fsync_calls == 2:
+                raise OSError("PRIVATE_POST_SWAP_FSYNC_CANARY")
+
+        monkeypatch.setattr(
+            relay,
+            "_fsync_parent_directory",
+            fail_second_parent_fsync,
+        )
     with pytest.raises(OSError):
         relay.atomic_write_group([
             (created, "new-compose", 0o640),

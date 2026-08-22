@@ -491,7 +491,7 @@ def bootstrap_generated_root(parent_fd: int, name: str) -> int:
 def _open_or_create_root_directory_at(parent_fd: int, name: str, mode: int) -> int:
     component = _safe_component(name)
     try:
-        return _open_root_directory_at(parent_fd, component)
+        descriptor = _open_root_directory_at(parent_fd, component)
     except RelayConfigurationError:
         try:
             os.mkdir(component, mode, dir_fd=parent_fd)
@@ -500,7 +500,21 @@ def _open_or_create_root_directory_at(parent_fd: int, name: str, mode: int) -> i
             pass
         except OSError:
             raise RelayConfigurationError("E_RELAY_WRITE") from None
-    return _open_root_directory_at(parent_fd, component)
+        descriptor = _open_root_directory_at(parent_fd, component)
+    try:
+        os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
+        metadata = os.fstat(descriptor)
+        require_root_owned(metadata, expected_type="directory")
+        if stat.S_IMODE(metadata.st_mode) != mode:
+            raise RelayConfigurationError("E_RELAY_WRITE")
+        return descriptor
+    except RelayConfigurationError:
+        os.close(descriptor)
+        raise
+    except OSError:
+        os.close(descriptor)
+        raise RelayConfigurationError("E_RELAY_WRITE") from None
 
 
 def _read_regular_at(
@@ -570,10 +584,14 @@ def _atomic_write_at(parent_fd: int, name: str, content: str, mode: int) -> None
         temporary_exists = False
         replaced = True
         os.fsync(parent_fd)
-        require_root_owned(
-            os.stat(component, dir_fd=parent_fd, follow_symlinks=False),
-            expected_type="file",
+        published = os.stat(
+            component,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
         )
+        require_root_owned(published, expected_type="file")
+        if stat.S_IMODE(published.st_mode) != mode:
+            raise RelayConfigurationError("E_RELAY_WRITE")
     except RelayConfigurationError as error:
         if replaced:
             raise AtomicWriteError(True) from error
@@ -790,6 +808,7 @@ class ProductionContext:
     medchat_fd: int
     generated_fd: int
     nginx_parent_fd: int
+    nginx_sbin_fd: int
     nginx_binary_fd: int
     _owned_fds: tuple[int, ...]
 
@@ -798,6 +817,25 @@ class ProductionContext:
 
     def read_worker_env(self) -> dict[str, str]:
         return read_env_at(self.medchat_fd, PRODUCTION_WORKER_ENV.name)
+
+    def verify_nginx_executable_identity(self) -> None:
+        try:
+            held = os.fstat(self.nginx_binary_fd)
+            current = os.stat(
+                PRODUCTION_NGINX_COMMAND.name,
+                dir_fd=self.nginx_sbin_fd,
+                follow_symlinks=False,
+            )
+            require_root_owned(held, expected_type="file")
+            require_root_owned(current, expected_type="file")
+        except (OSError, RelayConfigurationError):
+            raise _path_error() from None
+        if (
+            (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino)
+            or not held.st_mode & 0o111
+            or not current.st_mode & 0o111
+        ):
+            raise _path_error()
 
     def close(self) -> None:
         for descriptor in reversed(self._owned_fds):
@@ -868,6 +906,7 @@ def open_production_context(arguments: argparse.Namespace):
             medchat_fd=medchat_fd,
             generated_fd=generated_fd,
             nginx_parent_fd=nginx_parent_fd,
+            nginx_sbin_fd=sbin_fd,
             nginx_binary_fd=nginx_binary_fd,
             _owned_fds=tuple(opened),
         )
@@ -1893,25 +1932,18 @@ def _command_succeeds(argv: Sequence[str]) -> bool:
     return True
 
 
-def _validate_nginx_command(path: Path) -> Path:
-    if path != PRODUCTION_NGINX_COMMAND:
-        raise _path_error()
-    trusted = validate_trusted_path(path, Path("/usr/sbin"), enforce_permissions=True)
-    try:
-        metadata = trusted.stat()
-    except OSError:
-        raise _path_error() from None
-    require_root_owned(metadata, expected_type="file")
-    if not metadata.st_mode & 0o111:
-        raise _path_error()
-    return trusted
-
-
 def _validate_offline_paths(arguments: argparse.Namespace) -> None:
     root = Path(os.path.abspath(arguments.offline_root))
     validate_trusted_path(root, root)
-    validate_trusted_path(arguments.env_file, root)
-    validate_trusted_path(arguments.worker_env_file, root)
+    for env_path in (arguments.env_file, arguments.worker_env_file):
+        candidate = Path(os.path.abspath(env_path))
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            raise _path_error() from None
+        # Parent trust failures are path errors. The final leaf is opened later
+        # with O_NOFOLLOW so a final env symlink has stable E_RELAY_ENV taxonomy.
+        validate_trusted_path(candidate.parent, root)
     validate_trusted_path(arguments.output_dir, root, allow_missing_leaf=True)
     nginx_parent = Path(arguments.nginx_output).parent
     validate_trusted_path(nginx_parent, root, allow_missing_leaf=True)
@@ -2045,18 +2077,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                     for network in inspected_networks
                 )
 
+            def checked_nginx_command(*command: str) -> bool:
+                context.verify_nginx_executable_identity()
+                return _command_succeeds(
+                    (str(PRODUCTION_NGINX_COMMAND), *command)
+                )
+
             activate_generation_descriptor(
                 generated_root_fd=context.generated_fd,
                 generation_id=arguments.activate,
                 nginx_parent_fd=context.nginx_parent_fd,
                 recheck_host_conflicts=recheck,
                 bridge_ready=bridge_ready,
-                nginx_validate=lambda _path: _command_succeeds(
-                    (str(PRODUCTION_NGINX_COMMAND), "-t")
-                ),
-                nginx_reload=lambda: _command_succeeds(
-                    (str(PRODUCTION_NGINX_COMMAND), "-s", "reload")
-                ),
+                nginx_validate=lambda _path: checked_nginx_command("-t"),
+                nginx_reload=lambda: checked_nginx_command("-s", "reload"),
                 expected_config=_config_summary(
                     config, compose_project, namespace, taskqueue
                 ),
