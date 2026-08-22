@@ -9,6 +9,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -45,6 +47,12 @@ class RelayConfigurationError(ValueError):
     def __init__(self, code: str = "E_RELAY_CONFIGURATION") -> None:
         super().__init__(code)
         self.code = code
+
+
+class AtomicWriteError(OSError):
+    def __init__(self, replaced: bool) -> None:
+        super().__init__("atomic relay output write failed")
+        self.replaced = replaced
 
 
 @dataclass(frozen=True)
@@ -122,7 +130,8 @@ def parse_relay_config(values: Mapping[str, str]) -> RelayConfig:
 
 def _is_expected_network(network: DockerNetwork, expected_project: str) -> bool:
     return (
-        network.labels.get("com.docker.compose.project") == expected_project
+        network.name == f"{expected_project}_worker-metrics-scrape"
+        and network.labels.get("com.docker.compose.project") == expected_project
         and network.labels.get("com.docker.compose.network")
         == "worker-metrics-scrape"
         and network.labels.get("com.medchat.temporal.metrics-relay") == "true"
@@ -275,22 +284,97 @@ def _read_env_file(path: Path) -> dict[str, str]:
 
 def _run_bounded(argv: Sequence[str]) -> str:
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             list(argv),
-            capture_output=True,
-            timeout=INSPECTION_TIMEOUT_SECONDS,
-            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except OSError:
         raise RelayConfigurationError("E_RELAY_INSPECTION") from None
+
+    assert process.stdout is not None
+    assert process.stderr is not None
+    stdout = bytearray()
+    stderr = bytearray()
+    overflow = threading.Event()
+    reader_failed = threading.Event()
+    output_lock = threading.Lock()
+    output_bytes = 0
+
+    def drain(stream: object, destination: bytearray) -> None:
+        nonlocal output_bytes
+        try:
+            while True:
+                chunk = stream.read(64 * 1024)
+                if not chunk:
+                    return
+                with output_lock:
+                    remaining = MAX_INSPECTION_BYTES - output_bytes
+                    if remaining > 0:
+                        accepted = chunk[:remaining]
+                        destination.extend(accepted)
+                        output_bytes += len(accepted)
+                    if len(chunk) > remaining:
+                        overflow.set()
+                        return
+        except (OSError, ValueError):
+            reader_failed.set()
+
+    readers = [
+        threading.Thread(target=drain, args=(process.stdout, stdout), daemon=True),
+        threading.Thread(target=drain, args=(process.stderr, stderr), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+
+    deadline = time.monotonic() + INSPECTION_TIMEOUT_SECONDS
+    timed_out = False
+    while process.poll() is None:
+        if overflow.is_set() or reader_failed.is_set():
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            break
+        overflow.wait(min(0.05, remaining))
+
+    if process.poll() is None:
+        try:
+            process.terminate()
+            process.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                process.kill()
+                process.wait(timeout=1)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+    for reader in readers:
+        reader.join(timeout=1)
+    if any(reader.is_alive() for reader in readers):
+        try:
+            process.stdout.close()
+            process.stderr.close()
+        except OSError:
+            pass
+        for reader in readers:
+            reader.join(timeout=1)
+    else:
+        process.stdout.close()
+        process.stderr.close()
+
     if (
-        result.returncode != 0
-        or len(result.stdout) > MAX_INSPECTION_BYTES
-        or len(result.stderr) > MAX_INSPECTION_BYTES
+        timed_out
+        or overflow.is_set()
+        or reader_failed.is_set()
+        or any(reader.is_alive() for reader in readers)
+        or process.returncode != 0
     ):
         raise RelayConfigurationError("E_RELAY_INSPECTION")
     try:
-        return result.stdout.decode("utf-8")
+        return stdout.decode("utf-8")
     except UnicodeDecodeError:
         raise RelayConfigurationError("E_RELAY_INSPECTION") from None
 
@@ -307,12 +391,14 @@ def _inspect_routes() -> list[ipaddress.IPv4Network]:
         if not isinstance(item, dict):
             raise RelayConfigurationError("E_RELAY_INSPECTION")
         destination = item.get("dst")
-        if not isinstance(destination, str) or destination == "default":
+        if destination == "default":
             continue
+        if not isinstance(destination, str):
+            raise RelayConfigurationError("E_RELAY_INSPECTION")
         try:
             network = ipaddress.ip_network(destination, strict=False)
         except ValueError:
-            continue
+            raise RelayConfigurationError("E_RELAY_INSPECTION") from None
         if isinstance(network, ipaddress.IPv4Network):
             routes.append(network)
     return routes
@@ -356,11 +442,11 @@ def _inspect_docker_networks() -> list[DockerNetwork]:
                 raise RelayConfigurationError("E_RELAY_INSPECTION")
             subnet_value = configuration.get("Subnet")
             if not isinstance(subnet_value, str):
-                continue
+                raise RelayConfigurationError("E_RELAY_INSPECTION")
             try:
                 subnet = ipaddress.ip_network(subnet_value, strict=True)
             except ValueError:
-                continue
+                raise RelayConfigurationError("E_RELAY_INSPECTION") from None
             if isinstance(subnet, ipaddress.IPv4Network):
                 networks.append(DockerNetwork(name, subnet, clean_labels))
     return networks
@@ -373,6 +459,16 @@ def _expected_project(values: Mapping[str, str]) -> str:
     return project
 
 
+def _fsync_parent_directory(parent: Path) -> None:
+    if os.name != "posix":
+        return
+    directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def atomic_write(path: str | Path, content: str, mode: int = 0o640) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -382,6 +478,7 @@ def atomic_write(path: str | Path, content: str, mode: int = 0o640) -> None:
         prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
     )
     temporary = Path(temporary_name)
+    replaced = False
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
             stream.write(content)
@@ -389,12 +486,10 @@ def atomic_write(path: str | Path, content: str, mode: int = 0o640) -> None:
             os.fsync(stream.fileno())
         os.chmod(temporary, mode)
         os.replace(temporary, target)
-        if os.name == "posix":
-            directory = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+        replaced = True
+        _fsync_parent_directory(target.parent)
+    except OSError as error:
+        raise AtomicWriteError(replaced) from error
     finally:
         try:
             temporary.unlink()
@@ -427,8 +522,14 @@ def atomic_write_group(
     committed: list[Path] = []
     try:
         for path, content, mode in normalized:
-            atomic_write(path, content, mode)
-            committed.append(path)
+            try:
+                atomic_write(path, content, mode)
+            except AtomicWriteError as error:
+                if error.replaced:
+                    committed.append(path)
+                raise
+            else:
+                committed.append(path)
     except OSError as original:
         rollback_failed = False
         for path in reversed(committed):
@@ -438,6 +539,7 @@ def atomic_write_group(
                     atomic_write(path, content, mode)
                 else:
                     path.unlink(missing_ok=True)
+                    _fsync_parent_directory(path.parent)
             except OSError:
                 rollback_failed = True
         if rollback_failed:

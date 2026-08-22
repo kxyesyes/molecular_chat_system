@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import ModuleType
@@ -202,6 +203,113 @@ def test_compose_labels_without_relay_ownership_label_are_rejected() -> None:
     assert relay.find_conflicts(config, [config.subnet], [spoofed], "medchat")
 
 
+def test_wrong_name_network_with_copied_ownership_labels_is_rejected() -> None:
+    relay = load_relay()
+    config = relay.parse_relay_config(DEFAULT_VALUES)
+    copied_labels = relay.DockerNetwork(
+        name="foreign_worker-metrics-scrape",
+        subnet=config.subnet,
+        labels={
+            "com.docker.compose.project": "medchat",
+            "com.docker.compose.network": "worker-metrics-scrape",
+            "com.medchat.temporal.metrics-relay": "true",
+        },
+    )
+    assert relay.find_conflicts(
+        config,
+        [config.subnet],
+        [copied_labels],
+        "medchat",
+    ) == [
+        "docker:foreign_worker-metrics-scrape:172.30.95.0/28",
+        "route:172.30.95.0/28",
+    ]
+
+
+@pytest.mark.parametrize("destination", [None, "not-a-network", "172.30.95.999/28"])
+def test_route_inspection_rejects_malformed_non_default_destinations(
+    monkeypatch,
+    destination: object,
+) -> None:
+    relay = load_relay()
+    monkeypatch.setattr(
+        relay,
+        "_run_bounded",
+        lambda _argv: json.dumps([{"dst": destination}]),
+    )
+    with pytest.raises(relay.RelayConfigurationError) as error:
+        relay._inspect_routes()
+    assert error.value.code == "E_RELAY_INSPECTION"
+
+
+def test_route_inspection_skips_only_explicit_default_route(monkeypatch) -> None:
+    relay = load_relay()
+    monkeypatch.setattr(
+        relay,
+        "_run_bounded",
+        lambda _argv: json.dumps([
+            {"dst": "default"},
+            {"dst": "172.30.0.0/16"},
+        ]),
+    )
+    assert relay._inspect_routes() == [ipaddress.ip_network("172.30.0.0/16")]
+
+
+def test_docker_inspection_rejects_malformed_subnet(monkeypatch) -> None:
+    relay = load_relay()
+    responses = iter([
+        "network-id\n",
+        json.dumps([{
+            "Name": "foreign",
+            "Labels": {},
+            "IPAM": {"Config": [{"Subnet": "172.30.95.999/28"}]},
+        }]),
+    ])
+    monkeypatch.setattr(relay, "_run_bounded", lambda _argv: next(responses))
+    with pytest.raises(relay.RelayConfigurationError) as error:
+        relay._inspect_docker_networks()
+    assert error.value.code == "E_RELAY_INSPECTION"
+
+
+def test_inspection_output_limit_terminates_process_without_secret_echo(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    relay = load_relay()
+    marker = tmp_path / "process-finished"
+    monkeypatch.setattr(relay, "MAX_INSPECTION_BYTES", 4096)
+    program = (
+        "import pathlib, sys, time; "
+        "sys.stdout.buffer.write(b'PRIVATE_INSPECTION_SECRET' + b'x' * 131072); "
+        "sys.stdout.buffer.flush(); "
+        "time.sleep(1); "
+        f"pathlib.Path({str(marker)!r}).write_text('finished')"
+    )
+    started = time.monotonic()
+    with pytest.raises(relay.RelayConfigurationError) as error:
+        relay._run_bounded((sys.executable, "-c", program))
+    elapsed = time.monotonic() - started
+    assert error.value.code == "E_RELAY_INSPECTION"
+    assert "PRIVATE_INSPECTION_SECRET" not in str(error.value)
+    assert not marker.exists()
+    assert elapsed < 1
+
+
+def test_inspection_output_limit_applies_to_combined_stdout_and_stderr(
+    monkeypatch,
+) -> None:
+    relay = load_relay()
+    monkeypatch.setattr(relay, "MAX_INSPECTION_BYTES", 4096)
+    program = (
+        "import sys; "
+        "sys.stdout.buffer.write(b'x' * 3072); "
+        "sys.stderr.buffer.write(b'y' * 3072)"
+    )
+    with pytest.raises(relay.RelayConfigurationError) as error:
+        relay._run_bounded((sys.executable, "-c", program))
+    assert error.value.code == "E_RELAY_INSPECTION"
+
+
 @pytest.mark.parametrize(
     ("content", "expected_error"),
     [
@@ -317,6 +425,42 @@ def test_atomic_group_failure_restores_every_prior_output(
         "known-good-targets.json",
         "known-good-relay.conf",
     ]
+
+
+def test_atomic_group_rolls_back_after_post_swap_directory_fsync_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    relay = load_relay()
+    created = tmp_path / "new-compose.yml"
+    replaced = tmp_path / "targets.json"
+    untouched = tmp_path / "relay.conf"
+    replaced.write_text("known-good-targets", encoding="utf-8")
+    untouched.write_text("known-good-relay", encoding="utf-8")
+    fsync_calls = 0
+
+    def fail_second_directory_fsync(_parent: Path) -> None:
+        nonlocal fsync_calls
+        fsync_calls += 1
+        if fsync_calls == 2:
+            raise OSError("PRIVATE_POST_SWAP_FSYNC_CANARY")
+
+    monkeypatch.setattr(
+        relay,
+        "_fsync_parent_directory",
+        fail_second_directory_fsync,
+        raising=False,
+    )
+    with pytest.raises(OSError):
+        relay.atomic_write_group([
+            (created, "new-compose", 0o640),
+            (replaced, "new-targets", 0o640),
+            (untouched, "new-relay", 0o640),
+        ])
+    assert not created.exists()
+    assert replaced.read_text(encoding="utf-8") == "known-good-targets"
+    assert untouched.read_text(encoding="utf-8") == "known-good-relay"
+    assert not list(tmp_path.glob(".*.tmp"))
 
 
 def test_failed_cli_validation_preserves_all_prior_outputs(tmp_path: Path) -> None:
