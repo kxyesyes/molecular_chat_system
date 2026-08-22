@@ -19,6 +19,7 @@ from temporalio.client import Client
 from src.task_runtime.config import TaskRuntimeConfig
 from src.task_runtime.docking_execution import DockingExecution
 from src.task_runtime.prometheus_metrics import TemporalWorkerMetrics
+from src.task_runtime.production_worker import validate_production_worker_config
 from src.task_runtime.store import TaskStore
 from src.task_runtime.staging import DockingInputStager
 from src.task_runtime.temporal.activities import TemporalDockingActivities
@@ -49,6 +50,11 @@ def _install_signal_handlers(stop: asyncio.Event) -> None:
 
 async def main() -> None:
     config = TaskRuntimeConfig.from_env()
+    validate_production_worker_config(
+        config,
+        project_root=PROJECT_ROOT,
+        docking_output_root=(PROJECT_ROOT / "temp_docking").resolve(),
+    )
     metrics = TemporalWorkerMetrics()
     metrics.configure_release(
         config.canary_percent,

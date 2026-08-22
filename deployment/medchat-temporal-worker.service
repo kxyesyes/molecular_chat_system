@@ -10,16 +10,21 @@ Group=medchat
 WorkingDirectory=/opt/medchat/molecular_chat_system
 EnvironmentFile=/etc/medchat/medchat.env
 Environment=MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY=1
-ExecStartPre=/opt/conda/envs/medchat/bin/python -c "from src.task_runtime.config import TaskRuntimeConfig; c=TaskRuntimeConfig.from_env(); assert not c.warnings and c.docking_concurrency == 1"
+ExecStartPre=+/usr/bin/systemd-tmpfiles --create /opt/medchat/molecular_chat_system/deployment/medchat-temporal-worker.tmpfiles
+ExecStartPre=+/opt/conda/envs/medchat/bin/python scripts/validate_temporal_worker_production.py --check-environment-file /etc/medchat/medchat.env
+ExecStartPre=/opt/conda/envs/medchat/bin/python scripts/validate_temporal_worker_production.py --check-config
 ExecStart=/opt/conda/envs/medchat/bin/python scripts/run_temporal_docking_worker.py
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=60
-TimeoutStopSec=45
-KillMode=control-group
+TimeoutStopSec=90
+KillMode=mixed
+KillSignal=SIGTERM
+SendSIGKILL=yes
+UMask=0077
 PrivateTmp=true
 NoNewPrivileges=true
-ProtectSystem=full
+ProtectSystem=strict
 ReadWritePaths=/opt/medchat/molecular_chat_system/scratch /opt/medchat/molecular_chat_system/temp_docking
 
 [Install]

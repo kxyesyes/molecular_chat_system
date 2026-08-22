@@ -591,6 +591,11 @@ def test_worker_script_binds_metrics_before_temporal_connect_and_shuts_down(tmp_
 
     metrics = Metrics()
     config = _script_config(tmp_path)
+    monkeypatch.setattr(
+        module,
+        "validate_production_worker_config",
+        lambda *_args, **_kwargs: events.append("validate"),
+    )
     monkeypatch.setattr(module, "TemporalWorkerMetrics", lambda: metrics)
     monkeypatch.setattr(module.TaskRuntimeConfig, "from_env", lambda: config)
     monkeypatch.setattr(module, "Client", SimpleNamespace(connect=connect))
@@ -606,7 +611,10 @@ def test_worker_script_binds_metrics_before_temporal_connect_and_shuts_down(tmp_
 
     asyncio.run(module.main())
 
-    assert events == ["configure", "backup", "bind", "connect", "poll", "metrics_shutdown"]
+    assert events == [
+        "validate", "configure", "backup", "bind", "connect", "poll",
+        "metrics_shutdown",
+    ]
 
 
 def test_worker_script_bind_failure_prevents_connect_polling_and_science(tmp_path, monkeypatch, capsys):
@@ -633,6 +641,11 @@ def test_worker_script_bind_failure_prevents_connect_polling_and_science(tmp_pat
         calls["science"] += 1
 
     config = _script_config(tmp_path)
+    monkeypatch.setattr(
+        module,
+        "validate_production_worker_config",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(module, "TemporalWorkerMetrics", Metrics)
     monkeypatch.setattr(module.TaskRuntimeConfig, "from_env", lambda: config)
     monkeypatch.setattr(module, "Client", SimpleNamespace(connect=connect))

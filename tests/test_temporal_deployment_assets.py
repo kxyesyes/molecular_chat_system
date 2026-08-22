@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import configparser
 import errno
 import json
 import os
@@ -45,6 +44,7 @@ RELAY_TEMPLATE = ROOT / "deployment" / "nginx-medchat-temporal-metrics.conf.temp
 RELAY_SCRIPT = ROOT / "scripts" / "configure_temporal_metrics_relay.py"
 WEB_SYSTEMD_UNIT = ROOT / "deployment" / "medchat.service"
 WORKER_SYSTEMD_UNIT = ROOT / "deployment" / "medchat-temporal-worker.service"
+WORKER_TMPFILES = ROOT / "deployment" / "medchat-temporal-worker.tmpfiles"
 
 LONG_RUNNING = {
     "postgres", "postgres-exporter", "temporal", "temporal-ui", "prometheus", "grafana"
@@ -111,94 +111,108 @@ MOUNTS = {
 }
 
 
-def parse_systemd_unit(path: Path) -> dict[str, dict[str, str]]:
-    parser = configparser.ConfigParser(
-        interpolation=None,
-        strict=True,
-        delimiters=("=",),
-        comment_prefixes=("#", ";"),
-        inline_comment_prefixes=None,
-        empty_lines_in_values=False,
-    )
-    parser.optionxform = str
-    with path.open(encoding="utf-8") as stream:
-        parser.read_file(stream)
-    return {
-        section: dict(parser.items(section, raw=True))
-        for section in parser.sections()
-    }
+def parse_systemd_directives(path: Path) -> dict[str, dict[str, list[str]]]:
+    parsed: dict[str, dict[str, list[str]]] = {}
+    section: str | None = None
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            parsed.setdefault(section, {})
+            continue
+        assert section is not None and "=" in line
+        name, value = line.split("=", 1)
+        parsed[section].setdefault(name, []).append(value)
+    return parsed
 
 
 def test_temporal_worker_systemd_unit_has_full_hardened_contract() -> None:
-    assert parse_systemd_unit(WORKER_SYSTEMD_UNIT) == {
+    assert parse_systemd_directives(WORKER_SYSTEMD_UNIT) == {
         "Unit": {
-            "Description": "MedChat Temporal Docking Worker",
-            "After": "network-online.target docker.service",
-            "Wants": "network-online.target",
+            "Description": ["MedChat Temporal Docking Worker"],
+            "After": ["network-online.target docker.service"],
+            "Wants": ["network-online.target"],
         },
         "Service": {
-            "Type": "simple",
-            "User": "medchat",
-            "Group": "medchat",
-            "WorkingDirectory": "/opt/medchat/molecular_chat_system",
-            "EnvironmentFile": "/etc/medchat/medchat.env",
-            "Environment": "MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY=1",
-            "ExecStartPre": (
-                "/opt/conda/envs/medchat/bin/python -c \"from "
-                "src.task_runtime.config import TaskRuntimeConfig; "
-                "c=TaskRuntimeConfig.from_env(); assert not c.warnings and "
-                "c.docking_concurrency == 1\""
-            ),
-            "ExecStart": (
+            "Type": ["simple"],
+            "User": ["medchat"],
+            "Group": ["medchat"],
+            "WorkingDirectory": ["/opt/medchat/molecular_chat_system"],
+            "EnvironmentFile": ["/etc/medchat/medchat.env"],
+            "Environment": ["MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY=1"],
+            "ExecStartPre": [
+                "+/usr/bin/systemd-tmpfiles --create "
+                "/opt/medchat/molecular_chat_system/deployment/"
+                "medchat-temporal-worker.tmpfiles",
+                "+/opt/conda/envs/medchat/bin/python "
+                "scripts/validate_temporal_worker_production.py "
+                "--check-environment-file /etc/medchat/medchat.env",
+                "/opt/conda/envs/medchat/bin/python "
+                "scripts/validate_temporal_worker_production.py --check-config",
+            ],
+            "ExecStart": [
                 "/opt/conda/envs/medchat/bin/python "
                 "scripts/run_temporal_docking_worker.py"
-            ),
-            "Restart": "on-failure",
-            "RestartSec": "5",
-            "TimeoutStartSec": "60",
-            "TimeoutStopSec": "45",
-            "KillMode": "control-group",
-            "PrivateTmp": "true",
-            "NoNewPrivileges": "true",
-            "ProtectSystem": "full",
-            "ReadWritePaths": (
+            ],
+            "Restart": ["on-failure"],
+            "RestartSec": ["5"],
+            "TimeoutStartSec": ["60"],
+            "TimeoutStopSec": ["90"],
+            "KillMode": ["mixed"],
+            "KillSignal": ["SIGTERM"],
+            "SendSIGKILL": ["yes"],
+            "UMask": ["0077"],
+            "PrivateTmp": ["true"],
+            "NoNewPrivileges": ["true"],
+            "ProtectSystem": ["strict"],
+            "ReadWritePaths": [
                 "/opt/medchat/molecular_chat_system/scratch "
                 "/opt/medchat/molecular_chat_system/temp_docking"
-            ),
+            ],
         },
-        "Install": {"WantedBy": "multi-user.target"},
+        "Install": {"WantedBy": ["multi-user.target"]},
     }
 
 
 def test_web_systemd_unit_preserves_behavior_with_narrow_environment_source() -> None:
-    assert parse_systemd_unit(WEB_SYSTEMD_UNIT) == {
+    assert parse_systemd_directives(WEB_SYSTEMD_UNIT) == {
         "Unit": {
-            "Description": "MedChat Web Service",
-            "After": "network.target",
+            "Description": ["MedChat Web Service"],
+            "After": ["network.target"],
         },
         "Service": {
-            "Type": "simple",
-            "User": "medchat",
-            "Group": "medchat",
-            "WorkingDirectory": "/opt/medchat/molecular_chat_system",
-            "EnvironmentFile": "/etc/medchat/medchat.env",
-            "ExecStart": "/opt/conda/envs/medchat/bin/python main.py --no-reload",
-            "Restart": "always",
-            "RestartSec": "3",
-            "TimeoutStartSec": "120",
-            "TimeoutStopSec": "30",
+            "Type": ["simple"],
+            "User": ["medchat"],
+            "Group": ["medchat"],
+            "WorkingDirectory": ["/opt/medchat/molecular_chat_system"],
+            "EnvironmentFile": ["/etc/medchat/medchat.env"],
+            "ExecStart": [
+                "/opt/conda/envs/medchat/bin/python main.py --no-reload"
+            ],
+            "Restart": ["always"],
+            "RestartSec": ["3"],
+            "TimeoutStartSec": ["120"],
+            "TimeoutStopSec": ["30"],
         },
-        "Install": {"WantedBy": "multi-user.target"},
+        "Install": {"WantedBy": ["multi-user.target"]},
     }
 
 
 def test_web_and_temporal_worker_systemd_units_are_independent_processes() -> None:
-    web = parse_systemd_unit(WEB_SYSTEMD_UNIT)
-    worker = parse_systemd_unit(WORKER_SYSTEMD_UNIT)
+    web = parse_systemd_directives(WEB_SYSTEMD_UNIT)
+    worker = parse_systemd_directives(WORKER_SYSTEMD_UNIT)
     for unit in (web, worker):
         assert "Requires" not in unit["Unit"]
         assert "PartOf" not in unit["Unit"]
     assert web["Service"]["ExecStart"] != worker["Service"]["ExecStart"]
+    worker_commands = [
+        *worker["Service"]["ExecStartPre"],
+        *worker["Service"]["ExecStart"],
+    ]
+    assert all("docker " not in command.lower() for command in worker_commands)
+    assert all("compose" not in command.lower() for command in worker_commands)
 
 
 def test_systemd_units_have_no_shell_interpolation_or_embedded_credentials() -> None:
@@ -214,18 +228,35 @@ def test_systemd_units_have_no_shell_interpolation_or_embedded_credentials() -> 
     )
     for path in units:
         text = path.read_text(encoding="utf-8")
-        parsed = parse_systemd_unit(path)
+        parsed = parse_systemd_directives(path)
         executable_values = [
             value
-            for key, value in parsed["Service"].items()
+            for key, values in parsed["Service"].items()
             if key.startswith("Exec")
+            for value in values
         ]
         assert not embedded_credential.search(text), path.name
         assert not secret_assignment.search(text), path.name
         assert all(not shell_interpolation.search(value) for value in executable_values)
         environment = parsed["Service"].get("Environment")
         if environment is not None:
-            assert environment == "MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY=1"
+            assert environment == ["MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY=1"]
+
+
+def test_temporal_worker_tmpfiles_has_exact_private_directory_contract() -> None:
+    records = [
+        line.strip()
+        for line in WORKER_TMPFILES.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith(("#", ";"))
+    ]
+    assert records == [
+        "d /opt/medchat/molecular_chat_system/scratch 0700 medchat medchat -",
+        "d /opt/medchat/molecular_chat_system/scratch/task_inputs 0700 medchat medchat -",
+        "d /opt/medchat/molecular_chat_system/scratch/temporal_backups 0700 medchat medchat -",
+        "d /opt/medchat/molecular_chat_system/temp_docking 0700 medchat medchat -",
+    ]
+    assert all(record.split(maxsplit=1)[0] == "d" for record in records)
+    assert "/etc/medchat" not in "\n".join(records)
 
 
 def shell_executable() -> Path:

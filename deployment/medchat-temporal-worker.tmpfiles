@@ -1,0 +1,4 @@
+d /opt/medchat/molecular_chat_system/scratch 0700 medchat medchat -
+d /opt/medchat/molecular_chat_system/scratch/task_inputs 0700 medchat medchat -
+d /opt/medchat/molecular_chat_system/scratch/temporal_backups 0700 medchat medchat -
+d /opt/medchat/molecular_chat_system/temp_docking 0700 medchat medchat -
