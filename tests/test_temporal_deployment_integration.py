@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import http.server
 import os
 import secrets
 import shutil
 import socket
 import stat
 import subprocess
+import sys
+import threading
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Callable
@@ -20,6 +24,10 @@ DEPLOY = ROOT / "deployment" / "temporal"
 COMPOSE = DEPLOY / "docker-compose.yml"
 ROTATE_SCRIPT = DEPLOY / "scripts" / "rotate-exporter-password.sh"
 OPT_IN = "MEDCHAT_RUN_TEMPORAL_COMPOSE_INTEGRATION"
+RELAY_OPT_IN = "MEDCHAT_RUN_TEMPORAL_DEPLOYMENT_INTEGRATION"
+RELAY_SCRIPT = ROOT / "scripts" / "configure_temporal_metrics_relay.py"
+RELAY_TEST_LABEL = "com.medchat.temporal.metrics-relay-test"
+WORKER_UP_QUERY = 'up{job="medchat-temporal-worker"}'
 
 
 def require_compose_integration() -> str:
@@ -452,3 +460,294 @@ exec "$REAL_DOCKER" "$@"
         ) == "healthy"
 
     exercise()
+
+
+def require_metrics_relay_integration() -> tuple[str, str]:
+    if os.environ.get(RELAY_OPT_IN) != "1":
+        pytest.skip(f"set {RELAY_OPT_IN}=1 to run privileged metrics relay integration")
+    if sys.platform != "linux":
+        pytest.skip("metrics relay integration requires Linux network namespaces")
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        pytest.skip("metrics relay integration requires root")
+    docker = shutil.which("docker")
+    nginx = shutil.which("nginx")
+    if docker is None:
+        pytest.skip("metrics relay integration requires Docker")
+    if nginx is None:
+        pytest.skip("metrics relay integration requires nginx")
+    if shutil.which("ip") is None:
+        pytest.skip("metrics relay integration requires iproute2")
+    version = subprocess.run(
+        [docker, "version"], capture_output=True, text=True, timeout=15
+    )
+    if version.returncode != 0:
+        pytest.skip("Docker daemon unavailable for metrics relay integration")
+    return docker, nginx
+
+
+class _LoopbackMetricsHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if self.path != "/metrics":
+            self.send_error(404)
+            return
+        payload = (
+            "# TYPE medchat_temporal_worker_ready gauge\n"
+            "medchat_temporal_worker_ready 1\n"
+        ).encode("ascii")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+def test_worker_metrics_relay_end_to_end_is_acl_protected(tmp_path: Path) -> None:
+    docker, nginx = require_metrics_relay_integration()
+    project = f"medchat-relay-it-{uuid.uuid4().hex[:10]}"
+    prometheus_container = f"{project}-prometheus"
+    network_name = f"{project}-worker-metrics-scrape"
+    nginx_process: subprocess.Popen[str] | None = None
+    metrics_server: http.server.ThreadingHTTPServer | None = None
+    metrics_thread: threading.Thread | None = None
+    created_network = False
+    created_prometheus = False
+
+    def docker_run(*arguments: str, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [docker, *arguments],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+    def cleanup_labeled_resource(kind: str, name: str) -> None:
+        inspect = docker_run(
+            "inspect",
+            "--type",
+            kind,
+            "--format",
+            f'{{{{ index .{ "Config.Labels" if kind == "container" else "Labels"} "{RELAY_TEST_LABEL}" }}}}',
+            name,
+            timeout=15,
+        )
+        if inspect.returncode != 0:
+            return
+        if inspect.stdout.strip() != project:
+            pytest.fail(f"cleanup refused unlabeled {kind} resource", pytrace=False)
+        command = (
+            ("container", "rm", "--force", name)
+            if kind == "container"
+            else ("network", "rm", name)
+        )
+        removed = docker_run(*command, timeout=60)
+        if removed.returncode != 0:
+            pytest.fail(f"labeled {kind} cleanup failed", pytrace=False)
+
+    try:
+        env_file = tmp_path / "relay.env"
+        generated = tmp_path / "generated"
+        nginx_relay = tmp_path / "relay.conf"
+        selected: tuple[str, str, str] | None = None
+        for octet in range(200, 240):
+            subnet = f"172.30.{octet}.0/28"
+            gateway = f"172.30.{octet}.1"
+            prometheus_address = f"172.30.{octet}.2"
+            env_file.write_text(
+                "\n".join((
+                    f"COMPOSE_PROJECT_NAME={project}",
+                    f"MEDCHAT_TEMPORAL_METRICS_RELAY_SUBNET={subnet}",
+                    f"MEDCHAT_TEMPORAL_METRICS_RELAY_GATEWAY={gateway}",
+                    f"MEDCHAT_TEMPORAL_PROMETHEUS_SCRAPE_ADDRESS={prometheus_address}",
+                    "MEDCHAT_TEMPORAL_METRICS_RELAY_PORT=9466",
+                )) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            configured = subprocess.run(
+                [
+                    sys.executable,
+                    str(RELAY_SCRIPT),
+                    "--env-file",
+                    str(env_file),
+                    "--output-dir",
+                    str(generated),
+                    "--nginx-output",
+                    str(nginx_relay),
+                    "--check-host-conflicts",
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            if configured.returncode == 0:
+                selected = subnet, gateway, prometheus_address
+                break
+            if configured.stderr != "ERROR E_RELAY_CONFLICT\n":
+                pytest.fail("metrics relay host conflict inspection failed")
+        if selected is None:
+            pytest.skip("no conflict-free private /28 available for relay integration")
+        subnet, gateway, prometheus_address = selected
+
+        network = docker_run(
+            "network",
+            "create",
+            "--internal",
+            "--subnet",
+            subnet,
+            "--gateway",
+            gateway,
+            "--label",
+            f"{RELAY_TEST_LABEL}={project}",
+            network_name,
+            timeout=60,
+        )
+        assert network.returncode == 0
+        created_network = True
+
+        try:
+            metrics_server = http.server.ThreadingHTTPServer(
+                ("127.0.0.1", 9465), _LoopbackMetricsHandler
+            )
+        except OSError as exc:
+            pytest.skip(f"loopback worker metrics port unavailable: {type(exc).__name__}")
+        metrics_thread = threading.Thread(target=metrics_server.serve_forever, daemon=True)
+        metrics_thread.start()
+
+        nginx_root = tmp_path / "nginx"
+        nginx_root.mkdir()
+        nginx_config = nginx_root / "nginx.conf"
+        nginx_config.write_text(
+            "\n".join((
+                "daemon off;",
+                f"pid {nginx_root.as_posix()}/nginx.pid;",
+                "error_log stderr notice;",
+                "events {}",
+                "http {",
+                f"    include {nginx_relay.as_posix()};",
+                "}",
+                "",
+            )),
+            encoding="utf-8",
+            newline="\n",
+        )
+        nginx_base = [nginx, "-p", f"{nginx_root.as_posix()}/", "-c", str(nginx_config)]
+        checked = subprocess.run(
+            [*nginx_base, "-t"], capture_output=True, text=True, timeout=15
+        )
+        assert checked.returncode == 0
+        nginx_process = subprocess.Popen(
+            nginx_base,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        time.sleep(1)
+        assert nginx_process.poll() is None
+        reloaded = subprocess.run(
+            [*nginx_base, "-s", "reload"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert reloaded.returncode == 0
+
+        prometheus_config = tmp_path / "prometheus.yml"
+        prometheus_config.write_text(
+            """global:
+  scrape_interval: 1s
+scrape_configs:
+  - job_name: medchat-temporal-worker
+    file_sd_configs:
+      - files: [/etc/prometheus/file_sd/worker-targets.json]
+        refresh_interval: 1s
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+        started = docker_run(
+            "run",
+            "--detach",
+            "--name",
+            prometheus_container,
+            "--network",
+            network_name,
+            "--ip",
+            prometheus_address,
+            "--label",
+            f"{RELAY_TEST_LABEL}={project}",
+            "--volume",
+            f"{prometheus_config}:/etc/prometheus/prometheus.yml:ro",
+            "--volume",
+            f"{generated / 'worker-targets.json'}:/etc/prometheus/file_sd/worker-targets.json:ro",
+            "prom/prometheus:v3.13.2",
+            timeout=180,
+        )
+        assert started.returncode == 0
+        created_prometheus = True
+
+        encoded_query = urllib.parse.quote(WORKER_UP_QUERY, safe="")
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            queried = docker_run(
+                "exec",
+                prometheus_container,
+                "wget",
+                "-qO-",
+                f"http://127.0.0.1:9090/api/v1/query?query={encoded_query}",
+                timeout=15,
+            )
+            if queried.returncode == 0:
+                payload = json.loads(queried.stdout)
+                results = payload.get("data", {}).get("result", [])
+                if results and results[0].get("value", [None, None])[1] == "1":
+                    break
+            time.sleep(2)
+        else:
+            pytest.fail('up{job="medchat-temporal-worker"} did not reach 1')
+
+        denied = docker_run(
+            "run",
+            "--rm",
+            "--network",
+            network_name,
+            "--label",
+            f"{RELAY_TEST_LABEL}={project}",
+            "curlimages/curl:8.15.0",
+            "--silent",
+            "--output",
+            "/dev/null",
+            "--write-out",
+            "%{http_code}",
+            f"http://{gateway}:9466/metrics",
+            timeout=180,
+        )
+        assert denied.returncode == 0 and denied.stdout == "403", (
+            "non-Prometheus relay access was not denied"
+        )
+        with pytest.raises(OSError, match=".*"):
+            connection = socket.create_connection(("127.0.0.1", 9466), timeout=1)
+            connection.close()
+            pytest.fail("localhost relay unexpectedly reachable")
+    finally:
+        if nginx_process is not None:
+            nginx_process.terminate()
+            try:
+                nginx_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                nginx_process.kill()
+                nginx_process.wait(timeout=5)
+        if metrics_server is not None:
+            metrics_server.shutdown()
+            metrics_server.server_close()
+        if metrics_thread is not None:
+            metrics_thread.join(timeout=5)
+        try:
+            if created_prometheus:
+                cleanup_labeled_resource("container", prometheus_container)
+        finally:
+            if created_network:
+                cleanup_labeled_resource("network", network_name)

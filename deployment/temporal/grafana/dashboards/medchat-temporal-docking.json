@@ -41,7 +41,7 @@
       "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
       "id": 4,
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
-      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "sum(approximate_backlog_count)", "refId": "A"}],
+      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "sum(approximate_backlog_count{namespace=\"default\",taskqueue=\"medchat-docking\"})", "refId": "A"}],
       "title": "Queue backlog",
       "type": "timeseries"
     },
@@ -51,8 +51,8 @@
       "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0},
       "id": 5,
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
-      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "sum(increase(service_requests{operation=\"StartWorkflowExecution\"}[5m]))", "refId": "A"}],
-      "title": "Temporal accepted count",
+      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "sum(increase(service_requests{service_name=\"frontend\",namespace=\"default\",operation=\"StartWorkflowExecution\"}[5m]))", "refId": "A"}],
+      "title": "Workflow start requests",
       "type": "timeseries"
     },
     {
@@ -144,7 +144,7 @@
       "gridPos": {"h": 5, "w": 4, "x": 20, "y": 12},
       "id": 14,
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "values": false}},
-      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "count(ALERTS{alertstate=\"firing\",release_blocker=\"true\"})", "refId": "A"}],
+      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "count(ALERTS{alertstate=\"firing\",release_blocker=\"true\"}) or vector(0)", "refId": "A"}],
       "title": "Firing release blockers",
       "type": "stat"
     }

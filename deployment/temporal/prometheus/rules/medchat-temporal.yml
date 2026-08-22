@@ -14,7 +14,7 @@ groups:
           description: The docking worker heartbeat is missing or older than sixty seconds.
 
       - alert: TemporalQueueBacklogGrowing
-        expr: deriv(approximate_backlog_count[10m]) > 0
+        expr: deriv(approximate_backlog_count{namespace="default",taskqueue="medchat-docking"}[10m]) > 0
         for: 10m
         labels:
           severity: critical
@@ -23,15 +23,15 @@ groups:
           summary: Temporal queue backlog is growing
           description: The official Temporal queue backlog gauge has increased over ten minutes.
 
-      - alert: TemporalWorkflowStartFailures
-        expr: increase(service_errors{operation="StartWorkflowExecution"}[5m]) > 0
+      - alert: TemporalWorkflowStartUnexpectedErrors
+        expr: increase(service_errors{service_name="frontend",namespace="default",operation="StartWorkflowExecution"}[15m]) > 0
         for: 5m
         labels:
           severity: critical
           release_blocker: "true"
         annotations:
-          summary: Temporal workflow starts are failing
-          description: Temporal reported one or more workflow start RPC failures.
+          summary: Temporal workflow starts have unexpected errors
+          description: The Temporal frontend reported unexpected workflow start request errors.
 
       - alert: TemporalDuplicateVinaExecution
         expr: increase(medchat_temporal_duplicate_vina_execution_total[15m]) > 0
@@ -63,7 +63,7 @@ groups:
       - alert: TemporalDockingP95TooHigh
         expr: |
           histogram_quantile(0.95, sum by (le) (rate(medchat_temporal_task_duration_seconds_bucket[15m])))
-            > medchat_temporal_baseline_p95_seconds * 1.5
+            > scalar(max(medchat_temporal_baseline_p95_seconds)) * 1.5
           or
           histogram_quantile(0.95, sum by (le) (rate(medchat_temporal_task_duration_seconds_bucket[15m]))) > 60
         for: 10m
@@ -76,9 +76,9 @@ groups:
 
       - alert: TemporalRuntimeFailureRateHigh
         expr: |
-          sum(increase(medchat_temporal_task_terminal_total{status!="succeeded"}[10m]))
+          sum(increase(medchat_temporal_task_terminal_total{status!="succeeded"}[30m]))
           /
-          clamp_min(sum(increase(medchat_temporal_task_terminal_total[10m])), 1)
+          clamp_min(sum(increase(medchat_temporal_task_terminal_total[30m])), 1)
           > 0.05
         for: 10m
         labels:
@@ -96,6 +96,7 @@ groups:
           or up{job="temporal-postgres"} != 1
           or absent(pg_up{job="temporal-postgres"})
           or pg_up{job="temporal-postgres"} != 1
+        for: 60s
         labels:
           severity: critical
           release_blocker: "true"

@@ -22,6 +22,7 @@ scrape_configs:
           - postgres-exporter:9187
 
   - job_name: medchat-temporal-worker
-    static_configs:
-      - targets:
-          - host.docker.internal:9465
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/file_sd/worker-targets.json
+        refresh_interval: 30s
