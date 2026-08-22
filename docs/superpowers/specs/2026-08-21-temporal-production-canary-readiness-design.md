@@ -134,11 +134,11 @@ docs/runbooks/
 - 长期运行的 Temporal 使用固定版本 `temporalio/server`，不得使用已弃用的 `temporalio/auto-setup`；
 - 使用匹配版本的 `temporalio/admin-tools` one-shot job 管理主库/visibility schema，并由独立 one-shot job 幂等创建或确认 namespace 后收敛 retention；
 - schema 和 role-sync 在执行数据库客户端前验证 ASCII PostgreSQL identifier；exporter role-sync 不维护易漏的 catalog allowlist，而是直接 `DROP ROLE IF EXISTS temporal_exporter`，且禁止 `REASSIGN OWNED`/`DROP OWNED`，由 PostgreSQL 的集群级 dependency 检查对任何残留 ownership/ACL fail closed；成功后重建固定 `NOINHERIT` 登录角色，并仅授予 `pg_monitor` 的 `INHERIT TRUE`、`SET FALSE`、`ADMIN FALSE` membership；
-- exporter 密码轮换只允许通过受测运维脚本重跑 role-sync 并 force-recreate exporter；最低 Docker Compose 版本为 `>= 2.17`；
+- exporter 密码轮换只允许通过受测运维脚本重跑 role-sync 并 force-recreate exporter；脚本必须先检查 Compose 支持 `--wait`/`--wait-timeout`，再以 120 秒有界等待确认 `pg_up 1` healthcheck 通过后才返回成功；最低 Docker Compose 版本为 `>= 2.17`；
 - exporter healthcheck 必须在有限超时内读取 metrics 并确认 `pg_up 1`，不能仅把 HTTP 200 视为健康；
 - 密码、Grafana 管理凭据和其他 secret 只通过 Docker Compose file secret 注入；`env.example` 仅声明空的 `*_FILE` 路径键，不声明值型密码；
 - PostgreSQL 使用 `POSTGRES_PASSWORD_FILE`，Grafana 使用 `GF_SECURITY_ADMIN_PASSWORD__FILE`；不原生支持 file secret 的镜像只允许在容器 entrypoint 内读取并导出，禁止写入 Compose service environment、命令参数或日志；
-- 仓库只提交 `env.example`，不得包含真实凭据或机器绝对路径；secret 文件要求 regular file、非 symlink、无尾随换行、最多 1024 bytes，并使用 0600 或受限 ACL；
+- 仓库只提交 `env.example`，不得包含真实凭据或机器绝对路径；secret 文件要求 regular file、非 symlink、无尾随换行、最多 1024 bytes；POSIX 主机上由 deployment owner 持有 `0700` 父目录，目录内 secret 文件固定为只读 `0444`，Windows 使用等效受限 ACL；本地 Compose `file:` secret 是 bind mount，service secret 的 `uid`、`gid`、`mode` 不会修复宿主文件权限；
 - PostgreSQL、Temporal、Prometheus 和 Grafana 数据使用命名 volume；
 - 依赖 Compose project 隔离网络名称，不设置全局 `name`；使用 internal `database`、Temporal API `temporal`、`temporal-metrics`、`postgres-metrics` 和 `prometheus-grafana` 最小网络，不使用默认全共享网络平面；
 - 所有服务使用有上限的 `json-file` 日志轮换；长期运行服务配置 healthcheck 和 `unless-stopped`，one-shot job 使用有限 `on-failure:N` 并通过 `service_completed_successfully` 串联；

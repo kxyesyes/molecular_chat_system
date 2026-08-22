@@ -925,12 +925,21 @@ services use `unless-stopped` plus healthchecks; one-shot jobs use bounded
 Prometheus and Grafana retain only their exact read-only configuration mounts.
 `env.example` declares empty `*_FILE` path keys and non-secret defaults, plus the
 regular-file, no-symlink, no-trailing-newline, 1024-byte, and host-permission
-contract. Docker Compose `>= 2.17` is required for long-form dependency restart.
+contract. On POSIX the deployment owner controls a mode `0700` parent directory
+whose single-value secret files are mode `0444`; the protected parent blocks
+other host users from traversing to the files while non-root containers can read
+their individual read-only mounts. Local Compose `file:` secrets use bind mounts,
+so service-level `uid`, `gid`, and `mode` cannot repair host file permissions and
+must not be treated as a substitute for this host contract. Docker Compose
+`>= 2.17` is required for long-form dependency restart.
 The only supported exporter password rotation path is
 `deployment/temporal/scripts/rotate-exporter-password.sh`: after replacing the
 protected file, it reruns role-sync to completion and force-recreates
-`postgres-exporter` so the process rereads the secret. The complete operator
-runbook remains Task 11 scope.
+`postgres-exporter` so the process rereads the secret. Before changing services,
+the script verifies `docker compose up --help` exposes both `--wait` and
+`--wait-timeout`; unsupported clients fail with a stable error. Recreate uses a
+120-second bounded wait and reports success only after the exporter's `pg_up 1`
+healthcheck passes. The complete operator runbook remains Task 11 scope.
 
 - [ ] **Step 4: Verify GREEN and Compose rendering when Docker is available**
 
@@ -946,8 +955,16 @@ Remove-Item Env:TEMPORAL_POSTGRES_PASSWORD_FILE,Env:TEMPORAL_POSTGRES_EXPORTER_P
 
 Expected: static and shell-stub pytest passes. The integration test is skipped
 unless `MEDCHAT_RUN_TEMPORAL_COMPOSE_INTEGRATION=1` and Docker Compose are both
-available; opt-in execution uses a unique test project and cleans up its volumes
-in `finally`. Compose rendering uses temporary non-secret files
+available. Opt-in execution uses a unique test project, creates a deployment-owner
+`0700` secret directory with `0444` files, and verifies PostgreSQL, schema,
+Temporal Server, role-sync, exporter, and Grafana can consume only their assigned
+secrets; long-running services must become healthy and one-shot jobs must complete.
+The successful rotation assertion checks exporter health immediately after the
+script returns, while a deterministic wrong-password wait timeout must return
+nonzero without `OK`. A fixture teardown checks `down --volumes --remove-orphans`
+and reports cleanup failure without replacing an earlier test assertion. Test-only
+Grafana bind sources live under the temporary directory, so the integration test
+does not create or populate Task 7 paths. Compose rendering uses temporary non-secret files
 outside tracked paths and never starts or pulls a container. Record
 `docker compose config` as skipped when Docker is unavailable; never infer
 runtime readiness from static tests. Clear process environment and temporary

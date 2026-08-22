@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import time
 import uuid
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -83,19 +86,100 @@ def wait_for_health(
     pytest.fail(f"{service} did not reach expected health state {expected}")
 
 
-def test_exporter_role_audit_health_and_supported_rotation(tmp_path: Path) -> None:
+def health_status(
+    base: list[str],
+    service: str,
+    *,
+    environment: dict[str, str],
+) -> str:
+    container = run(
+        [*base, "ps", "-q", service], environment=environment, timeout=15
+    ).stdout.strip()
+    assert container
+    result = run(
+        [base[0], "inspect", "--format", "{{.State.Health.Status}}", container],
+        environment=environment,
+        timeout=15,
+    )
+    assert result.returncode == 0
+    return result.stdout.strip()
+
+
+@pytest.fixture
+def register_compose_cleanup(
+    request: pytest.FixtureRequest,
+) -> Callable[[list[str], dict[str, str]], None]:
+    def register(base: list[str], environment: dict[str, str]) -> None:
+        def cleanup() -> None:
+            result = run(
+                [*base, "down", "--volumes", "--remove-orphans"],
+                environment=environment,
+                timeout=180,
+            )
+            if result.returncode != 0:
+                pytest.fail("isolated Compose cleanup failed", pytrace=False)
+
+        request.addfinalizer(cleanup)
+
+    return register
+
+
+def test_exporter_role_audit_health_and_supported_rotation(
+    tmp_path: Path,
+    register_compose_cleanup: Callable[[list[str], dict[str, str]], None],
+) -> None:
     docker = require_compose_integration()
     project = f"medchat-temporal-it-{uuid.uuid4().hex[:10]}"
     postgres_password = secrets.token_urlsafe(24)
     exporter_password = secrets.token_urlsafe(24)
-    postgres_secret = tmp_path / "postgres-password"
-    exporter_secret = tmp_path / "exporter-password"
-    grafana_secret = tmp_path / "grafana-password"
-    postgres_secret.write_text(postgres_password, encoding="utf-8", newline="")
-    exporter_secret.write_text(exporter_password, encoding="utf-8", newline="")
-    grafana_secret.write_text(secrets.token_urlsafe(24), encoding="utf-8", newline="")
-    for secret_file in (postgres_secret, exporter_secret, grafana_secret):
-        secret_file.chmod(0o600)
+    secret_directory = tmp_path / "secrets"
+    secret_directory.mkdir(mode=0o700)
+    secret_directory.chmod(0o700)
+    postgres_secret = secret_directory / "postgres-password"
+    exporter_secret = secret_directory / "exporter-password"
+    grafana_secret = secret_directory / "grafana-password"
+
+    def replace_secret(path: Path, value: str) -> None:
+        replacement = secret_directory / f".{path.name}.new"
+        replacement.write_text(value, encoding="utf-8", newline="")
+        replacement.chmod(0o444)
+        os.replace(replacement, path)
+        path.chmod(0o444)
+
+    replace_secret(postgres_secret, postgres_password)
+    replace_secret(exporter_secret, exporter_password)
+    replace_secret(grafana_secret, secrets.token_urlsafe(24))
+    if os.name == "posix":
+        assert stat.S_IMODE(secret_directory.stat().st_mode) == 0o700
+        assert secret_directory.stat().st_uid == os.geteuid()
+        for secret_file in (postgres_secret, exporter_secret, grafana_secret):
+            assert stat.S_IMODE(secret_file.stat().st_mode) == 0o444
+            assert secret_file.stat().st_uid == os.geteuid()
+
+    grafana_provisioning = tmp_path / "grafana-provisioning"
+    grafana_dashboards = tmp_path / "grafana-dashboards"
+    grafana_provisioning.mkdir()
+    grafana_dashboards.mkdir()
+    compose_override = tmp_path / "compose.integration.yml"
+    compose_override.write_text(
+        "\n".join([
+            "services:",
+            "  grafana:",
+            "    volumes:",
+            "      - grafana-data:/var/lib/grafana",
+            "      - type: bind",
+            f"        source: {json.dumps(str(grafana_provisioning))}",
+            "        target: /etc/grafana/provisioning",
+            "        read_only: true",
+            "      - type: bind",
+            f"        source: {json.dumps(str(grafana_dashboards))}",
+            "        target: /var/lib/grafana/dashboards",
+            "        read_only: true",
+            "",
+        ]),
+        encoding="utf-8",
+        newline="\n",
+    )
 
     environment = os.environ.copy()
     environment.update({
@@ -108,7 +192,11 @@ def test_exporter_role_audit_health_and_supported_rotation(tmp_path: Path) -> No
         "TEMPORAL_POSTGRES_USER": "temporal_it",
         "TEMPORAL_POSTGRES_HOST_PORT": str(unused_loopback_port()),
     })
-    base = [docker, "compose", "-p", project, "-f", str(COMPOSE)]
+    base = [
+        docker, "compose", "-p", project,
+        "-f", str(COMPOSE), "-f", str(compose_override),
+    ]
+    register_compose_cleanup(base, environment)
 
     def compose(*arguments: str, timeout: int = 180) -> subprocess.CompletedProcess[str]:
         return run([*base, *arguments], environment=environment, timeout=timeout)
@@ -133,7 +221,7 @@ def test_exporter_role_audit_health_and_supported_rotation(tmp_path: Path) -> No
     def role_sync() -> subprocess.CompletedProcess[str]:
         return compose("run", "--rm", "temporal-exporter-role-sync")
 
-    try:
+    def exercise() -> None:
         assert compose("up", "-d", "postgres", timeout=300).returncode == 0
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
@@ -147,17 +235,26 @@ def test_exporter_role_audit_health_and_supported_rotation(tmp_path: Path) -> No
         else:
             pytest.fail("isolated PostgreSQL did not become ready")
 
-        assert psql(
-            "postgres", "CREATE DATABASE temporal_visibility_it"
+        assert compose(
+            "run", "--rm", "temporal-schema", timeout=300
         ).returncode == 0
+        assert compose("up", "-d", "temporal", timeout=300).returncode == 0
+        wait_for_health(
+            base, "temporal", "healthy", environment=environment, timeout=180
+        )
         assert role_sync().returncode == 0
+
+        assert compose(
+            "up", "-d", "--no-deps", "grafana", timeout=300
+        ).returncode == 0
+        wait_for_health(
+            base, "grafana", "healthy", environment=environment, timeout=120
+        )
 
         first_oid = scalar(
             "postgres", "SELECT oid FROM pg_roles WHERE rolname = 'temporal_exporter'"
         )
-        exporter_secret.write_text(
-            secrets.token_urlsafe(24), encoding="utf-8", newline=""
-        )
+        replace_secret(exporter_secret, secrets.token_urlsafe(24))
         assert role_sync().returncode == 0
         second_oid = scalar(
             "postgres", "SELECT oid FROM pg_roles WHERE rolname = 'temporal_exporter'"
@@ -225,9 +322,7 @@ def test_exporter_role_audit_health_and_supported_rotation(tmp_path: Path) -> No
             base, "postgres-exporter", "healthy", environment=environment, timeout=120
         )
 
-        exporter_secret.write_text(
-            secrets.token_urlsafe(24), encoding="utf-8", newline=""
-        )
+        replace_secret(exporter_secret, secrets.token_urlsafe(24))
         assert compose(
             "up", "-d", "--no-deps", "--force-recreate", "postgres-exporter",
             timeout=180,
@@ -236,21 +331,60 @@ def test_exporter_role_audit_health_and_supported_rotation(tmp_path: Path) -> No
             base, "postgres-exporter", "unhealthy", environment=environment, timeout=120
         )
 
-        exporter_secret.write_text(
-            secrets.token_urlsafe(24), encoding="utf-8", newline=""
+        mismatch_secret = secret_directory / "exporter-password-mismatch"
+        replace_secret(mismatch_secret, secrets.token_urlsafe(24))
+        replace_secret(exporter_secret, secrets.token_urlsafe(24))
+        wrapper_directory = tmp_path / "docker-wrapper"
+        wrapper_directory.mkdir()
+        docker_wrapper = wrapper_directory / "docker"
+        docker_wrapper.write_text(
+            """#!/bin/sh
+set -eu
+if printf '%s\\n' "$*" | grep -q ' run --rm temporal-exporter-role-sync$'; then
+    "$REAL_DOCKER" "$@"
+    rm -f "$ROTATION_SECRET_FILE"
+    cp "$ROTATION_MISMATCH_FILE" "$ROTATION_SECRET_FILE"
+    chmod 0444 "$ROTATION_SECRET_FILE"
+    exit 0
+fi
+if printf '%s\\n' "$*" | grep -q \
+    ' up -d --wait --wait-timeout 120 --no-deps --force-recreate postgres-exporter$'; then
+    exec "$REAL_DOCKER" compose -f "$ROTATION_COMPOSE_FILE" up -d --wait \
+        --wait-timeout 1 --no-deps --force-recreate postgres-exporter
+fi
+exec "$REAL_DOCKER" "$@"
+""",
+            encoding="utf-8",
+            newline="\n",
         )
+        docker_wrapper.chmod(0o755)
+        timeout_environment = environment.copy()
+        timeout_environment.update({
+            "PATH": f"{wrapper_directory}{os.pathsep}{environment.get('PATH', '')}",
+            "REAL_DOCKER": docker,
+            "ROTATION_COMPOSE_FILE": str(COMPOSE),
+            "ROTATION_SECRET_FILE": str(exporter_secret),
+            "ROTATION_MISMATCH_FILE": str(mismatch_secret),
+        })
+        timed_out_rotation = run(
+            [shutil.which("sh") or "/bin/sh", str(ROTATE_SCRIPT)],
+            environment=timeout_environment,
+            timeout=60,
+        )
+        assert timed_out_rotation.returncode != 0
+        assert timed_out_rotation.stdout == ""
+        assert timed_out_rotation.stderr == "ERROR E_EXPORTER_HEALTH\n"
+
+        replace_secret(exporter_secret, secrets.token_urlsafe(24))
         rotation = run(
             [shutil.which("sh") or "/bin/sh", str(ROTATE_SCRIPT)],
             environment=environment,
             timeout=300,
         )
         assert rotation.returncode == 0
-        wait_for_health(
-            base, "postgres-exporter", "healthy", environment=environment, timeout=120
-        )
-    finally:
-        run(
-            [*base, "down", "--volumes", "--remove-orphans"],
-            environment=environment,
-            timeout=180,
-        )
+        assert rotation.stdout == "OK E_EXPORTER_ROTATED\n"
+        assert health_status(
+            base, "postgres-exporter", environment=environment
+        ) == "healthy"
+
+    exercise()

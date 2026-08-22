@@ -53,6 +53,16 @@ if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 17 ]; }; then
     fail E_COMPOSE_VERSION
 fi
 
+compose_up_help=$(docker compose up --help 2>/dev/null) ||
+    fail E_COMPOSE_WAIT_UNSUPPORTED
+printf '%s\n' "$compose_up_help" |
+    grep -Eq '(^|[[:space:]])--wait([=[:space:]]|$)' ||
+    fail E_COMPOSE_WAIT_UNSUPPORTED
+printf '%s\n' "$compose_up_help" |
+    grep -Eq '(^|[[:space:]])--wait-timeout([=[:space:]]|$)' ||
+    fail E_COMPOSE_WAIT_UNSUPPORTED
+unset compose_up_help
+
 script_directory=${0%/*}
 [ "$script_directory" != "$0" ] || script_directory=.
 script_directory=$(CDPATH= cd -- "$script_directory" 2>/dev/null && pwd -P) ||
@@ -65,8 +75,9 @@ if ! docker compose -f "$compose_file" \
     fail E_ROLE_SYNC
 fi
 if ! docker compose -f "$compose_file" \
-    up -d --no-deps --force-recreate postgres-exporter >/dev/null 2>&1; then
-    fail E_EXPORTER_RECREATE
+    up -d --wait --wait-timeout 120 --no-deps --force-recreate \
+    postgres-exporter >/dev/null 2>&1; then
+    fail E_EXPORTER_HEALTH
 fi
 
 printf '%s\n' "OK E_EXPORTER_ROTATED"

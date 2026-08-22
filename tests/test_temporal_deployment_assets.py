@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import re
 import shutil
@@ -21,6 +22,7 @@ NAMESPACE_SCRIPT = DEPLOY / "scripts" / "temporal-namespace-setup.sh"
 ROTATE_SCRIPT = DEPLOY / "scripts" / "rotate-exporter-password.sh"
 PLAN = ROOT / "docs/superpowers/plans/2026-08-21-temporal-production-canary-readiness.md"
 DESIGN = ROOT / "docs/superpowers/specs/2026-08-21-temporal-production-canary-readiness-design.md"
+INTEGRATION_TEST = ROOT / "tests/test_temporal_deployment_integration.py"
 
 LONG_RUNNING = {
     "postgres", "postgres-exporter", "temporal", "temporal-ui", "prometheus", "grafana"
@@ -362,6 +364,30 @@ def test_secrets_are_file_backed_not_compose_values() -> None:
     assert "${TEMPORAL_POSTGRES_PASSWORD:" not in text
     assert "${GRAFANA_ADMIN_PASSWORD:" not in text
 
+    expected_service_secrets = {
+        "postgres": {"temporal_postgres_password"},
+        "temporal-schema": {"temporal_postgres_password"},
+        "temporal": {"temporal_postgres_password"},
+        "temporal-namespace": set(),
+        "temporal-exporter-role-sync": {
+            "temporal_postgres_password",
+            "temporal_postgres_exporter_password",
+        },
+        "postgres-exporter": {"temporal_postgres_exporter_password"},
+        "temporal-ui": set(),
+        "prometheus": set(),
+        "grafana": {"grafana_admin_password"},
+    }
+    for name, service in services.items():
+        mounted = {
+            item["source"] if isinstance(item, dict) else str(item)
+            for item in service.get("secrets", [])
+        }
+        assert mounted == expected_service_secrets[name]
+        for item in service.get("secrets", []):
+            if isinstance(item, dict):
+                assert {"uid", "gid", "mode"}.isdisjoint(item)
+
 
 def test_exporter_database_is_dynamic_and_role_sync_precedes_exporter() -> None:
     services = load_yaml(COMPOSE)["services"]
@@ -385,18 +411,35 @@ def test_exporter_database_is_dynamic_and_role_sync_precedes_exporter() -> None:
 
 
 @pytest.mark.parametrize(
-    ("scenario", "expected_returncode", "expected_error", "expected_calls"),
+    (
+        "scenario", "expected_returncode", "expected_stdout", "expected_error",
+        "expected_calls",
+    ),
     [
-        ("success", 0, "", ["version", "role-sync", "recreate"]),
-        ("role-sync-fails", 1, "ERROR E_ROLE_SYNC\n", ["version", "role-sync"]),
-        ("recreate-fails", 1, "ERROR E_EXPORTER_RECREATE\n", ["version", "role-sync", "recreate"]),
-        ("old-compose", 1, "ERROR E_COMPOSE_VERSION\n", ["version"]),
+        (
+            "success", 0, "OK E_EXPORTER_ROTATED\n", "",
+            ["version", "up-help", "role-sync", "recreate-wait"],
+        ),
+        (
+            "role-sync-fails", 1, "", "ERROR E_ROLE_SYNC\n",
+            ["version", "up-help", "role-sync"],
+        ),
+        (
+            "wait-timeout", 1, "", "ERROR E_EXPORTER_HEALTH\n",
+            ["version", "up-help", "role-sync", "recreate-wait"],
+        ),
+        (
+            "wait-unsupported", 1, "", "ERROR E_COMPOSE_WAIT_UNSUPPORTED\n",
+            ["version", "up-help"],
+        ),
+        ("old-compose", 1, "", "ERROR E_COMPOSE_VERSION\n", ["version"]),
     ],
 )
 def test_exporter_password_rotation_runs_supported_sequence_and_stops_on_failure(
     tmp_path: Path,
     scenario: str,
     expected_returncode: int,
+    expected_stdout: str,
     expected_error: str,
     expected_calls: list[str],
 ) -> None:
@@ -414,13 +457,22 @@ case "$*" in
       printf '%s\\n' '2.17.0'
     fi
     ;;
+  "compose up --help")
+    printf '%s\\n' up-help >> "$STUB_LOG"
+    if [ "$STUB_SCENARIO" = "wait-unsupported" ]; then
+      printf '%s\\n' 'Usage: docker compose up'
+    else
+      printf '%s\\n' '  --wait  Wait for services to be running|healthy'
+      printf '%s\\n' '  --wait-timeout int  Maximum duration in seconds'
+    fi
+    ;;
   *" run --rm temporal-exporter-role-sync")
     printf '%s\\n' role-sync >> "$STUB_LOG"
     [ "$STUB_SCENARIO" != "role-sync-fails" ] || exit 7
     ;;
-  *" up -d --no-deps --force-recreate postgres-exporter")
-    printf '%s\\n' recreate >> "$STUB_LOG"
-    [ "$STUB_SCENARIO" != "recreate-fails" ] || exit 8
+  *" up -d --wait --wait-timeout 120 --no-deps --force-recreate postgres-exporter")
+    printf '%s\\n' recreate-wait >> "$STUB_LOG"
+    [ "$STUB_SCENARIO" != "wait-timeout" ] || exit 8
     ;;
   *) exit 93 ;;
 esac
@@ -439,9 +491,12 @@ esac
     )
     calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
     assert result.returncode == expected_returncode
+    assert result.stdout == expected_stdout
     assert result.stderr == expected_error
     assert calls == expected_calls
     assert "rotation-test-password" not in result.stdout + result.stderr
+    if expected_returncode:
+        assert "OK" not in result.stdout
 
 
 def test_exporter_rotation_rejects_unsupported_compose_and_unsafe_secret_file(
@@ -449,6 +504,9 @@ def test_exporter_rotation_rejects_unsupported_compose_and_unsafe_secret_file(
 ) -> None:
     script = ROTATE_SCRIPT.read_text(encoding="utf-8")
     assert "2.17" in script
+    assert "compose up --help" in script
+    assert "--wait-timeout 120" in script
+    assert "E_COMPOSE_WAIT_UNSUPPORTED" in script
     assert '-L "$secret_file"' in script
     assert "maximum_secret_bytes=1024" in script
     assert "wc -l" in script
@@ -464,7 +522,15 @@ def test_exporter_rotation_rejects_host_secret_symlink_before_docker(
     try:
         link.symlink_to(target)
     except OSError as error:
-        pytest.skip(f"host symlink creation unavailable: {error.__class__.__name__}")
+        known_windows_capability_error = os.name == "nt" and (
+            error.errno in {errno.EPERM, errno.EACCES}
+            or getattr(error, "winerror", None) == 1314
+        )
+        if known_windows_capability_error:
+            pytest.skip(
+                "host symlink creation unavailable due to Windows privilege"
+            )
+        raise
     log = tmp_path / "docker.log"
     result = run_shell_script(
         ROTATE_SCRIPT,
@@ -803,10 +869,26 @@ def test_env_example_has_only_empty_file_secret_keys() -> None:
     guidance = ENV_EXAMPLE.read_text(encoding="utf-8").lower()
     assert "never commit real" in guidance
     for contract in (
-        "regular file", "symlink", "trailing newline", "1024", "0600", "acl",
-        "printf", "rotate-exporter-password.sh", ">= 2.17",
+        "regular file", "symlink", "trailing newline", "1024", "0700", "0444",
+        "deployment owner", "bind mount", "uid", "gid", "mode", "printf",
+        "rotate-exporter-password.sh", ">= 2.17",
     ):
         assert contract in guidance
+    assert "0600" not in guidance
+
+
+def test_opt_in_integration_uses_host_secret_and_cleanup_contracts() -> None:
+    integration = INTEGRATION_TEST.read_text(encoding="utf-8")
+    assert "secret_directory.chmod(0o700)" in integration
+    assert "path.chmod(0o444)" in integration
+    assert ".chmod(0o600)" not in integration
+    assert "request.addfinalizer(cleanup)" in integration
+    assert '"down", "--volumes", "--remove-orphans"' in integration
+    assert "if result.returncode != 0" in integration
+    assert "isolated Compose cleanup failed" in integration
+    assert integration.index("assert rotation.returncode == 0") < integration.index(
+        "assert health_status("
+    )
 
 
 def test_no_dangerous_privileges_version_key_or_unescaped_container_vars() -> None:
@@ -835,6 +917,9 @@ def test_task6_documentation_matches_runtime_contracts() -> None:
     assert "database" in boundary and "temporal-metrics" in boundary
     for contract in (
         "rotate-exporter-password.sh", ">= 2.17", "pg_up",
-        "namespace update", "NOBYPASSRLS", "DROP ROLE", "project",
+        "namespace update", "NOBYPASSRLS", "DROP ROLE", "project", "0700",
+        "0444", "bind", "--wait-timeout",
     ):
         assert contract in task6
+    assert "0600" not in task6
+    assert "0600" not in boundary
