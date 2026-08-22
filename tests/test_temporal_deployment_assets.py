@@ -55,6 +55,32 @@ NETWORKS = {
     "prometheus": {"monitoring"},
     "grafana": {"monitoring"},
 }
+MOUNTS = {
+    "postgres": ["temporal-postgres-data:/var/lib/postgresql/data"],
+    "temporal-schema": [
+        "./scripts/temporal-schema-setup.sh:/opt/medchat/temporal-schema-setup.sh:ro"
+    ],
+    "temporal": [
+        "./scripts/temporal-server-entrypoint.sh:/opt/medchat/temporal-server-entrypoint.sh:ro"
+    ],
+    "temporal-namespace": [
+        "./scripts/temporal-namespace-setup.sh:/opt/medchat/temporal-namespace-setup.sh:ro"
+    ],
+    "temporal-exporter-role-sync": [
+        "./postgres-init/010-exporter.sh:/opt/medchat/010-exporter.sh:ro"
+    ],
+    "postgres-exporter": [],
+    "temporal-ui": [],
+    "prometheus": [
+        "prometheus-data:/prometheus",
+        "./prometheus:/etc/prometheus:ro",
+    ],
+    "grafana": [
+        "grafana-data:/var/lib/grafana",
+        "./grafana/provisioning:/etc/grafana/provisioning:ro",
+        "./grafana/dashboards:/var/lib/grafana/dashboards:ro",
+    ],
+}
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -76,7 +102,7 @@ def env_map(service: dict[str, Any]) -> dict[str, str]:
     return result
 
 
-def deps(service: dict[str, Any]) -> dict[str, dict[str, str]]:
+def deps(service: dict[str, Any]) -> dict[str, dict[str, Any]]:
     value = service.get("depends_on", {})
     assert isinstance(value, dict)
     return value
@@ -94,9 +120,11 @@ def test_images_services_ports_and_mount_boundaries() -> None:
     }
     for name, service in services.items():
         assert service.get("ports", []) == PORTS[name]
+        assert service.get("volumes", []) == MOUNTS[name]
         assert all(str(port).startswith("127.0.0.1:") for port in service.get("ports", []))
         assert all(not str(mount).startswith("./") or str(mount).endswith(":ro")
                    for mount in service.get("volumes", []))
+        assert all(not str(mount).startswith("/") for mount in service.get("volumes", []))
     text = COMPOSE.read_text(encoding="utf-8")
     assert "/docker-entrypoint-initdb.d" not in text
     assert "./postgres-init/010-exporter.sh:/opt/medchat/010-exporter.sh:ro" in text
@@ -128,6 +156,21 @@ def test_lifecycle_healthchecks_and_bounded_logs() -> None:
         assert service.get("stop_grace_period"), name
         assert service.get("logging") == expected_logging, name
 
+    commands = {
+        name: " ".join(map(str, services[name]["healthcheck"]["test"]))
+        for name in LONG_RUNNING
+    }
+    assert "pg_isready" in commands["postgres"]
+    assert "127.0.0.1:9187/metrics" in commands["postgres-exporter"]
+    assert "7233" in commands["temporal"]
+    assert (
+        "temporal operator cluster health" in commands["temporal"]
+        or "nc -z" in commands["temporal"]
+    )
+    assert "127.0.0.1:8080" in commands["temporal-ui"]
+    assert "127.0.0.1:9090/-/healthy" in commands["prometheus"]
+    assert "127.0.0.1:3000/api/health" in commands["grafana"]
+
 
 def test_job_dependencies_are_completed_successfully_and_acyclic() -> None:
     services = load_yaml(COMPOSE)["services"]
@@ -138,7 +181,10 @@ def test_job_dependencies_are_completed_successfully_and_acyclic() -> None:
         "temporal-namespace": {"temporal": {"condition": "service_healthy"}},
         "temporal-exporter-role-sync": {"postgres": {"condition": "service_healthy"}},
         "postgres-exporter": {
-            "temporal-exporter-role-sync": {"condition": "service_completed_successfully"}
+            "temporal-exporter-role-sync": {
+                "condition": "service_completed_successfully",
+                "restart": True,
+            }
         },
         "temporal-ui": {
             "temporal-namespace": {"condition": "service_completed_successfully"}
@@ -151,6 +197,9 @@ def test_job_dependencies_are_completed_successfully_and_acyclic() -> None:
     }
     actual = {name: deps(service) for name, service in services.items()}
     assert actual == expected
+    role_sync = services["temporal-exporter-role-sync"]
+    assert "profiles" not in role_sync
+    assert role_sync["entrypoint"] == ["/opt/medchat/010-exporter.sh"]
 
     def visit(name: str, ancestors: frozenset[str]) -> None:
         assert name not in ancestors
@@ -213,7 +262,10 @@ def test_exporter_database_is_dynamic_and_role_sync_precedes_exporter() -> None:
         "DATA_SOURCE_PASS_FILE": "/run/secrets/temporal_postgres_exporter_password",
     }
     assert deps(exporter) == {
-        "temporal-exporter-role-sync": {"condition": "service_completed_successfully"}
+        "temporal-exporter-role-sync": {
+            "condition": "service_completed_successfully",
+            "restart": True,
+        }
     }
 
 

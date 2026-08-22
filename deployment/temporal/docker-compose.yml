@@ -149,6 +149,7 @@ services:
     depends_on:
       temporal-exporter-role-sync:
         condition: service_completed_successfully
+        restart: true
     environment:
       - DATA_SOURCE_URI=postgres:5432/${TEMPORAL_POSTGRES_DB:-temporal}?sslmode=disable
       - DATA_SOURCE_USER=temporal_exporter
