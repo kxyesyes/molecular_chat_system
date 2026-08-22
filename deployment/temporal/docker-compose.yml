@@ -87,7 +87,7 @@ services:
     networks:
       - database
       - temporal
-      - monitoring
+      - temporal-metrics
     healthcheck:
       test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
       interval: 15s
@@ -128,6 +128,7 @@ services:
       - PGHOST=postgres
       - PGPORT=5432
       - PGDATABASE=${TEMPORAL_POSTGRES_DB:-temporal}
+      - VISIBILITY_DBNAME=${TEMPORAL_POSTGRES_VISIBILITY_DB:-temporal_visibility}
       - PGUSER=${TEMPORAL_POSTGRES_USER:-temporal}
     entrypoint:
       - /opt/medchat/010-exporter.sh
@@ -159,9 +160,9 @@ services:
         target: temporal_postgres_exporter_password
     networks:
       - database
-      - monitoring
+      - postgres-metrics
     healthcheck:
-      test: ["CMD-SHELL", "wget --spider --quiet http://127.0.0.1:9187/metrics"]
+      test: ["CMD-SHELL", "wget -qO- -T 4 http://127.0.0.1:9187/metrics | grep -Eq '^pg_up 1(\\.0)?$$'"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -204,7 +205,9 @@ services:
       - prometheus-data:/prometheus
       - ./prometheus:/etc/prometheus:ro
     networks:
-      - monitoring
+      - temporal-metrics
+      - postgres-metrics
+      - prometheus-grafana
     healthcheck:
       test: ["CMD-SHELL", "wget --spider --quiet http://127.0.0.1:9090/-/healthy"]
       interval: 15s
@@ -233,7 +236,7 @@ services:
       - source: grafana_admin_password
         target: grafana_admin_password
     networks:
-      - monitoring
+      - prometheus-grafana
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:3000/api/health"]
       interval: 15s
@@ -248,12 +251,11 @@ volumes:
 
 networks:
   database:
-    name: medchat-temporal-database
     internal: true
   temporal:
-    name: medchat-temporal
-  monitoring:
-    name: medchat-temporal-monitoring
+  temporal-metrics:
+  postgres-metrics:
+  prometheus-grafana:
 
 secrets:
   temporal_postgres_password:

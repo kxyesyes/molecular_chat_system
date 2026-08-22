@@ -132,13 +132,15 @@ docs/runbooks/
 - PostgreSQL、Temporal gRPC、Temporal UI、Prometheus 和 Grafana 默认只绑定 `127.0.0.1`；
 - Temporal 内部 PostgreSQL 使用独立数据库和账号，不复用 MedChat SQLite；
 - 长期运行的 Temporal 使用固定版本 `temporalio/server`，不得使用已弃用的 `temporalio/auto-setup`；
-- 使用匹配版本的 `temporalio/admin-tools` one-shot job 管理主库/visibility schema，并由独立 one-shot job 幂等创建或确认 namespace；
-- exporter role-sync 作为每次部署都可运行的 one-shot job；已有角色必须执行 `ALTER ROLE` 以支持密码轮换，再由 exporter 依赖其成功完成；
+- 使用匹配版本的 `temporalio/admin-tools` one-shot job 管理主库/visibility schema，并由独立 one-shot job 幂等创建或确认 namespace 后收敛 retention；
+- schema 和 role-sync 在执行数据库客户端前验证 ASCII PostgreSQL identifier；exporter role-sync 审计额外 membership、对象 ownership 与危险显式授权并 fail closed，仅在审计通过后收敛 `NOBYPASSRLS` 等属性、密码、`pg_monitor` 和双库 CONNECT；
+- exporter 密码轮换只允许通过受测运维脚本重跑 role-sync 并 force-recreate exporter；最低 Docker Compose 版本为 `>= 2.17`；
+- exporter healthcheck 必须在有限超时内读取 metrics 并确认 `pg_up 1`，不能仅把 HTTP 200 视为健康；
 - 密码、Grafana 管理凭据和其他 secret 只通过 Docker Compose file secret 注入；`env.example` 仅声明空的 `*_FILE` 路径键，不声明值型密码；
 - PostgreSQL 使用 `POSTGRES_PASSWORD_FILE`，Grafana 使用 `GF_SECURITY_ADMIN_PASSWORD__FILE`；不原生支持 file secret 的镜像只允许在容器 entrypoint 内读取并导出，禁止写入 Compose service environment、命令参数或日志；
-- 仓库只提交 `env.example`，不得包含真实凭据或机器绝对路径；
+- 仓库只提交 `env.example`，不得包含真实凭据或机器绝对路径；secret 文件要求 regular file、非 symlink、无尾随换行、最多 1024 bytes，并使用 0600 或受限 ACL；
 - PostgreSQL、Temporal、Prometheus 和 Grafana 数据使用命名 volume；
-- 使用命名 `database`、`temporal`、`monitoring` 网络分段，database 网络为 internal，不使用默认全共享网络平面；
+- 依赖 Compose project 隔离网络名称，不设置全局 `name`；使用 internal `database`、Temporal API `temporal`、`temporal-metrics`、`postgres-metrics` 和 `prometheus-grafana` 最小网络，不使用默认全共享网络平面；
 - 所有服务使用有上限的 `json-file` 日志轮换；长期运行服务配置 healthcheck 和 `unless-stopped`，one-shot job 使用有限 `on-failure:N` 并通过 `service_completed_successfully` 串联；
 - Temporal schema 初始化采用官方支持的启动流程，不由 MedChat Web 执行；
 - Compose 不挂载整个仓库，也不授予 Docker socket；

@@ -807,7 +807,9 @@ git commit -m "feat(runtime): expose temporal worker metrics"
 - Create: `deployment/temporal/scripts/temporal-schema-setup.sh`
 - Create: `deployment/temporal/scripts/temporal-server-entrypoint.sh`
 - Create: `deployment/temporal/scripts/temporal-namespace-setup.sh`
+- Create: `deployment/temporal/scripts/rotate-exporter-password.sh`
 - Create: `tests/test_temporal_deployment_assets.py`
+- Create: `tests/test_temporal_deployment_integration.py`
 
 - [ ] **Step 1: Write failing Compose security tests**
 
@@ -850,7 +852,9 @@ def test_postgres_exporter_role_is_runtime_secret_and_read_only():
     assert "set -x" not in script
     assert "/run/secrets/temporal_postgres_exporter_password" in script
     assert "GRANT pg_monitor TO temporal_exporter" in script
-    assert "SUPERUSER" not in script
+    assert "NOBYPASSRLS" in script
+    assert "pg_auth_members" in script
+    assert "aclexplode" in script
 ```
 
 - [ ] **Step 2: Verify RED**
@@ -883,31 +887,49 @@ ports:
 ```
 
 The schema job depends on healthy PostgreSQL, creates missing databases
-idempotently, and runs the matching main and visibility schema migrations.
-The server starts only after that job completes successfully. The namespace
-job depends on healthy Temporal and idempotently creates or confirms
-`default`. The role-sync job runs on every deployment after PostgreSQL is
-healthy, creates `temporal_exporter` only when absent, always applies
-`ALTER ROLE` for password rotation, and grants only `pg_monitor`.
-`postgres-exporter` starts only after role-sync succeeds and uses the dynamic
-`${TEMPORAL_POSTGRES_DB:-temporal}` database.
+idempotently, validates database/user names as ASCII PostgreSQL identifiers
+before invoking any client, and runs the matching main and visibility schema
+migrations. The server starts only after that job completes successfully. The
+namespace job depends on healthy Temporal, idempotently creates or confirms
+`default`, then always runs `temporal operator namespace update --retention` so
+configured retention drift converges. The role-sync job is an explicit one-shot
+available on every deployment after PostgreSQL is healthy; it validates both
+database names and the administrator role, creates `temporal_exporter` as
+`NOLOGIN` only when absent, and fails closed
+if the role has unexpected membership, object ownership, or dangerous explicit
+grants in either database. Only after a clean audit does it apply `ALTER ROLE`
+with `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, grant
+`pg_monitor`, and grant CONNECT to both databases. `postgres-exporter` starts only
+after role-sync succeeds and uses the dynamic `${TEMPORAL_POSTGRES_DB:-temporal}`
+database. Its healthcheck fetches metrics with a finite timeout and requires
+`pg_up 1`; an HTTP 200 alone is not healthy.
 
 PostgreSQL, Grafana, server, schema, and role-sync credentials come only from
 Compose secret files. PostgreSQL uses `POSTGRES_PASSWORD_FILE`; Grafana uses
 `GF_SECURITY_ADMIN_PASSWORD__FILE`; wrappers read secrets inside the
 container when an image lacks native file support. No password is present in a
-Compose service environment value or psql argv. Segment services across named
-`database`, `temporal`, and `monitoring` networks; make the database
-network internal. Every service uses bounded `json-file` logging. Long-running
+Compose service environment value or psql argv. Compose project isolation owns
+all network names: retain internal `database` and Temporal API `temporal`
+networks, and use separate `temporal-metrics`, `postgres-metrics`, and
+`prometheus-grafana` planes. Grafana reaches only Prometheus, and the UI does not
+join a metrics network. Every service uses bounded `json-file` logging. Long-running
 services use `unless-stopped` plus healthchecks; one-shot jobs use bounded
 `on-failure:N` restart and `service_completed_successfully` dependencies.
 Prometheus and Grafana retain only their exact read-only configuration mounts.
-`env.example` declares empty `*_FILE` path keys and non-secret defaults.
+`env.example` declares empty `*_FILE` path keys and non-secret defaults, plus the
+regular-file, no-symlink, no-trailing-newline, 1024-byte, and host-permission
+contract. Docker Compose `>= 2.17` is required for long-form dependency restart.
+The only supported exporter password rotation path is
+`deployment/temporal/scripts/rotate-exporter-password.sh`: after replacing the
+protected file, it reruns role-sync to completion and force-recreates
+`postgres-exporter` so the process rereads the secret. The complete operator
+runbook remains Task 11 scope.
 
 - [ ] **Step 4: Verify GREEN and Compose rendering when Docker is available**
 
 ```powershell
 C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\test_temporal_deployment_assets.py -q -p no:cacheprovider
+C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests\test_temporal_deployment_integration.py -q -p no:cacheprovider -rs
 $env:TEMPORAL_POSTGRES_PASSWORD_FILE = "<temporary non-secret file outside the repository>"
 $env:TEMPORAL_POSTGRES_EXPORTER_PASSWORD_FILE = "<temporary non-secret file outside the repository>"
 $env:GRAFANA_ADMIN_PASSWORD_FILE = "<temporary non-secret file outside the repository>"
@@ -915,7 +937,10 @@ docker compose --env-file deployment/temporal/env.example -f deployment/temporal
 Remove-Item Env:TEMPORAL_POSTGRES_PASSWORD_FILE,Env:TEMPORAL_POSTGRES_EXPORTER_PASSWORD_FILE,Env:GRAFANA_ADMIN_PASSWORD_FILE
 ```
 
-Expected: pytest passes. Compose rendering uses temporary non-secret files
+Expected: static and shell-stub pytest passes. The integration test is skipped
+unless `MEDCHAT_RUN_TEMPORAL_COMPOSE_INTEGRATION=1` and Docker Compose are both
+available; opt-in execution uses a unique test project and cleans up its volumes
+in `finally`. Compose rendering uses temporary non-secret files
 outside tracked paths and never starts or pulls a container. Record
 `docker compose config` as skipped when Docker is unavailable; never infer
 runtime readiness from static tests. Clear process environment and temporary
@@ -924,8 +949,8 @@ files after rendering.
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add -- deployment/temporal/docker-compose.yml deployment/temporal/env.example deployment/temporal/postgres-init/010-exporter.sh deployment/temporal/scripts/temporal-schema-setup.sh deployment/temporal/scripts/temporal-server-entrypoint.sh deployment/temporal/scripts/temporal-namespace-setup.sh tests/test_temporal_deployment_assets.py
-git commit -m "fix(deploy): harden temporal production bootstrap"
+git add -- deployment/temporal/docker-compose.yml deployment/temporal/env.example deployment/temporal/postgres-init/010-exporter.sh deployment/temporal/scripts/temporal-schema-setup.sh deployment/temporal/scripts/temporal-server-entrypoint.sh deployment/temporal/scripts/temporal-namespace-setup.sh deployment/temporal/scripts/rotate-exporter-password.sh tests/test_temporal_deployment_assets.py tests/test_temporal_deployment_integration.py docs/superpowers/plans/2026-08-21-temporal-production-canary-readiness.md docs/superpowers/specs/2026-08-21-temporal-production-canary-readiness-design.md
+git commit -m "fix(deploy): close temporal production safety gaps"
 ```
 
 ## Task 7: Provision Prometheus alerts and Grafana dashboard
