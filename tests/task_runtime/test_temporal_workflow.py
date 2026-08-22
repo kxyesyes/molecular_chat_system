@@ -1926,7 +1926,7 @@ def test_worker_readiness_is_true_only_during_polling_and_false_after_shutdown(
     asyncio.run(scenario())
 
 
-def test_worker_readiness_resets_and_cleans_heartbeat_when_polling_raises(
+def test_worker_immediate_failure_never_announces_readiness_and_cleans_heartbeat(
     tmp_path,
     monkeypatch,
 ):
@@ -1959,7 +1959,13 @@ def test_worker_readiness_resets_and_cleans_heartbeat_when_polling_raises(
                 metrics=metrics,
             )
 
-        assert metrics.ready_transitions == [True, False]
+        assert metrics.ready_transitions == []
+        assert not any(
+            not task.done()
+            and task is not asyncio.current_task()
+            and "run_worker_heartbeat" in repr(task.get_coro())
+            for task in asyncio.all_tasks()
+        )
 
     asyncio.run(scenario())
 
@@ -2029,6 +2035,231 @@ def test_worker_outer_cancellation_joins_polling_task_without_leaking(
             await asyncio.sleep(0)
 
     asyncio.run(scenario())
+
+
+def test_worker_shutdown_failure_cancels_and_joins_pending_polling_task(
+    tmp_path,
+    monkeypatch,
+):
+    class BrokenShutdownWorker:
+        def __init__(self) -> None:
+            self.polling = asyncio.Event()
+            self.stop = asyncio.Event()
+            self.cleaned = asyncio.Event()
+            self.shutdown_calls = 0
+
+        async def run(self) -> None:
+            self.polling.set()
+            try:
+                await self.stop.wait()
+            finally:
+                self.cleaned.set()
+
+        async def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            raise RuntimeError("C:/private/CCO shutdown detail")
+
+    async def scenario() -> None:
+        fake_worker = BrokenShutdownWorker()
+        metrics = _RecordingMetrics()
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        shutdown = asyncio.Event()
+        monkeypatch.setattr(
+            "src.task_runtime.temporal.worker.build_temporal_worker",
+            lambda *_args: fake_worker,
+        )
+        running = asyncio.create_task(
+            run_temporal_worker(
+                object(),
+                TemporalDockingActivities(
+                    store,
+                    _FakeDockingExecution(_success_result()),
+                ),
+                store,
+                WorkerSettings(
+                    task_queue="medchat-docking",
+                    namespace="default",
+                    graceful_shutdown_seconds=0.1,
+                ),
+                worker_id="worker-1",
+                sdk_version="1.30.0",
+                shutdown=shutdown,
+                metrics=metrics,
+            )
+        )
+        assert await asyncio.wait_for(fake_worker.polling.wait(), timeout=1.0)
+        try:
+            shutdown.set()
+            with pytest.raises(RuntimeError, match="^Temporal worker shutdown failed$") as failure:
+                await asyncio.wait_for(running, timeout=1.0)
+
+            assert failure.value.__cause__ is None
+            assert fake_worker.shutdown_calls == 1
+            assert fake_worker.cleaned.is_set()
+            assert metrics.ready_transitions == [True, False]
+            assert not any(
+                not task.done()
+                and task is not asyncio.current_task()
+                and "run_temporal_worker" in repr(task.get_coro())
+                for task in asyncio.all_tasks()
+            )
+        finally:
+            fake_worker.stop.set()
+            await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+
+
+def test_worker_cancellation_preserves_primary_over_shutdown_failure(
+    tmp_path,
+    monkeypatch,
+):
+    class BrokenShutdownWorker:
+        def __init__(self) -> None:
+            self.polling = asyncio.Event()
+            self.cleaned = asyncio.Event()
+            self.shutdown_entered = asyncio.Event()
+            self.release_shutdown = asyncio.Event()
+            self.shutdown_calls = 0
+
+        async def run(self) -> None:
+            self.polling.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cleaned.set()
+
+        async def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            self.shutdown_entered.set()
+            await self.release_shutdown.wait()
+            raise RuntimeError("C:/private/CCO shutdown detail")
+
+    async def scenario() -> None:
+        fake_worker = BrokenShutdownWorker()
+        metrics = _RecordingMetrics()
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        monkeypatch.setattr(
+            "src.task_runtime.temporal.worker.build_temporal_worker",
+            lambda *_args: fake_worker,
+        )
+        running = asyncio.create_task(
+            run_temporal_worker(
+                object(),
+                TemporalDockingActivities(
+                    store,
+                    _FakeDockingExecution(_success_result()),
+                ),
+                store,
+                WorkerSettings(
+                    task_queue="medchat-docking",
+                    namespace="default",
+                    graceful_shutdown_seconds=0.1,
+                ),
+                worker_id="worker-1",
+                sdk_version="1.30.0",
+                shutdown=asyncio.Event(),
+                metrics=metrics,
+            )
+        )
+        assert await asyncio.wait_for(fake_worker.polling.wait(), timeout=1.0)
+        running.cancel()
+        assert await asyncio.wait_for(fake_worker.shutdown_entered.wait(), timeout=1.0)
+        running.cancel()
+        fake_worker.release_shutdown.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(running, timeout=1.0)
+
+        assert fake_worker.shutdown_calls == 1
+        assert fake_worker.cleaned.is_set()
+        assert metrics.ready_transitions == [True, False]
+        assert not any(
+            not task.done()
+            and task is not asyncio.current_task()
+            and "run_temporal_worker" in repr(task.get_coro())
+            for task in asyncio.all_tasks()
+        )
+
+    asyncio.run(scenario())
+
+
+def test_worker_run_exception_preserves_primary_over_shutdown_failure(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    class PrimaryRunError(RuntimeError):
+        pass
+
+    class FailingWorker:
+        def __init__(self) -> None:
+            self.polling = asyncio.Event()
+            self.release = asyncio.Event()
+            self.cleaned = asyncio.Event()
+            self.shutdown_calls = 0
+
+        async def run(self) -> None:
+            self.polling.set()
+            try:
+                await self.release.wait()
+                raise PrimaryRunError("primary polling failure")
+            finally:
+                self.cleaned.set()
+
+        async def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            self.release.set()
+            await asyncio.sleep(0)
+            raise RuntimeError("C:/private/CCO shutdown detail")
+
+    async def scenario() -> None:
+        fake_worker = FailingWorker()
+        metrics = _RecordingMetrics()
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        shutdown = asyncio.Event()
+        monkeypatch.setattr(
+            "src.task_runtime.temporal.worker.build_temporal_worker",
+            lambda *_args: fake_worker,
+        )
+        running = asyncio.create_task(
+            run_temporal_worker(
+                object(),
+                TemporalDockingActivities(
+                    store,
+                    _FakeDockingExecution(_success_result()),
+                ),
+                store,
+                WorkerSettings(
+                    task_queue="medchat-docking",
+                    namespace="default",
+                    graceful_shutdown_seconds=0.1,
+                ),
+                worker_id="worker-1",
+                sdk_version="1.30.0",
+                shutdown=shutdown,
+                metrics=metrics,
+            )
+        )
+        assert await asyncio.wait_for(fake_worker.polling.wait(), timeout=1.0)
+        shutdown.set()
+        with pytest.raises(PrimaryRunError, match="primary polling failure"):
+            await asyncio.wait_for(running, timeout=1.0)
+
+        assert fake_worker.shutdown_calls == 1
+        assert fake_worker.cleaned.is_set()
+        assert metrics.ready_transitions == [True, False]
+        assert not any(
+            not task.done()
+            and task is not asyncio.current_task()
+            and "run_temporal_worker" in repr(task.get_coro())
+            for task in asyncio.all_tasks()
+        )
+
+    with caplog.at_level("ERROR", logger="src.task_runtime.temporal.worker"):
+        asyncio.run(scenario())
+    assert "temporal_worker_shutdown_failed code=WORKER_SHUTDOWN_FAILED" in caplog.text
+    assert "private" not in caplog.text
+    assert "CCO" not in caplog.text
 
 
 def test_worker_heartbeat_log_does_not_disclose_store_exception(caplog):
