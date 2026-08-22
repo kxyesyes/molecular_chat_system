@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import importlib.util
 import ipaddress
 import json
@@ -13,7 +14,7 @@ import threading
 import time
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -570,6 +571,115 @@ def test_production_paths_reject_non_posix_activation() -> None:
     assert error.value.code == "E_RELAY_PATH"
 
 
+@pytest.mark.parametrize(
+    ("mode", "expected_type"),
+    [
+        (stat.S_IFDIR | 0o755, "directory"),
+        (stat.S_IFREG | 0o644, "file"),
+    ],
+)
+def test_production_metadata_rejects_non_root_owner_even_with_safe_mode(
+    mode: int,
+    expected_type: str,
+) -> None:
+    relay = load_relay()
+    metadata = SimpleNamespace(st_uid=1000, st_mode=mode)
+    with pytest.raises(relay.RelayConfigurationError) as error:
+        relay.require_root_owned(metadata, expected_type=expected_type)
+    assert error.value.code == "E_RELAY_PATH"
+
+
+def test_production_main_uses_descriptor_context_instead_of_path_reopen() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    production_branch = source.split("def main(", 1)[1]
+    assert "open_production_context(" in production_branch
+    assert "context.read_relay_env()" in production_branch
+    assert "context.read_worker_env()" in production_branch
+    assert "stage_generation_descriptor(" in production_branch
+    assert "activate_generation_descriptor(" in production_branch
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux descriptor bootstrap contract")
+def test_bootstrap_creates_only_final_generated_directory_descriptor_relatively(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    relay = load_relay()
+    parent = tmp_path / "generated"
+    parent.mkdir()
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    monkeypatch.setattr(relay, "require_root_owned", lambda *_args, **_kwargs: None)
+    try:
+        generated_fd = relay.bootstrap_generated_root(parent_fd, "temporal-metrics")
+        os.close(generated_fd)
+        assert (parent / "temporal-metrics").is_dir()
+        with pytest.raises(relay.RelayConfigurationError) as error:
+            relay.bootstrap_generated_root(parent_fd, "nested/escape")
+        assert error.value.code == "E_RELAY_PATH"
+    finally:
+        os.close(parent_fd)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux openat parent replacement contract")
+def test_descriptor_env_read_survives_parent_path_replacement(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    relay = load_relay()
+    original_parent = tmp_path / "medchat"
+    original_parent.mkdir()
+    write_env(original_parent / "temporal.env")
+    parent_fd = os.open(
+        original_parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    monkeypatch.setattr(relay, "require_root_owned", lambda *_args, **_kwargs: None)
+    try:
+        original_parent.rename(tmp_path / "detached-medchat")
+        replacement_parent = tmp_path / "medchat"
+        replacement_parent.mkdir()
+        write_env(
+            replacement_parent / "temporal.env",
+            {**DEFAULT_VALUES, "MEDCHAT_TEMPORAL_METRICS_RELAY_PORT": "9467"},
+        )
+        values = relay.read_env_at(parent_fd, "temporal.env")
+    finally:
+        os.close(parent_fd)
+    assert values["MEDCHAT_TEMPORAL_METRICS_RELAY_PORT"] == "9466"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux root ownership contract")
+def test_descriptor_directory_open_rejects_non_root_fstat(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    relay = load_relay()
+    child = tmp_path / "child"
+    child.mkdir()
+    parent_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    real_fstat = relay.os.fstat
+
+    class NonRootMetadata:
+        def __init__(self, wrapped) -> None:
+            self._wrapped = wrapped
+            self.st_uid = 1000
+
+        def __getattr__(self, name: str):
+            return getattr(self._wrapped, name)
+
+    monkeypatch.setattr(
+        relay.os,
+        "fstat",
+        lambda descriptor: NonRootMetadata(real_fstat(descriptor)),
+    )
+    try:
+        with pytest.raises(relay.RelayConfigurationError) as error:
+            relay._open_root_directory_at(parent_fd, "child")
+    finally:
+        os.close(parent_fd)
+    assert error.value.code == "E_RELAY_PATH"
+
+
 def test_trusted_path_rejects_parent_symlink(tmp_path: Path) -> None:
     relay = load_relay()
     trusted_root = tmp_path / "trusted"
@@ -685,6 +795,80 @@ def test_render_stages_versioned_generation_without_exposing_live_target(
     assert not (root / "live" / "file_sd" / "worker-targets.json").exists()
 
 
+@pytest.mark.parametrize(
+    "unexpected_name",
+    ["../escape", "/absolute", "file_sd/../escape", "extra.txt"],
+)
+def test_stage_rejects_non_allowlisted_generation_payloads(
+    tmp_path: Path,
+    unexpected_name: str,
+) -> None:
+    relay = load_relay()
+    generation = render_test_generation(relay, tmp_path / "generated")
+    files = dict(generation.files)
+    files[unexpected_name] = "unexpected"
+    malformed = relay.RenderedGeneration(generation.generation_id, files)
+    with pytest.raises(relay.RelayConfigurationError) as error:
+        relay.validate_rendered_generation(malformed)
+    assert error.value.code == "E_RELAY_MANIFEST"
+    assert not (tmp_path / "escape").exists()
+
+
+def test_activation_rejects_payload_and_hash_tampering_under_old_generation_id(
+    tmp_path: Path,
+) -> None:
+    relay = load_relay()
+    root = tmp_path / "generated"
+    generation = render_test_generation(relay, root)
+    relay.stage_generation(generation, root)
+    generation_root = root / "generations" / generation.generation_id
+    payload = generation_root / "nginx.conf"
+    tampered_content = payload.read_text("utf-8") + "# tampered\n"
+    payload.write_text(
+        tampered_content,
+        encoding="utf-8",
+        newline="\n",
+    )
+    manifest_path = generation_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text("utf-8"))
+    manifest["sha256"]["nginx.conf"] = hashlib.sha256(
+        tampered_content.encode("utf-8")
+    ).hexdigest()
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(relay.RelayConfigurationError) as error:
+        relay.activate_generation(
+            generated_root=root,
+            generation_id=generation.generation_id,
+            nginx_output=tmp_path / "relay.conf",
+            recheck_host_conflicts=lambda: None,
+            bridge_ready=lambda: True,
+            nginx_validate=lambda _path: True,
+            nginx_reload=lambda: True,
+        )
+    assert error.value.code == "E_RELAY_MANIFEST"
+
+
+@pytest.mark.parametrize("extra_location", ["manifest", "config", "sha256"])
+def test_generation_manifest_schema_rejects_all_extra_fields(
+    tmp_path: Path,
+    extra_location: str,
+) -> None:
+    relay = load_relay()
+    generation = render_test_generation(relay, tmp_path / "generated")
+    files = dict(generation.files)
+    manifest = json.loads(files["manifest.json"])
+    target = manifest if extra_location == "manifest" else manifest[extra_location]
+    target["unexpected"] = "value"
+    files["manifest.json"] = json.dumps(manifest, sort_keys=True)
+    malformed = relay.RenderedGeneration(generation.generation_id, files)
+    with pytest.raises(relay.RelayConfigurationError) as error:
+        relay.validate_rendered_generation(malformed)
+    assert error.value.code == "E_RELAY_MANIFEST"
+
+
 def test_activation_publishes_worker_target_last_and_records_active_generation(
     tmp_path: Path,
     monkeypatch,
@@ -750,7 +934,7 @@ def test_failed_reconfiguration_retains_old_live_generation(tmp_path: Path) -> N
             nginx_validate=lambda _path: True,
             nginx_reload=lambda: False,
         )
-    assert error.value.code == "E_RELAY_ACTIVATION"
+    assert error.value.code == "E_RELAY_ROLLBACK"
     assert (root / "live" / "file_sd" / "worker-targets.json").read_text(
         "utf-8"
     ) == old_target
@@ -758,6 +942,102 @@ def test_failed_reconfiguration_retains_old_live_generation(tmp_path: Path) -> N
     assert json.loads((root / "live" / "manifest.json").read_text("utf-8"))[
         "generation_id"
     ] == first.generation_id
+
+
+def test_reload_failure_after_apply_restores_and_reloads_old_nginx(
+    tmp_path: Path,
+) -> None:
+    relay = load_relay()
+    root = tmp_path / "generated"
+    nginx_output = tmp_path / "nginx" / "relay.conf"
+    first = render_test_generation(relay, root, 9466)
+    relay.stage_generation(first, root)
+    relay.activate_generation(
+        generated_root=root,
+        generation_id=first.generation_id,
+        nginx_output=nginx_output,
+        recheck_host_conflicts=lambda: None,
+        bridge_ready=lambda: True,
+        nginx_validate=lambda _path: True,
+        nginx_reload=lambda: True,
+    )
+    old_nginx = nginx_output.read_text("utf-8")
+    second = render_test_generation(relay, root, 9467)
+    relay.stage_generation(second, root)
+    reloads: list[str] = []
+
+    def reload_after_apply_failure() -> bool:
+        reloads.append("reload")
+        return len(reloads) > 1
+
+    with pytest.raises(relay.RelayConfigurationError) as error:
+        relay.activate_generation(
+            generated_root=root,
+            generation_id=second.generation_id,
+            nginx_output=nginx_output,
+            recheck_host_conflicts=lambda: None,
+            bridge_ready=lambda: True,
+            nginx_validate=lambda _path: True,
+            nginx_reload=reload_after_apply_failure,
+        )
+    assert error.value.code == "E_RELAY_ACTIVATION"
+    assert reloads == ["reload", "reload"]
+    assert nginx_output.read_text("utf-8") == old_nginx
+
+
+def test_target_publish_failure_restores_live_files_and_reloads_old_nginx(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    relay = load_relay()
+    root = tmp_path / "generated"
+    nginx_output = tmp_path / "nginx" / "relay.conf"
+    first = render_test_generation(relay, root, 9466)
+    relay.stage_generation(first, root)
+    relay.activate_generation(
+        generated_root=root,
+        generation_id=first.generation_id,
+        nginx_output=nginx_output,
+        recheck_host_conflicts=lambda: None,
+        bridge_ready=lambda: True,
+        nginx_validate=lambda _path: True,
+        nginx_reload=lambda: True,
+    )
+    live_paths = (
+        root / "live" / "compose.override.yml",
+        root / "live" / "manifest.json",
+        root / "live" / "file_sd" / "worker-targets.json",
+    )
+    old_live = {path: path.read_bytes() for path in live_paths}
+    old_nginx = nginx_output.read_bytes()
+    second = render_test_generation(relay, root, 9467)
+    relay.stage_generation(second, root)
+    real_write = relay.atomic_write
+    failed = False
+
+    def fail_target_once(path: Path, content: str, mode: int = 0o640) -> None:
+        nonlocal failed
+        if Path(path) == live_paths[-1] and not failed:
+            failed = True
+            raise OSError("target publish fault")
+        real_write(path, content, mode)
+
+    monkeypatch.setattr(relay, "atomic_write", fail_target_once)
+    reloads: list[str] = []
+    with pytest.raises(relay.RelayConfigurationError) as error:
+        relay.activate_generation(
+            generated_root=root,
+            generation_id=second.generation_id,
+            nginx_output=nginx_output,
+            recheck_host_conflicts=lambda: None,
+            bridge_ready=lambda: True,
+            nginx_validate=lambda _path: True,
+            nginx_reload=lambda: reloads.append("reload") or True,
+        )
+    assert error.value.code == "E_RELAY_WRITE"
+    assert reloads == ["reload", "reload"]
+    assert nginx_output.read_bytes() == old_nginx
+    assert {path: path.read_bytes() for path in live_paths} == old_live
 
 
 def test_generation_lock_serializes_concurrent_activation(tmp_path: Path) -> None:
@@ -845,6 +1125,95 @@ def test_cli_writes_one_coherent_group_and_never_echoes_unrelated_secret(
     assert "allow 172.30.95.2;" in nginx
     combined = result.stdout + result.stderr + json.dumps(override) + nginx
     assert "PRIVATE_RELAY_SECRET_CANARY" not in combined
+
+
+def test_cli_repeated_render_is_stable_on_current_platform(tmp_path: Path) -> None:
+    env_file = write_env(
+        tmp_path / "relay.env",
+        {
+            "COMPOSE_PROJECT_NAME": "medchat",
+            "TEMPORAL_NAMESPACE": "default",
+            **DEFAULT_VALUES,
+        },
+    )
+    output_dir = tmp_path / "generated"
+    nginx_output = tmp_path / "nginx" / "relay.conf"
+    first = run_cli(env_file, output_dir, nginx_output)
+    second = run_cli(env_file, output_dir, nginx_output)
+    assert first.returncode == second.returncode == 0
+    assert first.stderr == second.stderr == ""
+    assert first.stdout == second.stdout
+    generation_id = first.stdout.split("generation=", 1)[1].strip()
+    manifest = output_dir / "generations" / generation_id / "manifest.json"
+    assert json.loads(manifest.read_text("utf-8"))["generation_id"] == generation_id
+
+
+def test_generation_retention_keeps_active_and_newest_four_valid_ids(
+    tmp_path: Path,
+) -> None:
+    relay = load_relay()
+    root = tmp_path / "generated"
+    nginx_output = tmp_path / "nginx" / "relay.conf"
+    generations = [render_test_generation(relay, root, 9466 + index) for index in range(7)]
+    relay.stage_generation(generations[0], root)
+    relay.activate_generation(
+        generated_root=root,
+        generation_id=generations[0].generation_id,
+        nginx_output=nginx_output,
+        recheck_host_conflicts=lambda: None,
+        bridge_ready=lambda: True,
+        nginx_validate=lambda _path: True,
+        nginx_reload=lambda: True,
+    )
+    for generation in generations[1:]:
+        time.sleep(0.01)
+        relay.stage_generation(generation, root)
+    retained = {
+        path.name
+        for path in (root / "generations").iterdir()
+        if path.is_dir()
+    }
+    assert retained == {
+        generations[0].generation_id,
+        *(generation.generation_id for generation in generations[-4:]),
+    }
+
+
+def test_generation_retention_ignores_invalid_names_and_symlinks(
+    tmp_path: Path,
+) -> None:
+    relay = load_relay()
+    root = tmp_path / "generated"
+    generations_dir = root / "generations"
+    generations_dir.mkdir(parents=True)
+    invalid = generations_dir / "operator-notes"
+    invalid.mkdir()
+    external = tmp_path / "external-generation"
+    external.mkdir()
+    linked = generations_dir / ("a" * 24)
+    try:
+        linked.symlink_to(external, target_is_directory=True)
+    except OSError as error:
+        if os.name == "nt" and (
+            error.errno in {errno.EPERM, errno.EACCES}
+            or getattr(error, "winerror", None) == 1314
+        ):
+            pytest.skip("Windows symlink privilege unavailable")
+        raise
+    generation = render_test_generation(relay, root, 9466)
+    relay.stage_generation(generation, root)
+    relay.prune_generations(root, pending_generation_id=generation.generation_id)
+    assert invalid.is_dir()
+    assert linked.is_symlink()
+    assert external.is_dir()
+
+
+def test_env_example_documents_root_owned_final_directory_bootstrap() -> None:
+    content = (ROOT / "deployment" / "temporal" / "env.example").read_text("utf-8")
+    normalized = " ".join(line.lstrip("# ") for line in content.splitlines())
+    assert "/etc/medchat/generated" in content
+    assert "root-owned" in content
+    assert "only the final temporal-metrics directory" in normalized
 
 
 def test_atomic_write_failure_preserves_prior_file(tmp_path: Path, monkeypatch) -> None:

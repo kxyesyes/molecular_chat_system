@@ -50,6 +50,23 @@ PRODUCTION_NGINX_OUTPUT = Path(
 )
 PRODUCTION_NGINX_COMMAND = Path("/usr/sbin/nginx")
 GENERATION_ID = re.compile(r"[0-9a-f]{24}\Z")
+SAFE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+PAYLOAD_NAMES = (
+    "compose.override.yml",
+    "file_sd/worker-targets.json",
+    "nginx.conf",
+)
+GENERATION_FILE_NAMES = frozenset((*PAYLOAD_NAMES, "manifest.json"))
+MANIFEST_KEYS = frozenset(("config", "generation_id", "schema_version", "sha256"))
+CONFIG_SUMMARY_KEYS = frozenset((
+    "compose_project",
+    "gateway",
+    "namespace",
+    "port",
+    "prometheus_address",
+    "subnet",
+    "taskqueue",
+))
 _LOCKS_GUARD = threading.Lock()
 _GENERATION_LOCKS: dict[str, threading.Lock] = {}
 
@@ -295,12 +312,7 @@ def render_generation(
         "subnet": str(config.subnet),
         "taskqueue": taskqueue,
     }
-    identity = json.dumps(
-        {"config": summary, "sha256": hashes},
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    generation_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+    generation_id = compute_generation_id(summary, hashes)
     manifest = {
         "config": summary,
         "generation_id": generation_id,
@@ -316,6 +328,93 @@ def render_generation(
     )
 
 
+def compute_generation_id(
+    config: Mapping[str, object],
+    hashes: Mapping[str, str],
+) -> str:
+    identity = json.dumps(
+        {"config": dict(config), "sha256": dict(hashes)},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+
+
+def _validate_config_summary(summary: object) -> dict[str, object]:
+    if not isinstance(summary, dict) or set(summary) != CONFIG_SUMMARY_KEYS:
+        raise RelayConfigurationError("E_RELAY_MANIFEST")
+    clean = dict(summary)
+    if (
+        not isinstance(clean["compose_project"], str)
+        or not PROJECT_NAME.fullmatch(clean["compose_project"])
+        or clean["namespace"] != "default"
+        or clean["taskqueue"] != "medchat-docking"
+        or not isinstance(clean["port"], int)
+        or isinstance(clean["port"], bool)
+        or not 1024 <= clean["port"] <= 65535
+    ):
+        raise RelayConfigurationError("E_RELAY_MANIFEST")
+    try:
+        subnet = ipaddress.ip_network(clean["subnet"], strict=True)
+        gateway = ipaddress.ip_address(clean["gateway"])
+        prometheus = ipaddress.ip_address(clean["prometheus_address"])
+    except (TypeError, ValueError):
+        raise RelayConfigurationError("E_RELAY_MANIFEST") from None
+    if (
+        not isinstance(subnet, ipaddress.IPv4Network)
+        or not isinstance(gateway, ipaddress.IPv4Address)
+        or not isinstance(prometheus, ipaddress.IPv4Address)
+        or gateway not in subnet
+        or prometheus not in subnet
+        or gateway == prometheus
+    ):
+        raise RelayConfigurationError("E_RELAY_MANIFEST")
+    return clean
+
+
+def _validate_generation_files(
+    generation_id: str,
+    files: Mapping[str, str],
+) -> dict[str, object]:
+    if (
+        not GENERATION_ID.fullmatch(generation_id)
+        or not isinstance(files, Mapping)
+        or set(files) != GENERATION_FILE_NAMES
+        or any(not isinstance(value, str) for value in files.values())
+    ):
+        raise RelayConfigurationError("E_RELAY_MANIFEST")
+    try:
+        manifest = json.loads(files["manifest.json"])
+    except (TypeError, json.JSONDecodeError):
+        raise RelayConfigurationError("E_RELAY_MANIFEST") from None
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != MANIFEST_KEYS
+        or manifest["schema_version"] != 1
+        or manifest["generation_id"] != generation_id
+        or not isinstance(manifest["sha256"], dict)
+        or set(manifest["sha256"]) != set(PAYLOAD_NAMES)
+    ):
+        raise RelayConfigurationError("E_RELAY_MANIFEST")
+    summary = _validate_config_summary(manifest["config"])
+    actual_hashes: dict[str, str] = {}
+    for name in PAYLOAD_NAMES:
+        expected = manifest["sha256"].get(name)
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise RelayConfigurationError("E_RELAY_MANIFEST")
+        actual = hashlib.sha256(files[name].encode("utf-8")).hexdigest()
+        if actual != expected:
+            raise RelayConfigurationError("E_RELAY_MANIFEST")
+        actual_hashes[name] = actual
+    if compute_generation_id(summary, actual_hashes) != generation_id:
+        raise RelayConfigurationError("E_RELAY_MANIFEST")
+    return manifest
+
+
+def validate_rendered_generation(generation: RenderedGeneration) -> None:
+    _validate_generation_files(generation.generation_id, generation.files)
+
+
 def _is_reparse_point(metadata: os.stat_result) -> bool:
     attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
     return bool(getattr(metadata, "st_file_attributes", 0) & attribute)
@@ -323,6 +422,228 @@ def _is_reparse_point(metadata: os.stat_result) -> bool:
 
 def _path_error() -> RelayConfigurationError:
     return RelayConfigurationError("E_RELAY_PATH")
+
+
+def require_root_owned(
+    metadata: os.stat_result,
+    *,
+    expected_type: str,
+) -> None:
+    """Fail closed unless a production object is root-owned and immutable to peers."""
+    if getattr(metadata, "st_uid", None) != 0:
+        raise _path_error()
+    if stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise _path_error()
+    if expected_type == "directory":
+        valid_type = stat.S_ISDIR(metadata.st_mode)
+    elif expected_type == "file":
+        valid_type = stat.S_ISREG(metadata.st_mode)
+    else:
+        raise _path_error()
+    if not valid_type or _is_reparse_point(metadata):
+        raise _path_error()
+
+
+def _safe_component(name: str) -> str:
+    if not isinstance(name, str) or not SAFE_COMPONENT.fullmatch(name):
+        raise _path_error()
+    if name in {".", ".."}:
+        raise _path_error()
+    return name
+
+
+def _open_root_directory_at(parent_fd: int, name: str) -> int:
+    component = _safe_component(name)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        descriptor = os.open(component, flags, dir_fd=parent_fd)
+    except OSError:
+        raise _path_error() from None
+    try:
+        require_root_owned(os.fstat(descriptor), expected_type="directory")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def bootstrap_generated_root(parent_fd: int, name: str) -> int:
+    """Create only the final production directory beneath an already trusted fd."""
+    component = _safe_component(name)
+    try:
+        return _open_root_directory_at(parent_fd, component)
+    except RelayConfigurationError:
+        try:
+            os.mkdir(component, 0o750, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except FileExistsError:
+            pass
+        except OSError:
+            raise _path_error() from None
+    return _open_root_directory_at(parent_fd, component)
+
+
+def _open_or_create_root_directory_at(parent_fd: int, name: str, mode: int) -> int:
+    component = _safe_component(name)
+    try:
+        return _open_root_directory_at(parent_fd, component)
+    except RelayConfigurationError:
+        try:
+            os.mkdir(component, mode, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except FileExistsError:
+            pass
+        except OSError:
+            raise RelayConfigurationError("E_RELAY_WRITE") from None
+    return _open_root_directory_at(parent_fd, component)
+
+
+def _read_regular_at(
+    parent_fd: int,
+    name: str,
+    *,
+    max_bytes: int = MAX_INSPECTION_BYTES,
+) -> str:
+    component = _safe_component(name)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(component, flags, dir_fd=parent_fd)
+        metadata = os.fstat(descriptor)
+        require_root_owned(metadata, expected_type="file")
+        if metadata.st_size > max_bytes:
+            raise RelayConfigurationError("E_RELAY_MANIFEST")
+        data = os.read(descriptor, max_bytes + 1)
+        after = os.fstat(descriptor)
+        if (
+            len(data) > max_bytes
+            or _metadata_snapshot(after) != _metadata_snapshot(metadata)
+        ):
+            raise RelayConfigurationError("E_RELAY_MANIFEST")
+        return data.decode("utf-8")
+    except RelayConfigurationError:
+        raise
+    except (OSError, UnicodeError):
+        raise RelayConfigurationError("E_RELAY_MANIFEST") from None
+    finally:
+        if "descriptor" in locals():
+            os.close(descriptor)
+
+
+def _atomic_write_at(parent_fd: int, name: str, content: str, mode: int) -> None:
+    component = _safe_component(name)
+    temporary_name = f".{component}.{secrets.token_hex(12)}.tmp"
+    temporary_exists = False
+    replaced = False
+    try:
+        try:
+            existing = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            require_root_owned(existing, expected_type="file")
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        descriptor = os.open(temporary_name, flags, mode, dir_fd=parent_fd)
+        temporary_exists = True
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.fchmod(stream.fileno(), mode)
+            require_root_owned(os.fstat(stream.fileno()), expected_type="file")
+        os.replace(
+            temporary_name,
+            component,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+        temporary_exists = False
+        replaced = True
+        os.fsync(parent_fd)
+        require_root_owned(
+            os.stat(component, dir_fd=parent_fd, follow_symlinks=False),
+            expected_type="file",
+        )
+    except RelayConfigurationError as error:
+        if replaced:
+            raise AtomicWriteError(True) from error
+        raise
+    except OSError as error:
+        raise AtomicWriteError(replaced) from error
+    finally:
+        if temporary_exists:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+
+
+def _snapshot_regular_at(parent_fd: int, name: str) -> tuple[bool, str, int]:
+    try:
+        metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False, "", 0o640
+    require_root_owned(metadata, expected_type="file")
+    return True, _read_regular_at(parent_fd, name), stat.S_IMODE(metadata.st_mode)
+
+
+def _restore_regular_at(
+    parent_fd: int,
+    name: str,
+    previous: tuple[bool, str, int],
+) -> None:
+    existed, content, mode = previous
+    if existed:
+        _atomic_write_at(parent_fd, name, content, mode)
+    else:
+        try:
+            os.unlink(name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        os.fsync(parent_fd)
+
+
+def _atomic_write_group_at(
+    outputs: Sequence[tuple[int, str, str, int]],
+) -> None:
+    identities = [
+        (os.fstat(parent_fd).st_dev, os.fstat(parent_fd).st_ino, name)
+        for parent_fd, name, _, _ in outputs
+    ]
+    if len(identities) != len(set(identities)):
+        raise RelayConfigurationError("E_RELAY_WRITE")
+    previous = {
+        identity: _snapshot_regular_at(parent_fd, name)
+        for identity, (parent_fd, name, _, _) in zip(identities, outputs)
+    }
+    committed: list[tuple[int, str, tuple[int, int, str]]] = []
+    try:
+        for identity, (parent_fd, name, content, mode) in zip(identities, outputs):
+            try:
+                _atomic_write_at(parent_fd, name, content, mode)
+            except AtomicWriteError as error:
+                if error.replaced:
+                    committed.append((parent_fd, name, identity))
+                raise
+            else:
+                committed.append((parent_fd, name, identity))
+    except (OSError, RelayConfigurationError) as original:
+        try:
+            for parent_fd, name, identity in reversed(committed):
+                _restore_regular_at(parent_fd, name, previous[identity])
+        except (OSError, RelayConfigurationError):
+            raise RelayConfigurationError("E_RELAY_ROLLBACK") from original
+        raise
 
 
 def validate_trusted_path(
@@ -380,27 +701,8 @@ def validate_production_paths(
     )
     if any(Path(actual) != required for actual, required in expected):
         raise _path_error()
-    validate_trusted_path(
-        env_file,
-        Path("/etc/medchat"),
-        enforce_permissions=True,
-    )
-    validate_trusted_path(
-        worker_env_file,
-        Path("/etc/medchat"),
-        enforce_permissions=True,
-    )
-    validate_trusted_path(
-        generated_root,
-        Path("/etc/medchat"),
-        enforce_permissions=True,
-    )
-    validate_trusted_path(
-        nginx_output,
-        Path("/etc/nginx/conf.d"),
-        allow_missing_leaf=True,
-        enforce_permissions=True,
-    )
+    # Production traversal is intentionally deferred to open_production_context:
+    # it keeps every trusted parent open and never reopens these full paths.
 
 
 def parse_env_text(text: str) -> dict[str, str]:
@@ -418,14 +720,171 @@ def parse_env_text(text: str) -> dict[str, str]:
     return values
 
 
-def _metadata_snapshot(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
-    return (
+def _metadata_snapshot(
+    metadata: os.stat_result,
+    *,
+    platform: str | None = None,
+) -> tuple[int, ...]:
+    stable = (
         metadata.st_dev,
         metadata.st_ino,
         metadata.st_size,
         metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
     )
+    if (os.name if platform is None else platform) == "nt":
+        return stable
+    return (*stable, metadata.st_ctime_ns)
+
+
+def _read_open_env_descriptor(descriptor: int, *, production: bool) -> dict[str, str]:
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse_point(opened)
+            or opened.st_size > MAX_ENV_BYTES
+        ):
+            raise RelayConfigurationError("E_RELAY_ENV")
+        if production:
+            require_root_owned(opened, expected_type="file")
+        data = os.read(descriptor, MAX_ENV_BYTES + 1)
+        if len(data) > MAX_ENV_BYTES or b"\0" in data:
+            raise RelayConfigurationError("E_RELAY_ENV")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise RelayConfigurationError("E_RELAY_ENV") from None
+        values = parse_env_text(text)
+        after = os.fstat(descriptor)
+        if _metadata_snapshot(after) != _metadata_snapshot(opened):
+            raise RelayConfigurationError("E_RELAY_ENV")
+        if production:
+            require_root_owned(after, expected_type="file")
+        return values
+    except RelayConfigurationError:
+        raise
+    except OSError:
+        raise RelayConfigurationError("E_RELAY_ENV") from None
+
+
+def read_env_at(parent_fd: int, name: str) -> dict[str, str]:
+    component = _safe_component(name)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(component, flags, dir_fd=parent_fd)
+    except OSError:
+        raise RelayConfigurationError("E_RELAY_ENV") from None
+    try:
+        return _read_open_env_descriptor(descriptor, production=True)
+    finally:
+        os.close(descriptor)
+
+
+@dataclass
+class ProductionContext:
+    medchat_fd: int
+    generated_fd: int
+    nginx_parent_fd: int
+    nginx_binary_fd: int
+    _owned_fds: tuple[int, ...]
+
+    def read_relay_env(self) -> dict[str, str]:
+        return read_env_at(self.medchat_fd, PRODUCTION_RELAY_ENV.name)
+
+    def read_worker_env(self) -> dict[str, str]:
+        return read_env_at(self.medchat_fd, PRODUCTION_WORKER_ENV.name)
+
+    def close(self) -> None:
+        for descriptor in reversed(self._owned_fds):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+@contextmanager
+def open_production_context(arguments: argparse.Namespace):
+    validate_production_paths(
+        env_file=arguments.env_file,
+        worker_env_file=arguments.worker_env_file,
+        generated_root=arguments.output_dir,
+        nginx_output=arguments.nginx_output,
+    )
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        raise _path_error()
+    if arguments.nginx_command != PRODUCTION_NGINX_COMMAND:
+        raise _path_error()
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    opened: list[int] = []
+    context: ProductionContext | None = None
+    try:
+        root_fd = os.open("/", flags)
+        opened.append(root_fd)
+        require_root_owned(os.fstat(root_fd), expected_type="directory")
+
+        etc_fd = _open_root_directory_at(root_fd, "etc")
+        opened.append(etc_fd)
+        medchat_fd = _open_root_directory_at(etc_fd, "medchat")
+        opened.append(medchat_fd)
+        generated_parent_fd = _open_root_directory_at(medchat_fd, "generated")
+        opened.append(generated_parent_fd)
+        generated_fd = bootstrap_generated_root(
+            generated_parent_fd, PRODUCTION_GENERATED_ROOT.name
+        )
+        opened.append(generated_fd)
+
+        nginx_fd = _open_root_directory_at(etc_fd, "nginx")
+        opened.append(nginx_fd)
+        nginx_parent_fd = _open_root_directory_at(nginx_fd, "conf.d")
+        opened.append(nginx_parent_fd)
+
+        usr_fd = _open_root_directory_at(root_fd, "usr")
+        opened.append(usr_fd)
+        sbin_fd = _open_root_directory_at(usr_fd, "sbin")
+        opened.append(sbin_fd)
+        binary_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        nginx_binary_fd = os.open("nginx", binary_flags, dir_fd=sbin_fd)
+        opened.append(nginx_binary_fd)
+        binary_metadata = os.fstat(nginx_binary_fd)
+        require_root_owned(binary_metadata, expected_type="file")
+        if not binary_metadata.st_mode & 0o111:
+            raise _path_error()
+
+        context = ProductionContext(
+            medchat_fd=medchat_fd,
+            generated_fd=generated_fd,
+            nginx_parent_fd=nginx_parent_fd,
+            nginx_binary_fd=nginx_binary_fd,
+            _owned_fds=tuple(opened),
+        )
+        yield context
+    except RelayConfigurationError:
+        raise
+    except OSError:
+        raise _path_error() from None
+    finally:
+        if context is not None:
+            context.close()
+        else:
+            for descriptor in reversed(opened):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
 
 
 def _read_env_file(path: Path) -> dict[str, str]:
@@ -915,12 +1374,196 @@ def generation_lock(generated_root: str | Path):
                 os.close(root_descriptor)
 
 
+@contextmanager
+def generation_lock_descriptor(root_fd: int):
+    metadata = os.fstat(root_fd)
+    require_root_owned(metadata, expected_type="directory")
+    key = f"fd:{metadata.st_dev}:{metadata.st_ino}"
+    with _LOCKS_GUARD:
+        thread_lock = _GENERATION_LOCKS.setdefault(key, threading.Lock())
+    with thread_lock:
+        flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            descriptor = os.open("relay.lock", flags, 0o600, dir_fd=root_fd)
+            os.fchmod(descriptor, 0o600)
+            require_root_owned(os.fstat(descriptor), expected_type="file")
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        except (OSError, RelayConfigurationError):
+            if "descriptor" in locals():
+                os.close(descriptor)
+            raise _path_error() from None
+        try:
+            yield
+        finally:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+
+def _read_verified_generation_at(root_fd: int, generation_id: str) -> dict[str, str]:
+    if not GENERATION_ID.fullmatch(generation_id):
+        raise RelayConfigurationError("E_RELAY_MANIFEST")
+    descriptors: list[int] = []
+    try:
+        generations_fd = _open_root_directory_at(root_fd, "generations")
+        descriptors.append(generations_fd)
+        generation_fd = _open_root_directory_at(generations_fd, generation_id)
+        descriptors.append(generation_fd)
+        file_sd_fd = _open_root_directory_at(generation_fd, "file_sd")
+        descriptors.append(file_sd_fd)
+        if set(os.listdir(generation_fd)) != {
+            "compose.override.yml", "file_sd", "manifest.json", "nginx.conf"
+        } or set(os.listdir(file_sd_fd)) != {"worker-targets.json"}:
+            raise RelayConfigurationError("E_RELAY_MANIFEST")
+        files = {
+            "compose.override.yml": _read_regular_at(generation_fd, "compose.override.yml"),
+            "file_sd/worker-targets.json": _read_regular_at(file_sd_fd, "worker-targets.json"),
+            "nginx.conf": _read_regular_at(generation_fd, "nginx.conf"),
+            "manifest.json": _read_regular_at(generation_fd, "manifest.json"),
+        }
+        _validate_generation_files(generation_id, files)
+        return files
+    except RelayConfigurationError as error:
+        if error.code == "E_RELAY_PATH":
+            raise RelayConfigurationError("E_RELAY_MANIFEST") from None
+        raise
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _active_generation_id_at(root_fd: int) -> str | None:
+    descriptors: list[int] = []
+    try:
+        live_fd = _open_root_directory_at(root_fd, "live")
+        descriptors.append(live_fd)
+        manifest = json.loads(_read_regular_at(live_fd, "manifest.json"))
+        generation_id = manifest.get("generation_id")
+    except (RelayConfigurationError, json.JSONDecodeError, AttributeError):
+        return None
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+    return generation_id if isinstance(generation_id, str) and GENERATION_ID.fullmatch(generation_id) else None
+
+
+def _remove_valid_generation_at(generations_fd: int, generation_id: str) -> None:
+    descriptors: list[int] = []
+    try:
+        generation_fd = _open_root_directory_at(generations_fd, generation_id)
+        descriptors.append(generation_fd)
+        file_sd_fd = _open_root_directory_at(generation_fd, "file_sd")
+        descriptors.append(file_sd_fd)
+        os.unlink("worker-targets.json", dir_fd=file_sd_fd)
+        os.close(file_sd_fd)
+        descriptors.pop()
+        os.rmdir("file_sd", dir_fd=generation_fd)
+        for name in ("compose.override.yml", "nginx.conf", "manifest.json"):
+            os.unlink(name, dir_fd=generation_fd)
+        os.close(generation_fd)
+        descriptors.pop()
+        os.rmdir(generation_id, dir_fd=generations_fd)
+        os.fsync(generations_fd)
+    except (OSError, RelayConfigurationError):
+        # Exact-shape deletion only; unexpected files or races are retained.
+        return
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _prune_generations_descriptor_locked(root_fd: int, pending_generation_id: str) -> None:
+    if not GENERATION_ID.fullmatch(pending_generation_id):
+        raise RelayConfigurationError("E_RELAY_MANIFEST")
+    try:
+        generations_fd = _open_root_directory_at(root_fd, "generations")
+    except RelayConfigurationError:
+        return
+    try:
+        valid: list[tuple[int, str]] = []
+        for name in os.listdir(generations_fd):
+            if not GENERATION_ID.fullmatch(name):
+                continue
+            try:
+                generation_fd = _open_root_directory_at(generations_fd, name)
+                try:
+                    modified = os.fstat(generation_fd).st_mtime_ns
+                finally:
+                    os.close(generation_fd)
+                _read_verified_generation_at(root_fd, name)
+            except RelayConfigurationError:
+                continue
+            valid.append((modified, name))
+        active = _active_generation_id_at(root_fd)
+        protected = {active} if active is not None else set()
+        candidates = sorted(
+            valid,
+            key=lambda item: (item[1] == pending_generation_id, item[0], item[1]),
+            reverse=True,
+        )
+        for _, generation_id in candidates:
+            if generation_id not in protected and len(protected) < (5 if active else 4):
+                protected.add(generation_id)
+        protected.add(pending_generation_id)
+        for _, generation_id in valid:
+            if generation_id not in protected:
+                _remove_valid_generation_at(generations_fd, generation_id)
+    finally:
+        os.close(generations_fd)
+
+
+def stage_generation_descriptor(
+    generation: RenderedGeneration,
+    generated_root_fd: int,
+) -> None:
+    validate_rendered_generation(generation)
+    with generation_lock_descriptor(generated_root_fd):
+        descriptors: list[int] = []
+        try:
+            generations_fd = _open_or_create_root_directory_at(
+                generated_root_fd, "generations", 0o750
+            )
+            descriptors.append(generations_fd)
+            generation_fd = _open_or_create_root_directory_at(
+                generations_fd, generation.generation_id, 0o750
+            )
+            descriptors.append(generation_fd)
+            generation_file_sd_fd = _open_or_create_root_directory_at(
+                generation_fd, "file_sd", 0o750
+            )
+            descriptors.append(generation_file_sd_fd)
+            live_fd = _open_or_create_root_directory_at(generated_root_fd, "live", 0o750)
+            descriptors.append(live_fd)
+            live_file_sd_fd = _open_or_create_root_directory_at(live_fd, "file_sd", 0o755)
+            descriptors.append(live_file_sd_fd)
+            _atomic_write_group_at([
+                (generation_fd, "compose.override.yml", generation.files["compose.override.yml"], 0o640),
+                (generation_file_sd_fd, "worker-targets.json", generation.files["file_sd/worker-targets.json"], 0o644),
+                (generation_fd, "nginx.conf", generation.files["nginx.conf"], 0o640),
+                (generation_fd, "manifest.json", generation.files["manifest.json"], 0o640),
+            ])
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+        _prune_generations_descriptor_locked(generated_root_fd, generation.generation_id)
+
+
 def stage_generation(
     generation: RenderedGeneration,
     generated_root: str | Path,
 ) -> Path:
-    if not GENERATION_ID.fullmatch(generation.generation_id):
-        raise RelayConfigurationError("E_RELAY_MANIFEST")
+    validate_rendered_generation(generation)
     root = Path(generated_root)
     with generation_lock(root):
         generation_root = root / "generations" / generation.generation_id
@@ -935,6 +1578,7 @@ def stage_generation(
             for name, content in generation.files.items()
         ]
         atomic_write_group(outputs)
+        _prune_generations_locked(root, generation.generation_id)
     return generation_root
 
 
@@ -943,30 +1587,131 @@ def _read_verified_generation(root: Path, generation_id: str) -> dict[str, str]:
         raise RelayConfigurationError("E_RELAY_MANIFEST")
     generation_root = root / "generations" / generation_id
     try:
-        manifest_text = (generation_root / "manifest.json").read_text("utf-8")
-        manifest = json.loads(manifest_text)
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        generation_metadata = generation_root.lstat()
+        file_sd_metadata = (generation_root / "file_sd").lstat()
+        root_entries = {entry.name for entry in os.scandir(generation_root)}
+        file_sd_entries = {
+            entry.name for entry in os.scandir(generation_root / "file_sd")
+        }
+    except OSError:
         raise RelayConfigurationError("E_RELAY_MANIFEST") from None
     if (
-        not isinstance(manifest, dict)
-        or manifest.get("schema_version") != 1
-        or manifest.get("generation_id") != generation_id
-        or not isinstance(manifest.get("sha256"), dict)
+        not stat.S_ISDIR(generation_metadata.st_mode)
+        or stat.S_ISLNK(generation_metadata.st_mode)
+        or _is_reparse_point(generation_metadata)
+        or not stat.S_ISDIR(file_sd_metadata.st_mode)
+        or stat.S_ISLNK(file_sd_metadata.st_mode)
+        or _is_reparse_point(file_sd_metadata)
+        or root_entries != {"compose.override.yml", "file_sd", "manifest.json", "nginx.conf"}
+        or file_sd_entries != {"worker-targets.json"}
     ):
         raise RelayConfigurationError("E_RELAY_MANIFEST")
-    files: dict[str, str] = {"manifest.json": manifest_text}
-    for name in ("compose.override.yml", "file_sd/worker-targets.json", "nginx.conf"):
-        expected = manifest["sha256"].get(name)
-        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
-            raise RelayConfigurationError("E_RELAY_MANIFEST")
+
+    def read_regular(path: Path) -> str:
         try:
-            content = (generation_root / name).read_text("utf-8")
+            metadata = path.lstat()
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or _is_reparse_point(metadata)
+            ):
+                raise RelayConfigurationError("E_RELAY_MANIFEST")
+            return path.read_text("utf-8")
+        except RelayConfigurationError:
+            raise
         except (OSError, UnicodeError):
             raise RelayConfigurationError("E_RELAY_MANIFEST") from None
-        if hashlib.sha256(content.encode("utf-8")).hexdigest() != expected:
-            raise RelayConfigurationError("E_RELAY_MANIFEST")
-        files[name] = content
+
+    try:
+        manifest_text = read_regular(generation_root / "manifest.json")
+        manifest = json.loads(manifest_text)
+    except json.JSONDecodeError:
+        raise RelayConfigurationError("E_RELAY_MANIFEST") from None
+    files: dict[str, str] = {"manifest.json": manifest_text}
+    for name in PAYLOAD_NAMES:
+        files[name] = read_regular(generation_root / name)
+    _validate_generation_files(generation_id, files)
     return files
+
+
+def _active_generation_id(root: Path) -> str | None:
+    try:
+        manifest_path = root / "live" / "manifest.json"
+        metadata = manifest_path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or _is_reparse_point(metadata)
+        ):
+            return None
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        generation_id = manifest.get("generation_id")
+    except (OSError, UnicodeError, json.JSONDecodeError, AttributeError):
+        return None
+    return generation_id if isinstance(generation_id, str) and GENERATION_ID.fullmatch(generation_id) else None
+
+
+def _remove_valid_generation(root: Path, generation_id: str) -> None:
+    if not GENERATION_ID.fullmatch(generation_id):
+        return
+    generation_root = root / "generations" / generation_id
+    try:
+        for name in ("compose.override.yml", "nginx.conf", "manifest.json"):
+            (generation_root / name).unlink()
+        (generation_root / "file_sd" / "worker-targets.json").unlink()
+        (generation_root / "file_sd").rmdir()
+        generation_root.rmdir()
+        _fsync_parent_directory(root / "generations")
+    except OSError:
+        # Retention is conservative: unexpected content or races leave the
+        # generation in place instead of broadening deletion behavior.
+        return
+
+
+def _prune_generations_locked(root: Path, pending_generation_id: str) -> None:
+    if not GENERATION_ID.fullmatch(pending_generation_id):
+        raise RelayConfigurationError("E_RELAY_MANIFEST")
+    generations_root = root / "generations"
+    valid: list[tuple[int, str]] = []
+    try:
+        entries = list(os.scandir(generations_root))
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise RelayConfigurationError("E_RELAY_WRITE") from None
+    for entry in entries:
+        if not GENERATION_ID.fullmatch(entry.name) or not entry.is_dir(follow_symlinks=False):
+            continue
+        try:
+            _read_verified_generation(root, entry.name)
+            modified = entry.stat(follow_symlinks=False).st_mtime_ns
+        except (OSError, RelayConfigurationError):
+            continue
+        valid.append((modified, entry.name))
+    active = _active_generation_id(root)
+    protected = {active} if active is not None else set()
+    candidates = sorted(
+        valid,
+        key=lambda item: (item[1] == pending_generation_id, item[0], item[1]),
+        reverse=True,
+    )
+    for _, generation_id in candidates:
+        if generation_id not in protected and len(protected) < (5 if active else 4):
+            protected.add(generation_id)
+    protected.add(pending_generation_id)
+    for _, generation_id in valid:
+        if generation_id not in protected:
+            _remove_valid_generation(root, generation_id)
+
+
+def prune_generations(
+    generated_root: str | Path,
+    *,
+    pending_generation_id: str,
+) -> None:
+    root = Path(generated_root)
+    with generation_lock(root):
+        _prune_generations_locked(root, pending_generation_id)
 
 
 def _restore_file(path: Path, previous: tuple[bool, str, int]) -> None:
@@ -1023,14 +1768,14 @@ def activate_generation(
             )
         else:
             old_nginx = (False, "", 0o640)
-        reloaded = False
+        reload_attempted = False
         try:
             atomic_write(nginx_path, files["nginx.conf"], 0o640)
             if not nginx_validate(nginx_path):
                 raise RelayConfigurationError("E_RELAY_ACTIVATION")
+            reload_attempted = True
             if not nginx_reload():
                 raise RelayConfigurationError("E_RELAY_ACTIVATION")
-            reloaded = True
             atomic_write_group([
                 (root / "live" / "compose.override.yml", files["compose.override.yml"], 0o640),
                 (root / "live" / "manifest.json", files["manifest.json"], 0o640),
@@ -1040,17 +1785,87 @@ def activate_generation(
                     0o644,
                 ),
             ])
-        except (OSError, RelayConfigurationError) as original:
+        except Exception as original:
             try:
                 _restore_file(nginx_path, old_nginx)
-                if reloaded:
+                if reload_attempted:
                     if not nginx_validate(nginx_path) or not nginx_reload():
                         raise OSError("nginx rollback failed")
-            except (OSError, UnicodeError):
+            except Exception:
                 raise RelayConfigurationError("E_RELAY_ROLLBACK") from original
             if isinstance(original, RelayConfigurationError):
                 raise original
             raise RelayConfigurationError("E_RELAY_WRITE") from None
+
+
+def activate_generation_descriptor(
+    *,
+    generated_root_fd: int,
+    generation_id: str,
+    nginx_parent_fd: int,
+    recheck_host_conflicts,
+    bridge_ready,
+    nginx_validate,
+    nginx_reload,
+    expected_config: Mapping[str, object] | None = None,
+) -> None:
+    nginx_name = PRODUCTION_NGINX_OUTPUT.name
+    with generation_lock_descriptor(generated_root_fd):
+        files = _read_verified_generation_at(generated_root_fd, generation_id)
+        if expected_config is not None:
+            try:
+                manifest_config = json.loads(files["manifest.json"])["config"]
+            except (json.JSONDecodeError, KeyError, TypeError):
+                raise RelayConfigurationError("E_RELAY_MANIFEST") from None
+            if manifest_config != dict(expected_config):
+                raise RelayConfigurationError("E_RELAY_RUNTIME_MISMATCH")
+        try:
+            recheck_host_conflicts()
+        except RelayConfigurationError:
+            raise
+        except Exception:
+            raise RelayConfigurationError("E_RELAY_INSPECTION") from None
+        try:
+            if not bridge_ready():
+                raise RelayConfigurationError("E_RELAY_ACTIVATION")
+        except RelayConfigurationError:
+            raise
+        except Exception:
+            raise RelayConfigurationError("E_RELAY_ACTIVATION") from None
+
+        old_nginx = _snapshot_regular_at(nginx_parent_fd, nginx_name)
+        reload_attempted = False
+        live_descriptors: list[int] = []
+        try:
+            _atomic_write_at(nginx_parent_fd, nginx_name, files["nginx.conf"], 0o640)
+            if not nginx_validate(PRODUCTION_NGINX_OUTPUT):
+                raise RelayConfigurationError("E_RELAY_ACTIVATION")
+            reload_attempted = True
+            if not nginx_reload():
+                raise RelayConfigurationError("E_RELAY_ACTIVATION")
+            live_fd = _open_or_create_root_directory_at(generated_root_fd, "live", 0o750)
+            live_descriptors.append(live_fd)
+            file_sd_fd = _open_or_create_root_directory_at(live_fd, "file_sd", 0o755)
+            live_descriptors.append(file_sd_fd)
+            _atomic_write_group_at([
+                (live_fd, "compose.override.yml", files["compose.override.yml"], 0o640),
+                (live_fd, "manifest.json", files["manifest.json"], 0o640),
+                (file_sd_fd, "worker-targets.json", files["file_sd/worker-targets.json"], 0o644),
+            ])
+        except Exception as original:
+            try:
+                _restore_regular_at(nginx_parent_fd, nginx_name, old_nginx)
+                if reload_attempted:
+                    if not nginx_validate(PRODUCTION_NGINX_OUTPUT) or not nginx_reload():
+                        raise OSError("nginx rollback failed")
+            except Exception:
+                raise RelayConfigurationError("E_RELAY_ROLLBACK") from original
+            if isinstance(original, RelayConfigurationError):
+                raise original
+            raise RelayConfigurationError("E_RELAY_WRITE") from None
+        finally:
+            for descriptor in reversed(live_descriptors):
+                os.close(descriptor)
 
 
 def _config_summary(
@@ -1086,7 +1901,8 @@ def _validate_nginx_command(path: Path) -> Path:
         metadata = trusted.stat()
     except OSError:
         raise _path_error() from None
-    if not stat.S_ISREG(metadata.st_mode) or not metadata.st_mode & 0o111:
+    require_root_owned(metadata, expected_type="file")
+    if not metadata.st_mode & 0o111:
         raise _path_error()
     return trusted
 
@@ -1114,7 +1930,13 @@ def _read_relay_template() -> str:
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Configure Temporal worker metrics relay")
+    parser = argparse.ArgumentParser(
+        description="Configure Temporal worker metrics relay",
+        epilog=(
+            "Production requires root, existing root-owned trusted parents, and "
+            "creates only /etc/medchat/generated/temporal-metrics as the final directory."
+        ),
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--render", action="store_true")
     mode.add_argument("--activate", metavar="GENERATION_ID")
@@ -1135,30 +1957,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not arguments.render:
                 raise _path_error()
             _validate_offline_paths(arguments)
-        else:
-            validate_production_paths(
-                env_file=arguments.env_file,
-                worker_env_file=arguments.worker_env_file,
-                generated_root=arguments.output_dir,
-                nginx_output=arguments.nginx_output,
-            )
-        if arguments.skip_host_conflicts and arguments.offline_root is None:
-            raise _path_error()
-        values = _read_env_file(arguments.env_file)
-        worker_values = _read_env_file(arguments.worker_env_file)
-        config = parse_relay_config(values)
-        namespace, taskqueue = validate_runtime_contract(values, worker_values)
-        compose_project = _expected_project(values)
-        if arguments.render and not arguments.skip_host_conflicts:
-            conflicts = find_conflicts(
-                config,
-                _inspect_routes(),
-                _inspect_docker_networks(),
-                compose_project,
-            )
-            if conflicts:
-                raise RelayConfigurationError("E_RELAY_CONFLICT")
-        if arguments.render:
+            values = _read_env_file(arguments.env_file)
+            worker_values = _read_env_file(arguments.worker_env_file)
+            config = parse_relay_config(values)
+            namespace, taskqueue = validate_runtime_contract(values, worker_values)
+            compose_project = _expected_project(values)
+            if not arguments.skip_host_conflicts:
+                conflicts = find_conflicts(
+                    config,
+                    _inspect_routes(),
+                    _inspect_docker_networks(),
+                    compose_project,
+                )
+                if conflicts:
+                    raise RelayConfigurationError("E_RELAY_CONFLICT")
             generation = render_generation(
                 config=config,
                 compose_project=compose_project,
@@ -1170,61 +1982,87 @@ def main(argv: Sequence[str] | None = None) -> int:
             stage_generation(generation, arguments.output_dir)
             print(f"OK E_RELAY_RENDERED generation={generation.generation_id}")
             return 0
-        if arguments.nginx_command is None:
+        if arguments.skip_host_conflicts:
             raise _path_error()
-        nginx_command = _validate_nginx_command(arguments.nginx_command)
-        inspected_networks: list[DockerNetwork] = []
+        with open_production_context(arguments) as context:
+            values = context.read_relay_env()
+            worker_values = context.read_worker_env()
+            config = parse_relay_config(values)
+            namespace, taskqueue = validate_runtime_contract(values, worker_values)
+            compose_project = _expected_project(values)
+            if arguments.render:
+                conflicts = find_conflicts(
+                    config,
+                    _inspect_routes(),
+                    _inspect_docker_networks(),
+                    compose_project,
+                )
+                if conflicts:
+                    raise RelayConfigurationError("E_RELAY_CONFLICT")
+                generation = render_generation(
+                    config=config,
+                    compose_project=compose_project,
+                    generated_root=arguments.output_dir,
+                    namespace=namespace,
+                    taskqueue=taskqueue,
+                    nginx_template=_read_relay_template(),
+                )
+                stage_generation_descriptor(generation, context.generated_fd)
+                print(f"OK E_RELAY_RENDERED generation={generation.generation_id}")
+                return 0
 
-        def recheck() -> None:
-            fresh_values = _read_env_file(arguments.env_file)
-            fresh_worker_values = _read_env_file(arguments.worker_env_file)
-            fresh_namespace, fresh_taskqueue = validate_runtime_contract(
-                fresh_values, fresh_worker_values
-            )
-            fresh_config = parse_relay_config(fresh_values)
-            if (
-                fresh_config != config
-                or fresh_namespace != namespace
-                or fresh_taskqueue != taskqueue
-                or _expected_project(fresh_values) != compose_project
-            ):
-                raise RelayConfigurationError("E_RELAY_RUNTIME_MISMATCH")
-            networks = _inspect_docker_networks()
-            conflicts = find_conflicts(
-                config,
-                _inspect_routes(),
-                networks,
-                compose_project,
-            )
-            if conflicts:
-                raise RelayConfigurationError("E_RELAY_CONFLICT")
-            inspected_networks[:] = networks
+            inspected_networks: list[DockerNetwork] = []
 
-        def bridge_ready() -> bool:
-            return any(
-                network.subnet == config.subnet
-                and _is_expected_network(network, compose_project)
-                for network in inspected_networks
-            )
+            def recheck() -> None:
+                fresh_values = context.read_relay_env()
+                fresh_worker_values = context.read_worker_env()
+                fresh_namespace, fresh_taskqueue = validate_runtime_contract(
+                    fresh_values, fresh_worker_values
+                )
+                fresh_config = parse_relay_config(fresh_values)
+                if (
+                    fresh_config != config
+                    or fresh_namespace != namespace
+                    or fresh_taskqueue != taskqueue
+                    or _expected_project(fresh_values) != compose_project
+                ):
+                    raise RelayConfigurationError("E_RELAY_RUNTIME_MISMATCH")
+                networks = _inspect_docker_networks()
+                conflicts = find_conflicts(
+                    config,
+                    _inspect_routes(),
+                    networks,
+                    compose_project,
+                )
+                if conflicts:
+                    raise RelayConfigurationError("E_RELAY_CONFLICT")
+                inspected_networks[:] = networks
 
-        activate_generation(
-            generated_root=arguments.output_dir,
-            generation_id=arguments.activate,
-            nginx_output=arguments.nginx_output,
-            recheck_host_conflicts=recheck,
-            bridge_ready=bridge_ready,
-            nginx_validate=lambda _path: _command_succeeds(
-                (str(nginx_command), "-t")
-            ),
-            nginx_reload=lambda: _command_succeeds(
-                (str(nginx_command), "-s", "reload")
-            ),
-            expected_config=_config_summary(
-                config, compose_project, namespace, taskqueue
-            ),
-        )
-        print(f"OK E_RELAY_ACTIVATED generation={arguments.activate}")
-        return 0
+            def bridge_ready() -> bool:
+                return any(
+                    network.subnet == config.subnet
+                    and _is_expected_network(network, compose_project)
+                    for network in inspected_networks
+                )
+
+            activate_generation_descriptor(
+                generated_root_fd=context.generated_fd,
+                generation_id=arguments.activate,
+                nginx_parent_fd=context.nginx_parent_fd,
+                recheck_host_conflicts=recheck,
+                bridge_ready=bridge_ready,
+                nginx_validate=lambda _path: _command_succeeds(
+                    (str(PRODUCTION_NGINX_COMMAND), "-t")
+                ),
+                nginx_reload=lambda: _command_succeeds(
+                    (str(PRODUCTION_NGINX_COMMAND), "-s", "reload")
+                ),
+                expected_config=_config_summary(
+                    config, compose_project, namespace, taskqueue
+                ),
+            )
+            print(f"OK E_RELAY_ACTIVATED generation={arguments.activate}")
+            return 0
     except RelayConfigurationError as error:
         print(f"ERROR {error.code}", file=sys.stderr)
         return 1
