@@ -61,6 +61,77 @@ def run(
     )
 
 
+def replace_secret_file(
+    path: Path,
+    value: str,
+    *,
+    platform_name: str | None = None,
+) -> None:
+    host_platform = os.name if platform_name is None else platform_name
+    replacement = path.parent / f".{path.name}.new"
+    if host_platform == "nt":
+        for candidate in (path, replacement):
+            if candidate.exists():
+                candidate.chmod(stat.S_IREAD | stat.S_IWRITE)
+    replacement.write_text(value, encoding="utf-8", newline="")
+    if host_platform == "posix":
+        replacement.chmod(0o444)
+    os.replace(replacement, path)
+    if host_platform == "posix":
+        path.chmod(0o444)
+
+
+def test_replace_secret_file_windows_keeps_target_replaceable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "secret"
+    target.write_text("old", encoding="utf-8", newline="")
+    simulated_modes = {target: 0o444}
+    chmod_calls: list[tuple[Path, int]] = []
+    real_replace = os.replace
+
+    def record_chmod(path: Path, mode: int) -> None:
+        chmod_calls.append((path, mode))
+        simulated_modes[path] = mode
+
+    def windows_replace(source: str | Path, destination: str | Path) -> None:
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if simulated_modes.get(destination_path) == 0o444:
+            raise PermissionError("simulated Windows read-only target")
+        real_replace(source_path, destination_path)
+        simulated_modes[destination_path] = simulated_modes.pop(source_path, 0o666)
+
+    monkeypatch.setattr(Path, "chmod", record_chmod)
+    monkeypatch.setattr(os, "replace", windows_replace)
+
+    replace_secret_file(target, "first", platform_name="nt")
+    replace_secret_file(target, "second", platform_name="nt")
+
+    assert target.read_text(encoding="utf-8") == "second"
+    assert all(mode != 0o444 for _, mode in chmod_calls)
+    assert simulated_modes[target] != 0o444
+
+
+def test_replace_secret_file_posix_applies_read_only_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "secret"
+    chmod_calls: list[tuple[Path, int]] = []
+
+    def record_chmod(path: Path, mode: int) -> None:
+        chmod_calls.append((path, mode))
+
+    monkeypatch.setattr(Path, "chmod", record_chmod)
+    replace_secret_file(target, "value", platform_name="posix")
+
+    replacement = tmp_path / ".secret.new"
+    assert (replacement, 0o444) in chmod_calls
+    assert chmod_calls[-1] == (target, 0o444)
+
+
 def wait_for_health(
     base: list[str],
     service: str,
@@ -139,16 +210,9 @@ def test_exporter_role_audit_health_and_supported_rotation(
     exporter_secret = secret_directory / "exporter-password"
     grafana_secret = secret_directory / "grafana-password"
 
-    def replace_secret(path: Path, value: str) -> None:
-        replacement = secret_directory / f".{path.name}.new"
-        replacement.write_text(value, encoding="utf-8", newline="")
-        replacement.chmod(0o444)
-        os.replace(replacement, path)
-        path.chmod(0o444)
-
-    replace_secret(postgres_secret, postgres_password)
-    replace_secret(exporter_secret, exporter_password)
-    replace_secret(grafana_secret, secrets.token_urlsafe(24))
+    replace_secret_file(postgres_secret, postgres_password)
+    replace_secret_file(exporter_secret, exporter_password)
+    replace_secret_file(grafana_secret, secrets.token_urlsafe(24))
     if os.name == "posix":
         assert stat.S_IMODE(secret_directory.stat().st_mode) == 0o700
         assert secret_directory.stat().st_uid == os.geteuid()
@@ -254,7 +318,7 @@ def test_exporter_role_audit_health_and_supported_rotation(
         first_oid = scalar(
             "postgres", "SELECT oid FROM pg_roles WHERE rolname = 'temporal_exporter'"
         )
-        replace_secret(exporter_secret, secrets.token_urlsafe(24))
+        replace_secret_file(exporter_secret, secrets.token_urlsafe(24))
         assert role_sync().returncode == 0
         second_oid = scalar(
             "postgres", "SELECT oid FROM pg_roles WHERE rolname = 'temporal_exporter'"
@@ -322,7 +386,7 @@ def test_exporter_role_audit_health_and_supported_rotation(
             base, "postgres-exporter", "healthy", environment=environment, timeout=120
         )
 
-        replace_secret(exporter_secret, secrets.token_urlsafe(24))
+        replace_secret_file(exporter_secret, secrets.token_urlsafe(24))
         assert compose(
             "up", "-d", "--no-deps", "--force-recreate", "postgres-exporter",
             timeout=180,
@@ -332,8 +396,8 @@ def test_exporter_role_audit_health_and_supported_rotation(
         )
 
         mismatch_secret = secret_directory / "exporter-password-mismatch"
-        replace_secret(mismatch_secret, secrets.token_urlsafe(24))
-        replace_secret(exporter_secret, secrets.token_urlsafe(24))
+        replace_secret_file(mismatch_secret, secrets.token_urlsafe(24))
+        replace_secret_file(exporter_secret, secrets.token_urlsafe(24))
         wrapper_directory = tmp_path / "docker-wrapper"
         wrapper_directory.mkdir()
         docker_wrapper = wrapper_directory / "docker"
@@ -375,7 +439,7 @@ exec "$REAL_DOCKER" "$@"
         assert timed_out_rotation.stdout == ""
         assert timed_out_rotation.stderr == "ERROR E_EXPORTER_HEALTH\n"
 
-        replace_secret(exporter_secret, secrets.token_urlsafe(24))
+        replace_secret_file(exporter_secret, secrets.token_urlsafe(24))
         rotation = run(
             [shutil.which("sh") or "/bin/sh", str(ROTATE_SCRIPT)],
             environment=environment,
