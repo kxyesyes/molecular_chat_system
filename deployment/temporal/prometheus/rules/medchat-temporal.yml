@@ -94,12 +94,14 @@ groups:
           or up{job="temporal-server"} != 1
           or absent(up{job="temporal-postgres"})
           or up{job="temporal-postgres"} != 1
+          or absent(pg_up{job="temporal-postgres"})
+          or pg_up{job="temporal-postgres"} != 1
         labels:
           severity: critical
           release_blocker: "true"
         annotations:
           summary: Temporal or PostgreSQL metrics are unavailable
-          description: The Temporal server or PostgreSQL exporter scrape is missing or unhealthy.
+          description: The Temporal server scrape, PostgreSQL exporter scrape, or database connection is missing or unhealthy.
 
       - alert: TemporalBackupVerificationStale
         expr: |

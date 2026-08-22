@@ -72,8 +72,8 @@ NETWORKS = {
     "temporal-exporter-role-sync": {"database"},
     "postgres-exporter": {"database", "postgres-metrics"},
     "temporal-ui": {"temporal"},
-    "prometheus": {"temporal-metrics", "postgres-metrics", "grafana-prometheus"},
-    "grafana": {"grafana-prometheus"},
+    "prometheus": {"temporal-metrics", "postgres-metrics", "prometheus-grafana"},
+    "grafana": {"prometheus-grafana"},
 }
 MOUNTS = {
     "postgres": ["temporal-postgres-data:/var/lib/postgresql/data"],
@@ -334,7 +334,7 @@ def test_named_networks_segment_database_temporal_and_monitoring() -> None:
         "temporal": None,
         "temporal-metrics": None,
         "postgres-metrics": None,
-        "grafana-prometheus": None,
+        "prometheus-grafana": None,
     }
     assert all("name" not in (configuration or {})
                for configuration in compose["networks"].values())
@@ -980,11 +980,11 @@ def test_compose_exposes_metrics_only_over_segmented_monitoring_networks() -> No
     assert set(services["prometheus"]["networks"]) == {
         "temporal-metrics",
         "postgres-metrics",
-        "grafana-prometheus",
+        "prometheus-grafana",
     }
-    assert set(services["grafana"]["networks"]) == {"grafana-prometheus"}
+    assert set(services["grafana"]["networks"]) == {"prometheus-grafana"}
     assert "temporal-metrics" in services["temporal"]["networks"]
-    assert "grafana-prometheus" not in services["temporal"]["networks"]
+    assert "prometheus-grafana" not in services["temporal"]["networks"]
     assert "monitoring" not in compose["networks"]
     assert all("name" not in (value or {}) for value in compose["networks"].values())
 
@@ -1081,6 +1081,8 @@ def test_alert_promql_uses_pinned_temporal_and_task5_metrics_correctly() -> None
     for job in ("temporal-server", "temporal-postgres"):
         assert f'absent(up{{job="{job}"}})' in unavailable
         assert f'up{{job="{job}"}}!=1' in unavailable
+    assert 'absent(pg_up{job="temporal-postgres"})' in unavailable
+    assert 'pg_up{job="temporal-postgres"}!=1' in unavailable
 
     backup = _compact_promql(alerts["TemporalBackupVerificationStale"]["expr"])
     backup_metric = "medchat_temporal_backup_verified_timestamp_seconds"
