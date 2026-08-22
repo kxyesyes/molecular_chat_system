@@ -889,6 +889,10 @@ def test_env_example_has_only_empty_file_secret_keys() -> None:
     assert values["MEDCHAT_TEMPORAL_METRICS_RELAY_GATEWAY"] == "172.30.95.1"
     assert values["MEDCHAT_TEMPORAL_PROMETHEUS_SCRAPE_ADDRESS"] == "172.30.95.2"
     assert values["MEDCHAT_TEMPORAL_METRICS_RELAY_PORT"] == "9466"
+    env_text = ENV_EXAMPLE.read_text(encoding="utf-8")
+    assert "E_RELAY_RUNTIME_MISMATCH" in env_text
+    assert "MEDCHAT_TEMPORAL_NAMESPACE=default" in env_text
+    assert "MEDCHAT_TEMPORAL_DOCKING_QUEUE=medchat-docking" in env_text
     guidance = ENV_EXAMPLE.read_text(encoding="utf-8").lower()
     assert "never commit real" in guidance
     for contract in (
@@ -1028,7 +1032,7 @@ def _alert_rules() -> dict[str, dict[str, Any]]:
     rules = load_yaml(PROMETHEUS_RULES)
     assert isinstance(rules.get("groups"), list) and rules["groups"]
     flattened = [rule for group in rules["groups"] for rule in group["rules"]]
-    assert len(flattened) == 10
+    assert len(flattened) == 11
     return {rule["alert"]: rule for rule in flattened}
 
 
@@ -1046,6 +1050,7 @@ def test_release_blocking_alerts_have_exact_names_safe_metadata_and_durations() 
         "TemporalMultipleTerminalEvents": None,
         "TemporalArtifactValidationFailure": None,
         "TemporalDockingP95TooHigh": "10m",
+        "TemporalDockingP95BaselineMissing": None,
         "TemporalRuntimeFailureRateHigh": "10m",
         "TemporalPostgresUnavailable": "60s",
         "TemporalBackupVerificationStale": "15m",
@@ -1074,6 +1079,12 @@ def test_alert_promql_uses_pinned_temporal_and_task5_metrics_correctly() -> None
     heartbeat_metric = "medchat_temporal_worker_last_heartbeat_timestamp_seconds"
     assert f"time()-{heartbeat_metric}>60" in heartbeat
     assert f"absent({heartbeat_metric})" in heartbeat
+
+    baseline_missing = _compact_promql(
+        alerts["TemporalDockingP95BaselineMissing"]["expr"]
+    )
+    assert "absent(medchat_temporal_baseline_p95_seconds)" in baseline_missing
+    assert "max(medchat_temporal_baseline_p95_seconds)<=0" in baseline_missing
 
     # Temporal v1.29.7 source evidence:
     # https://github.com/temporalio/temporal/blob/v1.29.7/common/metrics/metric_defs.go
@@ -1295,12 +1306,11 @@ def test_monitoring_assets_parse_without_embedded_credentials_or_host_paths() ->
 
 def test_promtool_fixture_covers_scopes_windows_and_availability_grace() -> None:
     fixture = load_yaml(PROMETHEUS_RULE_TEST)
-    assert fixture["rule_files"] == [
-        "deployment/temporal/prometheus/rules/medchat-temporal.yml"
-    ]
+    assert fixture["rule_files"] == ["../rules/medchat-temporal.yml"]
     names = {case["name"] for case in fixture["tests"]}
     assert names == {
         "labeled baseline p95 fires",
+        "missing baseline blocks release",
         "scoped docking queue grows",
         "unrelated queue does not fire",
         "low frequency start error persists",
@@ -1318,6 +1328,24 @@ def test_promtool_fixture_covers_scopes_windows_and_availability_grace() -> None
     assert 'alertname: TemporalPostgresUnavailable' in serialized
 
 
+def test_promtool_executes_temporal_rule_fixture_when_available() -> None:
+    promtool = shutil.which("promtool")
+    if promtool is None:
+        pytest.skip("promtool command unavailable")
+    result = subprocess.run(
+        [promtool, "test", "rules", str(PROMETHEUS_RULE_TEST)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        "promtool test rules returned nonzero:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+
 def test_metrics_relay_integration_is_explicit_safe_and_test_labeled() -> None:
     integration = INTEGRATION_TEST.read_text(encoding="utf-8")
     assert 'MEDCHAT_RUN_TEMPORAL_DEPLOYMENT_INTEGRATION' in integration
@@ -1329,3 +1357,13 @@ def test_metrics_relay_integration_is_explicit_safe_and_test_labeled() -> None:
     assert "non-Prometheus relay access was not denied" in integration
     assert "localhost relay unexpectedly reachable" in integration
     assert "cleanup refused unlabeled" in integration
+    assert "cleanup inspect failed" in integration
+    assert "compose.override.yml" in integration
+    assert "for relay_port in (9466, 9467)" in integration
+    assert "activate_generation(" in integration
+    assert "com.docker.compose.project" in integration
+    assert "com.docker.compose.network" in integration
+    assert "errno.EADDRINUSE" in integration
+    assert "loopback worker metrics port unavailable" not in integration
+    assert "network_exists = docker_run" in integration
+    assert "container_exists = docker_run" in integration

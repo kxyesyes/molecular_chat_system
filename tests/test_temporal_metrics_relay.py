@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import errno
 import importlib.util
 import ipaddress
 import json
 import os
+import re
+import stat
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -45,22 +49,66 @@ def write_env(path: Path, values: dict[str, str] | None = None) -> Path:
     return path
 
 
+def write_worker_env(
+    path: Path,
+    *,
+    namespace: str = "default",
+    taskqueue: str = "medchat-docking",
+) -> Path:
+    path.write_text(
+        "\n".join((
+            f"MEDCHAT_TEMPORAL_NAMESPACE={namespace}",
+            f"MEDCHAT_TEMPORAL_DOCKING_QUEUE={taskqueue}",
+        )) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    return path
+
+
+def render_args(root: Path, *, skip_conflicts: bool = False) -> list[str]:
+    arguments = [
+        "--render",
+        "--env-file", str(write_env(root / "temporal.env", {
+            "COMPOSE_PROJECT_NAME": "medchat",
+            "TEMPORAL_NAMESPACE": "default",
+            **DEFAULT_VALUES,
+        })),
+        "--worker-env-file", str(write_worker_env(root / "medchat.env")),
+        "--output-dir", str(root / "generated"),
+        "--nginx-output", str(root / "nginx" / "relay.conf"),
+        "--offline-root", str(root),
+    ]
+    if skip_conflicts:
+        arguments.append("--skip-host-conflicts")
+    return arguments
+
+
 def run_cli(
     env_file: Path,
     output_dir: Path,
     nginx_output: Path,
     *extra: str,
 ) -> subprocess.CompletedProcess[str]:
+    worker_env = env_file.parent / "medchat-worker.env"
+    if not worker_env.exists():
+        write_worker_env(worker_env)
     return subprocess.run(
         [
             sys.executable,
             str(SCRIPT),
+            "--render",
             "--env-file",
             str(env_file),
+            "--worker-env-file",
+            str(worker_env),
             "--output-dir",
             str(output_dir),
             "--nginx-output",
             str(nginx_output),
+            "--offline-root",
+            str(env_file.parent),
+            "--skip-host-conflicts",
             *extra,
         ],
         cwd=ROOT,
@@ -122,6 +170,64 @@ def test_pure_renderers_keep_compose_target_and_nginx_coherent() -> None:
     assert "${" not in nginx
 
 
+def test_compose_mounts_complete_file_sd_directory_read_only() -> None:
+    relay = load_relay()
+    yaml = pytest.importorskip("yaml")
+    config = relay.parse_relay_config(DEFAULT_VALUES)
+    file_sd_directory = "/etc/medchat/generated/temporal-metrics/live/file_sd"
+    override = yaml.safe_load(
+        relay.render_compose_override(config, file_sd_directory)
+    )
+    mount = override["services"]["prometheus"]["volumes"][0]
+    assert mount["source"] == file_sd_directory
+    assert mount["target"] == "/etc/prometheus/file_sd"
+    assert mount["read_only"] is True
+
+
+def test_compose_renderer_default_mounts_stable_live_file_sd_directory() -> None:
+    relay = load_relay()
+    yaml = pytest.importorskip("yaml")
+    config = relay.parse_relay_config(DEFAULT_VALUES)
+    override = yaml.safe_load(relay.render_compose_override(config))
+    mount = override["services"]["prometheus"]["volumes"][0]
+    assert mount["source"] == (
+        "/etc/medchat/generated/temporal-metrics/live/file_sd"
+    )
+    assert mount["target"] == "/etc/prometheus/file_sd"
+
+
+def test_cli_assigns_world_readable_mode_only_to_worker_targets(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    relay = load_relay()
+    captured: list[tuple[Path, str, int]] = []
+    monkeypatch.setattr(relay, "atomic_write_group", lambda outputs: captured.extend(outputs))
+    assert relay.main(render_args(tmp_path, skip_conflicts=True)) == 0
+    modes = {Path(path).name: mode for path, _content, mode in captured}
+    assert modes["worker-targets.json"] == 0o644
+    assert modes["compose.override.yml"] == 0o640
+    assert modes["nginx.conf"] == 0o640
+    assert modes["manifest.json"] == 0o640
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission contract")
+def test_worker_targets_posix_mode_is_container_readable(tmp_path: Path) -> None:
+    relay = load_relay()
+    target = tmp_path / "worker-targets.json"
+    relay.atomic_write(target, "[]\n", 0o644)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def test_production_writer_uses_nofollow_directory_fd_operations() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "O_DIRECTORY" in source
+    assert "O_NOFOLLOW" in source
+    assert "dir_fd=" in source
+    assert "src_dir_fd=" in source
+    assert "dst_dir_fd=" in source
+
+
 @pytest.mark.parametrize(
     "values",
     [
@@ -147,6 +253,98 @@ def test_invalid_relay_groups_fail_closed(values: dict[str, str]) -> None:
     with pytest.raises(relay.RelayConfigurationError) as error:
         relay.parse_relay_config(values)
     assert error.value.code == "E_RELAY_CONFIGURATION"
+
+
+@pytest.mark.parametrize(
+    ("compose_namespace", "worker_namespace", "worker_queue"),
+    [
+        ("other", "default", "medchat-docking"),
+        ("default", "other", "medchat-docking"),
+        ("default", "default", "other-queue"),
+    ],
+)
+def test_runtime_monitoring_contract_fails_closed_on_selector_mismatch(
+    compose_namespace: str,
+    worker_namespace: str,
+    worker_queue: str,
+) -> None:
+    relay = load_relay()
+    with pytest.raises(relay.RelayConfigurationError) as error:
+        relay.validate_runtime_contract(
+            {"TEMPORAL_NAMESPACE": compose_namespace},
+            {
+                "MEDCHAT_TEMPORAL_NAMESPACE": worker_namespace,
+                "MEDCHAT_TEMPORAL_DOCKING_QUEUE": worker_queue,
+            },
+        )
+    assert error.value.code == "E_RELAY_RUNTIME_MISMATCH"
+
+
+def test_runtime_monitoring_contract_requires_explicit_matching_values() -> None:
+    relay = load_relay()
+    with pytest.raises(relay.RelayConfigurationError) as error:
+        relay.validate_runtime_contract({}, {})
+    assert error.value.code == "E_RELAY_RUNTIME_MISMATCH"
+    assert relay.validate_runtime_contract(
+        {"TEMPORAL_NAMESPACE": "default"},
+        {
+            "MEDCHAT_TEMPORAL_NAMESPACE": "default",
+            "MEDCHAT_TEMPORAL_DOCKING_QUEUE": "medchat-docking",
+        },
+    ) == ("default", "medchat-docking")
+
+
+def test_render_checks_host_conflicts_by_default(tmp_path: Path, monkeypatch) -> None:
+    relay = load_relay()
+
+    def fail_inspection() -> list[object]:
+        raise relay.RelayConfigurationError("E_RELAY_INSPECTION")
+
+    monkeypatch.setattr(relay, "_inspect_routes", fail_inspection)
+    assert relay.main(render_args(tmp_path)) == 1
+    assert not (tmp_path / "generated" / "generations").exists()
+
+
+def test_skip_host_conflicts_is_offline_render_only(tmp_path: Path) -> None:
+    relay = load_relay()
+    assert relay.main(render_args(tmp_path, skip_conflicts=True)) == 0
+    production_like = render_args(tmp_path, skip_conflicts=True)
+    offline_index = production_like.index("--offline-root")
+    del production_like[offline_index:offline_index + 2]
+    assert relay.main(production_like) == 1
+
+
+def test_cli_reports_path_template_and_write_errors_separately(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    relay = load_relay()
+    escaped = render_args(tmp_path, skip_conflicts=True)
+    nginx_index = escaped.index("--nginx-output") + 1
+    escaped[nginx_index] = str(tmp_path.parent / "escaped-nginx.conf")
+    assert relay.main(escaped) == 1
+    assert capsys.readouterr().err == "ERROR E_RELAY_PATH\n"
+
+    def template_failure() -> str:
+        raise relay.RelayConfigurationError("E_RELAY_TEMPLATE")
+
+    monkeypatch.setattr(relay, "_read_relay_template", template_failure)
+    assert relay.main(render_args(tmp_path, skip_conflicts=True)) == 1
+    assert capsys.readouterr().err == "ERROR E_RELAY_TEMPLATE\n"
+
+    monkeypatch.setattr(
+        relay,
+        "_read_relay_template",
+        lambda: TEMPLATE.read_text(encoding="utf-8"),
+    )
+    monkeypatch.setattr(
+        relay,
+        "stage_generation",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("PRIVATE_WRITE")),
+    )
+    assert relay.main(render_args(tmp_path, skip_conflicts=True)) == 1
+    assert capsys.readouterr().err == "ERROR E_RELAY_WRITE\n"
 
 
 def test_route_and_foreign_docker_overlaps_are_rejected() -> None:
@@ -344,12 +542,268 @@ def test_cli_rejects_symlink_env_without_disclosing_target(tmp_path: Path) -> No
     try:
         link.symlink_to(target)
     except OSError as exc:
-        pytest.skip(f"symlink creation unavailable: {type(exc).__name__}")
+        if os.name == "nt" and (
+            exc.errno in {errno.EPERM, errno.EACCES}
+            or getattr(exc, "winerror", None) == 1314
+        ):
+            pytest.skip("Windows symlink privilege unavailable")
+        raise
     result = run_cli(link, tmp_path / "generated", tmp_path / "relay.conf")
     assert result.returncode == 1
     assert result.stdout == ""
     assert result.stderr == "ERROR E_RELAY_ENV\n"
     assert "PRIVATE_ENV_TARGET" not in result.stderr
+
+
+def test_production_paths_reject_non_posix_activation() -> None:
+    relay = load_relay()
+    with pytest.raises(relay.RelayConfigurationError) as error:
+        relay.validate_production_paths(
+            env_file=Path("/etc/medchat/temporal.env"),
+            worker_env_file=Path("/etc/medchat/medchat.env"),
+            generated_root=Path("/etc/medchat/generated/temporal-metrics"),
+            nginx_output=Path(
+                "/etc/nginx/conf.d/medchat-temporal-worker-metrics.conf"
+            ),
+            platform="nt",
+        )
+    assert error.value.code == "E_RELAY_PATH"
+
+
+def test_trusted_path_rejects_parent_symlink(tmp_path: Path) -> None:
+    relay = load_relay()
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    linked_parent = trusted_root / "linked"
+    try:
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+    except OSError as error:
+        if os.name == "nt" and (
+            error.errno in {errno.EPERM, errno.EACCES}
+            or getattr(error, "winerror", None) == 1314
+        ):
+            pytest.skip("Windows symlink privilege unavailable")
+        raise
+    with pytest.raises(relay.RelayConfigurationError) as error:
+        relay.validate_trusted_path(
+            linked_parent / "worker-targets.json",
+            trusted_root,
+            allow_missing_leaf=True,
+        )
+    assert error.value.code == "E_RELAY_PATH"
+
+
+def test_env_read_rejects_concurrent_in_place_modification(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    relay = load_relay()
+    env_file = write_env(tmp_path / "relay.env")
+    original_parse = relay.parse_env_text
+
+    def modify_during_parse(text: str) -> dict[str, str]:
+        values = original_parse(text)
+        env_file.write_text(text + "# changed concurrently\n", encoding="utf-8")
+        return values
+
+    monkeypatch.setattr(relay, "parse_env_text", modify_during_parse)
+    with pytest.raises(relay.RelayConfigurationError) as error:
+        relay._read_env_file(env_file)
+    assert error.value.code == "E_RELAY_ENV"
+
+
+def test_env_read_rejects_replacement_between_lstat_and_nofollow_open(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    relay = load_relay()
+    env_file = write_env(tmp_path / "relay.env")
+    replacement = write_env(
+        tmp_path / "replacement.env",
+        {**DEFAULT_VALUES, "MEDCHAT_TEMPORAL_METRICS_RELAY_PORT": "9467"},
+    )
+    real_open = relay.os.open
+    replaced = False
+
+    def replace_then_open(path: object, flags: int, *args, **kwargs):
+        nonlocal replaced
+        if not replaced and Path(path) == env_file:
+            replaced = True
+            os.replace(replacement, env_file)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(relay.os, "open", replace_then_open)
+    with pytest.raises(relay.RelayConfigurationError) as error:
+        relay._read_env_file(env_file)
+    assert error.value.code == "E_RELAY_ENV"
+
+
+def render_test_generation(relay: ModuleType, root: Path, port: int = 9466):
+    config = relay.parse_relay_config({
+        **DEFAULT_VALUES,
+        "MEDCHAT_TEMPORAL_METRICS_RELAY_PORT": str(port),
+    })
+    return relay.render_generation(
+        config=config,
+        compose_project="medchat",
+        generated_root=root,
+        namespace="default",
+        taskqueue="medchat-docking",
+        nginx_template=TEMPLATE.read_text(encoding="utf-8"),
+    )
+
+
+def test_render_stages_versioned_generation_without_exposing_live_target(
+    tmp_path: Path,
+) -> None:
+    relay = load_relay()
+    root = tmp_path / "generated"
+    generation = render_test_generation(relay, root)
+    relay.stage_generation(generation, root)
+    generation_root = root / "generations" / generation.generation_id
+    assert (generation_root / "compose.override.yml").is_file()
+    assert (generation_root / "file_sd" / "worker-targets.json").is_file()
+    assert (generation_root / "nginx.conf").is_file()
+    manifest_path = generation_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["generation_id"] == generation.generation_id
+    assert manifest["schema_version"] == 1
+    assert set(manifest["sha256"]) == {
+        "compose.override.yml", "file_sd/worker-targets.json", "nginx.conf"
+    }
+    assert manifest["config"] == {
+        "compose_project": "medchat",
+        "gateway": "172.30.95.1",
+        "namespace": "default",
+        "port": 9466,
+        "prometheus_address": "172.30.95.2",
+        "subnet": "172.30.95.0/28",
+        "taskqueue": "medchat-docking",
+    }
+    assert not (root / "live" / "file_sd" / "worker-targets.json").exists()
+
+
+def test_activation_publishes_worker_target_last_and_records_active_generation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    relay = load_relay()
+    root = tmp_path / "generated"
+    nginx_output = tmp_path / "nginx" / "relay.conf"
+    generation = render_test_generation(relay, root)
+    relay.stage_generation(generation, root)
+    events: list[str] = []
+    writes: list[Path] = []
+    real_atomic_write = relay.atomic_write
+
+    def observed_write(path: Path, content: str, mode: int = 0o640) -> None:
+        writes.append(Path(path))
+        real_atomic_write(path, content, mode)
+
+    monkeypatch.setattr(relay, "atomic_write", observed_write)
+    relay.activate_generation(
+        generated_root=root,
+        generation_id=generation.generation_id,
+        nginx_output=nginx_output,
+        recheck_host_conflicts=lambda: events.append("recheck"),
+        bridge_ready=lambda: events.append("bridge") or True,
+        nginx_validate=lambda _path: events.append("validate") or True,
+        nginx_reload=lambda: events.append("reload") or True,
+    )
+    assert events == ["recheck", "bridge", "validate", "reload"]
+    assert writes[-1] == root / "live" / "file_sd" / "worker-targets.json"
+    assert json.loads((root / "live" / "manifest.json").read_text("utf-8"))[
+        "generation_id"
+    ] == generation.generation_id
+
+
+def test_failed_reconfiguration_retains_old_live_generation(tmp_path: Path) -> None:
+    relay = load_relay()
+    root = tmp_path / "generated"
+    nginx_output = tmp_path / "nginx" / "relay.conf"
+    first = render_test_generation(relay, root, 9466)
+    relay.stage_generation(first, root)
+    relay.activate_generation(
+        generated_root=root,
+        generation_id=first.generation_id,
+        nginx_output=nginx_output,
+        recheck_host_conflicts=lambda: None,
+        bridge_ready=lambda: True,
+        nginx_validate=lambda _path: True,
+        nginx_reload=lambda: True,
+    )
+    old_target = (root / "live" / "file_sd" / "worker-targets.json").read_text(
+        "utf-8"
+    )
+    old_nginx = nginx_output.read_text("utf-8")
+    second = render_test_generation(relay, root, 9467)
+    relay.stage_generation(second, root)
+    with pytest.raises(relay.RelayConfigurationError) as error:
+        relay.activate_generation(
+            generated_root=root,
+            generation_id=second.generation_id,
+            nginx_output=nginx_output,
+            recheck_host_conflicts=lambda: None,
+            bridge_ready=lambda: True,
+            nginx_validate=lambda _path: True,
+            nginx_reload=lambda: False,
+        )
+    assert error.value.code == "E_RELAY_ACTIVATION"
+    assert (root / "live" / "file_sd" / "worker-targets.json").read_text(
+        "utf-8"
+    ) == old_target
+    assert nginx_output.read_text("utf-8") == old_nginx
+    assert json.loads((root / "live" / "manifest.json").read_text("utf-8"))[
+        "generation_id"
+    ] == first.generation_id
+
+
+def test_generation_lock_serializes_concurrent_activation(tmp_path: Path) -> None:
+    relay = load_relay()
+    root = tmp_path / "generated"
+    first = render_test_generation(relay, root, 9466)
+    second = render_test_generation(relay, root, 9467)
+    relay.stage_generation(first, root)
+    relay.stage_generation(second, root)
+    entered = threading.Event()
+    release = threading.Event()
+    second_entered = threading.Event()
+    errors: list[BaseException] = []
+
+    def activate(generation_id: str, first_call: bool) -> None:
+        try:
+            def recheck() -> None:
+                if first_call:
+                    entered.set()
+                    assert release.wait(5)
+                else:
+                    second_entered.set()
+
+            relay.activate_generation(
+                generated_root=root,
+                generation_id=generation_id,
+                nginx_output=tmp_path / "relay.conf",
+                recheck_host_conflicts=recheck,
+                bridge_ready=lambda: True,
+                nginx_validate=lambda _path: True,
+                nginx_reload=lambda: True,
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    first_thread = threading.Thread(target=activate, args=(first.generation_id, True))
+    second_thread = threading.Thread(target=activate, args=(second.generation_id, False))
+    first_thread.start()
+    assert entered.wait(5)
+    second_thread.start()
+    assert not second_entered.wait(0.2)
+    release.set()
+    first_thread.join(5)
+    second_thread.join(5)
+    assert not errors
+    assert second_entered.is_set()
 
 
 def test_cli_writes_one_coherent_group_and_never_echoes_unrelated_secret(
@@ -358,6 +812,7 @@ def test_cli_writes_one_coherent_group_and_never_echoes_unrelated_secret(
     values = {
         "UNRELATED_SECRET": "PRIVATE_RELAY_SECRET_CANARY",
         "COMPOSE_PROJECT_NAME": "medchat",
+        "TEMPORAL_NAMESPACE": "default",
         **DEFAULT_VALUES,
     }
     env_file = write_env(tmp_path / "relay.env", values)
@@ -365,18 +820,27 @@ def test_cli_writes_one_coherent_group_and_never_echoes_unrelated_secret(
     nginx_output = tmp_path / "nginx" / "relay.conf"
     result = run_cli(env_file, output_dir, nginx_output)
     assert result.returncode == 0
-    assert result.stdout == "OK E_RELAY_CONFIGURED\n"
+    assert re.fullmatch(
+        r"OK E_RELAY_RENDERED generation=([0-9a-f]{24})\n",
+        result.stdout,
+    )
     assert result.stderr == ""
+    generation_id = result.stdout.split("generation=", 1)[1].strip()
+    generation_root = output_dir / "generations" / generation_id
     yaml = pytest.importorskip("yaml")
-    override = yaml.safe_load((output_dir / "compose.override.yml").read_text("utf-8"))
+    override = yaml.safe_load(
+        (generation_root / "compose.override.yml").read_text("utf-8")
+    )
     mount = override["services"]["prometheus"]["volumes"][0]
-    assert Path(mount["source"]) == (output_dir / "worker-targets.json").resolve()
-    assert mount["target"] == "/etc/prometheus/file_sd/worker-targets.json"
+    assert Path(mount["source"]) == (output_dir / "live" / "file_sd").resolve()
+    assert mount["target"] == "/etc/prometheus/file_sd"
     assert mount["read_only"] is True
-    assert json.loads((output_dir / "worker-targets.json").read_text("utf-8")) == [
+    assert json.loads(
+        (generation_root / "file_sd" / "worker-targets.json").read_text("utf-8")
+    ) == [
         {"targets": ["172.30.95.1:9466"]}
     ]
-    nginx = nginx_output.read_text(encoding="utf-8")
+    nginx = (generation_root / "nginx.conf").read_text(encoding="utf-8")
     assert "listen 172.30.95.1:9466;" in nginx
     assert "allow 172.30.95.2;" in nginx
     combined = result.stdout + result.stderr + json.dumps(override) + nginx
@@ -473,7 +937,11 @@ def test_failed_cli_validation_preserves_all_prior_outputs(tmp_path: Path) -> No
         path.write_text("known-good", encoding="utf-8")
     env_file = write_env(
         tmp_path / "relay.env",
-        {**DEFAULT_VALUES, "MEDCHAT_TEMPORAL_METRICS_RELAY_PORT": "PRIVATE_BAD_PORT"},
+        {
+            "TEMPORAL_NAMESPACE": "default",
+            **DEFAULT_VALUES,
+            "MEDCHAT_TEMPORAL_METRICS_RELAY_PORT": "PRIVATE_BAD_PORT",
+        },
     )
     result = run_cli(env_file, output_dir, nginx)
     assert result.returncode == 1

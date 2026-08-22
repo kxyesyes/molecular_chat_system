@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import errno
+import importlib.util
 import json
 import http.server
 import os
@@ -15,6 +17,7 @@ import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Callable
+from types import ModuleType
 
 import pytest
 
@@ -485,6 +488,18 @@ def require_metrics_relay_integration() -> tuple[str, str]:
     return docker, nginx
 
 
+def load_metrics_relay_module() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "configure_temporal_metrics_relay_integration",
+        RELAY_SCRIPT,
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class _LoopbackMetricsHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path != "/metrics":
@@ -506,9 +521,10 @@ class _LoopbackMetricsHandler(http.server.BaseHTTPRequestHandler):
 
 def test_worker_metrics_relay_end_to_end_is_acl_protected(tmp_path: Path) -> None:
     docker, nginx = require_metrics_relay_integration()
+    relay = load_metrics_relay_module()
     project = f"medchat-relay-it-{uuid.uuid4().hex[:10]}"
     prometheus_container = f"{project}-prometheus"
-    network_name = f"{project}-worker-metrics-scrape"
+    network_name = f"{project}_worker-metrics-scrape"
     nginx_process: subprocess.Popen[str] | None = None
     metrics_server: http.server.ThreadingHTTPServer | None = None
     metrics_thread: threading.Thread | None = None
@@ -534,7 +550,7 @@ def test_worker_metrics_relay_end_to_end_is_acl_protected(tmp_path: Path) -> Non
             timeout=15,
         )
         if inspect.returncode != 0:
-            return
+            pytest.fail(f"cleanup inspect failed for {kind} resource", pytrace=False)
         if inspect.stdout.strip() != project:
             pytest.fail(f"cleanup refused unlabeled {kind} resource", pytrace=False)
         command = (
@@ -548,9 +564,20 @@ def test_worker_metrics_relay_end_to_end_is_acl_protected(tmp_path: Path) -> Non
 
     try:
         env_file = tmp_path / "relay.env"
+        worker_env = tmp_path / "worker.env"
+        worker_env.write_text(
+            "MEDCHAT_TEMPORAL_NAMESPACE=default\n"
+            "MEDCHAT_TEMPORAL_DOCKING_QUEUE=medchat-docking\n",
+            encoding="utf-8",
+            newline="\n",
+        )
         generated = tmp_path / "generated"
-        nginx_relay = tmp_path / "relay.conf"
+        nginx_root = tmp_path / "nginx"
+        nginx_root.mkdir()
+        nginx_relay = nginx_root / "relay.conf"
+        nginx_relay.write_text("# inactive relay generation\n", encoding="utf-8")
         selected: tuple[str, str, str] | None = None
+        generation_id = ""
         for octet in range(200, 240):
             subnet = f"172.30.{octet}.0/28"
             gateway = f"172.30.{octet}.1"
@@ -558,6 +585,7 @@ def test_worker_metrics_relay_end_to_end_is_acl_protected(tmp_path: Path) -> Non
             env_file.write_text(
                 "\n".join((
                     f"COMPOSE_PROJECT_NAME={project}",
+                    "TEMPORAL_NAMESPACE=default",
                     f"MEDCHAT_TEMPORAL_METRICS_RELAY_SUBNET={subnet}",
                     f"MEDCHAT_TEMPORAL_METRICS_RELAY_GATEWAY={gateway}",
                     f"MEDCHAT_TEMPORAL_PROMETHEUS_SCRAPE_ADDRESS={prometheus_address}",
@@ -570,13 +598,17 @@ def test_worker_metrics_relay_end_to_end_is_acl_protected(tmp_path: Path) -> Non
                 [
                     sys.executable,
                     str(RELAY_SCRIPT),
+                    "--render",
                     "--env-file",
                     str(env_file),
+                    "--worker-env-file",
+                    str(worker_env),
                     "--output-dir",
                     str(generated),
                     "--nginx-output",
                     str(nginx_relay),
-                    "--check-host-conflicts",
+                    "--offline-root",
+                    str(tmp_path),
                 ],
                 cwd=ROOT,
                 capture_output=True,
@@ -585,40 +617,25 @@ def test_worker_metrics_relay_end_to_end_is_acl_protected(tmp_path: Path) -> Non
             )
             if configured.returncode == 0:
                 selected = subnet, gateway, prometheus_address
+                generation_id = configured.stdout.split("generation=", 1)[1].strip()
                 break
             if configured.stderr != "ERROR E_RELAY_CONFLICT\n":
                 pytest.fail("metrics relay host conflict inspection failed")
         if selected is None:
-            pytest.skip("no conflict-free private /28 available for relay integration")
+            pytest.fail("no conflict-free private /28 available for relay integration")
         subnet, gateway, prometheus_address = selected
-
-        network = docker_run(
-            "network",
-            "create",
-            "--internal",
-            "--subnet",
-            subnet,
-            "--gateway",
-            gateway,
-            "--label",
-            f"{RELAY_TEST_LABEL}={project}",
-            network_name,
-            timeout=60,
-        )
-        assert network.returncode == 0
-        created_network = True
 
         try:
             metrics_server = http.server.ThreadingHTTPServer(
                 ("127.0.0.1", 9465), _LoopbackMetricsHandler
             )
         except OSError as exc:
-            pytest.skip(f"loopback worker metrics port unavailable: {type(exc).__name__}")
+            if exc.errno == errno.EADDRINUSE:
+                pytest.skip("loopback worker metrics port is already in use")
+            raise
         metrics_thread = threading.Thread(target=metrics_server.serve_forever, daemon=True)
         metrics_thread.start()
 
-        nginx_root = tmp_path / "nginx"
-        nginx_root.mkdir()
         nginx_config = nginx_root / "nginx.conf"
         nginx_config.write_text(
             "\n".join((
@@ -641,20 +658,12 @@ def test_worker_metrics_relay_end_to_end_is_acl_protected(tmp_path: Path) -> Non
         assert checked.returncode == 0
         nginx_process = subprocess.Popen(
             nginx_base,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             text=True,
         )
         time.sleep(1)
         assert nginx_process.poll() is None
-        reloaded = subprocess.run(
-            [*nginx_base, "-s", "reload"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        assert reloaded.returncode == 0
-
         prometheus_config = tmp_path / "prometheus.yml"
         prometheus_config.write_text(
             """global:
@@ -668,46 +677,163 @@ scrape_configs:
             encoding="utf-8",
             newline="\n",
         )
-        started = docker_run(
-            "run",
-            "--detach",
-            "--name",
-            prometheus_container,
-            "--network",
-            network_name,
-            "--ip",
-            prometheus_address,
-            "--label",
-            f"{RELAY_TEST_LABEL}={project}",
-            "--volume",
-            f"{prometheus_config}:/etc/prometheus/prometheus.yml:ro",
-            "--volume",
-            f"{generated / 'worker-targets.json'}:/etc/prometheus/file_sd/worker-targets.json:ro",
-            "prom/prometheus:v3.13.2",
-            timeout=180,
+        base_compose = tmp_path / "compose.base.yml"
+        base_compose.write_text(
+            "\n".join((
+                "services:",
+                "  prometheus:",
+                "    image: prom/prometheus:v3.13.2",
+                f"    container_name: {prometheus_container}",
+                "    labels:",
+                f"      {RELAY_TEST_LABEL}: {project}",
+                "    volumes:",
+                f"      - {prometheus_config}:/etc/prometheus/prometheus.yml:ro",
+                "networks:",
+                "  worker-metrics-scrape:",
+                "    labels:",
+                f"      {RELAY_TEST_LABEL}: {project}",
+                "",
+            )),
+            encoding="utf-8",
+            newline="\n",
         )
-        assert started.returncode == 0
-        created_prometheus = True
+        generated_override = (
+            generated / "generations" / generation_id / "compose.override.yml"
+        )
 
-        encoded_query = urllib.parse.quote(WORKER_UP_QUERY, safe="")
-        deadline = time.monotonic() + 60
-        while time.monotonic() < deadline:
-            queried = docker_run(
-                "exec",
-                prometheus_container,
-                "wget",
-                "-qO-",
-                f"http://127.0.0.1:9090/api/v1/query?query={encoded_query}",
-                timeout=15,
+        def compose_up(override: Path) -> None:
+            nonlocal created_network, created_prometheus
+            started = subprocess.run(
+                [
+                    docker, "compose", "--project-name", project,
+                    "-f", str(base_compose), "-f", str(override),
+                    "up", "--detach", "prometheus",
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=180,
             )
-            if queried.returncode == 0:
-                payload = json.loads(queried.stdout)
-                results = payload.get("data", {}).get("result", [])
-                if results and results[0].get("value", [None, None])[1] == "1":
-                    break
-            time.sleep(2)
-        else:
-            pytest.fail('up{job="medchat-temporal-worker"} did not reach 1')
+            network_exists = docker_run(
+                "network", "inspect", network_name, timeout=15
+            )
+            container_exists = docker_run(
+                "container", "inspect", prometheus_container, timeout=15
+            )
+            created_network = network_exists.returncode == 0
+            created_prometheus = container_exists.returncode == 0
+            assert started.returncode == 0, started.stderr
+
+        compose_up(generated_override)
+
+        ownership = docker_run(
+            "network", "inspect", network_name,
+            "--format", "{{json .Labels}}", timeout=15,
+        )
+        assert ownership.returncode == 0
+        ownership_labels = json.loads(ownership.stdout)
+        assert ownership_labels["com.docker.compose.project"] == project
+        assert ownership_labels["com.docker.compose.network"] == "worker-metrics-scrape"
+        assert ownership_labels["com.medchat.temporal.metrics-relay"] == "true"
+        assert ownership_labels[RELAY_TEST_LABEL] == project
+
+        inspected_networks: list[object] = []
+
+        def recheck_conflicts() -> None:
+            networks = relay._inspect_docker_networks()
+            assert relay.find_conflicts(
+                relay.parse_relay_config(relay._read_env_file(env_file)),
+                relay._inspect_routes(),
+                networks,
+                project,
+            ) == []
+            inspected_networks[:] = networks
+
+        def bridge_ready() -> bool:
+            return any(
+                network.name == network_name
+                and network.labels.get("com.docker.compose.project") == project
+                and network.labels.get("com.docker.compose.network")
+                == "worker-metrics-scrape"
+                for network in inspected_networks
+            )
+
+        def nginx_validate(_path: Path) -> bool:
+            return subprocess.run(
+                [*nginx_base, "-t"], capture_output=True, text=True, timeout=15
+            ).returncode == 0
+
+        def nginx_reload() -> bool:
+            return subprocess.run(
+                [*nginx_base, "-s", "reload"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            ).returncode == 0
+
+        for relay_port in (9466, 9467):
+            if relay_port != 9466:
+                current = env_file.read_text(encoding="utf-8")
+                env_file.write_text(
+                    current.replace(
+                        "MEDCHAT_TEMPORAL_METRICS_RELAY_PORT=9466",
+                        f"MEDCHAT_TEMPORAL_METRICS_RELAY_PORT={relay_port}",
+                    ),
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                configured = subprocess.run(
+                    [
+                        sys.executable, str(RELAY_SCRIPT), "--render",
+                        "--env-file", str(env_file),
+                        "--worker-env-file", str(worker_env),
+                        "--output-dir", str(generated),
+                        "--nginx-output", str(nginx_relay),
+                        "--offline-root", str(tmp_path),
+                    ],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                assert configured.returncode == 0, configured.stderr
+                generation_id = configured.stdout.split("generation=", 1)[1].strip()
+                generated_override = (
+                    generated / "generations" / generation_id / "compose.override.yml"
+                )
+                compose_up(generated_override)
+
+            relay.activate_generation(
+                generated_root=generated,
+                generation_id=generation_id,
+                nginx_output=nginx_relay,
+                recheck_host_conflicts=recheck_conflicts,
+                bridge_ready=bridge_ready,
+                nginx_validate=nginx_validate,
+                nginx_reload=nginx_reload,
+            )
+            target = generated / "live" / "file_sd" / "worker-targets.json"
+            assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+            encoded_query = urllib.parse.quote(WORKER_UP_QUERY, safe="")
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                queried = docker_run(
+                    "exec",
+                    prometheus_container,
+                    "wget",
+                    "-qO-",
+                    f"http://127.0.0.1:9090/api/v1/query?query={encoded_query}",
+                    timeout=15,
+                )
+                if queried.returncode == 0:
+                    payload = json.loads(queried.stdout)
+                    results = payload.get("data", {}).get("result", [])
+                    if any(item.get("value", [None, None])[1] == "1" for item in results):
+                        break
+                time.sleep(2)
+            else:
+                pytest.fail('up{job="medchat-temporal-worker"} did not reach 1')
 
         denied = docker_run(
             "run",
@@ -722,14 +848,14 @@ scrape_configs:
             "/dev/null",
             "--write-out",
             "%{http_code}",
-            f"http://{gateway}:9466/metrics",
+            f"http://{gateway}:9467/metrics",
             timeout=180,
         )
         assert denied.returncode == 0 and denied.stdout == "403", (
             "non-Prometheus relay access was not denied"
         )
-        with pytest.raises(OSError, match=".*"):
-            connection = socket.create_connection(("127.0.0.1", 9466), timeout=1)
+        with pytest.raises(OSError):
+            connection = socket.create_connection(("127.0.0.1", 9467), timeout=1)
             connection.close()
             pytest.fail("localhost relay unexpectedly reachable")
     finally:

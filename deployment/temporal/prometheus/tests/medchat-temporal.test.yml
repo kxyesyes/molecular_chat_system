@@ -1,9 +1,22 @@
 rule_files:
-  - deployment/temporal/prometheus/rules/medchat-temporal.yml
+  - ../rules/medchat-temporal.yml
 
 evaluation_interval: 15s
 
 tests:
+  - name: missing baseline blocks release
+    interval: 1m
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: TemporalDockingP95BaselineMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              release_blocker: "true"
+            exp_annotations:
+              summary: Temporal docking p95 baseline is unavailable
+              description: A positive measured docking latency baseline is required before release.
+
   - name: labeled baseline p95 fires
     interval: 1m
     input_series:
