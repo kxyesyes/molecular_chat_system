@@ -4,6 +4,7 @@
 **状态：** 已确认，待实施计划
 **前置阶段：** `docs/superpowers/specs/2026-08-12-industrial-agent-temporal-docking-canary-design.md`
 **目标分支：** `codex/temporal-production-canary-readiness`
+**修订：** 2026-08-22 增加宿主机 worker 指标安全中继，并收敛 Prometheus 查询契约
 
 ## 1. 背景与目标
 
@@ -84,9 +85,10 @@ flowchart LR
     SCI --> ART["Task artifacts + completion manifest"]
     WORKER --> STORE
     WEB --> METRICS["Web metrics endpoint"]
-    WORKER --> WMETRICS["Worker metrics endpoint"]
+    WORKER --> WMETRICS["Worker metrics endpoint · 127.0.0.1:9465"]
+    WMETRICS --> RELAY["nginx metrics relay · dedicated bridge gateway"]
     METRICS --> PROM["Prometheus · Compose"]
-    WMETRICS --> PROM
+    RELAY -->|"仅 Prometheus 固定地址可访问"| PROM
     TEMP --> PROM
     PROM --> GRAFANA["Grafana · Compose"]
 ```
@@ -106,16 +108,19 @@ deployment/
 │   ├── env.example
 │   ├── prometheus/
 │   │   ├── prometheus.yml
-│   │   └── rules/medchat-temporal.yml
+│   │   ├── rules/medchat-temporal.yml
+│   │   └── tests/medchat-temporal.test.yml
 │   └── grafana/
 │       ├── provisioning/datasources/prometheus.yml
 │       ├── provisioning/dashboards/dashboard.yml
 │       └── dashboards/medchat-temporal-docking.json
 ├── medchat.service
-└── medchat-temporal-worker.service
+├── medchat-temporal-worker.service
+└── nginx-medchat-temporal-metrics.conf.template
 scripts/
 ├── manage_temporal_canary.py
 ├── observe_temporal_canary.py
+├── configure_temporal_metrics_relay.py
 ├── backup_temporal_postgres.py
 └── restore_temporal_postgres.py
 docs/runbooks/
@@ -141,6 +146,7 @@ docs/runbooks/
 - 仓库只提交 `env.example`，不得包含真实凭据或机器绝对路径；secret 文件要求 regular file、非 symlink、无尾随换行、最多 1024 bytes；POSIX 主机上由 deployment owner 持有 `0700` 父目录，目录内 secret 文件固定为只读 `0444`，Windows 使用等效受限 ACL；本地 Compose `file:` secret 是 bind mount，service secret 的 `uid`、`gid`、`mode` 不会修复宿主文件权限；
 - PostgreSQL、Temporal、Prometheus 和 Grafana 数据使用命名 volume；
 - 依赖 Compose project 隔离网络名称，不设置全局 `name`；使用 internal `database`、Temporal API `temporal`、`temporal-metrics`、`postgres-metrics` 和 `prometheus-grafana` 最小网络，不使用默认全共享网络平面；
+- 使用额外的专用 `worker-metrics-scrape` bridge 网络连接 Prometheus 与宿主机 nginx 指标中继；该网络使用部署时校验并生成的私有 CIDR、网关和 Prometheus 固定地址，只有 Prometheus 加入，其他 Compose 服务不得加入；
 - 所有服务使用有上限的 `json-file` 日志轮换；长期运行服务配置 healthcheck 和 `unless-stopped`，one-shot job 使用有限 `on-failure:N` 并通过 `service_completed_successfully` 串联；
 - Temporal schema 初始化采用官方支持的启动流程，不由 MedChat Web 执行；
 - Compose 不挂载整个仓库，也不授予 Docker socket；
@@ -183,10 +189,14 @@ MEDCHAT_TEMPORAL_DOCKING_QUEUE=medchat-docking
 MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY=1
 MEDCHAT_TEMPORAL_WORKER_METRICS_ADDRESS=127.0.0.1
 MEDCHAT_TEMPORAL_WORKER_METRICS_PORT=9465
+MEDCHAT_TEMPORAL_METRICS_RELAY_SUBNET=172.30.95.0/28
+MEDCHAT_TEMPORAL_METRICS_RELAY_GATEWAY=172.30.95.1
+MEDCHAT_TEMPORAL_PROMETHEUS_SCRAPE_ADDRESS=172.30.95.2
+MEDCHAT_TEMPORAL_METRICS_RELAY_PORT=9466
 MEDCHAT_TEMPORAL_BASELINE_P95_SECONDS=40
 ```
 
-基线 p95 必须为正数并通过部署前真实验收确定。默认示例值只用于配置结构说明，不能作为生产测量结论。
+基线 p95 必须为正数并通过部署前真实验收确定。默认示例值只用于配置结构说明，不能作为生产测量结论。指标中继的 CIDR、网关、Prometheus 地址和端口是一个不可分割的配置组；示例值仅为默认候选值。部署助手必须在生成配置前检查私有 IPv4、成员关系、地址互异、现有 Docker 网络和宿主机路由冲突，任何冲突都 fail closed。需要改网段时必须由同一次配置生成同时更新 Compose、Prometheus target 和 nginx listener，禁止手工只改其中一处。
 
 ### 6.2 安全规则
 
@@ -232,6 +242,23 @@ worker readiness 为 true 需要同时满足：
 
 heartbeat age 超过 60 秒视为 stale。worker 没有活动任务时仍需通过进程级心跳证明服务存活；该心跳不得冒充某个 task Activity heartbeat。
 
+### 7.3 宿主机指标中继
+
+Prometheus 运行在 Compose 中，而 worker 为宿主机 systemd 进程。Docker 的 `host-gateway` 不能访问宿主机 `127.0.0.1`，因此不得把 `host.docker.internal:9465` 当作可用链路，也不得为了抓取方便把 worker 改为监听 `0.0.0.0`。
+
+本阶段复用仓库现有的宿主机 nginx，增加独立的指标中继 server：
+
+- worker 继续只监听 `127.0.0.1:9465`；
+- nginx 只监听 `worker-metrics-scrape` 专用 bridge 的宿主机网关地址和中继端口，默认候选为 `172.30.95.1:9466`；
+- 只允许 Prometheus 在该专用网络上的固定地址访问，其他来源 `deny all`；只开放精确的 `/metrics`，其他路径返回 404；
+- nginx 将 `/metrics` 反向代理到 `http://127.0.0.1:9465/metrics`，使用短连接、有限 connect/read timeout，不转发客户端身份、认证头或任意路径；
+- Compose 不发布中继端口，不把该端口绑定到公网或普通 LAN；只有 Prometheus 加入专用网络；
+- 监控链路故障只能使 worker scrape 失败并阻止 canary 晋级，不得终止正在执行的科研任务，也不得把科学终态改写为失败。
+
+`scripts/configure_temporal_metrics_relay.py` 是部署配置生成器，不是长期运行的代理。它从受控环境文件读取上述配置组，校验地址和冲突，并在 `/etc/medchat/generated/temporal-metrics/` 下生成 `compose.override.yml` 和 Prometheus `worker-targets.json`，同时生成 `/etc/nginx/conf.d/medchat-temporal-worker-metrics.conf`。所有写入使用临时文件、`fsync` 和原子替换。Compose 启动命令必须同时指定仓库主文件和生成的 override；主 Prometheus 配置通过 file-SD 读取生成 target，禁止复制三份静态地址。
+
+首次部署顺序固定为：校验配置与路由冲突、生成运行时文件、用主 Compose 文件和 override 创建专用 bridge、确认网关地址已绑定、执行 `nginx -t` 并 reload、启动或重启 Prometheus、验证 worker target `up == 1`。后续改网段也遵循同一顺序。任一步失败都保留上一份有效配置且不 reload；若新 bridge 已创建但应用失败，部署助手必须报告人工回滚命令，不得静默删除未知网络。脚本输出只能包含逻辑配置和脱敏状态，不得输出 secret。
+
 ## 8. Prometheus、Grafana 与告警
 
 ### 8.1 Prometheus
@@ -245,13 +272,15 @@ Prometheus 抓取：
 
 scrape target 只使用本机或 Compose 内部网络地址。配置不得把 Grafana/Prometheus 暴露到公网。
 
+worker target 必须通过第 7.3 节的 nginx 中继抓取。Prometheus 配置使用生成的 file-SD 文件，避免环境配置与静态 YAML 漂移；target 必须是专用 bridge 网关和中继端口。`up{job="medchat-temporal-worker"} == 1` 是 canary preflight 的硬条件。
+
 ### 8.2 告警规则
 
 至少提供以下本地告警：
 
 - worker heartbeat stale > 60 秒；
-- queue backlog 持续增长；
-- Temporal workflow start failure；
+- 指定 namespace 与 docking task queue 的 backlog 持续增长；
+- Temporal frontend 在指定 namespace 上的 `StartWorkflowExecution` unexpected service error；
 - 单任务 Vina attempt > 1；
 - 单任务 terminal event > 1；
 - succeeded 任务 artifact validation 失败；
@@ -262,12 +291,23 @@ scrape target 只使用本机或 Compose 内部网络地址。配置不得把 Gr
 
 阶段 3B 只配置 Prometheus rule 和 Grafana 可视化，不配置外部通知接收器。告警处于 firing 时必须阻止 canary 晋级。
 
+规则必须满足以下查询契约：
+
+- Temporal backlog 查询同时限定 `namespace` 和 docking `task_queue`；Temporal start 查询同时限定 frontend `service_name`、`namespace` 与 `operation="StartWorkflowExecution"`；若固定版本导出的 label 名不同，实施时以真实 `/metrics` 样本为准更新规则和测试，不允许取消作用域；
+- `service_requests` 只表示 start RPC 请求量，不表示 workflow 已被 Temporal 接受。dashboard 面板必须命名为“Workflow start requests”；真实 accepted 数继续由 observation report 的 history/TaskStore 证据提供；
+- `service_errors` 只表示 unexpected service errors，告警名称和说明不得泛化为所有 start failure；需要细分错误时使用固定版本实际导出的 `service_error_with_type`，不得推断不存在的标签；
+- p95 相对基线比较把基线规约为单一 scalar（例如 `scalar(max(medchat_temporal_baseline_p95_seconds))`），或显式统一标签后再比较，禁止无标签 histogram 与带 `job`/`instance` 的 gauge 做空向量匹配；
+- 低频硬失败 counter 的 lookback 必须长于 `for` 窗口：start unexpected error 至少 `[15m]`/`for: 5m`，runtime failure rate 至少 `[30m]`/`for: 10m`；duplicate Vina、多终态、artifact/provenance 失败不设置 `for`；
+- scrape/数据库不可用告警使用短但非零的 `for`，避免一次 scrape 抖动立即阻断；heartbeat 继续要求连续 stale；
+- firing blocker 数量查询使用 `count(ALERTS{alertstate="firing",release_blocker="true"}) or vector(0)`，无告警时必须显示 0。
+
 ### 8.3 Grafana
 
 提交可自动 provisioning 的 Prometheus datasource 和最小 dashboard，展示：
 
 - local/Temporal 流量比例；
 - queue backlog 和活动任务；
+- Workflow start requests（不得标记为 accepted count）；
 - worker heartbeat/readiness；
 - 成功、partial、failed、canceled 分布；
 - p50/p95 latency；
@@ -441,13 +481,17 @@ Temporal PostgreSQL 必须使用官方 `pg_dump`/`pg_restore` 能力或等价的
 - 镜像无 `latest`、端口 loopback、volume/healthcheck/restart policy 存在；
 - systemd `systemd-analyze verify`，或在 Windows 上使用可重复的静态 parser 验证；
 - Prometheus `promtool check config` 与 `promtool check rules`，工具缺失时如实标为未执行；
+- Prometheus `promtool test rules` 使用提交的时序 fixture 验证 p95 基线匹配、namespace/task queue 作用域、低频 counter 窗口、availability grace period 和零 blocker 显示；
 - Grafana provisioning 和 dashboard JSON schema 检查；
 - 示例环境文件不含 secret 和绝对机器路径。
+
+静态测试还必须验证 worker 仍只允许 loopback、Prometheus 不再引用 `host.docker.internal:9465`、只有 Prometheus 加入 `worker-metrics-scrape` 网络，以及 nginx 中继仅开放 `/metrics` 并带 allow/deny ACL。
 
 ### 14.3 本地 Temporal 集成测试
 
 - 启动本地 Temporal dev server 或 Compose；
 - worker 连接、poll 和 metrics readiness；
+- 在 opt-in Linux Docker 测试中创建专用 bridge、启动 loopback worker 指标端点、渲染并 reload nginx 中继，确认 Prometheus target `up == 1`；同时从非 Prometheus 容器和宿主机非中继地址验证访问被拒绝；Docker、nginx 或权限缺失时如实 skip，不能作为生产就绪证据；
 - contract repeat 3；
 - worker restart 后任务由 Temporal 恢复；
 - 已接受任务不回落 local；
@@ -475,7 +519,7 @@ Temporal PostgreSQL 必须使用官方 `pg_dump`/`pg_restore` 能力或等价的
 本阶段完成需要同时满足：
 
 1. Compose、systemd、Prometheus 和 Grafana 资产通过静态或本地工具验证；
-2. worker 指标只监听 loopback，label 无高基数或敏感字段；
+2. worker 指标只监听 loopback，label 无高基数或敏感字段；Compose Prometheus 通过受 ACL 保护的 nginx 专用 bridge 中继真实抓取成功，且该中继不暴露到公网或普通 LAN；
 3. canary manager 只允许 0/5/10/25、禁止跳级、支持安全 rollback-to-0；
 4. promotion 只能消费真实、完整、未过期的 passed observation report；
 5. observation report 能从真实任务历史计算样本、失败率、p50/p95 和所有科学不变量；
