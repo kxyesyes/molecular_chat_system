@@ -18,6 +18,7 @@ from temporalio.client import Client
 
 from src.task_runtime.config import TaskRuntimeConfig
 from src.task_runtime.docking_execution import DockingExecution
+from src.task_runtime.prometheus_metrics import TemporalWorkerMetrics
 from src.task_runtime.store import TaskStore
 from src.task_runtime.staging import DockingInputStager
 from src.task_runtime.temporal.activities import TemporalDockingActivities
@@ -48,38 +49,62 @@ def _install_signal_handlers(stop: asyncio.Event) -> None:
 
 async def main() -> None:
     config = TaskRuntimeConfig.from_env()
-    client = await Client.connect(
-        config.temporal_address,
-        namespace=config.temporal_namespace,
+    metrics = TemporalWorkerMetrics()
+    metrics.configure_release(
+        config.canary_percent,
+        config.baseline_p95_seconds,
     )
-    store = TaskStore()
-    activities = TemporalDockingActivities(
-        store,
-        DockingExecution(config.staging_root),
-        stager=DockingInputStager(config.staging_root),
-        process_runner=ManagedDockingProcessRunner(
-            DockingProcessConfig(
-                staging_root=config.staging_root,
-                allowed_output_root=(PROJECT_ROOT / "temp_docking").resolve(),
-            )
-        ),
+    metrics.refresh_backup_verification(config.backup_state_path)
+    metrics_server = metrics.start_loopback_server(
+        config.worker_metrics_address,
+        config.worker_metrics_port,
     )
-    settings = WorkerSettings(
-        task_queue=config.docking_queue,
-        namespace=config.temporal_namespace,
-    )
-    stop = asyncio.Event()
-    _install_signal_handlers(stop)
-    await run_temporal_worker(
-        client,
-        activities,
-        store,
-        settings,
-        worker_id=f"temporal-docking-{socket.gethostname()}",
-        sdk_version=importlib.metadata.version("temporalio"),
-        shutdown=stop,
-    )
+    try:
+        client = await Client.connect(
+            config.temporal_address,
+            namespace=config.temporal_namespace,
+        )
+        store = TaskStore()
+        activities = TemporalDockingActivities(
+            store,
+            DockingExecution(config.staging_root),
+            stager=DockingInputStager(config.staging_root),
+            process_runner=ManagedDockingProcessRunner(
+                DockingProcessConfig(
+                    staging_root=config.staging_root,
+                    allowed_output_root=(PROJECT_ROOT / "temp_docking").resolve(),
+                )
+            ),
+            metrics=metrics,
+        )
+        settings = WorkerSettings(
+            task_queue=config.docking_queue,
+            namespace=config.temporal_namespace,
+        )
+        stop = asyncio.Event()
+        _install_signal_handlers(stop)
+        await run_temporal_worker(
+            client,
+            activities,
+            store,
+            settings,
+            worker_id=f"temporal-docking-{socket.gethostname()}",
+            sdk_version=importlib.metadata.version("temporalio"),
+            shutdown=stop,
+            metrics=metrics,
+            backup_state_path=config.backup_state_path,
+        )
+    finally:
+        metrics_server.shutdown()
+
+
+def _run_cli() -> int:
+    try:
+        asyncio.run(main())
+    except OSError:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(_run_cli())

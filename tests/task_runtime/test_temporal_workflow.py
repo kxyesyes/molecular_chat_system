@@ -37,6 +37,7 @@ from src.task_runtime.temporal.activities import (
 from src.task_runtime.temporal.worker import (
     WorkerSettings,
     build_temporal_worker,
+    run_temporal_worker,
     run_worker_heartbeat,
 )
 from src.task_runtime.temporal.workflows import (
@@ -138,6 +139,50 @@ class _FakeDockingExecution:
         return self.run_verified(task_id, manifest_locator, **kwargs)
 
 
+class _RecordingMetrics:
+    def __init__(self) -> None:
+        self.attempts: list[tuple[str, int]] = []
+        self.started: list[str] = []
+        self.finished: list[tuple[str, float]] = []
+        self.terminals: list[tuple[str, str]] = []
+        self.ready_transitions: list[bool] = []
+        self.heartbeats = 0
+        self.backup_refreshes: list[Path] = []
+        self.terminal_violations = 0
+        self.artifact_failures = 0
+        self.provenance_failures = 0
+
+    def docking_process_attempt(self, task_type: str, attempt: int) -> None:
+        self.attempts.append((task_type, attempt))
+
+    def activity_started(self, task_type: str) -> None:
+        self.started.append(task_type)
+
+    def activity_finished(self, task_type: str, duration: float) -> None:
+        self.finished.append((task_type, duration))
+
+    def terminal_projected(self, task_type: str, status: str) -> None:
+        self.terminals.append((task_type, status))
+
+    def terminal_invariant_violation(self) -> None:
+        self.terminal_violations += 1
+
+    def artifact_validation_failure(self) -> None:
+        self.artifact_failures += 1
+
+    def provenance_validation_failure(self) -> None:
+        self.provenance_failures += 1
+
+    def set_ready(self, ready: bool) -> None:
+        self.ready_transitions.append(ready)
+
+    def record_worker_heartbeat(self) -> None:
+        self.heartbeats += 1
+
+    def refresh_backup_verification(self, path: Path) -> None:
+        self.backup_refreshes.append(path)
+
+
 def _success_result() -> dict:
     return {
         "success": True,
@@ -167,6 +212,212 @@ def _success_result() -> dict:
             "fallback_used": False,
         },
     }
+
+
+def _strict_terminal_provenance() -> dict:
+    return {
+        "tool": "molecular_docking",
+        "tool_name": "molecular_docking",
+        "tool_version": "1",
+        "attempt": 1,
+        "demo_mode": False,
+        "fallback_used": False,
+    }
+
+
+def test_activity_metrics_balance_success_and_project_one_terminal(tmp_path):
+    async def scenario() -> None:
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        _create_task(store)
+        assert store.claim_running(TASK_ID, attempt=1)
+        metrics = _RecordingMetrics()
+        activities = TemporalDockingActivities(
+            store,
+            _FakeDockingExecution(_success_result()),
+            metrics=metrics,
+        )
+
+        async def never_shutdown() -> None:
+            await asyncio.Event().wait()
+
+        outcome = await activities._run_docking_activity(
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
+            attempt=1,
+            heartbeat=lambda _: None,
+            worker_shutdown_waiter=never_shutdown,
+            heartbeat_interval=0.01,
+        )
+        projected = await activities._project_terminal(
+            {"operation": "terminal", **outcome}
+        )
+
+        assert projected["applied"] is True
+        assert metrics.attempts == [("docking", 1)]
+        assert metrics.started == ["docking"]
+        assert len(metrics.finished) == 1
+        assert metrics.finished[0][0] == "docking"
+        assert metrics.finished[0][1] >= 0
+        assert metrics.terminals == [("docking", TaskStatus.SUCCEEDED.value)]
+
+    asyncio.run(scenario())
+
+
+def test_activity_metrics_balance_scientific_failure_and_count_artifact_terminal(tmp_path):
+    async def scenario() -> None:
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        _create_task(store)
+        assert store.claim_running(TASK_ID, attempt=1)
+        metrics = _RecordingMetrics()
+        invalid = _success_result()
+        invalid["data"]["pose_file"] = "C:/private/pose.pdbqt"
+        invalid["data"]["best_pose"]["pose_file"] = "C:/private/pose.pdbqt"
+        invalid["artifacts"][0]["path"] = "C:/private/pose.pdbqt"
+        activities = TemporalDockingActivities(
+            store,
+            _FakeDockingExecution(invalid),
+            metrics=metrics,
+        )
+
+        async def never_shutdown() -> None:
+            await asyncio.Event().wait()
+
+        outcome = await activities._run_docking_activity(
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
+            attempt=1,
+            heartbeat=lambda _: None,
+            worker_shutdown_waiter=never_shutdown,
+            heartbeat_interval=0.01,
+        )
+        assert outcome["error_code"] == TaskErrorCode.DOCKING_ARTIFACT_INVALID.value
+        await activities._project_terminal({"operation": "terminal", **outcome})
+
+        assert metrics.attempts == [("docking", 1)]
+        assert metrics.started == ["docking"]
+        assert len(metrics.finished) == 1
+        assert metrics.terminals == [("docking", TaskStatus.FAILED.value)]
+        assert metrics.artifact_failures == 1
+
+    asyncio.run(scenario())
+
+
+def test_activity_metrics_balance_cancellation(tmp_path):
+    async def scenario() -> None:
+        metrics = _RecordingMetrics()
+        docking = _FakeDockingExecution(_success_result(), delay=5.0)
+        activities = TemporalDockingActivities(
+            TaskStore(tmp_path / "tasks.sqlite"),
+            docking,
+            metrics=metrics,
+        )
+
+        async def never_shutdown() -> None:
+            await asyncio.Event().wait()
+
+        running = asyncio.create_task(
+            activities._run_docking_activity(
+                {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
+                attempt=1,
+                heartbeat=lambda _: None,
+                worker_shutdown_waiter=never_shutdown,
+                heartbeat_interval=0.01,
+            )
+        )
+        assert await asyncio.to_thread(docking.started.wait, 1.0)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+
+        assert metrics.attempts == [("docking", 1)]
+        assert metrics.started == ["docking"]
+        assert len(metrics.finished) == 1
+        assert metrics.terminals == []
+        assert docking.stopped.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_metrics_exceptions_do_not_replace_science_or_leave_sink_active(tmp_path):
+    class RaisingMetrics(_RecordingMetrics):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active = 0
+
+        def docking_process_attempt(self, task_type, attempt):
+            super().docking_process_attempt(task_type, attempt)
+            raise RuntimeError("metrics attempt failed")
+
+        def activity_started(self, task_type):
+            self.active += 1
+            raise RuntimeError("metrics start failed")
+
+        def activity_finished(self, task_type, duration):
+            self.active -= 1
+            raise RuntimeError("metrics finish failed")
+
+        def terminal_projected(self, task_type, status):
+            raise RuntimeError("metrics terminal failed")
+
+    async def scenario() -> None:
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        _create_task(store)
+        assert store.claim_running(TASK_ID, attempt=1)
+        metrics = RaisingMetrics()
+        activities = TemporalDockingActivities(
+            store,
+            _FakeDockingExecution(_success_result()),
+            metrics=metrics,
+        )
+
+        async def never_shutdown() -> None:
+            await asyncio.Event().wait()
+
+        outcome = await activities._run_docking_activity(
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
+            attempt=1,
+            heartbeat=lambda _: None,
+            worker_shutdown_waiter=never_shutdown,
+            heartbeat_interval=0.01,
+        )
+        projected = await activities._project_terminal(
+            {"operation": "terminal", **outcome}
+        )
+
+        assert outcome["status"] == TaskStatus.SUCCEEDED.value
+        assert projected["applied"] is True
+        assert metrics.active == 0
+        assert metrics.attempts == [("docking", 1)]
+
+    asyncio.run(scenario())
+
+
+def test_duplicate_attempt_metric_is_recorded_before_process_task_creation(tmp_path):
+    class OrderedRunner:
+        async def run(self, payload, *, attempt, progress_callback):
+            assert metrics.attempts == [("docking", 2)]
+            return _success_result()
+
+    async def scenario() -> None:
+        activities = TemporalDockingActivities(
+            TaskStore(tmp_path / "tasks.sqlite"),
+            _FakeDockingExecution(_success_result()),
+            process_runner=OrderedRunner(),
+            metrics=metrics,
+        )
+
+        async def never_shutdown() -> None:
+            await asyncio.Event().wait()
+
+        outcome = await activities._run_docking_activity(
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
+            attempt=2,
+            heartbeat=lambda _: None,
+            worker_shutdown_waiter=never_shutdown,
+            heartbeat_interval=0.01,
+        )
+        assert outcome["status"] == TaskStatus.SUCCEEDED.value
+
+    metrics = _RecordingMetrics()
+    asyncio.run(scenario())
 
 
 def test_docking_activity_keeps_event_loop_responsive_and_bounds_heartbeats():
@@ -960,7 +1211,7 @@ def test_workflow_success_projects_exactly_one_terminal(monkeypatch):
                 "result": {"pose_count": 2, "best_energy": -7.5},
                 "artifacts": [],
                 "warnings": [],
-                "provenance": {"tool": "molecular_docking"},
+                "provenance": _strict_terminal_provenance(),
             }
         return {"applied": True, "status": payload.get("status", "running")}
 
@@ -1274,7 +1525,7 @@ def test_terminal_projection_outage_preserves_scientific_outcome(monkeypatch):
                 "result": {"pose_count": 1, "best_energy": -6.0},
                 "artifacts": [],
                 "warnings": [],
-                "provenance": {"tool": "molecular_docking"},
+                "provenance": _strict_terminal_provenance(),
             }
         if payload["operation"] == "terminal":
             raise RuntimeError("projection unavailable")
@@ -1314,7 +1565,7 @@ def test_cancel_after_terminal_projection_scheduled_preserves_scientific_outcome
                 "result": {"pose_count": 1, "best_energy": -7.0},
                 "artifacts": [],
                 "warnings": [],
-                "provenance": {"tool": "molecular_docking"},
+                "provenance": _strict_terminal_provenance(),
             }
         operations.append((payload["operation"], payload.get("status")))
         projection_cancellation_types.append(kwargs.get("cancellation_type"))
@@ -1354,7 +1605,12 @@ def test_projection_is_strict_and_duplicate_terminal_is_idempotent(tmp_path):
     async def scenario() -> None:
         store = TaskStore(tmp_path / "tasks.sqlite")
         _create_task(store)
-        activities = TemporalDockingActivities(store, _FakeDockingExecution(_success_result()))
+        metrics = _RecordingMetrics()
+        activities = TemporalDockingActivities(
+            store,
+            _FakeDockingExecution(_success_result()),
+            metrics=metrics,
+        )
 
         assert (await activities.project_task_activity({
             "operation": "running",
@@ -1373,7 +1629,7 @@ def test_projection_is_strict_and_duplicate_terminal_is_idempotent(tmp_path):
             },
             "artifacts": [],
             "warnings": [],
-            "provenance": {"tool": "molecular_docking"},
+            "provenance": _strict_terminal_provenance(),
         }
         first = await activities.project_task_activity(terminal_payload)
         second = await activities.project_task_activity(terminal_payload)
@@ -1384,6 +1640,7 @@ def test_projection_is_strict_and_duplicate_terminal_is_idempotent(tmp_path):
         assert "smiles" not in record.result
         terminal_events = [event for event in store.events(TASK_ID) if event.is_terminal]
         assert len(terminal_events) == 1
+        assert metrics.terminals == [("docking", TaskStatus.SUCCEEDED.value)]
 
     asyncio.run(scenario())
 
@@ -1399,7 +1656,12 @@ def test_conflicting_terminal_projection_fails_closed(tmp_path):
             result={"pose_count": 1},
             projection_policy=ResultProjectionPolicy.SCIENTIFIC_STRICT,
         )
-        activities = TemporalDockingActivities(store, _FakeDockingExecution(_success_result()))
+        metrics = _RecordingMetrics()
+        activities = TemporalDockingActivities(
+            store,
+            _FakeDockingExecution(_success_result()),
+            metrics=metrics,
+        )
 
         with pytest.raises(ApplicationError) as error:
             await activities.project_task_activity(
@@ -1413,8 +1675,44 @@ def test_conflicting_terminal_projection_fails_closed(tmp_path):
 
         assert error.value.non_retryable is True
         assert error.value.type == "TASK_PROJECTION_CONFLICT"
+        assert metrics.terminal_violations == 1
+        assert metrics.terminals == []
 
         assert len([event for event in store.events(TASK_ID) if event.is_terminal]) == 1
+
+    asyncio.run(scenario())
+
+
+def test_succeeded_projection_rejects_non_strict_provenance_at_boundary(tmp_path):
+    async def scenario() -> None:
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        _create_task(store)
+        assert store.claim_running(TASK_ID, attempt=1)
+        metrics = _RecordingMetrics()
+        activities = TemporalDockingActivities(
+            store,
+            _FakeDockingExecution(_success_result()),
+            metrics=metrics,
+        )
+
+        with pytest.raises(ApplicationError) as failure:
+            await activities.project_task_activity(
+                {
+                    "operation": "terminal",
+                    "task_id": TASK_ID,
+                    "status": TaskStatus.SUCCEEDED.value,
+                    "result": {"pose_count": 1, "best_energy": -7.0},
+                    "artifacts": [],
+                    "warnings": [],
+                    "provenance": {"tool": "molecular_docking"},
+                }
+            )
+
+        assert failure.value.type == TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value
+        assert failure.value.non_retryable is True
+        assert metrics.provenance_failures == 1
+        assert metrics.terminals == []
+        assert store.get(TASK_ID).status is TaskStatus.RUNNING
 
     asyncio.run(scenario())
 
@@ -1450,7 +1748,7 @@ def test_terminal_projection_joins_submitted_sqlite_commit_on_cancel(
                     "result": {"pose_count": 1, "best_energy": -7.0},
                     "artifacts": [],
                     "warnings": [],
-                    "provenance": {"tool": "molecular_docking"},
+                    "provenance": _strict_terminal_provenance(),
                 }
             )
         )
@@ -1547,6 +1845,188 @@ def test_worker_heartbeat_stops_without_a_dangling_task(tmp_path):
         health = store.worker_health("temporal", "medchat-docking")
         assert health["available"] is True
         assert task.done()
+
+    asyncio.run(scenario())
+
+
+def test_worker_heartbeat_updates_store_metric_and_backup_refresh(tmp_path):
+    async def scenario() -> None:
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        metrics = _RecordingMetrics()
+        marker = tmp_path / "latest-verified.json"
+        stop = asyncio.Event()
+        asyncio.get_running_loop().call_later(0.025, stop.set)
+        await run_worker_heartbeat(
+            store,
+            worker_id="worker-1",
+            task_queue="medchat-docking",
+            sdk_version="1.30.0",
+            stop=stop,
+            interval=0.01,
+            metrics=metrics,
+            backup_state_path=marker,
+        )
+
+        assert store.worker_health("temporal", "medchat-docking")["available"] is True
+        assert metrics.heartbeats >= 1
+        assert metrics.backup_refreshes == [marker] * metrics.heartbeats
+
+    asyncio.run(scenario())
+
+
+def test_worker_readiness_is_true_only_during_polling_and_false_after_shutdown(
+    tmp_path,
+    monkeypatch,
+):
+    class FakeWorker:
+        def __init__(self) -> None:
+            self.polling = asyncio.Event()
+            self.stopped = asyncio.Event()
+
+        async def run(self) -> None:
+            self.polling.set()
+            await self.stopped.wait()
+
+        async def shutdown(self) -> None:
+            self.stopped.set()
+
+    async def scenario() -> None:
+        fake_worker = FakeWorker()
+        metrics = _RecordingMetrics()
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        settings = WorkerSettings(task_queue="medchat-docking", namespace="default")
+        shutdown = asyncio.Event()
+        monkeypatch.setattr(
+            "src.task_runtime.temporal.worker.build_temporal_worker",
+            lambda *_args: fake_worker,
+        )
+        running = asyncio.create_task(
+            run_temporal_worker(
+                object(),
+                TemporalDockingActivities(
+                    store,
+                    _FakeDockingExecution(_success_result()),
+                ),
+                store,
+                settings,
+                worker_id="worker-1",
+                sdk_version="1.30.0",
+                shutdown=shutdown,
+                metrics=metrics,
+                backup_state_path=tmp_path / "latest-verified.json",
+            )
+        )
+        assert await asyncio.wait_for(fake_worker.polling.wait(), timeout=1.0)
+        assert metrics.ready_transitions == [True]
+        shutdown.set()
+        await asyncio.wait_for(running, timeout=1.0)
+
+        assert metrics.ready_transitions == [True, False]
+
+    asyncio.run(scenario())
+
+
+def test_worker_readiness_resets_and_cleans_heartbeat_when_polling_raises(
+    tmp_path,
+    monkeypatch,
+):
+    class BrokenWorker:
+        async def run(self) -> None:
+            raise RuntimeError("polling failed")
+
+        async def shutdown(self) -> None:
+            raise AssertionError("shutdown is not needed")
+
+    async def scenario() -> None:
+        metrics = _RecordingMetrics()
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        monkeypatch.setattr(
+            "src.task_runtime.temporal.worker.build_temporal_worker",
+            lambda *_args: BrokenWorker(),
+        )
+        with pytest.raises(RuntimeError, match="polling failed"):
+            await run_temporal_worker(
+                object(),
+                TemporalDockingActivities(
+                    store,
+                    _FakeDockingExecution(_success_result()),
+                ),
+                store,
+                WorkerSettings(task_queue="medchat-docking", namespace="default"),
+                worker_id="worker-1",
+                sdk_version="1.30.0",
+                shutdown=asyncio.Event(),
+                metrics=metrics,
+            )
+
+        assert metrics.ready_transitions == [True, False]
+
+    asyncio.run(scenario())
+
+
+def test_worker_outer_cancellation_joins_polling_task_without_leaking(
+    tmp_path,
+    monkeypatch,
+):
+    class CancellableWorker:
+        def __init__(self) -> None:
+            self.polling = asyncio.Event()
+            self.stop = asyncio.Event()
+            self.cleaned = asyncio.Event()
+            self.shutdown_calls = 0
+
+        async def run(self) -> None:
+            self.polling.set()
+            try:
+                await self.stop.wait()
+            finally:
+                self.cleaned.set()
+
+        async def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            self.stop.set()
+
+    async def scenario() -> None:
+        fake_worker = CancellableWorker()
+        metrics = _RecordingMetrics()
+        store = TaskStore(tmp_path / "tasks.sqlite")
+        monkeypatch.setattr(
+            "src.task_runtime.temporal.worker.build_temporal_worker",
+            lambda *_args: fake_worker,
+        )
+        running = asyncio.create_task(
+            run_temporal_worker(
+                object(),
+                TemporalDockingActivities(
+                    store,
+                    _FakeDockingExecution(_success_result()),
+                ),
+                store,
+                WorkerSettings(task_queue="medchat-docking", namespace="default"),
+                worker_id="worker-1",
+                sdk_version="1.30.0",
+                shutdown=asyncio.Event(),
+                metrics=metrics,
+            )
+        )
+        assert await asyncio.wait_for(fake_worker.polling.wait(), timeout=1.0)
+        try:
+            running.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await running
+
+            assert fake_worker.shutdown_calls == 1
+            assert fake_worker.cleaned.is_set()
+            assert metrics.ready_transitions == [True, False]
+            assert not any(
+                not task.done()
+                and task is not asyncio.current_task()
+                and "run_temporal_worker.<locals>.poll" in repr(task.get_coro())
+                for task in asyncio.all_tasks()
+            )
+        finally:
+            fake_worker.stop.set()
+            await asyncio.sleep(0)
 
     asyncio.run(scenario())
 
@@ -1774,7 +2254,7 @@ def test_temporal_sdk_sandbox_executes_success_workflow_once():
             "result": {"pose_count": 1, "best_energy": -7.0},
             "artifacts": [],
             "warnings": [],
-            "provenance": {"tool": "molecular_docking"},
+            "provenance": _strict_terminal_provenance(),
         }
 
     @activity.defn(name=PROJECTION_ACTIVITY_NAME)
@@ -1925,7 +2405,7 @@ def test_temporal_terminal_commit_retry_receipt_wins_when_inspect_unavailable(
             "result": {"pose_count": 1, "best_energy": -7.0},
             "artifacts": [],
             "warnings": [],
-            "provenance": {"tool": "molecular_docking"},
+            "provenance": _strict_terminal_provenance(),
         }
 
     async def scenario() -> None:
@@ -2028,7 +2508,7 @@ def test_temporal_terminal_scheduled_before_commit_is_scientific_status_wins(
             "result": {"pose_count": 1, "best_energy": -7.0},
             "artifacts": [],
             "warnings": [],
-            "provenance": {"tool": "molecular_docking"},
+            "provenance": _strict_terminal_provenance(),
         }
 
     async def scenario() -> None:

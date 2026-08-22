@@ -26,6 +26,7 @@ from src.task_runtime.models import (
     sanitize_provenance,
     sanitize_public_artifacts,
 )
+from src.task_runtime.prometheus_metrics import TemporalWorkerMetrics
 from src.task_runtime.staging import DockingInputStager, ManifestError
 from src.task_runtime.store import TaskStore
 from src.task_runtime.temporal.process_runner import ManagedDockingProcessRunner
@@ -73,6 +74,30 @@ _UUID4 = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 _MANIFEST_LOCATOR = "input_manifest.json"
+
+
+def _best_effort_metric(
+    metrics: TemporalWorkerMetrics | None,
+    method: str,
+    *args: Any,
+) -> None:
+    if metrics is None:
+        return
+    try:
+        getattr(metrics, method)(*args)
+    except Exception:
+        pass
+
+
+def _has_strict_terminal_provenance(payload: dict[str, Any]) -> bool:
+    provenance = payload.get("provenance")
+    return (
+        isinstance(provenance, dict)
+        and provenance.get("tool") == "molecular_docking"
+        and provenance.get("tool_name") == "molecular_docking"
+        and provenance.get("demo_mode") is False
+        and provenance.get("fallback_used") is False
+    )
 
 
 @dataclass
@@ -475,6 +500,7 @@ class TemporalDockingActivities:
         *,
         stager: DockingInputStager | None = None,
         process_runner: ManagedDockingProcessRunner | None = None,
+        metrics: TemporalWorkerMetrics | None = None,
     ) -> None:
         if (
             process_runner is None
@@ -488,6 +514,7 @@ class TemporalDockingActivities:
         self.docking_execution = docking_execution
         self.stager = stager or getattr(docking_execution, "_stager", None)
         self.process_runner = process_runner
+        self.metrics = metrics
 
     @activity.defn(name=VERIFY_MANIFEST_ACTIVITY_NAME)
     async def verify_manifest_activity(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -568,36 +595,46 @@ class TemporalDockingActivities:
         heartbeat_interval: float = 1.0,
     ) -> dict[str, Any]:
         task_id, _ = _validate_docking_payload(payload)
-        docking_call = (
-            _run_docking_in_process(
-                self.process_runner,
-                payload,
-                attempt=attempt,
-                heartbeat=heartbeat,
-                heartbeat_interval=heartbeat_interval,
-                heartbeat_projection=lambda update: self._project_live_heartbeat(
-                    task_id,
-                    update,
-                ),
-            )
-            if self.process_runner is not None
-            else _run_docking_in_test_thread(
-                self.docking_execution,
-                payload,
-                attempt=attempt,
-                heartbeat=heartbeat,
-                heartbeat_interval=heartbeat_interval,
-                heartbeat_projection=lambda update: self._project_live_heartbeat(
-                    task_id,
-                    update,
-                ),
-            )
-        )
-        run_task = asyncio.create_task(
-            docking_call
-        )
-        shutdown_task = asyncio.create_task(worker_shutdown_waiter())
+        if type(attempt) is not int or attempt <= 0:
+            raise ValueError("invalid activity attempt")
+        started_at = time.monotonic()
+        run_task: asyncio.Task | None = None
+        shutdown_task: asyncio.Task | None = None
         try:
+            _best_effort_metric(self.metrics, "activity_started", "docking")
+            _best_effort_metric(
+                self.metrics,
+                "docking_process_attempt",
+                "docking",
+                attempt,
+            )
+            docking_call = (
+                _run_docking_in_process(
+                    self.process_runner,
+                    payload,
+                    attempt=attempt,
+                    heartbeat=heartbeat,
+                    heartbeat_interval=heartbeat_interval,
+                    heartbeat_projection=lambda update: self._project_live_heartbeat(
+                        task_id,
+                        update,
+                    ),
+                )
+                if self.process_runner is not None
+                else _run_docking_in_test_thread(
+                    self.docking_execution,
+                    payload,
+                    attempt=attempt,
+                    heartbeat=heartbeat,
+                    heartbeat_interval=heartbeat_interval,
+                    heartbeat_projection=lambda update: self._project_live_heartbeat(
+                        task_id,
+                        update,
+                    ),
+                )
+            )
+            run_task = asyncio.create_task(docking_call)
+            shutdown_task = asyncio.create_task(worker_shutdown_waiter())
             done, _ = await asyncio.wait(
                 {run_task, shutdown_task},
                 return_when=asyncio.FIRST_COMPLETED,
@@ -606,23 +643,30 @@ class TemporalDockingActivities:
                 run_task.cancel()
             return await asyncio.shield(run_task)
         except asyncio.CancelledError:
-            if not run_task.done():
+            if run_task is not None and not run_task.done():
                 run_task.cancel()
-            while not run_task.done():
+            while run_task is not None and not run_task.done():
                 try:
                     await asyncio.shield(run_task)
                 except asyncio.CancelledError:
                     continue
                 except Exception:
                     break
-            if not run_task.cancelled():
+            if run_task is not None and not run_task.cancelled():
                 error = run_task.exception()
                 if isinstance(error, ApplicationError):
                     raise error
             raise
         finally:
-            shutdown_task.cancel()
-            await asyncio.gather(shutdown_task, return_exceptions=True)
+            if shutdown_task is not None:
+                shutdown_task.cancel()
+                await asyncio.gather(shutdown_task, return_exceptions=True)
+            _best_effort_metric(
+                self.metrics,
+                "activity_finished",
+                "docking",
+                max(0.0, time.monotonic() - started_at),
+            )
 
     async def _project_live_heartbeat(
         self,
@@ -727,6 +771,18 @@ class TemporalDockingActivities:
             TaskStatus.TIMED_OUT,
         }:
             raise RuntimeError("invalid terminal projection")
+        if status is TaskStatus.SUCCEEDED and not _has_strict_terminal_provenance(
+            payload
+        ):
+            _best_effort_metric(
+                self.metrics,
+                "provenance_validation_failure",
+            )
+            raise ApplicationError(
+                "Scientific provenance validation failed",
+                type=TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value,
+                non_retryable=True,
+            ) from None
         error_code = payload.get("error_code")
         applied = await _to_thread_completion_safe(
             self.store.project_temporal_terminal,
@@ -739,6 +795,20 @@ class TemporalDockingActivities:
             provenance=payload.get("provenance"),
         )
         if applied:
+            if (
+                status is TaskStatus.FAILED
+                and error_code == TaskErrorCode.DOCKING_ARTIFACT_INVALID.value
+            ):
+                _best_effort_metric(
+                    self.metrics,
+                    "artifact_validation_failure",
+                )
+            _best_effort_metric(
+                self.metrics,
+                "terminal_projected",
+                "docking",
+                status.value,
+            )
             return {"applied": True, "status": status.value}
         record = await _to_thread_completion_safe(
             self.store.get,
@@ -746,6 +816,10 @@ class TemporalDockingActivities:
         )
         if record.status is status:
             return {"applied": False, "idempotent": True, "status": status.value}
+        _best_effort_metric(
+            self.metrics,
+            "terminal_invariant_violation",
+        )
         raise _projection_conflict()
 
 
