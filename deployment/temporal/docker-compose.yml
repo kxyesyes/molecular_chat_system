@@ -1,0 +1,158 @@
+services:
+  postgres:
+    image: postgres:16.14-alpine3.23
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 60s
+    environment:
+      - POSTGRES_DB=${TEMPORAL_POSTGRES_DB:-temporal}
+      - POSTGRES_USER=${TEMPORAL_POSTGRES_USER:-temporal}
+      - POSTGRES_PASSWORD=${TEMPORAL_POSTGRES_PASSWORD:?required}
+    ports:
+      - "127.0.0.1:${TEMPORAL_POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - temporal-postgres-data:/var/lib/postgresql/data
+      - ./postgres-init/010-exporter.sh:/docker-entrypoint-initdb.d/010-exporter.sh:ro
+    secrets:
+      - source: temporal_postgres_exporter_password
+        target: temporal_postgres_exporter_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  postgres-exporter:
+    image: ghcr.io/prometheus-community/postgres-exporter:v0.20.1
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATA_SOURCE_URI=postgres:5432/temporal?sslmode=disable
+      - DATA_SOURCE_USER=temporal_exporter
+      - DATA_SOURCE_PASS_FILE=/run/secrets/temporal_postgres_exporter_password
+    secrets:
+      - source: temporal_postgres_exporter_password
+        target: temporal_postgres_exporter_password
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider --quiet http://127.0.0.1:9187/metrics"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  temporal:
+    image: temporalio/auto-setup:1.29.7
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_SEEDS=postgres
+      - POSTGRES_USER=${TEMPORAL_POSTGRES_USER:-temporal}
+      - POSTGRES_PWD=${TEMPORAL_POSTGRES_PASSWORD:?required}
+      - DBNAME=${TEMPORAL_POSTGRES_DB:-temporal}
+      - VISIBILITY_DBNAME=${TEMPORAL_POSTGRES_VISIBILITY_DB:-temporal_visibility}
+      - TEMPORAL_ADDRESS=temporal:7233
+    ports:
+      - "127.0.0.1:${TEMPORAL_GRPC_HOST_PORT:-7233}:7233"
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  temporal-ui:
+    image: temporalio/ui:2.53.1
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+    ports:
+      - "127.0.0.1:${TEMPORAL_UI_HOST_PORT:-8233}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider --quiet http://127.0.0.1:8080/"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  prometheus:
+    image: prom/prometheus:v3.13.2
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    depends_on:
+      postgres-exporter:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${PROMETHEUS_HOST_PORT:-9090}:9090"
+    volumes:
+      - prometheus-data:/prometheus
+      - ./prometheus:/etc/prometheus:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider --quiet http://127.0.0.1:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  grafana:
+    image: grafana/grafana:12.4.8-ubuntu
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?required}
+    ports:
+      - "127.0.0.1:${GRAFANA_HOST_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  temporal-postgres-data:
+  prometheus-data:
+  grafana-data:
+
+secrets:
+  temporal_postgres_exporter_password:
+    file: ${TEMPORAL_POSTGRES_EXPORTER_PASSWORD_FILE:?required}
