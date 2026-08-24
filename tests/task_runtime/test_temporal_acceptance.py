@@ -555,6 +555,47 @@ def test_real_runs_cancellation_converges_submitted_receipt(
     assert events == ["submit", "cancel", "close"]
 
 
+def test_real_cli_signal_supervisor_cancels_active_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_temporal_docking_acceptance as acceptance
+
+    canceled: list[bool] = []
+    handlers: dict[int, object] = {}
+
+    async def active_run(_repeat: int, _timeout: float) -> list[dict[str, object]]:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            canceled.append(True)
+            raise
+
+    def install(selected: int, handler: object) -> object:
+        handlers[selected] = handler
+        return handler
+
+    monkeypatch.setattr(acceptance, "_real_runs", active_run)
+    monkeypatch.setattr(acceptance.signal, "getsignal", lambda _selected: "previous")
+    monkeypatch.setattr(acceptance.signal, "signal", install)
+
+    async def scenario() -> list[dict[str, object]]:
+        supervisor = asyncio.create_task(
+            acceptance._real_runs_with_signal_cancellation(3, 2400)
+        )
+        while acceptance.signal.SIGTERM not in handlers:
+            await asyncio.sleep(0)
+        handler = handlers[acceptance.signal.SIGTERM]
+        assert callable(handler)
+        handler(acceptance.signal.SIGTERM, None)
+        return await supervisor
+
+    runs = asyncio.run(scenario())
+
+    assert canceled == [True]
+    assert len(runs) == 3
+    assert all(run["warnings"] == ["acceptance_cancelled"] for run in runs)
+
+
 def test_real_projection_rejects_conflicting_artifact_type_aliases(tmp_path):
     from scripts.run_temporal_docking_acceptance import _project_real_record, summarize_runs
 

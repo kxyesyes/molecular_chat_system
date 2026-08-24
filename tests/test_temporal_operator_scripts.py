@@ -4379,6 +4379,7 @@ def test_real_acceptance_subprocess_uses_isolated_canary_override_and_redacts(
     secret = "PRIVATE_PREFLIGHT_SECRET_CANARY"
     calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
     source_digests: list[str] = []
+    timeouts: list[float] = []
 
     def runner(
         argv: list[str],
@@ -4387,7 +4388,8 @@ def test_real_acceptance_subprocess_uses_isolated_canary_override_and_redacts(
         environment: dict[str, str],
         timeout: float,
     ) -> object:
-        del cwd, timeout
+        del cwd
+        timeouts.append(timeout)
         calls.append((tuple(argv), dict(environment)))
         output = Path(argv[argv.index("--output") + 1])
         payload = _task10_real_source_report(tmp_path / "artifacts")
@@ -4430,7 +4432,148 @@ def test_real_acceptance_subprocess_uses_isolated_canary_override_and_redacts(
     assert evidence["provenance_gate"]["evidence_type"] == "real_temporal_vina"
     assert "runs" not in evidence
     assert evidence["source_report_sha256"] == source_digests[0]
+    assert timeouts == [7360.0]
     _assert_canonical_report_hash(evidence)
+
+
+def test_acceptance_parent_watchdog_soft_terminates_then_waits_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_temporal_production_preflight as preflight
+
+    events: list[object] = []
+
+    class FakeProcess:
+        pid = 4321
+        returncode = 1
+
+        def communicate(self, *, timeout: float) -> tuple[bytes, bytes]:
+            events.append(("communicate", timeout))
+            if len([item for item in events if isinstance(item, tuple)]) == 1:
+                raise subprocess.TimeoutExpired("acceptance", timeout)
+            return b"", b""
+
+        def send_signal(self, selected: int) -> None:
+            events.append(("signal", selected))
+
+        def terminate(self) -> None:
+            events.append("terminate")
+
+        def kill(self) -> None:
+            events.append("kill")
+
+    monkeypatch.setattr(preflight.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    result = preflight._subprocess_runner(
+        ["/trusted/python", "-I", "acceptance.py"],
+        cwd=PROJECT_ROOT,
+        environment={},
+        timeout=7360.0,
+        cleanup_grace=130.0,
+    )
+
+    assert result.returncode == 1
+    assert events[0] == ("communicate", 7230.0)
+    expected_signal = (
+        signal.CTRL_BREAK_EVENT
+        if os.name == "nt" and hasattr(signal, "CTRL_BREAK_EVENT")
+        else signal.SIGTERM
+    )
+    assert events[1] == ("signal", expected_signal)
+    assert events[2] == ("communicate", 130.0)
+    assert "kill" not in events
+
+
+def test_acceptance_parent_watchdog_kills_only_after_cleanup_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_temporal_production_preflight as preflight
+
+    events: list[object] = []
+
+    class HungProcess:
+        pid = 4322
+        returncode = -9
+        killed = False
+
+        def communicate(self, *, timeout: float | None = None) -> tuple[bytes, bytes]:
+            events.append(("communicate", timeout))
+            if timeout is not None and not self.killed:
+                raise subprocess.TimeoutExpired("acceptance", timeout)
+            return b"", b""
+
+        def send_signal(self, selected: int) -> None:
+            events.append(("signal", selected))
+
+        def terminate(self) -> None:
+            events.append("terminate")
+
+        def kill(self) -> None:
+            self.killed = True
+            events.append("kill")
+
+    monkeypatch.setattr(preflight.subprocess, "Popen", lambda *_args, **_kwargs: HungProcess())
+    result = preflight._subprocess_runner(
+        ["/trusted/python", "-I", "acceptance.py"],
+        cwd=PROJECT_ROOT,
+        environment={},
+        timeout=7360.0,
+        cleanup_grace=130.0,
+    )
+
+    assert result.returncode == -9
+    assert events[-2:] == [
+        "kill",
+        ("communicate", preflight.ACCEPTANCE_CLOSE_BUDGET_SECONDS),
+    ]
+    assert ("communicate", 130.0) in events
+
+
+def test_acceptance_parent_watchdog_signal_failure_still_reaps_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_temporal_production_preflight as preflight
+
+    events: list[object] = []
+
+    class SignalFailureProcess:
+        pid = 4323
+        returncode = 1
+
+        def communicate(self, *, timeout: float) -> tuple[bytes, bytes]:
+            events.append(("communicate", timeout))
+            if len([item for item in events if isinstance(item, tuple)]) == 1:
+                raise subprocess.TimeoutExpired("acceptance", timeout)
+            return b"", b""
+
+        def send_signal(self, _selected: int) -> None:
+            events.append("signal_failed")
+            raise OSError("no console")
+
+        def terminate(self) -> None:
+            events.append("terminate")
+
+        def kill(self) -> None:
+            events.append("kill")
+
+    monkeypatch.setattr(
+        preflight.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: SignalFailureProcess(),
+    )
+    result = preflight._subprocess_runner(
+        ["/trusted/python", "-I", "acceptance.py"],
+        cwd=PROJECT_ROOT,
+        environment={},
+        timeout=7360.0,
+        cleanup_grace=130.0,
+    )
+
+    assert result.returncode == 1
+    assert events[1:4] == [
+        "signal_failed",
+        "terminate",
+        ("communicate", 130.0),
+    ]
 
 
 def test_real_acceptance_fake_runner_cannot_forge_shallow_pass(
@@ -4494,6 +4637,12 @@ def test_failed_acceptance_child_projection_remains_canonical(
         "non_numeric_energy",
         "multiple_terminal_events",
         "missing_run",
+        "boolean_run_index",
+        "boolean_attempt",
+        "boolean_terminal_count",
+        "boolean_run_count",
+        "boolean_passed_count",
+        "boolean_pass_rate",
         "wrong_aggregate",
     ],
 )
@@ -4526,6 +4675,18 @@ def test_real_acceptance_rejects_incomplete_or_relabelled_evidence(
             runs[0]["terminal_event_count"] = 2
         elif mutation == "missing_run":
             runs.pop()
+        elif mutation == "boolean_run_index":
+            runs[0]["run"] = True
+        elif mutation == "boolean_attempt":
+            runs[0]["vina_attempts"] = True
+        elif mutation == "boolean_terminal_count":
+            runs[0]["terminal_event_count"] = True
+        elif mutation == "boolean_run_count":
+            payload["run_count"] = True
+        elif mutation == "boolean_passed_count":
+            payload["passed_count"] = True
+        elif mutation == "boolean_pass_rate":
+            payload["pass_rate"] = True
         elif mutation == "wrong_aggregate":
             payload["passed_count"] = 2
         payload.pop("sha256")
@@ -4655,6 +4816,68 @@ def test_deployment_tool_resolution_ignores_untrusted_path(
     assert attempted == [Path("/usr/bin/promtool"), Path("/usr/local/bin/promtool")]
 
 
+def test_deployment_runner_close_is_idempotent_and_closes_cached_tools() -> None:
+    from scripts.validate_temporal_deployment import DeploymentCommandRunner
+
+    closed: list[str] = []
+    runner = DeploymentCommandRunner()
+    runner._tools = {
+        "docker": SimpleNamespace(close=lambda: closed.append("docker")),
+        "promtool": SimpleNamespace(close=lambda: closed.append("promtool")),
+    }
+
+    runner.close()
+    runner.close()
+
+    assert sorted(closed) == ["docker", "promtool"]
+    assert runner._tools == {}
+
+
+def test_trusted_executable_context_closes_both_descriptors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.task_runtime.trusted_process import TrustedExecutable
+
+    closed: list[int] = []
+    monkeypatch.setattr(os, "close", lambda descriptor: closed.append(descriptor))
+    tool = TrustedExecutable(10, (1, 2, 3, 4, 5), 11, "tool")
+
+    with tool as selected:
+        assert selected is tool
+    tool.close()
+
+    assert closed == [10, 11]
+    assert tool.descriptor == -1
+    assert tool.parent_descriptor == -1
+
+
+def test_validate_deployment_closes_only_internally_created_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.validate_temporal_deployment as deployment_validator
+
+    closed: list[str] = []
+
+    class FakeRunner(_MissingDeploymentTools):
+        def close(self) -> None:
+            closed.append("closed")
+
+    monkeypatch.setattr(deployment_validator, "DeploymentCommandRunner", FakeRunner)
+    deployment_validator.validate_deployment(
+        repo_root=PROJECT_ROOT,
+        platform_name="Windows",
+    )
+    assert closed == ["closed"]
+
+    external = FakeRunner()
+    deployment_validator.validate_deployment(
+        repo_root=PROJECT_ROOT,
+        command_runner=external,
+        platform_name="Windows",
+    )
+    assert closed == ["closed"]
+
+
 @requires_posix_descriptor_io
 def test_trusted_tool_rejects_symlink_and_named_leaf_replacement(
     postgres_trusted_tmp_path: Path,
@@ -4718,6 +4941,53 @@ def test_task10_atomic_report_writer_rejects_symlink(
 
     assert target.read_text(encoding="utf-8") == "sentinel"
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_deployment_validator_cli_requires_existing_output_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.validate_temporal_deployment as deployment_validator
+
+    monkeypatch.setattr(
+        deployment_validator,
+        "validate_deployment",
+        lambda: {"status": "partial", "sha256": "a" * 64},
+    )
+    missing_parent = tmp_path / "missing" / "report.json"
+
+    assert deployment_validator.main(["--output", str(missing_parent)]) == 1
+    assert not missing_parent.parent.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle/path ctime semantics")
+def test_windows_snapshot_allows_handle_path_ctime_difference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.secure_io as secure_io
+
+    source = tmp_path / "asset.yml"
+    source.write_bytes(b"stable")
+    original_fstat = secure_io.os.fstat
+
+    def shifted_ctime(descriptor: int) -> object:
+        metadata = original_fstat(descriptor)
+        return SimpleNamespace(
+            st_dev=metadata.st_dev,
+            st_ino=metadata.st_ino,
+            st_mode=metadata.st_mode,
+            st_file_attributes=getattr(metadata, "st_file_attributes", 0),
+            st_size=metadata.st_size,
+            st_mtime_ns=metadata.st_mtime_ns,
+            st_ctime_ns=metadata.st_ctime_ns + 10_000,
+        )
+
+    monkeypatch.setattr(secure_io.os, "fstat", shifted_ctime)
+    snapshot = secure_io.read_file_snapshot(source.resolve(), 1024)
+
+    assert snapshot.content == b"stable"
+    assert snapshot.sha256 == hashlib.sha256(b"stable").hexdigest()
 
 
 def test_task10_atomic_report_writer_rejects_symlink_ancestor(

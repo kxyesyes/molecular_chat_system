@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 from pathlib import PurePosixPath
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,11 @@ from src.task_runtime.trusted_process import open_trusted_executable
 
 MAX_ACCEPTANCE_REPORT_BYTES = 4 * 1024 * 1024
 _ACCEPTANCE_MODES = {"contract", "real"}
+ACCEPTANCE_REPEAT = 3
+REAL_RUN_TIMEOUT_SECONDS = 2400.0
+RUN_CANCELLATION_BUDGET_SECONDS = 40.0
+ACCEPTANCE_CLOSE_BUDGET_SECONDS = 10.0
+ACCEPTANCE_MARGIN_SECONDS = 30.0
 _ACCEPTANCE_PROJECTION_KEYS = {
     "status", "mode", "run_count", "scientific_execution", "provenance_gate",
     "source_report_sha256", "source_schema_valid", "sha256",
@@ -217,8 +223,18 @@ def _subprocess_runner(
     environment: dict[str, str],
     timeout: float,
     pass_fds: tuple[int, ...] = (),
+    cleanup_grace: float = 0.0,
 ) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(
+    soft_timeout = timeout - cleanup_grace
+    if soft_timeout <= 0 or cleanup_grace < 0:
+        raise ValueError("invalid acceptance timeout")
+    popen_kwargs: dict[str, object] = {}
+    if os.name == "posix":
+        popen_kwargs["pass_fds"] = pass_fds
+        popen_kwargs["start_new_session"] = True
+    elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    process = subprocess.Popen(
         argv,
         cwd=cwd,
         env=environment,
@@ -226,10 +242,40 @@ def _subprocess_runner(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         shell=False,
-        timeout=timeout,
-        check=False,
-        pass_fds=pass_fds,
+        **popen_kwargs,
     )
+    try:
+        process.communicate(timeout=soft_timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name == "nt" and hasattr(signal, "CTRL_BREAK_EVENT"):
+                process.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                process.send_signal(signal.SIGTERM)
+        except (OSError, ValueError):
+            process.terminate()
+        try:
+            process.communicate(timeout=cleanup_grace)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=ACCEPTANCE_CLOSE_BUDGET_SECONDS)
+    return subprocess.CompletedProcess(argv, process.returncode)
+
+
+def _acceptance_timeout_budget(*, real: bool) -> tuple[float, float]:
+    if not real:
+        return 300.0, ACCEPTANCE_CLOSE_BUDGET_SECONDS
+    cleanup = (
+        ACCEPTANCE_REPEAT * RUN_CANCELLATION_BUDGET_SECONDS
+        + ACCEPTANCE_CLOSE_BUDGET_SECONDS
+    )
+    total = (
+        ACCEPTANCE_REPEAT
+        * (REAL_RUN_TIMEOUT_SECONDS + RUN_CANCELLATION_BUDGET_SECONDS)
+        + ACCEPTANCE_CLOSE_BUDGET_SECONDS
+        + ACCEPTANCE_MARGIN_SECONDS
+    )
+    return total, cleanup
 
 
 def _read_acceptance(path: Path) -> dict[str, Any] | None:
@@ -280,7 +326,11 @@ def _validate_source_acceptance(
         expected_keys.add("contract_checks")
     if set(payload) != expected_keys or payload.get("mode") != mode:
         return False
-    if payload.get("status") != "passed" or payload.get("run_count") != 3:
+    if (
+        payload.get("status") != "passed"
+        or type(payload.get("run_count")) is not int
+        or payload.get("run_count") != ACCEPTANCE_REPEAT
+    ):
         return False
     if payload.get("scientific_execution") is not (mode == "real"):
         return False
@@ -299,14 +349,19 @@ def _validate_source_acceptance(
             return False
         provenance = run.get("provenance")
         if (
-            run.get("run") != index
+            type(run.get("run")) is not int
+            or run.get("run") != index
             or run.get("status") != "passed"
             or run.get("backend") != expected_backend
+            or type(run.get("workflow_id")) is not str
+            or type(run.get("vina_attempts")) is not int
             or run.get("vina_attempts") != 1
+            or type(run.get("terminal_event_count")) is not int
             or run.get("terminal_event_count") != 1
             or run.get("pose_exists") is not True
             or type(run.get("pose_count")) is not int
             or run["pose_count"] < 1
+            or type(run.get("binding_energy")) is not float
             or not _finite_number(run.get("binding_energy"))
             or not _safe_artifact_path(run.get("artifact_path"))
             or type(run.get("artifact_sha256")) is not str
@@ -323,6 +378,7 @@ def _validate_source_acceptance(
             or run.get("fallback_used") is not False
             or run.get("artifact_integrity_valid") is not True
             or run.get("terminal_event_valid") is not True
+            or type(run.get("latency_ms")) is not float
             or not _finite_number(run.get("latency_ms"))
             or float(run["latency_ms"]) < 0
             or run.get("warnings") != []
@@ -350,6 +406,14 @@ def _validate_source_acceptance(
             if snapshot.sha256 != run["artifact_sha256"]:
                 return False
     ordered = sorted(latencies)
+    latency_summary = payload.get("latency_ms")
+    if (
+        type(latency_summary) is not dict
+        or set(latency_summary) != {"p50", "p95"}
+        or type(latency_summary.get("p50")) is not float
+        or type(latency_summary.get("p95")) is not float
+    ):
+        return False
     aggregate = {
         "status": "passed",
         "run_count": 3,
@@ -360,6 +424,13 @@ def _validate_source_acceptance(
         "latency_ms": {"p50": ordered[1], "p95": ordered[2]},
         "failure_type_distribution": {},
     }
+    if (
+        type(payload.get("passed_count")) is not int
+        or type(payload.get("pass_rate")) is not float
+        or type(payload.get("duplicate_vina_count")) is not int
+        or type(payload.get("terminal_event_violation_count")) is not int
+    ):
+        return False
     if any(payload.get(key) != value for key, value in aggregate.items()):
         return False
     if mode == "contract":
@@ -368,6 +439,18 @@ def _validate_source_acceptance(
             "cancellation_confirmed", "completion_reused", "heartbeat_observed",
             "probe_count", "raw_executor_calls", "startup_fallback_only",
         }:
+            return False
+        if (
+            any(
+                type(checks.get(key)) is not bool
+                for key in (
+                    "cancellation_confirmed", "completion_reused",
+                    "heartbeat_observed", "startup_fallback_only",
+                )
+            )
+            or type(checks.get("probe_count")) is not int
+            or type(checks.get("raw_executor_calls")) is not int
+        ):
             return False
         if checks != {
             "cancellation_confirmed": True,
@@ -430,11 +513,12 @@ def run_acceptance_evidence(
         "--mode",
         mode,
         "--repeat",
-        "3",
+        str(ACCEPTANCE_REPEAT),
         "--output",
         os.fspath(output_path),
     ]
     trusted = None
+    timeout, cleanup_grace = _acceptance_timeout_budget(real=mode == "real")
     try:
         if command_runner is _subprocess_runner:
             trusted = open_trusted_executable(Path(os.path.realpath(argv[0])))
@@ -442,14 +526,15 @@ def run_acceptance_evidence(
             trusted.revalidate()
             result = command_runner(
                 argv, cwd=Path(repo_root), environment=environment,
-                timeout=7260.0 if mode == "real" else 300.0,
+                timeout=timeout,
                 pass_fds=trusted.pass_fds,
+                cleanup_grace=cleanup_grace,
             )
             trusted.revalidate()
         else:
             result = command_runner(
                 argv, cwd=Path(repo_root), environment=environment,
-                timeout=7260.0 if mode == "real" else 300.0,
+                timeout=timeout,
             )
         payload = _read_acceptance(output_path)
     except Exception:

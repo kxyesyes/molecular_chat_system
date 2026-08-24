@@ -11,7 +11,7 @@ import secrets
 import stat
 from typing import Callable, Mapping
 
-from src.task_runtime.config import _stat_identity
+from src.task_runtime.config import _stat_identity, _stat_version
 from src.task_runtime.trusted_files import (
     apply_windows_security,
     capture_trusted_path_boundary,
@@ -23,17 +23,13 @@ from src.task_runtime.trusted_files import (
 class FileSnapshot:
     content: bytes
     sha256: str
-    identity: tuple[int, int, int, int, int]
+    identity: tuple[tuple[int, ...], tuple[int, ...]]
 
 
-def _identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
-    return (
-        metadata.st_dev,
-        metadata.st_ino,
-        metadata.st_size,
-        metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
-    )
+def _identity(metadata: object) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Use the runtime's platform-specific handle/path comparison semantics."""
+
+    return _stat_identity(metadata), _stat_version(metadata)
 
 
 def _is_reparse(metadata: os.stat_result) -> bool:

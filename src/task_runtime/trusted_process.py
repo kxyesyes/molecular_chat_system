@@ -47,12 +47,29 @@ class TrustedExecutable:
             raise ValueError("trusted tool changed")
 
     def close(self) -> None:
+        failed = False
         if self.descriptor >= 0:
-            os.close(self.descriptor)
+            descriptor = self.descriptor
             self.descriptor = -1
+            try:
+                os.close(descriptor)
+            except OSError:
+                failed = True
         if self.parent_descriptor >= 0:
-            os.close(self.parent_descriptor)
+            descriptor = self.parent_descriptor
             self.parent_descriptor = -1
+            try:
+                os.close(descriptor)
+            except OSError:
+                failed = True
+        if failed:
+            raise ValueError("trusted tool close failed")
+
+    def __enter__(self) -> "TrustedExecutable":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
 
 
 def open_trusted_executable(path: Path | str) -> TrustedExecutable:

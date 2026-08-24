@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import signal
 import sys
 import tempfile
 import threading
@@ -660,6 +661,49 @@ async def _real_runs(
     return results
 
 
+async def _real_runs_with_signal_cancellation(
+    repeat: int,
+    timeout_seconds: float,
+) -> list[dict[str, Any]]:
+    """Translate process termination into cancellation of the active receipt."""
+
+    loop = asyncio.get_running_loop()
+    task = asyncio.create_task(_real_runs(repeat, timeout_seconds))
+    previous: list[tuple[int, object]] = []
+
+    def request_cancellation(_selected: int, _frame: object) -> None:
+        if not task.done():
+            loop.call_soon_threadsafe(task.cancel)
+
+    for name in ("SIGTERM", "SIGINT", "SIGBREAK"):
+        selected = getattr(signal, name, None)
+        if selected is None:
+            continue
+        try:
+            prior = signal.getsignal(selected)
+            signal.signal(selected, request_cancellation)
+            previous.append((selected, prior))
+        except (OSError, RuntimeError, ValueError):
+            continue
+    try:
+        return await task
+    except asyncio.CancelledError:
+        return [
+            {
+                "status": "failed",
+                "latency_ms": 0,
+                "warnings": ["acceptance_cancelled"],
+            }
+            for _ in range(repeat)
+        ]
+    finally:
+        for selected, handler in reversed(previous):
+            try:
+                signal.signal(selected, handler)
+            except (OSError, RuntimeError, ValueError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate Temporal docking release gates")
     parser.add_argument("--mode", choices=("contract", "real"), default="contract")
@@ -693,7 +737,9 @@ def main(argv: list[str] | None = None) -> int:
             ),
         }
     else:
-        runs = asyncio.run(_real_runs(args.repeat, args.timeout_seconds))
+        runs = asyncio.run(
+            _real_runs_with_signal_cancellation(args.repeat, args.timeout_seconds)
+        )
     report = summarize_runs(
         runs,
         expected_backend="contract" if args.mode == "contract" else "temporal",

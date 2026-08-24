@@ -201,6 +201,24 @@ class DeploymentCommandRunner:
                 continue
         return False
 
+    def close(self) -> None:
+        tools = tuple(self._tools.values())
+        self._tools.clear()
+        failed = False
+        for tool in tools:
+            try:
+                tool.close()
+            except Exception:
+                failed = True
+        if failed:
+            raise ValueError("deployment tool close failed")
+
+    def __enter__(self) -> "DeploymentCommandRunner":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
     def run(
         self,
         argv: list[str],
@@ -1232,9 +1250,27 @@ def validate_deployment(
     platform_name: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    root = Path(repo_root)
+    owns_runner = command_runner is None
     runner = command_runner or DeploymentCommandRunner()
-    host = platform_name or platform.system()
+    try:
+        return _validate_deployment_with_runner(
+            root=Path(repo_root),
+            runner=runner,
+            host=platform_name or platform.system(),
+            now=now,
+        )
+    finally:
+        if owns_runner:
+            runner.close()
+
+
+def _validate_deployment_with_runner(
+    *,
+    root: Path,
+    runner: object,
+    host: str,
+    now: datetime | None,
+) -> dict[str, Any]:
     checks: dict[str, dict[str, str]] = {
         "python_static": _python_static(root),
     }
@@ -1372,7 +1408,6 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     try:
         report = validate_deployment()
-        arguments.output.parent.mkdir(parents=True, exist_ok=True)
         write_report_atomic(arguments.output, report)
     except Exception:
         print("temporal_deployment_validation=failed code=validation_failed", file=sys.stderr)
