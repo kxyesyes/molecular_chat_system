@@ -4,7 +4,7 @@
 **状态：** 已确认，待实施计划
 **前置阶段：** `docs/superpowers/specs/2026-08-12-industrial-agent-temporal-docking-canary-design.md`
 **目标分支：** `codex/temporal-production-canary-readiness`
-**修订：** 2026-08-22 增加宿主机 worker 指标安全中继，收敛 Prometheus 查询契约，并加固 systemd worker 生命周期
+**修订：** 2026-08-24 增加 root-owned prepare unit 与专用 worker 配置边界，消除特权进程执行服务用户可写代码的风险
 
 ## 1. 背景与目标
 
@@ -116,7 +116,11 @@ deployment/
 │       └── dashboards/medchat-temporal-docking.json
 ├── medchat.service
 ├── medchat-temporal-worker.service
-├── medchat-temporal-worker.tmpfiles
+├── medchat-temporal-worker-prepare.service
+├── temporal-worker.env.example
+├── install-temporal-worker.sh
+├── libexec/validate-temporal-worker-env.py
+├── tmpfiles/medchat-temporal-worker.conf
 └── nginx-medchat-temporal-metrics.conf.template
 scripts/
 ├── manage_temporal_canary.py
@@ -162,19 +166,20 @@ docs/runbooks/
 
 - 使用与阶段 3A 真实验收相同的 MedChat Conda Python；
 - 运行 `scripts/run_temporal_docking_worker.py`；
-- 从权限受控的 `/etc/medchat/medchat.env` 读取非提交配置；
+- 只从权限受控、无 secret 的 `/etc/medchat/temporal-worker.env` 读取 worker 专用配置，不复用 Web 环境文件；
 - 固定 `MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY=1`；
 - 设置独立工作目录、服务用户、明确的 restart policy 和启动超时；使用 `ProtectSystem=strict`、`UMask=0077`，只允许写入受控的 `scratch` 与 `temp_docking` 运行目录；
 - 使用 `KillMode=mixed` 和 `TimeoutStopSec=90`：systemd 先只向 worker 主进程发送 SIGTERM，使 Temporal worker 停止 poll 并沿用阶段 3A 的受控 Vina 子进程清理；仅在超时后才由 systemd 强制清理同一 cgroup 的剩余进程；
 - 不在命令行参数、状态输出或日志中暴露密码、API key、完整 prompt、SMILES 或绝对用户路径；
-- 启动前执行严格生产配置校验，但不得在 `ExecStartPre` 运行 Vina、连接 Temporal、启动指标服务或修改 TaskStore；
+- 通过 `Requires=` 和 `After=` 依赖 `medchat-temporal-worker-prepare.service`；worker unit 内不得使用 `+`、`!` 或其他特权命令前缀，所有 Python 命令均以 `medchat` 身份执行；
+- 启动前以非特权身份执行严格生产配置校验，但不得运行 Vina、连接 Temporal、启动指标服务或修改 TaskStore；
 - 与 Web 服务相互独立，worker 重启不能触发 Web 重启。
 
 现有 `deployment/medchat.service` 仅在需要补充环境和依赖顺序时做最小修改，不改变 Web 的科学或 API 行为。
 
 #### 5.3.1 生产配置门禁
 
-生产 worker 使用共享、显式的校验器，例如 `src/task_runtime/production_worker.py`；`scripts/validate_temporal_worker_production.py` 只是其无副作用 CLI。校验器不得使用 Python `assert`，因此在 `PYTHONOPTIMIZE=1` 或 `python -O` 下仍必须 fail closed。它必须同时由 systemd `ExecStartPre` 和 `scripts/run_temporal_docking_worker.py` 调用，worker 入口必须在启动 metrics、连接 Temporal 或创建运行产物前完成复验，避免直接执行脚本绕过 systemd 门禁。
+生产 worker 使用共享、显式的校验器，例如 `src/task_runtime/production_worker.py`；`scripts/validate_temporal_worker_production.py` 只是其无副作用、非特权 CLI。校验器不得使用 Python `assert`，因此在 `PYTHONOPTIMIZE=1` 或 `python -O` 下仍必须 fail closed。它必须同时由 worker unit 的普通 `ExecStartPre` 和 `scripts/run_temporal_docking_worker.py` 调用，worker 入口必须在启动 metrics、连接 Temporal 或创建运行产物前完成复验，避免直接执行脚本绕过 systemd 门禁。
 
 校验通过必须同时满足：
 
@@ -184,18 +189,37 @@ docs/runbooks/
 - TaskStore、staging、backup 和 docking 输出路径解析后均位于批准的可写根目录内，不得通过 `..`、符号链接或路径别名逃逸；
 - 配置解析没有 warning；任何 fallback、local backend、空环境、非法端口或冲突路径均拒绝启动。
 
-`/etc/medchat/medchat.env` 是必需部署资产，必须为 root:root 持有的 regular file、非符号链接、权限 `0600`。由于普通 `medchat` 服务用户不应直接读取该文件元数据或内容，service 使用一个范围最小的特权 `ExecStartPre=+... --check-environment-file /etc/medchat/medchat.env` 只验证 owner、mode、类型和 symlink 状态；该检查不得读取、打印或复制变量值。systemd manager 以 root 读取 `EnvironmentFile` 后，后续非特权 `ExecStartPre` 和 worker 仅验证已注入的配置值。
+#### 5.3.2 root-owned prepare unit
 
-#### 5.3.2 运行目录引导与服务依赖
+systemd 会在命令执行前读取 `EnvironmentFile=`，而 `+` 前缀会使命令绕过 `User=` 及文件系统 namespacing 限制。因此不得使用“worker unit 先读取环境文件、再用 `+ExecStartPre` 校验”的顺序，也不得由 root 执行仓库或 Conda 中的 Python 代码。
 
-`deployment/medchat-temporal-worker.tmpfiles` 负责在 worker 启动前创建：
+`medchat-temporal-worker-prepare.service` 是独立的 root-owned oneshot unit，必须：
+
+- 不声明 `EnvironmentFile=`，不继承 worker 配置值，不导入仓库模块或 Conda；
+- 先调用安装到 `/usr/libexec/medchat/validate-temporal-worker-env` 的独立、仅依赖系统 Python 标准库的校验程序；
+- 校验成功后调用 `/usr/bin/systemd-tmpfiles --create /usr/lib/tmpfiles.d/medchat-temporal-worker.conf`；
+- 使用 `RemainAfterExit=yes` 并通过 `PartOf=medchat-temporal-worker.service` 与 worker 的显式 restart 生命周期绑定；首次启动及运维 restart 必须先重新完成 prepare，配置更新 runbook 必须同时 restart prepare 与 worker；
+- 不运行 Docker、Compose、Temporal、Vina、TaskStore 或任何科学工具。
+
+独立校验程序通过 descriptor-relative `os.open(..., dir_fd=...)`、`O_NOFOLLOW`、`fstat` 和有界读取检查 `/etc/medchat/temporal-worker.env`。从 `/`、`/etc` 到 `/etc/medchat` 的每级父目录必须为 root 持有且不可被 group/other 写入；叶文件必须为 root:root、regular、非 symlink、`0600`。文件语法只允许单行 `ASCII_NAME=value`、UTF-8、有限大小、无 NUL、无重复键或续行；只接受明确的 Temporal、TaskStore 和 docking 工具变量白名单，拒绝 API key、token、`LD_PRELOAD`、`PYTHONHOME`、`PYTHONPATH` 及其他 loader/runtime 注入变量。校验失败只输出稳定错误码，不输出路径、变量值或文件内容。
+
+#### 5.3.3 安装所有权与运行目录
+
+仓库提供的 unit、tmpfiles 和 helper 只是安装源。受测安装流程只能从运维人员已验证 commit/hash、父目录链不可被 `medchat` 写入的 root-owned release staging 执行；禁止在运行中的 service-user-writable checkout 上使用 `sudo ./install-temporal-worker.sh`。安装脚本必须支持非特权 `--destdir` 生成与清单校验，特权安装阶段只把已验证 bundle 复制为 root-owned、非服务用户可写的生产资产：
+
+- `/etc/systemd/system/medchat-temporal-worker.service`：root:root `0644`；
+- `/etc/systemd/system/medchat-temporal-worker-prepare.service`：root:root `0644`；
+- `/usr/libexec/medchat/validate-temporal-worker-env`：root:root `0755`；
+- `/usr/lib/tmpfiles.d/medchat-temporal-worker.conf`：root:root `0644`。
+
+`/opt/medchat/molecular_chat_system` 与 `/opt/conda/envs/medchat` 必须由 root 持有且不可被 `medchat`、group 或 other 写入。部署文档不得再执行 `chown -R medchat:medchat /opt/medchat`。只有以下运行目录由 tmpfiles 创建为 `medchat:medchat`、`0700`：
 
 - `scratch`；
 - `scratch/task_inputs`；
 - `scratch/temporal_backups`；
 - `temp_docking`。
 
-这些目录固定由 `medchat:medchat` 持有并使用 `0700`。tmpfiles 配置只创建目录，不创建空的 `/etc/medchat/medchat.env`，也不改写未知已有文件。安装/runbook 必须先验证服务用户、仓库部署根目录、环境文件和目录权限，再启动 worker。
+tmpfiles 配置只创建上述目录，不创建环境文件，也不改写未知已有文件。安装脚本必须支持 staging/DESTDIR 测试并在复制后验证 owner、mode、regular-file 和 no-symlink 契约；它不得创建带默认值的生产环境文件。
 
 Docker/Compose 基础设施由运维流程管理并先于 worker 启动；worker unit 可以声明网络和 Docker 服务顺序依赖，但不得调用 Docker、自动执行 Compose 或修改基础设施状态。Temporal 不可达时 worker 应由受控 restart policy 重试，不能启动 local worker 代替。
 
@@ -206,7 +230,8 @@ Docker/Compose 基础设施由运维流程管理并先于 worker 启动；worker
 生产配置分为：
 
 - Compose 基础设施配置：`/etc/medchat/temporal.env`，其中 secret 仅记录受保护 secret 文件的 `*_FILE` 路径，不记录 secret 值；
-- MedChat Web/worker 配置：`/etc/medchat/medchat.env`；
+- MedChat Web 配置：`/etc/medchat/medchat.env`，继续由 Web unit 使用；
+- Temporal docking worker 配置：`/etc/medchat/temporal-worker.env`，只允许任务运行时与 docking 工具白名单变量，不包含外部 LLM、API key、token 或数据库密码；
 - 仓库示例：不含 secret 的 `deployment/temporal/env.example`。
 
 关键变量至少包括：
@@ -225,7 +250,12 @@ MEDCHAT_TEMPORAL_METRICS_RELAY_GATEWAY=172.30.95.1
 MEDCHAT_TEMPORAL_PROMETHEUS_SCRAPE_ADDRESS=172.30.95.2
 MEDCHAT_TEMPORAL_METRICS_RELAY_PORT=9466
 MEDCHAT_TEMPORAL_BASELINE_P95_SECONDS=40
+MOLECULAR_DOCKING_ROOT=/opt/medchat/tools/autodock
+MOLECULAR_DOCKING_VINA=/opt/medchat/tools/autodock/vina/vina
+MOLECULAR_DOCKING_ADFR_BIN=/opt/medchat/tools/ADFRsuite/bin
 ```
+
+worker 环境文件白名单严格限定为：`MEDCHAT_TASK_BACKEND`、`MEDCHAT_TEMPORAL_CANARY_PERCENT`、`MEDCHAT_TEMPORAL_ADDRESS`、`MEDCHAT_TEMPORAL_NAMESPACE`、`MEDCHAT_TEMPORAL_DOCKING_QUEUE`、`MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY`、`MEDCHAT_TASK_STAGING_ROOT`、`MEDCHAT_TASK_DB_PATH`、`MEDCHAT_TEMPORAL_WORKER_METRICS_ADDRESS`、`MEDCHAT_TEMPORAL_WORKER_METRICS_PORT`、`MEDCHAT_TEMPORAL_BASELINE_P95_SECONDS`、`MEDCHAT_TEMPORAL_BACKUP_STATE`、`MOLECULAR_DOCKING_ROOT`、`MOLECULAR_DOCKING_VINA`、`MOLECULAR_DOCKING_ADFR_BIN`、`MOLECULAR_DOCKING_PREPARE_RECEPTOR`、`MOLECULAR_DOCKING_PREPARE_LIGAND` 和 `MOLECULAR_DOCKING_VINA_TIMEOUT_SECONDS`。指标中继网络键只属于基础设施配置，不得注入 worker。`PATH`、`PYTHONDONTWRITEBYTECODE` 等进程级固定值只能在 root-owned unit 中声明，不能由环境文件覆盖。
 
 基线 p95 必须为正数并通过部署前真实验收确定。默认示例值只用于配置结构说明，不能作为生产测量结论。指标中继的 CIDR、网关、Prometheus 地址和端口是一个不可分割的配置组；示例值仅为默认候选值。部署助手必须在生成配置前检查私有 IPv4、成员关系、地址互异、现有 Docker 网络和宿主机路由冲突，任何冲突都 fail closed。需要改网段时必须由同一次配置生成同时更新 Compose、Prometheus target 和 nginx listener，禁止手工只改其中一处。
 
@@ -236,7 +266,7 @@ MEDCHAT_TEMPORAL_BASELINE_P95_SECONDS=40
 - 配置检查输出逻辑地址、namespace、queue 和端口，不输出数据库 DSN；
 - artifact、SQLite 路径和工作目录对外只使用 repo-relative 或逻辑标识；
 - 管理脚本拒绝符号链接配置文件和超出允许目录的目标路径；
-- canary 配置文件必须由服务用户可读、仅授权运维角色可写。
+- worker/canary 环境文件必须为 root:root `0600`，只由 systemd manager 读取并注入非特权 worker；仅授权运维角色可通过受测原子更新工具修改。
 
 ## 7. Worker 指标与健康
 
@@ -507,6 +537,8 @@ Temporal PostgreSQL 必须使用官方 `pg_dump`/`pg_restore` 能力或等价的
 - 监控不可用导致 promotion blocked，而不是篡改科学状态。
 - 生产 worker 配置校验在空环境、local backend、默认值冒充显式配置、warning、路径逃逸和 `PYTHONOPTIMIZE=1` 下均 fail closed；
 - 直接运行 worker 入口与 systemd `ExecStartPre` 使用同一校验器，且失败发生在 metrics、Temporal 连接和文件副作用之前；
+- root-owned 环境校验器拒绝父目录/叶文件 symlink、非 root owner、group/other 可写目录、宽松 leaf mode、重复键、非法 UTF-8、超限文件、非白名单键和 loader/runtime 注入变量；
+- 安装脚本在 staging/DESTDIR 中生成 root-owned unit、libexec 和 tmpfiles 资产，只把四个运行目录授予 `medchat`，且不会创建生产环境文件；
 
 ### 14.2 静态部署测试
 
@@ -520,7 +552,9 @@ Temporal PostgreSQL 必须使用官方 `pg_dump`/`pg_restore` 能力或等价的
 
 静态测试还必须验证 worker 仍只允许 loopback、Prometheus 不再引用 `host.docker.internal:9465`、只有 Prometheus 加入 `worker-metrics-scrape` 网络，以及 nginx 中继仅开放 `/metrics` 并带 allow/deny ACL。
 
-systemd 部署测试还必须验证 `ProtectSystem=strict`、`UMask=0077`、`KillMode=mixed`、`TimeoutStopSec=90`、受限 `ReadWritePaths` 和两层 `ExecStartPre` 门禁；在 Linux 上使用 `systemd-analyze verify` 检查真实 unit。tmpfiles 测试必须证明四个运行目录可以从空部署状态创建为 `medchat:medchat`、`0700`，且不会创建或改写环境文件。环境文件元数据测试必须覆盖缺失文件、symlink、错误 owner、宽松 mode 和合法 root:root `0600`。
+systemd 部署测试还必须验证 `ProtectSystem=strict`、`UMask=0077`、`KillMode=mixed`、`TimeoutStopSec=90`、受限 `ReadWritePaths`、worker unit 无特权命令前缀，以及 prepare unit 无 `EnvironmentFile`、无仓库/Conda 执行路径；在 Linux 上使用 `systemd-analyze verify` 检查真实 unit。tmpfiles 测试必须证明四个运行目录可以从空部署状态创建为 `medchat:medchat`、`0700`，且不会创建或改写环境文件。安装资产测试必须验证目标 owner/mode/no-symlink 和源代码、Conda 不可被服务用户写入。
+
+环境校验器需在真实 Linux 文件系统上测试 descriptor-relative no-follow 行为，至少覆盖父目录 symlink、叶 symlink、world/group-writable parent、替换竞争、错误 owner/mode、合法 root:root `0600`、白名单与 `LD_PRELOAD`/`PYTHONHOME`/`PYTHONPATH` 拒绝。Windows 只允许运行纯解析与静态测试；缺少 Linux no-follow 证据时必须 truthfully skip 并阻断生产就绪。
 
 ### 14.3 本地 Temporal 集成测试
 
@@ -532,7 +566,7 @@ systemd 部署测试还必须验证 `ProtectSystem=strict`、`UMask=0077`、`Kil
 - 已接受任务不回落 local；
 - 每任务 Vina attempt/terminal invariant 保持成立。
 
-在 opt-in Linux systemd 集成测试中，使用可控的 worker/子进程 fixture 验证停止语义：SIGTERM 先到达 worker 主进程并触发协作式清理；正常清理窗口内不应同时终止 Vina 子进程；若 fixture 故意超时，systemd 最终必须清除同一 cgroup 内全部后代。测试结束后不得残留 worker 或科学工具进程。缺少 systemd/cgroup 权限时应明确 skip，不能以字符串断言替代该生产证据。
+在 opt-in Linux systemd 集成测试中，使用可控的 worker/子进程 fixture 验证停止语义：SIGTERM 先到达 worker 主进程并触发协作式清理；正常清理窗口内不应同时终止 Vina 子进程；若 fixture 故意超时，systemd 最终必须清除同一 cgroup 内全部后代。测试通过 `ControlGroup` 与 `cgroup.procs` 判断存活并通过 `systemctl kill` 清理；不得对可能复用的裸数字 PID 直接发送信号。所有 cleanup 命令必须检查返回状态，测试结束后不得残留 worker 或科学工具进程。缺少 systemd/cgroup 权限时应明确 skip，不能以字符串断言替代该生产证据。
 
 ### 14.4 真实科学验收
 
@@ -565,9 +599,11 @@ systemd 部署测试还必须验证 `ProtectSystem=strict`、`UMask=0077`、`Kil
 8. 所有新增输出完成脱敏，没有 secret、用户数据、SMILES、完整 prompt 或绝对机器路径；
 9. 默认配置仍为 canary 0%，没有自动切换真实生产流量；
 10. production worker 在空环境、local backend、隐式默认、warning 或非法路径下拒绝启动，且 `python -O` 无法绕过；
-11. worker 运行时文件系统为严格只读边界，新增文件默认私有，只有 tmpfiles 创建的四个 `medchat:medchat`、`0700` 目录可写；
-12. systemd 停止先允许 worker 协作式清理，超时后清除整个 cgroup，测试后无 Vina 或 worker 后代残留；
-13. runbook 能由部署人员完成环境文件校验、目录引导、Compose 先行启动、worker 启动、检查、晋级、回滚、备份和恢复验证。
+11. worker 和 prepare unit 不以 root 执行任何仓库、Conda 或服务用户可写资产；prepare unit 不读取 `EnvironmentFile`，worker unit 不含 `+`/`!` 特权前缀；
+12. source、Conda、已安装 unit/libexec/tmpfiles 均为 root-owned 且不可被 `medchat` 写入；worker 运行时文件系统为严格只读边界，新增文件默认私有，只有 tmpfiles 创建的四个 `medchat:medchat`、`0700` 目录可写；
+13. 专用 worker 环境文件通过 parent-chain/leaf no-follow 与变量白名单校验，不含 secret 或 loader/runtime 注入变量；
+14. systemd 停止先允许 worker 协作式清理，超时后清除整个 cgroup，测试不按裸 PID 发信号且结束后无 Vina 或 worker 后代残留；
+15. runbook 能由部署人员完成 root-owned 安装、环境文件校验、目录引导、Compose 先行启动、worker 启动、检查、晋级、回滚、备份和恢复验证。
 
 ## 16. 实施顺序
 
