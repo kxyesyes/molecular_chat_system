@@ -44,7 +44,18 @@ RELAY_TEMPLATE = ROOT / "deployment" / "nginx-medchat-temporal-metrics.conf.temp
 RELAY_SCRIPT = ROOT / "scripts" / "configure_temporal_metrics_relay.py"
 WEB_SYSTEMD_UNIT = ROOT / "deployment" / "medchat.service"
 WORKER_SYSTEMD_UNIT = ROOT / "deployment" / "medchat-temporal-worker.service"
-WORKER_TMPFILES = ROOT / "deployment" / "medchat-temporal-worker.tmpfiles"
+PREPARE_SYSTEMD_UNIT = (
+    ROOT / "deployment" / "medchat-temporal-worker-prepare.service"
+)
+WORKER_TMPFILES = (
+    ROOT / "deployment" / "tmpfiles" / "medchat-temporal-worker.conf"
+)
+OLD_WORKER_TMPFILES = ROOT / "deployment" / "medchat-temporal-worker.tmpfiles"
+WORKER_ENV_EXAMPLE = ROOT / "deployment" / "temporal-worker.env.example"
+WORKER_INSTALLER = ROOT / "deployment" / "install-temporal-worker.sh"
+WORKER_HELPER = (
+    ROOT / "deployment" / "libexec" / "validate-temporal-worker-env.py"
+)
 
 LONG_RUNNING = {
     "postgres", "postgres-exporter", "temporal", "temporal-ui", "prometheus", "grafana"
@@ -132,23 +143,25 @@ def test_temporal_worker_systemd_unit_has_full_hardened_contract() -> None:
     assert parse_systemd_directives(WORKER_SYSTEMD_UNIT) == {
         "Unit": {
             "Description": ["MedChat Temporal Docking Worker"],
-            "After": ["network-online.target docker.service"],
+            "After": [
+                "network-online.target docker.service "
+                "medchat-temporal-worker-prepare.service"
+            ],
             "Wants": ["network-online.target"],
+            "Requires": ["medchat-temporal-worker-prepare.service"],
         },
         "Service": {
             "Type": ["simple"],
             "User": ["medchat"],
             "Group": ["medchat"],
             "WorkingDirectory": ["/opt/medchat/molecular_chat_system"],
-            "EnvironmentFile": ["/etc/medchat/medchat.env"],
-            "Environment": ["MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY=1"],
+            "EnvironmentFile": ["/etc/medchat/temporal-worker.env"],
+            "Environment": [
+                "PATH=/opt/conda/envs/medchat/bin:/usr/local/sbin:"
+                "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "PYTHONDONTWRITEBYTECODE=1",
+            ],
             "ExecStartPre": [
-                "+/usr/bin/systemd-tmpfiles --create "
-                "/opt/medchat/molecular_chat_system/deployment/"
-                "medchat-temporal-worker.tmpfiles",
-                "+/opt/conda/envs/medchat/bin/python "
-                "scripts/validate_temporal_worker_production.py "
-                "--check-environment-file /etc/medchat/medchat.env",
                 "/opt/conda/envs/medchat/bin/python "
                 "scripts/validate_temporal_worker_production.py --check-config",
             ],
@@ -171,9 +184,55 @@ def test_temporal_worker_systemd_unit_has_full_hardened_contract() -> None:
                 "/opt/medchat/molecular_chat_system/scratch "
                 "/opt/medchat/molecular_chat_system/temp_docking"
             ],
+            "ReadOnlyPaths": [
+                "/opt/medchat/molecular_chat_system "
+                "/opt/conda/envs/medchat"
+            ],
         },
         "Install": {"WantedBy": ["multi-user.target"]},
     }
+
+    worker = parse_systemd_directives(WORKER_SYSTEMD_UNIT)
+    assert all(
+        not value.startswith(("+", "!"))
+        for key, values in worker["Service"].items()
+        if key.startswith("Exec")
+        for value in values
+    )
+
+
+def test_temporal_worker_prepare_unit_is_root_only_and_environment_free() -> None:
+    prepare = parse_systemd_directives(PREPARE_SYSTEMD_UNIT)
+    assert prepare == {
+        "Unit": {
+            "Description": [
+                "Prepare MedChat Temporal Docking Worker Trust Boundary"
+            ],
+            "Before": ["medchat-temporal-worker.service"],
+            "PartOf": ["medchat-temporal-worker.service"],
+        },
+        "Service": {
+            "Type": ["oneshot"],
+            "ExecStart": [
+                "/usr/libexec/medchat/validate-temporal-worker-env",
+                "/usr/bin/systemd-tmpfiles --create "
+                "/usr/lib/tmpfiles.d/medchat-temporal-worker.conf",
+            ],
+            "RemainAfterExit": ["yes"],
+        },
+    }
+    assert not ({"User", "Environment", "EnvironmentFile"} & prepare["Service"].keys())
+    combined = PREPARE_SYSTEMD_UNIT.read_text(encoding="utf-8").lower()
+    for forbidden in (
+        "/opt/medchat",
+        "/opt/conda",
+        "docker",
+        "compose",
+        "temporal address",
+        "vina",
+        "taskstore",
+    ):
+        assert forbidden not in combined
 
 
 def test_web_systemd_unit_preserves_behavior_with_narrow_environment_source() -> None:
@@ -203,9 +262,13 @@ def test_web_systemd_unit_preserves_behavior_with_narrow_environment_source() ->
 def test_web_and_temporal_worker_systemd_units_are_independent_processes() -> None:
     web = parse_systemd_directives(WEB_SYSTEMD_UNIT)
     worker = parse_systemd_directives(WORKER_SYSTEMD_UNIT)
-    for unit in (web, worker):
-        assert "Requires" not in unit["Unit"]
-        assert "PartOf" not in unit["Unit"]
+    assert "Requires" not in web["Unit"]
+    assert "PartOf" not in web["Unit"]
+    assert "medchat.service" not in " ".join(
+        value
+        for values in worker["Unit"].values()
+        for value in values
+    )
     assert web["Service"]["ExecStart"] != worker["Service"]["ExecStart"]
     worker_commands = [
         *worker["Service"]["ExecStartPre"],
@@ -216,7 +279,7 @@ def test_web_and_temporal_worker_systemd_units_are_independent_processes() -> No
 
 
 def test_systemd_units_have_no_shell_interpolation_or_embedded_credentials() -> None:
-    units = (WEB_SYSTEMD_UNIT, WORKER_SYSTEMD_UNIT)
+    units = (WEB_SYSTEMD_UNIT, WORKER_SYSTEMD_UNIT, PREPARE_SYSTEMD_UNIT)
     embedded_credential = re.compile(
         r"(?i)(?:https?|postgres(?:ql)?|mysql|redis)://[^/\s:@]+:[^/\s@]+@"
     )
@@ -238,12 +301,12 @@ def test_systemd_units_have_no_shell_interpolation_or_embedded_credentials() -> 
         assert not embedded_credential.search(text), path.name
         assert not secret_assignment.search(text), path.name
         assert all(not shell_interpolation.search(value) for value in executable_values)
-        environment = parsed["Service"].get("Environment")
-        if environment is not None:
-            assert environment == ["MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY=1"]
+        environment = parsed["Service"].get("Environment", [])
+        assert all("KEY=" not in value and "TOKEN=" not in value for value in environment)
 
 
 def test_temporal_worker_tmpfiles_has_exact_private_directory_contract() -> None:
+    assert not OLD_WORKER_TMPFILES.exists()
     records = [
         line.strip()
         for line in WORKER_TMPFILES.read_text(encoding="utf-8").splitlines()
@@ -257,6 +320,131 @@ def test_temporal_worker_tmpfiles_has_exact_private_directory_contract() -> None
     ]
     assert all(record.split(maxsplit=1)[0] == "d" for record in records)
     assert "/etc/medchat" not in "\n".join(records)
+
+
+def test_temporal_worker_environment_example_is_exact_non_secret_allowlist() -> None:
+    assignments = {
+        line.split("=", 1)[0]: line.split("=", 1)[1]
+        for line in WORKER_ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith(("#", ";"))
+    }
+    assert set(assignments) == {
+        "MEDCHAT_TASK_BACKEND",
+        "MEDCHAT_TEMPORAL_CANARY_PERCENT",
+        "MEDCHAT_TEMPORAL_ADDRESS",
+        "MEDCHAT_TEMPORAL_NAMESPACE",
+        "MEDCHAT_TEMPORAL_DOCKING_QUEUE",
+        "MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY",
+        "MEDCHAT_TASK_STAGING_ROOT",
+        "MEDCHAT_TASK_DB_PATH",
+        "MEDCHAT_TEMPORAL_WORKER_METRICS_ADDRESS",
+        "MEDCHAT_TEMPORAL_WORKER_METRICS_PORT",
+        "MEDCHAT_TEMPORAL_BASELINE_P95_SECONDS",
+        "MEDCHAT_TEMPORAL_BACKUP_STATE",
+        "MOLECULAR_DOCKING_ROOT",
+        "MOLECULAR_DOCKING_VINA",
+        "MOLECULAR_DOCKING_ADFR_BIN",
+        "MOLECULAR_DOCKING_PREPARE_RECEPTOR",
+        "MOLECULAR_DOCKING_PREPARE_LIGAND",
+        "MOLECULAR_DOCKING_VINA_TIMEOUT_SECONDS",
+    }
+    assert all(value and not re.search(r"(?i)(secret|password|token|api.?key)", value) for value in assignments.values())
+    assert not ({"PATH", "PYTHONPATH", "PYTHONHOME", "LD_PRELOAD"} & assignments.keys())
+    assert all("RELAY" not in key and "PROMETHEUS_SCRAPE" not in key for key in assignments)
+
+
+def _wsl_path(path: Path) -> str:
+    resolved = path.resolve().as_posix()
+    assert re.fullmatch(r"[A-Za-z]:/.*", resolved)
+    return f"/mnt/{resolved[0].lower()}{resolved[2:]}"
+
+
+def test_temporal_worker_installer_has_live_source_guard_and_no_service_actions() -> None:
+    source = WORKER_INSTALLER.read_text(encoding="utf-8")
+    assert source.startswith("#!/bin/sh\nset -eu\n")
+    assert "PATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH\n" in source
+    assert "--destdir" in source
+    assert "sha256sum" in source
+    assert "id -u" in source
+    assert "stat -c %u" in source
+    assert "022" in source
+    assert "root-owned" in source
+    assert "/etc/medchat/temporal-worker.env" not in source
+    assert not re.search(r"systemctl\s+(?:start|restart|reload|enable)", source)
+
+
+def test_temporal_worker_installer_stages_exact_assets_without_side_effects(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        if shutil.which("wsl.exe") is None:
+            pytest.skip("WSL unavailable for POSIX installer validation")
+        repository = _wsl_path(ROOT)
+        command = f"""
+set -eu
+cd '{repository}'
+destination=$(mktemp -d)
+trap 'rm -rf -- "$destination"' EXIT
+sh deployment/install-temporal-worker.sh --destdir "$destination"
+cmp deployment/medchat-temporal-worker.service "$destination/etc/systemd/system/medchat-temporal-worker.service"
+cmp deployment/medchat-temporal-worker-prepare.service "$destination/etc/systemd/system/medchat-temporal-worker-prepare.service"
+cmp deployment/libexec/validate-temporal-worker-env.py "$destination/usr/libexec/medchat/validate-temporal-worker-env"
+cmp deployment/tmpfiles/medchat-temporal-worker.conf "$destination/usr/lib/tmpfiles.d/medchat-temporal-worker.conf"
+test "$(stat -c %a "$destination/usr/libexec/medchat/validate-temporal-worker-env")" = 755
+test "$(stat -c %a "$destination/etc/systemd/system/medchat-temporal-worker.service")" = 644
+test "$(stat -c %a "$destination/etc/systemd/system/medchat-temporal-worker-prepare.service")" = 644
+test "$(stat -c %a "$destination/usr/lib/tmpfiles.d/medchat-temporal-worker.conf")" = 644
+test "$(stat -c %a "$destination/usr/share/medchat/temporal-worker-assets.sha256")" = 644
+test ! -e "$destination/etc/medchat/temporal-worker.env"
+(cd "$destination" && sha256sum -c usr/share/medchat/temporal-worker-assets.sha256)
+"""
+        result = subprocess.run(
+            ["wsl.exe", "-e", "sh", "-lc", command],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return
+
+    destination = tmp_path / "root"
+    result = subprocess.run(
+        ["sh", str(WORKER_INSTALLER), "--destdir", str(destination)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    installed = {
+        "etc/systemd/system/medchat-temporal-worker.service": WORKER_SYSTEMD_UNIT,
+        "etc/systemd/system/medchat-temporal-worker-prepare.service": PREPARE_SYSTEMD_UNIT,
+        "usr/libexec/medchat/validate-temporal-worker-env": WORKER_HELPER,
+        "usr/lib/tmpfiles.d/medchat-temporal-worker.conf": WORKER_TMPFILES,
+    }
+    for relative, source in installed.items():
+        target = destination / relative
+        assert target.read_bytes() == source.read_bytes()
+        assert target.stat().st_mode & 0o777 == (
+            0o755 if relative.startswith("usr/libexec/") else 0o644
+        )
+    manifest = destination / "usr/share/medchat/temporal-worker-assets.sha256"
+    assert manifest.stat().st_mode & 0o777 == 0o644
+    assert not (destination / "etc/medchat/temporal-worker.env").exists()
+    check = subprocess.run(
+        ["sha256sum", "-c", "usr/share/medchat/temporal-worker-assets.sha256"],
+        cwd=destination,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert check.returncode == 0, check.stderr
 
 
 def shell_executable() -> Path:

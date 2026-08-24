@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import builtins
 import importlib
 import os
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -308,80 +306,12 @@ def test_validator_cli_fails_closed_under_python_optimization() -> None:
     assert "local" not in combined
 
 
-def _metadata(mode: int, *, uid: int = 0, gid: int = 0) -> SimpleNamespace:
-    return SimpleNamespace(st_mode=mode, st_uid=uid, st_gid=gid)
-
-
-def test_environment_file_metadata_accepts_root_owned_regular_0600(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    metadata = _metadata(stat.S_IFREG | 0o600)
-    monkeypatch.setattr(validator_cli.os, "lstat", lambda _path: metadata)
-
-    def forbid_open(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("metadata validation must not open the environment file")
-
-    monkeypatch.setattr(builtins, "open", forbid_open)
-    monkeypatch.setattr(Path, "open", forbid_open)
-    monkeypatch.setattr(validator_cli.os, "open", forbid_open)
-    validator_cli.validate_environment_file_metadata(Path("private.env"))
-
-
-@pytest.mark.parametrize(
-    ("metadata", "code"),
-    [
-        (_metadata(stat.S_IFLNK | 0o777), "environment_file_not_regular"),
-        (_metadata(stat.S_IFREG | 0o600, uid=1000), "environment_file_wrong_owner"),
-        (_metadata(stat.S_IFREG | 0o600, gid=1000), "environment_file_wrong_owner"),
-        (_metadata(stat.S_IFREG | 0o640), "environment_file_wrong_mode"),
-    ],
-)
-def test_environment_file_metadata_rejects_unsafe_metadata(
-    monkeypatch: pytest.MonkeyPatch,
-    metadata: SimpleNamespace,
-    code: str,
-) -> None:
-    monkeypatch.setattr(validator_cli.os, "lstat", lambda _path: metadata)
-    with pytest.raises(ProductionWorkerValidationError) as raised:
-        validator_cli.validate_environment_file_metadata(Path("private.env"))
-    assert code in raised.value.codes
-
-
-def test_environment_file_metadata_missing_is_redacted(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    def missing(_path: Path) -> None:
-        raise FileNotFoundError("C:/private/secret.env")
-
-    monkeypatch.setattr(validator_cli.os, "lstat", missing)
-    result = validator_cli.main(
-        ["--check-environment-file", "C:/private/secret.env"]
-    )
-    output = capsys.readouterr()
-    assert result == 1
-    assert output.out == ""
-    assert output.err == (
-        "temporal_worker_production_validation=failed "
-        "code=environment_file_unavailable\n"
-    )
-    assert "private" not in output.err.lower()
-    assert "secret" not in output.err.lower()
-
-
-def test_validator_cli_success_prints_only_passed(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.setattr(
-        validator_cli.os,
-        "lstat",
-        lambda _path: _metadata(stat.S_IFREG | 0o600),
-    )
-    assert validator_cli.main(["--check-environment-file", "ignored.env"]) == 0
-    output = capsys.readouterr()
-    assert output.out == "temporal_worker_production_validation=passed\n"
-    assert output.err == ""
+def test_validator_cli_supports_only_config_mode() -> None:
+    source = VALIDATOR_SCRIPT.read_text(encoding="utf-8")
+    assert "--check-environment-file" not in source
+    assert "lstat" not in source
+    with pytest.raises(SystemExit):
+        validator_cli.main(["--check-environment-file", "private.env"])
 
 
 def test_worker_revalidates_before_metrics_temporal_store_or_files(
