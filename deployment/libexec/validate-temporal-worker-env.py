@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import errno
+import os
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import Mapping
@@ -131,10 +134,131 @@ def parse_environment_payload(payload: bytes) -> Mapping[str, str]:
 
 
 def validate_environment_file(path: Path = ENVIRONMENT_FILE) -> Mapping[str, str]:
-    """Fail closed until descriptor-relative trust validation is installed."""
+    """Validate and parse one root-trusted file through a single descriptor chain."""
 
-    del path
-    raise TrustBoundaryError("environment_file_unavailable")
+    path_text = os.fspath(path)
+    if not isinstance(path_text, str) or not path_text.startswith("/") or path_text == "/":
+        raise TrustBoundaryError("environment_path_invalid")
+    components = path_text.split("/")[1:]
+    if not components or any(component in {"", ".", ".."} for component in components):
+        raise TrustBoundaryError("environment_path_invalid")
+
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    leaf_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptors: list[int] = []
+    try:
+        try:
+            current_directory = os.open("/", directory_flags)
+        except OSError as exc:
+            raise TrustBoundaryError("environment_file_unavailable") from exc
+        descriptors.append(current_directory)
+        _validate_parent_descriptor(current_directory)
+
+        for component in components[:-1]:
+            try:
+                current_directory = os.open(
+                    component,
+                    directory_flags,
+                    dir_fd=current_directory,
+                )
+            except OSError as exc:
+                raise TrustBoundaryError(_open_failure_code(exc)) from exc
+            descriptors.append(current_directory)
+            _validate_parent_descriptor(current_directory)
+
+        try:
+            leaf_descriptor = os.open(
+                components[-1],
+                leaf_flags,
+                dir_fd=current_directory,
+            )
+        except OSError as exc:
+            raise TrustBoundaryError(_open_failure_code(exc)) from exc
+        descriptors.append(leaf_descriptor)
+
+        try:
+            before = os.fstat(leaf_descriptor)
+        except OSError as exc:
+            raise TrustBoundaryError("environment_file_unavailable") from exc
+        if not stat.S_ISREG(before.st_mode):
+            raise TrustBoundaryError("environment_file_not_regular")
+        if before.st_uid != 0 or before.st_gid != 0:
+            raise TrustBoundaryError("environment_file_wrong_owner")
+        if stat.S_IMODE(before.st_mode) != 0o600:
+            raise TrustBoundaryError("environment_file_wrong_mode")
+        if before.st_size > MAX_ENVIRONMENT_BYTES:
+            raise TrustBoundaryError("environment_file_too_large")
+
+        chunks: list[bytes] = []
+        remaining = MAX_ENVIRONMENT_BYTES + 1
+        while remaining:
+            try:
+                chunk = os.read(leaf_descriptor, remaining)
+            except InterruptedError:
+                continue
+            except OSError as exc:
+                raise TrustBoundaryError("environment_file_unavailable") from exc
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > MAX_ENVIRONMENT_BYTES:
+            raise TrustBoundaryError("environment_file_too_large")
+
+        try:
+            after = os.fstat(leaf_descriptor)
+        except OSError as exc:
+            raise TrustBoundaryError("environment_file_unavailable") from exc
+        if _identity(before) != _identity(after):
+            raise TrustBoundaryError("environment_file_changed")
+        return parse_environment_payload(payload)
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _validate_parent_descriptor(descriptor: int) -> None:
+    try:
+        metadata = os.fstat(descriptor)
+    except OSError as exc:
+        raise TrustBoundaryError("environment_file_unavailable") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+    ):
+        raise TrustBoundaryError("environment_parent_untrusted")
+
+
+def _open_failure_code(error: OSError) -> str:
+    if error.errno in {errno.ELOOP, errno.ENOTDIR, errno.EINVAL}:
+        return "environment_path_invalid"
+    return "environment_file_unavailable"
+
+
+def _identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

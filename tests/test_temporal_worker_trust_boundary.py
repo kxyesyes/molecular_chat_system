@@ -64,6 +64,37 @@ def test_helper_is_standalone_standard_library_source() -> None:
     assert imported <= set(sys.stdlib_module_names) | {"__future__"}
 
 
+def test_descriptor_traversal_uses_no_follow_dir_fd_contract() -> None:
+    source = HELPER_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    os_open_calls = [
+        node
+        for node in calls
+        if isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "os"
+        and node.func.attr == "open"
+    ]
+    assert len(os_open_calls) == 3
+    assert sum(
+        any(keyword.arg == "dir_fd" for keyword in call.keywords)
+        for call in os_open_calls
+    ) == 2
+    assert "O_DIRECTORY" in source
+    assert "O_NOFOLLOW" in source
+    assert "O_CLOEXEC" in source
+    assert "O_NONBLOCK" in source
+    assert not any(
+        isinstance(call.func, ast.Name) and call.func.id == "open" for call in calls
+    )
+    assert not any(
+        isinstance(call.func, ast.Attribute)
+        and call.func.attr in {"resolve", "stat", "lstat"}
+        for call in calls
+    )
+
+
 def test_parser_accepts_only_canonical_allowlisted_assignments(helper) -> None:
     payload = (
         b"# worker only\n"
@@ -188,6 +219,20 @@ def test_cli_output_is_fixed_and_redacted(helper, monkeypatch, capsys) -> None:
         "temporal_worker_environment_validation=failed "
         "code=environment_key_forbidden\n"
     )
+
+
+def test_cli_success_output_is_fixed(helper, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(helper, "validate_environment_file", lambda: {})
+    assert helper.main([]) == 0
+    output = capsys.readouterr()
+    assert output.out == "temporal_worker_environment_validation=passed\n"
+    assert output.err == ""
+
+
+def test_descriptor_validator_rejects_relative_paths_before_open(helper) -> None:
+    with pytest.raises(helper.TrustBoundaryError) as raised:
+        helper.validate_environment_file(Path("private/temporal-worker.env"))
+    assert raised.value.code == "environment_path_invalid"
 
 
 def test_cli_rejects_path_argument_without_echo_or_traceback() -> None:
