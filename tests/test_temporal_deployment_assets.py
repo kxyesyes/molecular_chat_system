@@ -450,29 +450,142 @@ test ! -e "$parent_outside/systemd"
     assert result.returncode == 0, result.stderr
 
 
-def test_temporal_worker_installer_live_root_targets_are_root_owned() -> None:
+def test_temporal_worker_live_install_arms_cleanup_before_install() -> None:
+    command = _live_root_install_command("/mnt/d/repository")
+    absence_check = command.index("for target in")
+    cleanup_arm = command.index("cleanup_armed=1")
+    installer_call = command.index(
+        'sh "$release/deployment/install-temporal-worker.sh" --destdir /'
+    )
+    absence_check_end = command.index(
+        "done\nif [ ! -d /usr/libexec/medchat ]; then"
+    )
+    assert absence_check < absence_check_end < cleanup_arm < installer_call
+    assert 'if [ "$cleanup_armed" -eq 1 ]; then' in command
+    assert "trap cleanup EXIT" in command
+    assert "trap cleanup_on_signal HUP INT TERM" in command
+
+
+def test_temporal_worker_installer_detects_post_replace_target_replacement() -> None:
     if os.name != "nt" or shutil.which("wsl.exe") is None:
-        pytest.skip("WSL root is required for isolated live-install validation")
+        pytest.skip("WSL is required for deterministic installer race validation")
     repository = _wsl_path(ROOT)
     command = f"""
 set -eu
+cd '{repository}'
+release=$(mktemp -d)
+destination=$(mktemp -d)
+trap 'rm -rf -- "$release" "$destination"' EXIT HUP INT TERM
+cp -R deployment "$release/deployment"
+python3 - "$release/deployment/install-temporal-worker.sh" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+needle = '''        os.replace(
+            temporary_name,
+            leaf_name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        os.fsync(parent_descriptor)
+'''
+replacement = needle + '''        if relative_path == "etc/systemd/system/medchat-temporal-worker.service":
+            attack_name = ".medchat-test-post-replace-attack"
+            attack_payload = b"tampered temporal worker unit\\\\n"
+            try:
+                os.unlink(attack_name, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                pass
+            attack_descriptor = os.open(
+                attack_name,
+                CREATE_FLAGS,
+                mode,
+                dir_fd=parent_descriptor,
+            )
+            try:
+                attack_offset = 0
+                while attack_offset < len(attack_payload):
+                    attack_written = os.write(
+                        attack_descriptor,
+                        attack_payload[attack_offset:],
+                    )
+                    if attack_written <= 0:
+                        raise RuntimeError("test attack write made no progress")
+                    attack_offset += attack_written
+                os.fchmod(attack_descriptor, mode)
+                os.fsync(attack_descriptor)
+            finally:
+                os.close(attack_descriptor)
+            os.replace(
+                attack_name,
+                leaf_name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            os.fsync(parent_descriptor)
+'''
+if source.count(needle) != 1:
+    raise SystemExit("installer replacement anchor changed")
+path.write_text(source.replace(needle, replacement), encoding="utf-8", newline="\\n")
+PY
+set +e
+output=$(sh "$release/deployment/install-temporal-worker.sh" --destdir "$destination" 2>&1)
+result=$?
+set -e
+test "$result" -eq 1
+test "$output" = 'temporal_worker_install=failed code=asset_installation_failed'
+test ! -L "$destination/etc/systemd/system/medchat-temporal-worker.service"
+test "$(cat "$destination/etc/systemd/system/medchat-temporal-worker.service")" = 'tampered temporal worker unit'
+test ! -e "$destination/usr/share/medchat/temporal-worker-assets.sha256"
+"""
+    result = subprocess.run(
+        ["wsl.exe", "-e", "sh", "-lc", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def _live_root_install_command(repository: str) -> str:
+    return f"""
+set -eu
 repository='{repository}'
-release=$(mktemp -d /root/medchat-temporal-installer-live-XXXXXX)
-installed=0
+release=
+cleanup_armed=0
+created_libexec_dir=0
+created_share_dir=0
 cleanup() {{
-    if [ "$installed" -eq 1 ]; then
+    if [ "$cleanup_armed" -eq 1 ]; then
         rm -f -- \
             /etc/systemd/system/medchat-temporal-worker.service \
             /etc/systemd/system/medchat-temporal-worker-prepare.service \
             /usr/libexec/medchat/validate-temporal-worker-env \
             /usr/lib/tmpfiles.d/medchat-temporal-worker.conf \
             /usr/share/medchat/temporal-worker-assets.sha256
-        rmdir /usr/libexec/medchat 2>/dev/null || true
-        rmdir /usr/share/medchat 2>/dev/null || true
+        if [ "$created_libexec_dir" -eq 1 ]; then
+            rmdir /usr/libexec/medchat 2>/dev/null || true
+        fi
+        if [ "$created_share_dir" -eq 1 ]; then
+            rmdir /usr/share/medchat 2>/dev/null || true
+        fi
     fi
-    rm -rf -- "$release"
+    if [ -n "$release" ]; then rm -rf -- "$release"; fi
 }}
-trap cleanup EXIT HUP INT TERM
+cleanup_on_signal() {{
+    cleanup
+    trap - EXIT HUP INT TERM
+    exit 1
+}}
+trap cleanup EXIT
+trap cleanup_on_signal HUP INT TERM
+release=$(mktemp -d /root/medchat-temporal-installer-live-XXXXXX)
 for target in \
     /etc/systemd/system/medchat-temporal-worker.service \
     /etc/systemd/system/medchat-temporal-worker-prepare.service \
@@ -482,6 +595,9 @@ for target in \
 do
     if [ -e "$target" ] || [ -L "$target" ]; then exit 77; fi
 done
+if [ ! -d /usr/libexec/medchat ]; then created_libexec_dir=1; fi
+if [ ! -d /usr/share/medchat ]; then created_share_dir=1; fi
+cleanup_armed=1
 mkdir -p "$release/deployment/libexec" "$release/deployment/tmpfiles"
 cp "$repository/deployment/install-temporal-worker.sh" "$release/deployment/"
 cp "$repository/deployment/medchat-temporal-worker.service" "$release/deployment/"
@@ -491,7 +607,6 @@ cp "$repository/deployment/tmpfiles/medchat-temporal-worker.conf" "$release/depl
 chown -R root:root "$release"
 chmod -R go-w "$release"
 sh "$release/deployment/install-temporal-worker.sh" --destdir /
-installed=1
 test ! -L /etc/systemd/system/medchat-temporal-worker.service
 test ! -L /etc/systemd/system/medchat-temporal-worker-prepare.service
 test ! -L /usr/libexec/medchat/validate-temporal-worker-env
@@ -508,7 +623,26 @@ test "$(stat -c %a /usr/libexec/medchat/validate-temporal-worker-env)" = 755
 test "$(stat -c %a /usr/lib/tmpfiles.d/medchat-temporal-worker.conf)" = 644
 test "$(stat -c %a /usr/share/medchat/temporal-worker-assets.sha256)" = 644
 (cd / && sha256sum -c /usr/share/medchat/temporal-worker-assets.sha256)
+cleanup
+cleanup_armed=0
+for target in \
+    /etc/systemd/system/medchat-temporal-worker.service \
+    /etc/systemd/system/medchat-temporal-worker-prepare.service \
+    /usr/libexec/medchat/validate-temporal-worker-env \
+    /usr/lib/tmpfiles.d/medchat-temporal-worker.conf \
+    /usr/share/medchat/temporal-worker-assets.sha256
+do
+    test ! -e "$target"
+    test ! -L "$target"
+done
 """
+
+
+def test_temporal_worker_installer_live_root_targets_are_root_owned() -> None:
+    if os.name != "nt" or shutil.which("wsl.exe") is None:
+        pytest.skip("WSL root is required for isolated live-install validation")
+    repository = _wsl_path(ROOT)
+    command = _live_root_install_command(repository)
     result = subprocess.run(
         ["wsl.exe", "-u", "root", "-e", "sh", "-lc", command],
         cwd=ROOT,
@@ -522,6 +656,53 @@ test "$(stat -c %a /usr/share/medchat/temporal-worker-assets.sha256)" = 644
     if result.returncode == 77:
         pytest.skip("WSL already has Temporal worker production assets")
     assert result.returncode == 0, result.stderr
+
+
+def test_temporal_worker_live_install_failure_path_cleans_created_targets() -> None:
+    if os.name != "nt" or shutil.which("wsl.exe") is None:
+        pytest.skip("WSL root is required for live-install failure cleanup validation")
+    repository = _wsl_path(ROOT)
+    installer_call = 'sh "$release/deployment/install-temporal-worker.sh" --destdir /'
+    command = _live_root_install_command(repository)
+    assert command.count(installer_call) == 1
+    command = command.replace(installer_call, f"{installer_call}\nexit 91", 1)
+    result = subprocess.run(
+        ["wsl.exe", "-u", "root", "-e", "sh", "-lc", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=90,
+        check=False,
+    )
+    if result.returncode == 77:
+        pytest.skip("WSL already has Temporal worker production assets")
+    assert result.returncode == 91, result.stderr
+    cleanup_check = """
+set -eu
+for target in \
+    /etc/systemd/system/medchat-temporal-worker.service \
+    /etc/systemd/system/medchat-temporal-worker-prepare.service \
+    /usr/libexec/medchat/validate-temporal-worker-env \
+    /usr/lib/tmpfiles.d/medchat-temporal-worker.conf \
+    /usr/share/medchat/temporal-worker-assets.sha256
+do
+    test ! -e "$target"
+    test ! -L "$target"
+done
+"""
+    cleanup_result = subprocess.run(
+        ["wsl.exe", "-u", "root", "-e", "sh", "-lc", cleanup_check],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+    )
+    assert cleanup_result.returncode == 0, cleanup_result.stderr
 
 
 def test_temporal_worker_installer_stages_exact_assets_without_side_effects(
