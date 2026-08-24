@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import importlib.util
 import os
 import stat
@@ -137,6 +138,20 @@ class TemporalWorkerTrustLinuxTests(unittest.TestCase):
     def test_fifo_fails_without_blocking(self) -> None:
         self.environment_file.unlink()
         os.mkfifo(self.environment_file, 0o600)
+        self._assert_code("environment_file_not_regular")
+
+    def test_device_node_fails_closed_when_mknod_is_available(self) -> None:
+        self.environment_file.unlink()
+        try:
+            os.mknod(
+                self.environment_file,
+                stat.S_IFCHR | 0o600,
+                os.makedev(1, 3),
+            )
+        except OSError as exc:
+            if exc.errno in {errno.EPERM, errno.EACCES, errno.ENOSYS, errno.EOPNOTSUPP}:
+                self.skipTest("mknod is unavailable in this Linux root environment")
+            raise
         self._assert_code("environment_file_not_regular")
 
     def test_oversize_file_fails(self) -> None:

@@ -364,13 +364,164 @@ def test_temporal_worker_installer_has_live_source_guard_and_no_service_actions(
     assert source.startswith("#!/bin/sh\nset -eu\n")
     assert "PATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH\n" in source
     assert "--destdir" in source
-    assert "sha256sum" in source
+    assert "/usr/bin/python3" in source
+    assert "hashlib" in source
+    assert "O_NOFOLLOW" in source
+    assert "os.replace" in source
+    assert "os.fstat" in source
     assert "id -u" in source
     assert "stat -c %u" in source
     assert "022" in source
     assert "root-owned" in source
     assert "/etc/medchat/temporal-worker.env" not in source
     assert not re.search(r"systemctl\s+(?:start|restart|reload|enable)", source)
+
+
+def test_temporal_worker_installer_routes_root_aliases_through_live_guard() -> None:
+    if os.name != "nt" or shutil.which("wsl.exe") is None:
+        pytest.skip("WSL non-root execution is required for live-root alias validation")
+    repository = _wsl_path(ROOT)
+    command = f"""
+set -eu
+cd '{repository}'
+if [ "$(id -u)" -eq 0 ]; then exit 77; fi
+for destination in / /./ /tmp/.. ///
+do
+    set +e
+    output=$(sh deployment/install-temporal-worker.sh --destdir "$destination" 2>&1)
+    result=$?
+    set -e
+    test "$result" -eq 1
+    test "$output" = 'temporal_worker_install=failed code=root_required'
+done
+"""
+    result = subprocess.run(
+        ["wsl.exe", "-e", "sh", "-lc", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+    )
+    if result.returncode == 77:
+        pytest.skip("WSL default user is root")
+    assert result.returncode == 0, result.stderr
+
+
+def test_temporal_worker_installer_does_not_follow_leaf_or_parent_symlinks() -> None:
+    if os.name != "nt" or shutil.which("wsl.exe") is None:
+        pytest.skip("WSL is required for installer symlink validation")
+    repository = _wsl_path(ROOT)
+    command = f"""
+set -eu
+cd '{repository}'
+destination=$(mktemp -d)
+outside=$(mktemp -d)
+parent_destination=$(mktemp -d)
+parent_outside=$(mktemp -d)
+trap 'rm -rf -- "$destination" "$outside" "$parent_destination" "$parent_outside"' EXIT
+mkdir -p "$destination/etc/systemd/system"
+printf '%s\n' keep > "$outside/marker"
+ln -s "$outside/marker" "$destination/etc/systemd/system/medchat-temporal-worker.service"
+sh deployment/install-temporal-worker.sh --destdir "$destination"
+test ! -L "$destination/etc/systemd/system/medchat-temporal-worker.service"
+cmp deployment/medchat-temporal-worker.service "$destination/etc/systemd/system/medchat-temporal-worker.service"
+test "$(cat "$outside/marker")" = keep
+ln -s "$parent_outside" "$parent_destination/etc"
+set +e
+sh deployment/install-temporal-worker.sh --destdir "$parent_destination" >/dev/null 2>&1
+result=$?
+set -e
+test "$result" -ne 0
+test ! -e "$parent_outside/systemd"
+"""
+    result = subprocess.run(
+        ["wsl.exe", "-e", "sh", "-lc", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_temporal_worker_installer_live_root_targets_are_root_owned() -> None:
+    if os.name != "nt" or shutil.which("wsl.exe") is None:
+        pytest.skip("WSL root is required for isolated live-install validation")
+    repository = _wsl_path(ROOT)
+    command = f"""
+set -eu
+repository='{repository}'
+release=$(mktemp -d /root/medchat-temporal-installer-live-XXXXXX)
+installed=0
+cleanup() {{
+    if [ "$installed" -eq 1 ]; then
+        rm -f -- \
+            /etc/systemd/system/medchat-temporal-worker.service \
+            /etc/systemd/system/medchat-temporal-worker-prepare.service \
+            /usr/libexec/medchat/validate-temporal-worker-env \
+            /usr/lib/tmpfiles.d/medchat-temporal-worker.conf \
+            /usr/share/medchat/temporal-worker-assets.sha256
+        rmdir /usr/libexec/medchat 2>/dev/null || true
+        rmdir /usr/share/medchat 2>/dev/null || true
+    fi
+    rm -rf -- "$release"
+}}
+trap cleanup EXIT HUP INT TERM
+for target in \
+    /etc/systemd/system/medchat-temporal-worker.service \
+    /etc/systemd/system/medchat-temporal-worker-prepare.service \
+    /usr/libexec/medchat/validate-temporal-worker-env \
+    /usr/lib/tmpfiles.d/medchat-temporal-worker.conf \
+    /usr/share/medchat/temporal-worker-assets.sha256
+do
+    if [ -e "$target" ] || [ -L "$target" ]; then exit 77; fi
+done
+mkdir -p "$release/deployment/libexec" "$release/deployment/tmpfiles"
+cp "$repository/deployment/install-temporal-worker.sh" "$release/deployment/"
+cp "$repository/deployment/medchat-temporal-worker.service" "$release/deployment/"
+cp "$repository/deployment/medchat-temporal-worker-prepare.service" "$release/deployment/"
+cp "$repository/deployment/libexec/validate-temporal-worker-env.py" "$release/deployment/libexec/"
+cp "$repository/deployment/tmpfiles/medchat-temporal-worker.conf" "$release/deployment/tmpfiles/"
+chown -R root:root "$release"
+chmod -R go-w "$release"
+sh "$release/deployment/install-temporal-worker.sh" --destdir /
+installed=1
+test ! -L /etc/systemd/system/medchat-temporal-worker.service
+test ! -L /etc/systemd/system/medchat-temporal-worker-prepare.service
+test ! -L /usr/libexec/medchat/validate-temporal-worker-env
+test ! -L /usr/lib/tmpfiles.d/medchat-temporal-worker.conf
+test ! -L /usr/share/medchat/temporal-worker-assets.sha256
+test "$(stat -c %u:%g /etc/systemd/system/medchat-temporal-worker.service)" = 0:0
+test "$(stat -c %u:%g /etc/systemd/system/medchat-temporal-worker-prepare.service)" = 0:0
+test "$(stat -c %u:%g /usr/libexec/medchat/validate-temporal-worker-env)" = 0:0
+test "$(stat -c %u:%g /usr/lib/tmpfiles.d/medchat-temporal-worker.conf)" = 0:0
+test "$(stat -c %u:%g /usr/share/medchat/temporal-worker-assets.sha256)" = 0:0
+test "$(stat -c %a /etc/systemd/system/medchat-temporal-worker.service)" = 644
+test "$(stat -c %a /etc/systemd/system/medchat-temporal-worker-prepare.service)" = 644
+test "$(stat -c %a /usr/libexec/medchat/validate-temporal-worker-env)" = 755
+test "$(stat -c %a /usr/lib/tmpfiles.d/medchat-temporal-worker.conf)" = 644
+test "$(stat -c %a /usr/share/medchat/temporal-worker-assets.sha256)" = 644
+(cd / && sha256sum -c /usr/share/medchat/temporal-worker-assets.sha256)
+"""
+    result = subprocess.run(
+        ["wsl.exe", "-u", "root", "-e", "sh", "-lc", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=90,
+        check=False,
+    )
+    if result.returncode == 77:
+        pytest.skip("WSL already has Temporal worker production assets")
+    assert result.returncode == 0, result.stderr
 
 
 def test_temporal_worker_installer_stages_exact_assets_without_side_effects(
@@ -395,6 +546,17 @@ test "$(stat -c %a "$destination/etc/systemd/system/medchat-temporal-worker.serv
 test "$(stat -c %a "$destination/etc/systemd/system/medchat-temporal-worker-prepare.service")" = 644
 test "$(stat -c %a "$destination/usr/lib/tmpfiles.d/medchat-temporal-worker.conf")" = 644
 test "$(stat -c %a "$destination/usr/share/medchat/temporal-worker-assets.sha256")" = 644
+expected_owner="$(id -u):$(id -g)"
+for installed in \
+    "$destination/etc/systemd/system/medchat-temporal-worker.service" \
+    "$destination/etc/systemd/system/medchat-temporal-worker-prepare.service" \
+    "$destination/usr/libexec/medchat/validate-temporal-worker-env" \
+    "$destination/usr/lib/tmpfiles.d/medchat-temporal-worker.conf" \
+    "$destination/usr/share/medchat/temporal-worker-assets.sha256"
+do
+    test ! -L "$installed"
+    test "$(stat -c %u:%g "$installed")" = "$expected_owner"
+done
 test ! -e "$destination/etc/medchat/temporal-worker.env"
 (cd "$destination" && sha256sum -c usr/share/medchat/temporal-worker-assets.sha256)
 """
