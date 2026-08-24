@@ -8,6 +8,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import signal
 import sqlite3
 import stat
@@ -4342,7 +4344,12 @@ def test_deployment_validator_passes_only_executed_host_checks(
     assert all(check["status"] == "passed" for check in report["checks"].values())
     assert len(calls) == 4
     assert calls[0][0][:2] == ("docker", "compose")
-    assert calls[-1][0][:2] == ("systemd-analyze", "verify")
+    assert calls[-1][0] == (
+        "systemd-analyze",
+        "verify",
+        "deployment/medchat.service",
+        "deployment/medchat-temporal-worker.service",
+    )
     assert secret not in json.dumps(calls)
 
 
@@ -4404,3 +4411,149 @@ def test_task10_atomic_report_writer_rejects_symlink(
 
     assert target.read_text(encoding="utf-8") == "sentinel"
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def _task10_static_fixture(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    shutil.copytree(PROJECT_ROOT / "deployment", root / "deployment")
+    (root / "scripts").mkdir()
+    for name in (
+        "run_temporal_docking_acceptance.py",
+        "backup_temporal_postgres.py",
+        "restore_temporal_postgres.py",
+    ):
+        shutil.copy2(PROJECT_ROOT / "scripts" / name, root / "scripts" / name)
+    return root
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "compose_service",
+        "compose_service_shape",
+        "compose_network",
+        "compose_privilege",
+        "systemd_contract",
+        "prometheus_job",
+        "prometheus_rule",
+        "prometheus_other_rule",
+        "prometheus_fixture",
+        "grafana_query",
+    ],
+)
+def test_deployment_python_static_rejects_semantic_asset_tamper(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    from scripts import validate_temporal_deployment as validator
+
+    root = _task10_static_fixture(tmp_path)
+    if mutation == "compose_service":
+        path = root / "deployment/temporal/docker-compose.yml"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(content.replace("  temporal-ui:\n", "  temporal-ui-rogue:\n", 1), encoding="utf-8")
+    elif mutation == "compose_service_shape":
+        path = root / "deployment/temporal/docker-compose.yml"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            re.sub(
+                r"(?ms)^  temporal-ui:\n.*?(?=^  prometheus:)",
+                "  temporal-ui: malformed\n",
+                content,
+                count=1,
+            ),
+            encoding="utf-8",
+        )
+    elif mutation == "compose_network":
+        path = root / "deployment/temporal/docker-compose.yml"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(content.replace("  database:\n    internal: true", "  database-rogue:\n    internal: true", 1), encoding="utf-8")
+    elif mutation == "compose_privilege":
+        path = root / "deployment/temporal/docker-compose.yml"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            content.replace("    image: postgres:16.14-alpine3.23", "    image: postgres:16.14-alpine3.23\n    privileged: true", 1),
+            encoding="utf-8",
+        )
+    elif mutation == "systemd_contract":
+        path = root / "deployment/medchat-temporal-worker.service"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(content.replace("KillMode=mixed", "KillMode=process", 1), encoding="utf-8")
+    elif mutation == "prometheus_job":
+        path = root / "deployment/temporal/prometheus/prometheus.yml"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(content.replace("job_name: temporal-server", "job_name: temporal-rogue", 1), encoding="utf-8")
+    elif mutation == "prometheus_rule":
+        path = root / "deployment/temporal/prometheus/rules/medchat-temporal.yml"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(content.replace('taskqueue="medchat-docking"', 'taskqueue="other-queue"', 1), encoding="utf-8")
+    elif mutation == "prometheus_other_rule":
+        path = root / "deployment/temporal/prometheus/rules/medchat-temporal.yml"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            content.replace(
+                "medchat_temporal_duplicate_vina_execution_total[15m]",
+                "medchat_temporal_duplicate_vina_execution_total[1h]",
+                1,
+            ),
+            encoding="utf-8",
+        )
+    elif mutation == "prometheus_fixture":
+        path = root / "deployment/temporal/prometheus/tests/medchat-temporal.test.yml"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            content.replace("labeled baseline p95 fires", "unrecognized fixture", 1),
+            encoding="utf-8",
+        )
+    else:
+        path = root / "deployment/temporal/grafana/dashboards/medchat-temporal-docking.json"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            content.replace(
+                'service_requests{service_name=\\"frontend\\",namespace=\\"default\\",operation=\\"StartWorkflowExecution\\"}',
+                'service_requests{service_name=\\"frontend\\",namespace=\\"other\\",operation=\\"StartWorkflowExecution\\"}',
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+    assert validator._python_static(root) == {
+        "status": "failed",
+        "code": "python_static_invalid",
+    }
+
+
+@pytest.mark.parametrize(
+    ("queue_value", "expected"),
+    [(1, True), (0, False)],
+    ids=("target-queue", "non-target-queue-only"),
+)
+def test_observer_prometheus_queue_query_is_exactly_scoped(
+    queue_value: int,
+    expected: bool,
+) -> None:
+    assert observer.PROMETHEUS_QUERIES["namespace"] == (
+        'count(service_requests{namespace="default"}) > bool 0'
+    )
+    assert observer.PROMETHEUS_QUERIES["queue"] == (
+        'count(poll_success{namespace="default",taskqueue="medchat-docking"}) '
+        '> bool 0'
+    )
+    queries: list[str] = []
+
+    def fetcher(endpoint: str, query: str | None) -> dict[str, object]:
+        if endpoint == "alerts":
+            return _prom_alerts()
+        assert query is not None
+        queries.append(query)
+        if query == observer.PROMETHEUS_QUERIES["worker_age_seconds"]:
+            return _prom_scalar(5)
+        if query == observer.PROMETHEUS_QUERIES["queue"]:
+            return _prom_scalar(queue_value)
+        return _prom_scalar(1)
+
+    _worker, infrastructure, _alerts = observer._prometheus_state(fetcher)
+
+    assert infrastructure["queue"] is expected
+    assert all("task_queue" not in query for query in queries)
+    assert all('namespace!=""' not in query for query in queries)

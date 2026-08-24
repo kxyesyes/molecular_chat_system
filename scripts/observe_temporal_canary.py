@@ -88,10 +88,10 @@ PROMETHEUS_QUERIES = {
     ),
     "temporal": 'min(up{job="temporal-server"})',
     "namespace": (
-        'count(service_requests{namespace!=""}) > bool 0'
+        'count(service_requests{namespace="default"}) > bool 0'
     ),
     "queue": (
-        'count(poll_success{namespace!="",task_queue!=""}) '
+        'count(poll_success{namespace="default",taskqueue="medchat-docking"}) '
         "> bool 0"
     ),
 }
