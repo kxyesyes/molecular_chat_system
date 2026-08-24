@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import errno
+import hashlib
+import importlib.util
 import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -53,6 +56,9 @@ WORKER_TMPFILES = (
 OLD_WORKER_TMPFILES = ROOT / "deployment" / "medchat-temporal-worker.tmpfiles"
 WORKER_ENV_EXAMPLE = ROOT / "deployment" / "temporal-worker.env.example"
 WORKER_INSTALLER = ROOT / "deployment" / "install-temporal-worker.sh"
+BUNDLE_INSTALLER = (
+    ROOT / "deployment" / "libexec" / "install-temporal-worker-bundle.py"
+)
 WORKER_HELPER = (
     ROOT / "deployment" / "libexec" / "validate-temporal-worker-env.py"
 )
@@ -352,20 +358,294 @@ def _wsl_path(path: Path) -> str:
     return f"/mnt/{resolved[0].lower()}{resolved[2:]}"
 
 
+def _load_bundle_installer():
+    spec = importlib.util.spec_from_file_location(
+        "temporal_bundle_installer_test",
+        BUNDLE_INSTALLER,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_temporal_bundle_v1_digest_and_manifest_are_exact() -> None:
+    installer = _load_bundle_installer()
+    assets = {
+        "units/medchat-temporal-worker.service": (0o644, b"worker\n"),
+        "units/medchat-temporal-worker-prepare.service": (0o644, b"prepare\n"),
+        "libexec/validate-temporal-worker-env": (0o755, b"validate\n"),
+        "libexec/prepare-temporal-worker-directories": (0o755, b"prepare-dirs\n"),
+    }
+    framed = bytearray(b"MEDCHAT_TEMPORAL_BUNDLE_V1\0")
+    for path in sorted(assets, key=lambda value: value.encode("ascii")):
+        mode, payload = assets[path]
+        encoded = path.encode("ascii")
+        framed.extend(struct.pack(">I", len(encoded)))
+        framed.extend(encoded)
+        framed.extend(struct.pack(">I", mode))
+        framed.extend(struct.pack(">Q", len(payload)))
+        framed.extend(payload)
+    expected = hashlib.sha256(framed).hexdigest()
+    assert installer.compute_bundle_digest(assets) == expected
+    manifest = installer.build_manifest(assets, expected)
+    assert manifest.startswith(f"MEDCHAT_TEMPORAL_BUNDLE_V1 {expected}\n".encode())
+    assert manifest.endswith(b"\n") and not manifest.endswith(b"\n\n")
+    parsed = installer.parse_manifest(manifest)
+    assert parsed.bundle_digest == expected
+    assert parsed.assets == {
+        path: (mode, len(payload), hashlib.sha256(payload).hexdigest())
+        for path, (mode, payload) in assets.items()
+    }
+
+
+def _make_manifest_size_noncanonical(payload: bytes) -> bytes:
+    lines = payload.splitlines(keepends=True)
+    fields = lines[1].split(b" ", 3)
+    fields[2] = b"0" + fields[2]
+    lines[1] = b" ".join(fields)
+    return b"".join(lines)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda payload: payload.replace(b"\n", b"\r\n", 1),
+        lambda payload: payload + b"\n",
+        lambda payload: payload.replace(b"0644", b"644", 1),
+        _make_manifest_size_noncanonical,
+        lambda payload: payload.replace(
+            b"units/medchat-temporal-worker.service",
+            b"../medchat-temporal-worker.service",
+            1,
+        ),
+    ],
+    ids=["cr", "blank", "mode", "size", "dot-component"],
+)
+def test_temporal_bundle_manifest_parser_rejects_noncanonical_content(mutation) -> None:
+    installer = _load_bundle_installer()
+    assets = {
+        path: (mode, path.encode("ascii"))
+        for path, mode, _source in installer.ASSET_SPECS
+    }
+    digest = installer.compute_bundle_digest(assets)
+    with pytest.raises(installer.BundleInstallError):
+        installer.parse_manifest(mutation(installer.build_manifest(assets, digest)))
+
+
+def test_temporal_worker_shell_execs_the_bundle_writer() -> None:
+    source = WORKER_INSTALLER.read_text(encoding="utf-8")
+    assert "exec /usr/bin/python3" in source
+    assert "install-temporal-worker-bundle.py" in source
+    assert "from __future__ import annotations" not in source
+    assert "systemctl" not in source
+    assert "current" not in source
+
+
+def test_temporal_bundle_installer_stages_immutable_generation() -> None:
+    if os.name != "nt" or shutil.which("wsl.exe") is None:
+        pytest.skip("WSL is required for native generation staging validation")
+    repository = _wsl_path(ROOT)
+    command = f"""
+set -eu
+cd '{repository}'
+destination=$(mktemp -d)
+cleanup() {{
+    chmod -R u+w "$destination" 2>/dev/null || true
+    rm -rf -- "$destination"
+}}
+trap cleanup EXIT HUP INT TERM
+mkdir "$destination/run"
+sh deployment/install-temporal-worker.sh --destdir "$destination" > "$destination/result"
+digest=$(sed -n 's/^temporal_worker_bundle_installation=passed digest=//p' "$destination/result")
+test "$(printf %s "$digest" | wc -c)" -eq 64
+sh deployment/install-temporal-worker.sh --destdir "$destination" > "$destination/result-again"
+test "$(cat "$destination/result-again")" = "temporal_worker_bundle_installation=passed digest=$digest"
+generation="$destination/usr/lib/medchat/temporal-worker/releases/$digest"
+test -d "$generation"
+test ! -e "$destination/usr/lib/medchat/temporal-worker/current"
+test -f "$generation/manifest.sha256"
+test -f "$generation/units/medchat-temporal-worker.service"
+test -f "$generation/units/medchat-temporal-worker-prepare.service"
+test -x "$generation/libexec/validate-temporal-worker-env"
+test -x "$generation/libexec/prepare-temporal-worker-directories"
+test "$(stat -c %a "$destination/run/medchat-temporal-worker")" = 700
+test "$(stat -c %a "$destination/run/medchat-temporal-worker/install.lock")" = 600
+test "$(find "$destination/usr/lib/medchat/temporal-worker/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1
+test -z "$(find "$destination" -name '.staging-*' -o -name '.medchat-install-*')"
+"""
+    result = subprocess.run(
+        ["wsl.exe", "-e", "sh", "-lc", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=90,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_temporal_bundle_native_trust_and_generation_contracts() -> None:
+    if os.name != "nt" or shutil.which("wsl.exe") is None:
+        pytest.skip("WSL is required for native bundle trust validation")
+    repository = _wsl_path(ROOT)
+    command = r'''
+set -eu
+cd '__REPOSITORY__'
+test_root=$(mktemp -d)
+cleanup() {
+    chmod -R u+w "$test_root" 2>/dev/null || true
+    rm -rf -- "$test_root"
+}
+trap cleanup EXIT HUP INT TERM
+cp -R deployment "$test_root/source"
+python3 - "$test_root/source" "$test_root" <<'PY'
+import importlib.util
+import os
+from pathlib import Path
+import stat
+import sys
+
+source = Path(sys.argv[1])
+root = Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location(
+    "bundle_installer", source / "libexec/install-temporal-worker-bundle.py"
+)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+def destination(name):
+    path = root / name
+    path.mkdir(mode=0o700)
+    return path
+
+def expect(code, operation):
+    try:
+        operation()
+    except module.BundleInstallError as exc:
+        assert exc.code == code, (exc.code, code)
+    else:
+        raise AssertionError("operation unexpectedly succeeded")
+
+first = destination("valid")
+digest = module.install_bundle(str(source), str(first), False)
+generation = first / "usr/lib/medchat/temporal-worker/releases" / digest
+assert len(digest) == 64 and generation.is_dir()
+assert not (first / "usr/lib/medchat/temporal-worker/current").exists()
+expected_owner = (os.geteuid(), os.getegid())
+for directory in (generation, generation / "units", generation / "libexec"):
+    metadata = os.lstat(directory)
+    assert stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode)
+    assert stat.S_IMODE(metadata.st_mode) == 0o555
+    assert (metadata.st_uid, metadata.st_gid) == expected_owner
+for logical, mode, _source_name in module.ASSET_SPECS:
+    installed = generation / logical
+    metadata = os.lstat(installed)
+    assert stat.S_ISREG(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode)
+    assert stat.S_IMODE(metadata.st_mode) == mode
+    assert (metadata.st_uid, metadata.st_gid) == expected_owner
+manifest_meta = os.lstat(generation / "manifest.sha256")
+assert stat.S_ISREG(manifest_meta.st_mode)
+assert stat.S_IMODE(manifest_meta.st_mode) == 0o644
+module.verify_generation(
+    os.open(first / "usr/lib/medchat/temporal-worker/releases", module._DIRECTORY_FLAGS),
+    digest,
+    *expected_owner,
+)
+
+leaf = source / "medchat-temporal-worker.service"
+leaf_real = source / "worker.real"
+leaf.rename(leaf_real)
+leaf.symlink_to(leaf_real.name)
+expect("bundle_source_untrusted", lambda: module.install_bundle(str(source), str(destination("leaf-link")), False))
+leaf.unlink()
+leaf_real.rename(leaf)
+
+libexec = source / "libexec"
+libexec_real = source / "libexec.real"
+libexec.rename(libexec_real)
+libexec.symlink_to(libexec_real.name, target_is_directory=True)
+expect("bundle_source_untrusted", lambda: module.install_bundle(str(source), str(destination("parent-link")), False))
+libexec.unlink()
+libexec_real.rename(libexec)
+
+prepare = source / "medchat-temporal-worker-prepare.service"
+prepare_real = source / "prepare.real"
+prepare.rename(prepare_real)
+os.mkfifo(prepare)
+expect("bundle_source_untrusted", lambda: module.install_bundle(str(source), str(destination("fifo")), False))
+prepare.unlink()
+prepare_real.rename(prepare)
+
+oversize = source / "medchat-temporal-worker.service"
+original = oversize.read_bytes()
+oversize.write_bytes(b"x" * (module.MAX_ASSET_BYTES + 1))
+expect("bundle_source_too_large", lambda: module.install_bundle(str(source), str(destination("oversize")), False))
+oversize.write_bytes(original)
+
+original_read_all = module._read_all
+mutated = False
+def mutate_during_read(descriptor, limit, code):
+    global mutated
+    if not mutated:
+        mutated = True
+        with open(f"/proc/self/fd/{descriptor}", "ab", buffering=0) as writable:
+            writable.write(b"changed")
+    return original_read_all(descriptor, limit, code)
+module._read_all = mutate_during_read
+expect("bundle_source_changed", lambda: module.install_bundle(str(source), str(destination("mutation")), False))
+module._read_all = original_read_all
+oversize.write_bytes(original)
+
+lock_destination = destination("lock-link")
+(lock_destination / "run/medchat-temporal-worker").mkdir(parents=True, mode=0o700)
+sentinel = root / "sentinel"
+sentinel.write_text("keep", encoding="ascii")
+(lock_destination / "run/medchat-temporal-worker/install.lock").symlink_to(sentinel)
+expect("bundle_lock_untrusted", lambda: module.install_bundle(str(source), str(lock_destination), False))
+assert sentinel.read_text(encoding="ascii") == "keep"
+
+parent_destination = destination("release-parent-link")
+release_parent = parent_destination / "usr/lib/medchat/temporal-worker"
+release_parent.mkdir(parents=True)
+outside = root / "outside"
+outside.mkdir()
+(release_parent / "releases").symlink_to(outside, target_is_directory=True)
+expect("bundle_destination_untrusted", lambda: module.install_bundle(str(source), str(parent_destination), False))
+assert not any(outside.iterdir())
+PY
+'''.replace("__REPOSITORY__", repository)
+    result = subprocess.run(
+        ["wsl.exe", "-e", "sh", "-lc", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_temporal_worker_installer_has_live_source_guard_and_no_service_actions() -> None:
     source = WORKER_INSTALLER.read_text(encoding="utf-8")
+    writer = BUNDLE_INSTALLER.read_text(encoding="utf-8")
     assert source.startswith("#!/bin/sh\nset -eu\n")
     assert "PATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH\n" in source
     assert "--destdir" in source
     assert "/usr/bin/python3" in source
-    assert "hashlib" in source
-    assert "O_NOFOLLOW" in source
-    assert "os.replace" in source
-    assert "os.fstat" in source
+    assert "hashlib" in writer
+    assert "O_NOFOLLOW" in writer
+    assert "os.rename" in writer
+    assert "os.fstat" in writer
     assert "id -u" in source
     assert "stat -c %u" in source
     assert "022" in source
-    assert "root-owned" in source
+    assert "source_not_root_owned" in source
     assert "/etc/medchat/temporal-worker.env" not in source
     assert not re.search(r"systemctl\s+(?:start|restart|reload|enable)", source)
 
