@@ -1,5 +1,10 @@
 # MedChat Temporal 对接 Canary 生产就绪设计
 
+> **2026-08-24 信任边界修订（权威）：** 本文后续出现的“逐文件平铺安装”和
+> root `systemd-tmpfiles` 运行目录准备方案，均由 5.3.4 与 5.3.5 节取代，禁止继续
+> 实施或部署。实测 systemd 259 会在服务用户可写父目录下跟随叶 symlink 应用
+> ownership，因此旧方案存在直接提权路径。
+
 **日期：** 2026-08-21
 **状态：** 已确认，待实施计划
 **前置阶段：** `docs/superpowers/specs/2026-08-12-industrial-agent-temporal-docking-canary-design.md`
@@ -219,7 +224,67 @@ systemd 会在命令执行前读取 `EnvironmentFile=`，而 `+` 前缀会使命
 - `scratch/temporal_backups`；
 - `temp_docking`。
 
-tmpfiles 配置只创建上述目录，不创建环境文件，也不改写未知已有文件。安装脚本必须支持 staging/DESTDIR 测试并在复制后验证 owner、mode、regular-file 和 no-symlink 契约；它不得创建带默认值的生产环境文件。
+上述 tmpfiles 约定已被 5.3.4 节取代。安装脚本必须支持 staging/DESTDIR 测试；它不得创建带默认值的生产环境文件。
+
+#### 5.3.4 描述符相对运行目录准备（取代 tmpfiles）
+
+prepare unit 不再调用 `systemd-tmpfiles`。它在环境文件校验成功后调用同一不可变
+generation 内的 `prepare-temporal-worker-directories`。该 helper 只使用系统 Python
+标准库，固定处理四个运行目录，不接受任意路径参数或环境覆盖：
+
+- 从 `/` 开始逐级使用 `openat`/`mkdirat`、`O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`
+  遍历；root-owned 父链必须为 root:root 且无 group/other 写权限；
+- `scratch` 与 `temp_docking` 只能在 root-owned 项目根下创建；两个 scratch 子目录
+  只能在已验证为 `medchat:medchat 0700` 的 scratch fd 下创建；
+- 缺失目录可以创建，再通过已打开 fd 执行 `fchown`/`fchmod`；任何已存在对象必须
+  已经是 directory、非 symlink、`medchat:medchat 0700`，否则只报稳定错误并停止，
+  不尝试修复未知对象；
+- 创建或验证后比较 fd identity 与父目录中的 no-follow directory entry；任何重命名、
+  替换、symlink、非目录或 identity 变化均 fail closed；
+- helper 不读取 worker `EnvironmentFile`，不执行仓库、Conda、Docker、Temporal、Vina
+  或服务用户可写代码。
+
+真实 Linux/systemd 259 测试必须证明：叶 symlink 指向的 sentinel owner、mode、inode
+完全不变；FIFO、regular file、错误 owner/mode、父目录 symlink 和并发替换均失败；
+四个空部署目录可创建为 `medchat:medchat 0700`。
+
+#### 5.3.5 不可变 generation 与原子激活安装（取代平铺复制）
+
+安装器必须持有固定、root-owned、no-follow 的独占安装锁。它在任何生产目标变更前
+有界读取并验证全部源资产，然后构建内容寻址的不可变 generation：
+
+```text
+/usr/lib/medchat/temporal-worker/
+├── current -> releases/<bundle-sha256>
+└── releases/<bundle-sha256>/
+    ├── units/
+    ├── libexec/
+    └── manifest.sha256
+```
+
+generation 在同一 releases 父目录下的私有 staging 目录中完整写入、`fsync`、验证
+owner/group、精确 mode、regular/no-symlink、inode 与 SHA-256 后，才原子重命名为
+最终只读 generation。固定 systemd unit 入口只能是 root-owned symlink，并只能指向
+`/usr/lib/medchat/temporal-worker/current/units/...`；prepare 中的特权 helper 只能从
+`current/libexec` 解析。升级的唯一激活点是同目录临时 symlink 经 `os.replace` 原子
+切换 `current`。manifest 属于 generation，禁止先覆盖线上资产、最后才写 manifest。
+
+安装器还必须：
+
+- 使用 `exec` 将公开 shell PID 交给系统 Python；HUP/INT/TERM 由实际写入进程处理；
+- 在信号、异常和每个发布边界失败时，保证线上状态只能是完整旧 generation 或完整
+  新 generation；不得留下可执行的混合 bundle、临时文件或错误 manifest；
+- 对首次 bootstrap 创建的固定 unit symlink 做精确目标、owner 和 no-follow 验证，
+  失败时仅回滚本次确认创建的入口；已有非预期对象一律拒绝，不自动覆盖；
+- 对同一 DESTDIR 的并发安装串行化；不同 bundle 并发后最终 `current` 与 manifest
+  必须属于同一完整 generation；
+- live install 仍要求 root UID 与 root-owned、`go-w` 源父链；非特权 DESTDIR 使用
+  调用者 UID/GID，但执行同样的 generation、锁、验证和激活协议；
+- 不 reload、enable、start 服务，不创建生产环境文件，不删除未知旧 generation。
+
+Linux 原生直接运行 POSIX 测试；Windows 才通过 WSL。会触碰 `/` 的 live-root 测试
+必须要求显式破坏性测试 opt-in，并仅在一次性 distro、容器或 mount namespace 中运行，
+普通测试不得读写宿主固定 `/etc` 或 `/usr` 目标。
 
 Docker/Compose 基础设施由运维流程管理并先于 worker 启动；worker unit 可以声明网络和 Docker 服务顺序依赖，但不得调用 Docker、自动执行 Compose 或修改基础设施状态。Temporal 不可达时 worker 应由受控 restart policy 重试，不能启动 local worker 代替。
 
@@ -538,7 +603,7 @@ Temporal PostgreSQL 必须使用官方 `pg_dump`/`pg_restore` 能力或等价的
 - 生产 worker 配置校验在空环境、local backend、默认值冒充显式配置、warning、路径逃逸和 `PYTHONOPTIMIZE=1` 下均 fail closed；
 - 直接运行 worker 入口与 systemd `ExecStartPre` 使用同一校验器，且失败发生在 metrics、Temporal 连接和文件副作用之前；
 - root-owned 环境校验器拒绝父目录/叶文件 symlink、非 root owner、group/other 可写目录、宽松 leaf mode、重复键、非法 UTF-8、超限文件、非白名单键和 loader/runtime 注入变量；
-- 安装脚本在 staging/DESTDIR 中生成 root-owned unit、libexec 和 tmpfiles 资产，只把四个运行目录授予 `medchat`，且不会创建生产环境文件；
+- 安装脚本在 staging/DESTDIR 中生成内容寻址、带 manifest 的不可变 generation，并通过单一 `current` symlink 原子激活；目录 helper 只把四个固定运行目录授予 `medchat`，且不会创建生产环境文件；
 
 ### 14.2 静态部署测试
 
@@ -552,7 +617,7 @@ Temporal PostgreSQL 必须使用官方 `pg_dump`/`pg_restore` 能力或等价的
 
 静态测试还必须验证 worker 仍只允许 loopback、Prometheus 不再引用 `host.docker.internal:9465`、只有 Prometheus 加入 `worker-metrics-scrape` 网络，以及 nginx 中继仅开放 `/metrics` 并带 allow/deny ACL。
 
-systemd 部署测试还必须验证 `ProtectSystem=strict`、`UMask=0077`、`KillMode=mixed`、`TimeoutStopSec=90`、受限 `ReadWritePaths`、worker unit 无特权命令前缀，以及 prepare unit 无 `EnvironmentFile`、无仓库/Conda 执行路径；在 Linux 上使用 `systemd-analyze verify` 检查真实 unit。tmpfiles 测试必须证明四个运行目录可以从空部署状态创建为 `medchat:medchat`、`0700`，且不会创建或改写环境文件。安装资产测试必须验证目标 owner/mode/no-symlink 和源代码、Conda 不可被服务用户写入。
+systemd 部署测试还必须验证 `ProtectSystem=strict`、`UMask=0077`、`KillMode=mixed`、`TimeoutStopSec=90`、受限 `ReadWritePaths`、worker unit 无特权命令前缀，以及 prepare unit 无 `EnvironmentFile`、无仓库/Conda 执行路径；在 Linux 上使用 `systemd-analyze verify` 检查真实 unit。目录准备器测试必须证明四个运行目录可以从空部署状态创建为 `medchat:medchat`、`0700`，且 symlink sentinel 完全不变。安装资产测试必须验证 generation owner/mode/no-symlink/inode/hash、单点激活、并发串行化、失败/信号 old-or-new 不变量，以及源代码、Conda 不可被服务用户写入。
 
 环境校验器需在真实 Linux 文件系统上测试 descriptor-relative no-follow 行为，至少覆盖父目录 symlink、叶 symlink、world/group-writable parent、替换竞争、错误 owner/mode、合法 root:root `0600`、白名单与 `LD_PRELOAD`/`PYTHONHOME`/`PYTHONPATH` 拒绝。Windows 只允许运行纯解析与静态测试；缺少 Linux no-follow 证据时必须 truthfully skip 并阻断生产就绪。
 
@@ -600,9 +665,9 @@ systemd 部署测试还必须验证 `ProtectSystem=strict`、`UMask=0077`、`Kil
 9. 默认配置仍为 canary 0%，没有自动切换真实生产流量；
 10. production worker 在空环境、local backend、隐式默认、warning 或非法路径下拒绝启动，且 `python -O` 无法绕过；
 11. worker 和 prepare unit 不以 root 执行任何仓库、Conda 或服务用户可写资产；prepare unit 不读取 `EnvironmentFile`，worker unit 不含 `+`/`!` 特权前缀；
-12. source、Conda、已安装 unit/libexec/tmpfiles 均为 root-owned 且不可被 `medchat` 写入；worker 运行时文件系统为严格只读边界，新增文件默认私有，只有 tmpfiles 创建的四个 `medchat:medchat`、`0700` 目录可写；
+12. source、Conda、固定 unit 入口与已激活 immutable generation 均为 root-owned 且不可被 `medchat` 写入；worker 运行时文件系统为严格只读边界，新增文件默认私有，只有描述符相对目录准备器创建/验证的四个 `medchat:medchat`、`0700` 目录可写；
 13. 专用 worker 环境文件通过 parent-chain/leaf no-follow 与变量白名单校验，不含 secret 或 loader/runtime 注入变量；
-14. systemd 停止先允许 worker 协作式清理，超时后清除整个 cgroup，测试不按裸 PID 发信号且结束后无 Vina 或 worker 后代残留；
+14. systemd 停止先允许 worker 协作式清理，超时后清除整个 cgroup；清理在 kill 前重新确认 `LoadState` 与 `ControlGroup` 未变化，已 unload 且原 cgroup 不存在/为空时安全返回；测试不按裸 PID 发信号且结束后无 Vina 或 worker 后代残留；
 15. runbook 能由部署人员完成 root-owned 安装、环境文件校验、目录引导、Compose 先行启动、worker 启动、检查、晋级、回滚、备份和恢复验证。
 
 ## 16. 实施顺序
