@@ -206,6 +206,45 @@ def test_cleanup_uses_checked_systemd_cgroup_commands(
     ]
 
 
+def test_cleanup_accepts_failed_reset_only_for_checked_unloaded_unit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cgroup_root = tmp_path / "cgroup"
+    unit_cgroup = cgroup_root / "system.slice" / "fixture.service"
+    unit_cgroup.mkdir(parents=True)
+    (unit_cgroup / "cgroup.procs").write_text("", encoding="ascii")
+    commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str],
+        *,
+        timeout: float = 15,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout
+        commands.append(command)
+        if command[-2:] == ["--property=ControlGroup", "--value"]:
+            return subprocess.CompletedProcess(command, 0, "/system.slice/fixture.service\n", "")
+        if command[:2] == ["systemctl", "stop"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[:2] == ["systemctl", "reset-failed"]:
+            return subprocess.CompletedProcess(command, 1, "", "not loaded")
+        if command[-2:] == ["--property=LoadState", "--value"]:
+            return subprocess.CompletedProcess(command, 0, "not-found\n", "")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(sys.modules[__name__], "CGROUP_ROOT", cgroup_root)
+    monkeypatch.setattr(sys.modules[__name__], "_run", fake_run)
+    _cleanup_unit("fixture.service")
+    assert commands[-1] == [
+        "systemctl",
+        "show",
+        "fixture.service",
+        "--property=LoadState",
+        "--value",
+    ]
+
+
 @dataclass(frozen=True)
 class ProcessIdentity:
     pid: int
@@ -288,7 +327,7 @@ def _cgroup_has_processes(cgroup_path: Path) -> bool:
     return bool(_cgroup_processes(cgroup_path))
 
 
-def _cleanup_unit(unit: str) -> None:
+def _cleanup_unit(unit: str) -> subprocess.CompletedProcess[str] | None:
     _control_group_name, cgroup_path = _control_group(unit)
     try:
         stop = _run(["systemctl", "stop", unit], timeout=10)
@@ -306,7 +345,19 @@ def _cleanup_unit(unit: str) -> None:
         assert kill.returncode == 0, kill.stderr
     assert _wait_until(lambda: not _cgroup_has_processes(cgroup_path), timeout=5)
     reset = _run(["systemctl", "reset-failed", unit])
-    assert reset.returncode == 0, reset.stderr
+    if reset.returncode != 0:
+        load_state = _run(
+            [
+                "systemctl",
+                "show",
+                unit,
+                "--property=LoadState",
+                "--value",
+            ]
+        )
+        assert load_state.returncode == 0, load_state.stderr
+        assert load_state.stdout.strip() == "not-found", reset.stderr
+    return stop
 
 
 def _start_process_tree(
@@ -335,26 +386,36 @@ def _start_process_tree(
     ]
     result = _run(command)
     assert result.returncode == 0, result.stderr
-    assert _wait_until(pid_file.is_file), "process-tree PID file was not created"
-    payload = json.loads(pid_file.read_text(encoding="utf-8"))
-    pids = (int(payload["parent"]), int(payload["child"]))
-    control_group, cgroup_path = _control_group(unit)
-    assert set(pids) <= _cgroup_processes(cgroup_path)
-    identities = tuple(_read_process_identity(pid) for pid in pids)
-    assert all(identity is not None for identity in identities)
-    checked_identities = tuple(identity for identity in identities if identity is not None)
-    assert len(checked_identities) == 2
-    assert all(identity.cgroup == control_group for identity in checked_identities)
-    return event_file, (checked_identities[0], checked_identities[1])
+    try:
+        assert _wait_until(pid_file.is_file), "process-tree PID file was not created"
+        payload = json.loads(pid_file.read_text(encoding="utf-8"))
+        pids = (int(payload["parent"]), int(payload["child"]))
+        control_group, cgroup_path = _control_group(unit)
+        assert set(pids) <= _cgroup_processes(cgroup_path)
+        identities = tuple(_read_process_identity(pid) for pid in pids)
+        assert all(identity is not None for identity in identities)
+        checked_identities = tuple(
+            identity for identity in identities if identity is not None
+        )
+        assert len(checked_identities) == 2
+        assert all(identity.cgroup == control_group for identity in checked_identities)
+        return event_file, (checked_identities[0], checked_identities[1])
+    except Exception:
+        _cleanup_unit(unit)
+        raise
 
 
 def test_mixed_kill_allows_parent_to_stop_child_cooperatively(tmp_path: Path) -> None:
     _require_systemd_integration("systemd-run", "systemctl")
     unit = f"medchat-temporal-worker-test-{uuid.uuid4().hex}.service"
     identities: tuple[ProcessIdentity, ...] = ()
+    cleanup_required = False
     try:
         event_file, identities = _start_process_tree(tmp_path, "cooperative", unit)
-        stop = _run(["systemctl", "stop", unit], timeout=10)
+        cleanup_required = True
+        stop = _cleanup_unit(unit)
+        cleanup_required = False
+        assert stop is not None
         assert stop.returncode == 0, stop.stderr
         assert _wait_until(
             lambda: event_file.is_file()
@@ -373,18 +434,23 @@ def test_mixed_kill_allows_parent_to_stop_child_cooperatively(tmp_path: Path) ->
             for identity in identities
         )
     finally:
-        _cleanup_unit(unit)
+        if cleanup_required:
+            _cleanup_unit(unit)
 
 
 def test_mixed_kill_escalates_for_ignored_sigterm(tmp_path: Path) -> None:
     _require_systemd_integration("systemd-run", "systemctl")
     unit = f"medchat-temporal-worker-test-{uuid.uuid4().hex}.service"
     identities: tuple[ProcessIdentity, ...] = ()
+    cleanup_required = False
     try:
         _event_file, identities = _start_process_tree(tmp_path, "ignore", unit)
+        cleanup_required = True
         started = time.monotonic()
-        stop = _run(["systemctl", "stop", unit], timeout=10)
+        stop = _cleanup_unit(unit)
         elapsed = time.monotonic() - started
+        cleanup_required = False
+        assert stop is not None
         assert stop.returncode == 0, stop.stderr
         assert elapsed >= 2.5
         assert _active_state(unit) == "inactive"
@@ -393,7 +459,8 @@ def test_mixed_kill_escalates_for_ignored_sigterm(tmp_path: Path) -> None:
             for identity in identities
         )
     finally:
-        _cleanup_unit(unit)
+        if cleanup_required:
+            _cleanup_unit(unit)
 
 
 def test_systemd_analyze_verifies_committed_units_on_production_candidate() -> None:
