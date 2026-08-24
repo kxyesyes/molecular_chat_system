@@ -227,23 +227,32 @@ production environment values.
 - `deployment/README.md`
 - `tests/test_temporal_worker_trust_boundary.py`
 
-1. Query `LoadState`, `ControlGroup` and `InvocationID` together, open the cgroup
-   directory no-follow, and open its `cgroup.kill` file before the final identity check.
-   Record device/inode, re-query all unit properties and require the same original
-   identity. Force cleanup writes only to the already-open old `cgroup.kill` fd; it must
-   never call `systemctl kill <unit>` after checking. If the old fd/path is gone or the
-   identity changed, do not signal. Never signal stored numeric PIDs.
-2. Add tests for unload before cleanup, cgroup movement and same-path reload with a new
-   InvocationID and/or cgroup inode, including deterministic reload after final recheck
-   but before the old fd write; preserve
+1. Require cgroup v2 and an openable `cgroup.kill`; otherwise emit an explicit
+   production blocker with no fallback. Query `LoadState`, `ControlGroup`,
+   `InvocationID` and pending `Job` together, then open the old cgroup directory and
+   `cgroup.kill` no-follow and record device/inode.
+2. Establish a start mutex for the test-owned random unit before force cleanup: open
+   `/run/systemd/system` as a trusted root descriptor, create `<unit> -> /dev/null` with
+   `O_EXCL` symlink semantics, record its lstat inode, fsync, and daemon-reload. Confirm
+   `LoadState=masked`, no pending start/restart job, and the original InvocationID and
+   cgroup identity. A mask collision or unexpected existing entry aborts cleanup.
+3. Force cleanup writes only to the already-open old `cgroup.kill` fd. It never calls
+   `systemctl kill <unit>` and never signals stored numeric PIDs. Because the verified
+   mask rejects future starts, a new invocation cannot join the old inode after the
+   final check. On exit, remove only the exact mask symlink whose inode and `/dev/null`
+   target match this invocation, fsync and daemon-reload; otherwise report a blocker.
+4. Add tests for unload before cleanup, cgroup movement and same-path reload with a new
+   InvocationID and/or cgroup inode. At the synchronization point after final recheck
+   but before fd write, attempt a same-name start/reload and prove the runtime mask
+   rejects it and no new invocation joins the inode. Preserve
    the original test failure instead of masking it with cleanup assertions.
-3. Rewrite the worker install runbook around trusted source staging, generation
+5. Rewrite the worker install runbook around trusted source staging, generation
    preview, explicit legacy migration, transactional activate/rollback,
    current/manifest verification, environment creation and prepare+worker restart.
    Remove tmpfiles instructions and all recursive chown guidance.
-4. Document that live-root tests are destructive opt-in and must run only in an
+6. Document that live-root tests are destructive opt-in and must run only in an
    isolated disposable Linux environment.
-5. Commit.
+7. Commit.
 
 ## Task 6: Final verification and dual review
 

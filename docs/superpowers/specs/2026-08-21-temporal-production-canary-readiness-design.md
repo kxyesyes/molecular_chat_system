@@ -698,7 +698,7 @@ systemd 部署测试还必须验证 `ProtectSystem=strict`、`UMask=0077`、`Kil
 - 已接受任务不回落 local；
 - 每任务 Vina attempt/terminal invariant 保持成立。
 
-在 opt-in Linux systemd 集成测试中，使用可控的 worker/子进程 fixture 验证停止语义：SIGTERM 先到达 worker 主进程并触发协作式清理；正常清理窗口内不应同时终止 Vina 子进程；若 fixture 故意超时，systemd 最终必须清除同一 cgroup 内全部后代。测试通过 `ControlGroup` 与 `cgroup.procs` 判断存活并通过 `systemctl kill` 清理；不得对可能复用的裸数字 PID 直接发送信号。所有 cleanup 命令必须检查返回状态，测试结束后不得残留 worker 或科学工具进程。缺少 systemd/cgroup 权限时应明确 skip，不能以字符串断言替代该生产证据。
+在 opt-in Linux systemd 集成测试中，使用可控的 worker/子进程 fixture 验证停止语义：SIGTERM 先到达 worker 主进程并触发协作式清理；正常清理窗口内不应同时终止 Vina 子进程；若 fixture 故意超时，最终必须清除原 invocation 的全部后代。强制清理只适用于测试拥有的随机 unit：先在 `/run/systemd/system` 通过 no-follow descriptor 以 `O_EXCL` 创建指向 `/dev/null` 的 runtime mask，记录 symlink inode，`daemon-reload` 后确认 `LoadState=masked`、无排队 start/restart job 且 `InvocationID` 未变化，从而阻止任何新 invocation 加入同一 cgroup；随后只向预先打开的旧 `cgroup.kill` fd 写入。清理结束只在 symlink inode 与 target 仍匹配时删除本次 mask并再次 reload。不得使用 `systemctl kill <unit>` 或对裸数字 PID 发信号。所有 cleanup 命令必须检查返回状态，测试结束后不得残留 worker、科学工具进程或 runtime mask。缺少 systemd、cgroup v2、`cgroup.kill`、runtime mask 权限或真实 cgroup 证据时应明确 skip 并阻断生产就绪，不能回退或以字符串断言替代。
 
 ### 14.4 真实科学验收
 
@@ -734,7 +734,7 @@ systemd 部署测试还必须验证 `ProtectSystem=strict`、`UMask=0077`、`Kil
 11. worker 和 prepare unit 不以 root 执行任何仓库、Conda 或服务用户可写资产；prepare unit 不读取 `EnvironmentFile`，worker unit 不含 `+`/`!` 特权前缀；
 12. source、Conda、固定 unit 入口与已激活 immutable generation 均为 root-owned 且不可被 `medchat` 写入；worker 运行时文件系统为严格只读边界，新增文件默认私有，只有描述符相对目录准备器创建/验证的四个 `medchat:medchat`、`0700` 目录可写；
 13. 专用 worker 环境文件通过 parent-chain/leaf no-follow 与变量白名单校验，不含 secret 或 loader/runtime 注入变量；
-14. systemd 停止先允许 worker 协作式清理，超时后清除整个 cgroup；强制阶段预先 no-follow 打开原 cgroup 的 `cgroup.kill` 并绑定其 inode，复验 `LoadState`、`ControlGroup`、`InvocationID` 与 cgroup device/inode 后只向该已打开 fd 写入，不再调用按 unit 名解析的 `systemctl kill`；已 unload 且原 cgroup 不存在/为空时安全返回，同路径新 invocation 不得被 kill；测试在最终复验与 fd 写入之间注入同名 reload，且不按裸 PID 发信号，结束后无 Vina 或 worker 后代残留；
+14. systemd 停止先允许 worker 协作式清理，超时后清除原 invocation cgroup；强制阶段必须先建立并验证 runtime mask 启动互斥、确认无排队 job，再复验 `LoadState`、`ControlGroup`、`InvocationID` 与 cgroup device/inode，并只向预先打开的旧 `cgroup.kill` fd 写入；测试在最终复验与 fd 写入之间尝试同名 start/reload 并证明被 mask 阻止，且不使用 `systemctl kill <unit>` 或裸 PID 信号；cgroup v2/`cgroup.kill` 不可用时阻断生产就绪；结束后无 Vina、worker 后代或遗留 mask；
 15. runbook 能由部署人员完成 root-owned 安装、环境文件校验、目录引导、Compose 先行启动、worker 启动、检查、晋级、回滚、备份和恢复验证。
 
 ## 16. 实施顺序
