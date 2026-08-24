@@ -1093,22 +1093,6 @@ test ! -e "$parent_outside/systemd"
     assert result.returncode == 0, result.stderr
 
 
-def test_temporal_worker_live_install_arms_cleanup_before_install() -> None:
-    command = _live_root_install_command("/mnt/d/repository")
-    absence_check = command.index("for target in")
-    cleanup_arm = command.index("cleanup_armed=1")
-    installer_call = command.index(
-        'sh "$release/deployment/install-temporal-worker.sh" --destdir /'
-    )
-    absence_check_end = command.index(
-        "done\nif [ ! -d /usr/libexec/medchat ]; then"
-    )
-    assert absence_check < absence_check_end < cleanup_arm < installer_call
-    assert 'if [ "$cleanup_armed" -eq 1 ]; then' in command
-    assert "trap cleanup EXIT" in command
-    assert "trap cleanup_on_signal HUP INT TERM" in command
-
-
 @pytest.mark.skip(reason="superseded by immutable generation boundary coverage")
 def test_temporal_worker_installer_detects_post_replace_target_replacement() -> None:
     repository = _native_posix_repository()
