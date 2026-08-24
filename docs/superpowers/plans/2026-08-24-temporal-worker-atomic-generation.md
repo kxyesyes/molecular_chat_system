@@ -20,6 +20,25 @@ bootstrap-only and always resolve through `current`.
 scientific result validation, Web routes, Agent routing, Docker/Compose lifecycle, or
 production environment values.
 
+## Review corrections that govern every task
+
+- Installation and activation are separate. `install-temporal-worker.sh` only creates
+  an immutable generation. A separate operator command owns stop/switch/reload/verify/
+  start and rollback; the installer never changes a running service's `current`.
+- Live and DESTDIR locks use the exact relative path
+  `run/medchat-temporal-worker/install.lock`. Creating the `0700` lock directory and
+  `0600` lock file through trusted no-follow descriptors is the only permitted target
+  mutation before all source assets have been pre-read. The parent and lock inode,
+  owner and mode are fsynced and revalidated before `flock` is trusted.
+- Bundle framing is exactly `MEDCHAT_TEMPORAL_BUNDLE_V1\0`, followed for each fixed
+  asset in ASCII path order by 4-byte big-endian path length, path bytes, 4-byte mode,
+  8-byte payload length and payload. Manifest schema and allowed assets are exact and
+  canonical; duplicate, unknown, missing, unsorted or malformed entries fail closed.
+- `current` is only a relative `releases/<64-lower-hex>` symlink. Old and requested
+  generations must fully validate before activation or rollback.
+- Existing flat deployments require the explicit legacy migration in Task 3A. The
+  verified-dangerous tmpfiles policy is never restored on migration failure.
+
 ## Task 1: Replace tmpfiles with a no-follow directory preparer
 
 **Create:**
@@ -72,21 +91,25 @@ production environment values.
 2. Reduce the shell wrapper to canonical DESTDIR and live-source trust checks, then
    `exec /usr/bin/python3` so the public installer PID is the writer PID before any
    destination mutation.
-3. In the Python installer, acquire an exclusive `fcntl.flock` on a fixed lock opened
-   no-follow through a trusted descriptor chain. Require regular file, expected
-   UID/GID, exact `0600`; reject an unexpected existing object.
+3. In the Python installer, bootstrap `run/medchat-temporal-worker` with descriptor-
+   relative `mkdirat` as exact `0700`, then bootstrap `install.lock` with
+   `O_CREAT|O_EXCL|O_NOFOLLOW` as exact `0600`. Concurrent losers reopen no-follow and
+   verify the winner's object. Verify owner/mode/inode, fsync the directory, then take
+   exclusive `fcntl.flock`. This lock namespace is the only pre-read mutation.
 4. Read all fixed assets through no-follow descriptors with per-file and bundle size
-   bounds. For live install require root:root and no `022` source write bits. Compute a
-   deterministic bundle digest over logical path, exact mode and bytes.
+   bounds. For live install require root:root and no `022` source write bits. Compute
+   the exact V1 framed digest defined above.
 5. Construct a private same-filesystem staging generation under
    `usr/lib/medchat/temporal-worker/releases`. Write units, both helpers and
-   `manifest.sha256`; fsync files/directories; verify regular/no-symlink,
+   canonical `manifest.sha256` (version+bundle digest header, then sorted
+   `asset_sha256 mode size logical_path` rows); reject duplicate/unknown/missing or
+   malformed rows; fsync files/directories; verify regular/no-symlink,
    owner/group/mode/inode/hash; make generation directories immutable to non-root;
    atomically rename to `releases/<bundle-sha256>` or verify an existing identical
    generation without modifying it.
 6. Run focused tests and commit.
 
-## Task 3: Add bootstrap entrypoints and single-point activation
+## Task 3: Add bootstrap entrypoints and transactional activation
 
 **Modify:**
 
@@ -94,21 +117,56 @@ production environment values.
 - `deployment/medchat-temporal-worker-prepare.service`
 - `tests/test_temporal_deployment_assets.py`
 
+**Create:**
+
+- `deployment/activate-temporal-worker-generation.sh`
+
 1. Write RED tests that fixed unit entries are root-owned symlinks with exact targets
    through `/usr/lib/medchat/temporal-worker/current/units/`. Existing unexpected
    entries must fail and remain untouched.
 2. Bootstrap missing fixed symlinks with same-directory temporary symlinks and atomic
    replace; track only entries created by this invocation for rollback. Existing exact
    entries are verified, never rewritten.
-3. Activate a complete release using one temporary symlink plus `os.replace` of
-   `current`. Capture and verify the previous current target. On ordinary exception or
-   HUP/INT/TERM before completion, restore old current or remove the newly created
-   current when there was no predecessor. A crash after current replacement is allowed
-   to leave the complete new generation active, never a mixed bundle.
-4. Ensure prepare resolves both root helpers from `current/libexec`; no privileged
+3. The installer stops after publishing and validating a generation; it does not write
+   `current`. The activation wrapper source-guards itself then `exec`s the Python
+   operator path so its public PID is signal-aware. It accepts only one 64-lower-hex
+   generation argument (rollback uses the same command with an older existing digest).
+4. Under the same lock, validate the requested and current generation. Reject external,
+   absolute, dangling, dot-component or malformed current targets. Record whether both
+   services were active, stop worker then prepare and confirm inactive. Only then switch
+   current atomically, run fixed `/usr/bin/systemctl daemon-reload`, verify loaded unit
+   content against the target generation, and start prepare then worker.
+5. On reload/verification/start failure, stop the new units, restore old current,
+   daemon-reload again, and restart old services only if they were active before. With
+   no old generation, remove current and leave services inactive. Tests cover automatic
+   restart attempts during the stopped window and reload failure.
+6. Ensure prepare resolves both root helpers from `current/libexec`; no privileged
    process executes repo, Conda, service-user-writable or flat copied helper paths.
-5. Test first install, idempotent reinstall, upgrade, rollback and unexpected existing
+7. Test first install, idempotent reinstall, upgrade, rollback and unexpected existing
    objects; commit.
+
+## Task 3A: Migrate the known flat legacy deployment safely
+
+**Modify:**
+
+- `deployment/libexec/install-temporal-worker-bundle.py`
+- `deployment/activate-temporal-worker-generation.sh`
+- `tests/test_temporal_deployment_assets.py`
+
+1. Add an explicit `--migrate-legacy <generation>` operator path. Stop worker/prepare,
+   confirm inactive and inspect loaded state before touching files.
+2. No-follow validate legacy regular unit files, flat environment helper and dangerous
+   `/usr/lib/tmpfiles.d/medchat-temporal-worker.conf` against exact root owner, modes
+   and a source-code allowlist of hashes for the supported predecessor commits. Unknown
+   hash/type/symlink/mode/owner fails with no mutation.
+3. First atomically move the verified dangerous tmpfiles file into a root-only
+   quarantine name and fsync its parent. Then transactionally create/activate the
+   generation, convert the two known unit regular files to exact bootstrap symlinks,
+   daemon-reload and verify loaded unit content before starting.
+4. On failure, roll back only entries/current created by this invocation. Never restore
+   the dangerous tmpfiles policy; keep services inactive and emit a stable manual-
+   recovery-required status. Cover old prepare already active/loaded, unknown hashes,
+   failure after every migration boundary and reload failure.
 
 ## Task 4: Prove failure, signal and concurrency invariants
 
@@ -116,12 +174,19 @@ production environment values.
 
 - `tests/test_temporal_deployment_assets.py`
 
+**Create:**
+
+- `tests/run_temporal_live_install_isolated.sh`
+
 1. Add a POSIX runner: native Linux executes the shell directly; Windows uses WSL.
    Stage-only tests must run in either environment. Live `/` tests require
-   `MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS=1` and an explicitly documented disposable
-   distro/container/mount namespace; they are skipped by default.
+   `MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS=1`. The runner must create a private mount
+   namespace, verify its namespace inode differs from PID 1, bind private roots over
+   every touched `/etc`, `/usr` and lock target, and verify those mount sources before
+   running. Real systemd activation/migration instead requires a root-owned disposable-
+   environment marker plus an isolated VM/distro/container; otherwise refuse, not run.
 2. In temporary installer copies, inject deterministic failures at every generation
-   write/publish/bootstrap/current-replace boundary without adding production hooks.
+   write/publish/bootstrap/current-replace/daemon-reload/start boundary without adding production hooks.
    Assert the active state is a complete old or complete new generation, manifest and
    current agree, sentinels survive, and no staging/temp/release residue from the failed
    invocation remains.
@@ -141,16 +206,18 @@ production environment values.
 - `deployment/README.md`
 - `tests/test_temporal_worker_trust_boundary.py`
 
-1. Query `LoadState` and `ControlGroup` together. Before `systemctl kill`, query again
-   and require the same non-empty cgroup. If the unit is unloaded and the original
-   cgroup is absent/empty, return safely. Never signal stored numeric PIDs and never
-   kill a newly loaded same-name unit.
-2. Add tests for unload before cleanup, cgroup movement and same-name reload; preserve
+1. Query `LoadState`, `ControlGroup` and `InvocationID` together, and open the cgroup
+   directory no-follow to record device/inode. Before `systemctl kill`, query and open
+   again; require the same non-empty cgroup, InvocationID and cgroup device/inode. If
+   unloaded and the original cgroup is absent/empty, return safely. Never signal stored
+   numeric PIDs and never kill a newly loaded same-name unit.
+2. Add tests for unload before cleanup, cgroup movement and same-path reload with a new
+   InvocationID and/or cgroup inode; preserve
    the original test failure instead of masking it with cleanup assertions.
 3. Rewrite the worker install runbook around trusted source staging, generation
-   preview, root live install, current/manifest verification, explicit daemon-reload,
-   environment creation and prepare+worker restart. Remove tmpfiles instructions and
-   all recursive chown guidance.
+   preview, explicit legacy migration, transactional activate/rollback,
+   current/manifest verification, environment creation and prepare+worker restart.
+   Remove tmpfiles instructions and all recursive chown guidance.
 4. Document that live-root tests are destructive opt-in and must run only in an
    isolated disposable Linux environment.
 5. Commit.
@@ -173,10 +240,30 @@ MEDCHAT_RUN_TEMPORAL_DIRECTORY_INTEGRATION=1 python3 tests/test_temporal_worker_
 systemd-analyze verify deployment/medchat-temporal-worker-prepare.service deployment/medchat-temporal-worker.service
 ```
 
-Run the opt-in real systemd/cgroup suite where pytest and systemd are available. Any
-missing real Linux evidence remains a release blocker and must be reported, not
-converted to passed. Then request strict spec review followed by independent security
-quality review. Any finding returns to the implement/fix/re-review loop.
+Run native POSIX staging and the technically isolated live-root suite:
+
+```bash
+python3 -m pytest tests/test_temporal_deployment_assets.py -q -p no:cacheprovider -k 'installer or generation or legacy_migration'
+MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS=1 sudo -E tests/run_temporal_live_install_isolated.sh
+```
+
+The second command must create and verify its private mount namespace and bind roots;
+an environment flag without those checks is a failure, not a skip. For real activation,
+legacy migration and cgroup lifecycle, use a disposable systemd VM/distro/container
+with `/run/medchat-disposable-systemd-test` pre-provisioned as root:root `0400`:
+
+```bash
+MEDCHAT_RUN_TEMPORAL_DEPLOYMENT_INTEGRATION=1 \
+python3 -m pytest tests/test_temporal_systemd_integration.py \
+  tests/test_temporal_deployment_assets.py -q -p no:cacheprovider \
+  -k 'systemd or activation or legacy_migration'
+```
+
+Expected production-ready result: all three Linux groups execute and pass; a missing
+marker, unavailable private mounts, missing pytest or unavailable systemd produces an
+explicit skip/blocker and keeps Task 8 incomplete. Then request strict spec review
+followed by independent security quality review. Any finding returns to the
+implement/fix/re-review loop.
 
 ## Acceptance invariants
 

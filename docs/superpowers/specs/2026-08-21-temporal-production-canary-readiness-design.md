@@ -250,8 +250,15 @@ generation 内的 `prepare-temporal-worker-directories`。该 helper 只使用�
 
 #### 5.3.5 不可变 generation 与原子激活安装（取代平铺复制）
 
-安装器必须持有固定、root-owned、no-follow 的独占安装锁。它在任何生产目标变更前
-有界读取并验证全部源资产，然后构建内容寻址的不可变 generation：
+安装器和激活器必须共同持有固定的独占锁：live root 使用
+`/run/medchat-temporal-worker/install.lock`，DESTDIR 使用对应根下的同一相对路径。
+`/run/medchat-temporal-worker` 是唯一允许在源资产预读前发生的目标 mutation：从受信
+父 fd 通过 `mkdirat` 首次创建为预期 owner/group `0700`，随后以
+`O_DIRECTORY|O_NOFOLLOW` 打开并复验；锁叶用 `O_CREAT|O_EXCL|O_NOFOLLOW` 首次创建
+为 `0600`，并对父目录与锁文件执行 owner/mode/inode 复验和目录 `fsync`。并发首次
+创建时，失败方只能重新 no-follow 打开并验证胜者创建的对象，禁止截断或替换锁。
+持锁后，安装器在任何其他生产目标变更前有界读取并验证全部源资产，然后构建内容
+寻址的不可变 generation：
 
 ```text
 /usr/lib/medchat/temporal-worker/
@@ -262,29 +269,64 @@ generation 内的 `prepare-temporal-worker-directories`。该 helper 只使用�
     └── manifest.sha256
 ```
 
+bundle digest 使用固定二进制 framing：域分隔符
+`MEDCHAT_TEMPORAL_BUNDLE_V1\0`，随后按 ASCII logical path 排序，对每项依次哈希
+4-byte big-endian 路径长度、路径、4-byte mode、8-byte payload 长度与 payload。
+manifest 必须是 canonical ASCII：首行为版本与 64 位小写 bundle digest；后续按
+logical path 排序，每行只含 asset SHA-256、四位八进制 mode、十进制 size 与固定
+logical path。解析器拒绝 duplicate、unknown、missing、乱序、dot component、绝对
+路径、非 canonical 数字或超限内容；允许资产集合只能是两个 unit、环境校验 helper、
+目录准备 helper。
+
 generation 在同一 releases 父目录下的私有 staging 目录中完整写入、`fsync`、验证
 owner/group、精确 mode、regular/no-symlink、inode 与 SHA-256 后，才原子重命名为
 最终只读 generation。固定 systemd unit 入口只能是 root-owned symlink，并只能指向
 `/usr/lib/medchat/temporal-worker/current/units/...`；prepare 中的特权 helper 只能从
-`current/libexec` 解析。升级的唯一激活点是同目录临时 symlink 经 `os.replace` 原子
-切换 `current`。manifest 属于 generation，禁止先覆盖线上资产、最后才写 manifest。
+`current/libexec` 解析。所有 releases、bootstrap entry 与 current 操作都必须从受信
+根 fd descriptor-relative 执行。`current` 旧目标只允许 canonical relative target
+`releases/<64-lower-hex>`，且旧 generation/manifest 必须先完整验证；external、dangling、
+dot component 或错误 generation 名一律拒绝。manifest 属于 generation，禁止先覆盖
+线上资产、最后才写 manifest。
+
+安装与激活分离：安装命令只构建/验证 generation，不切换线上 `current`。独立的
+root operator activation 命令接收唯一参数 `<64-lower-hex>`，持同一锁、验证目标与
+当前 generation，停止 worker 与 prepare 并确认 inactive 后，才用同目录临时 symlink
+和 `os.replace` 切换 `current`；随后立即 `daemon-reload`，验证加载的 unit 内容和目标
+generation 一致，再按 prepare、worker 顺序启动。任何 reload/start 失败必须停止新
+unit、恢复旧 current、再次 reload，并仅在原服务先前为 active 时恢复旧服务。rollback
+复用同一 activation 命令指向一个已存在且完整验证的 generation，禁止直接手改 symlink。
 
 安装器还必须：
 
 - 使用 `exec` 将公开 shell PID 交给系统 Python；HUP/INT/TERM 由实际写入进程处理；
-- 在信号、异常和每个发布边界失败时，保证线上状态只能是完整旧 generation 或完整
-  新 generation；不得留下可执行的混合 bundle、临时文件或错误 manifest；
+- 在信号、异常和每个发布/激活边界失败时，保证线上状态只能是完整旧 generation 或
+  完整新 generation；不得留下可执行的混合 bundle、临时文件或错误 manifest；
 - 对首次 bootstrap 创建的固定 unit symlink 做精确目标、owner 和 no-follow 验证，
   失败时仅回滚本次确认创建的入口；已有非预期对象一律拒绝，不自动覆盖；
 - 对同一 DESTDIR 的并发安装串行化；不同 bundle 并发后最终 `current` 与 manifest
   必须属于同一完整 generation；
 - live install 仍要求 root UID 与 root-owned、`go-w` 源父链；非特权 DESTDIR 使用
   调用者 UID/GID，但执行同样的 generation、锁、验证和激活协议；
-- 不 reload、enable、start 服务，不创建生产环境文件，不删除未知旧 generation。
+- installer 不 reload、enable、start 服务；只有显式 activation/rollback 运维命令可以
+  按上述事务协议 stop/reload/start。所有命令都不创建生产环境文件，不删除未知旧
+  generation。
 
-Linux 原生直接运行 POSIX 测试；Windows 才通过 WSL。会触碰 `/` 的 live-root 测试
-必须要求显式破坏性测试 opt-in，并仅在一次性 distro、容器或 mount namespace 中运行，
-普通测试不得读写宿主固定 `/etc` 或 `/usr` 目标。
+一次性 legacy migration 必须在 worker/prepare 已停止且确认 inactive 后执行。迁移器
+通过 no-follow descriptor 校验旧平铺 unit、flat helper 与危险 tmpfiles 文件的类型、
+root owner、精确 mode 和仓库内置已知 hash allowlist；未知版本只报告阻断，不自动
+覆盖。验证后首先把危险 tmpfiles 文件原子移入 root-only quarantine 并 `fsync`，再构建
+generation、转换固定 unit 入口、设置 current、daemon-reload 并验证加载内容。失败时
+回滚本次创建的 unit 入口/current；绝不恢复危险 tmpfiles，服务保持 inactive 并给出
+稳定人工恢复状态。旧 prepare 已 loaded/active、旧 unit hash 不匹配、tmpfiles 已被
+替换或 reload 验证失败都必须有测试。
+
+Linux 原生直接运行 POSIX 测试；Windows 才通过 WSL。目录 helper 的 fixture 通过导入
+临时副本并向内部 fd 级函数传入私有 root descriptor 测试，生产 CLI 仍不接受路径参数。
+会触碰 `/` 的 live-root 测试必须要求显式破坏性测试 opt-in；测试入口还必须技术性确认
+自己位于不同于 PID 1 的 private mount namespace，并确认 `/etc/systemd/system`、
+`/usr/lib/medchat`、`/usr/libexec/medchat` 和锁目录均已 bind 到本测试私有 root，任一
+条件不满足即拒绝运行。需要与真实 systemd manager 交互的 activation/migration 测试只
+能在带专用 marker 的一次性 VM/distro/container 中运行，普通测试不得读写宿主固定目标。
 
 Docker/Compose 基础设施由运维流程管理并先于 worker 启动；worker unit 可以声明网络和 Docker 服务顺序依赖，但不得调用 Docker、自动执行 Compose 或修改基础设施状态。Temporal 不可达时 worker 应由受控 restart policy 重试，不能启动 local worker 代替。
 
@@ -667,7 +709,7 @@ systemd 部署测试还必须验证 `ProtectSystem=strict`、`UMask=0077`、`Kil
 11. worker 和 prepare unit 不以 root 执行任何仓库、Conda 或服务用户可写资产；prepare unit 不读取 `EnvironmentFile`，worker unit 不含 `+`/`!` 特权前缀；
 12. source、Conda、固定 unit 入口与已激活 immutable generation 均为 root-owned 且不可被 `medchat` 写入；worker 运行时文件系统为严格只读边界，新增文件默认私有，只有描述符相对目录准备器创建/验证的四个 `medchat:medchat`、`0700` 目录可写；
 13. 专用 worker 环境文件通过 parent-chain/leaf no-follow 与变量白名单校验，不含 secret 或 loader/runtime 注入变量；
-14. systemd 停止先允许 worker 协作式清理，超时后清除整个 cgroup；清理在 kill 前重新确认 `LoadState` 与 `ControlGroup` 未变化，已 unload 且原 cgroup 不存在/为空时安全返回；测试不按裸 PID 发信号且结束后无 Vina 或 worker 后代残留；
+14. systemd 停止先允许 worker 协作式清理，超时后清除整个 cgroup；清理在 kill 前重新确认 `LoadState`、`ControlGroup`、`InvocationID` 与已打开 cgroup 的 device/inode 均未变化，已 unload 且原 cgroup 不存在/为空时安全返回；同路径新 invocation 不得被 kill；测试不按裸 PID 发信号且结束后无 Vina 或 worker 后代残留；
 15. runbook 能由部署人员完成 root-owned 安装、环境文件校验、目录引导、Compose 先行启动、worker 启动、检查、晋级、回滚、备份和恢复验证。
 
 ## 16. 实施顺序
