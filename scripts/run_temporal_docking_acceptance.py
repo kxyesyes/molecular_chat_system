@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import re
 import sys
 import tempfile
@@ -26,6 +27,7 @@ from src.agent.persistence.redaction import (
     sanitize_sensitive_text,
 )
 from src.task_runtime.models import canonical_artifact_type
+from src.task_runtime.secure_io import read_file_snapshot
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _SAFE_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}\Z")
@@ -40,6 +42,7 @@ _BROAD_CREDENTIAL_FRAGMENT = re.compile(
     r")"
 )
 _TERMINAL = {"succeeded", "failed", "canceled", "timed_out"}
+MAX_POSE_BYTES = 64 * 1024 * 1024
 
 
 def _sensitive_string(value: Any) -> bool:
@@ -413,17 +416,6 @@ def _contract_probe() -> tuple[dict[str, Any], dict[str, Any]]:
         return run, checks
 
 
-def _hash_file(path: Path) -> str | None:
-    try:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
-    except (OSError, RuntimeError):
-        return None
-
-
 def _project_real_record(
     record,
     events,
@@ -454,7 +446,15 @@ def _project_real_record(
     stored_digest = artifact.get("sha256") or (
         artifact.get("metadata") or {}
     ).get("sha256")
-    actual_digest = _hash_file(pose_path) if pose_path and pose_path.is_file() else None
+    snapshot = None
+    if pose_path is not None:
+        try:
+            snapshot = read_file_snapshot(
+                Path(os.path.abspath(os.fspath(pose_path))), MAX_POSE_BYTES
+            )
+        except ValueError:
+            snapshot = None
+    actual_digest = snapshot.sha256 if snapshot is not None else None
     artifact_integrity_valid = (
         artifact_type == "docking_pose"
         and artifact_status in {None, "verified", "completed", "ready", "succeeded"}
@@ -474,7 +474,7 @@ def _project_real_record(
         "vina_attempts": record.attempt,
         "terminal_event_count": len(terminal),
         "terminal_event_valid": terminal_event_valid,
-        "pose_exists": bool(pose_path and pose_path.is_file()),
+        "pose_exists": snapshot is not None,
         "pose_count": result.get("pose_count"),
         "binding_energy": result.get("best_energy"),
         "artifact_path": safe_pose_rel,
@@ -497,12 +497,45 @@ def _project_real_record(
     }
 
 
-async def _real_runs(repeat: int, timeout_seconds: float) -> list[dict[str, Any]]:
+async def _cancel_and_confirm_terminal(
+    runtime: object,
+    task_id: str,
+    *,
+    terminal_statuses: set[object],
+    poll_interval_seconds: float,
+    reason: str,
+) -> bool:
+    try:
+        await asyncio.wait_for(
+            runtime.cancel(task_id, reason=reason), timeout=10.0
+        )
+    except Exception:
+        return False
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        try:
+            record = await asyncio.wait_for(runtime.get(task_id), timeout=10.0)
+        except Exception:
+            return False
+        if record.status in terminal_statuses:
+            return True
+        await asyncio.sleep(poll_interval_seconds)
+    return False
+
+
+async def _real_runs(
+    repeat: int,
+    timeout_seconds: float,
+    *,
+    config: object | None = None,
+    runtime_factory: object | None = None,
+    poll_interval_seconds: float = 1.0,
+) -> list[dict[str, Any]]:
     from src.task_runtime.config import TaskRuntimeConfig
     from src.task_runtime.models import TaskStatus
     from src.task_runtime.runtime import TaskRuntime
 
-    config = TaskRuntimeConfig.from_env()
+    config = config or TaskRuntimeConfig.from_env()
     if config.backend != "temporal_canary" or config.canary_percent != 100:
         return [{"status": "failed"} for _ in range(repeat)]
     receptor = PROJECT_ROOT / "data" / "samples" / "MAGL_5zun.pdb"
@@ -510,28 +543,41 @@ async def _real_runs(repeat: int, timeout_seconds: float) -> list[dict[str, Any]
     if not receptor.is_file() or not ligand.is_file():
         return [{"status": "failed"} for _ in range(repeat)]
 
-    runtime = TaskRuntime(config=config)
+    factory = runtime_factory or TaskRuntime
+    runtime = factory(config=config)
     results: list[dict[str, Any]] = []
     try:
         for _ in range(repeat):
             started = time.perf_counter()
+            receipt = None
             try:
-                receipt = await runtime.submit_docking(
-                    receptor_name=receptor.name,
-                    receptor_bytes=receptor.read_bytes(),
-                    ligand_name=ligand.name,
-                    ligand_bytes=ligand.read_bytes(),
-                    smiles=None,
-                    config={
-                        "center": [5.99, 3.01, 17.345],
-                        "size": [20.0, 20.0, 20.0],
-                        "exhaustiveness": 8,
-                        "num_modes": 10,
-                    },
-                )
                 deadline = time.monotonic() + timeout_seconds
+                receipt = await asyncio.wait_for(
+                    runtime.submit_docking(
+                        receptor_name=receptor.name,
+                        receptor_bytes=receptor.read_bytes(),
+                        ligand_name=ligand.name,
+                        ligand_bytes=ligand.read_bytes(),
+                        smiles=None,
+                        config={
+                            "center": [5.99, 3.01, 17.345],
+                            "size": [20.0, 20.0, 20.0],
+                            "exhaustiveness": 8,
+                            "num_modes": 10,
+                        },
+                    ),
+                    timeout=max(0.001, deadline - time.monotonic()),
+                )
                 while True:
-                    record = await runtime.get(receipt.task_id)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("acceptance timeout")
+                    try:
+                        record = await asyncio.wait_for(
+                            runtime.get(receipt.task_id), timeout=remaining
+                        )
+                    except asyncio.TimeoutError:
+                        raise TimeoutError("acceptance timeout") from None
                     if record.status in {
                         TaskStatus.SUCCEEDED,
                         TaskStatus.FAILED,
@@ -539,10 +585,16 @@ async def _real_runs(repeat: int, timeout_seconds: float) -> list[dict[str, Any]
                         TaskStatus.TIMED_OUT,
                     }:
                         break
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError("acceptance timeout")
-                    await asyncio.sleep(1.0)
-                events = await runtime.events(receipt.task_id)
+                    await asyncio.sleep(poll_interval_seconds)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("acceptance timeout")
+                try:
+                    events = await asyncio.wait_for(
+                        runtime.events(receipt.task_id), timeout=remaining
+                    )
+                except asyncio.TimeoutError:
+                    raise TimeoutError("acceptance timeout") from None
                 results.append(
                     _project_real_record(
                         record,
@@ -552,15 +604,59 @@ async def _real_runs(repeat: int, timeout_seconds: float) -> list[dict[str, Any]
                         latency_ms=int((time.perf_counter() - started) * 1000),
                     )
                 )
-            except Exception:
+            except asyncio.CancelledError:
+                if receipt is not None:
+                    await asyncio.shield(
+                        _cancel_and_confirm_terminal(
+                            runtime,
+                            receipt.task_id,
+                            terminal_statuses={
+                                TaskStatus.SUCCEEDED,
+                                TaskStatus.FAILED,
+                                TaskStatus.CANCELED,
+                                TaskStatus.TIMED_OUT,
+                            },
+                            poll_interval_seconds=poll_interval_seconds,
+                            reason="acceptance_cancelled",
+                        )
+                    )
+                raise
+            except Exception as error:
+                timed_out = isinstance(error, TimeoutError)
+                cleanup_confirmed = True
+                if receipt is not None:
+                    cleanup_confirmed = await _cancel_and_confirm_terminal(
+                        runtime,
+                        receipt.task_id,
+                        terminal_statuses={
+                            TaskStatus.SUCCEEDED,
+                            TaskStatus.FAILED,
+                            TaskStatus.CANCELED,
+                            TaskStatus.TIMED_OUT,
+                        },
+                        poll_interval_seconds=poll_interval_seconds,
+                        reason="acceptance_timeout" if timed_out else "acceptance_error",
+                    )
+                warnings = ["acceptance_timeout" if timed_out else "acceptance_run_failed"]
+                if not cleanup_confirmed:
+                    warnings.append("cleanup_failed")
                 results.append(
                     {
                         "status": "failed",
                         "latency_ms": int((time.perf_counter() - started) * 1000),
+                        "warnings": warnings,
                     }
                 )
+                if not cleanup_confirmed:
+                    break
     finally:
-        await runtime.close()
+        try:
+            await asyncio.wait_for(runtime.close(), timeout=10.0)
+        except Exception:
+            if results:
+                warnings = results[-1].setdefault("warnings", [])
+                if isinstance(warnings, list) and "cleanup_failed" not in warnings:
+                    warnings.append("cleanup_failed")
     return results
 
 
@@ -630,7 +726,6 @@ def main(argv: list[str] | None = None) -> int:
         }
     report["sha256"] = _canonical_sha256(report)
     try:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
         from scripts.validate_temporal_deployment import write_report_atomic
 
         write_report_atomic(args.output, report)

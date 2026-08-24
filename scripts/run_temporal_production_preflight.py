@@ -12,7 +12,6 @@ import os
 from pathlib import Path
 from pathlib import PurePosixPath
 import re
-import stat
 import subprocess
 import sys
 import tempfile
@@ -115,8 +114,7 @@ def _acceptance_gate(value: object, *, real: bool) -> dict[str, str]:
     )
     valid = (
         set(value) == _ACCEPTANCE_PROJECTION_KEYS
-        and
-        status == "passed"
+        and status == "passed"
         and hash_valid
         and value.get("mode") == expected_mode
         and value.get("run_count") == 3
@@ -126,7 +124,7 @@ def _acceptance_gate(value: object, *, real: bool) -> dict[str, str]:
         and provenance.get("evidence_type") == expected_type
         and value.get("source_schema_valid") is True
         and type(value.get("source_report_sha256")) is str
-        and len(value["source_report_sha256"]) == 64
+        and re.fullmatch(r"[0-9a-f]{64}", value["source_report_sha256"]) is not None
     )
     if valid:
         return _state(
@@ -264,7 +262,9 @@ def _safe_artifact_path(value: object) -> bool:
     if type(value) is not str or not value or "\\" in value or ":" in value:
         return False
     path = PurePosixPath(value)
-    return not path.is_absolute() and all(part not in {"", ".", ".."} for part in path.parts)
+    return not path.is_absolute() and all(
+        part not in {"", ".", ".."} for part in path.parts
+    )
 
 
 def _validate_source_acceptance(
@@ -313,7 +313,10 @@ def _validate_source_acceptance(
             or re.fullmatch(r"[0-9a-f]{64}", run["artifact_sha256"]) is None
             or run.get("provenance_complete") is not True
             or type(provenance) is not dict
-            or set(provenance) != {"tool_name", "tool_version", "model_name", "model_version"}
+            or not {"tool_name", "tool_version"}.issubset(provenance)
+            or not set(provenance).issubset(
+                {"tool_name", "tool_version", "model_name", "model_version"}
+            )
             or provenance.get("tool_name") != "molecular_docking"
             or not all(type(value) is str and value for value in provenance.values())
             or run.get("demo_mode") is not False
@@ -434,7 +437,7 @@ def run_acceptance_evidence(
     trusted = None
     try:
         if command_runner is _subprocess_runner:
-            trusted = open_trusted_executable(Path(argv[0]))
+            trusted = open_trusted_executable(Path(os.path.realpath(argv[0])))
             argv[0] = trusted.executable
             trusted.revalidate()
             result = command_runner(
@@ -533,7 +536,6 @@ def main(argv: list[str] | None = None) -> int:
             current_level=0,
             now=now,
         )
-        arguments.output.parent.mkdir(parents=True, exist_ok=True)
         write_report_atomic(arguments.output, report)
     except Exception:
         print("temporal_production_preflight=failed code=preflight_failed", file=sys.stderr)

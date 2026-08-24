@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -241,6 +244,315 @@ def test_real_projection_resolves_pose_from_strict_artifact_record(tmp_path):
     assert report["status"] == "passed"
     assert report["runs"][0]["artifact_path"] == relative
     assert report["runs"][0]["artifact_sha256"] == digest
+
+
+def _acceptance_record(task_id: str, relative: str, digest: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        status=SimpleNamespace(value="succeeded"),
+        backend="temporal",
+        external_workflow_id=f"medchat-docking-{task_id}",
+        attempt=1,
+        result={"pose_count": 1, "best_energy": -7.0},
+        artifacts=[
+            {
+                "artifact_type": "docking_pose",
+                "path": relative,
+                "sha256": digest,
+            }
+        ],
+        provenance={
+            "tool_name": "molecular_docking",
+            "tool_version": "vina-1.2.5",
+            "model_name": "AutoDock Vina",
+            "model_version": "1.2.5",
+            "demo_mode": False,
+            "fallback_used": False,
+        },
+        warnings=[],
+    )
+
+
+def test_real_projection_rejects_oversize_pose(tmp_path: Path) -> None:
+    from scripts.run_temporal_docking_acceptance import _project_real_record
+
+    task_id = "00000000-0000-4000-8000-000000000020"
+    relative = "artifacts/docking_pose.pdbqt"
+    pose = tmp_path / task_id / relative
+    pose.parent.mkdir(parents=True)
+    with pose.open("wb") as handle:
+        handle.truncate(64 * 1024 * 1024 + 1)
+
+    run = _project_real_record(
+        _acceptance_record(task_id, relative, "a" * 64),
+        [SimpleNamespace(is_terminal=True, event_type="task_succeeded")],
+        staging_root=tmp_path,
+        task_id=task_id,
+        latency_ms=1,
+    )
+
+    assert run["pose_exists"] is False
+    assert run["artifact_sha256"] is None
+    assert run["artifact_integrity_valid"] is False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX nofollow artifact test")
+def test_real_projection_rejects_symlink_fifo_and_device(tmp_path: Path) -> None:
+    from scripts.run_temporal_docking_acceptance import _project_real_record
+    from src.task_runtime.secure_io import read_file_snapshot
+
+    task_id = "00000000-0000-4000-8000-000000000021"
+    relative = "artifacts/docking_pose.pdbqt"
+    artifact = tmp_path / task_id / relative
+    artifact.parent.mkdir(parents=True)
+    target = tmp_path / "target.pdbqt"
+    target.write_bytes(b"pose")
+    artifact.symlink_to(target)
+    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+
+    symlink_run = _project_real_record(
+        _acceptance_record(task_id, relative, digest),
+        [SimpleNamespace(is_terminal=True, event_type="task_succeeded")],
+        staging_root=tmp_path,
+        task_id=task_id,
+        latency_ms=1,
+    )
+    artifact.unlink()
+    os.mkfifo(artifact)
+    fifo_run = _project_real_record(
+        _acceptance_record(task_id, relative, digest),
+        [SimpleNamespace(is_terminal=True, event_type="task_succeeded")],
+        staging_root=tmp_path,
+        task_id=task_id,
+        latency_ms=1,
+    )
+
+    assert symlink_run["artifact_integrity_valid"] is False
+    assert fifo_run["artifact_integrity_valid"] is False
+    with pytest.raises(ValueError, match="unsafe file snapshot"):
+        read_file_snapshot(Path("/dev/null"), 1024)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX nofollow component test")
+def test_real_projection_rejects_symlinked_artifact_ancestor(tmp_path: Path) -> None:
+    from scripts.run_temporal_docking_acceptance import _project_real_record
+
+    task_id = "00000000-0000-4000-8000-000000000023"
+    relative = "artifacts/docking_pose.pdbqt"
+    task_root = tmp_path / task_id
+    task_root.mkdir()
+    external = tmp_path / "external-artifacts"
+    external.mkdir()
+    pose = external / "docking_pose.pdbqt"
+    pose.write_bytes(b"pose")
+    (task_root / "artifacts").symlink_to(external, target_is_directory=True)
+    digest = hashlib.sha256(pose.read_bytes()).hexdigest()
+
+    run = _project_real_record(
+        _acceptance_record(task_id, relative, digest),
+        [SimpleNamespace(is_terminal=True, event_type="task_succeeded")],
+        staging_root=tmp_path,
+        task_id=task_id,
+        latency_ms=1,
+    )
+
+    assert run["pose_exists"] is False
+    assert run["artifact_integrity_valid"] is False
+
+
+def test_real_projection_rejects_same_size_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.secure_io as secure_io
+    from scripts.run_temporal_docking_acceptance import _project_real_record
+
+    task_id = "00000000-0000-4000-8000-000000000022"
+    relative = "artifacts/docking_pose.pdbqt"
+    artifact = tmp_path / task_id / relative
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"safe")
+    replacement = tmp_path / "replacement.pdbqt"
+    replacement.write_bytes(b"evil")
+    original = secure_io._bounded_read
+
+    def replace_after_read(descriptor: int, maximum_bytes: int) -> bytes:
+        content = original(descriptor, maximum_bytes)
+        os.replace(replacement, artifact)
+        return content
+
+    monkeypatch.setattr(secure_io, "_bounded_read", replace_after_read)
+    run = _project_real_record(
+        _acceptance_record(
+            task_id, relative, hashlib.sha256(b"safe").hexdigest()
+        ),
+        [SimpleNamespace(is_terminal=True, event_type="task_succeeded")],
+        staging_root=tmp_path,
+        task_id=task_id,
+        latency_ms=1,
+    )
+
+    assert run["pose_exists"] is False
+    assert run["artifact_integrity_valid"] is False
+
+
+def test_real_runs_cancels_timeout_before_starting_next_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_temporal_docking_acceptance as acceptance
+    from src.task_runtime.models import TaskStatus
+
+    samples = tmp_path / "data" / "samples"
+    samples.mkdir(parents=True)
+    (samples / "MAGL_5zun.pdb").write_bytes(b"ATOM\n")
+    (samples / "5.sdf").write_bytes(b"$$$$\n")
+    monkeypatch.setattr(acceptance, "PROJECT_ROOT", tmp_path)
+    events: list[str] = []
+
+    class FakeRuntime:
+        canceled: set[str]
+
+        def __init__(self, **_kwargs: object) -> None:
+            self.canceled = set()
+
+        async def submit_docking(self, **_kwargs: object) -> object:
+            task_id = f"task-{sum(item.startswith('submit') for item in events) + 1}"
+            events.append(f"submit:{task_id}")
+            return SimpleNamespace(task_id=task_id)
+
+        async def get(self, task_id: str) -> object:
+            status = TaskStatus.CANCELED if task_id in self.canceled else TaskStatus.RUNNING
+            return SimpleNamespace(status=status)
+
+        async def cancel(self, task_id: str, reason: str | None = None) -> object:
+            assert reason == "acceptance_timeout"
+            events.append(f"cancel:{task_id}")
+            self.canceled.add(task_id)
+            return SimpleNamespace(status=TaskStatus.CANCELED)
+
+        async def close(self) -> None:
+            events.append("close")
+
+    config = SimpleNamespace(
+        backend="temporal_canary", canary_percent=100, staging_root=tmp_path / "staging"
+    )
+    runs = asyncio.run(
+        acceptance._real_runs(
+            2,
+            0.001,
+            config=config,
+            runtime_factory=FakeRuntime,
+            poll_interval_seconds=0,
+        )
+    )
+
+    assert events.index("cancel:task-1") < events.index("submit:task-2")
+    assert all(run["status"] == "failed" for run in runs)
+    assert all("acceptance_timeout" in run["warnings"] for run in runs)
+
+
+def test_real_runs_stops_when_timeout_cleanup_does_not_converge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_temporal_docking_acceptance as acceptance
+    from src.task_runtime.models import TaskStatus
+
+    samples = tmp_path / "data" / "samples"
+    samples.mkdir(parents=True)
+    (samples / "MAGL_5zun.pdb").write_bytes(b"ATOM\n")
+    (samples / "5.sdf").write_bytes(b"$$$$\n")
+    monkeypatch.setattr(acceptance, "PROJECT_ROOT", tmp_path)
+    submits: list[str] = []
+
+    class FakeRuntime:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def submit_docking(self, **_kwargs: object) -> object:
+            submits.append("submit")
+            return SimpleNamespace(task_id="task-leftover")
+
+        async def get(self, _task_id: str) -> object:
+            return SimpleNamespace(status=TaskStatus.RUNNING)
+
+        async def cancel(self, _task_id: str, reason: str | None = None) -> object:
+            raise RuntimeError("private cleanup failure")
+
+        async def close(self) -> None:
+            return None
+
+    config = SimpleNamespace(
+        backend="temporal_canary", canary_percent=100, staging_root=tmp_path / "staging"
+    )
+    runs = asyncio.run(
+        acceptance._real_runs(
+            2,
+            0.001,
+            config=config,
+            runtime_factory=FakeRuntime,
+            poll_interval_seconds=0,
+        )
+    )
+
+    assert submits == ["submit"]
+    assert runs[0]["status"] == "failed"
+    assert "cleanup_failed" in runs[0]["warnings"]
+
+
+def test_real_runs_cancellation_converges_submitted_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_temporal_docking_acceptance as acceptance
+    from src.task_runtime.models import TaskStatus
+
+    samples = tmp_path / "data" / "samples"
+    samples.mkdir(parents=True)
+    (samples / "MAGL_5zun.pdb").write_bytes(b"ATOM\n")
+    (samples / "5.sdf").write_bytes(b"$$$$\n")
+    monkeypatch.setattr(acceptance, "PROJECT_ROOT", tmp_path)
+    events: list[str] = []
+
+    class FakeRuntime:
+        canceled = False
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def submit_docking(self, **_kwargs: object) -> object:
+            events.append("submit")
+            return SimpleNamespace(task_id="task-cancelled")
+
+        async def get(self, _task_id: str) -> object:
+            if self.canceled:
+                return SimpleNamespace(status=TaskStatus.CANCELED)
+            raise asyncio.CancelledError
+
+        async def cancel(self, _task_id: str, reason: str | None = None) -> object:
+            assert reason == "acceptance_cancelled"
+            self.canceled = True
+            events.append("cancel")
+            return SimpleNamespace(status=TaskStatus.CANCELED)
+
+        async def close(self) -> None:
+            events.append("close")
+
+    config = SimpleNamespace(
+        backend="temporal_canary", canary_percent=100, staging_root=tmp_path / "staging"
+    )
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            acceptance._real_runs(
+                2,
+                1,
+                config=config,
+                runtime_factory=FakeRuntime,
+                poll_interval_seconds=0,
+            )
+        )
+
+    assert events == ["submit", "cancel", "close"]
 
 
 def test_real_projection_rejects_conflicting_artifact_type_aliases(tmp_path):

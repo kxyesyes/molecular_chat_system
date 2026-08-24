@@ -4338,6 +4338,39 @@ def test_preflight_rejects_contract_or_fake_runner_as_real_evidence() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "alert_name",
+    [
+        "TemporalWorkerHeartbeatStale",
+        "TemporalQueueBacklogGrowing",
+        "TemporalWorkflowStartUnexpectedErrors",
+        "TemporalDuplicateVinaExecution",
+        "TemporalMultipleTerminalEvents",
+        "TemporalArtifactValidationFailure",
+        "TemporalDockingP95TooHigh",
+        "TemporalDockingP95BaselineMissing",
+        "TemporalRuntimeFailureRateHigh",
+        "TemporalPostgresUnavailable",
+        "TemporalBackupVerificationStale",
+    ],
+)
+def test_preflight_never_passes_with_any_release_blocker_firing(
+    alert_name: str,
+) -> None:
+    from scripts.run_temporal_production_preflight import build_preflight_report
+
+    inputs = _task10_preflight_inputs()
+    inputs["blocking_alerts"] = [alert_name]
+
+    report = build_preflight_report(**inputs)
+
+    assert report["status"] == "failed"
+    assert report["checks"]["blocking_alerts"] == {
+        "status": "failed",
+        "code": "blocking_alerts_firing",
+    }
+
+
 def test_real_acceptance_subprocess_uses_isolated_canary_override_and_redacts(
     tmp_path: Path,
 ) -> None:
@@ -4423,6 +4456,33 @@ def test_real_acceptance_fake_runner_cannot_forge_shallow_pass(
     assert evidence["source_schema_valid"] is False
 
 
+def test_failed_acceptance_child_projection_remains_canonical(
+    tmp_path: Path,
+) -> None:
+    from scripts.run_temporal_production_preflight import run_acceptance_evidence
+
+    artifact_root = tmp_path / "artifacts"
+
+    def runner(argv: list[str], **_kwargs: object) -> object:
+        output = Path(argv[argv.index("--output") + 1])
+        output.write_text(
+            json.dumps(_task10_real_source_report(artifact_root)), encoding="utf-8"
+        )
+        return SimpleNamespace(returncode=1)
+
+    evidence = run_acceptance_evidence(
+        mode="real",
+        repo_root=PROJECT_ROOT,
+        output_path=tmp_path / "real.json",
+        artifact_root=artifact_root,
+        command_runner=runner,
+        base_environment={},
+    )
+
+    assert evidence["status"] == "failed"
+    _assert_canonical_report_hash(evidence)
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -4430,6 +4490,10 @@ def test_real_acceptance_fake_runner_cannot_forge_shallow_pass(
         "failed_run",
         "missing_artifact",
         "demo_provenance",
+        "fallback_provenance",
+        "non_numeric_energy",
+        "multiple_terminal_events",
+        "missing_run",
         "wrong_aggregate",
     ],
 )
@@ -4454,6 +4518,14 @@ def test_real_acceptance_rejects_incomplete_or_relabelled_evidence(
             Path(artifact_root / runs[0]["workflow_id"].removeprefix("medchat-docking-") / runs[0]["artifact_path"]).unlink()
         elif mutation == "demo_provenance":
             runs[0]["demo_mode"] = True
+        elif mutation == "fallback_provenance":
+            runs[0]["fallback_used"] = True
+        elif mutation == "non_numeric_energy":
+            runs[0]["binding_energy"] = "-7.1"
+        elif mutation == "multiple_terminal_events":
+            runs[0]["terminal_event_count"] = 2
+        elif mutation == "missing_run":
+            runs.pop()
         elif mutation == "wrong_aggregate":
             payload["passed_count"] = 2
         payload.pop("sha256")
@@ -4485,6 +4557,7 @@ def test_deployment_validator_passes_only_executed_host_checks(
 
     secret = "PRIVATE_DEPLOYMENT_ENV_CANARY"
     calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
+    call_directories: list[Path] = []
 
     class PassingTools:
         def available(self, _tool: str) -> bool:
@@ -4498,7 +4571,8 @@ def test_deployment_validator_passes_only_executed_host_checks(
             environment: dict[str, str],
             timeout: float,
         ) -> object:
-            del cwd, timeout
+            del timeout
+            call_directories.append(cwd)
             calls.append((tuple(argv), dict(environment)))
             return SimpleNamespace(returncode=0)
 
@@ -4525,6 +4599,12 @@ def test_deployment_validator_passes_only_executed_host_checks(
         "verify",
         "deployment/medchat.service",
         "deployment/medchat-temporal-worker.service",
+    )
+    assert call_directories == [PROJECT_ROOT] * 5
+    assert all(
+        environment["PATH"]
+        == "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        for _argv, environment in calls
     )
     assert secret not in json.dumps(calls)
 
@@ -4573,6 +4653,34 @@ def test_deployment_tool_resolution_ignores_untrusted_path(
     assert runner.available("promtool") is False
     assert marker not in attempted
     assert attempted == [Path("/usr/bin/promtool"), Path("/usr/local/bin/promtool")]
+
+
+@requires_posix_descriptor_io
+def test_trusted_tool_rejects_symlink_and_named_leaf_replacement(
+    postgres_trusted_tmp_path: Path,
+) -> None:
+    from src.task_runtime.trusted_process import open_trusted_executable
+
+    binary_directory = postgres_trusted_tmp_path / "bin"
+    binary_directory.mkdir(mode=0o700)
+    tool = binary_directory / "tool"
+    tool.write_bytes(b"#!/bin/sh\nexit 0\n")
+    tool.chmod(0o700)
+    linked = binary_directory / "linked"
+    linked.symlink_to(tool)
+    with pytest.raises(ValueError, match="trusted tool unavailable"):
+        open_trusted_executable(linked)
+
+    trusted = open_trusted_executable(tool)
+    replacement = binary_directory / "replacement"
+    replacement.write_bytes(b"#!/bin/sh\nexit 1\n")
+    replacement.chmod(0o700)
+    os.replace(replacement, tool)
+    try:
+        with pytest.raises(ValueError, match="trusted tool changed"):
+            trusted.revalidate()
+    finally:
+        trusted.close()
 
 
 def test_preflight_windows_host_gaps_remain_partial() -> None:

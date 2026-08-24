@@ -1187,9 +1187,10 @@ def _python_static(repo_root: Path) -> dict[str, str]:
 def _public_compose_environment(env_text: str) -> dict[str, str]:
     environment = {
         key: value
-        for key in ("PATH", "SYSTEMROOT", "WINDIR", "HOME", "USERPROFILE")
+        for key in ("SYSTEMROOT", "WINDIR", "HOME", "USERPROFILE")
         if (value := os.environ.get(key)) is not None
     }
+    environment["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     for raw_line in env_text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:

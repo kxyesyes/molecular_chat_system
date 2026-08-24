@@ -19,6 +19,8 @@ def _identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
 class TrustedExecutable:
     descriptor: int
     identity: tuple[int, int, int, int, int]
+    parent_descriptor: int
+    name: str
 
     @property
     def executable(self) -> str:
@@ -29,13 +31,28 @@ class TrustedExecutable:
         return (self.descriptor,)
 
     def revalidate(self) -> None:
-        if _identity(os.fstat(self.descriptor)) != self.identity:
+        try:
+            named = os.stat(
+                self.name,
+                dir_fd=self.parent_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError:
+            raise ValueError("trusted tool changed") from None
+        if (
+            _identity(os.fstat(self.descriptor)) != self.identity
+            or _identity(named) != self.identity
+            or not stat.S_ISREG(named.st_mode)
+        ):
             raise ValueError("trusted tool changed")
 
     def close(self) -> None:
         if self.descriptor >= 0:
             os.close(self.descriptor)
             self.descriptor = -1
+        if self.parent_descriptor >= 0:
+            os.close(self.parent_descriptor)
+            self.parent_descriptor = -1
 
 
 def open_trusted_executable(path: Path | str) -> TrustedExecutable:
@@ -80,8 +97,9 @@ def open_trusted_executable(path: Path | str) -> TrustedExecutable:
             or _identity(metadata) != _identity(named)
         ):
             raise ValueError("trusted tool unavailable")
-        trusted = TrustedExecutable(leaf, _identity(metadata))
+        trusted = TrustedExecutable(leaf, _identity(metadata), current, source.name)
         leaf = -1
+        descriptors.remove(current)
         return trusted
     except (OSError, RuntimeError, ValueError):
         raise ValueError("trusted tool unavailable") from None

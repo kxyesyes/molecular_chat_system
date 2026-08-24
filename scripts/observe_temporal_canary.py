@@ -11,10 +11,8 @@ import math
 import os
 from pathlib import Path
 import re
-import secrets
 import stat
 import sys
-import tempfile
 from typing import Any
 import urllib.error
 import urllib.parse
@@ -27,10 +25,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.manage_temporal_canary import (  # noqa: E402
     _StableArgumentParser,
-    _fsync_directory,
     _is_reparse_point,
     _safe_read_snapshot,
-    _stat_identity,
 )
 from src.task_runtime.config import (  # noqa: E402
     TaskRuntimeConfig,
@@ -56,7 +52,6 @@ from src.task_runtime.store import (  # noqa: E402
     ReadOnlyTemporalObservationStore,
 )
 from src.task_runtime.trusted_files import (  # noqa: E402
-    _apply_windows_security,
     _capture_trusted_path_boundary,
     _normalized_path,
     _path_identities,
