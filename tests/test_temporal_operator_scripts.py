@@ -559,6 +559,12 @@ def test_postgres_posix_metadata_policy_requires_trusted_owner_group_and_modes(
         directory(1000, 1000, 0o700), final=True
     )
     postgres_backup._require_trusted_regular_metadata(regular(1000, 1000, 0o600))
+    postgres_backup._require_trusted_executable_metadata(
+        regular(0, 0, 0o755)
+    )
+    postgres_backup._require_trusted_executable_metadata(
+        regular(1000, 1000, 0o700)
+    )
 
     for metadata, final in (
         (directory(2000, 2000, 0o755), False),
@@ -579,6 +585,16 @@ def test_postgres_posix_metadata_policy_requires_trusted_owner_group_and_modes(
     ):
         with pytest.raises(postgres_backup.PostgresBackupError) as raised:
             postgres_backup._require_trusted_regular_metadata(metadata)
+        assert raised.value.code == "output_untrusted"
+
+    for metadata in (
+        regular(2000, 2000, 0o755),
+        regular(1000, 2000, 0o700),
+        regular(1000, 1000, 0o775),
+        regular(1000, 1000, 0o600),
+    ):
+        with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+            postgres_backup._require_trusted_executable_metadata(metadata)
         assert raised.value.code == "output_untrusted"
 
 
@@ -727,6 +743,8 @@ def test_postgres_real_runner_executes_fixed_tool_from_validated_bin_directory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spawned: list[tuple[str, ...]] = []
+    spawn_options: list[dict[str, object]] = []
+    opened_tools: list[object] = []
 
     class CompletedProcess:
         pid = 424243
@@ -741,11 +759,30 @@ def test_postgres_real_runner_executes_fixed_tool_from_validated_bin_directory(
         def revalidate(self) -> None:
             pass
 
+        def open_tool(self, _name: str) -> object:
+            tool = FakeTrustedTool()
+            opened_tools.append(tool)
+            return tool
+
         def close(self) -> None:
             pass
 
-    def fake_popen(argv: list[str], **_kwargs: object) -> CompletedProcess:
+    class FakeTrustedTool:
+        fd = 73
+        executable_path = "/proc/self/fd/73"
+
+        def __init__(self) -> None:
+            self.revalidations = 0
+
+        def revalidate(self) -> None:
+            self.revalidations += 1
+
+        def close(self) -> None:
+            pass
+
+    def fake_popen(argv: list[str], **kwargs: object) -> CompletedProcess:
         spawned.append(tuple(argv))
+        spawn_options.append(kwargs)
         return CompletedProcess()
 
     monkeypatch.setattr(
@@ -762,7 +799,99 @@ def test_postgres_real_runner_executes_fixed_tool_from_validated_bin_directory(
         timeout=1.0,
     )
 
-    assert spawned == [(os.fspath(Path("/trusted/postgresql/bin") / "psql"), "--version")]
+    assert spawned == [("/proc/self/fd/73", "--version")]
+    assert spawn_options[0]["pass_fds"] == (73,)
+    assert len(opened_tools) == 1
+    assert opened_tools[0].revalidations == 2
+
+
+def test_postgres_tool_replacement_after_spawn_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process_finished = False
+
+    class CompletedProcess:
+        pid = 424244
+
+        def wait(self, *, timeout: float) -> int:
+            nonlocal process_finished
+            process_finished = True
+            return 0
+
+    class FakeTrustedTool:
+        fd = 74
+        executable_path = "/proc/self/fd/74"
+
+        def revalidate(self) -> None:
+            if process_finished:
+                raise postgres_backup.PostgresBackupError("output_untrusted")
+
+        def close(self) -> None:
+            pass
+
+    class FakeTrustedBin:
+        path = Path("/trusted/postgresql/bin")
+
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def revalidate(self) -> None:
+            pass
+
+        def open_tool(self, _name: str) -> FakeTrustedTool:
+            return FakeTrustedTool()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        postgres_backup, "_process_groups_available", lambda: True
+    )
+    monkeypatch.setattr(
+        postgres_backup, "TrustedPostgresBinDirectory", FakeTrustedBin
+    )
+    monkeypatch.setattr(
+        postgres_backup.subprocess,
+        "Popen",
+        lambda _argv, **_kwargs: CompletedProcess(),
+    )
+
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        postgres_backup.run_command(
+            ["psql"],
+            environment={"PATH": "/trusted/postgresql/bin"},
+            timeout=1.0,
+        )
+    assert raised.value.code == "output_untrusted"
+
+
+def test_postgres_tool_leaf_open_is_descriptor_relative_and_nofollow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened: list[tuple[str, int, int | None]] = []
+
+    def reject_symlink(
+        name: str,
+        flags: int,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        opened.append((name, flags, dir_fd))
+        raise OSError(errno.ELOOP, "redacted")
+
+    trusted = object.__new__(postgres_backup.TrustedPostgresBinDirectory)
+    trusted.fd = 91
+    nofollow = getattr(os, "O_NOFOLLOW", 0) or 0x20000
+    monkeypatch.setattr(postgres_backup, "_NOFOLLOW", nofollow)
+    monkeypatch.setattr(postgres_backup.os, "open", reject_symlink)
+
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        trusted.open_tool("psql")
+
+    assert raised.value.code == "output_untrusted"
+    assert opened[0][0] == "psql"
+    assert opened[0][2] == 91
+    assert opened[0][1] & nofollow
 
 
 @pytest.mark.skipif(os.name == "posix", reason="non-POSIX fail-closed contract")
@@ -908,6 +1037,76 @@ def test_postgres_bin_directory_is_nofollow_owned_and_not_group_writable(
     with pytest.raises(postgres_backup.PostgresBackupError) as raised:
         postgres_backup.TrustedPostgresBinDirectory(postgres_bin)
     assert raised.value.code == "output_untrusted"
+
+
+@requires_posix_descriptor_io
+def test_postgres_tool_leaf_rejects_symlink_and_name_replacement(
+    postgres_trusted_tmp_path: Path,
+) -> None:
+    postgres_bin = postgres_trusted_tmp_path / "postgres-bin"
+    postgres_bin.mkdir(mode=0o700)
+    real_tool = postgres_trusted_tmp_path / "real-psql"
+    real_tool.write_bytes(b"tool")
+    os.chmod(real_tool, 0o700)
+    linked_tool = postgres_bin / "psql"
+    _create_symlink_or_skip(linked_tool, real_tool)
+    trusted = postgres_backup.TrustedPostgresBinDirectory(postgres_bin)
+    try:
+        with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+            trusted.open_tool("psql")
+        assert raised.value.code == "output_untrusted"
+
+        linked_tool.unlink()
+        linked_tool.write_bytes(b"original-tool")
+        os.chmod(linked_tool, 0o700)
+        tool = trusted.open_tool("psql")
+        try:
+            linked_tool.unlink()
+            linked_tool.write_bytes(b"replacement-tool")
+            os.chmod(linked_tool, 0o700)
+            with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+                tool.revalidate()
+            assert raised.value.code == "output_untrusted"
+        finally:
+            tool.close()
+    finally:
+        trusted.close()
+
+
+@requires_posix_descriptor_io
+def test_postgres_runner_executes_held_verified_tool_descriptor(
+    postgres_trusted_tmp_path: Path,
+) -> None:
+    if not sys.platform.startswith("linux") or not Path("/proc/self/fd").is_dir():
+        pytest.skip("Linux /proc/self/fd executable descriptors required")
+    if " " in sys.executable:
+        pytest.skip("test interpreter path cannot be represented in a shebang")
+
+    postgres_bin = postgres_trusted_tmp_path / "postgres-bin"
+    postgres_bin.mkdir(mode=0o700)
+    tool = postgres_bin / "psql"
+    tool.write_text(
+        f"#!{sys.executable}\nraise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+    os.chmod(tool, 0o700)
+
+    result = postgres_backup.run_command(
+        ["psql"],
+        environment={"PATH": os.fspath(postgres_bin)},
+        timeout=5.0,
+    )
+
+    assert result.returncode == 0
+
+
+def test_postgres_backup_success_path_uses_defined_partial_version() -> None:
+    source = BACKUP_SCRIPT.read_text(encoding="utf-8")
+    create_backup_source = source[
+        source.index("def create_backup(") : source.index("\ndef _parser()")
+    ]
+    assert "_partial_version" not in create_backup_source
+    assert "partial_version" in create_backup_source
 
 
 @requires_posix_descriptor_io

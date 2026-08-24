@@ -158,6 +158,20 @@ def _require_trusted_regular_metadata(metadata: os.stat_result) -> None:
         raise PostgresBackupError("output_untrusted")
 
 
+def _require_trusted_executable_metadata(metadata: os.stat_result) -> None:
+    effective_uid, effective_gid = _effective_ids()
+    owner = (metadata.st_uid, metadata.st_gid)
+    mode = stat.S_IMODE(metadata.st_mode)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or _is_reparse_point(metadata)
+        or owner not in {(0, 0), (effective_uid, effective_gid)}
+        or mode & 0o022
+        or not mode & 0o111
+    ):
+        raise PostgresBackupError("output_untrusted")
+
+
 def _open_directory_chain(path: Path, *, final_exact: bool = True) -> int:
     if not _descriptor_io_available():
         raise PostgresBackupError("output_untrusted")
@@ -241,6 +255,47 @@ def _selected_postgres_bin_dir(value: Path | None = None) -> Path:
     return Path(raw)
 
 
+class TrustedPostgresTool:
+    def __init__(
+        self,
+        directory: "TrustedPostgresBinDirectory",
+        name: str,
+        descriptor: int,
+        identity: tuple[int, int, int, int, int],
+    ) -> None:
+        self.directory = directory
+        self.name = name
+        self.fd = descriptor
+        self.identity = identity
+
+    @property
+    def executable_path(self) -> str:
+        if os.name != "posix" or not sys.platform.startswith("linux"):
+            raise PostgresBackupError("tool_failed")
+        return f"/proc/self/fd/{self.fd}"
+
+    def revalidate(self) -> None:
+        try:
+            opened = os.fstat(self.fd)
+            entry = _stat_at(self.directory.fd, self.name)
+            _require_trusted_executable_metadata(opened)
+            if (
+                _full_identity(opened) != self.identity
+                or _full_identity(entry) != self.identity
+                or _is_reparse_point(entry)
+            ):
+                raise PostgresBackupError("output_untrusted")
+        except PostgresBackupError:
+            raise
+        except OSError as exc:
+            raise PostgresBackupError("output_untrusted") from exc
+
+    def close(self) -> None:
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
+
 class TrustedPostgresBinDirectory:
     def __init__(self, path: Path) -> None:
         selected = _selected_postgres_bin_dir(path)
@@ -262,6 +317,32 @@ class TrustedPostgresBinDirectory:
                 raise PostgresBackupError("output_untrusted")
         finally:
             os.close(replacement)
+
+    def open_tool(self, name: str) -> TrustedPostgresTool:
+        if name not in POSTGRES_TOOL_NAMES:
+            raise PostgresBackupError("tool_failed")
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | _NOFOLLOW | _CLOEXEC | _BINARY,
+                dir_fd=self.fd,
+            )
+            opened = os.fstat(descriptor)
+            entry = _stat_at(self.fd, name)
+            _require_trusted_executable_metadata(opened)
+            identity = _full_identity(opened)
+            if _full_identity(entry) != identity or _is_reparse_point(entry):
+                raise PostgresBackupError("output_untrusted")
+            return TrustedPostgresTool(self, name, descriptor, identity)
+        except PostgresBackupError:
+            if descriptor >= 0:
+                os.close(descriptor)
+            raise
+        except OSError as exc:
+            if descriptor >= 0:
+                os.close(descriptor)
+            raise PostgresBackupError("output_untrusted") from exc
 
     def close(self) -> None:
         if self.fd >= 0:
@@ -425,21 +506,21 @@ def run_command(
         raise PostgresBackupError("tool_failed")
     command = list(argv)
     trusted_bin: TrustedPostgresBinDirectory | None = None
+    trusted_tool: TrustedPostgresTool | None = None
     if not command:
         raise PostgresBackupError("tool_failed")
     tool_name = Path(command[0]).name
-    if tool_name in POSTGRES_TOOL_NAMES:
-        path_value = environment.get("PATH")
-        if type(path_value) is not str:
-            raise PostgresBackupError("tool_failed")
-        try:
-            trusted_bin = TrustedPostgresBinDirectory(Path(path_value))
-            trusted_bin.revalidate()
-        except PostgresBackupError:
-            raise
-        command[0] = os.fspath(trusted_bin.path / tool_name)
     output = None
     try:
+        if tool_name in POSTGRES_TOOL_NAMES:
+            path_value = environment.get("PATH")
+            if type(path_value) is not str:
+                raise PostgresBackupError("tool_failed")
+            trusted_bin = TrustedPostgresBinDirectory(Path(path_value))
+            trusted_bin.revalidate()
+            trusted_tool = trusted_bin.open_tool(tool_name)
+            trusted_tool.revalidate()
+            command[0] = trusted_tool.executable_path
         output = tempfile.TemporaryFile() if capture_output else None
         process = subprocess.Popen(
             command,
@@ -453,6 +534,7 @@ def run_command(
             env=environment,
             shell=False,
             close_fds=True,
+            pass_fds=(trusted_tool.fd,) if trusted_tool is not None else (),
             start_new_session=True,
         )
         try:
@@ -463,6 +545,9 @@ def run_command(
             except BaseException:
                 pass
             raise PostgresBackupError("tool_timeout") from exc
+        if trusted_tool is not None:
+            trusted_tool.revalidate()
+            trusted_bin.revalidate()
         payload = b""
         if output is not None:
             output.seek(0)
@@ -479,6 +564,8 @@ def run_command(
     finally:
         if output is not None:
             output.close()
+        if trusted_tool is not None:
+            trusted_tool.close()
         if trusted_bin is not None:
             trusted_bin.close()
 
@@ -837,14 +924,15 @@ def create_backup(
             BACKUP_TIMEOUT_SECONDS,
             stdout_fd=partial_descriptor,
         )
-        digest, size, _partial_identity, partial_identity = _hash_descriptor(
+        digest, size, _partial_identity, partial_version = _hash_descriptor(
             partial_descriptor, code="dump_invalid", sync=True
         )
+        partial_identity = partial_version
         if size <= 0 or _SHA256.fullmatch(digest) is None:
             raise PostgresBackupError("dump_invalid")
         _require_descriptor_version(
             partial_descriptor,
-            _partial_version,
+            partial_version,
             code="dump_invalid",
         )
         _require_name_matches_fd(
