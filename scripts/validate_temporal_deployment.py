@@ -26,6 +26,14 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.task_runtime.deployment_contract import (  # noqa: E402
     TEMPORAL_RELEASE_BLOCKER_DURATIONS,
 )
+from src.task_runtime.secure_io import (  # noqa: E402
+    read_file_snapshot,
+    write_json_atomic,
+)
+from src.task_runtime.trusted_process import (  # noqa: E402
+    TrustedExecutable,
+    open_trusted_executable,
+)
 
 MAX_ASSET_BYTES = 4 * 1024 * 1024
 COMMAND_TIMEOUT_SECONDS = 60.0
@@ -173,8 +181,25 @@ _ALERT_DURATIONS = TEMPORAL_RELEASE_BLOCKER_DURATIONS
 
 
 class DeploymentCommandRunner:
+    _PATHS = {
+        "docker": (Path("/usr/bin/docker"), Path("/usr/local/bin/docker")),
+        "promtool": (Path("/usr/bin/promtool"), Path("/usr/local/bin/promtool")),
+        "systemd-analyze": (Path("/usr/bin/systemd-analyze"),),
+    }
+
+    def __init__(self) -> None:
+        self._tools: dict[str, TrustedExecutable] = {}
+
     def available(self, tool: str) -> bool:
-        return shutil.which(tool) is not None
+        if tool in self._tools:
+            return True
+        for path in self._PATHS.get(tool, ()):
+            try:
+                self._tools[tool] = open_trusted_executable(path)
+                return True
+            except ValueError:
+                continue
+        return False
 
     def run(
         self,
@@ -184,8 +209,12 @@ class DeploymentCommandRunner:
         environment: dict[str, str],
         timeout: float,
     ) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.run(
-            argv,
+        tool = self._tools.get(argv[0])
+        if tool is None:
+            raise ValueError("deployment tool unavailable")
+        tool.revalidate()
+        result = subprocess.run(
+            [tool.executable, *argv[1:]],
             cwd=cwd,
             env=environment,
             stdin=subprocess.DEVNULL,
@@ -194,7 +223,10 @@ class DeploymentCommandRunner:
             shell=False,
             timeout=timeout,
             check=False,
+            pass_fds=tool.pass_fds,
         )
+        tool.revalidate()
+        return result
 
 
 def _canonical_sha256(payload: dict[str, Any]) -> str:
@@ -228,94 +260,7 @@ def _is_reparse_point(metadata: os.stat_result) -> bool:
 
 
 def write_report_atomic(path: Path, report: dict[str, Any]) -> None:
-    destination = Path(os.path.abspath(os.fspath(path)))
-    parent = destination.parent
-    parent_before = parent.lstat()
-    if not stat.S_ISDIR(parent_before.st_mode) or _is_reparse_point(parent_before):
-        raise ValueError("unsafe report output")
-    try:
-        before = destination.lstat()
-    except FileNotFoundError:
-        before = None
-    if before is not None and (
-        not stat.S_ISREG(before.st_mode) or _is_reparse_point(before)
-    ):
-        raise ValueError("unsafe report output")
-    try:
-        content = json.dumps(
-            report,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8") + b"\n"
-    except (TypeError, ValueError):
-        raise ValueError("invalid report output") from None
-    descriptor = -1
-    temporary: Path | None = None
-    try:
-        descriptor, raw_temporary = tempfile.mkstemp(
-            prefix=f".{destination.name}.",
-            suffix=".tmp",
-            dir=parent,
-        )
-        temporary = Path(raw_temporary)
-        os.chmod(temporary, 0o600)
-        view = memoryview(content)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("short write")
-            view = view[written:]
-        os.fsync(descriptor)
-        temporary_identity = _file_identity(os.fstat(descriptor))
-        if os.name != "posix":
-            os.close(descriptor)
-            descriptor = -1
-        if _directory_identity(parent.lstat()) != _directory_identity(parent_before):
-            raise ValueError("unsafe report output")
-        try:
-            current = destination.lstat()
-        except FileNotFoundError:
-            current = None
-        if (before is None) != (current is None) or (
-            before is not None
-            and current is not None
-            and _file_identity(before) != _file_identity(current)
-        ):
-            raise ValueError("unsafe report output")
-        os.replace(temporary, destination)
-        temporary = None
-        final = destination.lstat()
-        if descriptor >= 0:
-            temporary_identity = _file_identity(os.fstat(descriptor))
-        if (
-            not stat.S_ISREG(final.st_mode)
-            or _is_reparse_point(final)
-            or _file_identity(final) != temporary_identity
-        ):
-            raise ValueError("unsafe report output")
-        if os.name == "posix":
-            directory_fd = os.open(
-                parent,
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_CLOEXEC", 0),
-            )
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-    except (OSError, RuntimeError, ValueError):
-        raise ValueError("atomic report output failed") from None
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        if temporary is not None:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+    write_json_atomic(path, report, maximum_bytes=MAX_ASSET_BYTES)
 
 
 def _generated_at(value: datetime | None) -> str:
@@ -328,13 +273,12 @@ def _generated_at(value: datetime | None) -> str:
 
 
 def _read_regular_asset(path: Path) -> str:
-    metadata = path.lstat()
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_ASSET_BYTES:
+    snapshot = read_file_snapshot(
+        Path(os.path.abspath(os.fspath(path))), MAX_ASSET_BYTES
+    )
+    if b"\x00" in snapshot.content:
         raise ValueError("deployment asset invalid")
-    content = path.read_bytes()
-    if len(content) != metadata.st_size or b"\x00" in content:
-        raise ValueError("deployment asset invalid")
-    return content.decode("utf-8", errors="strict")
+    return snapshot.content.decode("utf-8", errors="strict")
 
 
 def _require(condition: object) -> None:

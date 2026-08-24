@@ -51,6 +51,7 @@ from src.task_runtime.observation import (  # noqa: E402
     ObservationPolicy,
     build_observation_report,
 )
+from src.task_runtime.secure_io import write_json_atomic  # noqa: E402
 from src.task_runtime.store import (  # noqa: E402
     ReadOnlyTemporalObservationStore,
 )
@@ -648,131 +649,13 @@ def collect_observation(
 
 
 def write_report_atomic(path: Path, report: Mapping[str, object]) -> None:
-    destination = _normalized_path(path)
-    boundary = _capture_trusted_path_boundary(destination, require_file=False)
-    try:
-        content = json.dumps(
-            dict(report), sort_keys=True, separators=(",", ":"), allow_nan=False
-        ).encode("utf-8") + b"\n"
-    except (MemoryError, TypeError, ValueError):
-        raise ValueError("invalid report output") from None
-    if len(content) > MAX_REPORT_BYTES:
-        raise ValueError("invalid report output")
-    if _capture_trusted_path_boundary(destination, require_file=False) != boundary:
-        raise ValueError("unsafe report output")
-
-    parent = destination.parent
-    parent_descriptor: int | None = None
-    descriptor: int | None = None
-    temporary: Path | None = None
-    temporary_name: str | None = None
-    try:
-        if os.name == "posix":
-            directory_flags = (
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_CLOEXEC", 0)
-            )
-            if not getattr(os, "O_DIRECTORY", 0) or not getattr(os, "O_NOFOLLOW", 0):
-                raise ValueError("unsafe report output")
-            parent_descriptor = os.open(parent, directory_flags)
-            if _stat_identity(os.fstat(parent_descriptor)) != boundary.parent_identity:
-                raise ValueError("unsafe report output")
-            flags = (
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | os.O_NOFOLLOW
-                | getattr(os, "O_CLOEXEC", 0)
-            )
-            for _ in range(8):
-                temporary_name = f".{destination.name}.{secrets.token_hex(12)}.tmp"
-                try:
-                    descriptor = os.open(
-                        temporary_name, flags, 0o600, dir_fd=parent_descriptor
-                    )
-                except FileExistsError:
-                    continue
-                temporary = parent / temporary_name
-                break
-            if descriptor is None:
-                raise ValueError("unsafe report output")
-        else:
-            descriptor, name = tempfile.mkstemp(
-                prefix=f".{destination.name}.", suffix=".tmp", dir=parent
-            )
-            temporary = Path(name)
-            os.chmod(temporary, 0o600)
-        view = memoryview(content)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("short write")
-            view = view[written:]
-        os.fsync(descriptor)
-        if boundary.exists:
-            if os.name == "posix":
-                uid, gid, mode = boundary.file_security
-                if hasattr(os, "fchown"):
-                    os.fchown(descriptor, uid, gid)
-                os.fchmod(descriptor, mode)
-            else:
-                _apply_windows_security(temporary, boundary.file_security)
-        elif hasattr(os, "fchmod"):
-            os.fchmod(descriptor, 0o600)
-        os.fsync(descriptor)
-        temporary_identity = _stat_identity(os.fstat(descriptor))
-        current = _capture_trusted_path_boundary(destination, require_file=False)
-        if (
-            current.exists != boundary.exists
-            or current.file_identity != boundary.file_identity
-            or current.file_version != boundary.file_version
-            or current.file_security != boundary.file_security
-            or current.parent_identity != boundary.parent_identity
-            or current.parent_security != boundary.parent_security
-        ):
-            raise ValueError("unsafe report output")
-        if parent_descriptor is not None:
-            os.replace(
-                temporary_name,
-                destination.name,
-                src_dir_fd=parent_descriptor,
-                dst_dir_fd=parent_descriptor,
-            )
-        else:
-            os.replace(temporary, destination)
-        temporary = None
-        temporary_name = None
-        final = destination.lstat()
-        if _is_reparse_point(final) or _stat_identity(final) != temporary_identity:
-            raise ValueError("unsafe report output")
-        final_boundary = _capture_trusted_path_boundary(destination)
-        if (
-            final_boundary.parent_identity != boundary.parent_identity
-            or final_boundary.parent_security != boundary.parent_security
-            or (
-                boundary.exists
-                and final_boundary.file_security != boundary.file_security
-            )
-        ):
-            raise ValueError("unsafe report output")
-        _fsync_directory(parent)
-    except (OSError, RuntimeError, ValueError):
-        raise ValueError("atomic report output failed") from None
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        if temporary is not None:
-            try:
-                if parent_descriptor is not None and temporary_name is not None:
-                    os.unlink(temporary_name, dir_fd=parent_descriptor)
-                else:
-                    temporary.unlink()
-            except FileNotFoundError:
-                pass
-        if parent_descriptor is not None:
-            os.close(parent_descriptor)
+    write_json_atomic(
+        path,
+        report,
+        maximum_bytes=MAX_REPORT_BYTES,
+        capture_boundary=_capture_trusted_path_boundary,
+        is_reparse=_is_reparse_point,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:

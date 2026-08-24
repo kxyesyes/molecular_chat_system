@@ -4154,6 +4154,8 @@ def _task10_acceptance_report(mode: str) -> dict[str, object]:
             "status": "passed",
             "evidence_type": "real_temporal_vina" if real else "contract_replay",
         },
+        "source_report_sha256": "b" * 64,
+        "source_schema_valid": True,
     }
     canonical = json.dumps(
         report,
@@ -4161,6 +4163,71 @@ def _task10_acceptance_report(mode: str) -> dict[str, object]:
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
+    report["sha256"] = hashlib.sha256(canonical).hexdigest()
+    return report
+
+
+def _task10_real_source_report(artifact_root: Path) -> dict[str, object]:
+    runs: list[dict[str, object]] = []
+    latencies = [100.0, 200.0, 300.0]
+    for index, latency in enumerate(latencies, start=1):
+        task_id = f"00000000-0000-4000-8000-{index:012d}"
+        relative = "artifacts/docking_pose.pdbqt"
+        pose = artifact_root / task_id / relative
+        pose.parent.mkdir(parents=True)
+        pose.write_bytes(
+            f"REMARK VINA RESULT: {-7.0 - index / 10:.3f} 0.0 0.0\n".encode()
+        )
+        digest = hashlib.sha256(pose.read_bytes()).hexdigest()
+        runs.append(
+            {
+                "run": index,
+                "status": "passed",
+                "backend": "temporal",
+                "workflow_id": f"medchat-docking-{task_id}",
+                "vina_attempts": 1,
+                "terminal_event_count": 1,
+                "pose_exists": True,
+                "pose_count": 1,
+                "binding_energy": -7.0 - index / 10,
+                "artifact_path": relative,
+                "artifact_sha256": digest,
+                "provenance_complete": True,
+                "provenance": {
+                    "tool_name": "molecular_docking",
+                    "tool_version": "vina-1.2.5",
+                    "model_name": "AutoDock Vina",
+                    "model_version": "1.2.5",
+                },
+                "demo_mode": False,
+                "fallback_used": False,
+                "artifact_integrity_valid": True,
+                "terminal_event_valid": True,
+                "latency_ms": latency,
+                "warnings": [],
+                "failures": [],
+            }
+        )
+    report: dict[str, object] = {
+        "status": "passed",
+        "run_count": 3,
+        "passed_count": 3,
+        "pass_rate": 1.0,
+        "duplicate_vina_count": 0,
+        "terminal_event_violation_count": 0,
+        "latency_ms": {"p50": 200.0, "p95": 300.0},
+        "failure_type_distribution": {},
+        "runs": runs,
+        "mode": "real",
+        "scientific_execution": True,
+        "provenance_gate": {
+            "status": "passed",
+            "evidence_type": "real_temporal_vina",
+        },
+    }
+    canonical = json.dumps(
+        report, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()
     report["sha256"] = hashlib.sha256(canonical).hexdigest()
     return report
 
@@ -4278,6 +4345,7 @@ def test_real_acceptance_subprocess_uses_isolated_canary_override_and_redacts(
 
     secret = "PRIVATE_PREFLIGHT_SECRET_CANARY"
     calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
+    source_digests: list[str] = []
 
     def runner(
         argv: list[str],
@@ -4289,16 +4357,8 @@ def test_real_acceptance_subprocess_uses_isolated_canary_override_and_redacts(
         del cwd, timeout
         calls.append((tuple(argv), dict(environment)))
         output = Path(argv[argv.index("--output") + 1])
-        payload = _task10_acceptance_report("real")
-        payload.pop("sha256")
-        payload["runs"] = [{"status": "passed", "artifact_sha256": "a" * 64}]
-        canonical = json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-        payload["sha256"] = hashlib.sha256(canonical).hexdigest()
+        payload = _task10_real_source_report(tmp_path / "artifacts")
+        source_digests.append(str(payload["sha256"]))
         output.write_text(json.dumps(payload), encoding="utf-8")
         return SimpleNamespace(returncode=0)
 
@@ -4307,23 +4367,115 @@ def test_real_acceptance_subprocess_uses_isolated_canary_override_and_redacts(
         repo_root=PROJECT_ROOT,
         output_path=tmp_path / "real.json",
         command_runner=runner,
+        artifact_root=tmp_path / "artifacts",
         base_environment={
-            "PATH": os.environ.get("PATH", ""),
+            "PATH": "C:/malicious-path",
+            "PYTHONPATH": "C:/injected-python",
+            "LD_PRELOAD": "C:/injected-loader",
+            "OPENAI_API_KEY": secret,
             "TEMPORAL_POSTGRES_PASSWORD": secret,
             "MEDCHAT_TEMPORAL_CANARY_PERCENT": "5",
+            "MEDCHAT_TEMPORAL_ADDRESS": "127.0.0.1:7233",
         },
     )
 
     argv, child_environment = calls[0]
+    assert Path(argv[0]).is_absolute()
+    assert argv[1] == "-I"
     assert "--mode" in argv and "real" in argv
     assert "--repeat" in argv and "3" in argv
     assert secret not in " ".join(argv)
     assert child_environment["MEDCHAT_TASK_BACKEND"] == "temporal_canary"
     assert child_environment["MEDCHAT_TEMPORAL_CANARY_PERCENT"] == "100"
+    assert child_environment["MEDCHAT_TEMPORAL_ADDRESS"] == "127.0.0.1:7233"
+    assert "PATH" not in child_environment
+    assert "PYTHONPATH" not in child_environment
+    assert "LD_PRELOAD" not in child_environment
+    assert "OPENAI_API_KEY" not in child_environment
+    assert "TEMPORAL_POSTGRES_PASSWORD" not in child_environment
     assert secret not in json.dumps(evidence)
     assert evidence["provenance_gate"]["evidence_type"] == "real_temporal_vina"
     assert "runs" not in evidence
+    assert evidence["source_report_sha256"] == source_digests[0]
     _assert_canonical_report_hash(evidence)
+
+
+def test_real_acceptance_fake_runner_cannot_forge_shallow_pass(
+    tmp_path: Path,
+) -> None:
+    from scripts.run_temporal_production_preflight import run_acceptance_evidence
+
+    def runner(argv: list[str], **_kwargs: object) -> object:
+        output = Path(argv[argv.index("--output") + 1])
+        output.write_text(json.dumps(_task10_acceptance_report("real")))
+        return SimpleNamespace(returncode=0)
+
+    evidence = run_acceptance_evidence(
+        mode="real",
+        repo_root=PROJECT_ROOT,
+        output_path=tmp_path / "real.json",
+        artifact_root=tmp_path / "artifacts",
+        command_runner=runner,
+        base_environment={},
+    )
+
+    assert evidence["status"] == "failed"
+    assert evidence["source_schema_valid"] is False
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "contract_label",
+        "failed_run",
+        "missing_artifact",
+        "demo_provenance",
+        "wrong_aggregate",
+    ],
+)
+def test_real_acceptance_rejects_incomplete_or_relabelled_evidence(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    from scripts.run_temporal_production_preflight import run_acceptance_evidence
+
+    artifact_root = tmp_path / "artifacts"
+
+    def runner(argv: list[str], **_kwargs: object) -> object:
+        output = Path(argv[argv.index("--output") + 1])
+        payload = _task10_real_source_report(artifact_root)
+        runs = payload["runs"]
+        assert isinstance(runs, list)
+        if mutation == "contract_label":
+            payload["mode"] = "contract"
+        elif mutation == "failed_run":
+            runs[0]["status"] = "failed"
+        elif mutation == "missing_artifact":
+            Path(artifact_root / runs[0]["workflow_id"].removeprefix("medchat-docking-") / runs[0]["artifact_path"]).unlink()
+        elif mutation == "demo_provenance":
+            runs[0]["demo_mode"] = True
+        elif mutation == "wrong_aggregate":
+            payload["passed_count"] = 2
+        payload.pop("sha256")
+        payload["sha256"] = hashlib.sha256(
+            json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ).encode()
+        ).hexdigest()
+        output.write_text(json.dumps(payload), encoding="utf-8")
+        return SimpleNamespace(returncode=0)
+
+    evidence = run_acceptance_evidence(
+        mode="real",
+        repo_root=PROJECT_ROOT,
+        output_path=tmp_path / "real.json",
+        artifact_root=artifact_root,
+        command_runner=runner,
+        base_environment={},
+    )
+
+    assert evidence["status"] == "failed"
+    assert evidence["source_schema_valid"] is False
 
 
 def test_deployment_validator_passes_only_executed_host_checks(
@@ -4400,6 +4552,29 @@ def test_deployment_validator_failed_tool_is_never_partial() -> None:
     }
 
 
+def test_deployment_tool_resolution_ignores_untrusted_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.validate_temporal_deployment as deployment_validator
+
+    marker = tmp_path / "promtool"
+    marker.write_text("malicious", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    attempted: list[Path] = []
+
+    def reject(path: Path) -> object:
+        attempted.append(path)
+        raise ValueError("trusted tool unavailable")
+
+    monkeypatch.setattr(deployment_validator, "open_trusted_executable", reject)
+    runner = deployment_validator.DeploymentCommandRunner()
+
+    assert runner.available("promtool") is False
+    assert marker not in attempted
+    assert attempted == [Path("/usr/bin/promtool"), Path("/usr/local/bin/promtool")]
+
+
 def test_preflight_windows_host_gaps_remain_partial() -> None:
     from scripts.run_temporal_production_preflight import build_preflight_report
 
@@ -4435,6 +4610,45 @@ def test_task10_atomic_report_writer_rejects_symlink(
 
     assert target.read_text(encoding="utf-8") == "sentinel"
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_task10_atomic_report_writer_rejects_symlink_ancestor(
+    tmp_path: Path,
+) -> None:
+    from scripts.validate_temporal_deployment import write_report_atomic
+
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "linked"
+    _create_symlink_or_skip(linked_parent, real_parent)
+
+    with pytest.raises(ValueError, match="unsafe|atomic"):
+        write_report_atomic(linked_parent / "report.json", {"status": "passed"})
+
+    assert not (real_parent / "report.json").exists()
+
+
+def test_bounded_asset_snapshot_rejects_same_size_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.task_runtime.secure_io as secure_io
+
+    source = tmp_path / "asset.yml"
+    replacement = tmp_path / "replacement.yml"
+    source.write_bytes(b"safe")
+    replacement.write_bytes(b"evil")
+    original = secure_io._bounded_read
+
+    def replace_after_read(descriptor: int, maximum_bytes: int) -> bytes:
+        content = original(descriptor, maximum_bytes)
+        os.replace(replacement, source)
+        return content
+
+    monkeypatch.setattr(secure_io, "_bounded_read", replace_after_read)
+
+    with pytest.raises(ValueError, match="unsafe file snapshot"):
+        secure_io.read_file_snapshot(source.resolve(), 1024)
 
 
 def _task10_static_fixture(tmp_path: Path) -> Path:
