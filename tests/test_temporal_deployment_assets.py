@@ -7,8 +7,11 @@ import json
 import os
 import re
 import shutil
+import signal
 import struct
 import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -353,10 +356,53 @@ def test_temporal_worker_environment_example_is_exact_non_secret_allowlist() -> 
     assert all("RELAY" not in key and "PROMETHEUS_SCRAPE" not in key for key in assignments)
 
 
-def _wsl_path(path: Path) -> str:
-    resolved = path.resolve().as_posix()
-    assert re.fullmatch(r"[A-Za-z]:/.*", resolved)
-    return f"/mnt/{resolved[0].lower()}{resolved[2:]}"
+def _native_posix_repository(*, require_root: bool = False) -> str:
+    if sys.platform != "linux":
+        pytest.skip(
+            "native Linux POSIX execution is required; Windows does not dispatch WSL"
+        )
+    if shutil.which("sh") is None:
+        pytest.skip("native POSIX shell is unavailable")
+    if require_root and os.geteuid() != 0:
+        pytest.skip("native Linux root is required")
+    return ROOT.resolve().as_posix()
+
+
+def _run_native_posix(
+    command: str,
+    *,
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    _native_posix_repository()
+    return subprocess.run(
+        ["sh", "-lc", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        check=False,
+    )
+
+
+def test_posix_deployment_tests_never_dispatch_wsl_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def forbidden_run(command, *args, **kwargs):
+        del args, kwargs
+        calls.append(command)
+        raise AssertionError("a POSIX subprocess was started")
+
+    monkeypatch.setattr(subprocess, "run", forbidden_run)
+    if os.name == "nt":
+        with pytest.raises(pytest.skip.Exception):
+            _native_posix_repository()
+        assert calls == []
+    else:
+        pytest.skip("Windows dispatch guard is exercised only on Windows")
 
 
 def _load_bundle_installer():
@@ -526,9 +572,7 @@ def test_temporal_worker_legacy_allowlist_matches_flat_predecessor() -> None:
 
 
 def test_temporal_bundle_installer_stages_immutable_generation() -> None:
-    if os.name != "nt" or shutil.which("wsl.exe") is None:
-        pytest.skip("WSL is required for native generation staging validation")
-    repository = _wsl_path(ROOT)
+    repository = _native_posix_repository()
     command = f"""
 set -eu
 cd '{repository}'
@@ -557,23 +601,12 @@ test "$(stat -c %a "$destination/run/medchat-temporal-worker/install.lock")" = 6
 test "$(find "$destination/usr/lib/medchat/temporal-worker/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1
 test -z "$(find "$destination" -name '.staging-*' -o -name '.medchat-install-*')"
 """
-    result = subprocess.run(
-        ["wsl.exe", "-e", "sh", "-lc", command],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=90,
-        check=False,
-    )
+    result = _run_native_posix(command, timeout=90)
     assert result.returncode == 0, result.stderr
 
 
 def test_temporal_bundle_native_trust_and_generation_contracts() -> None:
-    if os.name != "nt" or shutil.which("wsl.exe") is None:
-        pytest.skip("WSL is required for native bundle trust validation")
-    repository = _wsl_path(ROOT)
+    repository = _native_posix_repository()
     command = r'''
 set -eu
 cd '__REPOSITORY__'
@@ -701,23 +734,12 @@ expect("bundle_destination_untrusted", lambda: module.install_bundle(str(source)
 assert not any(outside.iterdir())
 PY
 '''.replace("__REPOSITORY__", repository)
-    result = subprocess.run(
-        ["wsl.exe", "-e", "sh", "-lc", command],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=120,
-        check=False,
-    )
+    result = _run_native_posix(command, timeout=120)
     assert result.returncode == 0, result.stderr
 
 
 def test_temporal_activation_first_upgrade_rollback_and_failure_are_atomic() -> None:
-    if os.name != "nt" or shutil.which("wsl.exe") is None:
-        pytest.skip("WSL is required for native activation validation")
-    repository = _wsl_path(ROOT)
+    repository = _native_posix_repository()
     command = r'''
 set -eu
 cd '__REPOSITORY__'
@@ -838,24 +860,14 @@ assert entry.read_text(encoding="ascii") == "keep" and not entry.is_symlink()
 assert not (unexpected / "usr/lib/medchat/temporal-worker/current").exists()
 PY
 '''.replace("__REPOSITORY__", repository)
-    result = subprocess.run(
-        ["wsl.exe", "-e", "sh", "-lc", command],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=180,
-        check=False,
-    )
+    result = _run_native_posix(command, timeout=180)
     assert result.returncode == 0, result.stderr
 
 
 def test_temporal_legacy_migration_quarantines_dangerous_policy(
     tmp_path: Path,
 ) -> None:
-    if os.name != "nt" or shutil.which("wsl.exe") is None:
-        pytest.skip("WSL is required for native legacy migration validation")
+    _native_posix_repository(require_root=True)
     legacy = tmp_path / "legacy"
     legacy.mkdir()
     predecessor = {
@@ -873,8 +885,8 @@ def test_temporal_legacy_migration_quarantines_dangerous_policy(
             check=True,
         ).stdout
         (legacy / name).write_bytes(payload)
-    repository = _wsl_path(ROOT)
-    legacy_wsl = _wsl_path(legacy)
+    repository = ROOT.resolve().as_posix()
+    legacy_wsl = legacy.resolve().as_posix()
     command = r'''
 set -eu
 cd '__REPOSITORY__'
@@ -1004,16 +1016,7 @@ assert (after.st_dev, after.st_ino, stat.S_IMODE(after.st_mode), sentinel.read_t
 )
 PY
 '''.replace("__REPOSITORY__", repository).replace("__LEGACY__", legacy_wsl)
-    result = subprocess.run(
-        ["wsl.exe", "-u", "root", "-e", "sh", "-lc", command],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=240,
-        check=False,
-    )
+    result = _run_native_posix(command, timeout=240)
     assert result.returncode == 0, result.stderr
 
 
@@ -1037,9 +1040,9 @@ def test_temporal_worker_installer_has_live_source_guard_and_no_service_actions(
 
 
 def test_temporal_worker_installer_routes_root_aliases_through_live_guard() -> None:
-    if os.name != "nt" or shutil.which("wsl.exe") is None:
-        pytest.skip("WSL non-root execution is required for live-root alias validation")
-    repository = _wsl_path(ROOT)
+    repository = _native_posix_repository()
+    if os.geteuid() == 0:
+        pytest.skip("native non-root execution is required")
     command = f"""
 set -eu
 cd '{repository}'
@@ -1054,25 +1057,15 @@ do
     test "$output" = 'temporal_worker_install=failed code=root_required'
 done
 """
-    result = subprocess.run(
-        ["wsl.exe", "-e", "sh", "-lc", command],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=60,
-        check=False,
-    )
+    result = _run_native_posix(command, timeout=60)
     if result.returncode == 77:
-        pytest.skip("WSL default user is root")
+        pytest.skip("native non-root execution is required")
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.skip(reason="superseded by immutable bundle native trust coverage")
 def test_temporal_worker_installer_does_not_follow_leaf_or_parent_symlinks() -> None:
-    if os.name != "nt" or shutil.which("wsl.exe") is None:
-        pytest.skip("WSL is required for installer symlink validation")
-    repository = _wsl_path(ROOT)
+    repository = _native_posix_repository()
     command = f"""
 set -eu
 cd '{repository}'
@@ -1096,16 +1089,7 @@ set -e
 test "$result" -ne 0
 test ! -e "$parent_outside/systemd"
 """
-    result = subprocess.run(
-        ["wsl.exe", "-e", "sh", "-lc", command],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=60,
-        check=False,
-    )
+    result = _run_native_posix(command, timeout=60)
     assert result.returncode == 0, result.stderr
 
 
@@ -1125,10 +1109,9 @@ def test_temporal_worker_live_install_arms_cleanup_before_install() -> None:
     assert "trap cleanup_on_signal HUP INT TERM" in command
 
 
+@pytest.mark.skip(reason="superseded by immutable generation boundary coverage")
 def test_temporal_worker_installer_detects_post_replace_target_replacement() -> None:
-    if os.name != "nt" or shutil.which("wsl.exe") is None:
-        pytest.skip("WSL is required for deterministic installer race validation")
-    repository = _wsl_path(ROOT)
+    repository = _native_posix_repository()
     command = f"""
 set -eu
 cd '{repository}'
@@ -1199,26 +1182,16 @@ test ! -L "$destination/etc/systemd/system/medchat-temporal-worker.service"
 test "$(cat "$destination/etc/systemd/system/medchat-temporal-worker.service")" = 'tampered temporal worker unit'
 test ! -e "$destination/usr/share/medchat/temporal-worker-assets.sha256"
 """
-    result = subprocess.run(
-        ["wsl.exe", "-e", "sh", "-lc", command],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=60,
-        check=False,
-    )
+    result = _run_native_posix(command, timeout=60)
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.skip(reason="superseded by public-PID immutable staging signal coverage")
 @pytest.mark.parametrize("signal_name", ["HUP", "INT", "TERM"])
 def test_temporal_worker_installer_cleans_temporary_file_on_signal(
     signal_name: str,
 ) -> None:
-    if os.name != "nt" or shutil.which("wsl.exe") is None:
-        pytest.skip("WSL is required for deterministic installer signal validation")
-    repository = _wsl_path(ROOT)
+    repository = _native_posix_repository()
     command = f"""
 set -eu
 command -v setsid >/dev/null 2>&1 || exit 77
@@ -1386,223 +1359,250 @@ test ! -e "$destination/usr/share/medchat/temporal-worker-assets.sha256"
 rm -rf -- "$release"
 test ! -e "$release"
 """
-    result = subprocess.run(
-        ["wsl.exe", "-e", "sh", "-lc", command],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=45,
-        check=False,
-    )
+    result = _run_native_posix(command, timeout=45)
     if result.returncode == 77:
-        pytest.skip("WSL setsid is unavailable")
+        pytest.skip("native setsid is unavailable")
     assert result.returncode == 0, result.stderr
 
 
-def _live_root_install_command(repository: str) -> str:
-    return f"""
-set -eu
-repository='{repository}'
-release=
-cleanup_armed=0
-created_libexec_dir=0
-created_share_dir=0
-cleanup() {{
-    if [ "$cleanup_armed" -eq 1 ]; then
-        rm -f -- \
-            /etc/systemd/system/medchat-temporal-worker.service \
-            /etc/systemd/system/medchat-temporal-worker-prepare.service \
-            /usr/libexec/medchat/validate-temporal-worker-env \
-            /usr/lib/tmpfiles.d/medchat-temporal-worker.conf \
-            /usr/share/medchat/temporal-worker-assets.sha256
-        if [ "$created_libexec_dir" -eq 1 ]; then
-            rmdir /usr/libexec/medchat 2>/dev/null || true
-        fi
-        if [ "$created_share_dir" -eq 1 ]; then
-            rmdir /usr/share/medchat 2>/dev/null || true
-        fi
-    fi
-    if [ -n "$release" ]; then rm -rf -- "$release"; fi
-}}
-cleanup_on_signal() {{
-    cleanup
-    trap - EXIT HUP INT TERM
-    exit 1
-}}
-trap cleanup EXIT
-trap cleanup_on_signal HUP INT TERM
-release=$(mktemp -d /root/medchat-temporal-installer-live-XXXXXX)
-for target in \
-    /etc/systemd/system/medchat-temporal-worker.service \
-    /etc/systemd/system/medchat-temporal-worker-prepare.service \
-    /usr/libexec/medchat/validate-temporal-worker-env \
-    /usr/lib/tmpfiles.d/medchat-temporal-worker.conf \
-    /usr/share/medchat/temporal-worker-assets.sha256
-do
-    if [ -e "$target" ] || [ -L "$target" ]; then exit 77; fi
-done
-if [ ! -d /usr/libexec/medchat ]; then created_libexec_dir=1; fi
-if [ ! -d /usr/share/medchat ]; then created_share_dir=1; fi
-cleanup_armed=1
-mkdir -p "$release/deployment/libexec" "$release/deployment/tmpfiles"
-cp "$repository/deployment/install-temporal-worker.sh" "$release/deployment/"
-cp "$repository/deployment/medchat-temporal-worker.service" "$release/deployment/"
-cp "$repository/deployment/medchat-temporal-worker-prepare.service" "$release/deployment/"
-cp "$repository/deployment/libexec/validate-temporal-worker-env.py" "$release/deployment/libexec/"
-cp "$repository/deployment/tmpfiles/medchat-temporal-worker.conf" "$release/deployment/tmpfiles/"
-chown -R root:root "$release"
-chmod -R go-w "$release"
-sh "$release/deployment/install-temporal-worker.sh" --destdir /
-test ! -L /etc/systemd/system/medchat-temporal-worker.service
-test ! -L /etc/systemd/system/medchat-temporal-worker-prepare.service
-test ! -L /usr/libexec/medchat/validate-temporal-worker-env
-test ! -L /usr/lib/tmpfiles.d/medchat-temporal-worker.conf
-test ! -L /usr/share/medchat/temporal-worker-assets.sha256
-test "$(stat -c %u:%g /etc/systemd/system/medchat-temporal-worker.service)" = 0:0
-test "$(stat -c %u:%g /etc/systemd/system/medchat-temporal-worker-prepare.service)" = 0:0
-test "$(stat -c %u:%g /usr/libexec/medchat/validate-temporal-worker-env)" = 0:0
-test "$(stat -c %u:%g /usr/lib/tmpfiles.d/medchat-temporal-worker.conf)" = 0:0
-test "$(stat -c %u:%g /usr/share/medchat/temporal-worker-assets.sha256)" = 0:0
-test "$(stat -c %a /etc/systemd/system/medchat-temporal-worker.service)" = 644
-test "$(stat -c %a /etc/systemd/system/medchat-temporal-worker-prepare.service)" = 644
-test "$(stat -c %a /usr/libexec/medchat/validate-temporal-worker-env)" = 755
-test "$(stat -c %a /usr/lib/tmpfiles.d/medchat-temporal-worker.conf)" = 644
-test "$(stat -c %a /usr/share/medchat/temporal-worker-assets.sha256)" = 644
-(cd / && sha256sum -c /usr/share/medchat/temporal-worker-assets.sha256)
-cleanup
-cleanup_armed=0
-for target in \
-    /etc/systemd/system/medchat-temporal-worker.service \
-    /etc/systemd/system/medchat-temporal-worker-prepare.service \
-    /usr/libexec/medchat/validate-temporal-worker-env \
-    /usr/lib/tmpfiles.d/medchat-temporal-worker.conf \
-    /usr/share/medchat/temporal-worker-assets.sha256
-do
-    test ! -e "$target"
-    test ! -L "$target"
-done
-"""
-
-
-def test_temporal_worker_installer_live_root_targets_are_root_owned() -> None:
-    if os.name != "nt" or shutil.which("wsl.exe") is None:
-        pytest.skip("WSL root is required for isolated live-install validation")
-    repository = _wsl_path(ROOT)
-    command = _live_root_install_command(repository)
-    result = subprocess.run(
-        ["wsl.exe", "-u", "root", "-e", "sh", "-lc", command],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=90,
-        check=False,
+def test_temporal_worker_live_root_validation_is_a_release_blocker() -> None:
+    pytest.skip(
+        "release blocker: isolated live-root runner is intentionally not implemented"
     )
-    if result.returncode == 77:
-        pytest.skip("WSL already has Temporal worker production assets")
-    assert result.returncode == 0, result.stderr
 
 
-def test_temporal_worker_live_install_failure_path_cleans_created_targets() -> None:
-    if os.name != "nt" or shutil.which("wsl.exe") is None:
-        pytest.skip("WSL root is required for live-install failure cleanup validation")
-    repository = _wsl_path(ROOT)
-    installer_call = 'sh "$release/deployment/install-temporal-worker.sh" --destdir /'
-    command = _live_root_install_command(repository)
-    assert command.count(installer_call) == 1
-    command = command.replace(installer_call, f"{installer_call}\nexit 91", 1)
-    result = subprocess.run(
-        ["wsl.exe", "-u", "root", "-e", "sh", "-lc", command],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=90,
-        check=False,
+def _load_bundle_installer_from(path: Path):
+    spec = importlib.util.spec_from_file_location(
+        f"temporal_bundle_installer_{path.parent.name}", path
     )
-    if result.returncode == 77:
-        pytest.skip("WSL already has Temporal worker production assets")
-    assert result.returncode == 91, result.stderr
-    cleanup_check = """
-set -eu
-for target in \
-    /etc/systemd/system/medchat-temporal-worker.service \
-    /etc/systemd/system/medchat-temporal-worker-prepare.service \
-    /usr/libexec/medchat/validate-temporal-worker-env \
-    /usr/lib/tmpfiles.d/medchat-temporal-worker.conf \
-    /usr/share/medchat/temporal-worker-assets.sha256
-do
-    test ! -e "$target"
-    test ! -L "$target"
-done
-"""
-    cleanup_result = subprocess.run(
-        ["wsl.exe", "-u", "root", "-e", "sh", "-lc", cleanup_check],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=30,
-        check=False,
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _make_native_destination(path: Path) -> Path:
+    path.mkdir(mode=0o700)
+    (path / "sentinel").write_text("keep", encoding="ascii")
+    return path
+
+
+def _unlock_native_tree(path: Path) -> None:
+    for directory in sorted(
+        (entry for entry in path.rglob("*") if entry.is_dir()),
+        key=lambda entry: len(entry.parts),
+    ):
+        directory.chmod(0o700)
+
+
+def test_temporal_bundle_failures_leave_only_complete_generations(
+    tmp_path: Path,
+) -> None:
+    _native_posix_repository()
+    baseline_source = tmp_path / "baseline"
+    upgrade_source = tmp_path / "upgrade"
+    shutil.copytree(ROOT / "deployment", baseline_source)
+    shutil.copytree(ROOT / "deployment", upgrade_source)
+    worker = upgrade_source / "medchat-temporal-worker.service"
+    worker.write_bytes(worker.read_bytes() + b"\n# failure-boundary-upgrade\n")
+    installer = _load_bundle_installer_from(
+        baseline_source / "libexec/install-temporal-worker-bundle.py"
     )
-    assert cleanup_result.returncode == 0, cleanup_result.stderr
+    original_write = installer._write_file
+    original_rename = installer.os.rename
+
+    for fail_after in range(1, 6):
+        destination = _make_native_destination(tmp_path / f"write-{fail_after}")
+        try:
+            baseline = installer.install_bundle(
+                str(baseline_source), str(destination), False
+            )
+            writes = 0
+
+            def fail_after_write(*args, **kwargs):
+                nonlocal writes
+                original_write(*args, **kwargs)
+                writes += 1
+                if writes == fail_after:
+                    raise installer.BundleInstallError("bundle_publish_failed")
+
+            installer._write_file = fail_after_write
+            with pytest.raises(installer.BundleInstallError):
+                installer.install_bundle(str(upgrade_source), str(destination), False)
+            releases = destination / installer.RELEASES_RELATIVE
+            assert {entry.name for entry in releases.iterdir()} == {baseline}
+            assert (destination / "sentinel").read_text(encoding="ascii") == "keep"
+            assert not (destination / "usr/lib/medchat/temporal-worker/current").exists()
+            assert not list(destination.rglob(".staging-*"))
+        finally:
+            installer._write_file = original_write
+            _unlock_native_tree(destination)
+
+    destination = _make_native_destination(tmp_path / "post-publish")
+    try:
+        baseline = installer.install_bundle(
+            str(baseline_source), str(destination), False
+        )
+
+        def publish_then_fail(*args, **kwargs):
+            original_rename(*args, **kwargs)
+            raise installer.BundleInstallError("bundle_publish_failed")
+
+        installer.os.rename = publish_then_fail
+        with pytest.raises(installer.BundleInstallError):
+            installer.install_bundle(str(upgrade_source), str(destination), False)
+        releases_path = destination / installer.RELEASES_RELATIVE
+        releases = {entry.name for entry in releases_path.iterdir()}
+        assert baseline in releases and len(releases) == 2
+        releases_fd = os.open(releases_path, installer._DIRECTORY_FLAGS)
+        try:
+            for digest in releases:
+                installer.verify_generation(
+                    releases_fd, digest, os.geteuid(), os.getegid()
+                )
+        finally:
+            os.close(releases_fd)
+        assert not list(destination.rglob(".staging-*"))
+        assert (destination / "sentinel").read_text(encoding="ascii") == "keep"
+    finally:
+        installer.os.rename = original_rename
+        _unlock_native_tree(destination)
+
+
+@pytest.mark.parametrize("signal_name", ["SIGHUP", "SIGINT", "SIGTERM"])
+def test_temporal_bundle_signal_cleans_private_staging(
+    tmp_path: Path,
+    signal_name: str,
+) -> None:
+    _native_posix_repository()
+    source = tmp_path / f"source-{signal_name}"
+    shutil.copytree(ROOT / "deployment", source)
+    destination = _make_native_destination(tmp_path / f"destination-{signal_name}")
+    sync = tmp_path / f"sync-{signal_name}"
+    helper = source / "libexec/install-temporal-worker-bundle.py"
+    payload = helper.read_text(encoding="utf-8")
+    anchor = "        staging_created = True\n        generation = os.open("
+    injection = (
+        "        staging_created = True\n"
+        f"        sync_descriptor = os.open({str(sync)!r}, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)\n"
+        "        os.close(sync_descriptor)\n"
+        "        signal.pause()\n"
+        "        generation = os.open("
+    )
+    assert payload.count(anchor) == 1
+    helper.write_text(payload.replace(anchor, injection), encoding="utf-8", newline="\n")
+    process = subprocess.Popen(
+        ["sh", str(source / "install-temporal-worker.sh"), "--destdir", str(destination)],
+        cwd=source,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not sync.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert sync.exists() and process.poll() is None
+        os.kill(process.pid, getattr(signal, signal_name))
+        stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode != 0
+        assert stdout == ""
+        assert stderr == (
+            "temporal_worker_bundle_installation=failed "
+            "code=bundle_interrupted\n"
+        )
+        assert (destination / "sentinel").read_text(encoding="ascii") == "keep"
+        assert not list(destination.rglob(".staging-*"))
+        releases = destination / "usr/lib/medchat/temporal-worker/releases"
+        assert not releases.exists() or not any(releases.iterdir())
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        _unlock_native_tree(destination)
+
+
+def test_temporal_bundle_concurrent_installers_serialize_on_one_lock(
+    tmp_path: Path,
+) -> None:
+    _native_posix_repository()
+    first_source = tmp_path / "first-source"
+    second_source = tmp_path / "second-source"
+    shutil.copytree(ROOT / "deployment", first_source)
+    shutil.copytree(ROOT / "deployment", second_source)
+    second_worker = second_source / "medchat-temporal-worker.service"
+    second_worker.write_bytes(second_worker.read_bytes() + b"\n# concurrent-second\n")
+    marker = tmp_path / "first-holds-lock"
+    gate = tmp_path / "release-first"
+    helper = first_source / "libexec/install-temporal-worker-bundle.py"
+    payload = helper.read_text(encoding="utf-8")
+    anchor = "        assets = read_source_assets(source, live)\n"
+    injection = (
+        anchor
+        + f"        marker = os.open({str(marker)!r}, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)\n"
+        + "        os.close(marker)\n"
+        + f"        while not os.path.exists({str(gate)!r}):\n"
+        + "            time.sleep(0.02)\n"
+    )
+    assert payload.count(anchor) == 1
+    helper.write_text(payload.replace(anchor, injection), encoding="utf-8", newline="\n")
+    destination = _make_native_destination(tmp_path / "concurrent-destination")
+    first = subprocess.Popen(
+        ["sh", str(first_source / "install-temporal-worker.sh"), "--destdir", str(destination)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    second: subprocess.Popen[str] | None = None
+    try:
+        deadline = time.monotonic() + 10
+        while not marker.exists() and first.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert marker.exists() and first.poll() is None
+        second = subprocess.Popen(
+            ["sh", str(second_source / "install-temporal-worker.sh"), "--destdir", str(destination)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        time.sleep(0.25)
+        assert second.poll() is None
+        gate.touch()
+        first_stdout, first_stderr = first.communicate(timeout=15)
+        second_stdout, second_stderr = second.communicate(timeout=15)
+        assert first.returncode == 0, first_stderr
+        assert second.returncode == 0, second_stderr
+        pattern = re.compile(
+            r"temporal_worker_bundle_installation=passed digest=([0-9a-f]{64})\n?"
+        )
+        first_match = pattern.fullmatch(first_stdout)
+        second_match = pattern.fullmatch(second_stdout)
+        assert first_match is not None and second_match is not None
+        assert first_match.group(1) != second_match.group(1)
+        releases_path = destination / "usr/lib/medchat/temporal-worker/releases"
+        assert {entry.name for entry in releases_path.iterdir()} == {
+            first_match.group(1),
+            second_match.group(1),
+        }
+        assert not (destination / "usr/lib/medchat/temporal-worker/current").exists()
+        assert not list(destination.rglob(".staging-*"))
+    finally:
+        for process in (first, second):
+            if process is not None and process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+        _unlock_native_tree(destination)
 
 
 def test_temporal_worker_installer_stages_exact_assets_without_side_effects(
     tmp_path: Path,
 ) -> None:
-    if os.name == "nt":
-        if shutil.which("wsl.exe") is None:
-            pytest.skip("WSL unavailable for POSIX installer validation")
-        repository = _wsl_path(ROOT)
-        command = f"""
-set -eu
-cd '{repository}'
-destination=$(mktemp -d)
-trap 'rm -rf -- "$destination"' EXIT
-sh deployment/install-temporal-worker.sh --destdir "$destination"
-cmp deployment/medchat-temporal-worker.service "$destination/etc/systemd/system/medchat-temporal-worker.service"
-cmp deployment/medchat-temporal-worker-prepare.service "$destination/etc/systemd/system/medchat-temporal-worker-prepare.service"
-cmp deployment/libexec/validate-temporal-worker-env.py "$destination/usr/libexec/medchat/validate-temporal-worker-env"
-cmp deployment/tmpfiles/medchat-temporal-worker.conf "$destination/usr/lib/tmpfiles.d/medchat-temporal-worker.conf"
-test "$(stat -c %a "$destination/usr/libexec/medchat/validate-temporal-worker-env")" = 755
-test "$(stat -c %a "$destination/etc/systemd/system/medchat-temporal-worker.service")" = 644
-test "$(stat -c %a "$destination/etc/systemd/system/medchat-temporal-worker-prepare.service")" = 644
-test "$(stat -c %a "$destination/usr/lib/tmpfiles.d/medchat-temporal-worker.conf")" = 644
-test "$(stat -c %a "$destination/usr/share/medchat/temporal-worker-assets.sha256")" = 644
-expected_owner="$(id -u):$(id -g)"
-for installed in \
-    "$destination/etc/systemd/system/medchat-temporal-worker.service" \
-    "$destination/etc/systemd/system/medchat-temporal-worker-prepare.service" \
-    "$destination/usr/libexec/medchat/validate-temporal-worker-env" \
-    "$destination/usr/lib/tmpfiles.d/medchat-temporal-worker.conf" \
-    "$destination/usr/share/medchat/temporal-worker-assets.sha256"
-do
-    test ! -L "$installed"
-    test "$(stat -c %u:%g "$installed")" = "$expected_owner"
-done
-test ! -e "$destination/etc/medchat/temporal-worker.env"
-(cd "$destination" && sha256sum -c usr/share/medchat/temporal-worker-assets.sha256)
-"""
-        result = subprocess.run(
-            ["wsl.exe", "-e", "sh", "-lc", command],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60,
-            check=False,
-        )
-        assert result.returncode == 0, result.stderr
-        return
-
+    _native_posix_repository()
     destination = tmp_path / "root"
+    destination.mkdir(mode=0o700)
     result = subprocess.run(
         ["sh", str(WORKER_INSTALLER), "--destdir", str(destination)],
         cwd=ROOT,
@@ -1612,30 +1612,43 @@ test ! -e "$destination/etc/medchat/temporal-worker.env"
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    installed = {
-        "etc/systemd/system/medchat-temporal-worker.service": WORKER_SYSTEMD_UNIT,
-        "etc/systemd/system/medchat-temporal-worker-prepare.service": PREPARE_SYSTEMD_UNIT,
-        "usr/libexec/medchat/validate-temporal-worker-env": WORKER_HELPER,
-        "usr/lib/tmpfiles.d/medchat-temporal-worker.conf": WORKER_TMPFILES,
-    }
-    for relative, source in installed.items():
-        target = destination / relative
-        assert target.read_bytes() == source.read_bytes()
-        assert target.stat().st_mode & 0o777 == (
-            0o755 if relative.startswith("usr/libexec/") else 0o644
-        )
-    manifest = destination / "usr/share/medchat/temporal-worker-assets.sha256"
-    assert manifest.stat().st_mode & 0o777 == 0o644
-    assert not (destination / "etc/medchat/temporal-worker.env").exists()
-    check = subprocess.run(
-        ["sha256sum", "-c", "usr/share/medchat/temporal-worker-assets.sha256"],
-        cwd=destination,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
+    match = re.fullmatch(
+        r"temporal_worker_bundle_installation=passed digest=([0-9a-f]{64})\n?",
+        result.stdout,
     )
-    assert check.returncode == 0, check.stderr
+    assert match is not None
+    generation = (
+        destination
+        / "usr/lib/medchat/temporal-worker/releases"
+        / match.group(1)
+    )
+    try:
+        expected = {
+            "units/medchat-temporal-worker.service": (WORKER_SYSTEMD_UNIT, 0o644),
+            "units/medchat-temporal-worker-prepare.service": (
+                PREPARE_SYSTEMD_UNIT,
+                0o644,
+            ),
+            "libexec/validate-temporal-worker-env": (WORKER_HELPER, 0o755),
+            "libexec/prepare-temporal-worker-directories": (
+                WORKER_DIRECTORY_HELPER,
+                0o755,
+            ),
+        }
+        for relative, (source, mode) in expected.items():
+            target = generation / relative
+            assert not target.is_symlink()
+            assert target.read_bytes() == source.read_bytes()
+            assert target.stat().st_mode & 0o777 == mode
+        assert (generation / "manifest.sha256").stat().st_mode & 0o777 == 0o644
+        assert not (destination / "usr/lib/medchat/temporal-worker/current").exists()
+        assert not (destination / "etc/medchat/temporal-worker.env").exists()
+    finally:
+        for directory in sorted(
+            (path for path in destination.rglob("*") if path.is_dir()),
+            key=lambda path: len(path.parts),
+        ):
+            directory.chmod(0o700)
 
 
 def shell_executable() -> Path:
