@@ -4433,12 +4433,27 @@ def _task10_static_fixture(tmp_path: Path) -> Path:
         "compose_service_shape",
         "compose_network",
         "compose_privilege",
+        "compose_schema_entrypoint",
+        "compose_entrypoint",
+        "compose_namespace_entrypoint",
+        "compose_role_entrypoint",
+        "compose_command",
         "systemd_contract",
         "prometheus_job",
         "prometheus_rule",
         "prometheus_other_rule",
         "prometheus_fixture",
         "grafana_query",
+        "schema_script",
+        "schema_command",
+        "namespace_script",
+        "server_wrapper",
+        "role_sync_script",
+        "role_sync_command",
+        "role_sync_no_psql",
+        "rotate_script",
+        "missing_operator_script",
+        "nonregular_operator_script",
     ],
 )
 def test_deployment_python_static_rejects_semantic_asset_tamper(
@@ -4475,6 +4490,62 @@ def test_deployment_python_static_rejects_semantic_asset_tamper(
             content.replace("    image: postgres:16.14-alpine3.23", "    image: postgres:16.14-alpine3.23\n    privileged: true", 1),
             encoding="utf-8",
         )
+    elif mutation == "compose_schema_entrypoint":
+        path = root / "deployment/temporal/docker-compose.yml"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            content.replace(
+                "      - /opt/medchat/temporal-schema-setup.sh",
+                "      - /bin/false",
+                1,
+            ),
+            encoding="utf-8",
+        )
+    elif mutation == "compose_entrypoint":
+        path = root / "deployment/temporal/docker-compose.yml"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            content.replace(
+                "      - /opt/medchat/temporal-server-entrypoint.sh",
+                "      - /bin/false",
+                1,
+            ),
+            encoding="utf-8",
+        )
+    elif mutation == "compose_namespace_entrypoint":
+        path = root / "deployment/temporal/docker-compose.yml"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            content.replace(
+                "      - /opt/medchat/temporal-namespace-setup.sh",
+                "      - /bin/false",
+                1,
+            ),
+            encoding="utf-8",
+        )
+    elif mutation == "compose_role_entrypoint":
+        path = root / "deployment/temporal/docker-compose.yml"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            content.replace(
+                "      - /opt/medchat/010-exporter.sh",
+                "      - /bin/false",
+                1,
+            ),
+            encoding="utf-8",
+        )
+    elif mutation == "compose_command":
+        path = root / "deployment/temporal/docker-compose.yml"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            content.replace(
+                "      - /opt/medchat/temporal-server-entrypoint.sh\n",
+                "      - /opt/medchat/temporal-server-entrypoint.sh\n"
+                "    command: [/bin/false]\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
     elif mutation == "systemd_contract":
         path = root / "deployment/medchat-temporal-worker.service"
         content = path.read_text(encoding="utf-8")
@@ -4505,7 +4576,7 @@ def test_deployment_python_static_rejects_semantic_asset_tamper(
             content.replace("labeled baseline p95 fires", "unrecognized fixture", 1),
             encoding="utf-8",
         )
-    else:
+    elif mutation == "grafana_query":
         path = root / "deployment/temporal/grafana/dashboards/medchat-temporal-docking.json"
         content = path.read_text(encoding="utf-8")
         path.write_text(
@@ -4516,6 +4587,108 @@ def test_deployment_python_static_rejects_semantic_asset_tamper(
             ),
             encoding="utf-8",
         )
+    elif mutation == "schema_script":
+        path = root / "deployment/temporal/scripts/temporal-schema-setup.sh"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            content.replace("setup-schema -v 0.0", "setup-schema -v unsafe", 1),
+            encoding="utf-8",
+            newline="\n",
+        )
+    elif mutation == "schema_command":
+        path = root / "deployment/temporal/scripts/temporal-schema-setup.sh"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            content.replace("if ! psql \\", "if ! /bin/false \\", 1),
+            encoding="utf-8",
+            newline="\n",
+        )
+    elif mutation == "namespace_script":
+        path = root / "deployment/temporal/scripts/temporal-namespace-setup.sh"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            content.replace(
+                "temporal operator namespace update",
+                "/bin/false",
+                1,
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+    elif mutation == "server_wrapper":
+        path = root / "deployment/temporal/scripts/temporal-server-entrypoint.sh"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            content.replace(
+                'exec /etc/temporal/entrypoint.sh "$@"',
+                "exec /bin/false",
+                1,
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+    elif mutation == "role_sync_script":
+        path = root / "deployment/temporal/postgres-init/010-exporter.sh"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            content.replace("NOREPLICATION NOBYPASSRLS", "NOREPLICATION BYPASSRLS", 1),
+            encoding="utf-8",
+            newline="\n",
+        )
+    elif mutation == "role_sync_command":
+        path = root / "deployment/temporal/postgres-init/010-exporter.sh"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            content.replace("if ! psql \\", "if ! /bin/false \\", 1),
+            encoding="utf-8",
+            newline="\n",
+        )
+    elif mutation == "role_sync_no_psql":
+        path = root / "deployment/temporal/postgres-init/010-exporter.sh"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            content.replace("psql", "disabled-tool"),
+            encoding="utf-8",
+            newline="\n",
+        )
+    elif mutation == "rotate_script":
+        path = root / "deployment/temporal/scripts/rotate-exporter-password.sh"
+        content = path.read_text(encoding="utf-8")
+        path.write_text(
+            content.replace("--wait-timeout 120", "--wait-timeout 12", 1),
+            encoding="utf-8",
+            newline="\n",
+        )
+    elif mutation == "missing_operator_script":
+        (root / "deployment/temporal/scripts/rotate-exporter-password.sh").unlink()
+    else:
+        path = root / "deployment/temporal/scripts/rotate-exporter-password.sh"
+        path.unlink()
+        path.mkdir()
+
+    assert validator._python_static(root) == {
+        "status": "failed",
+        "code": "python_static_invalid",
+    }
+
+
+def test_deployment_python_static_rejects_symlink_operator_script(
+    tmp_path: Path,
+) -> None:
+    from scripts import validate_temporal_deployment as validator
+
+    root = _task10_static_fixture(tmp_path)
+    path = root / "deployment/temporal/scripts/rotate-exporter-password.sh"
+    path.unlink()
+    try:
+        path.symlink_to("temporal-schema-setup.sh")
+    except OSError as error:
+        if os.name == "nt" and (
+            error.errno in {errno.EPERM, errno.EACCES}
+            or getattr(error, "winerror", None) == 1314
+        ):
+            pytest.skip("Windows symlink privilege unavailable")
+        raise
 
     assert validator._python_static(root) == {
         "status": "failed",

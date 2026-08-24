@@ -159,6 +159,12 @@ _SERVICE_SECRETS = {
     "prometheus": set(),
     "grafana": {"grafana_admin_password"},
 }
+_SERVICE_ENTRYPOINTS = {
+    "temporal-schema": ["/opt/medchat/temporal-schema-setup.sh"],
+    "temporal": ["/opt/medchat/temporal-server-entrypoint.sh"],
+    "temporal-namespace": ["/opt/medchat/temporal-namespace-setup.sh"],
+    "temporal-exporter-role-sync": ["/opt/medchat/010-exporter.sh"],
+}
 _ALERT_DURATIONS = {
     "TemporalWorkerHeartbeatStale": "60s",
     "TemporalQueueBacklogGrowing": "10m",
@@ -395,6 +401,12 @@ def _validate_compose(compose: dict[str, Any], text: str) -> None:
         {name: service.get("image") for name, service in services.items()}
         == _IMAGES
     )
+    _require({
+        name: service["entrypoint"]
+        for name, service in services.items()
+        if "entrypoint" in service
+    } == _SERVICE_ENTRYPOINTS)
+    _require(all("command" not in service for service in services.values()))
     _require(set(compose.get("volumes", {})) == {
         "temporal-postgres-data",
         "prometheus-data",
@@ -531,6 +543,184 @@ def _validate_compose(compose: dict[str, Any], text: str) -> None:
         for service in services.values()
         for port in service.get("ports", [])
     ))
+
+
+def _validate_shell_header(text: str) -> None:
+    _require(text.startswith("#!/bin/sh\n"))
+    _require("set -eu" in text and "set -x" not in text)
+
+
+def _validate_bounded_secret_handling(text: str) -> None:
+    _require(all(token in text for token in (
+        "maximum_secret_bytes=1024",
+        "wc -c",
+        "wc -l",
+        "printf '\\r'",
+        "E_SECRET_FILE",
+        "E_SECRET_READ",
+        "E_SECRET_FORMAT",
+    )))
+    _require(
+        re.search(r"(?m)^\s*(?:echo|printf).*password", text) is None
+    )
+
+
+def _validate_identifier_contract(text: str) -> None:
+    _require(all(token in text for token in (
+        "LC_ALL=C",
+        "validate_identifier()",
+        '"${#value}" -le 63',
+        "[A-Za-z_]",
+        "*[!A-Za-z0-9_]*",
+        "E_IDENTIFIER",
+    )))
+
+
+def _validate_schema_script(text: str) -> None:
+    _validate_shell_header(text)
+    _validate_bounded_secret_handling(text)
+    _validate_identifier_contract(text)
+    _require(all(token in text for token in (
+        "/run/secrets/temporal_postgres_password",
+        'export PGPASSWORD="$postgres_password"',
+        'export SQL_PASSWORD="$postgres_password"',
+        "if ! psql \\",
+        "--set=ON_ERROR_STOP=1",
+        "WHERE NOT EXISTS",
+        "format('CREATE DATABASE %I'",
+        "\\gexec",
+        "E_SCHEMA_DATABASES",
+        "E_SCHEMA_MIGRATION",
+        "/etc/temporal/schema/postgresql/v12/temporal/versioned",
+        "/etc/temporal/schema/postgresql/v12/visibility/versioned",
+    )))
+    _require(text.count("setup-schema -v 0.0") == 2)
+    _require(text.count("update-schema -d") == 2)
+    _require(re.search(r"temporal-sql-tool[^\n]*\bcreate\b", text) is None)
+    _require("--password" not in text and "--pw" not in text)
+
+
+def _validate_namespace_script(text: str) -> None:
+    _validate_shell_header(text)
+    _require(all(token in text for token in (
+        "TEMPORAL_ADDRESS",
+        "DEFAULT_NAMESPACE",
+        "DEFAULT_NAMESPACE_RETENTION",
+        "MAX_ATTEMPTS",
+        "SLEEP_SECONDS",
+        "*[!0-9]*",
+        '"$MAX_ATTEMPTS" -gt 0',
+        "temporal operator cluster health",
+        "temporal operator namespace describe",
+        "temporal operator namespace create",
+        "temporal operator namespace update",
+        '--namespace "$DEFAULT_NAMESPACE"',
+        '--retention "$DEFAULT_NAMESPACE_RETENTION"',
+        '[ "$attempt" -ge "$MAX_ATTEMPTS" ]',
+        "E_CONFIGURATION",
+        "E_TEMPORAL_UNAVAILABLE",
+        "E_NAMESPACE_UNAVAILABLE",
+        "E_NAMESPACE_RETENTION",
+    )))
+    _require("MAX_ATTdMPTS" not in text)
+
+
+def _validate_server_wrapper(text: str) -> None:
+    _validate_shell_header(text)
+    _validate_bounded_secret_handling(text)
+    _require(all(token in text for token in (
+        "/run/secrets/temporal_postgres_password",
+        'export POSTGRES_PWD="$postgres_password"',
+        "unset postgres_password",
+        'exec /etc/temporal/entrypoint.sh "$@"',
+    )))
+
+
+def _validate_role_sync_script(text: str) -> None:
+    _validate_shell_header(text)
+    _validate_bounded_secret_handling(text)
+    _validate_identifier_contract(text)
+    _require(all(token in text for token in (
+        "/run/secrets/temporal_postgres_password",
+        "/run/secrets/temporal_postgres_exporter_password",
+        "if ! psql \\",
+        "--no-psqlrc",
+        "--set=ON_ERROR_STOP=1",
+        "\\getenv exporter_password TEMPORAL_EXPORTER_PASSWORD",
+        "BEGIN;",
+        "DROP ROLE IF EXISTS temporal_exporter",
+        "CREATE ROLE temporal_exporter WITH LOGIN PASSWORD",
+        "NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT",
+        "NOREPLICATION NOBYPASSRLS",
+        "GRANT pg_monitor TO temporal_exporter WITH INHERIT TRUE",
+        "GRANT pg_monitor TO temporal_exporter WITH SET FALSE",
+        "GRANT pg_monitor TO temporal_exporter WITH ADMIN FALSE",
+        "COMMIT;",
+        "E_EXPORTER_RESET",
+    )))
+    _require("GRANT CONNECT ON DATABASE" not in text)
+    _require("REASSIGN OWNED" not in text and "DROP OWNED" not in text)
+    _require(all(catalog not in text for catalog in (
+        "pg_shdepend",
+        "pg_auth_members",
+        "pg_database",
+        "pg_namespace",
+        "pg_class",
+        "pg_proc",
+        "pg_type",
+        "pg_default_acl",
+        "aclexplode",
+    )))
+    _require("--set=exporter_password" not in text)
+    psql_argv = text.split("psql", 1)[1].split("<<'SQL'", 1)[0]
+    _require("exporter_password" not in psql_argv)
+    _require("TEMPORAL_EXPORTER_PASSWORD" not in psql_argv)
+
+
+def _validate_rotate_exporter_script(text: str) -> None:
+    _validate_shell_header(text)
+    _validate_bounded_secret_handling(text)
+    _require(all(token in text for token in (
+        "LC_ALL=C",
+        'TEMPORAL_POSTGRES_EXPORTER_PASSWORD_FILE:-',
+        '[ ! -L "$secret_file" ]',
+        "docker compose version --short",
+        "E_COMPOSE_UNAVAILABLE",
+        "E_COMPOSE_VERSION",
+        "compose up --help",
+        "--wait-timeout 120",
+        "E_COMPOSE_WAIT_UNSUPPORTED",
+        'script_directory=$(CDPATH= cd -- "$script_directory" 2>/dev/null && pwd -P)',
+        "compose_file=$script_directory/../docker-compose.yml",
+        "run --rm temporal-exporter-role-sync",
+        "up -d --wait --wait-timeout 120 --no-deps --force-recreate",
+        "postgres-exporter",
+        "E_ROLE_SYNC",
+        "E_EXPORTER_HEALTH",
+        "OK E_EXPORTER_ROTATED",
+    )))
+    _require(
+        '[ "$major" -lt 2 ]' in text
+        and '[ "$major" -eq 2 ] && [ "$minor" -lt 17 ]' in text
+    )
+
+
+def _validate_operator_scripts(contents: dict[str, str]) -> None:
+    _validate_schema_script(contents[
+        "deployment/temporal/scripts/temporal-schema-setup.sh"
+    ])
+    _validate_namespace_script(contents[
+        "deployment/temporal/scripts/temporal-namespace-setup.sh"
+    ])
+    _validate_server_wrapper(contents[
+        "deployment/temporal/scripts/temporal-server-entrypoint.sh"
+    ])
+    _validate_role_sync_script(contents[
+        "deployment/temporal/postgres-init/010-exporter.sh"
+    ])
+    _validate_rotate_exporter_script(contents[
+        "deployment/temporal/scripts/rotate-exporter-password.sh"
+    ])
 
 
 def _validate_environment_example(text: str) -> None:
@@ -948,6 +1138,11 @@ def _python_static(repo_root: Path) -> dict[str, str]:
         "deployment/temporal/grafana/provisioning/datasources/prometheus.yml",
         "deployment/temporal/grafana/provisioning/dashboards/dashboard.yml",
         "deployment/temporal/grafana/dashboards/medchat-temporal-docking.json",
+        "deployment/temporal/scripts/temporal-schema-setup.sh",
+        "deployment/temporal/scripts/temporal-namespace-setup.sh",
+        "deployment/temporal/scripts/temporal-server-entrypoint.sh",
+        "deployment/temporal/postgres-init/010-exporter.sh",
+        "deployment/temporal/scripts/rotate-exporter-password.sh",
         "deployment/medchat.service",
         "deployment/medchat-temporal-worker.service",
         "deployment/medchat-temporal-worker-prepare.service",
@@ -979,6 +1174,7 @@ def _python_static(repo_root: Path) -> dict[str, str]:
         ])
         _require(type(dashboard) is dict)
         _validate_compose(_load_yaml(compose_text), compose_text)
+        _validate_operator_scripts(contents)
         _validate_environment_example(env_text)
         _validate_systemd_assets(contents)
         _validate_prometheus(
