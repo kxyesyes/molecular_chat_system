@@ -5,6 +5,6 @@ PartOf=medchat-temporal-worker.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/libexec/medchat/validate-temporal-worker-env
-ExecStart=/usr/bin/systemd-tmpfiles --create /usr/lib/tmpfiles.d/medchat-temporal-worker.conf
+ExecStart=/usr/lib/medchat/temporal-worker/current/libexec/validate-temporal-worker-env
+ExecStart=/usr/lib/medchat/temporal-worker/current/libexec/prepare-temporal-worker-directories
 RemainAfterExit=yes

@@ -56,6 +56,9 @@ WORKER_INSTALLER = ROOT / "deployment" / "install-temporal-worker.sh"
 WORKER_HELPER = (
     ROOT / "deployment" / "libexec" / "validate-temporal-worker-env.py"
 )
+WORKER_DIRECTORY_HELPER = (
+    ROOT / "deployment" / "libexec" / "prepare-temporal-worker-directories.py"
+)
 
 LONG_RUNNING = {
     "postgres", "postgres-exporter", "temporal", "temporal-ui", "prometheus", "grafana"
@@ -214,9 +217,10 @@ def test_temporal_worker_prepare_unit_is_root_only_and_environment_free() -> Non
         "Service": {
             "Type": ["oneshot"],
             "ExecStart": [
-                "/usr/libexec/medchat/validate-temporal-worker-env",
-                "/usr/bin/systemd-tmpfiles --create "
-                "/usr/lib/tmpfiles.d/medchat-temporal-worker.conf",
+                "/usr/lib/medchat/temporal-worker/current/libexec/"
+                "validate-temporal-worker-env",
+                "/usr/lib/medchat/temporal-worker/current/libexec/"
+                "prepare-temporal-worker-directories",
             ],
             "RemainAfterExit": ["yes"],
         },
@@ -305,21 +309,10 @@ def test_systemd_units_have_no_shell_interpolation_or_embedded_credentials() -> 
         assert all("KEY=" not in value and "TOKEN=" not in value for value in environment)
 
 
-def test_temporal_worker_tmpfiles_has_exact_private_directory_contract() -> None:
+def test_temporal_worker_tmpfiles_is_removed_in_favor_of_directory_helper() -> None:
     assert not OLD_WORKER_TMPFILES.exists()
-    records = [
-        line.strip()
-        for line in WORKER_TMPFILES.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith(("#", ";"))
-    ]
-    assert records == [
-        "d /opt/medchat/molecular_chat_system/scratch 0700 medchat medchat -",
-        "d /opt/medchat/molecular_chat_system/scratch/task_inputs 0700 medchat medchat -",
-        "d /opt/medchat/molecular_chat_system/scratch/temporal_backups 0700 medchat medchat -",
-        "d /opt/medchat/molecular_chat_system/temp_docking 0700 medchat medchat -",
-    ]
-    assert all(record.split(maxsplit=1)[0] == "d" for record in records)
-    assert "/etc/medchat" not in "\n".join(records)
+    assert not WORKER_TMPFILES.exists()
+    assert WORKER_DIRECTORY_HELPER.is_file()
 
 
 def test_temporal_worker_environment_example_is_exact_non_secret_allowlist() -> None:
