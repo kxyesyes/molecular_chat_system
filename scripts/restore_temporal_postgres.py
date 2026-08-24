@@ -534,6 +534,17 @@ def verify_restore(
         except backup.PostgresBackupError as exc:
             raise PostgresRestoreError("arguments_invalid") from exc
         connection = _connection_arguments(host, port, user)
+        try:
+            current_major = backup.server_major(
+                runner=runner,
+                environment=environment,
+                connection=connection,
+                database="postgres",
+            )
+        except backup.PostgresBackupError as exc:
+            raise _map_backup_error(exc) from exc
+        if current_major != manifest["postgres_major"]:
+            raise PostgresRestoreError("postgres_major_mismatch")
         exists = _target_exists(runner, environment, connection)
         if exists and not drop_verification_database:
             raise PostgresRestoreError("verification_database_exists")
@@ -548,17 +559,6 @@ def verify_restore(
                 DATABASE_COMMAND_TIMEOUT_SECONDS,
             )
             created = True
-            try:
-                current_major = backup.server_major(
-                    runner=runner,
-                    environment=environment,
-                    connection=connection,
-                    database=VERIFICATION_DATABASE,
-                )
-            except backup.PostgresBackupError as exc:
-                raise _map_backup_error(exc) from exc
-            if current_major != manifest["postgres_major"]:
-                raise PostgresRestoreError("postgres_major_mismatch")
             _revalidate_opened_dump(opened)
             _call(
                 runner,

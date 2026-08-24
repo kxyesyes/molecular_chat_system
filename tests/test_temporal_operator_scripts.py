@@ -785,9 +785,11 @@ def test_postgres_restore_validates_and_uses_fixed_isolated_commands(
         for command in commands
         if command[0] == "psql" and "server_version_num" in command[-1]
     )
-    assert server_query[server_query.index("--dbname") + 1] == "temporal_verify"
+    assert server_query[server_query.index("--dbname") + 1] == "postgres"
     assert commands.index(server_query) < next(
-        index for index, command in enumerate(commands) if command[0] == "pg_restore"
+        index
+        for index, command in enumerate(commands)
+        if command[0] in {"createdb", "dropdb"}
     )
 
 
@@ -875,6 +877,47 @@ def test_postgres_restore_rejects_ambiguous_drop_and_time_before_subprocess(
     assert runner.calls == []
 
 
+def test_postgres_restore_checks_server_major_before_database_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeOpenedBackup:
+        manifest = {"database": "temporal", "postgres_major": 15}
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    opened = FakeOpenedBackup()
+    monkeypatch.setattr(postgres_restore, "_open_backup", lambda _path: opened)
+    monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
+    runner = _PostgresRunner(target_exists=True, server_major=16)
+
+    with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
+        postgres_restore.verify_restore(
+            manifest_path=tmp_path / "backup-manifest.json",
+            source_database="temporal",
+            target_database="temporal_verify",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            drop_verification_database=True,
+            runner=runner,
+        )
+
+    assert raised.value.code == "postgres_major_mismatch"
+    commands = [call[0] for call in runner.calls]
+    assert not any(command[0] in {"createdb", "dropdb"} for command in commands)
+    assert len(commands) == 1
+    assert commands[0][0] == "psql"
+    assert commands[0][commands[0].index("--dbname") + 1] == "postgres"
+    assert all(call[1]["PGPASSWORD"] == "runtime-secret" for call in runner.calls)
+    assert "runtime-secret" not in "\0".join(runner.argv)
+    assert opened.closed
+
+
 @requires_posix_descriptor_io
 def test_postgres_restore_rejects_hash_size_major_and_noncanonical_manifest(
     tmp_path: Path,
@@ -902,10 +945,9 @@ def test_postgres_restore_rejects_hash_size_major_and_noncanonical_manifest(
             )
         assert raised.value.code == code
         assert not any(call[0][0] == "pg_restore" for call in runner.calls)
+        assert not any(call[0][0] == "createdb" for call in runner.calls)
         if code == "postgres_major_mismatch":
-            assert any(call[0][0] == "createdb" for call in runner.calls)
-        else:
-            assert not any(call[0][0] == "createdb" for call in runner.calls)
+            assert not any(call[0][0] == "dropdb" for call in runner.calls)
 
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
