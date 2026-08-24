@@ -15,7 +15,9 @@ import secrets
 import signal
 import stat
 import struct
+import subprocess
 import sys
+import time
 
 
 BUNDLE_PREFIX = b"MEDCHAT_TEMPORAL_BUNDLE_V1\0"
@@ -48,6 +50,47 @@ ASSET_SPECS = (
 EXPECTED_PATHS = tuple(spec[0] for spec in ASSET_SPECS)
 LOCK_RELATIVE = "run/medchat-temporal-worker/install.lock"
 RELEASES_RELATIVE = "usr/lib/medchat/temporal-worker/releases"
+BASE_RELATIVE = "usr/lib/medchat/temporal-worker"
+BOOTSTRAP_LINKS = {
+    "etc/systemd/system/medchat-temporal-worker.service": (
+        "/usr/lib/medchat/temporal-worker/current/units/"
+        "medchat-temporal-worker.service"
+    ),
+    "etc/systemd/system/medchat-temporal-worker-prepare.service": (
+        "/usr/lib/medchat/temporal-worker/current/units/"
+        "medchat-temporal-worker-prepare.service"
+    ),
+}
+LEGACY_TMPFILES_RELATIVE = "usr/lib/tmpfiles.d/medchat-temporal-worker.conf"
+LEGACY_QUARANTINE_RELATIVE = (
+    "usr/lib/medchat/temporal-worker/quarantine/legacy-tmpfiles.disabled"
+)
+LEGACY_ASSETS = {
+    "etc/systemd/system/medchat-temporal-worker.service": (
+        0o644,
+        "b0e389760fcadb31f6828974f66ca2bc8db2a99f27150cf2f3019e10386d1b20",
+    ),
+    "etc/systemd/system/medchat-temporal-worker-prepare.service": (
+        0o644,
+        "7c9a1aef6012d655492b6135d66c4741a3fd2593f319d01cdcda9cf3feffe18a",
+    ),
+    "usr/libexec/medchat/validate-temporal-worker-env": (
+        0o755,
+        "c1b9b720e81ee00011403c87781b59da9d3917865ff131039284b233b54de9dc",
+    ),
+    LEGACY_TMPFILES_RELATIVE: (
+        0o644,
+        "e76763839fdd6a07ec89130da442840230fd165b9726f23e1174477e7f538ed8",
+    ),
+}
+WORKER_UNIT = "medchat-temporal-worker.service"
+PREPARE_UNIT = "medchat-temporal-worker-prepare.service"
+PHASE_STOPPING = "stopping"
+PHASE_PRE_SWITCH = "pre-switch"
+PHASE_SWITCHED = "switched"
+PHASE_RELOADED = "reloaded"
+PHASE_PREPARE_STARTING = "prepare-starting"
+PHASE_WORKER_STARTING = "worker-starting"
 _LOWER_HEX = re.compile(r"[0-9a-f]{64}\Z")
 _STABLE_CODES = frozenset(
     {
@@ -62,6 +105,17 @@ _STABLE_CODES = frozenset(
         "bundle_generation_invalid",
         "bundle_publish_failed",
         "bundle_interrupted",
+        "activation_arguments_invalid",
+        "activation_root_required",
+        "activation_destination_untrusted",
+        "activation_generation_invalid",
+        "activation_current_invalid",
+        "activation_bootstrap_invalid",
+        "activation_systemctl_failed",
+        "activation_interrupted",
+        "activation_rollback_failed",
+        "legacy_migration_unsupported",
+        "legacy_migration_manual_recovery_required",
     }
 )
 _DIRECTORY_FLAGS = (
@@ -100,6 +154,13 @@ class ManifestInfo:
     def __init__(self, bundle_digest: str, assets: dict[str, tuple[int, int, str]]) -> None:
         self.bundle_digest = bundle_digest
         self.assets = assets
+
+
+class ActivationState:
+    def __init__(self) -> None:
+        self.phase = PHASE_PRE_SWITCH
+        self.interrupted = False
+        self.child: subprocess.Popen[bytes] | None = None
 
 
 def _signal_failure(_signum: int, _frame: object) -> None:
@@ -529,6 +590,632 @@ def verify_generation(releases: int, digest: str, uid: int, gid: int) -> None:
         os.close(generation)
 
 
+def _open_parent(root: int, relative: str, uid: int, gid: int) -> tuple[int, str]:
+    components = relative.split("/")
+    if any(component in {"", ".", ".."} for component in components):
+        raise BundleInstallError("activation_destination_untrusted")
+    try:
+        return _open_tree(root, tuple(components[:-1]), uid, gid), components[-1]
+    except (BundleInstallError, OSError) as exc:
+        raise BundleInstallError("activation_destination_untrusted") from exc
+
+
+def _bootstrap_unit_links(
+    root: int, uid: int, gid: int
+) -> list[tuple[str, tuple[int, int]]]:
+    created: list[tuple[str, tuple[int, int]]] = []
+    try:
+        for relative, target in BOOTSTRAP_LINKS.items():
+            parent, leaf = _open_parent(root, relative, uid, gid)
+            temporary = f".temporal-worker-link-{os.getpid()}-{secrets.token_hex(8)}"
+            try:
+                try:
+                    metadata = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    os.symlink(target, temporary, dir_fd=parent)
+                    try:
+                        os.link(
+                            temporary,
+                            leaf,
+                            src_dir_fd=parent,
+                            dst_dir_fd=parent,
+                            follow_symlinks=False,
+                        )
+                    except FileExistsError as exc:
+                        raise BundleInstallError("activation_bootstrap_invalid") from exc
+                    finally:
+                        os.unlink(temporary, dir_fd=parent)
+                    os.fsync(parent)
+                    metadata = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+                    created.append((relative, _identity(metadata)))
+                if not stat.S_ISLNK(metadata.st_mode) or os.readlink(leaf, dir_fd=parent) != target:
+                    raise BundleInstallError("activation_bootstrap_invalid")
+                entry = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+                if _identity(metadata) != _identity(entry) or (entry.st_uid, entry.st_gid) != (uid, gid):
+                    raise BundleInstallError("activation_bootstrap_invalid")
+            finally:
+                try:
+                    os.unlink(temporary, dir_fd=parent)
+                except FileNotFoundError:
+                    pass
+                os.close(parent)
+        return created
+    except Exception:
+        _remove_created_bootstrap_links(root, created, uid, gid)
+        raise
+
+
+def _remove_created_bootstrap_links(
+    root: int, created: list[tuple[str, tuple[int, int]]], uid: int, gid: int
+) -> None:
+    for relative, expected_identity in reversed(created):
+        parent, leaf = _open_parent(root, relative, uid, gid)
+        try:
+            metadata = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+            if (
+                _identity(metadata) != expected_identity
+                or not stat.S_ISLNK(metadata.st_mode)
+                or os.readlink(leaf, dir_fd=parent) != BOOTSTRAP_LINKS[relative]
+            ):
+                raise BundleInstallError("activation_rollback_failed")
+            os.unlink(leaf, dir_fd=parent)
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+
+
+def _read_current(base: int, releases: int, uid: int, gid: int) -> str | None:
+    try:
+        metadata = os.stat("current", dir_fd=base, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISLNK(metadata.st_mode) or (metadata.st_uid, metadata.st_gid) != (uid, gid):
+        raise BundleInstallError("activation_current_invalid")
+    target = os.readlink("current", dir_fd=base)
+    match = re.fullmatch(r"releases/([0-9a-f]{64})", target)
+    if match is None:
+        raise BundleInstallError("activation_current_invalid")
+    verify_generation(releases, match.group(1), uid, gid)
+    entry = os.stat("current", dir_fd=base, follow_symlinks=False)
+    if _identity(metadata) != _identity(entry):
+        raise BundleInstallError("activation_current_invalid")
+    return match.group(1)
+
+
+def _set_current(base: int, digest: str | None) -> None:
+    temporary = f".current-{os.getpid()}-{secrets.token_hex(8)}"
+    if digest is None:
+        try:
+            os.unlink("current", dir_fd=base)
+        except FileNotFoundError:
+            pass
+        os.fsync(base)
+        return
+    if not _LOWER_HEX.fullmatch(digest):
+        raise BundleInstallError("activation_generation_invalid")
+    os.symlink(f"releases/{digest}", temporary, dir_fd=base)
+    try:
+        os.replace(temporary, "current", src_dir_fd=base, dst_dir_fd=base)
+        os.fsync(base)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=base)
+        except FileNotFoundError:
+            pass
+
+
+_ACTIVE_ACTIVATION: ActivationState | None = None
+
+
+def _activation_signal(_signum: int, _frame: object) -> None:
+    state = _ACTIVE_ACTIVATION
+    signal.pthread_sigmask(signal.SIG_BLOCK, _INSTALL_SIGNALS)
+    if state is None:
+        return
+    state.interrupted = True
+    child = state.child
+    if child is not None and child.poll() is None:
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+
+def _install_activation_signal_handlers(state: ActivationState) -> None:
+    global _ACTIVE_ACTIVATION
+    _ACTIVE_ACTIVATION = state
+    for signum in _INSTALL_SIGNALS:
+        signal.signal(signum, _activation_signal)
+
+
+def _run_systemctl(
+    systemctl: str,
+    arguments: list[str],
+    state: ActivationState,
+    *,
+    accepted: tuple[int, ...] = (0,),
+    allow_after_interrupt: bool = False,
+) -> tuple[int, bytes]:
+    if state.interrupted and not allow_after_interrupt:
+        raise BundleInstallError("activation_interrupted")
+    try:
+        child = subprocess.Popen(
+            [systemctl, *arguments],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise BundleInstallError("activation_systemctl_failed") from exc
+    state.child = child
+    try:
+        deadline = time.monotonic() + 30.0
+        while child.poll() is None:
+            if state.interrupted and not allow_after_interrupt:
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                terminate_deadline = time.monotonic() + 5.0
+                while child.poll() is None and time.monotonic() < terminate_deadline:
+                    time.sleep(0.02)
+                if child.poll() is None:
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                child.wait(timeout=5)
+                raise BundleInstallError("activation_interrupted")
+            if time.monotonic() >= deadline:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                child.wait(timeout=5)
+                raise BundleInstallError("activation_systemctl_failed")
+            time.sleep(0.02)
+        output = child.communicate()[0] or b""
+        if child.returncode not in accepted:
+            raise BundleInstallError("activation_systemctl_failed")
+        if state.interrupted and not allow_after_interrupt:
+            raise BundleInstallError("activation_interrupted")
+        return child.returncode, output
+    finally:
+        state.child = None
+
+
+def _unit_is_active(systemctl: str, unit: str, state: ActivationState) -> bool:
+    result, _output = _run_systemctl(
+        systemctl, ["is-active", "--quiet", unit], state, accepted=(0, 3)
+    )
+    return result == 0
+
+
+def _confirm_inactive(systemctl: str, unit: str, state: ActivationState) -> None:
+    if _unit_is_active(systemctl, unit, state):
+        raise BundleInstallError("activation_systemctl_failed")
+
+
+def _loaded_unit_payload(output: bytes) -> bytes:
+    if output.startswith(b"# "):
+        _header, separator, remainder = output.partition(b"\n")
+        if not separator:
+            raise BundleInstallError("activation_systemctl_failed")
+        if remainder.startswith(b"\n"):
+            remainder = remainder[1:]
+        return remainder
+    return output
+
+
+def _verify_loaded_units(
+    systemctl: str, generation: int, state: ActivationState
+) -> None:
+    for unit in (PREPARE_UNIT, WORKER_UNIT):
+        _result, fragment = _run_systemctl(
+            systemctl,
+            ["show", unit, "--property=FragmentPath", "--value"],
+            state,
+        )
+        if fragment.rstrip(b"\n") != f"/etc/systemd/system/{unit}".encode("ascii"):
+            raise BundleInstallError("activation_systemctl_failed")
+        units = os.open("units", _DIRECTORY_FLAGS, dir_fd=generation)
+        try:
+            expected, _metadata = _read_named_file(units, unit, MAX_ASSET_BYTES)
+        finally:
+            os.close(units)
+        _result, loaded = _run_systemctl(
+            systemctl, ["cat", "--no-pager", unit], state
+        )
+        if _loaded_unit_payload(loaded) != expected:
+            raise BundleInstallError("activation_systemctl_failed")
+
+
+def _rollback_activation(
+    root: int,
+    base: int,
+    releases: int,
+    old_digest: str | None,
+    old_active: dict[str, bool],
+    created_links: list[tuple[str, tuple[int, int]]],
+    uid: int,
+    gid: int,
+    systemctl: str,
+    state: ActivationState,
+) -> None:
+    try:
+        for unit in (WORKER_UNIT, PREPARE_UNIT):
+            _run_systemctl(
+                systemctl, ["stop", unit], state, allow_after_interrupt=True
+            )
+        _set_current(base, old_digest)
+        _run_systemctl(
+            systemctl, ["daemon-reload"], state, allow_after_interrupt=True
+        )
+        if old_digest is not None:
+            verify_generation(releases, old_digest, uid, gid)
+            if old_active.get(PREPARE_UNIT):
+                _run_systemctl(
+                    systemctl, ["start", PREPARE_UNIT], state, allow_after_interrupt=True
+                )
+            if old_active.get(WORKER_UNIT):
+                _run_systemctl(
+                    systemctl, ["start", WORKER_UNIT], state, allow_after_interrupt=True
+                )
+        else:
+            _remove_created_bootstrap_links(root, created_links, uid, gid)
+    except Exception as exc:
+        raise BundleInstallError("activation_rollback_failed") from exc
+
+
+def activate_generation(
+    digest: str,
+    *,
+    root_path: str = "/",
+    systemctl: str = "/usr/bin/systemctl",
+) -> None:
+    if not _LOWER_HEX.fullmatch(digest):
+        raise BundleInstallError("activation_arguments_invalid")
+    uid = os.geteuid()
+    gid = os.getegid()
+    root = _open_absolute_directory(root_path)
+    lock_directory = lock = base = releases = generation = -1
+    state = ActivationState()
+    created_links: list[tuple[str, tuple[int, int]]] = []
+    old_digest: str | None = None
+    old_active = {PREPARE_UNIT: False, WORKER_UNIT: False}
+    switched = False
+    stopped = False
+    try:
+        _validate_directory(os.fstat(root), uid, gid)
+        lock_directory, lock = _acquire_lock(root, uid, gid)
+        base = _open_tree(root, tuple(BASE_RELATIVE.split("/")), uid, gid)
+        releases = os.open("releases", _DIRECTORY_FLAGS, dir_fd=base)
+        verify_generation(releases, digest, uid, gid)
+        old_digest = _read_current(base, releases, uid, gid)
+        created_links = _bootstrap_unit_links(root, uid, gid)
+        generation = os.open(digest, _DIRECTORY_FLAGS, dir_fd=releases)
+        _install_activation_signal_handlers(state)
+        old_active[WORKER_UNIT] = _unit_is_active(systemctl, WORKER_UNIT, state)
+        old_active[PREPARE_UNIT] = _unit_is_active(systemctl, PREPARE_UNIT, state)
+        state.phase = PHASE_STOPPING
+        stopped = True
+        _run_systemctl(systemctl, ["stop", WORKER_UNIT], state)
+        _run_systemctl(systemctl, ["stop", PREPARE_UNIT], state)
+        _confirm_inactive(systemctl, WORKER_UNIT, state)
+        _confirm_inactive(systemctl, PREPARE_UNIT, state)
+        state.phase = PHASE_PRE_SWITCH
+        _set_current(base, digest)
+        switched = True
+        state.phase = PHASE_SWITCHED
+        _run_systemctl(systemctl, ["daemon-reload"], state)
+        state.phase = PHASE_RELOADED
+        _verify_loaded_units(systemctl, generation, state)
+        state.phase = PHASE_PREPARE_STARTING
+        _run_systemctl(systemctl, ["start", PREPARE_UNIT], state)
+        state.phase = PHASE_WORKER_STARTING
+        _run_systemctl(systemctl, ["start", WORKER_UNIT], state)
+    except Exception:
+        if stopped:
+            signal.pthread_sigmask(signal.SIG_BLOCK, _INSTALL_SIGNALS)
+            _rollback_activation(
+                root,
+                base,
+                releases,
+                old_digest,
+                old_active,
+                created_links,
+                uid,
+                gid,
+                systemctl,
+                state,
+            )
+        elif created_links:
+            _remove_created_bootstrap_links(root, created_links, uid, gid)
+        raise
+    finally:
+        global _ACTIVE_ACTIVATION
+        _ACTIVE_ACTIVATION = None
+        for descriptor in (generation, releases, base, lock, lock_directory, root):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def _read_legacy_regular(
+    root: int,
+    relative: str,
+    expected_mode: int,
+    expected_digest: str,
+    uid: int,
+    gid: int,
+) -> bytes:
+    parent_path, leaf = relative.rsplit("/", 1)
+    try:
+        parent = _open_relative_directory(root, parent_path)
+        payload, metadata = _read_named_file(parent, leaf, MAX_ASSET_BYTES)
+        entry = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+    except (OSError, BundleInstallError) as exc:
+        raise BundleInstallError("legacy_migration_unsupported") from exc
+    finally:
+        if "parent" in locals():
+            os.close(parent)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or _identity(metadata) != _identity(entry)
+        or (metadata.st_uid, metadata.st_gid) != (uid, gid)
+        or stat.S_IMODE(metadata.st_mode) != expected_mode
+        or hashlib.sha256(payload).hexdigest() != expected_digest
+    ):
+        raise BundleInstallError("legacy_migration_unsupported")
+    return payload
+
+
+def _legacy_unit_state(
+    root: int, relative: str, uid: int, gid: int
+) -> str:
+    parent_path, leaf = relative.rsplit("/", 1)
+    parent = _open_relative_directory(root, parent_path)
+    try:
+        metadata = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+        if stat.S_ISLNK(metadata.st_mode):
+            if (
+                (metadata.st_uid, metadata.st_gid) == (uid, gid)
+                and os.readlink(leaf, dir_fd=parent) == BOOTSTRAP_LINKS[relative]
+            ):
+                return "bootstrap"
+            raise BundleInstallError("legacy_migration_unsupported")
+    except FileNotFoundError as exc:
+        raise BundleInstallError("legacy_migration_unsupported") from exc
+    finally:
+        os.close(parent)
+    mode, digest = LEGACY_ASSETS[relative]
+    _read_legacy_regular(root, relative, mode, digest, uid, gid)
+    return "legacy"
+
+
+def _optional_legacy_file(
+    root: int, relative: str, mode: int, digest: str, uid: int, gid: int
+) -> bool:
+    parent_path, leaf = relative.rsplit("/", 1)
+    try:
+        parent = _open_relative_directory(root, parent_path)
+    except OSError:
+        return False
+    try:
+        try:
+            os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+    finally:
+        os.close(parent)
+    _read_legacy_regular(root, relative, mode, digest, uid, gid)
+    return True
+
+
+def _quarantine_legacy_tmpfiles(root: int, uid: int, gid: int) -> bool:
+    source_mode, source_digest = LEGACY_ASSETS[LEGACY_TMPFILES_RELATIVE]
+    source_present = _optional_legacy_file(
+        root,
+        LEGACY_TMPFILES_RELATIVE,
+        source_mode,
+        source_digest,
+        uid,
+        gid,
+    )
+    quarantine_present = _optional_legacy_file(
+        root,
+        LEGACY_QUARANTINE_RELATIVE,
+        0o600,
+        source_digest,
+        uid,
+        gid,
+    )
+    if source_present == quarantine_present:
+        raise BundleInstallError("legacy_migration_unsupported")
+    if quarantine_present:
+        return False
+    quarantine_parent_path, quarantine_leaf = LEGACY_QUARANTINE_RELATIVE.rsplit("/", 1)
+    source_parent_path, source_leaf = LEGACY_TMPFILES_RELATIVE.rsplit("/", 1)
+    quarantine_parent = _open_tree(
+        root, tuple(quarantine_parent_path.split("/")), uid, gid
+    )
+    source_parent = _open_relative_directory(root, source_parent_path)
+    try:
+        os.rename(
+            source_leaf,
+            quarantine_leaf,
+            src_dir_fd=source_parent,
+            dst_dir_fd=quarantine_parent,
+        )
+        descriptor = os.open(quarantine_leaf, _READ_FLAGS, dir_fd=quarantine_parent)
+        try:
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+            metadata = os.fstat(descriptor)
+            entry = os.stat(
+                quarantine_leaf, dir_fd=quarantine_parent, follow_symlinks=False
+            )
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or (metadata.st_uid, metadata.st_gid) != (uid, gid)
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or _identity(metadata) != _identity(entry)
+            ):
+                raise BundleInstallError(
+                    "legacy_migration_manual_recovery_required"
+                )
+        finally:
+            os.close(descriptor)
+        os.fsync(source_parent)
+        os.fsync(quarantine_parent)
+    except OSError as exc:
+        raise BundleInstallError("legacy_migration_manual_recovery_required") from exc
+    finally:
+        os.close(source_parent)
+        os.close(quarantine_parent)
+    return True
+
+
+def _replace_legacy_unit_links(
+    root: int,
+    states: dict[str, str],
+    uid: int,
+    gid: int,
+) -> list[tuple[str, tuple[int, int]]]:
+    created: list[tuple[str, tuple[int, int]]] = []
+    try:
+        for relative, target in BOOTSTRAP_LINKS.items():
+            if states[relative] == "bootstrap":
+                continue
+            parent, leaf = _open_parent(root, relative, uid, gid)
+            temporary = f".legacy-unit-{os.getpid()}-{secrets.token_hex(8)}"
+            try:
+                os.symlink(target, temporary, dir_fd=parent)
+                os.replace(temporary, leaf, src_dir_fd=parent, dst_dir_fd=parent)
+                os.fsync(parent)
+                metadata = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+                if (
+                    not stat.S_ISLNK(metadata.st_mode)
+                    or os.readlink(leaf, dir_fd=parent) != target
+                    or (metadata.st_uid, metadata.st_gid) != (uid, gid)
+                ):
+                    raise BundleInstallError(
+                        "legacy_migration_manual_recovery_required"
+                    )
+                created.append((relative, _identity(metadata)))
+            finally:
+                try:
+                    os.unlink(temporary, dir_fd=parent)
+                except FileNotFoundError:
+                    pass
+                os.close(parent)
+        return created
+    except Exception:
+        _remove_created_bootstrap_links(root, created, uid, gid)
+        raise
+
+
+def migrate_legacy_generation(
+    digest: str,
+    *,
+    root_path: str = "/",
+    systemctl: str = "/usr/bin/systemctl",
+) -> None:
+    if not _LOWER_HEX.fullmatch(digest):
+        raise BundleInstallError("activation_arguments_invalid")
+    uid = os.geteuid()
+    gid = os.getegid()
+    root = _open_absolute_directory(root_path)
+    lock_directory = lock = base = releases = generation = -1
+    state = ActivationState()
+    quarantined = False
+    created_links: list[tuple[str, tuple[int, int]]] = []
+    current_before: str | None = None
+    current_changed = False
+    try:
+        _validate_directory(os.fstat(root), uid, gid)
+        lock_directory, lock = _acquire_lock(root, uid, gid)
+        base = _open_tree(root, tuple(BASE_RELATIVE.split("/")), uid, gid)
+        releases = os.open("releases", _DIRECTORY_FLAGS, dir_fd=base)
+        verify_generation(releases, digest, uid, gid)
+        generation = os.open(digest, _DIRECTORY_FLAGS, dir_fd=releases)
+        _install_activation_signal_handlers(state)
+        for unit in (WORKER_UNIT, PREPARE_UNIT):
+            _run_systemctl(systemctl, ["is-active", "--quiet", unit], state, accepted=(0, 3))
+            _result, fragment = _run_systemctl(
+                systemctl,
+                ["show", unit, "--property=FragmentPath", "--value"],
+                state,
+            )
+            if fragment.rstrip(b"\n") != f"/etc/systemd/system/{unit}".encode("ascii"):
+                raise BundleInstallError("legacy_migration_unsupported")
+        state.phase = PHASE_STOPPING
+        _run_systemctl(systemctl, ["stop", WORKER_UNIT], state)
+        _run_systemctl(systemctl, ["stop", PREPARE_UNIT], state)
+        _confirm_inactive(systemctl, WORKER_UNIT, state)
+        _confirm_inactive(systemctl, PREPARE_UNIT, state)
+        unit_states = {
+            relative: _legacy_unit_state(root, relative, uid, gid)
+            for relative in BOOTSTRAP_LINKS
+        }
+        helper_relative = "usr/libexec/medchat/validate-temporal-worker-env"
+        helper_mode, helper_digest = LEGACY_ASSETS[helper_relative]
+        _read_legacy_regular(
+            root, helper_relative, helper_mode, helper_digest, uid, gid
+        )
+        current_before = _read_current(base, releases, uid, gid)
+        if current_before not in {None, digest}:
+            raise BundleInstallError("legacy_migration_unsupported")
+        quarantined = _quarantine_legacy_tmpfiles(root, uid, gid)
+        created_links = _replace_legacy_unit_links(root, unit_states, uid, gid)
+        if current_before is None:
+            _set_current(base, digest)
+            current_changed = True
+        state.phase = PHASE_SWITCHED
+        _run_systemctl(systemctl, ["daemon-reload"], state)
+        state.phase = PHASE_RELOADED
+        _verify_loaded_units(systemctl, generation, state)
+        state.phase = PHASE_PREPARE_STARTING
+        _run_systemctl(systemctl, ["start", PREPARE_UNIT], state)
+        state.phase = PHASE_WORKER_STARTING
+        _run_systemctl(systemctl, ["start", WORKER_UNIT], state)
+    except Exception as exc:
+        if quarantined or created_links or current_changed:
+            signal.pthread_sigmask(signal.SIG_BLOCK, _INSTALL_SIGNALS)
+            try:
+                for unit in (WORKER_UNIT, PREPARE_UNIT):
+                    _run_systemctl(
+                        systemctl,
+                        ["stop", unit],
+                        state,
+                        allow_after_interrupt=True,
+                    )
+                if current_changed:
+                    _set_current(base, None)
+                if created_links:
+                    _remove_created_bootstrap_links(
+                        root, created_links, uid, gid
+                    )
+                _run_systemctl(
+                    systemctl,
+                    ["daemon-reload"],
+                    state,
+                    allow_after_interrupt=True,
+                )
+            except Exception:
+                pass
+            raise BundleInstallError(
+                "legacy_migration_manual_recovery_required"
+            ) from exc
+        raise
+    finally:
+        global _ACTIVE_ACTIVATION
+        _ACTIVE_ACTIVATION = None
+        for descriptor in (generation, releases, base, lock, lock_directory, root):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
 def _remove_tree(parent: int, name: str) -> None:
     descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
     try:
@@ -630,6 +1317,32 @@ def install_bundle(source_root_path: str, destination_path: str, live: bool) -> 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
+    if len(arguments) == 2 and arguments[0] in {"--activate", "--migrate-legacy"}:
+        if os.geteuid() != 0:
+            print(
+                "temporal_worker_activation=failed code=activation_root_required",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            if arguments[0] == "--activate":
+                activate_generation(arguments[1])
+            else:
+                migrate_legacy_generation(arguments[1])
+        except BundleInstallError as exc:
+            print(
+                f"temporal_worker_activation=failed code={exc.code}",
+                file=sys.stderr,
+            )
+            return 1
+        except Exception:
+            print(
+                "temporal_worker_activation=failed code=activation_systemctl_failed",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"temporal_worker_activation=passed digest={arguments[1]}")
+        return 0
     if len(arguments) != 5 or arguments[:1] != ["--source-root"] or arguments[2:3] != ["--destdir"] or arguments[4] not in {"--live", "--staging"}:
         print(
             "temporal_worker_bundle_installation=failed code=bundle_arguments_invalid",

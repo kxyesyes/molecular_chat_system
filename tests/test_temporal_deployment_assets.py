@@ -59,6 +59,7 @@ WORKER_INSTALLER = ROOT / "deployment" / "install-temporal-worker.sh"
 BUNDLE_INSTALLER = (
     ROOT / "deployment" / "libexec" / "install-temporal-worker-bundle.py"
 )
+WORKER_ACTIVATOR = ROOT / "deployment" / "activate-temporal-worker-generation.sh"
 WORKER_HELPER = (
     ROOT / "deployment" / "libexec" / "validate-temporal-worker-env.py"
 )
@@ -442,6 +443,88 @@ def test_temporal_worker_shell_execs_the_bundle_writer() -> None:
     assert "current" not in source
 
 
+def test_temporal_worker_activation_wrapper_is_fixed_and_execs_writer() -> None:
+    source = WORKER_ACTIVATOR.read_text(encoding="utf-8")
+    assert source.startswith("#!/bin/sh\nset -eu\n")
+    assert "PATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH\n" in source
+    assert "exec /usr/bin/python3" in source
+    assert "install-temporal-worker-bundle.py" in source
+    assert "--activate" in source
+    assert "--migrate-legacy" in source
+    assert "--destdir" not in source
+    assert "eval" not in source
+
+
+def test_temporal_worker_activation_operator_has_transactional_contract() -> None:
+    source = BUNDLE_INSTALLER.read_text(encoding="utf-8")
+    for required in (
+        "activate_generation(",
+        "migrate_legacy_generation(",
+        "BOOTSTRAP_LINKS",
+        'f"releases/{digest}"',
+        "start_new_session=True",
+        "os.killpg",
+        "daemon-reload",
+        "FragmentPath",
+        "PHASE_SWITCHED",
+        "PHASE_WORKER_STARTING",
+    ):
+        assert required in source
+
+
+def test_temporal_worker_bootstrap_symlink_targets_are_exact() -> None:
+    installer = _load_bundle_installer()
+    assert installer.BOOTSTRAP_LINKS == {
+        "etc/systemd/system/medchat-temporal-worker.service": (
+            "/usr/lib/medchat/temporal-worker/current/units/"
+            "medchat-temporal-worker.service"
+        ),
+        "etc/systemd/system/medchat-temporal-worker-prepare.service": (
+            "/usr/lib/medchat/temporal-worker/current/units/"
+            "medchat-temporal-worker-prepare.service"
+        ),
+    }
+
+
+def test_temporal_worker_legacy_allowlist_matches_flat_predecessor() -> None:
+    installer = _load_bundle_installer()
+    predecessor = {
+        "etc/systemd/system/medchat-temporal-worker.service": (
+            "deployment/medchat-temporal-worker.service",
+            0o644,
+        ),
+        "etc/systemd/system/medchat-temporal-worker-prepare.service": (
+            "deployment/medchat-temporal-worker-prepare.service",
+            0o644,
+        ),
+        "usr/libexec/medchat/validate-temporal-worker-env": (
+            "deployment/libexec/validate-temporal-worker-env.py",
+            0o755,
+        ),
+        "usr/lib/tmpfiles.d/medchat-temporal-worker.conf": (
+            "deployment/tmpfiles/medchat-temporal-worker.conf",
+            0o644,
+        ),
+    }
+    expected = {}
+    for installed, (repository_path, mode) in predecessor.items():
+        payload = subprocess.run(
+            ["git", "show", f"0c54b2f:{repository_path}"],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        ).stdout
+        expected[installed] = (mode, hashlib.sha256(payload).hexdigest())
+    assert installer.LEGACY_ASSETS == expected
+    assert installer.LEGACY_TMPFILES_RELATIVE == (
+        "usr/lib/tmpfiles.d/medchat-temporal-worker.conf"
+    )
+    assert installer.LEGACY_QUARANTINE_RELATIVE == (
+        "usr/lib/medchat/temporal-worker/quarantine/legacy-tmpfiles.disabled"
+    )
+
+
 def test_temporal_bundle_installer_stages_immutable_generation() -> None:
     if os.name != "nt" or shutil.which("wsl.exe") is None:
         pytest.skip("WSL is required for native generation staging validation")
@@ -626,6 +709,309 @@ PY
         encoding="utf-8",
         errors="replace",
         timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_temporal_activation_first_upgrade_rollback_and_failure_are_atomic() -> None:
+    if os.name != "nt" or shutil.which("wsl.exe") is None:
+        pytest.skip("WSL is required for native activation validation")
+    repository = _wsl_path(ROOT)
+    command = r'''
+set -eu
+cd '__REPOSITORY__'
+test_root=$(mktemp -d)
+cleanup() {
+    chmod -R u+w "$test_root" 2>/dev/null || true
+    rm -rf -- "$test_root"
+}
+trap cleanup EXIT HUP INT TERM
+cp -R deployment "$test_root/source"
+cat > "$test_root/systemctl" <<'SH'
+#!/bin/sh
+set -eu
+command=$1
+shift
+state=$TEST_TEMPORAL_STATE
+case "$command" in
+    is-active)
+        [ "$1" = --quiet ]
+        grep -qx "$2" "$state" 2>/dev/null && exit 0
+        exit 3
+        ;;
+    stop)
+        unit=$1
+        if [ -f "$state" ]; then grep -vx "$unit" "$state" > "$state.next" || true; mv "$state.next" "$state"; fi
+        ;;
+    start)
+        unit=$1
+        grep -qx "$unit" "$state" 2>/dev/null || printf '%s\n' "$unit" >> "$state"
+        ;;
+    daemon-reload)
+        if [ -f "$TEST_TEMPORAL_FAIL_RELOAD" ]; then rm "$TEST_TEMPORAL_FAIL_RELOAD"; exit 1; fi
+        ;;
+    show)
+        unit=$1
+        printf '/etc/systemd/system/%s\n' "$unit"
+        ;;
+    cat)
+        [ "$1" = --no-pager ]
+        unit=$2
+        cat "$TEST_TEMPORAL_ROOT/usr/lib/medchat/temporal-worker/current/units/$unit"
+        ;;
+    *) exit 2 ;;
+esac
+SH
+chmod 755 "$test_root/systemctl"
+python3 - "$test_root/source" "$test_root" <<'PY'
+import importlib.util
+import os
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1])
+test_root = Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("bundle", source / "libexec/install-temporal-worker-bundle.py")
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+systemctl = str(test_root / "systemctl")
+state = test_root / "state"
+fail_reload = test_root / "fail-reload"
+os.environ["TEST_TEMPORAL_STATE"] = str(state)
+os.environ["TEST_TEMPORAL_FAIL_RELOAD"] = str(fail_reload)
+
+def make_root(name):
+    path = test_root / name
+    path.mkdir(mode=0o700)
+    return path
+
+def current(root):
+    return os.readlink(root / "usr/lib/medchat/temporal-worker/current")
+
+root = make_root("root")
+os.environ["TEST_TEMPORAL_ROOT"] = str(root)
+first = module.install_bundle(str(source), str(root), False)
+module.activate_generation(first, root_path=str(root), systemctl=systemctl)
+assert current(root) == f"releases/{first}"
+for relative, target in module.BOOTSTRAP_LINKS.items():
+    installed = root / relative
+    assert installed.is_symlink() and os.readlink(installed) == target
+assert set(state.read_text().splitlines()) == {module.PREPARE_UNIT, module.WORKER_UNIT}
+
+module.activate_generation(first, root_path=str(root), systemctl=systemctl)
+assert current(root) == f"releases/{first}"
+
+worker_source = source / "medchat-temporal-worker.service"
+worker_source.write_bytes(worker_source.read_bytes() + b"\n# upgrade\n")
+second = module.install_bundle(str(source), str(root), False)
+assert second != first
+module.activate_generation(second, root_path=str(root), systemctl=systemctl)
+assert current(root) == f"releases/{second}"
+module.activate_generation(first, root_path=str(root), systemctl=systemctl)
+assert current(root) == f"releases/{first}"
+
+fail_reload.touch()
+try:
+    module.activate_generation(second, root_path=str(root), systemctl=systemctl)
+except module.BundleInstallError as exc:
+    assert exc.code == "activation_systemctl_failed"
+else:
+    raise AssertionError("reload failure unexpectedly succeeded")
+assert current(root) == f"releases/{first}"
+assert set(state.read_text().splitlines()) == {module.PREPARE_UNIT, module.WORKER_UNIT}
+
+unexpected = make_root("unexpected")
+os.environ["TEST_TEMPORAL_ROOT"] = str(unexpected)
+unexpected_digest = module.install_bundle(str(source), str(unexpected), False)
+entry = unexpected / "etc/systemd/system/medchat-temporal-worker.service"
+entry.parent.mkdir(parents=True)
+entry.write_text("keep", encoding="ascii")
+try:
+    module.activate_generation(unexpected_digest, root_path=str(unexpected), systemctl=systemctl)
+except module.BundleInstallError as exc:
+    assert exc.code == "activation_bootstrap_invalid"
+else:
+    raise AssertionError("unexpected bootstrap entry was accepted")
+assert entry.read_text(encoding="ascii") == "keep" and not entry.is_symlink()
+assert not (unexpected / "usr/lib/medchat/temporal-worker/current").exists()
+PY
+'''.replace("__REPOSITORY__", repository)
+    result = subprocess.run(
+        ["wsl.exe", "-e", "sh", "-lc", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_temporal_legacy_migration_quarantines_dangerous_policy(
+    tmp_path: Path,
+) -> None:
+    if os.name != "nt" or shutil.which("wsl.exe") is None:
+        pytest.skip("WSL is required for native legacy migration validation")
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    predecessor = {
+        "worker": "deployment/medchat-temporal-worker.service",
+        "prepare": "deployment/medchat-temporal-worker-prepare.service",
+        "env-helper": "deployment/libexec/validate-temporal-worker-env.py",
+        "tmpfiles": "deployment/tmpfiles/medchat-temporal-worker.conf",
+    }
+    for name, repository_path in predecessor.items():
+        payload = subprocess.run(
+            ["git", "show", f"0c54b2f:{repository_path}"],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        ).stdout
+        (legacy / name).write_bytes(payload)
+    repository = _wsl_path(ROOT)
+    legacy_wsl = _wsl_path(legacy)
+    command = r'''
+set -eu
+cd '__REPOSITORY__'
+test_root=$(mktemp -d)
+cleanup() {
+    chmod -R u+w "$test_root" 2>/dev/null || true
+    rm -rf -- "$test_root"
+}
+trap cleanup EXIT HUP INT TERM
+cp -R deployment "$test_root/source"
+cat > "$test_root/systemctl" <<'SH'
+#!/bin/sh
+set -eu
+command=$1
+shift
+state=$TEST_TEMPORAL_STATE
+case "$command" in
+    is-active) [ "$1" = --quiet ]; grep -qx "$2" "$state" 2>/dev/null && exit 0; exit 3 ;;
+    stop) unit=$1; grep -vx "$unit" "$state" > "$state.next" 2>/dev/null || true; mv "$state.next" "$state" ;;
+    start) unit=$1; grep -qx "$unit" "$state" 2>/dev/null || printf '%s\n' "$unit" >> "$state" ;;
+    daemon-reload) [ ! -f "$TEST_TEMPORAL_FAIL_RELOAD" ] || { rm "$TEST_TEMPORAL_FAIL_RELOAD"; exit 1; } ;;
+    show) printf '/etc/systemd/system/%s\n' "$1" ;;
+    cat) [ "$1" = --no-pager ]; cat "$TEST_TEMPORAL_ROOT/usr/lib/medchat/temporal-worker/current/units/$2" ;;
+    *) exit 2 ;;
+esac
+SH
+chmod 755 "$test_root/systemctl"
+python3 - "$test_root/source" "$test_root" '__LEGACY__' <<'PY'
+import hashlib
+import importlib.util
+import os
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+import sys
+
+source, test_root, legacy = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("bundle", source / "libexec/install-temporal-worker-bundle.py")
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+systemctl = str(test_root / "systemctl")
+
+def make_root(name):
+    root = test_root / name
+    root.mkdir(mode=0o700)
+    digest = module.install_bundle(str(source), str(root), False)
+    paths = {
+        "worker": (root / "etc/systemd/system/medchat-temporal-worker.service", 0o644),
+        "prepare": (root / "etc/systemd/system/medchat-temporal-worker-prepare.service", 0o644),
+        "env-helper": (root / "usr/libexec/medchat/validate-temporal-worker-env", 0o755),
+        "tmpfiles": (root / "usr/lib/tmpfiles.d/medchat-temporal-worker.conf", 0o644),
+    }
+    for fixture, (target, mode) in paths.items():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(legacy / fixture, target)
+        target.chmod(mode)
+    return root, digest
+
+def configure(root, name, active=True):
+    state = test_root / f"{name}.state"
+    if active:
+        state.write_text(f"{module.PREPARE_UNIT}\n{module.WORKER_UNIT}\n", encoding="ascii")
+    else:
+        state.touch()
+    os.environ["TEST_TEMPORAL_ROOT"] = str(root)
+    os.environ["TEST_TEMPORAL_STATE"] = str(state)
+    os.environ["TEST_TEMPORAL_FAIL_RELOAD"] = str(test_root / f"{name}.fail")
+    return state
+
+root, digest = make_root("success")
+state = configure(root, "success")
+module.migrate_legacy_generation(digest, root_path=str(root), systemctl=systemctl)
+tmpfiles = root / module.LEGACY_TMPFILES_RELATIVE
+quarantine = root / module.LEGACY_QUARANTINE_RELATIVE
+assert not tmpfiles.exists()
+metadata = os.lstat(quarantine)
+assert stat.S_ISREG(metadata.st_mode) and stat.S_IMODE(metadata.st_mode) == 0o600
+assert hashlib.sha256(quarantine.read_bytes()).hexdigest() == module.LEGACY_ASSETS[module.LEGACY_TMPFILES_RELATIVE][1]
+for relative, target in module.BOOTSTRAP_LINKS.items():
+    assert os.path.islink(root / relative) and os.readlink(root / relative) == target
+assert os.readlink(root / "usr/lib/medchat/temporal-worker/current") == f"releases/{digest}"
+assert set(state.read_text().splitlines()) == {module.PREPARE_UNIT, module.WORKER_UNIT}
+module.migrate_legacy_generation(digest, root_path=str(root), systemctl=systemctl)
+
+unknown, unknown_digest = make_root("unknown")
+unknown_state = configure(unknown, "unknown")
+unit = unknown / "etc/systemd/system/medchat-temporal-worker.service"
+unit.write_bytes(unit.read_bytes() + b"unknown")
+try:
+    module.migrate_legacy_generation(unknown_digest, root_path=str(unknown), systemctl=systemctl)
+except module.BundleInstallError as exc:
+    assert exc.code == "legacy_migration_unsupported"
+else:
+    raise AssertionError("unknown legacy hash was accepted")
+assert (unknown / module.LEGACY_TMPFILES_RELATIVE).is_file()
+assert not (unknown / module.LEGACY_QUARANTINE_RELATIVE).exists()
+assert not (unknown / "usr/lib/medchat/temporal-worker/current").exists()
+assert unknown_state.read_text() == ""
+
+failed, failed_digest = make_root("failed")
+failed_state = configure(failed, "failed")
+sentinel = test_root / "sentinel"
+sentinel.write_text("keep", encoding="ascii")
+sentinel.chmod(0o640)
+scratch = failed / "opt/medchat/molecular_chat_system/scratch"
+scratch.parent.mkdir(parents=True)
+scratch.symlink_to(sentinel)
+before = os.lstat(sentinel)
+(test_root / "failed.fail").touch()
+try:
+    module.migrate_legacy_generation(failed_digest, root_path=str(failed), systemctl=systemctl)
+except module.BundleInstallError as exc:
+    assert exc.code == "legacy_migration_manual_recovery_required"
+else:
+    raise AssertionError("reload failure unexpectedly succeeded")
+assert not (failed / module.LEGACY_TMPFILES_RELATIVE).exists()
+assert (failed / module.LEGACY_QUARANTINE_RELATIVE).is_file()
+assert not (failed / "usr/lib/medchat/temporal-worker/current").exists()
+assert failed_state.read_text() == ""
+if Path("/usr/bin/systemd-tmpfiles").is_file():
+    subprocess.run(["/usr/bin/systemd-tmpfiles", "--create", f"--root={failed}"], check=True)
+after = os.lstat(sentinel)
+assert (after.st_dev, after.st_ino, stat.S_IMODE(after.st_mode), sentinel.read_text()) == (
+    before.st_dev, before.st_ino, stat.S_IMODE(before.st_mode), "keep"
+)
+PY
+'''.replace("__REPOSITORY__", repository).replace("__LEGACY__", legacy_wsl)
+    result = subprocess.run(
+        ["wsl.exe", "-u", "root", "-e", "sh", "-lc", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=240,
         check=False,
     )
     assert result.returncode == 0, result.stderr
