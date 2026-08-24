@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -494,7 +495,9 @@ def test_temporal_bundle_manifest_parser_rejects_noncanonical_content(mutation) 
 
 def test_temporal_worker_shell_execs_the_bundle_writer() -> None:
     source = WORKER_INSTALLER.read_text(encoding="utf-8")
-    assert "exec /usr/bin/python3" in source
+    assert "exec /usr/bin/env -i" in source
+    assert "/usr/bin/python3 -I" in source
+    assert "exec /usr/bin/python3" not in source
     assert "install-temporal-worker-bundle.py" in source
     assert "from __future__ import annotations" not in source
     assert "systemctl" not in source
@@ -505,12 +508,98 @@ def test_temporal_worker_activation_wrapper_is_fixed_and_execs_writer() -> None:
     source = WORKER_ACTIVATOR.read_text(encoding="utf-8")
     assert source.startswith("#!/bin/sh\nset -eu\n")
     assert "PATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH\n" in source
-    assert "exec /usr/bin/python3" in source
+    assert "exec /usr/bin/env -i" in source
+    assert "/usr/bin/python3 -I" in source
+    assert "exec /usr/bin/python3" not in source
     assert "install-temporal-worker-bundle.py" in source
     assert "--activate" in source
     assert "--migrate-legacy" in source
     assert "--destdir" not in source
     assert "eval" not in source
+
+
+def test_temporal_privileged_python_and_runner_boundaries_clear_environment() -> None:
+    installer = WORKER_INSTALLER.read_text(encoding="utf-8")
+    activator = WORKER_ACTIVATOR.read_text(encoding="utf-8")
+    runner = LIVE_INSTALL_RUNNER.read_text(encoding="utf-8")
+    fixed_path = "PATH=/usr/sbin:/usr/bin:/sbin:/bin"
+    for wrapper in (installer, activator):
+        assert f"/usr/bin/env -i {fixed_path}" in wrapper
+        assert "/usr/bin/python3 -I" in wrapper
+    outer = runner.index("exec /usr/bin/env -i")
+    unshare = runner.index("/usr/bin/unshare --mount --fork", outer)
+    assert fixed_path in runner[outer:unshare]
+    assert "MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS=1" in runner[outer:unshare]
+    chroot = runner.index('chroot "$STATE/storage/merged"')
+    assert "/usr/bin/env -i" in runner[chroot:]
+    assert fixed_path in runner[chroot:]
+    assert "MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS=1" in runner[chroot:]
+    for forbidden in (
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "BASH_ENV",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+    ):
+        assert forbidden not in runner[outer:unshare]
+        assert forbidden not in runner[chroot:]
+
+
+def test_temporal_live_runner_documentation_requires_trusted_staging() -> None:
+    readme = (ROOT / "deployment/README.md").read_text(encoding="utf-8")
+    plan = (
+        ROOT
+        / "docs/superpowers/plans/2026-08-24-temporal-worker-atomic-generation.md"
+    ).read_text(encoding="utf-8")
+    assert "sudo -E" not in plan
+    assert "sudo /usr/bin/env -i" in plan
+    assert "root-owned" in readme
+    assert "go-w" in readme
+    assert "runner" in readme
+    assert "恶意 root 代码" in readme
+    assert "不能" in readme
+
+
+def test_temporal_wrapper_ignores_python_and_shell_startup_injection(
+    tmp_path: Path,
+) -> None:
+    _native_posix_repository()
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    malicious = tmp_path / "malicious"
+    marker = tmp_path / "startup-marker"
+    shutil.copytree(ROOT / "deployment", source)
+    destination.mkdir(mode=0o700)
+    malicious.mkdir()
+    (malicious / "sitecustomize.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('python')\n",
+        encoding="utf-8",
+    )
+    shell_startup = tmp_path / "shell-startup"
+    shell_startup.write_text(
+        f"printf shell > '{marker}'\n", encoding="utf-8", newline="\n"
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHONPATH": str(malicious),
+            "PYTHONHOME": str(malicious),
+            "BASH_ENV": str(shell_startup),
+            "ENV": str(shell_startup),
+            "LD_LIBRARY_PATH": str(malicious),
+        }
+    )
+    result = subprocess.run(
+        [str(source / "install-temporal-worker.sh"), "--destdir", str(destination)],
+        cwd=source,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
 
 
 def test_temporal_worker_activation_operator_has_transactional_contract() -> None:
@@ -706,6 +795,298 @@ def test_systemctl_child_exit_after_signal_reports_interruption(
         installer._run_systemctl("systemctl", ["daemon-reload"], state)
     assert raised.value.code == "activation_interrupted"
     assert state.child is None
+
+
+def test_rollback_reloads_and_verifies_old_cached_units_before_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer = _load_bundle_installer()
+    old_digest = "a" * 64
+    new_digest = "b" * 64
+    state = installer.ActivationState()
+    state.interrupted = True
+    cache = {"digest": new_digest}
+    current = {"digest": new_digest}
+    events: list[str] = []
+
+    def run_systemctl(_systemctl, arguments, _state, **kwargs):
+        assert kwargs.get("allow_after_interrupt") is True
+        events.append("systemctl:" + ":".join(arguments[:2]))
+        # A successful reload is not evidence that the manager cache changed.
+        # This fake deliberately leaves its cache on the new generation.
+        if arguments[0] == "show":
+            unit = arguments[1]
+            return (
+                0,
+                (
+                    "/usr/lib/medchat/temporal-worker/releases/"
+                    f"{cache['digest']}/units/{unit}\n"
+                ).encode("ascii"),
+            )
+        return 0, b""
+
+    monkeypatch.setattr(installer, "_run_systemctl", run_systemctl)
+    monkeypatch.setattr(installer, "verify_generation", lambda *args: None)
+    monkeypatch.setattr(
+        installer,
+        "_set_current",
+        lambda _base, digest: current.__setitem__("digest", digest),
+    )
+    monkeypatch.setattr(installer.os, "open", lambda *args, **kwargs: 91)
+    monkeypatch.setattr(installer.os, "close", lambda _descriptor: None)
+
+    with pytest.raises(installer.BundleInstallError) as raised:
+        installer._rollback_activation(
+            10,
+            11,
+            12,
+            old_digest,
+            {installer.PREPARE_UNIT: True, installer.WORKER_UNIT: True},
+            [],
+            0,
+            0,
+            "systemctl",
+            state,
+        )
+    assert raised.value.code == "activation_rollback_failed"
+    assert current["digest"] == old_digest
+    assert events == [
+        f"systemctl:stop:{installer.WORKER_UNIT}",
+        f"systemctl:stop:{installer.PREPARE_UNIT}",
+        "systemctl:daemon-reload",
+        f"systemctl:show:{installer.PREPARE_UNIT}",
+    ]
+    assert not any(event.startswith("systemctl:start:") for event in events)
+
+
+def test_allow_after_interrupt_rejects_nonrollback_callers() -> None:
+    installer = _load_bundle_installer()
+    state = installer.ActivationState()
+    state.interrupted = True
+    with pytest.raises(installer.BundleInstallError) as raised:
+        installer._run_systemctl(
+            "must-not-execute",
+            ["daemon-reload"],
+            state,
+            allow_after_interrupt=True,
+        )
+    assert raised.value.code == "activation_rollback_failed"
+    with pytest.raises(installer.BundleInstallError) as raised:
+        installer._verify_loaded_units(
+            "must-not-execute",
+            1,
+            2,
+            3,
+            "a" * 64,
+            0,
+            0,
+            "/",
+            state,
+            allow_after_interrupt=True,
+        )
+    assert raised.value.code == "activation_rollback_failed"
+
+
+@pytest.mark.parametrize("operation", ["bootstrap", "legacy"])
+@pytest.mark.parametrize("failure", ["fsync", "stat", "readlink"])
+def test_unit_link_transaction_journals_before_postpublication_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    failure: str,
+) -> None:
+    installer = _load_bundle_installer()
+    relative, target = next(iter(installer.BOOTSTRAP_LINKS.items()))
+    leaf = relative.rsplit("/", 1)[1]
+    entries: dict[str, object] = {}
+    published = False
+    failed = False
+    verified_stats = 0
+    inode = 40
+
+    class Metadata:
+        def __init__(self, *, symlink: bool, inode_value: int) -> None:
+            self.st_mode = (stat.S_IFLNK | 0o777) if symlink else (stat.S_IFREG | 0o644)
+            self.st_uid = 0
+            self.st_gid = 0
+            self.st_dev = 3
+            self.st_ino = inode_value
+            self.st_size = 1
+            self.st_mtime_ns = 2
+            self.st_ctime_ns = 3
+
+    if operation == "legacy":
+        entries[leaf] = Metadata(symlink=False, inode_value=9)
+
+    def fake_open_parent(_root, selected, _uid, _gid):
+        assert selected in installer.BOOTSTRAP_LINKS
+        return 17, selected.rsplit("/", 1)[1]
+
+    def fake_symlink(selected_target, name, *, dir_fd):
+        nonlocal inode
+        assert dir_fd == 17
+        inode += 1
+        metadata = Metadata(symlink=True, inode_value=inode)
+        metadata.target = selected_target
+        entries[name] = metadata
+
+    def fake_link(source, destination, **kwargs):
+        nonlocal published
+        original = entries[source]
+        linked = Metadata(symlink=True, inode_value=original.st_ino)
+        linked.target = original.target
+        linked.st_ctime_ns = original.st_ctime_ns + 1
+        entries[source] = linked
+        entries[destination] = linked
+        published = True
+
+    def fake_replace(source, destination, **kwargs):
+        nonlocal published
+        entries[destination] = entries.pop(source)
+        published = True
+
+    def fake_stat(name, **kwargs):
+        nonlocal failed, verified_stats
+        if name not in entries:
+            raise FileNotFoundError(name)
+        if published and name == leaf:
+            verified_stats += 1
+            if failure == "stat" and verified_stats == 1 and not failed:
+                failed = True
+                raise OSError("injected post-publication stat failure")
+        return entries[name]
+
+    def fake_readlink(name, **kwargs):
+        nonlocal failed
+        if published and name == leaf and failure == "readlink" and not failed:
+            failed = True
+            raise OSError("injected post-publication readlink failure")
+        return entries[name].target
+
+    def fake_fsync(_descriptor):
+        nonlocal failed
+        if published and failure == "fsync" and not failed:
+            failed = True
+            raise OSError("injected post-publication fsync failure")
+
+    def fake_unlink(name, **kwargs):
+        if name not in entries:
+            raise FileNotFoundError(name)
+        del entries[name]
+
+    monkeypatch.setattr(installer, "_open_parent", fake_open_parent)
+    monkeypatch.setattr(installer.os, "symlink", fake_symlink)
+    monkeypatch.setattr(installer.os, "link", fake_link)
+    monkeypatch.setattr(installer.os, "replace", fake_replace)
+    monkeypatch.setattr(installer.os, "stat", fake_stat)
+    monkeypatch.setattr(installer.os, "readlink", fake_readlink)
+    monkeypatch.setattr(installer.os, "fsync", fake_fsync)
+    monkeypatch.setattr(installer.os, "unlink", fake_unlink)
+    monkeypatch.setattr(installer.os, "close", lambda _descriptor: None)
+
+    with pytest.raises(OSError):
+        if operation == "bootstrap":
+            installer._bootstrap_unit_links(5, 0, 0)
+        else:
+            states = {item: "bootstrap" for item in installer.BOOTSTRAP_LINKS}
+            states[relative] = "legacy"
+            installer._replace_legacy_unit_links(5, states, 0, 0)
+    assert failed is True
+    assert leaf not in entries
+    assert not any(name.startswith(".temporal-worker-link-") for name in entries)
+    assert not any(name.startswith(".legacy-unit-") for name in entries)
+
+
+@pytest.mark.parametrize("operation", ["bootstrap", "legacy"])
+def test_unit_link_rollback_never_deletes_replaced_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    installer = _load_bundle_installer()
+    relative, target = next(iter(installer.BOOTSTRAP_LINKS.items()))
+    leaf = relative.rsplit("/", 1)[1]
+    entries: dict[str, object] = {}
+    published = False
+    replaced_identity: object | None = None
+    inode = 100
+
+    class Metadata:
+        def __init__(self, *, symlink: bool, inode_value: int) -> None:
+            self.st_mode = (stat.S_IFLNK | 0o777) if symlink else (stat.S_IFREG | 0o644)
+            self.st_uid = 0
+            self.st_gid = 0
+            self.st_dev = 7
+            self.st_ino = inode_value
+            self.st_size = 1
+            self.st_mtime_ns = 2
+            self.st_ctime_ns = 3
+            self.target = target
+
+    if operation == "legacy":
+        entries[leaf] = Metadata(symlink=False, inode_value=8)
+
+    monkeypatch.setattr(
+        installer,
+        "_open_parent",
+        lambda _root, selected, _uid, _gid: (19, selected.rsplit("/", 1)[1]),
+    )
+
+    def fake_symlink(_target, name, **kwargs):
+        nonlocal inode
+        inode += 1
+        entries[name] = Metadata(symlink=True, inode_value=inode)
+
+    def fake_link(source, destination, **kwargs):
+        nonlocal published
+        original = entries[source]
+        linked = Metadata(symlink=True, inode_value=original.st_ino)
+        linked.st_ctime_ns = original.st_ctime_ns + 1
+        entries[source] = linked
+        entries[destination] = linked
+        published = True
+
+    def fake_replace(source, destination, **kwargs):
+        nonlocal published
+        entries[destination] = entries.pop(source)
+        published = True
+
+    def fake_fsync(_descriptor):
+        nonlocal replaced_identity, inode
+        if published and replaced_identity is None:
+            inode += 1
+            replaced_identity = Metadata(symlink=True, inode_value=inode)
+            entries[leaf] = replaced_identity
+            raise OSError("injected identity replacement")
+
+    monkeypatch.setattr(installer.os, "symlink", fake_symlink)
+    monkeypatch.setattr(installer.os, "link", fake_link)
+    monkeypatch.setattr(installer.os, "replace", fake_replace)
+    monkeypatch.setattr(
+        installer.os,
+        "stat",
+        lambda name, **kwargs: entries[name]
+        if name in entries
+        else (_ for _ in ()).throw(FileNotFoundError(name)),
+    )
+    monkeypatch.setattr(installer.os, "readlink", lambda name, **kwargs: entries[name].target)
+    monkeypatch.setattr(installer.os, "fsync", fake_fsync)
+    monkeypatch.setattr(
+        installer.os,
+        "unlink",
+        lambda name, **kwargs: entries.pop(name)
+        if name in entries
+        else (_ for _ in ()).throw(FileNotFoundError(name)),
+    )
+    monkeypatch.setattr(installer.os, "close", lambda _descriptor: None)
+
+    with pytest.raises(installer.BundleInstallError) as raised:
+        if operation == "bootstrap":
+            installer._bootstrap_unit_links(5, 0, 0)
+        else:
+            states = {item: "bootstrap" for item in installer.BOOTSTRAP_LINKS}
+            states[relative] = "legacy"
+            installer._replace_legacy_unit_links(5, states, 0, 0)
+    assert raised.value.code == "activation_rollback_failed"
+    assert entries[leaf] is replaced_identity
 
 
 @pytest.mark.parametrize(
@@ -1218,6 +1599,7 @@ set -eu
 command=$1
 shift
 state=$TEST_TEMPORAL_STATE
+cache=$TEST_TEMPORAL_CACHE
 case "$command" in
     is-active)
         [ "$1" = --quiet ]
@@ -1234,17 +1616,21 @@ case "$command" in
         ;;
     daemon-reload)
         if [ -f "$TEST_TEMPORAL_FAIL_RELOAD" ]; then rm "$TEST_TEMPORAL_FAIL_RELOAD"; exit 1; fi
+        current=$(readlink "$TEST_TEMPORAL_ROOT/usr/lib/medchat/temporal-worker/current")
+        printf '%s\n' "$current" > "$cache.next"
+        mv "$cache.next" "$cache"
         ;;
     show)
         unit=$1
-        current=$(readlink "$TEST_TEMPORAL_ROOT/usr/lib/medchat/temporal-worker/current")
+        current=$(cat "$cache")
         printf '%s/usr/lib/medchat/temporal-worker/%s/units/%s\n' \
             "$TEST_TEMPORAL_ROOT" "$current" "$unit"
         ;;
     cat)
         [ "$1" = --no-pager ]
         unit=$2
-        cat "$TEST_TEMPORAL_ROOT/usr/lib/medchat/temporal-worker/current/units/$unit"
+        current=$(cat "$cache")
+        cat "$TEST_TEMPORAL_ROOT/usr/lib/medchat/temporal-worker/$current/units/$unit"
         ;;
     *) exit 2 ;;
 esac
@@ -1265,8 +1651,10 @@ spec.loader.exec_module(module)
 systemctl = str(test_root / "systemctl")
 state = test_root / "state"
 fail_reload = test_root / "fail-reload"
+cache = test_root / "loaded-generation"
 os.environ["TEST_TEMPORAL_STATE"] = str(state)
 os.environ["TEST_TEMPORAL_FAIL_RELOAD"] = str(fail_reload)
+os.environ["TEST_TEMPORAL_CACHE"] = str(cache)
 
 def make_root(name):
     path = test_root / name
@@ -1361,6 +1749,7 @@ state = Path(os.environ["TEST_ACTIVE_UNITS"])
 sync = Path(os.environ["TEST_PHASE_SYNC"])
 armed = Path(os.environ["TEST_PHASE_ARMED"])
 root = Path(os.environ["TEST_TEMPORAL_ROOT"])
+cache = root / ".loaded-generation"
 target = os.environ["TEST_TARGET_PHASE"]
 
 def units():
@@ -1407,16 +1796,19 @@ if command == "start":
     raise SystemExit(0)
 if command == "daemon-reload":
     block("reload")
+    current = os.readlink(root / "usr/lib/medchat/temporal-worker/current")
+    cache.write_text(current, encoding="ascii")
     raise SystemExit(0)
 if command == "show":
     block("verify")
     unit = arguments[0]
-    current = os.readlink(root / "usr/lib/medchat/temporal-worker/current")
+    current = cache.read_text(encoding="ascii")
     print(root / "usr/lib/medchat/temporal-worker" / current / "units" / unit)
     raise SystemExit(0)
 if command == "cat":
     unit = arguments[1]
-    payload = root / "usr/lib/medchat/temporal-worker/current/units" / unit
+    current = cache.read_text(encoding="ascii")
+    payload = root / "usr/lib/medchat/temporal-worker" / current / "units" / unit
     sys.stdout.buffer.write(payload.read_bytes())
     raise SystemExit(0)
 raise SystemExit(2)
@@ -1573,21 +1965,34 @@ set -eu
 command=$1
 shift
 state=$TEST_TEMPORAL_STATE
+cache=$TEST_TEMPORAL_CACHE
 case "$command" in
     is-active) [ "$1" = --quiet ]; grep -qx "$2" "$state" 2>/dev/null && exit 0; exit 3 ;;
     stop) unit=$1; grep -vx "$unit" "$state" > "$state.next" 2>/dev/null || true; mv "$state.next" "$state" ;;
     start) unit=$1; grep -qx "$unit" "$state" 2>/dev/null || printf '%s\n' "$unit" >> "$state" ;;
-    daemon-reload) [ ! -f "$TEST_TEMPORAL_FAIL_RELOAD" ] || { rm "$TEST_TEMPORAL_FAIL_RELOAD"; exit 1; } ;;
-    show)
+    daemon-reload)
+        [ ! -f "$TEST_TEMPORAL_FAIL_RELOAD" ] || { rm "$TEST_TEMPORAL_FAIL_RELOAD"; exit 1; }
         if [ -L "$TEST_TEMPORAL_ROOT/usr/lib/medchat/temporal-worker/current" ]; then
-            current=$(readlink "$TEST_TEMPORAL_ROOT/usr/lib/medchat/temporal-worker/current")
+            readlink "$TEST_TEMPORAL_ROOT/usr/lib/medchat/temporal-worker/current" > "$cache.next"
+            mv "$cache.next" "$cache"
+        else
+            rm -f "$cache"
+        fi
+        ;;
+    show)
+        if [ -f "$cache" ]; then
+            current=$(cat "$cache")
             printf '%s/usr/lib/medchat/temporal-worker/%s/units/%s\n' \
                 "$TEST_TEMPORAL_ROOT" "$current" "$1"
         else
             printf '%s/etc/systemd/system/%s\n' "$TEST_TEMPORAL_ROOT" "$1"
         fi
         ;;
-    cat) [ "$1" = --no-pager ]; cat "$TEST_TEMPORAL_ROOT/usr/lib/medchat/temporal-worker/current/units/$2" ;;
+    cat)
+        [ "$1" = --no-pager ]
+        current=$(cat "$cache")
+        cat "$TEST_TEMPORAL_ROOT/usr/lib/medchat/temporal-worker/$current/units/$2"
+        ;;
     *) exit 2 ;;
 esac
 SH
@@ -1634,6 +2039,7 @@ def configure(root, name, active=True):
     os.environ["TEST_TEMPORAL_ROOT"] = str(root)
     os.environ["TEST_TEMPORAL_STATE"] = str(state)
     os.environ["TEST_TEMPORAL_FAIL_RELOAD"] = str(test_root / f"{name}.fail")
+    os.environ["TEST_TEMPORAL_CACHE"] = str(test_root / f"{name}.cache")
     return state
 
 root, digest = make_root("success")
@@ -2243,7 +2649,12 @@ def test_temporal_live_runner_rejects_unverified_boundary_before_install(
     source = LIVE_INSTALL_RUNNER.read_text(encoding="utf-8")
     bind_anchor = '    mount --bind "$boundary_source" "$boundary_target"\n'
     verify_anchor = '    verify_boundary "$boundary_source" "$boundary_target"\n'
-    install_anchor = 'chroot "$STATE/storage/merged" /bin/sh -c \\\n'
+    install_anchor = (
+        "/usr/bin/env -i \\\n"
+        "    PATH=/usr/sbin:/usr/bin:/sbin:/bin \\\n"
+        "    MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS=1 \\\n"
+        '    chroot "$STATE/storage/merged" \\\n'
+    )
     state_anchor = 'case "$STATE" in /tmp/medchat-temporal-live.*) ;; *) fail ;; esac\n'
     assert source.count(bind_anchor) == 1
     assert source.count(verify_anchor) == 1

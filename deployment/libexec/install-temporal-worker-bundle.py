@@ -92,6 +92,7 @@ PHASE_RELOADED = "reloaded"
 PHASE_PREPARE_STARTING = "prepare-starting"
 PHASE_WORKER_STARTING = "worker-starting"
 PHASE_COMPLETE = "complete"
+_ROLLBACK_INTERRUPT_AUTHORITY = object()
 _LOWER_HEX = re.compile(r"[0-9a-f]{64}\Z")
 _STABLE_CODES = frozenset(
     {
@@ -172,6 +173,29 @@ class ActivationSignalContext:
     ) -> None:
         self.handlers = handlers
         self.previous_mask = previous_mask
+
+
+class LinkTransaction:
+    def __init__(
+        self,
+        relative: str,
+        temporary_identity: tuple[int, int, int, int, int],
+        target: str,
+    ) -> None:
+        self.relative = relative
+        self.temporary_identity = temporary_identity
+        self.published_inode_identity: tuple[int, int] | None = None
+        self.published_identity: tuple[int, int, int, int, int] | None = None
+        self.target = target
+
+    def mark_published(self) -> None:
+        self.published_inode_identity = self.temporary_identity[:2]
+
+    def record_published(self, metadata: os.stat_result) -> bool:
+        if _identity(metadata) != self.published_inode_identity:
+            return False
+        self.published_identity = _full_identity(metadata)
+        return True
 
 
 def _signal_failure(_signum: int, _frame: object) -> None:
@@ -768,8 +792,8 @@ def _open_parent(root: int, relative: str, uid: int, gid: int) -> tuple[int, str
 
 def _bootstrap_unit_links(
     root: int, uid: int, gid: int
-) -> list[tuple[str, tuple[int, int]]]:
-    created: list[tuple[str, tuple[int, int]]] = []
+) -> list[LinkTransaction]:
+    created: list[LinkTransaction] = []
     try:
         for relative, target in BOOTSTRAP_LINKS.items():
             parent, leaf = _open_parent(root, relative, uid, gid)
@@ -779,6 +803,14 @@ def _bootstrap_unit_links(
                     metadata = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
                 except FileNotFoundError:
                     os.symlink(target, temporary, dir_fd=parent)
+                    temporary_metadata = os.stat(
+                        temporary, dir_fd=parent, follow_symlinks=False
+                    )
+                    transaction = LinkTransaction(
+                        relative,
+                        _full_identity(temporary_metadata),
+                        target,
+                    )
                     try:
                         os.link(
                             temporary,
@@ -789,11 +821,18 @@ def _bootstrap_unit_links(
                         )
                     except FileExistsError as exc:
                         raise BundleInstallError("activation_bootstrap_invalid") from exc
-                    finally:
-                        os.unlink(temporary, dir_fd=parent)
+                    transaction.mark_published()
+                    created.append(transaction)
+                    published_metadata = os.stat(
+                        leaf, dir_fd=parent, follow_symlinks=False
+                    )
+                    if not transaction.record_published(published_metadata):
+                        raise BundleInstallError("activation_bootstrap_invalid")
+                    os.unlink(temporary, dir_fd=parent)
                     os.fsync(parent)
-                    metadata = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
-                    created.append((relative, _identity(metadata)))
+                    metadata = os.stat(
+                        leaf, dir_fd=parent, follow_symlinks=False
+                    )
                 if not stat.S_ISLNK(metadata.st_mode) or os.readlink(leaf, dir_fd=parent) != target:
                     raise BundleInstallError("activation_bootstrap_invalid")
                 entry = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
@@ -812,16 +851,21 @@ def _bootstrap_unit_links(
 
 
 def _remove_created_bootstrap_links(
-    root: int, created: list[tuple[str, tuple[int, int]]], uid: int, gid: int
+    root: int, created: list[LinkTransaction], uid: int, gid: int
 ) -> None:
-    for relative, expected_identity in reversed(created):
-        parent, leaf = _open_parent(root, relative, uid, gid)
+    for transaction in reversed(created):
+        parent, leaf = _open_parent(root, transaction.relative, uid, gid)
         try:
             metadata = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+            identity_matches = (
+                _full_identity(metadata) == transaction.published_identity
+                if transaction.published_identity is not None
+                else _identity(metadata) == transaction.published_inode_identity
+            )
             if (
-                _identity(metadata) != expected_identity
+                not identity_matches
                 or not stat.S_ISLNK(metadata.st_mode)
-                or os.readlink(leaf, dir_fd=parent) != BOOTSTRAP_LINKS[relative]
+                or os.readlink(leaf, dir_fd=parent) != transaction.target
             ):
                 raise BundleInstallError("activation_rollback_failed")
             os.unlink(leaf, dir_fd=parent)
@@ -929,7 +973,10 @@ def _run_systemctl(
     *,
     accepted: tuple[int, ...] = (0,),
     allow_after_interrupt: bool = False,
+    _interrupt_authority: object | None = None,
 ) -> tuple[int, bytes]:
+    if allow_after_interrupt and _interrupt_authority is not _ROLLBACK_INTERRUPT_AUTHORITY:
+        raise BundleInstallError("activation_rollback_failed")
     if state.interrupted and not allow_after_interrupt:
         raise BundleInstallError("activation_interrupted")
     try:
@@ -979,6 +1026,23 @@ def _run_systemctl(
         state.child = None
 
 
+def _run_rollback_systemctl(
+    systemctl: str,
+    arguments: list[str],
+    state: ActivationState,
+    *,
+    accepted: tuple[int, ...] = (0,),
+) -> tuple[int, bytes]:
+    return _run_systemctl(
+        systemctl,
+        arguments,
+        state,
+        accepted=accepted,
+        allow_after_interrupt=True,
+        _interrupt_authority=_ROLLBACK_INTERRUPT_AUTHORITY,
+    )
+
+
 def _unit_is_active(systemctl: str, unit: str, state: ActivationState) -> bool:
     result, _output = _run_systemctl(
         systemctl, ["is-active", "--quiet", unit], state, accepted=(0, 3)
@@ -1012,13 +1076,20 @@ def _verify_loaded_units(
     gid: int,
     root_path: str,
     state: ActivationState,
+    *,
+    allow_after_interrupt: bool = False,
+    _interrupt_authority: object | None = None,
 ) -> None:
+    if allow_after_interrupt and _interrupt_authority is not _ROLLBACK_INTERRUPT_AUTHORITY:
+        raise BundleInstallError("activation_rollback_failed")
     verify_generation(releases, digest, uid, gid)
     for unit in (PREPARE_UNIT, WORKER_UNIT):
         _result, fragment = _run_systemctl(
             systemctl,
             ["show", unit, "--property=FragmentPath", "--value"],
             state,
+            allow_after_interrupt=allow_after_interrupt,
+            _interrupt_authority=_interrupt_authority,
         )
         fragment_components = _parse_fragment_path(
             fragment, root_path, digest, unit
@@ -1050,7 +1121,11 @@ def _verify_loaded_units(
         finally:
             os.close(fragment_descriptor)
         _result, loaded = _run_systemctl(
-            systemctl, ["cat", "--no-pager", unit], state
+            systemctl,
+            ["cat", "--no-pager", unit],
+            state,
+            allow_after_interrupt=allow_after_interrupt,
+            _interrupt_authority=_interrupt_authority,
         )
         if _loaded_unit_payload(loaded) != expected:
             raise BundleInstallError("activation_systemctl_failed")
@@ -1062,35 +1137,45 @@ def _rollback_activation(
     releases: int,
     old_digest: str | None,
     old_active: dict[str, bool],
-    created_links: list[tuple[str, tuple[int, int]]],
+    created_links: list[LinkTransaction],
     uid: int,
     gid: int,
     systemctl: str,
     state: ActivationState,
+    root_path: str = "/",
 ) -> None:
+    old_generation = -1
     try:
         for unit in (WORKER_UNIT, PREPARE_UNIT):
-            _run_systemctl(
-                systemctl, ["stop", unit], state, allow_after_interrupt=True
-            )
+            _run_rollback_systemctl(systemctl, ["stop", unit], state)
         _set_current(base, old_digest)
-        _run_systemctl(
-            systemctl, ["daemon-reload"], state, allow_after_interrupt=True
-        )
+        _run_rollback_systemctl(systemctl, ["daemon-reload"], state)
         if old_digest is not None:
-            verify_generation(releases, old_digest, uid, gid)
+            old_generation = os.open(old_digest, _DIRECTORY_FLAGS, dir_fd=releases)
+            _verify_loaded_units(
+                systemctl,
+                root,
+                releases,
+                old_generation,
+                old_digest,
+                uid,
+                gid,
+                root_path,
+                state,
+                allow_after_interrupt=True,
+                _interrupt_authority=_ROLLBACK_INTERRUPT_AUTHORITY,
+            )
             if old_active.get(PREPARE_UNIT):
-                _run_systemctl(
-                    systemctl, ["start", PREPARE_UNIT], state, allow_after_interrupt=True
-                )
+                _run_rollback_systemctl(systemctl, ["start", PREPARE_UNIT], state)
             if old_active.get(WORKER_UNIT):
-                _run_systemctl(
-                    systemctl, ["start", WORKER_UNIT], state, allow_after_interrupt=True
-                )
+                _run_rollback_systemctl(systemctl, ["start", WORKER_UNIT], state)
         else:
             _remove_created_bootstrap_links(root, created_links, uid, gid)
     except Exception as exc:
         raise BundleInstallError("activation_rollback_failed") from exc
+    finally:
+        if old_generation >= 0:
+            os.close(old_generation)
 
 
 def activate_generation(
@@ -1106,7 +1191,7 @@ def activate_generation(
     state = ActivationState()
     signal_context = _install_activation_signal_handlers(state)
     root = lock_directory = lock = base = releases = generation = -1
-    created_links: list[tuple[str, tuple[int, int]]] = []
+    created_links: list[LinkTransaction] = []
     old_digest: str | None = None
     old_active = {PREPARE_UNIT: False, WORKER_UNIT: False}
     switched = False
@@ -1173,6 +1258,7 @@ def activate_generation(
                 gid,
                 systemctl,
                 state,
+                root_path,
             )
         elif created_links:
             _remove_created_bootstrap_links(root, created_links, uid, gid)
@@ -1374,8 +1460,8 @@ def _replace_legacy_unit_links(
     states: dict[str, str],
     uid: int,
     gid: int,
-) -> list[tuple[str, tuple[int, int]]]:
-    created: list[tuple[str, tuple[int, int]]] = []
+) -> list[LinkTransaction]:
+    created: list[LinkTransaction] = []
     try:
         for relative, target in BOOTSTRAP_LINKS.items():
             if states[relative] == "bootstrap":
@@ -1384,7 +1470,24 @@ def _replace_legacy_unit_links(
             temporary = f".legacy-unit-{os.getpid()}-{secrets.token_hex(8)}"
             try:
                 os.symlink(target, temporary, dir_fd=parent)
+                temporary_metadata = os.stat(
+                    temporary, dir_fd=parent, follow_symlinks=False
+                )
+                transaction = LinkTransaction(
+                    relative,
+                    _full_identity(temporary_metadata),
+                    target,
+                )
                 os.replace(temporary, leaf, src_dir_fd=parent, dst_dir_fd=parent)
+                transaction.mark_published()
+                created.append(transaction)
+                published_metadata = os.stat(
+                    leaf, dir_fd=parent, follow_symlinks=False
+                )
+                if not transaction.record_published(published_metadata):
+                    raise BundleInstallError(
+                        "legacy_migration_manual_recovery_required"
+                    )
                 os.fsync(parent)
                 metadata = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
                 if (
@@ -1395,7 +1498,6 @@ def _replace_legacy_unit_links(
                     raise BundleInstallError(
                         "legacy_migration_manual_recovery_required"
                     )
-                created.append((relative, _identity(metadata)))
             finally:
                 try:
                     os.unlink(temporary, dir_fd=parent)
@@ -1422,7 +1524,7 @@ def migrate_legacy_generation(
     signal_context = _install_activation_signal_handlers(state)
     root = lock_directory = lock = base = releases = generation = -1
     quarantined = False
-    created_links: list[tuple[str, tuple[int, int]]] = []
+    created_links: list[LinkTransaction] = []
     current_before: str | None = None
     current_changed = False
     try:
@@ -1499,24 +1601,14 @@ def migrate_legacy_generation(
             signal.pthread_sigmask(signal.SIG_BLOCK, _INSTALL_SIGNALS)
             try:
                 for unit in (WORKER_UNIT, PREPARE_UNIT):
-                    _run_systemctl(
-                        systemctl,
-                        ["stop", unit],
-                        state,
-                        allow_after_interrupt=True,
-                    )
+                    _run_rollback_systemctl(systemctl, ["stop", unit], state)
                 if current_changed:
                     _set_current(base, None)
                 if created_links:
                     _remove_created_bootstrap_links(
                         root, created_links, uid, gid
                     )
-                _run_systemctl(
-                    systemctl,
-                    ["daemon-reload"],
-                    state,
-                    allow_after_interrupt=True,
-                )
+                _run_rollback_systemctl(systemctl, ["daemon-reload"], state)
             except Exception:
                 pass
             raise BundleInstallError(

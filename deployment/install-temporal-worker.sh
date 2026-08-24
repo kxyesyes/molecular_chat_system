@@ -18,7 +18,8 @@ case "$2" in
     *) usage ;;
 esac
 DESTDIR=$(
-    /usr/bin/python3 -c '
+    /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    /usr/bin/python3 -I -c '
 import os
 import sys
 path = sys.argv[1]
@@ -71,7 +72,8 @@ else
     mode=--staging
 fi
 
-exec /usr/bin/python3 \
+exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    /usr/bin/python3 -I \
     "$SCRIPT_DIR/libexec/install-temporal-worker-bundle.py" \
     --source-root "$SCRIPT_DIR" \
     --destdir "$DESTDIR" \

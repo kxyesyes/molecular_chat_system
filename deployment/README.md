@@ -524,6 +524,8 @@ sudo systemctl restart medchat-temporal-worker.service
 - isolated live-root runner 已实现 private mount namespace、只读 lower root、tmpfs
   upper/work、overlay merged root 和 chroot 的技术隔离检查，但本轮 Windows 验证严禁执行；
   在 disposable Linux 上以 opt-in 实际运行并通过前仍是 release blocker。
+  runner 只能从所有父目录和文件均为 root-owned、`go-w` 的可信 staging 执行；mount
+  namespace 不能抵御恶意 root 代码，也不能把不可信发布源码变成可信安装输入。
 - staging failure/signal/concurrency 用例在 Windows 上按真实 POSIX 能力 skip；必须在
   native Linux 上直接执行并通过，不能用静态断言替代。
 - 真实 systemd activation/migration、`systemd-analyze verify`、mixed lifecycle 和

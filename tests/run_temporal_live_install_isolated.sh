@@ -12,7 +12,7 @@ fail() {
 validate_invocation() {
     [ "${MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS-}" = "1" ] || fail
     for tool in \
-        /usr/bin/unshare mount umount findmnt mountpoint chroot mktemp readlink \
+        /usr/bin/env /usr/bin/unshare mount umount findmnt mountpoint chroot mktemp readlink \
         cp chown chmod rmdir mkdir stat dirname id
     do
         command -v "$tool" >/dev/null 2>&1 || fail
@@ -94,7 +94,10 @@ if [ "${1-}" != "--inside" ]; then
     [ "$#" -eq 0 ] || fail
     SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
     REPOSITORY=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
-    exec /usr/bin/unshare --mount --fork -- "$0" --inside "$REPOSITORY"
+    exec /usr/bin/env -i \
+        PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+        MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS=1 \
+        /usr/bin/unshare --mount --fork -- "$0" --inside "$REPOSITORY"
 fi
 
 [ "$#" -eq 2 ] || fail
@@ -151,7 +154,14 @@ bind_boundary "usr/lib/medchat" "usr-lib-medchat"
 bind_boundary "usr/libexec/medchat" "usr-libexec-medchat"
 bind_boundary "run/medchat-temporal-worker" "run-medchat-temporal-worker"
 
-chroot "$STATE/storage/merged" /bin/sh -c \
+/usr/bin/env -i \
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS=1 \
+    chroot "$STATE/storage/merged" \
+    /usr/bin/env -i \
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS=1 \
+    /bin/sh -c \
     'cd /run/medchat-temporal-worker/source && sh ./install-temporal-worker.sh --destdir /'
 
 trap - EXIT HUP INT TERM

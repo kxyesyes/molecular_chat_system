@@ -49,6 +49,7 @@ do
         fail activation_source_untrusted
 done
 
-exec /usr/bin/python3 \
+exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    /usr/bin/python3 -I \
     "$SCRIPT_DIR/libexec/install-temporal-worker-bundle.py" \
     "$mode" "$digest"

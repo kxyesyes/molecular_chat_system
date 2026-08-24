@@ -95,8 +95,8 @@ production environment values.
    manifest completeness, source mutation, parent/leaf symlink, special file,
    ownership/mode, and lock-file trust.
 2. Reduce the shell wrapper to canonical DESTDIR and live-source trust checks, then
-   `exec /usr/bin/python3` so the public installer PID is the writer PID before any
-   destination mutation.
+   `exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /usr/bin/python3 -I` so
+   the public installer PID is the isolated writer PID before any destination mutation.
 3. In the Python installer, bootstrap `run/medchat-temporal-worker` with descriptor-
    relative `mkdirat` as exact `0700`, then bootstrap `install.lock` with
    `O_CREAT|O_EXCL|O_NOFOLLOW` as exact `0600`. Concurrent losers reopen no-follow and
@@ -276,7 +276,9 @@ Run native POSIX staging and the technically isolated live-root suite:
 
 ```bash
 python3 -m pytest tests/test_temporal_deployment_assets.py -q -p no:cacheprovider -k 'installer or generation or legacy_migration'
-MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS=1 sudo -E tests/run_temporal_live_install_isolated.sh
+sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS=1 \
+  tests/run_temporal_live_install_isolated.sh
 ```
 
 The second command must create and verify its private mount namespace and bind roots;
