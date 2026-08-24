@@ -2065,17 +2065,231 @@ def test_temporal_live_install_runner_has_verified_overlay_isolation() -> None:
     assert "rm -rf" not in source
     assert "find -delete" not in source
     assert "rmdir --" in source
+    assert "validate_invocation" in source
+    assert '\nvalidate_invocation\n\nif [ "${1-}" != "--inside" ]' in source
+    inside_body = source[source.index('[ "$#" -eq 2 ] || fail') :]
+    inside_namespace_check = inside_body.index(
+        '[ "$self_namespace" != "$pid1_namespace" ] || fail'
+    )
+    for mutation in (
+        "mount --make-rprivate /",
+        "STATE=$(mktemp -d /tmp/medchat-temporal-live.",
+        'mkdir "$STATE/lower" "$STATE/storage"',
+    ):
+        assert inside_namespace_check < inside_body.index(mutation)
+    namespace_check = source.index(
+        '[ "$self_namespace" != "$pid1_namespace" ] || fail'
+    )
+    assert namespace_check < source.index("mount --make-rprivate /")
+    assert namespace_check < source.index(
+        "mktemp -d /tmp/medchat-temporal-live."
+    )
     assert source.index("/usr/bin/unshare --mount --fork") < source.index(
         "mount --bind / "
     )
     assert source.index("/proc/self/ns/mnt") < source.index(
         "mktemp -d /tmp/medchat-temporal-live."
     )
-    merged_unmount = source.index('umount "$STATE/storage/merged"')
-    storage_unmount = source.index('umount "$STATE/storage"')
-    lower_unmount = source.index('umount "$STATE/lower"')
-    assert merged_unmount < storage_unmount < lower_unmount
     assert source.index("cleanup_failed") < source.index('rmdir -- "$STATE/lower"')
+    boundaries = (
+        "/etc/systemd/system",
+        "/usr/lib/medchat",
+        "/usr/libexec/medchat",
+        "/run/medchat-temporal-worker",
+    )
+    for boundary in boundaries:
+        assert boundary in source
+    assert 'findmnt -n -o FSTYPE --target "$STATE/storage"' in source
+    assert '"$STATE/storage/boundaries/run-medchat-temporal-worker/source"' in source
+    assert 'mountpoint -q "$boundary_target"' in source
+    assert 'findmnt -n -o TARGET --target "$boundary_target"' in source
+    assert 'stat -c "%d:%i" -- "$boundary_source"' in source
+    assert 'stat -c "%d:%i" -- "$boundary_target"' in source
+    assert source.count(
+        '    mount --bind "$boundary_source" "$boundary_target"\n'
+    ) == 1
+    assert source.count(
+        '    verify_boundary "$boundary_source" "$boundary_target"\n'
+    ) == 1
+    cleanup_targets = [
+        'unmount_checked "$STATE/storage/merged/run/medchat-temporal-worker"',
+        'unmount_checked "$STATE/storage/merged/usr/libexec/medchat"',
+        'unmount_checked "$STATE/storage/merged/usr/lib/medchat"',
+        'unmount_checked "$STATE/storage/merged/etc/systemd/system"',
+        'unmount_checked "$STATE/storage/merged"',
+        'unmount_checked "$STATE/storage"',
+        'unmount_checked "$STATE/lower"',
+    ]
+    assert [source.index(value) for value in cleanup_targets] == sorted(
+        source.index(value) for value in cleanup_targets
+    )
+    assert (
+        '    if mounted "$target"; then\n'
+        '        unmount_failed=1\n'
+        "    fi\n"
+    ) in source
+    assert [
+        line.strip()
+        for line in source.splitlines()
+        if line.strip().startswith("rmdir ")
+    ] == [
+        'rmdir -- "$STATE/lower"',
+        'rmdir -- "$STATE/storage"',
+        'rmdir -- "$STATE"',
+    ]
+
+
+def test_temporal_live_runner_missing_opt_in_rejects_without_mount() -> None:
+    shell = shell_executable()
+    environment = os.environ.copy()
+    environment.pop("MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS", None)
+    for arguments in ((), ("--inside", "/")):
+        result = subprocess.run(
+            [str(shell), shell_path(shell, LIVE_INSTALL_RUNNER), *arguments],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert result.stdout == ""
+        assert result.stderr == (
+            "temporal_live_install_isolated=failed code=isolation_unavailable\n"
+        )
+
+
+def test_temporal_live_runner_direct_inside_nonroot_rejects_without_mount() -> None:
+    shell = shell_executable()
+    identity = subprocess.run(
+        [str(shell), "-c", "id -u"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    ).stdout.strip()
+    if identity == "0":
+        pytest.skip("non-root shell is required for the safe direct-inside probe")
+    environment = os.environ.copy()
+    environment["MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS"] = "1"
+    result = subprocess.run(
+        [
+            str(shell),
+            shell_path(shell, LIVE_INSTALL_RUNNER),
+            "--inside",
+            "/",
+        ],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert result.stderr == (
+        "temporal_live_install_isolated=failed code=isolation_unavailable\n"
+    )
+
+
+def test_temporal_live_runner_direct_inside_rejects_same_namespace_before_mutation(
+    tmp_path: Path,
+) -> None:
+    repository = _native_posix_repository(require_root=True)
+    runner = tmp_path / "runner.sh"
+    marker = tmp_path / "mutation-reached"
+    source = LIVE_INSTALL_RUNNER.read_text(encoding="utf-8")
+    anchor = '[ "$self_namespace" != "$pid1_namespace" ] || fail\n'
+    assert source.count(anchor) == 1
+    runner.write_text(
+        source.replace(anchor, anchor + f"printf reached > '{marker}'\n"),
+        encoding="utf-8",
+        newline="\n",
+    )
+    runner.chmod(0o755)
+    environment = os.environ.copy()
+    environment["MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS"] = "1"
+    result = subprocess.run(
+        ["sh", str(runner), "--inside", repository],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert result.stderr == (
+        "temporal_live_install_isolated=failed code=isolation_unavailable\n"
+    )
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("fault", ["missing-bind", "source-mismatch"])
+def test_temporal_live_runner_rejects_unverified_boundary_before_install(
+    tmp_path: Path,
+    fault: str,
+) -> None:
+    _native_posix_repository(require_root=True)
+    if os.environ.get("MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS") != "1":
+        pytest.skip("isolated live-root rejection tests require explicit opt-in")
+    runner = tmp_path / "tests" / "runner.sh"
+    runner.parent.mkdir()
+    shutil.copytree(ROOT / "deployment", tmp_path / "deployment")
+    reached = tmp_path / "install-reached"
+    state_record = tmp_path / "state-path"
+    source = LIVE_INSTALL_RUNNER.read_text(encoding="utf-8")
+    bind_anchor = '    mount --bind "$boundary_source" "$boundary_target"\n'
+    verify_anchor = '    verify_boundary "$boundary_source" "$boundary_target"\n'
+    install_anchor = 'chroot "$STATE/storage/merged" /bin/sh -c \\\n'
+    state_anchor = 'case "$STATE" in /tmp/medchat-temporal-live.*) ;; *) fail ;; esac\n'
+    assert source.count(bind_anchor) == 1
+    assert source.count(verify_anchor) == 1
+    assert source.count(install_anchor) == 1
+    assert source.count(state_anchor) == 1
+    if fault == "missing-bind":
+        replacement = (
+            '    if [ "$boundary_relative" != "etc/systemd/system" ]; then\n'
+            + bind_anchor
+            + "    fi\n"
+        )
+        source = source.replace(bind_anchor, replacement)
+    else:
+        source = source.replace(
+            verify_anchor,
+            '    if [ "$boundary_relative" = "etc/systemd/system" ]; then\n'
+            '        boundary_source="$STATE/storage/boundaries/usr-lib-medchat"\n'
+            "    fi\n"
+            + verify_anchor,
+        )
+    source = source.replace(
+        install_anchor,
+        f"printf reached > '{reached}'\n" + install_anchor,
+    )
+    source = source.replace(
+        state_anchor,
+        state_anchor + f"printf '%s\\n' \"$STATE\" > '{state_record}'\n",
+    )
+    runner.write_text(source, encoding="utf-8", newline="\n")
+    runner.chmod(0o755)
+    result = subprocess.run(
+        ["sh", str(runner)],
+        cwd=ROOT,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert result.stderr == (
+        "temporal_live_install_isolated=failed code=isolation_unavailable\n"
+    )
+    assert not reached.exists()
+    state_path = Path(state_record.read_text(encoding="utf-8").strip())
+    assert not state_path.exists()
 
 
 def test_temporal_worker_live_root_validation_is_opt_in_and_isolated() -> None:
