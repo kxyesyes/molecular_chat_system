@@ -882,7 +882,9 @@ def test_postgres_tool_leaf_open_is_descriptor_relative_and_nofollow(
     trusted = object.__new__(postgres_backup.TrustedPostgresBinDirectory)
     trusted.fd = 91
     nofollow = getattr(os, "O_NOFOLLOW", 0) or 0x20000
+    path_only = getattr(os, "O_PATH", 0) or 0x400000
     monkeypatch.setattr(postgres_backup, "_NOFOLLOW", nofollow)
+    monkeypatch.setattr(postgres_backup, "_PATH", path_only, raising=False)
     monkeypatch.setattr(postgres_backup.os, "open", reject_symlink)
 
     with pytest.raises(postgres_backup.PostgresBackupError) as raised:
@@ -892,6 +894,42 @@ def test_postgres_tool_leaf_open_is_descriptor_relative_and_nofollow(
     assert opened[0][0] == "psql"
     assert opened[0][2] == 91
     assert opened[0][1] & nofollow
+    assert opened[0][1] & path_only
+
+
+def test_postgres_tool_leaf_open_fallback_is_nonblocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened: list[int] = []
+    nonblock = getattr(os, "O_NONBLOCK", 0) or 0x4000
+    noctty = getattr(os, "O_NOCTTY", 0) or 0x8000
+    nofollow = getattr(os, "O_NOFOLLOW", 0) or 0x20000
+
+    def reject_leaf(
+        _name: str,
+        flags: int,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        assert dir_fd == 92
+        opened.append(flags)
+        raise OSError(errno.ENXIO, "redacted")
+
+    trusted = object.__new__(postgres_backup.TrustedPostgresBinDirectory)
+    trusted.fd = 92
+    monkeypatch.setattr(postgres_backup, "_PATH", 0)
+    monkeypatch.setattr(postgres_backup, "_NONBLOCK", nonblock)
+    monkeypatch.setattr(postgres_backup, "_NOCTTY", noctty)
+    monkeypatch.setattr(postgres_backup, "_NOFOLLOW", nofollow)
+    monkeypatch.setattr(postgres_backup.os, "open", reject_leaf)
+
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        trusted.open_tool("psql")
+
+    assert raised.value.code == "output_untrusted"
+    assert opened[0] & nonblock
+    assert opened[0] & noctty
+    assert opened[0] & nofollow
 
 
 @pytest.mark.skipif(os.name == "posix", reason="non-POSIX fail-closed contract")
@@ -1071,6 +1109,47 @@ def test_postgres_tool_leaf_rejects_symlink_and_name_replacement(
             tool.close()
     finally:
         trusted.close()
+
+
+@requires_posix_descriptor_io
+def test_postgres_tool_fifo_without_writer_fails_quickly_before_spawn(
+    postgres_trusted_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not hasattr(os, "mkfifo") or not hasattr(signal, "setitimer"):
+        pytest.skip("POSIX FIFO and interval timer support required")
+    postgres_bin = postgres_trusted_tmp_path / "postgres-bin"
+    postgres_bin.mkdir(mode=0o700)
+    tool = postgres_bin / "psql"
+    os.mkfifo(tool, mode=0o700)
+    spawned = False
+
+    def unexpected_spawn(*_args: object, **_kwargs: object) -> None:
+        nonlocal spawned
+        spawned = True
+
+    def interrupt_blocked_open(_signal: int, _frame: object) -> None:
+        raise TimeoutError("FIFO tool open blocked")
+
+    monkeypatch.setattr(postgres_backup.subprocess, "Popen", unexpected_spawn)
+    previous_handler = signal.signal(signal.SIGALRM, interrupt_blocked_open)
+    signal.setitimer(signal.ITIMER_REAL, 2.0)
+    try:
+        started = time.monotonic()
+        with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+            postgres_backup.run_command(
+                ["psql"],
+                environment={"PATH": os.fspath(postgres_bin)},
+                timeout=1.0,
+            )
+        elapsed = time.monotonic() - started
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+    assert raised.value.code == "output_untrusted"
+    assert elapsed < 1.0
+    assert not spawned
 
 
 @requires_posix_descriptor_io

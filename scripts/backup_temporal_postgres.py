@@ -40,6 +40,9 @@ _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _BINARY = getattr(os, "O_BINARY", 0)
+_PATH = getattr(os, "O_PATH", 0)
+_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_NOCTTY = getattr(os, "O_NOCTTY", 0)
 
 
 class PostgresBackupError(RuntimeError):
@@ -323,9 +326,22 @@ class TrustedPostgresBinDirectory:
             raise PostgresBackupError("tool_failed")
         descriptor = -1
         try:
+            if _PATH:
+                open_flags = _PATH | _NOFOLLOW | _CLOEXEC
+            else:
+                if not _NONBLOCK or not _NOCTTY or not _NOFOLLOW:
+                    raise PostgresBackupError("output_untrusted")
+                open_flags = (
+                    os.O_RDONLY
+                    | _NONBLOCK
+                    | _NOCTTY
+                    | _NOFOLLOW
+                    | _CLOEXEC
+                    | _BINARY
+                )
             descriptor = os.open(
                 name,
-                os.O_RDONLY | _NOFOLLOW | _CLOEXEC | _BINARY,
+                open_flags,
                 dir_fd=self.fd,
             )
             opened = os.fstat(descriptor)
