@@ -316,21 +316,29 @@ MEDCHAT_NGINX_CONFIG=deployment/nginx-medchat.conf
 
 ## 8. 权限配置
 
-建议创建独立用户运行服务：
+建议创建独立用户运行服务，但不要把整个 `/opt/medchat` 交给服务用户：
 
 ```bash
 sudo useradd -r -m -d /opt/medchat medchat
-sudo chown -R medchat:medchat /opt/medchat
 ```
 
-确保这些目录可写：
+已验证的发布源码 `/opt/medchat/molecular_chat_system`、Conda 环境
+`/opt/conda/envs/medchat` 以及安装后的 systemd、helper 和 tmpfiles 资产必须由
+`root:root` 持有并保持 `go-w`。源码和 Conda 不得由 `medchat` 用户、group 或
+other 写入。
+
+Temporal docking worker 只允许以下四个运行目录由 `medchat` 持有，且权限固定为
+`0700`：
 
 ```bash
-chmod -R u+rwX /opt/medchat/molecular_chat_system/data
-chmod -R u+rwX /opt/medchat/molecular_chat_system/logs
-chmod -R u+rwX /opt/medchat/molecular_chat_system/temp_docking
-chmod -R u+rwX /opt/medchat/molecular_chat_system/scratch
+sudo install -d -o medchat -g medchat -m 0700 /opt/medchat/molecular_chat_system/scratch
+sudo install -d -o medchat -g medchat -m 0700 /opt/medchat/molecular_chat_system/scratch/task_inputs
+sudo install -d -o medchat -g medchat -m 0700 /opt/medchat/molecular_chat_system/scratch/temporal_backups
+sudo install -d -o medchat -g medchat -m 0700 /opt/medchat/molecular_chat_system/temp_docking
 ```
+
+不要递归放宽源码树权限。Web 服务需要的其他可写目录应按其独立运行契约逐项配置，
+不能扩大 Temporal worker 的写边界。
 
 ## 9. 启动前健康检查
 
@@ -420,6 +428,61 @@ sudo systemctl restart medchat
 sudo systemctl stop medchat
 sudo journalctl -u medchat -f
 ```
+
+### 11.1 Temporal docking worker 的可信安装
+
+Docker/Compose 基础设施由 operator 管理，并且必须先启动和确认健康；systemd unit
+不会启动、重启或修改 Docker/Compose：
+
+```bash
+cd /opt/medchat/molecular_chat_system/deployment/temporal
+docker compose --env-file /etc/medchat/temporal.env up -d
+```
+
+先验证 release commit 和 SHA256，再把相同 release 放入 root-owned、`go-w` 的发布
+暂存目录。可以先用非特权 DESTDIR 检查固定目标、权限和清单：
+
+```bash
+cd /usr/local/src/medchat-release
+sh deployment/install-temporal-worker.sh --destdir "$PWD/worker-install-preview"
+cd worker-install-preview
+sha256sum -c usr/share/medchat/temporal-worker-assets.sha256
+```
+
+只有 `/usr/local/src/medchat-release` 及其父目录和安装源文件均为 `root:root`、`go-w`
+后，才执行 live install。安装器只复制 unit、独立 helper 和 tmpfiles 配置；不会创建
+生产环境文件，也不会 reload、enable 或启动服务：
+
+```bash
+cd /usr/local/src/medchat-release
+sudo deployment/install-temporal-worker.sh --destdir /
+```
+
+由 operator 从 `deployment/temporal-worker.env.example` 手工创建专用环境文件：
+
+```bash
+sudo install -d -o root -g root -m 0755 /etc/medchat
+sudo install -o root -g root -m 0600 deployment/temporal-worker.env.example /etc/medchat/temporal-worker.env
+sudoedit /etc/medchat/temporal-worker.env
+```
+
+`/etc/medchat/temporal-worker.env` 必须保持 `root:root`、regular、非 symlink、`0600`，
+并且 no secrets：不得写入 API key、token、password、loader/runtime 变量或 Web 配置。
+启动 worker 前先 reload unit；首次启用 worker 会通过依赖启动 prepare：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now medchat-temporal-worker.service
+```
+
+每次修改专用环境文件后，必须先重跑 root trust preparation，再重启非特权 worker：
+
+```bash
+sudo systemctl restart medchat-temporal-worker-prepare.service
+sudo systemctl restart medchat-temporal-worker.service
+```
+
+不要只重启 worker 后假定旧的 prepare 验证仍然覆盖新配置。
 
 ## 12. nginx 反向代理
 

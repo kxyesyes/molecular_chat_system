@@ -11,6 +11,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER_PATH = ROOT / "deployment" / "libexec" / "validate-temporal-worker-env.py"
+SYSTEMD_INTEGRATION_PATH = ROOT / "tests" / "test_temporal_systemd_integration.py"
+DEPLOYMENT_README = ROOT / "deployment" / "README.md"
 ALLOWED_KEYS = {
     "MEDCHAT_TASK_BACKEND",
     "MEDCHAT_TEMPORAL_CANARY_PERCENT",
@@ -233,6 +235,47 @@ def test_descriptor_validator_rejects_relative_paths_before_open(helper) -> None
     with pytest.raises(helper.TrustBoundaryError) as raised:
         helper.validate_environment_file(Path("private/temporal-worker.env"))
     assert raised.value.code == "environment_path_invalid"
+
+
+def test_systemd_integration_cleanup_has_no_numeric_pid_signal_path() -> None:
+    source = SYSTEMD_INTEGRATION_PATH.read_text(encoding="utf-8")
+    cleanup_source = source[
+        source.index("def _control_group"):source.index("def _start_process_tree")
+    ]
+    assert "os.kill(" not in cleanup_source
+    assert "ControlGroup" in cleanup_source
+    assert "cgroup.procs" in cleanup_source
+    assert '"systemctl", "stop"' in cleanup_source
+    assert '"systemctl", "kill"' in cleanup_source
+    assert '"systemctl", "reset-failed"' in cleanup_source
+
+
+def test_deployment_docs_prescribe_trusted_worker_install_and_narrow_ownership() -> None:
+    documentation = DEPLOYMENT_README.read_text(encoding="utf-8")
+    assert "chown -R medchat:medchat /opt/medchat" not in documentation
+    assert "deployment/install-temporal-worker.sh --destdir" in documentation
+    assert "/opt/medchat/molecular_chat_system" in documentation
+    assert "/opt/conda/envs/medchat" in documentation
+    assert "root:root" in documentation
+    assert "go-w" in documentation
+    for runtime_directory in (
+        "/opt/medchat/molecular_chat_system/scratch",
+        "/opt/medchat/molecular_chat_system/scratch/task_inputs",
+        "/opt/medchat/molecular_chat_system/scratch/temporal_backups",
+        "/opt/medchat/molecular_chat_system/temp_docking",
+    ):
+        assert (
+            f"install -d -o medchat -g medchat -m 0700 {runtime_directory}"
+            in documentation
+        )
+    assert "/etc/medchat/temporal-worker.env" in documentation
+    assert "temporal-worker.env.example" in documentation
+    assert "0600" in documentation
+    assert "no secrets" in documentation.lower()
+    assert "systemctl restart medchat-temporal-worker-prepare.service" in documentation
+    assert "systemctl restart medchat-temporal-worker.service" in documentation
+    assert "Docker/Compose" in documentation
+    assert "operator" in documentation.lower()
 
 
 def test_cli_rejects_path_argument_without_echo_or_traceback() -> None:
