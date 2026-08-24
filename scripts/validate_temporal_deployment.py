@@ -23,6 +23,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.task_runtime.deployment_contract import (  # noqa: E402
+    TEMPORAL_RELEASE_BLOCKER_DURATIONS,
+)
+
 MAX_ASSET_BYTES = 4 * 1024 * 1024
 COMMAND_TIMEOUT_SECONDS = 60.0
 _SECRET_FILE_KEYS = (
@@ -165,19 +169,7 @@ _SERVICE_ENTRYPOINTS = {
     "temporal-namespace": ["/opt/medchat/temporal-namespace-setup.sh"],
     "temporal-exporter-role-sync": ["/opt/medchat/010-exporter.sh"],
 }
-_ALERT_DURATIONS = {
-    "TemporalWorkerHeartbeatStale": "60s",
-    "TemporalQueueBacklogGrowing": "10m",
-    "TemporalWorkflowStartUnexpectedErrors": "5m",
-    "TemporalDuplicateVinaExecution": None,
-    "TemporalMultipleTerminalEvents": None,
-    "TemporalArtifactValidationFailure": None,
-    "TemporalDockingP95TooHigh": "10m",
-    "TemporalDockingP95BaselineMissing": None,
-    "TemporalRuntimeFailureRateHigh": "10m",
-    "TemporalPostgresUnavailable": "60s",
-    "TemporalBackupVerificationStale": "15m",
-}
+_ALERT_DURATIONS = TEMPORAL_RELEASE_BLOCKER_DURATIONS
 
 
 class DeploymentCommandRunner:
@@ -1367,6 +1359,12 @@ def validate_deployment(
                 "check",
                 "rules",
                 "deployment/temporal/prometheus/rules/medchat-temporal.yml",
+            ],
+            [
+                "promtool",
+                "test",
+                "rules",
+                "deployment/temporal/prometheus/tests/medchat-temporal.test.yml",
             ],
         )
         passed = all(

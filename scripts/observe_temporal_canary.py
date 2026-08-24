@@ -36,6 +36,9 @@ from src.task_runtime.config import (  # noqa: E402
     TaskRuntimeConfig,
     read_temporal_backup_state,
 )
+from src.task_runtime.deployment_contract import (  # noqa: E402
+    TEMPORAL_RELEASE_BLOCKER_NAMES,
+)
 from src.task_runtime.models import (  # noqa: E402
     TaskStatus,
     canonical_artifact_type,
@@ -67,20 +70,7 @@ BACKUP_MAX_AGE = timedelta(hours=24)
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _ARTIFACT_SHA256 = re.compile(r"[0-9A-Fa-f]{64}\Z")
 _SAFE_TASK_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,254}\Z")
-_BLOCKING_ALERT_NAMES = frozenset(
-    {
-        "TemporalWorkerHeartbeatStale",
-        "TemporalQueueBacklogGrowing",
-        "TemporalWorkflowStartFailures",
-        "TemporalDuplicateVinaExecution",
-        "TemporalMultipleTerminalEvents",
-        "TemporalArtifactValidationFailure",
-        "TemporalDockingP95TooHigh",
-        "TemporalRuntimeFailureRateHigh",
-        "TemporalPostgresUnavailable",
-        "TemporalBackupVerificationStale",
-    }
-)
+_BLOCKING_ALERT_NAMES = TEMPORAL_RELEASE_BLOCKER_NAMES
 PROMETHEUS_QUERIES = {
     "worker_ready": "max(medchat_temporal_worker_ready)",
     "worker_age_seconds": (

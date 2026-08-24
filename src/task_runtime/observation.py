@@ -11,6 +11,7 @@ import json
 import math
 from typing import Any
 
+from .deployment_contract import TEMPORAL_RELEASE_BLOCKER_NAMES
 from .errors import TaskErrorCode
 
 
@@ -19,20 +20,7 @@ _TERMINAL_STATUSES = ("succeeded", "failed", "canceled", "timed_out")
 _KNOWN_ERROR_CODES = frozenset(code.value for code in TaskErrorCode)
 _MAX_SAMPLES = 10_000
 _MAX_IDENTIFIER_BYTES = 4096
-_BLOCKING_ALERT_NAMES = frozenset(
-    {
-        "TemporalWorkerHeartbeatStale",
-        "TemporalQueueBacklogGrowing",
-        "TemporalWorkflowStartFailures",
-        "TemporalDuplicateVinaExecution",
-        "TemporalMultipleTerminalEvents",
-        "TemporalArtifactValidationFailure",
-        "TemporalDockingP95TooHigh",
-        "TemporalRuntimeFailureRateHigh",
-        "TemporalPostgresUnavailable",
-        "TemporalBackupVerificationStale",
-    }
-)
+_BLOCKING_ALERT_NAMES = TEMPORAL_RELEASE_BLOCKER_NAMES
 
 
 def _finite_number(value: object, name: str, *, minimum: float | None = None) -> float:

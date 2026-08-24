@@ -3732,8 +3732,26 @@ def test_observer_prometheus_unavailable_is_partial_not_failed(
     assert "RAW_PROM_ERROR_CANARY" not in json.dumps(report)
 
 
-def test_observer_firing_allowlisted_alert_is_failed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "alert_name",
+    [
+        "TemporalWorkerHeartbeatStale",
+        "TemporalQueueBacklogGrowing",
+        "TemporalWorkflowStartUnexpectedErrors",
+        "TemporalDuplicateVinaExecution",
+        "TemporalMultipleTerminalEvents",
+        "TemporalArtifactValidationFailure",
+        "TemporalDockingP95TooHigh",
+        "TemporalDockingP95BaselineMissing",
+        "TemporalRuntimeFailureRateHigh",
+        "TemporalPostgresUnavailable",
+        "TemporalBackupVerificationStale",
+    ],
+)
+def test_observer_every_release_blocker_alert_is_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    alert_name: str,
 ) -> None:
     now = datetime.now(timezone.utc)
     store, staging, marker = _observer_fixture(tmp_path, now)
@@ -3741,7 +3759,7 @@ def test_observer_firing_allowlisted_alert_is_failed(
 
     def firing(endpoint: str, query: str | None = None):
         if endpoint == "alerts":
-            return _prom_alerts("TemporalArtifactValidationFailure", "PrivateAlertCanary")
+            return _prom_alerts(alert_name, "PrivateAlertCanary")
         return _passed_prometheus(endpoint, query)
 
     report = observer.collect_observation(
@@ -3753,7 +3771,7 @@ def test_observer_firing_allowlisted_alert_is_failed(
     )
 
     assert report["status"] == "failed"
-    assert report["blocking_alerts"] == ["TemporalArtifactValidationFailure"]
+    assert report["blocking_alerts"] == [alert_name]
     assert "PrivateAlertCanary" not in json.dumps(report)
 
 
@@ -4342,8 +4360,14 @@ def test_deployment_validator_passes_only_executed_host_checks(
 
     assert report["status"] == "passed"
     assert all(check["status"] == "passed" for check in report["checks"].values())
-    assert len(calls) == 4
+    assert len(calls) == 5
     assert calls[0][0][:2] == ("docker", "compose")
+    assert calls[3][0] == (
+        "promtool",
+        "test",
+        "rules",
+        "deployment/temporal/prometheus/tests/medchat-temporal.test.yml",
+    )
     assert calls[-1][0] == (
         "systemd-analyze",
         "verify",
