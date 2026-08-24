@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 from types import SimpleNamespace
+from typing import Callable
 import urllib.error
 
 import pytest
@@ -33,6 +34,19 @@ OBSERVE_SCRIPT = PROJECT_ROOT / "scripts" / "observe_temporal_canary.py"
 PYTHON = sys.executable
 BACKUP_SCRIPT = PROJECT_ROOT / "scripts" / "backup_temporal_postgres.py"
 RESTORE_SCRIPT = PROJECT_ROOT / "scripts" / "restore_temporal_postgres.py"
+POSIX_DESCRIPTOR_IO = (
+    os.name == "posix"
+    and bool(getattr(os, "O_DIRECTORY", 0))
+    and bool(getattr(os, "O_NOFOLLOW", 0))
+    and os.open in os.supports_dir_fd
+    and os.stat in os.supports_dir_fd
+    and os.stat in os.supports_follow_symlinks
+    and os.unlink in os.supports_dir_fd
+)
+requires_posix_descriptor_io = pytest.mark.skipif(
+    not POSIX_DESCRIPTOR_IO,
+    reason="POSIX descriptor-relative PostgreSQL operator I/O required",
+)
 
 
 class _PostgresRunner:
@@ -41,12 +55,20 @@ class _PostgresRunner:
         *,
         target_exists: bool = False,
         missing_table: str | None = None,
-        major: int = 16,
+        server_major: int = 16,
+        client_major: int = 15,
+        command_hook: Callable[[tuple[str, ...], int | None, int | None], None]
+        | None = None,
     ) -> None:
         self.target_exists = target_exists
         self.missing_table = missing_table
-        self.major = major
-        self.calls: list[tuple[tuple[str, ...], dict[str, str], float, bool]] = []
+        self.server_major = server_major
+        self.client_major = client_major
+        self.command_hook = command_hook
+        self.calls: list[
+            tuple[tuple[str, ...], dict[str, str], float, bool, int | None, int | None]
+        ] = []
+        self.restore_inputs: list[bytes] = []
 
     def __call__(
         self,
@@ -55,17 +77,44 @@ class _PostgresRunner:
         environment: dict[str, str],
         timeout: float,
         capture_output: bool = False,
+        stdin_fd: int | None = None,
+        stdout_fd: int | None = None,
     ) -> SimpleNamespace:
-        self.calls.append((tuple(argv), dict(environment), timeout, capture_output))
+        self.calls.append(
+            (
+                tuple(argv),
+                dict(environment),
+                timeout,
+                capture_output,
+                stdin_fd,
+                stdout_fd,
+            )
+        )
         executable = argv[0]
+        if self.command_hook is not None:
+            self.command_hook(tuple(argv), stdin_fd, stdout_fd)
         if argv[1:] == ["--version"]:
             return SimpleNamespace(
                 returncode=0,
-                stdout=f"{executable} (PostgreSQL) {self.major}.4\n".encode("ascii"),
+                stdout=f"{executable} (PostgreSQL) {self.client_major}.4\n".encode(
+                    "ascii"
+                ),
+            )
+        if executable == "psql" and "server_version_num" in argv[-1]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=f"{self.server_major}\n".encode("ascii"),
             )
         if executable == "pg_dump":
-            partial = Path(argv[argv.index("--file") + 1])
-            partial.write_bytes(b"PGDMP\x01temporal-logical-backup")
+            assert stdout_fd is not None
+            os.write(stdout_fd, b"PGDMP\x01temporal-logical-backup")
+            return SimpleNamespace(returncode=0, stdout=b"")
+        if executable == "pg_restore":
+            assert stdin_fd is not None
+            original_offset = os.lseek(stdin_fd, 0, os.SEEK_CUR)
+            os.lseek(stdin_fd, 0, os.SEEK_SET)
+            self.restore_inputs.append(os.read(stdin_fd, 1024 * 1024))
+            os.lseek(stdin_fd, original_offset, os.SEEK_SET)
             return SimpleNamespace(returncode=0, stdout=b"")
         if executable == "psql" and "pg_database" in argv[-1]:
             return SimpleNamespace(
@@ -83,7 +132,11 @@ class _PostgresRunner:
 
     @property
     def argv(self) -> list[str]:
-        return [argument for call, _environment, _timeout, _capture in self.calls for argument in call]
+        return [
+            argument
+            for call, _environment, _timeout, _capture, _stdin, _stdout in self.calls
+            for argument in call
+        ]
 
 
 def _backup_fixture(
@@ -108,6 +161,7 @@ def _backup_fixture(
     return manifest_path, manifest, selected_runner
 
 
+@requires_posix_descriptor_io
 def test_postgres_backup_uses_child_environment_and_atomic_canonical_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -135,7 +189,7 @@ def test_postgres_backup_uses_child_environment_and_atomic_canonical_manifest(
         if call[0][0] == "pg_dump" and call[0][1:] != ("--version",)
     ]
     assert len(database_calls) == 1
-    argv, environment, timeout, capture = database_calls[0]
+    argv, environment, timeout, capture, stdin_fd, stdout_fd = database_calls[0]
     assert argv == (
         "pg_dump",
         "--format=custom",
@@ -147,14 +201,22 @@ def test_postgres_backup_uses_child_environment_and_atomic_canonical_manifest(
         "5433",
         "--username",
         "temporal",
-        "--file",
-        str(tmp_path / ".temporal-20260824T123000Z.dump.partial"),
         "temporal",
     )
     assert environment["PGPASSWORD"] == password
     assert "TEMPORAL_POSTGRES_PASSWORD" not in environment
     assert timeout == postgres_backup.BACKUP_TIMEOUT_SECONDS
     assert capture is False
+    assert stdin_fd is None
+    assert stdout_fd is not None
+    assert not any(call[0][1:] == ("--version",) for call in runner.calls)
+    server_queries = [
+        call[0]
+        for call in runner.calls
+        if call[0][0] == "psql" and "server_version_num" in call[0][-1]
+    ]
+    assert len(server_queries) == 1
+    assert server_queries[0][server_queries[0].index("--dbname") + 1] == "temporal"
     assert not list(tmp_path.glob("*.partial"))
     assert not list(tmp_path.glob(".*.partial"))
 
@@ -198,7 +260,33 @@ def test_postgres_backup_rejects_noncanonical_identifiers_before_subprocess(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_postgres_backup_rejects_missing_password_and_existing_outputs(
+def test_postgres_internal_partial_leaf_is_safe_but_traversal_is_rejected() -> None:
+    assert postgres_backup._safe_leaf(".manifest.json.partial") == (
+        ".manifest.json.partial"
+    )
+    for unsafe in (".", "..", "../manifest", "dir/manifest", "\\manifest"):
+        with pytest.raises(postgres_backup.PostgresBackupError):
+            postgres_backup._safe_leaf(unsafe)
+
+
+def test_postgres_major_comes_from_server_query_not_client_version() -> None:
+    runner = _PostgresRunner(server_major=16, client_major=14)
+    major = postgres_backup.server_major(
+        runner=runner,
+        environment={"PATH": os.defpath, "PGPASSWORD": "child-only"},
+        connection=["--host", "127.0.0.1", "--port", "5433", "--username", "temporal"],
+        database="temporal",
+    )
+    assert major == 16
+    assert len(runner.calls) == 1
+    command = runner.calls[0][0]
+    assert command[0] == "psql"
+    assert "server_version_num" in command[-1]
+    assert command[command.index("--dbname") + 1] == "temporal"
+    assert command[1:] != ("--version",)
+
+
+def test_postgres_backup_rejects_missing_password(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -217,6 +305,14 @@ def test_postgres_backup_rejects_missing_password_and_existing_outputs(
         )
     assert raised.value.code == "password_missing"
     assert runner.calls == []
+
+
+@requires_posix_descriptor_io
+def test_postgres_backup_rejects_existing_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _PostgresRunner()
 
     monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
     existing = tmp_path / "temporal-20260824T000000Z.dump"
@@ -254,6 +350,7 @@ def test_postgres_backup_rejects_missing_password_and_existing_outputs(
     assert runner.calls == []
 
 
+@requires_posix_descriptor_io
 def test_postgres_backup_rejects_symlink_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -331,11 +428,302 @@ def test_postgres_cli_errors_are_stable_and_redacted(
     captured = capsys.readouterr()
     assert result == 1
     assert captured.out == ""
-    assert captured.err == "temporal_postgres_restore=failed code=manifest_invalid\n"
+    assert captured.err == "temporal_postgres_restore=failed code=manifest_untrusted\n"
     assert password not in captured.out + captured.err
     assert str(tmp_path) not in captured.out + captured.err
 
 
+@pytest.mark.skipif(POSIX_DESCRIPTOR_IO, reason="non-POSIX fail-closed contract")
+def test_postgres_backup_fails_closed_without_descriptor_relative_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
+    runner = _PostgresRunner()
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        postgres_backup.create_backup(
+            output_dir=tmp_path,
+            manifest_output=tmp_path / "manifest.json",
+            database="temporal",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            runner=runner,
+            now=datetime(2026, 8, 24, tzinfo=timezone.utc),
+        )
+    assert raised.value.code == "output_untrusted"
+    assert runner.calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_postgres_restore_closes_trusted_directory_when_manifest_open_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instances: list[SimpleNamespace] = []
+
+    class FakeDirectory:
+        def __init__(self, _path: Path) -> None:
+            self.fd = 123
+            self.closed = False
+            instances.append(self)
+
+        def close(self) -> None:
+            self.closed = True
+
+    def fail_manifest_open(_parent_fd: int, _name: str, code: str) -> int:
+        raise postgres_restore.PostgresRestoreError(code)
+
+    monkeypatch.setattr(postgres_backup, "TrustedDirectory", FakeDirectory)
+    monkeypatch.setattr(postgres_restore, "_open_regular_at", fail_manifest_open)
+    with pytest.raises(postgres_restore.PostgresRestoreError):
+        postgres_restore._open_backup(tmp_path / "manifest.json")
+    assert len(instances) == 1
+    assert instances[0].closed is True
+
+
+def test_postgres_dump_descriptor_version_rejects_in_place_mutation(
+    tmp_path: Path,
+) -> None:
+    dump_path = tmp_path / "dump"
+    dump_path.write_bytes(b"original")
+    descriptor = os.open(dump_path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    try:
+        expected = postgres_backup._full_identity(os.fstat(descriptor))
+        dump_path.write_bytes(b"mutated-content")
+        with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+            postgres_backup._require_descriptor_version(
+                descriptor, expected, code="dump_invalid"
+            )
+        assert raised.value.code == "dump_invalid"
+    finally:
+        os.close(descriptor)
+
+
+def test_postgres_trusted_directory_closes_descriptor_when_identity_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[int] = []
+    monkeypatch.setattr(postgres_backup, "_open_directory_chain", lambda _path: 77)
+    monkeypatch.setattr(postgres_backup.os, "fstat", lambda _fd: (_ for _ in ()).throw(OSError()))
+    monkeypatch.setattr(postgres_backup.os, "close", closed.append)
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        postgres_backup.TrustedDirectory(Path("/trusted"))
+    assert raised.value.code == "output_untrusted"
+    assert closed == [77]
+
+
+@requires_posix_descriptor_io
+def test_postgres_backup_rejects_parent_replacement_without_writing_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    displaced = tmp_path / "displaced"
+    attacked = False
+
+    def replace_parent(
+        argv: tuple[str, ...], _stdin_fd: int | None, _stdout_fd: int | None
+    ) -> None:
+        nonlocal attacked
+        if not attacked and argv[0] == "psql" and "server_version_num" in argv[-1]:
+            output.rename(displaced)
+            output.mkdir()
+            attacked = True
+
+    monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        postgres_backup.create_backup(
+            output_dir=output,
+            manifest_output=output / "manifest.json",
+            database="temporal",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            runner=_PostgresRunner(command_hook=replace_parent),
+            now=datetime(2026, 8, 24, tzinfo=timezone.utc),
+        )
+    assert raised.value.code == "output_untrusted"
+    assert attacked
+    assert list(output.iterdir()) == []
+    assert list(displaced.iterdir()) == []
+
+
+@requires_posix_descriptor_io
+def test_postgres_backup_parent_replaced_after_manifest_publish_rolls_back_both(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "output"
+    manifests = tmp_path / "manifests"
+    displaced = tmp_path / "displaced"
+    output.mkdir()
+    manifests.mkdir()
+    real_atomic_write = postgres_backup._atomic_write_new_at
+
+    def publish_then_replace_output(
+        directory: object,
+        destination_name: str,
+        payload: bytes,
+        *,
+        mode: int = 0o600,
+    ) -> tuple[int, int]:
+        identity = real_atomic_write(
+            directory, destination_name, payload, mode=mode
+        )
+        if destination_name == "manifest.json":
+            output.rename(displaced)
+            output.mkdir()
+        return identity
+
+    monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
+    monkeypatch.setattr(
+        postgres_backup, "_atomic_write_new_at", publish_then_replace_output
+    )
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        postgres_backup.create_backup(
+            output_dir=output,
+            manifest_output=manifests / "manifest.json",
+            database="temporal",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            runner=_PostgresRunner(),
+            now=datetime(2026, 8, 24, tzinfo=timezone.utc),
+        )
+    assert raised.value.code == "output_untrusted"
+    assert list(output.iterdir()) == []
+    assert list(displaced.iterdir()) == []
+    assert list(manifests.iterdir()) == []
+
+
+@requires_posix_descriptor_io
+def test_postgres_backup_dump_mutated_during_manifest_publish_rolls_back_both(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_atomic_write = postgres_backup._atomic_write_new_at
+    dump_path = tmp_path / "temporal-20260824T000000Z.dump"
+
+    def publish_then_mutate_dump(
+        directory: object,
+        destination_name: str,
+        payload: bytes,
+        *,
+        mode: int = 0o600,
+    ) -> tuple[int, int]:
+        identity = real_atomic_write(
+            directory, destination_name, payload, mode=mode
+        )
+        if destination_name == "manifest.json":
+            dump_path.write_bytes(b"same-inode-mutated-dump")
+        return identity
+
+    monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
+    monkeypatch.setattr(
+        postgres_backup, "_atomic_write_new_at", publish_then_mutate_dump
+    )
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        postgres_backup.create_backup(
+            output_dir=tmp_path,
+            manifest_output=tmp_path / "manifest.json",
+            database="temporal",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            runner=_PostgresRunner(),
+            now=datetime(2026, 8, 24, tzinfo=timezone.utc),
+        )
+    assert raised.value.code == "dump_invalid"
+    assert list(tmp_path.iterdir()) == []
+
+
+@requires_posix_descriptor_io
+def test_postgres_backup_partial_replacement_never_becomes_dump(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replacement = b"attacker-controlled-replacement"
+
+    def replace_partial(
+        argv: tuple[str, ...], _stdin_fd: int | None, stdout_fd: int | None
+    ) -> None:
+        if argv[0] != "pg_dump":
+            return
+        assert stdout_fd is not None
+        partial = next(tmp_path.glob(".*.partial"))
+        partial.unlink()
+        partial.write_bytes(replacement)
+
+    monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        postgres_backup.create_backup(
+            output_dir=tmp_path,
+            manifest_output=tmp_path / "manifest.json",
+            database="temporal",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            runner=_PostgresRunner(command_hook=replace_partial),
+            now=datetime(2026, 8, 24, tzinfo=timezone.utc),
+        )
+    assert raised.value.code == "dump_invalid"
+    assert next(tmp_path.glob(".*.partial")).read_bytes() == replacement
+    assert not (tmp_path / "temporal-20260824T000000Z.dump").exists()
+    assert not (tmp_path / "manifest.json").exists()
+
+
+@requires_posix_descriptor_io
+@pytest.mark.parametrize("attack_phase", ["before_restore", "during_restore"])
+def test_postgres_restore_rejects_dump_replaced_after_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attack_phase: str,
+) -> None:
+    manifest_path, manifest, _backup_runner = _backup_fixture(tmp_path, monkeypatch)
+    dump_path = tmp_path / str(manifest["dump_file"])
+    original = dump_path.read_bytes()
+    replacement = b"attacker-dump"
+    attacked = False
+
+    def replace_dump(
+        argv: tuple[str, ...], _stdin_fd: int | None, _stdout_fd: int | None
+    ) -> None:
+        nonlocal attacked
+        selected = (
+            argv[0] == "pg_restore"
+            if attack_phase == "during_restore"
+            else argv[0] == "psql"
+        )
+        if not attacked and selected:
+            dump_path.unlink()
+            dump_path.write_bytes(replacement)
+            attacked = True
+
+    runner = _PostgresRunner(command_hook=replace_dump)
+    with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
+        postgres_restore.verify_restore(
+            manifest_path=manifest_path,
+            source_database="temporal",
+            target_database="temporal_verify",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            runner=runner,
+        )
+    assert raised.value.code == "dump_untrusted"
+    assert attacked
+    if attack_phase == "during_restore":
+        assert runner.restore_inputs == [original]
+    else:
+        assert runner.restore_inputs == []
+    assert dump_path.read_bytes() == replacement
+    assert original != replacement
+    assert not (tmp_path / "latest-verified.json").exists()
+
+
+@requires_posix_descriptor_io
 def test_postgres_restore_validates_and_uses_fixed_isolated_commands(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -379,7 +767,6 @@ def test_postgres_restore_validates_and_uses_fixed_isolated_commands(
         "temporal",
         "--dbname",
         "temporal_verify",
-        str(tmp_path / str(manifest["dump_file"])),
     ) in commands
     assert any(command[0] == "createdb" and command[-1] == "temporal_verify" for command in commands)
     checked_tables = {
@@ -391,6 +778,17 @@ def test_postgres_restore_validates_and_uses_fixed_isolated_commands(
     assert not any(command[0] == "dropdb" for command in commands)
     assert "runtime-secret" not in "\0".join(runner.argv)
     assert all(call[1]["PGPASSWORD"] == "runtime-secret" for call in runner.calls)
+    assert runner.restore_inputs == [(tmp_path / str(manifest["dump_file"])).read_bytes()]
+    assert not any(call[0][1:] == ("--version",) for call in runner.calls)
+    server_query = next(
+        command
+        for command in commands
+        if command[0] == "psql" and "server_version_num" in command[-1]
+    )
+    assert server_query[server_query.index("--dbname") + 1] == "temporal_verify"
+    assert commands.index(server_query) < next(
+        index for index, command in enumerate(commands) if command[0] == "pg_restore"
+    )
 
 
 @pytest.mark.parametrize(
@@ -409,7 +807,8 @@ def test_postgres_restore_rejects_unsafe_database_targets_before_subprocess(
     target: str,
     code: str,
 ) -> None:
-    manifest_path, _manifest, _backup_runner = _backup_fixture(tmp_path, monkeypatch)
+    monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
+    manifest_path = tmp_path / "not-opened.json"
     runner = _PostgresRunner()
     with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
         postgres_restore.verify_restore(
@@ -422,6 +821,25 @@ def test_postgres_restore_rejects_unsafe_database_targets_before_subprocess(
             runner=runner,
         )
     assert raised.value.code == code
+    assert runner.calls == []
+
+
+def test_postgres_restore_maps_invalid_manifest_path_to_stable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
+    runner = _PostgresRunner()
+    with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
+        postgres_restore.verify_restore(
+            manifest_path=Path("invalid\x00manifest.json"),
+            source_database="temporal",
+            target_database="temporal_verify",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            runner=runner,
+        )
+    assert raised.value.code == "manifest_untrusted"
     assert runner.calls == []
 
 
@@ -438,7 +856,8 @@ def test_postgres_restore_rejects_ambiguous_drop_and_time_before_subprocess(
     drop_request: object,
     checked_at: datetime,
 ) -> None:
-    manifest_path, _manifest, _backup_runner = _backup_fixture(tmp_path, monkeypatch)
+    monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
+    manifest_path = tmp_path / "not-opened.json"
     runner = _PostgresRunner()
     with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
         postgres_restore.verify_restore(
@@ -456,6 +875,7 @@ def test_postgres_restore_rejects_ambiguous_drop_and_time_before_subprocess(
     assert runner.calls == []
 
 
+@requires_posix_descriptor_io
 def test_postgres_restore_rejects_hash_size_major_and_noncanonical_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -469,7 +889,7 @@ def test_postgres_restore_rejects_hash_size_major_and_noncanonical_manifest(
         mutated = dict(manifest)
         mutated[field] = value
         manifest_path.write_bytes(postgres_backup.canonical_json(mutated))
-        runner = _PostgresRunner(major=16)
+        runner = _PostgresRunner(server_major=16)
         with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
             postgres_restore.verify_restore(
                 manifest_path=manifest_path,
@@ -481,11 +901,11 @@ def test_postgres_restore_rejects_hash_size_major_and_noncanonical_manifest(
                 runner=runner,
             )
         assert raised.value.code == code
-        assert not any(
-            call[0][0] == "createdb"
-            or (call[0][0] == "pg_restore" and call[0][1:] != ("--version",))
-            for call in runner.calls
-        )
+        assert not any(call[0][0] == "pg_restore" for call in runner.calls)
+        if code == "postgres_major_mismatch":
+            assert any(call[0][0] == "createdb" for call in runner.calls)
+        else:
+            assert not any(call[0][0] == "createdb" for call in runner.calls)
 
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
@@ -519,6 +939,7 @@ def test_postgres_restore_rejects_hash_size_major_and_noncanonical_manifest(
     assert raised.value.code == "manifest_invalid"
 
 
+@requires_posix_descriptor_io
 def test_postgres_restore_existing_target_and_drop_are_fail_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -559,6 +980,7 @@ def test_postgres_restore_existing_target_and_drop_are_fail_closed(
     assert not any(command[-1] == "temporal" for command in drops)
 
 
+@requires_posix_descriptor_io
 def test_postgres_restore_missing_required_table_never_writes_verified_marker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -579,6 +1001,199 @@ def test_postgres_restore_missing_required_table_never_writes_verified_marker(
     assert not (tmp_path / "latest-verified.json").exists()
 
 
+@requires_posix_descriptor_io
+@pytest.mark.parametrize("published_name", ["dump", "manifest"])
+def test_postgres_backup_removes_published_assets_after_directory_fsync_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    published_name: str,
+) -> None:
+    monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
+    dump_name = "temporal-20260824T000000Z.dump"
+    manifest_name = "manifest.json"
+    selected = dump_name if published_name == "dump" else manifest_name
+    real_fsync = postgres_backup._fsync_directory_fd
+    failed = False
+
+    def fail_after_replace(parent_fd: int) -> None:
+        nonlocal failed
+        try:
+            os.stat(selected, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            real_fsync(parent_fd)
+            return
+        if not failed:
+            failed = True
+            raise OSError("injected post-replace fsync failure")
+        real_fsync(parent_fd)
+
+    monkeypatch.setattr(postgres_backup, "_fsync_directory_fd", fail_after_replace)
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        postgres_backup.create_backup(
+            output_dir=tmp_path,
+            manifest_output=tmp_path / manifest_name,
+            database="temporal",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            runner=_PostgresRunner(),
+            now=datetime(2026, 8, 24, tzinfo=timezone.utc),
+        )
+    assert raised.value.code == "atomic_write_failed"
+    assert failed
+    assert not (tmp_path / dump_name).exists()
+    assert not (tmp_path / manifest_name).exists()
+
+
+@requires_posix_descriptor_io
+@pytest.mark.parametrize("published_name", ["dump", "manifest"])
+def test_postgres_backup_final_identity_race_preserves_replacement_and_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    published_name: str,
+) -> None:
+    monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
+    dump_name = "temporal-20260824T000000Z.dump"
+    manifest_name = "manifest.json"
+    selected = dump_name if published_name == "dump" else manifest_name
+    replacement = b"attacker-replacement"
+    real_stat_at = postgres_backup._stat_at
+    attacked = False
+
+    def replace_first_published(parent_fd: int, name: str) -> os.stat_result:
+        nonlocal attacked
+        if name == selected and not attacked:
+            try:
+                real_stat_at(parent_fd, name)
+            except FileNotFoundError:
+                pass
+            else:
+                os.unlink(name, dir_fd=parent_fd)
+                descriptor = os.open(
+                    name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+                try:
+                    os.write(descriptor, replacement)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                attacked = True
+        return real_stat_at(parent_fd, name)
+
+    monkeypatch.setattr(postgres_backup, "_stat_at", replace_first_published)
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        postgres_backup.create_backup(
+            output_dir=tmp_path,
+            manifest_output=tmp_path / manifest_name,
+            database="temporal",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            runner=_PostgresRunner(),
+            now=datetime(2026, 8, 24, tzinfo=timezone.utc),
+        )
+    assert raised.value.code == "atomic_write_failed"
+    assert attacked
+    assert (tmp_path / selected).read_bytes() == replacement
+    if published_name == "manifest":
+        assert not (tmp_path / dump_name).exists()
+    else:
+        assert not (tmp_path / manifest_name).exists()
+
+
+@requires_posix_descriptor_io
+def test_postgres_restore_restores_old_marker_after_post_replace_fsync_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path, _manifest, _backup_runner = _backup_fixture(tmp_path, monkeypatch)
+    marker_path = tmp_path / "latest-verified.json"
+    previous = b'{"status":"previous"}\n'
+    marker_path.write_bytes(previous)
+    real_fsync = postgres_backup._fsync_directory_fd
+    failed = False
+
+    def fail_once_after_marker_replace(parent_fd: int) -> None:
+        nonlocal failed
+        try:
+            current = os.stat(
+                marker_path.name, dir_fd=parent_fd, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            real_fsync(parent_fd)
+            return
+        if current.st_size != len(previous) and not failed:
+            failed = True
+            raise OSError("injected marker fsync failure")
+        real_fsync(parent_fd)
+
+    monkeypatch.setattr(
+        postgres_backup, "_fsync_directory_fd", fail_once_after_marker_replace
+    )
+    with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
+        postgres_restore.verify_restore(
+            manifest_path=manifest_path,
+            source_database="temporal",
+            target_database="temporal_verify",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            runner=_PostgresRunner(),
+        )
+    assert raised.value.code == "marker_write_failed"
+    assert failed
+    assert marker_path.read_bytes() == previous
+
+
+@requires_posix_descriptor_io
+def test_postgres_restore_final_marker_identity_race_preserves_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path, _manifest, _backup_runner = _backup_fixture(tmp_path, monkeypatch)
+    marker_path = tmp_path / "latest-verified.json"
+    marker_path.write_bytes(b'{"status":"previous"}\n')
+    replacement = b'{"status":"attacker"}\n'
+    real_stat_at = postgres_backup._stat_at
+    marker_stats = 0
+
+    def replace_before_final_identity(parent_fd: int, name: str) -> os.stat_result:
+        nonlocal marker_stats
+        if name == marker_path.name:
+            marker_stats += 1
+            if marker_stats == 3:
+                os.unlink(name, dir_fd=parent_fd)
+                descriptor = os.open(
+                    name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+                try:
+                    os.write(descriptor, replacement)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+        return real_stat_at(parent_fd, name)
+
+    monkeypatch.setattr(postgres_backup, "_stat_at", replace_before_final_identity)
+    with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
+        postgres_restore.verify_restore(
+            manifest_path=manifest_path,
+            source_database="temporal",
+            target_database="temporal_verify",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            runner=_PostgresRunner(),
+        )
+    assert raised.value.code == "marker_write_failed"
+    assert marker_path.read_bytes() == replacement
+
+
 def test_postgres_scripts_are_bounded_redacted_and_never_use_shell_true() -> None:
     backup_source = BACKUP_SCRIPT.read_text(encoding="utf-8")
     restore_source = RESTORE_SCRIPT.read_text(encoding="utf-8")
@@ -591,6 +1206,16 @@ def test_postgres_scripts_are_bounded_redacted_and_never_use_shell_true() -> Non
     assert "--exit-on-error" in restore_source
     assert "--single-transaction" in restore_source
     assert "dropdb" in restore_source
+    assert "server_version_num" in backup_source
+    assert "backup.server_major(" in restore_source
+    assert "stdout_fd" in backup_source
+    assert "stdin_fd" in restore_source
+    for source in (backup_source, restore_source):
+        assert "dir_fd=" in source
+        assert "src_dir_fd=" in source
+        assert "dst_dir_fd=" in source
+    assert 'postgres_major("pg_dump"' not in backup_source
+    assert 'postgres_major("pg_restore"' not in restore_source
 
 
 class _StatProxy:

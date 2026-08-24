@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Restore a Temporal dump only into the fixed isolated verification database."""
+"""Verify a Temporal dump through descriptor-confined isolated restore."""
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,6 +24,7 @@ VERIFICATION_DATABASE = "temporal_verify"
 RESTORE_TIMEOUT_SECONDS = 300.0
 DATABASE_COMMAND_TIMEOUT_SECONDS = 30.0
 QUERY_TIMEOUT_SECONDS = 15.0
+MAX_MARKER_BYTES = 16 * 1024
 REQUIRED_TEMPORAL_TABLES = (
     "cluster_metadata",
     "namespaces",
@@ -104,6 +105,7 @@ def _call(
     timeout: float,
     *,
     capture_output: bool = False,
+    stdin_fd: int | None = None,
 ) -> object:
     try:
         result = runner(
@@ -111,6 +113,8 @@ def _call(
             environment=environment,
             timeout=timeout,
             capture_output=capture_output,
+            stdin_fd=stdin_fd,
+            stdout_fd=None,
         )
     except backup.PostgresBackupError as exc:
         raise _map_backup_error(exc) from exc
@@ -126,56 +130,62 @@ def _call(
     return result
 
 
-def _read_regular_bounded(path: Path, limit: int, code: str) -> bytes:
-    flags = os.O_RDONLY | backup._NOFOLLOW | backup._CLOEXEC | backup._BINARY
+def _open_regular_at(parent_fd: int, name: str, code: str) -> int:
     try:
-        descriptor = os.open(path, flags)
-        try:
-            before = os.fstat(descriptor)
-            entry = os.lstat(path)
-            if (
-                not stat.S_ISREG(before.st_mode)
-                or backup._identity(before) != backup._identity(entry)
-                or backup._is_reparse_point(entry)
-            ):
-                raise PostgresRestoreError(code)
-            chunks: list[bytes] = []
-            remaining = limit + 1
-            while remaining:
-                chunk = os.read(descriptor, min(remaining, 64 * 1024))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            payload = b"".join(chunks)
-            after = os.fstat(descriptor)
-            if (
-                len(payload) > limit
-                or backup._full_identity(before) != backup._full_identity(after)
-            ):
-                raise PostgresRestoreError(code)
-            return payload
-        finally:
-            os.close(descriptor)
+        backup._safe_leaf(name, code)
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | backup._NOFOLLOW | backup._CLOEXEC | backup._BINARY,
+            dir_fd=parent_fd,
+        )
+    except (OSError, backup.PostgresBackupError) as exc:
+        raise PostgresRestoreError(code) from exc
+    try:
+        opened = os.fstat(descriptor)
+        entry = backup._stat_at(parent_fd, name)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or backup._full_identity(opened) != backup._full_identity(entry)
+            or backup._is_reparse_point(entry)
+        ):
+            raise PostgresRestoreError(code)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _read_descriptor_bounded(descriptor: int, limit: int, code: str) -> bytes:
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        before = os.fstat(descriptor)
+        chunks: list[bytes] = []
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if (
+            len(payload) > limit
+            or backup._full_identity(before) != backup._full_identity(after)
+        ):
+            raise PostgresRestoreError(code)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return payload
     except PostgresRestoreError:
         raise
     except OSError as exc:
         raise PostgresRestoreError(code) from exc
 
 
-def load_manifest(path: Path) -> tuple[Path, dict[str, object]]:
-    lexical = backup._absolute_lexical(Path(path))
+def _validate_manifest(payload: bytes) -> dict[str, object]:
     try:
-        parent, parent_metadata = backup._trusted_directory(lexical.parent)
-        manifest_path = parent / lexical.name
-        payload = _read_regular_bounded(
-            manifest_path, backup.MAX_MANIFEST_BYTES, "manifest_untrusted"
-        )
-        backup._revalidate_directory(parent, parent_metadata)
         decoded = json.loads(payload.decode("ascii"))
-    except PostgresRestoreError:
-        raise
-    except (backup.PostgresBackupError, UnicodeError, json.JSONDecodeError) as exc:
+    except (UnicodeError, json.JSONDecodeError) as exc:
         raise PostgresRestoreError("manifest_invalid") from exc
     if type(decoded) is not dict or set(decoded) != _MANIFEST_KEYS:
         raise PostgresRestoreError("manifest_invalid")
@@ -220,57 +230,86 @@ def load_manifest(path: Path) -> tuple[Path, dict[str, object]]:
         datetime.strptime(generated_at, "%Y-%m-%dT%H:%M:%SZ")
     except ValueError as exc:
         raise PostgresRestoreError("manifest_invalid") from exc
-    return manifest_path, manifest
+    return manifest
 
 
-def _verify_dump(
-    manifest_path: Path, manifest: dict[str, object]
-) -> Path:
-    dump_path = manifest_path.parent / str(manifest["dump_file"])
+@dataclass
+class _OpenedBackup:
+    directory: backup.TrustedDirectory
+    manifest_name: str
+    manifest: dict[str, object]
+    dump_name: str
+    dump_fd: int
+    dump_version: tuple[int, int, int, int, int]
+
+    def close(self) -> None:
+        if self.dump_fd >= 0:
+            os.close(self.dump_fd)
+            self.dump_fd = -1
+        self.directory.close()
+
+
+def _open_backup(manifest_path: Path) -> _OpenedBackup:
     try:
-        entry = os.lstat(dump_path)
-    except OSError as exc:
-        raise PostgresRestoreError("dump_untrusted") from exc
-    if (
-        not stat.S_ISREG(entry.st_mode)
-        or stat.S_ISLNK(entry.st_mode)
-        or backup._is_reparse_point(entry)
-    ):
-        raise PostgresRestoreError("dump_untrusted")
-    try:
-        digest, size, _identity = backup._hash_open_regular(
-            dump_path, backup._identity(entry)
-        )
+        lexical = backup._absolute_lexical(Path(manifest_path))
+        manifest_name = backup._safe_leaf(lexical.name, "manifest_untrusted")
+        directory = backup.TrustedDirectory(lexical.parent)
     except backup.PostgresBackupError as exc:
-        raise PostgresRestoreError("dump_untrusted") from exc
-    if size != manifest["size"]:
-        raise PostgresRestoreError("dump_size_mismatch")
-    if digest != manifest["sha256"]:
-        raise PostgresRestoreError("dump_hash_mismatch")
-    return dump_path
-
-
-def _postgres_major(
-    runner: Runner,
-    environment: dict[str, str],
-) -> int:
+        raise PostgresRestoreError("manifest_untrusted") from exc
+    manifest_fd = -1
+    dump_fd = -1
+    ownership_transferred = False
     try:
-        return backup.postgres_major(
-            "pg_restore", runner=runner, environment=environment
+        manifest_fd = _open_regular_at(
+            directory.fd, manifest_name, "manifest_untrusted"
         )
+        payload = _read_descriptor_bounded(
+            manifest_fd, backup.MAX_MANIFEST_BYTES, "manifest_untrusted"
+        )
+        manifest = _validate_manifest(payload)
+        directory.revalidate()
+        dump_name = str(manifest["dump_file"])
+        dump_fd = _open_regular_at(directory.fd, dump_name, "dump_untrusted")
+        try:
+            digest, size, _dump_identity, dump_version = backup._hash_descriptor(
+                dump_fd, code="dump_invalid", sync=False
+            )
+        except backup.PostgresBackupError as exc:
+            raise PostgresRestoreError("dump_untrusted") from exc
+        try:
+            backup._require_name_matches_fd(
+                directory.fd, dump_name, dump_fd, code="dump_invalid"
+            )
+        except backup.PostgresBackupError as exc:
+            raise PostgresRestoreError("dump_untrusted") from exc
+        if size != manifest["size"]:
+            raise PostgresRestoreError("dump_size_mismatch")
+        if digest != manifest["sha256"]:
+            raise PostgresRestoreError("dump_hash_mismatch")
+        opened = _OpenedBackup(
+            directory=directory,
+            manifest_name=manifest_name,
+            manifest=manifest,
+            dump_name=dump_name,
+            dump_fd=dump_fd,
+            dump_version=dump_version,
+        )
+        dump_fd = -1
+        ownership_transferred = True
+        return opened
     except backup.PostgresBackupError as exc:
-        raise _map_backup_error(exc) from exc
+        raise PostgresRestoreError("manifest_untrusted") from exc
+    finally:
+        if manifest_fd >= 0:
+            os.close(manifest_fd)
+        if dump_fd >= 0:
+            os.close(dump_fd)
+        if not ownership_transferred:
+            directory.close()
 
 
 def _connection_arguments(host: str, port: int, user: str) -> list[str]:
-    return [
-        "--host",
-        host,
-        "--port",
-        str(port),
-        "--username",
-        user,
-    ]
+    return ["--host", host, "--port", str(port), "--username", user]
 
 
 def _target_exists(
@@ -319,66 +358,142 @@ def _drop_target(
     )
 
 
-def _write_marker(path: Path, marker: dict[str, object]) -> None:
-    lexical = backup._absolute_lexical(path)
+def _revalidate_opened_dump(opened: _OpenedBackup) -> None:
     try:
-        parent, parent_metadata = backup._trusted_directory(lexical.parent)
-        destination = parent / lexical.name
-        temporary = destination.with_name(f".{destination.name}.partial")
-        try:
-            existing = os.lstat(destination)
-        except FileNotFoundError:
-            existing_identity: tuple[int, int] | None = None
-        except OSError as exc:
-            raise PostgresRestoreError("marker_write_failed") from exc
-        else:
-            if (
-                not stat.S_ISREG(existing.st_mode)
-                or stat.S_ISLNK(existing.st_mode)
-                or backup._is_reparse_point(existing)
-            ):
-                raise PostgresRestoreError("marker_write_failed")
-            existing_identity = backup._identity(existing)
-        backup._ensure_absent(temporary)
-        descriptor = -1
-        temporary_identity: tuple[int, int] | None = None
-        try:
-            descriptor, temporary_identity = backup._open_new_regular(temporary)
-            payload = backup.canonical_json(marker)
-            offset = 0
-            while offset < len(payload):
-                offset += os.write(descriptor, payload[offset:])
-            os.fsync(descriptor)
-            os.close(descriptor)
-            descriptor = -1
-            backup._revalidate_directory(parent, parent_metadata)
-            if existing_identity is None:
-                backup._ensure_absent(destination)
-            else:
-                current = os.lstat(destination)
-                if (
-                    backup._identity(current) != existing_identity
-                    or not stat.S_ISREG(current.st_mode)
-                    or backup._is_reparse_point(current)
-                ):
-                    raise PostgresRestoreError("marker_write_failed")
-            os.replace(temporary, destination)
-            backup._fsync_directory(parent)
-            published = os.lstat(destination)
-            if (
-                backup._identity(published) != temporary_identity
-                or not stat.S_ISREG(published.st_mode)
-                or backup._is_reparse_point(published)
-            ):
-                raise PostgresRestoreError("marker_write_failed")
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-            backup._safe_unlink(temporary, temporary_identity)
-    except PostgresRestoreError:
-        raise
+        opened.directory.revalidate()
+        backup._require_descriptor_version(
+            opened.dump_fd,
+            opened.dump_version,
+            code="dump_invalid",
+        )
+        backup._require_name_matches_fd(
+            opened.directory.fd,
+            opened.dump_name,
+            opened.dump_fd,
+            code="dump_invalid",
+        )
+        os.lseek(opened.dump_fd, 0, os.SEEK_SET)
     except (backup.PostgresBackupError, OSError) as exc:
+        raise PostgresRestoreError("dump_untrusted") from exc
+
+
+@dataclass(frozen=True)
+class _MarkerSnapshot:
+    existed: bool
+    payload: bytes
+    mode: int
+    identity: tuple[int, int, int, int, int] | None
+
+
+def _snapshot_marker(directory: backup.TrustedDirectory, name: str) -> _MarkerSnapshot:
+    try:
+        descriptor = _open_regular_at(directory.fd, name, "marker_write_failed")
+    except PostgresRestoreError:
+        try:
+            backup._stat_at(directory.fd, name)
+        except FileNotFoundError:
+            return _MarkerSnapshot(False, b"", 0o600, None)
+        raise
+    try:
+        metadata = os.fstat(descriptor)
+        payload = _read_descriptor_bounded(
+            descriptor, MAX_MARKER_BYTES, "marker_write_failed"
+        )
+        return _MarkerSnapshot(
+            True,
+            payload,
+            stat.S_IMODE(metadata.st_mode),
+            backup._full_identity(metadata),
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _rollback_marker(
+    directory: backup.TrustedDirectory,
+    name: str,
+    published_identity: tuple[int, int] | None,
+    previous: _MarkerSnapshot,
+) -> None:
+    if not backup._safe_unlink_at(directory.fd, name, published_identity):
+        return
+    if not previous.existed:
+        return
+    try:
+        backup._atomic_write_new_at(
+            directory,
+            name,
+            previous.payload,
+            mode=previous.mode,
+        )
+    except backup.PostgresBackupError:
+        return
+
+
+def _write_marker_at(
+    directory: backup.TrustedDirectory,
+    marker: dict[str, object],
+) -> None:
+    name = "latest-verified.json"
+    temporary_name = f".{name}.partial"
+    try:
+        previous = _snapshot_marker(directory, name)
+        backup._ensure_absent_at(directory.fd, temporary_name)
+        descriptor = backup._open_new_regular_at(directory.fd, temporary_name)
+    except (backup.PostgresBackupError, PostgresRestoreError) as exc:
         raise PostgresRestoreError("marker_write_failed") from exc
+    temporary_identity = backup._identity(os.fstat(descriptor))
+    published_identity: tuple[int, int] | None = None
+    replaced = False
+    try:
+        payload = backup.canonical_json(marker)
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise PostgresRestoreError("marker_write_failed")
+            view = view[written:]
+        os.fsync(descriptor)
+        if os.fstat(descriptor).st_size != len(payload):
+            raise PostgresRestoreError("marker_write_failed")
+        if previous.existed:
+            current = backup._stat_at(directory.fd, name)
+            if backup._full_identity(current) != previous.identity:
+                raise PostgresRestoreError("marker_write_failed")
+        else:
+            backup._ensure_absent_at(directory.fd, name)
+        directory.revalidate()
+        os.replace(
+            temporary_name,
+            name,
+            src_dir_fd=directory.fd,
+            dst_dir_fd=directory.fd,
+        )
+        replaced = True
+        published_identity = temporary_identity
+        published_descriptor = os.fstat(descriptor)
+        if backup._identity(published_descriptor) != published_identity:
+            raise PostgresRestoreError("marker_write_failed")
+        published_identity = backup._identity(published_descriptor)
+        backup._fsync_directory_fd(directory.fd)
+        published = backup._stat_at(directory.fd, name)
+        if (
+            backup._full_identity(published)
+            != backup._full_identity(published_descriptor)
+            or not stat.S_ISREG(published.st_mode)
+            or backup._is_reparse_point(published)
+        ):
+            raise PostgresRestoreError("marker_write_failed")
+        directory.revalidate()
+    except (backup.PostgresBackupError, PostgresRestoreError, OSError) as exc:
+        if replaced:
+            _rollback_marker(directory, name, published_identity, previous)
+        raise PostgresRestoreError("marker_write_failed") from exc
+    finally:
+        backup._safe_unlink_at(
+            directory.fd, temporary_name, temporary_identity, sync=False
+        )
+        os.close(descriptor)
 
 
 def verify_restore(
@@ -409,89 +524,102 @@ def verify_restore(
         raise PostgresRestoreError("verification_database_must_differ")
     if target_database != VERIFICATION_DATABASE:
         raise PostgresRestoreError("verification_database_invalid")
-    manifest_path, manifest = load_manifest(Path(manifest_path))
-    if source_database != manifest["database"]:
-        raise PostgresRestoreError("manifest_invalid")
-    dump_path = _verify_dump(manifest_path, manifest)
+    opened = _open_backup(Path(manifest_path))
     try:
-        environment = backup._password_environment()
-    except backup.PostgresBackupError as exc:
-        raise PostgresRestoreError("arguments_invalid") from exc
-    current_major = _postgres_major(runner, environment)
-    if current_major != manifest["postgres_major"]:
-        raise PostgresRestoreError("postgres_major_mismatch")
-    connection = _connection_arguments(host, port, user)
-    exists = _target_exists(runner, environment, connection)
-    if exists and not drop_verification_database:
-        raise PostgresRestoreError("verification_database_exists")
-    if exists:
-        _drop_target(runner, environment, connection)
-    created = False
-    try:
-        _call(
-            runner,
-            ["createdb", *connection, VERIFICATION_DATABASE],
-            environment,
-            DATABASE_COMMAND_TIMEOUT_SECONDS,
-        )
-        created = True
-        _call(
-            runner,
-            [
-                "pg_restore",
-                "--exit-on-error",
-                "--single-transaction",
-                "--no-owner",
-                "--no-acl",
-                *connection,
-                "--dbname",
-                VERIFICATION_DATABASE,
-                str(dump_path),
-            ],
-            environment,
-            RESTORE_TIMEOUT_SECONDS,
-        )
-        for table in REQUIRED_TEMPORAL_TABLES:
-            query = (
-                "SELECT CASE WHEN to_regclass('public."
-                f"{table}') IS NULL THEN 0 ELSE 1 END;"
+        manifest = opened.manifest
+        if source_database != manifest["database"]:
+            raise PostgresRestoreError("manifest_invalid")
+        try:
+            environment = backup._password_environment()
+        except backup.PostgresBackupError as exc:
+            raise PostgresRestoreError("arguments_invalid") from exc
+        connection = _connection_arguments(host, port, user)
+        exists = _target_exists(runner, environment, connection)
+        if exists and not drop_verification_database:
+            raise PostgresRestoreError("verification_database_exists")
+        if exists:
+            _drop_target(runner, environment, connection)
+        created = False
+        try:
+            _call(
+                runner,
+                ["createdb", *connection, VERIFICATION_DATABASE],
+                environment,
+                DATABASE_COMMAND_TIMEOUT_SECONDS,
             )
-            result = _call(
+            created = True
+            try:
+                current_major = backup.server_major(
+                    runner=runner,
+                    environment=environment,
+                    connection=connection,
+                    database=VERIFICATION_DATABASE,
+                )
+            except backup.PostgresBackupError as exc:
+                raise _map_backup_error(exc) from exc
+            if current_major != manifest["postgres_major"]:
+                raise PostgresRestoreError("postgres_major_mismatch")
+            _revalidate_opened_dump(opened)
+            _call(
                 runner,
                 [
-                    "psql",
+                    "pg_restore",
+                    "--exit-on-error",
+                    "--single-transaction",
+                    "--no-owner",
+                    "--no-acl",
                     *connection,
                     "--dbname",
                     VERIFICATION_DATABASE,
-                    "--no-align",
-                    "--tuples-only",
-                    "--set",
-                    "ON_ERROR_STOP=1",
-                    "--command",
-                    query,
                 ],
                 environment,
-                QUERY_TIMEOUT_SECONDS,
-                capture_output=True,
+                RESTORE_TIMEOUT_SECONDS,
+                stdin_fd=opened.dump_fd,
             )
-            if result.stdout.strip() != b"1":
-                raise PostgresRestoreError("required_table_missing")
-        checked_at = now or datetime.now(timezone.utc)
-        marker: dict[str, object] = {
-            "postgres_major": current_major,
-            "sha256": manifest["sha256"],
-            "source_database": source_database,
-            "status": "passed",
-            "verification_database": VERIFICATION_DATABASE,
-            "verified_at": checked_at.astimezone(timezone.utc)
-            .replace(microsecond=0)
-            .strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }
-        _write_marker(manifest_path.parent / "latest-verified.json", marker)
-        return marker
+            for table in REQUIRED_TEMPORAL_TABLES:
+                query = (
+                    "SELECT CASE WHEN to_regclass('public."
+                    f"{table}') IS NULL THEN 0 ELSE 1 END;"
+                )
+                result = _call(
+                    runner,
+                    [
+                        "psql",
+                        *connection,
+                        "--dbname",
+                        VERIFICATION_DATABASE,
+                        "--no-align",
+                        "--tuples-only",
+                        "--set",
+                        "ON_ERROR_STOP=1",
+                        "--command",
+                        query,
+                    ],
+                    environment,
+                    QUERY_TIMEOUT_SECONDS,
+                    capture_output=True,
+                )
+                if result.stdout.strip() != b"1":
+                    raise PostgresRestoreError("required_table_missing")
+            _revalidate_opened_dump(opened)
+            checked_at = now or datetime.now(timezone.utc)
+            marker: dict[str, object] = {
+                "postgres_major": current_major,
+                "sha256": manifest["sha256"],
+                "source_database": source_database,
+                "status": "passed",
+                "verification_database": VERIFICATION_DATABASE,
+                "verified_at": checked_at.astimezone(timezone.utc)
+                .replace(microsecond=0)
+                .strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+            _write_marker_at(opened.directory, marker)
+            return marker
+        finally:
+            if created and drop_verification_database:
+                _drop_target(runner, environment, connection)
     finally:
-        if created and drop_verification_database:
-            _drop_target(runner, environment, connection)
+        opened.close()
 
 
 def _parser() -> argparse.ArgumentParser:
