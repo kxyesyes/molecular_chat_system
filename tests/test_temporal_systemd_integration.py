@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -19,7 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKER_UNIT = ROOT / "deployment" / "medchat-temporal-worker.service"
 PREPARE_UNIT = ROOT / "deployment" / "medchat-temporal-worker-prepare.service"
 WEB_UNIT = ROOT / "deployment" / "medchat.service"
-RUN_INTEGRATION = "MEDCHAT_RUN_TEMPORAL_SYSTEMD_INTEGRATION"
+RUN_INTEGRATION = "MEDCHAT_RUN_TEMPORAL_DEPLOYMENT_INTEGRATION"
+DISPOSABLE_MARKER = "/run/medchat-disposable-systemd-test"
+DISPOSABLE_MARKER_CONTENT = b"MEDCHAT_TEMPORAL_DISPOSABLE_SYSTEMD_TEST_V1\n"
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 SYSTEMD_RUNTIME_UNIT_DIR = Path("/run/systemd/system")
 MIXED_LIFECYCLE = {
@@ -120,7 +123,164 @@ def test_committed_worker_unit_matches_transient_lifecycle_fixture() -> None:
         assert service[name] == [value]
 
 
-def _require_systemd_integration(*tools: str) -> None:
+def test_destructive_systemd_gate_is_fixed_and_canonical() -> None:
+    assert RUN_INTEGRATION == "MEDCHAT_RUN_TEMPORAL_DEPLOYMENT_INTEGRATION"
+    assert DISPOSABLE_MARKER == "/run/medchat-disposable-systemd-test"
+    source = Path(__file__).read_text(encoding="utf-8")
+    legacy_name = "MEDCHAT_RUN_TEMPORAL_" + "SYSTEMD_INTEGRATION"
+    assert legacy_name not in source
+    assert "O_NOFOLLOW" in source
+    assert "DISPOSABLE_MARKER_CONTENT" in source
+
+
+def test_disposable_marker_metadata_and_payload_are_exact() -> None:
+    class Metadata:
+        st_mode = stat.S_IFREG | 0o400
+        st_uid = 0
+        st_gid = 0
+        st_size = len(DISPOSABLE_MARKER_CONTENT)
+
+    _validate_disposable_marker_metadata(Metadata(), DISPOSABLE_MARKER_CONTENT)
+    for attribute, value in (
+        ("st_mode", stat.S_IFLNK | 0o777),
+        ("st_mode", stat.S_IFREG | 0o600),
+        ("st_uid", 1),
+        ("st_gid", 1),
+        ("st_size", len(DISPOSABLE_MARKER_CONTENT) + 1),
+    ):
+        tampered = type(
+            "TamperedMarkerMetadata",
+            (),
+            {
+                "st_mode": Metadata.st_mode,
+                "st_uid": Metadata.st_uid,
+                "st_gid": Metadata.st_gid,
+                "st_size": Metadata.st_size,
+            },
+        )()
+        setattr(tampered, attribute, value)
+        with pytest.raises(CleanupBlocked):
+            _validate_disposable_marker_metadata(
+                tampered, DISPOSABLE_MARKER_CONTENT
+            )
+    with pytest.raises(CleanupBlocked):
+        _validate_disposable_marker_metadata(Metadata(), b"wrong\n")
+
+
+def test_disposable_marker_parent_chain_rejects_writable_or_nonroot_directory() -> None:
+    class Metadata:
+        st_mode = stat.S_IFDIR | 0o755
+        st_uid = 0
+        st_gid = 0
+
+    _validate_trusted_root_directory(Metadata())
+    for attribute, value in (
+        ("st_mode", stat.S_IFDIR | 0o775),
+        ("st_mode", stat.S_IFLNK | 0o777),
+        ("st_uid", 1),
+        ("st_gid", 1),
+    ):
+        tampered = type(
+            "TamperedParentMetadata",
+            (),
+            {
+                "st_mode": Metadata.st_mode,
+                "st_uid": Metadata.st_uid,
+                "st_gid": Metadata.st_gid,
+            },
+        )()
+        setattr(tampered, attribute, value)
+        with pytest.raises(CleanupBlocked):
+            _validate_trusted_root_directory(tampered)
+
+
+def _validate_disposable_marker_metadata(metadata, payload: bytes) -> None:
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or (metadata.st_uid, metadata.st_gid) != (0, 0)
+        or stat.S_IMODE(metadata.st_mode) != 0o400
+        or metadata.st_size != len(DISPOSABLE_MARKER_CONTENT)
+        or payload != DISPOSABLE_MARKER_CONTENT
+    ):
+        raise CleanupBlocked("disposable systemd marker is untrusted")
+
+
+def _validate_trusted_root_directory(metadata) -> None:
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or (metadata.st_uid, metadata.st_gid) != (0, 0)
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+    ):
+        raise CleanupBlocked("disposable systemd marker parent is untrusted")
+
+
+def _validate_disposable_systemd_marker() -> None:
+    components = tuple(part for part in DISPOSABLE_MARKER.split("/") if part)
+    if components != ("run", "medchat-disposable-systemd-test"):
+        raise CleanupBlocked("disposable systemd marker location is invalid")
+    parent_name, leaf_name = components
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    root_fd = run_fd = marker_fd = -1
+    try:
+        root_fd = os.open("/", directory_flags)
+        _validate_trusted_root_directory(os.fstat(root_fd))
+        run_fd = os.open(parent_name, directory_flags, dir_fd=root_fd)
+        run_metadata = os.fstat(run_fd)
+        run_entry = os.stat(parent_name, dir_fd=root_fd, follow_symlinks=False)
+        _validate_trusted_root_directory(run_metadata)
+        if (run_metadata.st_dev, run_metadata.st_ino) != (
+            run_entry.st_dev,
+            run_entry.st_ino,
+        ):
+            raise CleanupBlocked("disposable systemd marker parent changed")
+        marker_fd = os.open(leaf_name, file_flags, dir_fd=run_fd)
+        before = os.fstat(marker_fd)
+        payload = os.read(marker_fd, len(DISPOSABLE_MARKER_CONTENT) + 1)
+        after = os.fstat(marker_fd)
+        entry = os.stat(
+            leaf_name,
+            dir_fd=run_fd,
+            follow_symlinks=False,
+        )
+        _validate_disposable_marker_metadata(after, payload)
+        if (
+            (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            )
+            != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            )
+            or (after.st_dev, after.st_ino) != (entry.st_dev, entry.st_ino)
+        ):
+            raise CleanupBlocked("disposable systemd marker changed")
+    except OSError as exc:
+        raise CleanupBlocked("disposable systemd marker is unavailable") from exc
+    finally:
+        for descriptor in (marker_fd, run_fd, root_fd):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def _require_systemd_integration(*tools: str, destructive: bool = True) -> None:
     if sys.platform != "linux":
         pytest.skip("Linux production-host systemd integration is required")
     if os.environ.get(RUN_INTEGRATION) != "1":
@@ -131,6 +291,11 @@ def _require_systemd_integration(*tools: str) -> None:
         pytest.skip("unified cgroup v2 is required for lifecycle validation")
     if os.geteuid() != 0:
         pytest.skip("root is required for transient system-unit validation")
+    if destructive:
+        try:
+            _validate_disposable_systemd_marker()
+        except CleanupBlocked:
+            pytest.skip("trusted disposable-systemd marker is required")
     missing = [tool for tool in tools if shutil.which(tool) is None]
     if missing:
         pytest.skip("required production systemd tools are unavailable")
@@ -468,6 +633,38 @@ class PosixCleanupBackend:
         os.close(cgroup.directory_fd)
 
 
+class SynchronizedStartReloadBackend(PosixCleanupBackend):
+    def __init__(self, unit: str) -> None:
+        self.unit = unit
+        original = self.snapshot(unit)
+        self.original_invocation_id = original.invocation_id
+        self.original_control_group = original.control_group
+        self.probe_completed = False
+
+    def stop(self, unit: str) -> subprocess.CompletedProcess[str]:
+        if unit != self.unit:
+            raise CleanupBlocked("synchronized cleanup unit changed")
+        return subprocess.CompletedProcess(
+            ["systemctl", "stop", unit], 1, "", "synchronized force cleanup"
+        )
+
+    def write_cgroup_kill(self, cgroup: CgroupHandle) -> None:
+        start = _run(["systemctl", "start", self.unit])
+        reload_result = _run(["systemctl", "reload", self.unit])
+        checked = self.snapshot(self.unit)
+        if (
+            start.returncode == 0
+            or reload_result.returncode == 0
+            or checked.load_state != "masked"
+            or checked.job
+            or checked.invocation_id != self.original_invocation_id
+            or checked.control_group != self.original_control_group
+        ):
+            raise CleanupBlocked("runtime mask did not exclude a new invocation")
+        self.probe_completed = True
+        super().write_cgroup_kill(cgroup)
+
+
 class FakeCleanupBackend:
     def __init__(self) -> None:
         self.snapshot_value = UnitSnapshot(
@@ -641,6 +838,12 @@ def test_cleanup_source_has_no_systemctl_kill_or_numeric_pid_signal() -> None:
     assert "os.kill(" not in cleanup_source
     assert "os.killpg(" not in cleanup_source
     assert 'os.write(cgroup.kill_fd, b"1\\n")' in cleanup_source
+
+
+def test_real_cleanup_suite_contains_synchronized_mask_probe() -> None:
+    backend_type = globals().get("SynchronizedStartReloadBackend")
+    assert backend_type is not None
+    assert issubclass(backend_type, PosixCleanupBackend)
 
 
 def test_cleanup_snapshot_queries_identity_and_job_together(
@@ -883,6 +1086,72 @@ def _start_process_tree(
         raise
 
 
+def test_runtime_mask_rejects_synchronized_start_and_reload(
+    tmp_path: Path,
+) -> None:
+    _require_systemd_integration("systemd-run", "systemctl")
+    unit = f"medchat-temporal-mask-test-{uuid.uuid4().hex}.service"
+    cleanup_required = False
+    primary_error: BaseException | None = None
+    try:
+        _event_file, identities = _start_process_tree(tmp_path, "ignore", unit)
+        cleanup_required = True
+        backend = SynchronizedStartReloadBackend(unit)
+        stop = _cleanup_unit(unit, backend=backend)
+        cleanup_required = False
+        assert stop is not None and stop.returncode != 0
+        assert backend.probe_completed
+        assert all(
+            _wait_until(lambda identity=identity: not _same_process_is_running(identity))
+            for identity in identities
+        )
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        if cleanup_required:
+            _cleanup_preserving(unit, primary_error)
+
+
+def test_real_systemd_fragment_paths_match_selected_generation() -> None:
+    _require_systemd_integration("systemctl", destructive=False)
+    helper_path = (
+        ROOT / "deployment/libexec/install-temporal-worker-bundle.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "temporal_fragment_integration", helper_path
+    )
+    assert spec is not None and spec.loader is not None
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    root = base = releases = generation = -1
+    try:
+        root = helper._open_absolute_directory("/")
+        base = helper._open_relative_directory(root, helper.BASE_RELATIVE)
+        releases = os.open("releases", helper._DIRECTORY_FLAGS, dir_fd=base)
+        digest = helper._read_current(base, releases, 0, 0)
+        assert digest is not None
+        helper.verify_generation(releases, digest, 0, 0)
+        generation = os.open(
+            digest, helper._DIRECTORY_FLAGS, dir_fd=releases
+        )
+        helper._verify_loaded_units(
+            "/usr/bin/systemctl",
+            root,
+            releases,
+            generation,
+            digest,
+            0,
+            0,
+            "/",
+            helper.ActivationState(),
+        )
+    finally:
+        for descriptor in (generation, releases, base, root):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
 def test_mixed_kill_allows_parent_to_stop_child_cooperatively(tmp_path: Path) -> None:
     _require_systemd_integration("systemd-run", "systemctl")
     unit = f"medchat-temporal-worker-test-{uuid.uuid4().hex}.service"
@@ -950,7 +1219,7 @@ def test_mixed_kill_escalates_for_ignored_sigterm(tmp_path: Path) -> None:
 
 
 def test_systemd_analyze_verifies_committed_units_on_production_candidate() -> None:
-    _require_systemd_integration("systemd-analyze")
+    _require_systemd_integration("systemd-analyze", destructive=False)
     result = _run(
         [
             "systemd-analyze",
