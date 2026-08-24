@@ -33,7 +33,7 @@
 - Create `scripts/backup_temporal_postgres.py`: produce an atomic logical dump plus SHA-256 manifest without exposing credentials.
 - Create `scripts/restore_temporal_postgres.py`: verify and restore a dump only into an explicitly different verification database.
 - Create `scripts/validate_temporal_deployment.py`: statically validate Compose, systemd, Prometheus, Grafana, environment examples, and secret/path policy on Windows or Linux.
-- Create `scripts/validate_temporal_worker_production.py`: expose environment-file metadata and injected-runtime validation as a redacted, side-effect-free CLI.
+- Create `scripts/validate_temporal_worker_production.py`: expose injected-runtime validation as a redacted, non-privileged CLI.
 
 ### Deployment and operations
 
@@ -46,8 +46,13 @@
 - Create `deployment/temporal/grafana/provisioning/dashboards/dashboard.yml`: provision the dashboard directory.
 - Create `deployment/temporal/grafana/dashboards/medchat-temporal-docking.json`: show rollout, health, latency, execution, terminal, artifact, and provenance gates without scientific payloads.
 - Create `deployment/medchat-temporal-worker.service`: run exactly one host-native docking worker.
-- Create `deployment/medchat-temporal-worker.tmpfiles`: bootstrap only the four private worker runtime directories.
+- Create `deployment/medchat-temporal-worker-prepare.service`: validate the dedicated worker environment and create runtime directories without consuming `EnvironmentFile`.
+- Create `deployment/libexec/validate-temporal-worker-env.py`: provide a standalone, root-owned, descriptor-relative environment trust validator.
+- Create `deployment/tmpfiles/medchat-temporal-worker.conf`: bootstrap only the four private worker runtime directories after trusted installation.
+- Create `deployment/temporal-worker.env.example`: document the exact non-secret worker variable allowlist.
+- Create `deployment/install-temporal-worker.sh`: stage and install verified root-owned worker deployment assets.
 - Modify `deployment/medchat.service`: use the controlled `/etc/medchat/medchat.env` boundary while preserving the existing Web command.
+- Modify `deployment/README.md`: require root-owned read-only source/runtime assets and service-user-owned state directories only.
 - Create `docs/runbooks/temporal_docking_canary.md`: document installation, startup, preflight, promotion, observation, rollback, backup, recovery, and incident handling.
 - Modify `docs/PROJECT_STANDARDS.md`: add Stage 3B deployment and release rules.
 - Modify `docs/handoff/latest.md`: record implementation scope, commands, results, limitations, branch, and commits.
@@ -63,6 +68,8 @@
 - Modify `tests/task_runtime/test_temporal_acceptance.py`: production evidence projection and no-regression checks.
 - Create `tests/task_runtime/test_production_worker.py`: production gate, path confinement, optimization-mode, metadata, and entrypoint-order tests.
 - Create `tests/test_temporal_systemd_integration.py`: opt-in Linux verification of mixed stop semantics and descendant cleanup.
+- Create `tests/test_temporal_worker_trust_boundary.py`: parser, installed-asset, environment allowlist, and systemd trust contracts.
+- Create `tests/test_temporal_worker_trust_linux_unittest.py`: stdlib-only Linux no-follow, parent-permission, race, and installation ownership checks.
 
 This plan does not modify molecular docking algorithms, `MolecularDockingService`, Vina parameters, Validator rules, non-docking Agent workflows, frontend behavior, or the MedChat TaskStore database engine.
 
@@ -1154,6 +1161,14 @@ git commit -m "fix(deploy): secure temporal worker metrics scrape"
 ```
 
 ## Task 8: Harden the systemd worker configuration and process lifecycle
+
+> **Superseded security notice (2026-08-24):** The Task 8 steps below document the
+> first corrective attempt and MUST NOT be executed. In particular, the privileged
+> `+ExecStartPre` commands and repository tmpfiles path are rejected because systemd
+> reads `EnvironmentFile` before commands and `+` bypasses the service user/filesystem
+> sandbox. The only authoritative corrective implementation plan is
+> [`2026-08-24-temporal-worker-trust-boundary.md`](2026-08-24-temporal-worker-trust-boundary.md).
+> Commit `10e82b7` is an intermediate baseline, not an approved production result.
 
 The first Task 8 implementation isolated the worker but its `assert`-based preflight,
 `ProtectSystem=full`, and `KillMode=control-group` do not satisfy the approved
