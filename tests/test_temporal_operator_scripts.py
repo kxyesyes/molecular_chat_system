@@ -4113,3 +4113,294 @@ def test_subprocess_cli_errors_never_leak_tracebacks_or_raw_arguments(tmp_path: 
     assert result.returncode != 0
     assert "Traceback" not in result.stderr
     assert secret not in result.stdout + result.stderr
+
+
+class _MissingDeploymentTools:
+    def available(self, _tool: str) -> bool:
+        return False
+
+    def run(self, *_args: object, **_kwargs: object) -> object:
+        raise AssertionError("missing deployment tools must not execute")
+
+
+def _task10_acceptance_report(mode: str) -> dict[str, object]:
+    real = mode == "real"
+    report: dict[str, object] = {
+        "status": "passed",
+        "mode": mode,
+        "run_count": 3,
+        "scientific_execution": real,
+        "provenance_gate": {
+            "status": "passed",
+            "evidence_type": "real_temporal_vina" if real else "contract_replay",
+        },
+    }
+    canonical = json.dumps(
+        report,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    report["sha256"] = hashlib.sha256(canonical).hexdigest()
+    return report
+
+
+def _task10_preflight_inputs() -> dict[str, object]:
+    return {
+        "deployment": {"status": "passed"},
+        "contract": _task10_acceptance_report("contract"),
+        "real": _task10_acceptance_report("real"),
+        "infrastructure": {
+            "temporal": True,
+            "namespace": True,
+            "queue": True,
+            "worker": True,
+        },
+        "blocking_alerts": [],
+        "backup": {"status": "passed", "restore_verified": True},
+        "current_level": 0,
+        "now": datetime(2026, 8, 25, 12, tzinfo=timezone.utc),
+    }
+
+
+def _assert_canonical_report_hash(report: dict[str, object]) -> None:
+    projected = dict(report)
+    digest = projected.pop("sha256")
+    canonical = json.dumps(
+        projected,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    assert digest == hashlib.sha256(canonical).hexdigest()
+
+
+def test_deployment_validator_has_explicit_pass_fail_skip_results() -> None:
+    from scripts.validate_temporal_deployment import validate_deployment
+
+    report = validate_deployment(
+        repo_root=PROJECT_ROOT,
+        command_runner=_MissingDeploymentTools(),
+        platform_name="Windows",
+        now=datetime(2026, 8, 25, 12, tzinfo=timezone.utc),
+    )
+
+    assert report["status"] == "partial"
+    assert report["checks"]["python_static"]["status"] == "passed"
+    assert report["checks"]["docker_compose"] == {
+        "status": "skipped",
+        "code": "docker_unavailable",
+    }
+    assert report["checks"]["promtool"] == {
+        "status": "skipped",
+        "code": "promtool_unavailable",
+    }
+    assert report["checks"]["systemd_analyze"] == {
+        "status": "skipped",
+        "code": "linux_systemd_required",
+    }
+    assert {
+        check["status"] for check in report["checks"].values()
+    } <= {"passed", "failed", "skipped"}
+    _assert_canonical_report_hash(report)
+
+
+def test_preflight_requires_repeat_three_real_science_and_backup() -> None:
+    from scripts.run_temporal_production_preflight import build_preflight_report
+
+    report = build_preflight_report(**_task10_preflight_inputs())
+
+    assert report["status"] == "passed"
+    assert report["stage"] == "preflight"
+    assert report["current_level"] == 0
+    assert report["all_required_gates"] is True
+    assert all(
+        gate["status"] == "passed" for gate in report["checks"].values()
+    )
+    _assert_canonical_report_hash(report)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["deployment", "contract", "real", "infrastructure", "backup"],
+)
+def test_preflight_never_passes_when_required_evidence_is_missing(field: str) -> None:
+    from scripts.run_temporal_production_preflight import build_preflight_report
+
+    inputs = _task10_preflight_inputs()
+    inputs[field] = {"status": "skipped"}
+
+    report = build_preflight_report(**inputs)
+
+    assert report["status"] != "passed"
+    assert report["all_required_gates"] is False
+
+
+def test_preflight_rejects_contract_or_fake_runner_as_real_evidence() -> None:
+    from scripts.run_temporal_production_preflight import build_preflight_report
+
+    inputs = _task10_preflight_inputs()
+    inputs["real"] = _task10_acceptance_report("contract")
+
+    report = build_preflight_report(**inputs)
+
+    assert report["status"] == "failed"
+    assert report["checks"]["real_science"] == {
+        "status": "failed",
+        "code": "real_science_invalid",
+    }
+
+
+def test_real_acceptance_subprocess_uses_isolated_canary_override_and_redacts(
+    tmp_path: Path,
+) -> None:
+    from scripts.run_temporal_production_preflight import run_acceptance_evidence
+
+    secret = "PRIVATE_PREFLIGHT_SECRET_CANARY"
+    calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
+
+    def runner(
+        argv: list[str],
+        *,
+        cwd: Path,
+        environment: dict[str, str],
+        timeout: float,
+    ) -> object:
+        del cwd, timeout
+        calls.append((tuple(argv), dict(environment)))
+        output = Path(argv[argv.index("--output") + 1])
+        payload = _task10_acceptance_report("real")
+        payload.pop("sha256")
+        payload["runs"] = [{"status": "passed", "artifact_sha256": "a" * 64}]
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        payload["sha256"] = hashlib.sha256(canonical).hexdigest()
+        output.write_text(json.dumps(payload), encoding="utf-8")
+        return SimpleNamespace(returncode=0)
+
+    evidence = run_acceptance_evidence(
+        mode="real",
+        repo_root=PROJECT_ROOT,
+        output_path=tmp_path / "real.json",
+        command_runner=runner,
+        base_environment={
+            "PATH": os.environ.get("PATH", ""),
+            "TEMPORAL_POSTGRES_PASSWORD": secret,
+            "MEDCHAT_TEMPORAL_CANARY_PERCENT": "5",
+        },
+    )
+
+    argv, child_environment = calls[0]
+    assert "--mode" in argv and "real" in argv
+    assert "--repeat" in argv and "3" in argv
+    assert secret not in " ".join(argv)
+    assert child_environment["MEDCHAT_TASK_BACKEND"] == "temporal_canary"
+    assert child_environment["MEDCHAT_TEMPORAL_CANARY_PERCENT"] == "100"
+    assert secret not in json.dumps(evidence)
+    assert evidence["provenance_gate"]["evidence_type"] == "real_temporal_vina"
+    assert "runs" not in evidence
+    _assert_canonical_report_hash(evidence)
+
+
+def test_deployment_validator_passes_only_executed_host_checks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.validate_temporal_deployment import validate_deployment
+
+    secret = "PRIVATE_DEPLOYMENT_ENV_CANARY"
+    calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
+
+    class PassingTools:
+        def available(self, _tool: str) -> bool:
+            return True
+
+        def run(
+            self,
+            argv: list[str],
+            *,
+            cwd: Path,
+            environment: dict[str, str],
+            timeout: float,
+        ) -> object:
+            del cwd, timeout
+            calls.append((tuple(argv), dict(environment)))
+            return SimpleNamespace(returncode=0)
+
+    monkeypatch.setenv("PRIVATE_DEPLOYMENT_TOKEN", secret)
+    report = validate_deployment(
+        repo_root=PROJECT_ROOT,
+        command_runner=PassingTools(),
+        platform_name="Linux",
+        now=datetime(2026, 8, 25, 12, tzinfo=timezone.utc),
+    )
+
+    assert report["status"] == "passed"
+    assert all(check["status"] == "passed" for check in report["checks"].values())
+    assert len(calls) == 4
+    assert calls[0][0][:2] == ("docker", "compose")
+    assert calls[-1][0][:2] == ("systemd-analyze", "verify")
+    assert secret not in json.dumps(calls)
+
+
+def test_deployment_validator_failed_tool_is_never_partial() -> None:
+    from scripts.validate_temporal_deployment import validate_deployment
+
+    class FailingPromtool:
+        def available(self, _tool: str) -> bool:
+            return True
+
+        def run(self, argv: list[str], **_kwargs: object) -> object:
+            return SimpleNamespace(returncode=1 if argv[0] == "promtool" else 0)
+
+    report = validate_deployment(
+        repo_root=PROJECT_ROOT,
+        command_runner=FailingPromtool(),
+        platform_name="Linux",
+    )
+
+    assert report["status"] == "failed"
+    assert report["checks"]["promtool"] == {
+        "status": "failed",
+        "code": "promtool_invalid",
+    }
+
+
+def test_preflight_windows_host_gaps_remain_partial() -> None:
+    from scripts.run_temporal_production_preflight import build_preflight_report
+
+    inputs = _task10_preflight_inputs()
+    inputs["deployment"] = {"status": "partial"}
+    inputs["infrastructure"] = {
+        "temporal": None,
+        "namespace": None,
+        "queue": None,
+        "worker": None,
+    }
+    inputs["blocking_alerts"] = None
+    inputs["backup"] = {"status": "skipped", "restore_verified": False}
+
+    report = build_preflight_report(**inputs)
+
+    assert report["status"] == "partial"
+    assert report["all_required_gates"] is False
+
+
+def test_task10_atomic_report_writer_rejects_symlink(
+    tmp_path: Path,
+) -> None:
+    from scripts.validate_temporal_deployment import write_report_atomic
+
+    target = tmp_path / "target.json"
+    target.write_text("sentinel", encoding="utf-8")
+    linked = tmp_path / "report.json"
+    _create_symlink_or_skip(linked, target)
+
+    with pytest.raises(ValueError, match="unsafe report output"):
+        write_report_atomic(linked, {"status": "passed"})
+
+    assert target.read_text(encoding="utf-8") == "sentinel"
+    assert not list(tmp_path.glob("*.tmp"))

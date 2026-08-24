@@ -53,6 +53,22 @@ def test_report_requires_unique_execution_and_terminal_event():
     assert report["runs"][0]["warnings"] == []
 
 
+def test_report_has_stable_failure_distribution() -> None:
+    from scripts.run_temporal_docking_acceptance import summarize_runs
+
+    report = summarize_runs(
+        [
+            _valid_run(),
+            _valid_run(pose_exists=False, provenance_complete=False),
+        ]
+    )
+
+    assert report["failure_type_distribution"] == {
+        "pose_missing": 1,
+        "provenance_incomplete": 1,
+    }
+
+
 def test_real_release_gate_rejects_local_fallback_backend():
     from scripts.run_temporal_docking_acceptance import summarize_runs
 
@@ -334,6 +350,19 @@ def test_contract_cli_marks_report_as_non_scientific(tmp_path: Path):
     assert report["mode"] == "contract"
     assert report["scientific_execution"] is False
     assert report["run_count"] == 2
+    assert report["provenance_gate"] == {
+        "status": "passed",
+        "evidence_type": "contract_replay",
+    }
+    projected = dict(report)
+    digest = projected.pop("sha256")
+    canonical = json.dumps(
+        projected,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    assert digest == __import__("hashlib").sha256(canonical).hexdigest()
     assert report["contract_checks"] == {
         "cancellation_confirmed": True,
         "completion_reused": True,
@@ -359,10 +388,9 @@ def test_cli_projection_failure_writes_safe_report_without_crashing(
     report = json.loads(output.read_text(encoding="utf-8"))
 
     assert exit_code == 1
-    assert report == {
-        "error": "report_projection_failed",
-        "mode": "contract",
-        "run_count": 0,
-        "scientific_execution": False,
-        "status": "failed",
-    }
+    assert report["error"] == "report_projection_failed"
+    assert report["mode"] == "contract"
+    assert report["run_count"] == 0
+    assert report["scientific_execution"] is False
+    assert report["status"] == "failed"
+    assert report["provenance_gate"]["status"] == "failed"

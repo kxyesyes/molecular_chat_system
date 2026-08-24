@@ -117,6 +117,18 @@ def _percentile(values: list[float], percentile: float) -> float | None:
     return ordered[index]
 
 
+def _canonical_sha256(payload: dict[str, Any]) -> str:
+    projected = dict(payload)
+    projected.pop("sha256", None)
+    canonical = json.dumps(
+        projected,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def summarize_runs(
     runs: list[dict[str, Any]],
     *,
@@ -216,6 +228,10 @@ def summarize_runs(
 
     passed = sum(item["status"] == "passed" for item in normalized)
     total = len(normalized)
+    failure_distribution: dict[str, int] = {}
+    for item in normalized:
+        for failure in item["failures"]:
+            failure_distribution[failure] = failure_distribution.get(failure, 0) + 1
     return {
         "status": "passed" if total > 0 and passed == total else "failed",
         "run_count": total,
@@ -227,6 +243,7 @@ def summarize_runs(
             "p50": _percentile(latencies, 0.50),
             "p95": _percentile(latencies, 0.95),
         },
+        "failure_type_distribution": dict(sorted(failure_distribution.items())),
         "runs": normalized,
     }
 
@@ -587,6 +604,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     report["mode"] = args.mode
     report["scientific_execution"] = args.mode == "real"
+    report["provenance_gate"] = {
+        "status": report["status"],
+        "evidence_type": (
+            "real_temporal_vina" if args.mode == "real" else "contract_replay"
+        ),
+    }
     if contract_checks is not None:
         report["contract_checks"] = contract_checks
     if _contains_sensitive(report):
@@ -596,12 +619,24 @@ def main(argv: list[str] | None = None) -> int:
             "run_count": 0,
             "scientific_execution": args.mode == "real",
             "error": "report_projection_failed",
+            "provenance_gate": {
+                "status": "failed",
+                "evidence_type": (
+                    "real_temporal_vina"
+                    if args.mode == "real"
+                    else "contract_replay"
+                ),
+            },
         }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    report["sha256"] = _canonical_sha256(report)
+    try:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        from scripts.validate_temporal_deployment import write_report_atomic
+
+        write_report_atomic(args.output, report)
+    except Exception:
+        print("temporal_docking_acceptance=failed code=report_write_failed", file=sys.stderr)
+        return 1
     print(json.dumps({"status": report["status"], "mode": args.mode, "run_count": report["run_count"]}))
     return 0 if report["status"] == "passed" else 1
 
