@@ -8,10 +8,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
+import time
 from types import SimpleNamespace
 from typing import Callable
 import urllib.error
@@ -47,6 +50,18 @@ requires_posix_descriptor_io = pytest.mark.skipif(
     not POSIX_DESCRIPTOR_IO,
     reason="POSIX descriptor-relative PostgreSQL operator I/O required",
 )
+
+
+@pytest.fixture
+def postgres_trusted_tmp_path() -> Path:
+    if not POSIX_DESCRIPTOR_IO:
+        pytest.skip("POSIX descriptor-relative PostgreSQL operator I/O required")
+    with tempfile.TemporaryDirectory(
+        prefix=".medchat-postgres-test-", dir=Path.home()
+    ) as directory:
+        path = Path(directory)
+        os.chmod(path, 0o700)
+        yield path
 
 
 class _PostgresRunner:
@@ -163,9 +178,10 @@ def _backup_fixture(
 
 @requires_posix_descriptor_io
 def test_postgres_backup_uses_child_environment_and_atomic_canonical_manifest(
-    tmp_path: Path,
+    postgres_trusted_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    tmp_path = postgres_trusted_tmp_path
     manifest_path, manifest, runner = _backup_fixture(tmp_path, monkeypatch)
     password = "runtime-secret"
     dump_path = tmp_path / str(manifest["dump_file"])
@@ -309,9 +325,10 @@ def test_postgres_backup_rejects_missing_password(
 
 @requires_posix_descriptor_io
 def test_postgres_backup_rejects_existing_outputs(
-    tmp_path: Path,
+    postgres_trusted_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    tmp_path = postgres_trusted_tmp_path
     runner = _PostgresRunner()
 
     monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
@@ -352,14 +369,15 @@ def test_postgres_backup_rejects_existing_outputs(
 
 @requires_posix_descriptor_io
 def test_postgres_backup_rejects_symlink_directory(
-    tmp_path: Path,
+    postgres_trusted_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    tmp_path = postgres_trusted_tmp_path
     monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
     runner = _PostgresRunner()
 
     real_directory = tmp_path / "real"
-    real_directory.mkdir()
+    real_directory.mkdir(mode=0o700)
     linked_directory = tmp_path / "linked"
     _create_symlink_or_skip(linked_directory, real_directory)
     with pytest.raises(postgres_backup.PostgresBackupError):
@@ -513,13 +531,493 @@ def test_postgres_trusted_directory_closes_descriptor_when_identity_read_fails(
     assert closed == [77]
 
 
-@requires_posix_descriptor_io
-def test_postgres_backup_rejects_parent_replacement_without_writing_replacement(
-    tmp_path: Path,
+def test_postgres_posix_metadata_policy_requires_trusted_owner_group_and_modes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(postgres_backup, "_effective_ids", lambda: (1000, 1000))
+
+    def directory(uid: int, gid: int, mode: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            st_mode=stat.S_IFDIR | mode,
+            st_uid=uid,
+            st_gid=gid,
+            st_file_attributes=0,
+        )
+
+    def regular(uid: int, gid: int, mode: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            st_mode=stat.S_IFREG | mode,
+            st_uid=uid,
+            st_gid=gid,
+            st_file_attributes=0,
+        )
+
+    postgres_backup._require_trusted_directory_metadata(
+        directory(0, 0, 0o755), final=False
+    )
+    postgres_backup._require_trusted_directory_metadata(
+        directory(1000, 1000, 0o700), final=True
+    )
+    postgres_backup._require_trusted_regular_metadata(regular(1000, 1000, 0o600))
+
+    for metadata, final in (
+        (directory(2000, 2000, 0o755), False),
+        (directory(0, 0, 0o775), False),
+        (directory(1000, 1000, 0o755), True),
+        (directory(1000, 2000, 0o700), True),
+    ):
+        with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+            postgres_backup._require_trusted_directory_metadata(
+                metadata, final=final
+            )
+        assert raised.value.code == "output_untrusted"
+
+    for metadata in (
+        regular(1000, 1000, 0o640),
+        regular(2000, 1000, 0o600),
+        regular(1000, 2000, 0o600),
+    ):
+        with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+            postgres_backup._require_trusted_regular_metadata(metadata)
+        assert raised.value.code == "output_untrusted"
+
+
+def test_postgres_safe_unlink_requires_full_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600,
+        st_dev=7,
+        st_ino=11,
+        st_size=23,
+        st_mtime_ns=29,
+        st_ctime_ns=31,
+        st_file_attributes=0,
+    )
+    unlinked: list[tuple[str, int | None]] = []
+    monkeypatch.setattr(postgres_backup, "_stat_at", lambda _fd, _name: metadata)
+    monkeypatch.setattr(
+        postgres_backup.os,
+        "unlink",
+        lambda name, *, dir_fd=None: unlinked.append((name, dir_fd)),
+    )
+
+    assert postgres_backup._safe_unlink_at(
+        17, "asset", postgres_backup._full_identity(metadata), sync=False
+    )
+    assert unlinked == [("asset", 17)]
+
+    changed_ctime = SimpleNamespace(**vars(metadata))
+    changed_ctime.st_ctime_ns += 1
+    monkeypatch.setattr(
+        postgres_backup, "_stat_at", lambda _fd, _name: changed_ctime
+    )
+    assert not postgres_backup._safe_unlink_at(
+        17, "asset", postgres_backup._full_identity(metadata), sync=False
+    )
+    assert unlinked == [("asset", 17)]
+
+
+def test_postgres_opened_backup_keeps_manifest_descriptor_until_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[int] = []
+    directory = SimpleNamespace(close=lambda: closed.append(99))
+    monkeypatch.setattr(postgres_restore.os, "close", closed.append)
+    opened = postgres_restore._OpenedBackup(
+        directory=directory,
+        manifest_name="manifest.json",
+        manifest={"database": "temporal"},
+        manifest_fd=41,
+        manifest_version=(1, 2, 3, 4, 5),
+        dump_name="temporal.dump",
+        dump_fd=42,
+        dump_version=(6, 7, 8, 9, 10),
+    )
+
+    opened.close()
+
+    assert closed == [42, 41, 99]
+
+
+def test_postgres_joint_revalidation_reports_manifest_identity_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened = SimpleNamespace(
+        directory=SimpleNamespace(fd=17, revalidate=lambda: None),
+        manifest_fd=41,
+        manifest_version=(1, 2, 3, 4, 5),
+        manifest_name="manifest.json",
+        manifest={"database": "temporal"},
+        dump_fd=42,
+        dump_version=(6, 7, 8, 9, 10),
+        dump_name="temporal.dump",
+    )
+
+    def reject_changed_manifest(
+        descriptor: int,
+        _expected: tuple[int, int, int, int, int],
+        *,
+        code: str,
+    ) -> None:
+        if descriptor == opened.manifest_fd:
+            raise postgres_backup.PostgresBackupError(code)
+
+    monkeypatch.setattr(
+        postgres_backup, "_require_descriptor_version", reject_changed_manifest
+    )
+    with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
+        postgres_restore._revalidate_opened_backup(opened)
+    assert raised.value.code == "manifest_untrusted"
+
+
+def test_postgres_password_environment_never_adopts_ambient_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
+    monkeypatch.setenv("PATH", "CREDENTIAL_STEALER_PATH")
+    environment = postgres_backup._password_environment(
+        Path("/trusted/postgresql/bin")
+    )
+    assert environment == {
+        "PATH": os.fspath(Path("/trusted/postgresql/bin")),
+        "PGPASSWORD": "runtime-secret",
+        "PGCONNECT_TIMEOUT": "10",
+    }
+
+
+def test_postgres_timeout_cleanup_failure_preserves_tool_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TimedOutProcess:
+        pid = 424242
+
+        def wait(self, *, timeout: float) -> int:
+            raise subprocess.TimeoutExpired("postgres-tool", timeout)
+
+    popen_options: dict[str, object] = {}
+
+    def fake_popen(_argv: list[str], **kwargs: object) -> TimedOutProcess:
+        popen_options.update(kwargs)
+        return TimedOutProcess()
+
+    monkeypatch.setattr(
+        postgres_backup, "_process_groups_available", lambda: True, raising=False
+    )
+    monkeypatch.setattr(postgres_backup.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        postgres_backup,
+        "_terminate_process_group",
+        lambda _process: (_ for _ in ()).throw(RuntimeError("cleanup failed")),
+    )
+
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        postgres_backup.run_command(
+            [sys.executable],
+            environment={"PATH": "/trusted/postgresql/bin"},
+            timeout=0.1,
+        )
+
+    assert raised.value.code == "tool_timeout"
+    assert popen_options["start_new_session"] is True
+    assert popen_options["shell"] is False
+
+
+def test_postgres_real_runner_executes_fixed_tool_from_validated_bin_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spawned: list[tuple[str, ...]] = []
+
+    class CompletedProcess:
+        pid = 424243
+
+        def wait(self, *, timeout: float) -> int:
+            return 0
+
+    class FakeTrustedBin:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+
+        def revalidate(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    def fake_popen(argv: list[str], **_kwargs: object) -> CompletedProcess:
+        spawned.append(tuple(argv))
+        return CompletedProcess()
+
+    monkeypatch.setattr(
+        postgres_backup, "_process_groups_available", lambda: True, raising=False
+    )
+    monkeypatch.setattr(
+        postgres_backup, "TrustedPostgresBinDirectory", FakeTrustedBin
+    )
+    monkeypatch.setattr(postgres_backup.subprocess, "Popen", fake_popen)
+
+    postgres_backup.run_command(
+        ["psql", "--version"],
+        environment={"PATH": "/trusted/postgresql/bin"},
+        timeout=1.0,
+    )
+
+    assert spawned == [(os.fspath(Path("/trusted/postgresql/bin") / "psql"), "--version")]
+
+
+@pytest.mark.skipif(os.name == "posix", reason="non-POSIX fail-closed contract")
+def test_postgres_runner_fails_closed_before_spawn_without_process_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spawned = False
+
+    def unexpected_spawn(*_args: object, **_kwargs: object) -> None:
+        nonlocal spawned
+        spawned = True
+
+    monkeypatch.setattr(postgres_backup.subprocess, "Popen", unexpected_spawn)
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        postgres_backup.run_command(
+            ["psql"], environment={"PATH": "ignored"}, timeout=0.1
+        )
+    assert raised.value.code == "tool_failed"
+    assert not spawned
+
+
+@requires_posix_descriptor_io
+def test_postgres_backup_rejects_separate_manifest_directory_before_pg_command(
+    postgres_trusted_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = postgres_trusted_tmp_path / "output"
+    manifests = postgres_trusted_tmp_path / "manifests"
+    output.mkdir(mode=0o700)
+    manifests.mkdir(mode=0o700)
+    monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
+    runner = _PostgresRunner()
+
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        postgres_backup.create_backup(
+            output_dir=output,
+            manifest_output=manifests / "manifest.json",
+            database="temporal",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            runner=runner,
+            now=datetime(2026, 8, 24, tzinfo=timezone.utc),
+        )
+
+    assert raised.value.code == "output_untrusted"
+    assert runner.calls == []
+
+
+@requires_posix_descriptor_io
+def test_postgres_trust_boundary_rejects_writable_parent_and_bad_leaf_mode(
+    postgres_trusted_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = postgres_trusted_tmp_path / "parent"
+    output = parent / "backups"
+    parent.mkdir(mode=0o700)
+    output.mkdir(mode=0o700)
+    monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
+    os.chmod(parent, 0o770)
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        postgres_backup.create_backup(
+            output_dir=output,
+            manifest_output=output / "manifest.json",
+            database="temporal",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            runner=_PostgresRunner(),
+            now=datetime(2026, 8, 24, tzinfo=timezone.utc),
+        )
+    assert raised.value.code == "output_untrusted"
+
+    os.chmod(parent, 0o700)
+    os.chmod(output, 0o750)
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        postgres_backup.create_backup(
+            output_dir=output,
+            manifest_output=output / "manifest.json",
+            database="temporal",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            runner=_PostgresRunner(),
+            now=datetime(2026, 8, 24, tzinfo=timezone.utc),
+        )
+    assert raised.value.code == "output_untrusted"
+
+    os.chmod(output, 0o700)
+    manifest_path, manifest, _runner = _backup_fixture(output, monkeypatch)
+    os.chmod(manifest_path, 0o640)
+    with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
+        postgres_restore.verify_restore(
+            manifest_path=manifest_path,
+            source_database="temporal",
+            target_database="temporal_verify",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            runner=_PostgresRunner(),
+        )
+    assert raised.value.code == "manifest_untrusted"
+
+    os.chmod(manifest_path, 0o600)
+    os.chmod(output / str(manifest["dump_file"]), 0o640)
+    with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
+        postgres_restore.verify_restore(
+            manifest_path=manifest_path,
+            source_database="temporal",
+            target_database="temporal_verify",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            runner=_PostgresRunner(),
+        )
+    assert raised.value.code == "dump_untrusted"
+
+
+@requires_posix_descriptor_io
+def test_postgres_trust_boundary_rejects_wrong_owner_and_group_when_root(
+    postgres_trusted_tmp_path: Path,
+) -> None:
+    if os.geteuid() != 0:
+        pytest.skip("root required to manufacture wrong PostgreSQL asset ownership")
+    output = postgres_trusted_tmp_path / "backups"
+    output.mkdir(mode=0o700)
+    os.chown(output, 1, 1)
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        postgres_backup.TrustedDirectory(output)
+    assert raised.value.code == "output_untrusted"
+
+
+@requires_posix_descriptor_io
+def test_postgres_bin_directory_is_nofollow_owned_and_not_group_writable(
+    postgres_trusted_tmp_path: Path,
+) -> None:
+    postgres_bin = postgres_trusted_tmp_path / "postgres-bin"
+    postgres_bin.mkdir(mode=0o700)
+    trusted = postgres_backup.TrustedPostgresBinDirectory(postgres_bin)
+    trusted.close()
+
+    os.chmod(postgres_bin, 0o770)
+    with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+        postgres_backup.TrustedPostgresBinDirectory(postgres_bin)
+    assert raised.value.code == "output_untrusted"
+
+
+@requires_posix_descriptor_io
+def test_postgres_restore_rejects_wrong_manifest_and_dump_ownership_when_root(
+    postgres_trusted_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.geteuid() != 0:
+        pytest.skip("root required to manufacture wrong PostgreSQL asset ownership")
+    manifest_path, manifest, _runner = _backup_fixture(
+        postgres_trusted_tmp_path, monkeypatch
+    )
+    dump_path = postgres_trusted_tmp_path / str(manifest["dump_file"])
+
+    os.chown(manifest_path, 1, 0)
+    with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
+        postgres_restore._open_backup(manifest_path)
+    assert raised.value.code == "manifest_untrusted"
+
+    os.chown(manifest_path, 0, 0)
+    os.chown(dump_path, 0, 1)
+    with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
+        postgres_restore._open_backup(manifest_path)
+    assert raised.value.code == "dump_untrusted"
+
+
+@requires_posix_descriptor_io
+def test_postgres_timeout_terminates_child_and_grandchild_process_group(
+    postgres_trusted_tmp_path: Path,
+) -> None:
+    state = postgres_trusted_tmp_path / "process-group.txt"
+    child_code = "\n".join(
+        (
+            "import os, signal, subprocess, sys, time",
+            "try:",
+            "    os.setsid()",
+            "except PermissionError:",
+            "    pass",
+            "grandchild = subprocess.Popen([sys.executable, '-c', "
+            "'import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(60)'])",
+            "with open(sys.argv[1], 'w', encoding='ascii') as stream:",
+            "    stream.write(f'{os.getpgrp()} {grandchild.pid}')",
+            "signal.signal(signal.SIGTERM, signal.SIG_DFL)",
+            "time.sleep(60)",
+        )
+    )
+    process_group: int | None = None
+    try:
+        with pytest.raises(postgres_backup.PostgresBackupError) as raised:
+            postgres_backup.run_command(
+                [sys.executable, "-c", child_code, str(state)],
+                environment={"PATH": os.defpath},
+                timeout=1.0,
+            )
+        assert raised.value.code == "tool_timeout"
+        deadline = time.monotonic() + 3.0
+        while not state.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        process_group = int(state.read_text(encoding="ascii").split()[0])
+        assert process_group != os.getpgrp()
+        with pytest.raises(ProcessLookupError):
+            os.killpg(process_group, 0)
+    finally:
+        if process_group is not None and process_group != os.getpgrp():
+            try:
+                os.killpg(process_group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@requires_posix_descriptor_io
+def test_postgres_restore_final_drop_failure_never_publishes_passed_marker(
+    postgres_trusted_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path, _manifest, _backup_runner = _backup_fixture(
+        postgres_trusted_tmp_path, monkeypatch
+    )
+
+    class FinalDropFailingRunner(_PostgresRunner):
+        def __call__(self, argv: list[str], **kwargs: object) -> SimpleNamespace:
+            result = super().__call__(argv, **kwargs)
+            if Path(argv[0]).name == "dropdb":
+                return SimpleNamespace(returncode=1, stdout=b"")
+            return result
+
+    with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
+        postgres_restore.verify_restore(
+            manifest_path=manifest_path,
+            source_database="temporal",
+            target_database="temporal_verify",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            drop_verification_database=True,
+            runner=FinalDropFailingRunner(),
+        )
+
+    assert raised.value.code == "tool_failed"
+    assert not (postgres_trusted_tmp_path / "latest-verified.json").exists()
+
+
+@requires_posix_descriptor_io
+def test_postgres_backup_rejects_parent_replacement_without_writing_replacement(
+    postgres_trusted_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path = postgres_trusted_tmp_path
     output = tmp_path / "output"
-    output.mkdir()
+    output.mkdir(mode=0o700)
     displaced = tmp_path / "displaced"
     attacked = False
 
@@ -529,7 +1027,7 @@ def test_postgres_backup_rejects_parent_replacement_without_writing_replacement(
         nonlocal attacked
         if not attacked and argv[0] == "psql" and "server_version_num" in argv[-1]:
             output.rename(displaced)
-            output.mkdir()
+            output.mkdir(mode=0o700)
             attacked = True
 
     monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
@@ -552,14 +1050,13 @@ def test_postgres_backup_rejects_parent_replacement_without_writing_replacement(
 
 @requires_posix_descriptor_io
 def test_postgres_backup_parent_replaced_after_manifest_publish_rolls_back_both(
-    tmp_path: Path,
+    postgres_trusted_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    tmp_path = postgres_trusted_tmp_path
     output = tmp_path / "output"
-    manifests = tmp_path / "manifests"
     displaced = tmp_path / "displaced"
-    output.mkdir()
-    manifests.mkdir()
+    output.mkdir(mode=0o700)
     real_atomic_write = postgres_backup._atomic_write_new_at
 
     def publish_then_replace_output(
@@ -574,7 +1071,7 @@ def test_postgres_backup_parent_replaced_after_manifest_publish_rolls_back_both(
         )
         if destination_name == "manifest.json":
             output.rename(displaced)
-            output.mkdir()
+            output.mkdir(mode=0o700)
         return identity
 
     monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
@@ -584,7 +1081,7 @@ def test_postgres_backup_parent_replaced_after_manifest_publish_rolls_back_both(
     with pytest.raises(postgres_backup.PostgresBackupError) as raised:
         postgres_backup.create_backup(
             output_dir=output,
-            manifest_output=manifests / "manifest.json",
+            manifest_output=output / "manifest.json",
             database="temporal",
             host="127.0.0.1",
             port=5433,
@@ -595,14 +1092,14 @@ def test_postgres_backup_parent_replaced_after_manifest_publish_rolls_back_both(
     assert raised.value.code == "output_untrusted"
     assert list(output.iterdir()) == []
     assert list(displaced.iterdir()) == []
-    assert list(manifests.iterdir()) == []
 
 
 @requires_posix_descriptor_io
 def test_postgres_backup_dump_mutated_during_manifest_publish_rolls_back_both(
-    tmp_path: Path,
+    postgres_trusted_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    tmp_path = postgres_trusted_tmp_path
     real_atomic_write = postgres_backup._atomic_write_new_at
     dump_path = tmp_path / "temporal-20260824T000000Z.dump"
 
@@ -641,9 +1138,10 @@ def test_postgres_backup_dump_mutated_during_manifest_publish_rolls_back_both(
 
 @requires_posix_descriptor_io
 def test_postgres_backup_partial_replacement_never_becomes_dump(
-    tmp_path: Path,
+    postgres_trusted_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    tmp_path = postgres_trusted_tmp_path
     replacement = b"attacker-controlled-replacement"
 
     def replace_partial(
@@ -677,10 +1175,11 @@ def test_postgres_backup_partial_replacement_never_becomes_dump(
 @requires_posix_descriptor_io
 @pytest.mark.parametrize("attack_phase", ["before_restore", "during_restore"])
 def test_postgres_restore_rejects_dump_replaced_after_hash(
-    tmp_path: Path,
+    postgres_trusted_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     attack_phase: str,
 ) -> None:
+    tmp_path = postgres_trusted_tmp_path
     manifest_path, manifest, _backup_runner = _backup_fixture(tmp_path, monkeypatch)
     dump_path = tmp_path / str(manifest["dump_file"])
     original = dump_path.read_bytes()
@@ -725,9 +1224,10 @@ def test_postgres_restore_rejects_dump_replaced_after_hash(
 
 @requires_posix_descriptor_io
 def test_postgres_restore_validates_and_uses_fixed_isolated_commands(
-    tmp_path: Path,
+    postgres_trusted_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    tmp_path = postgres_trusted_tmp_path
     manifest_path, manifest, _backup_runner = _backup_fixture(tmp_path, monkeypatch)
     runner = _PostgresRunner()
     marker = postgres_restore.verify_restore(
@@ -918,11 +1418,80 @@ def test_postgres_restore_checks_server_major_before_database_mutation(
     assert opened.closed
 
 
-@requires_posix_descriptor_io
-def test_postgres_restore_rejects_hash_size_major_and_noncanonical_manifest(
+def test_postgres_restore_revalidates_manifest_and_dump_after_final_drop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    dump_path = tmp_path / "held.dump"
+    dump_path.write_bytes(b"PGDMP-held")
+    dump_fd = os.open(dump_path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+
+    class FakeOpenedBackup:
+        manifest = {
+            "database": "temporal",
+            "postgres_major": 16,
+            "sha256": "a" * 64,
+        }
+        dump_fd = -1
+        directory = SimpleNamespace()
+
+        def __init__(self) -> None:
+            self.dump_fd = dump_fd
+
+        def close(self) -> None:
+            if self.dump_fd >= 0:
+                os.close(self.dump_fd)
+                self.dump_fd = -1
+
+    state = {"dropped": False, "marker_writes": 0}
+
+    class DropRecordingRunner(_PostgresRunner):
+        def __call__(self, argv: list[str], **kwargs: object) -> SimpleNamespace:
+            result = super().__call__(argv, **kwargs)
+            if Path(argv[0]).name == "dropdb":
+                state["dropped"] = True
+            return result
+
+    def revalidate(_opened: object) -> None:
+        if state["dropped"]:
+            raise postgres_restore.PostgresRestoreError("manifest_untrusted")
+
+    monkeypatch.setattr(
+        postgres_restore, "_open_backup", lambda _path: FakeOpenedBackup()
+    )
+    monkeypatch.setattr(postgres_restore, "_revalidate_opened_backup", revalidate)
+    monkeypatch.setattr(
+        postgres_restore,
+        "_write_marker_at",
+        lambda _directory, _marker: state.__setitem__(
+            "marker_writes", state["marker_writes"] + 1
+        ),
+    )
+    monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
+
+    with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
+        postgres_restore.verify_restore(
+            manifest_path=tmp_path / "manifest.json",
+            source_database="temporal",
+            target_database="temporal_verify",
+            host="127.0.0.1",
+            port=5433,
+            user="temporal",
+            drop_verification_database=True,
+            runner=DropRecordingRunner(),
+            now=datetime(2026, 8, 24, tzinfo=timezone.utc),
+        )
+
+    assert raised.value.code == "manifest_untrusted"
+    assert state == {"dropped": True, "marker_writes": 0}
+
+
+@requires_posix_descriptor_io
+def test_postgres_restore_rejects_hash_size_major_and_noncanonical_manifest(
+    postgres_trusted_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path = postgres_trusted_tmp_path
     manifest_path, manifest, _backup_runner = _backup_fixture(tmp_path, monkeypatch)
     for field, value, code in (
         ("sha256", "0" * 64, "dump_hash_mismatch"),
@@ -983,9 +1552,10 @@ def test_postgres_restore_rejects_hash_size_major_and_noncanonical_manifest(
 
 @requires_posix_descriptor_io
 def test_postgres_restore_existing_target_and_drop_are_fail_closed(
-    tmp_path: Path,
+    postgres_trusted_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    tmp_path = postgres_trusted_tmp_path
     manifest_path, _manifest, _backup_runner = _backup_fixture(tmp_path, monkeypatch)
     existing_runner = _PostgresRunner(target_exists=True)
     with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
@@ -1024,9 +1594,10 @@ def test_postgres_restore_existing_target_and_drop_are_fail_closed(
 
 @requires_posix_descriptor_io
 def test_postgres_restore_missing_required_table_never_writes_verified_marker(
-    tmp_path: Path,
+    postgres_trusted_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    tmp_path = postgres_trusted_tmp_path
     manifest_path, _manifest, _backup_runner = _backup_fixture(tmp_path, monkeypatch)
     runner = _PostgresRunner(missing_table="history_node")
     with pytest.raises(postgres_restore.PostgresRestoreError) as raised:
@@ -1046,10 +1617,11 @@ def test_postgres_restore_missing_required_table_never_writes_verified_marker(
 @requires_posix_descriptor_io
 @pytest.mark.parametrize("published_name", ["dump", "manifest"])
 def test_postgres_backup_removes_published_assets_after_directory_fsync_failure(
-    tmp_path: Path,
+    postgres_trusted_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     published_name: str,
 ) -> None:
+    tmp_path = postgres_trusted_tmp_path
     monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
     dump_name = "temporal-20260824T000000Z.dump"
     manifest_name = "manifest.json"
@@ -1090,10 +1662,11 @@ def test_postgres_backup_removes_published_assets_after_directory_fsync_failure(
 @requires_posix_descriptor_io
 @pytest.mark.parametrize("published_name", ["dump", "manifest"])
 def test_postgres_backup_final_identity_race_preserves_replacement_and_fails(
-    tmp_path: Path,
+    postgres_trusted_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     published_name: str,
 ) -> None:
+    tmp_path = postgres_trusted_tmp_path
     monkeypatch.setenv("TEMPORAL_POSTGRES_PASSWORD", "runtime-secret")
     dump_name = "temporal-20260824T000000Z.dump"
     manifest_name = "manifest.json"
@@ -1148,13 +1721,15 @@ def test_postgres_backup_final_identity_race_preserves_replacement_and_fails(
 
 @requires_posix_descriptor_io
 def test_postgres_restore_restores_old_marker_after_post_replace_fsync_failure(
-    tmp_path: Path,
+    postgres_trusted_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    tmp_path = postgres_trusted_tmp_path
     manifest_path, _manifest, _backup_runner = _backup_fixture(tmp_path, monkeypatch)
     marker_path = tmp_path / "latest-verified.json"
     previous = b'{"status":"previous"}\n'
     marker_path.write_bytes(previous)
+    os.chmod(marker_path, 0o600)
     real_fsync = postgres_backup._fsync_directory_fd
     failed = False
 
@@ -1192,12 +1767,14 @@ def test_postgres_restore_restores_old_marker_after_post_replace_fsync_failure(
 
 @requires_posix_descriptor_io
 def test_postgres_restore_final_marker_identity_race_preserves_replacement(
-    tmp_path: Path,
+    postgres_trusted_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    tmp_path = postgres_trusted_tmp_path
     manifest_path, _manifest, _backup_runner = _backup_fixture(tmp_path, monkeypatch)
     marker_path = tmp_path / "latest-verified.json"
     marker_path.write_bytes(b'{"status":"previous"}\n')
+    os.chmod(marker_path, 0o600)
     replacement = b'{"status":"attacker"}\n'
     real_stat_at = postgres_backup._stat_at
     marker_stats = 0
@@ -1244,7 +1821,12 @@ def test_postgres_scripts_are_bounded_redacted_and_never_use_shell_true() -> Non
         assert "timeout=" in source
         assert "Traceback" not in source
     assert "TEMPORAL_POSTGRES_PASSWORD" in backup_source
-    assert "backup._password_environment()" in restore_source
+    assert 'os.environ.get("PATH"' not in backup_source
+    assert "start_new_session=True" in backup_source
+    assert "os.killpg" in backup_source
+    assert "--postgres-bin-dir" in backup_source
+    assert "--postgres-bin-dir" in restore_source
+    assert "backup._password_environment(" in restore_source
     assert "--exit-on-error" in restore_source
     assert "--single-transaction" in restore_source
     assert "dropdb" in restore_source

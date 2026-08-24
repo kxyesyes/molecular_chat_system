@@ -10,10 +10,12 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Callable
 
 
@@ -23,6 +25,11 @@ QUERY_TIMEOUT_SECONDS = 15.0
 MAX_TOOL_OUTPUT_BYTES = 4096
 MAX_MANIFEST_BYTES = 16 * 1024
 MAX_PASSWORD_BYTES = 1024
+DEFAULT_POSTGRES_BIN_DIR = Path("/usr/bin")
+POSTGRES_BIN_DIR_ENV = "TEMPORAL_POSTGRES_BIN_DIR"
+PROCESS_TERM_GRACE_SECONDS = 0.5
+PROCESS_REAP_TIMEOUT_SECONDS = 2.0
+POSTGRES_TOOL_NAMES = frozenset({"createdb", "dropdb", "pg_dump", "pg_restore", "psql"})
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}\Z")
 _HOST = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\Z")
 _LEAF = re.compile(r"[A-Za-z0-9.][A-Za-z0-9._-]{0,127}\Z")
@@ -115,7 +122,43 @@ def _directory_flags() -> int:
     return os.O_RDONLY | _DIRECTORY | _NOFOLLOW | _CLOEXEC
 
 
-def _open_directory_chain(path: Path) -> int:
+def _effective_ids() -> tuple[int, int]:
+    if os.name != "posix" or not hasattr(os, "geteuid") or not hasattr(os, "getegid"):
+        raise PostgresBackupError("output_untrusted")
+    return os.geteuid(), os.getegid()
+
+
+def _require_trusted_directory_metadata(
+    metadata: os.stat_result,
+    *,
+    final: bool,
+) -> None:
+    effective_uid, effective_gid = _effective_ids()
+    owner = (metadata.st_uid, metadata.st_gid)
+    trusted_owner = owner in {(0, 0), (effective_uid, effective_gid)}
+    mode = stat.S_IMODE(metadata.st_mode)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or _is_reparse_point(metadata)
+        or not trusted_owner
+        or (final and (owner != (effective_uid, effective_gid) or mode != 0o700))
+        or (not final and mode & 0o022)
+    ):
+        raise PostgresBackupError("output_untrusted")
+
+
+def _require_trusted_regular_metadata(metadata: os.stat_result) -> None:
+    effective_uid, effective_gid = _effective_ids()
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or _is_reparse_point(metadata)
+        or (metadata.st_uid, metadata.st_gid) != (effective_uid, effective_gid)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise PostgresBackupError("output_untrusted")
+
+
+def _open_directory_chain(path: Path, *, final_exact: bool = True) -> int:
     if not _descriptor_io_available():
         raise PostgresBackupError("output_untrusted")
     lexical = _absolute_lexical(path)
@@ -124,19 +167,24 @@ def _open_directory_chain(path: Path) -> int:
     descriptor = -1
     try:
         descriptor = os.open("/", _directory_flags())
-        for component in lexical.parts[1:]:
+        root_is_final = final_exact and len(lexical.parts) == 1
+        _require_trusted_directory_metadata(os.fstat(descriptor), final=root_is_final)
+        components = lexical.parts[1:]
+        for index, component in enumerate(components):
             if component in {"", ".", ".."} or "/" in component:
                 raise PostgresBackupError("output_untrusted")
             child = os.open(component, _directory_flags(), dir_fd=descriptor)
             metadata = os.fstat(child)
-            if not stat.S_ISDIR(metadata.st_mode) or _is_reparse_point(metadata):
+            try:
+                _require_trusted_directory_metadata(
+                    metadata,
+                    final=final_exact and index == len(components) - 1,
+                )
+            except PostgresBackupError:
                 os.close(child)
-                raise PostgresBackupError("output_untrusted")
+                raise
             os.close(descriptor)
             descriptor = child
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISDIR(metadata.st_mode) or _is_reparse_point(metadata):
-            raise PostgresBackupError("output_untrusted")
         return descriptor
     except PostgresBackupError:
         if descriptor >= 0:
@@ -181,6 +229,46 @@ class TrustedDirectory:
         self.close()
 
 
+def _selected_postgres_bin_dir(value: Path | None = None) -> Path:
+    selected: object = value
+    if selected is None:
+        selected = os.environ.get(POSTGRES_BIN_DIR_ENV, DEFAULT_POSTGRES_BIN_DIR)
+    if not isinstance(selected, (str, os.PathLike)):
+        raise PostgresBackupError("output_untrusted")
+    raw = os.fspath(selected)
+    if not raw or "\x00" in raw:
+        raise PostgresBackupError("output_untrusted")
+    return Path(raw)
+
+
+class TrustedPostgresBinDirectory:
+    def __init__(self, path: Path) -> None:
+        selected = _selected_postgres_bin_dir(path)
+        if not selected.is_absolute():
+            raise PostgresBackupError("output_untrusted")
+        self.path = _absolute_lexical(selected)
+        self.fd = _open_directory_chain(self.path, final_exact=False)
+        try:
+            self.identity = _identity(os.fstat(self.fd))
+        except OSError as exc:
+            os.close(self.fd)
+            self.fd = -1
+            raise PostgresBackupError("output_untrusted") from exc
+
+    def revalidate(self) -> None:
+        replacement = _open_directory_chain(self.path, final_exact=False)
+        try:
+            if _identity(os.fstat(replacement)) != self.identity:
+                raise PostgresBackupError("output_untrusted")
+        finally:
+            os.close(replacement)
+
+    def close(self) -> None:
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
+
 def _stat_at(parent_fd: int, name: str) -> os.stat_result:
     return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
 
@@ -203,7 +291,7 @@ def _fsync_directory_fd(parent_fd: int) -> None:
 def _safe_unlink_at(
     parent_fd: int,
     name: str,
-    expected_identity: tuple[int, int] | None,
+    expected_identity: tuple[int, int, int, int, int] | None,
     *,
     sync: bool = True,
 ) -> bool:
@@ -212,7 +300,7 @@ def _safe_unlink_at(
     try:
         metadata = _stat_at(parent_fd, name)
         if (
-            _identity(metadata) != expected_identity
+            _full_identity(metadata) != expected_identity
             or not stat.S_ISREG(metadata.st_mode)
             or _is_reparse_point(metadata)
         ):
@@ -268,7 +356,7 @@ def canonical_json(payload: dict[str, object]) -> bytes:
         raise PostgresBackupError("manifest_invalid") from exc
 
 
-def _password_environment() -> dict[str, str]:
+def _password_environment(postgres_bin_dir: Path | None = None) -> dict[str, str]:
     password = os.environ.get("TEMPORAL_POSTGRES_PASSWORD")
     try:
         encoded = password.encode("utf-8", "strict") if type(password) is str else b""
@@ -282,10 +370,44 @@ def _password_environment() -> dict[str, str]:
     ):
         raise PostgresBackupError("password_missing")
     return {
-        "PATH": os.environ.get("PATH", os.defpath),
+        "PATH": os.fspath(postgres_bin_dir or DEFAULT_POSTGRES_BIN_DIR),
         "PGPASSWORD": password,
         "PGCONNECT_TIMEOUT": "10",
     }
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    process_group = process.pid
+    try:
+        os.killpg(process_group, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + PROCESS_TERM_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.02)
+    try:
+        os.killpg(process_group, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=PROCESS_REAP_TIMEOUT_SECONDS)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    deadline = time.monotonic() + PROCESS_REAP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.02)
+
+
+def _process_groups_available() -> bool:
+    return os.name == "posix" and hasattr(os, "killpg")
 
 
 def run_command(
@@ -297,12 +419,30 @@ def run_command(
     stdin_fd: int | None = None,
     stdout_fd: int | None = None,
 ) -> object:
+    if not _process_groups_available():
+        raise PostgresBackupError("tool_failed")
     if capture_output and stdout_fd is not None:
         raise PostgresBackupError("tool_failed")
-    output = tempfile.TemporaryFile() if capture_output else None
+    command = list(argv)
+    trusted_bin: TrustedPostgresBinDirectory | None = None
+    if not command:
+        raise PostgresBackupError("tool_failed")
+    tool_name = Path(command[0]).name
+    if tool_name in POSTGRES_TOOL_NAMES:
+        path_value = environment.get("PATH")
+        if type(path_value) is not str:
+            raise PostgresBackupError("tool_failed")
+        try:
+            trusted_bin = TrustedPostgresBinDirectory(Path(path_value))
+            trusted_bin.revalidate()
+        except PostgresBackupError:
+            raise
+        command[0] = os.fspath(trusted_bin.path / tool_name)
+    output = None
     try:
+        output = tempfile.TemporaryFile() if capture_output else None
         process = subprocess.Popen(
-            argv,
+            command,
             stdin=stdin_fd if stdin_fd is not None else subprocess.DEVNULL,
             stdout=(
                 stdout_fd
@@ -313,12 +453,15 @@ def run_command(
             env=environment,
             shell=False,
             close_fds=True,
+            start_new_session=True,
         )
         try:
             returncode = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
-            process.kill()
-            process.wait(timeout=5)
+            try:
+                _terminate_process_group(process)
+            except BaseException:
+                pass
             raise PostgresBackupError("tool_timeout") from exc
         payload = b""
         if output is not None:
@@ -336,6 +479,8 @@ def run_command(
     finally:
         if output is not None:
             output.close()
+        if trusted_bin is not None:
+            trusted_bin.close()
 
 
 Runner = Callable[..., object]
@@ -413,11 +558,11 @@ def _open_new_regular_at(parent_fd: int, name: str, mode: int = 0o600) -> int:
         os.fchmod(descriptor, mode)
         metadata = os.fstat(descriptor)
         entry = _stat_at(parent_fd, name)
+        _require_trusted_regular_metadata(metadata)
         if (
-            not stat.S_ISREG(metadata.st_mode)
-            or _full_identity(metadata) != _full_identity(entry)
+            _full_identity(metadata) != _full_identity(entry)
             or _is_reparse_point(entry)
-            or stat.S_IMODE(metadata.st_mode) != mode
+            or mode != 0o600
         ):
             raise PostgresBackupError("output_untrusted")
         return descriptor
@@ -511,7 +656,7 @@ def _require_name_matches_fd(
 def _require_published_identity_at(
     parent_fd: int,
     name: str,
-    expected_identity: tuple[int, int],
+    expected_identity: tuple[int, int, int, int, int],
     *,
     code: str,
 ) -> os.stat_result:
@@ -520,7 +665,7 @@ def _require_published_identity_at(
     except OSError as exc:
         raise PostgresBackupError(code) from exc
     if (
-        _identity(current) != expected_identity
+        _full_identity(current) != expected_identity
         or not stat.S_ISREG(current.st_mode)
         or _is_reparse_point(current)
     ):
@@ -533,13 +678,13 @@ def _publish_new_at(
     temporary_name: str,
     destination_name: str,
     descriptor: int,
-) -> tuple[int, int]:
+) -> tuple[int, int, int, int, int]:
     _safe_leaf(temporary_name)
     _safe_leaf(destination_name)
     temporary = _require_name_matches_fd(
         directory.fd, temporary_name, descriptor, code="dump_invalid"
     )
-    published_identity: tuple[int, int] | None = None
+    published_identity: tuple[int, int, int, int, int] | None = None
     replaced = False
     try:
         directory.revalidate()
@@ -551,11 +696,10 @@ def _publish_new_at(
             dst_dir_fd=directory.fd,
         )
         replaced = True
-        published_identity = _identity(temporary)
         published_descriptor = os.fstat(descriptor)
-        if _identity(published_descriptor) != published_identity:
+        if _identity(published_descriptor) != _identity(temporary):
             raise PostgresBackupError("atomic_write_failed")
-        published_identity = _identity(published_descriptor)
+        published_identity = _full_identity(published_descriptor)
         _fsync_directory_fd(directory.fd)
         published = _stat_at(directory.fd, destination_name)
         if (
@@ -582,16 +726,16 @@ def _atomic_write_new_at(
     payload: bytes,
     *,
     mode: int = 0o600,
-) -> tuple[int, int]:
+) -> tuple[int, int, int, int, int]:
     destination_name = _safe_leaf(destination_name)
     temporary_name = _safe_leaf(f".{destination_name}.partial")
     _ensure_absent_at(directory.fd, destination_name)
     _ensure_absent_at(directory.fd, temporary_name)
     descriptor = -1
-    temporary_identity: tuple[int, int] | None = None
+    temporary_identity: tuple[int, int, int, int, int] | None = None
     try:
         descriptor = _open_new_regular_at(directory.fd, temporary_name, mode)
-        temporary_identity = _identity(os.fstat(descriptor))
+        temporary_identity = _full_identity(os.fstat(descriptor))
         view = memoryview(payload)
         while view:
             written = os.write(descriptor, view)
@@ -609,6 +753,11 @@ def _atomic_write_new_at(
     except OSError as exc:
         raise PostgresBackupError("atomic_write_failed") from exc
     finally:
+        if descriptor >= 0:
+            try:
+                temporary_identity = _full_identity(os.fstat(descriptor))
+            except OSError:
+                pass
         _safe_unlink_at(
             directory.fd, temporary_name, temporary_identity, sync=False
         )
@@ -630,29 +779,38 @@ def create_backup(
     user: str,
     runner: Runner = run_command,
     now: datetime | None = None,
+    postgres_bin_dir: Path | None = None,
 ) -> dict[str, object]:
     database = validate_identifier(database)
     user = validate_identifier(user)
     host = validate_host(host)
     port = validate_port(port)
     stamp, generated_at = _utc_timestamp(now or datetime.now(timezone.utc))
-    environment = _password_environment()
+    selected_bin_dir = _selected_postgres_bin_dir(postgres_bin_dir)
+    environment = _password_environment(selected_bin_dir)
     manifest_path = _absolute_lexical(Path(manifest_output))
     manifest_name = _safe_leaf(manifest_path.name)
     dump_name = _safe_leaf(f"{database}-{stamp}.dump")
     partial_name = _safe_leaf(f".{dump_name}.partial")
     output = TrustedDirectory(Path(output_dir))
-    manifest_directory: TrustedDirectory | None = None
+    trusted_bin: TrustedPostgresBinDirectory | None = None
     partial_descriptor = -1
-    partial_identity: tuple[int, int] | None = None
-    published_identity: tuple[int, int] | None = None
-    manifest_identity: tuple[int, int] | None = None
+    partial_identity: tuple[int, int, int, int, int] | None = None
+    published_identity: tuple[int, int, int, int, int] | None = None
+    manifest_identity: tuple[int, int, int, int, int] | None = None
     try:
         manifest_directory = TrustedDirectory(manifest_path.parent)
+        try:
+            if manifest_directory.identity != output.identity:
+                raise PostgresBackupError("output_untrusted")
+        finally:
+            manifest_directory.close()
+        if runner is run_command:
+            trusted_bin = TrustedPostgresBinDirectory(selected_bin_dir)
         _ensure_absent_at(output.fd, dump_name)
         _ensure_absent_at(output.fd, partial_name)
-        _ensure_absent_at(manifest_directory.fd, manifest_name)
-        _ensure_absent_at(manifest_directory.fd, f".{manifest_name}.partial")
+        _ensure_absent_at(output.fd, manifest_name)
+        _ensure_absent_at(output.fd, f".{manifest_name}.partial")
         connection = _connection_arguments(host, port, user)
         major = server_major(
             runner=runner,
@@ -660,10 +818,11 @@ def create_backup(
             connection=connection,
             database=database,
         )
+        if trusted_bin is not None:
+            trusted_bin.revalidate()
         output.revalidate()
-        manifest_directory.revalidate()
         partial_descriptor = _open_new_regular_at(output.fd, partial_name)
-        partial_identity = _identity(os.fstat(partial_descriptor))
+        partial_identity = _full_identity(os.fstat(partial_descriptor))
         _invoke(
             runner,
             [
@@ -678,7 +837,7 @@ def create_backup(
             BACKUP_TIMEOUT_SECONDS,
             stdout_fd=partial_descriptor,
         )
-        digest, size, partial_identity, _partial_version = _hash_descriptor(
+        digest, size, _partial_identity, partial_identity = _hash_descriptor(
             partial_descriptor, code="dump_invalid", sync=True
         )
         if size <= 0 or _SHA256.fullmatch(digest) is None:
@@ -705,12 +864,11 @@ def create_backup(
             "status": "passed",
         }
         manifest_identity = _atomic_write_new_at(
-            manifest_directory,
+            output,
             manifest_name,
             canonical_json(manifest),
         )
         output.revalidate()
-        manifest_directory.revalidate()
         (
             final_digest,
             final_size,
@@ -732,32 +890,31 @@ def create_backup(
             code="atomic_write_failed",
         )
         _require_published_identity_at(
-            manifest_directory.fd,
+            output.fd,
             manifest_name,
             manifest_identity,
             code="atomic_write_failed",
         )
         return manifest
     except PostgresBackupError:
-        if manifest_directory is not None:
-            _safe_unlink_at(
-                manifest_directory.fd, manifest_name, manifest_identity
-            )
+        _safe_unlink_at(output.fd, manifest_name, manifest_identity)
         _safe_unlink_at(output.fd, dump_name, published_identity)
         raise
     except OSError as exc:
-        if manifest_directory is not None:
-            _safe_unlink_at(
-                manifest_directory.fd, manifest_name, manifest_identity
-            )
+        _safe_unlink_at(output.fd, manifest_name, manifest_identity)
         _safe_unlink_at(output.fd, dump_name, published_identity)
         raise PostgresBackupError("atomic_write_failed") from exc
     finally:
+        if partial_descriptor >= 0:
+            try:
+                partial_identity = _full_identity(os.fstat(partial_descriptor))
+            except OSError:
+                pass
         _safe_unlink_at(output.fd, partial_name, partial_identity, sync=False)
         if partial_descriptor >= 0:
             os.close(partial_descriptor)
-        if manifest_directory is not None:
-            manifest_directory.close()
+        if trusted_bin is not None:
+            trusted_bin.close()
         output.close()
 
 
@@ -769,6 +926,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--user", required=True)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--manifest-output", required=True, type=Path)
+    parser.add_argument("--postgres-bin-dir", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -780,13 +938,22 @@ def main(argv: list[str] | None = None) -> int:
         validate_identifier(arguments.user)
         validate_host(arguments.host)
         validate_port(arguments.port)
-        _password_environment()
+        selected_bin_dir = _selected_postgres_bin_dir(arguments.postgres_bin_dir)
+        _password_environment(selected_bin_dir)
         manifest_path = _absolute_lexical(arguments.manifest_output)
         _safe_leaf(manifest_path.name)
-        with TrustedDirectory(arguments.output_dir), TrustedDirectory(
-            manifest_path.parent
-        ):
-            pass
+        output_directory = TrustedDirectory(arguments.output_dir)
+        try:
+            manifest_directory = TrustedDirectory(manifest_path.parent)
+            try:
+                if output_directory.identity != manifest_directory.identity:
+                    raise PostgresBackupError("output_untrusted")
+            finally:
+                manifest_directory.close()
+            trusted_bin = TrustedPostgresBinDirectory(selected_bin_dir)
+            trusted_bin.close()
+        finally:
+            output_directory.close()
         if arguments.dry_run:
             print("temporal_postgres_backup=dry-run")
             return 0
@@ -797,6 +964,7 @@ def main(argv: list[str] | None = None) -> int:
             host=arguments.host,
             port=arguments.port,
             user=arguments.user,
+            postgres_bin_dir=selected_bin_dir,
         )
     except PostgresBackupError as exc:
         print(f"temporal_postgres_backup=failed code={exc.code}", file=sys.stderr)
