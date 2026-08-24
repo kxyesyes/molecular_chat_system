@@ -553,6 +553,195 @@ test ! -e "$destination/usr/share/medchat/temporal-worker-assets.sha256"
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize("signal_name", ["HUP", "INT", "TERM"])
+def test_temporal_worker_installer_cleans_temporary_file_on_signal(
+    signal_name: str,
+) -> None:
+    if os.name != "nt" or shutil.which("wsl.exe") is None:
+        pytest.skip("WSL is required for deterministic installer signal validation")
+    repository = _wsl_path(ROOT)
+    command = f"""
+set -eu
+command -v setsid >/dev/null 2>&1 || exit 77
+cd '{repository}'
+test_root=$(mktemp -d)
+release="$test_root/release"
+destination="$test_root/destination"
+sync_file="$test_root/sync"
+output_file="$test_root/output"
+leader=
+leader_starttime=
+python_pid=
+python_starttime=
+python_pgid=
+process_identity_matches() {{
+    python3 - "$python_pid" "$python_starttime" "$python_pgid" <<'PY'
+import os
+import sys
+
+pid, expected_starttime, expected_pgid = map(int, sys.argv[1:])
+try:
+    payload = open(f"/proc/{{pid}}/stat", encoding="ascii").read()
+    closing_parenthesis = payload.rfind(")")
+    starttime = int(payload[closing_parenthesis + 2 :].split()[19])
+    pgid = os.getpgid(pid)
+except (OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if (starttime, pgid) == (expected_starttime, expected_pgid) else 1)
+PY
+}}
+leader_identity_matches() {{
+    python3 - "$leader" "$leader_starttime" <<'PY'
+import os
+import sys
+
+pid, expected_starttime = map(int, sys.argv[1:])
+try:
+    payload = open(f"/proc/{{pid}}/stat", encoding="ascii").read()
+    closing_parenthesis = payload.rfind(")")
+    starttime = int(payload[closing_parenthesis + 2 :].split()[19])
+    pgid = os.getpgid(pid)
+except (OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if (starttime, pgid) == (expected_starttime, pid) else 1)
+PY
+}}
+kill_process_group() {{
+    python3 - "$1" <<'PY'
+import os
+import signal
+import sys
+
+os.killpg(int(sys.argv[1]), signal.SIGKILL)
+PY
+}}
+cleanup() {{
+    killed_group=0
+    if [ -n "$python_pid" ] && process_identity_matches; then
+        if kill_process_group "$python_pgid"; then killed_group=1; fi
+    elif [ -n "$leader" ] && [ -n "$leader_starttime" ] && leader_identity_matches; then
+        if kill_process_group "$leader"; then killed_group=1; fi
+    fi
+    if [ -n "$leader" ]; then
+        if [ "$killed_group" -eq 1 ] || ! kill -0 "$leader" 2>/dev/null; then
+            wait "$leader" 2>/dev/null || true
+        fi
+    fi
+    rm -rf -- "$test_root"
+}}
+cleanup_on_signal() {{
+    cleanup
+    trap - EXIT HUP INT TERM
+    exit 1
+}}
+trap cleanup EXIT
+trap cleanup_on_signal HUP INT TERM
+mkdir -p "$release" "$destination"
+printf '%s\n' keep > "$destination/sentinel"
+cp -R deployment "$release/deployment"
+python3 - "$release/deployment/install-temporal-worker.sh" "$sync_file" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+sync_path = sys.argv[2]
+source = path.read_text(encoding="utf-8")
+needle = '''        descriptor = os.open(
+            temporary_name,
+            CREATE_FLAGS,
+            mode,
+            dir_fd=parent_descriptor,
+        )
+        offset = 0
+'''
+injection = '''        sync_descriptor = os.open(
+            %r,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        try:
+            process_stat = open("/proc/self/stat", encoding="ascii").read()
+            closing_parenthesis = process_stat.rfind(")")
+            process_starttime = int(
+                process_stat[closing_parenthesis + 2 :].split()[19]
+            )
+            sync_payload = ("%%d %%d %%d\\\\n" %% (
+                os.getpid(),
+                os.getpgrp(),
+                process_starttime,
+            )).encode("ascii")
+            os.write(sync_descriptor, sync_payload)
+            os.fsync(sync_descriptor)
+        finally:
+            os.close(sync_descriptor)
+        __import__("signal").pause()
+''' % (sync_path,)
+if source.count(needle) != 1:
+    raise SystemExit("installer temporary-file synchronization anchor changed")
+replacement = needle.replace("        offset = 0\\n", injection + "        offset = 0\\n")
+path.write_text(source.replace(needle, replacement), encoding="utf-8", newline="\\n")
+PY
+setsid sh "$release/deployment/install-temporal-worker.sh" \
+    --destdir "$destination" >"$output_file" 2>&1 &
+leader=$!
+leader_starttime=$(python3 - "$leader" <<'PY'
+import sys
+
+payload = open(f"/proc/{{sys.argv[1]}}/stat", encoding="ascii").read()
+closing_parenthesis = payload.rfind(")")
+print(int(payload[closing_parenthesis + 2 :].split()[19]))
+PY
+)
+for attempt in $(seq 1 200)
+do
+    if [ -s "$sync_file" ]; then break; fi
+    if ! kill -0 "$leader" 2>/dev/null; then break; fi
+    sleep 0.025
+done
+test -s "$sync_file"
+read -r python_pid python_pgid python_starttime < "$sync_file"
+test "$python_pgid" = "$leader"
+process_identity_matches
+kill -s '{signal_name}' "$python_pid"
+for attempt in $(seq 1 200)
+do
+    if ! kill -0 "$leader" 2>/dev/null; then break; fi
+    sleep 0.025
+done
+if kill -0 "$leader" 2>/dev/null; then exit 90; fi
+set +e
+wait "$leader"
+result=$?
+set -e
+leader=
+python_pid=
+test "$result" -ne 0
+test "$(cat "$output_file")" = 'temporal_worker_install=failed code=asset_installation_failed'
+test "$(cat "$destination/sentinel")" = keep
+test -z "$(find "$destination" -name '.medchat-install-*' -print -quit)"
+test ! -e "$destination/etc/systemd/system/medchat-temporal-worker.service"
+test ! -e "$destination/etc/systemd/system/medchat-temporal-worker-prepare.service"
+test ! -e "$destination/usr/libexec/medchat/validate-temporal-worker-env"
+test ! -e "$destination/usr/lib/tmpfiles.d/medchat-temporal-worker.conf"
+test ! -e "$destination/usr/share/medchat/temporal-worker-assets.sha256"
+rm -rf -- "$release"
+test ! -e "$release"
+"""
+    result = subprocess.run(
+        ["wsl.exe", "-e", "sh", "-lc", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=45,
+        check=False,
+    )
+    if result.returncode == 77:
+        pytest.skip("WSL setsid is unavailable")
+    assert result.returncode == 0, result.stderr
+
+
 def _live_root_install_command(repository: str) -> str:
     return f"""
 set -eu

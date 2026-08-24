@@ -80,6 +80,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import signal
 import stat
 import sys
 
@@ -133,6 +134,18 @@ EXPECTED_GID = 0 if LIVE_INSTALL else os.getegid()
 
 class InstallFailure(RuntimeError):
     pass
+
+
+INSTALL_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+
+
+def fail_closed_on_signal(_signum: int, _frame: object) -> None:
+    signal.pthread_sigmask(signal.SIG_BLOCK, INSTALL_SIGNALS)
+    raise InstallFailure()
+
+
+for install_signal in INSTALL_SIGNALS:
+    signal.signal(install_signal, fail_closed_on_signal)
 
 
 def identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
