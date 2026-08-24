@@ -323,19 +323,15 @@ sudo useradd -r -m -d /opt/medchat medchat
 ```
 
 已验证的发布源码 `/opt/medchat/molecular_chat_system`、Conda 环境
-`/opt/conda/envs/medchat` 以及安装后的 systemd、helper 和 tmpfiles 资产必须由
+`/opt/conda/envs/medchat` 以及安装后的 systemd 和 helper 资产必须由
 `root:root` 持有并保持 `go-w`。源码和 Conda 不得由 `medchat` 用户、group 或
 other 写入。
 
-Temporal docking worker 只允许以下四个运行目录由 `medchat` 持有，且权限固定为
-`0700`：
-
-```bash
-sudo install -d -o medchat -g medchat -m 0700 /opt/medchat/molecular_chat_system/scratch
-sudo install -d -o medchat -g medchat -m 0700 /opt/medchat/molecular_chat_system/scratch/task_inputs
-sudo install -d -o medchat -g medchat -m 0700 /opt/medchat/molecular_chat_system/scratch/temporal_backups
-sudo install -d -o medchat -g medchat -m 0700 /opt/medchat/molecular_chat_system/temp_docking
-```
+Temporal docking worker 只允许 `scratch`、`scratch/task_inputs`、
+`scratch/temporal_backups` 和 `temp_docking` 四个运行目录由 `medchat` 持有，且权限固定
+为 `0700`。operator 不得手工创建或修复这些目录；只能通过已激活 generation 中的
+`prepare-temporal-worker-directories`，由 prepare/activation helper 以 descriptor-relative、
+no-follow 方式创建或验证。
 
 不要递归放宽源码树权限。Web 服务需要的其他可写目录应按其独立运行契约逐项配置，
 不能扩大 Temporal worker 的写边界。
@@ -513,7 +509,8 @@ sudoedit /etc/medchat/temporal-worker.env
 sudo systemctl enable medchat-temporal-worker.service
 ```
 
-每次修改专用环境文件后，必须先重跑 root trust preparation，再重启非特权 worker：
+每次修改专用环境文件后，必须先通过 prepare helper 重跑 root trust preparation，再重启
+非特权 worker：
 
 ```bash
 sudo systemctl restart medchat-temporal-worker-prepare.service
@@ -524,9 +521,9 @@ sudo systemctl restart medchat-temporal-worker.service
 
 #### 当前 release blockers
 
-- isolated live-root runner 尚未实现。本地、CI 或普通宿主不得直接运行 live-root 测试；
-  后续 runner 必须在一次性 disposable Linux 环境中证明 private mount namespace 和所有
-  bind roots 后才能执行。
+- isolated live-root runner 已实现 private mount namespace、只读 lower root、tmpfs
+  upper/work、overlay merged root 和 chroot 的技术隔离检查，但本轮 Windows 验证严禁执行；
+  在 disposable Linux 上以 opt-in 实际运行并通过前仍是 release blocker。
 - staging failure/signal/concurrency 用例在 Windows 上按真实 POSIX 能力 skip；必须在
   native Linux 上直接执行并通过，不能用静态断言替代。
 - 真实 systemd activation/migration、`systemd-analyze verify`、mixed lifecycle 和

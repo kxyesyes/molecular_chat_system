@@ -264,16 +264,10 @@ def test_deployment_docs_prescribe_trusted_worker_install_and_narrow_ownership()
     assert "/opt/conda/envs/medchat" in documentation
     assert "root:root" in documentation
     assert "go-w" in documentation
-    for runtime_directory in (
-        "/opt/medchat/molecular_chat_system/scratch",
-        "/opt/medchat/molecular_chat_system/scratch/task_inputs",
-        "/opt/medchat/molecular_chat_system/scratch/temporal_backups",
-        "/opt/medchat/molecular_chat_system/temp_docking",
-    ):
-        assert (
-            f"install -d -o medchat -g medchat -m 0700 {runtime_directory}"
-            in documentation
-        )
+    assert "install -d -o medchat" not in documentation
+    assert "systemd-tmpfiles" not in documentation
+    assert "prepare-temporal-worker-directories" in documentation
+    assert "activate-temporal-worker-generation.sh" in documentation
     assert "/etc/medchat/temporal-worker.env" in documentation
     assert "temporal-worker.env.example" in documentation
     assert "0600" in documentation
@@ -289,7 +283,6 @@ def test_deployment_docs_prescribe_trusted_worker_install_and_narrow_ownership()
     assert "legacy-tmpfiles.disabled" in documentation
     assert "isolated live-root runner" in documentation
     assert "release blocker" in documentation.lower()
-    assert "systemd-tmpfiles --create" not in documentation
 
 
 def test_cli_rejects_path_argument_without_echo_or_traceback() -> None:
