@@ -899,8 +899,10 @@ def test_unit_link_transaction_journals_before_postpublication_validation(
     leaf = relative.rsplit("/", 1)[1]
     entries: dict[str, object] = {}
     published = False
+    temporary_unlinked = False
+    stable_link_count: int | None = None
     failed = False
-    verified_stats = 0
+    post_unlink_stats = 0
     inode = 40
 
     class Metadata:
@@ -910,6 +912,7 @@ def test_unit_link_transaction_journals_before_postpublication_validation(
             self.st_gid = 0
             self.st_dev = 3
             self.st_ino = inode_value
+            self.st_nlink = 1
             self.st_size = 1
             self.st_mtime_ns = 2
             self.st_ctime_ns = 3
@@ -935,6 +938,7 @@ def test_unit_link_transaction_journals_before_postpublication_validation(
         linked = Metadata(symlink=True, inode_value=original.st_ino)
         linked.target = original.target
         linked.st_ctime_ns = original.st_ctime_ns + 1
+        linked.st_nlink = 2
         entries[source] = linked
         entries[destination] = linked
         published = True
@@ -945,33 +949,63 @@ def test_unit_link_transaction_journals_before_postpublication_validation(
         published = True
 
     def fake_stat(name, **kwargs):
-        nonlocal failed, verified_stats
+        nonlocal failed, post_unlink_stats
         if name not in entries:
             raise FileNotFoundError(name)
-        if published and name == leaf:
-            verified_stats += 1
-            if failure == "stat" and verified_stats == 1 and not failed:
+        after_safe_boundary = (
+            temporary_unlinked if operation == "bootstrap" else published
+        )
+        if after_safe_boundary and name == leaf:
+            post_unlink_stats += 1
+            if failure == "stat" and post_unlink_stats == 1 and not failed:
                 failed = True
-                raise OSError("injected post-publication stat failure")
+                raise OSError("injected post-unlink stat failure")
         return entries[name]
 
     def fake_readlink(name, **kwargs):
         nonlocal failed
-        if published and name == leaf and failure == "readlink" and not failed:
+        after_safe_boundary = (
+            temporary_unlinked if operation == "bootstrap" else published
+        )
+        if (
+            after_safe_boundary
+            and name == leaf
+            and failure == "readlink"
+            and not failed
+        ):
             failed = True
-            raise OSError("injected post-publication readlink failure")
+            raise OSError("injected post-unlink readlink failure")
         return entries[name].target
 
     def fake_fsync(_descriptor):
         nonlocal failed
-        if published and failure == "fsync" and not failed:
+        after_safe_boundary = (
+            temporary_unlinked if operation == "bootstrap" else published
+        )
+        if after_safe_boundary and failure == "fsync" and not failed:
             failed = True
-            raise OSError("injected post-publication fsync failure")
+            raise OSError("injected post-unlink fsync failure")
 
     def fake_unlink(name, **kwargs):
+        nonlocal stable_link_count, temporary_unlinked
         if name not in entries:
             raise FileNotFoundError(name)
+        removed = entries[name]
         del entries[name]
+        if (
+            operation == "bootstrap"
+            and name != leaf
+            and leaf in entries
+            and entries[leaf].st_dev == removed.st_dev
+            and entries[leaf].st_ino == removed.st_ino
+        ):
+            stable = Metadata(symlink=True, inode_value=removed.st_ino)
+            stable.target = removed.target
+            stable.st_nlink = removed.st_nlink - 1
+            stable.st_ctime_ns = removed.st_ctime_ns + 1
+            entries[leaf] = stable
+            temporary_unlinked = True
+            stable_link_count = stable.st_nlink
 
     monkeypatch.setattr(installer, "_open_parent", fake_open_parent)
     monkeypatch.setattr(installer.os, "symlink", fake_symlink)
@@ -994,6 +1028,76 @@ def test_unit_link_transaction_journals_before_postpublication_validation(
     assert leaf not in entries
     assert not any(name.startswith(".temporal-worker-link-") for name in entries)
     assert not any(name.startswith(".legacy-unit-") for name in entries)
+    if operation == "bootstrap":
+        assert temporary_unlinked is True
+        assert stable_link_count == 1
+
+
+@pytest.mark.parametrize("replace_entry", [False, True])
+def test_bootstrap_real_hardlink_post_unlink_failure_uses_safe_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replace_entry: bool,
+) -> None:
+    _native_posix_repository()
+    installer = _load_bundle_installer()
+    root = tmp_path / ("replacement" if replace_entry else "owned")
+    units = root / "etc/systemd/system"
+    units.mkdir(parents=True, mode=0o700)
+    root.chmod(0o700)
+    (root / "etc").chmod(0o700)
+    (root / "etc/systemd").chmod(0o700)
+    units.chmod(0o700)
+    relative, expected_target = next(iter(installer.BOOTSTRAP_LINKS.items()))
+    leaf = relative.rsplit("/", 1)[1]
+    entry = units / leaf
+    replacement_target = "/replacement-owned-by-another-actor"
+    real_unlink = os.unlink
+    real_fsync = os.fsync
+    real_symlink = os.symlink
+    temporary_unlinked = False
+    injected = False
+
+    def unlink_after_hardlink(name, *args, **kwargs):
+        nonlocal temporary_unlinked
+        result = real_unlink(name, *args, **kwargs)
+        if str(name).startswith(".temporal-worker-link-"):
+            temporary_unlinked = True
+        return result
+
+    def fail_post_unlink_fsync(descriptor):
+        nonlocal injected
+        if temporary_unlinked and not injected:
+            injected = True
+            if replace_entry:
+                real_unlink(leaf, dir_fd=descriptor)
+                real_symlink(replacement_target, leaf, dir_fd=descriptor)
+            raise OSError("injected post-unlink fsync failure")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(installer.os, "unlink", unlink_after_hardlink)
+    monkeypatch.setattr(installer.os, "fsync", fail_post_unlink_fsync)
+    root_descriptor = os.open(root, installer._DIRECTORY_FLAGS)
+    try:
+        if replace_entry:
+            with pytest.raises(installer.BundleInstallError) as raised:
+                installer._bootstrap_unit_links(
+                    root_descriptor, os.geteuid(), os.getegid()
+                )
+            assert raised.value.code == "activation_rollback_failed"
+            assert os.path.islink(entry)
+            assert os.readlink(entry) == replacement_target
+        else:
+            with pytest.raises(OSError, match="post-unlink fsync"):
+                installer._bootstrap_unit_links(
+                    root_descriptor, os.geteuid(), os.getegid()
+                )
+            assert not entry.exists() and not entry.is_symlink()
+        assert injected is True
+        assert not list(units.glob(".temporal-worker-link-*"))
+        assert expected_target == installer.BOOTSTRAP_LINKS[relative]
+    finally:
+        os.close(root_descriptor)
 
 
 @pytest.mark.parametrize("operation", ["bootstrap", "legacy"])

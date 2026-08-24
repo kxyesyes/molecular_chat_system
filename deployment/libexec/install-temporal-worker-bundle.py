@@ -823,12 +823,12 @@ def _bootstrap_unit_links(
                         raise BundleInstallError("activation_bootstrap_invalid") from exc
                     transaction.mark_published()
                     created.append(transaction)
+                    os.unlink(temporary, dir_fd=parent)
                     published_metadata = os.stat(
                         leaf, dir_fd=parent, follow_symlinks=False
                     )
                     if not transaction.record_published(published_metadata):
                         raise BundleInstallError("activation_bootstrap_invalid")
-                    os.unlink(temporary, dir_fd=parent)
                     os.fsync(parent)
                     metadata = os.stat(
                         leaf, dir_fd=parent, follow_symlinks=False
