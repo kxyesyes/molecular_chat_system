@@ -63,6 +63,7 @@ BUNDLE_INSTALLER = (
     ROOT / "deployment" / "libexec" / "install-temporal-worker-bundle.py"
 )
 WORKER_ACTIVATOR = ROOT / "deployment" / "activate-temporal-worker-generation.sh"
+LIVE_INSTALL_RUNNER = ROOT / "tests" / "run_temporal_live_install_isolated.sh"
 WORKER_HELPER = (
     ROOT / "deployment" / "libexec" / "validate-temporal-worker-env.py"
 )
@@ -386,6 +387,17 @@ def _run_native_posix(
     )
 
 
+def _wait_for_path(path: Path, process: subprocess.Popen, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.is_file():
+            return True
+        if process.poll() is not None:
+            return False
+        time.sleep(0.02)
+    return path.is_file()
+
+
 def test_posix_deployment_tests_never_dispatch_wsl_on_windows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -518,6 +530,393 @@ def test_temporal_worker_activation_operator_has_transactional_contract() -> Non
         assert required in source
 
 
+def test_generation_directories_require_exact_readonly_metadata() -> None:
+    installer = _load_bundle_installer()
+
+    class Metadata:
+        st_mode = 0o040555
+        st_uid = 17
+        st_gid = 23
+
+    installer._validate_generation_directory_metadata(Metadata(), 17, 23)
+    for attribute, value in (
+        ("st_mode", 0o040755),
+        ("st_mode", 0o100555),
+        ("st_uid", 18),
+        ("st_gid", 24),
+    ):
+        tampered = type(
+            "TamperedMetadata",
+            (),
+            {
+                "st_mode": Metadata.st_mode,
+                "st_uid": Metadata.st_uid,
+                "st_gid": Metadata.st_gid,
+            },
+        )()
+        setattr(tampered, attribute, value)
+        with pytest.raises(installer.BundleInstallError) as raised:
+            installer._validate_generation_directory_metadata(tampered, 17, 23)
+        assert raised.value.code == "bundle_generation_invalid"
+
+
+def test_fragment_path_parser_selects_only_requested_release() -> None:
+    installer = _load_bundle_installer()
+    digest = "a" * 64
+    unit = installer.WORKER_UNIT
+    selected = (
+        f"/usr/lib/medchat/temporal-worker/releases/{digest}/units/{unit}"
+    )
+    assert installer._parse_fragment_path(
+        selected.encode("ascii") + b"\n", "/", digest, unit
+    ) == (
+        "usr",
+        "lib",
+        "medchat",
+        "temporal-worker",
+        "releases",
+        digest,
+        "units",
+        unit,
+    )
+    fixture = "/tmp/temporal-fixture"
+    assert installer._parse_fragment_path(
+        f"{fixture}{selected}\n".encode("ascii"), fixture, digest, unit
+    )[-3:] == (digest, "units", unit)
+    assert installer._parse_fragment_path(
+        f"{fixture}/etc/systemd/system/{unit}\n".encode("ascii"),
+        fixture,
+        digest,
+        unit,
+    ) == ("etc", "systemd", "system", unit)
+    assert installer._parse_fragment_path(
+        (
+            f"{fixture}/usr/lib/medchat/temporal-worker/current/units/{unit}\n"
+        ).encode("ascii"),
+        fixture,
+        digest,
+        unit,
+    )[-3:] == ("current", "units", unit)
+
+    rejected = (
+        f"/usr/lib/medchat/temporal-worker/releases/{'b' * 64}/units/{unit}",
+        f"/usr/lib/medchat/temporal-worker/releases/{digest}/units/../{unit}",
+        f"/usr/lib/medchat/temporal-worker/releases/{digest}/units/{unit}//",
+        f"relative/releases/{digest}/units/{unit}",
+        f"{fixture}-alias{selected}",
+    )
+    for path in rejected:
+        with pytest.raises(installer.BundleInstallError) as raised:
+            installer._parse_fragment_path(
+                path.encode("ascii") + b"\n", fixture, digest, unit
+            )
+        assert raised.value.code == "activation_systemctl_failed"
+
+
+@pytest.mark.parametrize("entrypoint", ["activate_generation", "migrate_legacy_generation"])
+def test_activation_handlers_are_armed_before_root_or_lock_access(
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    installer = _load_bundle_installer()
+    events: list[str] = []
+
+    token = object()
+
+    def arm(state):
+        del state
+        events.append("arm")
+        return token
+
+    def restore(received):
+        assert received is token
+        events.append("restore")
+
+    def fail_root(_path):
+        events.append("root")
+        raise installer.BundleInstallError("activation_destination_untrusted")
+
+    monkeypatch.setattr(installer, "_install_activation_signal_handlers", arm)
+    monkeypatch.setattr(installer, "_restore_activation_signal_handlers", restore)
+    monkeypatch.setattr(installer, "_open_absolute_directory", fail_root)
+    monkeypatch.setattr(installer.os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(installer.os, "getegid", lambda: 0, raising=False)
+    with pytest.raises(installer.BundleInstallError):
+        getattr(installer, entrypoint)("a" * 64, root_path="fixture")
+    assert events == ["arm", "root", "restore"]
+
+
+@pytest.mark.parametrize("entrypoint", ["activate_generation", "migrate_legacy_generation"])
+def test_interrupt_during_handler_arm_prevents_bootstrap_and_lock_access(
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    installer = _load_bundle_installer()
+    events: list[str] = []
+    token = object()
+
+    def arm(state):
+        state.interrupted = True
+        events.append("arm")
+        return token
+
+    monkeypatch.setattr(installer, "_install_activation_signal_handlers", arm)
+    monkeypatch.setattr(
+        installer,
+        "_restore_activation_signal_handlers",
+        lambda received: events.append("restore") if received is token else None,
+    )
+    monkeypatch.setattr(
+        installer,
+        "_open_absolute_directory",
+        lambda _path: events.append("root"),
+    )
+    monkeypatch.setattr(installer.os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(installer.os, "getegid", lambda: 0, raising=False)
+    with pytest.raises(installer.BundleInstallError) as raised:
+        getattr(installer, entrypoint)("a" * 64, root_path="fixture")
+    assert raised.value.code == "activation_interrupted"
+    assert events == ["arm", "restore"]
+
+
+def test_activation_state_has_terminal_complete_phase() -> None:
+    installer = _load_bundle_installer()
+    assert installer.PHASE_COMPLETE == "complete"
+
+
+def test_systemctl_child_exit_after_signal_reports_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer = _load_bundle_installer()
+    state = installer.ActivationState()
+
+    class Child:
+        pid = 4242
+        returncode = 143
+
+        def poll(self):
+            state.interrupted = True
+            return self.returncode
+
+        def communicate(self):
+            return (b"", b"")
+
+    monkeypatch.setattr(installer.subprocess, "Popen", lambda *args, **kwargs: Child())
+    with pytest.raises(installer.BundleInstallError) as raised:
+        installer._run_systemctl("systemctl", ["daemon-reload"], state)
+    assert raised.value.code == "activation_interrupted"
+    assert state.child is None
+
+
+@pytest.mark.parametrize(
+    ("source_present", "quarantine_present", "expected"),
+    [
+        (True, False, "move"),
+        (False, True, "complete"),
+        (True, True, None),
+        (False, False, None),
+    ],
+)
+def test_legacy_quarantine_retry_state_is_fail_closed(
+    source_present: bool,
+    quarantine_present: bool,
+    expected: str | None,
+) -> None:
+    installer = _load_bundle_installer()
+    if expected is None:
+        with pytest.raises(installer.BundleInstallError) as raised:
+            installer._legacy_quarantine_transition(
+                source_present, quarantine_present
+            )
+        assert raised.value.code == "legacy_migration_unsupported"
+    else:
+        assert installer._legacy_quarantine_transition(
+            source_present, quarantine_present
+        ) == expected
+
+
+def test_legacy_quarantine_parent_requires_root_owned_0700() -> None:
+    installer = _load_bundle_installer()
+
+    class Metadata:
+        st_mode = 0o040700
+        st_uid = 0
+        st_gid = 0
+
+    installer._validate_quarantine_directory_metadata(Metadata(), 0, 0)
+    for attribute, value in (
+        ("st_mode", 0o040755),
+        ("st_mode", 0o100700),
+        ("st_uid", 1),
+        ("st_gid", 1),
+    ):
+        tampered = type(
+            "TamperedQuarantineMetadata",
+            (),
+            {
+                "st_mode": Metadata.st_mode,
+                "st_uid": Metadata.st_uid,
+                "st_gid": Metadata.st_gid,
+            },
+        )()
+        setattr(tampered, attribute, value)
+        with pytest.raises(installer.BundleInstallError) as raised:
+            installer._validate_quarantine_directory_metadata(tampered, 0, 0)
+        assert raised.value.code == "legacy_migration_unsupported"
+
+
+def test_migration_rolls_back_when_current_replace_reports_postmutation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer = _load_bundle_installer()
+    digest = "a" * 64
+    set_current_calls: list[str | None] = []
+    removed_links: list[object] = []
+    opened = iter((14, 15))
+    token = object()
+
+    monkeypatch.setattr(installer.os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(installer.os, "getegid", lambda: 0, raising=False)
+    monkeypatch.setattr(installer.signal, "SIG_BLOCK", 0, raising=False)
+    monkeypatch.setattr(
+        installer.signal, "pthread_sigmask", lambda *args: set(), raising=False
+    )
+    monkeypatch.setattr(installer, "_install_activation_signal_handlers", lambda state: token)
+    monkeypatch.setattr(installer, "_restore_activation_signal_handlers", lambda value: None)
+    monkeypatch.setattr(installer, "_open_absolute_directory", lambda path: 10)
+    monkeypatch.setattr(installer, "_validate_directory", lambda *args: None)
+    monkeypatch.setattr(installer.os, "fstat", lambda descriptor: object())
+    monkeypatch.setattr(installer, "_acquire_lock", lambda *args: (11, 12))
+    monkeypatch.setattr(installer, "_open_tree", lambda *args: 13)
+    monkeypatch.setattr(installer.os, "open", lambda *args, **kwargs: next(opened))
+    monkeypatch.setattr(installer.os, "close", lambda descriptor: None)
+    monkeypatch.setattr(installer, "verify_generation", lambda *args: None)
+    monkeypatch.setattr(
+        installer,
+        "_run_systemctl",
+        lambda _systemctl, arguments, _state, **kwargs: (
+            (3, b"") if arguments[0] == "is-active" else (0, b"")
+        ),
+    )
+    monkeypatch.setattr(installer, "_parse_fragment_path", lambda *args: ())
+    monkeypatch.setattr(installer, "_legacy_unit_state", lambda *args: "legacy")
+    monkeypatch.setattr(installer, "_read_legacy_regular", lambda *args: b"")
+    monkeypatch.setattr(installer, "_read_current", lambda *args: None)
+    monkeypatch.setattr(installer, "_quarantine_legacy_tmpfiles", lambda *args: True)
+    monkeypatch.setattr(
+        installer,
+        "_replace_legacy_unit_links",
+        lambda *args: [("fixture", (1, 2))],
+    )
+    monkeypatch.setattr(
+        installer,
+        "_remove_created_bootstrap_links",
+        lambda *args: removed_links.append(args[1]),
+    )
+
+    def fail_after_replace(_base, selected):
+        set_current_calls.append(selected)
+        if selected is not None:
+            raise OSError("post-replace fsync failure")
+
+    monkeypatch.setattr(installer, "_set_current", fail_after_replace)
+    with pytest.raises(installer.BundleInstallError) as raised:
+        installer.migrate_legacy_generation(digest, root_path="/fixture")
+    assert raised.value.code == "legacy_migration_manual_recovery_required"
+    assert set_current_calls == [digest, None]
+    assert removed_links == [[("fixture", (1, 2))]]
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    ["quarantine", "links", "reload", "verify", "prepare-start", "worker-start"],
+)
+def test_migration_boundary_failures_converge_to_manual_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    installer = _load_bundle_installer()
+    digest = "a" * 64
+    opened = iter((14, 15))
+    set_current_calls: list[str | None] = []
+    events: list[str] = []
+    token = object()
+
+    monkeypatch.setattr(installer.os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(installer.os, "getegid", lambda: 0, raising=False)
+    monkeypatch.setattr(installer.signal, "SIG_BLOCK", 0, raising=False)
+    monkeypatch.setattr(
+        installer.signal, "pthread_sigmask", lambda *args: set(), raising=False
+    )
+    monkeypatch.setattr(installer, "_install_activation_signal_handlers", lambda state: token)
+    monkeypatch.setattr(installer, "_restore_activation_signal_handlers", lambda value: None)
+    monkeypatch.setattr(installer, "_open_absolute_directory", lambda path: 10)
+    monkeypatch.setattr(installer, "_validate_directory", lambda *args: None)
+    monkeypatch.setattr(installer.os, "fstat", lambda descriptor: object())
+    monkeypatch.setattr(installer, "_acquire_lock", lambda *args: (11, 12))
+    monkeypatch.setattr(installer, "_open_tree", lambda *args: 13)
+    monkeypatch.setattr(installer.os, "open", lambda *args, **kwargs: next(opened))
+    monkeypatch.setattr(installer.os, "close", lambda descriptor: None)
+    monkeypatch.setattr(installer, "verify_generation", lambda *args: None)
+    monkeypatch.setattr(installer, "_parse_fragment_path", lambda *args: ())
+    monkeypatch.setattr(installer, "_legacy_unit_state", lambda *args: "legacy")
+    monkeypatch.setattr(installer, "_read_legacy_regular", lambda *args: b"")
+    monkeypatch.setattr(installer, "_read_current", lambda *args: None)
+    monkeypatch.setattr(installer, "_remove_created_bootstrap_links", lambda *args: None)
+
+    def run_systemctl(_systemctl, arguments, _state, **kwargs):
+        events.append("systemctl:" + ":".join(arguments[:2]))
+        if arguments[0] == "is-active":
+            return 3, b""
+        if kwargs.get("allow_after_interrupt"):
+            return 0, b""
+        if boundary == "reload" and arguments[0] == "daemon-reload":
+            raise installer.BundleInstallError("activation_systemctl_failed")
+        if boundary == "prepare-start" and arguments == ["start", installer.PREPARE_UNIT]:
+            raise installer.BundleInstallError("activation_systemctl_failed")
+        if boundary == "worker-start" and arguments == ["start", installer.WORKER_UNIT]:
+            raise installer.BundleInstallError("activation_systemctl_failed")
+        return 0, b""
+
+    def quarantine(*args):
+        events.append("quarantine")
+        if boundary == "quarantine":
+            raise installer.BundleInstallError(
+                "legacy_migration_manual_recovery_required"
+            )
+        return True
+
+    def replace_links(*args):
+        events.append("links")
+        if boundary == "links":
+            raise installer.BundleInstallError(
+                "legacy_migration_manual_recovery_required"
+            )
+        return [("fixture", (1, 2))]
+
+    def verify_loaded(*args):
+        events.append("verify")
+        if boundary == "verify":
+            raise installer.BundleInstallError("activation_systemctl_failed")
+
+    monkeypatch.setattr(installer, "_run_systemctl", run_systemctl)
+    monkeypatch.setattr(installer, "_quarantine_legacy_tmpfiles", quarantine)
+    monkeypatch.setattr(installer, "_replace_legacy_unit_links", replace_links)
+    monkeypatch.setattr(installer, "_verify_loaded_units", verify_loaded)
+    monkeypatch.setattr(
+        installer,
+        "_set_current",
+        lambda _base, selected: set_current_calls.append(selected),
+    )
+
+    with pytest.raises(installer.BundleInstallError) as raised:
+        installer.migrate_legacy_generation(digest, root_path="/fixture")
+    assert raised.value.code == "legacy_migration_manual_recovery_required"
+    assert boundary.split("-")[0] in "\n".join(events)
+    if boundary not in {"quarantine", "links"}:
+        assert set_current_calls == [digest, None]
+
+
 def test_temporal_worker_bootstrap_symlink_targets_are_exact() -> None:
     installer = _load_bundle_installer()
     assert installer.BOOTSTRAP_LINKS == {
@@ -602,6 +1001,69 @@ test "$(find "$destination/usr/lib/medchat/temporal-worker/releases" -mindepth 1
 test -z "$(find "$destination" -name '.staging-*' -o -name '.medchat-install-*')"
 """
     result = _run_native_posix(command, timeout=90)
+    assert result.returncode == 0, result.stderr
+
+
+def test_temporal_generation_rejects_directory_mode_and_owner_tamper() -> None:
+    repository = _native_posix_repository(require_root=True)
+    command = f"""
+set -eu
+cd '{repository}'
+destination=$(mktemp -d)
+cleanup() {{
+    chmod -R u+w "$destination" 2>/dev/null || true
+    rm -rf -- "$destination"
+}}
+trap cleanup EXIT HUP INT TERM
+mkdir "$destination/run"
+sh deployment/install-temporal-worker.sh --destdir "$destination" > "$destination/result"
+digest=$(sed -n 's/^temporal_worker_bundle_installation=passed digest=//p' "$destination/result")
+python3 - "$destination" "$digest" <<'PY'
+import importlib.util
+import os
+from pathlib import Path
+import stat
+import sys
+
+root_path = Path(sys.argv[1])
+digest = sys.argv[2]
+source = Path("deployment/libexec/install-temporal-worker-bundle.py")
+spec = importlib.util.spec_from_file_location("bundle_metadata", source)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+root = module._open_absolute_directory(str(root_path))
+releases = module._open_relative_directory(root, module.RELEASES_RELATIVE)
+try:
+    module.verify_generation(releases, digest, 0, 0)
+    generation = root_path / module.RELEASES_RELATIVE / digest
+    for relative in (".", "units", "libexec"):
+        target = generation if relative == "." else generation / relative
+        target.chmod(0o755)
+        try:
+            module.verify_generation(releases, digest, 0, 0)
+        except module.BundleInstallError as exc:
+            assert exc.code == "bundle_generation_invalid"
+        else:
+            raise AssertionError("generation directory mode tamper was accepted")
+        target.chmod(0o555)
+
+    target = generation / "units"
+    os.chown(target, 1, 1)
+    try:
+        module.verify_generation(releases, digest, 0, 0)
+    except module.BundleInstallError as exc:
+        assert exc.code == "bundle_generation_invalid"
+    else:
+        raise AssertionError("generation directory owner tamper was accepted")
+    os.chown(target, 0, 0)
+finally:
+    os.close(releases)
+    os.close(root)
+PY
+"""
+    result = _run_native_posix(command, timeout=120)
     assert result.returncode == 0, result.stderr
 
 
@@ -775,7 +1237,9 @@ case "$command" in
         ;;
     show)
         unit=$1
-        printf '/etc/systemd/system/%s\n' "$unit"
+        current=$(readlink "$TEST_TEMPORAL_ROOT/usr/lib/medchat/temporal-worker/current")
+        printf '%s/usr/lib/medchat/temporal-worker/%s/units/%s\n' \
+            "$TEST_TEMPORAL_ROOT" "$current" "$unit"
         ;;
     cat)
         [ "$1" = --no-pager ]
@@ -864,6 +1328,212 @@ PY
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize("signal_name", ["SIGHUP", "SIGINT", "SIGTERM"])
+@pytest.mark.parametrize(
+    "phase", ["switch", "reload", "verify", "prepare-start", "worker-start"]
+)
+def test_activation_signal_state_machine_rolls_back_and_reaps_child(
+    tmp_path: Path,
+    signal_name: str,
+    phase: str,
+) -> None:
+    _native_posix_repository()
+    source = tmp_path / "source"
+    root = tmp_path / "root"
+    state = tmp_path / "active-units"
+    sync = tmp_path / "sync.json"
+    armed = tmp_path / "armed"
+    fake_systemctl = tmp_path / "systemctl"
+    driver = tmp_path / "driver.py"
+    shutil.copytree(ROOT / "deployment", source)
+    root.mkdir(mode=0o700)
+    fake_systemctl.write_text(
+        r'''#!/usr/bin/python3
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+
+command, *arguments = sys.argv[1:]
+state = Path(os.environ["TEST_ACTIVE_UNITS"])
+sync = Path(os.environ["TEST_PHASE_SYNC"])
+armed = Path(os.environ["TEST_PHASE_ARMED"])
+root = Path(os.environ["TEST_TEMPORAL_ROOT"])
+target = os.environ["TEST_TARGET_PHASE"]
+
+def units():
+    if not state.exists():
+        return []
+    return [line for line in state.read_text(encoding="ascii").splitlines() if line]
+
+def save(values):
+    state.write_text("".join(f"{value}\n" for value in values), encoding="ascii")
+
+def starttime():
+    payload = Path("/proc/self/stat").read_text(encoding="ascii")
+    closing = payload.rfind(")")
+    return int(payload[closing + 2:].split()[19])
+
+def block(name):
+    if name != target or not armed.exists():
+        return
+    armed.unlink()
+    temporary = sync.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps({"pid": os.getpid(), "starttime": starttime()}),
+        encoding="ascii",
+    )
+    os.replace(temporary, sync)
+    while True:
+        signal.pause()
+
+if command == "is-active":
+    raise SystemExit(0 if arguments[1] in units() else 3)
+if command == "stop":
+    save([unit for unit in units() if unit != arguments[0]])
+    raise SystemExit(0)
+if command == "start":
+    unit = arguments[0]
+    if unit.endswith("prepare.service"):
+        block("prepare-start")
+    else:
+        block("worker-start")
+    current = units()
+    if unit not in current:
+        current.append(unit)
+        save(current)
+    raise SystemExit(0)
+if command == "daemon-reload":
+    block("reload")
+    raise SystemExit(0)
+if command == "show":
+    block("verify")
+    unit = arguments[0]
+    current = os.readlink(root / "usr/lib/medchat/temporal-worker/current")
+    print(root / "usr/lib/medchat/temporal-worker" / current / "units" / unit)
+    raise SystemExit(0)
+if command == "cat":
+    unit = arguments[1]
+    payload = root / "usr/lib/medchat/temporal-worker/current/units" / unit
+    sys.stdout.buffer.write(payload.read_bytes())
+    raise SystemExit(0)
+raise SystemExit(2)
+''',
+        encoding="utf-8",
+        newline="\n",
+    )
+    fake_systemctl.chmod(0o755)
+    driver.write_text(
+        r'''import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+source, root, systemctl, state, sync, armed, phase = map(Path, sys.argv[1:])
+helper_path = source / "libexec/install-temporal-worker-bundle.py"
+spec = importlib.util.spec_from_file_location("activation_signal_driver", helper_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+os.environ.update({
+    "TEST_ACTIVE_UNITS": str(state),
+    "TEST_PHASE_SYNC": str(sync),
+    "TEST_PHASE_ARMED": str(armed),
+    "TEST_TEMPORAL_ROOT": str(root),
+    "TEST_TARGET_PHASE": str(phase),
+})
+first = module.install_bundle(str(source), str(root), False)
+module.activate_generation(first, root_path=str(root), systemctl=str(systemctl))
+worker = source / "medchat-temporal-worker.service"
+worker.write_bytes(worker.read_bytes() + b"\n# signal-upgrade\n")
+second = module.install_bundle(str(source), str(root), False)
+armed.write_text("armed\n", encoding="ascii")
+if str(phase) == "switch":
+    original_set_current = module._set_current
+    def synchronized_set_current(base, digest):
+        original_set_current(base, digest)
+        if digest == second and armed.exists():
+            armed.unlink()
+            payload = Path("/proc/self/stat").read_text(encoding="ascii")
+            closing = payload.rfind(")")
+            starttime = int(payload[closing + 2:].split()[19])
+            sync.write_text(
+                json.dumps({"pid": os.getpid(), "starttime": starttime}),
+                encoding="ascii",
+            )
+            while not module._ACTIVE_ACTIVATION.interrupted:
+                time.sleep(0.01)
+    module._set_current = synchronized_set_current
+try:
+    module.activate_generation(second, root_path=str(root), systemctl=str(systemctl))
+except module.BundleInstallError as exc:
+    assert exc.code == "activation_interrupted"
+    assert os.readlink(root / "usr/lib/medchat/temporal-worker/current") == f"releases/{first}"
+    assert set(state.read_text(encoding="ascii").splitlines()) == {
+        module.PREPARE_UNIT,
+        module.WORKER_UNIT,
+    }
+    print("temporal_worker_activation=failed code=activation_interrupted")
+    raise SystemExit(17)
+raise AssertionError("signal did not interrupt activation")
+''',
+        encoding="utf-8",
+        newline="\n",
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(driver),
+            str(source),
+            str(root),
+            str(fake_systemctl),
+            str(state),
+            str(sync),
+            str(armed),
+            phase,
+        ],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        assert _wait_for_path(sync, process, timeout=20)
+        identity = json.loads(sync.read_text(encoding="ascii"))
+        os.kill(process.pid, getattr(signal, signal_name))
+        stdout, stderr = process.communicate(timeout=30)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+    assert process.returncode == 17
+    assert stdout == "temporal_worker_activation=failed code=activation_interrupted\n"
+    assert stderr == ""
+    child_pid = int(identity["pid"])
+    if child_pid != process.pid:
+        proc_stat = Path(f"/proc/{child_pid}/stat")
+        if proc_stat.exists():
+            payload = proc_stat.read_text(encoding="ascii")
+            closing = payload.rfind(")")
+            assert int(payload[closing + 2:].split()[19]) != int(identity["starttime"])
+    import fcntl
+
+    lock_path = root / "run/medchat-temporal-worker/install.lock"
+    lock = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(lock)
+    base = root / "usr/lib/medchat/temporal-worker"
+    assert not list(base.glob(".current-*"))
+    assert not list((root / "etc/systemd/system").glob(".temporal-worker-link-*"))
+
+
 def test_temporal_legacy_migration_quarantines_dangerous_policy(
     tmp_path: Path,
 ) -> None:
@@ -908,7 +1578,15 @@ case "$command" in
     stop) unit=$1; grep -vx "$unit" "$state" > "$state.next" 2>/dev/null || true; mv "$state.next" "$state" ;;
     start) unit=$1; grep -qx "$unit" "$state" 2>/dev/null || printf '%s\n' "$unit" >> "$state" ;;
     daemon-reload) [ ! -f "$TEST_TEMPORAL_FAIL_RELOAD" ] || { rm "$TEST_TEMPORAL_FAIL_RELOAD"; exit 1; } ;;
-    show) printf '/etc/systemd/system/%s\n' "$1" ;;
+    show)
+        if [ -L "$TEST_TEMPORAL_ROOT/usr/lib/medchat/temporal-worker/current" ]; then
+            current=$(readlink "$TEST_TEMPORAL_ROOT/usr/lib/medchat/temporal-worker/current")
+            printf '%s/usr/lib/medchat/temporal-worker/%s/units/%s\n' \
+                "$TEST_TEMPORAL_ROOT" "$current" "$1"
+        else
+            printf '%s/etc/systemd/system/%s\n' "$TEST_TEMPORAL_ROOT" "$1"
+        fi
+        ;;
     cat) [ "$1" = --no-pager ]; cat "$TEST_TEMPORAL_ROOT/usr/lib/medchat/temporal-worker/current/units/$2" ;;
     *) exit 2 ;;
 esac
@@ -966,12 +1644,33 @@ quarantine = root / module.LEGACY_QUARANTINE_RELATIVE
 assert not tmpfiles.exists()
 metadata = os.lstat(quarantine)
 assert stat.S_ISREG(metadata.st_mode) and stat.S_IMODE(metadata.st_mode) == 0o600
+parent_metadata = os.lstat(quarantine.parent)
+assert (
+    stat.S_ISDIR(parent_metadata.st_mode)
+    and stat.S_IMODE(parent_metadata.st_mode) == 0o700
+    and (parent_metadata.st_uid, parent_metadata.st_gid) == (0, 0)
+)
 assert hashlib.sha256(quarantine.read_bytes()).hexdigest() == module.LEGACY_ASSETS[module.LEGACY_TMPFILES_RELATIVE][1]
 for relative, target in module.BOOTSTRAP_LINKS.items():
     assert os.path.islink(root / relative) and os.readlink(root / relative) == target
 assert os.readlink(root / "usr/lib/medchat/temporal-worker/current") == f"releases/{digest}"
 assert set(state.read_text().splitlines()) == {module.PREPARE_UNIT, module.WORKER_UNIT}
 module.migrate_legacy_generation(digest, root_path=str(root), systemctl=systemctl)
+
+wrong_parent, wrong_parent_digest = make_root("wrong-parent")
+configure(wrong_parent, "wrong-parent")
+quarantine_parent = wrong_parent / module.LEGACY_QUARANTINE_RELATIVE
+quarantine_parent.parent.mkdir(mode=0o755)
+try:
+    module.migrate_legacy_generation(
+        wrong_parent_digest, root_path=str(wrong_parent), systemctl=systemctl
+    )
+except module.BundleInstallError as exc:
+    assert exc.code == "legacy_migration_unsupported"
+else:
+    raise AssertionError("wide quarantine parent was accepted")
+assert (wrong_parent / module.LEGACY_TMPFILES_RELATIVE).is_file()
+assert not quarantine_parent.exists()
 
 unknown, unknown_digest = make_root("unknown")
 unknown_state = configure(unknown, "unknown")
@@ -1349,10 +2048,49 @@ test ! -e "$release"
     assert result.returncode == 0, result.stderr
 
 
-def test_temporal_worker_live_root_validation_is_a_release_blocker() -> None:
-    pytest.skip(
-        "release blocker: isolated live-root runner is intentionally not implemented"
+def test_temporal_live_install_runner_has_verified_overlay_isolation() -> None:
+    source = LIVE_INSTALL_RUNNER.read_text(encoding="utf-8")
+    assert source.startswith("#!/bin/sh\nset -eu\n")
+    assert "MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS" in source
+    assert "/usr/bin/unshare --mount --fork" in source
+    assert "mount --make-rprivate /" in source
+    assert "/proc/1/ns/mnt" in source and "/proc/self/ns/mnt" in source
+    assert "mount --bind / " in source
+    assert "remount,bind,ro" in source
+    assert "-t tmpfs" in source
+    assert "-t overlay overlay" in source
+    assert "lowerdir=" in source and "upperdir=" in source and "workdir=" in source
+    assert "findmnt" in source
+    assert "chroot" in source
+    assert "rm -rf" not in source
+    assert "find -delete" not in source
+    assert "rmdir --" in source
+    assert source.index("/usr/bin/unshare --mount --fork") < source.index(
+        "mount --bind / "
     )
+    assert source.index("/proc/self/ns/mnt") < source.index(
+        "mktemp -d /tmp/medchat-temporal-live."
+    )
+    merged_unmount = source.index('umount "$STATE/storage/merged"')
+    storage_unmount = source.index('umount "$STATE/storage"')
+    lower_unmount = source.index('umount "$STATE/lower"')
+    assert merged_unmount < storage_unmount < lower_unmount
+    assert source.index("cleanup_failed") < source.index('rmdir -- "$STATE/lower"')
+
+
+def test_temporal_worker_live_root_validation_is_opt_in_and_isolated() -> None:
+    _native_posix_repository(require_root=True)
+    if os.environ.get("MEDCHAT_RUN_TEMPORAL_LIVE_INSTALL_TESTS") != "1":
+        pytest.skip("isolated live-root execution requires explicit opt-in")
+    result = subprocess.run(
+        [str(LIVE_INSTALL_RUNNER)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _load_bundle_installer_from(path: Path):

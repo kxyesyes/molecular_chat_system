@@ -91,6 +91,7 @@ PHASE_SWITCHED = "switched"
 PHASE_RELOADED = "reloaded"
 PHASE_PREPARE_STARTING = "prepare-starting"
 PHASE_WORKER_STARTING = "worker-starting"
+PHASE_COMPLETE = "complete"
 _LOWER_HEX = re.compile(r"[0-9a-f]{64}\Z")
 _STABLE_CODES = frozenset(
     {
@@ -161,6 +162,16 @@ class ActivationState:
         self.phase = PHASE_PRE_SWITCH
         self.interrupted = False
         self.child: subprocess.Popen[bytes] | None = None
+
+
+class ActivationSignalContext:
+    def __init__(
+        self,
+        handlers: dict[int, object],
+        previous_mask: set[signal.Signals],
+    ) -> None:
+        self.handlers = handlers
+        self.previous_mask = previous_mask
 
 
 def _signal_failure(_signum: int, _frame: object) -> None:
@@ -324,6 +335,17 @@ def _validate_directory(metadata: os.stat_result, uid: int, gid: int, exact_mode
         or (exact_mode is None and mode & 0o022)
     ):
         raise BundleInstallError("bundle_destination_untrusted")
+
+
+def _validate_generation_directory_metadata(
+    metadata: os.stat_result, uid: int, gid: int
+) -> None:
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or (metadata.st_uid, metadata.st_gid) != (uid, gid)
+        or stat.S_IMODE(metadata.st_mode) != 0o555
+    ):
+        raise BundleInstallError("bundle_generation_invalid")
 
 
 def _open_or_create_directory(
@@ -554,10 +576,30 @@ def verify_generation(releases: int, digest: str, uid: int, gid: int) -> None:
         raise BundleInstallError("bundle_generation_invalid") from exc
     try:
         metadata = os.fstat(generation)
-        _validate_directory(metadata, uid, gid)
+        _validate_generation_directory_metadata(metadata, uid, gid)
         entry = os.stat(digest, dir_fd=releases, follow_symlinks=False)
         if _identity(metadata) != _identity(entry):
             raise BundleInstallError("bundle_generation_invalid")
+        generation_directories: dict[str, int] = {}
+        for name in ("units", "libexec"):
+            try:
+                descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=generation)
+            except OSError as exc:
+                raise BundleInstallError("bundle_generation_invalid") from exc
+            try:
+                directory_metadata = os.fstat(descriptor)
+                directory_entry = os.stat(
+                    name, dir_fd=generation, follow_symlinks=False
+                )
+                _validate_generation_directory_metadata(
+                    directory_metadata, uid, gid
+                )
+                if _identity(directory_metadata) != _identity(directory_entry):
+                    raise BundleInstallError("bundle_generation_invalid")
+                generation_directories[name] = descriptor
+            except Exception:
+                os.close(descriptor)
+                raise
         manifest_payload, manifest_meta = _read_named_file(
             generation, "manifest.sha256", MAX_MANIFEST_BYTES
         )
@@ -569,11 +611,9 @@ def verify_generation(releases: int, digest: str, uid: int, gid: int) -> None:
         assets: dict[str, tuple[int, bytes]] = {}
         for path, expected_mode, _source in ASSET_SPECS:
             parent_path, leaf = path.rsplit("/", 1)
-            parent = _open_relative_directory(generation, parent_path)
-            try:
-                payload, asset_meta = _read_named_file(parent, leaf, MAX_ASSET_BYTES)
-            finally:
-                os.close(parent)
+            payload, asset_meta = _read_named_file(
+                generation_directories[parent_path], leaf, MAX_ASSET_BYTES
+            )
             declared_mode, declared_size, declared_hash = manifest.assets[path]
             if (
                 declared_mode != expected_mode
@@ -587,7 +627,133 @@ def verify_generation(releases: int, digest: str, uid: int, gid: int) -> None:
         if compute_bundle_digest(assets) != digest:
             raise BundleInstallError("bundle_generation_invalid")
     finally:
+        for descriptor in locals().get("generation_directories", {}).values():
+            os.close(descriptor)
         os.close(generation)
+
+
+def _parse_fragment_path(
+    payload: bytes,
+    root_path: str,
+    digest: str,
+    unit: str,
+) -> tuple[str, ...]:
+    try:
+        text = payload.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise BundleInstallError("activation_systemctl_failed") from exc
+    if text.endswith("\n"):
+        text = text[:-1]
+    if (
+        not text
+        or "\n" in text
+        or "\r" in text
+        or "\x00" in text
+        or not text.startswith("/")
+        or not _LOWER_HEX.fullmatch(digest)
+        or unit not in {PREPARE_UNIT, WORKER_UNIT}
+    ):
+        raise BundleInstallError("activation_systemctl_failed")
+    root_components = tuple(part for part in root_path.split("/") if part)
+    path_components = tuple(text.split("/")[1:])
+    if any(part in {"", ".", ".."} for part in path_components):
+        raise BundleInstallError("activation_systemctl_failed")
+    if root_path != "/":
+        if path_components[: len(root_components)] != root_components:
+            raise BundleInstallError("activation_systemctl_failed")
+        path_components = path_components[len(root_components) :]
+    expected = tuple(
+        f"usr/lib/medchat/temporal-worker/releases/{digest}/units/{unit}".split("/")
+    )
+    allowed = {
+        expected,
+        tuple(f"usr/lib/medchat/temporal-worker/current/units/{unit}".split("/")),
+        ("etc", "systemd", "system", unit),
+    }
+    if path_components not in allowed:
+        raise BundleInstallError("activation_systemctl_failed")
+    return path_components
+
+
+def _open_fragment_target(
+    root: int,
+    components: tuple[str, ...],
+    digest: str,
+    unit: str,
+    uid: int,
+    gid: int,
+) -> int:
+    expected = tuple(
+        f"usr/lib/medchat/temporal-worker/releases/{digest}/units/{unit}".split("/")
+    )
+    pending = list(components)
+    resolved: list[str] = []
+    current = os.dup(root)
+    symlinks = 0
+    try:
+        while pending:
+            component = pending.pop(0)
+            try:
+                entry = os.stat(component, dir_fd=current, follow_symlinks=False)
+            except OSError as exc:
+                raise BundleInstallError("activation_systemctl_failed") from exc
+            if stat.S_ISLNK(entry.st_mode):
+                if (entry.st_uid, entry.st_gid) != (uid, gid):
+                    raise BundleInstallError("activation_systemctl_failed")
+                symlinks += 1
+                if symlinks > 8:
+                    raise BundleInstallError("activation_systemctl_failed")
+                target = os.readlink(component, dir_fd=current)
+                absolute = target.startswith("/")
+                target_components = tuple(part for part in target.split("/") if part)
+                if (
+                    not target_components
+                    or any(part in {".", ".."} for part in target_components)
+                    or "//" in target
+                ):
+                    raise BundleInstallError("activation_systemctl_failed")
+                if absolute:
+                    os.close(current)
+                    current = os.dup(root)
+                    resolved = []
+                pending = list(target_components) + pending
+                continue
+            if pending:
+                if not stat.S_ISDIR(entry.st_mode):
+                    raise BundleInstallError("activation_systemctl_failed")
+                try:
+                    next_descriptor = os.open(
+                        component, _DIRECTORY_FLAGS, dir_fd=current
+                    )
+                except OSError as exc:
+                    raise BundleInstallError("activation_systemctl_failed") from exc
+                descriptor_metadata = os.fstat(next_descriptor)
+                if _identity(descriptor_metadata) != _identity(entry):
+                    os.close(next_descriptor)
+                    raise BundleInstallError("activation_systemctl_failed")
+                os.close(current)
+                current = next_descriptor
+                resolved.append(component)
+                continue
+            if tuple((*resolved, component)) != expected:
+                raise BundleInstallError("activation_systemctl_failed")
+            try:
+                descriptor = os.open(component, _READ_FLAGS, dir_fd=current)
+            except OSError as exc:
+                raise BundleInstallError("activation_systemctl_failed") from exc
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or (metadata.st_uid, metadata.st_gid) != (uid, gid)
+                or stat.S_IMODE(metadata.st_mode) != 0o644
+                or _identity(metadata) != _identity(entry)
+            ):
+                os.close(descriptor)
+                raise BundleInstallError("activation_systemctl_failed")
+            return descriptor
+        raise BundleInstallError("activation_systemctl_failed")
+    finally:
+        os.close(current)
 
 
 def _open_parent(root: int, relative: str, uid: int, gid: int) -> tuple[int, str]:
@@ -721,11 +887,39 @@ def _activation_signal(_signum: int, _frame: object) -> None:
             pass
 
 
-def _install_activation_signal_handlers(state: ActivationState) -> None:
+def _install_activation_signal_handlers(
+    state: ActivationState,
+) -> ActivationSignalContext:
     global _ACTIVE_ACTIVATION
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _INSTALL_SIGNALS)
+    handlers: dict[int, object] = {}
     _ACTIVE_ACTIVATION = state
-    for signum in _INSTALL_SIGNALS:
-        signal.signal(signum, _activation_signal)
+    try:
+        for signum in _INSTALL_SIGNALS:
+            handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, _activation_signal)
+    except Exception:
+        _ACTIVE_ACTIVATION = None
+        for signum, handler in handlers.items():
+            signal.signal(signum, handler)
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        raise
+    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    return ActivationSignalContext(handlers, previous_mask)
+
+
+def _restore_activation_signal_handlers(context: ActivationSignalContext) -> None:
+    global _ACTIVE_ACTIVATION
+    signal.pthread_sigmask(signal.SIG_BLOCK, _INSTALL_SIGNALS)
+    _ACTIVE_ACTIVATION = None
+    for signum, handler in context.handlers.items():
+        signal.signal(signum, handler)
+    signal.pthread_sigmask(signal.SIG_SETMASK, context.previous_mask)
+
+
+def _raise_if_interrupted(state: ActivationState) -> None:
+    if state.interrupted:
+        raise BundleInstallError("activation_interrupted")
 
 
 def _run_systemctl(
@@ -776,10 +970,10 @@ def _run_systemctl(
                 raise BundleInstallError("activation_systemctl_failed")
             time.sleep(0.02)
         output = child.communicate()[0] or b""
-        if child.returncode not in accepted:
-            raise BundleInstallError("activation_systemctl_failed")
         if state.interrupted and not allow_after_interrupt:
             raise BundleInstallError("activation_interrupted")
+        if child.returncode not in accepted:
+            raise BundleInstallError("activation_systemctl_failed")
         return child.returncode, output
     finally:
         state.child = None
@@ -809,21 +1003,52 @@ def _loaded_unit_payload(output: bytes) -> bytes:
 
 
 def _verify_loaded_units(
-    systemctl: str, generation: int, state: ActivationState
+    systemctl: str,
+    root: int,
+    releases: int,
+    generation: int,
+    digest: str,
+    uid: int,
+    gid: int,
+    root_path: str,
+    state: ActivationState,
 ) -> None:
+    verify_generation(releases, digest, uid, gid)
     for unit in (PREPARE_UNIT, WORKER_UNIT):
         _result, fragment = _run_systemctl(
             systemctl,
             ["show", unit, "--property=FragmentPath", "--value"],
             state,
         )
-        if fragment.rstrip(b"\n") != f"/etc/systemd/system/{unit}".encode("ascii"):
-            raise BundleInstallError("activation_systemctl_failed")
+        fragment_components = _parse_fragment_path(
+            fragment, root_path, digest, unit
+        )
+        fragment_descriptor = _open_fragment_target(
+            root, fragment_components, digest, unit, uid, gid
+        )
         units = os.open("units", _DIRECTORY_FLAGS, dir_fd=generation)
         try:
-            expected, _metadata = _read_named_file(units, unit, MAX_ASSET_BYTES)
+            expected, expected_metadata = _read_named_file(
+                units, unit, MAX_ASSET_BYTES
+            )
         finally:
             os.close(units)
+        try:
+            fragment_before = os.fstat(fragment_descriptor)
+            fragment_payload = _read_all(
+                fragment_descriptor,
+                MAX_ASSET_BYTES,
+                "activation_systemctl_failed",
+            )
+            fragment_after = os.fstat(fragment_descriptor)
+            if (
+                _full_identity(fragment_before) != _full_identity(fragment_after)
+                or _identity(fragment_after) != _identity(expected_metadata)
+                or fragment_payload != expected
+            ):
+                raise BundleInstallError("activation_systemctl_failed")
+        finally:
+            os.close(fragment_descriptor)
         _result, loaded = _run_systemctl(
             systemctl, ["cat", "--no-pager", unit], state
         )
@@ -878,24 +1103,28 @@ def activate_generation(
         raise BundleInstallError("activation_arguments_invalid")
     uid = os.geteuid()
     gid = os.getegid()
-    root = _open_absolute_directory(root_path)
-    lock_directory = lock = base = releases = generation = -1
     state = ActivationState()
+    signal_context = _install_activation_signal_handlers(state)
+    root = lock_directory = lock = base = releases = generation = -1
     created_links: list[tuple[str, tuple[int, int]]] = []
     old_digest: str | None = None
     old_active = {PREPARE_UNIT: False, WORKER_UNIT: False}
     switched = False
     stopped = False
     try:
+        _raise_if_interrupted(state)
+        root = _open_absolute_directory(root_path)
         _validate_directory(os.fstat(root), uid, gid)
         lock_directory, lock = _acquire_lock(root, uid, gid)
+        _raise_if_interrupted(state)
         base = _open_tree(root, tuple(BASE_RELATIVE.split("/")), uid, gid)
+        _raise_if_interrupted(state)
         releases = os.open("releases", _DIRECTORY_FLAGS, dir_fd=base)
         verify_generation(releases, digest, uid, gid)
         old_digest = _read_current(base, releases, uid, gid)
         created_links = _bootstrap_unit_links(root, uid, gid)
+        _raise_if_interrupted(state)
         generation = os.open(digest, _DIRECTORY_FLAGS, dir_fd=releases)
-        _install_activation_signal_handlers(state)
         old_active[WORKER_UNIT] = _unit_is_active(systemctl, WORKER_UNIT, state)
         old_active[PREPARE_UNIT] = _unit_is_active(systemctl, PREPARE_UNIT, state)
         state.phase = PHASE_STOPPING
@@ -907,14 +1136,29 @@ def activate_generation(
         state.phase = PHASE_PRE_SWITCH
         _set_current(base, digest)
         switched = True
+        _raise_if_interrupted(state)
         state.phase = PHASE_SWITCHED
         _run_systemctl(systemctl, ["daemon-reload"], state)
         state.phase = PHASE_RELOADED
-        _verify_loaded_units(systemctl, generation, state)
+        _verify_loaded_units(
+            systemctl,
+            root,
+            releases,
+            generation,
+            digest,
+            uid,
+            gid,
+            root_path,
+            state,
+        )
         state.phase = PHASE_PREPARE_STARTING
         _run_systemctl(systemctl, ["start", PREPARE_UNIT], state)
         state.phase = PHASE_WORKER_STARTING
         _run_systemctl(systemctl, ["start", WORKER_UNIT], state)
+        signal.pthread_sigmask(signal.SIG_BLOCK, _INSTALL_SIGNALS)
+        if state.interrupted:
+            raise BundleInstallError("activation_interrupted")
+        state.phase = PHASE_COMPLETE
     except Exception:
         if stopped:
             signal.pthread_sigmask(signal.SIG_BLOCK, _INSTALL_SIGNALS)
@@ -934,11 +1178,10 @@ def activate_generation(
             _remove_created_bootstrap_links(root, created_links, uid, gid)
         raise
     finally:
-        global _ACTIVE_ACTIVATION
-        _ACTIVE_ACTIVATION = None
         for descriptor in (generation, releases, base, lock, lock_directory, root):
             if descriptor >= 0:
                 os.close(descriptor)
+        _restore_activation_signal_handlers(signal_context)
 
 
 def _read_legacy_regular(
@@ -1012,6 +1255,27 @@ def _optional_legacy_file(
     return True
 
 
+def _legacy_quarantine_transition(
+    source_present: bool, quarantine_present: bool
+) -> str:
+    if source_present and not quarantine_present:
+        return "move"
+    if quarantine_present and not source_present:
+        return "complete"
+    raise BundleInstallError("legacy_migration_unsupported")
+
+
+def _validate_quarantine_directory_metadata(
+    metadata: os.stat_result, uid: int, gid: int
+) -> None:
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or (metadata.st_uid, metadata.st_gid) != (uid, gid)
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise BundleInstallError("legacy_migration_unsupported")
+
+
 def _quarantine_legacy_tmpfiles(root: int, uid: int, gid: int) -> bool:
     source_mode, source_digest = LEGACY_ASSETS[LEGACY_TMPFILES_RELATIVE]
     source_present = _optional_legacy_file(
@@ -1030,15 +1294,44 @@ def _quarantine_legacy_tmpfiles(root: int, uid: int, gid: int) -> bool:
         uid,
         gid,
     )
-    if source_present == quarantine_present:
-        raise BundleInstallError("legacy_migration_unsupported")
-    if quarantine_present:
-        return False
-    quarantine_parent_path, quarantine_leaf = LEGACY_QUARANTINE_RELATIVE.rsplit("/", 1)
-    source_parent_path, source_leaf = LEGACY_TMPFILES_RELATIVE.rsplit("/", 1)
-    quarantine_parent = _open_tree(
-        root, tuple(quarantine_parent_path.split("/")), uid, gid
+    transition = _legacy_quarantine_transition(
+        source_present, quarantine_present
     )
+    if transition == "complete":
+        base = _open_relative_directory(root, BASE_RELATIVE)
+        try:
+            quarantine_directory = os.open(
+                "quarantine", _DIRECTORY_FLAGS, dir_fd=base
+            )
+            try:
+                metadata = os.fstat(quarantine_directory)
+                entry = os.stat(
+                    "quarantine", dir_fd=base, follow_symlinks=False
+                )
+                _validate_quarantine_directory_metadata(metadata, uid, gid)
+                if _identity(metadata) != _identity(entry):
+                    raise BundleInstallError("legacy_migration_unsupported")
+            finally:
+                os.close(quarantine_directory)
+        except (OSError, BundleInstallError) as exc:
+            raise BundleInstallError("legacy_migration_unsupported") from exc
+        finally:
+            os.close(base)
+        return False
+    _quarantine_parent_path, quarantine_leaf = LEGACY_QUARANTINE_RELATIVE.rsplit("/", 1)
+    source_parent_path, source_leaf = LEGACY_TMPFILES_RELATIVE.rsplit("/", 1)
+    base = _open_relative_directory(root, BASE_RELATIVE)
+    try:
+        quarantine_parent = _open_or_create_directory(
+            base, "quarantine", 0o700, uid, gid, exact=True
+        )
+        _validate_quarantine_directory_metadata(
+            os.fstat(quarantine_parent), uid, gid
+        )
+    except (OSError, BundleInstallError) as exc:
+        raise BundleInstallError("legacy_migration_unsupported") from exc
+    finally:
+        os.close(base)
     source_parent = _open_relative_directory(root, source_parent_path)
     try:
         os.rename(
@@ -1125,21 +1418,24 @@ def migrate_legacy_generation(
         raise BundleInstallError("activation_arguments_invalid")
     uid = os.geteuid()
     gid = os.getegid()
-    root = _open_absolute_directory(root_path)
-    lock_directory = lock = base = releases = generation = -1
     state = ActivationState()
+    signal_context = _install_activation_signal_handlers(state)
+    root = lock_directory = lock = base = releases = generation = -1
     quarantined = False
     created_links: list[tuple[str, tuple[int, int]]] = []
     current_before: str | None = None
     current_changed = False
     try:
+        _raise_if_interrupted(state)
+        root = _open_absolute_directory(root_path)
         _validate_directory(os.fstat(root), uid, gid)
         lock_directory, lock = _acquire_lock(root, uid, gid)
+        _raise_if_interrupted(state)
         base = _open_tree(root, tuple(BASE_RELATIVE.split("/")), uid, gid)
+        _raise_if_interrupted(state)
         releases = os.open("releases", _DIRECTORY_FLAGS, dir_fd=base)
         verify_generation(releases, digest, uid, gid)
         generation = os.open(digest, _DIRECTORY_FLAGS, dir_fd=releases)
-        _install_activation_signal_handlers(state)
         for unit in (WORKER_UNIT, PREPARE_UNIT):
             _run_systemctl(systemctl, ["is-active", "--quiet", unit], state, accepted=(0, 3))
             _result, fragment = _run_systemctl(
@@ -1147,8 +1443,10 @@ def migrate_legacy_generation(
                 ["show", unit, "--property=FragmentPath", "--value"],
                 state,
             )
-            if fragment.rstrip(b"\n") != f"/etc/systemd/system/{unit}".encode("ascii"):
-                raise BundleInstallError("legacy_migration_unsupported")
+            try:
+                _parse_fragment_path(fragment, root_path, digest, unit)
+            except BundleInstallError as exc:
+                raise BundleInstallError("legacy_migration_unsupported") from exc
         state.phase = PHASE_STOPPING
         _run_systemctl(systemctl, ["stop", WORKER_UNIT], state)
         _run_systemctl(systemctl, ["stop", PREPARE_UNIT], state)
@@ -1167,18 +1465,35 @@ def migrate_legacy_generation(
         if current_before not in {None, digest}:
             raise BundleInstallError("legacy_migration_unsupported")
         quarantined = _quarantine_legacy_tmpfiles(root, uid, gid)
+        _raise_if_interrupted(state)
         created_links = _replace_legacy_unit_links(root, unit_states, uid, gid)
+        _raise_if_interrupted(state)
         if current_before is None:
-            _set_current(base, digest)
             current_changed = True
+            _set_current(base, digest)
+            _raise_if_interrupted(state)
         state.phase = PHASE_SWITCHED
         _run_systemctl(systemctl, ["daemon-reload"], state)
         state.phase = PHASE_RELOADED
-        _verify_loaded_units(systemctl, generation, state)
+        _verify_loaded_units(
+            systemctl,
+            root,
+            releases,
+            generation,
+            digest,
+            uid,
+            gid,
+            root_path,
+            state,
+        )
         state.phase = PHASE_PREPARE_STARTING
         _run_systemctl(systemctl, ["start", PREPARE_UNIT], state)
         state.phase = PHASE_WORKER_STARTING
         _run_systemctl(systemctl, ["start", WORKER_UNIT], state)
+        signal.pthread_sigmask(signal.SIG_BLOCK, _INSTALL_SIGNALS)
+        if state.interrupted:
+            raise BundleInstallError("activation_interrupted")
+        state.phase = PHASE_COMPLETE
     except Exception as exc:
         if quarantined or created_links or current_changed:
             signal.pthread_sigmask(signal.SIG_BLOCK, _INSTALL_SIGNALS)
@@ -1209,11 +1524,10 @@ def migrate_legacy_generation(
             ) from exc
         raise
     finally:
-        global _ACTIVE_ACTIVATION
-        _ACTIVE_ACTIVATION = None
         for descriptor in (generation, releases, base, lock, lock_directory, root):
             if descriptor >= 0:
                 os.close(descriptor)
+        _restore_activation_signal_handlers(signal_context)
 
 
 def _remove_tree(parent: int, name: str) -> None:
