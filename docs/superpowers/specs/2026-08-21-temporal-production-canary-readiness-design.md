@@ -271,12 +271,22 @@ generation 内的 `prepare-temporal-worker-directories`。该 helper 只使用�
 
 bundle digest 使用固定二进制 framing：域分隔符
 `MEDCHAT_TEMPORAL_BUNDLE_V1\0`，随后按 ASCII logical path 排序，对每项依次哈希
-4-byte big-endian 路径长度、路径、4-byte mode、8-byte payload 长度与 payload。
-manifest 必须是 canonical ASCII：首行为版本与 64 位小写 bundle digest；后续按
-logical path 排序，每行只含 asset SHA-256、四位八进制 mode、十进制 size 与固定
-logical path。解析器拒绝 duplicate、unknown、missing、乱序、dot component、绝对
-路径、非 canonical 数字或超限内容；允许资产集合只能是两个 unit、环境校验 helper、
-目录准备 helper。
+4-byte big-endian unsigned 路径长度、路径、4-byte big-endian unsigned mode、
+8-byte big-endian unsigned payload 长度与 payload。mode 范围是 `0..07777`，payload
+长度不超过固定 per-asset/bundle 上限。允许资产精确为：
+
+- `units/medchat-temporal-worker.service`，mode `0644`；
+- `units/medchat-temporal-worker-prepare.service`，mode `0644`；
+- `libexec/validate-temporal-worker-env`，mode `0755`；
+- `libexec/prepare-temporal-worker-directories`，mode `0755`。
+
+manifest 必须是 canonical ASCII，精确 grammar 为
+`MEDCHAT_TEMPORAL_BUNDLE_V1 <64-lower-hex>\n`，随后四行
+`<64-lower-hex-asset-sha256> <4-octal-mode> <canonical-decimal-size> <logical-path>\n`，
+按 logical path 排序并以单个 LF 结束；size 仅在数值为 0 时允许单个 `0`，其他情况
+禁止前导零。解析器拒绝 CR、空行、duplicate、unknown、missing、乱序、dot component、
+绝对路径、非 canonical 数字或超限内容。generation 目录名、manifest header digest 与
+按四项资产重新计算的 bundle digest 必须三者相同。
 
 generation 在同一 releases 父目录下的私有 staging 目录中完整写入、`fsync`、验证
 owner/group、精确 mode、regular/no-symlink、inode 与 SHA-256 后，才原子重命名为
@@ -314,11 +324,26 @@ unit、恢复旧 current、再次 reload，并仅在原服务先前为 active �
 一次性 legacy migration 必须在 worker/prepare 已停止且确认 inactive 后执行。迁移器
 通过 no-follow descriptor 校验旧平铺 unit、flat helper 与危险 tmpfiles 文件的类型、
 root owner、精确 mode 和仓库内置已知 hash allowlist；未知版本只报告阻断，不自动
-覆盖。验证后首先把危险 tmpfiles 文件原子移入 root-only quarantine 并 `fsync`，再构建
-generation、转换固定 unit 入口、设置 current、daemon-reload 并验证加载内容。失败时
+覆盖。验证后首先把危险 tmpfiles 文件原子移出所有 tmpfiles 搜索目录，固定目标为
+`/usr/lib/medchat/temporal-worker/quarantine/legacy-tmpfiles.disabled`；quarantine 父目录
+为 root:root `0700`，目标为 root:root `0600`、非 `.conf`，通过同文件系统 descriptor-
+relative rename 后 `fsync` 两个父目录。重试时“源存在且 quarantine 不存在”执行迁移，
+“源不存在且 quarantine 为已知 hash”视为已隔离；两者同时存在、两者都不存在或 hash
+不符均 fail closed。随后构建 generation、转换固定 unit 入口、设置 current、
+daemon-reload 并验证加载内容。失败时
 回滚本次创建的 unit 入口/current；绝不恢复危险 tmpfiles，服务保持 inactive 并给出
 稳定人工恢复状态。旧 prepare 已 loaded/active、旧 unit hash 不匹配、tmpfiles 已被
-替换或 reload 验证失败都必须有测试。
+替换或 reload 验证失败都必须有测试；迁移失败后运行全局 `systemd-tmpfiles --create`
+不得改变 symlink sentinel 的 owner、mode、inode 或内容。
+
+activation/rollback 进程在持锁期间维护显式 phase：stopping、pre-switch、switched、
+reloaded、prepare-starting、worker-starting、complete。它通过 `exec` 成为公开 PID；
+每个固定 `/usr/bin/systemctl` 子进程在独立 process group 中启动并由 `Popen` 持有。
+首次 HUP/INT/TERM 只设置中断状态、阻塞后续安装信号、终止并有界等待当前子进程组，
+超时后强制收敛；随后在仍持锁且安装信号被阻塞时按 phase 停止新服务、恢复旧 current、
+daemon-reload 并按原 active 状态恢复旧服务。任何 child 未收割、锁提前释放、半切换
+current 或跳过 rollback 都视为失败。测试必须在 switch、reload、verify、prepare-start
+和 worker-start 同步点分别发送三个信号并证明无子进程残留。
 
 Linux 原生直接运行 POSIX 测试；Windows 才通过 WSL。目录 helper 的 fixture 通过导入
 临时副本并向内部 fd 级函数传入私有 root descriptor 测试，生产 CLI 仍不接受路径参数。
@@ -709,7 +734,7 @@ systemd 部署测试还必须验证 `ProtectSystem=strict`、`UMask=0077`、`Kil
 11. worker 和 prepare unit 不以 root 执行任何仓库、Conda 或服务用户可写资产；prepare unit 不读取 `EnvironmentFile`，worker unit 不含 `+`/`!` 特权前缀；
 12. source、Conda、固定 unit 入口与已激活 immutable generation 均为 root-owned 且不可被 `medchat` 写入；worker 运行时文件系统为严格只读边界，新增文件默认私有，只有描述符相对目录准备器创建/验证的四个 `medchat:medchat`、`0700` 目录可写；
 13. 专用 worker 环境文件通过 parent-chain/leaf no-follow 与变量白名单校验，不含 secret 或 loader/runtime 注入变量；
-14. systemd 停止先允许 worker 协作式清理，超时后清除整个 cgroup；清理在 kill 前重新确认 `LoadState`、`ControlGroup`、`InvocationID` 与已打开 cgroup 的 device/inode 均未变化，已 unload 且原 cgroup 不存在/为空时安全返回；同路径新 invocation 不得被 kill；测试不按裸 PID 发信号且结束后无 Vina 或 worker 后代残留；
+14. systemd 停止先允许 worker 协作式清理，超时后清除整个 cgroup；强制阶段预先 no-follow 打开原 cgroup 的 `cgroup.kill` 并绑定其 inode，复验 `LoadState`、`ControlGroup`、`InvocationID` 与 cgroup device/inode 后只向该已打开 fd 写入，不再调用按 unit 名解析的 `systemctl kill`；已 unload 且原 cgroup 不存在/为空时安全返回，同路径新 invocation 不得被 kill；测试在最终复验与 fd 写入之间注入同名 reload，且不按裸 PID 发信号，结束后无 Vina 或 worker 后代残留；
 15. runbook 能由部署人员完成 root-owned 安装、环境文件校验、目录引导、Compose 先行启动、worker 启动、检查、晋级、回滚、备份和恢复验证。
 
 ## 16. 实施顺序

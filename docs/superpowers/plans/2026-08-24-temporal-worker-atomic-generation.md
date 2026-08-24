@@ -31,9 +31,15 @@ production environment values.
   mutation before all source assets have been pre-read. The parent and lock inode,
   owner and mode are fsynced and revalidated before `flock` is trusted.
 - Bundle framing is exactly `MEDCHAT_TEMPORAL_BUNDLE_V1\0`, followed for each fixed
-  asset in ASCII path order by 4-byte big-endian path length, path bytes, 4-byte mode,
-  8-byte payload length and payload. Manifest schema and allowed assets are exact and
-  canonical; duplicate, unknown, missing, unsorted or malformed entries fail closed.
+  asset in ASCII path order by 4-byte big-endian unsigned path length, path bytes,
+  4-byte big-endian unsigned mode (`0..07777`), 8-byte big-endian unsigned bounded
+  payload length and payload. Exact assets/modes are worker unit `0644`, prepare unit
+  `0644`, environment helper `0755`, directory helper `0755`, using the installed
+  logical paths in the design. Manifest first line is exactly
+  `MEDCHAT_TEMPORAL_BUNDLE_V1 <64-lower-hex>\n`; four sorted rows are exactly
+  `<asset-sha256> <4-octal-mode> <canonical-decimal-size> <logical-path>\n`, with one
+  final LF. Generation name, header digest and recomputed digest must match. Duplicate,
+  unknown, missing, unsorted, CR, blank or malformed content fails closed.
 - `current` is only a relative `releases/<64-lower-hex>` symlink. Old and requested
   generations must fully validate before activation or rollback.
 - Existing flat deployments require the explicit legacy migration in Task 3A. The
@@ -145,6 +151,14 @@ production environment values.
 7. Test first install, idempotent reinstall, upgrade, rollback and unexpected existing
    objects; commit.
 
+8. Implement an explicit signal state machine for stopping, pre-switch, switched,
+   reloaded, prepare-starting and worker-starting phases. Each absolute-path systemctl
+   child runs in its own process group and remains owned by a live `Popen`. First
+   HUP/INT/TERM blocks further install signals, terminates and bounded-waits/reaps the
+   current child, then performs phase-aware rollback and old-service restoration while
+   still holding the lock. Test HUP/INT/TERM at switch, reload, verify, prepare-start
+   and worker-start; no child, lock or partial activation may remain.
+
 ## Task 3A: Migrate the known flat legacy deployment safely
 
 **Modify:**
@@ -159,14 +173,21 @@ production environment values.
    `/usr/lib/tmpfiles.d/medchat-temporal-worker.conf` against exact root owner, modes
    and a source-code allowlist of hashes for the supported predecessor commits. Unknown
    hash/type/symlink/mode/owner fails with no mutation.
-3. First atomically move the verified dangerous tmpfiles file into a root-only
-   quarantine name and fsync its parent. Then transactionally create/activate the
+3. First atomically move the verified dangerous tmpfiles file outside every tmpfiles
+   search directory to the fixed same-filesystem path
+   `usr/lib/medchat/temporal-worker/quarantine/legacy-tmpfiles.disabled`. Create the
+   quarantine parent as root:root `0700`, install the file as root:root `0600`, and
+   fsync both parents. Retry accepts only source-present/quarantine-absent or
+   source-absent/quarantine-present-with-known-hash; all other combinations fail.
+   Then transactionally create/activate the
    generation, convert the two known unit regular files to exact bootstrap symlinks,
    daemon-reload and verify loaded unit content before starting.
 4. On failure, roll back only entries/current created by this invocation. Never restore
    the dangerous tmpfiles policy; keep services inactive and emit a stable manual-
    recovery-required status. Cover old prepare already active/loaded, unknown hashes,
-   failure after every migration boundary and reload failure.
+   retry combinations, failure after every migration boundary and reload failure. After
+   a failed migration, execute real global systemd-tmpfiles in an isolated root and
+   prove the symlink sentinel owner/mode/inode/content is unchanged.
 
 ## Task 4: Prove failure, signal and concurrency invariants
 
@@ -206,13 +227,15 @@ production environment values.
 - `deployment/README.md`
 - `tests/test_temporal_worker_trust_boundary.py`
 
-1. Query `LoadState`, `ControlGroup` and `InvocationID` together, and open the cgroup
-   directory no-follow to record device/inode. Before `systemctl kill`, query and open
-   again; require the same non-empty cgroup, InvocationID and cgroup device/inode. If
-   unloaded and the original cgroup is absent/empty, return safely. Never signal stored
-   numeric PIDs and never kill a newly loaded same-name unit.
+1. Query `LoadState`, `ControlGroup` and `InvocationID` together, open the cgroup
+   directory no-follow, and open its `cgroup.kill` file before the final identity check.
+   Record device/inode, re-query all unit properties and require the same original
+   identity. Force cleanup writes only to the already-open old `cgroup.kill` fd; it must
+   never call `systemctl kill <unit>` after checking. If the old fd/path is gone or the
+   identity changed, do not signal. Never signal stored numeric PIDs.
 2. Add tests for unload before cleanup, cgroup movement and same-path reload with a new
-   InvocationID and/or cgroup inode; preserve
+   InvocationID and/or cgroup inode, including deterministic reload after final recheck
+   but before the old fd write; preserve
    the original test failure instead of masking it with cleanup assertions.
 3. Rewrite the worker install runbook around trusted source staging, generation
    preview, explicit legacy migration, transactional activate/rollback,
