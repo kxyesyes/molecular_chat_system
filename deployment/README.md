@@ -440,23 +440,62 @@ docker compose --env-file /etc/medchat/temporal.env up -d
 ```
 
 先验证 release commit 和 SHA256，再把相同 release 放入 root-owned、`go-w` 的发布
-暂存目录。可以先用非特权 DESTDIR 检查固定目标、权限和清单：
+暂存目录。源码、`/opt/conda/envs/medchat`、安装脚本和已激活 generation 都必须由
+`root:root` 持有且不可被 group/other 写入。禁止对 `/opt/medchat` 做递归 `chown`；只有
+本节列出的四个运行目录属于 `medchat:medchat 0700`。
+
+安装与激活是两个独立事务。先用非特权 DESTDIR stage 一个不可变、内容寻址的
+generation；安装器只写入
+`usr/lib/medchat/temporal-worker/releases/<bundle-sha256>` 和安装锁，不创建
+`current`、不写生产环境文件，也不 reload、enable、start 或 restart 服务：
 
 ```bash
 cd /usr/local/src/medchat-release
-sh deployment/install-temporal-worker.sh --destdir "$PWD/worker-install-preview"
-cd worker-install-preview
-sha256sum -c usr/share/medchat/temporal-worker-assets.sha256
+preview="$PWD/worker-install-preview"
+install -d -m 0700 "$preview"
+sh deployment/install-temporal-worker.sh --destdir "$preview"
+# 记录输出中的 64 位 bundle digest，并检查：
+cat "$preview/usr/lib/medchat/temporal-worker/releases/<bundle-sha256>/manifest.sha256"
+test ! -e "$preview/usr/lib/medchat/temporal-worker/current"
 ```
 
 只有 `/usr/local/src/medchat-release` 及其父目录和安装源文件均为 `root:root`、`go-w`
-后，才执行 live install。安装器只复制 unit、独立 helper 和 tmpfiles 配置；不会创建
-生产环境文件，也不会 reload、enable 或启动服务：
+后，才执行 live stage。live stage 仍然不切换当前 generation：
 
 ```bash
 cd /usr/local/src/medchat-release
 sudo deployment/install-temporal-worker.sh --destdir /
 ```
+
+首次从已知平铺 predecessor 迁移时，必须使用显式 migration。迁移器会先停止并确认
+worker/prepare inactive，按内置 hash allowlist 校验旧 unit、helper 和危险旧策略，然后
+把危险策略永久移出搜索路径到
+`/usr/lib/medchat/temporal-worker/quarantine/legacy-tmpfiles.disabled`。未知 hash、类型、
+owner 或 mode 一律 fail closed；失败时绝不恢复危险策略，服务保持 inactive 并要求人工
+恢复：
+
+```bash
+sudo deployment/activate-temporal-worker-generation.sh \
+  --migrate-legacy <bundle-sha256>
+```
+
+非 legacy 部署、后续升级和 rollback 都使用同一事务 activation 命令。它验证 generation
+目录名、`manifest.sha256` header 和重新计算的 bundle digest 三方一致，停止 worker 后
+停止 prepare，原子切换 `current`，执行 daemon-reload，核对 systemd 实际加载内容，再按
+prepare、worker 顺序启动。任一步失败都会恢复旧 `current`，并且只恢复原先 active 的
+旧服务：
+
+```bash
+# 首次激活或升级
+sudo deployment/activate-temporal-worker-generation.sh <new-bundle-sha256>
+
+# rollback：目标必须是已存在且完整验证的旧 generation
+sudo deployment/activate-temporal-worker-generation.sh <old-bundle-sha256>
+```
+
+固定 unit 入口只能是 root-owned symlink，并精确指向
+`/usr/lib/medchat/temporal-worker/current/units/`。prepare 的两个 root helper 只能从
+`current/libexec/` 执行。不得手工修改 `current`、固定 unit symlink 或 generation 内容。
 
 由 operator 从 `deployment/temporal-worker.env.example` 手工创建专用环境文件：
 
@@ -468,11 +507,10 @@ sudoedit /etc/medchat/temporal-worker.env
 
 `/etc/medchat/temporal-worker.env` 必须保持 `root:root`、regular、非 symlink、`0600`，
 并且 no secrets：不得写入 API key、token、password、loader/runtime 变量或 Web 配置。
-启动 worker 前先 reload unit；首次启用 worker 会通过依赖启动 prepare：
+首次 activation 已完成 daemon-reload 与启动顺序；如需设置开机启动，只启用 worker：
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now medchat-temporal-worker.service
+sudo systemctl enable medchat-temporal-worker.service
 ```
 
 每次修改专用环境文件后，必须先重跑 root trust preparation，再重启非特权 worker：
@@ -483,6 +521,18 @@ sudo systemctl restart medchat-temporal-worker.service
 ```
 
 不要只重启 worker 后假定旧的 prepare 验证仍然覆盖新配置。
+
+#### 当前 release blockers
+
+- isolated live-root runner 尚未实现。本地、CI 或普通宿主不得直接运行 live-root 测试；
+  后续 runner 必须在一次性 disposable Linux 环境中证明 private mount namespace 和所有
+  bind roots 后才能执行。
+- staging failure/signal/concurrency 用例在 Windows 上按真实 POSIX 能力 skip；必须在
+  native Linux 上直接执行并通过，不能用静态断言替代。
+- 真实 systemd activation/migration、`systemd-analyze verify`、mixed lifecycle 和
+  runtime-mask + old `cgroup.kill` fd 测试尚未在 disposable production candidate 上执行，
+  均为 release blocker。无 cgroup v2 或不可打开 `cgroup.kill` 时没有 PID 或
+  `systemctl kill` fallback。
 
 ## 12. nginx 反向代理
 

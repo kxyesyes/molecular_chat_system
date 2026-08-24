@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -20,6 +21,7 @@ PREPARE_UNIT = ROOT / "deployment" / "medchat-temporal-worker-prepare.service"
 WEB_UNIT = ROOT / "deployment" / "medchat.service"
 RUN_INTEGRATION = "MEDCHAT_RUN_TEMPORAL_SYSTEMD_INTEGRATION"
 CGROUP_ROOT = Path("/sys/fs/cgroup")
+SYSTEMD_RUNTIME_UNIT_DIR = Path("/run/systemd/system")
 MIXED_LIFECYCLE = {
     "KillMode": "mixed",
     "KillSignal": "SIGTERM",
@@ -154,95 +156,542 @@ def _wait_until(predicate: Callable[[], bool], timeout: float = 5) -> bool:
     return predicate()
 
 
-def test_cleanup_uses_checked_systemd_cgroup_commands(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    cgroup_root = tmp_path / "cgroup"
-    unit_cgroup = cgroup_root / "system.slice" / "fixture.service"
-    unit_cgroup.mkdir(parents=True)
-    processes = unit_cgroup / "cgroup.procs"
-    processes.write_text("123\n", encoding="ascii")
-    commands: list[list[str]] = []
+class CleanupBlocked(RuntimeError):
+    """The test-owned unit cannot be cleaned without risking another invocation."""
 
-    def fake_run(
-        command: list[str],
-        *,
-        timeout: float = 15,
-    ) -> subprocess.CompletedProcess[str]:
-        del timeout
-        commands.append(command)
-        if command[:2] == ["systemctl", "show"]:
-            return subprocess.CompletedProcess(command, 0, "/system.slice/fixture.service\n", "")
-        if command[:2] == ["systemctl", "stop"]:
-            return subprocess.CompletedProcess(command, 1, "", "stop failed")
-        if command[:2] == ["systemctl", "kill"]:
-            processes.write_text("", encoding="ascii")
-            return subprocess.CompletedProcess(command, 0, "", "")
-        if command[:2] == ["systemctl", "reset-failed"]:
-            return subprocess.CompletedProcess(command, 0, "", "")
-        raise AssertionError(command)
 
-    monkeypatch.setattr(sys.modules[__name__], "CGROUP_ROOT", cgroup_root)
-    monkeypatch.setattr(sys.modules[__name__], "_run", fake_run)
-    _cleanup_unit("fixture.service")
-    assert commands == [
-        [
+@dataclass(frozen=True)
+class UnitSnapshot:
+    load_state: str
+    control_group: str
+    invocation_id: str
+    job: str
+
+
+@dataclass(frozen=True)
+class CgroupHandle:
+    directory_fd: int
+    kill_fd: int
+    control_group: str
+    directory_identity: tuple[int, int]
+    kill_identity: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class MaskHandle:
+    directory_fd: int
+    identity: tuple[int, int]
+    unit: str
+
+
+def _file_identity(metadata: os.stat_result) -> tuple[int, int]:
+    return metadata.st_dev, metadata.st_ino
+
+
+class PosixCleanupBackend:
+    _directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    _read_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+    def snapshot(self, unit: str) -> UnitSnapshot:
+        command = [
             "systemctl",
             "show",
-            "fixture.service",
+            unit,
+            "--property=LoadState",
             "--property=ControlGroup",
-            "--value",
-        ],
-        ["systemctl", "stop", "fixture.service"],
-        [
-            "systemctl",
-            "kill",
-            "--kill-whom=all",
-            "--signal=SIGKILL",
-            "fixture.service",
-        ],
-        ["systemctl", "reset-failed", "fixture.service"],
+            "--property=InvocationID",
+            "--property=Job",
+        ]
+        result = _run(command)
+        if result.returncode != 0:
+            raise CleanupBlocked("unit snapshot unavailable")
+        values: dict[str, str] = {}
+        for line in result.stdout.splitlines():
+            if "=" not in line:
+                raise CleanupBlocked("unit snapshot malformed")
+            key, value = line.split("=", 1)
+            if key in values:
+                raise CleanupBlocked("unit snapshot malformed")
+            values[key] = value
+        expected = {"LoadState", "ControlGroup", "InvocationID", "Job"}
+        if set(values) != expected:
+            raise CleanupBlocked("unit snapshot incomplete")
+        return UnitSnapshot(
+            load_state=values["LoadState"],
+            control_group=values["ControlGroup"],
+            invocation_id=values["InvocationID"],
+            job=values["Job"],
+        )
+
+    def open_cgroup(self, snapshot: UnitSnapshot) -> CgroupHandle:
+        components = snapshot.control_group.split("/")
+        if (
+            not snapshot.control_group.startswith("/")
+            or snapshot.control_group == "/"
+            or any(component in {"", ".", ".."} for component in components[1:])
+        ):
+            raise CleanupBlocked("control group is not confined")
+        root_fd = os.open(CGROUP_ROOT, self._directory_flags)
+        directory_fd = -1
+        kill_fd = -1
+        try:
+            controllers = os.open(
+                "cgroup.controllers", self._read_flags, dir_fd=root_fd
+            )
+            os.close(controllers)
+            directory_fd = os.dup(root_fd)
+            for component in components[1:]:
+                next_fd = os.open(
+                    component, self._directory_flags, dir_fd=directory_fd
+                )
+                os.close(directory_fd)
+                directory_fd = next_fd
+            kill_fd = os.open(
+                "cgroup.kill",
+                os.O_WRONLY
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=directory_fd,
+            )
+            directory_metadata = os.fstat(directory_fd)
+            kill_metadata = os.fstat(kill_fd)
+            if not stat.S_ISDIR(directory_metadata.st_mode) or not stat.S_ISREG(
+                kill_metadata.st_mode
+            ):
+                raise CleanupBlocked("cgroup v2 kill interface unavailable")
+            return CgroupHandle(
+                directory_fd=directory_fd,
+                kill_fd=kill_fd,
+                control_group=snapshot.control_group,
+                directory_identity=_file_identity(directory_metadata),
+                kill_identity=_file_identity(kill_metadata),
+            )
+        except (OSError, CleanupBlocked) as exc:
+            if kill_fd >= 0:
+                os.close(kill_fd)
+            if directory_fd >= 0:
+                os.close(directory_fd)
+            if isinstance(exc, CleanupBlocked):
+                raise
+            raise CleanupBlocked("cgroup v2 kill interface unavailable") from exc
+        finally:
+            os.close(root_fd)
+
+    def create_runtime_mask(self, unit: str) -> MaskHandle:
+        if "/" in unit or unit in {"", ".", ".."}:
+            raise CleanupBlocked("unit name is unsafe")
+        directory_fd = os.open(SYSTEMD_RUNTIME_UNIT_DIR, self._directory_flags)
+        created = False
+        try:
+            parent = os.fstat(directory_fd)
+            if (
+                not stat.S_ISDIR(parent.st_mode)
+                or (parent.st_uid, parent.st_gid) != (0, 0)
+                or stat.S_IMODE(parent.st_mode) & 0o022
+            ):
+                raise CleanupBlocked("runtime unit directory is untrusted")
+            try:
+                os.symlink("/dev/null", unit, dir_fd=directory_fd)
+                created = True
+            except FileExistsError as exc:
+                raise CleanupBlocked("runtime mask collision") from exc
+            metadata = os.stat(unit, dir_fd=directory_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISLNK(metadata.st_mode)
+                or (metadata.st_uid, metadata.st_gid) != (0, 0)
+                or os.readlink(unit, dir_fd=directory_fd) != "/dev/null"
+            ):
+                raise CleanupBlocked("runtime mask is untrusted")
+            os.fsync(directory_fd)
+            return MaskHandle(
+                directory_fd=directory_fd,
+                identity=_file_identity(metadata),
+                unit=unit,
+            )
+        except Exception:
+            if created:
+                try:
+                    metadata = os.stat(
+                        unit, dir_fd=directory_fd, follow_symlinks=False
+                    )
+                    if (
+                        stat.S_ISLNK(metadata.st_mode)
+                        and os.readlink(unit, dir_fd=directory_fd) == "/dev/null"
+                    ):
+                        os.unlink(unit, dir_fd=directory_fd)
+                        os.fsync(directory_fd)
+                except OSError:
+                    pass
+            os.close(directory_fd)
+            raise
+
+    def daemon_reload(self) -> None:
+        result = _run(["systemctl", "daemon-reload"])
+        if result.returncode != 0:
+            raise CleanupBlocked("systemd daemon-reload failed")
+
+    def verify_runtime_mask(
+        self,
+        unit: str,
+        mask: MaskHandle,
+        original: UnitSnapshot,
+        cgroup: CgroupHandle,
+    ) -> None:
+        try:
+            metadata = os.stat(
+                unit, dir_fd=mask.directory_fd, follow_symlinks=False
+            )
+            target = os.readlink(unit, dir_fd=mask.directory_fd)
+            directory_metadata = os.fstat(cgroup.directory_fd)
+            kill_metadata = os.fstat(cgroup.kill_fd)
+            root_fd = -1
+            current_directory_fd = -1
+            try:
+                root_fd = os.open(CGROUP_ROOT, self._directory_flags)
+                current_directory_fd = os.dup(root_fd)
+                for component in cgroup.control_group.split("/")[1:]:
+                    next_fd = os.open(
+                        component,
+                        self._directory_flags,
+                        dir_fd=current_directory_fd,
+                    )
+                    os.close(current_directory_fd)
+                    current_directory_fd = next_fd
+                current_directory_metadata = os.fstat(current_directory_fd)
+            finally:
+                if current_directory_fd >= 0:
+                    os.close(current_directory_fd)
+                if root_fd >= 0:
+                    os.close(root_fd)
+        except OSError as exc:
+            raise CleanupBlocked("cleanup identity cannot be revalidated") from exc
+        checked = self.snapshot(unit)
+        if (
+            not stat.S_ISLNK(metadata.st_mode)
+            or _file_identity(metadata) != mask.identity
+            or target != "/dev/null"
+            or checked.load_state != "masked"
+            or checked.job
+            or checked.control_group != original.control_group
+            or checked.invocation_id != original.invocation_id
+            or _file_identity(directory_metadata) != cgroup.directory_identity
+            or _file_identity(current_directory_metadata) != cgroup.directory_identity
+            or _file_identity(kill_metadata) != cgroup.kill_identity
+        ):
+            raise CleanupBlocked("cleanup identity changed")
+
+    def stop(self, unit: str) -> subprocess.CompletedProcess[str]:
+        try:
+            return _run(["systemctl", "stop", unit], timeout=10)
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(
+                ["systemctl", "stop", unit], 124, "", "stop timed out"
+            )
+
+    def _has_processes(self, cgroup: CgroupHandle) -> bool:
+        descriptor = os.open(
+            "cgroup.procs", self._read_flags, dir_fd=cgroup.directory_fd
+        )
+        try:
+            payload = bytearray()
+            while len(payload) <= 1_048_576:
+                chunk = os.read(descriptor, min(65_536, 1_048_577 - len(payload)))
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            if len(payload) > 1_048_576:
+                raise CleanupBlocked("cgroup process list is oversized")
+            text = bytes(payload).decode("ascii")
+        except (OSError, UnicodeError) as exc:
+            raise CleanupBlocked("cgroup process list unavailable") from exc
+        finally:
+            os.close(descriptor)
+        lines = [line for line in text.splitlines() if line]
+        if any(not line.isdecimal() for line in lines):
+            raise CleanupBlocked("cgroup process list malformed")
+        return bool(lines)
+
+    def wait_empty(self, cgroup: CgroupHandle, timeout: float) -> bool:
+        return _wait_until(lambda: not self._has_processes(cgroup), timeout=timeout)
+
+    def write_cgroup_kill(self, cgroup: CgroupHandle) -> None:
+        metadata = os.fstat(cgroup.kill_fd)
+        if _file_identity(metadata) != cgroup.kill_identity:
+            raise CleanupBlocked("cgroup kill descriptor identity changed")
+        try:
+            written = os.write(cgroup.kill_fd, b"1\n")
+        except OSError as exc:
+            raise CleanupBlocked("cgroup kill write failed") from exc
+        if written != 2:
+            raise CleanupBlocked("cgroup kill write was incomplete")
+
+    def reset_failed(self, unit: str) -> None:
+        result = _run(["systemctl", "reset-failed", unit])
+        if result.returncode != 0:
+            raise CleanupBlocked("systemd reset-failed failed")
+
+    def remove_runtime_mask(self, mask: MaskHandle) -> None:
+        try:
+            try:
+                metadata = os.stat(
+                    mask.unit, dir_fd=mask.directory_fd, follow_symlinks=False
+                )
+                target = os.readlink(mask.unit, dir_fd=mask.directory_fd)
+            except OSError as exc:
+                raise CleanupBlocked(
+                    "runtime mask cleanup cannot be verified"
+                ) from exc
+            if (
+                not stat.S_ISLNK(metadata.st_mode)
+                or _file_identity(metadata) != mask.identity
+                or target != "/dev/null"
+            ):
+                raise CleanupBlocked("runtime mask cleanup identity changed")
+            os.unlink(mask.unit, dir_fd=mask.directory_fd)
+            os.fsync(mask.directory_fd)
+        finally:
+            os.close(mask.directory_fd)
+
+    def close_cgroup(self, cgroup: CgroupHandle) -> None:
+        os.close(cgroup.kill_fd)
+        os.close(cgroup.directory_fd)
+
+
+class FakeCleanupBackend:
+    def __init__(self) -> None:
+        self.snapshot_value = UnitSnapshot(
+            load_state="loaded",
+            control_group="/system.slice/fixture.service",
+            invocation_id="invocation-one",
+            job="",
+        )
+        self.mask_identity = (41, 42)
+        self.cgroup_identity = (51, 52)
+        self.kill_identity = (61, 62)
+        self.processes = True
+        self.masked = False
+        self.events: list[str] = []
+        self.mutation: str | None = None
+        self.remove_failure = False
+
+    def snapshot(self, unit: str) -> UnitSnapshot:
+        self.events.append("snapshot")
+        value = self.snapshot_value
+        if self.masked:
+            value = UnitSnapshot(
+                load_state="masked",
+                control_group=value.control_group,
+                invocation_id=value.invocation_id,
+                job=value.job,
+            )
+        if self.mutation == "unload":
+            value = UnitSnapshot("not-found", "", "", "")
+        elif self.mutation == "movement":
+            value = UnitSnapshot(
+                value.load_state,
+                "/system.slice/replacement.service",
+                value.invocation_id,
+                value.job,
+            )
+        elif self.mutation == "invocation":
+            value = UnitSnapshot(
+                value.load_state,
+                value.control_group,
+                "invocation-two",
+                value.job,
+            )
+        return value
+
+    def open_cgroup(self, snapshot: UnitSnapshot) -> CgroupHandle:
+        self.events.append("open-cgroup")
+        return CgroupHandle(
+            directory_fd=101,
+            kill_fd=102,
+            control_group=snapshot.control_group,
+            directory_identity=self.cgroup_identity,
+            kill_identity=self.kill_identity,
+        )
+
+    def create_runtime_mask(self, unit: str) -> MaskHandle:
+        self.events.append("create-mask")
+        assert not self.masked
+        self.masked = True
+        return MaskHandle(directory_fd=201, identity=self.mask_identity, unit=unit)
+
+    def daemon_reload(self) -> None:
+        self.events.append("daemon-reload")
+
+    def verify_runtime_mask(
+        self,
+        unit: str,
+        mask: MaskHandle,
+        original: UnitSnapshot,
+        cgroup: CgroupHandle,
+    ) -> None:
+        self.events.append("verify-mask")
+        assert self.masked and mask.identity == self.mask_identity
+        if self.mutation == "inode":
+            raise CleanupBlocked("cgroup identity changed")
+        checked = self.snapshot(unit)
+        if (
+            checked.load_state != "masked"
+            or checked.job
+            or checked.control_group != original.control_group
+            or checked.invocation_id != original.invocation_id
+            or cgroup.directory_identity != self.cgroup_identity
+        ):
+            raise CleanupBlocked("unit identity changed")
+
+    def stop(self, unit: str) -> subprocess.CompletedProcess[str]:
+        self.events.append("stop")
+        return subprocess.CompletedProcess(["systemctl", "stop", unit], 1, "", "failed")
+
+    def wait_empty(self, cgroup: CgroupHandle, timeout: float) -> bool:
+        del cgroup, timeout
+        self.events.append("wait-empty")
+        return not self.processes
+
+    def write_cgroup_kill(self, cgroup: CgroupHandle) -> None:
+        self.events.append("attempt-start-reload")
+        assert self.masked, "runtime mask must reject same-name start/reload"
+        assert cgroup.kill_fd == 102 and cgroup.kill_identity == self.kill_identity
+        self.events.append("write-old-cgroup-kill-fd")
+        self.processes = False
+
+    def reset_failed(self, unit: str) -> None:
+        del unit
+        self.events.append("reset-failed")
+
+    def remove_runtime_mask(self, mask: MaskHandle) -> None:
+        self.events.append("remove-exact-mask")
+        if self.remove_failure:
+            raise CleanupBlocked("mask cleanup failed")
+        assert self.masked and mask.identity == self.mask_identity
+        self.masked = False
+
+    def close_cgroup(self, cgroup: CgroupHandle) -> None:
+        del cgroup
+        self.events.append("close-cgroup-fds")
+
+
+def test_cleanup_masks_before_writing_opened_old_cgroup_kill_fd() -> None:
+    backend = FakeCleanupBackend()
+    stop = _cleanup_unit("fixture.service", backend=backend)
+    assert stop is not None and stop.returncode == 1
+    assert backend.events.index("create-mask") < backend.events.index("stop")
+    final_verify = max(
+        index for index, event in enumerate(backend.events) if event == "verify-mask"
+    )
+    assert final_verify < backend.events.index("attempt-start-reload")
+    assert backend.events.index("attempt-start-reload") < backend.events.index(
+        "write-old-cgroup-kill-fd"
+    )
+    assert backend.events[-4:] == [
+        "remove-exact-mask",
+        "daemon-reload",
+        "close-cgroup-fds",
+        "reset-failed",
     ]
 
 
-def test_cleanup_accepts_failed_reset_only_for_checked_unloaded_unit(
+@pytest.mark.parametrize("mutation", ["unload", "movement", "invocation", "inode"])
+def test_cleanup_blocks_changed_unit_or_cgroup_identity(mutation: str) -> None:
+    backend = FakeCleanupBackend()
+    if mutation == "unload":
+        backend.mutation = mutation
+        with pytest.raises(CleanupBlocked):
+            _cleanup_unit("fixture.service", backend=backend)
+        assert "create-mask" not in backend.events
+        return
+    original_verify = backend.verify_runtime_mask
+    verification_count = 0
+
+    def mutate_at_final_check(*args, **kwargs):
+        nonlocal verification_count
+        verification_count += 1
+        if verification_count == 2:
+            backend.mutation = mutation
+        return original_verify(*args, **kwargs)
+
+    backend.verify_runtime_mask = mutate_at_final_check  # type: ignore[method-assign]
+    with pytest.raises(CleanupBlocked):
+        _cleanup_unit("fixture.service", backend=backend)
+    assert "write-old-cgroup-kill-fd" not in backend.events
+    assert not backend.masked
+
+
+def test_cleanup_source_has_no_systemctl_kill_or_numeric_pid_signal() -> None:
+    source = Path(__file__).read_text(encoding="utf-8")
+    cleanup_source = source[
+        source.index("class PosixCleanupBackend"):
+        source.index("class FakeCleanupBackend")
+    ]
+    assert '"systemctl", "kill"' not in cleanup_source
+    assert "os.kill(" not in cleanup_source
+    assert "os.killpg(" not in cleanup_source
+    assert 'os.write(cgroup.kill_fd, b"1\\n")' in cleanup_source
+
+
+def test_cleanup_snapshot_queries_identity_and_job_together(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
-    cgroup_root = tmp_path / "cgroup"
-    unit_cgroup = cgroup_root / "system.slice" / "fixture.service"
-    unit_cgroup.mkdir(parents=True)
-    (unit_cgroup / "cgroup.procs").write_text("", encoding="ascii")
     commands: list[list[str]] = []
 
-    def fake_run(
-        command: list[str],
-        *,
-        timeout: float = 15,
-    ) -> subprocess.CompletedProcess[str]:
+    def fake_run(command: list[str], *, timeout: float = 15):
         del timeout
         commands.append(command)
-        if command[-2:] == ["--property=ControlGroup", "--value"]:
-            return subprocess.CompletedProcess(command, 0, "/system.slice/fixture.service\n", "")
-        if command[:2] == ["systemctl", "stop"]:
-            return subprocess.CompletedProcess(command, 0, "", "")
-        if command[:2] == ["systemctl", "reset-failed"]:
-            return subprocess.CompletedProcess(command, 1, "", "not loaded")
-        if command[-2:] == ["--property=LoadState", "--value"]:
-            return subprocess.CompletedProcess(command, 0, "not-found\n", "")
-        raise AssertionError(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            "LoadState=loaded\n"
+            "ControlGroup=/system.slice/fixture.service\n"
+            "InvocationID=invocation-one\n"
+            "Job=\n",
+            "",
+        )
 
-    monkeypatch.setattr(sys.modules[__name__], "CGROUP_ROOT", cgroup_root)
     monkeypatch.setattr(sys.modules[__name__], "_run", fake_run)
-    _cleanup_unit("fixture.service")
-    assert commands[-1] == [
+    assert PosixCleanupBackend().snapshot("fixture.service") == UnitSnapshot(
+        "loaded", "/system.slice/fixture.service", "invocation-one", ""
+    )
+    assert commands == [[
         "systemctl",
         "show",
         "fixture.service",
         "--property=LoadState",
-        "--value",
-    ]
+        "--property=ControlGroup",
+        "--property=InvocationID",
+        "--property=Job",
+    ]]
+
+
+def test_cleanup_preserves_primary_failure_when_mask_cleanup_also_fails() -> None:
+    backend = FakeCleanupBackend()
+    backend.remove_failure = True
+    verification_count = 0
+    original_verify = backend.verify_runtime_mask
+
+    def fail_final_verify(*args, **kwargs):
+        nonlocal verification_count
+        verification_count += 1
+        if verification_count == 2:
+            raise CleanupBlocked("primary identity failure")
+        return original_verify(*args, **kwargs)
+
+    backend.verify_runtime_mask = fail_final_verify  # type: ignore[method-assign]
+    with pytest.raises(CleanupBlocked, match="primary identity failure"):
+        _cleanup_unit("fixture.service", backend=backend)
 
 
 @dataclass(frozen=True)
@@ -327,37 +776,66 @@ def _cgroup_has_processes(cgroup_path: Path) -> bool:
     return bool(_cgroup_processes(cgroup_path))
 
 
-def _cleanup_unit(unit: str) -> subprocess.CompletedProcess[str] | None:
-    _control_group_name, cgroup_path = _control_group(unit)
+def _cleanup_unit(
+    unit: str,
+    *,
+    backend: PosixCleanupBackend | FakeCleanupBackend | None = None,
+) -> subprocess.CompletedProcess[str] | None:
+    cleanup = PosixCleanupBackend() if backend is None else backend
+    original = cleanup.snapshot(unit)
+    if (
+        original.load_state != "loaded"
+        or not original.control_group
+        or not original.invocation_id
+        or original.job
+    ):
+        raise CleanupBlocked("unit is not a stable loaded invocation")
+    cgroup = cleanup.open_cgroup(original)
+    mask: MaskHandle | None = None
+    primary_error: BaseException | None = None
+    stop: subprocess.CompletedProcess[str] | None = None
+    cleanup_succeeded = False
     try:
-        stop = _run(["systemctl", "stop", unit], timeout=10)
-    except subprocess.TimeoutExpired:
-        stop = None
-    if (stop is None or stop.returncode != 0) and _cgroup_has_processes(cgroup_path):
-        kill = _run(
-            [
-                "systemctl", "kill",
-                "--kill-whom=all",
-                "--signal=SIGKILL",
-                unit,
-            ]
-        )
-        assert kill.returncode == 0, kill.stderr
-    assert _wait_until(lambda: not _cgroup_has_processes(cgroup_path), timeout=5)
-    reset = _run(["systemctl", "reset-failed", unit])
-    if reset.returncode != 0:
-        load_state = _run(
-            [
-                "systemctl",
-                "show",
-                unit,
-                "--property=LoadState",
-                "--value",
-            ]
-        )
-        assert load_state.returncode == 0, load_state.stderr
-        assert load_state.stdout.strip() == "not-found", reset.stderr
+        mask = cleanup.create_runtime_mask(unit)
+        cleanup.daemon_reload()
+        cleanup.verify_runtime_mask(unit, mask, original, cgroup)
+        stop = cleanup.stop(unit)
+        if not cleanup.wait_empty(cgroup, timeout=5):
+            cleanup.verify_runtime_mask(unit, mask, original, cgroup)
+            cleanup.write_cgroup_kill(cgroup)
+            if not cleanup.wait_empty(cgroup, timeout=5):
+                raise CleanupBlocked("old cgroup remained populated after cgroup.kill")
+        cleanup_succeeded = True
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        mask_error: BaseException | None = None
+        if mask is not None:
+            try:
+                cleanup.remove_runtime_mask(mask)
+                cleanup.daemon_reload()
+            except BaseException as exc:
+                mask_error = exc
+        cleanup.close_cgroup(cgroup)
+        if mask_error is not None:
+            if primary_error is None:
+                raise mask_error
+            if hasattr(primary_error, "add_note"):
+                primary_error.add_note(f"runtime mask cleanup also failed: {mask_error}")
+    if cleanup_succeeded:
+        cleanup.reset_failed(unit)
     return stop
+
+
+def _cleanup_preserving(unit: str, primary_error: BaseException | None) -> None:
+    try:
+        _cleanup_unit(unit)
+    except BaseException as cleanup_error:
+        if primary_error is None:
+            raise
+        if hasattr(primary_error, "add_note"):
+            primary_error.add_note(f"unit cleanup also failed: {cleanup_error}")
 
 
 def _start_process_tree(
@@ -400,8 +878,8 @@ def _start_process_tree(
         assert len(checked_identities) == 2
         assert all(identity.cgroup == control_group for identity in checked_identities)
         return event_file, (checked_identities[0], checked_identities[1])
-    except Exception:
-        _cleanup_unit(unit)
+    except BaseException as exc:
+        _cleanup_preserving(unit, exc)
         raise
 
 
@@ -410,6 +888,7 @@ def test_mixed_kill_allows_parent_to_stop_child_cooperatively(tmp_path: Path) ->
     unit = f"medchat-temporal-worker-test-{uuid.uuid4().hex}.service"
     identities: tuple[ProcessIdentity, ...] = ()
     cleanup_required = False
+    primary_error: BaseException | None = None
     try:
         event_file, identities = _start_process_tree(tmp_path, "cooperative", unit)
         cleanup_required = True
@@ -433,9 +912,12 @@ def test_mixed_kill_allows_parent_to_stop_child_cooperatively(tmp_path: Path) ->
             _wait_until(lambda identity=identity: not _same_process_is_running(identity))
             for identity in identities
         )
+    except BaseException as exc:
+        primary_error = exc
+        raise
     finally:
         if cleanup_required:
-            _cleanup_unit(unit)
+            _cleanup_preserving(unit, primary_error)
 
 
 def test_mixed_kill_escalates_for_ignored_sigterm(tmp_path: Path) -> None:
@@ -443,6 +925,7 @@ def test_mixed_kill_escalates_for_ignored_sigterm(tmp_path: Path) -> None:
     unit = f"medchat-temporal-worker-test-{uuid.uuid4().hex}.service"
     identities: tuple[ProcessIdentity, ...] = ()
     cleanup_required = False
+    primary_error: BaseException | None = None
     try:
         _event_file, identities = _start_process_tree(tmp_path, "ignore", unit)
         cleanup_required = True
@@ -458,9 +941,12 @@ def test_mixed_kill_escalates_for_ignored_sigterm(tmp_path: Path) -> None:
             _wait_until(lambda identity=identity: not _same_process_is_running(identity))
             for identity in identities
         )
+    except BaseException as exc:
+        primary_error = exc
+        raise
     finally:
         if cleanup_required:
-            _cleanup_unit(unit)
+            _cleanup_preserving(unit, primary_error)
 
 
 def test_systemd_analyze_verifies_committed_units_on_production_candidate() -> None:

@@ -240,13 +240,19 @@ def test_descriptor_validator_rejects_relative_paths_before_open(helper) -> None
 def test_systemd_integration_cleanup_has_no_numeric_pid_signal_path() -> None:
     source = SYSTEMD_INTEGRATION_PATH.read_text(encoding="utf-8")
     cleanup_source = source[
-        source.index("def _control_group"):source.index("def _start_process_tree")
+        source.index("class PosixCleanupBackend"):source.index("class FakeCleanupBackend")
     ]
     assert "os.kill(" not in cleanup_source
+    assert "os.killpg(" not in cleanup_source
     assert "ControlGroup" in cleanup_source
     assert "cgroup.procs" in cleanup_source
+    assert "cgroup.kill" in cleanup_source
+    assert "InvocationID" in cleanup_source
+    assert '"--property=Job"' in cleanup_source
+    assert "create_runtime_mask" in cleanup_source
+    assert "follow_symlinks=False" in cleanup_source
     assert '"systemctl", "stop"' in cleanup_source
-    assert '"systemctl", "kill"' in cleanup_source
+    assert '"systemctl", "kill"' not in cleanup_source
     assert '"systemctl", "reset-failed"' in cleanup_source
 
 
@@ -276,6 +282,14 @@ def test_deployment_docs_prescribe_trusted_worker_install_and_narrow_ownership()
     assert "systemctl restart medchat-temporal-worker.service" in documentation
     assert "Docker/Compose" in documentation
     assert "operator" in documentation.lower()
+    assert "manifest.sha256" in documentation
+    assert "releases/<bundle-sha256>" in documentation
+    assert "activate-temporal-worker-generation.sh" in documentation
+    assert "--migrate-legacy" in documentation
+    assert "legacy-tmpfiles.disabled" in documentation
+    assert "isolated live-root runner" in documentation
+    assert "release blocker" in documentation.lower()
+    assert "systemd-tmpfiles --create" not in documentation
 
 
 def test_cli_rejects_path_argument_without_echo_or_traceback() -> None:
