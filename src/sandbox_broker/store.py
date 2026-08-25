@@ -13,7 +13,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 
 from .models import (
@@ -37,6 +37,10 @@ class IdempotencyConflict(ValueError):
     """Raised when an idempotency key is reused for different canonical input."""
 
 
+class ArtifactConflict(ValueError):
+    """Raised when artifact identity or relative-path uniqueness is violated."""
+
+
 @dataclass(frozen=True)
 class BrokerJobRecord:
     """An immutable snapshot of a persisted broker job."""
@@ -55,6 +59,18 @@ class BrokerJobRecord:
     cleanup_status: str
     created_at: float
     updated_at: float
+
+
+@dataclass(frozen=True)
+class ArtifactRecord:
+    """An immutable snapshot of persisted artifact metadata."""
+
+    artifact_id: str
+    job_id: str
+    relative_path: str
+    media_type: str
+    size_bytes: int
+    sha256: str
 
 
 _EXPECTED_COLUMNS = {
@@ -690,6 +706,162 @@ class BrokerStore:
                 terminal_values,
             ).fetchall()
         return [self._row_to_record(row) for row in rows]
+
+    def register_artifact(
+        self,
+        artifact_id: str,
+        job_id: str,
+        relative_path: str,
+        media_type: str,
+        size_bytes: int,
+        sha256: str,
+    ) -> ArtifactRecord:
+        """Register immutable artifact metadata for an existing job."""
+
+        self._validate_artifact_values(
+            artifact_id,
+            job_id,
+            relative_path,
+            media_type,
+            size_bytes,
+            sha256,
+        )
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                job = connection.execute(
+                    "SELECT 1 FROM jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                if job is None:
+                    raise KeyError("job not found")
+                try:
+                    connection.execute(
+                        """
+                        INSERT INTO artifacts(
+                            artifact_id, job_id, relative_path, media_type,
+                            size_bytes, sha256
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            artifact_id,
+                            job_id,
+                            relative_path,
+                            media_type,
+                            size_bytes,
+                            sha256,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    raise ArtifactConflict("artifact identity conflict") from None
+                row = connection.execute(
+                    "SELECT * FROM artifacts WHERE job_id=? AND artifact_id=?",
+                    (job_id, artifact_id),
+                ).fetchone()
+                record = self._row_to_artifact(row)
+                connection.commit()
+                return record
+            except BaseException:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
+
+    def get_artifact(self, job_id: str, artifact_id: str) -> ArtifactRecord | None:
+        """Return one artifact only when both its job and identifier match."""
+
+        self._validate_artifact_identifier("job_id", job_id)
+        self._validate_artifact_identifier("artifact_id", artifact_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM artifacts WHERE job_id=? AND artifact_id=?",
+                (job_id, artifact_id),
+            ).fetchone()
+        return self._row_to_artifact(row) if row is not None else None
+
+    def list_artifacts(self, job_id: str) -> list[ArtifactRecord]:
+        """List immutable artifact metadata for exactly one job."""
+
+        self._validate_artifact_identifier("job_id", job_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM artifacts WHERE job_id=? ORDER BY artifact_id",
+                (job_id,),
+            ).fetchall()
+        return [self._row_to_artifact(row) for row in rows]
+
+    @staticmethod
+    def _validate_artifact_identifier(name: str, value: object) -> None:
+        if type(value) is not str:
+            raise TypeError(f"{name} must be a string")
+        if _UUID_HEX_PATTERN.fullmatch(value) is None:
+            raise ValueError(f"{name} must be lowercase UUID hex")
+
+    @staticmethod
+    def _validate_artifact_relative_path(value: object) -> None:
+        if type(value) is not str:
+            raise TypeError("relative_path must be a string")
+        if not value or "\\" in value or ":" in value:
+            raise ValueError("relative_path must be a safe POSIX relative path")
+        pieces = value.split("/")
+        relative = PurePosixPath(value)
+        if (
+            relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in pieces)
+            or str(relative) != value
+        ):
+            raise ValueError("relative_path must be a safe POSIX relative path")
+
+    @staticmethod
+    def _validate_artifact_values(
+        artifact_id: object,
+        job_id: object,
+        relative_path: object,
+        media_type: object,
+        size_bytes: object,
+        sha256: object,
+    ) -> None:
+        BrokerStore._validate_artifact_identifier("artifact_id", artifact_id)
+        BrokerStore._validate_artifact_identifier("job_id", job_id)
+        BrokerStore._validate_artifact_relative_path(relative_path)
+        if type(media_type) is not str:
+            raise TypeError("media_type must be a string")
+        if not media_type.strip():
+            raise ValueError("media_type must be non-empty")
+        if type(size_bytes) is not int:
+            raise TypeError("size_bytes must be an integer")
+        if size_bytes < 0:
+            raise ValueError("size_bytes must be nonnegative")
+        if type(sha256) is not str:
+            raise TypeError("sha256 must be a string")
+        if _SHA256_PATTERN.fullmatch(sha256) is None:
+            raise ValueError("sha256 must be a lowercase SHA-256 digest")
+
+    @staticmethod
+    def _row_to_artifact(row: sqlite3.Row) -> ArtifactRecord:
+        try:
+            artifact_id = row["artifact_id"]
+            job_id = row["job_id"]
+            relative_path = row["relative_path"]
+            media_type = row["media_type"]
+            size_bytes = row["size_bytes"]
+            sha256 = row["sha256"]
+            BrokerStore._validate_artifact_values(
+                artifact_id,
+                job_id,
+                relative_path,
+                media_type,
+                size_bytes,
+                sha256,
+            )
+            return ArtifactRecord(
+                artifact_id=artifact_id,
+                job_id=job_id,
+                relative_path=relative_path,
+                media_type=media_type,
+                size_bytes=size_bytes,
+                sha256=sha256,
+            )
+        except (IndexError, KeyError, TypeError, ValueError):
+            raise RuntimeError("persisted broker artifact is invalid") from None
 
     @staticmethod
     def _reject_json_constant(_: str) -> None:

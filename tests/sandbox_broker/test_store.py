@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import FrozenInstanceError
 import json
 import math
 import os
@@ -21,7 +22,12 @@ from src.sandbox_broker.models import (
     TERMINAL_STATUSES,
     transition_allowed,
 )
-from src.sandbox_broker.store import BrokerStore, IdempotencyConflict
+from src.sandbox_broker.store import (
+    ArtifactConflict,
+    ArtifactRecord,
+    BrokerStore,
+    IdempotencyConflict,
+)
 
 
 SHA256_A = "a" * 64
@@ -1122,3 +1128,157 @@ def test_store_source_parses_as_python_310() -> None:
     source_path = Path(__file__).parents[2] / "src" / "sandbox_broker" / "store.py"
 
     ast.parse(source_path.read_text(encoding="utf-8"), feature_version=(3, 10))
+
+
+def test_artifact_store_register_get_and_list_are_job_scoped(tmp_path: Path) -> None:
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    first, _ = store.create_or_get("idem-a", SHA256_A, "trace-a")
+    second, _ = store.create_or_get("idem-b", SHA256_B, "trace-b")
+    artifact_id = "1" * 32
+    relative = f"jobs/{first.job_id}/published/{artifact_id}"
+
+    record = store.register_artifact(
+        artifact_id,
+        first.job_id,
+        relative,
+        "chemical/x-pdbqt",
+        17,
+        SHA256_A,
+    )
+
+    assert record == ArtifactRecord(
+        artifact_id=artifact_id,
+        job_id=first.job_id,
+        relative_path=relative,
+        media_type="chemical/x-pdbqt",
+        size_bytes=17,
+        sha256=SHA256_A,
+    )
+    assert store.get_artifact(first.job_id, artifact_id) == record
+    assert store.get_artifact(second.job_id, artifact_id) is None
+    assert store.list_artifacts(first.job_id) == [record]
+    assert store.list_artifacts(second.job_id) == []
+    with pytest.raises(FrozenInstanceError):
+        record.size_bytes = 18  # type: ignore[misc]
+
+
+def test_artifact_store_requires_existing_job_and_maps_unique_conflicts(
+    tmp_path: Path,
+) -> None:
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    job, _ = store.create_or_get("idem", SHA256_A, "trace")
+    artifact_id = "1" * 32
+    relative = f"jobs/{job.job_id}/published/{artifact_id}"
+    store.register_artifact(
+        artifact_id, job.job_id, relative, "text/plain", 1, SHA256_A
+    )
+
+    with pytest.raises(ArtifactConflict):
+        store.register_artifact(
+            artifact_id, job.job_id, relative, "text/plain", 1, SHA256_A
+        )
+    with pytest.raises(ArtifactConflict):
+        store.register_artifact(
+            "2" * 32, job.job_id, relative, "text/plain", 1, SHA256_A
+        )
+    with pytest.raises(KeyError):
+        store.register_artifact(
+            "3" * 32,
+            "f" * 32,
+            f"jobs/{'f' * 32}/published/{'3' * 32}",
+            "text/plain",
+            1,
+            SHA256_A,
+        )
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "",
+        "/jobs/id/published/artifact",
+        "../artifact",
+        "jobs/../artifact",
+        "jobs\\id\\artifact",
+        "./jobs/id/artifact",
+        "jobs//id/artifact",
+    ],
+)
+def test_artifact_store_rejects_unsafe_relative_paths(
+    tmp_path: Path, relative_path: str
+) -> None:
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    job, _ = store.create_or_get("idem", SHA256_A, "trace")
+    with pytest.raises((TypeError, ValueError)):
+        store.register_artifact(
+            "1" * 32, job.job_id, relative_path, "text/plain", 1, SHA256_A
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("artifact_id", True),
+        ("artifact_id", "A" * 32),
+        ("job_id", 1),
+        ("job_id", "a" * 31),
+        ("relative_path", 1),
+        ("media_type", ""),
+        ("media_type", True),
+        ("size_bytes", True),
+        ("size_bytes", "1"),
+        ("size_bytes", -1),
+        ("sha256", "A" * 64),
+        ("sha256", True),
+    ],
+)
+def test_artifact_store_rejects_type_confusion(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    job, _ = store.create_or_get("idem", SHA256_A, "trace")
+    values: dict[str, object] = {
+        "artifact_id": "1" * 32,
+        "job_id": job.job_id,
+        "relative_path": f"jobs/{job.job_id}/published/{'1' * 32}",
+        "media_type": "text/plain",
+        "size_bytes": 1,
+        "sha256": SHA256_A,
+    }
+    values[field] = value
+    with pytest.raises((TypeError, ValueError)):
+        store.register_artifact(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("artifact_id", "A" * 32),
+        ("relative_path", "../escape"),
+        ("media_type", ""),
+        ("size_bytes", -1),
+        ("sha256", "A" * 64),
+    ],
+)
+def test_artifact_store_strictly_decodes_persisted_rows(
+    tmp_path: Path, column: str, value: object
+) -> None:
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    job, _ = store.create_or_get("idem", SHA256_A, "trace")
+    artifact_id = "1" * 32
+    store.register_artifact(
+        artifact_id,
+        job.job_id,
+        f"jobs/{job.job_id}/published/{artifact_id}",
+        "text/plain",
+        1,
+        SHA256_A,
+    )
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            f"UPDATE artifacts SET {column}=? WHERE artifact_id=?",
+            (value, artifact_id),
+        )
+
+    with pytest.raises(RuntimeError, match="persisted broker artifact is invalid"):
+        store.list_artifacts(job.job_id)
