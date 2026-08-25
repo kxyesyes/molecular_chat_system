@@ -1130,6 +1130,84 @@ def test_store_source_parses_as_python_310() -> None:
     ast.parse(source_path.read_text(encoding="utf-8"), feature_version=(3, 10))
 
 
+def test_service_store_apis_are_atomic_and_terminalize_once(tmp_path: Path) -> None:
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    job, _ = store.create_or_get("idem-service", SHA256_A, "trace-service")
+
+    assert store.get_by_idempotency("idem-service") == job
+    assert store.get_by_idempotency("missing") is None
+    store.transition(job.job_id, BrokerJobStatus.PROVISIONING)
+    attached = store.attach_sandbox(job.job_id, "sandbox-1")
+    assert attached.sandbox_id == "sandbox-1"
+    with pytest.raises(ValueError, match="sandbox attachment conflict"):
+        store.attach_sandbox(job.job_id, "sandbox-2")
+
+    cancelling = store.request_cancel(job.job_id)
+    assert cancelling.cancel_requested is True
+    assert store.request_cancel(job.job_id).cancel_requested is True
+    assert store.record_cleanup(job.job_id, "in_progress").cleanup_status == "in_progress"
+    assert store.record_cleanup(job.job_id, "succeeded").cleanup_status == "succeeded"
+    terminal = store.complete(
+        job.job_id,
+        warnings=["validated_before_cancel"],
+        provenance={"cleanup_status": "succeeded"},
+    )
+    assert terminal.status is BrokerJobStatus.CANCELLED
+    assert terminal.error_code == BrokerErrorCode.CANCELLED.value
+    assert terminal.warnings == ["validated_before_cancel"]
+    assert store.fail(job.job_id, BrokerErrorCode.COMMAND_FAILED) == terminal
+    assert store.cancel(job.job_id) == terminal
+
+
+def test_service_store_rejects_invalid_cleanup_and_sensitive_json(tmp_path: Path) -> None:
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    job, _ = store.create_or_get("idem-json", SHA256_A, "trace-json")
+
+    with pytest.raises(ValueError, match="cleanup status transition"):
+        store.record_cleanup(job.job_id, "succeeded")
+        store.record_cleanup(job.job_id, "in_progress")
+    with pytest.raises(ValueError, match="persisted job metadata is invalid"):
+        store.fail(
+            job.job_id,
+            BrokerErrorCode.INVALID_INPUT,
+            warnings=[r"C:\secret\receptor.pdb"],
+        )
+    with pytest.raises(ValueError, match="persisted job metadata is invalid"):
+        store.fail(
+            job.job_id,
+            BrokerErrorCode.INVALID_INPUT,
+            provenance={"api_key": "do-not-store"},
+        )
+
+
+def test_service_store_expire_and_manual_audit_delete_obey_fk_order(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    clock = iter([1_000.0, 2_000.0, 3_000.0])
+    monkeypatch.setattr(BrokerStore, "_now", staticmethod(lambda: next(clock)))
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    job, _ = store.create_or_get("idem-expire", SHA256_A, "trace-expire")
+    artifact_id = "1" * 32
+    store.register_artifact(
+        artifact_id,
+        job.job_id,
+        f"jobs/{job.job_id}/published/{artifact_id}",
+        "text/plain",
+        1,
+        SHA256_A,
+    )
+
+    assert store.jobs_updated_before(999.0) == []
+    assert store.jobs_updated_before(1_000.0) == [job]
+    expired = store.expire_active(job.job_id)
+    assert expired.status is BrokerJobStatus.EXPIRED
+    assert store.delete_terminal_audit(job.job_id, cutoff=1_999.0) is False
+    assert store.delete_terminal_audit(job.job_id, cutoff=2_000.0) is True
+    assert store.get(job.job_id) is None
+    assert store.list_artifacts(job.job_id) == []
+
+
 def test_artifact_store_register_get_and_list_are_job_scoped(tmp_path: Path) -> None:
     store = BrokerStore(tmp_path / "broker.sqlite")
     first, _ = store.create_or_get("idem-a", SHA256_A, "trace-a")

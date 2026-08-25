@@ -33,6 +33,10 @@ _UUID_HEX_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 _CLEANUP_STATUSES = frozenset({"not_started", "in_progress", "succeeded", "failed"})
 _MAX_WARNING_LENGTH = 4096
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_SENSITIVE_KEY_PATTERN = re.compile(
+    r"(?i)(?:api[_ -]?key|token|password|secret|credential)"
+)
+_WINDOWS_ABSOLUTE_PATH_PATTERN = re.compile(r"^[A-Za-z]:[\\/]")
 
 
 class IdempotencyConflict(ValueError):
@@ -617,6 +621,415 @@ class BrokerStore:
         with self._connect() as connection:
             row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
         return self._row_to_record(row) if row is not None else None
+
+    def get_by_idempotency(self, idempotency_key: str) -> BrokerJobRecord | None:
+        """Return one job by its opaque idempotency key without creating state."""
+
+        if type(idempotency_key) is not str or not idempotency_key.strip():
+            raise TypeError("idempotency_key must be a non-empty string")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+        return self._row_to_record(row) if row is not None else None
+
+    def attach_sandbox(self, job_id: str, sandbox_id: str) -> BrokerJobRecord:
+        """Persist exactly one SDK sandbox identity during provisioning."""
+
+        if type(job_id) is not str or not job_id:
+            raise TypeError("job_id must be a non-empty string")
+        if type(sandbox_id) is not str or not sandbox_id.strip():
+            raise TypeError("sandbox_id must be a non-empty string")
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError("job not found")
+                if (
+                    row["status"] != BrokerJobStatus.PROVISIONING.value
+                    or row["sandbox_id"] is not None
+                ):
+                    raise ValueError("sandbox attachment conflict")
+                now = self._now()
+                changed = connection.execute(
+                    "UPDATE jobs SET sandbox_id=?, updated_at=? "
+                    "WHERE job_id=? AND status=? AND sandbox_id IS NULL",
+                    (
+                        sandbox_id,
+                        now,
+                        job_id,
+                        BrokerJobStatus.PROVISIONING.value,
+                    ),
+                )
+                if changed.rowcount != 1:
+                    raise RuntimeError("concurrent sandbox attachment")
+                updated = connection.execute(
+                    "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                record = self._row_to_record(updated)
+                connection.commit()
+                return record
+            except BaseException:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
+
+    def request_cancel(self, job_id: str) -> BrokerJobRecord:
+        """Atomically record a cancellation request; terminal jobs stay immutable."""
+
+        if type(job_id) is not str or not job_id:
+            raise TypeError("job_id must be a non-empty string")
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError("job not found")
+                record = self._row_to_record(row)
+                if record.status in TERMINAL_STATUSES or record.cancel_requested:
+                    connection.commit()
+                    return record
+                now = self._now()
+                changed = connection.execute(
+                    "UPDATE jobs SET cancel_requested=1, updated_at=? "
+                    "WHERE job_id=? AND status=? AND cancel_requested=0",
+                    (now, job_id, record.status.value),
+                )
+                if changed.rowcount != 1:
+                    raise RuntimeError("concurrent cancellation request")
+                updated = connection.execute(
+                    "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                result = self._row_to_record(updated)
+                connection.commit()
+                return result
+            except BaseException:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
+
+    def record_cleanup(self, job_id: str, cleanup_status: str) -> BrokerJobRecord:
+        """CAS one planned cleanup state while the job remains active."""
+
+        if type(job_id) is not str or not job_id:
+            raise TypeError("job_id must be a non-empty string")
+        if type(cleanup_status) is not str or cleanup_status not in _CLEANUP_STATUSES:
+            raise ValueError("cleanup status transition is invalid")
+        allowed = {
+            "not_started": frozenset({"in_progress", "succeeded", "failed"}),
+            "in_progress": frozenset({"succeeded", "failed"}),
+            "succeeded": frozenset({"succeeded"}),
+            "failed": frozenset({"failed", "in_progress"}),
+        }
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError("job not found")
+                record = self._row_to_record(row)
+                if record.status in TERMINAL_STATUSES:
+                    if record.cleanup_status == cleanup_status:
+                        connection.commit()
+                        return record
+                    raise ValueError("cleanup status transition is invalid")
+                if cleanup_status == record.cleanup_status:
+                    connection.commit()
+                    return record
+                if cleanup_status not in allowed[record.cleanup_status]:
+                    raise ValueError("cleanup status transition is invalid")
+                now = self._now()
+                changed = connection.execute(
+                    "UPDATE jobs SET cleanup_status=?, updated_at=? "
+                    "WHERE job_id=? AND status=? AND cleanup_status=?",
+                    (
+                        cleanup_status,
+                        now,
+                        job_id,
+                        record.status.value,
+                        record.cleanup_status,
+                    ),
+                )
+                if changed.rowcount != 1:
+                    raise RuntimeError("concurrent cleanup update")
+                updated = connection.execute(
+                    "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                result = self._row_to_record(updated)
+                connection.commit()
+                return result
+            except BaseException:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
+
+    def complete(
+        self,
+        job_id: str,
+        *,
+        warnings: list[str] | tuple[str, ...],
+        provenance: dict[str, Any],
+    ) -> BrokerJobRecord:
+        return self._terminalize(
+            job_id,
+            BrokerJobStatus.SUCCEEDED,
+            error_code=None,
+            warnings=warnings,
+            provenance=provenance,
+            cleanup_status="succeeded",
+        )
+
+    def fail(
+        self,
+        job_id: str,
+        error_code: BrokerErrorCode | str,
+        *,
+        warnings: list[str] | tuple[str, ...] = (),
+        provenance: dict[str, Any] | None = None,
+        cleanup_status: str | None = None,
+    ) -> BrokerJobRecord:
+        return self._terminalize(
+            job_id,
+            BrokerJobStatus.FAILED,
+            error_code=error_code,
+            warnings=warnings,
+            provenance=provenance,
+            cleanup_status=cleanup_status,
+        )
+
+    def cancel(
+        self,
+        job_id: str,
+        *,
+        warnings: list[str] | tuple[str, ...] = (),
+        provenance: dict[str, Any] | None = None,
+        cleanup_status: str | None = None,
+    ) -> BrokerJobRecord:
+        return self._terminalize(
+            job_id,
+            BrokerJobStatus.CANCELLED,
+            error_code=BrokerErrorCode.CANCELLED,
+            warnings=warnings,
+            provenance=provenance,
+            cleanup_status=cleanup_status,
+        )
+
+    def expire_active(
+        self,
+        job_id: str,
+        *,
+        cleanup_status: str | None = None,
+    ) -> BrokerJobRecord:
+        return self._terminalize(
+            job_id,
+            BrokerJobStatus.EXPIRED,
+            error_code=BrokerErrorCode.EXPIRED,
+            warnings=(),
+            provenance=None,
+            cleanup_status=cleanup_status,
+        )
+
+    def _terminalize(
+        self,
+        job_id: str,
+        target: BrokerJobStatus,
+        *,
+        error_code: BrokerErrorCode | str | None,
+        warnings: list[str] | tuple[str, ...],
+        provenance: dict[str, Any] | None,
+        cleanup_status: str | None,
+    ) -> BrokerJobRecord:
+        if type(job_id) is not str or not job_id:
+            raise TypeError("job_id must be a non-empty string")
+        if target not in TERMINAL_STATUSES:
+            raise ValueError("terminal target is invalid")
+        warnings_json, provenance_json = self._canonical_metadata(warnings, provenance)
+        normalized_error = self._normalize_error_code(error_code)
+        if target is BrokerJobStatus.FAILED and normalized_error is None:
+            raise ValueError("failed jobs require an error code")
+        if cleanup_status is not None and cleanup_status not in {"succeeded", "failed"}:
+            raise ValueError("cleanup status transition is invalid")
+
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError("job not found")
+                current = self._row_to_record(row)
+                if current.status in TERMINAL_STATUSES:
+                    connection.commit()
+                    return current
+
+                actual_target = target
+                actual_error = normalized_error
+                if target is BrokerJobStatus.SUCCEEDED and current.cancel_requested:
+                    actual_target = BrokerJobStatus.CANCELLED
+                    actual_error = BrokerErrorCode.CANCELLED.value
+                if not transition_allowed(current.status, actual_target):
+                    raise ValueError("illegal job transition")
+
+                actual_cleanup = cleanup_status
+                if actual_cleanup is None:
+                    actual_cleanup = current.cleanup_status
+                    if actual_cleanup == "not_started" and current.sandbox_id is None:
+                        actual_cleanup = "succeeded"
+                if actual_cleanup not in {"succeeded", "failed"}:
+                    raise ValueError("cleanup status transition is invalid")
+                now = self._now()
+                changed = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status=?, phase=?, error_code=?, warnings_json=?,
+                        provenance_json=?, cleanup_status=?, updated_at=?
+                    WHERE job_id=? AND status=?
+                    """,
+                    (
+                        actual_target.value,
+                        actual_target.value,
+                        actual_error,
+                        warnings_json,
+                        provenance_json,
+                        actual_cleanup,
+                        now,
+                        job_id,
+                        current.status.value,
+                    ),
+                )
+                if changed.rowcount != 1:
+                    raise RuntimeError("concurrent job terminalization")
+                connection.execute(
+                    "INSERT INTO transitions(job_id, status, phase, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (job_id, actual_target.value, actual_target.value, now),
+                )
+                updated = connection.execute(
+                    "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                result = self._row_to_record(updated)
+                connection.commit()
+                return result
+            except BaseException:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
+
+    @classmethod
+    def _canonical_metadata(
+        cls,
+        warnings: object,
+        provenance: object,
+    ) -> tuple[str, str | None]:
+        try:
+            if type(warnings) not in (list, tuple):
+                raise ValueError
+            normalized_warnings = list(warnings)
+            if any(
+                type(item) is not str
+                or not item.strip()
+                or len(item) > _MAX_WARNING_LENGTH
+                for item in normalized_warnings
+            ):
+                raise ValueError
+            cls._reject_sensitive_json(normalized_warnings)
+            if provenance is not None:
+                if type(provenance) is not dict:
+                    raise ValueError
+                cls._validate_json_value(provenance)
+                cls._reject_sensitive_json(provenance)
+            warnings_json = json.dumps(
+                normalized_warnings,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+            provenance_json = (
+                None
+                if provenance is None
+                else json.dumps(
+                    provenance,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+            )
+            return warnings_json, provenance_json
+        except (OverflowError, RecursionError, TypeError, ValueError):
+            raise ValueError("persisted job metadata is invalid") from None
+
+    @classmethod
+    def _reject_sensitive_json(cls, value: object) -> None:
+        if type(value) is str:
+            if (
+                value.startswith(("/", "\\\\"))
+                or _WINDOWS_ABSOLUTE_PATH_PATTERN.match(value) is not None
+                or "\x00" in value
+            ):
+                raise ValueError
+            return
+        if type(value) is list:
+            for item in value:
+                cls._reject_sensitive_json(item)
+            return
+        if type(value) is dict:
+            for key, item in value.items():
+                if _SENSITIVE_KEY_PATTERN.search(key) is not None:
+                    raise ValueError
+                cls._reject_sensitive_json(item)
+
+    def jobs_updated_before(self, cutoff: float) -> list[BrokerJobRecord]:
+        if type(cutoff) not in (int, float) or not math.isfinite(float(cutoff)):
+            raise ValueError("cutoff must be a finite epoch")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM jobs WHERE updated_at<=? ORDER BY updated_at, job_id",
+                (float(cutoff),),
+            ).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
+    def delete_terminal_audit(self, job_id: str, *, cutoff: float) -> bool:
+        """Delete one old terminal audit graph in explicit foreign-key order."""
+
+        if type(job_id) is not str or not job_id:
+            raise TypeError("job_id must be a non-empty string")
+        if type(cutoff) not in (int, float) or not math.isfinite(float(cutoff)):
+            raise ValueError("cutoff must be a finite epoch")
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                if row is None:
+                    connection.commit()
+                    return False
+                record = self._row_to_record(row)
+                if record.status not in TERMINAL_STATUSES or record.updated_at > float(cutoff):
+                    connection.commit()
+                    return False
+                connection.execute("DELETE FROM artifacts WHERE job_id=?", (job_id,))
+                connection.execute("DELETE FROM transitions WHERE job_id=?", (job_id,))
+                deleted = connection.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
+                if deleted.rowcount != 1:
+                    raise RuntimeError("concurrent audit deletion")
+                connection.commit()
+                return True
+            except BaseException:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
 
     def transition(
         self,
