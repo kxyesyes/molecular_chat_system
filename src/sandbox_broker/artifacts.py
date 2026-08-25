@@ -204,6 +204,7 @@ class ArtifactRegistry:
         part_identity: tuple[int, int] | None = None
         final_identity: tuple[int, int] | None = None
         registered = False
+        preserve_final = False
         artifact_id: str | None = None
         try:
             validated_job_id = _require_uuid_hex(job_id)
@@ -300,12 +301,16 @@ class ArtifactRegistry:
                 try:
                     observed = self._store.get_artifact(validated_job_id, artifact_id)
                 except Exception:
-                    observed = None
+                    preserve_final = True
+                    raise
+                if observed is not None:
+                    preserve_final = True
                 if observed == expected:
                     registered = True
                     return observed
                 raise
             if record != expected:
+                preserve_final = True
                 raise ValueError
             registered = True
             return record
@@ -321,7 +326,7 @@ class ArtifactRegistry:
                     pass
             if part is not None:
                 _safe_unlink(part, part_identity)
-            if not registered and final is not None:
+            if not registered and not preserve_final and final is not None:
                 _safe_unlink(final, final_identity)
 
     def read_registered(self, job_id: str, artifact_id: str, limit: int) -> bytes:

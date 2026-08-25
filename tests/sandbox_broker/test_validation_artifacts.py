@@ -428,6 +428,95 @@ def test_scientific_output_requires_best_energy_to_be_global_minimum(
         b"MODEL 1\nENDMDL\n"
     )
     output = build_valid_output(tmp_path, pose=pose)
+    rewrite_result(output, {"pose_count": 2})
+    with pytest.raises(ScientificOutputError):
+        validate_scientific_output(output, SHA_A, SHA_B, 1024)
+
+
+def test_scientific_output_counts_all_modes_in_one_pose_file(tmp_path: Path) -> None:
+    pose = (
+        b"REMARK VINA RESULT: -8.1 0.0 0.0\n"
+        b"MODEL 1\nENDMDL\n"
+        b"REMARK VINA RESULT: -7.2 1.0 1.5\n"
+        b"MODEL 2\nENDMDL\n"
+    )
+    output = build_valid_output(tmp_path, pose=pose)
+    rewrite_result(output, {"pose_count": 2, "best_energy": -8.1})
+
+    validated = validate_scientific_output(output, SHA_A, SHA_B, 1024)
+
+    assert validated.pose_count == 2
+    assert validated.pose_files == ("poses/result.pdbqt",)
+
+
+def test_scientific_output_rejects_mode_count_not_file_count(tmp_path: Path) -> None:
+    pose = (
+        b"REMARK VINA RESULT: -8.1 0.0 0.0\n"
+        b"REMARK VINA RESULT: -7.2 1.0 1.5\n"
+    )
+    output = build_valid_output(tmp_path, pose=pose)
+    rewrite_result(output, {"pose_count": 1, "best_energy": -8.1})
+
+    with pytest.raises(ScientificOutputError):
+        validate_scientific_output(output, SHA_A, SHA_B, 1024)
+
+
+def test_scientific_output_counts_modes_across_unique_pose_files(
+    tmp_path: Path,
+) -> None:
+    first = (
+        b"REMARK VINA RESULT: -8.1 0.0 0.0\n"
+        b"REMARK VINA RESULT: -7.2 1.0 1.5\n"
+    )
+    output = build_valid_output(tmp_path, pose=first)
+    (output / "poses" / "second.pdbqt").write_bytes(
+        b"REMARK VINA RESULT: -6.5 2.0 2.5\n"
+    )
+    rewrite_result(
+        output,
+        {
+            "pose_count": 3,
+            "best_energy": -8.1,
+            "pose_files": ["poses/result.pdbqt", "poses/second.pdbqt"],
+        },
+    )
+
+    validated = validate_scientific_output(output, SHA_A, SHA_B, 2048)
+
+    assert validated.pose_count == 3
+    assert validated.pose_files == (
+        "poses/result.pdbqt",
+        "poses/second.pdbqt",
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_remark",
+    [
+        b"REMARK VINA RESULT: nan 1.0 1.5\n",
+        b"REMARK VINA RESULT: -7.0 1.0\n",
+        b"REMARK VINA RESULT broken\n",
+    ],
+)
+def test_scientific_output_rejects_invalid_later_mode(
+    tmp_path: Path, invalid_remark: bytes
+) -> None:
+    pose = b"REMARK VINA RESULT: -7.4 0.0 0.0\n" + invalid_remark
+    output = build_valid_output(tmp_path, pose=pose)
+    rewrite_result(output, {"pose_count": 1})
+
+    with pytest.raises(ScientificOutputError):
+        validate_scientific_output(output, SHA_A, SHA_B, 1024)
+
+
+def test_scientific_output_requires_first_mode_to_be_best(tmp_path: Path) -> None:
+    pose = (
+        b"REMARK VINA RESULT: -7.0 0.0 0.0\n"
+        b"REMARK VINA RESULT: -8.0 1.0 1.5\n"
+    )
+    output = build_valid_output(tmp_path, pose=pose)
+    rewrite_result(output, {"pose_count": 2, "best_energy": -8.0})
+
     with pytest.raises(ScientificOutputError):
         validate_scientific_output(output, SHA_A, SHA_B, 1024)
 
@@ -619,7 +708,97 @@ def test_artifact_db_failure_removes_published_file_and_redacts(
         registry.publish(job_id, "pose", POSE, "chemical/x-pdbqt")
     published = store.db_path.parent / "jobs" / job_id / "published"
     assert not published.exists() or not list(published.iterdir())
+    assert store.list_artifacts(job_id) == []
     assert "database-secret" not in str(caught.value)
+    assert str(tmp_path) not in str(caught.value)
+
+
+def test_artifact_uncertain_commit_preserves_file_when_confirmation_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    store, job_id = make_store_and_job(tmp_path)
+    registry = ArtifactRegistry(store.db_path.parent, store, max_artifact_bytes=1024)
+    original_register = store.register_artifact
+
+    def commit_then_fail(*args: object, **kwargs: object) -> object:
+        original_register(*args, **kwargs)  # type: ignore[arg-type]
+        raise RuntimeError("register-secret")
+
+    def fail_confirmation(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise RuntimeError("query-secret")
+
+    monkeypatch.setattr(store, "register_artifact", commit_then_fail)
+    monkeypatch.setattr(store, "get_artifact", fail_confirmation)
+    with pytest.raises(ValueError) as caught:
+        registry.publish(job_id, "pose", POSE, "chemical/x-pdbqt")
+
+    records = store.list_artifacts(job_id)
+    assert len(records) == 1
+    recorded_path = store.db_path.parent / Path(*records[0].relative_path.split("/"))
+    assert recorded_path.read_bytes() == POSE
+    rendered = str(caught.value)
+    assert "register-secret" not in rendered
+    assert "query-secret" not in rendered
+    assert str(tmp_path) not in rendered
+
+
+def test_artifact_confirmed_commit_returns_success_after_register_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    store, job_id = make_store_and_job(tmp_path)
+    registry = ArtifactRegistry(store.db_path.parent, store, max_artifact_bytes=1024)
+    original_register = store.register_artifact
+
+    def commit_then_fail(*args: object, **kwargs: object) -> object:
+        original_register(*args, **kwargs)  # type: ignore[arg-type]
+        raise RuntimeError("register-secret")
+
+    monkeypatch.setattr(store, "register_artifact", commit_then_fail)
+
+    record = registry.publish(job_id, "pose", POSE, "chemical/x-pdbqt")
+
+    assert store.get_artifact(job_id, record.artifact_id) == record
+    recorded_path = store.db_path.parent / Path(*record.relative_path.split("/"))
+    assert recorded_path.read_bytes() == POSE
+
+
+def test_artifact_conflicting_commit_preserves_file_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    store, job_id = make_store_and_job(tmp_path)
+    registry = ArtifactRegistry(store.db_path.parent, store, max_artifact_bytes=1024)
+    original_register = store.register_artifact
+
+    def commit_conflict_then_fail(
+        artifact_id: str,
+        registered_job_id: str,
+        relative_path: str,
+        media_type: str,
+        size_bytes: int,
+        sha256: str,
+    ) -> object:
+        del media_type
+        original_register(
+            artifact_id,
+            registered_job_id,
+            relative_path,
+            "text/plain",
+            size_bytes,
+            sha256,
+        )
+        raise RuntimeError("conflict-secret")
+
+    monkeypatch.setattr(store, "register_artifact", commit_conflict_then_fail)
+    with pytest.raises(ValueError) as caught:
+        registry.publish(job_id, "pose", POSE, "chemical/x-pdbqt")
+
+    records = store.list_artifacts(job_id)
+    assert len(records) == 1
+    assert records[0].media_type == "text/plain"
+    recorded_path = store.db_path.parent / Path(*records[0].relative_path.split("/"))
+    assert recorded_path.read_bytes() == POSE
+    assert "conflict-secret" not in str(caught.value)
     assert str(tmp_path) not in str(caught.value)
 
 

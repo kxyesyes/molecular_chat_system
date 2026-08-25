@@ -19,7 +19,9 @@ from src.task_runtime.secure_io import read_file_snapshot
 _CHUNK_BYTES = 1024 * 1024
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _UUID_HEX_PATTERN = re.compile(r"^[0-9a-f]{32}$")
-_ENERGY_PATTERN = re.compile(r"^REMARK VINA RESULT:\s+(\S+)")
+_ENERGY_PATTERN = re.compile(
+    r"^REMARK VINA RESULT:\s+(\S+)\s+(\S+)\s+(\S+)\s*$"
+)
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _EXPECTED_RESULT_FIELDS = frozenset(
     {
@@ -388,13 +390,15 @@ def _parse_pose_energies(content: bytes) -> tuple[float, ...]:
     text = content.decode("utf-8")
     energies: list[float] = []
     for line in text.splitlines():
+        if not line.startswith("REMARK VINA RESULT"):
+            continue
         match = _ENERGY_PATTERN.match(line)
         if match is None:
-            continue
-        energy = float(match.group(1))
-        if not math.isfinite(energy):
             raise ValueError
-        energies.append(energy)
+        values = tuple(float(match.group(index)) for index in (1, 2, 3))
+        if any(not math.isfinite(value) for value in values):
+            raise ValueError
+        energies.append(values[0])
     if not energies:
         raise ValueError
     return tuple(energies)
@@ -455,29 +459,31 @@ def _validate_scientific_output(
     if type(warnings) is not list or any(type(item) is not str for item in warnings):
         raise ValueError
     pose_values = payload["pose_files"]
-    if type(pose_values) is not list:
+    if type(pose_values) is not list or not pose_values:
         raise ValueError
 
     parsed_paths = [_pose_relative_path(item) for item in pose_values]
     aliases = [item[0].casefold() for item in parsed_paths]
-    if len(parsed_paths) != pose_count or len(set(aliases)) != len(aliases):
+    if len(set(aliases)) != len(aliases):
         raise ValueError
 
     total_bytes = len(result_content)
     all_energies: list[float] = []
     pose_names: list[str] = []
-    for name, relative in parsed_paths:
+    for index, (name, relative) in enumerate(parsed_paths):
         projected = _project_without_links(root, relative)
         content = _read_regular_snapshot(projected, max_output_bytes)
         total_bytes += len(content)
         if total_bytes > max_output_bytes:
             raise ValueError
         energies = _parse_pose_energies(content)
-        if not math.isclose(energies[0], best_energy, rel_tol=0.0, abs_tol=1e-6):
+        if index == 0 and not math.isclose(
+            energies[0], best_energy, rel_tol=0.0, abs_tol=1e-6
+        ):
             raise ValueError
         all_energies.extend(energies)
         pose_names.append(name)
-    if not all_energies or not math.isclose(
+    if len(all_energies) != pose_count or not math.isclose(
         min(all_energies), best_energy, rel_tol=0.0, abs_tol=1e-6
     ):
         raise ValueError
