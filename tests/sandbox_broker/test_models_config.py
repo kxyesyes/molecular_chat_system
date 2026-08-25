@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import secrets
 from dataclasses import FrozenInstanceError
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -40,8 +41,12 @@ def _provenance(**overrides: object) -> BrokerProvenance:
 
 def _set_required_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
     credential = secrets.token_urlsafe(32)
-    monkeypatch.setenv("MEDCHAT_SANDBOX_BROKER_STATE", str(tmp_path / "state"))
-    monkeypatch.setenv("MEDCHAT_SANDBOX_BROKER_SOCKET", str(tmp_path / "broker.sock"))
+    state_root = tmp_path / "state"
+    state_root.mkdir(exist_ok=True)
+    socket_parent = tmp_path / "run"
+    socket_parent.mkdir(exist_ok=True)
+    monkeypatch.setenv("MEDCHAT_SANDBOX_BROKER_STATE", str(state_root))
+    monkeypatch.setenv("MEDCHAT_SANDBOX_BROKER_SOCKET", str(socket_parent / "broker.sock"))
     monkeypatch.setenv(
         "MEDCHAT_SANDBOX_IMAGE",
         f"registry.example/medchat/vina:1@sha256:{SHA256}",
@@ -52,9 +57,13 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
 
 
 def _config_values(tmp_path: Path, **overrides: object) -> dict[str, object]:
+    state_root = tmp_path / "state"
+    state_root.mkdir(exist_ok=True)
+    socket_parent = tmp_path / "run"
+    socket_parent.mkdir(exist_ok=True)
     values: dict[str, object] = {
-        "state_root": tmp_path / "state",
-        "socket_path": tmp_path / "broker.sock",
+        "state_root": state_root,
+        "socket_path": socket_parent / "broker.sock",
         "image_uri": "registry.example/medchat/vina:1",
         "image_digest": SHA256,
         "opensandbox_domain": "127.0.0.1:8080",
@@ -65,6 +74,17 @@ def _config_values(tmp_path: Path, **overrides: object) -> dict[str, object]:
 
 
 def test_job_status_values_are_exact() -> None:
+    assert list(BrokerJobStatus.__members__) == [
+        "QUEUED",
+        "PROVISIONING",
+        "UPLOADING",
+        "RUNNING",
+        "VALIDATING",
+        "SUCCEEDED",
+        "FAILED",
+        "CANCELLED",
+        "EXPIRED",
+    ]
     assert [status.value for status in BrokerJobStatus] == [
         "queued",
         "provisioning",
@@ -76,9 +96,28 @@ def test_job_status_values_are_exact() -> None:
         "cancelled",
         "expired",
     ]
+    assert BrokerJobStatus.QUEUED.value == "queued"
+    assert BrokerJobStatus.PROVISIONING.value == "provisioning"
+    assert not hasattr(BrokerJobStatus, "queued")
 
 
 def test_error_code_values_are_exact() -> None:
+    assert list(BrokerErrorCode.__members__) == [
+        "INVALID_INPUT",
+        "IDEMPOTENCY_CONFLICT",
+        "UNAUTHORIZED",
+        "QUEUE_SATURATED",
+        "OPENSANDBOX_UNAVAILABLE",
+        "PROVISIONING_FAILED",
+        "UPLOAD_FAILED",
+        "EXECUTION_TIMEOUT",
+        "COMMAND_FAILED",
+        "SCIENTIFIC_OUTPUT_INVALID",
+        "ARTIFACT_FAILED",
+        "CANCELLED",
+        "EXPIRED",
+        "CLEANUP_FAILED",
+    ]
     assert [code.value for code in BrokerErrorCode] == [
         "invalid_input",
         "idempotency_conflict",
@@ -95,47 +134,49 @@ def test_error_code_values_are_exact() -> None:
         "expired",
         "cleanup_failed",
     ]
+    assert BrokerErrorCode.COMMAND_FAILED.value == "command_failed"
+    assert not hasattr(BrokerErrorCode, "command_failed")
 
 
 def test_only_declared_status_transitions_are_allowed() -> None:
     allowed = {
-        BrokerJobStatus.queued: {
-            BrokerJobStatus.provisioning,
-            BrokerJobStatus.failed,
-            BrokerJobStatus.cancelled,
-            BrokerJobStatus.expired,
+        BrokerJobStatus.QUEUED: {
+            BrokerJobStatus.PROVISIONING,
+            BrokerJobStatus.FAILED,
+            BrokerJobStatus.CANCELLED,
+            BrokerJobStatus.EXPIRED,
         },
-        BrokerJobStatus.provisioning: {
-            BrokerJobStatus.uploading,
-            BrokerJobStatus.failed,
-            BrokerJobStatus.cancelled,
-            BrokerJobStatus.expired,
+        BrokerJobStatus.PROVISIONING: {
+            BrokerJobStatus.UPLOADING,
+            BrokerJobStatus.FAILED,
+            BrokerJobStatus.CANCELLED,
+            BrokerJobStatus.EXPIRED,
         },
-        BrokerJobStatus.uploading: {
-            BrokerJobStatus.running,
-            BrokerJobStatus.failed,
-            BrokerJobStatus.cancelled,
-            BrokerJobStatus.expired,
+        BrokerJobStatus.UPLOADING: {
+            BrokerJobStatus.RUNNING,
+            BrokerJobStatus.FAILED,
+            BrokerJobStatus.CANCELLED,
+            BrokerJobStatus.EXPIRED,
         },
-        BrokerJobStatus.running: {
-            BrokerJobStatus.validating,
-            BrokerJobStatus.failed,
-            BrokerJobStatus.cancelled,
-            BrokerJobStatus.expired,
+        BrokerJobStatus.RUNNING: {
+            BrokerJobStatus.VALIDATING,
+            BrokerJobStatus.FAILED,
+            BrokerJobStatus.CANCELLED,
+            BrokerJobStatus.EXPIRED,
         },
-        BrokerJobStatus.validating: {
-            BrokerJobStatus.succeeded,
-            BrokerJobStatus.failed,
-            BrokerJobStatus.cancelled,
-            BrokerJobStatus.expired,
+        BrokerJobStatus.VALIDATING: {
+            BrokerJobStatus.SUCCEEDED,
+            BrokerJobStatus.FAILED,
+            BrokerJobStatus.CANCELLED,
+            BrokerJobStatus.EXPIRED,
         },
     }
 
     assert TERMINAL_STATUSES == {
-        BrokerJobStatus.succeeded,
-        BrokerJobStatus.failed,
-        BrokerJobStatus.cancelled,
-        BrokerJobStatus.expired,
+        BrokerJobStatus.SUCCEEDED,
+        BrokerJobStatus.FAILED,
+        BrokerJobStatus.CANCELLED,
+        BrokerJobStatus.EXPIRED,
     }
     for current in BrokerJobStatus:
         for target in BrokerJobStatus:
@@ -147,8 +188,23 @@ def test_terminal_statuses_cannot_transition() -> None:
         assert all(not transition_allowed(current, target) for target in BrokerJobStatus)
 
 
+@pytest.mark.parametrize(
+    ("current", "target"),
+    [
+        ("queued", BrokerJobStatus.PROVISIONING),
+        (BrokerJobStatus.QUEUED, "provisioning"),
+        (None, BrokerJobStatus.PROVISIONING),
+        (BrokerJobStatus.QUEUED, None),
+        (1, BrokerJobStatus.PROVISIONING),
+        (BrokerJobStatus.QUEUED, 1),
+    ],
+)
+def test_transition_allowed_rejects_non_status_inputs(current: object, target: object) -> None:
+    assert transition_allowed(current, target) is False
+
+
 def test_docking_parameters_accept_valid_values_and_defaults() -> None:
-    parameters = DockingParameters(center=(1, 2.5, -3), size=(20, 30, 40))
+    parameters = DockingParameters(center=[1, 2.5, -3], size=[20, 30, 40])
 
     assert parameters.center == (1.0, 2.5, -3.0)
     assert parameters.size == (20.0, 30.0, 40.0)
@@ -162,6 +218,32 @@ def test_docking_parameters_accept_valid_values_and_defaults() -> None:
 def test_docking_parameters_reject_non_finite_vectors(field: str, invalid: float) -> None:
     values = {"center": (0.0, 0.0, 0.0), "size": (20.0, 20.0, 20.0)}
     values[field] = (invalid, 1.0, 1.0)
+
+    with pytest.raises(ValidationError):
+        DockingParameters(**values)
+
+
+@pytest.mark.parametrize("field", ["center", "size"])
+@pytest.mark.parametrize("invalid", ["1", Decimal("1"), True])
+def test_docking_parameters_reject_non_numeric_vector_components(
+    field: str,
+    invalid: object,
+) -> None:
+    values: dict[str, object] = {"center": (0, 0, 0), "size": (20, 20, 20)}
+    values[field] = (invalid, 1, 1)
+
+    with pytest.raises(ValidationError):
+        DockingParameters(**values)
+
+
+@pytest.mark.parametrize("field", ["center", "size"])
+@pytest.mark.parametrize("invalid", ["1,2,3", (1, 2), [1, 2, 3, 4], {1, 2, 3}])
+def test_docking_parameters_require_three_item_list_or_tuple(
+    field: str,
+    invalid: object,
+) -> None:
+    values: dict[str, object] = {"center": (0, 0, 0), "size": (20, 20, 20)}
+    values[field] = invalid
 
     with pytest.raises(ValidationError):
         DockingParameters(**values)
@@ -184,6 +266,9 @@ def test_docking_parameters_reject_invalid_size(invalid: float) -> None:
         ("energy_range", 20.1),
         ("energy_range", float("nan")),
         ("energy_range", float("inf")),
+        ("energy_range", True),
+        ("energy_range", "3"),
+        ("energy_range", Decimal("3")),
     ],
 )
 def test_docking_parameters_reject_out_of_range_scalars(field: str, invalid: object) -> None:
@@ -224,6 +309,13 @@ def test_provenance_requires_gvisor_secure_runtime(invalid: object) -> None:
         _provenance(secure_runtime=invalid)
 
 
+@pytest.mark.parametrize("field", ["demo_mode", "fallback_used"])
+@pytest.mark.parametrize("invalid", ["false", "off", 0, 1])
+def test_provenance_flags_require_strict_booleans(field: str, invalid: object) -> None:
+    with pytest.raises(ValidationError):
+        _provenance(**{field: invalid})
+
+
 def test_manifest_validates_energy_pose_count_schema_and_extra_fields() -> None:
     valid = {
         "job_id": "job-1",
@@ -249,6 +341,49 @@ def test_manifest_validates_energy_pose_count_schema_and_extra_fields() -> None:
             DockingManifest(**(valid | overrides))
 
 
+@pytest.mark.parametrize("invalid", [True, 1.0, "1"])
+def test_manifest_schema_version_requires_exact_integer_one(invalid: object) -> None:
+    with pytest.raises(ValidationError):
+        DockingManifest.model_validate(
+            {
+                "schema_version": invalid,
+                "job_id": "job-1",
+                "trace_id": "trace-1",
+                "pose_count": 1,
+                "best_energy": -7.4,
+                "provenance": _provenance(),
+            }
+        )
+
+
+@pytest.mark.parametrize("invalid", [True, 1.0, "1"])
+def test_manifest_pose_count_requires_strict_integer(invalid: object) -> None:
+    with pytest.raises(ValidationError):
+        DockingManifest.model_validate(
+            {
+                "job_id": "job-1",
+                "trace_id": "trace-1",
+                "pose_count": invalid,
+                "best_energy": -7.4,
+                "provenance": _provenance(),
+            }
+        )
+
+
+@pytest.mark.parametrize("invalid", [True, "-7.4", Decimal("-7.4")])
+def test_manifest_best_energy_requires_real_builtin_number(invalid: object) -> None:
+    with pytest.raises(ValidationError):
+        DockingManifest.model_validate(
+            {
+                "job_id": "job-1",
+                "trace_id": "trace-1",
+                "pose_count": 1,
+                "best_energy": invalid,
+                "provenance": _provenance(),
+            }
+        )
+
+
 def test_manifest_uses_independent_mutable_defaults() -> None:
     common = {
         "job_id": "job-1",
@@ -257,8 +392,8 @@ def test_manifest_uses_independent_mutable_defaults() -> None:
         "best_energy": -7.4,
         "provenance": _provenance(),
     }
-    first = DockingManifest(**common)
-    second = DockingManifest(**common)
+    first = DockingManifest.model_validate(common)
+    second = DockingManifest.model_validate(common)
 
     assert first.artifacts is not second.artifacts
     assert first.warnings is not second.warnings
@@ -275,7 +410,7 @@ def test_broker_config_loads_required_environment_and_fixed_limits(
     config = BrokerConfig.from_env()
 
     assert config.state_root == (tmp_path / "state").resolve()
-    assert config.socket_path == (tmp_path / "broker.sock").resolve()
+    assert config.socket_path == (tmp_path / "run" / "broker.sock").resolve()
     assert config.image_uri == "registry.example/medchat/vina:1"
     assert config.image_digest == SHA256
     assert config.opensandbox_domain == "127.0.0.1:8080"
@@ -446,6 +581,7 @@ def test_broker_config_rejects_symlink_aliases_for_state_and_socket(
 ) -> None:
     real_root = tmp_path / "real"
     real_root.mkdir()
+    (real_root / "state").mkdir()
     alias_root = tmp_path / "alias"
     try:
         alias_root.symlink_to(real_root, target_is_directory=True)
@@ -509,6 +645,55 @@ def test_direct_config_rejects_non_loopback_domain(tmp_path: Path, domain: str) 
 def test_direct_config_rejects_empty_api_key(tmp_path: Path, api_key: str) -> None:
     with pytest.raises(ValueError, match="opensandbox_api_key"):
         BrokerConfig(**_config_values(tmp_path, opensandbox_api_key=api_key))
+
+
+def test_broker_config_rejects_missing_state_directory(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="state_root"):
+        BrokerConfig(**_config_values(tmp_path, state_root=tmp_path / "missing-state"))
+
+
+def test_broker_config_rejects_missing_socket_parent(tmp_path: Path) -> None:
+    missing_socket = tmp_path / "missing-run" / "broker.sock"
+
+    with pytest.raises(ValueError, match="socket_path"):
+        BrokerConfig(**_config_values(tmp_path, socket_path=missing_socket))
+
+
+@pytest.mark.parametrize("field", ["state_root", "socket_path"])
+def test_broker_config_rejects_regular_file_as_directory(tmp_path: Path, field: str) -> None:
+    ordinary_file = tmp_path / "ordinary-file"
+    ordinary_file.write_text("not a directory", encoding="utf-8")
+    invalid = ordinary_file if field == "state_root" else ordinary_file / "broker.sock"
+
+    with pytest.raises(ValueError, match=field):
+        BrokerConfig(**_config_values(tmp_path, **{field: invalid}))
+
+
+@pytest.mark.parametrize(
+    ("method", "error_type"),
+    [
+        ("resolve", OSError),
+        ("resolve", RuntimeError),
+        ("stat", OSError),
+        ("stat", RuntimeError),
+    ],
+)
+def test_broker_config_wraps_path_inspection_errors_without_disclosing_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    method: str,
+    error_type: type[Exception],
+) -> None:
+    values = _config_values(tmp_path)
+
+    def fail_inspection(*args: object, **kwargs: object) -> object:
+        raise error_type("inspection failed")
+
+    monkeypatch.setattr(Path, method, fail_inspection)
+
+    with pytest.raises(ValueError) as caught:
+        BrokerConfig(**values)
+    assert str(tmp_path) not in str(caught.value)
 
 
 def test_broker_config_repr_does_not_disclose_credentials_or_paths(

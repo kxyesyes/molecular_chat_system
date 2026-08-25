@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -35,7 +36,12 @@ def _required_environment(name: str) -> str:
     return value
 
 
-def _validate_stable_absolute_path(candidate: object, name: str) -> Path:
+def _validate_stable_absolute_path(
+    candidate: object,
+    name: str,
+    *,
+    require_directory: bool,
+) -> Path:
     if not isinstance(candidate, Path):
         raise ValueError(f"{name} must be a Path")
     if not candidate.is_absolute():
@@ -43,15 +49,28 @@ def _validate_stable_absolute_path(candidate: object, name: str) -> Path:
     if ".." in candidate.parts:
         raise ValueError(f"{name} must not contain parent-directory aliases")
 
-    lexical = Path(os.path.abspath(candidate))
-    resolved = candidate.resolve(strict=False)
+    try:
+        lexical = Path(os.path.abspath(candidate))
+        resolved = candidate.resolve(strict=False)
+        directory = resolved if require_directory else resolved.parent
+        directory_mode = directory.stat().st_mode
+    except (OSError, RuntimeError):
+        raise ValueError(f"{name} could not be safely inspected") from None
+
     if not resolved.is_absolute() or lexical != resolved:
         raise ValueError(f"{name} must resolve to a stable absolute path")
+    if not stat.S_ISDIR(directory_mode):
+        requirement = "an existing directory" if require_directory else "an existing parent directory"
+        raise ValueError(f"{name} must reference {requirement}")
     return resolved
 
 
-def _stable_absolute_path(name: str) -> Path:
-    return _validate_stable_absolute_path(Path(_required_environment(name)), name)
+def _stable_absolute_path(name: str, *, require_directory: bool) -> Path:
+    return _validate_stable_absolute_path(
+        Path(_required_environment(name)),
+        name,
+        require_directory=require_directory,
+    )
 
 
 @dataclass(frozen=True)
@@ -76,8 +95,16 @@ class BrokerConfig:
     audit_retention_seconds: int = 2_592_000
 
     def __post_init__(self) -> None:
-        state_root = _validate_stable_absolute_path(self.state_root, "state_root")
-        socket_path = _validate_stable_absolute_path(self.socket_path, "socket_path")
+        state_root = _validate_stable_absolute_path(
+            self.state_root,
+            "state_root",
+            require_directory=True,
+        )
+        socket_path = _validate_stable_absolute_path(
+            self.socket_path,
+            "socket_path",
+            require_directory=False,
+        )
         object.__setattr__(self, "state_root", state_root)
         object.__setattr__(self, "socket_path", socket_path)
 
@@ -100,8 +127,14 @@ class BrokerConfig:
 
     @classmethod
     def from_env(cls) -> "BrokerConfig":
-        state_root = _stable_absolute_path("MEDCHAT_SANDBOX_BROKER_STATE")
-        socket_path = _stable_absolute_path("MEDCHAT_SANDBOX_BROKER_SOCKET")
+        state_root = _stable_absolute_path(
+            "MEDCHAT_SANDBOX_BROKER_STATE",
+            require_directory=True,
+        )
+        socket_path = _stable_absolute_path(
+            "MEDCHAT_SANDBOX_BROKER_SOCKET",
+            require_directory=False,
+        )
 
         image = _required_environment("MEDCHAT_SANDBOX_IMAGE")
         image_match = _IMAGE_PATTERN.fullmatch(image)
