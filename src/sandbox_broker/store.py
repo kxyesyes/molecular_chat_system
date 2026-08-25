@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sqlite3
 import stat
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -40,15 +41,15 @@ class BrokerJobRecord:
     idempotency_key: str = field(repr=False)
     canonical_input_sha256: str = field(repr=False)
     status: BrokerJobStatus
-    phase: str | None
+    phase: str
     sandbox_id: str | None
     error_code: str | None
     warnings: list[str] = field(repr=False)
     provenance: dict[str, Any] | None = field(repr=False)
     cancel_requested: bool
     cleanup_status: str
-    created_at: str
-    updated_at: str
+    created_at: float
+    updated_at: float
 
 
 _EXPECTED_COLUMNS = {
@@ -58,22 +59,22 @@ _EXPECTED_COLUMNS = {
         ("idempotency_key", "TEXT", 1, None, 0, 0),
         ("canonical_input_sha256", "TEXT", 1, None, 0, 0),
         ("status", "TEXT", 1, None, 0, 0),
-        ("phase", "TEXT", 0, None, 0, 0),
+        ("phase", "TEXT", 1, None, 0, 0),
         ("sandbox_id", "TEXT", 0, None, 0, 0),
         ("error_code", "TEXT", 0, None, 0, 0),
         ("warnings_json", "TEXT", 1, "'[]'", 0, 0),
         ("provenance_json", "TEXT", 0, None, 0, 0),
         ("cancel_requested", "INTEGER", 1, "0", 0, 0),
         ("cleanup_status", "TEXT", 1, "'not_started'", 0, 0),
-        ("created_at", "TEXT", 1, None, 0, 0),
-        ("updated_at", "TEXT", 1, None, 0, 0),
+        ("created_at", "REAL", 1, None, 0, 0),
+        ("updated_at", "REAL", 1, None, 0, 0),
     ),
     "transitions": (
         ("sequence", "INTEGER", 0, None, 1, 0),
         ("job_id", "TEXT", 1, None, 0, 0),
         ("status", "TEXT", 1, None, 0, 0),
-        ("phase", "TEXT", 0, None, 0, 0),
-        ("created_at", "TEXT", 1, None, 0, 0),
+        ("phase", "TEXT", 1, None, 0, 0),
+        ("created_at", "REAL", 1, None, 0, 0),
     ),
     "artifacts": (
         ("artifact_id", "TEXT", 0, None, 1, 0),
@@ -84,6 +85,139 @@ _EXPECTED_COLUMNS = {
         ("sha256", "TEXT", 1, None, 0, 0),
     ),
 }
+
+_CANONICAL_TABLE_SQL = {
+    "jobs": """
+        CREATE TABLE jobs(
+            job_id TEXT PRIMARY KEY,
+            trace_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            canonical_input_sha256 TEXT NOT NULL,
+            status TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            sandbox_id TEXT,
+            error_code TEXT,
+            warnings_json TEXT NOT NULL DEFAULT '[]',
+            provenance_json TEXT,
+            cancel_requested INTEGER NOT NULL DEFAULT 0,
+            cleanup_status TEXT NOT NULL DEFAULT 'not_started',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )
+    """,
+    "transitions": """
+        CREATE TABLE transitions(
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL REFERENCES jobs(job_id),
+            status TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            created_at REAL NOT NULL
+        )
+    """,
+    "artifacts": """
+        CREATE TABLE artifacts(
+            artifact_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL REFERENCES jobs(job_id),
+            relative_path TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            sha256 TEXT NOT NULL,
+            UNIQUE(job_id, relative_path)
+        )
+    """,
+}
+
+_EXPECTED_FOREIGN_KEYS = {
+    "jobs": (),
+    "transitions": (
+        (0, 0, "jobs", "job_id", "job_id", "NO ACTION", "NO ACTION", "NONE"),
+    ),
+    "artifacts": (
+        (0, 0, "jobs", "job_id", "job_id", "NO ACTION", "NO ACTION", "NONE"),
+    ),
+}
+
+_EXPECTED_INDEX_CONTRACTS = {
+    "jobs": {
+        (1, 0, "pk", ((0, 0, "job_id", 0, "BINARY"),)),
+        (1, 0, "u", ((0, 2, "idempotency_key", 0, "BINARY"),)),
+    },
+    "transitions": set(),
+    "artifacts": {
+        (1, 0, "pk", ((0, 0, "artifact_id", 0, "BINARY"),)),
+        (
+            1,
+            0,
+            "u",
+            (
+                (0, 1, "job_id", 0, "BINARY"),
+                (1, 2, "relative_path", 0, "BINARY"),
+            ),
+        ),
+    },
+}
+
+
+def _sql_tokens(sql: str) -> tuple[str, ...]:
+    """Tokenize stored SQLite DDL while discarding comments outside quotes."""
+
+    tokens: list[str] = []
+    index = 0
+    while index < len(sql):
+        character = sql[index]
+        if character.isspace():
+            index += 1
+            continue
+        if sql.startswith("--", index):
+            newline = sql.find("\n", index + 2)
+            index = len(sql) if newline < 0 else newline + 1
+            continue
+        if sql.startswith("/*", index):
+            closing = sql.find("*/", index + 2)
+            if closing < 0:
+                raise ValueError("unterminated SQL comment")
+            index = closing + 2
+            continue
+        if character in {"'", '"', "`"}:
+            quote = character
+            start = index
+            index += 1
+            while index < len(sql):
+                if sql[index] != quote:
+                    index += 1
+                    continue
+                if index + 1 < len(sql) and sql[index + 1] == quote:
+                    index += 2
+                    continue
+                index += 1
+                break
+            else:
+                raise ValueError("unterminated SQL quote")
+            tokens.append(sql[start:index])
+            continue
+        if character == "[":
+            closing = sql.find("]", index + 1)
+            if closing < 0:
+                raise ValueError("unterminated SQL identifier")
+            tokens.append(sql[index : closing + 1])
+            index = closing + 1
+            continue
+        if character.isalnum() or character == "_":
+            start = index
+            index += 1
+            while index < len(sql) and (sql[index].isalnum() or sql[index] == "_"):
+                index += 1
+            tokens.append(sql[start:index].upper())
+            continue
+        tokens.append(character)
+        index += 1
+    return tuple(tokens)
+
+
+_CANONICAL_TABLE_TOKENS = {
+    table: _sql_tokens(sql) for table, sql in _CANONICAL_TABLE_SQL.items()
+}
+_SQLITE_SEQUENCE_TOKENS = _sql_tokens("CREATE TABLE sqlite_sequence(name,seq)")
 
 
 class BrokerStore:
@@ -150,47 +284,12 @@ class BrokerStore:
                 if version not in (0, _SCHEMA_VERSION):
                     raise RuntimeError("incompatible broker database schema")
                 connection.execute("BEGIN IMMEDIATE")
-                statements = (
-                    """
-                    CREATE TABLE IF NOT EXISTS jobs(
-                        job_id TEXT PRIMARY KEY,
-                        trace_id TEXT NOT NULL,
-                        idempotency_key TEXT NOT NULL UNIQUE,
-                        canonical_input_sha256 TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        phase TEXT,
-                        sandbox_id TEXT,
-                        error_code TEXT,
-                        warnings_json TEXT NOT NULL DEFAULT '[]',
-                        provenance_json TEXT,
-                        cancel_requested INTEGER NOT NULL DEFAULT 0,
-                        cleanup_status TEXT NOT NULL DEFAULT 'not_started',
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
+                for canonical_sql in _CANONICAL_TABLE_SQL.values():
+                    statement = canonical_sql.replace(
+                        "CREATE TABLE",
+                        "CREATE TABLE IF NOT EXISTS",
+                        1,
                     )
-                    """,
-                    """
-                    CREATE TABLE IF NOT EXISTS transitions(
-                        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                        job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
-                        status TEXT NOT NULL,
-                        phase TEXT,
-                        created_at TEXT NOT NULL
-                    )
-                    """,
-                    """
-                    CREATE TABLE IF NOT EXISTS artifacts(
-                        artifact_id TEXT PRIMARY KEY,
-                        job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
-                        relative_path TEXT NOT NULL,
-                        media_type TEXT NOT NULL,
-                        size_bytes INTEGER NOT NULL,
-                        sha256 TEXT NOT NULL,
-                        UNIQUE(job_id, relative_path)
-                    )
-                    """,
-                )
-                for statement in statements:
                     connection.execute(statement)
                 self._validate_schema(connection)
                 connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
@@ -203,6 +302,7 @@ class BrokerStore:
     @staticmethod
     def _validate_schema(connection: sqlite3.Connection) -> None:
         try:
+            BrokerStore._validate_schema_objects(connection)
             for table, expected in _EXPECTED_COLUMNS.items():
                 rows = connection.execute(f"PRAGMA table_xinfo({table})").fetchall()
                 observed = tuple(
@@ -219,54 +319,90 @@ class BrokerStore:
                 if observed != expected:
                     raise RuntimeError("incompatible broker database schema")
 
-            transitions_sql = connection.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='transitions'"
-            ).fetchone()[0]
-            if "AUTOINCREMENT" not in transitions_sql.upper():
-                raise RuntimeError("incompatible broker database schema")
-
-            for table in ("transitions", "artifacts"):
+            for table, expected in _EXPECTED_FOREIGN_KEYS.items():
                 foreign_keys = connection.execute(f"PRAGMA foreign_key_list({table})").fetchall()
-                observed_keys = {
-                    (row["table"], row["from"], row["to"], row["on_delete"].upper())
+                observed_keys = tuple(
+                    (
+                        row["id"],
+                        row["seq"],
+                        row["table"],
+                        row["from"],
+                        row["to"],
+                        row["on_update"],
+                        row["on_delete"],
+                        row["match"],
+                    )
                     for row in foreign_keys
-                }
-                if ("jobs", "job_id", "job_id", "CASCADE") not in observed_keys:
+                )
+                if observed_keys != expected:
                     raise RuntimeError("incompatible broker database schema")
 
-            if ("idempotency_key",) not in BrokerStore._unique_constraints(connection, "jobs"):
-                raise RuntimeError("incompatible broker database schema")
-            if ("job_id", "relative_path") not in BrokerStore._unique_constraints(
-                connection,
-                "artifacts",
-            ):
-                raise RuntimeError("incompatible broker database schema")
-        except (IndexError, KeyError, sqlite3.DatabaseError, TypeError):
+            for table, expected in _EXPECTED_INDEX_CONTRACTS.items():
+                if BrokerStore._index_contracts(connection, table) != expected:
+                    raise RuntimeError("incompatible broker database schema")
+        except (IndexError, KeyError, sqlite3.DatabaseError, TypeError, ValueError):
             raise RuntimeError("incompatible broker database schema") from None
 
     @staticmethod
-    def _unique_constraints(
-        connection: sqlite3.Connection,
-        table: str,
-    ) -> set[tuple[str, ...]]:
-        constraints: set[tuple[str, ...]] = set()
-        for row in connection.execute(f"PRAGMA index_list({table})").fetchall():
-            if not row["unique"] or row["partial"] or row["origin"] != "u":
+    def _validate_schema_objects(connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name"
+        ).fetchall()
+        observed_tables: set[str] = set()
+        sqlite_sequence_seen = False
+        for row in rows:
+            name = row["name"]
+            if name in _CANONICAL_TABLE_TOKENS:
+                if row["type"] != "table" or row["tbl_name"] != name:
+                    raise RuntimeError("incompatible broker database schema")
+                if _sql_tokens(row["sql"]) != _CANONICAL_TABLE_TOKENS[name]:
+                    raise RuntimeError("incompatible broker database schema")
+                observed_tables.add(name)
                 continue
-            index_rows = connection.execute(f"PRAGMA index_xinfo({row['name']})").fetchall()
-            key_rows = [index_row for index_row in index_rows if index_row["key"]]
-            if [index_row["seqno"] for index_row in key_rows] != list(range(len(key_rows))):
+            if name == "sqlite_sequence":
+                if (
+                    row["type"] != "table"
+                    or row["tbl_name"] != "sqlite_sequence"
+                    or _sql_tokens(row["sql"]) != _SQLITE_SEQUENCE_TOKENS
+                ):
+                    raise RuntimeError("incompatible broker database schema")
+                sqlite_sequence_seen = True
                 continue
-            if any(
-                index_row["cid"] < 0
-                or index_row["name"] is None
-                or index_row["desc"]
-                or index_row["coll"] != "BINARY"
-                for index_row in key_rows
+            if (
+                row["type"] == "index"
+                and name.startswith("sqlite_autoindex_")
+                and row["tbl_name"] in {"jobs", "artifacts"}
+                and row["sql"] is None
             ):
                 continue
-            constraints.add(tuple(index_row["name"] for index_row in key_rows))
-        return constraints
+            raise RuntimeError("incompatible broker database schema")
+
+        if observed_tables != set(_CANONICAL_TABLE_TOKENS) or not sqlite_sequence_seen:
+            raise RuntimeError("incompatible broker database schema")
+
+    @staticmethod
+    def _index_contracts(
+        connection: sqlite3.Connection,
+        table: str,
+    ) -> set[tuple[object, ...]]:
+        contracts: set[tuple[object, ...]] = set()
+        for row in connection.execute(f"PRAGMA index_list({table})").fetchall():
+            index_rows = connection.execute(f"PRAGMA index_xinfo({row['name']})").fetchall()
+            key_rows = [index_row for index_row in index_rows if index_row["key"]]
+            key_contract = tuple(
+                (
+                    index_row["seqno"],
+                    index_row["cid"],
+                    index_row["name"],
+                    index_row["desc"],
+                    index_row["coll"],
+                )
+                for index_row in key_rows
+            )
+            contracts.add(
+                (row["unique"], row["partial"], row["origin"], key_contract)
+            )
+        return contracts
 
     def create_or_get(
         self,
@@ -448,25 +584,38 @@ class BrokerStore:
                 raise ValueError
             if provenance is not None and not isinstance(provenance, dict):
                 raise ValueError
+            phase = row["phase"]
+            created_at = row["created_at"]
+            updated_at = row["updated_at"]
+            if type(phase) is not str or not phase:
+                raise ValueError
+            if any(
+                type(value) not in (int, float) or not math.isfinite(value)
+                for value in (created_at, updated_at)
+            ):
+                raise ValueError
             return BrokerJobRecord(
                 job_id=row["job_id"],
                 trace_id=row["trace_id"],
                 idempotency_key=row["idempotency_key"],
                 canonical_input_sha256=row["canonical_input_sha256"],
                 status=BrokerJobStatus(row["status"]),
-                phase=row["phase"],
+                phase=phase,
                 sandbox_id=row["sandbox_id"],
                 error_code=row["error_code"],
                 warnings=warnings.copy(),
                 provenance=dict(provenance) if provenance is not None else None,
                 cancel_requested=bool(row["cancel_requested"]),
                 cleanup_status=row["cleanup_status"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
+                created_at=float(created_at),
+                updated_at=float(updated_at),
             )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             raise RuntimeError("persisted broker job is invalid") from None
 
     @staticmethod
-    def _now() -> str:
-        return datetime.now(timezone.utc).isoformat()
+    def _now() -> float:
+        value = time.time()
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise RuntimeError("system clock returned a non-finite time")
+        return float(value)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import math
 import os
 import sqlite3
 import subprocess
@@ -8,9 +9,11 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
+import src.sandbox_broker.store as broker_store_module
 from src.sandbox_broker.models import (
     BrokerErrorCode,
     BrokerJobStatus,
@@ -35,14 +38,30 @@ def _transition_rows(db_path: Path, job_id: str) -> list[tuple[str, str | None]]
 def _create_custom_schema(
     db_path: Path,
     *,
-    jobs_idempotency_definition: str = "idempotency_key TEXT NOT NULL",
-    jobs_unique_constraint: str | None = "UNIQUE(idempotency_key)",
+    jobs_idempotency_definition: str = "idempotency_key TEXT NOT NULL UNIQUE",
+    jobs_unique_constraint: str | None = None,
+    jobs_extra_constraint: str | None = None,
+    cancel_requested_definition: str = "cancel_requested INTEGER NOT NULL DEFAULT 0",
+    transition_sequence_definition: str = "sequence INTEGER PRIMARY KEY AUTOINCREMENT",
+    transition_extra_constraint: str | None = None,
     artifact_relative_path_definition: str = "relative_path TEXT NOT NULL",
     artifact_unique_constraint: str | None = "UNIQUE(job_id, relative_path)",
+    artifact_extra_constraint: str | None = None,
     extra_indexes: tuple[str, ...] = (),
 ) -> None:
-    jobs_unique = f", {jobs_unique_constraint}" if jobs_unique_constraint else ""
-    artifact_unique = f", {artifact_unique_constraint}" if artifact_unique_constraint else ""
+    jobs_constraints = "".join(
+        f", {constraint}"
+        for constraint in (jobs_unique_constraint, jobs_extra_constraint)
+        if constraint
+    )
+    transition_constraints = (
+        f", {transition_extra_constraint}" if transition_extra_constraint else ""
+    )
+    artifact_constraints = "".join(
+        f", {constraint}"
+        for constraint in (artifact_unique_constraint, artifact_extra_constraint)
+        if constraint
+    )
     with sqlite3.connect(db_path) as connection:
         connection.executescript(
             f"""
@@ -52,37 +71,62 @@ def _create_custom_schema(
                 {jobs_idempotency_definition},
                 canonical_input_sha256 TEXT NOT NULL,
                 status TEXT NOT NULL,
-                phase TEXT,
+                phase TEXT NOT NULL,
                 sandbox_id TEXT,
                 error_code TEXT,
                 warnings_json TEXT NOT NULL DEFAULT '[]',
                 provenance_json TEXT,
-                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                {cancel_requested_definition},
                 cleanup_status TEXT NOT NULL DEFAULT 'not_started',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-                {jobs_unique}
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+                {jobs_constraints}
             );
             CREATE TABLE transitions(
-                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+                {transition_sequence_definition},
+                job_id TEXT NOT NULL REFERENCES jobs(job_id),
                 status TEXT NOT NULL,
-                phase TEXT,
-                created_at TEXT NOT NULL
+                phase TEXT NOT NULL,
+                created_at REAL NOT NULL
+                {transition_constraints}
             );
             CREATE TABLE artifacts(
                 artifact_id TEXT PRIMARY KEY,
-                job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+                job_id TEXT NOT NULL REFERENCES jobs(job_id),
                 {artifact_relative_path_definition},
                 media_type TEXT NOT NULL,
                 size_bytes INTEGER NOT NULL,
                 sha256 TEXT NOT NULL
-                {artifact_unique}
+                {artifact_constraints}
             );
             """
         )
         for statement in extra_indexes:
             connection.execute(statement)
+
+
+def _rewrite_table_sql(
+    db_path: Path,
+    table: str,
+    transform: Callable[[str], str],
+) -> None:
+    with sqlite3.connect(db_path) as connection:
+        sql = connection.execute(
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()[0]
+        rewritten = transform(sql)
+        connection.execute("PRAGMA writable_schema=ON")
+        connection.execute(
+            "UPDATE sqlite_schema SET sql=? WHERE type='table' AND name=?",
+            (rewritten, table),
+        )
+        schema_version = connection.execute("PRAGMA schema_version").fetchone()[0]
+        connection.execute(f"PRAGMA schema_version={schema_version + 1}")
+
+
+def _append_table_constraint(db_path: Path, table: str, constraint: str) -> None:
+    _rewrite_table_sql(db_path, table, lambda sql: f"{sql.rstrip()[:-1]}, {constraint})")
 
 
 def _advance_to(
@@ -127,6 +171,9 @@ def test_create_and_same_hash_reuse_preserve_original_identity_and_trace(tmp_pat
     assert int(first.job_id, 16) >= 0
     assert first.trace_id == second.trace_id == "trace-1"
     assert first.status is BrokerJobStatus.QUEUED
+    assert first.phase == BrokerJobStatus.QUEUED.value
+    assert type(first.created_at) is float and math.isfinite(first.created_at)
+    assert type(first.updated_at) is float and math.isfinite(first.updated_at)
     assert _transition_rows(db_path, first.job_id) == [("queued", "queued")]
 
 
@@ -373,6 +420,202 @@ def test_incompatible_existing_schema_is_rejected(tmp_path: Path) -> None:
     assert str(tmp_path) not in str(raised.value)
 
 
+def test_created_schema_matches_canonical_columns_foreign_keys_and_internal_objects(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "broker.sqlite"
+    BrokerStore(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        jobs = {row["name"]: row for row in connection.execute("PRAGMA table_xinfo(jobs)")}
+        transitions = {
+            row["name"]: row for row in connection.execute("PRAGMA table_xinfo(transitions)")
+        }
+        assert (jobs["phase"]["type"], jobs["phase"]["notnull"]) == ("TEXT", 1)
+        assert (jobs["created_at"]["type"], jobs["created_at"]["notnull"]) == ("REAL", 1)
+        assert (jobs["updated_at"]["type"], jobs["updated_at"]["notnull"]) == ("REAL", 1)
+        assert (transitions["phase"]["type"], transitions["phase"]["notnull"]) == (
+            "TEXT",
+            1,
+        )
+        assert (
+            transitions["created_at"]["type"],
+            transitions["created_at"]["notnull"],
+        ) == ("REAL", 1)
+
+        def foreign_keys(table: str) -> tuple[tuple[object, ...], ...]:
+            return tuple(
+                (
+                    row["id"],
+                    row["seq"],
+                    row["table"],
+                    row["from"],
+                    row["to"],
+                    row["on_update"],
+                    row["on_delete"],
+                    row["match"],
+                )
+                for row in connection.execute(f"PRAGMA foreign_key_list({table})")
+            )
+
+        expected_reference = ((0, 0, "jobs", "job_id", "job_id", "NO ACTION", "NO ACTION", "NONE"),)
+        assert foreign_keys("jobs") == ()
+        assert foreign_keys("transitions") == expected_reference
+        assert foreign_keys("artifacts") == expected_reference
+        assert connection.execute(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='sqlite_sequence'"
+        ).fetchone()[0] == 1
+
+    BrokerStore(db_path)
+
+
+def test_manual_canonical_schema_is_accepted(tmp_path: Path) -> None:
+    db_path = tmp_path / "broker.sqlite"
+    _create_custom_schema(db_path)
+
+    store = BrokerStore(db_path)
+    job, reused = store.create_or_get("idem-1", SHA256_A, "trace-1")
+
+    assert reused is False
+    assert job.phase == BrokerJobStatus.QUEUED.value
+
+
+def test_job_and_transition_times_use_finite_epoch_floats(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert hasattr(broker_store_module, "time")
+    values = iter((1_700_000_000.25, 1_700_000_001.5))
+    monkeypatch.setattr(broker_store_module.time, "time", lambda: next(values))
+    store = BrokerStore(tmp_path / "broker.sqlite")
+
+    created, _ = store.create_or_get("idem-1", SHA256_A, "trace-1")
+    transitioned = store.transition(created.job_id, BrokerJobStatus.PROVISIONING)
+
+    assert type(created.created_at) is float
+    assert type(created.updated_at) is float
+    assert math.isfinite(created.created_at)
+    assert created.created_at == created.updated_at == 1_700_000_000.25
+    assert transitioned.created_at == created.created_at
+    assert transitioned.updated_at == 1_700_000_001.5
+    with sqlite3.connect(store.db_path) as connection:
+        assert connection.execute(
+            "SELECT typeof(created_at), typeof(updated_at) FROM jobs WHERE job_id=?",
+            (created.job_id,),
+        ).fetchone() == ("real", "real")
+        assert connection.execute(
+            "SELECT typeof(created_at) FROM transitions ORDER BY sequence"
+        ).fetchall() == [("real",), ("real",)]
+
+
+def test_non_finite_system_time_is_rejected_without_path_disclosure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert hasattr(broker_store_module, "time")
+    monkeypatch.setattr(broker_store_module.time, "time", lambda: float("nan"))
+    db_path = tmp_path / "secret-clock-path" / "broker.sqlite"
+    db_path.parent.mkdir()
+    store = BrokerStore(db_path)
+
+    with pytest.raises(RuntimeError, match="system clock") as raised:
+        store.create_or_get("idem-1", SHA256_A, "trace-1")
+
+    assert str(tmp_path) not in str(raised.value)
+    assert "secret-clock-path" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "CREATE TABLE unexpected_table(value TEXT)",
+        "CREATE VIEW unexpected_view AS SELECT job_id FROM jobs",
+        "CREATE TRIGGER unexpected_trigger AFTER INSERT ON jobs BEGIN SELECT 1; END",
+        "CREATE INDEX unexpected_index ON jobs(status)",
+    ],
+)
+def test_extra_user_schema_objects_are_rejected_without_path_disclosure(
+    tmp_path: Path,
+    statement: str,
+) -> None:
+    db_path = tmp_path / "secret-object-path" / "broker.sqlite"
+    db_path.parent.mkdir()
+    BrokerStore(db_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(statement)
+
+    with pytest.raises(RuntimeError, match="incompatible broker database schema") as raised:
+        BrokerStore(db_path)
+
+    assert str(tmp_path) not in str(raised.value)
+    assert "secret-object-path" not in str(raised.value)
+
+
+def test_extra_check_constraint_is_rejected(tmp_path: Path) -> None:
+    db_path = tmp_path / "broker.sqlite"
+    BrokerStore(db_path)
+    _append_table_constraint(db_path, "jobs", "CHECK(cancel_requested IN (0, 1))")
+
+    with pytest.raises(RuntimeError, match="incompatible broker database schema"):
+        BrokerStore(db_path)
+
+
+def test_extra_foreign_key_is_rejected(tmp_path: Path) -> None:
+    db_path = tmp_path / "broker.sqlite"
+    BrokerStore(db_path)
+    _append_table_constraint(
+        db_path,
+        "artifacts",
+        "FOREIGN KEY(relative_path) REFERENCES jobs(job_id)",
+    )
+
+    with pytest.raises(RuntimeError, match="incompatible broker database schema"):
+        BrokerStore(db_path)
+
+
+def test_autoincrement_keyword_in_comment_does_not_satisfy_canonical_ddl(tmp_path: Path) -> None:
+    db_path = tmp_path / "broker.sqlite"
+    BrokerStore(db_path)
+    _rewrite_table_sql(
+        db_path,
+        "transitions",
+        lambda sql: sql.replace("AUTOINCREMENT", "/* AUTOINCREMENT */"),
+    )
+
+    with pytest.raises(RuntimeError, match="incompatible broker database schema"):
+        BrokerStore(db_path)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {
+            "jobs_idempotency_definition": "idempotency_key TEXT NOT NULL",
+            "jobs_unique_constraint": "UNIQUE(idempotency_key, trace_id)",
+        },
+        {"artifact_unique_constraint": "UNIQUE(relative_path, job_id)"},
+        {"artifact_unique_constraint": "UNIQUE(job_id, relative_path, media_type)"},
+        {
+            "jobs_idempotency_definition": "idempotency_key TEXT NOT NULL",
+            "jobs_unique_constraint": None,
+            "extra_indexes": (
+                "CREATE UNIQUE INDEX expression_unique ON jobs(lower(idempotency_key))",
+            ),
+        },
+    ],
+)
+def test_expression_extra_key_and_wrong_order_unique_schemas_are_rejected(
+    tmp_path: Path,
+    overrides: dict[str, object],
+) -> None:
+    db_path = tmp_path / "broker.sqlite"
+    _create_custom_schema(db_path, **overrides)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="incompatible broker database schema"):
+        BrokerStore(db_path)
+
+
 @pytest.mark.parametrize(
     ("table", "expression"),
     [
@@ -411,6 +654,7 @@ def test_partial_unique_index_cannot_impersonate_required_global_constraint(
     if target == "jobs":
         _create_custom_schema(
             db_path,
+            jobs_idempotency_definition="idempotency_key TEXT NOT NULL",
             jobs_unique_constraint=None,
             extra_indexes=(
                 "CREATE UNIQUE INDEX disguised_jobs_unique ON jobs(idempotency_key) "
@@ -442,6 +686,7 @@ def test_non_constraint_unique_index_cannot_replace_required_unique_constraint(
     if target == "jobs":
         _create_custom_schema(
             db_path,
+            jobs_idempotency_definition="idempotency_key TEXT NOT NULL",
             jobs_unique_constraint=None,
             extra_indexes=(
                 "CREATE UNIQUE INDEX external_jobs_unique ON jobs(idempotency_key)",
@@ -472,8 +717,8 @@ def test_non_constraint_unique_index_cannot_replace_required_unique_constraint(
     ),
     [
         (
-            "idempotency_key TEXT COLLATE NOCASE NOT NULL",
-            "UNIQUE(idempotency_key)",
+            "idempotency_key TEXT COLLATE NOCASE NOT NULL UNIQUE",
+            None,
             "relative_path TEXT NOT NULL",
             "UNIQUE(job_id, relative_path)",
         ),
@@ -484,14 +729,14 @@ def test_non_constraint_unique_index_cannot_replace_required_unique_constraint(
             "UNIQUE(job_id, relative_path)",
         ),
         (
-            "idempotency_key TEXT NOT NULL",
-            "UNIQUE(idempotency_key)",
+            "idempotency_key TEXT NOT NULL UNIQUE",
+            None,
             "relative_path TEXT COLLATE NOCASE NOT NULL",
             "UNIQUE(job_id, relative_path)",
         ),
         (
-            "idempotency_key TEXT NOT NULL",
-            "UNIQUE(idempotency_key)",
+            "idempotency_key TEXT NOT NULL UNIQUE",
+            None,
             "relative_path TEXT NOT NULL",
             "UNIQUE(job_id, relative_path DESC)",
         ),
@@ -500,7 +745,7 @@ def test_non_constraint_unique_index_cannot_replace_required_unique_constraint(
 def test_required_unique_constraints_reject_collation_and_descending_keys(
     tmp_path: Path,
     jobs_idempotency_definition: str,
-    jobs_unique_constraint: str,
+    jobs_unique_constraint: str | None,
     artifact_relative_path_definition: str,
     artifact_unique_constraint: str,
 ) -> None:
