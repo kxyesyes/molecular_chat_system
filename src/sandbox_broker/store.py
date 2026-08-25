@@ -53,35 +53,35 @@ class BrokerJobRecord:
 
 _EXPECTED_COLUMNS = {
     "jobs": (
-        ("job_id", "TEXT", 0, None, 1),
-        ("trace_id", "TEXT", 1, None, 0),
-        ("idempotency_key", "TEXT", 1, None, 0),
-        ("canonical_input_sha256", "TEXT", 1, None, 0),
-        ("status", "TEXT", 1, None, 0),
-        ("phase", "TEXT", 0, None, 0),
-        ("sandbox_id", "TEXT", 0, None, 0),
-        ("error_code", "TEXT", 0, None, 0),
-        ("warnings_json", "TEXT", 1, "'[]'", 0),
-        ("provenance_json", "TEXT", 0, None, 0),
-        ("cancel_requested", "INTEGER", 1, "0", 0),
-        ("cleanup_status", "TEXT", 1, "'not_started'", 0),
-        ("created_at", "TEXT", 1, None, 0),
-        ("updated_at", "TEXT", 1, None, 0),
+        ("job_id", "TEXT", 0, None, 1, 0),
+        ("trace_id", "TEXT", 1, None, 0, 0),
+        ("idempotency_key", "TEXT", 1, None, 0, 0),
+        ("canonical_input_sha256", "TEXT", 1, None, 0, 0),
+        ("status", "TEXT", 1, None, 0, 0),
+        ("phase", "TEXT", 0, None, 0, 0),
+        ("sandbox_id", "TEXT", 0, None, 0, 0),
+        ("error_code", "TEXT", 0, None, 0, 0),
+        ("warnings_json", "TEXT", 1, "'[]'", 0, 0),
+        ("provenance_json", "TEXT", 0, None, 0, 0),
+        ("cancel_requested", "INTEGER", 1, "0", 0, 0),
+        ("cleanup_status", "TEXT", 1, "'not_started'", 0, 0),
+        ("created_at", "TEXT", 1, None, 0, 0),
+        ("updated_at", "TEXT", 1, None, 0, 0),
     ),
     "transitions": (
-        ("sequence", "INTEGER", 0, None, 1),
-        ("job_id", "TEXT", 1, None, 0),
-        ("status", "TEXT", 1, None, 0),
-        ("phase", "TEXT", 0, None, 0),
-        ("created_at", "TEXT", 1, None, 0),
+        ("sequence", "INTEGER", 0, None, 1, 0),
+        ("job_id", "TEXT", 1, None, 0, 0),
+        ("status", "TEXT", 1, None, 0, 0),
+        ("phase", "TEXT", 0, None, 0, 0),
+        ("created_at", "TEXT", 1, None, 0, 0),
     ),
     "artifacts": (
-        ("artifact_id", "TEXT", 0, None, 1),
-        ("job_id", "TEXT", 1, None, 0),
-        ("relative_path", "TEXT", 1, None, 0),
-        ("media_type", "TEXT", 1, None, 0),
-        ("size_bytes", "INTEGER", 1, None, 0),
-        ("sha256", "TEXT", 1, None, 0),
+        ("artifact_id", "TEXT", 0, None, 1, 0),
+        ("job_id", "TEXT", 1, None, 0, 0),
+        ("relative_path", "TEXT", 1, None, 0, 0),
+        ("media_type", "TEXT", 1, None, 0, 0),
+        ("size_bytes", "INTEGER", 1, None, 0, 0),
+        ("sha256", "TEXT", 1, None, 0, 0),
     ),
 }
 
@@ -204,9 +204,16 @@ class BrokerStore:
     def _validate_schema(connection: sqlite3.Connection) -> None:
         try:
             for table, expected in _EXPECTED_COLUMNS.items():
-                rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+                rows = connection.execute(f"PRAGMA table_xinfo({table})").fetchall()
                 observed = tuple(
-                    (row["name"], row["type"].upper(), row["notnull"], row["dflt_value"], row["pk"])
+                    (
+                        row["name"],
+                        row["type"].upper(),
+                        row["notnull"],
+                        row["dflt_value"],
+                        row["pk"],
+                        row["hidden"],
+                    )
                     for row in rows
                 )
                 if observed != expected:
@@ -227,9 +234,9 @@ class BrokerStore:
                 if ("jobs", "job_id", "job_id", "CASCADE") not in observed_keys:
                     raise RuntimeError("incompatible broker database schema")
 
-            if ("idempotency_key",) not in BrokerStore._unique_indexes(connection, "jobs"):
+            if ("idempotency_key",) not in BrokerStore._unique_constraints(connection, "jobs"):
                 raise RuntimeError("incompatible broker database schema")
-            if ("job_id", "relative_path") not in BrokerStore._unique_indexes(
+            if ("job_id", "relative_path") not in BrokerStore._unique_constraints(
                 connection,
                 "artifacts",
             ):
@@ -238,17 +245,28 @@ class BrokerStore:
             raise RuntimeError("incompatible broker database schema") from None
 
     @staticmethod
-    def _unique_indexes(
+    def _unique_constraints(
         connection: sqlite3.Connection,
         table: str,
     ) -> set[tuple[str, ...]]:
-        indexes: set[tuple[str, ...]] = set()
+        constraints: set[tuple[str, ...]] = set()
         for row in connection.execute(f"PRAGMA index_list({table})").fetchall():
-            if not row["unique"]:
+            if not row["unique"] or row["partial"] or row["origin"] != "u":
                 continue
-            columns = connection.execute(f"PRAGMA index_info({row['name']})").fetchall()
-            indexes.add(tuple(column["name"] for column in columns))
-        return indexes
+            index_rows = connection.execute(f"PRAGMA index_xinfo({row['name']})").fetchall()
+            key_rows = [index_row for index_row in index_rows if index_row["key"]]
+            if [index_row["seqno"] for index_row in key_rows] != list(range(len(key_rows))):
+                continue
+            if any(
+                index_row["cid"] < 0
+                or index_row["name"] is None
+                or index_row["desc"]
+                or index_row["coll"] != "BINARY"
+                for index_row in key_rows
+            ):
+                continue
+            constraints.add(tuple(index_row["name"] for index_row in key_rows))
+        return constraints
 
     def create_or_get(
         self,

@@ -32,6 +32,59 @@ def _transition_rows(db_path: Path, job_id: str) -> list[tuple[str, str | None]]
         ).fetchall()
 
 
+def _create_custom_schema(
+    db_path: Path,
+    *,
+    jobs_idempotency_definition: str = "idempotency_key TEXT NOT NULL",
+    jobs_unique_constraint: str | None = "UNIQUE(idempotency_key)",
+    artifact_relative_path_definition: str = "relative_path TEXT NOT NULL",
+    artifact_unique_constraint: str | None = "UNIQUE(job_id, relative_path)",
+    extra_indexes: tuple[str, ...] = (),
+) -> None:
+    jobs_unique = f", {jobs_unique_constraint}" if jobs_unique_constraint else ""
+    artifact_unique = f", {artifact_unique_constraint}" if artifact_unique_constraint else ""
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            f"""
+            CREATE TABLE jobs(
+                job_id TEXT PRIMARY KEY,
+                trace_id TEXT NOT NULL,
+                {jobs_idempotency_definition},
+                canonical_input_sha256 TEXT NOT NULL,
+                status TEXT NOT NULL,
+                phase TEXT,
+                sandbox_id TEXT,
+                error_code TEXT,
+                warnings_json TEXT NOT NULL DEFAULT '[]',
+                provenance_json TEXT,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                cleanup_status TEXT NOT NULL DEFAULT 'not_started',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+                {jobs_unique}
+            );
+            CREATE TABLE transitions(
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+                status TEXT NOT NULL,
+                phase TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE artifacts(
+                artifact_id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+                {artifact_relative_path_definition},
+                media_type TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                sha256 TEXT NOT NULL
+                {artifact_unique}
+            );
+            """
+        )
+        for statement in extra_indexes:
+            connection.execute(statement)
+
+
 def _advance_to(
     store: BrokerStore,
     job_id: str,
@@ -313,6 +366,152 @@ def test_incompatible_existing_schema_is_rejected(tmp_path: Path) -> None:
     db_path = tmp_path / "broker.sqlite"
     with sqlite3.connect(db_path) as connection:
         connection.execute("CREATE TABLE jobs (job_id TEXT PRIMARY KEY)")
+
+    with pytest.raises(RuntimeError, match="incompatible broker database schema") as raised:
+        BrokerStore(db_path)
+
+    assert str(tmp_path) not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("table", "expression"),
+    [
+        ("jobs", "job_id || ''"),
+        ("transitions", "job_id || ''"),
+        ("artifacts", "artifact_id || ''"),
+    ],
+)
+def test_generated_extra_columns_are_rejected_without_path_disclosure(
+    tmp_path: Path,
+    table: str,
+    expression: str,
+) -> None:
+    db_path = tmp_path / "secret-schema-path" / "broker.sqlite"
+    db_path.parent.mkdir()
+    BrokerStore(db_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            f"ALTER TABLE {table} ADD COLUMN hidden_extra TEXT "
+            f"GENERATED ALWAYS AS ({expression}) VIRTUAL"
+        )
+
+    with pytest.raises(RuntimeError, match="incompatible broker database schema") as raised:
+        BrokerStore(db_path)
+
+    assert str(tmp_path) not in str(raised.value)
+    assert "secret-schema-path" not in str(raised.value)
+
+
+@pytest.mark.parametrize("target", ["jobs", "artifacts"])
+def test_partial_unique_index_cannot_impersonate_required_global_constraint(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    db_path = tmp_path / "broker.sqlite"
+    if target == "jobs":
+        _create_custom_schema(
+            db_path,
+            jobs_unique_constraint=None,
+            extra_indexes=(
+                "CREATE UNIQUE INDEX disguised_jobs_unique ON jobs(idempotency_key) "
+                "WHERE idempotency_key <> ''",
+            ),
+        )
+    else:
+        _create_custom_schema(
+            db_path,
+            artifact_unique_constraint=None,
+            extra_indexes=(
+                "CREATE UNIQUE INDEX disguised_artifacts_unique "
+                "ON artifacts(job_id, relative_path) WHERE size_bytes >= 0",
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="incompatible broker database schema") as raised:
+        BrokerStore(db_path)
+
+    assert str(tmp_path) not in str(raised.value)
+
+
+@pytest.mark.parametrize("target", ["jobs", "artifacts"])
+def test_non_constraint_unique_index_cannot_replace_required_unique_constraint(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    db_path = tmp_path / "broker.sqlite"
+    if target == "jobs":
+        _create_custom_schema(
+            db_path,
+            jobs_unique_constraint=None,
+            extra_indexes=(
+                "CREATE UNIQUE INDEX external_jobs_unique ON jobs(idempotency_key)",
+            ),
+        )
+    else:
+        _create_custom_schema(
+            db_path,
+            artifact_unique_constraint=None,
+            extra_indexes=(
+                "CREATE UNIQUE INDEX external_artifacts_unique "
+                "ON artifacts(job_id, relative_path)",
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="incompatible broker database schema") as raised:
+        BrokerStore(db_path)
+
+    assert str(tmp_path) not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    (
+        "jobs_idempotency_definition",
+        "jobs_unique_constraint",
+        "artifact_relative_path_definition",
+        "artifact_unique_constraint",
+    ),
+    [
+        (
+            "idempotency_key TEXT COLLATE NOCASE NOT NULL",
+            "UNIQUE(idempotency_key)",
+            "relative_path TEXT NOT NULL",
+            "UNIQUE(job_id, relative_path)",
+        ),
+        (
+            "idempotency_key TEXT NOT NULL",
+            "UNIQUE(idempotency_key DESC)",
+            "relative_path TEXT NOT NULL",
+            "UNIQUE(job_id, relative_path)",
+        ),
+        (
+            "idempotency_key TEXT NOT NULL",
+            "UNIQUE(idempotency_key)",
+            "relative_path TEXT COLLATE NOCASE NOT NULL",
+            "UNIQUE(job_id, relative_path)",
+        ),
+        (
+            "idempotency_key TEXT NOT NULL",
+            "UNIQUE(idempotency_key)",
+            "relative_path TEXT NOT NULL",
+            "UNIQUE(job_id, relative_path DESC)",
+        ),
+    ],
+)
+def test_required_unique_constraints_reject_collation_and_descending_keys(
+    tmp_path: Path,
+    jobs_idempotency_definition: str,
+    jobs_unique_constraint: str,
+    artifact_relative_path_definition: str,
+    artifact_unique_constraint: str,
+) -> None:
+    db_path = tmp_path / "broker.sqlite"
+    _create_custom_schema(
+        db_path,
+        jobs_idempotency_definition=jobs_idempotency_definition,
+        jobs_unique_constraint=jobs_unique_constraint,
+        artifact_relative_path_definition=artifact_relative_path_definition,
+        artifact_unique_constraint=artifact_unique_constraint,
+    )
 
     with pytest.raises(RuntimeError, match="incompatible broker database schema") as raised:
         BrokerStore(db_path)
