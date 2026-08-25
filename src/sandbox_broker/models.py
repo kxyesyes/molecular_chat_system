@@ -144,7 +144,7 @@ class BrokerProvenance(BaseModel):
     sandbox_id: str
     image_uri: str
     image_digest: str
-    secure_runtime: bool
+    secure_runtime: Literal["gvisor"]
     vina_version: str
     meeko_version: str
     receptor_sha256: str

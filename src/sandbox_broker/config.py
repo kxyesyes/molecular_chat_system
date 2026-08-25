@@ -5,12 +5,27 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 
 _IMAGE_PATTERN = re.compile(r"^([^\s@]+)@sha256:([0-9a-f]{64})$")
+_IMAGE_URI_PATTERN = re.compile(r"^[^\s@]+$")
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _APPROVED_DOMAINS = frozenset({"127.0.0.1:8080", "localhost:8080"})
+_APPROVED_LIMITS = {
+    "cpu": "2",
+    "memory": "4Gi",
+    "pids_limit": 128,
+    "receptor_max_bytes": 52_428_800,
+    "ligand_max_bytes": 10_485_760,
+    "output_max_bytes": 104_857_600,
+    "execution_timeout_seconds": 180,
+    "sandbox_timeout_seconds": 300,
+    "concurrency": 1,
+    "queue_capacity": 8,
+    "artifact_retention_seconds": 86_400,
+    "audit_retention_seconds": 2_592_000,
+}
 
 
 def _required_environment(name: str) -> str:
@@ -20,14 +35,23 @@ def _required_environment(name: str) -> str:
     return value
 
 
-def _stable_absolute_path(name: str) -> Path:
-    candidate = Path(_required_environment(name))
+def _validate_stable_absolute_path(candidate: object, name: str) -> Path:
+    if not isinstance(candidate, Path):
+        raise ValueError(f"{name} must be a Path")
     if not candidate.is_absolute():
         raise ValueError(f"{name} must be an absolute path")
+    if ".." in candidate.parts:
+        raise ValueError(f"{name} must not contain parent-directory aliases")
+
+    lexical = Path(os.path.abspath(candidate))
     resolved = candidate.resolve(strict=False)
-    if not resolved.is_absolute() or resolved.resolve(strict=False) != resolved:
+    if not resolved.is_absolute() or lexical != resolved:
         raise ValueError(f"{name} must resolve to a stable absolute path")
     return resolved
+
+
+def _stable_absolute_path(name: str) -> Path:
+    return _validate_stable_absolute_path(Path(_required_environment(name)), name)
 
 
 @dataclass(frozen=True)
@@ -52,33 +76,27 @@ class BrokerConfig:
     audit_retention_seconds: int = 2_592_000
 
     def __post_init__(self) -> None:
-        try:
-            cpu_amount = Decimal(self.cpu)
-        except InvalidOperation as exc:
-            raise ValueError("cpu must remain within the fixed safety limit") from exc
-        if not cpu_amount.is_finite() or not 0 < cpu_amount <= 2:
-            raise ValueError("cpu must remain within the fixed safety limit")
+        state_root = _validate_stable_absolute_path(self.state_root, "state_root")
+        socket_path = _validate_stable_absolute_path(self.socket_path, "socket_path")
+        object.__setattr__(self, "state_root", state_root)
+        object.__setattr__(self, "socket_path", socket_path)
 
-        memory_match = re.fullmatch(r"([1-4])Gi", self.memory)
-        if memory_match is None:
-            raise ValueError("memory must remain within the fixed safety limit")
+        if not isinstance(self.image_uri, str) or _IMAGE_URI_PATTERN.fullmatch(self.image_uri) is None:
+            raise ValueError("image_uri must be non-empty and contain no whitespace or @")
+        if (
+            not isinstance(self.image_digest, str)
+            or _SHA256_PATTERN.fullmatch(self.image_digest) is None
+        ):
+            raise ValueError("image_digest must be 64 lowercase hexadecimal characters")
+        if self.opensandbox_domain not in _APPROVED_DOMAINS:
+            raise ValueError("opensandbox_domain must use the approved loopback endpoint")
+        if not isinstance(self.opensandbox_api_key, str) or not self.opensandbox_api_key.strip():
+            raise ValueError("opensandbox_api_key must be non-empty")
 
-        maximums = {
-            "pids_limit": 128,
-            "receptor_max_bytes": 50 * 1024 * 1024,
-            "ligand_max_bytes": 10 * 1024 * 1024,
-            "output_max_bytes": 100 * 1024 * 1024,
-            "execution_timeout_seconds": 180,
-            "sandbox_timeout_seconds": 300,
-            "concurrency": 1,
-            "queue_capacity": 8,
-            "artifact_retention_seconds": 86_400,
-            "audit_retention_seconds": 2_592_000,
-        }
-        for name, maximum in maximums.items():
+        for name, approved in _APPROVED_LIMITS.items():
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= maximum:
-                raise ValueError(f"{name} must remain within the fixed safety limit")
+            if type(value) is not type(approved) or value != approved:
+                raise ValueError(f"{name} must equal the fixed safety limit")
 
     @classmethod
     def from_env(cls) -> "BrokerConfig":

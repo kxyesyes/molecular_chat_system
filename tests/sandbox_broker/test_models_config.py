@@ -27,7 +27,7 @@ def _provenance(**overrides: object) -> BrokerProvenance:
         "sandbox_id": "sandbox-1",
         "image_uri": "registry.example/medchat/vina:1",
         "image_digest": SHA256,
-        "secure_runtime": True,
+        "secure_runtime": "gvisor",
         "vina_version": "1.2.5",
         "meeko_version": "0.5.1",
         "receptor_sha256": "b" * 64,
@@ -49,6 +49,19 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
     monkeypatch.setenv("OPEN_SANDBOX_DOMAIN", "127.0.0.1:8080")
     monkeypatch.setenv("OPEN_SANDBOX_API_KEY", credential)
     return credential
+
+
+def _config_values(tmp_path: Path, **overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "state_root": tmp_path / "state",
+        "socket_path": tmp_path / "broker.sock",
+        "image_uri": "registry.example/medchat/vina:1",
+        "image_digest": SHA256,
+        "opensandbox_domain": "127.0.0.1:8080",
+        "opensandbox_api_key": secrets.token_urlsafe(32),
+    }
+    values.update(overrides)
+    return values
 
 
 def test_job_status_values_are_exact() -> None:
@@ -205,6 +218,12 @@ def test_provenance_rejects_invalid_digests(field: str, invalid: str) -> None:
         _provenance(**{field: invalid})
 
 
+@pytest.mark.parametrize("invalid", [True, "runc", ""])
+def test_provenance_requires_gvisor_secure_runtime(invalid: object) -> None:
+    with pytest.raises(ValidationError):
+        _provenance(secure_runtime=invalid)
+
+
 def test_manifest_validates_energy_pose_count_schema_and_extra_fields() -> None:
     valid = {
         "job_id": "job-1",
@@ -278,40 +297,46 @@ def test_broker_config_loads_required_environment_and_fixed_limits(
 
 
 @pytest.mark.parametrize(
-    ("field", "raised_value"),
+    ("field", "approved"),
     [
-        ("cpu", "3"),
-        ("memory", "5Gi"),
-        ("pids_limit", 129),
-        ("receptor_max_bytes", 50 * 1024 * 1024 + 1),
-        ("ligand_max_bytes", 10 * 1024 * 1024 + 1),
-        ("output_max_bytes", 100 * 1024 * 1024 + 1),
-        ("execution_timeout_seconds", 181),
-        ("sandbox_timeout_seconds", 301),
-        ("concurrency", 2),
-        ("queue_capacity", 9),
-        ("artifact_retention_seconds", 86_401),
-        ("audit_retention_seconds", 2_592_001),
+        ("cpu", "2"),
+        ("memory", "4Gi"),
+        ("pids_limit", 128),
+        ("receptor_max_bytes", 52_428_800),
+        ("ligand_max_bytes", 10_485_760),
+        ("output_max_bytes", 104_857_600),
+        ("execution_timeout_seconds", 180),
+        ("sandbox_timeout_seconds", 300),
+        ("concurrency", 1),
+        ("queue_capacity", 8),
+        ("artifact_retention_seconds", 86_400),
+        ("audit_retention_seconds", 2_592_000),
     ],
 )
-def test_broker_config_rejects_requester_raised_limits(
+@pytest.mark.parametrize("direction", ["low", "high", "bool", "float"])
+def test_broker_config_rejects_every_non_approved_limit(
     tmp_path: Path,
     field: str,
-    raised_value: object,
+    approved: object,
+    direction: str,
 ) -> None:
-    credential = secrets.token_urlsafe(32)
-    values: dict[str, object] = {
-        "state_root": (tmp_path / "state").resolve(),
-        "socket_path": (tmp_path / "broker.sock").resolve(),
-        "image_uri": "registry.example/medchat/vina:1",
-        "image_digest": SHA256,
-        "opensandbox_domain": "127.0.0.1:8080",
-        "opensandbox_api_key": credential,
-        field: raised_value,
-    }
+    if isinstance(approved, str):
+        invalid_values = {
+            "low": "1" if field == "cpu" else "3Gi",
+            "high": "3" if field == "cpu" else "5Gi",
+            "bool": True,
+            "float": 2.0 if field == "cpu" else 4.0,
+        }
+    else:
+        invalid_values = {
+            "low": approved - 1,
+            "high": approved + 1,
+            "bool": True,
+            "float": float(approved),
+        }
 
     with pytest.raises(ValueError, match="safety limit"):
-        BrokerConfig(**values)
+        BrokerConfig(**_config_values(tmp_path, **{field: invalid_values[direction]}))
 
 
 @pytest.mark.parametrize("domain", ["127.0.0.1:8080", "localhost:8080"])
@@ -393,6 +418,97 @@ def test_broker_config_rejects_relative_paths(
 
     with pytest.raises(ValueError, match=variable):
         BrokerConfig.from_env()
+
+
+@pytest.mark.parametrize(
+    "variable",
+    ["MEDCHAT_SANDBOX_BROKER_STATE", "MEDCHAT_SANDBOX_BROKER_SOCKET"],
+)
+def test_broker_config_rejects_absolute_parent_aliases_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    variable: str,
+) -> None:
+    _set_required_env(monkeypatch, tmp_path)
+    leaf = "state" if variable.endswith("STATE") else "broker.sock"
+    alias = tmp_path / "unused" / ".." / leaf
+    assert alias.is_absolute()
+    assert ".." in alias.parts
+    monkeypatch.setenv(variable, str(alias))
+
+    with pytest.raises(ValueError, match=variable):
+        BrokerConfig.from_env()
+
+
+def test_broker_config_rejects_symlink_aliases_for_state_and_socket(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+    alias_root = tmp_path / "alias"
+    try:
+        alias_root.symlink_to(real_root, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symlinks unavailable on this platform: {type(exc).__name__}")
+
+    _set_required_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("MEDCHAT_SANDBOX_BROKER_STATE", str(alias_root / "state"))
+    with pytest.raises(ValueError, match="MEDCHAT_SANDBOX_BROKER_STATE"):
+        BrokerConfig.from_env()
+
+    monkeypatch.setenv("MEDCHAT_SANDBOX_BROKER_STATE", str(real_root / "state"))
+    monkeypatch.setenv("MEDCHAT_SANDBOX_BROKER_SOCKET", str(alias_root / "broker.sock"))
+    with pytest.raises(ValueError, match="MEDCHAT_SANDBOX_BROKER_SOCKET"):
+        BrokerConfig.from_env()
+
+
+@pytest.mark.parametrize("field", ["state_root", "socket_path"])
+def test_direct_config_requires_path_instances(tmp_path: Path, field: str) -> None:
+    with pytest.raises(ValueError, match=field):
+        BrokerConfig(**_config_values(tmp_path, **{field: str(tmp_path / field)}))
+
+
+@pytest.mark.parametrize("field", ["state_root", "socket_path"])
+def test_direct_config_rejects_relative_paths(tmp_path: Path, field: str) -> None:
+    with pytest.raises(ValueError, match=field):
+        BrokerConfig(**_config_values(tmp_path, **{field: Path("relative/path")}))
+
+
+@pytest.mark.parametrize("field", ["state_root", "socket_path"])
+def test_direct_config_rejects_absolute_parent_aliases(tmp_path: Path, field: str) -> None:
+    leaf = "state" if field == "state_root" else "broker.sock"
+    alias = tmp_path / "unused" / ".." / leaf
+
+    with pytest.raises(ValueError, match=field):
+        BrokerConfig(**_config_values(tmp_path, **{field: alias}))
+
+
+@pytest.mark.parametrize("image_uri", ["", "registry.example/vina image", "repo@tag"])
+def test_direct_config_rejects_invalid_image_uri(tmp_path: Path, image_uri: str) -> None:
+    with pytest.raises(ValueError, match="image_uri"):
+        BrokerConfig(**_config_values(tmp_path, image_uri=image_uri))
+
+
+@pytest.mark.parametrize("image_digest", ["a" * 63, "A" * 64, "g" * 64])
+def test_direct_config_rejects_invalid_image_digest(
+    tmp_path: Path,
+    image_digest: str,
+) -> None:
+    with pytest.raises(ValueError, match="image_digest"):
+        BrokerConfig(**_config_values(tmp_path, image_digest=image_digest))
+
+
+@pytest.mark.parametrize("domain", ["0.0.0.0:8080", "example.com:8080"])
+def test_direct_config_rejects_non_loopback_domain(tmp_path: Path, domain: str) -> None:
+    with pytest.raises(ValueError, match="opensandbox_domain"):
+        BrokerConfig(**_config_values(tmp_path, opensandbox_domain=domain))
+
+
+@pytest.mark.parametrize("api_key", ["", "   "])
+def test_direct_config_rejects_empty_api_key(tmp_path: Path, api_key: str) -> None:
+    with pytest.raises(ValueError, match="opensandbox_api_key"):
+        BrokerConfig(**_config_values(tmp_path, opensandbox_api_key=api_key))
 
 
 def test_broker_config_repr_does_not_disclose_credentials_or_paths(
