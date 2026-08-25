@@ -17,10 +17,29 @@ from src.task_runtime.secure_io import read_file_snapshot
 
 
 _CHUNK_BYTES = 1024 * 1024
+_POSE_READ_CHUNK_BYTES = 64 * 1024
+_MAX_RESULT_JSON_BYTES = 1024 * 1024
+_MAX_POSE_LINE_BYTES = 4096
+_MAX_POSE_FILES = 64
+_MAX_POSE_MODES = 256
+_MAX_WARNINGS = 64
+_MAX_WARNING_LENGTH = 1024
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _UUID_HEX_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+_ASCII_FLOAT = (
+    rb"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+)
 _ENERGY_PATTERN = re.compile(
-    r"^REMARK VINA RESULT:\s+(\S+)\s+(\S+)\s+(\S+)\s*$"
+    rb"^REMARK VINA RESULT:[ \t]+("
+    + _ASCII_FLOAT
+    + rb")[ \t]+("
+    + _ASCII_FLOAT
+    + rb")[ \t]+("
+    + _ASCII_FLOAT
+    + rb")[ \t]*$"
+)
+_ENERGY_CLAIM_PATTERN = re.compile(
+    rb"^[ \t]*REMARK[ \t]+VINA[ \t]+RESULT(?=[: \t]|$)"
 )
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _EXPECTED_RESULT_FIELDS = frozenset(
@@ -82,6 +101,20 @@ def _is_reparse(metadata: os.stat_result) -> bool:
 
 def _identity(metadata: os.stat_result) -> tuple[int, int]:
     return metadata.st_dev, metadata.st_ino
+
+
+def _stable_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    identity = (
+        int(getattr(metadata, "st_dev", 0)),
+        int(getattr(metadata, "st_ino", 0)),
+        stat.S_IFMT(int(getattr(metadata, "st_mode", 0))),
+        int(getattr(metadata, "st_file_attributes", 0)),
+        int(getattr(metadata, "st_size", -1)),
+        int(getattr(metadata, "st_mtime_ns", -1)),
+    )
+    if os.name == "posix":
+        return identity + (int(getattr(metadata, "st_ctime_ns", -1)),)
+    return identity
 
 
 def _absolute_components(path: Path) -> list[Path]:
@@ -311,6 +344,10 @@ def stage_input(
         relative = PurePosixPath("jobs", validated_job_id, "input", server_name)
         return StagedInput(str(relative), total, digest.hexdigest())
     except Exception:
+        if published and final is not None:
+            _safe_unlink_created(final, published_identity)
+        raise InputStagingError("input staging failed") from None
+    finally:
         if descriptor is not None:
             try:
                 os.close(descriptor)
@@ -318,9 +355,6 @@ def stage_input(
                 pass
         if part is not None:
             _safe_unlink_created(part, part_identity)
-        if published and final is not None:
-            _safe_unlink_created(final, published_identity)
-        raise InputStagingError("input staging failed") from None
 
 
 def _reject_json_constant(_: str) -> None:
@@ -386,22 +420,175 @@ def _pose_relative_path(value: object) -> tuple[str, PurePosixPath]:
     return value, relative
 
 
-def _parse_pose_energies(content: bytes) -> tuple[float, ...]:
-    text = content.decode("utf-8")
-    energies: list[float] = []
-    for line in text.splitlines():
-        if not line.startswith("REMARK VINA RESULT"):
-            continue
-        match = _ENERGY_PATTERN.match(line)
-        if match is None:
-            raise ValueError
-        values = tuple(float(match.group(index)) for index in (1, 2, 3))
-        if any(not math.isfinite(value) for value in values):
-            raise ValueError
-        energies.append(values[0])
-    if not energies:
+def _append_pose_line_energy(
+    line: bytes, energies: list[float], maximum_modes: int
+) -> None:
+    if line.endswith(b"\r"):
+        line = line[:-1]
+    if _ENERGY_CLAIM_PATTERN.match(line) is None:
+        return
+    match = _ENERGY_PATTERN.fullmatch(line)
+    if match is None:
         raise ValueError
-    return tuple(energies)
+    values = tuple(float(match.group(index)) for index in (1, 2, 3))
+    if any(not math.isfinite(value) for value in values):
+        raise ValueError
+    if len(energies) >= maximum_modes:
+        raise ValueError
+    energies.append(values[0])
+
+
+def _consume_pose_chunk(
+    chunk: bytes,
+    line_buffer: bytearray,
+    energies: list[float],
+    maximum_modes: int,
+) -> None:
+    if any(
+        value not in (9, 10, 13) and not 32 <= value <= 126
+        for value in chunk
+    ):
+        raise ValueError
+    start = 0
+    while True:
+        newline = chunk.find(b"\n", start)
+        if newline < 0:
+            line_buffer.extend(chunk[start:])
+            if len(line_buffer) > _MAX_POSE_LINE_BYTES:
+                raise ValueError
+            return
+        line_buffer.extend(chunk[start:newline])
+        if len(line_buffer) > _MAX_POSE_LINE_BYTES:
+            raise ValueError
+        _append_pose_line_energy(bytes(line_buffer), energies, maximum_modes)
+        line_buffer.clear()
+        start = newline + 1
+
+
+def _read_pose_energies(
+    path: Path, maximum_bytes: int, maximum_modes: int
+) -> tuple[tuple[float, ...], int]:
+    descriptors: list[int] = []
+    parent_paths: list[Path] = []
+    try:
+        if maximum_bytes < 0 or maximum_modes <= 0:
+            raise ValueError
+        if os.name == "posix":
+            directory_flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            if not getattr(os, "O_DIRECTORY", 0) or not getattr(os, "O_NOFOLLOW", 0):
+                raise ValueError
+            current = os.open(path.anchor, directory_flags)
+            descriptors.append(current)
+            directory_identities = [_stable_identity(os.fstat(current))]
+            parts = path.parts[1:]
+            if not parts:
+                raise ValueError
+            for component in parts[:-1]:
+                current = os.open(component, directory_flags, dir_fd=current)
+                descriptors.append(current)
+                metadata = os.fstat(current)
+                if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
+                    raise ValueError
+                directory_identities.append(_stable_identity(metadata))
+            flags = (
+                os.O_RDONLY
+                | os.O_NONBLOCK
+                | getattr(os, "O_NOCTTY", 0)
+                | os.O_NOFOLLOW
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            descriptor = os.open(parts[-1], flags, dir_fd=current)
+            descriptors.append(descriptor)
+            before = os.fstat(descriptor)
+            named_before = os.stat(parts[-1], dir_fd=current, follow_symlinks=False)
+        else:
+            current_path = Path(path.anchor)
+            for component in path.parts[1:-1]:
+                current_path /= component
+                metadata = current_path.lstat()
+                if (
+                    not stat.S_ISDIR(metadata.st_mode)
+                    or stat.S_ISLNK(metadata.st_mode)
+                    or _is_reparse(metadata)
+                ):
+                    raise ValueError
+                parent_paths.append(current_path)
+            directory_identities = [
+                _stable_identity(parent.lstat()) for parent in parent_paths
+            ]
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+            )
+            descriptor = os.open(path, flags)
+            descriptors.append(descriptor)
+            before = os.fstat(descriptor)
+            named_before = path.lstat()
+
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(named_before.st_mode)
+            or _is_reparse(named_before)
+            or before.st_nlink != 1
+            or named_before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > maximum_bytes
+            or _stable_identity(before) != _stable_identity(named_before)
+        ):
+            raise ValueError
+
+        energies: list[float] = []
+        line_buffer = bytearray()
+        total = 0
+        while True:
+            request = min(_POSE_READ_CHUNK_BYTES, maximum_bytes + 1 - total)
+            if request <= 0:
+                raise ValueError
+            chunk = os.read(descriptor, request)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > maximum_bytes:
+                raise ValueError
+            _consume_pose_chunk(chunk, line_buffer, energies, maximum_modes)
+        if line_buffer:
+            _append_pose_line_energy(bytes(line_buffer), energies, maximum_modes)
+        if not energies:
+            raise ValueError
+
+        after = os.fstat(descriptor)
+        if os.name == "posix":
+            named_after = os.stat(parts[-1], dir_fd=current, follow_symlinks=False)
+            current_directory_identities = [
+                _stable_identity(os.fstat(item)) for item in descriptors[:-1]
+            ]
+        else:
+            named_after = path.lstat()
+            current_directory_identities = [
+                _stable_identity(parent.lstat()) for parent in parent_paths
+            ]
+        if (
+            total != before.st_size
+            or after.st_nlink != 1
+            or named_after.st_nlink != 1
+            or _stable_identity(before) != _stable_identity(after)
+            or _stable_identity(before) != _stable_identity(named_after)
+            or directory_identities != current_directory_identities
+        ):
+            raise ValueError
+        return tuple(energies), total
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def _validate_scientific_output(
@@ -429,7 +616,9 @@ def _validate_scientific_output(
     ):
         raise ValueError
 
-    result_content = _read_regular_snapshot(root / "result.json", max_output_bytes)
+    result_content = _read_regular_snapshot(
+        root / "result.json", min(max_output_bytes, _MAX_RESULT_JSON_BYTES)
+    )
     payload = json.loads(
         result_content.decode("utf-8"),
         parse_constant=_reject_json_constant,
@@ -444,7 +633,7 @@ def _validate_scientific_output(
     if payload["receptor_sha256"] != receptor_sha256 or payload["ligand_sha256"] != ligand_sha256:
         raise ValueError
     pose_count = payload["pose_count"]
-    if type(pose_count) is not int or pose_count <= 0:
+    if type(pose_count) is not int or not 0 < pose_count <= _MAX_POSE_MODES:
         raise ValueError
     best_value = payload["best_energy"]
     if type(best_value) not in (int, float):
@@ -456,10 +645,21 @@ def _validate_scientific_output(
         if type(payload[key]) is not str or not payload[key].strip():
             raise ValueError
     warnings = payload["warnings"]
-    if type(warnings) is not list or any(type(item) is not str for item in warnings):
+    if (
+        type(warnings) is not list
+        or len(warnings) > _MAX_WARNINGS
+        or any(
+            type(item) is not str or len(item) > _MAX_WARNING_LENGTH
+            for item in warnings
+        )
+    ):
         raise ValueError
     pose_values = payload["pose_files"]
-    if type(pose_values) is not list or not pose_values:
+    if (
+        type(pose_values) is not list
+        or not pose_values
+        or len(pose_values) > _MAX_POSE_FILES
+    ):
         raise ValueError
 
     parsed_paths = [_pose_relative_path(item) for item in pose_values]
@@ -472,11 +672,12 @@ def _validate_scientific_output(
     pose_names: list[str] = []
     for index, (name, relative) in enumerate(parsed_paths):
         projected = _project_without_links(root, relative)
-        content = _read_regular_snapshot(projected, max_output_bytes)
-        total_bytes += len(content)
-        if total_bytes > max_output_bytes:
-            raise ValueError
-        energies = _parse_pose_energies(content)
+        energies, pose_bytes = _read_pose_energies(
+            projected,
+            max_output_bytes - total_bytes,
+            _MAX_POSE_MODES - len(all_energies),
+        )
+        total_bytes += pose_bytes
         if index == 0 and not math.isclose(
             energies[0], best_energy, rel_tol=0.0, abs_tol=1e-6
         ):

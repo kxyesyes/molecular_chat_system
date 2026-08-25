@@ -274,6 +274,167 @@ def test_stage_input_never_overwrites_final_created_during_publication(
     assert not (final.parent / ".ligand.sdf.part").exists()
 
 
+@pytest.mark.parametrize(
+    "interrupt_type",
+    [KeyboardInterrupt, SystemExit, asyncio.CancelledError],
+)
+def test_stage_input_read_interrupt_closes_fd_cleans_part_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    interrupt_type: type[BaseException],
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    job_id = "1" * 32
+    opened_parts: list[int] = []
+    original_open = os.open
+
+    def capture_open(path: object, flags: int, mode: int = 0o777) -> int:
+        descriptor = original_open(path, flags, mode)
+        if str(path).endswith(".part"):
+            opened_parts.append(descriptor)
+        return descriptor
+
+    class InterruptingSource:
+        def read(self, size: int) -> bytes:
+            del size
+            raise interrupt_type()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(validation_module.os, "open", capture_open)
+        with pytest.raises(interrupt_type):
+            stage_input(
+                state_root,
+                job_id,
+                "ligand",
+                ".sdf",
+                InterruptingSource(),  # type: ignore[arg-type]
+                16,
+            )
+
+    assert len(opened_parts) == 1
+    descriptor_closed = False
+    try:
+        os.fstat(opened_parts[0])
+    except OSError:
+        descriptor_closed = True
+    if not descriptor_closed:
+        os.close(opened_parts[0])
+    assert descriptor_closed
+    input_root = state_root / "jobs" / job_id / "input"
+    assert not (input_root / ".ligand.sdf.part").exists()
+
+    retried = stage_input(
+        state_root, job_id, "ligand", ".sdf", io.BytesIO(b"retry"), 16
+    )
+    assert retried.size_bytes == 5
+
+
+@pytest.mark.parametrize("failure_point", ["write", "fsync", "publish"])
+def test_stage_input_io_interrupt_cleans_part_and_allows_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure_point: str,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    job_id = "1" * 32
+    opened_parts: list[int] = []
+    original_open = os.open
+    original_link = os.link
+
+    def capture_open(path: object, flags: int, mode: int = 0o777) -> int:
+        descriptor = original_open(path, flags, mode)
+        if str(path).endswith(".part"):
+            opened_parts.append(descriptor)
+        return descriptor
+
+    def interrupt_write(descriptor: int, content: object) -> int:
+        del descriptor, content
+        raise KeyboardInterrupt
+
+    def interrupt_fsync(descriptor: int) -> None:
+        del descriptor
+        raise KeyboardInterrupt
+
+    def publish_then_interrupt(
+        source: object,
+        destination: object,
+        *,
+        follow_symlinks: bool = True,
+    ) -> None:
+        original_link(source, destination, follow_symlinks=follow_symlinks)
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patch:
+        patch.setattr(validation_module.os, "open", capture_open)
+        if failure_point == "write":
+            patch.setattr(validation_module.os, "write", interrupt_write)
+        elif failure_point == "fsync":
+            patch.setattr(validation_module.os, "fsync", interrupt_fsync)
+        else:
+            patch.setattr(validation_module.os, "link", publish_then_interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            stage_input(
+                state_root, job_id, "ligand", ".sdf", io.BytesIO(b"content"), 16
+            )
+
+    assert len(opened_parts) == 1
+    descriptor_closed = False
+    try:
+        os.fstat(opened_parts[0])
+    except OSError:
+        descriptor_closed = True
+    if not descriptor_closed:
+        os.close(opened_parts[0])
+    assert descriptor_closed
+    input_root = state_root / "jobs" / job_id / "input"
+    assert not (input_root / ".ligand.sdf.part").exists()
+
+    retried = stage_input(
+        state_root, job_id, "ligand", ".sdf", io.BytesIO(b"content"), 16
+    )
+    assert retried.size_bytes == 7
+
+
+def test_stage_input_interrupt_never_deletes_replaced_part(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    job_id = "1" * 32
+
+    def replace_part_then_interrupt(
+        source: object,
+        destination: object,
+        *,
+        follow_symlinks: bool = True,
+    ) -> None:
+        del destination, follow_symlinks
+        part = Path(source)
+        part.unlink()
+        part.write_bytes(b"attacker")
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patch:
+        patch.setattr(validation_module.os, "link", replace_part_then_interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            stage_input(
+                state_root, job_id, "ligand", ".sdf", io.BytesIO(b"content"), 16
+            )
+
+    part = state_root / "jobs" / job_id / "input" / ".ligand.sdf.part"
+    assert part.read_bytes() == b"attacker"
+    with pytest.raises(InputStagingError):
+        stage_input(
+            state_root, job_id, "ligand", ".sdf", io.BytesIO(b"content"), 16
+        )
+    part.unlink()
+    assert stage_input(
+        state_root, job_id, "ligand", ".sdf", io.BytesIO(b"content"), 16
+    ).size_bytes == 7
+
+
 def test_stage_input_rejects_state_and_part_symlinks(tmp_path: Path) -> None:
     real = tmp_path / "real"
     real.mkdir()
@@ -497,6 +658,8 @@ def test_scientific_output_counts_modes_across_unique_pose_files(
         b"REMARK VINA RESULT: nan 1.0 1.5\n",
         b"REMARK VINA RESULT: -7.0 1.0\n",
         b"REMARK VINA RESULT broken\n",
+        b" REMARK VINA RESULT: -7.0 1.0 1.5\n",
+        b"REMARK  VINA RESULT: -7.0 1.0 1.5\n",
     ],
 )
 def test_scientific_output_rejects_invalid_later_mode(
@@ -520,6 +683,155 @@ def test_scientific_output_requires_first_mode_to_be_best(tmp_path: Path) -> Non
 
     with pytest.raises(ScientificOutputError):
         validate_scientific_output(output, SHA_A, SHA_B, 1024)
+
+
+def test_scientific_output_reads_second_pose_only_with_remaining_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = build_valid_output(tmp_path)
+    second_content = b"REMARK VINA RESULT: -6.5 1.0 1.5\n"
+    (output / "poses" / "second.pdbqt").write_bytes(second_content)
+    rewrite_result(
+        output,
+        {
+            "pose_count": 2,
+            "pose_files": ["poses/result.pdbqt", "poses/second.pdbqt"],
+        },
+    )
+    result_size = (output / "result.json").stat().st_size
+    total_size = result_size + len(POSE) + len(second_content)
+    second_descriptors: set[int] = set()
+    second_requests: list[int] = []
+    original_open = os.open
+    original_read = os.read
+
+    def tracking_open(
+        path: object,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if dir_fd is None:
+            descriptor = original_open(path, flags, mode)
+        else:
+            descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if str(path).endswith("second.pdbqt"):
+            second_descriptors.add(descriptor)
+        return descriptor
+
+    def tracking_read(descriptor: int, size: int) -> bytes:
+        if descriptor in second_descriptors:
+            second_requests.append(size)
+        return original_read(descriptor, size)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(validation_module.os, "open", tracking_open)
+        patch.setattr(validation_module.os, "read", tracking_read)
+        validated = validate_scientific_output(
+            output, SHA_A, SHA_B, total_size
+        )
+
+    assert validated.pose_count == 2
+    assert second_requests
+    assert max(second_requests) <= len(second_content) + 1
+    with pytest.raises(ScientificOutputError):
+        validate_scientific_output(output, SHA_A, SHA_B, total_size - 1)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        b"A" * 4097 + b"\n",
+        b"ordinary\x00binary\n",
+        "non-ascii-\N{LATIN SMALL LETTER E WITH ACUTE}\n".encode("utf-8"),
+        b"\xff\n",
+    ],
+)
+def test_scientific_output_rejects_unbounded_or_non_ascii_pose_lines(
+    tmp_path: Path, prefix: bytes
+) -> None:
+    output = build_valid_output(tmp_path, pose=prefix + POSE)
+    with pytest.raises(ScientificOutputError):
+        validate_scientific_output(output, SHA_A, SHA_B, 8192)
+
+
+def test_scientific_output_rejects_more_than_64_pose_files(tmp_path: Path) -> None:
+    output = build_valid_output(tmp_path)
+    pose_files: list[str] = []
+    for index in range(65):
+        name = f"poses/mode-{index:02d}.pdbqt"
+        (output / "poses" / f"mode-{index:02d}.pdbqt").write_bytes(POSE)
+        pose_files.append(name)
+    rewrite_result(output, {"pose_count": 65, "pose_files": pose_files})
+
+    with pytest.raises(ScientificOutputError):
+        validate_scientific_output(output, SHA_A, SHA_B, 32 * 1024)
+
+
+def test_scientific_output_rejects_more_than_256_modes(tmp_path: Path) -> None:
+    pose = b"REMARK VINA RESULT: -7.4 0.0 0.0\n" * 257
+    output = build_valid_output(tmp_path, pose=pose)
+    rewrite_result(output, {"pose_count": 256})
+
+    with pytest.raises(ScientificOutputError):
+        validate_scientific_output(output, SHA_A, SHA_B, 32 * 1024)
+
+
+@pytest.mark.parametrize(
+    "warnings",
+    [
+        ["warning"] * 65,
+        ["w" * 1025],
+    ],
+)
+def test_scientific_output_bounds_warning_cardinality_and_length(
+    tmp_path: Path, warnings: list[str]
+) -> None:
+    output = build_valid_output(tmp_path)
+    rewrite_result(output, {"warnings": warnings})
+
+    with pytest.raises(ScientificOutputError):
+        validate_scientific_output(output, SHA_A, SHA_B, 16 * 1024)
+
+
+@pytest.mark.parametrize(
+    "remark",
+    [
+        b"REMARK VINA RESULT: -7_4 0.0 0.0\n",
+        b"REMARK VINA RESULT: -7.4 0_0 0.0\n",
+        "REMARK VINA RESULT: -7.4 \N{ARABIC-INDIC DIGIT ZERO}.0 0.0\n".encode("utf-8"),
+        b"REMARK VINA RESULT: -7,4 0.0 0.0\n",
+        b"REMARK VINA RESULT: 0x1p0 0.0 0.0\n",
+        b"REMARK VINA RESULT: -7.4tail 0.0 0.0\n",
+        b"REMARK VINA RESULT: nan 0.0 0.0\n",
+        b"REMARK VINA RESULT: -7.4 inf 0.0\n",
+        b" REMARK VINA RESULT: -7.4 0.0 0.0\n",
+        b"REMARK  VINA RESULT: -7.4 0.0 0.0\n",
+    ],
+)
+def test_scientific_output_rejects_non_ascii_decimal_vina_tokens(
+    tmp_path: Path, remark: bytes
+) -> None:
+    output = build_valid_output(tmp_path, pose=remark)
+    with pytest.raises(ScientificOutputError):
+        validate_scientific_output(output, SHA_A, SHA_B, 1024)
+
+
+def test_scientific_output_accepts_strict_decimal_and_exponent_tokens(
+    tmp_path: Path,
+) -> None:
+    pose = (
+        b"REMARK VINA RESULT: -7.4e0 +0 .5\n"
+        b"REMARK VINA RESULT: -6E+0 1. 2e-3\n"
+    )
+    output = build_valid_output(tmp_path, pose=pose)
+    rewrite_result(output, {"pose_count": 2})
+
+    validated = validate_scientific_output(output, SHA_A, SHA_B, 1024)
+
+    assert validated.pose_count == 2
+    assert validated.best_energy == -7.4
 
 
 def test_scientific_output_enforces_total_size_and_strict_limit_type(tmp_path: Path) -> None:
