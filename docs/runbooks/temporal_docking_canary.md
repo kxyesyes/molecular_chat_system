@@ -201,6 +201,25 @@ sudo /usr/bin/env -i \
   --env-file /etc/medchat/temporal.env \
   -f deployment/temporal/docker-compose.yml \
   -f "$relay_root/live/compose.override.yml" \
+  up -d --wait --wait-timeout 180 temporal
+
+if ! sudo /usr/bin/env -i \
+  HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/bin/docker compose \
+  --env-file /etc/medchat/temporal.env \
+  -f deployment/temporal/docker-compose.yml \
+  -f "$relay_root/live/compose.override.yml" \
+  run --rm --no-deps --no-TTY temporal-namespace
+then
+  exit 1
+fi
+
+sudo /usr/bin/env -i \
+  HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/bin/docker compose \
+  --env-file /etc/medchat/temporal.env \
+  -f deployment/temporal/docker-compose.yml \
+  -f "$relay_root/live/compose.override.yml" \
   up -d --wait --wait-timeout 180 prometheus
 ```
 
@@ -219,11 +238,13 @@ the nginx config, runs the pinned `/usr/sbin/nginx -t`, reloads nginx, and only
 after both succeed atomically publishes the live override, manifest, and worker
 target. The explicit post-activation `nginx -t` above is an additional operator
 check; activation has already performed both test and reload. The final Compose
-command uses `live/compose.override.yml` and names only `prometheus`. From the
-committed dependency graph Compose also starts and waits for `postgres`,
-`temporal-schema`, `temporal`, `temporal-exporter-role-sync`, and
-`postgres-exporter`; it does not start unrelated `temporal-ui` or `grafana` at
-this gate.
+commands use `live/compose.override.yml`. First, `up ... temporal` waits for
+PostgreSQL, schema setup, and Temporal health. The synchronous, dependency-free
+`run --rm --no-deps --no-TTY temporal-namespace` then executes the bounded namespace
+setup against that healthy server; any nonzero exit stops the procedure. Only
+after this one-shot succeeds does `up ... prometheus` start and wait for its
+remaining `temporal-exporter-role-sync` and `postgres-exporter` dependencies.
+It does not start unrelated `temporal-ui` or `grafana` at this gate.
 
 The schema, namespace, Temporal server, and exporter role-sync wrappers mounted
 by Compose are part of the validated deployment contract. Do not replace their

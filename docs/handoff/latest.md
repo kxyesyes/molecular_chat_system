@@ -174,9 +174,12 @@ Agent/contract reports are local ignored artifacts and are not committed:
    Compose creates the dedicated labeled bridge. Confirm Prometheus is not
    running, then activate the relay and require its pinned nginx config
    test/reload to pass. With the base Compose file and published live override,
-   run `up -d --wait --wait-timeout 180 prometheus`; the committed dependency
-   graph supplies PostgreSQL, schema, Temporal, role-sync, and PostgreSQL
-   exporter. Do not use `sudo -E`, `--preserve-env`, or loosen env/secret modes.
+   start/wait for healthy Temporal and its PostgreSQL/schema dependencies, then
+   synchronously run `temporal-namespace` with `--rm --no-deps --no-TTY` and
+   require exit code 0. Only then run
+   `up -d --wait --wait-timeout 180 prometheus`; its
+   remaining dependency closure supplies role-sync and PostgreSQL exporter. Do
+   not use `sudo -E`, `--preserve-env`, or loosen env/secret modes.
 6. Activate the staged worker generation, then require the Prometheus query
    `up{job="medchat-temporal-worker"}` to return exactly one target with value
    `1`. Only after that gate, start `temporal-ui` and `grafana` with the same base
