@@ -70,7 +70,9 @@ MEDCHAT_TEMPORAL_WORKER_METRICS_ADDRESS=127.0.0.1
 The Web runtime file `/etc/medchat/medchat.env` is separate. It starts at
 `MEDCHAT_TASK_BACKEND=temporal_canary` with
 `MEDCHAT_TEMPORAL_CANARY_PERCENT=0`; it is the file changed by the canary
-manager. Other application secrets in that file remain runtime-only.
+manager. Other application secrets in that file remain runtime-only. Both this
+file and the dedicated worker file remain `root:root 0600`; systemd PID 1 reads
+them before starting the unprivileged services.
 
 Compose secret source files must be created by the approved host secret manager
 without echoing their values. Each is a regular, non-symlink file with one value,
@@ -85,35 +87,112 @@ GRAFANA_ADMIN_PASSWORD_FILE=<protected secret file>
 
 Before every start, verify the files and parent directory metadata through the
 approved host provisioning process. Do not use `echo`, repository `.env` files,
-or command-line secret values.
+or command-line secret values. An ordinary operator cannot read these files and
+must not be added to a broadly privileged group as a workaround. Compose is run
+through the fixed root command below: root reads the root-only env and secret
+files, while `/usr/bin/env -i` prevents the caller's environment from crossing
+the privilege boundary. Do not use `sudo -E` or `sudo --preserve-env`.
 
-## 3. Start the operator-managed Compose stack
+## 3. Render the metrics relay and start Compose
 
 Run from the reviewed release root. All published ports in the committed Compose
-file bind to `127.0.0.1`; do not add public port mappings.
+file bind to `127.0.0.1`; do not add public port mappings. The metrics relay must
+be rendered before Compose starts. Its generation-specific override is what adds
+the private `worker-metrics-scrape` bridge, assigns Prometheus its fixed scrape
+address, and mounts the empty pre-created live file-SD directory.
+
+Production mode accepts only the fixed paths shown here. In particular,
+`--worker-env-file` is `/etc/medchat/medchat.env`, and
+`--nginx-command` is `/usr/sbin/nginx`. The existing
+`/etc/medchat/generated` parent must be `root:root` and not group/other writable;
+the relay creates only its final `temporal-metrics` child.
 
 ```bash
-docker compose \
+cd /usr/local/src/medchat-release
+release_root=/usr/local/src/medchat-release
+relay_root=/etc/medchat/generated/temporal-metrics
+relay_nginx=/etc/nginx/conf.d/medchat-temporal-worker-metrics.conf
+
+sudo install -d -o root -g root -m 0755 /etc/medchat/generated
+
+relay_render="$(
+  sudo /usr/bin/env -i \
+    HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    /opt/conda/envs/medchat/bin/python -I \
+    "$release_root/scripts/configure_temporal_metrics_relay.py" \
+    --render \
+    --env-file /etc/medchat/temporal.env \
+    --worker-env-file /etc/medchat/medchat.env \
+    --output-dir "$relay_root" \
+    --nginx-output "$relay_nginx" \
+    --nginx-command /usr/sbin/nginx
+)"
+printf '%s\n' "$relay_render"
+generation_id=${relay_render#OK E_RELAY_RENDERED generation=}
+case "$generation_id" in *[!0-9a-f]*|'') exit 1;; esac
+[ "${#generation_id}" -eq 24 ] || exit 1
+
+compose_override="$relay_root/generations/$generation_id/compose.override.yml"
+sudo /usr/bin/test -f "$compose_override"
+
+sudo /usr/bin/env -i \
+  HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/bin/docker compose \
   --env-file /etc/medchat/temporal.env \
   -f deployment/temporal/docker-compose.yml \
+  -f "$compose_override" \
   config --quiet
 
-docker compose \
+sudo /usr/bin/env -i \
+  HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/bin/docker compose \
   --env-file /etc/medchat/temporal.env \
   -f deployment/temporal/docker-compose.yml \
+  -f "$compose_override" \
   up -d --wait --wait-timeout 180
 
-docker compose \
+sudo /usr/bin/env -i \
+  HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /opt/conda/envs/medchat/bin/python -I \
+  "$release_root/scripts/configure_temporal_metrics_relay.py" \
+  --activate "$generation_id" \
+  --env-file /etc/medchat/temporal.env \
+  --worker-env-file /etc/medchat/medchat.env \
+  --output-dir "$relay_root" \
+  --nginx-output "$relay_nginx" \
+  --nginx-command /usr/sbin/nginx
+
+sudo /usr/bin/env -i \
+  HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/sbin/nginx -t
+
+sudo /usr/bin/env -i \
+  HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/bin/docker compose \
   --env-file /etc/medchat/temporal.env \
   -f deployment/temporal/docker-compose.yml \
+  -f "$relay_root/live/compose.override.yml" \
   ps
 ```
 
+Render prints exactly `OK E_RELAY_RENDERED generation=<24 lowercase hex>` and
+stages `compose.override.yml`, `file_sd/worker-targets.json`, `nginx.conf`, and a
+hash-bound manifest. Compose consumes the staged override first, creating the
+expected project-owned/labeled bridge and starting Prometheus with an empty live
+file-SD mount. It must not be started from the base Compose file alone.
+
+Activate re-reads both env files, rechecks routes and Docker networks, and
+refuses to proceed unless that exact private bridge exists. It then publishes
+the nginx config, runs the pinned `/usr/sbin/nginx -t`, reloads nginx, and only
+after both succeed atomically publishes the live override, manifest, and worker
+target. The explicit post-activation `nginx -t` above is an additional operator
+check; activation has already performed both test and reload. Subsequent Compose
+commands use `live/compose.override.yml`.
+
 The schema, namespace, Temporal server, and exporter role-sync wrappers mounted
 by Compose are part of the validated deployment contract. Do not replace their
-entrypoints or commands. Configure the worker metrics relay only with
-`scripts/configure_temporal_metrics_relay.py`; its production mode requires
-trusted pre-existing parents and preserves a loopback/private-network boundary.
+entrypoints or commands. Do not manually create the bridge, nginx file,
+file-SD target, or live override.
 
 ## 4. Stage and activate an immutable worker generation
 
@@ -150,6 +229,45 @@ sudo systemctl enable medchat-temporal-worker.service
 sudo systemctl status medchat-temporal-worker-prepare.service \
   medchat-temporal-worker.service
 ```
+
+After the worker is active, wait for one file-SD refresh and scrape interval and
+require the exact worker job to report one target with value `1`:
+
+```bash
+/opt/conda/envs/medchat/bin/python -I - <<'PY'
+import json
+import time
+import urllib.parse
+import urllib.request
+
+query = 'up{job="medchat-temporal-worker"}'
+url = "http://127.0.0.1:9090/api/v1/query?" + urllib.parse.urlencode(
+    {"query": query}
+)
+deadline = time.monotonic() + 90
+while time.monotonic() < deadline:
+    try:
+        with urllib.request.urlopen(url, timeout=10) as response:
+            payload = json.load(response)
+        result = payload.get("data", {}).get("result", [])
+        if (
+            payload.get("status") == "success"
+            and len(result) == 1
+            and result[0].get("metric", {}).get("job")
+            == "medchat-temporal-worker"
+            and result[0].get("value", [None, None])[1] == "1"
+        ):
+            print("temporal_worker_target_up=1")
+            break
+    except (OSError, ValueError):
+        pass
+    time.sleep(2)
+else:
+    raise SystemExit("temporal_worker_target_not_up")
+PY
+```
+
+Failure to reach exactly one `up` target blocks deployment and canary preflight.
 
 Activation verifies the directory digest, canonical manifest, and all four
 assets; switches `current`; reloads systemd; verifies the actually loaded unit

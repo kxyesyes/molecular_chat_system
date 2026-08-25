@@ -6,7 +6,7 @@ Branch: `codex/temporal-production-canary-readiness`
 
 Task 11 starting HEAD: `73b17026609df6e14705df728791ba0a93baca6f`
 
-Isolated worktree: `D:\MedChat\molecular_chat_system_worktrees\industrial-agent-temporal-docking`
+Workspace: isolated task worktree
 
 ## Objective and current state
 
@@ -159,25 +159,32 @@ Agent/contract reports are local ignored artifacts and are not committed:
 
 1. On a disposable native Linux production candidate, verify root-owned `go-w`
    release/Conda/deployment sources and run the trust-boundary stdlib suites.
-2. Run the isolated live-install runner in its private mount namespace, then
-   stage and activate the immutable generation. If a flat predecessor exists,
-   exercise the allowlisted migration and confirm legacy tmpfiles remains
-   quarantined.
+2. Run the isolated live-install runner in its private mount namespace and stage
+   the immutable worker generation without activating it. If a flat predecessor
+   exists, exercise the allowlisted migration only during the later activation
+   window and confirm legacy tmpfiles remains quarantined.
 3. Run `systemd-analyze verify` for the Web and worker units, real activation/
    rollback/migration signal tests, mixed lifecycle tests, and the runtime-mask +
    held old `cgroup.kill` descriptor integration test on cgroup v2.
 4. Provision runtime-only Compose secrets and both environment files through the
    trusted host process; set an approved positive backup retention policy.
-5. Start the pinned Compose stack, configure the loopback metrics relay, and run
-   Docker Compose config, promtool config/rules/tests, dashboard, health, queue,
-   and alert checks.
-6. Use a trusted version-specific PostgreSQL bin directory to create a real
+5. As root with an empty inherited environment, render a metrics-relay
+   generation from the root-only env files. Start the pinned Compose stack with
+   that generation's override so Compose creates the dedicated labeled bridge
+   and starts Prometheus; then activate the relay, require its pinned nginx
+   config test/reload to pass, and switch later Compose commands to the live
+   override. Do not use `sudo -E`, `--preserve-env`, or loosen env/secret modes.
+6. Activate the staged worker generation, then require the Prometheus query
+   `up{job="medchat-temporal-worker"}` to return exactly one target with value
+   `1`. Run promtool config/rules/tests, dashboard, health, queue, and alert
+   checks.
+7. Use a trusted version-specific PostgreSQL bin directory to create a real
    atomic backup and verify restore into `temporal_verify`; confirm the passed
    `latest-verified.json` marker.
-7. At canary 0, run production preflight. It must include deployment, contract
+8. At canary 0, run production preflight. It must include deployment, contract
    repeat 3, real Temporal/Vina repeat 3 with verified artifacts/provenance,
    infrastructure, release-blocker alerts, and backup/restore evidence.
-8. Promote only `0 -> 5 -> 10 -> 25`. At each nonzero level collect 20 real
+9. Promote only `0 -> 5 -> 10 -> 25`. At each nonzero level collect 20 real
    terminal tasks, or observe 24 hours with at least 3, before the next level.
 
 Any missing host action keeps readiness `partial`. Rollback first routes only new
@@ -185,7 +192,6 @@ traffic to 0; it does not delete or locally replay Temporal-accepted work.
 
 ## Workspace integrity
 
-All commands and edits in this task used the isolated worktree named above. No
-command was run against, and no file was changed in, the original
-`D:\MedChat\molecular_chat_system` workspace. Runtime reports remain ignored and
-outside the documentation commit.
+All commands and edits in this task used the isolated task worktree. No command
+was run against, and no file was changed in, the original mixed workspace.
+Runtime reports remain ignored and outside the documentation commit.
