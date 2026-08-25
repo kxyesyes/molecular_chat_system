@@ -669,7 +669,11 @@ class OpenSandboxClient:
             raise SandboxInputError("only fixed broker inputs may be uploaded")
         limits = {
             "receptor.pdb": self._config.receptor_max_bytes,
+            "receptor.pdbqt": self._config.receptor_max_bytes,
             "ligand.sdf": self._config.ligand_max_bytes,
+            "ligand.mol": self._config.ligand_max_bytes,
+            "ligand.pdb": self._config.ligand_max_bytes,
+            "ligand.pdbqt": self._config.ligand_max_bytes,
             "request.json": _REQUEST_MAX_BYTES,
         }
         limit = limits.get(parts[-1])

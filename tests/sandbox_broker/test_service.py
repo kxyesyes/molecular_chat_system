@@ -18,7 +18,11 @@ from src.sandbox_broker.models import (
     DockingManifest,
     DockingParameters,
 )
-from src.sandbox_broker.opensandbox_client import SandboxCommandResult, SandboxHandle
+from src.sandbox_broker.opensandbox_client import (
+    OpenSandboxClient,
+    SandboxCommandResult,
+    SandboxHandle,
+)
 from src.sandbox_broker.service import (
     BrokerFailure,
     PreparedDockingSubmission,
@@ -115,6 +119,28 @@ class FakeSandboxClient:
         self.destroyed_ids.append(sandbox_id)
 
 
+class _UploadRecordingFactory:
+    def __init__(self) -> None:
+        self.uploads: list[tuple[str, str]] = []
+
+    async def upload_text(self, raw: object, path: str, data: str) -> None:
+        del raw
+        self.uploads.append((path, data))
+
+
+class AdapterUploadSandboxClient(FakeSandboxClient):
+    """Run service uploads through the production adapter's fixed allowlist."""
+
+    def __init__(self, config: BrokerConfig) -> None:
+        super().__init__()
+        self.factory = _UploadRecordingFactory()
+        self.adapter = OpenSandboxClient(config, sandbox_factory=self.factory)
+        self.uploads = self.factory.uploads
+
+    async def upload_text(self, handle: SandboxHandle, path: str, data: str) -> None:
+        await self.adapter.upload_text(handle, path, data)
+
+
 class FaultSandboxClient(FakeSandboxClient):
     def __init__(
         self,
@@ -188,6 +214,35 @@ class BlockingDestroySandboxClient(FakeSandboxClient):
         await self.destroy_release.wait()
 
 
+class BlockingCreateSandboxClient(FakeSandboxClient):
+    def __init__(self, *, failure: BaseException | None = None) -> None:
+        super().__init__()
+        self.failure = failure
+        self.remote_live = asyncio.Event()
+        self.create_release = asyncio.Event()
+        self.live_ids: set[str] = set()
+        self.create_cancelled = False
+
+    async def create(self, job_id: str) -> SandboxHandle:
+        self.create_count += 1
+        sandbox_id = f"sandbox-{job_id}"
+        self.live_ids.add(sandbox_id)
+        self.remote_live.set()
+        try:
+            await self.create_release.wait()
+        except asyncio.CancelledError:
+            self.create_cancelled = True
+            raise
+        if self.failure is not None:
+            self.live_ids.remove(sandbox_id)
+            raise self.failure
+        return SandboxHandle(sandbox_id, object())
+
+    async def destroy(self, handle: SandboxHandle) -> None:
+        await super().destroy(handle)
+        self.live_ids.remove(handle.sandbox_id)
+
+
 def _config(tmp_path: Path) -> BrokerConfig:
     state_root = tmp_path / "state"
     state_root.mkdir(parents=True)
@@ -227,6 +282,41 @@ def _prepared(config: BrokerConfig) -> PreparedDockingSubmission:
             parameters, receptor, ligand
         ),
         trace_id="trace-1",
+    )
+
+
+def _prepared_with_suffixes(
+    config: BrokerConfig,
+    receptor_suffix: str,
+    ligand_suffix: str,
+) -> PreparedDockingSubmission:
+    staged = config.state_root / "staged" / ("2" * 32)
+    staged.mkdir(parents=True, exist_ok=True)
+    receptor_bytes = b"ATOM\n"
+    ligand_bytes = b"ligand\n"
+    receptor_name = f"receptor{receptor_suffix}"
+    ligand_name = f"ligand{ligand_suffix}"
+    (staged / receptor_name).write_bytes(receptor_bytes)
+    (staged / ligand_name).write_bytes(ligand_bytes)
+    receptor = StagedInput(
+        relative_path=f"staged/{'2' * 32}/{receptor_name}",
+        size_bytes=len(receptor_bytes),
+        sha256=hashlib.sha256(receptor_bytes).hexdigest(),
+    )
+    ligand = StagedInput(
+        relative_path=f"staged/{'2' * 32}/{ligand_name}",
+        size_bytes=len(ligand_bytes),
+        sha256=hashlib.sha256(ligand_bytes).hexdigest(),
+    )
+    parameters = DockingParameters(center=[1, 2, 3], size=[20, 20, 20])
+    return PreparedDockingSubmission(
+        parameters=parameters,
+        receptor=receptor,
+        ligand=ligand,
+        canonical_input_sha256=canonical_submission_sha256(
+            parameters, receptor, ligand
+        ),
+        trace_id="trace-suffixes",
     )
 
 
@@ -340,6 +430,46 @@ def test_job_runs_once_and_manifest_is_visible_only_after_cleanup(tmp_path: Path
     assert pose == POSE.encode("utf-8")
 
 
+@pytest.mark.parametrize("receptor_suffix", [".pdb", ".pdbqt"])
+@pytest.mark.parametrize("ligand_suffix", [".sdf", ".mol", ".pdb", ".pdbqt"])
+def test_every_accepted_suffix_combination_reaches_the_production_adapter_and_run(
+    tmp_path: Path,
+    receptor_suffix: str,
+    ligand_suffix: str,
+) -> None:
+    async def scenario() -> tuple[object, AdapterUploadSandboxClient]:
+        config = _config(tmp_path)
+        sdk = AdapterUploadSandboxClient(config)
+        store = BrokerStore(config.state_root / "broker.sqlite")
+        service = SandboxBrokerService(
+            config,
+            store,
+            sdk,
+            ArtifactRegistry(config.state_root, store),
+        )
+        await service.start()
+        prepared = _prepared_with_suffixes(config, receptor_suffix, ligand_suffix)
+        job = await service.submit(prepared, "idem-suffix-combination")
+        terminal = await service.wait_terminal(job.job_id)
+        await service.stop()
+        return terminal, sdk
+
+    terminal, sdk = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.SUCCEEDED
+    assert sdk.run_count == 1
+    request_text = next(
+        data for path, data in sdk.uploads if path == "/workspace/input/request.json"
+    )
+    request = json.loads(request_text)
+    assert request["receptor_path"] == f"/workspace/input/receptor{receptor_suffix}"
+    assert request["ligand_path"] == f"/workspace/input/ligand{ligand_suffix}"
+    assert [path for path, _ in sdk.uploads] == [
+        f"/workspace/input/receptor{receptor_suffix}",
+        f"/workspace/input/ligand{ligand_suffix}",
+        "/workspace/input/request.json",
+    ]
+
+
 def test_invalid_scientific_output_fails_without_manifest(tmp_path: Path) -> None:
     async def scenario() -> tuple[object, SandboxBrokerService]:
         sdk = FakeSandboxClient(valid_result=False)
@@ -425,6 +555,35 @@ def test_queued_and_running_cancellation_are_idempotent_and_cleanup(
     assert queued.status is BrokerJobStatus.CANCELLED
     assert sdk.create_count == 1
     assert sdk.destroy_count == 1
+
+
+def test_cancel_during_provisioning_waits_for_create_then_attaches_and_destroys(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> tuple[object, BlockingCreateSandboxClient]:
+        sdk = BlockingCreateSandboxClient()
+        service, _, config = _service(tmp_path, sdk)
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-cancel-create")
+        await sdk.remote_live.wait()
+
+        await service.cancel(job.job_id)
+        await asyncio.sleep(0)
+        assert service.get_job(job.job_id).status is BrokerJobStatus.PROVISIONING
+        assert sdk.live_ids == {f"sandbox-{job.job_id}"}
+
+        sdk.create_release.set()
+        terminal = await service.wait_terminal(job.job_id)
+        await service.stop()
+        return terminal, sdk
+
+    terminal, sdk = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.CANCELLED
+    assert terminal.cleanup_status == "succeeded"
+    assert terminal.sandbox_id is not None
+    assert sdk.create_cancelled is False
+    assert sdk.destroyed_ids == [terminal.sandbox_id]
+    assert sdk.live_ids == set()
 
 
 def test_execution_timeout_and_command_failure_are_stable_and_cleanup(
@@ -748,6 +907,42 @@ def test_stop_cancels_running_job_only_after_successful_cleanup(tmp_path: Path) 
     assert leaked == []
 
 
+def test_stop_shields_inflight_create_until_handle_is_attached_and_destroyed(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> tuple[object, BlockingCreateSandboxClient, list[str]]:
+        sdk = BlockingCreateSandboxClient()
+        service, _, config = _service(tmp_path, sdk)
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-stop-create")
+        await sdk.remote_live.wait()
+
+        stop_task = asyncio.create_task(service.stop())
+        await asyncio.sleep(0)
+        assert not stop_task.done()
+        assert service.get_job(job.job_id).cleanup_status == "not_started"
+
+        sdk.create_release.set()
+        await stop_task
+        terminal = service.get_job(job.job_id)
+        leaked = [
+            task.get_name()
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith("sandbox-broker-")
+            and not task.done()
+        ]
+        return terminal, sdk, leaked
+
+    terminal, sdk, leaked = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.CANCELLED
+    assert terminal.cleanup_status == "succeeded"
+    assert terminal.sandbox_id is not None
+    assert sdk.destroyed_ids == [terminal.sandbox_id]
+    assert sdk.live_ids == set()
+    assert leaked == []
+
+
 def test_bounded_stop_marks_unfinished_cleanup_failed_and_leaks_no_tasks(
     tmp_path: Path,
 ) -> None:
@@ -784,6 +979,58 @@ def test_bounded_stop_marks_unfinished_cleanup_failed_and_leaks_no_tasks(
     assert terminal.status is BrokerJobStatus.FAILED
     assert terminal.error_code == BrokerErrorCode.CLEANUP_FAILED.value
     assert terminal.cleanup_status == "failed"
+    assert leaked == []
+
+
+def test_bounded_stop_never_claims_unknown_create_cleanup_succeeded(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> tuple[bool, object, BlockingCreateSandboxClient, list[str]]:
+        sdk = BlockingCreateSandboxClient()
+        service, _, config = _service(tmp_path, sdk)
+        service._stop_timeout_seconds = 0.01
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-stop-unknown-create")
+        await sdk.remote_live.wait()
+
+        stop_task = asyncio.create_task(service.stop())
+        bounded = True
+        try:
+            await asyncio.wait_for(asyncio.shield(stop_task), timeout=0.2)
+        except asyncio.TimeoutError:
+            bounded = False
+        terminal = service.get_job(job.job_id)
+
+        sdk.create_release.set()
+        for _ in range(50):
+            pending_broker_tasks = [
+                task
+                for task in asyncio.all_tasks()
+                if task is not asyncio.current_task()
+                and task.get_name().startswith("sandbox-broker-")
+                and not task.done()
+            ]
+            if not sdk.live_ids and not pending_broker_tasks:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0)
+        leaked = [
+            task.get_name()
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith("sandbox-broker-")
+            and not task.done()
+        ]
+        return bounded, terminal, sdk, leaked
+
+    bounded, terminal, sdk, leaked = asyncio.run(scenario())
+    assert bounded is True
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.CLEANUP_FAILED.value
+    assert terminal.cleanup_status == "failed"
+    assert sdk.create_cancelled is False
+    assert len(sdk.destroyed_ids) == 1
+    assert sdk.live_ids == set()
     assert leaked == []
 
 
@@ -859,11 +1106,25 @@ def test_recovery_retries_a_persisted_failed_cleanup_before_terminalizing(
     assert terminal.cleanup_status == "succeeded"
 
 
+@pytest.mark.parametrize(
+    "warning",
+    [
+        "path=/home/runner/pose.pdbqt",
+        "file:/tmp/pose.pdbqt",
+        'source="/home/runner/pose.pdbqt"',
+        "source=[/home/runner/pose.pdbqt]",
+        r"source=C:\Users\runner\pose.pdbqt",
+        r"source=\\server\share\pose.pdbqt",
+        "\x1b[31mpath=/home/runner/pose.pdbqt\x1b[0m",
+        "path=\x00/home/runner/pose.pdbqt",
+    ],
+)
 def test_untrusted_warning_with_host_path_fails_scientific_gate_without_leak(
     tmp_path: Path,
+    warning: str,
 ) -> None:
     async def scenario() -> tuple[object, SandboxBrokerService]:
-        sdk = FakeSandboxClient(result_extras={"warnings": [r"C:\secret\pose.pdbqt"]})
+        sdk = FakeSandboxClient(result_extras={"warnings": [warning]})
         service, _, config = _service(tmp_path, sdk)
         await service.start()
         job = await service.submit(_prepared(config), "idem-warning-path")
@@ -875,9 +1136,26 @@ def test_untrusted_warning_with_host_path_fails_scientific_gate_without_leak(
     assert terminal.status is BrokerJobStatus.FAILED
     assert terminal.error_code == BrokerErrorCode.SCIENTIFIC_OUTPUT_INVALID.value
     assert terminal.warnings == ()
-    assert "secret" not in repr(terminal)
+    assert warning not in repr(terminal)
     with pytest.raises(KeyError):
         service.get_manifest(terminal.job_id)
+
+
+def test_scientific_fraction_warning_is_not_mistaken_for_an_absolute_path(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> object:
+        sdk = FakeSandboxClient(result_extras={"warnings": ["score ratio 1/2"]})
+        service, _, config = _service(tmp_path, sdk)
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-warning-fraction")
+        terminal = await service.wait_terminal(job.job_id)
+        await service.stop()
+        return terminal
+
+    terminal = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.SUCCEEDED
+    assert terminal.warnings == ("score ratio 1/2",)
 
 
 def test_complete_failure_falls_back_to_terminal_artifact_failure(

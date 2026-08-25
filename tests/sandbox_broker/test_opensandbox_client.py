@@ -406,6 +406,35 @@ def test_upload_rejects_type_confusion_aliases_and_unapproved_names(
     assert fake.uploads == []
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "receptor.pdb",
+        "receptor.pdbqt",
+        "ligand.sdf",
+        "ligand.mol",
+        "ligand.pdb",
+        "ligand.pdbqt",
+        "request.json",
+    ],
+)
+def test_upload_accepts_every_fixed_server_input_name(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    fake = FakeSandboxFactory()
+    client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+    handle = SandboxHandle("sandbox-1", fake.raw)
+
+    asyncio.run(
+        client.upload_text(handle, f"/workspace/input/{name}", "fixed input\n")
+    )
+
+    assert fake.uploads == [
+        (f"/workspace/input/{name}", "fixed input\n")
+    ]
+
+
 def test_upload_uses_utf8_byte_limits_for_each_fixed_input(tmp_path: Path) -> None:
     fake = FakeSandboxFactory()
     client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)

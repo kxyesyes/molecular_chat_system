@@ -43,9 +43,14 @@ _TOOL_VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .+_()-]{0,127}$")
 _SENSITIVE_TEXT_PATTERN = re.compile(
     r"(?i)(?:api[_ -]?key|token|password|secret|credential|bearer\s+)"
 )
-_WINDOWS_PATH_PATTERN = re.compile(r"(?i)(?:^|\s)[A-Z]:[\\/]")
-_POSIX_HOST_PATH_PATTERN = re.compile(
-    r"(?:^|\s)/(?!workspace(?:/|$)|opt/medchat(?:/|$))"
+_ANSI_ESCAPE_PATTERN = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-_])")
+_CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
+_WINDOWS_PATH_PATTERN = re.compile(r"(?i)(?<![A-Za-z0-9])[A-Z]:[\\/]")
+_UNC_PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:\\\\|//)[^\\/\s]+[\\/]"
+)
+_POSIX_ABSOLUTE_PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])/(?!/)(?=$|[A-Za-z0-9._~-])"
 )
 _MANIFEST_MAX_BYTES = 1024 * 1024
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -231,6 +236,7 @@ class SandboxBrokerService:
         self._stopping = False
         self._consumer_task: asyncio.Task[None] | None = None
         self._job_tasks: dict[str, asyncio.Task[None]] = {}
+        self._create_tasks: dict[str, asyncio.Task[Any]] = {}
         self._cleanup_tasks: dict[str, asyncio.Task[Any]] = {}
         self._prepared: dict[str, PreparedDockingSubmission] = {}
         self._terminal_events: dict[str, asyncio.Event] = {}
@@ -279,6 +285,7 @@ class SandboxBrokerService:
                 tracked = {
                     consumer,
                     *self._job_tasks.values(),
+                    *self._create_tasks.values(),
                     *self._cleanup_tasks.values(),
                 }
                 if tracked:
@@ -297,7 +304,11 @@ class SandboxBrokerService:
     def _terminalize_stop_timeout(self) -> None:
         for record in self.store.active_jobs():
             try:
-                if record.sandbox_id is None:
+                create_task = self._create_tasks.get(record.job_id)
+                create_result_unknown = (
+                    create_task is not None and not create_task.done()
+                )
+                if record.sandbox_id is None and not create_result_unknown:
                     self.store.record_cleanup(record.job_id, "succeeded")
                     self.store.fail(
                         record.job_id,
@@ -442,11 +453,16 @@ class SandboxBrokerService:
         try:
             self.store.transition(job_id, BrokerJobStatus.PROVISIONING)
             try:
-                created = await self.client.create(job_id)
+                created, create_interrupted = await self._create_without_cancelling(
+                    job_id
+                )
                 if type(created) is not SandboxHandle:
                     raise ValueError
                 handle = created
                 self.store.attach_sandbox(job_id, handle.sandbox_id)
+                if create_interrupted:
+                    cancelled = True
+                    return
             except asyncio.CancelledError:
                 raise
             except BaseException:
@@ -555,6 +571,32 @@ class SandboxBrokerService:
                             )
             except BaseException:
                 pass
+
+    async def _create_without_cancelling(
+        self,
+        job_id: str,
+    ) -> tuple[object, bool]:
+        """Let the bounded SDK create finish even when its caller is cancelled."""
+
+        create_task = asyncio.create_task(
+            self.client.create(job_id),
+            name=f"sandbox-broker-create-{job_id}",
+        )
+        self._create_tasks[job_id] = create_task
+        interrupted = False
+        try:
+            while not create_task.done():
+                try:
+                    await asyncio.shield(create_task)
+                except asyncio.CancelledError:
+                    interrupted = True
+                    continue
+                except BaseException:
+                    break
+            return create_task.result(), interrupted
+        finally:
+            if self._create_tasks.get(job_id) is create_task:
+                del self._create_tasks[job_id]
 
     async def cancel(self, job_id: str) -> BrokerJobView:
         """Request cancellation once and coordinate the active execution task."""
@@ -1071,13 +1113,17 @@ class SandboxBrokerService:
 
     @staticmethod
     def _safe_warning(value: object) -> bool:
+        if type(value) is not str:
+            return False
+        normalized = _ANSI_ESCAPE_PATTERN.sub("", value)
+        normalized = _CONTROL_CHARACTER_PATTERN.sub("", normalized)
         return bool(
-            type(value) is str
-            and value.strip()
-            and not any(ord(character) < 32 or ord(character) == 127 for character in value)
-            and _SENSITIVE_TEXT_PATTERN.search(value) is None
-            and _WINDOWS_PATH_PATTERN.search(value) is None
-            and _POSIX_HOST_PATH_PATTERN.search(value) is None
+            value.strip()
+            and normalized == value
+            and _SENSITIVE_TEXT_PATTERN.search(normalized) is None
+            and _WINDOWS_PATH_PATTERN.search(normalized) is None
+            and _UNC_PATH_PATTERN.search(normalized) is None
+            and _POSIX_ABSOLUTE_PATH_PATTERN.search(normalized) is None
         )
 
     def _publish_manifest(
@@ -1107,10 +1153,14 @@ class SandboxBrokerService:
             except BaseException:
                 return "failed"
             return "succeeded"
+        cleanup_tracking_active = True
         try:
             self.store.record_cleanup(job_id, "in_progress")
         except BaseException:
-            return "failed"
+            # A bounded stop may already have terminalized an unknown create as
+            # cleanup-failed. The raw handle must still be destroyed when it
+            # eventually arrives, even though terminal metadata is immutable.
+            cleanup_tracking_active = False
         cleanup_task = asyncio.create_task(self.client.destroy(handle))
         cleanup_task.set_name(f"sandbox-broker-cleanup-{job_id}")
         self._cleanup_tasks[job_id] = cleanup_task
@@ -1127,15 +1177,17 @@ class SandboxBrokerService:
         try:
             await asyncio.shield(cleanup_task)
         except BaseException:
+            if cleanup_tracking_active:
+                try:
+                    self.store.record_cleanup(job_id, "failed")
+                except BaseException:
+                    pass
+            return "failed"
+        if cleanup_tracking_active:
             try:
-                self.store.record_cleanup(job_id, "failed")
+                self.store.record_cleanup(job_id, "succeeded")
             except BaseException:
-                pass
-            return "failed"
-        try:
-            self.store.record_cleanup(job_id, "succeeded")
-        except BaseException:
-            return "failed"
+                return "failed"
         return "succeeded"
 
     def get_manifest(self, job_id: str) -> DockingManifest:

@@ -1180,6 +1180,61 @@ def test_service_store_rejects_invalid_cleanup_and_sensitive_json(tmp_path: Path
         )
 
 
+@pytest.mark.parametrize(
+    "unsafe_value",
+    [
+        "path=/home/runner/result.json",
+        "file:/tmp/result.json",
+        'path="/home/runner/result.json"',
+        "path=[/home/runner/result.json]",
+        r"path=C:\Users\runner\result.json",
+        r"path=\\server\share\result.json",
+        "\x1b[31mpath=/home/runner/result.json\x1b[0m",
+        "path=\x00/home/runner/result.json",
+    ],
+)
+def test_store_rejects_embedded_paths_in_warnings_and_provenance_without_echo(
+    tmp_path: Path,
+    unsafe_value: str,
+) -> None:
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    warning_job, _ = store.create_or_get("idem-warning", SHA256_A, "trace-warning")
+    provenance_job, _ = store.create_or_get(
+        "idem-provenance", SHA256_B, "trace-provenance"
+    )
+
+    with pytest.raises(ValueError, match="persisted job metadata is invalid") as warning:
+        store.fail(
+            warning_job.job_id,
+            BrokerErrorCode.INVALID_INPUT,
+            warnings=[unsafe_value],
+        )
+    with pytest.raises(ValueError, match="persisted job metadata is invalid") as provenance:
+        store.fail(
+            provenance_job.job_id,
+            BrokerErrorCode.INVALID_INPUT,
+            provenance={"detail": unsafe_value},
+        )
+
+    assert unsafe_value not in str(warning.value)
+    assert unsafe_value not in str(provenance.value)
+
+
+def test_store_allows_fraction_text_in_warning_and_provenance(tmp_path: Path) -> None:
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    job, _ = store.create_or_get("idem-fraction", SHA256_A, "trace-fraction")
+
+    terminal = store.fail(
+        job.job_id,
+        BrokerErrorCode.INVALID_INPUT,
+        warnings=["score ratio 1/2"],
+        provenance={"scientific_note": "score ratio 1/2"},
+    )
+
+    assert terminal.warnings == ["score ratio 1/2"]
+    assert terminal.provenance == {"scientific_note": "score ratio 1/2"}
+
+
 def test_service_store_expire_and_manual_audit_delete_obey_fk_order(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

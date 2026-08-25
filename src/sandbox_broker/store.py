@@ -36,7 +36,17 @@ _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _SENSITIVE_KEY_PATTERN = re.compile(
     r"(?i)(?:api[_ -]?key|token|password|secret|credential)"
 )
-_WINDOWS_ABSOLUTE_PATH_PATTERN = re.compile(r"^[A-Za-z]:[\\/]")
+_ANSI_ESCAPE_PATTERN = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-_])")
+_CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
+_WINDOWS_ABSOLUTE_PATH_PATTERN = re.compile(
+    r"(?i)(?<![A-Za-z0-9])[A-Z]:[\\/]"
+)
+_UNC_ABSOLUTE_PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:\\\\|//)[^\\/\s]+[\\/]"
+)
+_POSIX_ABSOLUTE_PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])/(?!/)(?=$|[A-Za-z0-9._~-])"
+)
 
 
 class IdempotencyConflict(ValueError):
@@ -972,10 +982,13 @@ class BrokerStore:
     @classmethod
     def _reject_sensitive_json(cls, value: object) -> None:
         if type(value) is str:
+            normalized = _ANSI_ESCAPE_PATTERN.sub("", value)
+            normalized = _CONTROL_CHARACTER_PATTERN.sub("", normalized)
             if (
-                value.startswith(("/", "\\\\"))
-                or _WINDOWS_ABSOLUTE_PATH_PATTERN.match(value) is not None
-                or "\x00" in value
+                normalized != value
+                or _WINDOWS_ABSOLUTE_PATH_PATTERN.search(normalized) is not None
+                or _UNC_ABSOLUTE_PATH_PATTERN.search(normalized) is not None
+                or _POSIX_ABSOLUTE_PATH_PATTERN.search(normalized) is not None
             ):
                 raise ValueError
             return
@@ -985,7 +998,12 @@ class BrokerStore:
             return
         if type(value) is dict:
             for key, item in value.items():
-                if _SENSITIVE_KEY_PATTERN.search(key) is not None:
+                normalized_key = _ANSI_ESCAPE_PATTERN.sub("", key)
+                normalized_key = _CONTROL_CHARACTER_PATTERN.sub("", normalized_key)
+                if (
+                    normalized_key != key
+                    or _SENSITIVE_KEY_PATTERN.search(normalized_key) is not None
+                ):
                     raise ValueError
                 cls._reject_sensitive_json(item)
 
@@ -1401,6 +1419,7 @@ class BrokerStore:
                 for item in warnings
             ):
                 raise ValueError
+            BrokerStore._reject_sensitive_json(warnings)
 
             provenance_text = row["provenance_json"]
             if provenance_text is None:
@@ -1415,6 +1434,7 @@ class BrokerStore:
                 if type(provenance) is not dict:
                     raise ValueError
                 BrokerStore._validate_json_value(provenance)
+                BrokerStore._reject_sensitive_json(provenance)
 
             created_at = row["created_at"]
             updated_at = row["updated_at"]
