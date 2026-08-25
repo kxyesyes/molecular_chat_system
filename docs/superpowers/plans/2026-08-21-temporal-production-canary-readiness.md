@@ -6,7 +6,7 @@
 
 **Architecture:** Keep MedChat Web and the scientific docking worker host-native under systemd, while Temporal Server, its dedicated PostgreSQL, Temporal UI, Prometheus, and Grafana run in Docker Compose. Add a strict rollout domain and a read-only observation projector over the existing SQLite task/event/artifact records; promotion consumes only hashed, current, sanitized evidence, and rollback changes only new traffic.
 
-**Tech Stack:** Python 3.10+, SQLite, Temporal Python SDK 1.30.0, prometheus-client 0.26.0, Docker Compose, Temporal Server 1.29.7, Temporal admin-tools 1.29.7, PostgreSQL 16.14, postgres-exporter 0.20.1, Prometheus 3.13.2, Grafana 12.4.8, systemd, pytest/pytest-asyncio, AutoDock Vina.
+**Tech Stack:** Python 3.10+, SQLite, Temporal Python SDK 1.30.0, prometheus-client 0.26.0, Docker Compose, Temporal Server 1.29.7, Temporal admin-tools 1.29.7-tctl-1.18.4-cli-1.7.2, PostgreSQL 16.14, postgres-exporter 0.20.1, Prometheus 3.13.2, Grafana 12.4.8, systemd, pytest/pytest-asyncio, AutoDock Vina.
 
 ---
 
@@ -832,8 +832,8 @@ def test_compose_uses_pinned_images_loopback_ports_and_healthchecks():
     assert services["postgres"]["image"] == "postgres:16.14-alpine3.23"
     assert services["postgres-exporter"]["image"] == "ghcr.io/prometheus-community/postgres-exporter:v0.20.1"
     assert services["temporal"]["image"] == "temporalio/server:1.29.7"
-    assert services["temporal-schema"]["image"] == "temporalio/admin-tools:1.29.7"
-    assert services["temporal-namespace"]["image"] == "temporalio/admin-tools:1.29.7"
+    assert services["temporal-schema"]["image"] == "temporalio/admin-tools:1.29.7-tctl-1.18.4-cli-1.7.2"
+    assert services["temporal-namespace"]["image"] == "temporalio/admin-tools:1.29.7-tctl-1.18.4-cli-1.7.2"
     assert services["temporal-ui"]["image"] == "temporalio/ui:2.53.1"
     assert services["prometheus"]["image"] == "prom/prometheus:v3.13.2"
     assert services["grafana"]["image"] == "grafana/grafana:12.4.8-ubuntu"
@@ -888,7 +888,7 @@ Define nine services: six long-running services named `postgres`,
 `grafana`, plus one-shot jobs named `temporal-schema`,
 `temporal-namespace`, and `temporal-exporter-role-sync`. Pin the Temporal
 server to `temporalio/server:1.29.7` and both Temporal administrative jobs to
-`temporalio/admin-tools:1.29.7`. Use named volumes
+`temporalio/admin-tools:1.29.7-tctl-1.18.4-cli-1.7.2`. Use named volumes
 `temporal-postgres-data`, `prometheus-data`, and `grafana-data`. Bind host
 ports as:
 

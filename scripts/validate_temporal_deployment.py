@@ -53,9 +53,9 @@ _LONG_RUNNING = {
 _JOBS = {"temporal-schema", "temporal-namespace", "temporal-exporter-role-sync"}
 _IMAGES = {
     "postgres": "postgres:16.14-alpine3.23",
-    "temporal-schema": "temporalio/admin-tools:1.29.7",
+    "temporal-schema": "temporalio/admin-tools:1.29.7-tctl-1.18.4-cli-1.7.2",
     "temporal": "temporalio/server:1.29.7",
-    "temporal-namespace": "temporalio/admin-tools:1.29.7",
+    "temporal-namespace": "temporalio/admin-tools:1.29.7-tctl-1.18.4-cli-1.7.2",
     "temporal-exporter-role-sync": "postgres:16.14-alpine3.23",
     "postgres-exporter": "ghcr.io/prometheus-community/postgres-exporter:v0.20.1",
     "temporal-ui": "temporalio/ui:2.53.1",

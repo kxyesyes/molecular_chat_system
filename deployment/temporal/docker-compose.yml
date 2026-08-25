@@ -36,7 +36,7 @@ services:
 
   temporal-schema:
     <<: *service-defaults
-    image: temporalio/admin-tools:1.29.7
+    image: temporalio/admin-tools:1.29.7-tctl-1.18.4-cli-1.7.2
     restart: "on-failure:5"
     stop_grace_period: 30s
     depends_on:
@@ -98,7 +98,7 @@ services:
 
   temporal-namespace:
     <<: *service-defaults
-    image: temporalio/admin-tools:1.29.7
+    image: temporalio/admin-tools:1.29.7-tctl-1.18.4-cli-1.7.2
     restart: "on-failure:5"
     stop_grace_period: 30s
     depends_on:

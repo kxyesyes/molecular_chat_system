@@ -184,7 +184,14 @@ def write_json_atomic(
     """Atomically publish bounded canonical JSON across a captured trust boundary."""
 
     destination = normalized_path(path)
-    boundary = capture_boundary(destination, require_file=False)
+
+    def capture_report_boundary(*, require_file: bool = False) -> object:
+        try:
+            return capture_boundary(destination, require_file=require_file)
+        except (OSError, RuntimeError, ValueError):
+            raise ValueError("unsafe report output") from None
+
+    boundary = capture_report_boundary()
     try:
         content = json.dumps(
             dict(report), sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -193,7 +200,7 @@ def write_json_atomic(
         raise ValueError("invalid report output") from None
     if len(content) > maximum_bytes:
         raise ValueError("invalid report output")
-    if capture_boundary(destination, require_file=False) != boundary:
+    if capture_report_boundary() != boundary:
         raise ValueError("unsafe report output")
 
     parent = destination.parent
@@ -257,7 +264,7 @@ def write_json_atomic(
         if os.name != "posix":
             os.close(descriptor)
             descriptor = None
-        current = capture_boundary(destination, require_file=False)
+        current = capture_report_boundary()
         if (
             current.exists != boundary.exists
             or current.file_identity != boundary.file_identity
@@ -279,7 +286,7 @@ def write_json_atomic(
         final = destination.lstat()
         if is_reparse(final) or _stat_identity(final) != temporary_identity:
             raise ValueError("unsafe report output")
-        final_boundary = capture_boundary(destination)
+        final_boundary = capture_report_boundary(require_file=True)
         if (
             final_boundary.parent_identity != boundary.parent_identity
             or final_boundary.parent_security != boundary.parent_security
@@ -287,7 +294,11 @@ def write_json_atomic(
         ):
             raise ValueError("unsafe report output")
         _fsync_directory(parent)
-    except (OSError, RuntimeError, ValueError):
+    except ValueError as exc:
+        if str(exc) == "unsafe report output":
+            raise ValueError("unsafe report output") from None
+        raise ValueError("atomic report output failed") from None
+    except (OSError, RuntimeError):
         raise ValueError("atomic report output failed") from None
     finally:
         if descriptor is not None:

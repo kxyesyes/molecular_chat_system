@@ -412,6 +412,33 @@ def _safe_unlink_at(
         return False
 
 
+def _safe_unlink_pinned_at(
+    parent_fd: int,
+    name: str,
+    descriptor: int,
+    *,
+    sync: bool = True,
+) -> bool:
+    if descriptor < 0:
+        return False
+    try:
+        opened = os.fstat(descriptor)
+        named = _stat_at(parent_fd, name)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(named.st_mode)
+            or _is_reparse_point(named)
+            or _identity(opened) != _identity(named)
+        ):
+            return False
+        os.unlink(name, dir_fd=parent_fd)
+        if sync:
+            _fsync_directory_fd(parent_fd)
+        return True
+    except (FileNotFoundError, OSError):
+        return False
+
+
 def validate_identifier(value: object) -> str:
     if type(value) is not str or _IDENTIFIER.fullmatch(value) is None:
         raise PostgresBackupError("arguments_invalid")
@@ -1002,11 +1029,17 @@ def create_backup(
         return manifest
     except PostgresBackupError:
         _safe_unlink_at(output.fd, manifest_name, manifest_identity)
-        _safe_unlink_at(output.fd, dump_name, published_identity)
+        if not _safe_unlink_pinned_at(
+            output.fd, dump_name, partial_descriptor
+        ):
+            _safe_unlink_at(output.fd, dump_name, published_identity)
         raise
     except OSError as exc:
         _safe_unlink_at(output.fd, manifest_name, manifest_identity)
-        _safe_unlink_at(output.fd, dump_name, published_identity)
+        if not _safe_unlink_pinned_at(
+            output.fd, dump_name, partial_descriptor
+        ):
+            _safe_unlink_at(output.fd, dump_name, published_identity)
         raise PostgresBackupError("atomic_write_failed") from exc
     finally:
         if partial_descriptor >= 0:

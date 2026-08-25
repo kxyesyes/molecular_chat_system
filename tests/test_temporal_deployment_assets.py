@@ -78,9 +78,9 @@ LONG_RUNNING = {
 JOBS = {"temporal-schema", "temporal-namespace", "temporal-exporter-role-sync"}
 IMAGES = {
     "postgres": "postgres:16.14-alpine3.23",
-    "temporal-schema": "temporalio/admin-tools:1.29.7",
+    "temporal-schema": "temporalio/admin-tools:1.29.7-tctl-1.18.4-cli-1.7.2",
     "temporal": "temporalio/server:1.29.7",
-    "temporal-namespace": "temporalio/admin-tools:1.29.7",
+    "temporal-namespace": "temporalio/admin-tools:1.29.7-tctl-1.18.4-cli-1.7.2",
     "temporal-exporter-role-sync": "postgres:16.14-alpine3.23",
     "postgres-exporter": "ghcr.io/prometheus-community/postgres-exporter:v0.20.1",
     "temporal-ui": "temporalio/ui:2.53.1",
@@ -377,7 +377,7 @@ def _run_native_posix(
 ) -> subprocess.CompletedProcess[str]:
     _native_posix_repository()
     return subprocess.run(
-        ["sh", "-lc", command],
+        ["sh", "-lc", f"umask 022\n{command}"],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -3931,7 +3931,7 @@ def test_task6_documentation_matches_runtime_contracts() -> None:
     assert "Temporal Server auto-setup" not in plan
     assert "temporalio/auto-setup" not in task6
     assert "temporalio/server:1.29.7" in task6
-    assert "temporalio/admin-tools:1.29.7" in task6
+    assert "temporalio/admin-tools:1.29.7-tctl-1.18.4-cli-1.7.2" in task6
     assert all(word in task6 for word in ("schema", "namespace", "role-sync"))
     assert "temporalio/server" in boundary and "temporalio/admin-tools" in boundary
     assert "*_FILE" in boundary

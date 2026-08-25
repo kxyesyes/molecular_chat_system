@@ -54,6 +54,18 @@ requires_posix_descriptor_io = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(scope="module", autouse=True)
+def restrictive_posix_umask() -> object:
+    if os.name != "posix":
+        yield
+        return
+    previous = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
 @pytest.fixture
 def postgres_trusted_tmp_path() -> Path:
     if not POSIX_DESCRIPTOR_IO:
@@ -4941,6 +4953,56 @@ def test_task10_atomic_report_writer_rejects_symlink(
 
     assert target.read_text(encoding="utf-8") == "sentinel"
     assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("fail_at", [2, 3, 4])
+def test_atomic_report_writer_normalizes_every_boundary_capture_failure(
+    tmp_path: Path,
+    fail_at: int,
+) -> None:
+    import src.task_runtime.secure_io as secure_io
+
+    output = tmp_path / "report.json"
+    calls = 0
+
+    def flaky_capture(path: Path, *, require_file: bool = True) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == fail_at:
+            raise ValueError("RAW_TRUST_BOUNDARY_ERROR_CANARY")
+        return secure_io.capture_trusted_path_boundary(
+            path, require_file=require_file
+        )
+
+    with pytest.raises(ValueError, match="^unsafe report output$") as error:
+        secure_io.write_json_atomic(
+            output,
+            {"status": "passed"},
+            maximum_bytes=4096,
+            capture_boundary=flaky_capture,
+        )
+
+    assert "RAW_TRUST_BOUNDARY_ERROR_CANARY" not in str(error.value)
+
+
+@requires_posix_descriptor_io
+def test_atomic_report_writer_enforces_mode_under_permissive_umask(
+    tmp_path: Path,
+) -> None:
+    import src.task_runtime.secure_io as secure_io
+
+    output = tmp_path / "report.json"
+    previous = os.umask(0o002)
+    try:
+        secure_io.write_json_atomic(
+            output,
+            {"status": "passed"},
+            maximum_bytes=4096,
+        )
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
 
 
 def test_deployment_validator_cli_requires_existing_output_parent(
