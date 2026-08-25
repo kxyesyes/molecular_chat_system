@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import math
 import os
 import sqlite3
@@ -33,6 +34,37 @@ def _transition_rows(db_path: Path, job_id: str) -> list[tuple[str, str | None]]
             "SELECT status, phase FROM transitions WHERE job_id=? ORDER BY sequence",
             (job_id,),
         ).fetchall()
+
+
+def _set_job_column(
+    db_path: Path,
+    job_id: str,
+    column: str,
+    value: object,
+) -> str:
+    allowed_columns = {
+        "job_id",
+        "trace_id",
+        "idempotency_key",
+        "canonical_input_sha256",
+        "status",
+        "phase",
+        "sandbox_id",
+        "error_code",
+        "warnings_json",
+        "provenance_json",
+        "cancel_requested",
+        "cleanup_status",
+        "created_at",
+        "updated_at",
+    }
+    assert column in allowed_columns
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            f"UPDATE jobs SET {column}=? WHERE job_id=?",
+            (value, job_id),
+        )
+    return value if column == "job_id" and isinstance(value, str) else job_id
 
 
 def _create_custom_schema(
@@ -369,6 +401,136 @@ def test_constructor_rejects_symlinked_parent(tmp_path: Path) -> None:
         alias_parent.rmdir()
 
 
+def test_constructor_rejects_existing_hardlinked_database_target(tmp_path: Path) -> None:
+    original = tmp_path / "source.sqlite"
+    original.touch()
+    db_path = tmp_path / "sk-secret-hardlink.sqlite"
+    os.link(original, db_path)
+
+    with pytest.raises(ValueError) as raised:
+        BrokerStore(db_path)
+
+    assert str(tmp_path) not in str(raised.value)
+    assert "sk-secret-hardlink" not in str(raised.value)
+
+
+def test_initialized_store_rejects_new_hardlink_alias(tmp_path: Path) -> None:
+    db_path = tmp_path / "broker.sqlite"
+    store = BrokerStore(db_path)
+    job, _ = store.create_or_get("idem-1", SHA256_A, "trace-1")
+    alias = tmp_path / "alias.sqlite"
+    os.link(db_path, alias)
+
+    try:
+        with pytest.raises(RuntimeError, match="database path identity") as raised:
+            store.get(job.job_id)
+        assert str(tmp_path) not in str(raised.value)
+    finally:
+        alias.unlink()
+
+
+def test_initialized_store_rejects_replaced_database_target(tmp_path: Path) -> None:
+    db_path = tmp_path / "sk-secret-target.sqlite"
+    store = BrokerStore(db_path)
+    job, _ = store.create_or_get("idem-1", SHA256_A, "trace-1")
+    replacement = tmp_path / "replacement.sqlite"
+    BrokerStore(replacement)
+    os.replace(replacement, db_path)
+
+    with pytest.raises(RuntimeError, match="database path identity") as raised:
+        store.get(job.job_id)
+
+    assert str(tmp_path) not in str(raised.value)
+    assert "sk-secret-target" not in str(raised.value)
+
+
+def test_initialized_store_rejects_missing_database_target(tmp_path: Path) -> None:
+    db_path = tmp_path / "sk-secret-missing.sqlite"
+    store = BrokerStore(db_path)
+    db_path.unlink()
+
+    with pytest.raises(RuntimeError, match="database path identity") as raised:
+        store.active_jobs()
+
+    assert str(tmp_path) not in str(raised.value)
+    assert "sk-secret-missing" not in str(raised.value)
+
+
+def test_initialized_store_rejects_hardlinked_target_replacement(tmp_path: Path) -> None:
+    db_path = tmp_path / "broker.sqlite"
+    store = BrokerStore(db_path)
+    source = tmp_path / "source.sqlite"
+    source.touch()
+    replacement = tmp_path / "replacement.sqlite"
+    os.link(source, replacement)
+    os.replace(replacement, db_path)
+
+    with pytest.raises(RuntimeError, match="database path identity") as raised:
+        store.active_jobs()
+
+    assert str(tmp_path) not in str(raised.value)
+
+
+def test_initialized_store_rejects_replaced_parent_identity(tmp_path: Path) -> None:
+    parent = tmp_path / "state"
+    parent.mkdir()
+    store = BrokerStore(parent / "broker.sqlite")
+    moved_parent = tmp_path / "moved-state"
+    parent.rename(moved_parent)
+    parent.mkdir()
+
+    with pytest.raises(RuntimeError, match="database path identity") as raised:
+        store.active_jobs()
+
+    assert str(tmp_path) not in str(raised.value)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX ownership and mode contract")
+def test_constructor_rejects_group_or_other_writable_parent(tmp_path: Path) -> None:
+    parent = tmp_path / "unsafe-parent"
+    parent.mkdir()
+    parent.chmod(0o777)
+
+    try:
+        with pytest.raises(ValueError) as raised:
+            BrokerStore(parent / "broker.sqlite")
+        assert str(tmp_path) not in str(raised.value)
+    finally:
+        parent.chmod(0o700)
+
+
+def test_constructor_rejects_symlink_or_reparse_database_target(tmp_path: Path) -> None:
+    real_target = tmp_path / "real.sqlite"
+    real_target.touch()
+    alias = tmp_path / "alias.sqlite"
+    alias_is_directory = False
+    try:
+        os.symlink(real_target, alias)
+    except OSError:
+        if os.name != "nt":
+            raise
+        real_target.unlink()
+        real_target.mkdir()
+        junction = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(alias), str(real_target)],
+            capture_output=True,
+            check=False,
+        )
+        if junction.returncode != 0:
+            pytest.skip("creating a target reparse point is unavailable")
+        alias_is_directory = True
+
+    try:
+        with pytest.raises(ValueError) as raised:
+            BrokerStore(alias)
+        assert str(tmp_path) not in str(raised.value)
+    finally:
+        if alias_is_directory:
+            alias.rmdir()
+        else:
+            alias.unlink()
+
+
 def test_constructor_rejects_parent_directory_aliases(tmp_path: Path) -> None:
     parent = tmp_path / "parent"
     parent.mkdir()
@@ -407,6 +569,50 @@ def test_busy_timeout_is_observable_and_bounded(tmp_path: Path) -> None:
 
     assert elapsed >= timeout_ms / 1000 * 0.7
     assert elapsed < timeout_ms / 1000 + 2
+
+
+def test_initialization_lock_prevents_committed_version_two_from_being_downgraded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "broker.sqlite"
+    BrokerStore(db_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("PRAGMA user_version=0")
+
+    assert hasattr(BrokerStore, "_read_schema_version")
+    original_read = BrokerStore._read_schema_version
+    version_read = threading.Event()
+    writer_started = threading.Event()
+    writer_committed = threading.Event()
+
+    def delayed_read(connection: sqlite3.Connection) -> int:
+        version = original_read(connection)
+        version_read.set()
+        assert writer_started.wait(timeout=5)
+        writer_committed.wait(timeout=1)
+        return version
+
+    monkeypatch.setattr(BrokerStore, "_read_schema_version", staticmethod(delayed_read))
+
+    def commit_version_two() -> None:
+        writer_started.set()
+        with sqlite3.connect(db_path, isolation_level=None, timeout=5) as connection:
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("PRAGMA user_version=2")
+            connection.commit()
+        writer_committed.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        initializer = executor.submit(BrokerStore, db_path)
+        assert version_read.wait(timeout=5)
+        writer = executor.submit(commit_version_two)
+        initializer.result(timeout=5)
+        writer.result(timeout=5)
+
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
 
 
 def test_incompatible_existing_schema_is_rejected(tmp_path: Path) -> None:
@@ -524,6 +730,128 @@ def test_non_finite_system_time_is_rejected_without_path_disclosure(
 
     assert str(tmp_path) not in str(raised.value)
     assert "secret-clock-path" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("job_id", "not-a-uuid"),
+        ("trace_id", sqlite3.Binary(b"trace")),
+        ("idempotency_key", " "),
+        ("canonical_input_sha256", "A" * 64),
+        ("status", "not-a-status"),
+        ("phase", " "),
+        ("sandbox_id", " "),
+        ("error_code", "sk-secret-invalid-error-code"),
+        ("cancel_requested", 2),
+        ("cleanup_status", sqlite3.Binary(b"failed")),
+        ("cleanup_status", "completed"),
+        ("warnings_json", sqlite3.Binary(b"[]")),
+        ("provenance_json", sqlite3.Binary(b"{}")),
+        ("created_at", sqlite3.Binary(b"1.0")),
+    ],
+)
+def test_corrupt_job_column_is_rejected_with_sanitized_error(
+    tmp_path: Path,
+    column: str,
+    value: object,
+) -> None:
+    db_path = tmp_path / "sk-secret-corrupt-row.sqlite"
+    store = BrokerStore(db_path)
+    job, _ = store.create_or_get("idem-1", SHA256_A, "trace-1")
+    lookup_job_id = _set_job_column(db_path, job.job_id, column, value)
+
+    with pytest.raises(RuntimeError, match="persisted broker job is invalid") as raised:
+        store.get(lookup_job_id)
+
+    message = str(raised.value)
+    assert str(tmp_path) not in message
+    assert "sk-secret" not in message
+    if isinstance(value, str) and value.strip():
+        assert value not in message
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("warnings_json", "{}"),
+        ("warnings_json", "null"),
+        ("warnings_json", '["", "valid"]'),
+        ("warnings_json", '["   "]'),
+        ("warnings_json", json.dumps(["x" * 4097])),
+        ("provenance_json", "[]"),
+        ("provenance_json", "null"),
+        ("provenance_json", '{"value": NaN}'),
+        ("provenance_json", '{"value": Infinity}'),
+        ("provenance_json", '{"value": -Infinity}'),
+    ],
+)
+def test_corrupt_job_json_is_rejected(
+    tmp_path: Path,
+    column: str,
+    value: str,
+) -> None:
+    db_path = tmp_path / "broker.sqlite"
+    store = BrokerStore(db_path)
+    job, _ = store.create_or_get("idem-1", SHA256_A, "trace-1")
+    _set_job_column(db_path, job.job_id, column, value)
+
+    with pytest.raises(RuntimeError, match="persisted broker job is invalid"):
+        store.get(job.job_id)
+
+
+@pytest.mark.parametrize(
+    "cleanup_status",
+    ["not_started", "in_progress", "succeeded", "failed"],
+)
+def test_planned_cleanup_status_values_are_accepted(
+    tmp_path: Path,
+    cleanup_status: str,
+) -> None:
+    db_path = tmp_path / "broker.sqlite"
+    store = BrokerStore(db_path)
+    job, _ = store.create_or_get("idem-1", SHA256_A, "trace-1")
+    _set_job_column(db_path, job.job_id, "cleanup_status", cleanup_status)
+
+    assert store.get(job.job_id).cleanup_status == cleanup_status  # type: ignore[union-attr]
+
+
+def test_corrupt_job_timestamp_order_and_infinity_are_rejected(tmp_path: Path) -> None:
+    db_path = tmp_path / "broker.sqlite"
+    store = BrokerStore(db_path)
+    first, _ = store.create_or_get("idem-1", SHA256_A, "trace-1")
+    second, _ = store.create_or_get("idem-2", SHA256_B, "trace-2")
+    _set_job_column(db_path, first.job_id, "updated_at", first.created_at - 1.0)
+    _set_job_column(db_path, second.job_id, "updated_at", float("inf"))
+
+    with pytest.raises(RuntimeError, match="persisted broker job is invalid"):
+        store.get(first.job_id)
+    with pytest.raises(RuntimeError, match="persisted broker job is invalid"):
+        store.get(second.job_id)
+
+
+def test_job_json_snapshots_are_deep_defensive_copies(tmp_path: Path) -> None:
+    db_path = tmp_path / "broker.sqlite"
+    store = BrokerStore(db_path)
+    job, _ = store.create_or_get("idem-1", SHA256_A, "trace-1")
+    _set_job_column(db_path, job.job_id, "warnings_json", '["warning"]')
+    _set_job_column(
+        db_path,
+        job.job_id,
+        "provenance_json",
+        '{"nested": {"values": [1, 2.5, true, null]}}',
+    )
+
+    first = store.get(job.job_id)
+    assert first is not None
+    first.warnings.append("mutated")
+    assert first.provenance is not None
+    first.provenance["nested"]["values"].append("mutated")
+
+    second = store.get(job.job_id)
+    assert second is not None
+    assert second.warnings == ["warning"]
+    assert second.provenance == {"nested": {"values": [1, 2.5, True, None]}}
 
 
 @pytest.mark.parametrize(

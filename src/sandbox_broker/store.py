@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -26,6 +27,10 @@ from .models import (
 _BUSY_TIMEOUT_MS = 500
 _SCHEMA_VERSION = 1
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_UUID_HEX_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+_CLEANUP_STATUSES = frozenset({"not_started", "in_progress", "succeeded", "failed"})
+_MAX_WARNING_LENGTH = 4096
+_WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 class IdempotencyConflict(ValueError):
@@ -225,7 +230,18 @@ class BrokerStore:
 
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = self._validate_db_path(db_path)
+        self._parent_identity = self._parent_path_identity(
+            self._db_path.parent,
+            constructor=True,
+        )
+        self._target_identity = self._target_path_identity(
+            self._db_path,
+            allow_missing=True,
+            constructor=True,
+        )
+        self._initialized = False
         self._initialize()
+        self._initialized = True
 
     @property
     def db_path(self) -> Path:
@@ -248,27 +264,122 @@ class BrokerStore:
             lexical = Path(os.path.abspath(path))
             resolved = path.resolve(strict=False)
             parent = resolved.parent
-            parent_mode = parent.stat().st_mode
-            target_mode = path.lstat().st_mode if path.exists() else None
+            parent_stat = os.lstat(parent)
         except (OSError, RuntimeError):
             raise ValueError("db_path must have an existing real directory parent") from None
 
         if lexical != resolved:
             raise ValueError("db_path must resolve to a stable non-aliased path")
-        if not stat.S_ISDIR(parent_mode):
+        if not stat.S_ISDIR(parent_stat.st_mode):
             raise ValueError("db_path must have an existing real directory parent")
-        if target_mode is not None and not stat.S_ISREG(target_mode):
-            raise ValueError("db_path target must be absent or a regular file")
         return resolved
+
+    @staticmethod
+    def _is_reparse_point(path_stat: os.stat_result) -> bool:
+        attributes = getattr(path_stat, "st_file_attributes", 0)
+        return bool(attributes & _WINDOWS_REPARSE_POINT)
+
+    @classmethod
+    def _parent_path_identity(
+        cls,
+        parent: Path,
+        *,
+        constructor: bool,
+    ) -> tuple[int, int]:
+        try:
+            parent_stat = os.lstat(parent)
+            valid = (
+                stat.S_ISDIR(parent_stat.st_mode)
+                and not stat.S_ISLNK(parent_stat.st_mode)
+                and not cls._is_reparse_point(parent_stat)
+            )
+            if os.name == "posix":
+                valid = (
+                    valid
+                    and parent_stat.st_uid == os.geteuid()
+                    and not parent_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                )
+            if not valid:
+                raise OSError
+            return (parent_stat.st_dev, parent_stat.st_ino)
+        except (OSError, RuntimeError):
+            if constructor:
+                raise ValueError("db_path requires a trusted private parent directory") from None
+            raise RuntimeError("broker database path identity check failed") from None
+
+    @classmethod
+    def _target_path_identity(
+        cls,
+        path: Path,
+        *,
+        allow_missing: bool,
+        constructor: bool,
+    ) -> tuple[int, int] | None:
+        try:
+            target_stat = os.lstat(path)
+        except FileNotFoundError:
+            if allow_missing:
+                return None
+            if constructor:
+                raise ValueError("db_path target must be an existing regular file") from None
+            raise RuntimeError("broker database path identity check failed") from None
+        except (OSError, RuntimeError):
+            if constructor:
+                raise ValueError("db_path target must be absent or a regular file") from None
+            raise RuntimeError("broker database path identity check failed") from None
+
+        valid = (
+            stat.S_ISREG(target_stat.st_mode)
+            and not stat.S_ISLNK(target_stat.st_mode)
+            and not cls._is_reparse_point(target_stat)
+            and target_stat.st_nlink == 1
+        )
+        if not valid:
+            if constructor:
+                raise ValueError("db_path target must be a private regular file")
+            raise RuntimeError("broker database path identity check failed")
+        return (target_stat.st_dev, target_stat.st_ino)
+
+    def _verify_path_identity(
+        self,
+        *,
+        allow_initial_missing: bool = False,
+        capture_initial_target: bool = False,
+    ) -> None:
+        if self._parent_path_identity(self._db_path.parent, constructor=False) != (
+            self._parent_identity
+        ):
+            raise RuntimeError("broker database path identity check failed")
+
+        observed_target = self._target_path_identity(
+            self._db_path,
+            allow_missing=allow_initial_missing,
+            constructor=False,
+        )
+        if self._target_identity is None:
+            if observed_target is None and allow_initial_missing:
+                return
+            if capture_initial_target and observed_target is not None:
+                self._target_identity = observed_target
+                return
+            raise RuntimeError("broker database path identity check failed")
+        if observed_target != self._target_identity:
+            raise RuntimeError("broker database path identity check failed")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(
-            self._db_path,
-            timeout=_BUSY_TIMEOUT_MS / 1000,
-            isolation_level=None,
-        )
+        initial_creation = not self._initialized and self._target_identity is None
+        self._verify_path_identity(allow_initial_missing=initial_creation)
         try:
+            connection = sqlite3.connect(
+                self._db_path,
+                timeout=_BUSY_TIMEOUT_MS / 1000,
+                isolation_level=None,
+            )
+        except sqlite3.Error:
+            raise RuntimeError("unable to open broker database") from None
+        try:
+            self._verify_path_identity(capture_initial_target=initial_creation)
             connection.row_factory = sqlite3.Row
             connection.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
             connection.execute("PRAGMA foreign_keys=ON")
@@ -276,14 +387,15 @@ class BrokerStore:
             yield connection
         finally:
             connection.close()
+            self._verify_path_identity()
 
     def _initialize(self) -> None:
         with self._connect() as connection:
             try:
-                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                connection.execute("BEGIN IMMEDIATE")
+                version = self._read_schema_version(connection)
                 if version not in (0, _SCHEMA_VERSION):
                     raise RuntimeError("incompatible broker database schema")
-                connection.execute("BEGIN IMMEDIATE")
                 for canonical_sql in _CANONICAL_TABLE_SQL.values():
                     statement = canonical_sql.replace(
                         "CREATE TABLE",
@@ -298,6 +410,10 @@ class BrokerStore:
                 if connection.in_transaction:
                     connection.rollback()
                 raise
+
+    @staticmethod
+    def _read_schema_version(connection: sqlite3.Connection) -> int:
+        return int(connection.execute("PRAGMA user_version").fetchone()[0])
 
     @staticmethod
     def _validate_schema(connection: sqlite3.Connection) -> None:
@@ -576,41 +692,137 @@ class BrokerStore:
         return [self._row_to_record(row) for row in rows]
 
     @staticmethod
+    def _reject_json_constant(_: str) -> None:
+        raise ValueError
+
+    @staticmethod
+    def _validate_json_value(value: object) -> None:
+        if value is None or type(value) in (str, bool, int):
+            return
+        if type(value) is float:
+            if not math.isfinite(value):
+                raise ValueError
+            return
+        if type(value) is list:
+            for item in value:
+                BrokerStore._validate_json_value(item)
+            return
+        if type(value) is dict:
+            for key, item in value.items():
+                if type(key) is not str:
+                    raise ValueError
+                BrokerStore._validate_json_value(item)
+            return
+        raise ValueError
+
+    @staticmethod
+    def _require_nonempty_string(value: object) -> str:
+        if type(value) is not str or not value.strip():
+            raise ValueError
+        return value
+
+    @staticmethod
     def _row_to_record(row: sqlite3.Row) -> BrokerJobRecord:
         try:
-            warnings = json.loads(row["warnings_json"])
-            provenance = json.loads(row["provenance_json"]) if row["provenance_json"] else None
-            if not isinstance(warnings, list) or any(type(item) is not str for item in warnings):
+            job_id = BrokerStore._require_nonempty_string(row["job_id"])
+            trace_id = BrokerStore._require_nonempty_string(row["trace_id"])
+            idempotency_key = BrokerStore._require_nonempty_string(row["idempotency_key"])
+            canonical_hash = BrokerStore._require_nonempty_string(
+                row["canonical_input_sha256"]
+            )
+            status_value = BrokerStore._require_nonempty_string(row["status"])
+            phase = BrokerStore._require_nonempty_string(row["phase"])
+            cleanup_status = BrokerStore._require_nonempty_string(row["cleanup_status"])
+            if not _UUID_HEX_PATTERN.fullmatch(job_id):
                 raise ValueError
-            if provenance is not None and not isinstance(provenance, dict):
+            if not _SHA256_PATTERN.fullmatch(canonical_hash):
                 raise ValueError
-            phase = row["phase"]
-            created_at = row["created_at"]
-            updated_at = row["updated_at"]
-            if type(phase) is not str or not phase:
+            status = BrokerJobStatus(status_value)
+
+            sandbox_value = row["sandbox_id"]
+            sandbox_id = (
+                None
+                if sandbox_value is None
+                else BrokerStore._require_nonempty_string(sandbox_value)
+            )
+            error_value = row["error_code"]
+            if error_value is None:
+                error_code = None
+            else:
+                error_code = BrokerErrorCode(
+                    BrokerStore._require_nonempty_string(error_value)
+                ).value
+
+            cancel_requested = row["cancel_requested"]
+            if type(cancel_requested) is not int or cancel_requested not in (0, 1):
+                raise ValueError
+            if cleanup_status not in _CLEANUP_STATUSES:
+                raise ValueError
+
+            warnings_text = row["warnings_json"]
+            if type(warnings_text) is not str:
+                raise ValueError
+            warnings = json.loads(
+                warnings_text,
+                parse_constant=BrokerStore._reject_json_constant,
+            )
+            if type(warnings) is not list:
                 raise ValueError
             if any(
-                type(value) not in (int, float) or not math.isfinite(value)
-                for value in (created_at, updated_at)
+                type(item) is not str
+                or not item.strip()
+                or len(item) > _MAX_WARNING_LENGTH
+                for item in warnings
             ):
                 raise ValueError
+
+            provenance_text = row["provenance_json"]
+            if provenance_text is None:
+                provenance = None
+            else:
+                if type(provenance_text) is not str:
+                    raise ValueError
+                provenance = json.loads(
+                    provenance_text,
+                    parse_constant=BrokerStore._reject_json_constant,
+                )
+                if type(provenance) is not dict:
+                    raise ValueError
+                BrokerStore._validate_json_value(provenance)
+
+            created_at = row["created_at"]
+            updated_at = row["updated_at"]
+            if type(created_at) is not float or type(updated_at) is not float:
+                raise ValueError
+            if not math.isfinite(created_at) or not math.isfinite(updated_at):
+                raise ValueError
+            if updated_at < created_at:
+                raise ValueError
             return BrokerJobRecord(
-                job_id=row["job_id"],
-                trace_id=row["trace_id"],
-                idempotency_key=row["idempotency_key"],
-                canonical_input_sha256=row["canonical_input_sha256"],
-                status=BrokerJobStatus(row["status"]),
+                job_id=job_id,
+                trace_id=trace_id,
+                idempotency_key=idempotency_key,
+                canonical_input_sha256=canonical_hash,
+                status=status,
                 phase=phase,
-                sandbox_id=row["sandbox_id"],
-                error_code=row["error_code"],
-                warnings=warnings.copy(),
-                provenance=dict(provenance) if provenance is not None else None,
-                cancel_requested=bool(row["cancel_requested"]),
-                cleanup_status=row["cleanup_status"],
-                created_at=float(created_at),
-                updated_at=float(updated_at),
+                sandbox_id=sandbox_id,
+                error_code=error_code,
+                warnings=copy.deepcopy(warnings),
+                provenance=copy.deepcopy(provenance),
+                cancel_requested=bool(cancel_requested),
+                cleanup_status=cleanup_status,
+                created_at=created_at,
+                updated_at=updated_at,
             )
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        except (
+            IndexError,
+            json.JSONDecodeError,
+            KeyError,
+            OverflowError,
+            RecursionError,
+            TypeError,
+            ValueError,
+        ):
             raise RuntimeError("persisted broker job is invalid") from None
 
     @staticmethod
