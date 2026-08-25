@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import hashlib
 import io
 import json
@@ -800,6 +801,84 @@ def test_artifact_conflicting_commit_preserves_file_and_fails_closed(
     assert recorded_path.read_bytes() == POSE
     assert "conflict-secret" not in str(caught.value)
     assert str(tmp_path) not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "interrupt_type",
+    [KeyboardInterrupt, SystemExit, asyncio.CancelledError],
+)
+def test_artifact_committed_register_interrupt_preserves_file_and_type(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    interrupt_type: type[BaseException],
+) -> None:
+    store, job_id = make_store_and_job(tmp_path)
+    registry = ArtifactRegistry(store.db_path.parent, store, max_artifact_bytes=1024)
+    original_register = store.register_artifact
+
+    def commit_then_interrupt(*args: object, **kwargs: object) -> object:
+        original_register(*args, **kwargs)  # type: ignore[arg-type]
+        raise interrupt_type()
+
+    monkeypatch.setattr(store, "register_artifact", commit_then_interrupt)
+    with pytest.raises(interrupt_type):
+        registry.publish(job_id, "pose", POSE, "chemical/x-pdbqt")
+
+    records = store.list_artifacts(job_id)
+    assert len(records) == 1
+    recorded_path = store.db_path.parent / Path(*records[0].relative_path.split("/"))
+    assert recorded_path.read_bytes() == POSE
+
+
+def test_artifact_precommit_interrupt_cleans_only_after_confirmed_absence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    store, job_id = make_store_and_job(tmp_path)
+    registry = ArtifactRegistry(store.db_path.parent, store, max_artifact_bytes=1024)
+
+    def interrupt_before_commit(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(store, "register_artifact", interrupt_before_commit)
+    with pytest.raises(KeyboardInterrupt):
+        registry.publish(job_id, "pose", POSE, "chemical/x-pdbqt")
+
+    assert store.list_artifacts(job_id) == []
+    published = store.db_path.parent / "jobs" / job_id / "published"
+    assert not published.exists() or not list(published.iterdir())
+
+
+@pytest.mark.parametrize(
+    "interrupt_type",
+    [KeyboardInterrupt, SystemExit, asyncio.CancelledError],
+)
+def test_artifact_confirmation_interrupt_preserves_committed_file_and_type(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    interrupt_type: type[BaseException],
+) -> None:
+    store, job_id = make_store_and_job(tmp_path)
+    registry = ArtifactRegistry(store.db_path.parent, store, max_artifact_bytes=1024)
+    original_register = store.register_artifact
+
+    def commit_then_fail(*args: object, **kwargs: object) -> object:
+        original_register(*args, **kwargs)  # type: ignore[arg-type]
+        raise RuntimeError("register-secret")
+
+    def interrupt_confirmation(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise interrupt_type()
+
+    monkeypatch.setattr(store, "register_artifact", commit_then_fail)
+    monkeypatch.setattr(store, "get_artifact", interrupt_confirmation)
+    with pytest.raises(interrupt_type):
+        registry.publish(job_id, "pose", POSE, "chemical/x-pdbqt")
+
+    records = store.list_artifacts(job_id)
+    assert len(records) == 1
+    recorded_path = store.db_path.parent / Path(*records[0].relative_path.split("/"))
+    assert recorded_path.read_bytes() == POSE
 
 
 def test_artifact_publish_never_overwrites_competing_final(

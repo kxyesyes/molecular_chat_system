@@ -204,7 +204,7 @@ class ArtifactRegistry:
         part_identity: tuple[int, int] | None = None
         final_identity: tuple[int, int] | None = None
         registered = False
-        preserve_final = False
+        proven_unregistered = True
         artifact_id: str | None = None
         try:
             validated_job_id = _require_uuid_hex(job_id)
@@ -288,6 +288,7 @@ class ArtifactRegistry:
                 size_bytes=len(content),
                 sha256=digest.hexdigest(),
             )
+            proven_unregistered = False
             try:
                 record = self._store.register_artifact(
                     artifact_id,
@@ -297,20 +298,26 @@ class ArtifactRegistry:
                     len(content),
                     digest.hexdigest(),
                 )
-            except Exception:
+            except BaseException as registration_failure:
+                confirmation_failed = False
                 try:
                     observed = self._store.get_artifact(validated_job_id, artifact_id)
-                except Exception:
-                    preserve_final = True
+                except BaseException as confirmation_failure:
+                    if not isinstance(confirmation_failure, Exception):
+                        raise
+                    confirmation_failed = True
+                    observed = None
+                if confirmation_failed:
                     raise
-                if observed is not None:
-                    preserve_final = True
+                if observed is None:
+                    proven_unregistered = True
+                if not isinstance(registration_failure, Exception):
+                    raise
                 if observed == expected:
                     registered = True
                     return observed
                 raise
             if record != expected:
-                preserve_final = True
                 raise ValueError
             registered = True
             return record
@@ -326,7 +333,7 @@ class ArtifactRegistry:
                     pass
             if part is not None:
                 _safe_unlink(part, part_identity)
-            if not registered and not preserve_final and final is not None:
+            if not registered and proven_unregistered and final is not None:
                 _safe_unlink(final, final_identity)
 
     def read_registered(self, job_id: str, artifact_id: str, limit: int) -> bytes:
