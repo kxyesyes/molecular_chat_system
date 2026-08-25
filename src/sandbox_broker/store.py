@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 
+from src.task_runtime.config import _stat_identity
+
 from .models import (
     TERMINAL_STATUSES,
     BrokerErrorCode,
@@ -301,7 +303,7 @@ class BrokerStore:
         parent: Path,
         *,
         constructor: bool,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, ...]:
         try:
             parent_stat = os.lstat(parent)
             valid = (
@@ -317,7 +319,7 @@ class BrokerStore:
                 )
             if not valid:
                 raise OSError
-            return (parent_stat.st_dev, parent_stat.st_ino)
+            return _stat_identity(parent_stat)
         except (OSError, RuntimeError):
             if constructor:
                 raise ValueError("db_path requires a trusted private parent directory") from None
@@ -330,7 +332,7 @@ class BrokerStore:
         *,
         allow_missing: bool,
         constructor: bool,
-    ) -> tuple[int, int] | None:
+    ) -> tuple[int, ...] | None:
         try:
             target_stat = os.lstat(path)
         except FileNotFoundError:
@@ -354,7 +356,7 @@ class BrokerStore:
             if constructor:
                 raise ValueError("db_path target must be a private regular file")
             raise RuntimeError("broker database path identity check failed")
-        return (target_stat.st_dev, target_stat.st_ino)
+        return _stat_identity(target_stat)
 
     def _verify_path_identity(
         self,
@@ -776,6 +778,45 @@ class BrokerStore:
                 (job_id, artifact_id),
             ).fetchone()
         return self._row_to_artifact(row) if row is not None else None
+
+    def delete_artifact_if_matches(self, expected: ArtifactRecord) -> bool:
+        """Delete only the exact artifact metadata supplied by a compensating caller."""
+
+        if type(expected) is not ArtifactRecord:
+            raise TypeError("expected must be an ArtifactRecord")
+        self._validate_artifact_values(
+            expected.artifact_id,
+            expected.job_id,
+            expected.relative_path,
+            expected.media_type,
+            expected.size_bytes,
+            expected.sha256,
+        )
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT * FROM artifacts WHERE job_id=? AND artifact_id=?",
+                    (expected.job_id, expected.artifact_id),
+                ).fetchone()
+                if row is None:
+                    connection.commit()
+                    return False
+                observed = self._row_to_artifact(row)
+                if observed != expected:
+                    raise ArtifactConflict("artifact metadata conflict")
+                deleted = connection.execute(
+                    "DELETE FROM artifacts WHERE job_id=? AND artifact_id=?",
+                    (expected.job_id, expected.artifact_id),
+                )
+                if deleted.rowcount != 1:
+                    raise RuntimeError("artifact compensation failed")
+                connection.commit()
+                return True
+            except BaseException:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
 
     def list_artifacts(self, job_id: str) -> list[ArtifactRecord]:
         """List immutable artifact metadata for exactly one job."""

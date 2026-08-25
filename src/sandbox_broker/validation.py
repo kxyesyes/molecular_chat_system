@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
+from src.task_runtime.config import _stat_identity, _stat_version
 from src.task_runtime.secure_io import read_file_snapshot
 
 
@@ -99,22 +100,14 @@ def _is_reparse(metadata: os.stat_result) -> bool:
     return bool(getattr(metadata, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT)
 
 
-def _identity(metadata: os.stat_result) -> tuple[int, int]:
-    return metadata.st_dev, metadata.st_ino
+def _identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return _stat_identity(metadata)
 
 
-def _stable_identity(metadata: os.stat_result) -> tuple[int, ...]:
-    identity = (
-        int(getattr(metadata, "st_dev", 0)),
-        int(getattr(metadata, "st_ino", 0)),
-        stat.S_IFMT(int(getattr(metadata, "st_mode", 0))),
-        int(getattr(metadata, "st_file_attributes", 0)),
-        int(getattr(metadata, "st_size", -1)),
-        int(getattr(metadata, "st_mtime_ns", -1)),
-    )
-    if os.name == "posix":
-        return identity + (int(getattr(metadata, "st_ctime_ns", -1)),)
-    return identity
+def _file_identity(
+    metadata: os.stat_result,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    return _stat_identity(metadata), _stat_version(metadata)
 
 
 def _absolute_components(path: Path) -> list[Path]:
@@ -188,7 +181,7 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _safe_unlink_created(path: Path, created_identity: tuple[int, int] | None) -> None:
+def _safe_unlink_created(path: Path, created_identity: tuple[int, ...] | None) -> None:
     if created_identity is None:
         return
     try:
@@ -243,8 +236,8 @@ def stage_input(
 
     part: Path | None = None
     final: Path | None = None
-    part_identity: tuple[int, int] | None = None
-    published_identity: tuple[int, int] | None = None
+    part_identity: tuple[int, ...] | None = None
+    published_identity: tuple[int, ...] | None = None
     descriptor: int | None = None
     published = False
     try:
@@ -484,17 +477,21 @@ def _read_pose_energies(
                 raise ValueError
             current = os.open(path.anchor, directory_flags)
             descriptors.append(current)
-            directory_identities = [_stable_identity(os.fstat(current))]
+            directory_identities = [_identity(os.fstat(current))]
+            parent_paths.append(Path(path.anchor))
             parts = path.parts[1:]
             if not parts:
                 raise ValueError
+            current_path = Path(path.anchor)
             for component in parts[:-1]:
                 current = os.open(component, directory_flags, dir_fd=current)
                 descriptors.append(current)
                 metadata = os.fstat(current)
                 if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
                     raise ValueError
-                directory_identities.append(_stable_identity(metadata))
+                directory_identities.append(_identity(metadata))
+                current_path /= component
+                parent_paths.append(current_path)
             flags = (
                 os.O_RDONLY
                 | os.O_NONBLOCK
@@ -519,7 +516,7 @@ def _read_pose_energies(
                     raise ValueError
                 parent_paths.append(current_path)
             directory_identities = [
-                _stable_identity(parent.lstat()) for parent in parent_paths
+                _identity(parent.lstat()) for parent in parent_paths
             ]
             flags = (
                 os.O_RDONLY
@@ -539,7 +536,7 @@ def _read_pose_energies(
             or named_before.st_nlink != 1
             or before.st_size <= 0
             or before.st_size > maximum_bytes
-            or _stable_identity(before) != _stable_identity(named_before)
+            or _file_identity(before) != _file_identity(named_before)
         ):
             raise ValueError
 
@@ -566,20 +563,31 @@ def _read_pose_energies(
         if os.name == "posix":
             named_after = os.stat(parts[-1], dir_fd=current, follow_symlinks=False)
             current_directory_identities = [
-                _stable_identity(os.fstat(item)) for item in descriptors[:-1]
+                _identity(os.fstat(item)) for item in descriptors[:-1]
             ]
         else:
             named_after = path.lstat()
             current_directory_identities = [
-                _stable_identity(parent.lstat()) for parent in parent_paths
+                _identity(parent.lstat()) for parent in parent_paths
             ]
+        named_directory_identities: list[tuple[int, ...]] = []
+        for parent in parent_paths:
+            parent_metadata = parent.lstat()
+            if (
+                not stat.S_ISDIR(parent_metadata.st_mode)
+                or stat.S_ISLNK(parent_metadata.st_mode)
+                or _is_reparse(parent_metadata)
+            ):
+                raise ValueError
+            named_directory_identities.append(_identity(parent_metadata))
         if (
             total != before.st_size
             or after.st_nlink != 1
             or named_after.st_nlink != 1
-            or _stable_identity(before) != _stable_identity(after)
-            or _stable_identity(before) != _stable_identity(named_after)
+            or _file_identity(before) != _file_identity(after)
+            or _file_identity(before) != _file_identity(named_after)
             or directory_identities != current_directory_identities
+            or directory_identities != named_directory_identities
         ):
             raise ValueError
         return tuple(energies), total

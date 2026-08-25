@@ -1162,6 +1162,32 @@ def test_artifact_store_register_get_and_list_are_job_scoped(tmp_path: Path) -> 
         record.size_bytes = 18  # type: ignore[misc]
 
 
+def test_artifact_store_deletes_only_an_exact_expected_record(tmp_path: Path) -> None:
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    job, _ = store.create_or_get("idem", SHA256_A, "trace")
+    artifact_id = "1" * 32
+    relative = f"jobs/{job.job_id}/published/{artifact_id}"
+    record = store.register_artifact(
+        artifact_id, job.job_id, relative, "text/plain", 3, SHA256_A
+    )
+    conflicting = ArtifactRecord(
+        artifact_id=record.artifact_id,
+        job_id=record.job_id,
+        relative_path=record.relative_path,
+        media_type="application/json",
+        size_bytes=record.size_bytes,
+        sha256=record.sha256,
+    )
+
+    with pytest.raises(ArtifactConflict):
+        store.delete_artifact_if_matches(conflicting)
+    assert store.get_artifact(job.job_id, artifact_id) == record
+
+    assert store.delete_artifact_if_matches(record) is True
+    assert store.get_artifact(job.job_id, artifact_id) is None
+    assert store.delete_artifact_if_matches(record) is False
+
+
 def test_artifact_store_requires_existing_job_and_maps_unique_conflicts(
     tmp_path: Path,
 ) -> None:

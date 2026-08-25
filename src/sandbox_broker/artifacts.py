@@ -9,6 +9,7 @@ import stat
 import uuid
 from pathlib import Path, PurePosixPath
 
+from src.task_runtime.config import _stat_identity, _stat_version
 from src.task_runtime.secure_io import read_file_snapshot
 
 from .store import ArtifactRecord, BrokerStore
@@ -34,8 +35,14 @@ def _is_reparse(metadata: os.stat_result) -> bool:
     return bool(getattr(metadata, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT)
 
 
-def _identity(metadata: os.stat_result) -> tuple[int, int]:
-    return metadata.st_dev, metadata.st_ino
+def _identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return _stat_identity(metadata)
+
+
+def _file_identity(
+    metadata: os.stat_result,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    return _stat_identity(metadata), _stat_version(metadata)
 
 
 def _absolute_components(path: Path) -> list[Path]:
@@ -109,7 +116,7 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _safe_unlink(path: Path, expected_identity: tuple[int, int] | None) -> None:
+def _safe_unlink(path: Path, expected_identity: tuple[int, ...] | None) -> None:
     if expected_identity is None:
         return
     try:
@@ -141,6 +148,43 @@ def _project_without_links(root: Path, relative: PurePosixPath) -> Path:
         if index < len(relative.parts) - 1 and not stat.S_ISDIR(metadata.st_mode):
             raise ValueError
     return projected
+
+
+def _verify_published_file(
+    path: Path,
+    descriptor: int,
+    expected_file_identity: tuple[tuple[int, ...], tuple[int, ...]],
+    expected_size: int,
+    expected_sha256: str,
+) -> None:
+    source_before = os.fstat(descriptor)
+    named_before = path.lstat()
+    if (
+        not stat.S_ISREG(source_before.st_mode)
+        or not stat.S_ISREG(named_before.st_mode)
+        or stat.S_ISLNK(named_before.st_mode)
+        or _is_reparse(named_before)
+        or source_before.st_nlink != 1
+        or named_before.st_nlink != 1
+        or source_before.st_size != expected_size
+        or named_before.st_size != expected_size
+        or _file_identity(source_before) != expected_file_identity
+        or _file_identity(named_before) != expected_file_identity
+    ):
+        raise ValueError
+    snapshot = read_file_snapshot(path, expected_size)
+    source_after = os.fstat(descriptor)
+    named_after = path.lstat()
+    if (
+        len(snapshot.content) != expected_size
+        or snapshot.sha256 != expected_sha256
+        or snapshot.identity != expected_file_identity
+        or source_after.st_nlink != 1
+        or named_after.st_nlink != 1
+        or _file_identity(source_after) != expected_file_identity
+        or _file_identity(named_after) != expected_file_identity
+    ):
+        raise ValueError
 
 
 class ArtifactRegistry:
@@ -201,8 +245,8 @@ class ArtifactRegistry:
         part: Path | None = None
         final: Path | None = None
         descriptor: int | None = None
-        part_identity: tuple[int, int] | None = None
-        final_identity: tuple[int, int] | None = None
+        part_identity: tuple[int, ...] | None = None
+        final_identity: tuple[int, ...] | None = None
         registered = False
         proven_unregistered = True
         artifact_id: str | None = None
@@ -254,8 +298,6 @@ class ArtifactRegistry:
                 or _identity(published_root.lstat()) != parent_identity
             ):
                 raise ValueError
-            os.close(descriptor)
-            descriptor = None
             try:
                 final.lstat()
             except FileNotFoundError:
@@ -264,17 +306,54 @@ class ArtifactRegistry:
                 raise ValueError
             os.link(part, final, follow_symlinks=False)
             final_identity = _identity(after)
+            linked_source = os.fstat(descriptor)
+            linked_final = final.lstat()
+            if (
+                not stat.S_ISREG(linked_final.st_mode)
+                or stat.S_ISLNK(linked_final.st_mode)
+                or _is_reparse(linked_final)
+                or linked_source.st_nlink != 2
+                or linked_final.st_nlink != 2
+                or _identity(linked_source) != final_identity
+                or _identity(linked_final) != final_identity
+                or linked_source.st_size != len(content)
+                or linked_final.st_size != len(content)
+            ):
+                raise ValueError
+            if os.name != "posix":
+                os.close(descriptor)
+                descriptor = None
             part.unlink()
             part_identity = None
+            if descriptor is None:
+                descriptor = os.open(
+                    final,
+                    os.O_RDONLY
+                    | getattr(os, "O_BINARY", 0)
+                    | getattr(os, "O_NONBLOCK", 0),
+                )
+            published_source = os.fstat(descriptor)
             final_metadata = final.lstat()
+            expected_file_identity = _file_identity(published_source)
             if (
-                final_identity != _identity(after)
+                final_identity != _identity(final_metadata)
+                or final_identity != _identity(published_source)
                 or not stat.S_ISREG(final_metadata.st_mode)
+                or not stat.S_ISREG(published_source.st_mode)
                 or final_metadata.st_nlink != 1
+                or published_source.st_nlink != 1
                 or _is_reparse(final_metadata)
+                or _file_identity(final_metadata) != expected_file_identity
                 or _identity(published_root.lstat()) != parent_identity
             ):
                 raise ValueError
+            _verify_published_file(
+                final,
+                descriptor,
+                expected_file_identity,
+                len(content),
+                digest.hexdigest(),
+            )
             _fsync_directory(published_root)
 
             relative_path = str(
@@ -287,6 +366,13 @@ class ArtifactRegistry:
                 media_type=media_type,
                 size_bytes=len(content),
                 sha256=digest.hexdigest(),
+            )
+            _verify_published_file(
+                final,
+                descriptor,
+                expected_file_identity,
+                expected.size_bytes,
+                expected.sha256,
             )
             proven_unregistered = False
             try:
@@ -314,11 +400,35 @@ class ArtifactRegistry:
                 if not isinstance(registration_failure, Exception):
                     raise
                 if observed == expected:
+                    try:
+                        _verify_published_file(
+                            final,
+                            descriptor,
+                            expected_file_identity,
+                            expected.size_bytes,
+                            expected.sha256,
+                        )
+                    except Exception:
+                        self._store.delete_artifact_if_matches(expected)
+                        proven_unregistered = True
+                        raise
                     registered = True
                     return observed
                 raise
             if record != expected:
                 raise ValueError
+            try:
+                _verify_published_file(
+                    final,
+                    descriptor,
+                    expected_file_identity,
+                    expected.size_bytes,
+                    expected.sha256,
+                )
+            except Exception:
+                self._store.delete_artifact_if_matches(expected)
+                proven_unregistered = True
+                raise
             registered = True
             return record
         except KeyError:

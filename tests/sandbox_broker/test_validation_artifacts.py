@@ -739,6 +739,105 @@ def test_scientific_output_reads_second_pose_only_with_remaining_budget(
         validate_scientific_output(output, SHA_A, SHA_B, total_size - 1)
 
 
+def test_scientific_output_allows_sibling_churn_during_incremental_pose_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pose = b"ATOM 1\n" * 12_000 + POSE
+    output = build_valid_output(tmp_path, pose=pose)
+    sibling = output.parent / "concurrent-sibling"
+    pose_descriptors: set[int] = set()
+    original_open = os.open
+    original_read = os.read
+    created = False
+
+    def tracking_open(
+        path: object,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if dir_fd is None:
+            descriptor = original_open(path, flags, mode)
+        else:
+            descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if str(path).endswith("result.pdbqt"):
+            pose_descriptors.add(descriptor)
+        return descriptor
+
+    def create_sibling_while_reading(descriptor: int, size: int) -> bytes:
+        nonlocal created
+        content = original_read(descriptor, size)
+        if descriptor in pose_descriptors and content and not created:
+            sibling.mkdir()
+            sibling.rmdir()
+            created = True
+        return content
+
+    with monkeypatch.context() as patch:
+        patch.setattr(validation_module.os, "open", tracking_open)
+        patch.setattr(validation_module.os, "read", create_sibling_while_reading)
+        validated = validate_scientific_output(output, SHA_A, SHA_B, 256 * 1024)
+
+    assert created
+    assert validated.pose_count == 1
+
+
+def test_scientific_output_rejects_path_component_replaced_during_pose_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pose = b"ATOM 1\n" * 12_000 + POSE
+    output = build_valid_output(tmp_path, pose=pose)
+    moved = output.parent / "moved-output"
+    pose_descriptors: set[int] = set()
+    original_open = os.open
+    original_read = os.read
+    replaced = False
+    unsupported = False
+
+    def tracking_open(
+        path: object,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if dir_fd is None:
+            descriptor = original_open(path, flags, mode)
+        else:
+            descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if str(path).endswith("result.pdbqt"):
+            pose_descriptors.add(descriptor)
+        return descriptor
+
+    def replace_component_while_reading(descriptor: int, size: int) -> bytes:
+        nonlocal replaced, unsupported
+        content = original_read(descriptor, size)
+        if descriptor in pose_descriptors and content and not replaced and not unsupported:
+            try:
+                os.replace(output, moved)
+                output.mkdir()
+                (output / "poses").mkdir()
+                replaced = True
+            except OSError:
+                unsupported = True
+        return content
+
+    caught: ScientificOutputError | None = None
+    with monkeypatch.context() as patch:
+        patch.setattr(validation_module.os, "open", tracking_open)
+        patch.setattr(validation_module.os, "read", replace_component_while_reading)
+        try:
+            validate_scientific_output(output, SHA_A, SHA_B, 256 * 1024)
+        except ScientificOutputError as exc:
+            caught = exc
+
+    if unsupported:
+        pytest.skip("open-directory replacement unavailable")
+    assert replaced
+    assert caught is not None
+
+
 @pytest.mark.parametrize(
     "prefix",
     [
@@ -911,6 +1010,68 @@ def test_artifact_publish_and_identifier_only_read(tmp_path: Path) -> None:
     with pytest.raises(KeyError):
         registry.read_registered(job_id, "../pose", 1024)
     assert str(store.db_path.parent) not in repr(registry)
+
+
+def test_artifact_publish_rejects_final_replaced_after_link(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    store, job_id = make_store_and_job(tmp_path)
+    registry = ArtifactRegistry(store.db_path.parent, store, max_artifact_bytes=1024)
+    original_link = os.link
+
+    def link_then_replace(
+        source: object,
+        destination: object,
+        *,
+        follow_symlinks: bool = True,
+    ) -> None:
+        original_link(source, destination, follow_symlinks=follow_symlinks)
+        replacement = Path(destination).with_suffix(".replacement")
+        replacement.write_bytes(b"attacker")
+        os.replace(replacement, destination)
+
+    monkeypatch.setattr(artifacts_module.os, "link", link_then_replace)
+
+    with pytest.raises(ValueError):
+        registry.publish(job_id, "pose", POSE, "chemical/x-pdbqt")
+
+    assert store.list_artifacts(job_id) == []
+
+
+def test_artifact_publish_rejects_final_replaced_during_registration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    store, job_id = make_store_and_job(tmp_path)
+    registry = ArtifactRegistry(store.db_path.parent, store, max_artifact_bytes=1024)
+    original_register = store.register_artifact
+
+    def replace_then_register(
+        artifact_id: str,
+        registered_job_id: str,
+        relative_path: str,
+        media_type: str,
+        size_bytes: int,
+        sha256: str,
+    ) -> object:
+        final = store.db_path.parent / Path(*relative_path.split("/"))
+        replacement = final.with_suffix(".replacement")
+        replacement.write_bytes(b"x" * size_bytes)
+        os.replace(replacement, final)
+        return original_register(
+            artifact_id,
+            registered_job_id,
+            relative_path,
+            media_type,
+            size_bytes,
+            sha256,
+        )
+
+    monkeypatch.setattr(store, "register_artifact", replace_then_register)
+
+    with pytest.raises(ValueError):
+        registry.publish(job_id, "pose", POSE, "chemical/x-pdbqt")
+
+    assert store.list_artifacts(job_id) == []
 
 
 def test_artifact_rejects_unknown_job_cross_job_media_type_and_bad_limits(
