@@ -659,6 +659,40 @@ def test_broker_config_rejects_missing_socket_parent(tmp_path: Path) -> None:
         BrokerConfig(**_config_values(tmp_path, socket_path=missing_socket))
 
 
+def test_direct_config_rejects_socket_path_occupied_by_regular_file(tmp_path: Path) -> None:
+    values = _config_values(tmp_path)
+    socket_path = values["socket_path"]
+    assert isinstance(socket_path, Path)
+    socket_path.write_text("occupied", encoding="utf-8")
+
+    with pytest.raises(ValueError) as caught:
+        BrokerConfig(**values)
+
+    rendered = str(caught.value)
+    if str(tmp_path) in rendered:
+        pytest.fail("socket validation error disclosed its path")
+    if str(values["opensandbox_api_key"]) in rendered:
+        pytest.fail("socket validation error disclosed its credential")
+
+
+def test_env_config_rejects_socket_path_occupied_by_regular_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    credential = _set_required_env(monkeypatch, tmp_path)
+    socket_path = tmp_path / "run" / "broker.sock"
+    socket_path.write_text("occupied", encoding="utf-8")
+
+    with pytest.raises(ValueError) as caught:
+        BrokerConfig.from_env()
+
+    rendered = str(caught.value)
+    if str(tmp_path) in rendered:
+        pytest.fail("socket validation error disclosed its path")
+    if credential in rendered:
+        pytest.fail("socket validation error disclosed its credential")
+
+
 @pytest.mark.parametrize("field", ["state_root", "socket_path"])
 def test_broker_config_rejects_regular_file_as_directory(tmp_path: Path, field: str) -> None:
     ordinary_file = tmp_path / "ordinary-file"

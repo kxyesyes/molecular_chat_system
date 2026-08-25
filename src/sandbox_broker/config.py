@@ -49,7 +49,13 @@ def _validate_stable_absolute_path(
     if ".." in candidate.parts:
         raise ValueError(f"{name} must not contain parent-directory aliases")
 
+    socket_target_mode: int | None = None
     try:
+        if not require_directory:
+            try:
+                socket_target_mode = candidate.lstat().st_mode
+            except FileNotFoundError:
+                pass
         lexical = Path(os.path.abspath(candidate))
         resolved = candidate.resolve(strict=False)
         directory = resolved if require_directory else resolved.parent
@@ -62,6 +68,8 @@ def _validate_stable_absolute_path(
     if not stat.S_ISDIR(directory_mode):
         requirement = "an existing directory" if require_directory else "an existing parent directory"
         raise ValueError(f"{name} must reference {requirement}")
+    if socket_target_mode is not None and not stat.S_ISSOCK(socket_target_mode):
+        raise ValueError(f"{name} target must be absent or an existing Unix socket")
     return resolved
 
 
