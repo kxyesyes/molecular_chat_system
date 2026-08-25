@@ -27,6 +27,7 @@ from src.sandbox_broker.service import (
     BrokerFailure,
     PreparedDockingSubmission,
     SandboxBrokerService,
+    StopIncomplete,
     canonical_submission_sha256,
 )
 from src.sandbox_broker.store import BrokerStore
@@ -206,12 +207,17 @@ class BlockingDestroySandboxClient(FakeSandboxClient):
         super().__init__(block=True)
         self.destroy_started = asyncio.Event()
         self.destroy_release = asyncio.Event()
+        self.destroy_cancelled = False
 
     async def destroy(self, handle: SandboxHandle) -> None:
-        del handle
         self.destroy_count += 1
         self.destroy_started.set()
-        await self.destroy_release.wait()
+        try:
+            await self.destroy_release.wait()
+        except asyncio.CancelledError:
+            self.destroy_cancelled = True
+            raise
+        self.destroyed_ids.append(handle.sandbox_id)
 
 
 class BlockingCreateSandboxClient(FakeSandboxClient):
@@ -241,6 +247,42 @@ class BlockingCreateSandboxClient(FakeSandboxClient):
     async def destroy(self, handle: SandboxHandle) -> None:
         await super().destroy(handle)
         self.live_ids.remove(handle.sandbox_id)
+
+
+class _AdapterLifecycleRaw:
+    def __init__(self, sandbox_id: str) -> None:
+        self.id = sandbox_id
+
+
+class AdapterLifecycleFactory:
+    def __init__(self) -> None:
+        self.remote_live = asyncio.Event()
+        self.create_release = asyncio.Event()
+        self.live_ids: set[str] = set()
+        self.destroyed_ids: list[str] = []
+        self.create_cancelled = False
+
+    async def create(self, **policy: object) -> _AdapterLifecycleRaw:
+        metadata = policy["metadata"]
+        assert isinstance(metadata, dict)
+        sandbox_id = f"sandbox-{metadata['medchat.job_id']}"
+        raw = _AdapterLifecycleRaw(sandbox_id)
+        self.live_ids.add(sandbox_id)
+        self.remote_live.set()
+        try:
+            await self.create_release.wait()
+        except asyncio.CancelledError:
+            self.create_cancelled = True
+            raise
+        return raw
+
+    async def destroy(self, raw: _AdapterLifecycleRaw) -> None:
+        self.live_ids.remove(raw.id)
+        self.destroyed_ids.append(raw.id)
+
+    async def destroy_by_id(self, sandbox_id: str) -> None:
+        self.live_ids.remove(sandbox_id)
+        self.destroyed_ids.append(sandbox_id)
 
 
 def _config(tmp_path: Path) -> BrokerConfig:
@@ -555,6 +597,101 @@ def test_queued_and_running_cancellation_are_idempotent_and_cleanup(
     assert queued.status is BrokerJobStatus.CANCELLED
     assert sdk.create_count == 1
     assert sdk.destroy_count == 1
+
+
+def test_cancel_before_job_coroutine_starts_keeps_consumer_alive(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> tuple[object, object, FakeSandboxClient]:
+        loop = asyncio.get_running_loop()
+        release_first_job = asyncio.Event()
+        first_job_wrapped = asyncio.Event()
+        intercepted = False
+
+        def delaying_task_factory(
+            task_loop: asyncio.AbstractEventLoop,
+            coroutine: object,
+        ) -> asyncio.Task[object]:
+            nonlocal intercepted
+            code = getattr(coroutine, "cr_code", None)
+            if not intercepted and getattr(code, "co_name", None) == "_run_job":
+                intercepted = True
+
+                async def delayed() -> object:
+                    first_job_wrapped.set()
+                    try:
+                        await release_first_job.wait()
+                        return await coroutine  # type: ignore[misc]
+                    finally:
+                        close = getattr(coroutine, "close", None)
+                        if callable(close):
+                            close()
+
+                return asyncio.Task(delayed(), loop=task_loop)
+            return asyncio.Task(coroutine, loop=task_loop)  # type: ignore[arg-type]
+
+        loop.set_task_factory(delaying_task_factory)
+        sdk = FakeSandboxClient()
+        service, _, config = _service(tmp_path, sdk)
+        try:
+            await service.start()
+            first = await service.submit(_prepared(config), "idem-prestart-cancel")
+            await first_job_wrapped.wait()
+            await service.cancel(first.job_id)
+            second = await service.submit(_prepared(config), "idem-after-cancel")
+            release_first_job.set()
+            first_terminal = await service.wait_terminal(first.job_id, timeout=1.0)
+            second_terminal = await service.wait_terminal(second.job_id, timeout=1.0)
+            await service.stop()
+            return first_terminal, second_terminal, sdk
+        finally:
+            release_first_job.set()
+            loop.set_task_factory(None)
+
+    first, second, sdk = asyncio.run(scenario())
+    assert first.status is BrokerJobStatus.CANCELLED
+    assert second.status is BrokerJobStatus.SUCCEEDED
+    assert sdk.create_count == 1
+    assert sdk.run_count == 1
+    assert sdk.destroy_count == 1
+
+
+def test_run_cancel_event_cancels_only_run_task_and_consumer_runs_next_job(
+    tmp_path: Path,
+) -> None:
+    class RunCancellationClient(FakeSandboxClient):
+        def __init__(self) -> None:
+            super().__init__(block=True)
+            self.run_cancellations = 0
+
+        async def run(self, handle: SandboxHandle) -> SandboxCommandResult:
+            try:
+                return await super().run(handle)
+            except asyncio.CancelledError:
+                self.run_cancellations += 1
+                raise
+
+    async def scenario() -> tuple[object, object, RunCancellationClient]:
+        sdk = RunCancellationClient()
+        service, _, config = _service(tmp_path, sdk)
+        await service.start()
+        first = await service.submit(_prepared(config), "idem-run-event-cancel")
+        await sdk.running.wait()
+        await service.cancel(first.job_id)
+        second = await service.submit(_prepared(config), "idem-after-run-cancel")
+        first_terminal = await service.wait_terminal(first.job_id, timeout=1.0)
+        sdk.release.set()
+        second_terminal = await service.wait_terminal(second.job_id, timeout=1.0)
+        await service.stop()
+        return first_terminal, second_terminal, sdk
+
+    first, second, sdk = asyncio.run(scenario())
+    assert first.status is BrokerJobStatus.CANCELLED
+    assert first.cleanup_status == "succeeded"
+    assert second.status is BrokerJobStatus.SUCCEEDED
+    assert sdk.run_cancellations == 1
+    assert sdk.run_count == 2
+    assert sdk.destroy_count == 2
 
 
 def test_cancel_during_provisioning_waits_for_create_then_attaches_and_destroys(
@@ -943,26 +1080,25 @@ def test_stop_shields_inflight_create_until_handle_is_attached_and_destroyed(
     assert leaked == []
 
 
-def test_bounded_stop_marks_unfinished_cleanup_failed_and_leaks_no_tasks(
+def test_cancelled_stop_waiter_does_not_cancel_known_cleanup(
     tmp_path: Path,
 ) -> None:
-    async def scenario() -> tuple[bool, object, list[str]]:
+    async def scenario() -> tuple[object, BlockingDestroySandboxClient, list[str]]:
         sdk = BlockingDestroySandboxClient()
         service, _, config = _service(tmp_path, sdk)
-        service._stop_timeout_seconds = 0.02
         await service.start()
-        job = await service.submit(_prepared(config), "idem-stop-timeout")
+        job = await service.submit(_prepared(config), "idem-stop-caller-cancel")
         await sdk.running.wait()
         stop_task = asyncio.create_task(service.stop())
         await sdk.destroy_started.wait()
-        bounded = True
-        try:
-            await asyncio.wait_for(asyncio.shield(stop_task), timeout=0.2)
-        except asyncio.TimeoutError:
-            bounded = False
-        finally:
-            sdk.destroy_release.set()
+        stop_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
             await stop_task
+        assert not sdk.destroy_release.is_set()
+        assert sdk.destroy_cancelled is False
+
+        sdk.destroy_release.set()
+        await service.stop(timeout=1.0)
         await asyncio.sleep(0)
         terminal = service.get_job(job.job_id)
         leaked = [
@@ -972,48 +1108,54 @@ def test_bounded_stop_marks_unfinished_cleanup_failed_and_leaks_no_tasks(
             and task.get_name().startswith("sandbox-broker-")
             and not task.done()
         ]
-        return bounded, terminal, leaked
+        return terminal, sdk, leaked
 
-    bounded, terminal, leaked = asyncio.run(scenario())
-    assert bounded is True
-    assert terminal.status is BrokerJobStatus.FAILED
-    assert terminal.error_code == BrokerErrorCode.CLEANUP_FAILED.value
-    assert terminal.cleanup_status == "failed"
+    terminal, sdk, leaked = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.CANCELLED
+    assert terminal.cleanup_status == "succeeded"
+    assert sdk.destroy_cancelled is False
+    assert sdk.destroyed_ids == [terminal.sandbox_id]
     assert leaked == []
 
 
-def test_bounded_stop_never_claims_unknown_create_cleanup_succeeded(
+def test_short_stop_keeps_adapter_create_and_shutdown_running_until_retry(
     tmp_path: Path,
 ) -> None:
-    async def scenario() -> tuple[bool, object, BlockingCreateSandboxClient, list[str]]:
-        sdk = BlockingCreateSandboxClient()
-        service, _, config = _service(tmp_path, sdk)
-        service._stop_timeout_seconds = 0.01
+    async def scenario() -> tuple[object, AdapterLifecycleFactory, list[str]]:
+        config = _config(tmp_path)
+        factory = AdapterLifecycleFactory()
+        sdk = OpenSandboxClient(config, sandbox_factory=factory)
+        store = BrokerStore(config.state_root / "broker.sqlite")
+        service = SandboxBrokerService(
+            config,
+            store,
+            sdk,
+            ArtifactRegistry(config.state_root, store),
+        )
         await service.start()
         job = await service.submit(_prepared(config), "idem-stop-unknown-create")
-        await sdk.remote_live.wait()
+        await factory.remote_live.wait()
 
-        stop_task = asyncio.create_task(service.stop())
-        bounded = True
-        try:
-            await asyncio.wait_for(asyncio.shield(stop_task), timeout=0.2)
-        except asyncio.TimeoutError:
-            bounded = False
-        terminal = service.get_job(job.job_id)
+        with pytest.raises(StopIncomplete, match="shutdown is incomplete"):
+            await service.stop(timeout=0.01)
+        pending = service.get_job(job.job_id)
+        assert pending.status is BrokerJobStatus.PROVISIONING
+        assert pending.cleanup_status == "not_started"
+        assert factory.live_ids == {f"sandbox-{job.job_id}"}
+        assert any(not task.done() for task in service._create_tasks.values())
 
-        sdk.create_release.set()
-        for _ in range(50):
-            pending_broker_tasks = [
-                task
-                for task in asyncio.all_tasks()
-                if task is not asyncio.current_task()
-                and task.get_name().startswith("sandbox-broker-")
-                and not task.done()
-            ]
-            if not sdk.live_ids and not pending_broker_tasks:
+        factory.create_release.set()
+        for _ in range(100):
+            if service._shutdown_task is not None and service._shutdown_task.done():
                 break
             await asyncio.sleep(0.01)
+        assert service._shutdown_task is not None
+        assert service._shutdown_task.done()
+        await service.stop(timeout=1.0)
+        assert service._shutdown_task is None
+        assert service._stopping is False
         await asyncio.sleep(0)
+        terminal = service.get_job(job.job_id)
         leaked = [
             task.get_name()
             for task in asyncio.all_tasks()
@@ -1021,16 +1163,15 @@ def test_bounded_stop_never_claims_unknown_create_cleanup_succeeded(
             and task.get_name().startswith("sandbox-broker-")
             and not task.done()
         ]
-        return bounded, terminal, sdk, leaked
+        return terminal, factory, leaked
 
-    bounded, terminal, sdk, leaked = asyncio.run(scenario())
-    assert bounded is True
-    assert terminal.status is BrokerJobStatus.FAILED
-    assert terminal.error_code == BrokerErrorCode.CLEANUP_FAILED.value
-    assert terminal.cleanup_status == "failed"
-    assert sdk.create_cancelled is False
-    assert len(sdk.destroyed_ids) == 1
-    assert sdk.live_ids == set()
+    terminal, factory, leaked = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.CANCELLED
+    assert terminal.cleanup_status == "succeeded"
+    assert terminal.sandbox_id is not None
+    assert factory.create_cancelled is False
+    assert factory.destroyed_ids == [terminal.sandbox_id]
+    assert factory.live_ids == set()
     assert leaked == []
 
 
@@ -1106,6 +1247,41 @@ def test_recovery_retries_a_persisted_failed_cleanup_before_terminalizing(
     assert terminal.cleanup_status == "succeeded"
 
 
+def test_recovery_retries_terminal_cleanup_pending_without_rewriting_audit(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> tuple[object, object, RecoverySandboxClient, list[object]]:
+        failing = FaultSandboxClient("destroy")
+        service, store, config = _service(tmp_path, failing)
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-terminal-cleanup-retry")
+        before = await service.wait_terminal(job.job_id)
+        await service.stop()
+        assert store.cleanup_pending_jobs()
+
+        recovery = RecoverySandboxClient()
+        reopened = SandboxBrokerService(
+            config,
+            store,
+            recovery,
+            ArtifactRegistry(config.state_root, store),
+        )
+        await reopened.recover()
+        after = reopened.get_job(job.job_id)
+        return before, after, recovery, store.cleanup_pending_jobs()
+
+    before, after, recovery, pending = asyncio.run(scenario())
+    assert before.status is BrokerJobStatus.FAILED
+    assert before.error_code == BrokerErrorCode.CLEANUP_FAILED.value
+    assert before.cleanup_status == "failed"
+    assert after.status is before.status
+    assert after.error_code == before.error_code
+    assert after.warnings == before.warnings
+    assert after.cleanup_status == "succeeded"
+    assert recovery.recovery_calls == 1
+    assert pending == []
+
+
 @pytest.mark.parametrize(
     "warning",
     [
@@ -1117,6 +1293,9 @@ def test_recovery_retries_a_persisted_failed_cleanup_before_terminalizing(
         r"source=\\server\share\pose.pdbqt",
         "\x1b[31mpath=/home/runner/pose.pdbqt\x1b[0m",
         "path=\x00/home/runner/pose.pdbqt",
+        "prefix/home/runner/pose.pdbqt",
+        r"prefixC:\Users\runner\pose.pdbqt",
+        r"prefix\\server\share\pose.pdbqt",
     ],
 )
 def test_untrusted_warning_with_host_path_fails_scientific_gate_without_leak(

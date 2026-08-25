@@ -1180,6 +1180,68 @@ def test_service_store_rejects_invalid_cleanup_and_sensitive_json(tmp_path: Path
         )
 
 
+def test_terminal_cleanup_retry_preserves_terminal_audit_and_clears_pending(
+    tmp_path: Path,
+) -> None:
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    job, _ = store.create_or_get("idem-cleanup-retry", SHA256_A, "trace-retry")
+    store.transition(job.job_id, BrokerJobStatus.PROVISIONING)
+    store.attach_sandbox(job.job_id, "sandbox-retry")
+    terminal = store.fail(
+        job.job_id,
+        BrokerErrorCode.CLEANUP_FAILED,
+        warnings=["cleanup_failed"],
+        cleanup_status="failed",
+    )
+    with sqlite3.connect(store.db_path) as connection:
+        transitions_before = connection.execute(
+            "SELECT status, phase FROM transitions WHERE job_id=? ORDER BY sequence",
+            (job.job_id,),
+        ).fetchall()
+
+    assert store.cleanup_pending_jobs() == [terminal]
+    in_progress = store.record_cleanup(job.job_id, "in_progress")
+    succeeded = store.record_cleanup(job.job_id, "succeeded")
+
+    assert in_progress.status is BrokerJobStatus.FAILED
+    assert succeeded.status is BrokerJobStatus.FAILED
+    assert succeeded.error_code == BrokerErrorCode.CLEANUP_FAILED.value
+    assert succeeded.warnings == ["cleanup_failed"]
+    assert succeeded.sandbox_id == "sandbox-retry"
+    assert succeeded.cleanup_status == "succeeded"
+    with sqlite3.connect(store.db_path) as connection:
+        transitions_after = connection.execute(
+            "SELECT status, phase FROM transitions WHERE job_id=? ORDER BY sequence",
+            (job.job_id,),
+        ).fetchall()
+    assert transitions_after == transitions_before
+    assert store.cleanup_pending_jobs() == []
+
+
+def test_cleanup_pending_jobs_fails_closed_on_corrupt_matching_row(
+    tmp_path: Path,
+) -> None:
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    job, _ = store.create_or_get("idem-corrupt-pending", SHA256_A, "trace-corrupt")
+    store.transition(job.job_id, BrokerJobStatus.PROVISIONING)
+    store.attach_sandbox(job.job_id, "sandbox-corrupt")
+    store.fail(
+        job.job_id,
+        BrokerErrorCode.CLEANUP_FAILED,
+        warnings=["cleanup_failed"],
+        cleanup_status="failed",
+    )
+    _set_job_column(
+        store.db_path,
+        job.job_id,
+        "warnings_json",
+        '{"not":"a-list"}',
+    )
+
+    with pytest.raises(RuntimeError, match="persisted broker job is invalid"):
+        store.cleanup_pending_jobs()
+
+
 @pytest.mark.parametrize(
     "unsafe_value",
     [
@@ -1191,6 +1253,9 @@ def test_service_store_rejects_invalid_cleanup_and_sensitive_json(tmp_path: Path
         r"path=\\server\share\result.json",
         "\x1b[31mpath=/home/runner/result.json\x1b[0m",
         "path=\x00/home/runner/result.json",
+        "prefix/home/runner/result.json",
+        r"prefixC:\Users\runner\result.json",
+        r"prefix\\server\share\result.json",
     ],
 )
 def test_store_rejects_embedded_paths_in_warnings_and_provenance_without_echo(

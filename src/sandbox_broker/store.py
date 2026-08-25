@@ -24,6 +24,7 @@ from .models import (
     BrokerJobStatus,
     transition_allowed,
 )
+from .safety import is_safe_metadata_text
 
 
 _BUSY_TIMEOUT_MS = 500
@@ -35,17 +36,6 @@ _MAX_WARNING_LENGTH = 4096
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _SENSITIVE_KEY_PATTERN = re.compile(
     r"(?i)(?:api[_ -]?key|token|password|secret|credential)"
-)
-_ANSI_ESCAPE_PATTERN = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-_])")
-_CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
-_WINDOWS_ABSOLUTE_PATH_PATTERN = re.compile(
-    r"(?i)(?<![A-Za-z0-9])[A-Z]:[\\/]"
-)
-_UNC_ABSOLUTE_PATH_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9])(?:\\\\|//)[^\\/\s]+[\\/]"
-)
-_POSIX_ABSOLUTE_PATH_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9])/(?!/)(?=$|[A-Za-z0-9._~-])"
 )
 
 
@@ -725,7 +715,7 @@ class BrokerStore:
                 raise
 
     def record_cleanup(self, job_id: str, cleanup_status: str) -> BrokerJobRecord:
-        """CAS one planned cleanup state while the job remains active."""
+        """CAS cleanup state, including terminal failed-cleanup recovery."""
 
         if type(job_id) is not str or not job_id:
             raise TypeError("job_id must be a non-empty string")
@@ -737,6 +727,11 @@ class BrokerStore:
             "succeeded": frozenset({"succeeded"}),
             "failed": frozenset({"failed", "in_progress"}),
         }
+        terminal_allowed = {
+            "failed": frozenset({"failed", "in_progress"}),
+            "in_progress": frozenset({"in_progress", "succeeded", "failed"}),
+            "succeeded": frozenset({"succeeded"}),
+        }
         with self._connect() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
@@ -746,15 +741,18 @@ class BrokerStore:
                 if row is None:
                     raise KeyError("job not found")
                 record = self._row_to_record(row)
-                if record.status in TERMINAL_STATUSES:
-                    if record.cleanup_status == cleanup_status:
-                        connection.commit()
-                        return record
-                    raise ValueError("cleanup status transition is invalid")
                 if cleanup_status == record.cleanup_status:
                     connection.commit()
                     return record
-                if cleanup_status not in allowed[record.cleanup_status]:
+                transitions = (
+                    terminal_allowed
+                    if record.status in TERMINAL_STATUSES
+                    else allowed
+                )
+                if (
+                    record.cleanup_status not in transitions
+                    or cleanup_status not in transitions[record.cleanup_status]
+                ):
                     raise ValueError("cleanup status transition is invalid")
                 now = self._now()
                 changed = connection.execute(
@@ -982,14 +980,7 @@ class BrokerStore:
     @classmethod
     def _reject_sensitive_json(cls, value: object) -> None:
         if type(value) is str:
-            normalized = _ANSI_ESCAPE_PATTERN.sub("", value)
-            normalized = _CONTROL_CHARACTER_PATTERN.sub("", normalized)
-            if (
-                normalized != value
-                or _WINDOWS_ABSOLUTE_PATH_PATTERN.search(normalized) is not None
-                or _UNC_ABSOLUTE_PATH_PATTERN.search(normalized) is not None
-                or _POSIX_ABSOLUTE_PATH_PATTERN.search(normalized) is not None
-            ):
+            if not is_safe_metadata_text(value):
                 raise ValueError
             return
         if type(value) is list:
@@ -998,11 +989,9 @@ class BrokerStore:
             return
         if type(value) is dict:
             for key, item in value.items():
-                normalized_key = _ANSI_ESCAPE_PATTERN.sub("", key)
-                normalized_key = _CONTROL_CHARACTER_PATTERN.sub("", normalized_key)
                 if (
-                    normalized_key != key
-                    or _SENSITIVE_KEY_PATTERN.search(normalized_key) is not None
+                    not is_safe_metadata_text(key)
+                    or _SENSITIVE_KEY_PATTERN.search(key) is not None
                 ):
                     raise ValueError
                 cls._reject_sensitive_json(item)
@@ -1137,6 +1126,18 @@ class BrokerStore:
                 f"SELECT * FROM jobs WHERE status NOT IN ({placeholders}) "
                 "ORDER BY created_at ASC, job_id ASC",
                 terminal_values,
+            ).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
+    def cleanup_pending_jobs(self) -> list[BrokerJobRecord]:
+        """Return every decodable job whose persisted sandbox still needs cleanup."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM jobs "
+                "WHERE sandbox_id IS NOT NULL AND cleanup_status<>? "
+                "ORDER BY created_at ASC, job_id ASC",
+                ("succeeded",),
             ).fetchall()
         return [self._row_to_record(row) for row in rows]
 

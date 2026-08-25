@@ -27,6 +27,7 @@ from .models import (
     DockingParameters,
 )
 from .opensandbox_client import SandboxCommandResult, SandboxHandle
+from .safety import is_safe_metadata_text
 from .store import ArtifactRecord, BrokerJobRecord, BrokerStore
 from .validation import (
     ScientificOutputError,
@@ -43,15 +44,6 @@ _TOOL_VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .+_()-]{0,127}$")
 _SENSITIVE_TEXT_PATTERN = re.compile(
     r"(?i)(?:api[_ -]?key|token|password|secret|credential|bearer\s+)"
 )
-_ANSI_ESCAPE_PATTERN = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-_])")
-_CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
-_WINDOWS_PATH_PATTERN = re.compile(r"(?i)(?<![A-Za-z0-9])[A-Z]:[\\/]")
-_UNC_PATH_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9])(?:\\\\|//)[^\\/\s]+[\\/]"
-)
-_POSIX_ABSOLUTE_PATH_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9])/(?!/)(?=$|[A-Za-z0-9._~-])"
-)
 _MANIFEST_MAX_BYTES = 1024 * 1024
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
@@ -64,6 +56,13 @@ class BrokerFailure(Exception):
             raise TypeError("code must be BrokerErrorCode")
         self.code = code
         super().__init__(code.value)
+
+
+class StopIncomplete(RuntimeError):
+    """A sanitized signal that shutdown is still completing in the background."""
+
+    def __init__(self) -> None:
+        super().__init__("sandbox broker shutdown is incomplete")
 
 
 def _safe_staged_input(value: object, role: str) -> StagedInput:
@@ -235,20 +234,25 @@ class SandboxBrokerService:
         self._started = False
         self._stopping = False
         self._consumer_task: asyncio.Task[None] | None = None
+        self._shutdown_task: asyncio.Task[None] | None = None
         self._job_tasks: dict[str, asyncio.Task[None]] = {}
         self._create_tasks: dict[str, asyncio.Task[Any]] = {}
         self._cleanup_tasks: dict[str, asyncio.Task[Any]] = {}
         self._prepared: dict[str, PreparedDockingSubmission] = {}
         self._terminal_events: dict[str, asyncio.Event] = {}
+        self._cancel_events: dict[str, asyncio.Event] = {}
         self._lifecycle_lock = asyncio.Lock()
         self._recovery_lock = asyncio.Lock()
+        self._recovery_generation = 0
         self._retention_lock = asyncio.Lock()
-        self._stop_timeout_seconds = 5.0
+        self._cleanup_timeout_margin_seconds = 30.0
 
     async def start(self) -> None:
         """Start exactly one consumer; repeated calls are harmless."""
 
         async with self._lifecycle_lock:
+            if self._shutdown_task is not None and not self._shutdown_task.done():
+                raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
             if self._started and self._consumer_task is not None and not self._consumer_task.done():
                 return
             self._stopping = False
@@ -257,90 +261,100 @@ class SandboxBrokerService:
                 self._consume(), name="sandbox-broker-consumer"
             )
 
-    async def stop(self) -> None:
-        """Stop the consumer and coordinate any active job cleanup."""
+    async def stop(self, *, timeout: float | None = None) -> None:
+        """Request cancellation and await one shared, non-cancellable shutdown."""
 
-        async with self._lifecycle_lock:
-            if not self._started and self._consumer_task is None:
-                return
-            self._started = False
-            self._stopping = True
-            consumer = self._consumer_task
-            self._consumer_task = None
-            if consumer is not None and not consumer.done():
-                consumer.cancel()
-        if consumer is not None:
-            done, pending = await asyncio.wait(
-                {consumer}, timeout=self._stop_timeout_seconds
+        if timeout is None:
+            wait_seconds = (
+                float(self.config.sandbox_timeout_seconds)
+                + self._cleanup_timeout_margin_seconds
             )
-            if pending:
-                self._terminalize_stop_timeout()
-                for task in tuple(self._cleanup_tasks.values()):
-                    if not task.done():
-                        task.cancel()
-                for task in tuple(self._job_tasks.values()):
-                    if not task.done():
-                        task.cancel()
-                consumer.cancel()
-                tracked = {
-                    consumer,
-                    *self._job_tasks.values(),
-                    *self._create_tasks.values(),
-                    *self._cleanup_tasks.values(),
-                }
-                if tracked:
-                    await asyncio.wait(
-                        tracked,
-                        timeout=self._stop_timeout_seconds,
-                    )
-            if consumer.done():
+        elif (
+            type(timeout) not in (int, float)
+            or not math.isfinite(float(timeout))
+            or float(timeout) <= 0
+        ):
+            raise ValueError("shutdown timeout is invalid")
+        else:
+            wait_seconds = float(timeout)
+
+        completed_shutdown_failed = False
+        async with self._lifecycle_lock:
+            shutdown = self._shutdown_task
+            if shutdown is not None and shutdown.done():
                 try:
-                    consumer.result()
+                    shutdown.result()
                 except BaseException:
-                    pass
-        self._fail_unstarted_queued_jobs()
-        self._stopping = False
+                    completed_shutdown_failed = True
+                self._shutdown_task = None
+                self._stopping = False
+                if self._consumer_task is not None and self._consumer_task.done():
+                    self._consumer_task = None
+                shutdown = None
+            if shutdown is None:
+                if (
+                    not self._started
+                    and self._consumer_task is None
+                    and not self._job_tasks
+                    and not self._create_tasks
+                    and not self._cleanup_tasks
+                ):
+                    if completed_shutdown_failed:
+                        raise StopIncomplete()
+                    return
+                self._started = False
+                self._stopping = True
+                shutdown = asyncio.create_task(
+                    self._shutdown(),
+                    name="sandbox-broker-shutdown",
+                )
+                self._shutdown_task = shutdown
 
-    def _terminalize_stop_timeout(self) -> None:
+        try:
+            await asyncio.wait_for(asyncio.shield(shutdown), timeout=wait_seconds)
+        except asyncio.TimeoutError:
+            raise StopIncomplete() from None
+        finally:
+            if shutdown.done():
+                async with self._lifecycle_lock:
+                    if self._shutdown_task is shutdown:
+                        self._shutdown_task = None
+                    self._stopping = False
+
+    async def _shutdown(self) -> None:
         for record in self.store.active_jobs():
             try:
-                create_task = self._create_tasks.get(record.job_id)
-                create_result_unknown = (
-                    create_task is not None and not create_task.done()
-                )
-                if record.sandbox_id is None and not create_result_unknown:
-                    self.store.record_cleanup(record.job_id, "succeeded")
-                    self.store.fail(
-                        record.job_id,
-                        BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
-                        cleanup_status="succeeded",
-                    )
-                else:
-                    self.store.fail(
-                        record.job_id,
-                        BrokerErrorCode.CLEANUP_FAILED,
-                        warnings=("cleanup_failed",),
-                        cleanup_status="failed",
-                    )
-                self._terminal_events.setdefault(record.job_id, asyncio.Event()).set()
+                current = self.store.request_cancel(record.job_id)
+                if current.status not in TERMINAL_STATUSES:
+                    self._cancel_events.setdefault(
+                        current.job_id, asyncio.Event()
+                    ).set()
             except BaseException:
-                pass
-
-    def _fail_unstarted_queued_jobs(self) -> None:
-        for record in self.store.active_jobs():
-            if record.status is not BrokerJobStatus.QUEUED:
                 continue
+
+        await self._queue.join()
+        consumer = self._consumer_task
+        if consumer is not None and not consumer.done():
+            consumer.cancel()
+        if consumer is not None:
             try:
-                self.store.record_cleanup(record.job_id, "succeeded")
-                self.store.fail(
-                    record.job_id,
-                    BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
-                    cleanup_status="succeeded",
-                )
-                self._prepared.pop(record.job_id, None)
-                self._terminal_events.setdefault(record.job_id, asyncio.Event()).set()
+                await asyncio.shield(consumer)
+            except asyncio.CancelledError:
+                pass
             except BaseException:
                 pass
+
+        tracked = {
+            *self._job_tasks.values(),
+            *self._create_tasks.values(),
+            *self._cleanup_tasks.values(),
+        }
+        if tracked:
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in tracked),
+                return_exceptions=True,
+            )
+        self._consumer_task = None
 
     async def submit(
         self,
@@ -375,10 +389,12 @@ class SandboxBrokerService:
 
         self._prepared[record.job_id] = prepared
         self._terminal_events.setdefault(record.job_id, asyncio.Event())
+        self._cancel_events.setdefault(record.job_id, asyncio.Event())
         try:
             self._queue.put_nowait(record.job_id)
         except asyncio.QueueFull:
             self._prepared.pop(record.job_id, None)
+            self._cancel_events.pop(record.job_id, None)
             terminal = self.store.fail(
                 record.job_id,
                 BrokerErrorCode.QUEUE_SATURATED,
@@ -432,15 +448,22 @@ class SandboxBrokerService:
                 try:
                     await asyncio.shield(current)
                 except asyncio.CancelledError:
-                    current.cancel()
-                    try:
-                        await asyncio.shield(current)
-                    except BaseException:
-                        pass
+                    if current.cancelled():
+                        continue
+                    while not current.done():
+                        try:
+                            await asyncio.shield(current)
+                        except asyncio.CancelledError:
+                            continue
+                        except BaseException:
+                            break
                     raise
+                except BaseException:
+                    pass
             finally:
                 self._job_tasks.pop(job_id, None)
                 self._prepared.pop(job_id, None)
+                self._cancel_events.pop(job_id, None)
                 self._terminal_events.setdefault(job_id, asyncio.Event()).set()
                 self._queue.task_done()
 
@@ -451,7 +474,13 @@ class SandboxBrokerService:
         cancelled = False
         cleanup = "succeeded"
         try:
+            if self._cancellation_requested(job_id):
+                cancelled = True
+                return
             self.store.transition(job_id, BrokerJobStatus.PROVISIONING)
+            if self._cancellation_requested(job_id):
+                cancelled = True
+                return
             try:
                 created, create_interrupted = await self._create_without_cancelling(
                     job_id
@@ -460,7 +489,7 @@ class SandboxBrokerService:
                     raise ValueError
                 handle = created
                 self.store.attach_sandbox(job_id, handle.sandbox_id)
-                if create_interrupted:
+                if create_interrupted or self._cancellation_requested(job_id):
                     cancelled = True
                     return
             except asyncio.CancelledError:
@@ -470,6 +499,9 @@ class SandboxBrokerService:
                 return
 
             self.store.transition(job_id, BrokerJobStatus.UPLOADING)
+            if self._cancellation_requested(job_id):
+                cancelled = True
+                return
             try:
                 await self._upload_fixed_inputs(job_id, handle)
             except asyncio.CancelledError:
@@ -477,15 +509,21 @@ class SandboxBrokerService:
             except BaseException:
                 failure = BrokerErrorCode.UPLOAD_FAILED
                 return
+            if self._cancellation_requested(job_id):
+                cancelled = True
+                return
 
             self.store.transition(job_id, BrokerJobStatus.RUNNING)
             try:
-                command = await asyncio.wait_for(
-                    self.client.run(handle),
-                    timeout=self.config.execution_timeout_seconds,
+                command, run_cancelled = await self._run_with_cancellation(
+                    job_id,
+                    handle,
                 )
             except asyncio.TimeoutError:
                 failure = BrokerErrorCode.EXECUTION_TIMEOUT
+                return
+            if run_cancelled:
+                cancelled = True
                 return
             if type(command) is not SandboxCommandResult:
                 failure = BrokerErrorCode.OPENSANDBOX_UNAVAILABLE
@@ -493,8 +531,14 @@ class SandboxBrokerService:
             if command.exit_code != 0:
                 failure = BrokerErrorCode.COMMAND_FAILED
                 return
+            if self._cancellation_requested(job_id):
+                cancelled = True
+                return
 
             self.store.transition(job_id, BrokerJobStatus.VALIDATING)
+            if self._cancellation_requested(job_id):
+                cancelled = True
+                return
             try:
                 completion = await self._download_validate_publish(job_id, handle)
             except ScientificOutputError:
@@ -572,6 +616,61 @@ class SandboxBrokerService:
             except BaseException:
                 pass
 
+    def _cancellation_requested(self, job_id: str) -> bool:
+        event = self._cancel_events.setdefault(job_id, asyncio.Event())
+        if event.is_set():
+            return True
+        record = self.store.get(job_id)
+        if record is None:
+            return True
+        if record.cancel_requested:
+            event.set()
+            return True
+        return record.status in TERMINAL_STATUSES
+
+    async def _run_with_cancellation(
+        self,
+        job_id: str,
+        handle: SandboxHandle,
+    ) -> tuple[object | None, bool]:
+        run_task = asyncio.create_task(
+            self.client.run(handle),
+            name=f"sandbox-broker-run-{job_id}",
+        )
+        cancel_wait = asyncio.create_task(
+            self._cancel_events.setdefault(job_id, asyncio.Event()).wait(),
+            name=f"sandbox-broker-cancel-wait-{job_id}",
+        )
+        try:
+            done, _ = await asyncio.wait(
+                {run_task, cancel_wait},
+                timeout=self.config.execution_timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                run_task.cancel()
+                try:
+                    await run_task
+                except BaseException:
+                    pass
+                raise asyncio.TimeoutError
+            if cancel_wait in done and cancel_wait.result():
+                if not run_task.done():
+                    run_task.cancel()
+                try:
+                    await run_task
+                except BaseException:
+                    pass
+                return None, True
+            return run_task.result(), False
+        finally:
+            if not cancel_wait.done():
+                cancel_wait.cancel()
+            try:
+                await cancel_wait
+            except BaseException:
+                pass
+
     async def _create_without_cancelling(
         self,
         job_id: str,
@@ -599,7 +698,7 @@ class SandboxBrokerService:
                 del self._create_tasks[job_id]
 
     async def cancel(self, job_id: str) -> BrokerJobView:
-        """Request cancellation once and coordinate the active execution task."""
+        """Persist and signal cancellation without cancelling lifecycle tasks."""
 
         try:
             record = self.store.request_cancel(job_id)
@@ -609,18 +708,7 @@ class SandboxBrokerService:
             raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE) from None
         if record.status in TERMINAL_STATUSES:
             return _record_view(record)
-        task = self._job_tasks.get(job_id)
-        if record.status is BrokerJobStatus.QUEUED and task is None:
-            try:
-                self.store.record_cleanup(job_id, "succeeded")
-                terminal = self.store.cancel(job_id, cleanup_status="succeeded")
-            except Exception:
-                raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE) from None
-            self._prepared.pop(job_id, None)
-            self._terminal_events.setdefault(job_id, asyncio.Event()).set()
-            return _record_view(terminal)
-        if task is not None and not task.done():
-            task.cancel()
+        self._cancel_events.setdefault(job_id, asyncio.Event()).set()
         current = self.store.get(job_id)
         if current is None:
             raise KeyError("job not found")
@@ -629,24 +717,18 @@ class SandboxBrokerService:
     async def recover(self) -> None:
         """Destroy persisted orphan sandboxes and fail every interrupted job."""
 
+        observed_generation = self._recovery_generation
         async with self._recovery_lock:
-            for record in self.store.active_jobs():
+            if observed_generation != self._recovery_generation:
+                return
+            for record in self.store.cleanup_pending_jobs():
                 try:
                     current = self.store.get(record.job_id)
-                    if current is None or current.status in TERMINAL_STATUSES:
+                    if current is None or current.cleanup_status == "succeeded":
                         continue
                     if current.sandbox_id is None:
-                        self.store.record_cleanup(current.job_id, "succeeded")
-                        self.store.fail(
-                            current.job_id,
-                            BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
-                            cleanup_status="succeeded",
-                        )
-                        self._terminal_events.setdefault(
-                            current.job_id, asyncio.Event()
-                        ).set()
                         continue
-                    if current.cleanup_status != "succeeded":
+                    if current.cleanup_status != "in_progress":
                         self.store.record_cleanup(current.job_id, "in_progress")
                     try:
                         await self.client.destroy_by_id(current.sandbox_id)
@@ -654,19 +736,23 @@ class SandboxBrokerService:
                         latest = self.store.get(current.job_id)
                         if latest is not None and latest.cleanup_status != "succeeded":
                             self.store.record_cleanup(current.job_id, "failed")
-                        self.store.fail(
-                            current.job_id,
-                            BrokerErrorCode.CLEANUP_FAILED,
-                            warnings=("cleanup_failed",),
-                            cleanup_status="failed",
-                        )
+                        latest = self.store.get(current.job_id)
+                        if latest is not None and latest.status not in TERMINAL_STATUSES:
+                            self.store.fail(
+                                current.job_id,
+                                BrokerErrorCode.CLEANUP_FAILED,
+                                warnings=("cleanup_failed",),
+                                cleanup_status="failed",
+                            )
                     else:
                         self.store.record_cleanup(current.job_id, "succeeded")
-                        self.store.fail(
-                            current.job_id,
-                            BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
-                            cleanup_status="succeeded",
-                        )
+                        latest = self.store.get(current.job_id)
+                        if latest is not None and latest.status not in TERMINAL_STATUSES:
+                            self.store.fail(
+                                current.job_id,
+                                BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
+                                cleanup_status="succeeded",
+                            )
                     self._terminal_events.setdefault(
                         current.job_id, asyncio.Event()
                     ).set()
@@ -682,6 +768,39 @@ class SandboxBrokerService:
                             )
                         except BaseException:
                             pass
+
+            for record in self.store.active_jobs():
+                try:
+                    current = self.store.get(record.job_id)
+                    if current is None or current.status in TERMINAL_STATUSES:
+                        continue
+                    if current.sandbox_id is not None:
+                        if current.cleanup_status == "succeeded":
+                            self.store.fail(
+                                current.job_id,
+                                BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
+                                cleanup_status="succeeded",
+                            )
+                        else:
+                            self.store.fail(
+                                current.job_id,
+                                BrokerErrorCode.CLEANUP_FAILED,
+                                warnings=("cleanup_failed",),
+                                cleanup_status="failed",
+                            )
+                    else:
+                        self.store.record_cleanup(current.job_id, "succeeded")
+                        self.store.fail(
+                            current.job_id,
+                            BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
+                            cleanup_status="succeeded",
+                        )
+                    self._terminal_events.setdefault(
+                        current.job_id, asyncio.Event()
+                    ).set()
+                except BaseException:
+                    continue
+            self._recovery_generation += 1
 
     async def expire(self, now: float) -> None:
         """Apply bounded file and audit retention without following aliases."""
@@ -1113,17 +1232,10 @@ class SandboxBrokerService:
 
     @staticmethod
     def _safe_warning(value: object) -> bool:
-        if type(value) is not str:
-            return False
-        normalized = _ANSI_ESCAPE_PATTERN.sub("", value)
-        normalized = _CONTROL_CHARACTER_PATTERN.sub("", normalized)
         return bool(
-            value.strip()
-            and normalized == value
-            and _SENSITIVE_TEXT_PATTERN.search(normalized) is None
-            and _WINDOWS_PATH_PATTERN.search(normalized) is None
-            and _UNC_PATH_PATTERN.search(normalized) is None
-            and _POSIX_ABSOLUTE_PATH_PATTERN.search(normalized) is None
+            is_safe_metadata_text(value)
+            and type(value) is str
+            and _SENSITIVE_TEXT_PATTERN.search(value) is None
         )
 
     def _publish_manifest(
@@ -1157,9 +1269,8 @@ class SandboxBrokerService:
         try:
             self.store.record_cleanup(job_id, "in_progress")
         except BaseException:
-            # A bounded stop may already have terminalized an unknown create as
-            # cleanup-failed. The raw handle must still be destroyed when it
-            # eventually arrives, even though terminal metadata is immutable.
+            # A concurrent terminal state or persistence failure must never
+            # suppress destruction of a handle already returned by the SDK.
             cleanup_tracking_active = False
         cleanup_task = asyncio.create_task(self.client.destroy(handle))
         cleanup_task.set_name(f"sandbox-broker-cleanup-{job_id}")
