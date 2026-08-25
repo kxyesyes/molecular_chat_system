@@ -1,6 +1,6 @@
 # MedChat 项目规范
 
-版本日期：2026-06-19
+版本日期：2026-08-25
 适用仓库：`molecular_chat_system`
 规范状态：基于当前仓库结构整理；标记为“待确认”的内容尚未形成团队最终决策。
 
@@ -446,22 +446,29 @@ GitHub 分支保护和必需审批人数为“待确认”。
 
 ## 18. Temporal docking canary 运行规范
 
-Temporal 是 docking 长任务的可选执行后端，不是全局默认，也不替代现有科学工具、Validator 或同步 API。默认配置必须保持：
+Temporal 是 docking 长任务的可选执行后端，不是全局默认，也不替代现有科学工具、Validator 或同步 API。开发和未放量环境的默认配置必须保持：
 
 ```powershell
 $env:MEDCHAT_TASK_BACKEND = "local"
 $env:MEDCHAT_TEMPORAL_CANARY_PERCENT = "0"
 ```
 
-### 18.1 安装与本地验证
+### 18.1 生产边界与安装
 
-可选依赖来自 `requirements-agent-temporal.txt`：
+- 生产目标仅为 native Linux + systemd + cgroup v2；Windows、SDK dev server、contract fake 和 replay 不能作为生产证据。
+- Docker Compose 基础设施由 operator 先启动并确认健康，systemd Web/worker unit 不启动、重启或修改 Docker。
+- worker 独立于 Web，docking 并发固定为 `1`；Temporal/PostgreSQL/UI/Prometheus/Grafana 端口与 worker metrics 仅允许 loopback 或私有网络。
+- secrets 只从运行时 secret file/环境注入，不得进入 Git、argv、日志或报告；专用 worker env 是 `root:root 0600` 的精确无秘密 allowlist。
+- worker 资产只能由 `install-temporal-worker.sh` stage 为不可变 generation，再由 `activate-temporal-worker-generation.sh` 事务 activate、rollback 或 migrate。禁止手工复制 unit/helper、修改 `current`、绕过 digest/manifest，或恢复 legacy tmpfiles。
+- prepare service 只能从已激活 generation 执行环境验证和目录 helper；只有四个受控运行目录属于 `medchat:medchat 0700`，源码、Conda 与部署资产保持 `root:root`、`go-w`。
+
+完整生产步骤见 `docs/runbooks/temporal_docking_canary.md`。可选依赖仍来自 `requirements-agent-temporal.txt`：
 
 ```powershell
 python -m pip install -r requirements-agent-temporal.txt
 ```
 
-本地开发可分别启动 SDK 开发服务器和单并发 docking worker：
+本地开发可分别启动 SDK 开发服务器和单并发 docking worker，但不得用于生产：
 
 ```powershell
 python scripts/run_temporal_dev_server.py
@@ -472,7 +479,7 @@ $env:MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY = "1"
 python scripts/run_temporal_docking_worker.py
 ```
 
-`run_temporal_dev_server.py` 仅用于开发和验收。生产 Temporal 服务的部署、备份和高可用方式为“待确认”，不得把开发服务器作为生产依赖。worker 必须独立于 Web 进程运行，且 docking 并发固定为 1；非法配置必须 fail closed 到 `local`、0%。
+`run_temporal_dev_server.py` 仅用于开发和验收。非法配置必须 fail closed 到 `local`、0%。
 
 ### 18.2 API 与兼容边界
 
@@ -500,20 +507,13 @@ python scripts/run_temporal_docking_acceptance.py --mode real --repeat 3 --outpu
 0% -> 5% -> 10% -> 25%
 ```
 
-每一档至少观察 20 个已接受任务或一个完整发布观察窗。只有同时满足“无重复 Vina、无多终态、无 artifact/hash 失配、取消可追踪、heartbeat 新鲜、p95 无显著退化”才可晋级。任一硬门禁失败立即把新流量降为 0%；已由 Temporal 接受的 workflow 继续收敛到终态，不得回退后在 local 重放同一科学任务。
+不得跳级或 force 绕过。每一档必须观察至少 20 个真实 Temporal 已接受并进入终态的任务，或完整 24 小时且至少 3 个此类任务。晋级还要求 deployment、真实 Vina repeat 3、Temporal/PostgreSQL/Prometheus、告警、备份与隔离恢复，以及 Vina 次数、单终态、artifact/hash 和真实 provenance 全部通过。任一 required evidence 缺失、unavailable 或 skipped 都是 `partial` 并阻断晋级，绝不能记为 passed。
 
-回滚新流量：
+任一硬门禁失败立即通过 `manage_temporal_canary.py rollback` 把 Web 新流量降为 0%。回滚只改变新流量，不删除 Temporal history、TaskStore、staging、artifact 或报告，也不得在 local 重放已被 Temporal 接受的任务；accepted workflow 继续由 worker 收敛。PostgreSQL 备份/恢复必须使用受信的版本化 bin 目录，密码只进入 child env，恢复目标固定为 `temporal_verify` 且永不 drop source。
 
-```powershell
-$env:MEDCHAT_TASK_BACKEND = "local"
-$env:MEDCHAT_TEMPORAL_CANARY_PERCENT = "0"
-```
+### 18.5 证据真实性
 
-随后停止专用 worker，并确认同步 docking 和本地任务回归通过。回滚不得删除 task SQLite、staging completion、Temporal history 或 pose 证据。
-
-### 18.5 Stage 3B 边界
-
-本阶段明确不包含 PostgreSQL、Redis、NATS、对象存储、Kubernetes、多节点/多 worker 调度、完整 Agent workflow 迁移、LangGraph state 迁移、人工审批平台、删除同步 docking API，以及 Vina 算法或评分逻辑重写。这些内容必须单独设计、评审和迁移，不能通过扩大 canary 比例顺带引入。
+contract/replay 只证明生命周期契约；它们、fake runner、Windows 静态验证和缺少宿主工具的检查都不能冒充真实 Vina、Temporal、PostgreSQL、systemd 或 cgroup 证据。报告必须逐项保留 `passed`、`failed`、`skipped`，总体状态按最严格结果收敛。
 
 ## 待确认事项汇总
 
