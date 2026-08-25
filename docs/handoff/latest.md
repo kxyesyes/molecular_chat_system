@@ -169,15 +169,19 @@ Agent/contract reports are local ignored artifacts and are not committed:
 4. Provision runtime-only Compose secrets and both environment files through the
    trusted host process; set an approved positive backup retention policy.
 5. As root with an empty inherited environment, render a metrics-relay
-   generation from the root-only env files. Start the pinned Compose stack with
-   that generation's override so Compose creates the dedicated labeled bridge
-   and starts Prometheus; then activate the relay, require its pinned nginx
-   config test/reload to pass, and switch later Compose commands to the live
-   override. Do not use `sudo -E`, `--preserve-env`, or loosen env/secret modes.
+   generation from the root-only env files. With its generation override,
+   stop/force-recreate only the Prometheus container without starting it so
+   Compose creates the dedicated labeled bridge. Confirm Prometheus is not
+   running, then activate the relay and require its pinned nginx config
+   test/reload to pass. With the base Compose file and published live override,
+   run `up -d --wait --wait-timeout 180 prometheus`; the committed dependency
+   graph supplies PostgreSQL, schema, Temporal, role-sync, and PostgreSQL
+   exporter. Do not use `sudo -E`, `--preserve-env`, or loosen env/secret modes.
 6. Activate the staged worker generation, then require the Prometheus query
    `up{job="medchat-temporal-worker"}` to return exactly one target with value
-   `1`. Run promtool config/rules/tests, dashboard, health, queue, and alert
-   checks.
+   `1`. Only after that gate, start `temporal-ui` and `grafana` with the same base
+   and live override. Run promtool config/rules/tests, dashboard, health, queue,
+   and alert checks.
 7. Use a trusted version-specific PostgreSQL bin directory to create a real
    atomic backup and verify restore into `temporal_verify`; confirm the passed
    `latest-verified.json` marker.

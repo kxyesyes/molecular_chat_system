@@ -93,13 +93,15 @@ through the fixed root command below: root reads the root-only env and secret
 files, while `/usr/bin/env -i` prevents the caller's environment from crossing
 the privilege boundary. Do not use `sudo -E` or `sudo --preserve-env`.
 
-## 3. Render the metrics relay and start Compose
+## 3. Render and activate the metrics relay before Prometheus
 
 Run from the reviewed release root. All published ports in the committed Compose
-file bind to `127.0.0.1`; do not add public port mappings. The metrics relay must
-be rendered before Compose starts. Its generation-specific override is what adds
-the private `worker-metrics-scrape` bridge, assigns Prometheus its fixed scrape
-address, and mounts the empty pre-created live file-SD directory.
+file bind to `127.0.0.1`; do not add public port mappings. Render the metrics
+relay first. Use its generation-specific override only to stop/recreate the
+Prometheus container without starting it; this makes Compose create the private
+`worker-metrics-scrape` bridge with the required ownership labels, subnet, and
+gateway. Activate the relay and nginx while Prometheus remains stopped. Only
+then start Prometheus with the published live override.
 
 Production mode accepts only the fixed paths shown here. In particular,
 `--worker-env-file` is `/etc/medchat/medchat.env`, and
@@ -149,7 +151,26 @@ sudo /usr/bin/env -i \
   --env-file /etc/medchat/temporal.env \
   -f deployment/temporal/docker-compose.yml \
   -f "$compose_override" \
-  up -d --wait --wait-timeout 180
+  stop --timeout 30 prometheus
+
+sudo /usr/bin/env -i \
+  HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/bin/docker compose \
+  --env-file /etc/medchat/temporal.env \
+  -f deployment/temporal/docker-compose.yml \
+  -f "$compose_override" \
+  create --no-deps --force-recreate prometheus
+
+running_prometheus="$(
+  sudo /usr/bin/env -i \
+    HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    /usr/bin/docker compose \
+    --env-file /etc/medchat/temporal.env \
+    -f deployment/temporal/docker-compose.yml \
+    -f "$compose_override" \
+    ps --status running --services prometheus
+)"
+[ -z "$running_prometheus" ] || exit 1
 
 sudo /usr/bin/env -i \
   HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
@@ -172,22 +193,37 @@ sudo /usr/bin/env -i \
   --env-file /etc/medchat/temporal.env \
   -f deployment/temporal/docker-compose.yml \
   -f "$relay_root/live/compose.override.yml" \
-  ps
+  config --quiet
+
+sudo /usr/bin/env -i \
+  HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/bin/docker compose \
+  --env-file /etc/medchat/temporal.env \
+  -f deployment/temporal/docker-compose.yml \
+  -f "$relay_root/live/compose.override.yml" \
+  up -d --wait --wait-timeout 180 prometheus
 ```
 
 Render prints exactly `OK E_RELAY_RENDERED generation=<24 lowercase hex>` and
 stages `compose.override.yml`, `file_sd/worker-targets.json`, `nginx.conf`, and a
-hash-bound manifest. Compose consumes the staged override first, creating the
-expected project-owned/labeled bridge and starting Prometheus with an empty live
-file-SD mount. It must not be started from the base Compose file alone.
+hash-bound manifest. Compose consumes the staged override first only to
+force-recreate a stopped Prometheus container and the expected
+project-owned/labeled bridge. The explicit running-service check must remain
+empty; activation is forbidden while Prometheus is running against an
+unpublished generation. Prometheus must never be started from the base Compose
+file alone.
 
 Activate re-reads both env files, rechecks routes and Docker networks, and
 refuses to proceed unless that exact private bridge exists. It then publishes
 the nginx config, runs the pinned `/usr/sbin/nginx -t`, reloads nginx, and only
 after both succeed atomically publishes the live override, manifest, and worker
 target. The explicit post-activation `nginx -t` above is an additional operator
-check; activation has already performed both test and reload. Subsequent Compose
-commands use `live/compose.override.yml`.
+check; activation has already performed both test and reload. The final Compose
+command uses `live/compose.override.yml` and names only `prometheus`. From the
+committed dependency graph Compose also starts and waits for `postgres`,
+`temporal-schema`, `temporal`, `temporal-exporter-role-sync`, and
+`postgres-exporter`; it does not start unrelated `temporal-ui` or `grafana` at
+this gate.
 
 The schema, namespace, Temporal server, and exporter role-sync wrappers mounted
 by Compose are part of the validated deployment contract. Do not replace their
@@ -268,6 +304,21 @@ PY
 ```
 
 Failure to reach exactly one `up` target blocks deployment and canary preflight.
+After that gate passes, start the two operator-facing services with the same
+base and live override; their declared dependencies reuse the already healthy
+Temporal and Prometheus services:
+
+```bash
+cd /usr/local/src/medchat-release
+relay_root=/etc/medchat/generated/temporal-metrics
+sudo /usr/bin/env -i \
+  HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/bin/docker compose \
+  --env-file /etc/medchat/temporal.env \
+  -f deployment/temporal/docker-compose.yml \
+  -f "$relay_root/live/compose.override.yml" \
+  up -d --wait --wait-timeout 180 temporal-ui grafana
+```
 
 Activation verifies the directory digest, canonical manifest, and all four
 assets; switches `current`; reloads systemd; verifies the actually loaded unit
