@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import json
 import re
 import unicodedata
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from fnmatch import fnmatchcase
@@ -23,23 +27,83 @@ _OUTPUT_ROOT_PARTS = ("workspace", "output")
 _REQUEST_MAX_BYTES = 64 * 1024
 _READ_MAX_BYTES = 16 * 1024 * 1024
 _COMMAND_OUTPUT_MAX_BYTES = 16 * 1024
-_COMMAND_INSPECTION_MAX_BYTES = 64 * 1024
 _LIST_MAX_FILES = 256
+_TRUNCATED_MARKER = "\n[TRUNCATED]"
 _PATH_MAX_CHARACTERS = 512
+_LIST_OUTPUT_MAX_BYTES = (_PATH_MAX_CHARACTERS + 4) * (_LIST_MAX_FILES + 1)
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _PATH_COMPONENT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _ALLOWED_LIST_PATTERNS = frozenset({"*", "*.json", "*.pdbqt"})
 _ANSI_OSC_PATTERN = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _ANSI_CSI_PATTERN = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-_])")
+_AUTHORIZATION_HEADER_PATTERN = re.compile(
+    r"(?i)\bauthorization[ \t]*:[^\r\n]*"
+)
 _SECRET_ASSIGNMENT_PATTERN = re.compile(
-    r"(?i)\b(?:api[_ -]?key|authorization|token|password|secret)\b"
-    r"\s*[:=]\s*(?:bearer\s+)?[^\s,;]+"
+    r"(?i)\b(?:x[-_])?(?:api[-_ ]?key|api[-_ ]?token|access[-_ ]?token|"
+    r"token|password|secret)\b[ \t]*[:=][ \t]*[^\s,;]+"
 )
 _BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
 _OPENAI_KEY_PATTERN = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
 _WINDOWS_HOST_PATH_PATTERN = re.compile(r"(?i)\b[A-Z]:[\\/][^\s]*")
 _POSIX_HOST_PATH_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9_])/(?:home|Users|tmp|var/folders)/[^\s]*"
+    r"(?<![A-Za-z0-9_])/(?!workspace(?:/|$)|opt/medchat(?:/|$))[^\s]*"
+)
+_LIST_HELPER_SOURCE = r'''
+import fnmatch
+import json
+import os
+import re
+import sys
+
+root = sys.argv[1]
+pattern = sys.argv[2]
+allowed = os.path.realpath("/workspace/output")
+resolved_root = os.path.realpath(root)
+component = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+def inside_output(candidate):
+    try:
+        return os.path.commonpath((allowed, candidate)) == allowed
+    except ValueError:
+        return False
+
+if not inside_output(resolved_root):
+    raise SystemExit(76)
+
+count = 0
+for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+    directories[:] = sorted(
+        name
+        for name in directories
+        if not os.path.islink(os.path.join(current, name))
+    )
+    for name in sorted(files):
+        candidate = os.path.join(current, name)
+        parts = candidate.split("/")[1:]
+        if (
+            len(candidate) > 512
+            or "\\" in candidate
+            or "\0" in candidate
+            or not parts
+            or any(not component.fullmatch(part) for part in parts)
+        ):
+            raise SystemExit(76)
+        if os.path.islink(candidate):
+            continue
+        if not inside_output(os.path.realpath(candidate)):
+            raise SystemExit(76)
+        if fnmatch.fnmatchcase(name, pattern):
+            count += 1
+            if count > 256:
+                raise SystemExit(75)
+            sys.stdout.write(
+                json.dumps(candidate, separators=(",", ":"), ensure_ascii=True)
+                + "\n"
+            )
+'''.strip()
+_LIST_HELPER_B64 = base64.b64encode(_LIST_HELPER_SOURCE.encode("utf-8")).decode(
+    "ascii"
 )
 
 
@@ -163,13 +227,23 @@ class _SandboxFactory(Protocol):
     async def upload_text(self, raw: Any, path: str, data: str) -> None:
         raise NotImplementedError
 
-    async def read_text(self, raw: Any, path: str, max_bytes: int) -> object:
+    async def read_bytes_stream(
+        self,
+        raw: Any,
+        path: str,
+        max_bytes: int,
+    ) -> object:
         raise NotImplementedError
 
-    async def list_files(self, raw: Any, path: str, pattern: str) -> object:
-        raise NotImplementedError
-
-    async def run(self, raw: Any, command: str) -> object:
+    async def run(
+        self,
+        raw: Any,
+        command: str,
+        *,
+        on_stdout: Callable[[Any], Awaitable[None]],
+        on_stderr: Callable[[Any], Awaitable[None]],
+        skip_accumulation: bool,
+    ) -> object:
         raise NotImplementedError
 
     async def destroy(self, raw: Any) -> None:
@@ -187,6 +261,7 @@ class _OfficialSDK:
     WriteEntry: Any
     SearchEntry: Any
     NetworkPolicy: Any
+    ExecutionHandlers: Any
 
 
 def _load_official_sdk() -> _OfficialSDK:
@@ -196,6 +271,7 @@ def _load_official_sdk() -> _OfficialSDK:
         from opensandbox import Sandbox, SandboxManager
         from opensandbox.config import ConnectionConfig
         from opensandbox.models import NetworkPolicy, SearchEntry, WriteEntry
+        from opensandbox.models.execd import ExecutionHandlers
     except (ImportError, ModuleNotFoundError):
         raise SandboxDependencyUnavailableError(
             "the pinned OpenSandbox SDK is unavailable"
@@ -207,6 +283,7 @@ def _load_official_sdk() -> _OfficialSDK:
         WriteEntry=WriteEntry,
         SearchEntry=SearchEntry,
         NetworkPolicy=NetworkPolicy,
+        ExecutionHandlers=ExecutionHandlers,
     )
 
 
@@ -264,21 +341,35 @@ class _OfficialSandboxFactory:
         entry = sdk.WriteEntry(path=path, data=data, mode=600, encoding="utf-8")
         await raw.files.write_files([entry])
 
-    async def read_text(self, raw: Any, path: str, max_bytes: int) -> object:
+    async def read_bytes_stream(
+        self,
+        raw: Any,
+        path: str,
+        max_bytes: int,
+    ) -> object:
         self._sdk()
-        return await raw.files.read_file(
+        return await raw.files.read_bytes_stream(
             path,
-            encoding="utf-8",
+            chunk_size=64 * 1024,
             range_header=f"bytes=0-{max_bytes}",
         )
 
-    async def list_files(self, raw: Any, path: str, pattern: str) -> object:
+    async def run(
+        self,
+        raw: Any,
+        command: str,
+        *,
+        on_stdout: Callable[[Any], Awaitable[None]],
+        on_stderr: Callable[[Any], Awaitable[None]],
+        skip_accumulation: bool,
+    ) -> object:
         sdk = self._sdk()
-        return await raw.files.search(sdk.SearchEntry(path=path, pattern=pattern))
-
-    async def run(self, raw: Any, command: str) -> object:
-        self._sdk()
-        return await raw.commands.run(command)
+        handlers = sdk.ExecutionHandlers(
+            on_stdout=on_stdout,
+            on_stderr=on_stderr,
+            skip_accumulation=skip_accumulation,
+        )
+        return await raw.commands.run(command, handlers=handlers)
 
     async def destroy(self, raw: Any) -> None:
         await raw.destroy()
@@ -356,9 +447,14 @@ def _remove_control_characters(value: str) -> str:
     )
 
 
-def _sanitize_output(value: str, config: BrokerConfig) -> str:
-    sanitized = _ANSI_OSC_PATTERN.sub("", value)
-    sanitized = _ANSI_CSI_PATTERN.sub("", sanitized)
+def _normalize_output(value: str) -> str:
+    normalized = _ANSI_OSC_PATTERN.sub("", value)
+    normalized = _ANSI_CSI_PATTERN.sub("", normalized)
+    return _remove_control_characters(normalized)
+
+
+def _redact_normalized_output(value: str, config: BrokerConfig) -> str:
+    sanitized = _AUTHORIZATION_HEADER_PATTERN.sub("[REDACTED]", value)
     sensitive_values = {
         config.opensandbox_api_key,
         str(config.state_root),
@@ -367,41 +463,134 @@ def _sanitize_output(value: str, config: BrokerConfig) -> str:
         str(config.socket_path).replace("\\", "/"),
     }
     for sensitive in sorted(sensitive_values, key=len, reverse=True):
-        if sensitive:
-            sanitized = sanitized.replace(sensitive, "[REDACTED]")
+        normalized_sensitive = _normalize_output(sensitive)
+        if normalized_sensitive:
+            sanitized = sanitized.replace(normalized_sensitive, "[REDACTED]")
     sanitized = _SECRET_ASSIGNMENT_PATTERN.sub("[REDACTED]", sanitized)
     sanitized = _BEARER_PATTERN.sub("[REDACTED]", sanitized)
     sanitized = _OPENAI_KEY_PATTERN.sub("[REDACTED]", sanitized)
     sanitized = _WINDOWS_HOST_PATH_PATTERN.sub("[REDACTED]", sanitized)
     sanitized = _POSIX_HOST_PATH_PATTERN.sub("[REDACTED]", sanitized)
-    sanitized = _remove_control_characters(sanitized)
-    return _truncate_utf8(sanitized, _COMMAND_OUTPUT_MAX_BYTES)
+    return sanitized
 
 
-def _bounded_log_text(messages: object) -> str:
-    if type(messages) is not list:
-        raise SandboxProtocolError("the command service returned invalid logs")
-    chunks: list[str] = []
-    used = 0
-    for message in messages:
+def _sanitize_output(value: str, config: BrokerConfig) -> str:
+    normalized = _normalize_output(value)
+    redacted = _redact_normalized_output(normalized, config)
+    truncated = _truncate_utf8(redacted, _COMMAND_OUTPUT_MAX_BYTES)
+    return _redact_normalized_output(truncated, config)
+
+
+class _BoundedUtf8Buffer:
+    """Keep at most ``capacity`` bytes without encoding an unbounded chunk."""
+
+    def __init__(self, capacity: int) -> None:
+        self._capacity = capacity
+        self._data = bytearray()
+        self.truncated = False
+
+    def feed_message(self, message: object) -> None:
         text = getattr(message, "text", None)
         if type(text) is not str:
             raise SandboxProtocolError("the command service returned invalid logs")
+        self.feed_text(text)
+
+    def feed_text(self, value: str) -> None:
+        remaining = self._capacity - len(self._data)
+        if remaining <= 0:
+            if value:
+                self.truncated = True
+            return
+
+        # A Unicode code point takes at most four UTF-8 bytes. Inspecting only
+        # this prefix prevents a malicious callback chunk from causing another
+        # unbounded allocation while still proving whether data was omitted.
+        prefix = value[: remaining + 1]
         try:
-            encoded = text.encode("utf-8", errors="strict")
+            encoded = prefix.encode("utf-8", errors="strict")
         except UnicodeError:
             raise SandboxProtocolError(
                 "the command service returned invalid UTF-8 logs"
             ) from None
-        remaining = _COMMAND_INSPECTION_MAX_BYTES - used
-        if remaining <= 0:
-            break
         if len(encoded) > remaining:
-            chunks.append(encoded[:remaining].decode("utf-8", errors="ignore"))
-            break
-        chunks.append(text)
-        used += len(encoded)
-    return "".join(chunks)
+            self._data.extend(encoded[:remaining])
+            self.truncated = True
+        else:
+            self._data.extend(encoded)
+        if len(prefix) < len(value):
+            self.truncated = True
+
+    def text(self) -> str:
+        return bytes(self._data).decode("utf-8", errors="ignore")
+
+
+def _finalize_command_output(
+    buffer: _BoundedUtf8Buffer,
+    config: BrokerConfig,
+) -> str:
+    value = buffer.text()
+    if buffer.truncated:
+        # Omit a boundary guard so a credential split exactly at the transport
+        # cap can never be returned as an apparently harmless partial secret.
+        known_secret_bytes = len(
+            _normalize_output(config.opensandbox_api_key).encode(
+                "utf-8", errors="strict"
+            )
+        )
+        guard = max(512, known_secret_bytes)
+        value = _truncate_utf8(
+            value,
+            max(0, _utf8_size(value, SandboxProtocolError) - guard),
+        )
+    sanitized = _sanitize_output(value, config)
+    if buffer.truncated:
+        marker_bytes = len(_TRUNCATED_MARKER.encode("utf-8"))
+        sanitized = (
+            _truncate_utf8(
+                sanitized,
+                _COMMAND_OUTPUT_MAX_BYTES - marker_bytes,
+            )
+            + _TRUNCATED_MARKER
+        )
+    return _redact_normalized_output(sanitized, config)
+
+
+def _fixed_list_command(path: str, pattern: str) -> str:
+    """Build the one internal discovery command from already-validated tokens."""
+
+    return (
+        "python -c \"import base64;"
+        f"exec(base64.b64decode('{_LIST_HELPER_B64}'))\" "
+        f"'{path}' '{pattern}'"
+    )
+
+
+async def _consume_bounded_read_stream(stream: object) -> str:
+    if not hasattr(stream, "__aiter__"):
+        raise SandboxProtocolError("the sandbox service returned invalid output")
+    data = bytearray()
+    try:
+        async for chunk in stream:  # type: ignore[union-attr]
+            if type(chunk) is not bytes:
+                raise SandboxProtocolError(
+                    "the sandbox service returned non-bytes output"
+                )
+            remaining = _READ_MAX_BYTES + 1 - len(data)
+            if remaining <= 0:
+                raise SandboxReadError("sandbox output exceeded its byte limit")
+            data.extend(chunk[:remaining])
+            if len(chunk) > remaining or len(data) > _READ_MAX_BYTES:
+                raise SandboxReadError("sandbox output exceeded its byte limit")
+    finally:
+        close = getattr(stream, "aclose", None)
+        if callable(close):
+            await close()
+    try:
+        return bytes(data).decode("utf-8", errors="strict")
+    except UnicodeError:
+        raise SandboxProtocolError(
+            "the sandbox service returned invalid UTF-8 output"
+        ) from None
 
 
 class OpenSandboxClient:
@@ -421,7 +610,8 @@ class OpenSandboxClient:
             if sandbox_factory is None
             else sandbox_factory
         )
-        self._destroy_started: set[str] = set()
+        self._cleanup_in_flight: dict[str, asyncio.Task[None]] = {}
+        self._cleanup_completed: set[str] = set()
 
     def _handle(self, handle: object) -> SandboxHandle:
         if type(handle) is not SandboxHandle or handle.raw is None:
@@ -500,7 +690,7 @@ class OpenSandboxClient:
         validated_handle = self._handle(handle)
         _validate_output_path(path, allow_root=False)
         try:
-            result = await self._factory.read_text(
+            stream = await self._factory.read_bytes_stream(
                 validated_handle.raw,
                 path,
                 _READ_MAX_BYTES,
@@ -511,11 +701,12 @@ class OpenSandboxClient:
             ) from None
         except Exception:
             raise SandboxReadError("sandbox output read failed") from None
-        if type(result) is not str:
-            raise SandboxProtocolError("the sandbox service returned non-text output")
-        if _utf8_size(result, SandboxProtocolError) > _READ_MAX_BYTES:
-            raise SandboxReadError("sandbox output exceeded its byte limit")
-        return result
+        try:
+            return await _consume_bounded_read_stream(stream)
+        except (SandboxProtocolError, SandboxReadError):
+            raise
+        except Exception:
+            raise SandboxReadError("sandbox output read failed") from None
 
     async def list_files(
         self,
@@ -527,11 +718,22 @@ class OpenSandboxClient:
         requested_parts = _validate_output_path(path, allow_root=True)
         if type(pattern) is not str or pattern not in _ALLOWED_LIST_PATTERNS:
             raise SandboxInputError("the search pattern is outside the fixed contract")
+        stdout_buffer = _BoundedUtf8Buffer(_LIST_OUTPUT_MAX_BYTES)
+        stderr_buffer = _BoundedUtf8Buffer(_COMMAND_OUTPUT_MAX_BYTES)
+
+        async def on_stdout(message: object) -> None:
+            stdout_buffer.feed_message(message)
+
+        async def on_stderr(message: object) -> None:
+            stderr_buffer.feed_message(message)
+
         try:
-            result = await self._factory.list_files(
+            execution = await self._factory.run(
                 validated_handle.raw,
-                path,
-                pattern,
+                _fixed_list_command(path, pattern),
+                on_stdout=on_stdout,
+                on_stderr=on_stderr,
+                skip_accumulation=True,
             )
         except SandboxDependencyUnavailableError:
             raise SandboxDependencyUnavailableError(
@@ -539,15 +741,31 @@ class OpenSandboxClient:
             ) from None
         except Exception:
             raise SandboxListError("sandbox output listing failed") from None
-        if type(result) is not list:
+
+        exit_code = getattr(execution, "exit_code", None)
+        if type(exit_code) is not int or not -(2**31) <= exit_code < 2**31:
+            raise SandboxProtocolError("the command service returned an invalid result")
+        if stdout_buffer.truncated:
+            raise SandboxListError("sandbox output listing exceeded its byte limit")
+        if exit_code != 0:
+            raise SandboxListError("sandbox output listing failed")
+
+        serialized = stdout_buffer.text()
+        if serialized and not serialized.endswith("\n"):
             raise SandboxProtocolError("the sandbox service returned an invalid file list")
-        if len(result) > _LIST_MAX_FILES:
+        lines = serialized.splitlines()
+        if len(lines) > _LIST_MAX_FILES:
             raise SandboxListError("sandbox output listing exceeded its file limit")
 
         paths: list[str] = []
         seen: set[str] = set()
-        for entry in result:
-            candidate = entry if type(entry) is str else getattr(entry, "path", None)
+        for line in lines:
+            try:
+                candidate = json.loads(line)
+            except (json.JSONDecodeError, UnicodeError):
+                raise SandboxProtocolError(
+                    "the sandbox service returned an invalid file list"
+                ) from None
             if type(candidate) is not str:
                 raise SandboxProtocolError(
                     "the sandbox service returned an invalid file path"
@@ -573,10 +791,22 @@ class OpenSandboxClient:
 
     async def run(self, handle: SandboxHandle) -> SandboxCommandResult:
         validated_handle = self._handle(handle)
+        stdout_buffer = _BoundedUtf8Buffer(_COMMAND_OUTPUT_MAX_BYTES)
+        stderr_buffer = _BoundedUtf8Buffer(_COMMAND_OUTPUT_MAX_BYTES)
+
+        async def on_stdout(message: object) -> None:
+            stdout_buffer.feed_message(message)
+
+        async def on_stderr(message: object) -> None:
+            stderr_buffer.feed_message(message)
+
         try:
             execution = await self._factory.run(
                 validated_handle.raw,
                 _FIXED_COMMAND,
+                on_stdout=on_stdout,
+                on_stderr=on_stderr,
+                skip_accumulation=True,
             )
         except SandboxDependencyUnavailableError:
             raise SandboxDependencyUnavailableError(
@@ -586,53 +816,66 @@ class OpenSandboxClient:
             raise SandboxRunError("sandbox command execution failed") from None
 
         exit_code = getattr(execution, "exit_code", None)
-        logs = getattr(execution, "logs", None)
-        if (
-            type(exit_code) is not int
-            or not -(2**31) <= exit_code < 2**31
-            or logs is None
-        ):
+        if type(exit_code) is not int or not -(2**31) <= exit_code < 2**31:
             raise SandboxProtocolError("the command service returned an invalid result")
-        stdout = _bounded_log_text(getattr(logs, "stdout", None))
-        stderr = _bounded_log_text(getattr(logs, "stderr", None))
         return SandboxCommandResult(
             exit_code=exit_code,
-            stdout=_sanitize_output(stdout, self._config),
-            stderr=_sanitize_output(stderr, self._config),
+            stdout=_finalize_command_output(stdout_buffer, self._config),
+            stderr=_finalize_command_output(stderr_buffer, self._config),
         )
+
+    async def _perform_cleanup(self, cleanup: Any) -> None:
+        try:
+            await cleanup()
+        except SandboxDependencyUnavailableError:
+            raise SandboxDependencyUnavailableError(
+                "the pinned OpenSandbox SDK is unavailable"
+            ) from None
+        except Exception:
+            raise SandboxDestroyError("sandbox cleanup failed") from None
+
+    def _cleanup_finished(
+        self,
+        sandbox_id: str,
+        task: asyncio.Task[None],
+    ) -> None:
+        if self._cleanup_in_flight.get(sandbox_id) is not task:
+            return
+        del self._cleanup_in_flight[sandbox_id]
+        try:
+            failure = task.exception()
+        except BaseException:
+            return
+        if failure is None:
+            self._cleanup_completed.add(sandbox_id)
+
+    async def _cleanup_once(self, sandbox_id: str, cleanup: Any) -> None:
+        if sandbox_id in self._cleanup_completed:
+            return
+        task = self._cleanup_in_flight.get(sandbox_id)
+        if task is None:
+            task = asyncio.create_task(self._perform_cleanup(cleanup))
+            self._cleanup_in_flight[sandbox_id] = task
+            task.add_done_callback(
+                lambda completed, sandbox_id=sandbox_id: self._cleanup_finished(
+                    sandbox_id,
+                    completed,
+                )
+            )
+        await asyncio.shield(task)
 
     async def destroy(self, handle: SandboxHandle) -> None:
         validated_handle = self._handle(handle)
-        claimed = False
-        try:
-            if validated_handle.sandbox_id not in self._destroy_started:
-                self._destroy_started.add(validated_handle.sandbox_id)
-                claimed = True
-        finally:
-            if claimed:
-                try:
-                    await self._factory.destroy(validated_handle.raw)
-                except SandboxDependencyUnavailableError:
-                    raise SandboxDependencyUnavailableError(
-                        "the pinned OpenSandbox SDK is unavailable"
-                    ) from None
-                except Exception:
-                    raise SandboxDestroyError("sandbox cleanup failed") from None
+
+        async def cleanup() -> None:
+            await self._factory.destroy(validated_handle.raw)
+
+        await self._cleanup_once(validated_handle.sandbox_id, cleanup)
 
     async def destroy_by_id(self, sandbox_id: str) -> None:
         validated_id = _validate_id(sandbox_id, server_value=False)
-        claimed = False
-        try:
-            if validated_id not in self._destroy_started:
-                self._destroy_started.add(validated_id)
-                claimed = True
-        finally:
-            if claimed:
-                try:
-                    await self._factory.destroy_by_id(validated_id)
-                except SandboxDependencyUnavailableError:
-                    raise SandboxDependencyUnavailableError(
-                        "the pinned OpenSandbox SDK is unavailable"
-                    ) from None
-                except Exception:
-                    raise SandboxDestroyError("sandbox cleanup failed") from None
+
+        async def cleanup() -> None:
+            await self._factory.destroy_by_id(validated_id)
+
+        await self._cleanup_once(validated_id, cleanup)

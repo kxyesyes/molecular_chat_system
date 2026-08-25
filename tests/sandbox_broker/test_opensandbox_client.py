@@ -3,12 +3,16 @@ from __future__ import annotations
 import asyncio
 import ast
 import inspect
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 
 import src.sandbox_broker.opensandbox_client as opensandbox_client_module
 from src.sandbox_broker.config import BrokerConfig
@@ -47,16 +51,21 @@ class FakeSandboxFactory:
         self.commands: list[str] = []
         self.uploads: list[tuple[str, str]] = []
         self.reads: list[tuple[str, int]] = []
-        self.searches: list[tuple[str, str]] = []
         self.destroyed: list[str] = []
         self.destroyed_by_id: list[str] = []
         self.raw = FakeRawSandbox()
-        self.read_result: object = ""
-        self.list_result: object = []
+        self.read_chunks: list[object] = []
+        self.read_stream_closes = 0
         self.execution: object = SimpleNamespace(
             exit_code=0,
             logs=SimpleNamespace(stdout=[], stderr=[]),
         )
+        self.list_execution: object = SimpleNamespace(exit_code=0)
+        self.stdout_chunks: list[object] = []
+        self.stderr_chunks: list[object] = []
+        self.list_stdout_chunks: list[object] = []
+        self.list_stderr_chunks: list[object] = []
+        self.run_calls: list[dict[str, object]] = []
         self.failures: dict[str, BaseException] = {}
 
     def _fail(self, operation: str) -> None:
@@ -74,7 +83,7 @@ class FakeSandboxFactory:
         del raw
         self.uploads.append((path, data))
 
-    async def read_text(
+    async def read_bytes_stream(
         self,
         raw: FakeRawSandbox,
         path: str,
@@ -83,24 +92,46 @@ class FakeSandboxFactory:
         self._fail("read")
         del raw
         self.reads.append((path, max_bytes))
-        return self.read_result
 
-    async def list_files(
+        async def chunks() -> Any:
+            try:
+                for chunk in self.read_chunks:
+                    yield chunk
+            finally:
+                self.read_stream_closes += 1
+
+        return chunks()
+
+    async def run(
         self,
         raw: FakeRawSandbox,
-        path: str,
-        pattern: str,
+        command: str,
+        *,
+        on_stdout: Any,
+        on_stderr: Any,
+        skip_accumulation: bool,
     ) -> object:
-        self._fail("list")
-        del raw
-        self.searches.append((path, pattern))
-        return self.list_result
-
-    async def run(self, raw: FakeRawSandbox, command: str) -> object:
-        self._fail("run")
+        is_list_helper = command != FIXED_COMMAND
+        self._fail("list" if is_list_helper else "run")
         del raw
         self.commands.append(command)
-        return self.execution
+        self.run_calls.append(
+            {
+                "command": command,
+                "on_stdout": on_stdout,
+                "on_stderr": on_stderr,
+                "skip_accumulation": skip_accumulation,
+            }
+        )
+        stdout_chunks = self.list_stdout_chunks if is_list_helper else self.stdout_chunks
+        stderr_chunks = self.list_stderr_chunks if is_list_helper else self.stderr_chunks
+        for chunk in stdout_chunks:
+            message = chunk if not isinstance(chunk, str) else SimpleNamespace(text=chunk)
+            await on_stdout(message)
+        for chunk in stderr_chunks:
+            message = chunk if not isinstance(chunk, str) else SimpleNamespace(text=chunk)
+            await on_stderr(message)
+        return self.list_execution if is_list_helper else self.execution
 
     async def destroy(self, raw: FakeRawSandbox) -> None:
         self.destroyed.append(raw.id)
@@ -204,21 +235,62 @@ def test_explicit_falsey_factory_is_not_replaced_by_production_factory(
     assert len(fake.create_calls) == 1
 
 
-def test_dependency_profiles_are_exact() -> None:
+def _requirement_pins(path: Path) -> dict[str, Requirement]:
+    requirements: dict[str, Requirement] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        requirement = Requirement(stripped)
+        assert requirement.name not in requirements
+        assert len(list(requirement.specifier)) == 1
+        specifier = next(iter(requirement.specifier))
+        assert specifier.operator == "=="
+        requirements[requirement.name] = requirement
+    return requirements
+
+
+def test_dependency_profiles_are_exact_and_sdk_compatible() -> None:
     root = Path(__file__).parents[2]
-    assert (root / "requirements-opensandbox-broker.txt").read_text(
-        encoding="utf-8"
-    ).splitlines() == [
-        "fastapi==0.104.1",
-        "httpx==0.25.2",
-        "opensandbox==0.1.15",
-        "pydantic==2.5.0",
-        "python-multipart==0.0.6",
-        "uvicorn[standard]==0.24.0",
-    ]
-    assert (root / "requirements-opensandbox-server.txt").read_text(
-        encoding="utf-8"
-    ).splitlines() == ["opensandbox-server==0.2.2"]
+    broker = _requirement_pins(root / "requirements-opensandbox-broker.txt")
+    server = _requirement_pins(root / "requirements-opensandbox-server.txt")
+    assert set(broker) == {
+        "attrs",
+        "fastapi",
+        "httpx",
+        "opensandbox",
+        "pydantic",
+        "python-dateutil",
+        "python-multipart",
+        "uvicorn",
+    }
+    expected_versions = {
+        "attrs": "21.3.0",
+        "fastapi": "0.104.1",
+        "httpx": "0.27.0",
+        "opensandbox": "0.1.15",
+        "pydantic": "2.5.0",
+        "python-dateutil": "2.8.2",
+        "python-multipart": "0.0.6",
+        "uvicorn": "0.24.0",
+    }
+    for name, version in expected_versions.items():
+        assert str(broker[name].specifier) == f"=={version}"
+    assert broker["uvicorn"].extras == {"standard"}
+
+    # All non-extra Requires-Dist entries from the official 0.1.15 wheel.
+    sdk_ranges = {
+        "attrs": ">=21.3.0",
+        "httpx": ">=0.27.0,<1.0",
+        "pydantic": ">=2.4.2,<3.0",
+        "python-dateutil": ">=2.8.2,<3.0",
+    }
+    for name, supported_range in sdk_ranges.items():
+        assert Version(expected_versions[name]) in SpecifierSet(supported_range)
+
+    assert set(server) == {"opensandbox-server"}
+    assert str(server["opensandbox-server"].specifier) == "==0.2.2"
+    assert not set(broker).intersection(server)
 
 
 def test_contract_dataclasses_are_frozen_and_hide_raw() -> None:
@@ -383,20 +455,42 @@ def test_read_rejects_noncanonical_or_out_of_root_paths(
     assert fake.reads == []
 
 
-def test_read_is_bounded_and_rejects_non_text_or_oversized_results(tmp_path: Path) -> None:
+def test_read_stream_is_transport_bounded_and_rejects_invalid_or_oversized_bytes(
+    tmp_path: Path,
+) -> None:
     fake = FakeSandboxFactory()
     client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
     handle = SandboxHandle("sandbox-1", fake.raw)
 
-    fake.read_result = b"not text"
+    fake.read_chunks = ["not bytes"]
     with pytest.raises(SandboxProtocolError):
         asyncio.run(client.read_text(handle, "/workspace/output/result.json"))
 
-    fake.read_result = "x" * (16 * 1024 * 1024 + 1)
+    fake.read_chunks = [b"x" * (64 * 1024)] * 257
     with pytest.raises(SandboxReadError):
         asyncio.run(client.read_text(handle, "/workspace/output/result.json"))
 
     assert all(limit == 16 * 1024 * 1024 for _, limit in fake.reads)
+    assert fake.read_stream_closes == 2
+
+
+def test_read_stream_returns_strict_utf8_without_using_unbounded_read_api(
+    tmp_path: Path,
+) -> None:
+    fake = FakeSandboxFactory()
+    encoded = "配体".encode("utf-8")
+    fake.read_chunks = [encoded[:4], encoded[4:]]
+    client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+
+    result = asyncio.run(
+        client.read_text(
+            SandboxHandle("sandbox-1", fake.raw),
+            "/workspace/output/result.json",
+        )
+    )
+
+    assert result == "配体"
+    assert fake.reads == [("/workspace/output/result.json", 16 * 1024 * 1024)]
 
 
 @pytest.mark.parametrize(
@@ -425,7 +519,7 @@ def test_list_rejects_unsafe_paths_and_patterns(
     with pytest.raises(SandboxInputError):
         asyncio.run(client.list_files(handle, path, pattern))  # type: ignore[arg-type]
 
-    assert fake.searches == []
+    assert fake.commands == []
 
 
 def test_list_revalidates_deduplicates_and_bounds_server_paths(tmp_path: Path) -> None:
@@ -433,7 +527,12 @@ def test_list_revalidates_deduplicates_and_bounds_server_paths(tmp_path: Path) -
     client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
     handle = SandboxHandle("sandbox-1", fake.raw)
     valid = "/workspace/output/poses/result.pdbqt"
-    fake.list_result = [valid, valid, "/workspace/output/result.json"]
+    fake.list_stdout_chunks = [
+        "".join(
+            json.dumps(candidate) + "\n"
+            for candidate in (valid, valid, "/workspace/output/result.json")
+        )
+    ]
 
     assert asyncio.run(client.list_files(handle, "/workspace/output", "*")) == [
         valid,
@@ -445,12 +544,42 @@ def test_list_revalidates_deduplicates_and_bounds_server_paths(tmp_path: Path) -
         ["/workspace/output\\result.json"],
         ["/workspace/outputish/result.json"],
         [1],
-        "not-a-list",
+        "not-json\n",
         [f"/workspace/output/file-{index}.json" for index in range(257)],
     ):
-        fake.list_result = unsafe
+        if type(unsafe) is str:
+            fake.list_stdout_chunks = [unsafe]
+        else:
+            fake.list_stdout_chunks = [
+                "".join(json.dumps(candidate) + "\n" for candidate in unsafe)
+            ]
         with pytest.raises((SandboxProtocolError, SandboxListError)):
             asyncio.run(client.list_files(handle, "/workspace/output", "*"))
+
+
+def test_list_257th_file_and_transport_overflow_fail_without_returning_prefix(
+    tmp_path: Path,
+) -> None:
+    fake = FakeSandboxFactory()
+    client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+    handle = SandboxHandle("sandbox-1", fake.raw)
+    fake.list_stdout_chunks = ["x" * (1024 * 1024)] * 16
+
+    with pytest.raises(SandboxListError):
+        asyncio.run(client.list_files(handle, "/workspace/output", "*.json"))
+
+    fake.list_stdout_chunks = [
+        "".join(
+            json.dumps(f"/workspace/output/file-{index}.json") + "\n"
+            for index in range(256)
+        )
+    ]
+    fake.list_execution = SimpleNamespace(exit_code=75)
+    with pytest.raises(SandboxListError):
+        asyncio.run(client.list_files(handle, "/workspace/output", "*.json"))
+
+    assert all(call["skip_accumulation"] is True for call in fake.run_calls)
+    assert all(call["command"] != FIXED_COMMAND for call in fake.run_calls)
 
 
 @pytest.mark.parametrize("operation", ["create", "upload", "read", "list", "run"])
@@ -531,6 +660,39 @@ def test_cancellation_and_base_exceptions_propagate_unchanged(
         assert raised.value is failure
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("callback test-only-credential C:\\Users\\private"),
+        asyncio.CancelledError(),
+        FatalSDKSignal(),
+    ],
+)
+def test_stream_callback_failures_are_sanitized_or_propagated_unchanged(
+    tmp_path: Path,
+    failure: BaseException,
+) -> None:
+    class FailingMessage:
+        @property
+        def text(self) -> str:
+            raise failure
+
+    fake = FakeSandboxFactory()
+    fake.stdout_chunks = [FailingMessage()]
+    client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+
+    if isinstance(failure, Exception):
+        with pytest.raises(SandboxRunError) as raised:
+            asyncio.run(client.run(SandboxHandle("sandbox-1", fake.raw)))
+        assert "test-only-credential" not in str(raised.value)
+        assert "Users" not in str(raised.value)
+    else:
+        with pytest.raises(type(failure)) as raised:
+            asyncio.run(client.run(SandboxHandle("sandbox-1", fake.raw)))
+        if not isinstance(failure, asyncio.CancelledError):
+            assert raised.value is failure
+
+
 def test_run_rejects_type_confusion_and_sanitizes_bounded_utf8_output(
     tmp_path: Path,
 ) -> None:
@@ -554,11 +716,10 @@ def test_run_rejects_type_confusion_and_sanitizes_bounded_utf8_output(
     )
     fake.execution = SimpleNamespace(
         exit_code=7,
-        logs=SimpleNamespace(
-            stdout=[SimpleNamespace(text=dangerous)],
-            stderr=[SimpleNamespace(text=dangerous)],
-        ),
+        logs=SimpleNamespace(stdout=[], stderr=[]),
     )
+    fake.stdout_chunks = [dangerous]
+    fake.stderr_chunks = [dangerous]
     result = asyncio.run(client.run(handle))
 
     assert result.exit_code == 7
@@ -573,6 +734,217 @@ def test_run_rejects_type_confusion_and_sanitizes_bounded_utf8_output(
         assert "Users" not in output
         assert "/home/private" not in output
         output.encode("utf-8", errors="strict")
+
+
+def test_redaction_normalizes_before_removing_complete_authorization_values(
+    tmp_path: Path,
+) -> None:
+    fake = FakeSandboxFactory()
+    client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+    handle = SandboxHandle("sandbox-1", fake.raw)
+    fake.execution = SimpleNamespace(
+        exit_code=0,
+        logs=SimpleNamespace(stdout=[], stderr=[]),
+    )
+    fake.stdout_chunks = [
+        "known=test\x00-only-",
+        (
+            "credential\nAuthorization: Basic dXNlcjpwYXNz\n"
+            "Authorization:\x1b[31m Custom scheme-secret-value\x1b[0m\n"
+            "X-API-\x1b[32mKey: split-ansi-secret\x1b[0m\n"
+            "C:\\Users\\private\\host-secret /tmp/private/host-secret "
+            "/etc/medchat/host-secret"
+        ),
+    ]
+
+    result = asyncio.run(client.run(handle))
+
+    assert "test-only-credential" not in result.stdout
+    assert "dXNlcjpwYXNz" not in result.stdout
+    assert "scheme-secret-value" not in result.stdout
+    assert "split-ansi-secret" not in result.stdout
+    assert "host-secret" not in result.stdout
+    assert "/etc/medchat" not in result.stdout
+    assert "\x00" not in result.stdout
+    assert "\x1b" not in result.stdout
+
+
+def test_redaction_stays_safe_at_multibyte_truncation_boundary(tmp_path: Path) -> None:
+    fake = FakeSandboxFactory()
+    client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+    handle = SandboxHandle("sandbox-1", fake.raw)
+    payload = (
+        "茅" * 8_180
+        + " Authorization: Basic boundary-secret-value"
+        + " api_token=tail-secret-value"
+    )
+    fake.execution = SimpleNamespace(
+        exit_code=0,
+        logs=SimpleNamespace(stdout=[], stderr=[]),
+    )
+    fake.stdout_chunks = [payload]
+
+    result = asyncio.run(client.run(handle))
+
+    assert len(result.stdout.encode("utf-8")) <= 16 * 1024
+    assert "boundary-secret-value" not in result.stdout
+    assert "tail-secret-value" not in result.stdout
+    assert "锟斤拷" not in result.stdout
+    result.stdout.encode("utf-8", errors="strict")
+
+
+def test_run_uses_bounded_stream_handlers_without_execution_accumulation(
+    tmp_path: Path,
+) -> None:
+    class ExecutionWithoutReadableLogs:
+        exit_code = 0
+
+        @property
+        def logs(self) -> object:
+            raise AssertionError("Execution.logs must not be read")
+
+    fake = FakeSandboxFactory()
+    fake.execution = ExecutionWithoutReadableLogs()
+    huge_chunk = "x" * (1024 * 1024)
+    fake.stdout_chunks = [huge_chunk] * 32
+    fake.stderr_chunks = [huge_chunk] * 32
+    client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+
+    result = asyncio.run(client.run(SandboxHandle("sandbox-1", fake.raw)))
+
+    assert fake.run_calls[0]["command"] == FIXED_COMMAND
+    assert fake.run_calls[0]["skip_accumulation"] is True
+    assert callable(fake.run_calls[0]["on_stdout"])
+    assert callable(fake.run_calls[0]["on_stderr"])
+    assert len(result.stdout.encode("utf-8")) <= 16 * 1024
+    assert len(result.stderr.encode("utf-8")) <= 16 * 1024
+    assert result.stdout.endswith("[TRUNCATED]")
+    assert result.stderr.endswith("[TRUNCATED]")
+
+
+def test_official_factory_builds_async_nonaccumulating_execution_handlers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handler_calls: list[dict[str, object]] = []
+
+    class FakeExecutionHandlers:
+        def __init__(self, **values: object) -> None:
+            handler_calls.append(values)
+            self.on_stdout = values["on_stdout"]
+            self.on_stderr = values["on_stderr"]
+
+    class FakeCommands:
+        async def run(self, command: str, *, handlers: object) -> object:
+            assert command == FIXED_COMMAND
+            assert isinstance(handlers, FakeExecutionHandlers)
+            await handlers.on_stdout(SimpleNamespace(text="streamed"))
+            return SimpleNamespace(exit_code=0)
+
+    sdk = opensandbox_client_module._OfficialSDK(
+        ConnectionConfig=object,
+        Sandbox=object,
+        SandboxManager=object,
+        WriteEntry=object,
+        SearchEntry=object,
+        NetworkPolicy=object,
+        ExecutionHandlers=FakeExecutionHandlers,
+    )
+    monkeypatch.setattr(opensandbox_client_module, "_load_official_sdk", lambda: sdk)
+    client = OpenSandboxClient(config(tmp_path))
+    raw = SimpleNamespace(commands=FakeCommands())
+
+    result = asyncio.run(client.run(SandboxHandle("sandbox-1", raw)))
+
+    assert result.stdout == "streamed"
+    assert handler_calls[0]["skip_accumulation"] is True
+    assert callable(handler_calls[0]["on_stdout"])
+    assert callable(handler_calls[0]["on_stderr"])
+
+
+def test_official_factory_uses_streaming_read_and_fixed_bounded_list_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads: list[dict[str, object]] = []
+    commands: list[tuple[str, object]] = []
+
+    class ForbiddenSearchEntry:
+        def __init__(self, **values: object) -> None:
+            raise AssertionError(f"unbounded SearchEntry used: {values}")
+
+    class FakeExecutionHandlers:
+        def __init__(self, **values: object) -> None:
+            self.on_stdout = values["on_stdout"]
+            self.on_stderr = values["on_stderr"]
+            self.skip_accumulation = values["skip_accumulation"]
+
+    class FakeFiles:
+        async def read_file(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("unbounded read_file used")
+
+        async def search(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("unbounded search used")
+
+        async def read_bytes_stream(
+            self,
+            path: str,
+            *,
+            chunk_size: int,
+            range_header: str,
+        ) -> object:
+            reads.append(
+                {
+                    "path": path,
+                    "chunk_size": chunk_size,
+                    "range_header": range_header,
+                }
+            )
+
+            async def chunks() -> Any:
+                yield "结果".encode("utf-8")
+
+            return chunks()
+
+    class FakeCommands:
+        async def run(self, command: str, *, handlers: object) -> object:
+            commands.append((command, handlers))
+            assert handlers.skip_accumulation is True
+            await handlers.on_stdout(
+                SimpleNamespace(text=json.dumps("/workspace/output/result.json") + "\n")
+            )
+            return SimpleNamespace(exit_code=0)
+
+    sdk = opensandbox_client_module._OfficialSDK(
+        ConnectionConfig=object,
+        Sandbox=object,
+        SandboxManager=object,
+        WriteEntry=object,
+        SearchEntry=ForbiddenSearchEntry,
+        NetworkPolicy=object,
+        ExecutionHandlers=FakeExecutionHandlers,
+    )
+    monkeypatch.setattr(opensandbox_client_module, "_load_official_sdk", lambda: sdk)
+    client = OpenSandboxClient(config(tmp_path))
+    raw = SimpleNamespace(files=FakeFiles(), commands=FakeCommands())
+    handle = SandboxHandle("sandbox-1", raw)
+
+    assert asyncio.run(client.read_text(handle, "/workspace/output/result.json")) == "结果"
+    assert asyncio.run(client.list_files(handle, "/workspace/output", "*.json")) == [
+        "/workspace/output/result.json"
+    ]
+
+    assert reads == [
+        {
+            "path": "/workspace/output/result.json",
+            "chunk_size": 64 * 1024,
+            "range_header": f"bytes=0-{16 * 1024 * 1024}",
+        }
+    ]
+    assert len(commands) == 1
+    assert "run_docking.py" not in commands[0][0]
+    assert "base64.b64decode" in commands[0][0]
+    assert commands[0][0].endswith("'/workspace/output' '*.json'")
 
 
 def test_destroy_and_destroy_by_id_are_best_possible_exactly_once(tmp_path: Path) -> None:
@@ -599,6 +971,74 @@ def test_destroy_and_destroy_by_id_are_best_possible_exactly_once(tmp_path: Path
     assert second.destroyed_by_id == ["sandbox-orphan"]
 
 
+def test_caller_cancellation_does_not_cancel_shared_cleanup(tmp_path: Path) -> None:
+    class BlockingCleanupFactory(FakeSandboxFactory):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cleanup_started = asyncio.Event()
+            self.release_cleanup = asyncio.Event()
+
+        async def destroy(self, raw: FakeRawSandbox) -> None:
+            self.destroyed.append(raw.id)
+            self.cleanup_started.set()
+            await self.release_cleanup.wait()
+
+    async def scenario() -> BlockingCleanupFactory:
+        fake = BlockingCleanupFactory()
+        client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+        handle = SandboxHandle("sandbox-1", fake.raw)
+        caller = asyncio.create_task(client.destroy(handle))
+        await fake.cleanup_started.wait()
+
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+
+        follower = asyncio.create_task(client.destroy_by_id("sandbox-1"))
+        await asyncio.sleep(0)
+        assert not follower.done()
+        fake.release_cleanup.set()
+        await follower
+        await client.destroy(handle)
+        return fake
+
+    fake = asyncio.run(scenario())
+
+    assert fake.destroyed == ["sandbox-1"]
+    assert fake.destroyed_by_id == []
+
+
+def test_concurrent_destroy_apis_share_one_in_flight_task(tmp_path: Path) -> None:
+    class BlockingCleanupFactory(FakeSandboxFactory):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cleanup_started = asyncio.Event()
+            self.release_cleanup = asyncio.Event()
+
+        async def destroy(self, raw: FakeRawSandbox) -> None:
+            self.destroyed.append(raw.id)
+            self.cleanup_started.set()
+            await self.release_cleanup.wait()
+
+    async def scenario() -> BlockingCleanupFactory:
+        fake = BlockingCleanupFactory()
+        client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+        handle = SandboxHandle("sandbox-1", fake.raw)
+        by_handle = asyncio.create_task(client.destroy(handle))
+        await fake.cleanup_started.wait()
+        by_id = asyncio.create_task(client.destroy_by_id("sandbox-1"))
+        await asyncio.sleep(0)
+        assert not by_id.done()
+        fake.release_cleanup.set()
+        await asyncio.gather(by_handle, by_id)
+        return fake
+
+    fake = asyncio.run(scenario())
+
+    assert fake.destroyed == ["sandbox-1"]
+    assert fake.destroyed_by_id == []
+
+
 @pytest.mark.parametrize("operation", ["destroy", "destroy_by_id"])
 @pytest.mark.parametrize("failure", [asyncio.CancelledError(), FatalSDKSignal()])
 def test_destroy_invocation_is_not_skipped_when_base_exception_propagates(
@@ -610,20 +1050,35 @@ def test_destroy_invocation_is_not_skipped_when_base_exception_propagates(
     fake.failures[operation] = failure
     client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
 
-    if operation == "destroy":
-        call = client.destroy(SandboxHandle("sandbox-1", fake.raw))
-    else:
-        call = client.destroy_by_id("sandbox-1")
-    with pytest.raises(type(failure)) as raised:
-        asyncio.run(call)
+    async def scenario() -> BaseException:
+        if operation == "destroy":
+            call = client.destroy(SandboxHandle("sandbox-1", fake.raw))
+        else:
+            call = client.destroy_by_id("sandbox-1")
+        try:
+            await call
+        except BaseException as raised:
+            propagated = raised
+        else:
+            raise AssertionError("cleanup BaseException was swallowed")
+
+        del fake.failures[operation]
+        if operation == "destroy":
+            await client.destroy(SandboxHandle("sandbox-1", fake.raw))
+        else:
+            await client.destroy_by_id("sandbox-1")
+        return propagated
+
+    raised = asyncio.run(scenario())
 
     if not isinstance(failure, asyncio.CancelledError):
-        assert raised.value is failure
-    assert len(fake.destroyed) + len(fake.destroyed_by_id) == 1
+        assert raised is failure
+    assert type(raised) is type(failure)
+    assert len(fake.destroyed) + len(fake.destroyed_by_id) == 2
 
 
 @pytest.mark.parametrize("operation", ["destroy", "destroy_by_id"])
-def test_destroy_maps_ordinary_errors_without_retrying(
+def test_destroy_maps_ordinary_errors_and_allows_retry(
     tmp_path: Path,
     operation: str,
 ) -> None:
@@ -633,19 +1088,30 @@ def test_destroy_maps_ordinary_errors_without_retrying(
     )
     client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
 
-    async def scenario() -> None:
+    async def scenario() -> SandboxDestroyError:
+        if operation == "destroy":
+            first = client.destroy(SandboxHandle("sandbox-1", fake.raw))
+        else:
+            first = client.destroy_by_id("sandbox-1")
+        try:
+            await first
+        except SandboxDestroyError as raised:
+            failure = raised
+        else:
+            raise AssertionError("cleanup failure was swallowed")
+
+        del fake.failures[operation]
         if operation == "destroy":
             await client.destroy(SandboxHandle("sandbox-1", fake.raw))
         else:
             await client.destroy_by_id("sandbox-1")
+        return failure
 
-    with pytest.raises(SandboxDestroyError) as raised:
-        asyncio.run(scenario())
-    asyncio.run(scenario())
+    raised = asyncio.run(scenario())
 
-    assert "test-only-credential" not in str(raised.value)
-    assert "Users" not in str(raised.value)
-    assert len(fake.destroyed) + len(fake.destroyed_by_id) == 1
+    assert "test-only-credential" not in str(raised)
+    assert "Users" not in str(raised)
+    assert len(fake.destroyed) + len(fake.destroyed_by_id) == 2
 
 
 @pytest.mark.parametrize(
