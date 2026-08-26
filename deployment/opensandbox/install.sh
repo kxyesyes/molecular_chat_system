@@ -8,8 +8,11 @@ GROUP_MIGRATION_INTENT=remove-medchat-from-medchat-sandbox
 SYSTEMCTL_TIMEOUT_SECONDS=15
 MEDCHAT_SERVICE_STATE=unknown
 TEMPORAL_WORKER_SERVICE_STATE=unknown
-LIVE_SERVICES_QUIESCED=0
 GROUP_MEMBERSHIP_REVOKED=0
+SERVICE_STATE_CAPTURED=0
+BOTH_SERVICES_INACTIVE=0
+BROKER_ENV_DIRECTORY=/etc/medchat
+BROKER_ENV_NAME=sandbox-broker.env
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 
@@ -94,10 +97,47 @@ confirm_inactive() {
     [ "$state" = inactive ] || fail service_stop_unconfirmed
 }
 
+medchat_service_is_inactive() {
+    state=$(
+        timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
+            systemctl show --property=ActiveState --value medchat.service \
+            2>/dev/null
+    ) || return 1
+    [ "$state" = inactive ]
+}
+
+temporal_worker_service_is_inactive() {
+    state=$(
+        timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
+            systemctl show --property=ActiveState --value medchat-temporal-worker.service \
+            2>/dev/null
+    ) || return 1
+    [ "$state" = inactive ]
+}
+
+force_quiesce_known_medchat_services() {
+    BOTH_SERVICES_INACTIVE=0
+    run_systemctl stop medchat-temporal-worker.service || :
+    run_systemctl stop medchat.service || :
+    if ! temporal_worker_service_is_inactive; then
+        run_systemctl kill --kill-whom=all --signal=SIGKILL medchat-temporal-worker.service || :
+        run_systemctl stop medchat-temporal-worker.service || :
+    fi
+    if ! medchat_service_is_inactive; then
+        run_systemctl kill --kill-whom=all --signal=SIGKILL medchat.service || :
+        run_systemctl stop medchat.service || :
+    fi
+    if temporal_worker_service_is_inactive && medchat_service_is_inactive; then
+        BOTH_SERVICES_INACTIVE=1
+        return 0
+    fi
+    return 1
+}
+
 quiesce_shared_medchat_services() {
     MEDCHAT_SERVICE_STATE=$(query_medchat_service_state)
     TEMPORAL_WORKER_SERVICE_STATE=$(query_temporal_worker_service_state)
-    LIVE_SERVICES_QUIESCED=1
+    SERVICE_STATE_CAPTURED=1
     if [ "$TEMPORAL_WORKER_SERVICE_STATE" = active ]; then
         run_systemctl stop medchat-temporal-worker.service || fail service_stop_failed
     fi
@@ -106,6 +146,7 @@ quiesce_shared_medchat_services() {
     fi
     confirm_inactive medchat-temporal-worker.service
     confirm_inactive medchat.service
+    BOTH_SERVICES_INACTIVE=1
 }
 
 restore_prior_medchat_services() {
@@ -117,21 +158,141 @@ restore_prior_medchat_services() {
     fi
 }
 
+secure_broker_credentials() {
+    /usr/bin/env -i PATH="$PATH" /usr/bin/python3 -I - \
+        "$BROKER_ENV_DIRECTORY" "$BROKER_ENV_NAME" >/dev/null 2>&1 <<'PY'
+import os
+import stat
+import sys
+
+directory = sys.argv[1]
+name = sys.argv[2]
+directory_descriptor = None
+descriptor = None
+
+
+class SecurityError(Exception):
+    pass
+
+
+def fail() -> None:
+    raise SecurityError
+
+
+def unlink_named_path() -> None:
+    try:
+        os.unlink(name, dir_fd=directory_descriptor)
+    except FileNotFoundError:
+        return
+    try:
+        os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    fail()
+
+
+try:
+    if name != "sandbox-broker.env" or "/" in name or "\x00" in name:
+        fail()
+    directory_descriptor = os.open(
+        directory,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+    )
+    directory_metadata = os.fstat(directory_descriptor)
+    if (
+        not stat.S_ISDIR(directory_metadata.st_mode)
+        or stat.S_IMODE(directory_metadata.st_mode) & 0o022
+        or directory_metadata.st_uid != os.geteuid()
+    ):
+        fail()
+    try:
+        named = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        raise SystemExit(0)
+    if not stat.S_ISREG(named.st_mode) or named.st_nlink != 1:
+        unlink_named_path()
+        raise SystemExit(0)
+    descriptor = os.open(
+        name,
+        os.O_WRONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+        dir_fd=directory_descriptor,
+    )
+    opened = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_nlink != 1
+        or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+    ):
+        fail()
+    os.fchmod(descriptor, 0o600)
+    if os.geteuid() == 0:
+        os.fchown(descriptor, 0, 0)
+    elif directory == "/etc/medchat":
+        fail()
+    final = os.fstat(descriptor)
+    final_named = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+    expected_uid = 0 if os.geteuid() == 0 else os.geteuid()
+    if (
+        stat.S_IMODE(final.st_mode) != 0o600
+        or final.st_uid != expected_uid
+        or (final.st_dev, final.st_ino) != (final_named.st_dev, final_named.st_ino)
+    ):
+        fail()
+except Exception:
+    if directory_descriptor is not None:
+        try:
+            unlink_named_path()
+        except (OSError, SecurityError):
+            pass
+    raise SystemExit(1)
+finally:
+    if descriptor is not None:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    if directory_descriptor is not None:
+        try:
+            os.close(directory_descriptor)
+        except OSError:
+            pass
+PY
+}
+
+warn_credentials_locked_services_not_restored() {
+    # Operators must rotate any credential that may have been read before migration.
+    printf '%s\n' \
+        'opensandbox_install=warning code=credentials_locked_services_not_restored' \
+        >&2
+}
+
 restore_stopped_services_on_failure() {
     status=$?
     trap - EXIT HUP INT TERM
-    if [ "$LIVE_SERVICES_QUIESCED" -eq 1 ]; then
-        run_systemctl stop medchat-temporal-worker.service || :
-        run_systemctl stop medchat.service || :
-        remove_legacy_medchat_membership >/dev/null 2>&1 || :
-        if [ "$GROUP_MEMBERSHIP_REVOKED" -eq 1 ]; then
-            restore_prior_medchat_services || :
+    if [ "$SERVICE_STATE_CAPTURED" -eq 1 ]; then
+        force_quiesce_known_medchat_services || :
+        if [ "$BOTH_SERVICES_INACTIVE" -eq 1 ]; then
+            remove_legacy_medchat_membership >/dev/null 2>&1 || :
+            if [ "$GROUP_MEMBERSHIP_REVOKED" -eq 1 ]; then
+                if restore_prior_medchat_services; then
+                    exit "$status"
+                fi
+                force_quiesce_known_medchat_services || :
+            fi
         fi
+        secure_broker_credentials || :
+        warn_credentials_locked_services_not_restored
     fi
     exit "$status"
 }
 
 remove_legacy_medchat_membership() {
+    GROUP_MEMBERSHIP_REVOKED=0
     timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
         gpasswd --delete medchat medchat-sandbox >/dev/null 2>&1 || :
     memberships=$(
@@ -538,7 +699,6 @@ if [ "$DESTDIR" = / ]; then
     run_systemctl daemon-reload
     run_systemctl enable medchat-opensandbox.service medchat-sandbox-broker.service
     restore_prior_medchat_services || fail service_restore_failed
-    LIVE_SERVICES_QUIESCED=0
     trap - EXIT HUP INT TERM
 fi
 

@@ -361,18 +361,158 @@ def test_failure_restoration_is_gated_on_verified_group_revocation() -> None:
     migration_end = installer.index("\n}\n", migration_start)
     migration = installer[migration_start:migration_end]
     assert "GROUP_MEMBERSHIP_REVOKED=1" in migration
+    verification = [
+        migration.index("GROUP_MEMBERSHIP_REVOKED=0"),
+        migration.index("gpasswd --delete medchat medchat-sandbox"),
+        migration.index("id -nG medchat"),
+        migration.index("GROUP_MEMBERSHIP_REVOKED=1"),
+    ]
+    assert verification == sorted(verification)
 
     trap_start = installer.index("restore_stopped_services_on_failure() {")
     trap_end = installer.index("\n}\n", trap_start)
     failure_trap = installer[trap_start:trap_end]
     failure_order = [
-        failure_trap.index("run_systemctl stop medchat-temporal-worker.service"),
-        failure_trap.index("run_systemctl stop medchat.service"),
+        failure_trap.index("force_quiesce_known_medchat_services"),
+        failure_trap.index('if [ "$BOTH_SERVICES_INACTIVE" -eq 1 ]'),
         failure_trap.index("remove_legacy_medchat_membership"),
         failure_trap.index('if [ "$GROUP_MEMBERSHIP_REVOKED" -eq 1 ]; then'),
         failure_trap.index("restore_prior_medchat_services"),
     ]
     assert failure_order == sorted(failure_order)
+
+
+def test_failure_trap_force_quiesces_before_restore_or_locks_credentials() -> None:
+    installer = INSTALLER.read_text(encoding="utf-8")
+
+    assert "SERVICE_STATE_CAPTURED=0" in installer
+    assert "force_quiesce_known_medchat_services" in installer
+    assert (
+        "run_systemctl kill --kill-whom=all --signal=SIGKILL "
+        "medchat-temporal-worker.service"
+    ) in installer
+    assert (
+        "run_systemctl kill --kill-whom=all --signal=SIGKILL medchat.service"
+        in installer
+    )
+    assert "secure_broker_credentials" in installer
+    assert (
+        "opensandbox_install=warning "
+        "code=credentials_locked_services_not_restored"
+    ) in installer
+
+    trap_start = installer.index("restore_stopped_services_on_failure() {")
+    trap_end = installer.index("\n}\n", trap_start)
+    failure_trap = installer[trap_start:trap_end]
+    locked_path = failure_trap.index("secure_broker_credentials")
+    restore_path = failure_trap.index("restore_prior_medchat_services")
+    assert "force_quiesce_known_medchat_services" in failure_trap
+    assert 'if [ "$BOTH_SERVICES_INACTIVE" -eq 1 ]' in failure_trap
+    assert 'if [ "$GROUP_MEMBERSHIP_REVOKED" -eq 1 ]' in failure_trap
+    assert locked_path != restore_path
+
+
+def test_credential_lockdown_is_root_only_and_symlink_safe() -> None:
+    installer = INSTALLER.read_text(encoding="utf-8")
+
+    lockdown_start = installer.index("secure_broker_credentials() {")
+    lockdown_end = installer.index("\n}\n", lockdown_start)
+    lockdown = installer[lockdown_start:lockdown_end]
+    assert 'BROKER_ENV_DIRECTORY=/etc/medchat' in installer
+    assert 'BROKER_ENV_NAME=sandbox-broker.env' in installer
+    assert "O_NOFOLLOW" in lockdown
+    assert "dir_fd=" in lockdown
+    assert "follow_symlinks=False" in lockdown
+    assert "os.fchmod(descriptor, 0o600)" in lockdown
+    assert "os.fchown(descriptor, 0, 0)" in lockdown
+    assert "os.unlink" in lockdown
+
+
+def _installer_function_source(name: str) -> str:
+    installer = INSTALLER.read_text(encoding="utf-8")
+    start = installer.index(name + "() {")
+    end = installer.index("\n}\n", start) + len("\n}\n")
+    return installer[start:end]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="shell behavior requires POSIX")
+def test_force_quiesce_still_active_never_restarts_services(tmp_path: Path) -> None:
+    event_log = tmp_path / "events"
+    script = tmp_path / "force-quiesce.sh"
+    script.write_text(
+        "#!/bin/sh\nset -u\n"
+        "EVENT_LOG=$1\nBOTH_SERVICES_INACTIVE=0\n"
+        "run_systemctl() { printf '%s\\n' \"$*\" >>\"$EVENT_LOG\"; return 1; }\n"
+        "temporal_worker_service_is_inactive() { return 1; }\n"
+        "medchat_service_is_inactive() { return 1; }\n"
+        + _installer_function_source("force_quiesce_known_medchat_services")
+        + "if force_quiesce_known_medchat_services; then exit 90; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["sh", str(script), str(event_log)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+    events = event_log.read_text(encoding="utf-8").splitlines()
+    assert any(event.startswith("stop ") for event in events)
+    assert any("kill --kill-whom=all --signal=SIGKILL" in event for event in events)
+    assert not any(event.startswith(("start ", "restart ")) for event in events)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="credential mode requires POSIX")
+def test_credential_lockdown_secures_regular_file_and_unlinks_symlink(
+    tmp_path: Path,
+) -> None:
+    secure_dir = tmp_path / "etc-medchat"
+    secure_dir.mkdir(mode=0o700)
+    credential = secure_dir / "sandbox-broker.env"
+    credential.write_text("OPEN_SANDBOX_API_KEY=test-placeholder\n", encoding="utf-8")
+    credential.chmod(0o640)
+    script = tmp_path / "secure-credential.sh"
+    script.write_text(
+        "#!/bin/sh\nset -eu\nPATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH\n"
+        "BROKER_ENV_DIRECTORY=$1\nBROKER_ENV_NAME=sandbox-broker.env\n"
+        + _installer_function_source("secure_broker_credentials")
+        + "secure_broker_credentials\n",
+        encoding="utf-8",
+    )
+
+    first = subprocess.run(
+        ["sh", str(script), str(secure_dir)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert first.returncode == 0
+    assert first.stdout == first.stderr == ""
+    assert stat.S_IMODE(credential.stat().st_mode) == 0o600
+
+    credential.unlink()
+    victim = tmp_path / "victim"
+    victim.write_text("sentinel", encoding="utf-8")
+    victim.chmod(0o640)
+    credential.symlink_to(victim)
+    second = subprocess.run(
+        ["sh", str(script), str(secure_dir)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert second.returncode == 0
+    assert not credential.exists() and not credential.is_symlink()
+    assert victim.read_text(encoding="utf-8") == "sentinel"
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o640
 
 
 def test_live_install_revokes_group_unconditionally_but_preview_only_models_intent() -> None:
@@ -641,6 +781,71 @@ def test_static_validator_rejects_missing_legacy_group_migration(
     assert validator.validate_static(root) == "installer_unsafe"
 
 
+@pytest.mark.parametrize(
+    "required_safety_operation",
+    [
+        "force_quiesce_known_medchat_services",
+        "secure_broker_credentials",
+        "credentials_locked_services_not_restored",
+    ],
+)
+def test_static_validator_rejects_missing_failure_lockdown(
+    tmp_path: Path,
+    required_safety_operation: str,
+) -> None:
+    validator = _load_validator()
+    root = _asset_root(tmp_path)
+    installer = root / "deployment/opensandbox/install.sh"
+    installer.write_text(
+        installer.read_text(encoding="utf-8").replace(
+            required_safety_operation,
+            "removed_failure_safety_operation",
+        ),
+        encoding="utf-8",
+    )
+
+    assert validator.validate_static(root) == "installer_unsafe"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "printf '%s\\n' usermod --append --groups=medchat-sandbox medchat",
+        "echo adduser medchat medchat-sandbox",
+        "logger 'usermod -aGmedchat-sandbox medchat'",
+        "# usermod --append --groups=medchat-sandbox medchat",
+        "gpasswd --delete medchat medchat-sandbox",
+        "usermod -aGmedchat-sandbox analyst",
+        "usermod -aGother-group medchat",
+        "printf \"usermod --append --groups=medchat-sandbox medchat",
+    ],
+)
+def test_membership_validator_ignores_inert_or_unrelated_text(line: str) -> None:
+    validator = _load_validator()
+
+    assert validator._assigns_persistent_broker_membership(line) is False
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "usermod -aGmedchat-sandbox medchat",
+        "LC_ALL=C usermod --append --groups=medchat-sandbox medchat",
+        "env -i PATH=/usr/sbin:/usr/bin usermod -aG medchat-sandbox medchat",
+        "command -- usermod --append --groups=medchat-sandbox medchat",
+        "sudo -- addgroup medchat medchat-sandbox",
+        "adduser \\" + "\n  medchat \\" + "\n  medchat-sandbox",
+        "gpasswd --add medchat medchat-sandbox",
+        "env usermod --append --groups=medchat-sandbox 'medchat",
+        'LC_ALL="C locale" usermod --append --groups=medchat-sandbox \'medchat',
+    ],
+)
+def test_membership_validator_rejects_executable_membership_changes(line: str) -> None:
+    validator = _load_validator()
+
+    assert validator._assigns_persistent_broker_membership(line) is True
+
+
 def test_static_validator_rejects_broker_environment_without_key(
     tmp_path: Path,
 ) -> None:
@@ -842,11 +1047,15 @@ def test_installer_has_valid_posix_shell_syntax() -> None:
 
 def test_installer_embedded_python_has_valid_syntax() -> None:
     installer = INSTALLER.read_text(encoding="utf-8")
-    embedded = installer.split("<<'PY'", 1)[1].split("\nPY\n", 1)[0].lstrip(
-        "\r\n"
-    )
-
-    compile(embedded, "deployment/opensandbox/install.sh:<python>", "exec")
+    embedded_blocks = installer.split("<<'PY'")[1:]
+    assert len(embedded_blocks) == 2
+    for index, block in enumerate(embedded_blocks):
+        embedded = block.split("\nPY\n", 1)[0].lstrip("\r\n")
+        compile(
+            embedded,
+            f"deployment/opensandbox/install.sh:<python-{index}>",
+            "exec",
+        )
 
 
 def test_installer_is_not_executable_on_windows_checkout() -> None:

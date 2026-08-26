@@ -323,31 +323,162 @@ def _usermod_assigns_group(tokens: list[str], group: str) -> bool:
     return False
 
 
+_SHELL_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+_MEMBERSHIP_COMMANDS = {"usermod", "adduser", "addgroup", "gpasswd"}
+_COMMAND_WRAPPERS = {"env", "command", "sudo"}
+_INERT_OUTPUT_COMMANDS = {"echo", "printf", "logger"}
+
+
+def _shell_command_segments(line: str) -> list[list[str]]:
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    lexer.commenters = "#"
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for token in lexer:
+        if token in {";", "&", "&&", "|", "||"}:
+            if current:
+                segments.append(current)
+                current = []
+        else:
+            current.append(token)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _raw_command_hint(line: str) -> str:
+    remaining = line.lstrip()
+    while True:
+        match = re.match(r"[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+", remaining)
+        if match is None:
+            break
+        remaining = remaining[match.end() :]
+    first = remaining.partition(" ")[0].strip("'\"")
+    return Path(first).name
+
+
+def _partial_command_hints(line: str) -> set[str]:
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    lexer.commenters = "#"
+    hints: set[str] = set()
+    current: list[str] = []
+    try:
+        for token in lexer:
+            if token in {";", "&", "&&", "|", "||"}:
+                resolved = _actual_command(current)
+                if resolved is not None:
+                    hints.add(resolved[0])
+                current = []
+            else:
+                current.append(token)
+    except ValueError:
+        pass
+    resolved = _actual_command(current)
+    if resolved is not None:
+        hints.add(resolved[0])
+    if not hints:
+        hints.add(_raw_command_hint(line))
+    return hints
+
+
+def _actual_command(tokens: list[str]) -> tuple[str, list[str]] | None:
+    index = 0
+    while index < len(tokens):
+        while index < len(tokens) and _SHELL_ASSIGNMENT.fullmatch(tokens[index]):
+            index += 1
+        if index >= len(tokens):
+            return None
+        command = Path(tokens[index]).name
+        if command in {"!", "if", "then", "do"}:
+            index += 1
+            continue
+        if command == "env":
+            index += 1
+            while index < len(tokens):
+                token = tokens[index]
+                if token == "--":
+                    index += 1
+                    break
+                if _SHELL_ASSIGNMENT.fullmatch(token):
+                    index += 1
+                    continue
+                if token in {"-u", "--unset"}:
+                    if index + 1 >= len(tokens):
+                        return None
+                    index += 2
+                    continue
+                if token.startswith("-"):
+                    index += 1
+                    continue
+                break
+            continue
+        if command == "command":
+            index += 1
+            while index < len(tokens) and tokens[index].startswith("-"):
+                if tokens[index] in {"-v", "-V"}:
+                    return ("command", tokens[index:])
+                index += 1
+            continue
+        if command == "sudo":
+            index += 1
+            options_with_values = {"-u", "--user", "-g", "--group", "-h", "--host"}
+            while index < len(tokens):
+                token = tokens[index]
+                if token == "--":
+                    index += 1
+                    break
+                if _SHELL_ASSIGNMENT.fullmatch(token):
+                    index += 1
+                    continue
+                if token in options_with_values:
+                    if index + 1 >= len(tokens):
+                        return None
+                    index += 2
+                    continue
+                if token.startswith("-"):
+                    index += 1
+                    continue
+                break
+            continue
+        return (command, tokens[index + 1 :])
+    return None
+
+
 def _assigns_persistent_broker_membership(text: str) -> bool:
     for line in _shell_logical_commands(text):
         if line.startswith("#") or "medchat-sandbox" not in line:
             continue
         try:
-            tokens = shlex.split(line, comments=True, posix=True)
+            segments = _shell_command_segments(line)
         except ValueError:
-            return True
-        token_set = set(tokens)
-        commands = {Path(token).name for token in tokens}
-        if "usermod" in commands and _usermod_assigns_group(
-            tokens, "medchat-sandbox"
-        ):
-            return True
-        if (
-            commands.intersection({"adduser", "addgroup"})
-            and {"medchat", "medchat-sandbox"}.issubset(token_set)
-        ):
-            return True
-        if (
-            "gpasswd" in commands
-            and {"medchat", "medchat-sandbox"}.issubset(token_set)
-            and token_set.intersection({"-a", "--add"})
-        ):
-            return True
+            hints = _partial_command_hints(line)
+            if hints and hints.issubset(_INERT_OUTPUT_COMMANDS):
+                continue
+            return bool(hints.intersection(_MEMBERSHIP_COMMANDS | _COMMAND_WRAPPERS))
+        for segment in segments:
+            resolved = _actual_command(segment)
+            if resolved is None:
+                continue
+            command, arguments = resolved
+            tokens = [command, *arguments]
+            token_set = set(tokens)
+            if command == "usermod" and _usermod_assigns_group(
+                tokens, "medchat-sandbox"
+            ):
+                return True
+            if (
+                command in {"adduser", "addgroup"}
+                and {"medchat", "medchat-sandbox"}.issubset(token_set)
+            ):
+                return True
+            if (
+                command == "gpasswd"
+                and {"medchat", "medchat-sandbox"}.issubset(token_set)
+                and token_set.intersection({"-a", "--add"})
+            ):
+                return True
     return False
 
 
@@ -375,6 +506,41 @@ def _live_migration_order_is_safe(text: str) -> bool:
     )
 
 
+def _failure_trap_is_safe(text: str) -> bool:
+    try:
+        start = text.index("restore_stopped_services_on_failure() {")
+        end = text.index("\n}\n", start)
+        trap = text[start:end]
+        operations = [
+            trap.index("force_quiesce_known_medchat_services"),
+            trap.index('if [ "$BOTH_SERVICES_INACTIVE" -eq 1 ]'),
+            trap.index("remove_legacy_medchat_membership"),
+            trap.index('if [ "$GROUP_MEMBERSHIP_REVOKED" -eq 1 ]'),
+            trap.index("restore_prior_medchat_services"),
+            trap.index("secure_broker_credentials"),
+            trap.index("warn_credentials_locked_services_not_restored"),
+        ]
+    except ValueError:
+        return False
+    return operations == sorted(operations)
+
+
+def _revocation_check_is_fresh(text: str) -> bool:
+    try:
+        start = text.index("remove_legacy_medchat_membership() {")
+        end = text.index("\n}\n", start)
+        migration = text[start:end]
+        operations = [
+            migration.index("GROUP_MEMBERSHIP_REVOKED=0"),
+            migration.index("gpasswd --delete medchat medchat-sandbox"),
+            migration.index("id -nG medchat"),
+            migration.index("GROUP_MEMBERSHIP_REVOKED=1"),
+        ]
+    except ValueError:
+        return False
+    return operations == sorted(operations)
+
+
 def _validate_installer(text: str) -> bool:
     forbidden = (
         "mktemp",
@@ -384,12 +550,6 @@ def _validate_installer(text: str) -> bool:
         "eval ",
         ". /etc/medchat/opensandbox.env",
         "source /etc/medchat/opensandbox.env",
-        "usermod --append --groups medchat-sandbox medchat",
-        "usermod -a -G medchat-sandbox medchat",
-        "adduser medchat medchat-sandbox",
-        "gpasswd --add medchat medchat-sandbox",
-        "gpasswd -a medchat medchat-sandbox",
-        "addgroup medchat medchat-sandbox",
     )
     required = (
         "set +x",
@@ -423,12 +583,30 @@ def _validate_installer(text: str) -> bool:
         "run_systemctl daemon-reload",
         '"$SCRIPT_DIR/../medchat-temporal-worker.service"',
         'rooted("/etc/systemd/system/medchat-temporal-worker.service")',
+        "SERVICE_STATE_CAPTURED=0",
+        "force_quiesce_known_medchat_services",
+        (
+            "run_systemctl kill --kill-whom=all --signal=SIGKILL "
+            "medchat-temporal-worker.service"
+        ),
+        "run_systemctl kill --kill-whom=all --signal=SIGKILL medchat.service",
+        "secure_broker_credentials",
+        "BROKER_ENV_DIRECTORY=/etc/medchat",
+        "BROKER_ENV_NAME=sandbox-broker.env",
+        "credentials_locked_services_not_restored",
+        "O_NOFOLLOW",
+        "follow_symlinks=False",
+        "os.fchmod(descriptor, 0o600)",
+        "os.fchown(descriptor, 0, 0)",
+        "GROUP_MEMBERSHIP_REVOKED=0",
     )
     return bool(
         all(value in text for value in required)
         and not any(value in text for value in forbidden)
         and not _assigns_persistent_broker_membership(text)
         and _live_migration_order_is_safe(text)
+        and _failure_trap_is_safe(text)
+        and _revocation_check_is_fresh(text)
     )
 
 
