@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
 import stat
@@ -22,6 +23,8 @@ DEPLOYMENT = ROOT / "deployment" / "opensandbox"
 SANDBOX_TOML = DEPLOYMENT / "sandbox.toml"
 OPENSANDBOX_SERVICE = DEPLOYMENT / "medchat-opensandbox.service"
 BROKER_SERVICE = DEPLOYMENT / "medchat-sandbox-broker.service"
+FIREWALL_SERVICE = DEPLOYMENT / "medchat-opensandbox-firewall.service"
+FIREWALL_SCRIPT = DEPLOYMENT / "configure-firewall.sh"
 ENV_EXAMPLE = DEPLOYMENT / "opensandbox.env.example"
 INSTALLER = DEPLOYMENT / "install.sh"
 TEMPORAL_WORKER_SERVICE = ROOT / "deployment" / "medchat-temporal-worker.service"
@@ -81,6 +84,8 @@ def _asset_root(tmp_path: Path) -> Path:
         SANDBOX_TOML,
         OPENSANDBOX_SERVICE,
         BROKER_SERVICE,
+        FIREWALL_SERVICE,
+        FIREWALL_SCRIPT,
         ENV_EXAMPLE,
         INSTALLER,
         TEMPORAL_WORKER_SERVICE,
@@ -90,6 +95,210 @@ def _asset_root(tmp_path: Path) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
     return tmp_path
+
+
+def test_firewall_gate_precedes_and_is_required_by_opensandbox() -> None:
+    firewall = _unit_sections(FIREWALL_SERVICE)
+    opensandbox = _unit_sections(OPENSANDBOX_SERVICE)
+
+    assert firewall["Service"]["Type"] == ["oneshot"]
+    assert firewall["Service"]["RemainAfterExit"] == ["yes"]
+    assert _section_words(firewall, "Unit", "After") == {"docker.service"}
+    assert _section_words(firewall, "Unit", "Requires") == {"docker.service"}
+    assert _section_words(firewall, "Unit", "Before") == {
+        "medchat-opensandbox.service"
+    }
+    assert _section_words(firewall, "Install", "RequiredBy") == {
+        "medchat-opensandbox.service"
+    }
+    assert "medchat-opensandbox-firewall.service" in _section_words(
+        opensandbox, "Unit", "After"
+    )
+    assert "medchat-opensandbox-firewall.service" in _section_words(
+        opensandbox, "Unit", "Requires"
+    )
+
+
+def test_firewall_uses_conntrack_original_ports_and_exact_bounded_range() -> None:
+    script = FIREWALL_SCRIPT.read_text(encoding="utf-8")
+
+    assert "40000:60000" in script
+    assert "--ctorigdstport" in script
+    assert "--ctdir ORIGINAL" in script
+    assert '-s "$loopback_source"' in script
+    assert "configure_family iptables 127.0.0.0/8" in script
+    assert "configure_family ip6tables ::1/128" in script
+    assert "-j DROP" in script
+    assert "-S DOCKER-USER 1" in script
+    assert "-S DOCKER-USER 2" in script
+    assert "--dport 40000:60000" not in script
+    assert "iptables" in script and "ip6tables" in script
+    assert "firewall_configuration_failed" in script
+    assert ">/dev/null 2>&1" in script
+
+
+def _write_fake_firewall_tool(directory: Path) -> Path:
+    state = directory / "state.json"
+    implementation = directory / "firewall-tool"
+    implementation.write_text(
+        "#!/usr/bin/python3\n"
+        "import json, os, sys\n"
+        "state_path = os.environ['FAKE_FIREWALL_STATE']\n"
+        "family = os.path.basename(sys.argv[0])\n"
+        "if os.environ.get('FAIL_FAMILY') == family:\n"
+        "    print('RAW_FIREWALL_CANARY', file=sys.stderr)\n"
+        "    raise SystemExit(1)\n"
+        "try:\n"
+        "    data = json.load(open(state_path, encoding='utf-8'))\n"
+        "except (FileNotFoundError, json.JSONDecodeError):\n"
+        "    data = {'iptables': [], 'ip6tables': []}\n"
+        "args = sys.argv[1:]\n"
+        "action = args[2]\n"
+        "if action == '-S':\n"
+        "    if len(args) == 4:\n"
+        "        raise SystemExit(0)\n"
+        "    index = int(args[4]) - 1\n"
+        "    rules = data[family]\n"
+        "    if index < 0 or index >= len(rules):\n"
+        "        raise SystemExit(1)\n"
+        "    print('-A DOCKER-USER ' + ' '.join(rules[index]))\n"
+        "    raise SystemExit(0)\n"
+        "chain = args[3]\n"
+        "offset = 5 if action == '-I' else 4\n"
+        "rule = args[offset:]\n"
+        "rules = data[family]\n"
+        "if action == '-C':\n"
+        "    raise SystemExit(0 if rule in rules else 1)\n"
+        "if action == '-I':\n"
+        "    rules.insert(0, rule)\n"
+        "elif action == '-D':\n"
+        "    rules.remove(rule)\n"
+        "else:\n"
+        "    raise SystemExit(2)\n"
+        "temporary = state_path + '.new'\n"
+        "with open(temporary, 'w', encoding='utf-8') as handle:\n"
+        "    json.dump(data, handle)\n"
+        "os.replace(temporary, state_path)\n",
+        encoding="utf-8",
+    )
+    implementation.chmod(0o755)
+    for name in ("iptables", "ip6tables"):
+        (directory / name).symlink_to(implementation.name)
+    return state
+
+
+@pytest.mark.skipif(os.name != "posix", reason="firewall behavior requires POSIX")
+def test_firewall_configuration_is_idempotent_and_orders_loopback_before_drop(
+    tmp_path: Path,
+) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    state = _write_fake_firewall_tool(tools)
+    script = tmp_path / "configure-firewall.sh"
+    source = FIREWALL_SCRIPT.read_text(encoding="utf-8").replace(
+        "PATH=/usr/sbin:/usr/bin:/sbin:/bin", f"PATH={tools}"
+    )
+    script.write_text(source, encoding="utf-8")
+    environment = os.environ.copy()
+    environment["FAKE_FIREWALL_STATE"] = str(state)
+
+    results = [
+        subprocess.run(
+            ["sh", str(script)],
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        for _ in range(2)
+    ]
+
+    assert all(result.returncode == 0 for result in results)
+    assert all(result.stdout == "opensandbox_firewall=passed\n" for result in results)
+    assert all(result.stderr == "" for result in results)
+    rules = json.loads(state.read_text(encoding="utf-8"))
+    for family in ("iptables", "ip6tables"):
+        assert len(rules[family]) == 2
+        assert rules[family][0][-2:] == ["-j", "RETURN"]
+        assert rules[family][1][-2:] == ["-j", "DROP"]
+        assert "--ctorigdstport" in rules[family][0]
+        assert "40000:60000" in rules[family][0]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="firewall behavior requires POSIX")
+def test_firewall_ipv6_failure_is_redacted_and_fails_closed(tmp_path: Path) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    state = _write_fake_firewall_tool(tools)
+    script = tmp_path / "configure-firewall.sh"
+    script.write_text(
+        FIREWALL_SCRIPT.read_text(encoding="utf-8").replace(
+            "PATH=/usr/sbin:/usr/bin:/sbin:/bin", f"PATH={tools}"
+        ),
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["FAKE_FIREWALL_STATE"] = str(state)
+    environment["FAIL_FAMILY"] = "ip6tables"
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert result.stderr == (
+        "opensandbox_firewall=failed code=firewall_configuration_failed\n"
+    )
+    assert "RAW_FIREWALL_CANARY" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("path", "mutation", "code"),
+    [
+        (
+            FIREWALL_SCRIPT,
+            lambda text: text.replace("--ctorigdstport", "--dport"),
+            "firewall_asset_unsafe",
+        ),
+        (
+            FIREWALL_SCRIPT,
+            lambda text: text.replace("40000:60000", "40000:61000"),
+            "firewall_asset_unsafe",
+        ),
+        (
+            FIREWALL_SERVICE,
+            lambda text: text.replace("Before=", "# Before="),
+            "firewall_unit_unsafe",
+        ),
+        (
+            OPENSANDBOX_SERVICE,
+            lambda text: text.replace(
+                "Requires=docker.service medchat-opensandbox-firewall.service",
+                "Requires=docker.service",
+            ),
+            "opensandbox_unit_unsafe",
+        ),
+    ],
+)
+def test_validator_rejects_firewall_mutations(
+    tmp_path: Path,
+    path: Path,
+    mutation: object,
+    code: str,
+) -> None:
+    validator = _load_validator()
+    root = _asset_root(tmp_path)
+    target = root / path.relative_to(ROOT)
+    target.write_text(mutation(target.read_text(encoding="utf-8")), encoding="utf-8")
+
+    assert validator.validate_static(root) == code
 
 
 def test_server_config_is_authenticated_loopback_gvisor_and_mount_safe() -> None:
@@ -225,7 +434,10 @@ def test_environment_example_has_placeholders_only() -> None:
             assert separator
             assignments[key] = value
 
-    assert assignments["OPEN_SANDBOX_API_KEY"] == "replace-with-random-secret"
+    placeholder = assignments["OPEN_SANDBOX_API_KEY"]
+    assert placeholder == "REPLACE_WITH_RANDOM_BASE64URL_SECRET_000000000000"
+    assert 32 <= len(placeholder) <= 256
+    assert all(character.isalnum() or character in "_-" for character in placeholder)
     assert assignments["MEDCHAT_SANDBOX_IMAGE"].endswith(
         "@sha256:" + "0" * 64
     )
@@ -249,6 +461,95 @@ def test_installer_keeps_token_literal_and_uses_safe_rendering_contract() -> Non
     assert ". /etc/medchat/opensandbox.env" not in installer
     assert "source /etc/medchat/opensandbox.env" not in installer
     assert "print(secret" not in installer
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "a" * 31,
+        "a" * 257,
+        "a" * 31 + " ",
+        " " + "a" * 32,
+        "a" * 32 + "\\",
+        "a" * 31 + '"',
+        "a" * 31 + "'",
+        "a" * 31 + "$",
+        "a" * 31 + ";",
+        "a" * 31 + "=",
+        "a" * 31 + "\t",
+    ],
+)
+def test_preview_install_rejects_noncanonical_environmentfile_secret(
+    tmp_path: Path,
+    secret: str,
+) -> None:
+    if os.name != "posix":
+        pytest.skip("installer preview requires POSIX")
+    _write_preview_environment(tmp_path, secret=secret)
+
+    result = subprocess.run(
+        ["sh", str(INSTALLER), "--destdir", str(tmp_path)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert secret not in result.stdout + result.stderr
+
+
+def test_installer_uses_atomic_durable_replacement_without_truncation() -> None:
+    installer = INSTALLER.read_text(encoding="utf-8")
+    generation = installer.split("<<'PY'", 2)[2].split("\nPY\n", 1)[0]
+
+    assert "os.replace(" in generation
+    assert "os.fsync(descriptor)" in generation
+    assert "os.fsync(parent_descriptor)" in generation
+    assert "os.O_EXCL" in generation
+    assert "os.ftruncate" not in generation
+    assert "stage_generation" in generation
+    assert "rollback_generation" in generation
+
+
+def test_rotation_failure_injection_is_confined_to_preview_mode() -> None:
+    installer = INSTALLER.read_text(encoding="utf-8")
+
+    assert "MEDCHAT_INSTALL_PREVIEW_FAIL_AFTER" in installer
+    assert 'if [ "$DESTDIR" = / ]; then' in installer
+    assert "preview_fail_after = int(sys.argv[9])" in installer
+    assert "if root == Path(\"/\") and preview_fail_after != 0" in installer
+
+
+def test_live_rotation_quiesces_all_services_and_activates_in_dependency_order() -> None:
+    installer = INSTALLER.read_text(encoding="utf-8")
+
+    for state in (
+        "MEDCHAT_SERVICE_STATE",
+        "TEMPORAL_WORKER_SERVICE_STATE",
+        "OPENSANDBOX_SERVICE_STATE",
+        "SANDBOX_BROKER_SERVICE_STATE",
+    ):
+        assert f"{state}=unknown" in installer
+    quiesce = installer.index("quiesce_deployment_services")
+    credential = installer.index('rooted("/etc/medchat/sandbox-broker.env")')
+    reload_units = installer.index("run_systemctl daemon-reload", credential)
+    restore_call = installer.index("restore_prior_medchat_services", reload_units)
+    restore_start = installer.index("restore_prior_medchat_services() {")
+    restore_end = installer.index("\n}", restore_start)
+    restore = installer[restore_start:restore_end]
+    opensandbox_start = restore.index("run_systemctl start medchat-opensandbox.service")
+    broker_start = restore.index(
+        "run_systemctl start medchat-sandbox-broker.service", opensandbox_start
+    )
+    web_restore = restore.index("run_systemctl start medchat.service", broker_start)
+    worker_restore = restore.index(
+        "run_systemctl start medchat-temporal-worker.service", web_restore
+    )
+    assert quiesce < credential < reload_units
+    assert reload_units < restore_call
+    assert opensandbox_start < broker_start < web_restore < worker_restore
 
 
 def test_installer_rejects_symlinked_directories_and_targets() -> None:
@@ -290,7 +591,7 @@ def test_installer_migrates_legacy_membership_and_models_preview_intent() -> Non
     assert 'if [ "$DESTDIR" = / ]; then' in installer
     assert 'remove_legacy_medchat_membership' in installer
     assert 'gpasswd --delete medchat medchat-sandbox' in installer
-    assert 'group_migration_intent = sys.argv[6]' in installer
+    assert 'group_migration_intent = sys.argv[8]' in installer
     assert 'group_migration_intent != "remove-medchat-from-medchat-sandbox"' in installer
 
 
@@ -307,7 +608,7 @@ def test_live_install_quiesces_shared_user_services_before_credential_write() ->
     ) in installer
 
     lifecycle = [
-        installer.index("\n    quiesce_shared_medchat_services\n"),
+        installer.index("\n    quiesce_deployment_services\n"),
         installer.index("\n    remove_legacy_medchat_membership"),
         installer.index("\n/usr/bin/env -i PATH=",),
         installer.index('rooted("/etc/medchat/sandbox-broker.env")'),
@@ -330,7 +631,7 @@ def test_live_install_quiesces_shared_user_services_before_credential_write() ->
     assert operations == sorted(operations)
 
 
-def test_live_install_restores_only_prior_active_services_after_unit_reload() -> None:
+def test_live_install_restores_prior_active_services_after_unit_reload() -> None:
     installer = INSTALLER.read_text(encoding="utf-8")
 
     assert '"$SCRIPT_DIR/../medchat-temporal-worker.service"' in installer
@@ -342,7 +643,8 @@ def test_live_install_restores_only_prior_active_services_after_unit_reload() ->
     assert "run_systemctl start medchat.service" in restore
     assert 'if [ "$TEMPORAL_WORKER_SERVICE_STATE" = active ]; then' in restore
     assert "run_systemctl start medchat-temporal-worker.service" in restore
-    assert "run_systemctl start medchat-sandbox-broker.service" not in restore
+    assert "run_systemctl start medchat-opensandbox.service" in restore
+    assert "run_systemctl start medchat-sandbox-broker.service" in restore
 
     reload_position = installer.index("\n    run_systemctl daemon-reload\n")
     restore_position = installer.index(
@@ -353,7 +655,7 @@ def test_live_install_restores_only_prior_active_services_after_unit_reload() ->
     assert ">/dev/null 2>&1" in installer
 
 
-def test_failure_restoration_is_gated_on_verified_group_revocation() -> None:
+def test_failure_path_revokes_group_but_keeps_services_fail_closed() -> None:
     installer = INSTALLER.read_text(encoding="utf-8")
 
     assert "GROUP_MEMBERSHIP_REVOKED=0" in installer
@@ -376,10 +678,10 @@ def test_failure_restoration_is_gated_on_verified_group_revocation() -> None:
         failure_trap.index("force_quiesce_known_medchat_services"),
         failure_trap.index('if [ "$BOTH_SERVICES_INACTIVE" -eq 1 ]'),
         failure_trap.index("remove_legacy_medchat_membership"),
-        failure_trap.index('if [ "$GROUP_MEMBERSHIP_REVOKED" -eq 1 ]; then'),
-        failure_trap.index("restore_prior_medchat_services"),
+        failure_trap.index("secure_broker_credentials"),
     ]
     assert failure_order == sorted(failure_order)
+    assert "restore_prior_medchat_services" not in failure_trap
 
 
 def test_failure_trap_force_quiesces_before_restore_or_locks_credentials() -> None:
@@ -405,11 +707,10 @@ def test_failure_trap_force_quiesces_before_restore_or_locks_credentials() -> No
     trap_end = installer.index("\n}\n", trap_start)
     failure_trap = installer[trap_start:trap_end]
     locked_path = failure_trap.index("secure_broker_credentials")
-    restore_path = failure_trap.index("restore_prior_medchat_services")
     assert "force_quiesce_known_medchat_services" in failure_trap
     assert 'if [ "$BOTH_SERVICES_INACTIVE" -eq 1 ]' in failure_trap
-    assert 'if [ "$GROUP_MEMBERSHIP_REVOKED" -eq 1 ]' in failure_trap
-    assert locked_path != restore_path
+    assert "restore_prior_medchat_services" not in failure_trap
+    assert locked_path > failure_trap.index("force_quiesce_known_medchat_services")
 
 
 def test_failure_trap_reports_lockdown_result_without_ignoring_failure() -> None:
@@ -463,6 +764,8 @@ def test_force_quiesce_still_active_never_restarts_services(tmp_path: Path) -> N
         "run_systemctl() { printf '%s\\n' \"$*\" >>\"$EVENT_LOG\"; return 1; }\n"
         "temporal_worker_service_is_inactive() { return 1; }\n"
         "medchat_service_is_inactive() { return 1; }\n"
+        "sandbox_broker_service_is_inactive() { return 1; }\n"
+        "opensandbox_service_is_inactive() { return 1; }\n"
         + _installer_function_source("force_quiesce_known_medchat_services")
         + "if force_quiesce_known_medchat_services; then exit 90; fi\n"
         "exit 0\n",
@@ -700,6 +1003,95 @@ def test_preview_install_renders_bootable_secret_scoped_assets(
 
 
 @pytest.mark.skipif(os.name != "posix", reason="installer preview requires POSIX")
+def test_preview_key_rotation_never_mixes_toml_and_broker_generation(
+    tmp_path: Path,
+) -> None:
+    first = "A" * 40
+    second = "B" * 40
+    _write_preview_environment(tmp_path, secret=first)
+    initial = subprocess.run(
+        ["sh", str(INSTALLER), "--destdir", str(tmp_path)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert initial.returncode == 0
+
+    _write_preview_environment(tmp_path, secret=second)
+    rotated = subprocess.run(
+        ["sh", str(INSTALLER), "--destdir", str(tmp_path)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert rotated.returncode == 0
+    rendered = tomllib.loads(
+        (tmp_path / "etc/medchat/opensandbox.toml").read_text(encoding="utf-8")
+    )
+    broker = dict(
+        line.split("=", 1)
+        for line in (tmp_path / "etc/medchat/sandbox-broker.env")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+    assert rendered["server"]["api_key"] == second
+    assert broker["OPEN_SANDBOX_API_KEY"] == second
+    assert first not in rotated.stdout + rotated.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="installer preview requires POSIX")
+def test_interrupted_preview_rotation_rolls_back_every_generation_file(
+    tmp_path: Path,
+) -> None:
+    first = "C" * 40
+    second = "D" * 40
+    _write_preview_environment(tmp_path, secret=first)
+    installed = subprocess.run(
+        ["sh", str(INSTALLER), "--destdir", str(tmp_path)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert installed.returncode == 0
+    generation_paths = (
+        tmp_path / "etc/medchat/opensandbox.toml",
+        tmp_path / "etc/medchat/sandbox-broker.env",
+        tmp_path / "etc/systemd/system/medchat-opensandbox-firewall.service",
+        tmp_path / "etc/systemd/system/medchat-opensandbox.service",
+        tmp_path / "etc/systemd/system/medchat-sandbox-broker.service",
+        tmp_path / "etc/systemd/system/medchat-temporal-worker.service",
+        tmp_path / "usr/local/libexec/medchat/configure-opensandbox-firewall",
+    )
+    before = {path: path.read_bytes() for path in generation_paths}
+
+    _write_preview_environment(tmp_path, secret=second)
+    environment = os.environ.copy()
+    environment["MEDCHAT_INSTALL_PREVIEW_FAIL_AFTER"] = "2"
+    interrupted = subprocess.run(
+        ["sh", str(INSTALLER), "--destdir", str(tmp_path)],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert interrupted.returncode != 0
+    assert interrupted.stdout == ""
+    assert second not in interrupted.stdout + interrupted.stderr
+    assert {path: path.read_bytes() for path in generation_paths} == before
+    assert not list(tmp_path.rglob("*.stage"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="installer preview requires POSIX")
 def test_preview_install_rejects_nonempty_approved_mount_directory(
     tmp_path: Path,
 ) -> None:
@@ -768,6 +1160,64 @@ def test_static_validator_returns_stable_codes_for_unsafe_assets(
     assert code in validator._STABLE_CODES
 
 
+@pytest.mark.parametrize(
+    ("asset", "needle", "addition", "expected"),
+    [
+        (
+            OPENSANDBOX_SERVICE,
+            "ReadWritePaths=/var/lib/opensandbox /run/opensandbox /var/run/docker.sock",
+            "\nReadWritePaths=/etc/medchat",
+            "opensandbox_unit_unsafe",
+        ),
+        (
+            BROKER_SERVICE,
+            "Environment=PYTHONDONTWRITEBYTECODE=1",
+            "\nEnvironment=OPENSANDBOX_SERVER_API_KEY=unsafe_override",
+            "broker_unit_unsafe",
+        ),
+        (
+            TEMPORAL_WORKER_SERVICE,
+            "ExecStart=/opt/conda/envs/medchat/bin/python scripts/run_temporal_docking_worker.py",
+            "\nExecStartPost=/usr/bin/chmod 0777 /run/medchat-sandbox/broker.sock",
+            "worker_unit_unsafe",
+        ),
+        (
+            OPENSANDBOX_SERVICE,
+            "EnvironmentFile=/etc/medchat/opensandbox.env",
+            "\nEnvironmentFile=/etc/default/unsafe-extra",
+            "opensandbox_unit_unsafe",
+        ),
+        (
+            BROKER_SERVICE,
+            "ReadOnlyPaths=/opt/medchat/molecular_chat_system /opt/conda/envs/medchat /etc/medchat/sandbox-broker.env",
+            " /etc",
+            "broker_unit_unsafe",
+        ),
+        (
+            TEMPORAL_WORKER_SERVICE,
+            "ReadOnlyPaths=/opt/medchat/molecular_chat_system /opt/conda/envs/medchat",
+            " /etc",
+            "worker_unit_unsafe",
+        ),
+    ],
+)
+def test_static_validator_rejects_extra_systemd_access_or_auth_directives(
+    tmp_path: Path,
+    asset: Path,
+    needle: str,
+    addition: str,
+    expected: str,
+) -> None:
+    validator = _load_validator()
+    root = _asset_root(tmp_path)
+    target = root / asset.relative_to(ROOT)
+    text = target.read_text(encoding="utf-8")
+    assert needle in text
+    target.write_text(text.replace(needle, needle + addition), encoding="utf-8")
+
+    assert validator.validate_static(root) == expected
+
+
 def test_static_validator_returns_stable_code_for_missing_asset(tmp_path: Path) -> None:
     validator = _load_validator()
     root = _asset_root(tmp_path)
@@ -805,6 +1255,8 @@ def test_static_validator_rejects_installer_without_directory_guards(
         "gpasswd --add medchat medchat-sandbox",
         "usermod \\" + "\n  --append \\" + "\n  --groups=medchat-sandbox \\" + "\n  medchat",
         "adduser \\" + "\n  medchat \\" + "\n  medchat-sandbox",
+        'group=medchat-sandbox; usermod -aG "$group" medchat',
+        'group="medchat-sandbox"\ncommand usermod --append --groups "$group" medchat',
     ],
 )
 def test_static_validator_rejects_persistent_broker_group_membership(
@@ -937,11 +1389,11 @@ def test_static_validator_rejects_root_owned_rendered_server_config(
     installer = root / "deployment/opensandbox/install.sh"
     text = installer.read_text(encoding="utf-8")
     owner_contract = (
-        '    rooted("/etc/medchat/opensandbox.toml"),\n'
-        '    rendered.encode("utf-8"),\n'
-        "    0o600,\n"
-        "    opensandbox_uid,\n"
-        "    opensandbox_gid,\n"
+        '            rooted("/etc/medchat/opensandbox.toml"),\n'
+        '            rendered.encode("utf-8"),\n'
+        "            0o600,\n"
+        "            opensandbox_uid,\n"
+        "            opensandbox_gid,\n"
     )
     installer.write_text(
         text.replace(
@@ -1009,6 +1461,20 @@ def test_validator_runtime_environment_requires_broker_key() -> None:
         "OPEN_SANDBOX_API_KEY=" + "b" * 32 + "\n" + image_assignment
     ) == ("registry.example/medchat-docking:approved@sha256:" + "a" * 64)
 
+    for unsafe in (
+        "b" * 31 + "\\",
+        "b" * 31 + '"',
+        "b" * 31 + "'",
+        "b" * 31 + " ",
+        " " + "b" * 32,
+        "b" * 31 + "$",
+        "b" * 31 + ";",
+        "b" * 31 + "=",
+    ):
+        assert validator._parse_runtime_environment(
+            "OPEN_SANDBOX_API_KEY=" + unsafe + "\n" + image_assignment
+        ) is None
+
 
 def test_safe_mocked_runtime_checks_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     validator = _load_validator()
@@ -1020,11 +1486,26 @@ def test_safe_mocked_runtime_checks_pass(monkeypatch: pytest.MonkeyPatch) -> Non
             return validator._CommandResult(True, "runsc version 20260801")
         if argv[:3] == ("docker", "info", "--format"):
             return validator._CommandResult(True, '{"runsc":{"path":"runsc"}}')
-        if argv[:4] == ("docker", "image", "ls", "--digests"):
+        if argv[:3] == ("docker", "image", "inspect"):
             return validator._CommandResult(
                 True,
-                "registry.invalid/medchat-docking@sha256:" + "a" * 64,
+                '["registry.invalid/medchat-docking@sha256:' + "a" * 64 + '"]',
             )
+        if argv[0] in {"iptables", "ip6tables"}:
+            if "-S" in argv:
+                source = "127.0.0.0/8" if argv[0] == "iptables" else "::1/128"
+                if argv[-1] == "1":
+                    return validator._CommandResult(
+                        True,
+                        f"-A DOCKER-USER -s {source} -p tcp -m conntrack "
+                        "--ctdir ORIGINAL --ctorigdstport 40000:60000 -j RETURN",
+                    )
+                return validator._CommandResult(
+                    True,
+                    "-A DOCKER-USER -p tcp -m conntrack --ctdir ORIGINAL "
+                    "--ctorigdstport 40000:60000 -j DROP",
+                )
+            return validator._CommandResult(True, "")
         if argv[:3] == ("systemctl", "is-active", "--quiet"):
             return validator._CommandResult(True, "")
         raise AssertionError(f"unexpected fixed command shape: {argv!r}")
@@ -1047,15 +1528,23 @@ def test_safe_mocked_runtime_checks_pass(monkeypatch: pytest.MonkeyPatch) -> Non
     assert validator.validate_runtime() is None
     assert all(isinstance(call, tuple) and call for call in calls)
     assert not any(call[0] in {"sh", "bash", "cmd", "powershell"} for call in calls)
+    image_reference = "registry.invalid/medchat-docking:approved@sha256:" + "a" * 64
     assert (
         "docker",
         "image",
-        "ls",
-        "--digests",
+        "inspect",
         "--format",
-        "{{.Repository}}@{{.Digest}}",
+        "{{json .RepoDigests}}",
+        image_reference,
     ) in calls
-    assert not any("registry.invalid" in argument for call in calls for argument in call)
+    assert not any(call[:3] == ("docker", "image", "ls") for call in calls)
+    for executable in ("iptables", "ip6tables"):
+        assert any(
+            call[0] == executable
+            and "--ctorigdstport" in call
+            and "40000:60000" in call
+            for call in calls
+        )
 
 
 def test_runtime_failure_is_allowlisted_and_does_not_echo_command_output(
@@ -1085,6 +1574,18 @@ def test_runtime_socket_contract_rejects_wrong_type_owner_or_mode(
             return validator._CommandResult(True, "runsc version 1")
         if argv[:3] == ("docker", "info", "--format"):
             return validator._CommandResult(True, '{"runsc":{"path":"runsc"}}')
+        if argv[0] in {"iptables", "ip6tables"}:
+            if "-S" in argv:
+                source = "127.0.0.0/8" if argv[0] == "iptables" else "::1/128"
+                suffix = (
+                    f"-s {source} -p tcp -m conntrack --ctdir ORIGINAL "
+                    "--ctorigdstport 40000:60000 -j RETURN"
+                    if argv[-1] == "1"
+                    else "-p tcp -m conntrack --ctdir ORIGINAL "
+                    "--ctorigdstport 40000:60000 -j DROP"
+                )
+                return validator._CommandResult(True, "-A DOCKER-USER " + suffix)
+            return validator._CommandResult(True, "")
         raise AssertionError(argv)
 
     monkeypatch.setattr(validator, "_run_command", command)
@@ -1096,6 +1597,30 @@ def test_runtime_socket_contract_rejects_wrong_type_owner_or_mode(
     )
 
     assert validator.validate_runtime() == "socket_invalid"
+
+
+def test_runtime_rejects_missing_firewall_rule_without_raw_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = _load_validator()
+    canary = "raw-firewall-secret-and-path"
+
+    def command(argv: tuple[str, ...]) -> validator._CommandResult:
+        if argv == ("runsc", "--version"):
+            return validator._CommandResult(True, "runsc version 1")
+        if argv[:3] == ("docker", "info", "--format"):
+            return validator._CommandResult(True, '{"runsc":{"path":"runsc"}}')
+        if argv[0] in {"iptables", "ip6tables"}:
+            return validator._CommandResult(False, canary)
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(validator, "_run_command", command)
+
+    code = validator.validate_runtime()
+
+    assert code == "firewall_rule_missing"
+    assert code in validator._STABLE_CODES
+    assert canary not in code
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell syntax check")

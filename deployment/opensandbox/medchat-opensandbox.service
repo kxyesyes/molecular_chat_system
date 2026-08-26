@@ -1,8 +1,8 @@
 [Unit]
 Description=MedChat OpenSandbox Server
-After=network-online.target docker.service
+After=network-online.target docker.service medchat-opensandbox-firewall.service
 Wants=network-online.target
-Requires=docker.service
+Requires=docker.service medchat-opensandbox-firewall.service
 
 [Service]
 Type=simple

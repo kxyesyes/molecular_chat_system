@@ -36,6 +36,7 @@ _HEALTH_TIMEOUT_SECONDS = 3.0
 _SOCKET_PATH = Path("/run/medchat-sandbox/broker.sock")
 _RUNTIME_ENV = Path("/etc/medchat/sandbox-broker.env")
 _SERVICES = (
+    "medchat-opensandbox-firewall.service",
     "medchat-opensandbox.service",
     "medchat-sandbox-broker.service",
     "medchat-temporal-worker.service",
@@ -66,6 +67,8 @@ _ASSET_PATHS = (
     "deployment/opensandbox/sandbox.toml",
     "deployment/opensandbox/medchat-opensandbox.service",
     "deployment/opensandbox/medchat-sandbox-broker.service",
+    "deployment/opensandbox/medchat-opensandbox-firewall.service",
+    "deployment/opensandbox/configure-firewall.sh",
     "deployment/opensandbox/opensandbox.env.example",
     "deployment/opensandbox/install.sh",
     "deployment/medchat-temporal-worker.service",
@@ -84,10 +87,13 @@ _STABLE_CODES = frozenset(
         "opensandbox_unit_unsafe",
         "broker_unit_unsafe",
         "worker_unit_unsafe",
+        "firewall_unit_unsafe",
+        "firewall_asset_unsafe",
         "installer_unsafe",
         "env_template_unsafe",
         "runsc_unavailable",
         "docker_runtime_unregistered",
+        "firewall_rule_missing",
         "opensandbox_unhealthy",
         "socket_invalid",
         "socket_owner_invalid",
@@ -174,6 +180,18 @@ def _hardened(unit: dict[str, dict[str, list[str]]]) -> bool:
     return all(_single(unit, key) == value for key, value in _REQUIRED_HARDENING.items())
 
 
+def _exact_values(
+    unit: dict[str, dict[str, list[str]]], key: str, expected: tuple[str, ...]
+) -> bool:
+    return tuple(_service_values(unit, key)) == expected
+
+
+_PATH_ENVIRONMENT = (
+    "PATH=/opt/conda/envs/medchat/bin:/usr/local/sbin:/usr/local/bin:"
+    "/usr/sbin:/usr/bin:/sbin:/bin"
+)
+
+
 def _load_assets(root: Path) -> dict[str, str] | None:
     assets: dict[str, str] = {}
     try:
@@ -212,6 +230,8 @@ def _validate_config(text: str) -> str | None:
         or type(docker.get("pids_limit")) is not int
         or docker.get("pids_limit") != 128
         or docker.get("no_new_privileges") is not True
+        or docker.get("port_range_min") != 40000
+        or docker.get("port_range_max") != 60000
         or set(docker.get("drop_capabilities", ())) != _DANGEROUS_CAPABILITIES
     ):
         return "docker_policy_unsafe"
@@ -223,22 +243,66 @@ def _validate_config(text: str) -> str | None:
 
 
 def _validate_opensandbox_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
+    exposed = "\n".join(
+        _service_values(unit, "EnvironmentFile")
+        + _service_values(unit, "Environment")
+    )
     return bool(
         _hardened(unit)
         and _single(unit, "User") == "medchat-opensandbox"
         and _single(unit, "Group") == "medchat-opensandbox"
-        and _single(unit, "EnvironmentFile") == "/etc/medchat/opensandbox.env"
+        and _exact_values(
+            unit, "EnvironmentFile", ("/etc/medchat/opensandbox.env",)
+        )
+        and _exact_values(
+            unit,
+            "Environment",
+            (_PATH_ENVIRONMENT, "PYTHONDONTWRITEBYTECODE=1"),
+        )
+        and _exact_values(unit, "ExecStartPre", ("/usr/bin/runsc --version",))
+        and _exact_values(
+            unit,
+            "ExecStart",
+            (
+                "/opt/conda/envs/medchat/bin/opensandbox-server --config "
+                "/etc/medchat/opensandbox.toml",
+            ),
+        )
+        and not _service_values(unit, "ExecStartPost")
         and _single(unit, "RuntimeDirectory") == "opensandbox"
         and _single(unit, "RuntimeDirectoryMode") == "0700"
         and _single(unit, "RestrictAddressFamilies") == "AF_UNIX AF_INET AF_INET6"
         and _service_words(unit, "SupplementaryGroups") == {"docker"}
-        and "/var/run/docker.sock" in _service_words(unit, "ReadWritePaths")
-        and "/var/lib/opensandbox/approved-empty"
-        in _service_words(unit, "InaccessiblePaths")
+        and _service_words(unit, "ReadWritePaths")
+        == {"/var/lib/opensandbox", "/run/opensandbox", "/var/run/docker.sock"}
+        and _service_words(unit, "ReadOnlyPaths")
+        == {"/etc/medchat/opensandbox.env", "/etc/medchat/opensandbox.toml"}
+        and _service_words(unit, "InaccessiblePaths")
+        == {"/var/lib/opensandbox/approved-empty"}
+        and _section_words(unit, "Unit", "After")
+        == {
+            "network-online.target",
+            "docker.service",
+            "medchat-opensandbox-firewall.service",
+        }
+        and _section_words(unit, "Unit", "Requires")
+        == {"docker.service", "medchat-opensandbox-firewall.service"}
+        and "OPENSANDBOX_SERVER_API_KEY" not in exposed
     )
 
 
 def _validate_broker_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
+    expected_environment = (
+        _PATH_ENVIRONMENT,
+        "PYTHONDONTWRITEBYTECODE=1",
+        "MEDCHAT_SANDBOX_BROKER_STATE=/var/lib/medchat-sandbox",
+        "MEDCHAT_SANDBOX_BROKER_SOCKET=/run/medchat-sandbox/broker.sock",
+        "OPEN_SANDBOX_DOMAIN=127.0.0.1:8080",
+    )
+    exposed = "\n".join(
+        _service_values(unit, "EnvironmentFile")
+        + _service_values(unit, "Environment")
+    )
     return bool(
         _hardened(unit)
         and _single(unit, "User") == "medchat-sandbox"
@@ -247,15 +311,38 @@ def _validate_broker_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
         and _single(unit, "NotifyAccess") == "main"
         and _single(unit, "RuntimeDirectory") == "medchat-sandbox"
         and _single(unit, "RuntimeDirectoryMode") == "0750"
-        and _single(unit, "EnvironmentFile")
-        == "/etc/medchat/sandbox-broker.env"
+        and _exact_values(
+            unit, "EnvironmentFile", ("/etc/medchat/sandbox-broker.env",)
+        )
+        and _exact_values(unit, "Environment", expected_environment)
+        and _exact_values(
+            unit,
+            "ExecStart",
+            ("/opt/conda/envs/medchat/bin/python scripts/run_sandbox_broker.py",),
+        )
+        and not _service_values(unit, "ExecStartPre")
+        and not _service_values(unit, "ExecStartPost")
         and _single(unit, "RestrictAddressFamilies") == "AF_UNIX AF_INET AF_INET6"
         and _service_words(unit, "ReadWritePaths")
         == {"/var/lib/medchat-sandbox", "/run/medchat-sandbox"}
+        and _service_words(unit, "ReadOnlyPaths")
+        == {
+            "/opt/medchat/molecular_chat_system",
+            "/opt/conda/envs/medchat",
+            "/etc/medchat/sandbox-broker.env",
+        }
+        and _service_words(unit, "InaccessiblePaths")
+        == {
+            "/var/run/docker.sock",
+            "/etc/medchat/opensandbox.env",
+            "/etc/medchat/opensandbox.toml",
+            "/var/lib/opensandbox/approved-empty",
+        }
         and "/var/run/docker.sock" not in _service_words(unit, "ReadWritePaths")
         and not _service_words(unit, "SupplementaryGroups")
         and "/etc/medchat/opensandbox.env"
         not in _service_values(unit, "EnvironmentFile")
+        and "OPENSANDBOX_SERVER_API_KEY" not in exposed
     )
 
 
@@ -265,13 +352,55 @@ def _validate_worker_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
         + _service_values(unit, "Environment")
     )
     return bool(
-        _service_words(unit, "SupplementaryGroups") == {"medchat-sandbox"}
-        and "/run/medchat-sandbox" in _service_words(unit, "ReadWritePaths")
+        _exact_values(unit, "EnvironmentFile", ("/etc/medchat/temporal-worker.env",))
+        and _exact_values(
+            unit,
+            "Environment",
+            (_PATH_ENVIRONMENT, "PYTHONDONTWRITEBYTECODE=1"),
+        )
+        and _exact_values(
+            unit,
+            "ExecStartPre",
+            (
+                "/opt/conda/envs/medchat/bin/python "
+                "scripts/validate_temporal_worker_production.py --check-config",
+            ),
+        )
+        and _exact_values(
+            unit,
+            "ExecStart",
+            (
+                "/opt/conda/envs/medchat/bin/python "
+                "scripts/run_temporal_docking_worker.py",
+            ),
+        )
+        and not _service_values(unit, "ExecStartPost")
+        and _service_words(unit, "SupplementaryGroups") == {"medchat-sandbox"}
+        and _service_words(unit, "ReadWritePaths")
+        == {
+            "/opt/medchat/molecular_chat_system/scratch",
+            "/opt/medchat/molecular_chat_system/temp_docking",
+            "/run/medchat-sandbox",
+        }
+        and _service_words(unit, "ReadOnlyPaths")
+        == {
+            "/opt/medchat/molecular_chat_system",
+            "/opt/conda/envs/medchat",
+        }
+        and _service_words(unit, "InaccessiblePaths")
+        == {
+            "/var/run/docker.sock",
+            "/etc/medchat/opensandbox.env",
+            "/etc/medchat/opensandbox.toml",
+            "/etc/medchat/sandbox-broker.env",
+            "/var/lib/opensandbox/approved-empty",
+        }
         and "/var/run/docker.sock" not in _service_words(unit, "ReadWritePaths")
         and "docker" not in _service_words(unit, "SupplementaryGroups")
         and "opensandbox.env" not in exposed_environment
         and "sandbox-broker.env" not in exposed_environment
         and "OPEN_SANDBOX_API_KEY" not in exposed_environment
+        and "OPENSANDBOX_SERVER_API_KEY" not in exposed_environment
         and "medchat-sandbox-broker.service"
         in _section_words(unit, "Unit", "After")
         and "medchat-sandbox-broker.service"
@@ -279,6 +408,59 @@ def _validate_worker_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
         and "/etc/medchat/sandbox-broker.env"
         in _service_words(unit, "InaccessiblePaths")
     )
+
+
+def _validate_firewall_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
+    return bool(
+        _hardened(unit)
+        and _single(unit, "Type") == "oneshot"
+        and _single(unit, "RemainAfterExit") == "yes"
+        and _single(unit, "User") == "root"
+        and _single(unit, "Group") == "root"
+        and _exact_values(
+            unit,
+            "ExecStart",
+            ("/usr/local/libexec/medchat/configure-opensandbox-firewall",),
+        )
+        and not _service_values(unit, "ExecStartPre")
+        and not _service_values(unit, "ExecStartPost")
+        and not _service_values(unit, "Environment")
+        and not _service_values(unit, "EnvironmentFile")
+        and not _service_values(unit, "ReadWritePaths")
+        and _single(unit, "CapabilityBoundingSet") == "CAP_NET_ADMIN"
+        and _single(unit, "AmbientCapabilities") == "CAP_NET_ADMIN"
+        and _single(unit, "RestrictAddressFamilies")
+        == "AF_UNIX AF_INET AF_INET6 AF_NETLINK"
+        and _section_words(unit, "Unit", "After") == {"docker.service"}
+        and _section_words(unit, "Unit", "Requires") == {"docker.service"}
+        and _section_words(unit, "Unit", "Before")
+        == {"medchat-opensandbox.service"}
+        and _section_words(unit, "Install", "RequiredBy")
+        == {"medchat-opensandbox.service"}
+    )
+
+
+def _validate_firewall_script(text: str) -> bool:
+    required = (
+        "set +x",
+        "set -eu",
+        "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+        "PORT_RANGE=40000:60000",
+        "iptables 127.0.0.0/8",
+        "ip6tables ::1/128",
+        "-S DOCKER-USER",
+        "-S DOCKER-USER 1",
+        "-S DOCKER-USER 2",
+        "-C DOCKER-USER",
+        "-I DOCKER-USER 1",
+        "--ctdir ORIGINAL",
+        "--ctorigdstport",
+        "-j RETURN",
+        "-j DROP",
+        "firewall_configuration_failed",
+        ">/dev/null 2>&1",
+    )
+    return all(value in text for value in required) and "--dport" not in text
 
 
 def _shell_logical_commands(text: str) -> list[str]:
@@ -447,8 +629,16 @@ def _actual_command(tokens: list[str]) -> tuple[str, list[str]] | None:
 
 
 def _assigns_persistent_broker_membership(text: str) -> bool:
+    variables: dict[str, str] = {}
     for line in _shell_logical_commands(text):
-        if line.startswith("#") or "medchat-sandbox" not in line:
+        if line.startswith("#"):
+            continue
+        relevant_variable = any(
+            value == "medchat-sandbox"
+            and (f"${name}" in line or f"${{{name}}}" in line)
+            for name, value in variables.items()
+        )
+        if "medchat-sandbox" not in line and not relevant_variable:
             continue
         try:
             segments = _shell_command_segments(line)
@@ -458,10 +648,22 @@ def _assigns_persistent_broker_membership(text: str) -> bool:
                 continue
             return bool(hints.intersection(_MEMBERSHIP_COMMANDS | _COMMAND_WRAPPERS))
         for segment in segments:
+            for token in segment:
+                if not _SHELL_ASSIGNMENT.fullmatch(token):
+                    break
+                name, value = token.split("=", 1)
+                variables[name] = value
             resolved = _actual_command(segment)
             if resolved is None:
                 continue
             command, arguments = resolved
+            expanded_arguments = []
+            for argument in arguments:
+                match = re.fullmatch(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))", argument)
+                if match is not None:
+                    argument = variables.get(match.group(1) or match.group(2), argument)
+                expanded_arguments.append(argument)
+            arguments = expanded_arguments
             tokens = [command, *arguments]
             token_set = set(tokens)
             if command == "usermod" and _usermod_assigns_group(
@@ -484,7 +686,7 @@ def _assigns_persistent_broker_membership(text: str) -> bool:
 
 def _live_migration_order_is_safe(text: str) -> bool:
     try:
-        quiesce = text.index("\n    quiesce_shared_medchat_services\n")
+        quiesce = text.index("\n    quiesce_deployment_services\n")
         revoke = text.index("\n    remove_legacy_medchat_membership", quiesce)
         render = text.index("\n/usr/bin/env -i PATH=", revoke)
         credential = text.index(
@@ -515,15 +717,16 @@ def _failure_trap_is_safe(text: str) -> bool:
             trap.index("force_quiesce_known_medchat_services"),
             trap.index('if [ "$BOTH_SERVICES_INACTIVE" -eq 1 ]'),
             trap.index("remove_legacy_medchat_membership"),
-            trap.index('if [ "$GROUP_MEMBERSHIP_REVOKED" -eq 1 ]'),
-            trap.index("restore_prior_medchat_services"),
             trap.index("secure_broker_credentials"),
             trap.index("warn_credentials_locked_services_not_restored"),
             trap.index("warn_credential_lockdown_failed_services_not_restored"),
         ]
     except ValueError:
         return False
-    return operations == sorted(operations)
+    return (
+        operations == sorted(operations)
+        and "restore_prior_medchat_services" not in trap
+    )
 
 
 def _revocation_check_is_fresh(text: str) -> bool:
@@ -572,18 +775,29 @@ def _validate_installer(text: str) -> bool:
         "O_NOFOLLOW",
         "os.fchmod",
         "os.fsync",
+        "os.fsync(parent_descriptor)",
+        "os.O_EXCL",
+        "os.replace",
+        "def stage_generation(",
+        "def rollback_generation(",
+        "MEDCHAT_INSTALL_PREVIEW_FAIL_AFTER",
+        "preview_fail_after = int(sys.argv[9])",
+        'if root == Path("/") and preview_fail_after != 0',
         "systemctl daemon-reload",
         "GROUP_MIGRATION_INTENT=remove-medchat-from-medchat-sandbox",
         "remove_legacy_medchat_membership",
         "gpasswd --delete medchat medchat-sandbox",
-        "group_migration_intent = sys.argv[6]",
+        "group_migration_intent = sys.argv[8]",
         'group_migration_intent != "remove-medchat-from-medchat-sandbox"',
         "SYSTEMCTL_TIMEOUT_SECONDS=15",
         "quiesce_shared_medchat_services",
+        "quiesce_deployment_services",
         "restore_stopped_services_on_failure",
         "run_systemctl daemon-reload",
         '"$SCRIPT_DIR/../medchat-temporal-worker.service"',
         'rooted("/etc/systemd/system/medchat-temporal-worker.service")',
+        'rooted("/etc/systemd/system/medchat-opensandbox-firewall.service")',
+        'rooted("/usr/local/libexec/medchat/configure-opensandbox-firewall")',
         "SERVICE_STATE_CAPTURED=0",
         "force_quiesce_known_medchat_services",
         (
@@ -601,10 +815,20 @@ def _validate_installer(text: str) -> bool:
         "os.fchmod(descriptor, 0o600)",
         "os.fchown(descriptor, 0, 0)",
         "GROUP_MEMBERSHIP_REVOKED=0",
+        're.fullmatch(r"[A-Za-z0-9_-]{32,256}", secret)',
+    )
+    opensandbox_owner_contract = (
+        '            rooted("/etc/medchat/opensandbox.toml"),\n'
+        '            rendered.encode("utf-8"),\n'
+        "            0o600,\n"
+        "            opensandbox_uid,\n"
+        "            opensandbox_gid,\n"
     )
     return bool(
         all(value in text for value in required)
+        and opensandbox_owner_contract in text
         and not any(value in text for value in forbidden)
+        and "os.ftruncate" not in text
         and not _assigns_persistent_broker_membership(text)
         and _live_migration_order_is_safe(text)
         and _failure_trap_is_safe(text)
@@ -624,7 +848,9 @@ def _validate_environment_example(text: str) -> bool:
     return bool(
         values
         == {
-            "OPEN_SANDBOX_API_KEY": "replace-with-random-secret",
+            "OPEN_SANDBOX_API_KEY": (
+                "REPLACE_WITH_RANDOM_BASE64URL_SECRET_000000000000"
+            ),
             "MEDCHAT_SANDBOX_IMAGE": (
                 "registry.invalid/medchat-docking:approved@sha256:" + "0" * 64
             ),
@@ -655,6 +881,11 @@ def validate_static(root: Path) -> str | None:
             worker = _unit_sections(
                 assets["deployment/medchat-temporal-worker.service"]
             )
+            firewall = _unit_sections(
+                assets[
+                    "deployment/opensandbox/medchat-opensandbox-firewall.service"
+                ]
+            )
         except ValueError:
             return "broker_unit_unsafe"
         if not _validate_opensandbox_unit(opensandbox):
@@ -663,6 +894,12 @@ def validate_static(root: Path) -> str | None:
             return "broker_unit_unsafe"
         if not _validate_worker_unit(worker):
             return "worker_unit_unsafe"
+        if not _validate_firewall_unit(firewall):
+            return "firewall_unit_unsafe"
+        if not _validate_firewall_script(
+            assets["deployment/opensandbox/configure-firewall.sh"]
+        ):
+            return "firewall_asset_unsafe"
         if not _validate_installer(assets["deployment/opensandbox/install.sh"]):
             return "installer_unsafe"
         if not _validate_environment_example(
@@ -770,11 +1007,7 @@ def _parse_runtime_environment(content: str) -> str | None:
         }:
             return None
         key = assignments["OPEN_SANDBOX_API_KEY"]
-        if (
-            len(key) < 32
-            or len(key) > 256
-            or any(ord(character) < 32 or ord(character) == 127 for character in key)
-        ):
+        if re.fullmatch(r"[A-Za-z0-9_-]{32,256}", key) is None:
             return None
         image = assignments["MEDCHAT_SANDBOX_IMAGE"]
         match = re.fullmatch(r"([^\s@]+)@sha256:([0-9a-f]{64})", image)
@@ -806,6 +1039,71 @@ def _runtime_image_reference() -> str | None:
         return None
 
 
+def _firewall_rules_present() -> bool:
+    families = (("iptables", "127.0.0.0/8"), ("ip6tables", "::1/128"))
+    for executable, loopback_source in families:
+        common = (
+            "-p",
+            "tcp",
+            "-m",
+            "conntrack",
+            "--ctdir",
+            "ORIGINAL",
+            "--ctorigdstport",
+            "40000:60000",
+        )
+        allow = _run_command(
+            (
+                executable,
+                "-w",
+                "5",
+                "-C",
+                "DOCKER-USER",
+                "-s",
+                loopback_source,
+                *common,
+                "-j",
+                "RETURN",
+            )
+        )
+        deny = _run_command(
+            (
+                executable,
+                "-w",
+                "5",
+                "-C",
+                "DOCKER-USER",
+                *common,
+                "-j",
+                "DROP",
+            )
+        )
+        expected_allow = (
+            f"-A DOCKER-USER -s {loopback_source} -p tcp -m conntrack "
+            "--ctdir ORIGINAL --ctorigdstport 40000:60000 -j RETURN"
+        )
+        expected_deny = (
+            "-A DOCKER-USER -p tcp -m conntrack --ctdir ORIGINAL "
+            "--ctorigdstport 40000:60000 -j DROP"
+        )
+        first = _run_command(
+            (executable, "-w", "5", "-S", "DOCKER-USER", "1")
+        )
+        second = _run_command(
+            (executable, "-w", "5", "-S", "DOCKER-USER", "2")
+        )
+        if (
+            not allow.ok
+            or not deny.ok
+            or not first.ok
+            or not second.ok
+            or first.stdout.strip() != expected_allow
+            or second.stdout.strip() != expected_deny
+        ):
+            return False
+    return True
+
+
 def validate_runtime() -> str | None:
     """Return a stable failure code, or ``None`` after safe runtime probes."""
 
@@ -825,6 +1123,9 @@ def validate_runtime() -> str | None:
             return "docker_runtime_unregistered"
         if not isinstance(runtimes, dict) or "runsc" not in runtimes:
             return "docker_runtime_unregistered"
+
+        if not _firewall_rules_present():
+            return "firewall_rule_missing"
 
         if not _opensandbox_health_is_ok():
             return "opensandbox_unhealthy"
@@ -859,16 +1160,23 @@ def validate_runtime() -> str | None:
             (
                 "docker",
                 "image",
-                "ls",
-                "--digests",
+                "inspect",
                 "--format",
-                "{{.Repository}}@{{.Digest}}",
+                "{{json .RepoDigests}}",
+                image,
             )
         )
         if not image_result.ok:
             return "image_digest_missing"
-        repo_digests = image_result.stdout.splitlines()
-        if expected_repo_digest not in repo_digests:
+        try:
+            repo_digests = json.loads(image_result.stdout)
+        except (json.JSONDecodeError, TypeError):
+            return "image_digest_missing"
+        if (
+            not isinstance(repo_digests, list)
+            or not all(isinstance(item, str) for item in repo_digests)
+            or expected_repo_digest not in repo_digests
+        ):
             return "image_digest_missing"
 
         for service in _SERVICES:

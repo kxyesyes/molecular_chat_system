@@ -2007,6 +2007,70 @@ def test_ready_server_notifies_only_after_uvicorn_startup(
     assert events == ["uvicorn_started", "systemd_ready"]
 
 
+def test_ready_notification_failure_shuts_down_lifespan_before_reraising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_sandbox_broker as entrypoint
+
+    events: list[str] = []
+
+    async def startup(server: object, sockets: object = None) -> None:
+        del sockets
+        events.append("uvicorn_started")
+        server.started = True
+        server.should_exit = False
+
+    async def shutdown(server: object, sockets: object = None) -> None:
+        del server, sockets
+        events.append("lifespan_shutdown")
+
+    def notify() -> None:
+        events.append("notify_failed")
+        raise RuntimeError("secret notify failure")
+
+    monkeypatch.setattr(entrypoint.uvicorn.Server, "startup", startup)
+    monkeypatch.setattr(entrypoint.uvicorn.Server, "shutdown", shutdown)
+    configuration = entrypoint.uvicorn.Config(object(), log_config=None)
+    server = entrypoint._ReadyServer(
+        configuration,
+        readiness_callback=notify,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="^sandbox broker readiness notification failed$",
+    ):
+        asyncio.run(server.startup(sockets=[]))
+
+    assert events == ["uvicorn_started", "notify_failed", "lifespan_shutdown"]
+    assert server.started is False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="real Unix sockets require POSIX")
+def test_server_failure_removes_owned_prebound_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_sandbox_broker as entrypoint
+
+    target = tmp_path / "broker.sock"
+
+    def fail_after_start(_server: object, sockets: object = None) -> None:
+        del sockets
+        assert target.exists()
+        raise RuntimeError("sandbox broker readiness notification failed")
+
+    monkeypatch.setattr(entrypoint._ReadyServer, "run", fail_after_start)
+
+    with pytest.raises(
+        RuntimeError,
+        match="^sandbox broker readiness notification failed$",
+    ):
+        entrypoint.serve_application(object(), target)
+
+    assert not target.exists()
+
+
 @pytest.mark.parametrize("kind", ["file", "directory", "symlink"])
 def test_stale_socket_cleanup_refuses_non_socket_targets(
     tmp_path: Path,

@@ -372,13 +372,47 @@ class _ReadyServer(uvicorn.Server):
     async def startup(self, sockets: list[socket.socket] | None = None) -> None:
         await super().startup(sockets=sockets)
         if self.started and not self.should_exit:
-            self._readiness_callback()
+            try:
+                self._readiness_callback()
+            except Exception:
+                self.should_exit = True
+                try:
+                    await super().shutdown(sockets=sockets)
+                except Exception:
+                    pass
+                self.started = False
+                raise RuntimeError(
+                    "sandbox broker readiness notification failed"
+                ) from None
+
+
+def _remove_owned_bound_socket(
+    socket_path: Path,
+    bound_identity: tuple[int, int],
+) -> None:
+    try:
+        target, parent_identity = _trusted_socket_parent(socket_path)
+        metadata = os.lstat(target)
+        parent = os.lstat(target.parent)
+        if (
+            not _verified_socket(metadata)
+            or _node_identity(metadata) != bound_identity
+            or _identity(parent) != parent_identity
+        ):
+            raise ValueError
+        os.unlink(target)
+    except FileNotFoundError:
+        return
+    except Exception:
+        raise RuntimeError("sandbox broker socket cleanup failed") from None
 
 
 def serve_application(application: object, socket_path: Path) -> None:
     """Serve from a pre-bound mode-0660 UDS and notify only when ready."""
 
     listener = bind_runtime_socket(socket_path)
+    bound_identity = _node_identity(os.lstat(socket_path))
+    server_failure: BaseException | None = None
     try:
         configuration = uvicorn.Config(
             application,
@@ -391,11 +425,19 @@ def serve_application(application: object, socket_path: Path) -> None:
             readiness_callback=_notify_systemd_ready,
         )
         server.run(sockets=[listener])
+    except BaseException as failure:
+        server_failure = failure
+        raise
     finally:
         try:
             listener.close()
         except OSError:
             pass
+        try:
+            _remove_owned_bound_socket(socket_path, bound_identity)
+        except RuntimeError:
+            if server_failure is None:
+                raise
 
 
 def main() -> None:

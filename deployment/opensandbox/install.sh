@@ -8,6 +8,8 @@ GROUP_MIGRATION_INTENT=remove-medchat-from-medchat-sandbox
 SYSTEMCTL_TIMEOUT_SECONDS=15
 MEDCHAT_SERVICE_STATE=unknown
 TEMPORAL_WORKER_SERVICE_STATE=unknown
+OPENSANDBOX_SERVICE_STATE=unknown
+SANDBOX_BROKER_SERVICE_STATE=unknown
 GROUP_MEMBERSHIP_REVOKED=0
 SERVICE_STATE_CAPTURED=0
 BOTH_SERVICES_INACTIVE=0
@@ -48,6 +50,15 @@ else
     usage
 fi
 [ -n "$DESTDIR" ] || usage
+PREVIEW_FAIL_AFTER=0
+if [ "$DESTDIR" != / ]; then
+    case "${MEDCHAT_INSTALL_PREVIEW_FAIL_AFTER-0}" in
+        0|1|2|3|4|5|6|7)
+            PREVIEW_FAIL_AFTER=${MEDCHAT_INSTALL_PREVIEW_FAIL_AFTER-0}
+            ;;
+        *) fail preview_failure_invalid ;;
+    esac
+fi
 
 source_is_regular_and_locked() {
     source_path=$1
@@ -86,11 +97,39 @@ query_temporal_worker_service_state() {
     esac
 }
 
+query_opensandbox_service_state() {
+    state=$(
+        timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
+            systemctl show --property=ActiveState --value \
+            medchat-opensandbox.service 2>/dev/null
+    ) || fail service_state_query_failed
+    case "$state" in
+        active|inactive) printf '%s\n' "$state" ;;
+        *) fail service_state_invalid ;;
+    esac
+}
+
+query_sandbox_broker_service_state() {
+    state=$(
+        timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
+            systemctl show --property=ActiveState --value \
+            medchat-sandbox-broker.service 2>/dev/null
+    ) || fail service_state_query_failed
+    case "$state" in
+        active|inactive) printf '%s\n' "$state" ;;
+        *) fail service_state_invalid ;;
+    esac
+}
+
 confirm_inactive() {
     case "$1" in
         medchat.service) state=$(query_medchat_service_state) ;;
         medchat-temporal-worker.service)
             state=$(query_temporal_worker_service_state)
+            ;;
+        medchat-opensandbox.service) state=$(query_opensandbox_service_state) ;;
+        medchat-sandbox-broker.service)
+            state=$(query_sandbox_broker_service_state)
             ;;
         *) fail service_name_invalid ;;
     esac
@@ -115,10 +154,30 @@ temporal_worker_service_is_inactive() {
     [ "$state" = inactive ]
 }
 
+opensandbox_service_is_inactive() {
+    state=$(
+        timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
+            systemctl show --property=ActiveState --value \
+            medchat-opensandbox.service 2>/dev/null
+    ) || return 1
+    [ "$state" = inactive ]
+}
+
+sandbox_broker_service_is_inactive() {
+    state=$(
+        timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
+            systemctl show --property=ActiveState --value \
+            medchat-sandbox-broker.service 2>/dev/null
+    ) || return 1
+    [ "$state" = inactive ]
+}
+
 force_quiesce_known_medchat_services() {
     BOTH_SERVICES_INACTIVE=0
     run_systemctl stop medchat-temporal-worker.service || :
     run_systemctl stop medchat.service || :
+    run_systemctl stop medchat-sandbox-broker.service || :
+    run_systemctl stop medchat-opensandbox.service || :
     if ! temporal_worker_service_is_inactive; then
         run_systemctl kill --kill-whom=all --signal=SIGKILL medchat-temporal-worker.service || :
         run_systemctl stop medchat-temporal-worker.service || :
@@ -127,7 +186,21 @@ force_quiesce_known_medchat_services() {
         run_systemctl kill --kill-whom=all --signal=SIGKILL medchat.service || :
         run_systemctl stop medchat.service || :
     fi
-    if temporal_worker_service_is_inactive && medchat_service_is_inactive; then
+    if ! sandbox_broker_service_is_inactive; then
+        run_systemctl kill --kill-whom=all --signal=SIGKILL \
+            medchat-sandbox-broker.service || :
+        run_systemctl stop medchat-sandbox-broker.service || :
+    fi
+    if ! opensandbox_service_is_inactive; then
+        run_systemctl kill --kill-whom=all --signal=SIGKILL \
+            medchat-opensandbox.service || :
+        run_systemctl stop medchat-opensandbox.service || :
+    fi
+    if temporal_worker_service_is_inactive \
+        && medchat_service_is_inactive \
+        && sandbox_broker_service_is_inactive \
+        && opensandbox_service_is_inactive
+    then
         BOTH_SERVICES_INACTIVE=1
         return 0
     fi
@@ -137,6 +210,8 @@ force_quiesce_known_medchat_services() {
 quiesce_shared_medchat_services() {
     MEDCHAT_SERVICE_STATE=$(query_medchat_service_state)
     TEMPORAL_WORKER_SERVICE_STATE=$(query_temporal_worker_service_state)
+    OPENSANDBOX_SERVICE_STATE=$(query_opensandbox_service_state)
+    SANDBOX_BROKER_SERVICE_STATE=$(query_sandbox_broker_service_state)
     SERVICE_STATE_CAPTURED=1
     if [ "$TEMPORAL_WORKER_SERVICE_STATE" = active ]; then
         run_systemctl stop medchat-temporal-worker.service || fail service_stop_failed
@@ -144,12 +219,35 @@ quiesce_shared_medchat_services() {
     if [ "$MEDCHAT_SERVICE_STATE" = active ]; then
         run_systemctl stop medchat.service || fail service_stop_failed
     fi
+    if [ "$SANDBOX_BROKER_SERVICE_STATE" = active ]; then
+        run_systemctl stop medchat-sandbox-broker.service || fail service_stop_failed
+    fi
+    if [ "$OPENSANDBOX_SERVICE_STATE" = active ]; then
+        run_systemctl stop medchat-opensandbox.service || fail service_stop_failed
+    fi
     confirm_inactive medchat-temporal-worker.service
     confirm_inactive medchat.service
+    confirm_inactive medchat-sandbox-broker.service
+    confirm_inactive medchat-opensandbox.service
     BOTH_SERVICES_INACTIVE=1
 }
 
+quiesce_deployment_services() {
+    quiesce_shared_medchat_services
+}
+
 restore_prior_medchat_services() {
+    if [ "$OPENSANDBOX_SERVICE_STATE" = active ] \
+        || [ "$SANDBOX_BROKER_SERVICE_STATE" = active ] \
+        || [ "$TEMPORAL_WORKER_SERVICE_STATE" = active ]
+    then
+        run_systemctl start medchat-opensandbox.service || return 1
+    fi
+    if [ "$SANDBOX_BROKER_SERVICE_STATE" = active ] \
+        || [ "$TEMPORAL_WORKER_SERVICE_STATE" = active ]
+    then
+        run_systemctl start medchat-sandbox-broker.service || return 1
+    fi
     if [ "$MEDCHAT_SERVICE_STATE" = active ]; then
         run_systemctl start medchat.service || return 1
     fi
@@ -284,12 +382,6 @@ restore_stopped_services_on_failure() {
         force_quiesce_known_medchat_services || :
         if [ "$BOTH_SERVICES_INACTIVE" -eq 1 ]; then
             remove_legacy_medchat_membership >/dev/null 2>&1 || :
-            if [ "$GROUP_MEMBERSHIP_REVOKED" -eq 1 ]; then
-                if restore_prior_medchat_services; then
-                    exit "$status"
-                fi
-                force_quiesce_known_medchat_services || :
-            fi
         fi
         if secure_broker_credentials >/dev/null 2>&1; then
             warn_credentials_locked_services_not_restored
@@ -321,6 +413,8 @@ if [ "$DESTDIR" = / ]; then
         "$SCRIPT_DIR/sandbox.toml" \
         "$SCRIPT_DIR/medchat-opensandbox.service" \
         "$SCRIPT_DIR/medchat-sandbox-broker.service" \
+        "$SCRIPT_DIR/medchat-opensandbox-firewall.service" \
+        "$SCRIPT_DIR/configure-firewall.sh" \
         "$SCRIPT_DIR/../medchat-temporal-worker.service"
     do
         source_is_regular_and_locked "$source_path" || fail source_untrusted
@@ -346,7 +440,7 @@ if [ "$DESTDIR" = / ]; then
     usermod --append --groups docker medchat-opensandbox
     trap restore_stopped_services_on_failure EXIT
     trap 'exit 1' HUP INT TERM
-    quiesce_shared_medchat_services
+    quiesce_deployment_services
     remove_legacy_medchat_membership || fail group_migration_failed
 
 fi
@@ -355,23 +449,31 @@ fi
     "$DESTDIR" "$SCRIPT_DIR/sandbox.toml" \
     "$SCRIPT_DIR/medchat-opensandbox.service" \
     "$SCRIPT_DIR/medchat-sandbox-broker.service" \
+    "$SCRIPT_DIR/medchat-opensandbox-firewall.service" \
+    "$SCRIPT_DIR/configure-firewall.sh" \
     "$SCRIPT_DIR/../medchat-temporal-worker.service" \
-    "$GROUP_MIGRATION_INTENT" <<'PY'
+    "$GROUP_MIGRATION_INTENT" "$PREVIEW_FAIL_AFTER" <<'PY'
 import json
 import os
 import re
 import stat
 import sys
+import uuid
 from pathlib import Path
 
 root = Path(sys.argv[1])
 template_path = Path(sys.argv[2])
 opensandbox_unit_path = Path(sys.argv[3])
 broker_unit_path = Path(sys.argv[4])
-worker_unit_path = Path(sys.argv[5])
-group_migration_intent = sys.argv[6]
+firewall_unit_path = Path(sys.argv[5])
+firewall_script_path = Path(sys.argv[6])
+worker_unit_path = Path(sys.argv[7])
+group_migration_intent = sys.argv[8]
+preview_fail_after = int(sys.argv[9])
 
 if group_migration_intent != "remove-medchat-from-medchat-sandbox":
+    raise SystemExit(1)
+if root == Path("/") and preview_fail_after != 0:
     raise SystemExit(1)
 
 
@@ -561,25 +663,49 @@ def read_source(path: Path) -> bytes:
                 pass
 
 
-def write_locked(path: Path, content: bytes, mode: int, uid: int, gid: int) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = None
+def fsync_parent(path: Path) -> None:
+    parent_descriptor = None
     try:
-        if path.exists() or path.is_symlink():
-            require_locked_regular(path, mode, expected_uid=uid)
-        descriptor = os.open(path, flags, mode)
+        parent_descriptor = os.open(
+            path.parent,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        os.fsync(parent_descriptor)
+    except OSError:
+        fail()
+    finally:
+        if parent_descriptor is not None:
+            try:
+                os.close(parent_descriptor)
+            except OSError:
+                pass
+
+
+def stage_locked(path: Path, content: bytes, mode: int, uid: int, gid: int) -> Path:
+    descriptor = None
+    staged = path.with_name(f".{path.name}.medchat-{uuid.uuid4().hex}.stage")
+    try:
+        descriptor = os.open(
+            staged,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
         opened = os.fstat(descriptor)
-        named = path.lstat()
         if (
             not stat.S_ISREG(opened.st_mode)
             or opened.st_nlink != 1
-            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
         ):
             fail()
         os.fchmod(descriptor, mode)
         if root == Path("/"):
             os.fchown(descriptor, uid, gid)
-        os.ftruncate(descriptor, 0)
         view = memoryview(content)
         while view:
             written = os.write(descriptor, view)
@@ -587,12 +713,102 @@ def write_locked(path: Path, content: bytes, mode: int, uid: int, gid: int) -> N
                 fail()
             view = view[written:]
         os.fsync(descriptor)
+        final = os.fstat(descriptor)
+        named = staged.lstat()
+        expected_uid = uid if root == Path("/") else os.getuid()
+        expected_gid = gid if root == Path("/") else os.getgid()
+        if (
+            not stat.S_ISREG(named.st_mode)
+            or (final.st_dev, final.st_ino) != (named.st_dev, named.st_ino)
+            or final.st_nlink != 1
+            or stat.S_IMODE(final.st_mode) != mode
+            or final.st_uid != expected_uid
+            or final.st_gid != expected_gid
+        ):
+            fail()
+        return staged
     except OSError:
         fail()
     finally:
         if descriptor is not None:
             try:
                 os.close(descriptor)
+            except OSError:
+                pass
+
+
+def snapshot_target(path: Path, mode: int, uid: int) -> tuple[bytes, int, int, int] | None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    require_locked_regular(path, mode, expected_uid=uid)
+    metadata = path.lstat()
+    return (
+        read_source(path),
+        stat.S_IMODE(metadata.st_mode),
+        metadata.st_uid,
+        metadata.st_gid,
+    )
+
+
+def rollback_generation(
+    committed: list[tuple[Path, tuple[int, int]]],
+    snapshots: dict[Path, tuple[bytes, int, int, int] | None],
+) -> None:
+    for path, installed_identity in reversed(committed):
+        current = path.lstat()
+        if (current.st_dev, current.st_ino) != installed_identity:
+            fail()
+        previous = snapshots[path]
+        if previous is None:
+            os.unlink(path)
+            fsync_parent(path)
+            continue
+        content, mode, uid, gid = previous
+        restored = stage_locked(path, content, mode, uid, gid)
+        os.replace(restored, path)
+        fsync_parent(path)
+
+
+def stage_generation(
+    entries: list[tuple[Path, bytes, int, int, int]],
+) -> None:
+    snapshots: dict[Path, tuple[bytes, int, int, int] | None] = {}
+    staged: list[tuple[Path, Path]] = []
+    committed: list[tuple[Path, tuple[int, int]]] = []
+    try:
+        for path, content, mode, uid, gid in entries:
+            snapshots[path] = snapshot_target(path, mode, uid)
+            temporary = stage_locked(path, content, mode, uid, gid)
+            staged.append((path, temporary))
+        for path, temporary in staged:
+            staged_metadata = temporary.lstat()
+            os.replace(temporary, path)
+            fsync_parent(path)
+            installed = path.lstat()
+            if (
+                not stat.S_ISREG(installed.st_mode)
+                or (installed.st_dev, installed.st_ino)
+                != (staged_metadata.st_dev, staged_metadata.st_ino)
+            ):
+                fail()
+            committed.append((path, (installed.st_dev, installed.st_ino)))
+            if preview_fail_after and len(committed) == preview_fail_after:
+                fail()
+    except BaseException:
+        try:
+            rollback_generation(committed, snapshots)
+        except BaseException:
+            pass
+        raise
+    finally:
+        for _path, temporary in staged:
+            try:
+                os.unlink(temporary)
+                fsync_parent(temporary)
+            except FileNotFoundError:
+                pass
             except OSError:
                 pass
 
@@ -636,14 +852,16 @@ ensure_directory(
     rooted("/run/medchat-sandbox"), 0o750, broker_uid, broker_gid
 )
 ensure_directory(rooted("/etc/systemd/system"), 0o755, 0, 0)
+ensure_directory(rooted("/usr/local/libexec"), 0o755, 0, 0)
+ensure_directory(rooted("/usr/local/libexec/medchat"), 0o755, 0, 0)
 
 environment_path = rooted("/etc/medchat/opensandbox.env")
 values = parse_environment(environment_path)
 secret = values["OPEN_SANDBOX_API_KEY"]
 image = values["MEDCHAT_SANDBOX_IMAGE"]
-if len(secret) < 32 or len(secret) > 256:
+if re.fullmatch(r"[A-Za-z0-9_-]{32,256}", secret) is None:
     fail()
-if secret == "replace-with-random-secret":
+if secret == "REPLACE_WITH_RANDOM_BASE64URL_SECRET_000000000000":
     fail()
 image_match = re.fullmatch(r"([^\s@]+)@sha256:([0-9a-f]{64})", image)
 if image_match is None or set(image_match.group(2)) == {"0"}:
@@ -655,6 +873,8 @@ try:
     template = read_source(template_path).decode("utf-8")
     opensandbox_unit = read_source(opensandbox_unit_path)
     broker_unit = read_source(broker_unit_path)
+    firewall_unit = read_source(firewall_unit_path)
+    firewall_script = read_source(firewall_script_path)
     worker_unit = read_source(worker_unit_path)
 except UnicodeError:
     fail()
@@ -663,50 +883,69 @@ if template.count(token) != 1:
     fail()
 rendered = template.replace(token, json.dumps(secret, ensure_ascii=True))
 
-write_locked(
-    rooted("/etc/medchat/opensandbox.toml"),
-    rendered.encode("utf-8"),
-    0o600,
-    opensandbox_uid,
-    opensandbox_gid,
-)
 broker_environment = (
     "OPEN_SANDBOX_API_KEY=" + secret + "\n"
     "MEDCHAT_SANDBOX_IMAGE=" + image + "\n"
 ).encode("utf-8")
-write_locked(
-    rooted("/etc/medchat/sandbox-broker.env"),
-    broker_environment,
-    0o640,
-    0,
-    broker_gid,
-)
-write_locked(
-    rooted("/etc/systemd/system/medchat-opensandbox.service"),
-    opensandbox_unit,
-    0o644,
-    0,
-    0,
-)
-write_locked(
-    rooted("/etc/systemd/system/medchat-sandbox-broker.service"),
-    broker_unit,
-    0o644,
-    0,
-    0,
-)
-write_locked(
-    rooted("/etc/systemd/system/medchat-temporal-worker.service"),
-    worker_unit,
-    0o644,
-    0,
-    0,
+stage_generation(
+    [
+        (
+            rooted("/etc/medchat/opensandbox.toml"),
+            rendered.encode("utf-8"),
+            0o600,
+            opensandbox_uid,
+            opensandbox_gid,
+        ),
+        (
+            rooted("/etc/medchat/sandbox-broker.env"),
+            broker_environment,
+            0o640,
+            0,
+            broker_gid,
+        ),
+        (
+            rooted("/etc/systemd/system/medchat-opensandbox-firewall.service"),
+            firewall_unit,
+            0o644,
+            0,
+            0,
+        ),
+        (
+            rooted("/etc/systemd/system/medchat-opensandbox.service"),
+            opensandbox_unit,
+            0o644,
+            0,
+            0,
+        ),
+        (
+            rooted("/etc/systemd/system/medchat-sandbox-broker.service"),
+            broker_unit,
+            0o644,
+            0,
+            0,
+        ),
+        (
+            rooted("/etc/systemd/system/medchat-temporal-worker.service"),
+            worker_unit,
+            0o644,
+            0,
+            0,
+        ),
+        (
+            rooted("/usr/local/libexec/medchat/configure-opensandbox-firewall"),
+            firewall_script,
+            0o755,
+            0,
+            0,
+        ),
+    ]
 )
 PY
 
 if [ "$DESTDIR" = / ]; then
     run_systemctl daemon-reload
-    run_systemctl enable medchat-opensandbox.service medchat-sandbox-broker.service
+    run_systemctl enable medchat-opensandbox-firewall.service \
+        medchat-opensandbox.service medchat-sandbox-broker.service
     restore_prior_medchat_services || fail service_restore_failed
     trap - EXIT HUP INT TERM
 fi
