@@ -89,6 +89,8 @@ def _validated_idempotency_key(value: object) -> str:
         type(value) is not str
         or not 1 <= len(value) <= 256
         or not value.strip()
+        or value != value.strip()
+        or "," in value
         or any(not 0x20 <= ord(character) <= 0x7E for character in value)
     ):
         raise BrokerFailure(BrokerErrorCode.INVALID_INPUT)

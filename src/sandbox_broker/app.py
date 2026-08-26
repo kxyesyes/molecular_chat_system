@@ -6,11 +6,12 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Annotated, AsyncIterator, Callable
 
-from fastapi import Depends, FastAPI, File, Form, Header, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .artifacts import ArtifactRegistry
 from .config import BrokerConfig
@@ -35,6 +36,106 @@ logger = logging.getLogger(__name__)
 
 _REQUEST_JSON_MAX_CHARS = 64 * 1024
 _MULTIPART_OVERHEAD_BYTES = 2 * 1024 * 1024
+
+
+class _MultipartBodyLimitExceeded(Exception):
+    pass
+
+
+class _MultipartBodyLimitMiddleware:
+    """Enforce the multipart transport limit against actual ASGI body bytes."""
+
+    def __init__(self, app: ASGIApp, *, maximum_bytes: int) -> None:
+        if type(maximum_bytes) is not int or maximum_bytes <= 0:
+            raise ValueError("invalid multipart body limit")
+        self.app = app
+        self.maximum_bytes = maximum_bytes
+
+    async def _send_error(self, scope: Scope, receive: Receive, send: Send, status: int, code: str) -> None:
+        await _error(status, code)(scope, receive, send)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope["type"] != "http"
+            or scope.get("method") != "POST"
+            or scope.get("path") != "/v1/docking/jobs"
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        raw_lengths = [
+            value
+            for name, value in scope.get("headers", [])
+            if name.lower() == b"content-length"
+        ]
+        if len(raw_lengths) > 1:
+            await self._send_error(
+                scope,
+                receive,
+                send,
+                422,
+                BrokerErrorCode.INVALID_INPUT.value,
+            )
+            return
+        if raw_lengths:
+            raw_length = raw_lengths[0]
+            if (
+                not raw_length
+                or len(raw_length) > 20
+                or any(byte < ord("0") or byte > ord("9") for byte in raw_length)
+            ):
+                await self._send_error(
+                    scope,
+                    receive,
+                    send,
+                    422,
+                    BrokerErrorCode.INVALID_INPUT.value,
+                )
+                return
+            declared = int(raw_length)
+            if declared > self.maximum_bytes:
+                await self._send_error(
+                    scope,
+                    receive,
+                    send,
+                    413,
+                    "payload_too_large",
+                )
+                return
+
+        total = 0
+        response_started = False
+
+        async def limited_receive() -> Message:
+            nonlocal total
+            message = await receive()
+            if message["type"] == "http.request":
+                body = message.get("body", b"")
+                if type(body) is not bytes:
+                    raise _MultipartBodyLimitExceeded
+                total += len(body)
+                if total > self.maximum_bytes:
+                    raise _MultipartBodyLimitExceeded
+            return message
+
+        async def tracked_send(message: Message) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, tracked_send)
+        except _MultipartBodyLimitExceeded:
+            if response_started:
+                raise
+            await self._send_error(
+                scope,
+                receive,
+                send,
+                413,
+                "payload_too_large",
+            )
 
 
 class PublicJob(BaseModel):
@@ -76,6 +177,34 @@ def _error(status_code: int, code: str) -> JSONResponse:
         status_code=status_code,
         content={"error": {"code": code}},
     )
+
+
+def _raw_idempotency_key(scope: Scope) -> str:
+    """Accept exactly one unmerged printable-ASCII idempotency header."""
+
+    try:
+        values = [
+            value
+            for name, value in scope.get("headers", [])
+            if type(name) is bytes
+            and type(value) is bytes
+            and name.lower() == b"idempotency-key"
+        ]
+        if len(values) != 1:
+            raise ValueError
+        raw_value = values[0]
+        if (
+            not 1 <= len(raw_value) <= 256
+            or b"," in raw_value
+            or any(byte < 0x20 or byte > 0x7E for byte in raw_value)
+        ):
+            raise ValueError
+        value = raw_value.decode("ascii", errors="strict")
+        if value != value.strip(" \t"):
+            raise ValueError
+        return value
+    except (UnicodeError, ValueError):
+        raise BrokerFailure(BrokerErrorCode.INVALID_INPUT) from None
 
 
 def _default_service(config: BrokerConfig) -> SandboxBrokerService:
@@ -136,26 +265,23 @@ def create_app(
                     logger.error("sandbox broker shutdown failed")
                     raise
 
-    app = FastAPI(lifespan=lifespan)
-
-    @app.middleware("http")
-    async def reject_oversized_request(request: Request, call_next: object) -> object:
-        if request.method == "POST" and request.url.path == "/v1/docking/jobs":
-            maximum = (
-                config.receptor_max_bytes
-                + config.ligand_max_bytes
-                + _REQUEST_JSON_MAX_CHARS
-                + _MULTIPART_OVERHEAD_BYTES
-            )
-            raw_length = request.headers.get("content-length")
-            if raw_length is not None:
-                try:
-                    length = int(raw_length)
-                except ValueError:
-                    return _error(422, BrokerErrorCode.INVALID_INPUT.value)
-                if length < 0 or length > maximum:
-                    return _error(422, BrokerErrorCode.INVALID_INPUT.value)
-        return await call_next(request)
+    maximum_body_bytes = (
+        config.receptor_max_bytes
+        + config.ligand_max_bytes
+        + _REQUEST_JSON_MAX_CHARS
+        + _MULTIPART_OVERHEAD_BYTES
+    )
+    app = FastAPI(
+        lifespan=lifespan,
+        openapi_url=None,
+        docs_url=None,
+        redoc_url=None,
+        redirect_slashes=False,
+    )
+    app.add_middleware(
+        _MultipartBodyLimitMiddleware,
+        maximum_bytes=maximum_body_bytes,
+    )
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_handler(
@@ -225,13 +351,13 @@ def create_app(
         dependencies=[Depends(require_exact_multipart)],
     )
     async def submit_job(
+        request: Request,
         request_json: Annotated[
             str,
             Form(min_length=2, max_length=_REQUEST_JSON_MAX_CHARS),
         ],
         receptor: Annotated[UploadFile, File()],
         ligand: Annotated[UploadFile, File()],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
         broker: object = Depends(get_service),
     ) -> PublicJob:
         try:
@@ -242,7 +368,7 @@ def create_app(
             parameters,
             receptor,
             ligand,
-            idempotency_key,
+            _raw_idempotency_key(request.scope),
         )
         return PublicJob.from_view(view)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import io
 import json
 import os
@@ -17,6 +18,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from starlette.datastructures import UploadFile
+from starlette.requests import ClientDisconnect
 
 from src.sandbox_broker.artifacts import ArtifactRegistry
 from src.sandbox_broker.config import BrokerConfig
@@ -792,6 +794,97 @@ def test_api_validation_and_multipart_shape_are_stable(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "headers",
+    [
+        [("Idempotency-Key", "same"), ("Idempotency-Key", "same")],
+        [("Idempotency-Key", "first"), ("Idempotency-Key", "second")],
+    ],
+)
+def test_api_rejects_every_duplicate_raw_idempotency_header(
+    tmp_path: Path,
+    headers: list[tuple[str, str]],
+) -> None:
+    from src.sandbox_broker.app import create_app
+
+    service = _ApiService()
+    app = create_app(_config(tmp_path), service=service)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/docking/jobs",
+            headers=headers,
+            data={
+                "request_json": json.dumps(
+                    {"center": [1, 2, 3], "size": [20, 20, 20]}
+                )
+            },
+            files={
+                "receptor": ("target.pdb", b"ATOM\n"),
+                "ligand": ("compound.sdf", b"ligand\n"),
+            },
+        )
+    assert response.status_code == 422
+    assert response.json() == {"error": {"code": "invalid_input"}}
+    assert service.submitted_keys == []
+
+
+@pytest.mark.parametrize("key", [" leading", "trailing ", "comma,key"])
+def test_api_rejects_ows_or_comma_in_raw_idempotency_header(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    from src.sandbox_broker.app import create_app
+
+    service = _ApiService()
+    app = create_app(_config(tmp_path), service=service)
+    with TestClient(app) as client:
+        response = _submit_api(client, key=key)
+    assert response.status_code == 422
+    assert response.json() == {"error": {"code": "invalid_input"}}
+    assert service.submitted_keys == []
+
+
+@pytest.mark.parametrize(
+    "raw_value",
+    [b"", b"x" * 257, b"bad\x00key", b"bad\x7fkey", b"\xff", "snowman-\u2603".encode()],
+)
+def test_raw_idempotency_parser_strictly_rejects_non_ascii_or_control_bytes(
+    raw_value: bytes,
+) -> None:
+    from src.sandbox_broker.app import _raw_idempotency_key
+
+    with pytest.raises(BrokerFailure) as raised:
+        _raw_idempotency_key(
+            {"headers": [(b"idempotency-key", raw_value)]}
+        )
+    assert raised.value.code is BrokerErrorCode.INVALID_INPUT
+
+
+@pytest.mark.parametrize("key", [" leading", "trailing "])
+def test_service_rejects_idempotency_ows_before_upload_or_lifecycle_check(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    service, store, _, _ = _service(tmp_path)
+    generated = _GeneratedFile(16)
+    receptor = type("Upload", (), {"filename": "target.pdb", "file": generated})()
+
+    async def scenario() -> BrokerFailure:
+        with pytest.raises(BrokerFailure) as raised:
+            await service.submit_uploads(
+                _parameters(),
+                receptor,
+                _upload("compound.sdf", b"ligand\n"),
+                key,
+            )
+        return raised.value
+
+    failure = asyncio.run(scenario())
+    assert failure.code is BrokerErrorCode.INVALID_INPUT
+    assert generated.total_read == 0
+    assert store.active_jobs() == []
+
+
+@pytest.mark.parametrize(
     ("key", "status", "code"),
     [
         ("conflict", 409, "idempotency_conflict"),
@@ -837,6 +930,232 @@ def test_openapi_contains_only_narrow_routes_and_no_dangerous_schema_fields(
     serialized = json.dumps(schema, sort_keys=True).lower()
     for forbidden in ('"command"', '"image"', '"mounts"', '"policy"', '"debug"', '"admin"'):
         assert forbidden not in serialized
+
+
+def test_app_registers_exactly_six_http_paths_without_docs_or_redirects(
+    tmp_path: Path,
+) -> None:
+    from src.sandbox_broker.app import create_app
+
+    app = create_app(_config(tmp_path), service=_ApiService())
+    assert {route.path for route in app.routes} == {
+        "/v1/docking/jobs",
+        "/v1/docking/jobs/{job_id}",
+        "/v1/docking/jobs/{job_id}/manifest",
+        "/v1/docking/jobs/{job_id}/artifacts/{artifact_id}",
+        "/v1/docking/jobs/{job_id}/cancel",
+        "/healthz",
+    }
+    with TestClient(app, follow_redirects=False) as client:
+        for path in ("/docs", "/openapi.json", "/redoc", "/healthz/"):
+            response = client.get(path)
+            assert response.status_code == 404
+            assert "location" not in response.headers
+            assert response.json() == {"error": {"code": "not_found"}}
+
+
+def _http_scope(headers: list[tuple[bytes, bytes]] | None = None) -> dict[str, object]:
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/docking/jobs",
+        "raw_path": b"/v1/docking/jobs",
+        "query_string": b"",
+        "root_path": "",
+        "headers": headers or [],
+        "client": ("127.0.0.1", 1234),
+        "server": ("broker", 80),
+    }
+
+
+def test_transport_gate_counts_actual_chunked_bytes_and_stops_after_overflow() -> None:
+    from src.sandbox_broker.app import _MultipartBodyLimitMiddleware
+
+    mebibyte = 1024 * 1024
+    receive_calls = 0
+    service_called = False
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        nonlocal receive_calls
+        receive_calls += 1
+        if receive_calls > 63:
+            pytest.fail("middleware read beyond the first overflowing chunk")
+        return {
+            "type": "http.request",
+            "body": b"x" * mebibyte,
+            "more_body": True,
+        }
+
+    async def downstream(
+        scope: dict[str, object],
+        downstream_receive: object,
+        send: object,
+    ) -> None:
+        nonlocal service_called
+        del scope, send
+        while True:
+            message = await downstream_receive()
+            if not message.get("more_body", False):
+                break
+        service_called = True
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    middleware = _MultipartBodyLimitMiddleware(
+        downstream,
+        maximum_bytes=62 * mebibyte,
+    )
+    asyncio.run(middleware(_http_scope(), receive, send))
+
+    assert receive_calls == 63
+    assert service_called is False
+    assert sent[0]["status"] == 413
+    assert json.loads(sent[1]["body"]) == {
+        "error": {"code": "payload_too_large"}
+    }
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [(b"content-length", b"1"), (b"content-length", b"1")],
+        [(b"content-length", b"1"), (b"content-length", b"2")],
+        [(b"content-length", b"-1")],
+        [(b"content-length", b"+1")],
+        [(b"content-length", b" 1")],
+        [(b"content-length", b"1, 1")],
+        [(b"content-length", b"not-a-number")],
+    ],
+)
+def test_transport_gate_rejects_duplicate_or_invalid_content_length_before_receive(
+    headers: list[tuple[bytes, bytes]],
+) -> None:
+    from src.sandbox_broker.app import _MultipartBodyLimitMiddleware
+
+    downstream_called = False
+    receive_called = False
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        nonlocal receive_called
+        receive_called = True
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def downstream(*args: object) -> None:
+        nonlocal downstream_called
+        del args
+        downstream_called = True
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    asyncio.run(
+        _MultipartBodyLimitMiddleware(downstream, maximum_bytes=8)(
+            _http_scope(headers), receive, send
+        )
+    )
+    assert downstream_called is False
+    assert receive_called is False
+    assert sent[0]["status"] == 422
+    assert json.loads(sent[1]["body"]) == {"error": {"code": "invalid_input"}}
+
+
+def test_transport_gate_preflights_declared_oversize_without_reading_body() -> None:
+    from src.sandbox_broker.app import _MultipartBodyLimitMiddleware
+
+    calls: list[str] = []
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        calls.append("receive")
+        return {"type": "http.request", "body": b"secret", "more_body": False}
+
+    async def downstream(*args: object) -> None:
+        del args
+        calls.append("downstream")
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    asyncio.run(
+        _MultipartBodyLimitMiddleware(downstream, maximum_bytes=8)(
+            _http_scope([(b"content-length", b"9")]), receive, send
+        )
+    )
+    assert calls == []
+    assert sent[0]["status"] == 413
+
+
+def test_transport_gate_allows_missing_length_but_rejects_actual_overflow() -> None:
+    from src.sandbox_broker.app import _MultipartBodyLimitMiddleware
+
+    messages = iter(
+        [
+            {"type": "http.request", "body": b"1234", "more_body": True},
+            {"type": "http.request", "body": b"5678", "more_body": True},
+            {"type": "http.request", "body": b"9", "more_body": False},
+        ]
+    )
+    service_called = False
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        return next(messages)
+
+    async def downstream(scope: object, downstream_receive: object, send: object) -> None:
+        nonlocal service_called
+        del scope, send
+        while True:
+            message = await downstream_receive()
+            if not message.get("more_body", False):
+                break
+        service_called = True
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    asyncio.run(
+        _MultipartBodyLimitMiddleware(downstream, maximum_bytes=8)(
+            _http_scope(), receive, send
+        )
+    )
+    assert service_called is False
+    assert sent[0]["status"] == 413
+
+
+@pytest.mark.parametrize("disconnect", [False, True])
+def test_transport_gate_propagates_cancellation_and_client_disconnect_without_state(
+    disconnect: bool,
+) -> None:
+    from src.sandbox_broker.app import _MultipartBodyLimitMiddleware
+
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        if disconnect:
+            return {"type": "http.disconnect"}
+        raise asyncio.CancelledError
+
+    async def downstream(scope: object, downstream_receive: object, send: object) -> None:
+        del scope, send
+        message = await downstream_receive()
+        if message["type"] == "http.disconnect":
+            raise ClientDisconnect
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    middleware = _MultipartBodyLimitMiddleware(downstream, maximum_bytes=8)
+    expected = ClientDisconnect if disconnect else asyncio.CancelledError
+    with pytest.raises(expected):
+        asyncio.run(middleware(_http_scope(), receive, send))
+    assert sent == []
+    assert vars(middleware) == {"app": downstream, "maximum_bytes": 8}
 
 
 def test_lifespan_stop_incomplete_is_logged_without_context_and_propagated(
@@ -928,6 +1247,16 @@ def test_uds_main_sets_umask_before_config_and_uses_only_exact_uds_args(
     )
     monkeypatch.setattr(
         entrypoint,
+        "acquire_runtime_lock",
+        lambda path: events.append(("lock", path)) or 91,
+    )
+    monkeypatch.setattr(
+        entrypoint,
+        "release_runtime_lock",
+        lambda descriptor: events.append(("release", descriptor)),
+    )
+    monkeypatch.setattr(
+        entrypoint,
         "remove_stale_socket",
         lambda path: events.append(("stale", path)),
     )
@@ -946,6 +1275,7 @@ def test_uds_main_sets_umask_before_config_and_uses_only_exact_uds_args(
     assert events == [
         ("umask", 0o077),
         "config",
+        ("lock", config.socket_path),
         ("stale", config.socket_path),
         ("app", config),
         (
@@ -956,9 +1286,9 @@ def test_uds_main_sets_umask_before_config_and_uses_only_exact_uds_args(
                 "workers": 1,
                 "access_log": False,
                 "log_level": "info",
-                "reload": False,
             },
         ),
+        ("release", 91),
     ]
 
 
@@ -987,39 +1317,64 @@ def test_stale_socket_cleanup_refuses_non_socket_targets(
     assert target.exists() or target.is_symlink()
 
 
-def test_stale_socket_cleanup_uses_two_matching_identity_checks_when_mocked(
+def test_stale_socket_cleanup_quarantines_matching_stale_identity_before_unlink(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import scripts.run_sandbox_broker as entrypoint
 
     target = tmp_path / "broker.sock"
-    real_lstat = entrypoint.os.lstat
     socket_stat = SimpleNamespace(
         st_mode=stat.S_IFSOCK | 0o600,
         st_dev=7,
         st_ino=11,
         st_file_attributes=0,
     )
-    target_calls = 0
+    parent_stat = SimpleNamespace(
+        st_mode=stat.S_IFDIR | 0o700,
+        st_dev=7,
+        st_ino=3,
+        st_file_attributes=0,
+    )
+    parent_identity = entrypoint._identity(parent_stat)
+    quarantine: Path | None = None
+    replaced: list[tuple[Path, Path]] = []
     removed: list[Path] = []
 
     def lstat(path: object) -> object:
-        nonlocal target_calls
+        nonlocal quarantine
         if Path(path) == target:
-            target_calls += 1
             return socket_stat
-        return real_lstat(path)
+        if quarantine is not None and Path(path) == quarantine:
+            return socket_stat
+        if Path(path) == target.parent:
+            return parent_stat
+        raise AssertionError(f"unexpected lstat target: {path}")
 
+    def replace(source: object, destination: object) -> None:
+        nonlocal quarantine
+        quarantine = Path(destination)
+        replaced.append((Path(source), quarantine))
+
+    monkeypatch.setattr(
+        entrypoint,
+        "_trusted_socket_parent",
+        lambda path: (target, parent_identity),
+    )
+    monkeypatch.setattr(entrypoint, "_socket_stale_candidate", lambda path: True)
     monkeypatch.setattr(entrypoint.os, "lstat", lstat)
+    monkeypatch.setattr(entrypoint.os, "replace", replace)
     monkeypatch.setattr(
         entrypoint.os,
         "unlink",
         lambda path: removed.append(Path(path)),
     )
     entrypoint.remove_stale_socket(target)
-    assert target_calls == 2
-    assert removed == [target]
+    assert len(replaced) == 1
+    assert replaced[0][0] == target
+    assert replaced[0][1].parent == target.parent
+    assert replaced[0][1] != target
+    assert removed == [replaced[0][1]]
 
 
 def test_stale_socket_cleanup_rejects_identity_swap_without_unlinking(
@@ -1053,10 +1408,13 @@ def test_stale_socket_cleanup_rejects_identity_swap_without_unlinking(
         return real_lstat(path)
 
     monkeypatch.setattr(entrypoint.os, "lstat", lstat)
+    monkeypatch.setattr(entrypoint, "_socket_stale_candidate", lambda path: True)
     monkeypatch.setattr(
         entrypoint.os,
-        "unlink",
-        lambda path: pytest.fail(f"unlinked swapped target: {path}"),
+        "replace",
+        lambda source, destination: pytest.fail(
+            f"replaced swapped target: {source} -> {destination}"
+        ),
     )
     with pytest.raises(RuntimeError, match="stale socket identity changed"):
         entrypoint.remove_stale_socket(target)
@@ -1074,3 +1432,339 @@ def test_stale_socket_cleanup_removes_real_unix_socket(tmp_path: Path) -> None:
         uds.close()
     remove_stale_socket(target)
     assert not target.exists()
+
+
+def test_runtime_lock_uses_secure_open_identity_checks_and_nonblocking_flock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_sandbox_broker as entrypoint
+
+    socket_path = tmp_path / "broker.sock"
+    lock_path = tmp_path / ".sandbox-broker.lock"
+    parent_stat = SimpleNamespace(
+        st_mode=stat.S_IFDIR | 0o700,
+        st_dev=9,
+        st_ino=2,
+        st_file_attributes=0,
+    )
+    lock_stat = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600,
+        st_dev=9,
+        st_ino=4,
+        st_nlink=1,
+        st_file_attributes=0,
+    )
+    opened: list[tuple[Path, int, int]] = []
+    flocked: list[int] = []
+
+    monkeypatch.setattr(
+        entrypoint,
+        "_trusted_socket_parent",
+        lambda path: (socket_path, entrypoint._identity(parent_stat)),
+    )
+    monkeypatch.setattr(
+        entrypoint.os,
+        "open",
+        lambda path, flags, mode: opened.append((Path(path), flags, mode)) or 41,
+    )
+    monkeypatch.setattr(entrypoint.os, "fstat", lambda descriptor: lock_stat)
+    monkeypatch.setattr(
+        entrypoint.os,
+        "lstat",
+        lambda path: parent_stat if Path(path) == tmp_path else lock_stat,
+    )
+    monkeypatch.setattr(
+        entrypoint,
+        "_flock_exclusive_nonblocking",
+        lambda descriptor: flocked.append(descriptor),
+    )
+
+    descriptor = entrypoint.acquire_runtime_lock(socket_path)
+    assert descriptor == 41
+    assert opened == [
+        (
+            lock_path,
+            entrypoint.os.O_CREAT
+            | entrypoint.os.O_RDWR
+            | getattr(entrypoint.os, "O_NOFOLLOW", 0)
+            | getattr(entrypoint.os, "O_CLOEXEC", 0),
+            0o600,
+        )
+    ]
+    assert flocked == [41]
+
+
+def test_runtime_lock_rejects_nonprivate_parent_before_flock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_sandbox_broker as entrypoint
+
+    socket_path = tmp_path / "broker.sock"
+    parent_stat = SimpleNamespace(
+        st_mode=stat.S_IFDIR | 0o755,
+        st_dev=9,
+        st_ino=2,
+        st_file_attributes=0,
+    )
+    lock_stat = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600,
+        st_dev=9,
+        st_ino=4,
+        st_nlink=1,
+        st_file_attributes=0,
+    )
+    closed: list[int] = []
+
+    monkeypatch.setattr(
+        entrypoint,
+        "_trusted_socket_parent",
+        lambda path: (socket_path, entrypoint._identity(parent_stat)),
+    )
+    monkeypatch.setattr(entrypoint.os, "open", lambda *args: 43)
+    monkeypatch.setattr(entrypoint.os, "fstat", lambda descriptor: lock_stat)
+    monkeypatch.setattr(
+        entrypoint.os,
+        "lstat",
+        lambda path: parent_stat if Path(path) == tmp_path else lock_stat,
+    )
+    monkeypatch.setattr(
+        entrypoint,
+        "_flock_exclusive_nonblocking",
+        lambda descriptor: pytest.fail("flocked in a nonprivate parent"),
+    )
+    monkeypatch.setattr(entrypoint.os, "close", lambda descriptor: closed.append(descriptor))
+
+    with pytest.raises(RuntimeError, match="sandbox broker lock unavailable"):
+        entrypoint.acquire_runtime_lock(socket_path)
+    assert closed == [43]
+
+
+def test_lock_failure_never_touches_stale_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_sandbox_broker as entrypoint
+
+    config = _config(tmp_path)
+    monkeypatch.setattr(entrypoint.os, "umask", lambda mask: None)
+    monkeypatch.setattr(
+        entrypoint.BrokerConfig,
+        "from_env",
+        classmethod(lambda cls: config),
+    )
+    monkeypatch.setattr(
+        entrypoint,
+        "acquire_runtime_lock",
+        lambda path: (_ for _ in ()).throw(
+            RuntimeError("sandbox broker lock unavailable")
+        ),
+    )
+    monkeypatch.setattr(
+        entrypoint,
+        "remove_stale_socket",
+        lambda path: pytest.fail("socket touched without owning the lock"),
+    )
+    with pytest.raises(RuntimeError, match="sandbox broker lock unavailable"):
+        entrypoint.main()
+
+
+def test_main_redacts_configuration_failure_before_filesystem_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_sandbox_broker as entrypoint
+
+    events: list[object] = []
+    monkeypatch.setattr(
+        entrypoint.os,
+        "umask",
+        lambda mask: events.append(("umask", mask)),
+    )
+    monkeypatch.setattr(
+        entrypoint.BrokerConfig,
+        "from_env",
+        classmethod(
+            lambda cls: (_ for _ in ()).throw(
+                RuntimeError(r"OPEN_SANDBOX_API_KEY=secret C:\runtime\broker.sock")
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        entrypoint,
+        "acquire_runtime_lock",
+        lambda path: pytest.fail("filesystem touched after invalid configuration"),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="sandbox broker configuration unavailable",
+    ) as raised:
+        entrypoint.main()
+    assert events == [("umask", 0o077)]
+    assert "secret" not in str(raised.value).lower()
+    assert "runtime" not in str(raised.value).lower()
+
+
+@pytest.mark.parametrize(
+    ("connect_errno", "stale"),
+    [
+        (None, False),
+        (errno.ECONNREFUSED, True),
+        (errno.ENOENT, True),
+        (errno.EACCES, False),
+        (errno.EPERM, False),
+        (errno.ETIMEDOUT, False),
+    ],
+)
+def test_unix_socket_probe_deletes_only_explicit_stale_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+    connect_errno: int | None,
+    stale: bool,
+) -> None:
+    import scripts.run_sandbox_broker as entrypoint
+
+    class FakeSocket:
+        def settimeout(self, timeout: float) -> None:
+            assert 0 < timeout <= 1
+
+        def connect(self, path: str) -> None:
+            del path
+            if connect_errno is not None:
+                raise OSError(connect_errno, r"sensitive C:\runtime\broker.sock")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(entrypoint.socket, "socket", lambda *args: FakeSocket())
+    assert entrypoint._socket_stale_candidate(Path("/run/broker.sock")) is stale
+
+
+def test_quarantine_identity_mismatch_is_never_unlinked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_sandbox_broker as entrypoint
+
+    target = tmp_path / "broker.sock"
+    original = SimpleNamespace(
+        st_mode=stat.S_IFSOCK | 0o600,
+        st_dev=4,
+        st_ino=8,
+        st_file_attributes=0,
+    )
+    swapped = SimpleNamespace(
+        st_mode=stat.S_IFSOCK | 0o600,
+        st_dev=4,
+        st_ino=9,
+        st_file_attributes=0,
+    )
+    parent = SimpleNamespace(
+        st_mode=stat.S_IFDIR | 0o700,
+        st_dev=4,
+        st_ino=2,
+        st_file_attributes=0,
+    )
+    quarantine: Path | None = None
+    target_reads = 0
+
+    def lstat(path: object) -> object:
+        nonlocal target_reads
+        if Path(path) == target:
+            target_reads += 1
+            return original
+        if quarantine is not None and Path(path) == quarantine:
+            return swapped
+        if Path(path) == target.parent:
+            return parent
+        raise AssertionError
+
+    def replace(source: object, destination: object) -> None:
+        nonlocal quarantine
+        assert Path(source) == target
+        quarantine = Path(destination)
+
+    monkeypatch.setattr(
+        entrypoint,
+        "_trusted_socket_parent",
+        lambda path: (target, entrypoint._identity(parent)),
+    )
+    monkeypatch.setattr(entrypoint, "_socket_stale_candidate", lambda path: True)
+    monkeypatch.setattr(entrypoint.os, "lstat", lstat)
+    monkeypatch.setattr(entrypoint.os, "replace", replace)
+    monkeypatch.setattr(
+        entrypoint.os,
+        "unlink",
+        lambda path: pytest.fail(f"unlinked mismatched quarantine: {path}"),
+    )
+    with pytest.raises(RuntimeError, match="stale socket identity changed"):
+        entrypoint.remove_stale_socket(target)
+    assert target_reads == 2
+
+
+def test_main_releases_lock_when_uvicorn_fails_and_redacts_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_sandbox_broker as entrypoint
+
+    config = _config(tmp_path)
+    released: list[int] = []
+    monkeypatch.setattr(entrypoint.os, "umask", lambda mask: None)
+    monkeypatch.setattr(
+        entrypoint.BrokerConfig,
+        "from_env",
+        classmethod(lambda cls: config),
+    )
+    monkeypatch.setattr(entrypoint, "acquire_runtime_lock", lambda path: 51)
+    monkeypatch.setattr(entrypoint, "remove_stale_socket", lambda path: None)
+    monkeypatch.setattr(entrypoint, "create_app", lambda observed: object())
+    monkeypatch.setattr(
+        entrypoint.uvicorn,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError(r"OPEN_SANDBOX_API_KEY=secret C:\runtime\broker.sock")
+        ),
+    )
+    monkeypatch.setattr(
+        entrypoint,
+        "release_runtime_lock",
+        lambda descriptor: released.append(descriptor),
+    )
+    with pytest.raises(RuntimeError, match="sandbox broker server failed") as raised:
+        entrypoint.main()
+    assert "secret" not in str(raised.value).lower()
+    assert str(tmp_path) not in str(raised.value)
+    assert released == [51]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fcntl requires POSIX")
+def test_runtime_lock_excludes_second_real_listener(tmp_path: Path) -> None:
+    from scripts.run_sandbox_broker import acquire_runtime_lock, release_runtime_lock
+
+    socket_path = tmp_path / "broker.sock"
+    first = acquire_runtime_lock(socket_path)
+    try:
+        with pytest.raises(RuntimeError, match="sandbox broker lock unavailable"):
+            acquire_runtime_lock(socket_path)
+    finally:
+        release_runtime_lock(first)
+    second = acquire_runtime_lock(socket_path)
+    release_runtime_lock(second)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="real Unix sockets require POSIX")
+def test_live_unix_listener_is_never_removed(tmp_path: Path) -> None:
+    from scripts.run_sandbox_broker import remove_stale_socket
+
+    target = tmp_path / "broker.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(target))
+    listener.listen(1)
+    try:
+        with pytest.raises(RuntimeError, match="active broker socket"):
+            remove_stale_socket(target)
+        assert target.exists()
+    finally:
+        listener.close()
+    remove_stale_socket(target)
