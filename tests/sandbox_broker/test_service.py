@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib.util
 import json
 import os
 import sqlite3
+import sys
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -35,6 +37,8 @@ from src.sandbox_broker.store import BrokerStore
 from src.sandbox_broker.validation import StagedInput
 
 
+ROOT = Path(__file__).parents[2]
+RUNNER = ROOT / "deployment" / "opensandbox" / "run_docking.py"
 POSE = "REMARK VINA RESULT: -7.4 0.0 0.0\nMODEL 1\nENDMDL\n"
 MULTI_MODE_POSE = (
     "REMARK VINA RESULT: -8.1 0.0 0.0\n"
@@ -160,6 +164,73 @@ class AdapterUploadSandboxClient(FakeSandboxClient):
 
     async def upload_text(self, handle: SandboxHandle, path: str, data: str) -> None:
         await self.adapter.upload_text(handle, path, data)
+
+
+def _run_uploaded_request_through_wrapper(
+    tmp_path: Path, uploads: list[tuple[str, str]]
+) -> dict[str, object]:
+    spec = importlib.util.spec_from_file_location("service_wrapper_contract", RUNNER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    input_root = tmp_path / "wrapper-input"
+    output_root = tmp_path / "wrapper-output"
+    input_root.mkdir(mode=0o700)
+    output_root.mkdir(mode=0o700)
+    module.INPUT_ROOT = input_root
+    module.OUTPUT_ROOT = output_root
+    for remote_path, data in uploads:
+        destination = input_root / Path(remote_path).name
+        destination.write_bytes(data.encode("utf-8"))
+        destination.chmod(0o600)
+
+    class FakeProcess:
+        next_pid = 30000
+
+        def __init__(self, argv: list[str], **kwargs: object) -> None:
+            del kwargs
+            self.argv = list(argv)
+            self.pid = FakeProcess.next_pid
+            FakeProcess.next_pid += 1
+            self.returncode: int | None = None
+            if self.argv[0] == "mk_prepare_receptor.py":
+                Path(self.argv[4]).write_text("RECEPTOR PDBQT\n", encoding="ascii")
+            elif self.argv[0] == "mk_prepare_ligand.py":
+                Path(self.argv[4]).write_text("LIGAND PDBQT\n", encoding="ascii")
+            elif self.argv[0] == "vina":
+                Path(self.argv[-1]).write_text(POSE, encoding="ascii")
+            else:  # pragma: no cover - exact argv failures should expose the tool
+                raise AssertionError(self.argv)
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.returncode = 0
+            return 0
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+    original_popen = module.subprocess.Popen
+    original_version = module.metadata.version
+    try:
+        module.subprocess.Popen = FakeProcess
+        module.metadata.version = lambda name: {
+            "vina": "1.2.5",
+            "meeko": "0.7.1",
+        }[name]
+        assert module.main(
+            [
+                "--request",
+                "/workspace/input/request.json",
+                "--output",
+                "/workspace/output",
+            ]
+        ) == 0
+    finally:
+        module.subprocess.Popen = original_popen
+        module.metadata.version = original_version
+    return json.loads((output_root / "result.json").read_text(encoding="ascii"))
 
 
 class FaultSandboxClient(FakeSandboxClient):
@@ -511,8 +582,8 @@ def test_single_pose_artifact_can_register_multiple_vina_modes(tmp_path: Path) -
     assert pose == MULTI_MODE_POSE.encode("utf-8")
 
 
-@pytest.mark.parametrize("receptor_suffix", [".pdb", ".pdbqt"])
-@pytest.mark.parametrize("ligand_suffix", [".sdf", ".mol", ".pdb", ".pdbqt"])
+@pytest.mark.parametrize("receptor_suffix", [".pdb"])
+@pytest.mark.parametrize("ligand_suffix", [".sdf", ".mol"])
 def test_every_accepted_suffix_combination_reaches_the_production_adapter_and_run(
     tmp_path: Path,
     receptor_suffix: str,
@@ -549,6 +620,13 @@ def test_every_accepted_suffix_combination_reaches_the_production_adapter_and_ru
         f"/workspace/input/ligand{ligand_suffix}",
         "/workspace/input/request.json",
     ]
+    assert request["parameters"] == DockingParameters(
+        center=[1, 2, 3], size=[20, 20, 20]
+    ).model_dump(mode="json")
+    wrapper_result = _run_uploaded_request_through_wrapper(tmp_path, sdk.uploads)
+    assert wrapper_result["status"] == "succeeded"
+    assert wrapper_result["vina_version"] == "1.2.5"
+    assert wrapper_result["meeko_version"] == "0.7.1"
 
 
 def test_invalid_scientific_output_fails_without_manifest(tmp_path: Path) -> None:

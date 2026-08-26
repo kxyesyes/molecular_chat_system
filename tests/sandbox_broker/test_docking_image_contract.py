@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -16,6 +17,7 @@ from typing import Callable
 import pytest
 
 from src.sandbox_broker.validation import validate_scientific_output
+from src.sandbox_broker.models import DockingParameters
 
 
 ROOT = Path(__file__).parents[2]
@@ -50,6 +52,15 @@ TARGET_PACKAGES = {
     "numpy",
     "openbabel",
 }
+TARGET_PACKAGE_PINS = {
+    "python": "3.10.14=hd12c33a_0_cpython",
+    "vina": "1.2.5=py310hb68b39e_3",
+    "meeko": "0.7.1=pyhd8ed1ab_1",
+    "rdkit": "2023.09.6=py310hb79e901_1",
+    "prody": "2.4.1=pyh5e1b82b_2",
+    "numpy": "1.26.4=py310hb13e2d6_0",
+    "openbabel": "3.1.1=py310hbff9852_9",
+}
 MINIMAL_ENV_KEYS = {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"}
 
 
@@ -66,16 +77,26 @@ def _sha(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _request(receptor: bytes = b"RECEPTOR\n", ligand: bytes = b"LIGAND\n") -> dict[str, object]:
+def _parameters(**updates: object) -> DockingParameters:
+    values: dict[str, object] = {
+        "center": [1.0, 2.0, 3.0],
+        "size": [20.0, 21.0, 22.0],
+        "exhaustiveness": 8,
+        "num_modes": 2,
+    }
+    values.update(updates)
+    return DockingParameters(**values)
+
+
+def _request(
+    receptor: bytes = b"RECEPTOR\n",
+    ligand: bytes = b"LIGAND\n",
+    *,
+    parameters: DockingParameters | None = None,
+) -> dict[str, object]:
     return {
         "schema_version": 1,
-        "parameters": {
-            "center": [1.0, 2.0, 3.0],
-            "size": [20.0, 21.0, 22.0],
-            "exhaustiveness": 8,
-            "num_modes": 2,
-            "energy_range": 3,
-        },
+        "parameters": (parameters or _parameters()).model_dump(mode="json"),
         "receptor_path": "/workspace/input/receptor.pdb",
         "ligand_path": "/workspace/input/ligand.sdf",
         "receptor_sha256": _sha(receptor),
@@ -133,29 +154,58 @@ def _fake_tools(
     ),
     fail_tool: str | None = None,
     timeout_tool: str | None = None,
+    unexpected_nested_tool: str | None = None,
 ) -> None:
-    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
-        copied = list(argv)
-        calls.append((copied, dict(kwargs)))
-        tool = copied[0]
-        if tool == timeout_tool:
-            raise subprocess.TimeoutExpired(copied, kwargs["timeout"])
-        if tool == fail_tool:
-            return SimpleNamespace(returncode=9)
-        if tool == "mk_prepare_receptor.py":
-            Path(copied[4]).write_bytes(b"RECEPTOR PDBQT\n")
-        elif tool == "mk_prepare_ligand.py":
-            Path(copied[4]).write_bytes(b"LIGAND PDBQT\n")
-        elif tool == "vina":
-            Path(copied[-1]).write_bytes(pose)
-        else:  # pragma: no cover - a contract regression should show the argv
-            raise AssertionError(copied)
-        return SimpleNamespace(returncode=0)
+    class FakeProcess:
+        next_pid = 20000
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+        def __init__(self, argv: list[str], **kwargs: object) -> None:
+            self.argv = list(argv)
+            self.kwargs = dict(kwargs)
+            self.pid = FakeProcess.next_pid
+            FakeProcess.next_pid += 1
+            self.returncode: int | None = None
+            self.terminated = False
+            self.killed = False
+            calls.append((self.argv, self.kwargs))
+            tool = self.argv[0]
+            if tool == "mk_prepare_receptor.py":
+                Path(self.argv[4]).write_bytes(b"RECEPTOR PDBQT\n")
+            elif tool == "mk_prepare_ligand.py":
+                Path(self.argv[4]).write_bytes(b"LIGAND PDBQT\n")
+            elif tool == "vina":
+                Path(self.argv[-1]).write_bytes(pose)
+            else:  # pragma: no cover - a contract regression should show the argv
+                raise AssertionError(self.argv)
+            if tool == unexpected_nested_tool:
+                parent = Path(self.argv[-1]).parent
+                nested = parent / "unexpected" / "nested"
+                nested.mkdir(parents=True)
+                (nested / "probe.txt").write_bytes(b"unexpected")
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.kwargs["wait_timeout"] = timeout
+            if self.argv[0] == timeout_tool and not (self.terminated or self.killed):
+                raise subprocess.TimeoutExpired(self.argv, timeout)
+            if self.returncode is None:
+                self.returncode = 9 if self.argv[0] == fail_tool else 0
+            return self.returncode
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = -int(signal.SIGTERM)
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -int(signal.SIGKILL)
+
+    monkeypatch.setattr(module.subprocess, "Popen", FakeProcess)
 
     def fake_version(distribution: str) -> str:
-        return {"vina": "1.2.7", "meeko": "0.7.1"}[distribution]
+        return {"vina": "1.2.5", "meeko": "0.7.1"}[distribution]
 
     monkeypatch.setattr(module.metadata, "version", fake_version)
 
@@ -165,10 +215,11 @@ def _run_valid(
     monkeypatch: pytest.MonkeyPatch,
     *,
     pose: bytes | None = None,
+    parameters: DockingParameters | None = None,
 ) -> tuple[ModuleType, Path, list[tuple[list[str], dict[str, object]]], int]:
     module = _load_runner()
     input_root, output_root = _configure_roots(module, monkeypatch, tmp_path)
-    _write_inputs(input_root, _request())
+    _write_inputs(input_root, _request(parameters=parameters))
     calls: list[tuple[list[str], dict[str, object]]] = []
     options = {} if pose is None else {"pose": pose}
     _fake_tools(monkeypatch, module, calls, **options)
@@ -184,6 +235,7 @@ def _run_failure(
     pose: bytes | None = None,
     fail_tool: str | None = None,
     timeout_tool: str | None = None,
+    unexpected_nested_tool: str | None = None,
     mutate: Callable[[Path], None] | None = None,
 ) -> tuple[int, dict[str, object], Path, list[tuple[list[str], dict[str, object]]]]:
     module = _load_runner()
@@ -199,6 +251,7 @@ def _run_failure(
         **({} if pose is None else {"pose": pose}),
         fail_tool=fail_tool,
         timeout_tool=timeout_tool,
+        unexpected_nested_tool=unexpected_nested_tool,
     )
     exit_code = module.main(REQUEST_ARGUMENTS)
     return exit_code, _result(output_root), output_root, calls
@@ -216,11 +269,11 @@ def test_dockerfile_is_exact_non_root_and_has_narrow_copy_scope() -> None:
     assert lines[0] == "FROM mambaorg/micromamba:2.3.2"
     assert (
         "COPY --chown=$MAMBA_USER:$MAMBA_USER "
-        "deployment/opensandbox/environment-lock.yml /tmp/environment-lock.yml"
+        "deployment/opensandbox/environment-lock.yml /tmp/environment-exact.yml"
     ) in lines
     assert "RUN micromamba config set channel_priority strict" in lines
     assert (
-        "RUN micromamba install -y -n base -f /tmp/environment-lock.yml "
+        "RUN micromamba install -y -n base -f /tmp/environment-exact.yml "
         "&& micromamba clean --all --yes"
     ) in lines
     assert "USER root" in lines
@@ -268,6 +321,60 @@ def test_lock_is_explicit_linux64_strict_and_fully_build_pinned() -> None:
     assert all(re.fullmatch(r"[a-z0-9_.+-]+=[^=\s*]+=[^=\s*]+", item) for item in dependencies)
     names = {item.split("=", 1)[0] for item in dependencies}
     assert TARGET_PACKAGES <= names
+    resolved = {
+        item.split("=", 1)[0]: item.split("=", 1)[1] for item in dependencies
+    }
+    assert {name: resolved[name] for name in TARGET_PACKAGE_PINS} == TARGET_PACKAGE_PINS
+
+
+@pytest.mark.skipif(
+    not os.environ.get("MICROMAMBA_EXE"),
+    reason="set MICROMAMBA_EXE to opt in to the real 2.3.2 consumption test",
+)
+def test_lock_is_consumed_by_opt_in_micromamba_232(tmp_path: Path) -> None:
+    binary = Path(os.environ["MICROMAMBA_EXE"])
+    exact_file = tmp_path / "environment-exact.yml"
+    exact_file.write_bytes(LOCK.read_bytes())
+    version = subprocess.run(
+        [str(binary), "--version"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert version.stdout.strip() == "2.3.2"
+    environment = {
+        "MAMBA_ROOT_PREFIX": str(tmp_path / "root"),
+        "MAMBA_NO_RC": "true",
+        "PATH": os.environ.get("PATH", ""),
+        "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
+        "HOME": str(tmp_path),
+        "USERPROFILE": str(tmp_path),
+        "TEMP": str(tmp_path),
+        "TMP": str(tmp_path),
+    }
+    consumed = subprocess.run(
+        [
+            str(binary),
+            "install",
+            "--dry-run",
+            "-y",
+            "-n",
+            "base",
+            "-f",
+            str(exact_file),
+            "--platform",
+            "linux-64",
+            "--strict-channel-priority",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env=environment,
+    )
+    assert consumed.returncode == 0, consumed.stderr[-2000:]
+    assert "Dry run" in consumed.stdout
 
 
 def test_wrapper_ast_forbids_dynamic_execution_and_uses_safe_subprocess() -> None:
@@ -278,20 +385,25 @@ def test_wrapper_ast_forbids_dynamic_execution_and_uses_safe_subprocess() -> Non
     assert not any(isinstance(node.func, ast.Name) and node.func.id in forbidden_names for node in calls)
     assert not any(
         isinstance(node.func, ast.Attribute)
-        and node.func.attr in {"system", "popen", "Popen"}
+        and node.func.attr in {"system", "popen"}
         for node in calls
     )
-    run_calls = [
+    popen_calls = [
         node
         for node in calls
-        if isinstance(node.func, ast.Attribute) and node.func.attr == "run"
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "Popen"
     ]
-    assert run_calls
-    assert all(node.args and not isinstance(node.args[0], ast.Constant) for node in run_calls)
+    assert popen_calls
+    assert all(node.args and not isinstance(node.args[0], ast.Constant) for node in popen_calls)
     assert all(
         any(keyword.arg == "shell" and isinstance(keyword.value, ast.Constant) and keyword.value.value is False
             for keyword in node.keywords)
-        for node in run_calls
+        for node in popen_calls
+    )
+    assert all(
+        any(keyword.arg == "start_new_session" and isinstance(keyword.value, ast.Constant) and keyword.value.value is True
+            for keyword in node.keywords)
+        for node in popen_calls
     )
     assert 'Path("/workspace/input")' in source
     assert 'Path("/workspace/output")' in source
@@ -314,7 +426,7 @@ def test_valid_fake_tools_execute_exact_sequence_and_emit_validator_schema(
         "pose_count": 2,
         "best_energy": -8.2,
         "pose_files": ["poses/result.pdbqt"],
-        "vina_version": "1.2.7",
+        "vina_version": "1.2.5",
         "meeko_version": "0.7.1",
         "warnings": [],
     }
@@ -370,11 +482,39 @@ def test_valid_fake_tools_execute_exact_sequence_and_emit_validator_schema(
         "--num_modes",
         "2",
         "--energy_range",
-        "3",
+        "3.0",
         "--out",
         str(output_root / "poses" / "result.pdbqt"),
     ]
     assert not (output_root / ".work").exists()
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        _parameters(),
+        _parameters(
+            center=[1.0e300, -1.0e300, 0.0],
+            size=[80.0, 0.1, 1.0],
+            exhaustiveness=64,
+            num_modes=20,
+            energy_range=20,
+        ),
+        _parameters(energy_range=0),
+    ],
+    ids=["defaults", "upper_bounds_and_unbounded_center", "zero_energy_range"],
+)
+def test_wrapper_accepts_real_docking_parameter_payloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parameters: DockingParameters,
+) -> None:
+    _, _, calls, exit_code = _run_valid(
+        tmp_path, monkeypatch, parameters=parameters
+    )
+    assert exit_code == 0
+    vina = calls[-1][0]
+    assert vina[vina.index("--energy_range") + 1] == str(parameters.energy_range)
 
 
 def test_subprocess_has_cumulative_deadline_silent_streams_and_secret_free_env(
@@ -384,7 +524,7 @@ def test_subprocess_has_cumulative_deadline_silent_streams_and_secret_free_env(
     monkeypatch.setenv("MEDCHAT_PRIVATE_TOKEN", "token-secret-value")
     _, _, calls, exit_code = _run_valid(tmp_path, monkeypatch)
     assert exit_code == 0
-    timeouts = [float(kwargs["timeout"]) for _, kwargs in calls]
+    timeouts = [float(kwargs["wait_timeout"]) for _, kwargs in calls]
     assert all(0 < value <= 180 for value in timeouts)
     assert timeouts == sorted(timeouts, reverse=True)
     for _, kwargs in calls:
@@ -392,6 +532,7 @@ def test_subprocess_has_cumulative_deadline_silent_streams_and_secret_free_env(
         assert kwargs["stdin"] is subprocess.DEVNULL
         assert kwargs["stdout"] is subprocess.DEVNULL
         assert kwargs["stderr"] is subprocess.DEVNULL
+        assert kwargs["start_new_session"] is True
         env = kwargs["env"]
         assert isinstance(env, dict)
         assert set(env) == MINIMAL_ENV_KEYS
@@ -437,9 +578,17 @@ def test_invalid_json_is_rejected_with_stable_sanitized_failure(
         lambda data: data.__setitem__("schema_version", True),
         lambda data: data["parameters"].__setitem__("extra", 1),  # type: ignore[union-attr]
         lambda data: data["parameters"].__setitem__("exhaustiveness", True),  # type: ignore[union-attr]
-        lambda data: data["parameters"].__setitem__("center", [0.0, 1_000_001.0, 0.0]),  # type: ignore[union-attr]
+        lambda data: data["parameters"].__setitem__("size", [80.1, 1.0, 1.0]),  # type: ignore[union-attr]
+        lambda data: data["parameters"].__setitem__("center", [0.0, True, 0.0]),  # type: ignore[union-attr]
+        lambda data: data["parameters"].__setitem__("exhaustiveness", 65),  # type: ignore[union-attr]
+        lambda data: data["parameters"].__setitem__("num_modes", 21),  # type: ignore[union-attr]
+        lambda data: data["parameters"].__setitem__("energy_range", 20.1),  # type: ignore[union-attr]
+        lambda data: data["parameters"].__setitem__("energy_range", True),  # type: ignore[union-attr]
         lambda data: data.__setitem__("receptor_path", "/workspace/input/../receptor.pdb"),
         lambda data: data.__setitem__("ligand_path", "/workspace/input/ligand.xyz"),
+        lambda data: data.__setitem__("receptor_path", "/workspace/input/receptor.pdbqt"),
+        lambda data: data.__setitem__("ligand_path", "/workspace/input/ligand.pdb"),
+        lambda data: data.__setitem__("ligand_path", "/workspace/input/ligand.pdbqt"),
         lambda data: data.__setitem__("receptor_sha256", "A" * 64),
         lambda data: data.__setitem__("ligand_sha256", "0" * 64),
     ],
@@ -448,9 +597,17 @@ def test_invalid_json_is_rejected_with_stable_sanitized_failure(
         "bool_schema",
         "parameter_extra",
         "bool_integer",
-        "out_of_range_vector",
+        "oversized_box",
+        "bool_center",
+        "exhaustiveness_upper_bound",
+        "num_modes_upper_bound",
+        "energy_upper_bound",
+        "bool_energy",
         "traversal",
         "suffix",
+        "unsupported_receptor_pdbqt",
+        "unsupported_ligand_pdb",
+        "unsupported_ligand_pdbqt",
         "uppercase_hash",
         "hash_mismatch",
     ],
@@ -490,6 +647,34 @@ def test_symlinked_input_is_rejected_without_reading_target(
     assert result["error_code"] == "invalid_input"
     assert calls == []
     assert "outside-secret" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    ("role", "suffix"),
+    [("receptor", ".pdbqt"), ("ligand", ".pdb"), ("ligand", ".pdbqt")],
+)
+def test_wrapper_rejects_existing_but_meeko_unsupported_input_suffixes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+    suffix: str,
+) -> None:
+    payload = _request()
+    payload[f"{role}_path"] = f"/workspace/input/{role}{suffix}"
+
+    def rename_input(input_root: Path) -> None:
+        original = input_root / ("receptor.pdb" if role == "receptor" else "ligand.sdf")
+        original.rename(input_root / f"{role}{suffix}")
+
+    exit_code, result, _, calls = _run_failure(
+        tmp_path,
+        monkeypatch,
+        payload=payload,
+        mutate=rename_input,
+    )
+    assert exit_code != 0
+    assert result["error_code"] == "invalid_input"
+    assert calls == []
 
 
 def test_input_hash_drift_between_validation_and_execution_fails_closed(
@@ -541,6 +726,44 @@ def test_absolute_deadline_includes_input_validation_time(
     assert result["phase"] == "receptor_preparation"
     assert result["error_code"] == "tool_timeout"
     assert calls == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux process-group contract")
+def test_timeout_terminates_and_reaps_real_child_and_grandchild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_runner()
+    _, output_root = _configure_roots(module, monkeypatch, tmp_path)
+    pid_file = tmp_path / "process-tree-pids.json"
+    child_code = (
+        "import json,os,subprocess,sys,time;"
+        "g=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);"
+        "open(sys.argv[1],'w').write(json.dumps([os.getpid(),g.pid]));"
+        "time.sleep(30)"
+    )
+    deadline = time.monotonic() + 0.5
+    with pytest.raises(module.DockingFailure) as raised:
+        module._run_tool(
+            [sys.executable, "-c", child_code, str(pid_file)],
+            "docking",
+            deadline,
+        )
+    assert raised.value.error_code == "tool_timeout"
+    pids = json.loads(pid_file.read_text(encoding="utf-8"))
+
+    def process_is_gone(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        status = Path(f"/proc/{pid}/stat")
+        return status.is_file() and status.read_text().split()[2] == "Z"
+
+    stop = time.monotonic() + 1.0
+    while time.monotonic() < stop and not all(process_is_gone(pid) for pid in pids):
+        time.sleep(0.02)
+    assert all(process_is_gone(pid) for pid in pids)
+    assert output_root.is_dir()
 
 
 @pytest.mark.parametrize(
@@ -627,7 +850,71 @@ def test_oversized_pose_is_rejected_and_removed(
     assert not (output_root / "poses" / "result.pdbqt").exists()
 
 
-def test_result_publish_is_atomic_mode_0600_and_preserves_unrelated_file(
+def test_unsorted_pose_energies_are_rejected_without_scientific_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pose = (
+        b"REMARK VINA RESULT: -6.0 0.0 0.0\n"
+        b"REMARK VINA RESULT: -7.0 0.0 0.0\n"
+    )
+    exit_code, result, output_root, _ = _run_failure(
+        tmp_path, monkeypatch, pose=pose
+    )
+    assert exit_code != 0
+    assert result["phase"] == "output_validation"
+    assert result["error_code"] == "invalid_output"
+    assert "best_energy" not in result and "pose_count" not in result
+    assert not (output_root / "poses").exists()
+
+
+@pytest.mark.parametrize(
+    "tool", ["mk_prepare_receptor.py", "mk_prepare_ligand.py", "vina"]
+)
+def test_unexpected_nested_tool_artifacts_fail_and_are_fully_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str
+) -> None:
+    exit_code, result, output_root, _ = _run_failure(
+        tmp_path,
+        monkeypatch,
+        unexpected_nested_tool=tool,
+    )
+    assert exit_code != 0
+    assert result["status"] == "failed"
+    assert result["phase"] == "output_validation"
+    assert result["error_code"] == "invalid_output"
+    assert "best_energy" not in result and "pose_count" not in result
+    assert not (output_root / ".work").exists()
+    assert not (output_root / "poses").exists()
+
+
+def test_cleanup_failure_is_stable_non_scientific_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_runner()
+    input_root, output_root = _configure_roots(module, monkeypatch, tmp_path)
+    _write_inputs(input_root, _request())
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    _fake_tools(monkeypatch, module, calls)
+    original_cleanup = module._clean_created_directory
+
+    def fail_work_cleanup(path: Path, identity: object) -> bool:
+        if path.name == ".work":
+            return False
+        return bool(original_cleanup(path, identity))
+
+    monkeypatch.setattr(module, "_clean_created_directory", fail_work_cleanup)
+    assert module.main(REQUEST_ARGUMENTS) != 0
+    result = _result(output_root)
+    assert result == {
+        "schema_version": 1,
+        "status": "failed",
+        "phase": "cleanup",
+        "error_code": "cleanup_failed",
+        "warnings": [],
+    }
+
+
+def test_result_publish_is_no_replace_atomic_mode_0600_and_preserves_unrelated_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = _load_runner()
@@ -637,23 +924,58 @@ def test_result_publish_is_atomic_mode_0600_and_preserves_unrelated_file(
     _write_inputs(input_root, _request())
     calls: list[tuple[list[str], dict[str, object]]] = []
     _fake_tools(monkeypatch, module, calls)
-    replaces: list[tuple[Path, Path]] = []
-    original_replace = module.os.replace
+    links: list[tuple[object, object, dict[str, object]]] = []
+    original_link = module.os.link
 
-    def recording_replace(source: object, destination: object) -> None:
-        source_path = Path(source)
+    def recording_link(
+        source: object, destination: object, **kwargs: object
+    ) -> None:
+        source_path = (
+            output_root / str(source)
+            if kwargs.get("src_dir_fd") is not None
+            else Path(source)
+        )
         if os.name == "posix":
             assert stat.S_IMODE(source_path.stat().st_mode) == 0o600
-        replaces.append((source_path, Path(destination)))
-        original_replace(source, destination)
+        links.append((source, destination, dict(kwargs)))
+        original_link(source, destination, **kwargs)
 
-    monkeypatch.setattr(module.os, "replace", recording_replace)
+    monkeypatch.setattr(module.os, "link", recording_link)
     assert module.main(REQUEST_ARGUMENTS) == 0
-    assert replaces and replaces[-1][1] == output_root / "result.json"
+    assert links
+    assert str(links[-1][1]).endswith("result.json")
     assert unrelated.read_text(encoding="utf-8") == "owner-data"
     assert not list(output_root.glob(".result.*.tmp"))
     if os.name == "posix":
         assert stat.S_IMODE((output_root / "result.json").stat().st_mode) == 0o600
+
+
+def test_result_publish_race_preserves_competing_sentinel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_runner()
+    input_root, output_root = _configure_roots(module, monkeypatch, tmp_path)
+    _write_inputs(input_root, _request())
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    _fake_tools(monkeypatch, module, calls)
+    sentinel = b"competing-owner-result"
+
+    def competing_link(
+        source: object, destination: object, **kwargs: object
+    ) -> None:
+        del source
+        final = (
+            output_root / str(destination)
+            if kwargs.get("dst_dir_fd") is not None
+            else Path(destination)
+        )
+        final.write_bytes(sentinel)
+        raise FileExistsError
+
+    monkeypatch.setattr(module.os, "link", competing_link)
+    assert module.main(REQUEST_ARGUMENTS) != 0
+    assert (output_root / "result.json").read_bytes() == sentinel
+    assert not list(output_root.glob(".result.*.tmp"))
 
 
 def test_existing_result_is_never_overwritten(

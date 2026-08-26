@@ -96,14 +96,14 @@ def test_stage_input_streams_one_mib_chunks_hashes_and_ignores_client_path(
         state_root,
         job_id,
         "receptor",
-        ".pdbqt",
+        ".pdb",
         source,
         len(content),
-        client_filename="../../host-secret.pdbqt",
+        client_filename="../../host-secret.pdb",
     )
 
     assert source.requests == [1024 * 1024, 1024 * 1024, 1024 * 1024]
-    assert staged.relative_path == f"jobs/{job_id}/input/receptor.pdbqt"
+    assert staged.relative_path == f"jobs/{job_id}/input/receptor.pdb"
     assert staged.size_bytes == len(content)
     assert staged.sha256 == hashlib.sha256(content).hexdigest()
     assert (state_root / Path(*staged.relative_path.split("/"))).read_bytes() == content
@@ -115,7 +115,10 @@ def test_stage_input_streams_one_mib_chunks_hashes_and_ignores_client_path(
     ("role", "suffix"),
     [
         ("receptor", ".sdf"),
+        ("receptor", ".pdbqt"),
         ("ligand", ".txt"),
+        ("ligand", ".pdb"),
+        ("ligand", ".pdbqt"),
         ("RECEPTOR", ".pdb"),
         ("ligand", ".PDBQT"),
         (True, ".pdb"),
@@ -137,6 +140,26 @@ def test_stage_input_requires_uuid_hex(tmp_path: Path, job_id: object) -> None:
     state_root.mkdir()
     with pytest.raises(InputStagingError):
         stage_input(state_root, job_id, "ligand", ".sdf", io.BytesIO(b"x"), 10)
+
+
+@pytest.mark.parametrize(
+    ("role", "suffix"),
+    [("receptor", ".pdb"), ("ligand", ".sdf"), ("ligand", ".mol")],
+)
+def test_stage_input_accepts_only_meeko_supported_suffixes(
+    tmp_path: Path, role: str, suffix: str
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    staged = stage_input(
+        state_root,
+        "1" * 32,
+        role,
+        suffix,
+        io.BytesIO(b"content"),
+        10,
+    )
+    assert staged.relative_path.endswith(f"/{role}{suffix}")
 
 
 @pytest.mark.parametrize("limit", [True, "1", -1, 0])
@@ -680,6 +703,21 @@ def test_scientific_output_requires_first_mode_to_be_best(tmp_path: Path) -> Non
     )
     output = build_valid_output(tmp_path, pose=pose)
     rewrite_result(output, {"pose_count": 2, "best_energy": -8.0})
+
+    with pytest.raises(ScientificOutputError):
+        validate_scientific_output(output, SHA_A, SHA_B, 1024)
+
+
+def test_scientific_output_requires_non_decreasing_mode_energies(
+    tmp_path: Path,
+) -> None:
+    pose = (
+        b"REMARK VINA RESULT: -8.0 0.0 0.0\n"
+        b"REMARK VINA RESULT: -6.0 1.0 1.5\n"
+        b"REMARK VINA RESULT: -7.0 2.0 2.5\n"
+    )
+    output = build_valid_output(tmp_path, pose=pose)
+    rewrite_result(output, {"pose_count": 3, "best_energy": -8.0})
 
     with pytest.raises(ScientificOutputError):
         validate_scientific_output(output, SHA_A, SHA_B, 1024)

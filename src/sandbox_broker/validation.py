@@ -58,8 +58,8 @@ _EXPECTED_RESULT_FIELDS = frozenset(
     }
 )
 _ALLOWED_SUFFIXES = {
-    "receptor": frozenset({".pdb", ".pdbqt"}),
-    "ligand": frozenset({".sdf", ".mol", ".pdb", ".pdbqt"}),
+    "receptor": frozenset({".pdb"}),
+    "ligand": frozenset({".sdf", ".mol"}),
 }
 
 
@@ -692,8 +692,12 @@ def _validate_scientific_output(
             raise ValueError
         all_energies.extend(energies)
         pose_names.append(name)
-    if len(all_energies) != pose_count or not math.isclose(
-        min(all_energies), best_energy, rel_tol=0.0, abs_tol=1e-6
+    if (
+        len(all_energies) != pose_count
+        or all_energies != sorted(all_energies)
+        or not math.isclose(
+            min(all_energies), best_energy, rel_tol=0.0, abs_tol=1e-6
+        )
     ):
         raise ValueError
 

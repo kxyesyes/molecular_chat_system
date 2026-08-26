@@ -379,7 +379,10 @@ def test_submit_uploads_reuses_exact_request_and_conflicts_on_change(
         ("receptor", "target..pdb"),
         ("receptor", "target.pdb\x00"),
         ("receptor", ".pdb"),
+        ("receptor", "target.pdbqt"),
         ("ligand", "compound.xyz"),
+        ("ligand", "compound.pdb"),
+        ("ligand", "compound.pdbqt"),
         ("ligand", "compound.sdf.zip"),
     ],
 )
@@ -1155,9 +1158,9 @@ def test_full_stack_chunked_upload_without_length_stays_413_and_skips_service(
             b"--" + boundary + b"\r\n",
             (
                 b'Content-Disposition: form-data; name="receptor"; '
-                b'filename="receptor.pdbqt"\r\n'
+                b'filename="receptor.pdb"\r\n'
             ),
-            b"Content-Type: chemical/x-pdbqt\r\n\r\n",
+            b"Content-Type: chemical/x-pdb\r\n\r\n",
             b"R" * 256 + b"\r\n",
             b"--" + boundary + b"\r\n",
             (
@@ -1241,9 +1244,9 @@ def test_rolled_multipart_spool_is_explicitly_closed_after_full_stack_413(
             b"--" + boundary + b"\r\n",
             (
                 b'Content-Disposition: form-data; name="receptor"; '
-                b'filename="receptor.pdbqt"\r\n'
+                b'filename="receptor.pdb"\r\n'
             ),
-            b"Content-Type: chemical/x-pdbqt\r\n\r\n",
+            b"Content-Type: chemical/x-pdb\r\n\r\n",
             b"R" * 1024 + b"\r\n",
             b"--" + boundary + b"--\r\n",
         ]
@@ -1322,9 +1325,9 @@ def test_rolled_multipart_spool_closes_on_cancel_and_retains_traceback(
             b"--" + boundary + b"\r\n",
             (
                 b'Content-Disposition: form-data; name="receptor"; '
-                b'filename="receptor.pdbqt"\r\n'
+                b'filename="receptor.pdb"\r\n'
             ),
-            b"Content-Type: chemical/x-pdbqt\r\n\r\n",
+            b"Content-Type: chemical/x-pdb\r\n\r\n",
             b"R" * 512,
         ]
     )
@@ -1428,7 +1431,7 @@ def test_route_closes_every_upload_when_service_is_cancelled(
             b"--" + boundary + b"\r\n",
             (
                 b'Content-Disposition: form-data; name="receptor"; '
-                b'filename="receptor.pdbqt"\r\n\r\nRECEPTOR\r\n'
+                b'filename="receptor.pdb"\r\n\r\nRECEPTOR\r\n'
             ),
             b"--" + boundary + b"\r\n",
             (

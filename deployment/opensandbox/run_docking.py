@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -37,10 +38,13 @@ _MAX_POSE_BYTES = 16 * 1024 * 1024
 _MAX_POSE_LINE_BYTES = 4096
 _MAX_MODES = 256
 _DEADLINE_SECONDS = 180.0
+_PROCESS_STOP_GRACE_SECONDS = 0.1
+_MAX_CLEANUP_ENTRIES = 128
+_MAX_CLEANUP_DEPTH = 8
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_RECEPTOR_PATH = re.compile(r"^/workspace/input/receptor\.(pdb|pdbqt)$")
-_LIGAND_PATH = re.compile(r"^/workspace/input/ligand\.(sdf|mol|pdb|pdbqt)$")
+_RECEPTOR_PATH = re.compile(r"^/workspace/input/receptor\.pdb$")
+_LIGAND_PATH = re.compile(r"^/workspace/input/ligand\.(sdf|mol)$")
 _ASCII_FLOAT = rb"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
 _ENERGY_LINE = re.compile(
     rb"^REMARK VINA RESULT:[ \t]+("
@@ -85,7 +89,7 @@ class Request:
     size: tuple[float, float, float]
     exhaustiveness: int
     num_modes: int
-    energy_range: int
+    energy_range: float
 
 
 class DockingFailure(Exception):
@@ -196,7 +200,7 @@ def _reject_constant(_: str) -> NoReturn:
     raise ValueError
 
 
-def _number_vector(value: object, *, positive: bool) -> tuple[float, float, float]:
+def _number_vector(value: object, *, size: bool) -> tuple[float, float, float]:
     if type(value) is not list or len(value) != 3:
         raise ValueError
     converted: list[float] = []
@@ -204,9 +208,9 @@ def _number_vector(value: object, *, positive: bool) -> tuple[float, float, floa
         if type(item) not in {int, float}:
             raise ValueError
         number = float(item)
-        if not math.isfinite(number) or abs(number) > 1_000_000:
+        if not math.isfinite(number):
             raise ValueError
-        if positive and not 0 < number <= 1_000:
+        if size and not 0 < number <= 80:
             raise ValueError
         converted.append(number)
     return converted[0], converted[1], converted[2]
@@ -216,6 +220,15 @@ def _strict_integer(value: object, minimum: int, maximum: int) -> int:
     if type(value) is not int or not minimum <= value <= maximum:
         raise ValueError
     return value
+
+
+def _energy_range(value: object) -> float:
+    if type(value) not in {int, float}:
+        raise ValueError
+    converted = float(value)
+    if not math.isfinite(converted) or not 0 <= converted <= 20:
+        raise ValueError
+    return converted
 
 
 def _path_from_contract(value: object, pattern: re.Pattern[str], role: str) -> Path:
@@ -266,11 +279,11 @@ def _parse_request() -> Request:
         ligand=ligand,
         receptor_sha256=receptor_hash,
         ligand_sha256=ligand_hash,
-        center=_number_vector(parameters["center"], positive=False),
-        size=_number_vector(parameters["size"], positive=True),
-        exhaustiveness=_strict_integer(parameters["exhaustiveness"], 1, 128),
-        num_modes=_strict_integer(parameters["num_modes"], 1, _MAX_MODES),
-        energy_range=_strict_integer(parameters["energy_range"], 0, 100),
+        center=_number_vector(parameters["center"], size=False),
+        size=_number_vector(parameters["size"], size=True),
+        exhaustiveness=_strict_integer(parameters["exhaustiveness"], 1, 64),
+        num_modes=_strict_integer(parameters["num_modes"], 1, 20),
+        energy_range=_energy_range(parameters["energy_range"]),
     )
 
 
@@ -305,9 +318,64 @@ def _safe_unlink_in_created_directory(path: Path, parent: Path) -> None:
 
 def _clean_created_directory(
     path: Path, created_identity: tuple[int, int, int, int, int] | None
-) -> None:
+) -> bool:
     if created_identity is None:
-        return
+        return True
+    if path.parent != OUTPUT_ROOT or path.name not in {_WORK_NAME, _POSES_NAME}:
+        return False
+    budget = [_MAX_CLEANUP_ENTRIES]
+
+    def remove_path_tree(current: Path, depth: int) -> None:
+        if depth > _MAX_CLEANUP_DEPTH:
+            raise OSError
+        for child in current.iterdir():
+            budget[0] -= 1
+            if budget[0] < 0:
+                raise OSError
+            value = child.lstat()
+            if (
+                stat.S_ISDIR(value.st_mode)
+                and not stat.S_ISLNK(value.st_mode)
+                and not _is_reparse(value)
+            ):
+                remove_path_tree(child, depth + 1)
+                child.rmdir()
+            else:
+                child.unlink()
+
+    def remove_descriptor_tree(descriptor: int, depth: int) -> None:
+        if depth > _MAX_CLEANUP_DEPTH:
+            raise OSError
+        for name in os.listdir(descriptor):
+            budget[0] -= 1
+            if budget[0] < 0 or name in {"", ".", ".."}:
+                raise OSError
+            value = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if stat.S_ISDIR(value.st_mode) and not stat.S_ISLNK(value.st_mode):
+                child_descriptor = os.open(
+                    name,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=descriptor,
+                )
+                try:
+                    opened = os.fstat(child_descriptor)
+                    if (opened.st_dev, opened.st_ino) != (value.st_dev, value.st_ino):
+                        raise OSError
+                    remove_descriptor_tree(child_descriptor, depth + 1)
+                    named = os.stat(
+                        name, dir_fd=descriptor, follow_symlinks=False
+                    )
+                    if (named.st_dev, named.st_ino) != (value.st_dev, value.st_ino):
+                        raise OSError
+                finally:
+                    os.close(child_descriptor)
+                os.rmdir(name, dir_fd=descriptor)
+            else:
+                os.unlink(name, dir_fd=descriptor)
+
     try:
         current = path.lstat()
         if (
@@ -316,14 +384,95 @@ def _clean_created_directory(
             or _is_reparse(current)
             or _identity(current)[:2] != created_identity[:2]
         ):
-            return
-        for child in path.iterdir():
-            value = child.lstat()
-            if not stat.S_ISDIR(value.st_mode):
-                child.unlink()
-        path.rmdir()
+            return False
+        if os.name == "posix":
+            parent_identity = _check_private_directory(OUTPUT_ROOT)
+            parent_descriptor = os.open(
+                OUTPUT_ROOT,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+            try:
+                opened_parent = os.fstat(parent_descriptor)
+                if _identity(opened_parent) != parent_identity:
+                    raise OSError
+                named = os.stat(
+                    path.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if (named.st_dev, named.st_ino) != created_identity[:2]:
+                    raise OSError
+                directory_descriptor = os.open(
+                    path.name,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=parent_descriptor,
+                )
+                try:
+                    opened = os.fstat(directory_descriptor)
+                    if (opened.st_dev, opened.st_ino) != created_identity[:2]:
+                        raise OSError
+                    remove_descriptor_tree(directory_descriptor, 0)
+                finally:
+                    os.close(directory_descriptor)
+                final_named = os.stat(
+                    path.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if (final_named.st_dev, final_named.st_ino) != created_identity[:2]:
+                    raise OSError
+                os.rmdir(path.name, dir_fd=parent_descriptor)
+                os.fsync(parent_descriptor)
+            finally:
+                os.close(parent_descriptor)
+        else:
+            remove_path_tree(path, 0)
+            final_named = path.lstat()
+            if _identity(final_named)[:2] != created_identity[:2]:
+                raise OSError
+            path.rmdir()
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return True
+        return False
     except (FileNotFoundError, OSError, RuntimeError):
-        pass
+        return False
+
+
+def _require_exact_created_files(
+    path: Path,
+    created_identity: tuple[int, int, int, int, int],
+    expected_names: set[str],
+) -> None:
+    current = path.lstat()
+    if (
+        not stat.S_ISDIR(current.st_mode)
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or _identity(current)[:2] != created_identity[:2]
+        or (os.name == "posix" and stat.S_IMODE(current.st_mode) != 0o700)
+    ):
+        _fail("output_validation", "invalid_output")
+    entries = list(path.iterdir())
+    if {entry.name for entry in entries} != expected_names:
+        _fail("output_validation", "invalid_output")
+    for entry in entries:
+        value = entry.lstat()
+        if (
+            not stat.S_ISREG(value.st_mode)
+            or stat.S_ISLNK(value.st_mode)
+            or _is_reparse(value)
+            or value.st_nlink != 1
+            or (os.name == "posix" and stat.S_IMODE(value.st_mode) & 0o077)
+        ):
+            _fail("output_validation", "invalid_output")
 
 
 def _remaining(deadline: float, phase: str) -> float:
@@ -333,25 +482,71 @@ def _remaining(deadline: float, phase: str) -> float:
     return value
 
 
-def _run_tool(argv: list[str], phase: str, deadline: float) -> None:
+def _stop_process_tree(process: subprocess.Popen[bytes]) -> bool:
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=_PROCESS_STOP_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=_PROCESS_STOP_GRACE_SECONDS)
+            return True
+        except (OSError, subprocess.TimeoutExpired):
+            return False
     try:
-        completed = subprocess.run(
+        if process.poll() is not None:
+            process.wait(timeout=0)
+            return True
+        process.terminate()
+        try:
+            process.wait(timeout=_PROCESS_STOP_GRACE_SECONDS)
+            return True
+        except subprocess.TimeoutExpired:
+            pass
+        process.kill()
+        process.wait(timeout=_PROCESS_STOP_GRACE_SECONDS)
+        return True
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _run_tool(argv: list[str], phase: str, deadline: float) -> None:
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        remaining = _remaining(deadline, phase)
+        process = subprocess.Popen(
             argv,
             shell=False,
-            check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=_remaining(deadline, phase),
             env=dict(_MINIMAL_ENV),
             cwd=str(OUTPUT_ROOT),
             close_fds=True,
+            start_new_session=True,
         )
+        return_code = process.wait(timeout=min(remaining, _remaining(deadline, phase)))
     except subprocess.TimeoutExpired:
+        if process is None or not _stop_process_tree(process):
+            _fail("cleanup", "cleanup_failed")
         _fail(phase, "tool_timeout")
     except (OSError, ValueError):
+        if process is not None and not _stop_process_tree(process):
+            _fail("cleanup", "cleanup_failed")
         _fail(phase, "tool_failed")
-    if completed.returncode != 0:
+    except BaseException:
+        if process is not None and not _stop_process_tree(process):
+            _fail("cleanup", "cleanup_failed")
+        raise
+    if return_code != 0:
         _fail(phase, "tool_failed")
 
 
@@ -389,6 +584,8 @@ def _parse_pose(path: Path, maximum_modes: int) -> list[float]:
             raise ValueError
     if not energies:
         raise ValueError
+    if energies[0] != min(energies) or energies != sorted(energies):
+        raise ValueError
     return energies
 
 
@@ -425,7 +622,7 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _atomic_result(payload: dict[str, object]) -> None:
-    _check_private_directory(OUTPUT_ROOT)
+    root_identity = _check_private_directory(OUTPUT_ROOT)
     final = OUTPUT_ROOT / _RESULT_NAME
     _ensure_absent(final)
     content = json.dumps(
@@ -434,7 +631,8 @@ def _atomic_result(payload: dict[str, object]) -> None:
         ensure_ascii=True,
         separators=(",", ":"),
     ).encode("ascii")
-    temporary = OUTPUT_ROOT / f".result.{os.getpid()}.{time.monotonic_ns()}.tmp"
+    temporary_name = f".result.{os.getpid()}.{time.monotonic_ns()}.tmp"
+    temporary = OUTPUT_ROOT / temporary_name
     flags = (
         os.O_WRONLY
         | os.O_CREAT
@@ -444,16 +642,49 @@ def _atomic_result(payload: dict[str, object]) -> None:
         | getattr(os, "O_BINARY", 0)
     )
     descriptor: int | None = None
+    directory_descriptor: int | None = None
+    created_inode: tuple[int, int] | None = None
+    final_created = False
     published = False
     try:
-        descriptor = os.open(temporary, flags, 0o600)
+        if os.name == "posix":
+            directory_descriptor = os.open(
+                OUTPUT_ROOT,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+            opened_root = os.fstat(directory_descriptor)
+            if (
+                not stat.S_ISDIR(opened_root.st_mode)
+                or _identity(opened_root) != root_identity
+            ):
+                raise OSError
+            descriptor = os.open(
+                temporary_name,
+                flags,
+                0o600,
+                dir_fd=directory_descriptor,
+            )
+        else:
+            descriptor = os.open(temporary, flags, 0o600)
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
             raise OSError
+        created_inode = (opened.st_dev, opened.st_ino)
         _write_all(descriptor, content)
         os.fsync(descriptor)
         after = os.fstat(descriptor)
-        named = temporary.lstat()
+        named = (
+            os.stat(
+                temporary_name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            if directory_descriptor is not None
+            else temporary.lstat()
+        )
         if (
             after.st_nlink != 1
             or _identity(after) != _identity(named)
@@ -463,18 +694,112 @@ def _atomic_result(payload: dict[str, object]) -> None:
             raise OSError
         os.close(descriptor)
         descriptor = None
-        _ensure_absent(final)
-        os.replace(temporary, final)
+        if directory_descriptor is not None:
+            os.link(
+                temporary_name,
+                _RESULT_NAME,
+                src_dir_fd=directory_descriptor,
+                dst_dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            final_created = True
+            linked_source = os.stat(
+                temporary_name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            linked_final = os.stat(
+                _RESULT_NAME,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                linked_source.st_nlink != 2
+                or linked_final.st_nlink != 2
+                or _identity(linked_source) != _identity(linked_final)
+                or (linked_final.st_dev, linked_final.st_ino) != created_inode
+                or stat.S_IMODE(linked_final.st_mode) != 0o600
+            ):
+                raise OSError
+            os.unlink(temporary_name, dir_fd=directory_descriptor)
+            final_value = os.stat(
+                _RESULT_NAME,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                final_value.st_nlink != 1
+                or (final_value.st_dev, final_value.st_ino) != created_inode
+                or stat.S_IMODE(final_value.st_mode) != 0o600
+            ):
+                raise OSError
+            os.fsync(directory_descriptor)
+        else:
+            os.link(temporary, final, follow_symlinks=False)
+            final_created = True
+            linked_source = temporary.lstat()
+            linked_final = final.lstat()
+            if (
+                linked_source.st_nlink != 2
+                or linked_final.st_nlink != 2
+                or _identity(linked_source) != _identity(linked_final)
+                or (linked_final.st_dev, linked_final.st_ino) != created_inode
+                or _is_reparse(linked_final)
+            ):
+                raise OSError
+            temporary.unlink()
+            final_value = final.lstat()
+            if (
+                final_value.st_nlink != 1
+                or (final_value.st_dev, final_value.st_ino) != created_inode
+                or _is_reparse(final_value)
+            ):
+                raise OSError
         published = True
-        _fsync_directory(OUTPUT_ROOT)
     finally:
         if descriptor is not None:
             try:
                 os.close(descriptor)
             except OSError:
                 pass
+        if directory_descriptor is not None:
+            if not published and final_created and created_inode is not None:
+                try:
+                    current_final = os.stat(
+                        _RESULT_NAME,
+                        dir_fd=directory_descriptor,
+                        follow_symlinks=False,
+                    )
+                    if (current_final.st_dev, current_final.st_ino) == created_inode:
+                        os.unlink(_RESULT_NAME, dir_fd=directory_descriptor)
+                        os.fsync(directory_descriptor)
+                except (FileNotFoundError, OSError):
+                    pass
+            if not published and created_inode is not None:
+                try:
+                    current = os.stat(
+                        temporary_name,
+                        dir_fd=directory_descriptor,
+                        follow_symlinks=False,
+                    )
+                    if (current.st_dev, current.st_ino) == created_inode:
+                        os.unlink(temporary_name, dir_fd=directory_descriptor)
+                except (FileNotFoundError, OSError):
+                    pass
+            try:
+                os.close(directory_descriptor)
+            except OSError:
+                pass
         if not published:
-            _safe_unlink_in_created_directory(temporary, OUTPUT_ROOT)
+            if directory_descriptor is None:
+                if final_created and created_inode is not None:
+                    try:
+                        current_final = final.lstat()
+                        if (current_final.st_dev, current_final.st_ino) == created_inode:
+                            final.unlink()
+                    except (FileNotFoundError, OSError):
+                        pass
+                _safe_unlink_in_created_directory(temporary, OUTPUT_ROOT)
 
 
 def _failure_result(phase: str, error_code: str) -> dict[str, object]:
@@ -487,7 +812,9 @@ def _failure_result(phase: str, error_code: str) -> dict[str, object]:
     }
 
 
-def _execute(request: Request, deadline: float) -> tuple[dict[str, object], Path, Path]:
+def _execute(
+    request: Request, deadline: float
+) -> tuple[dict[str, object], Path, tuple[int, int, int, int, int]]:
     work = OUTPUT_ROOT / _WORK_NAME
     poses = OUTPUT_ROOT / _POSES_NAME
     _ensure_absent(work)
@@ -512,6 +839,7 @@ def _execute(request: Request, deadline: float) -> tuple[dict[str, object], Path
             deadline,
         )
         _validate_created_file(receptor_pdbqt, _MAX_INPUT_BYTES)
+        _require_exact_created_files(work, work_identity, {"receptor.pdbqt"})
         _verify_input_hash(request.ligand, request.ligand_sha256)
         _run_tool(
             [
@@ -525,6 +853,9 @@ def _execute(request: Request, deadline: float) -> tuple[dict[str, object], Path
             deadline,
         )
         _validate_created_file(ligand_pdbqt, _MAX_INPUT_BYTES)
+        _require_exact_created_files(
+            work, work_identity, {"receptor.pdbqt", "ligand.pdbqt"}
+        )
         _run_tool(
             [
                 "vina",
@@ -557,6 +888,12 @@ def _execute(request: Request, deadline: float) -> tuple[dict[str, object], Path
             deadline,
         )
         try:
+            _require_exact_created_files(
+                work, work_identity, {"receptor.pdbqt", "ligand.pdbqt"}
+            )
+            if poses_identity is None:
+                raise ValueError
+            _require_exact_created_files(poses, poses_identity, {"result.pdbqt"})
             energies = _parse_pose(pose_file, request.num_modes)
             result = {
                 "schema_version": 1,
@@ -572,13 +909,17 @@ def _execute(request: Request, deadline: float) -> tuple[dict[str, object], Path
             }
         except (OSError, ValueError, UnicodeError, metadata.PackageNotFoundError):
             _fail("output_validation", "invalid_output")
-        _clean_created_directory(work, work_identity)
+        if not _clean_created_directory(work, work_identity):
+            _fail("cleanup", "cleanup_failed")
         work_identity = None
-        return result, work, poses
-    except Exception:
-        _safe_unlink_in_created_directory(pose_file, poses)
-        _clean_created_directory(poses, poses_identity)
-        _clean_created_directory(work, work_identity)
+        if poses_identity is None:
+            _fail("cleanup", "cleanup_failed")
+        return result, poses, poses_identity
+    except BaseException:
+        poses_clean = _clean_created_directory(poses, poses_identity)
+        work_clean = _clean_created_directory(work, work_identity)
+        if not poses_clean or not work_clean:
+            raise DockingFailure("cleanup", "cleanup_failed") from None
         raise
 
 
@@ -588,8 +929,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(2)
     deadline = time.monotonic() + _DEADLINE_SECONDS
     old_umask = os.umask(0o077)
-    work: Path | None = None
     poses: Path | None = None
+    poses_identity: tuple[int, int, int, int, int] | None = None
     try:
         try:
             _check_private_directory(OUTPUT_ROOT)
@@ -598,8 +939,14 @@ def main(argv: list[str] | None = None) -> int:
                 request = _parse_request()
             except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
                 _fail("input_validation", "invalid_input")
-            result, work, poses = _execute(request, deadline)
-            _atomic_result(result)
+            result, poses, poses_identity = _execute(request, deadline)
+            try:
+                _atomic_result(result)
+            except BaseException:
+                if not _clean_created_directory(poses, poses_identity):
+                    raise DockingFailure("cleanup", "cleanup_failed") from None
+                poses_identity = None
+                raise
             return 0
         except DockingFailure as failure:
             try:
@@ -614,10 +961,6 @@ def main(argv: list[str] | None = None) -> int:
                 pass
             return 1
     finally:
-        if work is not None:
-            _clean_created_directory(work, None)
-        if poses is not None and not (poses / "result.pdbqt").exists():
-            _clean_created_directory(poses, None)
         os.umask(old_umask)
 
 
