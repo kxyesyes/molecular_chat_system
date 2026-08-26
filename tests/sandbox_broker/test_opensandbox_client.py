@@ -1363,6 +1363,7 @@ def test_slow_cancellable_cleanups_timeout_drain_and_leave_no_inflight(
     assert len(fake.cancelled) == cleanup_count
     assert fake.started.count("sandbox-slow-0") == 2
     assert client._cleanup_in_flight == {}
+    assert client._cleanup_quarantine == set()
 
 
 def test_cancelled_cleanup_caller_still_reaches_adapter_hard_timeout(
@@ -1405,7 +1406,7 @@ def test_cancelled_cleanup_caller_still_reaches_adapter_hard_timeout(
     assert client._cleanup_in_flight == {}
 
 
-def test_cancellation_resistant_cleanup_is_detached_and_exception_consumed(
+def test_cancellation_resistant_cleanup_is_quarantined_until_completion(
     tmp_path: Path,
 ) -> None:
     class ResistantCleanupFactory(FakeSandboxFactory):
@@ -1443,20 +1444,150 @@ def test_cancellation_resistant_cleanup_is_detached_and_exception_consumed(
                 await cleanup
             with pytest.raises(SandboxDestroyError, match="cleanup failed"):
                 await client.drain_cleanup()
-            await client.drain_cleanup()
+            with pytest.raises(SandboxDestroyError, match="cleanup failed"):
+                await client.drain_cleanup()
             assert client._cleanup_in_flight == {}
+            assert len(client._cleanup_quarantine) == 1
             assert fake.cancel_seen.is_set()
+        finally:
             fake.release.set()
             await asyncio.sleep(0)
             await asyncio.sleep(0)
-        finally:
             loop.set_exception_handler(previous_handler)
+        await client.drain_cleanup()
         return client, fake, loop_errors
 
     client, fake, loop_errors = asyncio.run(scenario())
     assert fake.cancel_seen.is_set()
     assert client._cleanup_in_flight == {}
+    assert client._cleanup_quarantine == set()
     assert loop_errors == []
+
+
+def test_cleanup_quarantine_caps_thirty_six_resistant_raw_id_and_metadata_calls(
+    tmp_path: Path,
+) -> None:
+    class ResistantCleanupFactory(FakeSandboxFactory):
+        def __init__(self) -> None:
+            super().__init__()
+            self.release = asyncio.Event()
+            self.started: list[tuple[str, str]] = []
+            self.cancelled: list[tuple[str, str]] = []
+
+        async def _resist(self, kind: str, identity: str) -> None:
+            operation = (kind, identity)
+            self.started.append(operation)
+            if self.release.is_set():
+                return
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancelled.append(operation)
+                await self.release.wait()
+            raise RuntimeError("private-marker /private/zombie")
+
+        async def destroy(self, raw: FakeRawSandbox) -> None:
+            await self._resist("raw", raw.id)
+
+        async def destroy_by_id(self, sandbox_id: str) -> None:
+            await self._resist("id", sandbox_id)
+
+        async def destroy_by_job_id(self, job_id: str) -> int:
+            await self._resist("metadata", job_id)
+            raise AssertionError("unreachable")
+
+    async def scenario() -> tuple[
+        OpenSandboxClient,
+        ResistantCleanupFactory,
+        list[object],
+        tuple[bool, bool],
+        int,
+        set[str],
+    ]:
+        fake = ResistantCleanupFactory()
+        client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+        client._cleanup_hard_timeout_seconds = 0.02
+        client._cleanup_drain_margin_seconds = 0.02
+        calls: list[asyncio.Task[object]] = []
+        for index in range(12):
+            calls.append(
+                asyncio.create_task(
+                    client.destroy(
+                        SandboxHandle(
+                            f"sandbox-raw-{index}",
+                            FakeRawSandbox(f"sandbox-raw-{index}"),
+                        )
+                    )
+                )
+            )
+            calls.append(
+                asyncio.create_task(
+                    client.destroy_by_id(f"sandbox-id-{index}")
+                )
+            )
+            calls.append(
+                asyncio.create_task(client.destroy_by_job_id(f"job-{index}"))
+            )
+
+        try:
+            results = await asyncio.gather(*calls, return_exceptions=True)
+            spawned_before_breaker_probe = len(fake.started)
+            try:
+                await client.destroy_by_id("sandbox-breaker-probe")
+            except SandboxDestroyError:
+                pass
+            else:
+                raise AssertionError("cleanup circuit breaker did not fail closed")
+            spawned_after_breaker_probe = len(fake.started)
+            drain_failures: list[bool] = []
+            for _ in range(2):
+                try:
+                    await client.drain_cleanup()
+                except SandboxDestroyError:
+                    drain_failures.append(True)
+                else:
+                    drain_failures.append(False)
+            quarantine_count = len(
+                getattr(client, "_cleanup_quarantine", set())
+            )
+            assert all(
+                isinstance(task, asyncio.Task)
+                for task in client._cleanup_quarantine
+            )
+            started_kinds = {kind for kind, _identity in fake.started}
+        finally:
+            fake.release.set()
+            for _ in range(10):
+                await asyncio.sleep(0)
+
+        await client.drain_cleanup()
+        await client.destroy_by_id("sandbox-recovery-probe")
+        await client.drain_cleanup()
+        assert spawned_before_breaker_probe == spawned_after_breaker_probe
+        return (
+            client,
+            fake,
+            results,
+            (drain_failures[0], drain_failures[1]),
+            quarantine_count,
+            started_kinds,
+        )
+
+    client, fake, results, drain_failures, quarantine_count, kinds = asyncio.run(
+        scenario()
+    )
+
+    assert all(isinstance(result, SandboxDestroyError) for result in results)
+    assert client._cleanup_quarantine_limit == 16
+    assert len(fake.started) == 17
+    assert fake.started[-1] == ("id", "sandbox-recovery-probe")
+    assert len(fake.cancelled) == 16
+    assert quarantine_count == 16
+    assert kinds == {"raw", "id", "metadata"}
+    assert drain_failures == (True, True)
+    assert client._cleanup_in_flight == {}
+    assert client._cleanup_quarantine == set()
+    assert client._cleanup_active_operations == set()
 
 
 def test_destroy_by_job_id_is_a_fixed_metadata_filtered_compensation(

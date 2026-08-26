@@ -1681,12 +1681,13 @@ def test_stop_sanitizes_internal_baseexception_without_context_or_cause(
     assert failure.__context__ is None
 
 
-def test_stop_drains_adapter_cleanup_and_reports_timeout_once(tmp_path: Path) -> None:
+def test_stop_stays_incomplete_until_adapter_quarantine_is_empty(tmp_path: Path) -> None:
     class SlowAdapterFactory(_UploadRecordingFactory):
         def __init__(self) -> None:
             super().__init__()
             self.started = asyncio.Event()
             self.cancelled = False
+            self.release = asyncio.Event()
 
         async def destroy_by_id(self, sandbox_id: str) -> None:
             del sandbox_id
@@ -1695,7 +1696,8 @@ def test_stop_drains_adapter_cleanup_and_reports_timeout_once(tmp_path: Path) ->
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
                 self.cancelled = True
-                raise
+                await self.release.wait()
+            raise RuntimeError("private-marker /private/zombie")
 
     async def scenario() -> tuple[OpenSandboxClient, SlowAdapterFactory, SandboxBrokerService]:
         config = _config(tmp_path)
@@ -1717,13 +1719,20 @@ def test_stop_drains_adapter_cleanup_and_reports_timeout_once(tmp_path: Path) ->
         with pytest.raises(SandboxDestroyError):
             await cleanup
         assert client._cleanup_in_flight == {}
+        assert len(client._cleanup_quarantine) == 1
         assert service._cleanup_tasks == {}
+        with pytest.raises(StopIncomplete, match="shutdown is incomplete"):
+            await service.stop(timeout=0.5)
+        factory.release.set()
+        for _ in range(10):
+            await asyncio.sleep(0)
         await service.stop(timeout=0.5)
         return client, factory, service
 
     client, factory, service = asyncio.run(scenario())
     assert factory.cancelled is True
     assert client._cleanup_in_flight == {}
+    assert client._cleanup_quarantine == set()
     assert service._cleanup_tasks == {}
 
 

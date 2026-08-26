@@ -39,6 +39,7 @@ _SDK_REQUEST_TIMEOUT_SECONDS = 20
 _SDK_READY_TIMEOUT_SECONDS = 30
 _CLEANUP_COMPLETED_LIMIT = 4096
 _CLEANUP_DRAIN_MARGIN_SECONDS = 1.0
+_CLEANUP_QUARANTINE_LIMIT = 16
 _RECONCILE_PAGE_SIZE = 100
 _ANSI_OSC_PATTERN = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _ANSI_CSI_PATTERN = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-_])")
@@ -683,9 +684,14 @@ class OpenSandboxClient:
         self._cleanup_completed_limit = _CLEANUP_COMPLETED_LIMIT
         self._cleanup_hard_timeout_seconds = float(_SDK_REQUEST_TIMEOUT_SECONDS)
         self._cleanup_drain_margin_seconds = _CLEANUP_DRAIN_MARGIN_SECONDS
+        self._cleanup_quarantine_limit = _CLEANUP_QUARANTINE_LIMIT
+        self._cleanup_active_operations: set[asyncio.Task[Any]] = set()
+        self._cleanup_quarantine: set[asyncio.Task[Any]] = set()
         self._cleanup_generation = 0
         self._cleanup_failure_generation = 0
         self._cleanup_reported_failure_generation = 0
+        self._cleanup_breaker_generation = 0
+        self._cleanup_breaker_resolved_generation = 0
         self._cleanup_lock = asyncio.Lock()
 
     def _handle(self, handle: object) -> SandboxHandle:
@@ -904,22 +910,34 @@ class OpenSandboxClient:
         )
 
     async def _perform_cleanup(self, cleanup: Any) -> Any:
-        operation = asyncio.create_task(cleanup())
-        operation.add_done_callback(self._consume_cleanup_task)
+        async with self._cleanup_lock:
+            breaker_open = (
+                self._cleanup_breaker_generation
+                != self._cleanup_breaker_resolved_generation
+            )
+            if (
+                breaker_open
+                or len(self._cleanup_active_operations)
+                >= self._cleanup_quarantine_limit
+            ):
+                if not breaker_open:
+                    self._cleanup_breaker_generation += 1
+                raise SandboxDestroyError("sandbox cleanup failed")
+            operation = asyncio.create_task(cleanup())
+            self._cleanup_generation += 1
+            self._cleanup_active_operations.add(operation)
+            operation.add_done_callback(self._cleanup_operation_finished)
         try:
             done, _ = await asyncio.wait(
                 {operation},
                 timeout=self._cleanup_hard_timeout_seconds,
             )
             if operation not in done:
-                operation.cancel()
-                # Deliver cancellation to normal SDK/httpx coroutines without
-                # waiting on cancellation-resistant third-party code.
-                await asyncio.sleep(0)
+                await self._cancel_or_quarantine_cleanup(operation)
                 raise SandboxDestroyError("sandbox cleanup failed")
             return operation.result()
         except asyncio.CancelledError:
-            operation.cancel()
+            await self._cancel_or_quarantine_cleanup(operation)
             raise
         except SandboxDependencyUnavailableError:
             raise SandboxDependencyUnavailableError(
@@ -931,11 +949,35 @@ class OpenSandboxClient:
             raise SandboxDestroyError("sandbox cleanup failed") from None
 
     @staticmethod
-    def _consume_cleanup_task(task: asyncio.Task[None]) -> None:
+    def _consume_cleanup_task(task: asyncio.Task[Any]) -> None:
         try:
             task.exception()
         except BaseException:
             pass
+
+    def _cleanup_operation_finished(self, task: asyncio.Task[Any]) -> None:
+        """Consume and forget one real SDK operation on its event-loop thread."""
+
+        self._consume_cleanup_task(task)
+        self._cleanup_quarantine.discard(task)
+        self._cleanup_active_operations.discard(task)
+        if not self._cleanup_active_operations:
+            self._cleanup_breaker_resolved_generation = (
+                self._cleanup_breaker_generation
+            )
+
+    async def _cancel_or_quarantine_cleanup(
+        self,
+        operation: asyncio.Task[Any],
+    ) -> None:
+        operation.cancel()
+        # Give cancellable SDK/httpx operations one turn to honor cancellation.
+        await asyncio.sleep(0)
+        if operation.done():
+            return
+        async with self._cleanup_lock:
+            if operation in self._cleanup_active_operations and not operation.done():
+                self._cleanup_quarantine.add(operation)
 
     async def _perform_tracked_cleanup(
         self,
@@ -1013,9 +1055,24 @@ class OpenSandboxClient:
         deadline = loop.time() + total_timeout
         while True:
             async with self._cleanup_lock:
-                snapshot = tuple(self._cleanup_in_flight.values())
+                snapshot = tuple(
+                    {
+                        *self._cleanup_in_flight.values(),
+                        *self._cleanup_active_operations,
+                        *self._cleanup_quarantine,
+                    }
+                )
                 generation = self._cleanup_generation
+                breaker_open = (
+                    self._cleanup_breaker_generation
+                    != self._cleanup_breaker_resolved_generation
+                )
                 if not snapshot:
+                    if breaker_open:
+                        self._cleanup_reported_failure_generation = (
+                            self._cleanup_failure_generation
+                        )
+                        raise SandboxDestroyError("sandbox cleanup failed")
                     failed = (
                         self._cleanup_failure_generation
                         > self._cleanup_reported_failure_generation
@@ -1028,21 +1085,40 @@ class OpenSandboxClient:
             if snapshot:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
+                    async with self._cleanup_lock:
+                        self._cleanup_reported_failure_generation = (
+                            self._cleanup_failure_generation
+                        )
                     raise SandboxDestroyError("sandbox cleanup failed")
                 done, _ = await asyncio.wait(snapshot, timeout=remaining)
                 if len(done) != len(snapshot):
+                    async with self._cleanup_lock:
+                        self._cleanup_reported_failure_generation = (
+                            self._cleanup_failure_generation
+                        )
                     raise SandboxDestroyError("sandbox cleanup failed")
+                await asyncio.sleep(0)
                 continue
 
             # A cleanup can start immediately after the first empty check.
             # Yield once and require both emptiness and generation stability.
             await asyncio.sleep(0)
             async with self._cleanup_lock:
+                breaker_open = (
+                    self._cleanup_breaker_generation
+                    != self._cleanup_breaker_resolved_generation
+                )
                 if (
                     self._cleanup_in_flight
+                    or self._cleanup_active_operations
+                    or self._cleanup_quarantine
                     or self._cleanup_generation != generation
+                    or breaker_open
                 ):
                     if loop.time() >= deadline:
+                        self._cleanup_reported_failure_generation = (
+                            self._cleanup_failure_generation
+                        )
                         raise SandboxDestroyError("sandbox cleanup failed")
                     continue
                 if (
