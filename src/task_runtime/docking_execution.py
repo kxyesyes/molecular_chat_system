@@ -1246,6 +1246,8 @@ def _tool_failure_reason(
     code: AgentErrorCode | None,
     details: Mapping[str, Any] | None = None,
 ) -> str:
+    if code is AgentErrorCode.TOOL_TIMEOUT:
+        return "execution_timeout"
     if code in {
         AgentErrorCode.TOOL_UNAVAILABLE,
         AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE,

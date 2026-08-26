@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import inspect
 import math
 import multiprocessing
@@ -24,6 +25,7 @@ from src.agent.contracts import (
     WorkflowArtifact,
 )
 from src.task_runtime.docking_execution import DockingExecution as _DockingExecution
+from src.task_runtime.completion import CompletionError
 from src.task_runtime.staging import (
     DockingInputStager,
     ManifestError,
@@ -748,6 +750,121 @@ def test_opensandbox_backend_delegates_to_runner_from_env(
     assert len(calls) == 1
 
 
+def test_opensandbox_retry_reuses_pose_after_completion_prepare_crash(
+    tmp_path: Path,
+) -> None:
+    import src.docking.sandbox_runner as sandbox_module
+
+    manifest_path = _stage(tmp_path)
+    output_root = _allowed_output_root(tmp_path)
+    staged = json.loads(manifest_path.read_text(encoding="utf-8"))
+    receptor = (tmp_path / "task-1" / staged["receptor"]["path"]).read_bytes()
+    ligand = (tmp_path / "task-1" / staged["ligand"]["path"]).read_bytes()
+    pose = _vina_pdbqt(-7.2).encode("ascii")
+    broker_job_id = "1" * 32
+    artifact_id = "2" * 32
+    provenance = {
+        "sandbox_id": "sandbox-public-id",
+        "image_uri": "medchat-docking",
+        "image_digest": "a" * 64,
+        "secure_runtime": "gvisor",
+        "vina_version": "1.2.5",
+        "meeko_version": "0.6.1",
+        "receptor_sha256": hashlib.sha256(receptor).hexdigest(),
+        "ligand_sha256": hashlib.sha256(ligand).hexdigest(),
+        "cleanup_status": "succeeded",
+        "demo_mode": False,
+        "fallback_used": False,
+    }
+    job = {
+        "job_id": broker_job_id,
+        "trace_id": "trace-public",
+        "status": "succeeded",
+        "phase": "succeeded",
+        "error_code": None,
+        "warnings": [],
+        "provenance": provenance,
+        "cancel_requested": False,
+        "cleanup_status": "succeeded",
+        "created_at": 1.0,
+        "updated_at": 2.0,
+    }
+    broker_manifest = {
+        "schema_version": 1,
+        "job_id": broker_job_id,
+        "trace_id": "trace-public",
+        "pose_count": 1,
+        "best_energy": -7.2,
+        "artifacts": [
+            {
+                "artifact_id": artifact_id,
+                "media_type": "chemical/x-pdbqt",
+                "sha256": hashlib.sha256(pose).hexdigest(),
+                "size_bytes": len(pose),
+            }
+        ],
+        "warnings": [],
+        "provenance": provenance,
+    }
+    artifact_downloads = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal artifact_downloads
+        if request.url.path == "/v1/docking/jobs":
+            return httpx.Response(202, json=job)
+        if request.url.path.endswith("/manifest"):
+            return httpx.Response(200, json=broker_manifest)
+        if request.url.path.endswith(f"/artifacts/{artifact_id}"):
+            artifact_downloads += 1
+            return httpx.Response(
+                200,
+                stream=httpx.ByteStream(pose),
+                headers={
+                    "Content-Length": str(len(pose)),
+                    "Content-Type": "chemical/x-pdbqt",
+                },
+            )
+        if request.url.path.endswith("/cancel"):
+            return httpx.Response(202, json={**job, "status": "cancelled"})
+        raise AssertionError(request.url.path)
+
+    sandbox = sandbox_module.SandboxDockingRunner(
+        tmp_path / "broker.sock",
+        output_root,
+        transport=httpx.MockTransport(handler),
+    )
+    execution = DockingExecution(
+        tmp_path,
+        raw_executor=sandbox.execute,
+        allowed_output_root=output_root,
+    )
+    real_prepare = execution._completions.prepare
+    prepare_calls = 0
+
+    def crash_once(*args: Any, **kwargs: Any):
+        nonlocal prepare_calls
+        prepare_calls += 1
+        if prepare_calls == 1:
+            raise CompletionError("forced_prepare_crash")
+        return real_prepare(*args, **kwargs)
+
+    execution._completions.prepare = crash_once
+
+    first = execution.run_verified("task-1", manifest_path)
+    pose_path = output_root / "docking_task-1" / "result.pdbqt"
+    assert first["success"] is False
+    assert not _completion(tmp_path).exists()
+    assert pose_path.read_bytes() == pose
+    before = pose_path.stat()
+    second = execution.run_verified("task-1", manifest_path)
+    after = pose_path.stat()
+
+    assert second["success"] is True
+    assert artifact_downloads == 1
+    assert pose_path.read_bytes() == pose
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+
+
 def test_opensandbox_smiles_failure_keeps_stable_invalid_input_reason(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -824,7 +941,8 @@ def test_opensandbox_broker_failure_never_calls_real_local_tool_seam(
     ).run_verified("task-1", manifest)
 
     assert result["success"] is False
-    assert result["error"]["details"]["reason"] == "artifact_invalid"
+    assert result["error"]["code"] == AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE.value
+    assert result["error"]["details"]["reason"] == "environment_unavailable"
     assert local_calls == {"tool": 0, "compat": 0}
     assert "private" not in json.dumps(result).lower()
     assert "secret" not in json.dumps(result).lower()
@@ -1297,6 +1415,30 @@ def test_exception_or_cancellation_writes_no_completion(
     assert "secret" not in json.dumps(result)
     if mode == "failure":
         assert result["error"]["details"]["reason"] == "environment_unavailable"
+
+
+def test_tool_timeout_keeps_stable_legacy_execution_timeout_reason(
+    tmp_path: Path,
+) -> None:
+    manifest = _stage(tmp_path)
+
+    def executor(_payload: dict[str, Any], **_control: Any) -> ToolResult:
+        return ToolResult.error_result(
+            "molecular_docking",
+            AgentErrorCode.TOOL_TIMEOUT,
+            "raw timeout details must not survive",
+            details={"reason": "sandbox_timeout", "path": str(tmp_path)},
+        )
+
+    result = DockingExecution(tmp_path, raw_executor=executor).run_verified(
+        "task-1",
+        manifest,
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == AgentErrorCode.TOOL_TIMEOUT.value
+    assert result["error"]["details"] == {"reason": "execution_timeout"}
+    assert str(tmp_path) not in json.dumps(result)
 
 
 def test_non_tool_result_fails_without_completion(tmp_path: Path) -> None:

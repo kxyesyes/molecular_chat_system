@@ -17,6 +17,7 @@ import pytest
 from src.agent.contracts import AgentErrorCode, ObservationStatus
 import src.docking.sandbox_runner as runner_module
 from src.docking.sandbox_runner import SandboxDockingRunner
+from src.sandbox_broker.models import BrokerErrorCode
 
 
 BROKER_JOB_ID = "1" * 32
@@ -204,11 +205,157 @@ def test_stream_timeout_keeps_type_and_triggers_bounded_broker_cancel(
     result = _runner(tmp_path, handler).execute(payload, job_id="stream-timeout")
 
     assert result.success is False
+    assert result.error is not None
+    assert result.error.code is AgentErrorCode.TOOL_TIMEOUT
+    assert result.error.details == {"reason": "sandbox_timeout"}
     assert requests == [
         "/v1/docking/jobs",
         f"/v1/docking/jobs/{BROKER_JOB_ID}",
         f"/v1/docking/jobs/{BROKER_JOB_ID}/cancel",
     ]
+
+
+def test_connect_failure_has_stable_unavailable_mapping_without_raw_error(
+    tmp_path: Path,
+) -> None:
+    payload, _, _ = _inputs(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(
+            r"secret C:\private\broker.sock token=do-not-leak",
+            request=request,
+        )
+
+    result = _runner(tmp_path, handler).execute(payload, job_id="connect-failure")
+
+    assert result.success is False
+    assert result.error is not None
+    assert result.error.code is AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE
+    assert result.error.details == {"reason": "opensandbox_unavailable"}
+    assert "secret" not in result.message.lower()
+    assert "private" not in result.message.lower()
+
+
+@pytest.mark.parametrize(
+    ("broker_code", "status", "agent_code", "reason"),
+    [
+        (
+            BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
+            "failed",
+            AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE,
+            "opensandbox_unavailable",
+        ),
+        (
+            BrokerErrorCode.PROVISIONING_FAILED,
+            "failed",
+            AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE,
+            "opensandbox_unavailable",
+        ),
+        (
+            BrokerErrorCode.UPLOAD_FAILED,
+            "failed",
+            AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE,
+            "opensandbox_unavailable",
+        ),
+        (
+            BrokerErrorCode.CLEANUP_FAILED,
+            "failed",
+            AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE,
+            "opensandbox_unavailable",
+        ),
+        (
+            BrokerErrorCode.EXECUTION_TIMEOUT,
+            "failed",
+            AgentErrorCode.TOOL_TIMEOUT,
+            "sandbox_timeout",
+        ),
+        (
+            BrokerErrorCode.EXPIRED,
+            "expired",
+            AgentErrorCode.TOOL_TIMEOUT,
+            "sandbox_timeout",
+        ),
+        (
+            BrokerErrorCode.SCIENTIFIC_OUTPUT_INVALID,
+            "failed",
+            AgentErrorCode.INVALID_OUTPUT,
+            "artifact_invalid",
+        ),
+        (
+            BrokerErrorCode.ARTIFACT_FAILED,
+            "failed",
+            AgentErrorCode.INVALID_OUTPUT,
+            "artifact_invalid",
+        ),
+        (
+            BrokerErrorCode.COMMAND_FAILED,
+            "failed",
+            AgentErrorCode.INVALID_OUTPUT,
+            "artifact_invalid",
+        ),
+        (
+            BrokerErrorCode.INVALID_INPUT,
+            "failed",
+            AgentErrorCode.INVALID_INPUT,
+            "input_invalid",
+        ),
+        (
+            BrokerErrorCode.IDEMPOTENCY_CONFLICT,
+            "failed",
+            AgentErrorCode.INVALID_INPUT,
+            "idempotency_conflict",
+        ),
+        (
+            BrokerErrorCode.UNAUTHORIZED,
+            "failed",
+            AgentErrorCode.UNAUTHORIZED_TOOL,
+            "opensandbox_unauthorized",
+        ),
+        (
+            BrokerErrorCode.QUEUE_SATURATED,
+            "failed",
+            AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE,
+            "sandbox_queue_saturated",
+        ),
+    ],
+)
+def test_terminal_broker_error_code_has_stable_agent_mapping(
+    tmp_path: Path,
+    broker_code: BrokerErrorCode,
+    status: str,
+    agent_code: AgentErrorCode,
+    reason: str,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/v1/docking/jobs":
+            return httpx.Response(
+                202,
+                json=_job(
+                    status,
+                    receptor,
+                    ligand,
+                    error_code=broker_code.value,
+                    cleanup_status="succeeded",
+                ),
+            )
+        if request.url.path.endswith("/cancel"):
+            return httpx.Response(202, json=_job("cancelled", receptor, ligand))
+        raise AssertionError(request.url.path)
+
+    result = _runner(tmp_path, handler).execute(
+        payload,
+        job_id=f"terminal-{broker_code.value}",
+    )
+
+    assert result.success is False
+    assert result.error is not None
+    assert result.error.code is agent_code
+    assert result.error.details == {"reason": reason}
+    assert requests[-1] == f"/v1/docking/jobs/{BROKER_JOB_ID}/cancel"
 
 
 class _DripStream(httpx.SyncByteStream):
@@ -811,6 +958,76 @@ def test_json_response_is_streamed_and_closed_at_one_mib_cap(tmp_path: Path) -> 
     assert stream.closed is True
 
 
+@pytest.mark.parametrize(
+    "failure",
+    ["poll-extra", "poll-500", "manifest-invalid", "artifact-invalid"],
+)
+def test_submitted_job_failure_always_ends_with_bounded_cancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    pose = _pose(-7.2)
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/v1/docking/jobs":
+            status = "queued" if failure.startswith("poll-") else "succeeded"
+            return httpx.Response(202, json=_job(status, receptor, ligand))
+        if request.url.path == f"/v1/docking/jobs/{BROKER_JOB_ID}":
+            if failure == "poll-extra":
+                return httpx.Response(
+                    200,
+                    json={**_job("queued", receptor, ligand), "unexpected": True},
+                )
+            if failure == "poll-500":
+                return httpx.Response(500, text="secret broker traceback")
+        if request.url.path.endswith("/manifest"):
+            manifest = _manifest(receptor, ligand, pose)
+            if failure == "manifest-invalid":
+                manifest["unexpected"] = True
+            return httpx.Response(200, json=manifest)
+        if request.url.path.endswith(f"/artifacts/{ARTIFACT_ID}"):
+            assert failure == "artifact-invalid"
+            corrupted = pose[:-1] + b"X"
+            return httpx.Response(
+                200,
+                stream=httpx.ByteStream(corrupted),
+                headers={
+                    "Content-Length": str(len(corrupted)),
+                    "Content-Type": "chemical/x-pdbqt",
+                },
+            )
+        if request.url.path.endswith("/cancel"):
+            return httpx.Response(202, json=_job("cancelled", receptor, ligand))
+        raise AssertionError(request.url.path)
+
+    monkeypatch.setattr(runner_module.time, "sleep", lambda _seconds: None)
+
+    result = _runner(tmp_path, handler).execute(payload, job_id=f"cancel-{failure}")
+
+    assert result.success is False
+    assert requests[-1] == f"/v1/docking/jobs/{BROKER_JOB_ID}/cancel"
+    assert "secret" not in result.message.lower()
+
+
+def test_pre_submit_input_failure_does_not_attempt_broker_cancel(tmp_path: Path) -> None:
+    payload, _, _ = _inputs(tmp_path)
+    payload["unexpected"] = True
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        raise AssertionError("input rejection must happen before submit")
+
+    result = _runner(tmp_path, handler).execute(payload, job_id="invalid-input")
+
+    assert result.success is False
+    assert requests == []
+
+
 def test_runner_cancels_remotely_without_local_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -884,6 +1101,8 @@ def test_runner_rejects_untrusted_manifest_without_download_or_path_leak(
             return httpx.Response(202, json=_job("succeeded", receptor, ligand))
         if request.url.path.endswith("/manifest"):
             return httpx.Response(200, json=mutation(_manifest(receptor, ligand, pose)))
+        if request.url.path.endswith("/cancel"):
+            return httpx.Response(202, json=_job("cancelled", receptor, ligand))
         raise AssertionError("invalid manifest must prevent artifact download")
 
     result = _runner(tmp_path, handler).execute(payload, job_id="task-7")
@@ -891,7 +1110,11 @@ def test_runner_rejects_untrusted_manifest_without_download_or_path_leak(
     assert result.success is False
     assert result.data is None
     assert str(tmp_path) not in result.message
-    assert requests == ["/v1/docking/jobs", f"/v1/docking/jobs/{BROKER_JOB_ID}/manifest"]
+    assert requests == [
+        "/v1/docking/jobs",
+        f"/v1/docking/jobs/{BROKER_JOB_ID}/manifest",
+        f"/v1/docking/jobs/{BROKER_JOB_ID}/cancel",
+    ]
     assert not (tmp_path / "output" / "docking_task-7" / "result.pdbqt").exists()
 
 
@@ -959,6 +1182,144 @@ def test_existing_result_collision_fails_closed_without_overwrite(tmp_path: Path
 
     assert result.success is False
     assert final.read_bytes() == b"untrusted-existing-result\n"
+
+
+def test_existing_pose_matching_current_manifest_is_reused_without_overwrite(
+    tmp_path: Path,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    pose = _pose(-7.2, -6.8)
+    final = tmp_path / "output" / "docking_retry" / "result.pdbqt"
+    final.parent.mkdir(parents=True)
+    final.write_bytes(pose)
+    final.chmod(0o600)
+    before = final.stat()
+    requests: list[str] = []
+    manifest = _manifest(
+        receptor,
+        ligand,
+        pose,
+        pose_count=2,
+        best_energy=-7.2,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/v1/docking/jobs":
+            return httpx.Response(202, json=_job("succeeded", receptor, ligand))
+        if request.url.path.endswith("/manifest"):
+            return httpx.Response(200, json=manifest)
+        if request.url.path.endswith("/cancel"):
+            return httpx.Response(202, json=_job("cancelled", receptor, ligand))
+        raise AssertionError("matching retries must not redownload or replace the pose")
+
+    result = _runner(tmp_path, handler).execute(payload, job_id="retry")
+
+    after = final.stat()
+    assert result.success is True
+    assert result.data["total_poses"] == 2
+    assert final.read_bytes() == pose
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert requests == [
+        "/v1/docking/jobs",
+        f"/v1/docking/jobs/{BROKER_JOB_ID}/manifest",
+    ]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["hash", "energy", "mode", "symlink", "hardlink"],
+)
+def test_existing_pose_must_strictly_match_manifest_before_reuse(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    pose = _pose(-7.2)
+    existing = pose
+    manifest = _manifest(receptor, ligand, pose)
+    if failure == "hash":
+        existing = _pose(-6.2)
+    elif failure == "energy":
+        manifest["best_energy"] = -6.2
+    elif failure == "mode":
+        existing = _pose(-7.2, -6.2)
+        manifest = _manifest(
+            receptor,
+            ligand,
+            existing,
+            pose_count=1,
+            best_energy=-7.2,
+        )
+
+    final = tmp_path / "output" / f"docking_reject-{failure}" / "result.pdbqt"
+    final.parent.mkdir(parents=True)
+    linked: Path | None = None
+    if failure == "symlink":
+        target = tmp_path / "existing-target.pdbqt"
+        target.write_bytes(existing)
+        target.chmod(0o600)
+        try:
+            final.symlink_to(target)
+        except (NotImplementedError, OSError) as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+    else:
+        final.write_bytes(existing)
+        final.chmod(0o600)
+        if failure == "hardlink":
+            linked = tmp_path / "existing-hardlink.pdbqt"
+            try:
+                os.link(final, linked)
+            except OSError as exc:
+                pytest.skip(f"hardlinks unavailable: {exc}")
+
+    before = final.lstat()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/docking/jobs":
+            return httpx.Response(202, json=_job("succeeded", receptor, ligand))
+        if request.url.path.endswith("/manifest"):
+            return httpx.Response(200, json=manifest)
+        if request.url.path.endswith("/cancel"):
+            return httpx.Response(202, json=_job("cancelled", receptor, ligand))
+        raise AssertionError("an existing pose is never downloaded over or replaced")
+
+    result = _runner(tmp_path, handler).execute(
+        payload,
+        job_id=f"reject-{failure}",
+    )
+
+    after = final.lstat()
+    assert result.success is False
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    if failure != "symlink":
+        assert final.read_bytes() == existing
+    if linked is not None:
+        assert linked.read_bytes() == existing
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX owner/mode semantics required")
+def test_existing_pose_with_non_private_permissions_is_not_reused(tmp_path: Path) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    pose = _pose(-7.2)
+    final = tmp_path / "output" / "docking_bad-mode" / "result.pdbqt"
+    final.parent.mkdir(parents=True)
+    final.write_bytes(pose)
+    final.chmod(0o640)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/docking/jobs":
+            return httpx.Response(202, json=_job("succeeded", receptor, ligand))
+        if request.url.path.endswith("/manifest"):
+            return httpx.Response(200, json=_manifest(receptor, ligand, pose))
+        if request.url.path.endswith("/cancel"):
+            return httpx.Response(202, json=_job("cancelled", receptor, ligand))
+        raise AssertionError
+
+    result = _runner(tmp_path, handler).execute(payload, job_id="bad-mode")
+
+    assert result.success is False
+    assert stat.S_IMODE(final.stat().st_mode) == 0o640
 
 
 def test_posix_publish_uses_descriptor_relative_rename_noreplace() -> None:
@@ -1254,7 +1615,37 @@ def test_from_env_builds_only_an_httpx_uds_transport(
     assert runner.socket_path == socket_path
 
 
-def test_from_env_creates_a_fresh_uds_transport_for_each_execution(
+def test_unexpected_http_transport_type_is_closed_and_never_used(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload, _, _ = _inputs(tmp_path)
+    calls = 0
+
+    class UnexpectedTransport(httpx.BaseTransport):
+        def __init__(self) -> None:
+            self.closed = False
+
+        def handle_request(self, _request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(500)
+
+        def close(self) -> None:
+            self.closed = True
+
+    sentinel = UnexpectedTransport()
+    monkeypatch.setattr(httpx, "HTTPTransport", lambda **_kwargs: sentinel)
+    runner = SandboxDockingRunner(tmp_path / "broker.sock", tmp_path / "output")
+
+    result = runner.execute(payload, job_id="unexpected-transport")
+
+    assert result.success is False
+    assert sentinel.closed is True
+    assert calls == 0
+
+
+def test_from_env_closes_each_unexpected_transport_for_each_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1299,10 +1690,11 @@ def test_from_env_creates_a_fresh_uds_transport_for_each_execution(
 
     assert first.success is False and second.success is False
     assert len(transports) == 2
-    assert calls == ["task-1", "task-2"]
+    assert all(transport.closed for transport in transports)
+    assert calls == []
 
 
-def test_cancel_uses_a_fresh_uds_transport_after_request_client_closes(
+def test_unexpected_transport_cannot_be_used_for_submit_or_cancel(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1349,9 +1741,7 @@ def test_cancel_uses_a_fresh_uds_transport_after_request_client_closes(
 
     result = runner.execute(payload, job_id="task-7", cancel_event=cancel)
 
-    assert result.status == ObservationStatus.CANCELLED
-    assert len(transports) == 2
-    assert paths == [
-        "/v1/docking/jobs",
-        f"/v1/docking/jobs/{BROKER_JOB_ID}/cancel",
-    ]
+    assert result.status == ObservationStatus.FAILED
+    assert len(transports) == 1
+    assert transports[0].closed is True
+    assert paths == []

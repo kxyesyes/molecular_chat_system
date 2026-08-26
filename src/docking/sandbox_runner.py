@@ -26,7 +26,11 @@ from src.agent.contracts import (
     WorkflowArtifact,
 )
 from src.agent.persistence.redaction import sanitize_sensitive_text
-from src.sandbox_broker.models import BrokerJobStatus, TERMINAL_STATUSES
+from src.sandbox_broker.models import (
+    BrokerErrorCode,
+    BrokerJobStatus,
+    TERMINAL_STATUSES,
+)
 from src.task_runtime.config import _stat_identity, _stat_version
 from src.task_runtime.secure_io import read_file_snapshot
 
@@ -55,6 +59,16 @@ _HTTP_TRANSPORT_TYPE = httpx.HTTPTransport
 
 class _Cancelled(RuntimeError):
     pass
+
+
+class _BrokerFailure(RuntimeError):
+    def __init__(self, code: BrokerErrorCode) -> None:
+        self.code = code
+
+
+class _BrokerHttpFailure(RuntimeError):
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
 
 
 class _StrictModel(BaseModel):
@@ -184,7 +198,7 @@ class _PublicJob(_StrictModel):
     trace_id: str
     status: BrokerJobStatus
     phase: str
-    error_code: str | None
+    error_code: BrokerErrorCode | None
     warnings: list[str]
     provenance: _BrokerProvenance | None
     cancel_requested: StrictBool
@@ -218,10 +232,17 @@ class _PublicJob(_StrictModel):
     def validate_metadata(cls, value: str) -> str:
         return _safe_metadata(value)
 
-    @field_validator("error_code")
+    @field_validator("error_code", mode="before")
     @classmethod
-    def validate_error_code(cls, value: str | None) -> str | None:
-        return None if value is None else _safe_metadata(value)
+    def validate_error_code(cls, value: object) -> BrokerErrorCode | None:
+        if value is None:
+            return None
+        if type(value) is not str:
+            raise ValueError("invalid broker response")
+        try:
+            return BrokerErrorCode(value)
+        except ValueError:
+            raise ValueError("invalid broker response") from None
 
     @field_validator("warnings")
     @classmethod
@@ -496,7 +517,7 @@ def _response_model(
     deadline: float,
 ) -> _StrictModel:
     if response.status_code != status_code or response.is_redirect:
-        raise ValueError("invalid broker response")
+        raise _BrokerHttpFailure(response.status_code)
     try:
         validated = model.model_validate(_json_payload(response, deadline))
         _check_absolute_deadline(deadline)
@@ -572,6 +593,91 @@ def _emit_progress(callback: Callable[..., Any] | None, status: BrokerJobStatus)
         pass
 
 
+def _broker_error_result(code: BrokerErrorCode) -> ToolResult:
+    quality = {"real_execution": False, "execution_backend": "opensandbox"}
+    if code is BrokerErrorCode.CANCELLED:
+        return ToolResult.error_result(
+            "molecular_docking",
+            AgentErrorCode.CANCELLED,
+            "Docking execution was cancelled in OpenSandbox.",
+            status=ObservationStatus.CANCELLED,
+            quality=quality,
+        )
+    if code in {BrokerErrorCode.EXECUTION_TIMEOUT, BrokerErrorCode.EXPIRED}:
+        return ToolResult.error_result(
+            "molecular_docking",
+            AgentErrorCode.TOOL_TIMEOUT,
+            "OpenSandbox docking exceeded its execution deadline.",
+            details={"reason": "sandbox_timeout"},
+            quality=quality,
+        )
+    if code in {
+        BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
+        BrokerErrorCode.PROVISIONING_FAILED,
+        BrokerErrorCode.UPLOAD_FAILED,
+        BrokerErrorCode.CLEANUP_FAILED,
+    }:
+        return ToolResult.error_result(
+            "molecular_docking",
+            AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE,
+            "The OpenSandbox docking environment is unavailable.",
+            details={"reason": "opensandbox_unavailable"},
+            quality=quality,
+        )
+    if code is BrokerErrorCode.QUEUE_SATURATED:
+        return ToolResult.error_result(
+            "molecular_docking",
+            AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE,
+            "The OpenSandbox docking queue is unavailable.",
+            details={"reason": "sandbox_queue_saturated"},
+            quality=quality,
+        )
+    if code is BrokerErrorCode.UNAUTHORIZED:
+        return ToolResult.error_result(
+            "molecular_docking",
+            AgentErrorCode.UNAUTHORIZED_TOOL,
+            "The OpenSandbox docking request was not authorized.",
+            details={"reason": "opensandbox_unauthorized"},
+            quality=quality,
+        )
+    if code in {
+        BrokerErrorCode.INVALID_INPUT,
+        BrokerErrorCode.IDEMPOTENCY_CONFLICT,
+    }:
+        return ToolResult.error_result(
+            "molecular_docking",
+            AgentErrorCode.INVALID_INPUT,
+            "The OpenSandbox docking request was rejected.",
+            details={
+                "reason": (
+                    "idempotency_conflict"
+                    if code is BrokerErrorCode.IDEMPOTENCY_CONFLICT
+                    else "input_invalid"
+                )
+            },
+            quality=quality,
+        )
+    return ToolResult.error_result(
+        "molecular_docking",
+        AgentErrorCode.INVALID_OUTPUT,
+        "OpenSandbox docking did not produce a verified scientific artifact.",
+        details={"reason": "artifact_invalid"},
+        quality=quality,
+    )
+
+
+def _http_failure_code(status_code: int) -> BrokerErrorCode:
+    if status_code in {401, 403}:
+        return BrokerErrorCode.UNAUTHORIZED
+    if status_code == 409:
+        return BrokerErrorCode.IDEMPOTENCY_CONFLICT
+    if status_code in {400, 404, 405, 415, 422}:
+        return BrokerErrorCode.INVALID_INPUT
+    if status_code == 429:
+        return BrokerErrorCode.QUEUE_SATURATED
+    return BrokerErrorCode.OPENSANDBOX_UNAVAILABLE
+
+
 class SandboxDockingRunner:
     """Submit verified docking inputs to a broker reachable only over one UDS."""
 
@@ -615,6 +721,8 @@ class SandboxDockingRunner:
         cancel_event: Any = None,
     ) -> ToolResult:
         broker_job_id: str | None = None
+        completed = False
+        pose_published = False
         started = time.monotonic()
         deadline = started + _TOTAL_DEADLINE_SECONDS
         try:
@@ -712,9 +820,12 @@ class SandboxDockingRunner:
 
                 if current.status is BrokerJobStatus.CANCELLED:
                     raise _Cancelled
+                if current.status is not BrokerJobStatus.SUCCEEDED:
+                    if current.error_code is not None:
+                        raise _BrokerFailure(current.error_code)
+                    raise ValueError("sandbox docking did not succeed")
                 if (
-                    current.status is not BrokerJobStatus.SUCCEEDED
-                    or current.error_code is not None
+                    current.error_code is not None
                     or current.cancel_requested
                     or current.cleanup_status != "succeeded"
                     or current.provenance is None
@@ -747,7 +858,7 @@ class SandboxDockingRunner:
                 if _cancelled(cancel_event):
                     raise _Cancelled
                 artifact = manifest.artifacts[0]
-                pose_path = self._download_and_publish(
+                pose_path, pose_published = self._download_and_publish(
                     client,
                     broker_job_id,
                     artifact,
@@ -758,7 +869,8 @@ class SandboxDockingRunner:
                 )
 
             if _cancelled(cancel_event):
-                self._discard_uncommitted_pose(pose_path, artifact)
+                if pose_published:
+                    self._discard_uncommitted_pose(pose_path, artifact)
                 raise _Cancelled
 
             elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
@@ -808,12 +920,12 @@ class SandboxDockingRunner:
                 ),
             )
             if _cancelled(cancel_event):
-                self._discard_uncommitted_pose(pose_path, artifact)
+                if pose_published:
+                    self._discard_uncommitted_pose(pose_path, artifact)
                 raise _Cancelled
+            completed = True
             return result
         except _Cancelled:
-            if broker_job_id is not None:
-                self._cancel_best_effort(broker_job_id)
             return ToolResult.error_result(
                 "molecular_docking",
                 AgentErrorCode.CANCELLED,
@@ -821,16 +933,20 @@ class SandboxDockingRunner:
                 status=ObservationStatus.CANCELLED,
                 quality={"real_execution": False, "execution_backend": "opensandbox"},
             )
+        except _BrokerFailure as exc:
+            return _broker_error_result(exc.code)
+        except _BrokerHttpFailure as exc:
+            return _broker_error_result(_http_failure_code(exc.status_code))
         except (TimeoutError, httpx.TimeoutException):
-            if broker_job_id is not None:
-                self._cancel_best_effort(broker_job_id)
             return ToolResult.error_result(
                 "molecular_docking",
-                AgentErrorCode.INVALID_OUTPUT,
-                "OpenSandbox docking failed before a verified result was produced.",
-                details={"reason": "sandbox_execution_failed"},
+                AgentErrorCode.TOOL_TIMEOUT,
+                "OpenSandbox docking exceeded its execution deadline.",
+                details={"reason": "sandbox_timeout"},
                 quality={"real_execution": False, "execution_backend": "opensandbox"},
             )
+        except httpx.ConnectError:
+            return _broker_error_result(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
         except Exception:
             return ToolResult.error_result(
                 "molecular_docking",
@@ -839,6 +955,9 @@ class SandboxDockingRunner:
                 details={"reason": "sandbox_execution_failed"},
                 quality={"real_execution": False, "execution_backend": "opensandbox"},
             )
+        finally:
+            if broker_job_id is not None and not completed:
+                self._cancel_best_effort(broker_job_id)
 
     @staticmethod
     def _parameters(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -894,7 +1013,12 @@ class SandboxDockingRunner:
             return self._transport
         transport = httpx.HTTPTransport(uds=str(self.socket_path))
         if not isinstance(transport, _HTTP_TRANSPORT_TYPE):
-            return transport
+            try:
+                close = getattr(transport, "close", None)
+                if callable(close):
+                    close()
+            finally:
+                raise ValueError("invalid sandbox runner transport")
         try:
             pool = transport._pool
             backend = pool._network_backend
@@ -917,7 +1041,7 @@ class SandboxDockingRunner:
         original_job_id: str,
         deadline: float,
         cancel_event: Any,
-    ) -> Path:
+    ) -> tuple[Path, bool]:
         (
             output_root,
             job_root,
@@ -944,15 +1068,23 @@ class SandboxDockingRunner:
                 root_identity,
                 parent_identity,
             )
-            try:
-                if parent_descriptor is not None:
-                    os.stat(final_name, dir_fd=parent_descriptor, follow_symlinks=False)
-                else:
-                    final.lstat()
-            except FileNotFoundError:
-                pass
-            else:
-                raise ValueError("unsafe artifact output")
+            existing = self._reuse_existing_pose(
+                output_root,
+                job_root,
+                final,
+                final_name,
+                root_descriptor,
+                parent_descriptor,
+                root_identity,
+                parent_identity,
+                artifact,
+                manifest,
+                deadline,
+                cancel_event,
+            )
+            if existing is not None:
+                published = True
+                return existing, False
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
             flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
             if parent_descriptor is not None:
@@ -1129,7 +1261,7 @@ class SandboxDockingRunner:
             if _cancelled(cancel_event):
                 raise _Cancelled
             published = True
-            return final
+            return final, True
         finally:
             if descriptor is not None:
                 try:
@@ -1172,6 +1304,160 @@ class SandboxDockingRunner:
                     os.close(root_descriptor)
                 except OSError:
                     pass
+
+    def _reuse_existing_pose(
+        self,
+        output_root: Path,
+        job_root: Path,
+        final: Path,
+        final_name: str,
+        root_descriptor: int | None,
+        parent_descriptor: int | None,
+        root_identity: tuple[int, ...],
+        parent_identity: tuple[int, ...],
+        artifact: _Artifact,
+        manifest: _Manifest,
+        deadline: float,
+        cancel_event: Any,
+    ) -> Path | None:
+        from src.task_runtime.docking_execution import _VinaPoseStreamValidator
+
+        self._verify_output_parent(
+            output_root,
+            job_root,
+            root_descriptor,
+            parent_descriptor,
+            root_identity,
+            parent_identity,
+        )
+        validator = _VinaPoseStreamValidator(
+            expected_pose_count=manifest.pose_count,
+            expected_best_energy=manifest.best_energy,
+        )
+        if parent_descriptor is not None:
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            descriptor: int | None = None
+            try:
+                try:
+                    descriptor = os.open(
+                        final_name,
+                        flags,
+                        dir_fd=parent_descriptor,
+                    )
+                except FileNotFoundError:
+                    return None
+                except OSError:
+                    raise ValueError("unsafe artifact output") from None
+                before = os.fstat(descriptor)
+                named_before = os.stat(
+                    final_name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if (
+                    not stat.S_ISREG(before.st_mode)
+                    or not stat.S_ISREG(named_before.st_mode)
+                    or stat.S_ISLNK(named_before.st_mode)
+                    or before.st_nlink != 1
+                    or named_before.st_nlink != 1
+                    or before.st_uid != os.geteuid()
+                    or stat.S_IMODE(before.st_mode) != 0o600
+                    or before.st_size != artifact.size_bytes
+                    or (_stat_identity(before), _stat_version(before))
+                    != (_stat_identity(named_before), _stat_version(named_before))
+                ):
+                    raise ValueError("unsafe artifact output")
+                digest = hashlib.sha256()
+                total = 0
+                while True:
+                    self._check_deadline(deadline)
+                    if _cancelled(cancel_event):
+                        raise _Cancelled
+                    chunk = os.read(
+                        descriptor,
+                        min(64 * 1024, artifact.size_bytes - total + 1),
+                    )
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > artifact.size_bytes:
+                        raise ValueError("invalid artifact identity")
+                    digest.update(chunk)
+                    validator.feed(chunk)
+                self._check_deadline(deadline)
+                if _cancelled(cancel_event):
+                    raise _Cancelled
+                validator.finish()
+                after = os.fstat(descriptor)
+                named_after = os.stat(
+                    final_name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if (
+                    total != artifact.size_bytes
+                    or digest.hexdigest() != artifact.sha256
+                    or (_stat_identity(after), _stat_version(after))
+                    != (_stat_identity(before), _stat_version(before))
+                    or (_stat_identity(named_after), _stat_version(named_after))
+                    != (_stat_identity(before), _stat_version(before))
+                    or named_after.st_nlink != 1
+                ):
+                    raise ValueError("invalid artifact identity")
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+        else:
+            try:
+                before = final.lstat()
+            except FileNotFoundError:
+                return None
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or stat.S_ISLNK(before.st_mode)
+                or before.st_nlink != 1
+                or before.st_size != artifact.size_bytes
+                or bool(getattr(before, "st_file_attributes", 0) & 0x400)
+            ):
+                raise ValueError("unsafe artifact output")
+            self._check_deadline(deadline)
+            if _cancelled(cancel_event):
+                raise _Cancelled
+            try:
+                snapshot = read_file_snapshot(final, artifact.size_bytes)
+                after = final.lstat()
+            except Exception:
+                raise ValueError("unsafe artifact output") from None
+            if (
+                snapshot.sha256 != artifact.sha256
+                or len(snapshot.content) != artifact.size_bytes
+                or snapshot.identity
+                != (_stat_identity(before), _stat_version(before))
+                or snapshot.identity
+                != (_stat_identity(after), _stat_version(after))
+                or after.st_nlink != 1
+                or bool(getattr(after, "st_file_attributes", 0) & 0x400)
+            ):
+                raise ValueError("invalid artifact identity")
+            validator.feed(snapshot.content)
+            validator.finish()
+        self._check_deadline(deadline)
+        if _cancelled(cancel_event):
+            raise _Cancelled
+        self._verify_output_parent(
+            output_root,
+            job_root,
+            root_descriptor,
+            parent_descriptor,
+            root_identity,
+            parent_identity,
+        )
+        return final
 
     def _private_job_directory(
         self,
