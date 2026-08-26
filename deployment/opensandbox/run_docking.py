@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import math
@@ -39,8 +41,11 @@ _MAX_POSE_LINE_BYTES = 4096
 _MAX_MODES = 256
 _DEADLINE_SECONDS = 180.0
 _PROCESS_STOP_GRACE_SECONDS = 0.1
+_PROCESS_CLEANUP_SECONDS = 0.75
+_PROCESS_REAP_POLL_SECONDS = 0.01
 _MAX_CLEANUP_ENTRIES = 128
 _MAX_CLEANUP_DEPTH = 8
+_PR_SET_CHILD_SUBREAPER = 36
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _RECEPTOR_PATH = re.compile(r"^/workspace/input/receptor\.pdb$")
@@ -77,6 +82,8 @@ _MINIMAL_ENV = {
     "LANG": "C.UTF-8",
     "LC_ALL": "C.UTF-8",
 }
+_SUBREAPER_ENABLED = False
+_SUBREAPER_REQUIRED = False
 
 
 @dataclass(frozen=True)
@@ -482,25 +489,104 @@ def _remaining(deadline: float, phase: str) -> float:
     return value
 
 
+def _enable_child_subreaper() -> None:
+    global _SUBREAPER_ENABLED
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        library = ctypes.CDLL(None, use_errno=True)
+        prctl = library.prctl
+        prctl.argtypes = [
+            ctypes.c_int,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+        ]
+        prctl.restype = ctypes.c_int
+        if prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+            raise OSError
+    except (AttributeError, OSError, TypeError, ValueError):
+        _fail("environment_setup", "environment_unavailable")
+    _SUBREAPER_ENABLED = True
+
+
+def _wait_direct_child(
+    process: subprocess.Popen[bytes], deadline: float
+) -> bool:
+    if process.returncode is not None:
+        return True
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        process.poll()
+        return process.returncode is not None
+    try:
+        process.wait(timeout=remaining)
+        return True
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def _probe_adopted_process_group(process_group: int) -> tuple[bool, bool]:
+    found = False
+    while True:
+        try:
+            child, _ = os.waitpid(-process_group, os.WNOHANG)
+        except ChildProcessError:
+            return found, True
+        except OSError as failure:
+            if failure.errno == errno.ECHILD:
+                return found, True
+            raise
+        if child == 0:
+            return True, False
+        found = True
+
+
+def _wait_adopted_process_group(process_group: int, deadline: float) -> bool:
+    while True:
+        _, no_children = _probe_adopted_process_group(process_group)
+        if no_children:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(_PROCESS_REAP_POLL_SECONDS, remaining))
+
+
+def _signal_process_group(process_group: int, value: int) -> bool:
+    try:
+        os.killpg(process_group, value)
+        return True
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+
+
+def _terminate_and_reap_process_group(
+    process: subprocess.Popen[bytes],
+) -> bool:
+    process_group = process.pid
+    cleanup_deadline = time.monotonic() + _PROCESS_CLEANUP_SECONDS
+    term_deadline = min(
+        cleanup_deadline, time.monotonic() + _PROCESS_STOP_GRACE_SECONDS
+    )
+    if not _signal_process_group(process_group, signal.SIGTERM):
+        return False
+    direct_reaped = _wait_direct_child(process, term_deadline)
+    if direct_reaped and _wait_adopted_process_group(process_group, term_deadline):
+        return True
+    if not _signal_process_group(process_group, signal.SIGKILL):
+        return False
+    if not _wait_direct_child(process, cleanup_deadline):
+        return False
+    return _wait_adopted_process_group(process_group, cleanup_deadline)
+
+
 def _stop_process_tree(process: subprocess.Popen[bytes]) -> bool:
     if os.name == "posix":
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=_PROCESS_STOP_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
-            pass
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=_PROCESS_STOP_GRACE_SECONDS)
-            return True
-        except (OSError, subprocess.TimeoutExpired):
-            return False
+        return _terminate_and_reap_process_group(process)
     try:
         if process.poll() is not None:
             process.wait(timeout=0)
@@ -521,6 +607,12 @@ def _stop_process_tree(process: subprocess.Popen[bytes]) -> bool:
 def _run_tool(argv: list[str], phase: str, deadline: float) -> None:
     process: subprocess.Popen[bytes] | None = None
     try:
+        if (
+            sys.platform.startswith("linux")
+            and _SUBREAPER_REQUIRED
+            and not _SUBREAPER_ENABLED
+        ):
+            _fail("environment_setup", "environment_unavailable")
         remaining = _remaining(deadline, phase)
         process = subprocess.Popen(
             argv,
@@ -546,6 +638,15 @@ def _run_tool(argv: list[str], phase: str, deadline: float) -> None:
         if process is not None and not _stop_process_tree(process):
             _fail("cleanup", "cleanup_failed")
         raise
+    if os.name == "posix" and _SUBREAPER_ENABLED:
+        try:
+            has_descendants, _ = _probe_adopted_process_group(process.pid)
+        except OSError:
+            _fail("cleanup", "cleanup_failed")
+        if has_descendants:
+            if not _terminate_and_reap_process_group(process):
+                _fail("cleanup", "cleanup_failed")
+            _fail(phase, "tool_failed")
     if return_code != 0:
         _fail(phase, "tool_failed")
 
@@ -924,6 +1025,8 @@ def _execute(
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _SUBREAPER_REQUIRED
+    production_cli = argv is None
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments != _EXACT_ARGUMENTS:
         raise SystemExit(2)
@@ -935,6 +1038,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             _check_private_directory(OUTPUT_ROOT)
             _ensure_absent(OUTPUT_ROOT / _RESULT_NAME)
+            if production_cli:
+                _SUBREAPER_REQUIRED = True
+                _enable_child_subreaper()
             try:
                 request = _parse_request()
             except (OSError, ValueError, UnicodeError, json.JSONDecodeError):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import sqlite3
@@ -12,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+import src.sandbox_broker.service as service_module
 from src.sandbox_broker.artifacts import ArtifactRegistry
 from src.sandbox_broker.config import BrokerConfig
 from src.sandbox_broker.models import (
@@ -453,6 +455,37 @@ def _prepared_with_suffixes(
     )
 
 
+def _forged_prepared_with_suffixes(
+    config: BrokerConfig,
+    receptor_suffix: str,
+    ligand_suffix: str,
+) -> PreparedDockingSubmission:
+    valid = _prepared(config)
+    forged = object.__new__(PreparedDockingSubmission)
+    object.__setattr__(forged, "parameters", valid.parameters)
+    object.__setattr__(
+        forged,
+        "receptor",
+        StagedInput(
+            relative_path=f"staged/{'3' * 32}/receptor{receptor_suffix}",
+            size_bytes=5,
+            sha256="a" * 64,
+        ),
+    )
+    object.__setattr__(
+        forged,
+        "ligand",
+        StagedInput(
+            relative_path=f"staged/{'3' * 32}/ligand{ligand_suffix}",
+            size_bytes=7,
+            sha256="b" * 64,
+        ),
+    )
+    object.__setattr__(forged, "canonical_input_sha256", "c" * 64)
+    object.__setattr__(forged, "trace_id", "trace-forged-suffix")
+    return forged
+
+
 def _service(
     tmp_path: Path,
     sdk: object,
@@ -580,6 +613,82 @@ def test_single_pose_artifact_can_register_multiple_vina_modes(tmp_path: Path) -
     assert manifest.best_energy == -8.1
     assert len(manifest.artifacts) == 1
     assert pose == MULTI_MODE_POSE.encode("utf-8")
+
+
+def test_service_suffix_allowlist_is_single_and_matches_wrapper_contract() -> None:
+    assert service_module._UPLOAD_SUFFIXES == {
+        "receptor": frozenset({".pdb"}),
+        "ligand": frozenset({".sdf", ".mol"}),
+    }
+
+
+@pytest.mark.parametrize(
+    ("role", "suffix"),
+    [("receptor", ".pdb"), ("ligand", ".sdf"), ("ligand", ".mol")],
+)
+def test_service_upload_and_staged_suffix_guards_accept_exact_matrix(
+    role: str, suffix: str
+) -> None:
+    upload = type(
+        "Upload",
+        (),
+        {"filename": f"sample{suffix}", "file": io.BytesIO(b"payload")},
+    )()
+    assert service_module._upload_suffix(upload, role) == suffix
+    staged = StagedInput(
+        relative_path=f"staged/{'4' * 32}/{role}{suffix}",
+        size_bytes=7,
+        sha256="d" * 64,
+    )
+    assert service_module._safe_staged_input(staged, role) is staged
+
+
+@pytest.mark.parametrize(
+    ("role", "suffix"),
+    [("receptor", ".pdbqt"), ("ligand", ".pdb"), ("ligand", ".pdbqt")],
+)
+def test_service_upload_and_staged_suffix_guards_reject_meeko_unsupported_inputs(
+    role: str, suffix: str
+) -> None:
+    upload = type(
+        "Upload",
+        (),
+        {"filename": f"sample{suffix}", "file": io.BytesIO(b"payload")},
+    )()
+    with pytest.raises(BrokerFailure) as upload_failure:
+        service_module._upload_suffix(upload, role)
+    assert upload_failure.value.code is BrokerErrorCode.INVALID_INPUT
+    staged = StagedInput(
+        relative_path=f"staged/{'4' * 32}/{role}{suffix}",
+        size_bytes=7,
+        sha256="d" * 64,
+    )
+    with pytest.raises(ValueError):
+        service_module._safe_staged_input(staged, role)
+
+
+@pytest.mark.parametrize(
+    ("receptor_suffix", "ligand_suffix"),
+    [(".pdbqt", ".sdf"), (".pdb", ".pdb"), (".pdb", ".pdbqt")],
+)
+def test_direct_submit_rejects_forged_unsupported_prepared_suffix_before_readiness(
+    tmp_path: Path,
+    receptor_suffix: str,
+    ligand_suffix: str,
+) -> None:
+    service, store, config = _service(tmp_path, FakeSandboxClient())
+    forged = _forged_prepared_with_suffixes(
+        config, receptor_suffix, ligand_suffix
+    )
+
+    async def scenario() -> BrokerFailure:
+        with pytest.raises(BrokerFailure) as raised:
+            await service.submit(forged, "idem-forged-suffix")
+        return raised.value
+
+    failure = asyncio.run(scenario())
+    assert failure.code is BrokerErrorCode.INVALID_INPUT
+    assert store.active_jobs() == []
 
 
 @pytest.mark.parametrize("receptor_suffix", [".pdb"])

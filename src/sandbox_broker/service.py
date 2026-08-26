@@ -52,8 +52,8 @@ _REMOTE_AUTO_EXPIRY_WARNING = (
 )
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 _UPLOAD_SUFFIXES = {
-    "receptor": frozenset({".pdb", ".pdbqt"}),
-    "ligand": frozenset({".sdf", ".mol", ".pdb", ".pdbqt"}),
+    "receptor": frozenset({".pdb"}),
+    "ligand": frozenset({".sdf", ".mol"}),
 }
 
 
@@ -173,11 +173,7 @@ def _safe_staged_input(value: object, role: str) -> StagedInput:
         or pure.name != f"{role}{pure.suffix}"
     ):
         raise ValueError
-    approved = {
-        "receptor": frozenset({".pdb", ".pdbqt"}),
-        "ligand": frozenset({".sdf", ".mol", ".pdb", ".pdbqt"}),
-    }
-    if pure.suffix.lower() not in approved[role]:
+    if pure.suffix.lower() not in _UPLOAD_SUFFIXES[role]:
         raise ValueError
     if type(value.size_bytes) is not int or value.size_bytes <= 0:
         raise ValueError
@@ -547,6 +543,20 @@ class SandboxBrokerService:
     ) -> BrokerJobView:
         if type(prepared) is not PreparedDockingSubmission:
             raise BrokerFailure(BrokerErrorCode.INVALID_INPUT)
+        try:
+            expected_hash = canonical_submission_sha256(
+                prepared.parameters,
+                _safe_staged_input(prepared.receptor, "receptor"),
+                _safe_staged_input(prepared.ligand, "ligand"),
+            )
+            if (
+                prepared.canonical_input_sha256 != expected_hash
+                or type(prepared.trace_id) is not str
+                or _TRACE_PATTERN.fullmatch(prepared.trace_id) is None
+            ):
+                raise ValueError
+        except Exception:
+            raise BrokerFailure(BrokerErrorCode.INVALID_INPUT) from None
         checked_key = _validated_idempotency_key(idempotency_key)
         if (
             not self._started

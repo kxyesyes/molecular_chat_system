@@ -409,6 +409,12 @@ def test_wrapper_ast_forbids_dynamic_execution_and_uses_safe_subprocess() -> Non
     assert 'Path("/workspace/output")' in source
     assert "allow_nan=False" in source
     assert "object_pairs_hook" in source and "parse_constant" in source
+    assert "PR_SET_CHILD_SUBREAPER" in source
+    assert "ctypes.CDLL" in source
+    assert any(
+        isinstance(node.func, ast.Attribute) and node.func.attr == "waitpid"
+        for node in calls
+    )
 
 
 def test_valid_fake_tools_execute_exact_sequence_and_emit_validator_schema(
@@ -728,42 +734,239 @@ def test_absolute_deadline_includes_input_validation_time(
     assert calls == []
 
 
-@pytest.mark.skipif(os.name != "posix", reason="Linux process-group contract")
-def test_timeout_terminates_and_reaps_real_child_and_grandchild(
+def test_cli_subreaper_failure_is_stable_and_prevents_tool_spawn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = _load_runner()
-    _, output_root = _configure_roots(module, monkeypatch, tmp_path)
-    pid_file = tmp_path / "process-tree-pids.json"
+    input_root, output_root = _configure_roots(module, monkeypatch, tmp_path)
+    _write_inputs(input_root, _request())
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    _fake_tools(monkeypatch, module, calls)
+    monkeypatch.setattr(
+        module,
+        "_enable_child_subreaper",
+        lambda: module._fail("environment_setup", "environment_unavailable"),
+    )
+    monkeypatch.setattr(module.sys, "argv", [str(RUNNER), *REQUEST_ARGUMENTS])
+
+    assert module.main() != 0
+    assert calls == []
+    assert _result(output_root) == {
+        "schema_version": 1,
+        "status": "failed",
+        "phase": "environment_setup",
+        "error_code": "environment_unavailable",
+        "warnings": [],
+    }
+
+
+@pytest.mark.parametrize("return_code", [0, -1])
+def test_subreaper_prctl_uses_exact_operation_and_has_stable_failure(
+    monkeypatch: pytest.MonkeyPatch, return_code: int
+) -> None:
+    module = _load_runner()
+    calls: list[tuple[int, int, int, int, int]] = []
+
+    class FakePrctl:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, *arguments: int) -> int:
+            calls.append(arguments)  # type: ignore[arg-type]
+            return return_code
+
+    library = type("Library", (), {"prctl": FakePrctl()})()
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    monkeypatch.setattr(module.ctypes, "CDLL", lambda *args, **kwargs: library)
+    if return_code == 0:
+        module._enable_child_subreaper()
+        assert module._SUBREAPER_ENABLED is True
+    else:
+        with pytest.raises(module.DockingFailure) as raised:
+            module._enable_child_subreaper()
+        assert raised.value.phase == "environment_setup"
+        assert raised.value.error_code == "environment_unavailable"
+        assert module._SUBREAPER_ENABLED is False
+    assert calls == [(36, 1, 0, 0, 0)]
+
+
+def test_timeout_cleanup_reaps_direct_before_adopted_group_and_uses_kill_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_runner()
+    events: list[tuple[str, int]] = []
+
+    class FakeProcess:
+        pid = 41000
+        returncode: int | None = None
+        waits = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.waits += 1
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired(["tool"], 0.1)
+            self.returncode = -int(signal.SIGKILL)
+            events.append(("direct_reaped", self.pid))
+            return self.returncode
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+    process = FakeProcess()
+
+    def fake_killpg(process_group: int, value: int) -> None:
+        events.append(("signal", value))
+
+    reaps = iter([(41001, 0), ChildProcessError()])
+
+    def fake_waitpid(process_group: int, options: int) -> tuple[int, int]:
+        assert process.returncode is not None
+        assert process_group == -process.pid
+        assert options == module.os.WNOHANG
+        events.append(("descendant_wait", process.pid))
+        value = next(reaps)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    monkeypatch.setattr(module.os, "killpg", fake_killpg, raising=False)
+    monkeypatch.setattr(module.os, "waitpid", fake_waitpid, raising=False)
+    monkeypatch.setattr(module.os, "WNOHANG", 1, raising=False)
+    monkeypatch.setattr(module.signal, "SIGKILL", 9, raising=False)
+    assert module._terminate_and_reap_process_group(process) is True
+    assert events == [
+        ("signal", int(signal.SIGTERM)),
+        ("signal", 9),
+        ("direct_reaped", process.pid),
+        ("descendant_wait", process.pid),
+        ("descendant_wait", process.pid),
+    ]
+
+
+def test_explicit_unit_main_does_not_enable_subreaper_in_pytest_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_runner()
+    input_root, _ = _configure_roots(module, monkeypatch, tmp_path)
+    _write_inputs(input_root, _request())
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    _fake_tools(monkeypatch, module, calls)
+    monkeypatch.setattr(
+        module,
+        "_enable_child_subreaper",
+        lambda: (_ for _ in ()).throw(AssertionError("pytest became subreaper")),
+    )
+    assert module.main(REQUEST_ARGUMENTS) == 0
+
+
+def _linux_process_tree_probe(tmp_path: Path, mode: str) -> list[int]:
+    pid_file = tmp_path / f"{mode}-process-tree-pids.json"
+    output_root = tmp_path / f"{mode}-output"
+    output_root.mkdir(mode=0o700)
+    child_tail = "time.sleep(30)" if mode == "timeout" else "sys.exit(0)"
     child_code = (
         "import json,os,subprocess,sys,time;"
         "g=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);"
         "open(sys.argv[1],'w').write(json.dumps([os.getpid(),g.pid]));"
-        "time.sleep(30)"
+        + child_tail
     )
-    deadline = time.monotonic() + 0.5
-    with pytest.raises(module.DockingFailure) as raised:
-        module._run_tool(
-            [sys.executable, "-c", child_code, str(pid_file)],
-            "docking",
-            deadline,
-        )
-    assert raised.value.error_code == "tool_timeout"
-    pids = json.loads(pid_file.read_text(encoding="utf-8"))
+    helper_code = """
+import importlib.util
+import json
+import os
+import signal
+import sys
+import time
+from pathlib import Path
 
-    def process_is_gone(pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return True
-        status = Path(f"/proc/{pid}/stat")
-        return status.is_file() and status.read_text().split()[2] == "Z"
-
+spec = importlib.util.spec_from_file_location("runner_probe", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+m.OUTPUT_ROOT = Path(sys.argv[2])
+m._enable_child_subreaper()
+expected = "tool_timeout" if sys.argv[3] == "timeout" else "tool_failed"
+deadline = time.monotonic() + (0.5 if sys.argv[3] == "timeout" else 3.0)
+accepted = False
+try:
+    m._run_tool(
+        [sys.executable, "-c", sys.argv[4], sys.argv[5]],
+        "docking",
+        deadline,
+    )
+except m.DockingFailure as failure:
+    accepted = failure.error_code == expected
+pids = json.loads(Path(sys.argv[5]).read_text(encoding="utf-8"))
+remaining = [pid for pid in pids if Path(f"/proc/{pid}").exists()]
+if remaining:
+    try:
+        os.killpg(pids[0], signal.SIGKILL)
+    except ProcessLookupError:
+        pass
     stop = time.monotonic() + 1.0
-    while time.monotonic() < stop and not all(process_is_gone(pid) for pid in pids):
-        time.sleep(0.02)
-    assert all(process_is_gone(pid) for pid in pids)
-    assert output_root.is_dir()
+    while time.monotonic() < stop:
+        try:
+            child, _ = os.waitpid(-pids[0], os.WNOHANG)
+        except ChildProcessError:
+            break
+        if child == 0:
+            time.sleep(0.01)
+    remaining = [pid for pid in pids if Path(f"/proc/{pid}").exists()]
+if not accepted:
+    raise SystemExit(20)
+if remaining:
+    raise SystemExit(21)
+"""
+    compile(helper_code, "<linux-process-tree-probe>", "exec")
+    helper = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            helper_code,
+            str(RUNNER),
+            str(output_root),
+            mode,
+            child_code,
+            str(pid_file),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    pids: list[int] = []
+    try:
+        assert helper.wait(timeout=8) == 0
+        pids = json.loads(pid_file.read_text(encoding="utf-8"))
+        assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
+        return pids
+    finally:
+        if helper.poll() is None:
+            os.killpg(helper.pid, signal.SIGKILL)
+            helper.wait(timeout=1)
+        if pid_file.exists():
+            pids = json.loads(pid_file.read_text(encoding="utf-8"))
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="Linux subreaper contract"
+)
+def test_timeout_fully_reaps_real_child_and_grandchild(tmp_path: Path) -> None:
+    _linux_process_tree_probe(tmp_path, "timeout")
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="Linux subreaper contract"
+)
+def test_success_with_background_descendant_is_cleaned_and_fails(
+    tmp_path: Path,
+) -> None:
+    _linux_process_tree_probe(tmp_path, "background")
 
 
 @pytest.mark.parametrize(
