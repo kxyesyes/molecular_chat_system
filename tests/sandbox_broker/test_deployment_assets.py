@@ -132,7 +132,12 @@ def test_firewall_owns_internal_network_and_scopes_docker_user_rules() -> None:
     assert "NETWORK_NAME=medchat-opensandbox" in script
     assert "BRIDGE_INTERFACE=br-medchat-sbox" in script
     assert "NETWORK_LABEL=com.medchat.opensandbox.network=v1" in script
-    assert "SANDBOX_LABEL=opensandbox.io/sandbox-id" in script
+    assert "SANDBOX_LABEL=opensandbox.io/id" in script
+    assert "opensandbox.io/sandbox-id" not in script
+    assert "docker version --format '{{.Server.Version}}'" in script
+    assert "MIN_DOCKER_MAJOR=25" in script
+    assert "MIN_DOCKER_MINOR=0" in script
+    assert "MIN_DOCKER_PATCH=5" in script
     assert "docker network create" in script
     assert "--driver bridge" in script
     assert "--internal" in script
@@ -290,6 +295,10 @@ with open(state_path, encoding="utf-8") as handle:
 docker_state = data.setdefault("docker", {"network_exists": False})
 args = sys.argv[1:]
 
+if args[:2] == ["version", "--format"]:
+    print(os.environ.get("FAKE_DOCKER_VERSION", "26.0.0"))
+    raise SystemExit(0)
+
 if args[:2] == ["network", "create"]:
     docker_state["network_exists"] = True
     temporary = state_path + ".new"
@@ -314,7 +323,9 @@ if args[:2] == ["network", "inspect"]:
         '{{index .Options "com.docker.network.bridge.name"}}': "br-medchat-sbox",
         '{{index .Options "com.docker.network.bridge.enable_icc"}}': "false",
         "{{json .Labels}}": '{"com.medchat.opensandbox.network":"v1"}',
-        '{{range $id, $_ := .Containers}}{{$id}}{{"\\n"}}{{end}}': "",
+        '{{range $id, $_ := .Containers}}{{$id}}{{"\\n"}}{{end}}': os.environ.get(
+            "FAKE_ATTACHED_CONTAINER", ""
+        ),
     }
     if value not in values:
         raise SystemExit(2)
@@ -329,9 +340,9 @@ if args[:2] == ["ps", "-aq"]:
 
 if args[:2] == ["container", "inspect"]:
     if "NetworkSettings.Networks" in args[args.index("--format") + 1]:
-        print("bridge")
+        print(os.environ.get("FAKE_ATTACHED_NETWORKS", "bridge"))
     else:
-        print("sandbox-legacy")
+        print(os.environ.get("FAKE_ATTACHED_LABEL", "sandbox-legacy"))
     raise SystemExit(0)
 
 raise SystemExit(2)
@@ -541,6 +552,90 @@ def test_firewall_rejects_legacy_sandbox_before_rule_migration(
     final = json.loads(state.read_text(encoding="utf-8"))
     for family in ("iptables", "ip6tables"):
         assert legacy in final[family]["filter"]["DOCKER-USER"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="firewall behavior requires POSIX")
+@pytest.mark.parametrize("version", ["24.0.9", "25.0.4", "25.0.5-rc.1"])
+def test_firewall_rejects_unpatched_or_malformed_docker_version(
+    tmp_path: Path,
+    version: str,
+) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    state = _write_fake_firewall_tool(tools)
+    script = tmp_path / "configure-firewall.sh"
+    script.write_text(
+        FIREWALL_SCRIPT.read_text(encoding="utf-8").replace(
+            "PATH=/usr/sbin:/usr/bin:/sbin:/bin", f"PATH={tools}"
+        ),
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["FAKE_FIREWALL_STATE"] = str(state)
+    environment["FAKE_DOCKER_VERSION"] = version
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert result.stderr == (
+        "opensandbox_firewall=failed code=firewall_configuration_failed\n"
+    )
+    assert json.loads(state.read_text(encoding="utf-8"))["docker"] == {
+        "network_exists": False
+    }
+
+
+@pytest.mark.skipif(os.name != "posix", reason="firewall behavior requires POSIX")
+@pytest.mark.parametrize(
+    ("label", "networks"),
+    [
+        ("", "medchat-opensandbox"),
+        ("sandbox-123", "medchat-opensandbox\nunrelated"),
+    ],
+)
+def test_firewall_rejects_wrong_label_or_second_network_attachment(
+    tmp_path: Path,
+    label: str,
+    networks: str,
+) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    state = _write_fake_firewall_tool(tools)
+    script = tmp_path / "configure-firewall.sh"
+    script.write_text(
+        FIREWALL_SCRIPT.read_text(encoding="utf-8").replace(
+            "PATH=/usr/sbin:/usr/bin:/sbin:/bin", f"PATH={tools}"
+        ),
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["FAKE_FIREWALL_STATE"] = str(state)
+    environment["FAKE_ATTACHED_CONTAINER"] = "e" * 64
+    environment["FAKE_ATTACHED_LABEL"] = label
+    environment["FAKE_ATTACHED_NETWORKS"] = networks
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert result.stderr == (
+        "opensandbox_firewall=failed code=firewall_configuration_failed\n"
+    )
 
 
 @pytest.mark.skipif(os.name != "posix", reason="firewall behavior requires POSIX")
@@ -2075,7 +2170,7 @@ def test_runtime_network_accepts_only_owned_internal_sandbox_attachments(
             output = value if isinstance(value, str) else json.dumps(value)
             return validator._CommandResult(True, output)
         if argv[:3] == ("docker", "container", "inspect"):
-            if argv[4].startswith("{{index .Config.Labels"):
+            if argv[4] == '{{index .Config.Labels "opensandbox.io/id"}}':
                 return validator._CommandResult(True, "sandbox-123")
             return validator._CommandResult(
                 True, json.dumps({"medchat-opensandbox": {}})
@@ -2101,7 +2196,7 @@ def test_runtime_network_accepts_only_owned_internal_sandbox_attachments(
         "-aq",
         "--no-trunc",
         "--filter",
-        "label=opensandbox.io/sandbox-id",
+        "label=opensandbox.io/id",
     ) in calls
     assert not any("{{json .}}" in call for call in calls)
     assert not any(call[0] in {"sh", "bash"} for call in calls)
@@ -2139,6 +2234,135 @@ def test_runtime_network_rejects_legacy_sandbox_outside_owned_network(
     assert not validator._docker_network_is_safe()
 
 
+def test_runtime_network_rejects_deprecated_label_on_attached_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = _load_validator()
+    container_id = "c" * 64
+    network_fields: dict[str, object] = {
+        "{{.Name}}": "medchat-opensandbox",
+        "{{.Driver}}": "bridge",
+        "{{json .Internal}}": True,
+        "{{json .EnableIPv6}}": True,
+        "{{json .Options}}": {
+            "com.docker.network.bridge.name": "br-medchat-sbox",
+            "com.docker.network.bridge.enable_icc": "false",
+        },
+        "{{json .Labels}}": {"com.medchat.opensandbox.network": "v1"},
+        "{{json .Containers}}": {container_id: {}},
+    }
+
+    def command(argv: tuple[str, ...]) -> validator._CommandResult:
+        if argv[:3] == ("docker", "network", "inspect"):
+            value = network_fields[argv[4]]
+            return validator._CommandResult(
+                True, value if isinstance(value, str) else json.dumps(value)
+            )
+        if argv[:3] == ("docker", "container", "inspect"):
+            if argv[4] == '{{index .Config.Labels "opensandbox.io/sandbox-id"}}':
+                return validator._CommandResult(True, "deprecated-id")
+            if argv[4] == '{{index .Config.Labels "opensandbox.io/id"}}':
+                return validator._CommandResult(True, "")
+            return validator._CommandResult(
+                True, json.dumps({"medchat-opensandbox": {}})
+            )
+        if argv[:2] == ("docker", "ps"):
+            if argv[-1] == "label=opensandbox.io/sandbox-id":
+                return validator._CommandResult(True, container_id + "\n")
+            return validator._CommandResult(True, "")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(validator, "_run_command", command)
+
+    assert not validator._docker_network_is_safe()
+
+
+def test_runtime_network_rejects_attached_sandbox_with_second_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = _load_validator()
+    container_id = "d" * 64
+    network_fields: dict[str, object] = {
+        "{{.Name}}": "medchat-opensandbox",
+        "{{.Driver}}": "bridge",
+        "{{json .Internal}}": True,
+        "{{json .EnableIPv6}}": True,
+        "{{json .Options}}": {
+            "com.docker.network.bridge.name": "br-medchat-sbox",
+            "com.docker.network.bridge.enable_icc": "false",
+        },
+        "{{json .Labels}}": {"com.medchat.opensandbox.network": "v1"},
+        "{{json .Containers}}": {container_id: {}},
+    }
+
+    def command(argv: tuple[str, ...]) -> validator._CommandResult:
+        if argv[:3] == ("docker", "network", "inspect"):
+            value = network_fields[argv[4]]
+            return validator._CommandResult(
+                True, value if isinstance(value, str) else json.dumps(value)
+            )
+        if argv[:3] == ("docker", "container", "inspect"):
+            if argv[4].startswith("{{index .Config.Labels"):
+                return validator._CommandResult(True, "sandbox-123")
+            return validator._CommandResult(
+                True,
+                json.dumps({"medchat-opensandbox": {}, "unrelated": {}}),
+            )
+        if argv[:2] == ("docker", "ps"):
+            return validator._CommandResult(True, container_id + "\n")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(validator, "_run_command", command)
+
+    assert not validator._docker_network_is_safe()
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("25.0.5", True),
+        ("25.0.6", True),
+        ("26.0.0", True),
+        ("30.1.2", True),
+        ("25.0.5-rc.1", False),
+        ("25.0.4", False),
+        ("24.0.9", False),
+        ("23.0.6", False),
+        ("025.0.5", False),
+        ("25.0", False),
+        ("not-a-version", False),
+    ],
+)
+def test_docker_server_version_policy(version: str, expected: bool) -> None:
+    validator = _load_validator()
+
+    assert validator._docker_server_version_is_safe(version) is expected
+
+
+def test_runtime_rejects_unpatched_docker_with_stable_redacted_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = _load_validator()
+    canary = "docker-version-secret-output"
+
+    def command(argv: tuple[str, ...]) -> validator._CommandResult:
+        if argv == ("runsc", "--version"):
+            return validator._CommandResult(True, "runsc version 1")
+        if argv[:3] == ("docker", "info", "--format"):
+            return validator._CommandResult(True, '{"runsc":{}}')
+        if argv[:3] == ("docker", "version", "--format"):
+            return validator._CommandResult(True, "25.0.4")
+        return validator._CommandResult(False, canary)
+
+    monkeypatch.setattr(validator, "_run_command", command)
+
+    code = validator.validate_runtime()
+
+    assert code == "docker_version_unsafe"
+    assert code in validator._STABLE_CODES
+    assert canary not in code
+
+
 def test_safe_mocked_runtime_checks_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     validator = _load_validator()
     calls: list[tuple[str, ...]] = []
@@ -2149,6 +2373,8 @@ def test_safe_mocked_runtime_checks_pass(monkeypatch: pytest.MonkeyPatch) -> Non
             return validator._CommandResult(True, "runsc version 20260801")
         if argv[:3] == ("docker", "info", "--format"):
             return validator._CommandResult(True, '{"runsc":{"path":"runsc"}}')
+        if argv[:3] == ("docker", "version", "--format"):
+            return validator._CommandResult(True, "26.0.0")
         if argv[:3] == ("docker", "image", "inspect"):
             return validator._CommandResult(
                 True,
@@ -2226,6 +2452,8 @@ def test_runtime_rejects_mismatched_raw_ingress_chain_without_raw_output(
             return validator._CommandResult(True, "runsc version 1")
         if argv[:3] == ("docker", "info", "--format"):
             return validator._CommandResult(True, '{"runsc":{"path":"runsc"}}')
+        if argv[:3] == ("docker", "version", "--format"):
+            return validator._CommandResult(True, "26.0.0")
         if argv[0] in {"iptables", "ip6tables"}:
             if "-S" in argv:
                 return validator._CommandResult(True, canary)
@@ -2269,6 +2497,8 @@ def test_runtime_socket_contract_rejects_wrong_type_owner_or_mode(
             return validator._CommandResult(True, "runsc version 1")
         if argv[:3] == ("docker", "info", "--format"):
             return validator._CommandResult(True, '{"runsc":{"path":"runsc"}}')
+        if argv[:3] == ("docker", "version", "--format"):
+            return validator._CommandResult(True, "26.0.0")
         if argv[0] in {"iptables", "ip6tables"}:
             if "-S" in argv:
                 if argv[-1] == "-S":
@@ -2320,6 +2550,8 @@ def test_runtime_rejects_missing_firewall_rule_without_raw_output(
             return validator._CommandResult(True, "runsc version 1")
         if argv[:3] == ("docker", "info", "--format"):
             return validator._CommandResult(True, '{"runsc":{"path":"runsc"}}')
+        if argv[:3] == ("docker", "version", "--format"):
+            return validator._CommandResult(True, "26.0.0")
         if argv[0] in {"iptables", "ip6tables"}:
             return validator._CommandResult(False, canary)
         raise AssertionError(argv)

@@ -11,8 +11,11 @@ MAX_LEGACY_RULES=64
 NETWORK_NAME=medchat-opensandbox
 BRIDGE_INTERFACE=br-medchat-sbox
 NETWORK_LABEL=com.medchat.opensandbox.network=v1
-SANDBOX_LABEL=opensandbox.io/sandbox-id
+SANDBOX_LABEL=opensandbox.io/id
 LEGACY_CHAIN=MEDCHAT-OPENSANDBOX
+MIN_DOCKER_MAJOR=25
+MIN_DOCKER_MINOR=0
+MIN_DOCKER_PATCH=5
 
 fail() {
     printf '%s\n' \
@@ -51,6 +54,7 @@ verify_network() {
 
 ensure_network() {
     command -v docker >/dev/null 2>&1 || fail
+    verify_docker_version
     if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
         docker network create --driver bridge --internal --ipv6 \
             --label "$NETWORK_LABEL" \
@@ -59,6 +63,39 @@ ensure_network() {
             "$NETWORK_NAME" >/dev/null 2>&1 || :
     fi
     verify_network
+}
+
+valid_version_component() {
+    value=$1
+    case "$value" in
+        ''|*[!0-9]*|0[0-9]*) return 1 ;;
+    esac
+    [ "${#value}" -le 9 ]
+}
+
+verify_docker_version() {
+    version=$(docker version --format '{{.Server.Version}}' 2>/dev/null) || fail
+    [ "${#version}" -le 32 ] || fail
+    case "$version" in
+        .*|*.|*..*) fail ;;
+    esac
+    saved_ifs=$IFS
+    IFS=.
+    set -- $version
+    IFS=$saved_ifs
+    [ "$#" -eq 3 ] || fail
+    valid_version_component "$1" || fail
+    valid_version_component "$2" || fail
+    valid_version_component "$3" || fail
+    if [ "$1" -gt "$MIN_DOCKER_MAJOR" ]; then
+        return
+    fi
+    [ "$1" -eq "$MIN_DOCKER_MAJOR" ] || fail
+    if [ "$2" -gt "$MIN_DOCKER_MINOR" ]; then
+        return
+    fi
+    [ "$2" -eq "$MIN_DOCKER_MINOR" ] || fail
+    [ "$3" -ge "$MIN_DOCKER_PATCH" ] || fail
 }
 
 valid_container_id() {
@@ -77,12 +114,12 @@ valid_sandbox_id() {
     [ "${#value}" -le 128 ]
 }
 
-network_contains() {
+container_network_is_exact() {
     container=$1
     networks=$(docker container inspect --format \
         '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{"\n"}}{{end}}' \
         "$container" 2>/dev/null) || fail
-    printf '%s\n' "$networks" | grep -Fqx -- "$NETWORK_NAME"
+    [ "$networks" = "$NETWORK_NAME" ]
 }
 
 verify_container_ownership() {
@@ -92,7 +129,7 @@ verify_container_ownership() {
     for container in $attached; do
         valid_container_id "$container" || fail
         sandbox_id=$(docker container inspect --format \
-            '{{index .Config.Labels "opensandbox.io/sandbox-id"}}' \
+            '{{index .Config.Labels "opensandbox.io/id"}}' \
             "$container" 2>/dev/null) || fail
         valid_sandbox_id "$sandbox_id" || fail
     done
@@ -101,7 +138,7 @@ verify_container_ownership() {
         2>/dev/null) || fail
     for container in $labeled; do
         valid_container_id "$container" || fail
-        network_contains "$container" || legacy_sandboxes_fail
+        container_network_is_exact "$container" || legacy_sandboxes_fail
     done
 }
 

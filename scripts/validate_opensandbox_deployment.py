@@ -88,7 +88,7 @@ _PINNED_ASSET_SHA256 = {
         "d08a8ed8795d2c505099fd9ddf8660831fc9780d251d46c3f8132d99ce86a3e1"
     ),
     "deployment/opensandbox/configure-firewall.sh": (
-        "826e06ab4a45fc8f2e3f9728287db89ee806a3389cd619b055dde2c18406261f"
+        "77aa53b08dcf0a75fef4b6d6d4acaa70345f1d65181f5773174f6a025ba20f5c"
     ),
     "deployment/opensandbox/opensandbox.env.example": (
         "bdd4b347aacd786c555250f5733566d5fd8723e15c44aeb048af237852d089bf"
@@ -121,6 +121,7 @@ _STABLE_CODES = frozenset(
         "env_template_unsafe",
         "runsc_unavailable",
         "docker_runtime_unregistered",
+        "docker_version_unsafe",
         "docker_network_unsafe",
         "firewall_rule_missing",
         "opensandbox_unhealthy",
@@ -498,7 +499,11 @@ def _validate_firewall_script(text: str) -> bool:
         "NETWORK_NAME=medchat-opensandbox",
         "BRIDGE_INTERFACE=br-medchat-sbox",
         "NETWORK_LABEL=com.medchat.opensandbox.network=v1",
-        "SANDBOX_LABEL=opensandbox.io/sandbox-id",
+        "SANDBOX_LABEL=opensandbox.io/id",
+        "MIN_DOCKER_MAJOR=25",
+        "MIN_DOCKER_MINOR=0",
+        "MIN_DOCKER_PATCH=5",
+        "docker version --format '{{.Server.Version}}'",
         "LEGACY_CHAIN=MEDCHAT-OPENSANDBOX",
         "MAX_LEGACY_RULES=64",
         "docker network create --driver bridge --internal --ipv6",
@@ -1132,7 +1137,15 @@ def _runtime_image_reference() -> str | None:
 _NETWORK_NAME = "medchat-opensandbox"
 _BRIDGE_INTERFACE = "br-medchat-sbox"
 _NETWORK_LABEL = "com.medchat.opensandbox.network"
-_SANDBOX_LABEL = "opensandbox.io/sandbox-id"
+_SANDBOX_LABEL = "opensandbox.io/id"
+
+
+def _docker_server_version_is_safe(value: str) -> bool:
+    match = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", value)
+    if match is None or len(value) > 32:
+        return False
+    components = tuple(int(part) for part in match.groups())
+    return components >= (25, 0, 5)
 
 
 def _docker_network_is_safe() -> bool:
@@ -1185,7 +1198,7 @@ def _docker_network_is_safe() -> bool:
         label_result = _run_command(
             (
                 "docker", "container", "inspect", "--format",
-                '{{index .Config.Labels "opensandbox.io/sandbox-id"}}',
+                '{{index .Config.Labels "opensandbox.io/id"}}',
                 container_id,
             )
         )
@@ -1206,7 +1219,7 @@ def _docker_network_is_safe() -> bool:
             re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", sandbox_id)
             is None
             or not isinstance(networks, dict)
-            or _NETWORK_NAME not in networks
+            or set(networks) != {_NETWORK_NAME}
         ):
             return False
 
@@ -1310,6 +1323,15 @@ def validate_runtime() -> str | None:
             return "docker_runtime_unregistered"
         if not isinstance(runtimes, dict) or "runsc" not in runtimes:
             return "docker_runtime_unregistered"
+
+        docker_version = _run_command(
+            ("docker", "version", "--format", "{{.Server.Version}}")
+        )
+        if (
+            not docker_version.ok
+            or not _docker_server_version_is_safe(docker_version.stdout.strip())
+        ):
+            return "docker_version_unsafe"
 
         if not _docker_network_is_safe():
             return "docker_network_unsafe"
