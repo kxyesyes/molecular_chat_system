@@ -1497,3 +1497,244 @@ def test_cancel_completion_race_has_exactly_one_legal_terminal_transition(
             ),
         ).fetchone()[0]
     assert terminal_count == 1
+
+
+def test_hung_create_hits_hard_deadline_and_never_claims_cleanup_success(
+    tmp_path: Path,
+) -> None:
+    class CancellationResistantCreate(FakeSandboxClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release_create = asyncio.Event()
+
+        async def create(self, job_id: str) -> SandboxHandle:
+            self.create_count += 1
+            self.started.set()
+            while not self.release_create.is_set():
+                try:
+                    await self.release_create.wait()
+                except asyncio.CancelledError:
+                    continue
+            return SandboxHandle(f"sandbox-{job_id}", object())
+
+    async def scenario() -> tuple[object, float, list[str]]:
+        sdk = CancellationResistantCreate()
+        service, _, config = _service(tmp_path, sdk)
+        service._create_hard_timeout_seconds = 0.03
+        service._destroy_hard_timeout_seconds = 0.03
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-hung-create")
+        await sdk.started.wait()
+        started = asyncio.get_running_loop().time()
+        await service.stop(timeout=0.5)
+        elapsed = asyncio.get_running_loop().time() - started
+        terminal = service.get_job(job.job_id)
+        sdk.release_create.set()
+        await asyncio.sleep(0.02)
+        leaked = [
+            task.get_name()
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith("sandbox-broker-")
+            and not task.done()
+        ]
+        return terminal, elapsed, leaked
+
+    terminal, elapsed, leaked = asyncio.run(scenario())
+    assert elapsed < 0.5
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.cleanup_status == "failed"
+    assert "sandbox_auto_expires_within_configured_remote_lifetime" in terminal.warnings
+    assert leaked == []
+
+
+def test_hung_run_and_destroy_are_detached_after_hard_deadlines(
+    tmp_path: Path,
+) -> None:
+    class ResistantRunAndDestroy(FakeSandboxClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.release_run = asyncio.Event()
+            self.release_destroy = asyncio.Event()
+            self.destroy_started = asyncio.Event()
+
+        async def run(self, handle: SandboxHandle) -> SandboxCommandResult:
+            del handle
+            self.run_count += 1
+            self.running.set()
+            while not self.release_run.is_set():
+                try:
+                    await self.release_run.wait()
+                except asyncio.CancelledError:
+                    continue
+            return SandboxCommandResult(0, "", "")
+
+        async def destroy(self, handle: SandboxHandle) -> None:
+            self.destroy_count += 1
+            self.destroy_started.set()
+            while not self.release_destroy.is_set():
+                try:
+                    await self.release_destroy.wait()
+                except asyncio.CancelledError:
+                    continue
+            self.destroyed_ids.append(handle.sandbox_id)
+
+    async def scenario() -> tuple[object, float, list[str]]:
+        sdk = ResistantRunAndDestroy()
+        service, _, config = _service(tmp_path, sdk)
+        service._run_cancel_grace_seconds = 0.02
+        service._destroy_hard_timeout_seconds = 0.03
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-hung-run-destroy")
+        await sdk.running.wait()
+        started = asyncio.get_running_loop().time()
+        await service.cancel(job.job_id)
+        await service.stop(timeout=0.5)
+        elapsed = asyncio.get_running_loop().time() - started
+        terminal = service.get_job(job.job_id)
+        sdk.release_run.set()
+        sdk.release_destroy.set()
+        await asyncio.sleep(0.03)
+        leaked = [
+            task.get_name()
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith("sandbox-broker-")
+            and not task.done()
+        ]
+        return terminal, elapsed, leaked
+
+    terminal, elapsed, leaked = asyncio.run(scenario())
+    assert elapsed < 0.5
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.CLEANUP_FAILED.value
+    assert terminal.cleanup_status == "failed"
+    assert leaked == []
+
+
+def test_consumer_survives_store_get_baseexception_and_processes_next_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> tuple[object, object, FakeSandboxClient]:
+        sdk = FakeSandboxClient()
+        service, store, config = _service(tmp_path, sdk)
+        await service.start()
+        first = await service.submit(_prepared(config), "idem-flaky-get-first")
+        original_get = store.get
+        failed = False
+
+        def flaky_get(job_id: str) -> object:
+            nonlocal failed
+            task = asyncio.current_task()
+            if (
+                job_id == first.job_id
+                and not failed
+                and task is not None
+                and task.get_name() == "sandbox-broker-consumer"
+            ):
+                failed = True
+                raise KeyboardInterrupt("private-marker /private/path")
+            return original_get(job_id)
+
+        monkeypatch.setattr(store, "get", flaky_get)
+        second = await service.submit(_prepared(config), "idem-flaky-get-second")
+        first_terminal = await service.wait_terminal(first.job_id, timeout=1)
+        second_terminal = await service.wait_terminal(second.job_id, timeout=1)
+        await service.stop(timeout=1)
+        return first_terminal, second_terminal, sdk
+
+    first, second, sdk = asyncio.run(scenario())
+    assert first.status is BrokerJobStatus.FAILED
+    assert first.error_code == BrokerErrorCode.OPENSANDBOX_UNAVAILABLE.value
+    assert second.status is BrokerJobStatus.SUCCEEDED
+    assert sdk.run_count == 1
+
+
+def test_stop_sanitizes_internal_baseexception_without_context_or_cause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> StopIncomplete:
+        service, store, _ = _service(tmp_path, FakeSandboxClient())
+        await service.start()
+
+        def fail_active_jobs() -> object:
+            raise RuntimeError("private-marker C:\\private\\secret.txt")
+
+        monkeypatch.setattr(store, "active_jobs", fail_active_jobs)
+        try:
+            await service.stop(timeout=0.2)
+        except StopIncomplete as raised:
+            return raised
+        raise AssertionError("stop did not fail closed")
+
+    failure = asyncio.run(scenario())
+    assert "private-marker" not in str(failure)
+    assert "private-marker" not in repr(failure)
+    assert failure.__cause__ is None
+    assert failure.__context__ is None
+
+
+def test_terminal_wait_index_is_constant_after_one_thousand_jobs(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> SandboxBrokerService:
+        service, store, _ = _service(tmp_path, FakeSandboxClient())
+        job_ids: list[str] = []
+        for index in range(1000):
+            job, _ = store.create_or_get(
+                f"idem-bounded-{index}",
+                hashlib.sha256(str(index).encode("ascii")).hexdigest(),
+                f"trace-bounded-{index}",
+            )
+            store.fail(
+                job.job_id,
+                BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
+                cleanup_status="succeeded",
+            )
+            job_ids.append(job.job_id)
+        for job_id in job_ids:
+            await service.wait_terminal(job_id, timeout=2)
+        return service
+
+    service = asyncio.run(scenario())
+    assert not hasattr(service, "_terminal_events")
+    assert service._job_tasks == {}
+    assert service._create_tasks == {}
+    assert service._cleanup_tasks == {}
+
+
+@pytest.mark.parametrize(
+    "warning",
+    [
+        "prefix/data/model.bin",
+        "prefix/srv/worker/result.json",
+        "prefix/proc/self/status",
+        "prefix/dev/null",
+        "prefix/\u200bdata/model.bin",
+        "to\u200bken=private-marker",
+    ],
+)
+def test_unicode_reassembled_warning_fails_end_to_end_without_manifest(
+    tmp_path: Path,
+    warning: str,
+) -> None:
+    async def scenario() -> tuple[object, SandboxBrokerService]:
+        service, _, config = _service(
+            tmp_path,
+            FakeSandboxClient(result_extras={"warnings": [warning]}),
+        )
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-unicode-warning")
+        terminal = await service.wait_terminal(job.job_id)
+        await service.stop()
+        return terminal, service
+
+    terminal, service = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.warnings == ()
+    assert warning not in repr(terminal)
+    with pytest.raises(KeyError):
+        service.get_manifest(terminal.job_id)

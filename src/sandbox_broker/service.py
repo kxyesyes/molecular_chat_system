@@ -27,7 +27,7 @@ from .models import (
     DockingParameters,
 )
 from .opensandbox_client import SandboxCommandResult, SandboxHandle
-from .safety import is_safe_metadata_text
+from .safety import contains_sensitive_metadata_text, is_safe_metadata_text
 from .store import ArtifactRecord, BrokerJobRecord, BrokerStore
 from .validation import (
     ScientificOutputError,
@@ -41,11 +41,11 @@ _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _TRACE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _UUID_HEX_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 _TOOL_VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .+_()-]{0,127}$")
-_SENSITIVE_TEXT_PATTERN = re.compile(
-    r"(?i)(?:api[_ -]?key|token|password|secret|credential|bearer\s+)"
-)
 _MANIFEST_MAX_BYTES = 1024 * 1024
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_REMOTE_AUTO_EXPIRY_WARNING = (
+    "sandbox_auto_expires_within_configured_remote_lifetime"
+)
 
 
 class BrokerFailure(Exception):
@@ -63,6 +63,12 @@ class StopIncomplete(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__("sandbox broker shutdown is incomplete")
+
+
+class _CreateHardDeadline(Exception):
+    def __init__(self, cleanup_confirmed: bool) -> None:
+        self.cleanup_confirmed = cleanup_confirmed
+        super().__init__("sandbox create hard deadline exceeded")
 
 
 def _safe_staged_input(value: object, role: str) -> StagedInput:
@@ -239,13 +245,27 @@ class SandboxBrokerService:
         self._create_tasks: dict[str, asyncio.Task[Any]] = {}
         self._cleanup_tasks: dict[str, asyncio.Task[Any]] = {}
         self._prepared: dict[str, PreparedDockingSubmission] = {}
-        self._terminal_events: dict[str, asyncio.Event] = {}
+        self._terminal_condition = asyncio.Condition()
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._lifecycle_lock = asyncio.Lock()
         self._recovery_lock = asyncio.Lock()
         self._recovery_generation = 0
         self._retention_lock = asyncio.Lock()
         self._cleanup_timeout_margin_seconds = 30.0
+        self._create_hard_timeout_seconds = float(config.sandbox_timeout_seconds)
+        self._run_cancel_grace_seconds = 5.0
+        self._destroy_hard_timeout_seconds = 30.0
+
+    @staticmethod
+    def _consume_task_exception(task: asyncio.Task[Any]) -> None:
+        try:
+            task.exception()
+        except BaseException:
+            pass
+
+    async def _notify_terminal(self) -> None:
+        async with self._terminal_condition:
+            self._terminal_condition.notify_all()
 
     async def start(self) -> None:
         """Start exactly one consumer; repeated calls are harmless."""
@@ -308,18 +328,26 @@ class SandboxBrokerService:
                     self._shutdown(),
                     name="sandbox-broker-shutdown",
                 )
+                shutdown.add_done_callback(self._consume_task_exception)
                 self._shutdown_task = shutdown
 
+        incomplete = False
         try:
             await asyncio.wait_for(asyncio.shield(shutdown), timeout=wait_seconds)
+        except asyncio.CancelledError:
+            raise
         except asyncio.TimeoutError:
-            raise StopIncomplete() from None
+            incomplete = True
+        except BaseException:
+            incomplete = True
         finally:
             if shutdown.done():
                 async with self._lifecycle_lock:
                     if self._shutdown_task is shutdown:
                         self._shutdown_task = None
                     self._stopping = False
+        if incomplete:
+            raise StopIncomplete() from None
 
     async def _shutdown(self) -> None:
         for record in self.store.active_jobs():
@@ -332,8 +360,26 @@ class SandboxBrokerService:
             except BaseException:
                 continue
 
-        await self._queue.join()
         consumer = self._consumer_task
+        join_task = asyncio.create_task(
+            self._queue.join(), name="sandbox-broker-queue-drain"
+        )
+        join_task.add_done_callback(self._consume_task_exception)
+        while not join_task.done():
+            watched: set[asyncio.Task[Any]] = {join_task}
+            if consumer is not None:
+                watched.add(consumer)
+            done, _ = await asyncio.wait(
+                watched,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if join_task in done:
+                break
+            if consumer is not None and consumer in done:
+                self._consume_task_exception(consumer)
+                await self._drain_unserviceable_queue()
+                break
+        await asyncio.shield(join_task)
         if consumer is not None and not consumer.done():
             consumer.cancel()
         if consumer is not None:
@@ -350,11 +396,56 @@ class SandboxBrokerService:
             *self._cleanup_tasks.values(),
         }
         if tracked:
-            await asyncio.gather(
-                *(asyncio.shield(task) for task in tracked),
-                return_exceptions=True,
+            wait_limit = (
+                self._create_hard_timeout_seconds
+                + self._destroy_hard_timeout_seconds
+                + self._run_cancel_grace_seconds
             )
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        *(asyncio.shield(task) for task in tracked),
+                        return_exceptions=True,
+                    ),
+                    timeout=wait_limit,
+                )
+            except asyncio.TimeoutError:
+                for task in tracked:
+                    self._consume_task_exception(task) if task.done() else None
         self._consumer_task = None
+
+    async def _drain_unserviceable_queue(self) -> None:
+        while True:
+            try:
+                job_id = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            try:
+                self._fail_queue_item(job_id)
+                await self._notify_terminal()
+            finally:
+                self._prepared.pop(job_id, None)
+                self._cancel_events.pop(job_id, None)
+                self._queue.task_done()
+
+    def _fail_queue_item(self, job_id: str) -> None:
+        try:
+            record = self.store.get(job_id)
+            if record is not None and record.status not in TERMINAL_STATUSES:
+                self.store.fail(
+                    job_id,
+                    BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
+                    cleanup_status="succeeded",
+                )
+        except BaseException:
+            try:
+                self.store.fail(
+                    job_id,
+                    BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
+                    cleanup_status="succeeded",
+                )
+            except BaseException:
+                pass
 
     async def submit(
         self,
@@ -388,7 +479,6 @@ class SandboxBrokerService:
             return _record_view(record)
 
         self._prepared[record.job_id] = prepared
-        self._terminal_events.setdefault(record.job_id, asyncio.Event())
         self._cancel_events.setdefault(record.job_id, asyncio.Event())
         try:
             self._queue.put_nowait(record.job_id)
@@ -400,7 +490,7 @@ class SandboxBrokerService:
                 BrokerErrorCode.QUEUE_SATURATED,
                 cleanup_status="succeeded",
             )
-            self._terminal_events[record.job_id].set()
+            await self._notify_terminal()
             del terminal
             raise BrokerFailure(BrokerErrorCode.QUEUE_SATURATED) from None
         return _record_view(record)
@@ -420,17 +510,34 @@ class SandboxBrokerService:
         *,
         timeout: float | None = None,
     ) -> BrokerJobView:
-        record = self.get_job(job_id)
-        if record.status in TERMINAL_STATUSES:
-            return record
-        event = self._terminal_events.setdefault(job_id, asyncio.Event())
-        if timeout is None:
-            await event.wait()
-        else:
-            if type(timeout) not in (int, float) or not math.isfinite(float(timeout)) or timeout < 0:
-                raise ValueError("terminal wait timeout is invalid")
-            await asyncio.wait_for(event.wait(), float(timeout))
-        return self.get_job(job_id)
+        if timeout is not None and (
+            type(timeout) not in (int, float)
+            or not math.isfinite(float(timeout))
+            or timeout < 0
+        ):
+            raise ValueError("terminal wait timeout is invalid")
+        deadline = (
+            None
+            if timeout is None
+            else asyncio.get_running_loop().time() + float(timeout)
+        )
+        while True:
+            record = self.get_job(job_id)
+            if record.status in TERMINAL_STATUSES:
+                return record
+            async with self._terminal_condition:
+                record = self.get_job(job_id)
+                if record.status in TERMINAL_STATUSES:
+                    return record
+                if deadline is None:
+                    await self._terminal_condition.wait()
+                else:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                    await asyncio.wait_for(
+                        self._terminal_condition.wait(), timeout=remaining
+                    )
 
     async def _consume(self) -> None:
         while True:
@@ -460,12 +567,18 @@ class SandboxBrokerService:
                     raise
                 except BaseException:
                     pass
+            except asyncio.CancelledError:
+                raise
+            except BaseException:
+                self._fail_queue_item(job_id)
             finally:
                 self._job_tasks.pop(job_id, None)
                 self._prepared.pop(job_id, None)
                 self._cancel_events.pop(job_id, None)
-                self._terminal_events.setdefault(job_id, asyncio.Event()).set()
-                self._queue.task_done()
+                try:
+                    await self._notify_terminal()
+                finally:
+                    self._queue.task_done()
 
     async def _run_job(self, job_id: str) -> None:
         handle: SandboxHandle | None = None
@@ -473,6 +586,8 @@ class SandboxBrokerService:
         failure: BrokerErrorCode | None = None
         cancelled = False
         cleanup = "succeeded"
+        remote_identity_unknown = False
+        failure_warnings: tuple[str, ...] = ()
         try:
             if self._cancellation_requested(job_id):
                 cancelled = True
@@ -492,6 +607,12 @@ class SandboxBrokerService:
                 if create_interrupted or self._cancellation_requested(job_id):
                     cancelled = True
                     return
+            except _CreateHardDeadline as deadline:
+                remote_identity_unknown = not deadline.cleanup_confirmed
+                if remote_identity_unknown:
+                    failure_warnings = (_REMOTE_AUTO_EXPIRY_WARNING,)
+                failure = BrokerErrorCode.PROVISIONING_FAILED
+                return
             except asyncio.CancelledError:
                 raise
             except BaseException:
@@ -554,7 +675,11 @@ class SandboxBrokerService:
         except BaseException:
             failure = BrokerErrorCode.OPENSANDBOX_UNAVAILABLE
         finally:
-            cleanup = await self._destroy_best_effort(job_id, handle)
+            cleanup = await self._destroy_best_effort(
+                job_id,
+                handle,
+                remote_identity_unknown=remote_identity_unknown,
+            )
             try:
                 record = self.store.get(job_id)
                 if record is None or record.status in TERMINAL_STATUSES:
@@ -567,7 +692,7 @@ class SandboxBrokerService:
                             update={"cleanup_status": "failed"}
                         ).model_dump(mode="json")
                     )
-                    prior_warnings = (
+                    prior_warnings = failure_warnings + (
                         ()
                         if completion is None
                         else tuple(completion.manifest.warnings)
@@ -582,7 +707,12 @@ class SandboxBrokerService:
                 elif cancelled or record.cancel_requested:
                     self.store.cancel(job_id, cleanup_status="succeeded")
                 elif failure is not None:
-                    self.store.fail(job_id, failure, cleanup_status="succeeded")
+                    self.store.fail(
+                        job_id,
+                        failure,
+                        warnings=failure_warnings,
+                        cleanup_status="succeeded",
+                    )
                 elif completion is None:
                     self.store.fail(
                         job_id,
@@ -648,19 +778,10 @@ class SandboxBrokerService:
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if not done:
-                run_task.cancel()
-                try:
-                    await run_task
-                except BaseException:
-                    pass
+                await self._cancel_with_grace(run_task)
                 raise asyncio.TimeoutError
             if cancel_wait in done and cancel_wait.result():
-                if not run_task.done():
-                    run_task.cancel()
-                try:
-                    await run_task
-                except BaseException:
-                    pass
+                await self._cancel_with_grace(run_task)
                 return None, True
             return run_task.result(), False
         finally:
@@ -670,6 +791,22 @@ class SandboxBrokerService:
                 await cancel_wait
             except BaseException:
                 pass
+
+    async def _cancel_with_grace(self, task: asyncio.Task[Any]) -> None:
+        if task.done():
+            self._consume_task_exception(task)
+            return
+        task.cancel()
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=self._run_cancel_grace_seconds
+            )
+        except BaseException:
+            pass
+        if not task.done():
+            task.add_done_callback(self._consume_task_exception)
+        else:
+            self._consume_task_exception(task)
 
     async def _create_without_cancelling(
         self,
@@ -683,19 +820,61 @@ class SandboxBrokerService:
         )
         self._create_tasks[job_id] = create_task
         interrupted = False
+        deadline = (
+            asyncio.get_running_loop().time() + self._create_hard_timeout_seconds
+        )
         try:
             while not create_task.done():
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    create_task.cancel()
+                    confirmed = await self._reconcile_unknown_create(job_id)
+                    if not create_task.done():
+                        create_task.add_done_callback(self._consume_task_exception)
+                    else:
+                        self._consume_task_exception(create_task)
+                    raise _CreateHardDeadline(confirmed)
                 try:
-                    await asyncio.shield(create_task)
+                    await asyncio.wait_for(
+                        asyncio.shield(create_task), timeout=remaining
+                    )
                 except asyncio.CancelledError:
                     interrupted = True
                     continue
+                except asyncio.TimeoutError:
+                    create_task.cancel()
+                    confirmed = await self._reconcile_unknown_create(job_id)
+                    if not create_task.done():
+                        create_task.add_done_callback(self._consume_task_exception)
+                    else:
+                        self._consume_task_exception(create_task)
+                    raise _CreateHardDeadline(confirmed) from None
                 except BaseException:
                     break
             return create_task.result(), interrupted
         finally:
             if self._create_tasks.get(job_id) is create_task:
                 del self._create_tasks[job_id]
+
+    async def _reconcile_unknown_create(self, job_id: str) -> bool:
+        reconcile = getattr(self.client, "destroy_by_job_id", None)
+        if not callable(reconcile):
+            return False
+        task = asyncio.create_task(
+            reconcile(job_id), name=f"sandbox-broker-reconcile-{job_id}"
+        )
+        try:
+            destroyed = await asyncio.wait_for(
+                asyncio.shield(task), timeout=self._destroy_hard_timeout_seconds
+            )
+            return type(destroyed) is int and destroyed > 0
+        except BaseException:
+            if not task.done():
+                task.cancel()
+                task.add_done_callback(self._consume_task_exception)
+            else:
+                self._consume_task_exception(task)
+            return False
 
     async def cancel(self, job_id: str) -> BrokerJobView:
         """Persist and signal cancellation without cancelling lifecycle tasks."""
@@ -731,7 +910,7 @@ class SandboxBrokerService:
                     if current.cleanup_status != "in_progress":
                         self.store.record_cleanup(current.job_id, "in_progress")
                     try:
-                        await self.client.destroy_by_id(current.sandbox_id)
+                        await self._destroy_by_id_hard(current.sandbox_id)
                     except BaseException:
                         latest = self.store.get(current.job_id)
                         if latest is not None and latest.cleanup_status != "succeeded":
@@ -753,9 +932,7 @@ class SandboxBrokerService:
                                 BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
                                 cleanup_status="succeeded",
                             )
-                    self._terminal_events.setdefault(
-                        current.job_id, asyncio.Event()
-                    ).set()
+                    await self._notify_terminal()
                 except BaseException:
                     current = self.store.get(record.job_id)
                     if current is not None and current.status not in TERMINAL_STATUSES:
@@ -795,12 +972,27 @@ class SandboxBrokerService:
                             BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
                             cleanup_status="succeeded",
                         )
-                    self._terminal_events.setdefault(
-                        current.job_id, asyncio.Event()
-                    ).set()
+                    await self._notify_terminal()
                 except BaseException:
                     continue
             self._recovery_generation += 1
+
+    async def _destroy_by_id_hard(self, sandbox_id: str) -> None:
+        task = asyncio.create_task(
+            self.client.destroy_by_id(sandbox_id),
+            name=f"sandbox-broker-recovery-cleanup-{sandbox_id}",
+        )
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=self._destroy_hard_timeout_seconds
+            )
+        except BaseException:
+            if not task.done():
+                task.cancel()
+                task.add_done_callback(self._consume_task_exception)
+            else:
+                self._consume_task_exception(task)
+            raise BrokerFailure(BrokerErrorCode.CLEANUP_FAILED) from None
 
     async def expire(self, now: float) -> None:
         """Apply bounded file and audit retention without following aliases."""
@@ -838,9 +1030,7 @@ class SandboxBrokerService:
                         )
                     except Exception:
                         continue
-                    self._terminal_events.setdefault(
-                        latest.job_id, asyncio.Event()
-                    ).set()
+                    await self._notify_terminal()
 
             try:
                 audit_candidates = self.store.jobs_updated_before(audit_cutoff)
@@ -868,7 +1058,7 @@ class SandboxBrokerService:
                 return "succeeded"
             self.store.record_cleanup(record.job_id, "in_progress")
             try:
-                await self.client.destroy_by_id(record.sandbox_id)
+                await self._destroy_by_id_hard(record.sandbox_id)
             except BaseException:
                 self.store.record_cleanup(record.job_id, "failed")
                 self.store.fail(
@@ -877,7 +1067,7 @@ class SandboxBrokerService:
                     warnings=("cleanup_failed",),
                     cleanup_status="failed",
                 )
-                self._terminal_events.setdefault(record.job_id, asyncio.Event()).set()
+                await self._notify_terminal()
                 return "failed"
             self.store.record_cleanup(record.job_id, "succeeded")
             return "succeeded"
@@ -1235,7 +1425,7 @@ class SandboxBrokerService:
         return bool(
             is_safe_metadata_text(value)
             and type(value) is str
-            and _SENSITIVE_TEXT_PATTERN.search(value) is None
+            and not contains_sensitive_metadata_text(value)
         )
 
     def _publish_manifest(
@@ -1258,13 +1448,18 @@ class SandboxBrokerService:
         self,
         job_id: str,
         handle: SandboxHandle | None,
+        *,
+        remote_identity_unknown: bool = False,
     ) -> str:
         if handle is None:
             try:
-                self.store.record_cleanup(job_id, "succeeded")
+                self.store.record_cleanup(
+                    job_id,
+                    "failed" if remote_identity_unknown else "succeeded",
+                )
             except BaseException:
                 return "failed"
-            return "succeeded"
+            return "failed" if remote_identity_unknown else "succeeded"
         cleanup_tracking_active = True
         try:
             self.store.record_cleanup(job_id, "in_progress")
@@ -1286,7 +1481,22 @@ class SandboxBrokerService:
 
         cleanup_task.add_done_callback(cleanup_finished)
         try:
-            await asyncio.shield(cleanup_task)
+            await asyncio.wait_for(
+                asyncio.shield(cleanup_task),
+                timeout=self._destroy_hard_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            cleanup_task.cancel()
+            if self._cleanup_tasks.get(job_id) is cleanup_task:
+                del self._cleanup_tasks[job_id]
+            if not cleanup_task.done():
+                cleanup_task.add_done_callback(self._consume_task_exception)
+            if cleanup_tracking_active:
+                try:
+                    self.store.record_cleanup(job_id, "failed")
+                except BaseException:
+                    pass
+            return "failed"
         except BaseException:
             if cleanup_tracking_active:
                 try:

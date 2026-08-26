@@ -856,6 +856,7 @@ def test_official_factory_builds_async_nonaccumulating_execution_handlers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     handler_calls: list[dict[str, object]] = []
+    option_calls: list[dict[str, object]] = []
 
     class FakeExecutionHandlers:
         def __init__(self, **values: object) -> None:
@@ -864,11 +865,16 @@ def test_official_factory_builds_async_nonaccumulating_execution_handlers(
             self.on_stderr = values["on_stderr"]
 
     class FakeCommands:
-        async def run(self, command: str, *, handlers: object) -> object:
+        async def run(self, command: str, *, opts: object, handlers: object) -> object:
             assert command == FIXED_COMMAND
             assert isinstance(handlers, FakeExecutionHandlers)
+            assert opts is not None
             await handlers.on_stdout(SimpleNamespace(text="streamed"))
             return SimpleNamespace(exit_code=0)
+
+    class FakeRunCommandOpts:
+        def __init__(self, **values: object) -> None:
+            option_calls.append(values)
 
     sdk = opensandbox_client_module._OfficialSDK(
         ConnectionConfig=object,
@@ -878,6 +884,7 @@ def test_official_factory_builds_async_nonaccumulating_execution_handlers(
         SearchEntry=object,
         NetworkPolicy=object,
         ExecutionHandlers=FakeExecutionHandlers,
+        RunCommandOpts=FakeRunCommandOpts,
     )
     monkeypatch.setattr(opensandbox_client_module, "_load_official_sdk", lambda: sdk)
     client = OpenSandboxClient(config(tmp_path))
@@ -889,6 +896,7 @@ def test_official_factory_builds_async_nonaccumulating_execution_handlers(
     assert handler_calls[0]["skip_accumulation"] is True
     assert callable(handler_calls[0]["on_stdout"])
     assert callable(handler_calls[0]["on_stderr"])
+    assert option_calls[0]["timeout"].total_seconds() == 180  # type: ignore[union-attr]
 
 
 def test_official_factory_uses_streaming_read_and_fixed_bounded_list_helper(
@@ -936,8 +944,9 @@ def test_official_factory_uses_streaming_read_and_fixed_bounded_list_helper(
             return chunks()
 
     class FakeCommands:
-        async def run(self, command: str, *, handlers: object) -> object:
+        async def run(self, command: str, *, opts: object, handlers: object) -> object:
             commands.append((command, handlers))
+            assert opts is not None
             assert handlers.skip_accumulation is True
             await handlers.on_stdout(
                 SimpleNamespace(text=json.dumps("/workspace/output/result.json") + "\n")
@@ -952,6 +961,7 @@ def test_official_factory_uses_streaming_read_and_fixed_bounded_list_helper(
         SearchEntry=ForbiddenSearchEntry,
         NetworkPolicy=object,
         ExecutionHandlers=FakeExecutionHandlers,
+        RunCommandOpts=lambda **values: SimpleNamespace(**values),
     )
     monkeypatch.setattr(opensandbox_client_module, "_load_official_sdk", lambda: sdk)
     client = OpenSandboxClient(config(tmp_path))
@@ -1219,6 +1229,156 @@ def test_source_parses_as_python_310() -> None:
     source_path = Path(opensandbox_client_module.__file__)
 
     ast.parse(source_path.read_text(encoding="utf-8"), feature_version=(3, 10))
+
+
+def test_official_create_sets_explicit_bounded_transport_and_ready_timeouts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connections: list[dict[str, object]] = []
+    creates: list[dict[str, object]] = []
+
+    class ConnectionConfig:
+        def __init__(self, **values: object) -> None:
+            connections.append(values)
+
+    class NetworkPolicy:
+        def __init__(self, **values: object) -> None:
+            self.values = values
+
+    class Sandbox:
+        @classmethod
+        async def create(cls, image: str, **values: object) -> object:
+            creates.append({"image": image, **values})
+            return SimpleNamespace(id="sandbox-1")
+
+    sdk = opensandbox_client_module._OfficialSDK(
+        ConnectionConfig=ConnectionConfig,
+        Sandbox=Sandbox,
+        SandboxManager=object,
+        WriteEntry=object,
+        SearchEntry=object,
+        NetworkPolicy=NetworkPolicy,
+        ExecutionHandlers=object,
+    )
+    monkeypatch.setattr(opensandbox_client_module, "_load_official_sdk", lambda: sdk)
+
+    handle = asyncio.run(OpenSandboxClient(config(tmp_path)).create("job-1"))
+
+    assert handle.sandbox_id == "sandbox-1"
+    request_timeout = connections[0]["request_timeout"]
+    ready_timeout = creates[0]["ready_timeout"]
+    remote_lifetime = creates[0]["timeout"]
+    assert request_timeout.total_seconds() == 20  # type: ignore[union-attr]
+    assert ready_timeout.total_seconds() == 30  # type: ignore[union-attr]
+    assert remote_lifetime.total_seconds() == 300  # type: ignore[union-attr]
+
+
+def test_cleanup_completion_memory_is_bounded_and_evicted_ids_retry(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> tuple[OpenSandboxClient, FakeSandboxFactory]:
+        fake = FakeSandboxFactory()
+        client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+        client._cleanup_completed_limit = 3
+        for index in range(5):
+            await client.destroy_by_id(f"sandbox-{index}")
+        await client.destroy_by_id("sandbox-0")
+        return client, fake
+
+    client, fake = asyncio.run(scenario())
+
+    assert len(client._cleanup_completed) == 3
+    assert fake.destroyed_by_id.count("sandbox-0") == 2
+
+
+def test_destroy_by_job_id_is_a_fixed_metadata_filtered_compensation(
+    tmp_path: Path,
+) -> None:
+    class CompensationFactory(FakeSandboxFactory):
+        def __init__(self) -> None:
+            super().__init__()
+            self.job_ids: list[str] = []
+
+        async def destroy_by_job_id(self, job_id: str) -> int:
+            self.job_ids.append(job_id)
+            return 1
+
+    async def scenario() -> tuple[int, CompensationFactory]:
+        fake = CompensationFactory()
+        client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+        return await client.destroy_by_job_id("job-1"), fake
+
+    destroyed, fake = asyncio.run(scenario())
+    assert destroyed == 1
+    assert fake.job_ids == ["job-1"]
+
+
+def test_official_reconciliation_lists_only_fixed_job_metadata_then_kills(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    filters: list[dict[str, object]] = []
+    killed: list[str] = []
+
+    class ConnectionConfig:
+        def __init__(self, **_values: object) -> None:
+            pass
+
+    class SandboxFilter:
+        def __init__(self, **values: object) -> None:
+            filters.append(values)
+
+    class Manager:
+        @classmethod
+        async def create(cls, **_values: object) -> "Manager":
+            return cls()
+
+        async def list_sandbox_infos(self, _filter: object) -> object:
+            return SimpleNamespace(
+                sandbox_infos=[
+                    SimpleNamespace(
+                        id="sandbox-1",
+                        metadata={
+                            "medchat.operation": "molecular_docking",
+                            "medchat.job_id": "job-1",
+                        },
+                    )
+                ]
+            )
+
+        async def kill_sandbox(self, sandbox_id: str) -> None:
+            killed.append(sandbox_id)
+
+        async def close(self) -> None:
+            pass
+
+    sdk = opensandbox_client_module._OfficialSDK(
+        ConnectionConfig=ConnectionConfig,
+        Sandbox=object,
+        SandboxManager=Manager,
+        WriteEntry=object,
+        SearchEntry=object,
+        NetworkPolicy=object,
+        ExecutionHandlers=object,
+        SandboxFilter=SandboxFilter,
+    )
+    monkeypatch.setattr(opensandbox_client_module, "_load_official_sdk", lambda: sdk)
+
+    destroyed = asyncio.run(OpenSandboxClient(config(tmp_path)).destroy_by_job_id("job-1"))
+
+    assert destroyed == 1
+    assert filters == [
+        {
+            "metadata": {
+                "medchat.operation": "molecular_docking",
+                "medchat.job_id": "job-1",
+            },
+            "page": 1,
+            "page_size": 100,
+        }
+    ]
+    assert killed == ["sandbox-1"]
 
 
 def test_all_domain_errors_share_one_narrow_base() -> None:

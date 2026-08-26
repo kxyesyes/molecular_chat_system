@@ -24,7 +24,7 @@ from .models import (
     BrokerJobStatus,
     transition_allowed,
 )
-from .safety import is_safe_metadata_text
+from .safety import contains_sensitive_metadata_text, is_safe_metadata_text
 
 
 _BUSY_TIMEOUT_MS = 500
@@ -34,9 +34,6 @@ _UUID_HEX_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 _CLEANUP_STATUSES = frozenset({"not_started", "in_progress", "succeeded", "failed"})
 _MAX_WARNING_LENGTH = 4096
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-_SENSITIVE_KEY_PATTERN = re.compile(
-    r"(?i)(?:api[_ -]?key|token|password|secret|credential)"
-)
 
 
 class IdempotencyConflict(ValueError):
@@ -980,7 +977,10 @@ class BrokerStore:
     @classmethod
     def _reject_sensitive_json(cls, value: object) -> None:
         if type(value) is str:
-            if not is_safe_metadata_text(value):
+            if (
+                not is_safe_metadata_text(value)
+                or contains_sensitive_metadata_text(value)
+            ):
                 raise ValueError
             return
         if type(value) is list:
@@ -991,7 +991,7 @@ class BrokerStore:
             for key, item in value.items():
                 if (
                     not is_safe_metadata_text(key)
-                    or _SENSITIVE_KEY_PATTERN.search(key) is not None
+                    or contains_sensitive_metadata_text(key)
                 ):
                     raise ValueError
                 cls._reject_sensitive_json(item)

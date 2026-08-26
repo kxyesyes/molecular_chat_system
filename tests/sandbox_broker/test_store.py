@@ -1256,6 +1256,13 @@ def test_cleanup_pending_jobs_fails_closed_on_corrupt_matching_row(
         "prefix/home/runner/result.json",
         r"prefixC:\Users\runner\result.json",
         r"prefix\\server\share\result.json",
+        "prefix/data/model.bin",
+        "prefix/srv/worker/result.json",
+        "prefix/proc/self/status",
+        "prefix/dev/null",
+        "prefix/\u200bdata/model.bin",
+        "api\u200b_key=private-marker",
+        "token=private-marker",
     ],
 )
 def test_store_rejects_embedded_paths_in_warnings_and_provenance_without_echo(

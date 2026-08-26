@@ -7,6 +7,7 @@ import base64
 import json
 import re
 import unicodedata
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -34,6 +35,10 @@ _LIST_OUTPUT_MAX_BYTES = (_PATH_MAX_CHARACTERS + 4) * (_LIST_MAX_FILES + 1)
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _PATH_COMPONENT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _ALLOWED_LIST_PATTERNS = frozenset({"*", "*.json", "*.pdbqt"})
+_SDK_REQUEST_TIMEOUT_SECONDS = 20
+_SDK_READY_TIMEOUT_SECONDS = 30
+_CLEANUP_COMPLETED_LIMIT = 4096
+_RECONCILE_PAGE_SIZE = 100
 _ANSI_OSC_PATTERN = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _ANSI_CSI_PATTERN = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-_])")
 _AUTHORIZATION_HEADER_PATTERN = re.compile(
@@ -210,6 +215,9 @@ class SandboxClient(Protocol):
     async def destroy_by_id(self, sandbox_id: str) -> None:
         raise NotImplementedError
 
+    async def destroy_by_job_id(self, job_id: str) -> int:
+        raise NotImplementedError
+
 
 class _SandboxFactory(Protocol):
     async def create(
@@ -262,6 +270,8 @@ class _OfficialSDK:
     SearchEntry: Any
     NetworkPolicy: Any
     ExecutionHandlers: Any
+    SandboxFilter: Any = None
+    RunCommandOpts: Any = None
 
 
 def _load_official_sdk() -> _OfficialSDK:
@@ -270,8 +280,8 @@ def _load_official_sdk() -> _OfficialSDK:
     try:
         from opensandbox import Sandbox, SandboxManager
         from opensandbox.config import ConnectionConfig
-        from opensandbox.models import NetworkPolicy, SearchEntry, WriteEntry
-        from opensandbox.models.execd import ExecutionHandlers
+        from opensandbox.models import NetworkPolicy, SandboxFilter, SearchEntry, WriteEntry
+        from opensandbox.models.execd import ExecutionHandlers, RunCommandOpts
     except (ImportError, ModuleNotFoundError):
         raise SandboxDependencyUnavailableError(
             "the pinned OpenSandbox SDK is unavailable"
@@ -284,6 +294,8 @@ def _load_official_sdk() -> _OfficialSDK:
         SearchEntry=SearchEntry,
         NetworkPolicy=NetworkPolicy,
         ExecutionHandlers=ExecutionHandlers,
+        SandboxFilter=SandboxFilter,
+        RunCommandOpts=RunCommandOpts,
     )
 
 
@@ -309,6 +321,7 @@ class _OfficialSandboxFactory:
         return sdk.ConnectionConfig(
             api_key=self._config.opensandbox_api_key,
             domain=self._config.opensandbox_domain,
+            request_timeout=timedelta(seconds=_SDK_REQUEST_TIMEOUT_SECONDS),
         )
 
     async def create(
@@ -334,6 +347,7 @@ class _OfficialSandboxFactory:
             entrypoint=entrypoint,
             metadata=metadata,
             connection_config=self._connection(sdk),
+            ready_timeout=timedelta(seconds=_SDK_READY_TIMEOUT_SECONDS),
         )
 
     async def upload_text(self, raw: Any, path: str, data: str) -> None:
@@ -369,7 +383,14 @@ class _OfficialSandboxFactory:
             on_stderr=on_stderr,
             skip_accumulation=skip_accumulation,
         )
-        return await raw.commands.run(command, handlers=handlers)
+        if sdk.RunCommandOpts is None:
+            raise SandboxDependencyUnavailableError(
+                "the pinned OpenSandbox SDK command timeout is unavailable"
+            )
+        opts = sdk.RunCommandOpts(
+            timeout=timedelta(seconds=self._config.execution_timeout_seconds)
+        )
+        return await raw.commands.run(command, opts=opts, handlers=handlers)
 
     async def destroy(self, raw: Any) -> None:
         await raw.destroy()
@@ -381,6 +402,49 @@ class _OfficialSandboxFactory:
         )
         try:
             await manager.kill_sandbox(sandbox_id)
+        finally:
+            await manager.close()
+
+    async def destroy_by_job_id(self, job_id: str) -> int:
+        sdk = self._sdk()
+        if sdk.SandboxFilter is None:
+            raise SandboxDependencyUnavailableError(
+                "the pinned OpenSandbox SDK metadata filter is unavailable"
+            )
+        manager = await sdk.SandboxManager.create(
+            connection_config=self._connection(sdk)
+        )
+        try:
+            page = await manager.list_sandbox_infos(
+                sdk.SandboxFilter(
+                    metadata={
+                        "medchat.operation": "molecular_docking",
+                        "medchat.job_id": job_id,
+                    },
+                    page=1,
+                    page_size=_RECONCILE_PAGE_SIZE,
+                )
+            )
+            infos = getattr(page, "sandbox_infos", None)
+            if type(infos) is not list or len(infos) > _RECONCILE_PAGE_SIZE:
+                raise SandboxProtocolError(
+                    "the sandbox service returned an invalid reconciliation result"
+                )
+            destroyed = 0
+            for info in infos:
+                metadata = getattr(info, "metadata", None)
+                if (
+                    type(metadata) is not dict
+                    or metadata.get("medchat.operation") != "molecular_docking"
+                    or metadata.get("medchat.job_id") != job_id
+                ):
+                    raise SandboxProtocolError(
+                        "the sandbox service returned an invalid reconciliation result"
+                    )
+                sandbox_id = _validate_id(getattr(info, "id", None), server_value=True)
+                await manager.kill_sandbox(sandbox_id)
+                destroyed += 1
+            return destroyed
         finally:
             await manager.close()
 
@@ -611,7 +675,8 @@ class OpenSandboxClient:
             else sandbox_factory
         )
         self._cleanup_in_flight: dict[str, asyncio.Task[None]] = {}
-        self._cleanup_completed: set[str] = set()
+        self._cleanup_completed: OrderedDict[str, None] = OrderedDict()
+        self._cleanup_completed_limit = _CLEANUP_COMPLETED_LIMIT
 
     def _handle(self, handle: object) -> SandboxHandle:
         if type(handle) is not SandboxHandle or handle.raw is None:
@@ -851,7 +916,10 @@ class OpenSandboxClient:
         except BaseException:
             return
         if failure is None:
-            self._cleanup_completed.add(sandbox_id)
+            self._cleanup_completed[sandbox_id] = None
+            self._cleanup_completed.move_to_end(sandbox_id)
+            while len(self._cleanup_completed) > self._cleanup_completed_limit:
+                self._cleanup_completed.popitem(last=False)
 
     async def _cleanup_once(self, sandbox_id: str, cleanup: Any) -> None:
         if sandbox_id in self._cleanup_completed:
@@ -883,3 +951,24 @@ class OpenSandboxClient:
             await self._factory.destroy_by_id(validated_id)
 
         await self._cleanup_once(validated_id, cleanup)
+
+    async def destroy_by_job_id(self, job_id: str) -> int:
+        """Compensate only sandboxes carrying this broker's fixed job metadata."""
+
+        validated_job_id = _validate_id(job_id, server_value=False)
+        operation = getattr(self._factory, "destroy_by_job_id", None)
+        if not callable(operation):
+            raise SandboxDependencyUnavailableError(
+                "the pinned OpenSandbox SDK metadata filter is unavailable"
+            )
+        try:
+            destroyed = await operation(validated_job_id)
+        except SandboxDependencyUnavailableError:
+            raise
+        except Exception:
+            raise SandboxDestroyError("sandbox cleanup failed") from None
+        if type(destroyed) is not int or not 0 <= destroyed <= _RECONCILE_PAGE_SIZE:
+            raise SandboxProtocolError(
+                "the sandbox service returned an invalid reconciliation result"
+            )
+        return destroyed
