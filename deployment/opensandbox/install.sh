@@ -51,10 +51,17 @@ else
 fi
 [ -n "$DESTDIR" ] || usage
 PREVIEW_FAIL_AFTER=0
+PREVIEW_FAIL_POINT=none
 if [ "$DESTDIR" != / ]; then
     case "${MEDCHAT_INSTALL_PREVIEW_FAIL_AFTER-0}" in
         0|1|2|3|4|5|6|7)
             PREVIEW_FAIL_AFTER=${MEDCHAT_INSTALL_PREVIEW_FAIL_AFTER-0}
+            ;;
+        *) fail preview_failure_invalid ;;
+    esac
+    case "${MEDCHAT_INSTALL_PREVIEW_FAIL_POINT-none}" in
+        none|fsync_parent|post_replace_lstat)
+            PREVIEW_FAIL_POINT=${MEDCHAT_INSTALL_PREVIEW_FAIL_POINT-none}
             ;;
         *) fail preview_failure_invalid ;;
     esac
@@ -437,7 +444,6 @@ if [ "$DESTDIR" = / ]; then
             --home-dir /var/lib/opensandbox --no-create-home \
             --shell /usr/sbin/nologin medchat-opensandbox
 
-    usermod --append --groups docker medchat-opensandbox
     trap restore_stopped_services_on_failure EXIT
     trap 'exit 1' HUP INT TERM
     quiesce_deployment_services
@@ -452,7 +458,8 @@ fi
     "$SCRIPT_DIR/medchat-opensandbox-firewall.service" \
     "$SCRIPT_DIR/configure-firewall.sh" \
     "$SCRIPT_DIR/../medchat-temporal-worker.service" \
-    "$GROUP_MIGRATION_INTENT" "$PREVIEW_FAIL_AFTER" <<'PY'
+    "$GROUP_MIGRATION_INTENT" "$PREVIEW_FAIL_AFTER" \
+    "$PREVIEW_FAIL_POINT" <<'PY'
 import json
 import os
 import re
@@ -470,10 +477,15 @@ firewall_script_path = Path(sys.argv[6])
 worker_unit_path = Path(sys.argv[7])
 group_migration_intent = sys.argv[8]
 preview_fail_after = int(sys.argv[9])
+preview_fail_point = sys.argv[10]
 
 if group_migration_intent != "remove-medchat-from-medchat-sandbox":
     raise SystemExit(1)
 if root == Path("/") and preview_fail_after != 0:
+    raise SystemExit(1)
+if root == Path("/") and preview_fail_point != "none":
+    raise SystemExit(1)
+if preview_fail_point not in {"none", "fsync_parent", "post_replace_lstat"}:
     raise SystemExit(1)
 
 
@@ -785,7 +797,14 @@ def stage_generation(
         for path, temporary in staged:
             staged_metadata = temporary.lstat()
             os.replace(temporary, path)
+            committed.append(
+                (path, (staged_metadata.st_dev, staged_metadata.st_ino))
+            )
+            if preview_fail_point == "fsync_parent" and len(committed) == 1:
+                fail()
             fsync_parent(path)
+            if preview_fail_point == "post_replace_lstat" and len(committed) == 1:
+                fail()
             installed = path.lstat()
             if (
                 not stat.S_ISREG(installed.st_mode)
@@ -793,7 +812,6 @@ def stage_generation(
                 != (staged_metadata.st_dev, staged_metadata.st_ino)
             ):
                 fail()
-            committed.append((path, (installed.st_dev, installed.st_ino)))
             if preview_fail_after and len(committed) == preview_fail_after:
                 fail()
     except BaseException:

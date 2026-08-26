@@ -290,8 +290,10 @@ def _bound_socket_is_ready(socket_path: Path) -> bool:
         return False
 
 
-def bind_runtime_socket(socket_path: Path) -> socket.socket:
-    """Bind a non-listening UDS and make its final permissions explicit."""
+def bind_runtime_socket(
+    socket_path: Path,
+) -> tuple[socket.socket, tuple[int, int]]:
+    """Bind a non-listening UDS and return its verified filesystem identity."""
 
     listener: socket.socket | None = None
     try:
@@ -322,7 +324,7 @@ def bind_runtime_socket(socket_path: Path) -> socket.socket:
             or _identity(parent_after) != parent_identity
         ):
             raise ValueError
-        return listener
+        return listener, bound_identity
     except Exception:
         if listener is not None:
             try:
@@ -392,7 +394,10 @@ def _remove_owned_bound_socket(
 ) -> None:
     try:
         target, parent_identity = _trusted_socket_parent(socket_path)
-        metadata = os.lstat(target)
+        try:
+            metadata = os.lstat(target)
+        except OSError:
+            metadata = os.lstat(target)
         parent = os.lstat(target.parent)
         if (
             not _verified_socket(metadata)
@@ -410,8 +415,7 @@ def _remove_owned_bound_socket(
 def serve_application(application: object, socket_path: Path) -> None:
     """Serve from a pre-bound mode-0660 UDS and notify only when ready."""
 
-    listener = bind_runtime_socket(socket_path)
-    bound_identity = _node_identity(os.lstat(socket_path))
+    listener, bound_identity = bind_runtime_socket(socket_path)
     server_failure: BaseException | None = None
     try:
         configuration = uvicorn.Config(

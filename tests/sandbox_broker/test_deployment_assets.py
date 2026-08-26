@@ -125,12 +125,19 @@ def test_firewall_uses_conntrack_original_ports_and_exact_bounded_range() -> Non
     assert "40000:60000" in script
     assert "--ctorigdstport" in script
     assert "--ctdir ORIGINAL" in script
-    assert '-s "$loopback_source"' in script
-    assert "configure_family iptables 127.0.0.0/8" in script
-    assert "configure_family ip6tables ::1/128" in script
+    assert '-o "$BRIDGE_INTERFACE"' in script
+    assert '! -s "$loopback_source"' in script
+    assert "--ctstatus DNAT" in script
+    assert "NETWORK_NAME=medchat-opensandbox" in script
+    assert "BRIDGE_INTERFACE=br-medchat-sbox" in script
+    assert "docker network create" in script
+    assert "docker network inspect" in script
     assert "-j DROP" in script
     assert "-S DOCKER-USER 1" in script
-    assert "-S DOCKER-USER 2" in script
+    assert "-j RETURN" not in script
+    assert "-j ACCEPT" not in script
+    assert "-F DOCKER-USER" not in script
+    assert "-D DOCKER-USER" not in script
     assert "--dport 40000:60000" not in script
     assert "iptables" in script and "ip6tables" in script
     assert "firewall_configuration_failed" in script
@@ -151,8 +158,27 @@ def _write_fake_firewall_tool(directory: Path) -> Path:
         "try:\n"
         "    data = json.load(open(state_path, encoding='utf-8'))\n"
         "except (FileNotFoundError, json.JSONDecodeError):\n"
-        "    data = {'iptables': [], 'ip6tables': []}\n"
+        "    data = {'iptables': [], 'ip6tables': [], 'network': None}\n"
         "args = sys.argv[1:]\n"
+        "if family == 'docker':\n"
+        "    if args[:2] == ['network', 'create']:\n"
+        "        data['network'] = {'Driver': 'bridge', 'EnableIPv6': True, "
+        "'Options': {'com.docker.network.bridge.name': 'br-medchat-sbox'}}\n"
+        "        with open(state_path, 'w', encoding='utf-8') as handle:\n"
+        "            json.dump(data, handle)\n"
+        "        print('medchat-opensandbox')\n"
+        "        raise SystemExit(0)\n"
+        "    if args[:2] != ['network', 'inspect'] or data['network'] is None:\n"
+        "        raise SystemExit(1)\n"
+        "    if '--format' not in args:\n"
+        "        print('[]')\n"
+        "        raise SystemExit(0)\n"
+        "    template = args[args.index('--format') + 1]\n"
+        "    values = {'{{.Driver}}': 'bridge', '{{.EnableIPv6}}': 'true', "
+        "'{{json .Options}}': json.dumps(data['network']['Options'], "
+        "separators=(',', ':'))}\n"
+        "    print(values[template])\n"
+        "    raise SystemExit(0)\n"
         "action = args[2]\n"
         "if action == '-S':\n"
         "    if len(args) == 4:\n"
@@ -182,21 +208,25 @@ def _write_fake_firewall_tool(directory: Path) -> Path:
         encoding="utf-8",
     )
     implementation.chmod(0o755)
-    for name in ("iptables", "ip6tables"):
+    for name in ("docker", "iptables", "ip6tables"):
         (directory / name).symlink_to(implementation.name)
     return state
 
 
 @pytest.mark.skipif(os.name != "posix", reason="firewall behavior requires POSIX")
-def test_firewall_configuration_is_idempotent_and_orders_loopback_before_drop(
+def test_firewall_configuration_is_idempotent_and_scoped_to_dedicated_bridge(
     tmp_path: Path,
 ) -> None:
     tools = tmp_path / "tools"
     tools.mkdir()
     state = _write_fake_firewall_tool(tools)
     script = tmp_path / "configure-firewall.sh"
+    sys_class = tmp_path / "sys-class-net"
+    (sys_class / "br-medchat-sbox").mkdir(parents=True)
     source = FIREWALL_SCRIPT.read_text(encoding="utf-8").replace(
         "PATH=/usr/sbin:/usr/bin:/sbin:/bin", f"PATH={tools}"
+    ).replace(
+        "/sys/class/net", str(sys_class)
     )
     script.write_text(source, encoding="utf-8")
     environment = os.environ.copy()
@@ -219,9 +249,12 @@ def test_firewall_configuration_is_idempotent_and_orders_loopback_before_drop(
     assert all(result.stderr == "" for result in results)
     rules = json.loads(state.read_text(encoding="utf-8"))
     for family in ("iptables", "ip6tables"):
-        assert len(rules[family]) == 2
-        assert rules[family][0][-2:] == ["-j", "RETURN"]
-        assert rules[family][1][-2:] == ["-j", "DROP"]
+        assert len(rules[family]) == 1
+        assert rules[family][0][-2:] == ["-j", "DROP"]
+        assert rules[family][0][:2] == ["-o", "br-medchat-sbox"]
+        assert "!" in rules[family][0]
+        assert "--ctstatus" in rules[family][0]
+        assert "DNAT" in rules[family][0]
         assert "--ctorigdstport" in rules[family][0]
         assert "40000:60000" in rules[family][0]
 
@@ -232,9 +265,13 @@ def test_firewall_ipv6_failure_is_redacted_and_fails_closed(tmp_path: Path) -> N
     tools.mkdir()
     state = _write_fake_firewall_tool(tools)
     script = tmp_path / "configure-firewall.sh"
+    sys_class = tmp_path / "sys-class-net"
+    (sys_class / "br-medchat-sbox").mkdir(parents=True)
     script.write_text(
         FIREWALL_SCRIPT.read_text(encoding="utf-8").replace(
             "PATH=/usr/sbin:/usr/bin:/sbin:/bin", f"PATH={tools}"
+        ).replace(
+            "/sys/class/net", str(sys_class)
         ),
         encoding="utf-8",
     )
@@ -301,6 +338,46 @@ def test_validator_rejects_firewall_mutations(
     assert validator.validate_static(root) == code
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "iptables -F DOCKER-USER",
+        "ip6tables -D DOCKER-USER 1",
+        "iptables -I DOCKER-USER 1 -j ACCEPT",
+        "docker network rm medchat-opensandbox",
+        '"$tool" --flush DOCKER-USER',
+        "if docker network rm medchat-opensandbox; then :; fi",
+    ],
+)
+def test_firewall_validator_rejects_unapproved_executable_commands(
+    command: str,
+) -> None:
+    validator = _load_validator()
+    script = FIREWALL_SCRIPT.read_text(encoding="utf-8") + "\n" + command + "\n"
+
+    assert validator._validate_firewall_script(script) is False
+
+
+@pytest.mark.parametrize("directive", ["ExecReload=/bin/true", "ExecStop=/bin/true"])
+def test_firewall_unit_rejects_every_extra_exec_directive(
+    tmp_path: Path,
+    directive: str,
+) -> None:
+    validator = _load_validator()
+    root = _asset_root(tmp_path)
+    unit = root / FIREWALL_SERVICE.relative_to(ROOT)
+    unit.write_text(
+        unit.read_text(encoding="utf-8").replace(
+            "ExecStart=/usr/local/libexec/medchat/configure-opensandbox-firewall",
+            "ExecStart=/usr/local/libexec/medchat/configure-opensandbox-firewall\n"
+            + directive,
+        ),
+        encoding="utf-8",
+    )
+
+    assert validator.validate_static(root) == "firewall_unit_unsafe"
+
+
 def test_server_config_is_authenticated_loopback_gvisor_and_mount_safe() -> None:
     config = tomllib.loads(SANDBOX_TOML.read_text(encoding="utf-8"))
 
@@ -315,7 +392,7 @@ def test_server_config_is_authenticated_loopback_gvisor_and_mount_safe() -> None
         "docker_runtime": "runsc",
     }
     assert config["docker"]["pids_limit"] == 128
-    assert config["docker"]["network_mode"] == "bridge"
+    assert config["docker"]["network_mode"] == "medchat-opensandbox"
     assert config["docker"]["no_new_privileges"] is True
     assert set(config["docker"]["drop_capabilities"]) == {
         "AUDIT_WRITE",
@@ -512,6 +589,12 @@ def test_installer_uses_atomic_durable_replacement_without_truncation() -> None:
     assert "stage_generation" in generation
     assert "rollback_generation" in generation
 
+    replace = generation.index("os.replace(temporary, path)")
+    committed = generation.index("committed.append", replace)
+    fsync = generation.index("fsync_parent(path)", replace)
+    installed_lstat = generation.index("installed = path.lstat()", replace)
+    assert replace < committed < fsync < installed_lstat
+
 
 def test_rotation_failure_injection_is_confined_to_preview_mode() -> None:
     installer = INSTALLER.read_text(encoding="utf-8")
@@ -520,6 +603,8 @@ def test_rotation_failure_injection_is_confined_to_preview_mode() -> None:
     assert 'if [ "$DESTDIR" = / ]; then' in installer
     assert "preview_fail_after = int(sys.argv[9])" in installer
     assert "if root == Path(\"/\") and preview_fail_after != 0" in installer
+    assert "MEDCHAT_INSTALL_PREVIEW_FAIL_POINT" in installer
+    assert "preview_fail_point = sys.argv[10]" in installer
 
 
 def test_live_rotation_quiesces_all_services_and_activates_in_dependency_order() -> None:
@@ -1091,6 +1176,45 @@ def test_interrupted_preview_rotation_rolls_back_every_generation_file(
     assert not list(tmp_path.rglob("*.stage"))
 
 
+@pytest.mark.parametrize("fail_point", ["fsync_parent", "post_replace_lstat"])
+@pytest.mark.skipif(os.name != "posix", reason="installer preview requires POSIX")
+def test_post_replace_fault_rolls_back_old_generation(
+    tmp_path: Path,
+    fail_point: str,
+) -> None:
+    _write_preview_environment(tmp_path, secret="E" * 40)
+    first = subprocess.run(
+        ["sh", str(INSTALLER), "--destdir", str(tmp_path)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert first.returncode == 0
+    toml_path = tmp_path / "etc/medchat/opensandbox.toml"
+    broker_path = tmp_path / "etc/medchat/sandbox-broker.env"
+    old_generation = (toml_path.read_bytes(), broker_path.read_bytes())
+
+    _write_preview_environment(tmp_path, secret="F" * 40)
+    environment = os.environ.copy()
+    environment["MEDCHAT_INSTALL_PREVIEW_FAIL_POINT"] = fail_point
+    failed = subprocess.run(
+        ["sh", str(INSTALLER), "--destdir", str(tmp_path)],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert failed.returncode != 0
+    assert failed.stdout == ""
+    assert "F" * 40 not in failed.stdout + failed.stderr
+    assert (toml_path.read_bytes(), broker_path.read_bytes()) == old_generation
+
+
 @pytest.mark.skipif(os.name != "posix", reason="installer preview requires POSIX")
 def test_preview_install_rejects_nonempty_approved_mount_directory(
     tmp_path: Path,
@@ -1332,8 +1456,6 @@ def test_static_validator_rejects_missing_failure_lockdown(
         "logger 'usermod -aGmedchat-sandbox medchat'",
         "# usermod --append --groups=medchat-sandbox medchat",
         "gpasswd --delete medchat medchat-sandbox",
-        "usermod -aGmedchat-sandbox analyst",
-        "usermod -aGother-group medchat",
         "printf \"usermod --append --groups=medchat-sandbox medchat",
     ],
 )
@@ -1353,6 +1475,13 @@ def test_membership_validator_ignores_inert_or_unrelated_text(line: str) -> None
         "sudo -- addgroup medchat medchat-sandbox",
         "adduser \\" + "\n  medchat \\" + "\n  medchat-sandbox",
         "gpasswd --add medchat medchat-sandbox",
+        "usermod -aGmedchat-sandbox analyst",
+        "usermod -aGother-group medchat",
+        'group=medchat-sandbox; usermod -aG "$group" medchat',
+        'usermod -aG "medchat-${suffix}" medchat',
+        'usermod -aG "${group:-medchat-sandbox}" medchat',
+        'usermod -aG "$(printf medchat-sandbox)" medchat',
+        'addgroup medchat "medchat-""sandbox"',
         "env usermod --append --groups=medchat-sandbox 'medchat",
         'LC_ALL="C locale" usermod --append --groups=medchat-sandbox \'medchat',
     ],
@@ -1486,6 +1615,12 @@ def test_safe_mocked_runtime_checks_pass(monkeypatch: pytest.MonkeyPatch) -> Non
             return validator._CommandResult(True, "runsc version 20260801")
         if argv[:3] == ("docker", "info", "--format"):
             return validator._CommandResult(True, '{"runsc":{"path":"runsc"}}')
+        if argv[:3] == ("docker", "network", "inspect"):
+            return validator._CommandResult(
+                True,
+                '{"Driver":"bridge","EnableIPv6":true,"Options":'
+                '{"com.docker.network.bridge.name":"br-medchat-sbox"}}',
+            )
         if argv[:3] == ("docker", "image", "inspect"):
             return validator._CommandResult(
                 True,
@@ -1494,15 +1629,10 @@ def test_safe_mocked_runtime_checks_pass(monkeypatch: pytest.MonkeyPatch) -> Non
         if argv[0] in {"iptables", "ip6tables"}:
             if "-S" in argv:
                 source = "127.0.0.0/8" if argv[0] == "iptables" else "::1/128"
-                if argv[-1] == "1":
-                    return validator._CommandResult(
-                        True,
-                        f"-A DOCKER-USER -s {source} -p tcp -m conntrack "
-                        "--ctdir ORIGINAL --ctorigdstport 40000:60000 -j RETURN",
-                    )
                 return validator._CommandResult(
                     True,
-                    "-A DOCKER-USER -p tcp -m conntrack --ctdir ORIGINAL "
+                    f"-A DOCKER-USER -o br-medchat-sbox ! -s {source} "
+                    "-p tcp -m conntrack --ctstatus DNAT --ctdir ORIGINAL "
                     "--ctorigdstport 40000:60000 -j DROP",
                 )
             return validator._CommandResult(True, "")
@@ -1542,9 +1672,49 @@ def test_safe_mocked_runtime_checks_pass(monkeypatch: pytest.MonkeyPatch) -> Non
         assert any(
             call[0] == executable
             and "--ctorigdstport" in call
+            and "br-medchat-sbox" in call
+            and "--ctstatus" in call
+            and "DNAT" in call
             and "40000:60000" in call
             for call in calls
         )
+    assert (
+        "docker",
+        "network",
+        "inspect",
+        "--format",
+        "{{json .}}",
+        "medchat-opensandbox",
+    ) in calls
+
+
+def test_runtime_rejects_mismatched_dedicated_network_without_raw_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = _load_validator()
+    canary = "raw-network-canary"
+
+    def command(argv: tuple[str, ...]) -> validator._CommandResult:
+        if argv == ("runsc", "--version"):
+            return validator._CommandResult(True, "runsc version 1")
+        if argv[:3] == ("docker", "info", "--format"):
+            return validator._CommandResult(True, '{"runsc":{"path":"runsc"}}')
+        if argv[:3] == ("docker", "network", "inspect"):
+            return validator._CommandResult(
+                True,
+                '{"Driver":"overlay","EnableIPv6":true,"Options":'
+                '{"com.docker.network.bridge.name":"br-medchat-sbox"},'
+                f'"canary":"{canary}"}}',
+            )
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(validator, "_run_command", command)
+
+    code = validator.validate_runtime()
+
+    assert code == "docker_network_unsafe"
+    assert code in validator._STABLE_CODES
+    assert canary not in code
 
 
 def test_runtime_failure_is_allowlisted_and_does_not_echo_command_output(
@@ -1574,15 +1744,19 @@ def test_runtime_socket_contract_rejects_wrong_type_owner_or_mode(
             return validator._CommandResult(True, "runsc version 1")
         if argv[:3] == ("docker", "info", "--format"):
             return validator._CommandResult(True, '{"runsc":{"path":"runsc"}}')
+        if argv[:3] == ("docker", "network", "inspect"):
+            return validator._CommandResult(
+                True,
+                '{"Driver":"bridge","EnableIPv6":true,"Options":'
+                '{"com.docker.network.bridge.name":"br-medchat-sbox"}}',
+            )
         if argv[0] in {"iptables", "ip6tables"}:
             if "-S" in argv:
                 source = "127.0.0.0/8" if argv[0] == "iptables" else "::1/128"
                 suffix = (
-                    f"-s {source} -p tcp -m conntrack --ctdir ORIGINAL "
-                    "--ctorigdstport 40000:60000 -j RETURN"
-                    if argv[-1] == "1"
-                    else "-p tcp -m conntrack --ctdir ORIGINAL "
-                    "--ctorigdstport 40000:60000 -j DROP"
+                    f"-o br-medchat-sbox ! -s {source} -p tcp -m conntrack "
+                    "--ctstatus DNAT --ctdir ORIGINAL --ctorigdstport "
+                    "40000:60000 -j DROP"
                 )
                 return validator._CommandResult(True, "-A DOCKER-USER " + suffix)
             return validator._CommandResult(True, "")
@@ -1610,6 +1784,12 @@ def test_runtime_rejects_missing_firewall_rule_without_raw_output(
             return validator._CommandResult(True, "runsc version 1")
         if argv[:3] == ("docker", "info", "--format"):
             return validator._CommandResult(True, '{"runsc":{"path":"runsc"}}')
+        if argv[:3] == ("docker", "network", "inspect"):
+            return validator._CommandResult(
+                True,
+                '{"Driver":"bridge","EnableIPv6":true,"Options":'
+                '{"com.docker.network.bridge.name":"br-medchat-sbox"}}',
+            )
         if argv[0] in {"iptables", "ip6tables"}:
             return validator._CommandResult(False, canary)
         raise AssertionError(argv)

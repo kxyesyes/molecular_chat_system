@@ -93,6 +93,7 @@ _STABLE_CODES = frozenset(
         "env_template_unsafe",
         "runsc_unavailable",
         "docker_runtime_unregistered",
+        "docker_network_unsafe",
         "firewall_rule_missing",
         "opensandbox_unhealthy",
         "socket_invalid",
@@ -226,7 +227,7 @@ def _validate_config(text: str) -> str | None:
         return "runtime_not_gvisor"
     docker = config.get("docker", {})
     if (
-        docker.get("network_mode") != "bridge"
+        docker.get("network_mode") != "medchat-opensandbox"
         or type(docker.get("pids_limit")) is not int
         or docker.get("pids_limit") != 128
         or docker.get("no_new_privileges") is not True
@@ -411,6 +412,9 @@ def _validate_worker_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
 
 
 def _validate_firewall_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
+    exec_directives = {
+        key for key in unit["Service"] if key.startswith("Exec")
+    }
     return bool(
         _hardened(unit)
         and _single(unit, "Type") == "oneshot"
@@ -424,6 +428,7 @@ def _validate_firewall_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
         )
         and not _service_values(unit, "ExecStartPre")
         and not _service_values(unit, "ExecStartPost")
+        and exec_directives == {"ExecStart"}
         and not _service_values(unit, "Environment")
         and not _service_values(unit, "EnvironmentFile")
         and not _service_values(unit, "ReadWritePaths")
@@ -446,21 +451,85 @@ def _validate_firewall_script(text: str) -> bool:
         "set -eu",
         "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
         "PORT_RANGE=40000:60000",
+        "NETWORK_NAME=medchat-opensandbox",
+        "BRIDGE_INTERFACE=br-medchat-sbox",
+        "docker network create --driver bridge --ipv6",
+        "docker network inspect",
         "iptables 127.0.0.0/8",
         "ip6tables ::1/128",
         "-S DOCKER-USER",
         "-S DOCKER-USER 1",
-        "-S DOCKER-USER 2",
+        '-o "$BRIDGE_INTERFACE"',
+        '! -s "$loopback_source"',
+        "--ctstatus DNAT",
         "-C DOCKER-USER",
         "-I DOCKER-USER 1",
         "--ctdir ORIGINAL",
         "--ctorigdstport",
-        "-j RETURN",
         "-j DROP",
         "firewall_configuration_failed",
         ">/dev/null 2>&1",
     )
-    return all(value in text for value in required) and "--dport" not in text
+    direct_firewall = re.search(
+        r"(?m)^\s*(?:(?:env|command|sudo)\s+)*(?:iptables|ip6tables)\b",
+        text,
+    )
+    logical_commands = [line.strip() for line in _shell_logical_commands(text)]
+    firewall_commands = [
+        line
+        for line in logical_commands
+        if re.search(r'(?<!command -v )"\$tool"\s', line)
+        or re.search(r"(?:^|!\s)docker\s+network\s", line)
+    ]
+    expected_firewall_commands = [
+        'if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then',
+        (
+            'docker network create --driver bridge --ipv6 --opt '
+            '"com.docker.network.bridge.name=$BRIDGE_INTERFACE" '
+            '"$NETWORK_NAME" >/dev/null 2>&1 || fail'
+        ),
+        "docker network inspect --format '{{.Driver}}' \"$NETWORK_NAME\" 2>/dev/null",
+        (
+            "docker network inspect --format '{{json .Options}}' "
+            '"$NETWORK_NAME" 2>/dev/null'
+        ),
+        (
+            "docker network inspect --format '{{.EnableIPv6}}' "
+            '"$NETWORK_NAME" 2>/dev/null'
+        ),
+        (
+            '"$tool" -w "$WAIT_SECONDS" -S DOCKER-USER '
+            '>/dev/null 2>&1 || fail'
+        ),
+        '"$tool" -w "$WAIT_SECONDS" -S DOCKER-USER 1 2>/dev/null',
+        (
+            '"$tool" -w "$WAIT_SECONDS" -I DOCKER-USER 1 '
+            '-o "$BRIDGE_INTERFACE" ! -s "$loopback_source" -p tcp '
+            '-m conntrack --ctstatus DNAT --ctdir ORIGINAL '
+            '--ctorigdstport "$PORT_RANGE" -j DROP >/dev/null 2>&1 || fail'
+        ),
+        (
+            '"$tool" -w "$WAIT_SECONDS" -C DOCKER-USER '
+            '-o "$BRIDGE_INTERFACE" ! -s "$loopback_source" -p tcp '
+            '-m conntrack --ctstatus DNAT --ctdir ORIGINAL '
+            '--ctorigdstport "$PORT_RANGE" -j DROP >/dev/null 2>&1 || fail'
+        ),
+        '"$tool" -w "$WAIT_SECONDS" -S DOCKER-USER 1 2>/dev/null',
+    ]
+    docker_network_operations = re.findall(
+        r"\bdocker\s+network\s+([a-z-]+)", text
+    )
+    return bool(
+        all(value in text for value in required)
+        and "--dport" not in text
+        and "-j RETURN" not in text
+        and "-j ACCEPT" not in text
+        and direct_firewall is None
+        and firewall_commands == expected_firewall_commands
+        and text.count("docker network inspect") == 4
+        and text.count("docker network create") == 1
+        and set(docker_network_operations) == {"inspect", "create"}
+    )
 
 
 def _shell_logical_commands(text: str) -> list[str]:
@@ -629,16 +698,10 @@ def _actual_command(tokens: list[str]) -> tuple[str, list[str]] | None:
 
 
 def _assigns_persistent_broker_membership(text: str) -> bool:
-    variables: dict[str, str] = {}
     for line in _shell_logical_commands(text):
         if line.startswith("#"):
             continue
-        relevant_variable = any(
-            value == "medchat-sandbox"
-            and (f"${name}" in line or f"${{{name}}}" in line)
-            for name, value in variables.items()
-        )
-        if "medchat-sandbox" not in line and not relevant_variable:
+        if re.search(r"\b(?:usermod|adduser|addgroup|gpasswd)\b", line) is None:
             continue
         try:
             segments = _shell_command_segments(line)
@@ -648,38 +711,37 @@ def _assigns_persistent_broker_membership(text: str) -> bool:
                 continue
             return bool(hints.intersection(_MEMBERSHIP_COMMANDS | _COMMAND_WRAPPERS))
         for segment in segments:
-            for token in segment:
-                if not _SHELL_ASSIGNMENT.fullmatch(token):
-                    break
-                name, value = token.split("=", 1)
-                variables[name] = value
             resolved = _actual_command(segment)
             if resolved is None:
-                continue
+                return True
             command, arguments = resolved
-            expanded_arguments = []
-            for argument in arguments:
-                match = re.fullmatch(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))", argument)
-                if match is not None:
-                    argument = variables.get(match.group(1) or match.group(2), argument)
-                expanded_arguments.append(argument)
-            arguments = expanded_arguments
-            tokens = [command, *arguments]
-            token_set = set(tokens)
-            if command == "usermod" and _usermod_assigns_group(
-                tokens, "medchat-sandbox"
-            ):
+            if command in _MEMBERSHIP_COMMANDS:
+                if command == "gpasswd" and arguments == [
+                    "--delete",
+                    "medchat",
+                    "medchat-sandbox",
+                ]:
+                    continue
                 return True
-            if (
-                command in {"adduser", "addgroup"}
-                and {"medchat", "medchat-sandbox"}.issubset(token_set)
-            ):
-                return True
-            if (
-                command == "gpasswd"
-                and {"medchat", "medchat-sandbox"}.issubset(token_set)
-                and token_set.intersection({"-a", "--add"})
-            ):
+            if command == "timeout" and "gpasswd" in arguments:
+                index = arguments.index("gpasswd")
+                prefix = arguments[:index]
+                mutation = [
+                    token
+                    for token in arguments[index:]
+                    if not token.startswith((">", "1>", "2>"))
+                    and token not in {"1", "2", "&"}
+                ]
+                if prefix == [
+                    "--signal=KILL",
+                    "${SYSTEMCTL_TIMEOUT_SECONDS}s",
+                ] and mutation == [
+                    "gpasswd",
+                    "--delete",
+                    "medchat",
+                    "medchat-sandbox",
+                ]:
+                    continue
                 return True
     return False
 
@@ -745,6 +807,18 @@ def _revocation_check_is_fresh(text: str) -> bool:
     return operations == sorted(operations)
 
 
+def _atomic_commit_order_is_safe(text: str) -> bool:
+    try:
+        start = text.index("def stage_generation(")
+        replace = text.index("os.replace(temporary, path)", start)
+        committed = text.index("committed.append", replace)
+        fsync = text.index("fsync_parent(path)", replace)
+        verify = text.index("installed = path.lstat()", replace)
+    except ValueError:
+        return False
+    return replace < committed < fsync < verify
+
+
 def _validate_installer(text: str) -> bool:
     forbidden = (
         "mktemp",
@@ -781,8 +855,11 @@ def _validate_installer(text: str) -> bool:
         "def stage_generation(",
         "def rollback_generation(",
         "MEDCHAT_INSTALL_PREVIEW_FAIL_AFTER",
+        "MEDCHAT_INSTALL_PREVIEW_FAIL_POINT",
         "preview_fail_after = int(sys.argv[9])",
+        "preview_fail_point = sys.argv[10]",
         'if root == Path("/") and preview_fail_after != 0',
+        'if root == Path("/") and preview_fail_point != "none"',
         "systemctl daemon-reload",
         "GROUP_MIGRATION_INTENT=remove-medchat-from-medchat-sandbox",
         "remove_legacy_medchat_membership",
@@ -833,6 +910,7 @@ def _validate_installer(text: str) -> bool:
         and _live_migration_order_is_safe(text)
         and _failure_trap_is_safe(text)
         and _revocation_check_is_fresh(text)
+        and _atomic_commit_order_is_safe(text)
     )
 
 
@@ -1042,66 +1120,76 @@ def _runtime_image_reference() -> str | None:
 def _firewall_rules_present() -> bool:
     families = (("iptables", "127.0.0.0/8"), ("ip6tables", "::1/128"))
     for executable, loopback_source in families:
-        common = (
+        rule = (
+            "-o",
+            "br-medchat-sbox",
+            "!",
+            "-s",
+            loopback_source,
             "-p",
             "tcp",
             "-m",
             "conntrack",
+            "--ctstatus",
+            "DNAT",
             "--ctdir",
             "ORIGINAL",
             "--ctorigdstport",
             "40000:60000",
         )
-        allow = _run_command(
+        present = _run_command(
             (
                 executable,
                 "-w",
                 "5",
                 "-C",
                 "DOCKER-USER",
-                "-s",
-                loopback_source,
-                *common,
-                "-j",
-                "RETURN",
-            )
-        )
-        deny = _run_command(
-            (
-                executable,
-                "-w",
-                "5",
-                "-C",
-                "DOCKER-USER",
-                *common,
+                *rule,
                 "-j",
                 "DROP",
             )
         )
-        expected_allow = (
-            f"-A DOCKER-USER -s {loopback_source} -p tcp -m conntrack "
-            "--ctdir ORIGINAL --ctorigdstport 40000:60000 -j RETURN"
-        )
-        expected_deny = (
-            "-A DOCKER-USER -p tcp -m conntrack --ctdir ORIGINAL "
+        expected = (
+            f"-A DOCKER-USER -o br-medchat-sbox ! -s {loopback_source} "
+            "-p tcp -m conntrack --ctstatus DNAT --ctdir ORIGINAL "
             "--ctorigdstport 40000:60000 -j DROP"
         )
         first = _run_command(
             (executable, "-w", "5", "-S", "DOCKER-USER", "1")
         )
-        second = _run_command(
-            (executable, "-w", "5", "-S", "DOCKER-USER", "2")
-        )
         if (
-            not allow.ok
-            or not deny.ok
+            not present.ok
             or not first.ok
-            or not second.ok
-            or first.stdout.strip() != expected_allow
-            or second.stdout.strip() != expected_deny
+            or first.stdout.strip() != expected
         ):
             return False
     return True
+
+
+def _docker_network_is_safe() -> bool:
+    result = _run_command(
+        (
+            "docker",
+            "network",
+            "inspect",
+            "--format",
+            "{{json .}}",
+            "medchat-opensandbox",
+        )
+    )
+    if not result.ok:
+        return False
+    try:
+        network = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return bool(
+        isinstance(network, dict)
+        and network.get("Driver") == "bridge"
+        and network.get("EnableIPv6") is True
+        and network.get("Options")
+        == {"com.docker.network.bridge.name": "br-medchat-sbox"}
+    )
 
 
 def validate_runtime() -> str | None:
@@ -1123,6 +1211,9 @@ def validate_runtime() -> str | None:
             return "docker_runtime_unregistered"
         if not isinstance(runtimes, dict) or "runsc" not in runtimes:
             return "docker_runtime_unregistered"
+
+        if not _docker_network_is_safe():
+            return "docker_network_unsafe"
 
         if not _firewall_rules_present():
             return "firewall_rule_missing"

@@ -1969,7 +1969,7 @@ def test_prebound_broker_socket_is_real_owned_and_mode_0660(tmp_path: Path) -> N
     from scripts.run_sandbox_broker import bind_runtime_socket
 
     target = tmp_path / "broker.sock"
-    listener = bind_runtime_socket(target)
+    listener, bound_identity = bind_runtime_socket(target)
     try:
         metadata = os.lstat(target)
         assert stat.S_ISSOCK(metadata.st_mode)
@@ -1978,8 +1978,45 @@ def test_prebound_broker_socket_is_real_owned_and_mode_0660(tmp_path: Path) -> N
         assert metadata.st_gid == os.getegid()
         assert listener.family == socket.AF_UNIX
         assert listener.type & socket.SOCK_STREAM
+        assert bound_identity == (metadata.st_dev, metadata.st_ino)
     finally:
         listener.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="real Unix sockets require POSIX")
+def test_post_bind_lstat_failure_still_closes_and_unlinks_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_sandbox_broker as entrypoint
+
+    target = tmp_path / "broker.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(target))
+    metadata = os.lstat(target)
+    identity = (metadata.st_dev, metadata.st_ino)
+    real_lstat = entrypoint.os.lstat
+    failed_once = False
+
+    def flaky_lstat(path: object) -> os.stat_result:
+        nonlocal failed_once
+        if Path(path) == target and not failed_once:
+            failed_once = True
+            raise OSError("injected post-bind lstat failure")
+        return real_lstat(path)
+
+    monkeypatch.setattr(
+        entrypoint,
+        "bind_runtime_socket",
+        lambda _path: (listener, identity),
+    )
+    monkeypatch.setattr(entrypoint.os, "lstat", flaky_lstat)
+
+    with pytest.raises(RuntimeError):
+        entrypoint.serve_application(object(), target)
+
+    assert listener.fileno() == -1
+    assert not target.exists()
 
 
 def test_ready_server_notifies_only_after_uvicorn_startup(
