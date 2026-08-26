@@ -8,6 +8,7 @@ import re
 import stat
 import uuid
 from pathlib import Path, PurePosixPath
+from typing import Iterator
 
 from src.task_runtime.config import _stat_identity, _stat_version
 from src.task_runtime.secure_io import read_file_snapshot
@@ -185,6 +186,124 @@ def _verify_published_file(
         or _file_identity(named_after) != expected_file_identity
     ):
         raise ValueError
+
+
+def _verify_stream_pass(
+    path: Path,
+    descriptor: int,
+    expected_identity: tuple[tuple[int, ...], tuple[int, ...]],
+    expected_size: int,
+    expected_sha256: str,
+) -> None:
+    opened_before = os.fstat(descriptor)
+    named_before = path.lstat()
+    if (
+        not stat.S_ISREG(opened_before.st_mode)
+        or not stat.S_ISREG(named_before.st_mode)
+        or stat.S_ISLNK(named_before.st_mode)
+        or _is_reparse(named_before)
+        or opened_before.st_nlink != 1
+        or named_before.st_nlink != 1
+        or opened_before.st_size != expected_size
+        or named_before.st_size != expected_size
+        or _file_identity(opened_before) != expected_identity
+        or _file_identity(named_before) != expected_identity
+    ):
+        raise ValueError
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    total = 0
+    while True:
+        chunk = os.read(descriptor, _CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > expected_size:
+            raise ValueError
+        digest.update(chunk)
+    opened_after = os.fstat(descriptor)
+    named_after = path.lstat()
+    if (
+        total != expected_size
+        or digest.hexdigest() != expected_sha256
+        or opened_after.st_nlink != 1
+        or named_after.st_nlink != 1
+        or _file_identity(opened_after) != expected_identity
+        or _file_identity(named_after) != expected_identity
+    ):
+        raise ValueError
+    os.lseek(descriptor, 0, os.SEEK_SET)
+
+
+class _VerifiedArtifactIterator(Iterator[bytes]):
+    """Own one verified descriptor and close it on every terminal path."""
+
+    def __init__(
+        self,
+        path: Path,
+        descriptor: int,
+        expected_identity: tuple[tuple[int, ...], tuple[int, ...]],
+        record: ArtifactRecord,
+    ) -> None:
+        self._path = path
+        self._descriptor = descriptor
+        self._expected_identity = expected_identity
+        self._record = record
+        self._digest = hashlib.sha256()
+        self._total = 0
+        self._started = False
+        self._closed = False
+
+    def __next__(self) -> bytes:
+        if self._closed:
+            raise StopIteration
+        try:
+            if not self._started:
+                opened = os.fstat(self._descriptor)
+                named = self._path.lstat()
+                if (
+                    _file_identity(opened) != self._expected_identity
+                    or _file_identity(named) != self._expected_identity
+                    or opened.st_nlink != 1
+                    or named.st_nlink != 1
+                ):
+                    raise ValueError
+                self._started = True
+            chunk = os.read(self._descriptor, _CHUNK_BYTES)
+            if chunk:
+                self._total += len(chunk)
+                if self._total > self._record.size_bytes:
+                    raise ValueError
+                self._digest.update(chunk)
+                return chunk
+            opened = os.fstat(self._descriptor)
+            named = self._path.lstat()
+            if (
+                self._total != self._record.size_bytes
+                or self._digest.hexdigest() != self._record.sha256
+                or opened.st_nlink != 1
+                or named.st_nlink != 1
+                or _file_identity(opened) != self._expected_identity
+                or _file_identity(named) != self._expected_identity
+            ):
+                raise ValueError
+        except Exception:
+            self.close()
+            raise ValueError("artifact stream failed") from None
+        self.close()
+        raise StopIteration
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            os.close(self._descriptor)
+        except OSError:
+            pass
+
+    def __del__(self) -> None:
+        self.close()
 
 
 class ArtifactRegistry:
@@ -493,3 +612,85 @@ class ArtifactRegistry:
             raise KeyError("artifact not found") from None
         except Exception:
             raise ValueError("artifact read failed") from None
+
+    def open_registered(
+        self,
+        job_id: str,
+        artifact_id: str,
+        limit: int,
+    ) -> tuple[ArtifactRecord, Iterator[bytes]]:
+        """Verify a registered file once, then stream it with a second guard pass."""
+
+        descriptor: int | None = None
+        try:
+            validated_job_id = _require_uuid_hex(job_id)
+            validated_artifact_id = _require_uuid_hex(artifact_id)
+        except Exception:
+            raise KeyError("artifact not found") from None
+        if type(limit) is not int or limit < 0:
+            raise ValueError("artifact stream failed")
+        try:
+            record = self._store.get_artifact(validated_job_id, validated_artifact_id)
+            if record is None:
+                raise KeyError
+            expected_relative = str(
+                PurePosixPath(
+                    "jobs", validated_job_id, "published", validated_artifact_id
+                )
+            )
+            if record.relative_path != expected_relative or record.size_bytes > limit:
+                raise ValueError
+            root = self._checked_root()
+            relative = PurePosixPath(record.relative_path)
+            projected = _project_without_links(root, relative)
+            before = projected.lstat()
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or stat.S_ISLNK(before.st_mode)
+                or _is_reparse(before)
+                or before.st_nlink != 1
+                or before.st_size != record.size_bytes
+            ):
+                raise ValueError
+            descriptor = os.open(
+                projected,
+                os.O_RDONLY
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+            opened = os.fstat(descriptor)
+            expected_identity = _file_identity(opened)
+            if (
+                _file_identity(before) != expected_identity
+                or not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+            ):
+                raise ValueError
+            _verify_stream_pass(
+                projected,
+                descriptor,
+                expected_identity,
+                record.size_bytes,
+                record.sha256,
+            )
+        except KeyError:
+            if descriptor is not None:
+                os.close(descriptor)
+            raise KeyError("artifact not found") from None
+        except Exception:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            raise ValueError("artifact stream failed") from None
+
+        assert descriptor is not None
+
+        return record, _VerifiedArtifactIterator(
+            projected,
+            descriptor,
+            expected_identity,
+            record,
+        )

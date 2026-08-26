@@ -9,9 +9,12 @@ import math
 import os
 import re
 import stat
+import tempfile
+import threading
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO, Iterator
 
 from src.task_runtime.config import _stat_identity
 from src.task_runtime.secure_io import read_file_snapshot
@@ -28,11 +31,12 @@ from .models import (
 )
 from .opensandbox_client import SandboxCommandResult, SandboxHandle
 from .safety import contains_sensitive_metadata_text, is_safe_metadata_text
-from .store import ArtifactRecord, BrokerJobRecord, BrokerStore
+from .store import ArtifactRecord, BrokerJobRecord, BrokerStore, IdempotencyConflict
 from .validation import (
     ScientificOutputError,
     StagedInput,
     ValidatedScientificOutput,
+    stage_input,
     validate_scientific_output,
 )
 
@@ -46,6 +50,11 @@ _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _REMOTE_AUTO_EXPIRY_WARNING = (
     "sandbox_auto_expires_within_configured_remote_lifetime"
 )
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+_UPLOAD_SUFFIXES = {
+    "receptor": frozenset({".pdb", ".pdbqt"}),
+    "ligand": frozenset({".sdf", ".mol", ".pdb", ".pdbqt"}),
+}
 
 
 class BrokerFailure(Exception):
@@ -69,6 +78,82 @@ class _CreateHardDeadline(Exception):
     def __init__(self, cleanup_confirmed: bool) -> None:
         self.cleanup_confirmed = cleanup_confirmed
         super().__init__("sandbox create hard deadline exceeded")
+
+
+class _UploadCopyCancelled(Exception):
+    pass
+
+
+def _validated_idempotency_key(value: object) -> str:
+    if (
+        type(value) is not str
+        or not 1 <= len(value) <= 256
+        or not value.strip()
+        or any(not 0x20 <= ord(character) <= 0x7E for character in value)
+    ):
+        raise BrokerFailure(BrokerErrorCode.INVALID_INPUT)
+    return value
+
+
+def _upload_suffix(upload: object, role: str) -> str:
+    try:
+        filename = upload.filename
+        source = upload.file
+        if (
+            type(filename) is not str
+            or not 1 <= len(filename) <= 255
+            or filename in {".", ".."}
+            or filename.count(".") != 1
+            or filename.startswith(".")
+            or any(
+                character in {"/", "\\", ":"}
+                or ord(character) < 32
+                or ord(character) == 127
+                for character in filename
+            )
+            or not callable(getattr(source, "read", None))
+        ):
+            raise ValueError
+        suffix = f".{filename.rsplit('.', 1)[1].lower()}"
+        if suffix not in _UPLOAD_SUFFIXES[role]:
+            raise ValueError
+        return suffix
+    except Exception:
+        raise BrokerFailure(BrokerErrorCode.INVALID_INPUT) from None
+
+
+def _copy_upload_file(
+    source: BinaryIO,
+    destination: BinaryIO,
+    maximum_bytes: int,
+    cancelled: threading.Event,
+) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    total = 0
+    while True:
+        if cancelled.is_set():
+            raise _UploadCopyCancelled
+        chunk = source.read(_UPLOAD_CHUNK_BYTES)
+        if type(chunk) is not bytes or len(chunk) > _UPLOAD_CHUNK_BYTES:
+            raise ValueError
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > maximum_bytes:
+            raise ValueError
+        view = memoryview(chunk)
+        while view:
+            written = destination.write(view)
+            if type(written) is not int or written <= 0:
+                raise OSError
+            view = view[written:]
+        digest.update(chunk)
+    if total == 0:
+        raise ValueError
+    destination.flush()
+    os.fsync(destination.fileno())
+    destination.seek(0)
+    return total, digest.hexdigest()
 
 
 def _safe_staged_input(value: object, role: str) -> StagedInput:
@@ -460,8 +545,7 @@ class SandboxBrokerService:
     ) -> BrokerJobView:
         if type(prepared) is not PreparedDockingSubmission:
             raise BrokerFailure(BrokerErrorCode.INVALID_INPUT)
-        if type(idempotency_key) is not str or not idempotency_key.strip():
-            raise BrokerFailure(BrokerErrorCode.INVALID_INPUT)
+        checked_key = _validated_idempotency_key(idempotency_key)
         if (
             not self._started
             or self._stopping
@@ -471,18 +555,222 @@ class SandboxBrokerService:
             raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
         try:
             record, reused = self.store.create_or_get(
-                idempotency_key,
+                checked_key,
                 prepared.canonical_input_sha256,
                 prepared.trace_id,
             )
-        except Exception as exc:
-            from .store import IdempotencyConflict
-
-            if isinstance(exc, IdempotencyConflict):
+        except Exception as failure:
+            if isinstance(failure, IdempotencyConflict):
                 raise BrokerFailure(BrokerErrorCode.IDEMPOTENCY_CONFLICT) from None
             raise BrokerFailure(BrokerErrorCode.INVALID_INPUT) from None
         if reused:
             return _record_view(record)
+
+        return await self._enqueue_created(record, prepared)
+
+    async def _copy_upload_to_temporary(
+        self,
+        upload: object,
+        maximum_bytes: int,
+    ) -> tuple[BinaryIO, int, str]:
+        temporary: BinaryIO | None = None
+        copy_task: asyncio.Task[tuple[int, str]] | None = None
+        cancelled = threading.Event()
+        try:
+            source = upload.file
+            temporary = tempfile.TemporaryFile(
+                mode="w+b",
+                dir=self.config.state_root,
+            )
+            copy_task = asyncio.create_task(
+                asyncio.to_thread(
+                    _copy_upload_file,
+                    source,
+                    temporary,
+                    maximum_bytes,
+                    cancelled,
+                ),
+                name="sandbox-broker-upload-copy",
+            )
+            try:
+                size_bytes, sha256 = await asyncio.shield(copy_task)
+            except asyncio.CancelledError:
+                cancelled.set()
+                while not copy_task.done():
+                    try:
+                        await asyncio.shield(copy_task)
+                    except asyncio.CancelledError:
+                        continue
+                    except BaseException:
+                        break
+                raise
+            return temporary, size_bytes, sha256
+        except asyncio.CancelledError:
+            if temporary is not None:
+                temporary.close()
+            raise
+        except BaseException as failure:
+            if temporary is not None:
+                temporary.close()
+            if not isinstance(failure, Exception):
+                raise
+            raise BrokerFailure(BrokerErrorCode.INVALID_INPUT) from None
+
+    async def submit_uploads(
+        self,
+        parameters: DockingParameters,
+        receptor_upload: object,
+        ligand_upload: object,
+        idempotency_key: str,
+    ) -> BrokerJobView:
+        """Bound, hash, stage, and enqueue one multipart docking request."""
+
+        if type(parameters) is not DockingParameters:
+            raise BrokerFailure(BrokerErrorCode.INVALID_INPUT)
+        checked_key = _validated_idempotency_key(idempotency_key)
+        receptor_suffix = _upload_suffix(receptor_upload, "receptor")
+        ligand_suffix = _upload_suffix(ligand_upload, "ligand")
+        if (
+            not self._started
+            or self._stopping
+            or self._consumer_task is None
+            or self._consumer_task.done()
+        ):
+            raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
+
+        receptor_temporary: BinaryIO | None = None
+        ligand_temporary: BinaryIO | None = None
+        record: BrokerJobRecord | None = None
+        created = False
+        try:
+            receptor_temporary, receptor_size, receptor_sha256 = (
+                await self._copy_upload_to_temporary(
+                    receptor_upload,
+                    self.config.receptor_max_bytes,
+                )
+            )
+            ligand_temporary, ligand_size, ligand_sha256 = (
+                await self._copy_upload_to_temporary(
+                    ligand_upload,
+                    self.config.ligand_max_bytes,
+                )
+            )
+            receptor_placeholder = StagedInput(
+                relative_path=f"input/receptor{receptor_suffix}",
+                size_bytes=receptor_size,
+                sha256=receptor_sha256,
+            )
+            ligand_placeholder = StagedInput(
+                relative_path=f"input/ligand{ligand_suffix}",
+                size_bytes=ligand_size,
+                sha256=ligand_sha256,
+            )
+            canonical_hash = canonical_submission_sha256(
+                parameters,
+                receptor_placeholder,
+                ligand_placeholder,
+            )
+            try:
+                record, reused = self.store.create_or_get(
+                    checked_key,
+                    canonical_hash,
+                    uuid.uuid4().hex,
+                )
+            except IdempotencyConflict:
+                raise BrokerFailure(BrokerErrorCode.IDEMPOTENCY_CONFLICT) from None
+            except Exception:
+                raise BrokerFailure(BrokerErrorCode.INVALID_INPUT) from None
+            if reused:
+                return _record_view(record)
+            created = True
+
+            receptor_temporary.seek(0)
+            receptor = stage_input(
+                self.config.state_root,
+                record.job_id,
+                "receptor",
+                receptor_suffix,
+                receptor_temporary,
+                self.config.receptor_max_bytes,
+            )
+            ligand_temporary.seek(0)
+            ligand = stage_input(
+                self.config.state_root,
+                record.job_id,
+                "ligand",
+                ligand_suffix,
+                ligand_temporary,
+                self.config.ligand_max_bytes,
+            )
+            prepared = PreparedDockingSubmission(
+                parameters=parameters,
+                receptor=receptor,
+                ligand=ligand,
+                canonical_input_sha256=canonical_hash,
+                trace_id=record.trace_id,
+            )
+            return await self._enqueue_created(record, prepared)
+        except asyncio.CancelledError:
+            if created and record is not None:
+                self._fail_unqueued_submission(record.job_id)
+            raise
+        except BrokerFailure:
+            if created and record is not None:
+                current = self.store.get(record.job_id)
+                if current is not None and current.status is BrokerJobStatus.QUEUED:
+                    self._fail_unqueued_submission(record.job_id)
+                self._remove_job_tree(record.job_id)
+            raise
+        except Exception:
+            if created and record is not None:
+                self._fail_unqueued_submission(record.job_id)
+            raise BrokerFailure(BrokerErrorCode.INVALID_INPUT) from None
+        finally:
+            if receptor_temporary is not None:
+                receptor_temporary.close()
+            if ligand_temporary is not None:
+                ligand_temporary.close()
+
+    def _fail_unqueued_submission(self, job_id: str) -> None:
+        self._prepared.pop(job_id, None)
+        self._cancel_events.pop(job_id, None)
+        try:
+            current = self.store.get(job_id)
+            if current is not None and current.status not in TERMINAL_STATUSES:
+                self.store.fail(
+                    job_id,
+                    BrokerErrorCode.INVALID_INPUT,
+                    cleanup_status="succeeded",
+                )
+        except BaseException:
+            pass
+        self._remove_job_tree(job_id)
+
+    async def _enqueue_created(
+        self,
+        record: BrokerJobRecord,
+        prepared: PreparedDockingSubmission,
+    ) -> BrokerJobView:
+        if (
+            type(record) is not BrokerJobRecord
+            or type(prepared) is not PreparedDockingSubmission
+            or record.status is not BrokerJobStatus.QUEUED
+            or record.canonical_input_sha256 != prepared.canonical_input_sha256
+            or record.trace_id != prepared.trace_id
+        ):
+            raise BrokerFailure(BrokerErrorCode.INVALID_INPUT)
+        if (
+            not self._started
+            or self._stopping
+            or self._consumer_task is None
+            or self._consumer_task.done()
+        ):
+            self.store.fail(
+                record.job_id,
+                BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
+                cleanup_status="succeeded",
+            )
+            raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
 
         self._prepared[record.job_id] = prepared
         self._cancel_events.setdefault(record.job_id, asyncio.Event())
@@ -1586,5 +1874,35 @@ class SandboxBrokerService:
             return self.artifact_registry.read_registered(
                 job_id, artifact_id, self.config.output_max_bytes
             )
+        except Exception:
+            raise KeyError("artifact not found") from None
+
+    def open_artifact(
+        self,
+        job_id: str,
+        artifact_id: str,
+    ) -> tuple[ArtifactRecord, Iterator[bytes]]:
+        """Open only a pose allowlisted by a succeeded job's verified manifest."""
+
+        if type(artifact_id) is not str:
+            raise KeyError("artifact not found")
+        manifest = self.get_manifest(job_id)
+        allowed = {
+            item.get("artifact_id")
+            for item in manifest.artifacts
+            if type(item) is dict
+        }
+        if artifact_id not in allowed:
+            raise KeyError("artifact not found")
+        try:
+            record, stream = self.artifact_registry.open_registered(
+                job_id,
+                artifact_id,
+                self.config.output_max_bytes,
+            )
+            if record.media_type != "chemical/x-pdbqt":
+                stream.close()
+                raise ValueError
+            return record, stream
         except Exception:
             raise KeyError("artifact not found") from None
