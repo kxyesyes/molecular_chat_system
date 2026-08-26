@@ -6,18 +6,21 @@ import asyncio
 import errno
 import io
 import json
+import logging
 import os
 import socket
 import stat
 import sys
+import tempfile
 import threading
 import time
+import traceback
 from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from starlette.datastructures import UploadFile
+from starlette.datastructures import FormData, UploadFile
 from starlette.requests import ClientDisconnect
 
 from src.sandbox_broker.artifacts import ArtifactRegistry
@@ -252,6 +255,13 @@ def _parameters(**updates: object) -> DockingParameters:
 
 def _upload(filename: str, content: bytes) -> UploadFile:
     return UploadFile(io.BytesIO(content), filename=filename)
+
+
+def _open_fd_count() -> int | None:
+    descriptor_root = Path("/proc/self/fd")
+    if os.name != "posix" or not descriptor_root.is_dir():
+        return None
+    return len(list(descriptor_root.iterdir()))
 
 
 def _successful_service(
@@ -1201,6 +1211,313 @@ def test_full_stack_chunked_upload_without_length_stays_413_and_skips_service(
     }
 
 
+def test_rolled_multipart_spool_is_explicitly_closed_after_full_stack_413(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import starlette.formparsers as formparsers
+    from src.sandbox_broker.app import (
+        _MultipartBodyLimitMiddleware,
+        create_app,
+    )
+
+    real_spooled_temporary_file = tempfile.SpooledTemporaryFile
+    created: list[tuple[object, int]] = []
+
+    def tracked_spool(*args: object, **kwargs: object) -> object:
+        kwargs["max_size"] = 1
+        spool = real_spooled_temporary_file(*args, **kwargs)
+        descriptor = spool.fileno()
+        created.append((spool, descriptor))
+        return spool
+
+    monkeypatch.setattr(formparsers, "SpooledTemporaryFile", tracked_spool)
+    boundary = b"owned-limit-probe"
+    payload = b"".join(
+        [
+            b"--" + boundary + b"\r\n",
+            b'Content-Disposition: form-data; name="request_json"\r\n\r\n',
+            b'{"center":[1,2,3],"size":[20,20,20]}\r\n',
+            b"--" + boundary + b"\r\n",
+            (
+                b'Content-Disposition: form-data; name="receptor"; '
+                b'filename="receptor.pdbqt"\r\n'
+            ),
+            b"Content-Type: chemical/x-pdbqt\r\n\r\n",
+            b"R" * 1024 + b"\r\n",
+            b"--" + boundary + b"--\r\n",
+        ]
+    )
+    chunks = [payload[index : index + 64] for index in range(0, len(payload), 64)]
+    service = _ApiService()
+    app = create_app(_config(tmp_path), service=service)
+    limited = _MultipartBodyLimitMiddleware(app, maximum_bytes=448)
+    sent: list[dict[str, object]] = []
+    receive_count = 0
+    fd_baseline = _open_fd_count()
+
+    async def receive() -> dict[str, object]:
+        nonlocal receive_count
+        chunk = chunks[receive_count]
+        receive_count += 1
+        return {
+            "type": "http.request",
+            "body": chunk,
+            "more_body": receive_count < len(chunks),
+        }
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    scope = _http_scope(
+        [
+            (b"content-type", b"multipart/form-data; boundary=" + boundary),
+            (b"idempotency-key", b"rolled-limit"),
+        ]
+    )
+
+    async def exercise() -> None:
+        async with app.router.lifespan_context(app):
+            await limited(scope, receive, send)
+
+    asyncio.run(exercise())
+
+    assert sent[0]["status"] == 413
+    assert service.submitted_keys == []
+    assert created
+    assert receive_count * 64 <= 448 + 64
+    for spool, descriptor in created:
+        assert spool._rolled is True
+        assert spool.closed is True
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+    if fd_baseline is not None:
+        assert _open_fd_count() == fd_baseline
+
+
+def test_rolled_multipart_spool_closes_on_cancel_and_retains_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import starlette.formparsers as formparsers
+    from src.sandbox_broker.app import create_app
+
+    real_spooled_temporary_file = tempfile.SpooledTemporaryFile
+    created: list[tuple[object, int]] = []
+
+    def tracked_spool(*args: object, **kwargs: object) -> object:
+        kwargs["max_size"] = 1
+        spool = real_spooled_temporary_file(*args, **kwargs)
+        descriptor = spool.fileno()
+        created.append((spool, descriptor))
+        return spool
+
+    monkeypatch.setattr(formparsers, "SpooledTemporaryFile", tracked_spool)
+    boundary = b"owned-cancel-probe"
+    prefix = b"".join(
+        [
+            b"--" + boundary + b"\r\n",
+            b'Content-Disposition: form-data; name="request_json"\r\n\r\n',
+            b'{"center":[1,2,3],"size":[20,20,20]}\r\n',
+            b"--" + boundary + b"\r\n",
+            (
+                b'Content-Disposition: form-data; name="receptor"; '
+                b'filename="receptor.pdbqt"\r\n'
+            ),
+            b"Content-Type: chemical/x-pdbqt\r\n\r\n",
+            b"R" * 512,
+        ]
+    )
+    chunks = [prefix[index : index + 64] for index in range(0, len(prefix), 64)]
+    service = _ApiService()
+    app = create_app(_config(tmp_path), service=service)
+    receive_count = 0
+
+    async def receive() -> dict[str, object]:
+        nonlocal receive_count
+        if receive_count == len(chunks):
+            raise asyncio.CancelledError
+        chunk = chunks[receive_count]
+        receive_count += 1
+        return {"type": "http.request", "body": chunk, "more_body": True}
+
+    async def send(message: dict[str, object]) -> None:
+        pytest.fail(f"response sent after cancellation: {message}")
+
+    scope = _http_scope(
+        [
+            (b"content-type", b"multipart/form-data; boundary=" + boundary),
+            (b"idempotency-key", b"rolled-cancel"),
+        ]
+    )
+
+    async def exercise() -> None:
+        async with app.router.lifespan_context(app):
+            await app(scope, receive, send)
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        asyncio.run(exercise())
+
+    assert raised.value.__traceback__ is not None
+    assert service.submitted_keys == []
+    assert created
+    for spool, descriptor in created:
+        assert spool._rolled is True
+        assert spool.closed is True
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+@pytest.mark.parametrize(
+    ("key", "expected_status"),
+    [("owned-success", 202), ("unexpected-secret", 500)],
+)
+def test_route_closes_every_upload_after_service_success_or_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+    expected_status: int,
+) -> None:
+    import starlette.formparsers as formparsers
+    from src.sandbox_broker.app import create_app
+
+    real_spooled_temporary_file = tempfile.SpooledTemporaryFile
+    created: list[object] = []
+
+    def tracked_spool(*args: object, **kwargs: object) -> object:
+        spool = real_spooled_temporary_file(*args, **kwargs)
+        created.append(spool)
+        return spool
+
+    monkeypatch.setattr(formparsers, "SpooledTemporaryFile", tracked_spool)
+    app = create_app(_config(tmp_path), service=_ApiService())
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = _submit_api(client, key=key)
+    assert response.status_code == expected_status
+    assert len(created) == 2
+    assert all(spool.closed for spool in created)
+
+
+def test_route_closes_every_upload_when_service_is_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import starlette.formparsers as formparsers
+    from src.sandbox_broker.app import create_app
+
+    class CancelledSubmissionService(_ApiService):
+        async def submit_uploads(self, *args: object) -> BrokerJobView:
+            self.submitted_keys.append(str(args[-1]))
+            raise asyncio.CancelledError(r"service-canary C:\private\upload")
+
+    real_spooled_temporary_file = tempfile.SpooledTemporaryFile
+    created: list[object] = []
+
+    def tracked_spool(*args: object, **kwargs: object) -> object:
+        spool = real_spooled_temporary_file(*args, **kwargs)
+        created.append(spool)
+        return spool
+
+    monkeypatch.setattr(formparsers, "SpooledTemporaryFile", tracked_spool)
+    boundary = b"service-cancel-probe"
+    payload = b"".join(
+        [
+            b"--" + boundary + b"\r\n",
+            b'Content-Disposition: form-data; name="request_json"\r\n\r\n',
+            b'{"center":[1,2,3],"size":[20,20,20]}\r\n',
+            b"--" + boundary + b"\r\n",
+            (
+                b'Content-Disposition: form-data; name="receptor"; '
+                b'filename="receptor.pdbqt"\r\n\r\nRECEPTOR\r\n'
+            ),
+            b"--" + boundary + b"\r\n",
+            (
+                b'Content-Disposition: form-data; name="ligand"; '
+                b'filename="ligand.sdf"\r\n\r\nLIGAND\r\n'
+            ),
+            b"--" + boundary + b"--\r\n",
+        ]
+    )
+    service = CancelledSubmissionService()
+    app = create_app(_config(tmp_path), service=service)
+    received = False
+
+    async def receive() -> dict[str, object]:
+        nonlocal received
+        if received:
+            return {"type": "http.disconnect"}
+        received = True
+        return {"type": "http.request", "body": payload, "more_body": False}
+
+    async def send(message: dict[str, object]) -> None:
+        pytest.fail(f"response sent after service cancellation: {message}")
+
+    scope = _http_scope(
+        [
+            (b"content-type", b"multipart/form-data; boundary=" + boundary),
+            (b"idempotency-key", b"service-cancel"),
+        ]
+    )
+
+    async def exercise() -> None:
+        async with app.router.lifespan_context(app):
+            await app(scope, receive, send)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(exercise())
+    assert service.submitted_keys == ["service-cancel"]
+    assert len(created) == 2
+    assert all(spool.closed for spool in created)
+
+
+def test_form_cleanup_swallows_close_failure_and_continues() -> None:
+    from src.sandbox_broker.app import _close_form_uploads
+
+    calls: list[str] = []
+
+    class FailingUpload(UploadFile):
+        async def close(self) -> None:
+            calls.append("failing")
+            raise RuntimeError(r"close-canary C:\private\spool")
+
+    class FollowingUpload(UploadFile):
+        async def close(self) -> None:
+            calls.append("following")
+
+    form = FormData(
+        [
+            ("receptor", FailingUpload(io.BytesIO(b"r"), filename="r.pdb")),
+            ("ligand", FollowingUpload(io.BytesIO(b"l"), filename="l.sdf")),
+        ]
+    )
+    asyncio.run(_close_form_uploads(form))
+    asyncio.run(_close_form_uploads(form))
+    assert calls == ["failing", "following", "failing", "following"]
+
+
+def test_parser_cleanup_swallows_close_failure_and_is_repeat_safe() -> None:
+    from src.sandbox_broker.app import _close_parser_created_files
+
+    calls: list[str] = []
+
+    class FailingFile:
+        def close(self) -> None:
+            calls.append("failing")
+            raise RuntimeError(r"close-canary C:\private\parser")
+
+    class FollowingFile:
+        def close(self) -> None:
+            calls.append("following")
+
+    parser = SimpleNamespace(
+        _files_to_close_on_error=[FailingFile(), FollowingFile()]
+    )
+    _close_parser_created_files(parser)
+    _close_parser_created_files(parser)
+    assert calls == ["failing", "following"]
+    assert parser._files_to_close_on_error == []
+
+
 @pytest.mark.parametrize("disconnect", [False, True])
 def test_transport_gate_propagates_cancellation_and_client_disconnect_without_state(
     disconnect: bool,
@@ -1231,7 +1548,7 @@ def test_transport_gate_propagates_cancellation_and_client_disconnect_without_st
     assert vars(middleware) == {"app": downstream, "maximum_bytes": 8}
 
 
-def test_lifespan_stop_incomplete_is_logged_without_context_and_propagated(
+def test_lifespan_stop_incomplete_is_sanitized_after_cleanup(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1239,11 +1556,12 @@ def test_lifespan_stop_incomplete_is_logged_without_context_and_propagated(
 
     service = _ApiService(stop_failure=StopIncomplete())
     app = create_app(_config(tmp_path), service=service)
-    with pytest.raises(StopIncomplete):
-        with TestClient(app):
-            pass
+    with pytest.raises(RuntimeError, match="^sandbox broker shutdown failed$") as raised:
+        asyncio.run(_enter_lifespan_once(app))
     assert service.events == ["recover", "start", "stop"]
-    assert "sandbox broker shutdown incomplete" in caplog.text
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert "sandbox broker shutdown failed" in caplog.text
     assert "runtime-secret-value" not in caplog.text
     assert str(tmp_path) not in caplog.text
 
@@ -1284,18 +1602,161 @@ def test_lifespan_startup_failure_attempts_bounded_stop_and_redacts_logs(
 
     service = FailingService()
     app = create_app(_config(tmp_path), service=service)
-    with pytest.raises(RuntimeError):
-        with TestClient(app):
-            pass
+    with pytest.raises(RuntimeError, match="^sandbox broker startup failed$") as raised:
+        asyncio.run(_enter_lifespan_once(app))
     expected = ["recover", "stop"] if failure_stage == "recover" else [
         "recover",
         "start",
         "stop",
     ]
     assert service.events == expected
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    rendered = "".join(
+        traceback.format_exception(
+            type(raised.value),
+            raised.value,
+            raised.value.__traceback__,
+        )
+    )
+    assert "OPEN_SANDBOX_API_KEY" not in rendered
+    assert str(tmp_path) not in rendered
     assert "sandbox broker startup failed" in caplog.text
     assert "OPEN_SANDBOX_API_KEY" not in caplog.text
     assert str(tmp_path) not in caplog.text
+
+
+async def _enter_lifespan_once(app: object) -> None:
+    async with app.router.lifespan_context(app):
+        return None
+
+
+def test_startup_failure_cleanup_failure_does_not_replace_sanitized_error(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from src.sandbox_broker.app import create_app
+
+    class DoubleFailureService(_ApiService):
+        async def recover(self) -> None:
+            self.events.append("recover")
+            raise RuntimeError(r"recover-canary C:\private\recover")
+
+        async def stop(self, *, timeout: float | None = None) -> None:
+            assert timeout is not None
+            self.events.append("stop")
+            raise RuntimeError(r"cleanup-canary C:\private\cleanup")
+
+    service = DoubleFailureService()
+    app = create_app(_config(tmp_path), service=service)
+    with pytest.raises(RuntimeError, match="^sandbox broker startup failed$") as raised:
+        asyncio.run(_enter_lifespan_once(app))
+    assert service.events == ["recover", "stop"]
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    for forbidden in ("recover-canary", "cleanup-canary", "private"):
+        assert forbidden not in caplog.text
+
+
+@pytest.mark.parametrize("stage", ["startup", "shutdown"])
+def test_lifespan_cancellation_is_message_free_and_still_cleans_up(
+    tmp_path: Path,
+    stage: str,
+) -> None:
+    from src.sandbox_broker.app import create_app
+
+    class CancelledService(_ApiService):
+        async def recover(self) -> None:
+            self.events.append("recover")
+            if stage == "startup":
+                raise asyncio.CancelledError(r"cancel-canary C:\private\startup")
+
+        async def stop(self, *, timeout: float | None = None) -> None:
+            assert timeout is not None
+            self.events.append("stop")
+            if stage == "shutdown":
+                raise asyncio.CancelledError(r"cancel-canary C:\private\shutdown")
+
+    service = CancelledService()
+    app = create_app(_config(tmp_path), service=service)
+    with pytest.raises(asyncio.CancelledError) as raised:
+        asyncio.run(_enter_lifespan_once(app))
+    expected = ["recover", "stop"] if stage == "startup" else [
+        "recover",
+        "start",
+        "stop",
+    ]
+    assert service.events == expected
+    assert str(raised.value) == ""
+    assert raised.value.__cause__ is None
+    chained: BaseException | None = raised.value
+    while chained is not None:
+        assert "cancel-canary" not in str(chained)
+        assert "private" not in str(chained).lower()
+        chained = chained.__cause__ or chained.__context__
+    rendered = "".join(
+        traceback.format_exception(
+            type(raised.value),
+            raised.value,
+            raised.value.__traceback__,
+        )
+    )
+    assert "cancel-canary" not in rendered
+    assert "private" not in rendered.lower()
+
+
+@pytest.mark.parametrize("stage", ["startup", "shutdown"])
+@pytest.mark.filterwarnings(
+    "ignore:websockets.legacy is deprecated:DeprecationWarning"
+)
+@pytest.mark.filterwarnings(
+    "ignore:websockets.server.WebSocketServerProtocol is deprecated:DeprecationWarning"
+)
+def test_uvicorn_lifespan_logs_never_include_service_canary_or_path(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    stage: str,
+) -> None:
+    import uvicorn
+    from uvicorn.lifespan.on import LifespanOn
+
+    from src.sandbox_broker.app import create_app
+
+    canary = "LIFESPAN-SECRET-CANARY"
+    private_path = str(tmp_path / "private" / "broker.sqlite")
+
+    class FailingService(_ApiService):
+        async def recover(self) -> None:
+            self.events.append("recover")
+            if stage == "startup":
+                raise RuntimeError(f"{canary} {private_path}")
+
+        async def stop(self, *, timeout: float | None = None) -> None:
+            assert timeout is not None
+            self.events.append("stop")
+            if stage == "shutdown":
+                raise RuntimeError(f"{canary} {private_path}")
+
+    caplog.set_level(logging.ERROR)
+    app = create_app(_config(tmp_path), service=FailingService())
+    configuration = uvicorn.Config(app, lifespan="on", log_config=None)
+    configuration.load()
+    manager = LifespanOn(configuration)
+
+    async def exercise() -> None:
+        await manager.startup()
+        if stage == "shutdown":
+            await manager.shutdown()
+        await asyncio.sleep(0)
+
+    asyncio.run(exercise())
+
+    assert manager.should_exit is True
+    assert canary not in caplog.text
+    assert private_path not in caplog.text
+    assert "sandbox broker startup failed" in caplog.text or (
+        "sandbox broker shutdown failed" in caplog.text
+    )
 
 
 def test_uds_main_sets_umask_before_config_and_uses_only_exact_uds_args(

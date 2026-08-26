@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Annotated, AsyncIterator, Callable
+from typing import AsyncIterator, Callable
 
-from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
+from starlette.datastructures import FormData, UploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .artifacts import ArtifactRegistry
@@ -27,7 +30,6 @@ from .service import (
     BrokerFailure,
     BrokerJobView,
     SandboxBrokerService,
-    StopIncomplete,
 )
 from .store import BrokerStore
 
@@ -38,9 +40,9 @@ _REQUEST_JSON_MAX_CHARS = 64 * 1024
 _MULTIPART_OVERHEAD_BYTES = 2 * 1024 * 1024
 
 
-class _MultipartBodyLimitExceeded(StarletteHTTPException):
+class _MultipartBodyLimitExceeded(MultiPartException):
     def __init__(self) -> None:
-        super().__init__(status_code=413)
+        super().__init__("multipart body limit exceeded")
 
 
 class _MultipartBodyLimitMiddleware:
@@ -208,6 +210,104 @@ def _raw_idempotency_key(scope: Scope) -> str:
         raise BrokerFailure(BrokerErrorCode.INVALID_INPUT) from None
 
 
+def _close_parser_created_files(parser: MultiPartParser) -> None:
+    try:
+        created = getattr(parser, "_files_to_close_on_error", None)
+        files = tuple(created) if created is not None else ()
+        if hasattr(created, "clear"):
+            created.clear()
+    except BaseException:
+        files = ()
+    for file in files:
+        try:
+            file.close()
+        except BaseException:
+            pass
+
+
+async def _close_form_uploads(form: FormData) -> None:
+    closed: set[int] = set()
+    for _, value in form.multi_items():
+        if isinstance(value, UploadFile) and id(value) not in closed:
+            closed.add(id(value))
+            try:
+                await value.close()
+            except BaseException:
+                pass
+
+
+async def _parse_owned_multipart(request: Request) -> FormData:
+    parser = MultiPartParser(
+        headers=request.headers,
+        stream=request.stream(),
+        max_files=2,
+        max_fields=1,
+        max_part_size=_REQUEST_JSON_MAX_CHARS,
+    )
+    try:
+        return await parser.parse()
+    except BaseException:
+        _close_parser_created_files(parser)
+        raise
+
+
+def _raise_sanitized_lifecycle_failure(outcome: str, phase: str) -> None:
+    if outcome == "cancelled":
+        raise asyncio.CancelledError() from None
+    if outcome == "keyboard_interrupt":
+        raise KeyboardInterrupt() from None
+    if outcome == "system_exit":
+        raise SystemExit(1) from None
+    raise RuntimeError(f"sandbox broker {phase} failed") from None
+
+
+async def _stop_for_lifecycle(
+    broker: object,
+    *,
+    timeout: float,
+    failure_log: str,
+) -> str | None:
+    try:
+        await broker.stop(timeout=timeout)
+        return None
+    except asyncio.CancelledError:
+        logger.error(failure_log)
+        return "cancelled"
+    except Exception:
+        logger.error(failure_log)
+        return "failed"
+    except KeyboardInterrupt:
+        logger.error(failure_log)
+        return "keyboard_interrupt"
+    except SystemExit:
+        logger.error(failure_log)
+        return "system_exit"
+    except BaseException:
+        logger.error(failure_log)
+        return "failed"
+
+
+def _submission_parts(form: FormData) -> tuple[str, UploadFile, UploadFile]:
+    items = list(form.multi_items())
+    if len(items) != 3:
+        raise ValueError
+    names = [name for name, _ in items]
+    if sorted(names) != ["ligand", "receptor", "request_json"]:
+        raise ValueError
+    values = dict(items)
+    request_json = values["request_json"]
+    receptor = values["receptor"]
+    ligand = values["ligand"]
+    if (
+        type(request_json) is not str
+        or not 2 <= len(request_json) <= _REQUEST_JSON_MAX_CHARS
+        or not isinstance(receptor, UploadFile)
+        or not isinstance(ligand, UploadFile)
+    ):
+        raise ValueError
+    return request_json, receptor, ligand
+
+
 def _default_service(config: BrokerConfig) -> SandboxBrokerService:
     store = BrokerStore(config.state_root / "broker.sqlite")
     artifacts = ArtifactRegistry(
@@ -237,34 +337,46 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         broker = service
-        started = False
+        startup_outcome: str | None = None
         try:
             if broker is None:
                 broker = factory(config)
             app.state.sandbox_broker_service = broker
             await broker.recover()
             await broker.start()
-            started = True
+        except asyncio.CancelledError:
+            logger.error("sandbox broker startup failed")
+            startup_outcome = "cancelled"
+        except Exception:
+            logger.error("sandbox broker startup failed")
+            startup_outcome = "failed"
+        except KeyboardInterrupt:
+            logger.error("sandbox broker startup failed")
+            startup_outcome = "keyboard_interrupt"
+        except SystemExit:
+            logger.error("sandbox broker startup failed")
+            startup_outcome = "system_exit"
         except BaseException:
             logger.error("sandbox broker startup failed")
+            startup_outcome = "failed"
+        if startup_outcome is not None:
             if broker is not None:
-                try:
-                    await broker.stop(timeout=shutdown_timeout)
-                except BaseException:
-                    logger.error("sandbox broker startup cleanup failed")
-            raise
+                await _stop_for_lifecycle(
+                    broker,
+                    timeout=shutdown_timeout,
+                    failure_log="sandbox broker startup cleanup failed",
+                )
+            _raise_sanitized_lifecycle_failure(startup_outcome, "startup")
         try:
             yield
         finally:
-            if started:
-                try:
-                    await broker.stop(timeout=shutdown_timeout)
-                except StopIncomplete:
-                    logger.error("sandbox broker shutdown incomplete")
-                    raise
-                except BaseException:
-                    logger.error("sandbox broker shutdown failed")
-                    raise
+            shutdown_outcome = await _stop_for_lifecycle(
+                broker,
+                timeout=shutdown_timeout,
+                failure_log="sandbox broker shutdown failed",
+            )
+            if shutdown_outcome is not None:
+                _raise_sanitized_lifecycle_failure(shutdown_outcome, "shutdown")
 
     maximum_body_bytes = (
         config.receptor_max_bytes
@@ -316,8 +428,6 @@ def create_app(
         request: Request,
         failure: StarletteHTTPException,
     ) -> JSONResponse:
-        if isinstance(failure, _MultipartBodyLimitExceeded):
-            raise failure
         del request
         if failure.status_code == 404:
             return _error(404, "not_found")
@@ -340,44 +450,41 @@ def create_app(
         except AttributeError:
             raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE) from None
 
-    async def require_exact_multipart(request: Request) -> None:
-        try:
-            form = await request.form()
-            names = [name for name, _ in form.multi_items()]
-            if sorted(names) != ["ligand", "receptor", "request_json"]:
-                raise ValueError
-        except _MultipartBodyLimitExceeded:
-            raise
-        except Exception:
-            raise BrokerFailure(BrokerErrorCode.INVALID_INPUT) from None
-
     @app.post(
         "/v1/docking/jobs",
         status_code=202,
         response_model=PublicJob,
-        dependencies=[Depends(require_exact_multipart)],
     )
     async def submit_job(
         request: Request,
-        request_json: Annotated[
-            str,
-            Form(min_length=2, max_length=_REQUEST_JSON_MAX_CHARS),
-        ],
-        receptor: Annotated[UploadFile, File()],
-        ligand: Annotated[UploadFile, File()],
         broker: object = Depends(get_service),
     ) -> PublicJob:
+        idempotency_key = _raw_idempotency_key(request.scope)
         try:
-            parameters = DockingParameters.model_validate_json(request_json)
-        except ValidationError:
+            form = await _parse_owned_multipart(request)
+        except _MultipartBodyLimitExceeded:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
             raise BrokerFailure(BrokerErrorCode.INVALID_INPUT) from None
-        view = await broker.submit_uploads(
-            parameters,
-            receptor,
-            ligand,
-            _raw_idempotency_key(request.scope),
-        )
-        return PublicJob.from_view(view)
+        try:
+            try:
+                request_json, receptor, ligand = _submission_parts(form)
+                parameters = DockingParameters.model_validate_json(request_json)
+            except (KeyError, TypeError, ValueError, ValidationError):
+                raise BrokerFailure(BrokerErrorCode.INVALID_INPUT) from None
+            view = await broker.submit_uploads(
+                parameters,
+                receptor,
+                ligand,
+                idempotency_key,
+            )
+            return PublicJob.from_view(view)
+        finally:
+            await _close_form_uploads(form)
 
     @app.get("/v1/docking/jobs/{job_id}", response_model=PublicJob)
     async def get_job(
