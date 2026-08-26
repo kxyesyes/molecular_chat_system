@@ -6,10 +6,12 @@ from __future__ import annotations
 import ctypes
 import errno
 import hashlib
+import io
 import json
 import math
 import os
 import re
+import secrets
 import signal
 import stat
 import subprocess
@@ -39,9 +41,11 @@ _MAX_INPUT_BYTES = 128 * 1024 * 1024
 _MAX_POSE_BYTES = 16 * 1024 * 1024
 _MAX_POSE_LINE_BYTES = 4096
 _MAX_MODES = 256
-_DEADLINE_SECONDS = 180.0
+_OUTER_DEADLINE_SECONDS = 180.0
+_WRAPPER_DEADLINE_SECONDS = 177.0
+_CLEANUP_RESERVE_SECONDS = 2.0
+_RESULT_RESERVE_SECONDS = 1.0
 _PROCESS_STOP_GRACE_SECONDS = 0.1
-_PROCESS_CLEANUP_SECONDS = 0.75
 _PROCESS_REAP_POLL_SECONDS = 0.01
 _MAX_CLEANUP_ENTRIES = 128
 _MAX_CLEANUP_DEPTH = 8
@@ -84,6 +88,7 @@ _MINIMAL_ENV = {
 }
 _SUBREAPER_ENABLED = False
 _SUBREAPER_REQUIRED = False
+_INVOCATION_BASELINE_CHILDREN: frozenset[int] | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +102,13 @@ class Request:
     exhaustiveness: int
     num_modes: int
     energy_range: float
+
+
+@dataclass
+class _ProcessReference:
+    pid: int
+    starttime: int
+    pidfd: int | None
 
 
 class DockingFailure(Exception):
@@ -114,17 +126,35 @@ def _is_reparse(value: os.stat_result) -> bool:
     return bool(getattr(value, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT)
 
 
-def _identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int]:
     return (
         value.st_dev,
         value.st_ino,
-        value.st_size,
-        value.st_mtime_ns,
-        value.st_ctime_ns,
+        stat.S_IFMT(value.st_mode),
+        int(getattr(value, "st_file_attributes", 0)),
     )
 
 
-def _check_private_directory(path: Path) -> tuple[int, int, int, int, int]:
+def _stat_version(value: os.stat_result) -> tuple[int, ...]:
+    version = (value.st_size, value.st_mtime_ns)
+    if os.name == "posix":
+        version += (value.st_ctime_ns,)
+    return version
+
+
+def _snapshot_identity(
+    value: os.stat_result,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    return _stat_identity(value), _stat_version(value)
+
+
+def _identity(value: os.stat_result) -> tuple[int, ...]:
+    """Return stable object identity for directories and publication checks."""
+
+    return _stat_identity(value)
+
+
+def _check_private_directory(path: Path) -> tuple[int, ...]:
     value = path.lstat()
     if (
         not path.is_absolute()
@@ -164,7 +194,7 @@ def _read_regular_snapshot(path: Path, maximum_bytes: int) -> tuple[bytes, str]:
         if (
             not stat.S_ISREG(opened.st_mode)
             or opened.st_nlink != 1
-            or _identity(opened) != _identity(before)
+            or _snapshot_identity(opened) != _snapshot_identity(before)
         ):
             raise ValueError
         content = bytearray()
@@ -184,8 +214,8 @@ def _read_regular_snapshot(path: Path, maximum_bytes: int) -> tuple[bytes, str]:
             len(content) != before.st_size
             or after.st_nlink != 1
             or named_after.st_nlink != 1
-            or _identity(after) != _identity(before)
-            or _identity(named_after) != _identity(before)
+            or _snapshot_identity(after) != _snapshot_identity(before)
+            or _snapshot_identity(named_after) != _snapshot_identity(before)
             or _is_reparse(named_after)
         ):
             raise ValueError
@@ -248,6 +278,44 @@ def _path_from_contract(value: object, pattern: re.Pattern[str], role: str) -> P
     return INPUT_ROOT / name
 
 
+def _validate_single_ligand(content: bytes, suffix: str) -> None:
+    try:
+        from rdkit import Chem, rdBase
+    except Exception:
+        _fail("environment_setup", "environment_unavailable")
+    try:
+        with rdBase.BlockLogs():
+            if suffix == ".sdf":
+                supplier = Chem.ForwardSDMolSupplier(
+                    io.BytesIO(content),
+                    sanitize=True,
+                    removeHs=False,
+                    strictParsing=True,
+                )
+                molecules = []
+                for molecule in supplier:
+                    if molecule is None:
+                        raise ValueError
+                    molecules.append(molecule)
+                    if len(molecules) > 1:
+                        raise ValueError
+                if len(molecules) != 1:
+                    raise ValueError
+            elif suffix == ".mol":
+                text = content.decode("utf-8", errors="strict")
+                if "$$$$" in text or Chem.MolFromMolBlock(
+                    text,
+                    sanitize=True,
+                    removeHs=False,
+                    strictParsing=True,
+                ) is None:
+                    raise ValueError
+            else:  # pragma: no cover - guarded by the fixed path contract
+                raise ValueError
+    except Exception:
+        raise ValueError from None
+
+
 def _parse_request() -> Request:
     _check_private_directory(INPUT_ROOT)
     raw, _ = _read_regular_snapshot(INPUT_ROOT / _REQUEST_NAME, _MAX_REQUEST_BYTES)
@@ -278,9 +346,12 @@ def _parse_request() -> Request:
     ):
         raise ValueError
     _, actual_receptor_hash = _read_regular_snapshot(receptor, _MAX_INPUT_BYTES)
-    _, actual_ligand_hash = _read_regular_snapshot(ligand, _MAX_INPUT_BYTES)
+    ligand_content, actual_ligand_hash = _read_regular_snapshot(
+        ligand, _MAX_INPUT_BYTES
+    )
     if actual_receptor_hash != receptor_hash or actual_ligand_hash != ligand_hash:
         raise ValueError
+    _validate_single_ligand(ligand_content, ligand.suffix)
     return Request(
         receptor=receptor,
         ligand=ligand,
@@ -302,7 +373,7 @@ def _ensure_absent(path: Path) -> None:
     raise ValueError
 
 
-def _make_private_directory(path: Path) -> tuple[int, int, int, int, int]:
+def _make_private_directory(path: Path) -> tuple[int, ...]:
     path.mkdir(mode=0o700)
     return _check_private_directory(path)
 
@@ -324,11 +395,20 @@ def _safe_unlink_in_created_directory(path: Path, parent: Path) -> None:
 
 
 def _clean_created_directory(
-    path: Path, created_identity: tuple[int, int, int, int, int] | None
+    path: Path,
+    created_identity: tuple[int, ...] | None,
+    deadline: float | None = None,
 ) -> bool:
+    def within_deadline() -> bool:
+        return deadline is None or time.monotonic() < deadline
+
     if created_identity is None:
         return True
-    if path.parent != OUTPUT_ROOT or path.name not in {_WORK_NAME, _POSES_NAME}:
+    if (
+        not within_deadline()
+        or path.parent != OUTPUT_ROOT
+        or path.name not in {_WORK_NAME, _POSES_NAME}
+    ):
         return False
     budget = [_MAX_CLEANUP_ENTRIES]
 
@@ -336,6 +416,8 @@ def _clean_created_directory(
         if depth > _MAX_CLEANUP_DEPTH:
             raise OSError
         for child in current.iterdir():
+            if not within_deadline():
+                raise OSError
             budget[0] -= 1
             if budget[0] < 0:
                 raise OSError
@@ -353,14 +435,53 @@ def _clean_created_directory(
     def remove_descriptor_tree(descriptor: int, depth: int) -> None:
         if depth > _MAX_CLEANUP_DEPTH:
             raise OSError
+
+        def quarantine(name: str, expected: os.stat_result) -> str:
+            for _ in range(4):
+                quarantine_name = f".cleanup-{secrets.token_hex(16)}"
+                try:
+                    os.stat(
+                        quarantine_name,
+                        dir_fd=descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    break
+            else:
+                raise OSError
+            os.rename(
+                name,
+                quarantine_name,
+                src_dir_fd=descriptor,
+                dst_dir_fd=descriptor,
+            )
+            moved = os.stat(
+                quarantine_name, dir_fd=descriptor, follow_symlinks=False
+            )
+            if _stat_identity(moved) != _stat_identity(expected):
+                try:
+                    os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                except FileNotFoundError:
+                    os.rename(
+                        quarantine_name,
+                        name,
+                        src_dir_fd=descriptor,
+                        dst_dir_fd=descriptor,
+                    )
+                raise OSError
+            return quarantine_name
+
         for name in os.listdir(descriptor):
+            if not within_deadline():
+                raise OSError
             budget[0] -= 1
             if budget[0] < 0 or name in {"", ".", ".."}:
                 raise OSError
             value = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            quarantined = quarantine(name, value)
             if stat.S_ISDIR(value.st_mode) and not stat.S_ISLNK(value.st_mode):
                 child_descriptor = os.open(
-                    name,
+                    quarantined,
                     os.O_RDONLY
                     | getattr(os, "O_DIRECTORY", 0)
                     | getattr(os, "O_NOFOLLOW", 0)
@@ -373,15 +494,20 @@ def _clean_created_directory(
                         raise OSError
                     remove_descriptor_tree(child_descriptor, depth + 1)
                     named = os.stat(
-                        name, dir_fd=descriptor, follow_symlinks=False
+                        quarantined, dir_fd=descriptor, follow_symlinks=False
                     )
-                    if (named.st_dev, named.st_ino) != (value.st_dev, value.st_ino):
+                    if _stat_identity(named) != _stat_identity(value):
                         raise OSError
                 finally:
                     os.close(child_descriptor)
-                os.rmdir(name, dir_fd=descriptor)
+                os.rmdir(quarantined, dir_fd=descriptor)
             else:
-                os.unlink(name, dir_fd=descriptor)
+                final = os.stat(
+                    quarantined, dir_fd=descriptor, follow_symlinks=False
+                )
+                if _stat_identity(final) != _stat_identity(value):
+                    raise OSError
+                os.unlink(quarantined, dir_fd=descriptor)
 
     try:
         current = path.lstat()
@@ -412,8 +538,45 @@ def _clean_created_directory(
                 )
                 if (named.st_dev, named.st_ino) != created_identity[:2]:
                     raise OSError
-                directory_descriptor = os.open(
+                quarantine_name = f".cleanup-root-{secrets.token_hex(16)}"
+                try:
+                    os.stat(
+                        quarantine_name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise OSError
+                os.rename(
                     path.name,
+                    quarantine_name,
+                    src_dir_fd=parent_descriptor,
+                    dst_dir_fd=parent_descriptor,
+                )
+                moved = os.stat(
+                    quarantine_name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if _stat_identity(moved) != created_identity:
+                    try:
+                        os.stat(
+                            path.name,
+                            dir_fd=parent_descriptor,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        os.rename(
+                            quarantine_name,
+                            path.name,
+                            src_dir_fd=parent_descriptor,
+                            dst_dir_fd=parent_descriptor,
+                        )
+                    raise OSError
+                directory_descriptor = os.open(
+                    quarantine_name,
                     os.O_RDONLY
                     | getattr(os, "O_DIRECTORY", 0)
                     | getattr(os, "O_NOFOLLOW", 0)
@@ -428,13 +591,15 @@ def _clean_created_directory(
                 finally:
                     os.close(directory_descriptor)
                 final_named = os.stat(
-                    path.name,
+                    quarantine_name,
                     dir_fd=parent_descriptor,
                     follow_symlinks=False,
                 )
                 if (final_named.st_dev, final_named.st_ino) != created_identity[:2]:
                     raise OSError
-                os.rmdir(path.name, dir_fd=parent_descriptor)
+                os.rmdir(quarantine_name, dir_fd=parent_descriptor)
+                if not within_deadline():
+                    raise OSError
                 os.fsync(parent_descriptor)
             finally:
                 os.close(parent_descriptor)
@@ -455,7 +620,7 @@ def _clean_created_directory(
 
 def _require_exact_created_files(
     path: Path,
-    created_identity: tuple[int, int, int, int, int],
+    created_identity: tuple[int, ...],
     expected_names: set[str],
 ) -> None:
     current = path.lstat()
@@ -487,6 +652,13 @@ def _remaining(deadline: float, phase: str) -> float:
     if value <= 0:
         _fail(phase, "tool_timeout")
     return value
+
+
+def _deadline_layers(started: float) -> tuple[float, float, float]:
+    wrapper_deadline = started + _WRAPPER_DEADLINE_SECONDS
+    cleanup_deadline = wrapper_deadline - _RESULT_RESERVE_SECONDS
+    tool_deadline = cleanup_deadline - _CLEANUP_RESERVE_SECONDS
+    return tool_deadline, cleanup_deadline, wrapper_deadline
 
 
 def _enable_child_subreaper() -> None:
@@ -527,33 +699,6 @@ def _wait_direct_child(
         return False
 
 
-def _probe_adopted_process_group(process_group: int) -> tuple[bool, bool]:
-    found = False
-    while True:
-        try:
-            child, _ = os.waitpid(-process_group, os.WNOHANG)
-        except ChildProcessError:
-            return found, True
-        except OSError as failure:
-            if failure.errno == errno.ECHILD:
-                return found, True
-            raise
-        if child == 0:
-            return True, False
-        found = True
-
-
-def _wait_adopted_process_group(process_group: int, deadline: float) -> bool:
-    while True:
-        _, no_children = _probe_adopted_process_group(process_group)
-        if no_children:
-            return True
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        time.sleep(min(_PROCESS_REAP_POLL_SECONDS, remaining))
-
-
 def _signal_process_group(process_group: int, value: int) -> bool:
     try:
         os.killpg(process_group, value)
@@ -564,48 +709,221 @@ def _signal_process_group(process_group: int, value: int) -> bool:
         return False
 
 
-def _terminate_and_reap_process_group(
+def _bounded_proc_file(path: str) -> bytes:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        content = os.read(descriptor, 4097)
+        if len(content) > 4096:
+            raise OSError
+        return content
+    finally:
+        os.close(descriptor)
+
+
+def _linux_children() -> frozenset[int]:
+    content = _bounded_proc_file(f"/proc/self/task/{os.getpid()}/children")
+    if not content.strip():
+        return frozenset()
+    values = content.split()
+    if any(not value.isdigit() for value in values):
+        raise OSError
+    children = frozenset(int(value) for value in values)
+    if any(value <= 0 for value in children):
+        raise OSError
+    return children
+
+
+def _process_starttime(pid: int) -> int:
+    content = _bounded_proc_file(f"/proc/{pid}/stat")
+    closing = content.rfind(b")")
+    if closing <= 0:
+        raise OSError
+    fields = content[closing + 1 :].split()
+    if len(fields) <= 19 or not fields[19].isdigit():
+        raise OSError
+    return int(fields[19])
+
+
+def _open_process_reference(pid: int) -> _ProcessReference:
+    before = _process_starttime(pid)
+    pidfd: int | None = None
+    if hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"):
+        pidfd = os.pidfd_open(pid, 0)
+        try:
+            if _process_starttime(pid) != before:
+                raise OSError
+        except BaseException:
+            os.close(pidfd)
+            raise
+    return _ProcessReference(pid=pid, starttime=before, pidfd=pidfd)
+
+
+def _close_process_references(references: dict[int, _ProcessReference]) -> None:
+    for reference in references.values():
+        if reference.pidfd is not None:
+            try:
+                os.close(reference.pidfd)
+            except OSError:
+                pass
+    references.clear()
+
+
+def _signal_process(reference: _ProcessReference, value: int) -> bool:
+    try:
+        if reference.pidfd is not None:
+            signal.pidfd_send_signal(reference.pidfd, value, None, 0)
+        else:
+            if _process_starttime(reference.pid) != reference.starttime:
+                return False
+            os.kill(reference.pid, value)
+        return True
+    except ProcessLookupError:
+        return True
+    except OSError as failure:
+        return failure.errno == errno.ESRCH
+
+
+def _reap_introduced(
+    baseline: frozenset[int], references: dict[int, _ProcessReference]
+) -> tuple[bool, bool]:
+    reaped_any = False
+    if baseline:
+        for pid in tuple(references):
+            try:
+                child, _ = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                reference = references.pop(pid, None)
+                if reference is not None and reference.pidfd is not None:
+                    os.close(reference.pidfd)
+                continue
+            if child:
+                reference = references.pop(pid, None)
+                if reference is not None and reference.pidfd is not None:
+                    os.close(reference.pidfd)
+                reaped_any = True
+        return reaped_any, False
+    while True:
+        try:
+            child, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return reaped_any, True
+        except OSError as failure:
+            if failure.errno == errno.ECHILD:
+                return reaped_any, True
+            raise
+        if child == 0:
+            return reaped_any, False
+        reference = references.pop(child, None)
+        if reference is not None and reference.pidfd is not None:
+            os.close(reference.pidfd)
+        reaped_any = True
+
+
+def _manage_adopted_descendants(
+    baseline: frozenset[int],
+    references: dict[int, _ProcessReference],
+    value: int,
+) -> tuple[bool, bool]:
+    current = _linux_children()
+    introduced = current - baseline
+    for pid in introduced:
+        if pid not in references:
+            references[pid] = _open_process_reference(pid)
+    for pid in introduced:
+        if not _signal_process(references[pid], value):
+            return False, False
+    _, no_children = _reap_introduced(baseline, references)
+    remaining = _linux_children() - baseline
+    return True, not remaining and (not references) and (no_children or bool(baseline))
+
+
+def _terminate_and_reap_invocation(
     process: subprocess.Popen[bytes],
+    baseline: frozenset[int],
+    cleanup_deadline: float,
 ) -> bool:
-    process_group = process.pid
-    cleanup_deadline = time.monotonic() + _PROCESS_CLEANUP_SECONDS
+    references: dict[int, _ProcessReference] = {}
     term_deadline = min(
         cleanup_deadline, time.monotonic() + _PROCESS_STOP_GRACE_SECONDS
     )
-    if not _signal_process_group(process_group, signal.SIGTERM):
+    try:
+        if not _signal_process_group(process.pid, signal.SIGTERM):
+            return False
+        _wait_direct_child(process, term_deadline)
+        while time.monotonic() < term_deadline:
+            safe, clean = _manage_adopted_descendants(
+                baseline, references, signal.SIGTERM
+            )
+            if not safe:
+                return False
+            if process.returncode is not None and clean:
+                return True
+            time.sleep(
+                min(_PROCESS_REAP_POLL_SECONDS, term_deadline - time.monotonic())
+            )
+        if not _signal_process_group(process.pid, signal.SIGKILL):
+            return False
+        if not _wait_direct_child(process, cleanup_deadline):
+            return False
+        while time.monotonic() < cleanup_deadline:
+            safe, clean = _manage_adopted_descendants(
+                baseline, references, signal.SIGKILL
+            )
+            if not safe:
+                return False
+            if clean:
+                return True
+            time.sleep(
+                min(_PROCESS_REAP_POLL_SECONDS, cleanup_deadline - time.monotonic())
+            )
+        safe, clean = _manage_adopted_descendants(
+            baseline, references, signal.SIGKILL
+        )
+        return safe and clean
+    except (OSError, RuntimeError, ValueError):
         return False
-    direct_reaped = _wait_direct_child(process, term_deadline)
-    if direct_reaped and _wait_adopted_process_group(process_group, term_deadline):
-        return True
-    if not _signal_process_group(process_group, signal.SIGKILL):
-        return False
-    if not _wait_direct_child(process, cleanup_deadline):
-        return False
-    return _wait_adopted_process_group(process_group, cleanup_deadline)
+    finally:
+        _close_process_references(references)
 
 
-def _stop_process_tree(process: subprocess.Popen[bytes]) -> bool:
+def _stop_process_tree(
+    process: subprocess.Popen[bytes],
+    baseline: frozenset[int],
+    cleanup_deadline: float,
+) -> bool:
     if os.name == "posix":
-        return _terminate_and_reap_process_group(process)
+        return _terminate_and_reap_invocation(process, baseline, cleanup_deadline)
     try:
         if process.poll() is not None:
             process.wait(timeout=0)
             return True
         process.terminate()
+        term_remaining = min(
+            _PROCESS_STOP_GRACE_SECONDS,
+            max(0.0, cleanup_deadline - time.monotonic()),
+        )
         try:
-            process.wait(timeout=_PROCESS_STOP_GRACE_SECONDS)
+            process.wait(timeout=term_remaining)
             return True
         except subprocess.TimeoutExpired:
             pass
         process.kill()
-        process.wait(timeout=_PROCESS_STOP_GRACE_SECONDS)
+        process.wait(timeout=max(0.0, cleanup_deadline - time.monotonic()))
         return True
     except (OSError, subprocess.TimeoutExpired):
         return False
 
 
-def _run_tool(argv: list[str], phase: str, deadline: float) -> None:
+def _run_tool(
+    argv: list[str], phase: str, deadline: float, cleanup_deadline: float
+) -> None:
     process: subprocess.Popen[bytes] | None = None
+    baseline = frozenset()
     try:
         if (
             sys.platform.startswith("linux")
@@ -613,6 +931,12 @@ def _run_tool(argv: list[str], phase: str, deadline: float) -> None:
             and not _SUBREAPER_ENABLED
         ):
             _fail("environment_setup", "environment_unavailable")
+        if sys.platform.startswith("linux") and _SUBREAPER_ENABLED:
+            if _INVOCATION_BASELINE_CHILDREN is None:
+                _fail("environment_setup", "environment_unavailable")
+            baseline = _INVOCATION_BASELINE_CHILDREN
+            if _linux_children() - baseline:
+                _fail("cleanup", "cleanup_failed")
         remaining = _remaining(deadline, phase)
         process = subprocess.Popen(
             argv,
@@ -627,24 +951,32 @@ def _run_tool(argv: list[str], phase: str, deadline: float) -> None:
         )
         return_code = process.wait(timeout=min(remaining, _remaining(deadline, phase)))
     except subprocess.TimeoutExpired:
-        if process is None or not _stop_process_tree(process):
+        if process is None or not _stop_process_tree(
+            process, baseline, cleanup_deadline
+        ):
             _fail("cleanup", "cleanup_failed")
         _fail(phase, "tool_timeout")
     except (OSError, ValueError):
-        if process is not None and not _stop_process_tree(process):
+        if process is not None and not _stop_process_tree(
+            process, baseline, cleanup_deadline
+        ):
             _fail("cleanup", "cleanup_failed")
         _fail(phase, "tool_failed")
     except BaseException:
-        if process is not None and not _stop_process_tree(process):
+        if process is not None and not _stop_process_tree(
+            process, baseline, cleanup_deadline
+        ):
             _fail("cleanup", "cleanup_failed")
         raise
     if os.name == "posix" and _SUBREAPER_ENABLED:
         try:
-            has_descendants, _ = _probe_adopted_process_group(process.pid)
+            has_descendants = bool(_linux_children() - baseline)
         except OSError:
             _fail("cleanup", "cleanup_failed")
         if has_descendants:
-            if not _terminate_and_reap_process_group(process):
+            if not _terminate_and_reap_invocation(
+                process, baseline, cleanup_deadline
+            ):
                 _fail("cleanup", "cleanup_failed")
             _fail(phase, "tool_failed")
     if return_code != 0:
@@ -722,7 +1054,9 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _atomic_result(payload: dict[str, object]) -> None:
+def _atomic_result(payload: dict[str, object], deadline: float) -> None:
+    if deadline - time.monotonic() <= 0:
+        raise OSError
     root_identity = _check_private_directory(OUTPUT_ROOT)
     final = OUTPUT_ROOT / _RESULT_NAME
     _ensure_absent(final)
@@ -788,13 +1122,15 @@ def _atomic_result(payload: dict[str, object]) -> None:
         )
         if (
             after.st_nlink != 1
-            or _identity(after) != _identity(named)
+            or _snapshot_identity(after) != _snapshot_identity(named)
             or _is_reparse(named)
             or (os.name == "posix" and stat.S_IMODE(named.st_mode) != 0o600)
         ):
             raise OSError
         os.close(descriptor)
         descriptor = None
+        if deadline - time.monotonic() <= 0:
+            raise OSError
         if directory_descriptor is not None:
             os.link(
                 temporary_name,
@@ -817,7 +1153,7 @@ def _atomic_result(payload: dict[str, object]) -> None:
             if (
                 linked_source.st_nlink != 2
                 or linked_final.st_nlink != 2
-                or _identity(linked_source) != _identity(linked_final)
+                or _snapshot_identity(linked_source) != _snapshot_identity(linked_final)
                 or (linked_final.st_dev, linked_final.st_ino) != created_inode
                 or stat.S_IMODE(linked_final.st_mode) != 0o600
             ):
@@ -843,7 +1179,7 @@ def _atomic_result(payload: dict[str, object]) -> None:
             if (
                 linked_source.st_nlink != 2
                 or linked_final.st_nlink != 2
-                or _identity(linked_source) != _identity(linked_final)
+                or _snapshot_identity(linked_source) != _snapshot_identity(linked_final)
                 or (linked_final.st_dev, linked_final.st_ino) != created_inode
                 or _is_reparse(linked_final)
             ):
@@ -914,14 +1250,14 @@ def _failure_result(phase: str, error_code: str) -> dict[str, object]:
 
 
 def _execute(
-    request: Request, deadline: float
-) -> tuple[dict[str, object], Path, tuple[int, int, int, int, int]]:
+    request: Request, deadline: float, cleanup_deadline: float
+) -> tuple[dict[str, object], Path, tuple[int, ...]]:
     work = OUTPUT_ROOT / _WORK_NAME
     poses = OUTPUT_ROOT / _POSES_NAME
     _ensure_absent(work)
     _ensure_absent(poses)
     work_identity = _make_private_directory(work)
-    poses_identity: tuple[int, int, int, int, int] | None = None
+    poses_identity: tuple[int, ...] | None = None
     receptor_pdbqt = work / "receptor.pdbqt"
     ligand_pdbqt = work / "ligand.pdbqt"
     pose_file = poses / "result.pdbqt"
@@ -938,6 +1274,7 @@ def _execute(
             ],
             "receptor_preparation",
             deadline,
+            cleanup_deadline,
         )
         _validate_created_file(receptor_pdbqt, _MAX_INPUT_BYTES)
         _require_exact_created_files(work, work_identity, {"receptor.pdbqt"})
@@ -952,6 +1289,7 @@ def _execute(
             ],
             "ligand_preparation",
             deadline,
+            cleanup_deadline,
         )
         _validate_created_file(ligand_pdbqt, _MAX_INPUT_BYTES)
         _require_exact_created_files(
@@ -987,6 +1325,7 @@ def _execute(
             ],
             "docking",
             deadline,
+            cleanup_deadline,
         )
         try:
             _require_exact_created_files(
@@ -1010,30 +1349,34 @@ def _execute(
             }
         except (OSError, ValueError, UnicodeError, metadata.PackageNotFoundError):
             _fail("output_validation", "invalid_output")
-        if not _clean_created_directory(work, work_identity):
+        if not _clean_created_directory(work, work_identity, cleanup_deadline):
             _fail("cleanup", "cleanup_failed")
         work_identity = None
         if poses_identity is None:
             _fail("cleanup", "cleanup_failed")
         return result, poses, poses_identity
     except BaseException:
-        poses_clean = _clean_created_directory(poses, poses_identity)
-        work_clean = _clean_created_directory(work, work_identity)
+        poses_clean = _clean_created_directory(
+            poses, poses_identity, cleanup_deadline
+        )
+        work_clean = _clean_created_directory(work, work_identity, cleanup_deadline)
         if not poses_clean or not work_clean:
             raise DockingFailure("cleanup", "cleanup_failed") from None
         raise
 
 
 def main(argv: list[str] | None = None) -> int:
-    global _SUBREAPER_REQUIRED
+    global _INVOCATION_BASELINE_CHILDREN, _SUBREAPER_REQUIRED
     production_cli = argv is None
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments != _EXACT_ARGUMENTS:
         raise SystemExit(2)
-    deadline = time.monotonic() + _DEADLINE_SECONDS
+    tool_deadline, cleanup_deadline, wrapper_deadline = _deadline_layers(
+        time.monotonic()
+    )
     old_umask = os.umask(0o077)
     poses: Path | None = None
-    poses_identity: tuple[int, int, int, int, int] | None = None
+    poses_identity: tuple[int, ...] | None = None
     try:
         try:
             _check_private_directory(OUTPUT_ROOT)
@@ -1041,28 +1384,41 @@ def main(argv: list[str] | None = None) -> int:
             if production_cli:
                 _SUBREAPER_REQUIRED = True
                 _enable_child_subreaper()
+                try:
+                    _INVOCATION_BASELINE_CHILDREN = _linux_children()
+                except OSError:
+                    _fail("environment_setup", "environment_unavailable")
             try:
                 request = _parse_request()
             except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
                 _fail("input_validation", "invalid_input")
-            result, poses, poses_identity = _execute(request, deadline)
+            result, poses, poses_identity = _execute(
+                request, tool_deadline, cleanup_deadline
+            )
             try:
-                _atomic_result(result)
+                _atomic_result(result, wrapper_deadline)
             except BaseException:
-                if not _clean_created_directory(poses, poses_identity):
+                if not _clean_created_directory(
+                    poses, poses_identity, cleanup_deadline
+                ):
                     raise DockingFailure("cleanup", "cleanup_failed") from None
                 poses_identity = None
                 raise
             return 0
         except DockingFailure as failure:
             try:
-                _atomic_result(_failure_result(failure.phase, failure.error_code))
+                _atomic_result(
+                    _failure_result(failure.phase, failure.error_code),
+                    wrapper_deadline,
+                )
             except (OSError, ValueError):
                 pass
             return 1
         except Exception:
             try:
-                _atomic_result(_failure_result("internal", "internal_error"))
+                _atomic_result(
+                    _failure_result("internal", "internal_error"), wrapper_deadline
+                )
             except (OSError, ValueError):
                 pass
             return 1

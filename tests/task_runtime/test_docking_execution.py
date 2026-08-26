@@ -899,6 +899,71 @@ def test_opensandbox_smiles_failure_keeps_stable_invalid_input_reason(
     )
 
 
+@pytest.mark.parametrize(
+    ("receptor_name", "ligand_name"),
+    [
+        ("receptor.pdbqt", "ligand.sdf"),
+        ("receptor.pdb", "ligand.pdb"),
+        ("receptor.pdb", "ligand.pdbqt"),
+    ],
+)
+def test_opensandbox_rejects_unsupported_staged_suffix_without_local_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    receptor_name: str,
+    ligand_name: str,
+) -> None:
+    import src.docking.sandbox_runner as sandbox_module
+    import src.task_runtime.docking_execution as execution_module
+
+    manifest = DockingInputStager(tmp_path).stage(
+        "task-remote-suffix",
+        receptor_name,
+        b"ATOM\n",
+        ligand_name,
+        b"$$$$\n",
+        None,
+        CONFIG,
+    )
+    output_root = _allowed_output_root(tmp_path)
+    network_calls = 0
+    local_calls = 0
+
+    def forbidden_network(_request: httpx.Request) -> httpx.Response:
+        nonlocal network_calls
+        network_calls += 1
+        raise AssertionError("unsupported suffix reached broker")
+
+    def forbidden_local(*_args: Any, **_kwargs: Any) -> ToolResult:
+        nonlocal local_calls
+        local_calls += 1
+        raise AssertionError("OpenSandbox input rejection fell back locally")
+
+    runner = sandbox_module.SandboxDockingRunner(
+        tmp_path / "broker.sock",
+        output_root,
+        transport=httpx.MockTransport(forbidden_network),
+    )
+    monkeypatch.setenv("MEDCHAT_DOCKING_EXECUTION_BACKEND", "opensandbox")
+    monkeypatch.setattr(execution_module, "execute_tool_compat", forbidden_local)
+    monkeypatch.setattr(
+        sandbox_module.SandboxDockingRunner,
+        "from_env",
+        lambda _output_root: runner,
+    )
+
+    result = DockingExecution(
+        tmp_path,
+        allowed_output_root=output_root,
+    ).run_verified("task-remote-suffix", manifest)
+
+    assert result["success"] is False
+    assert result["error"]["code"] == AgentErrorCode.INVALID_INPUT.value
+    assert result["error"]["details"]["reason"] == "input_invalid"
+    assert network_calls == 0
+    assert local_calls == 0
+
+
 def test_opensandbox_broker_failure_never_calls_real_local_tool_seam(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -40,8 +40,8 @@ _UUID_HEX_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 _TRACE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _JOB_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _VERSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .+_()-]{0,127}\Z")
-_RECEPTOR_SUFFIXES = frozenset({".pdb", ".pdbqt"})
-_LIGAND_SUFFIXES = frozenset({".sdf", ".mol", ".pdb", ".pdbqt"})
+_REMOTE_RECEPTOR_SUFFIXES = frozenset({".pdb"})
+_REMOTE_LIGAND_SUFFIXES = frozenset({".sdf", ".mol"})
 _RECEPTOR_MAX_BYTES = 50 * 1024 * 1024
 _LIGAND_MAX_BYTES = 10 * 1024 * 1024
 _ARTIFACT_MAX_BYTES = 100 * 1024 * 1024
@@ -752,15 +752,22 @@ class SandboxDockingRunner:
                         "execution_backend": "opensandbox",
                     },
                 )
-            if type(payload.get("ligand_path")) is not str:
-                raise ValueError("sandbox docking requires a verified ligand file")
-            receptor, receptor_sha256 = _file_snapshot(
-                payload.get("receptor_path"), _RECEPTOR_SUFFIXES, _RECEPTOR_MAX_BYTES
-            )
-            ligand, ligand_sha256 = _file_snapshot(
-                payload.get("ligand_path"), _LIGAND_SUFFIXES, _LIGAND_MAX_BYTES
-            )
-            parameters = self._parameters(payload)
+            try:
+                if type(payload.get("ligand_path")) is not str:
+                    raise ValueError
+                receptor, receptor_sha256 = _file_snapshot(
+                    payload.get("receptor_path"),
+                    _REMOTE_RECEPTOR_SUFFIXES,
+                    _RECEPTOR_MAX_BYTES,
+                )
+                ligand, ligand_sha256 = _file_snapshot(
+                    payload.get("ligand_path"),
+                    _REMOTE_LIGAND_SUFFIXES,
+                    _LIGAND_MAX_BYTES,
+                )
+                parameters = self._parameters(payload)
+            except ValueError:
+                return _broker_error_result(BrokerErrorCode.INVALID_INPUT)
             if _cancelled(cancel_event):
                 raise _Cancelled
 

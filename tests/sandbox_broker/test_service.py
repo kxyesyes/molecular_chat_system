@@ -48,6 +48,18 @@ MULTI_MODE_POSE = (
     "REMARK VINA RESULT: -7.2 1.0 1.5\n"
     "MODEL 2\nENDMDL\n"
 )
+VALID_MOL = b"""ethanol
+  MedChat        2D
+
+  3  2  0  0  0  0  0  0  0  0999 V2000
+    0.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    1.2990    0.7500    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    2.5981    0.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0
+  1  2  1  0
+  2  3  1  0
+M  END
+"""
+VALID_SDF = VALID_MOL + b"$$$$\n"
 
 
 class FakeSandboxClient:
@@ -395,7 +407,7 @@ def _prepared(config: BrokerConfig) -> PreparedDockingSubmission:
     staged = config.state_root / "staged" / ("1" * 32)
     staged.mkdir(parents=True, exist_ok=True)
     receptor_bytes = b"ATOM\n"
-    ligand_bytes = b"ligand\n"
+    ligand_bytes = VALID_SDF
     (staged / "receptor.pdb").write_bytes(receptor_bytes)
     (staged / "ligand.sdf").write_bytes(ligand_bytes)
     receptor = StagedInput(
@@ -428,7 +440,7 @@ def _prepared_with_suffixes(
     staged = config.state_root / "staged" / ("2" * 32)
     staged.mkdir(parents=True, exist_ok=True)
     receptor_bytes = b"ATOM\n"
-    ligand_bytes = b"ligand\n"
+    ligand_bytes = VALID_SDF if ligand_suffix == ".sdf" else VALID_MOL
     receptor_name = f"receptor{receptor_suffix}"
     ligand_name = f"ligand{ligand_suffix}"
     (staged / receptor_name).write_bytes(receptor_bytes)

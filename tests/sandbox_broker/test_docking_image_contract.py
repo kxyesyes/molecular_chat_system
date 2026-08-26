@@ -62,6 +62,18 @@ TARGET_PACKAGE_PINS = {
     "openbabel": "3.1.1=py310hbff9852_9",
 }
 MINIMAL_ENV_KEYS = {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"}
+VALID_MOL = b"""ethanol
+  MedChat        2D
+
+  3  2  0  0  0  0  0  0  0  0999 V2000
+    0.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    1.2990    0.7500    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    2.5981    0.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0
+  1  2  1  0
+  2  3  1  0
+M  END
+"""
+VALID_SDF = VALID_MOL + b"$$$$\n"
 
 
 def _load_runner() -> ModuleType:
@@ -90,15 +102,16 @@ def _parameters(**updates: object) -> DockingParameters:
 
 def _request(
     receptor: bytes = b"RECEPTOR\n",
-    ligand: bytes = b"LIGAND\n",
+    ligand: bytes = VALID_SDF,
     *,
     parameters: DockingParameters | None = None,
+    ligand_suffix: str = ".sdf",
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
         "parameters": (parameters or _parameters()).model_dump(mode="json"),
         "receptor_path": "/workspace/input/receptor.pdb",
-        "ligand_path": "/workspace/input/ligand.sdf",
+        "ligand_path": f"/workspace/input/ligand{ligand_suffix}",
         "receptor_sha256": _sha(receptor),
         "ligand_sha256": _sha(ligand),
     }
@@ -109,12 +122,13 @@ def _write_inputs(
     payload: dict[str, object] | None = None,
     *,
     receptor: bytes = b"RECEPTOR\n",
-    ligand: bytes = b"LIGAND\n",
+    ligand: bytes = VALID_SDF,
+    ligand_suffix: str = ".sdf",
     raw_request: bytes | None = None,
 ) -> None:
     input_root.mkdir(mode=0o700)
     receptor_path = input_root / "receptor.pdb"
-    ligand_path = input_root / "ligand.sdf"
+    ligand_path = input_root / f"ligand{ligand_suffix}"
     receptor_path.write_bytes(receptor)
     ligand_path.write_bytes(ligand)
     receptor_path.chmod(0o600)
@@ -123,7 +137,10 @@ def _write_inputs(
     request_path.write_bytes(
         raw_request
         if raw_request is not None
-        else json.dumps(payload or _request(receptor, ligand), allow_nan=False).encode("utf-8")
+        else json.dumps(
+            payload or _request(receptor, ligand, ligand_suffix=ligand_suffix),
+            allow_nan=False,
+        ).encode("utf-8")
     )
     request_path.chmod(0o600)
 
@@ -428,7 +445,7 @@ def test_valid_fake_tools_execute_exact_sequence_and_emit_validator_schema(
         "schema_version": 1,
         "status": "succeeded",
         "receptor_sha256": _sha(b"RECEPTOR\n"),
-        "ligand_sha256": _sha(b"LIGAND\n"),
+        "ligand_sha256": _sha(VALID_SDF),
         "pose_count": 2,
         "best_energy": -8.2,
         "pose_files": ["poses/result.pdbqt"],
@@ -439,7 +456,7 @@ def test_valid_fake_tools_execute_exact_sequence_and_emit_validator_schema(
     validated = validate_scientific_output(
         output_root,
         _sha(b"RECEPTOR\n"),
-        _sha(b"LIGAND\n"),
+        _sha(VALID_SDF),
         20 * 1024 * 1024,
     )
     assert validated.pose_count == 2
@@ -723,7 +740,7 @@ def test_absolute_deadline_includes_input_validation_time(
 
     def slow_parse() -> object:
         parsed = original_parse()
-        now[0] = 181.0
+        now[0] = 175.0
         return parsed
 
     monkeypatch.setattr(module, "_parse_request", slow_parse)
@@ -732,6 +749,113 @@ def test_absolute_deadline_includes_input_validation_time(
     assert result["phase"] == "receptor_preparation"
     assert result["error_code"] == "tool_timeout"
     assert calls == []
+
+
+def test_deadline_layers_reserve_cleanup_and_result_publication() -> None:
+    module = _load_runner()
+    started = 1000.0
+    tool_deadline, cleanup_deadline, wrapper_deadline = module._deadline_layers(started)
+
+    assert started < tool_deadline < cleanup_deadline < wrapper_deadline
+    assert wrapper_deadline < started + 180.0
+    assert cleanup_deadline - tool_deadline >= 0.5
+    assert wrapper_deadline - cleanup_deadline >= 0.5
+
+
+def test_windows_snapshot_identity_ignores_ctime_but_keeps_content_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_runner()
+
+    def metadata(ctime: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            st_dev=1,
+            st_ino=2,
+            st_mode=stat.S_IFREG | 0o600,
+            st_file_attributes=0,
+            st_nlink=1,
+            st_size=3,
+            st_mtime_ns=10,
+            st_ctime_ns=ctime,
+        )
+
+    values = iter([metadata(1), metadata(3)])
+
+    class FakePath:
+        def lstat(self) -> SimpleNamespace:
+            return next(values)
+
+    fstats = iter([metadata(2), metadata(4)])
+    reads = iter([b"abc", b""])
+    monkeypatch.setattr(module.os, "name", "nt")
+    monkeypatch.setattr(module.os, "open", lambda *_args, **_kwargs: 9)
+    monkeypatch.setattr(module.os, "fstat", lambda _descriptor: next(fstats))
+    monkeypatch.setattr(module.os, "read", lambda _descriptor, _size: next(reads))
+    monkeypatch.setattr(module.os, "close", lambda _descriptor: None)
+
+    content, digest = module._read_regular_snapshot(FakePath(), 10)
+
+    assert content == b"abc"
+    assert digest == _sha(b"abc")
+
+
+@pytest.mark.parametrize(
+    ("suffix", "ligand"),
+    [
+        (".sdf", b"$$$$\n"),
+        (".sdf", b"not a molecule\n$$$$\n"),
+        (".sdf", VALID_SDF + VALID_SDF),
+        (".mol", b"not a molecule\n"),
+    ],
+    ids=["zero-record-sdf", "invalid-sdf", "multi-record-sdf", "invalid-mol"],
+)
+def test_ligand_must_be_exactly_one_valid_rdkit_molecule_before_meeko(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    suffix: str,
+    ligand: bytes,
+) -> None:
+    module = _load_runner()
+    input_root, output_root = _configure_roots(module, monkeypatch, tmp_path)
+    payload = _request(ligand=ligand, ligand_suffix=suffix)
+    _write_inputs(
+        input_root,
+        payload,
+        ligand=ligand,
+        ligand_suffix=suffix,
+    )
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    _fake_tools(monkeypatch, module, calls)
+
+    assert module.main(REQUEST_ARGUMENTS) != 0
+    assert _result(output_root) == {
+        "schema_version": 1,
+        "status": "failed",
+        "phase": "input_validation",
+        "error_code": "invalid_input",
+        "warnings": [],
+    }
+    assert calls == []
+
+
+def test_valid_single_record_mol_reaches_meeko(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_runner()
+    input_root, output_root = _configure_roots(module, monkeypatch, tmp_path)
+    payload = _request(ligand=VALID_MOL, ligand_suffix=".mol")
+    _write_inputs(
+        input_root,
+        payload,
+        ligand=VALID_MOL,
+        ligand_suffix=".mol",
+    )
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    _fake_tools(monkeypatch, module, calls)
+
+    assert module.main(REQUEST_ARGUMENTS) == 0
+    assert _result(output_root)["status"] == "succeeded"
+    assert calls[1][0][2] == str(input_root / "ligand.mol")
 
 
 def test_cli_subreaper_failure_is_stable_and_prevents_tool_spawn(
@@ -790,7 +914,7 @@ def test_subreaper_prctl_uses_exact_operation_and_has_stable_failure(
     assert calls == [(36, 1, 0, 0, 0)]
 
 
-def test_timeout_cleanup_reaps_direct_before_adopted_group_and_uses_kill_fallback(
+def test_timeout_cleanup_uses_absolute_budget_and_kill_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load_runner()
@@ -818,30 +942,31 @@ def test_timeout_cleanup_reaps_direct_before_adopted_group_and_uses_kill_fallbac
     def fake_killpg(process_group: int, value: int) -> None:
         events.append(("signal", value))
 
-    reaps = iter([(41001, 0), ChildProcessError()])
-
-    def fake_waitpid(process_group: int, options: int) -> tuple[int, int]:
-        assert process.returncode is not None
-        assert process_group == -process.pid
-        assert options == module.os.WNOHANG
-        events.append(("descendant_wait", process.pid))
-        value = next(reaps)
-        if isinstance(value, BaseException):
-            raise value
-        return value
-
     monkeypatch.setattr(module.os, "killpg", fake_killpg, raising=False)
-    monkeypatch.setattr(module.os, "waitpid", fake_waitpid, raising=False)
-    monkeypatch.setattr(module.os, "WNOHANG", 1, raising=False)
     monkeypatch.setattr(module.signal, "SIGKILL", 9, raising=False)
-    assert module._terminate_and_reap_process_group(process) is True
-    assert events == [
-        ("signal", int(signal.SIGTERM)),
-        ("signal", 9),
-        ("direct_reaped", process.pid),
-        ("descendant_wait", process.pid),
-        ("descendant_wait", process.pid),
-    ]
+    monkeypatch.setattr(module, "_PROCESS_STOP_GRACE_SECONDS", 0.001)
+    monkeypatch.setattr(
+        module,
+        "_manage_adopted_descendants",
+        lambda _baseline, _references, value: (
+            events.append(("descendant_signal", int(value))) or True,
+            True,
+        ),
+    )
+    cleanup_deadline = module.time.monotonic() + 1.0
+
+    assert module._terminate_and_reap_invocation(
+        process, frozenset(), cleanup_deadline
+    ) is True
+    assert events[0] == ("signal", int(signal.SIGTERM))
+    kill_group = events.index(("signal", 9))
+    direct_reap = events.index(("direct_reaped", process.pid))
+    kill_descendant = events.index(("descendant_signal", 9))
+    assert 0 < kill_group < direct_reap < kill_descendant
+    assert all(
+        event == ("descendant_signal", int(signal.SIGTERM))
+        for event in events[1:kill_group]
+    )
 
 
 def test_explicit_unit_main_does_not_enable_subreaper_in_pytest_process(
@@ -867,7 +992,8 @@ def _linux_process_tree_probe(tmp_path: Path, mode: str) -> list[int]:
     child_tail = "time.sleep(30)" if mode == "timeout" else "sys.exit(0)"
     child_code = (
         "import json,os,subprocess,sys,time;"
-        "g=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);"
+        "g=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],"
+        "preexec_fn=os.setsid);"
         "open(sys.argv[1],'w').write(json.dumps([os.getpid(),g.pid]));"
         + child_tail
     )
@@ -886,28 +1012,32 @@ sys.modules[spec.name] = m
 spec.loader.exec_module(m)
 m.OUTPUT_ROOT = Path(sys.argv[2])
 m._enable_child_subreaper()
+m._INVOCATION_BASELINE_CHILDREN = m._linux_children()
 expected = "tool_timeout" if sys.argv[3] == "timeout" else "tool_failed"
 deadline = time.monotonic() + (0.5 if sys.argv[3] == "timeout" else 3.0)
+cleanup_deadline = deadline + 0.75
 accepted = False
 try:
     m._run_tool(
         [sys.executable, "-c", sys.argv[4], sys.argv[5]],
         "docking",
         deadline,
+        cleanup_deadline,
     )
 except m.DockingFailure as failure:
     accepted = failure.error_code == expected
 pids = json.loads(Path(sys.argv[5]).read_text(encoding="utf-8"))
 remaining = [pid for pid in pids if Path(f"/proc/{pid}").exists()]
 if remaining:
-    try:
-        os.killpg(pids[0], signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    for pid in remaining:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     stop = time.monotonic() + 1.0
     while time.monotonic() < stop:
         try:
-            child, _ = os.waitpid(-pids[0], os.WNOHANG)
+            child, _ = os.waitpid(-1, os.WNOHANG)
         except ChildProcessError:
             break
         if child == 0:
@@ -1090,6 +1220,39 @@ def test_unexpected_nested_tool_artifacts_fail_and_are_fully_removed(
     assert not (output_root / "poses").exists()
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="POSIX dir-fd race")
+def test_cleanup_quarantine_preserves_swapped_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_runner()
+    _, output_root = _configure_roots(module, monkeypatch, tmp_path)
+    work = output_root / ".work"
+    work.mkdir(mode=0o700)
+    (work / "owned.txt").write_text("owned", encoding="ascii")
+    identity = module._check_private_directory(work)
+    replacement = output_root / "replacement"
+    replacement.mkdir(mode=0o700)
+    (replacement / "sentinel.txt").write_text("preserve", encoding="ascii")
+    saved = output_root / "saved-original"
+    original_rename = module.os.rename
+    injected = False
+
+    def racing_rename(source: object, destination: object, **kwargs: object) -> None:
+        nonlocal injected
+        if not injected and source == ".work":
+            injected = True
+            original_rename(work, saved)
+            original_rename(replacement, work)
+        original_rename(source, destination, **kwargs)
+
+    monkeypatch.setattr(module.os, "rename", racing_rename)
+
+    assert module._clean_created_directory(work, identity) is False
+    assert injected is True
+    assert (work / "sentinel.txt").read_text(encoding="ascii") == "preserve"
+    assert (saved / "owned.txt").read_text(encoding="ascii") == "owned"
+
+
 def test_cleanup_failure_is_stable_non_scientific_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1100,10 +1263,12 @@ def test_cleanup_failure_is_stable_non_scientific_failure(
     _fake_tools(monkeypatch, module, calls)
     original_cleanup = module._clean_created_directory
 
-    def fail_work_cleanup(path: Path, identity: object) -> bool:
+    def fail_work_cleanup(
+        path: Path, identity: object, deadline: float | None = None
+    ) -> bool:
         if path.name == ".work":
             return False
-        return bool(original_cleanup(path, identity))
+        return bool(original_cleanup(path, identity, deadline))
 
     monkeypatch.setattr(module, "_clean_created_directory", fail_work_cleanup)
     assert module.main(REQUEST_ARGUMENTS) != 0

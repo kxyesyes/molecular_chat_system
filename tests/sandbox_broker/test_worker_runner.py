@@ -139,6 +139,61 @@ def _runner(
     )
 
 
+@pytest.mark.parametrize(
+    ("role", "suffix"),
+    [
+        ("receptor", ".pdbqt"),
+        ("ligand", ".pdb"),
+        ("ligand", ".pdbqt"),
+    ],
+)
+def test_remote_suffix_contract_rejects_before_network(
+    tmp_path: Path, role: str, suffix: str
+) -> None:
+    payload, _, _ = _inputs(tmp_path)
+    replacement = tmp_path / f"{role}{suffix}"
+    replacement.write_bytes(b"input\n")
+    payload[f"{role}_path"] = str(replacement)
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("unsupported input must not reach the broker")
+
+    result = _runner(tmp_path, handler).execute(payload, job_id=f"bad-{role}-suffix")
+
+    assert result.success is False
+    assert result.error is not None
+    assert result.error.code is AgentErrorCode.INVALID_INPUT
+    assert result.error.details == {"reason": "input_invalid"}
+    assert calls == 0
+
+
+@pytest.mark.parametrize(
+    ("role", "suffix"),
+    [("receptor", ".pdb"), ("ligand", ".sdf"), ("ligand", ".mol")],
+)
+def test_remote_suffix_contract_allows_exact_matrix_to_reach_network(
+    tmp_path: Path, role: str, suffix: str
+) -> None:
+    payload, _, _ = _inputs(tmp_path)
+    replacement = tmp_path / f"{role}{suffix}"
+    replacement.write_bytes(b"input\n")
+    payload[f"{role}_path"] = str(replacement)
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(422)
+
+    result = _runner(tmp_path, handler).execute(payload, job_id=f"ok-{role}-suffix")
+
+    assert result.success is False
+    assert calls == 1
+
+
 class _Clock:
     def __init__(self) -> None:
         self.now = 0.0
