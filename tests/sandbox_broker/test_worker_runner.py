@@ -3,12 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import socket
 import stat
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import httpx
+import httpcore
 import pytest
 
 from src.agent.contracts import AgentErrorCode, ObservationStatus
@@ -169,6 +172,45 @@ class _TrackingStream(httpx.SyncByteStream):
         self.closed = True
 
 
+class _ReadTimeoutStream(httpx.SyncByteStream):
+    def __iter__(self):
+        raise httpx.ReadTimeout("deadline")
+        yield b""  # pragma: no cover
+
+
+def test_stream_timeout_keeps_type_and_triggers_bounded_broker_cancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/v1/docking/jobs":
+            return httpx.Response(202, json=_job("queued", receptor, ligand))
+        if request.url.path == f"/v1/docking/jobs/{BROKER_JOB_ID}":
+            return httpx.Response(
+                200,
+                stream=_ReadTimeoutStream(),
+                headers={"Content-Type": "application/json"},
+            )
+        if request.url.path.endswith("/cancel"):
+            return httpx.Response(202, json=_job("cancelled", receptor, ligand))
+        raise AssertionError
+
+    monkeypatch.setattr(runner_module.time, "sleep", lambda _seconds: None)
+
+    result = _runner(tmp_path, handler).execute(payload, job_id="stream-timeout")
+
+    assert result.success is False
+    assert requests == [
+        "/v1/docking/jobs",
+        f"/v1/docking/jobs/{BROKER_JOB_ID}",
+        f"/v1/docking/jobs/{BROKER_JOB_ID}/cancel",
+    ]
+
+
 class _DripStream(httpx.SyncByteStream):
     def __init__(self, chunks: list[bytes], clock: _Clock) -> None:
         self.chunks = chunks
@@ -184,6 +226,298 @@ class _DripStream(httpx.SyncByteStream):
 
     def close(self) -> None:
         self.closed = True
+
+
+class _BlockingNetworkStream:
+    def __init__(self) -> None:
+        self.timeouts: list[float | None] = []
+        self.closed = False
+
+    def read(self, _max_bytes: int, timeout: float | None = None) -> bytes:
+        self.timeouts.append(timeout)
+        assert timeout is not None
+        time.sleep(timeout)
+        raise httpcore.ReadTimeout
+
+    def write(self, _buffer: bytes, timeout: float | None = None) -> None:
+        self.timeouts.append(timeout)
+
+    def close(self) -> None:
+        self.closed = True
+
+    def start_tls(self, *args, **kwargs):
+        raise AssertionError("TLS is forbidden for the UDS broker")
+
+    def get_extra_info(self, _info: str):
+        return None
+
+
+class _BlockingDripNetworkStream(_BlockingNetworkStream):
+    def __init__(self) -> None:
+        super().__init__()
+        self.read_count = 0
+
+    def read(self, _max_bytes: int, timeout: float | None = None) -> bytes:
+        self.timeouts.append(timeout)
+        assert timeout is not None
+        self.read_count += 1
+        delay = 0.04
+        time.sleep(min(delay, timeout))
+        if timeout < delay:
+            raise httpcore.ReadTimeout
+        return b"x"
+
+
+def test_absolute_deadline_interrupts_blocking_stream_without_thread_leak() -> None:
+    raw = _BlockingNetworkStream()
+    before = {thread.ident for thread in threading.enumerate()}
+    started = time.monotonic()
+    stream = runner_module._AbsoluteDeadlineNetworkStream(
+        raw,
+        deadline=started + 0.08,
+    )
+
+    with pytest.raises(httpcore.ReadTimeout):
+        stream.read(1024, timeout=5.0)
+
+    elapsed = time.monotonic() - started
+    assert elapsed <= 0.18
+    assert raw.timeouts and 0 < raw.timeouts[0] <= 0.081
+    assert {thread.ident for thread in threading.enumerate()} == before
+
+
+def test_absolute_deadline_reclips_every_blocking_drip_read() -> None:
+    raw = _BlockingDripNetworkStream()
+    started = time.monotonic()
+    stream = runner_module._AbsoluteDeadlineNetworkStream(
+        raw,
+        deadline=started + 0.12,
+    )
+
+    with pytest.raises(httpcore.ReadTimeout):
+        while True:
+            stream.read(1024, timeout=5.0)
+
+    elapsed = time.monotonic() - started
+    assert elapsed <= 0.22
+    assert raw.read_count <= 4
+    assert raw.timeouts == sorted(raw.timeouts, reverse=True)
+
+
+def _http_response(
+    content: bytes,
+    *,
+    content_type: str = "application/json",
+) -> bytes:
+    return (
+        b"HTTP/1.1 200 OK\r\n"
+        + f"Content-Length: {len(content)}\r\n".encode("ascii")
+        + f"Content-Type: {content_type}\r\n".encode("ascii")
+        + b"Connection: close\r\n\r\n"
+        + content
+    )
+
+
+def _http_json_response(status: int, payload: dict[str, Any]) -> bytes:
+    content = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode(
+        "ascii"
+    )
+    reason = "Accepted" if status == 202 else "OK"
+    return (
+        f"HTTP/1.1 {status} {reason}\r\n".encode("ascii")
+        + f"Content-Length: {len(content)}\r\n".encode("ascii")
+        + b"Content-Type: application/json\r\n"
+        + b"Connection: close\r\n\r\n"
+        + content
+    )
+
+
+class _ScriptedUnixServer:
+    def __init__(self, socket_path: Path, scripts: list[Any]) -> None:
+        self.socket_path = socket_path
+        self.scripts = scripts
+        self.ready = threading.Event()
+        self.peer_closed = threading.Event()
+        self.requests: list[bytes] = []
+        self.error: BaseException | None = None
+        self.thread = threading.Thread(target=self._serve, name="test-uds-server")
+
+    def start(self) -> None:
+        self.thread.start()
+        assert self.ready.wait(timeout=2.0)
+
+    def join(self) -> None:
+        self.thread.join(timeout=2.0)
+        assert not self.thread.is_alive()
+        if self.error is not None:
+            raise self.error
+
+    @staticmethod
+    def _read_request(connection: socket.socket) -> bytes:
+        connection.settimeout(1.0)
+        content = bytearray()
+        while b"\r\n\r\n" not in content:
+            chunk = connection.recv(64 * 1024)
+            if not chunk:
+                return bytes(content)
+            content.extend(chunk)
+        head, body = bytes(content).split(b"\r\n\r\n", 1)
+        length = 0
+        for line in head.split(b"\r\n")[1:]:
+            if line.lower().startswith(b"content-length:"):
+                length = int(line.split(b":", 1)[1].strip())
+        while len(body) < length:
+            chunk = connection.recv(min(64 * 1024, length - len(body)))
+            if not chunk:
+                break
+            body += chunk
+        return head + b"\r\n\r\n" + body
+
+    def _serve(self) -> None:
+        listener: socket.socket | None = None
+        try:
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(self.socket_path))
+            listener.listen(4)
+            listener.settimeout(1.5)
+            self.ready.set()
+            for script in self.scripts:
+                connection, _ = listener.accept()
+                with connection:
+                    request = self._read_request(connection)
+                    self.requests.append(request.split(b"\r\n", 1)[0])
+                    try:
+                        script(connection)
+                    except (BrokenPipeError, ConnectionResetError, socket.timeout):
+                        self.peer_closed.set()
+                    connection.settimeout(0.5)
+                    try:
+                        if connection.recv(1) == b"":
+                            self.peer_closed.set()
+                    except (BrokenPipeError, ConnectionResetError, socket.timeout, OSError):
+                        self.peer_closed.set()
+        except BaseException as exc:
+            self.error = exc
+            self.ready.set()
+        finally:
+            if listener is not None:
+                listener.close()
+
+
+def _send_slow_header(connection: socket.socket) -> None:
+    time.sleep(0.45)
+    connection.sendall(b"HTTP/1.1 202 Accepted\r\n")
+
+
+def _send_drip(connection: socket.socket, response: bytes) -> None:
+    head, body = response.split(b"\r\n\r\n", 1)
+    connection.sendall(head + b"\r\n\r\n")
+    width = max(1, len(body) // 12)
+    for index in range(0, len(body), width):
+        connection.sendall(body[index : index + width])
+        time.sleep(0.04)
+
+
+def _fd_count() -> int | None:
+    root = Path("/proc/self/fd")
+    return len(list(root.iterdir())) if root.is_dir() else None
+
+
+@pytest.mark.skipif(os.name != "posix", reason="real Unix socket required")
+def test_real_uds_slow_header_is_cut_off_at_absolute_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload, _, _ = _inputs(tmp_path)
+    socket_path = tmp_path / "broker.sock"
+    before_threads = {thread.ident for thread in threading.enumerate()}
+    before_fds = _fd_count()
+    server = _ScriptedUnixServer(socket_path, [_send_slow_header])
+    server.start()
+    monkeypatch.setattr(runner_module, "_TOTAL_DEADLINE_SECONDS", 0.2)
+    runner = SandboxDockingRunner(socket_path, tmp_path / "output")
+
+    started = time.monotonic()
+    result = runner.execute(payload, job_id="slow-header")
+    elapsed = time.monotonic() - started
+    server.join()
+
+    assert result.success is False
+    assert elapsed <= 0.3
+    assert server.peer_closed.is_set()
+    assert {thread.ident for thread in threading.enumerate()} == before_threads
+    if before_fds is not None:
+        assert _fd_count() == before_fds
+    assert not (tmp_path / "output" / "docking_slow-header").exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="real Unix socket required")
+@pytest.mark.parametrize("phase", ["poll", "manifest", "artifact"])
+def test_real_uds_drip_is_cut_off_per_socket_read_and_cancel_is_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    pose = _pose(-7.2)
+    socket_path = tmp_path / "broker.sock"
+    succeeded = _http_json_response(202, _job("succeeded", receptor, ligand))
+    scripts: list[Any]
+    if phase == "poll":
+        scripts = [
+            lambda connection: connection.sendall(
+                _http_json_response(202, _job("queued", receptor, ligand))
+            ),
+            lambda connection: _send_drip(
+                connection,
+                _http_json_response(200, _job("succeeded", receptor, ligand)),
+            ),
+        ]
+    elif phase == "manifest":
+        scripts = [
+            lambda connection: connection.sendall(succeeded),
+            lambda connection: _send_drip(
+                connection,
+                _http_json_response(200, _manifest(receptor, ligand, pose)),
+            ),
+        ]
+    else:
+        scripts = [
+            lambda connection: connection.sendall(succeeded),
+            lambda connection: connection.sendall(
+                _http_json_response(200, _manifest(receptor, ligand, pose))
+            ),
+            lambda connection: _send_drip(
+                connection,
+                _http_response(pose, content_type="chemical/x-pdbqt"),
+            ),
+        ]
+    scripts.append(_send_slow_header)
+    before_threads = {thread.ident for thread in threading.enumerate()}
+    before_fds = _fd_count()
+    server = _ScriptedUnixServer(socket_path, scripts)
+    server.start()
+    monkeypatch.setattr(runner_module, "_TOTAL_DEADLINE_SECONDS", 0.2)
+    monkeypatch.setattr(runner_module, "_CANCEL_DEADLINE_SECONDS", 0.03)
+    runner = SandboxDockingRunner(socket_path, tmp_path / "output")
+
+    started = time.monotonic()
+    result = runner.execute(payload, job_id=f"drip-{phase}")
+    elapsed = time.monotonic() - started
+    server.join()
+
+    assert result.success is False
+    assert elapsed <= 0.3
+    assert server.requests[-1].endswith(
+        f"/v1/docking/jobs/{BROKER_JOB_ID}/cancel HTTP/1.1".encode("ascii")
+    )
+    assert server.peer_closed.is_set()
+    assert {thread.ident for thread in threading.enumerate()} == before_threads
+    if before_fds is not None:
+        assert _fd_count() == before_fds
+    assert not (
+        tmp_path / "output" / f"docking_drip-{phase}" / "result.pdbqt"
+    ).exists()
 
 
 def test_runner_uses_broker_manifest_and_publishes_verified_pose(
@@ -275,6 +609,8 @@ def test_slow_poll_response_hits_absolute_deadline_before_manifest(
         if request.url.path == f"/v1/docking/jobs/{BROKER_JOB_ID}":
             clock.advance(331.0)
             return httpx.Response(200, json=_job("succeeded", receptor, ligand))
+        if request.url.path.endswith("/cancel"):
+            return httpx.Response(202, json=_job("cancelled", receptor, ligand))
         raise AssertionError("deadline expiry must prevent manifest access")
 
     monkeypatch.setattr(runner_module.time, "monotonic", clock.monotonic)
@@ -286,6 +622,7 @@ def test_slow_poll_response_hits_absolute_deadline_before_manifest(
     assert requests == [
         "/v1/docking/jobs",
         f"/v1/docking/jobs/{BROKER_JOB_ID}",
+        f"/v1/docking/jobs/{BROKER_JOB_ID}/cancel",
     ]
 
 
@@ -305,6 +642,8 @@ def test_slow_manifest_response_hits_absolute_deadline_before_download(
         if request.url.path.endswith("/manifest"):
             clock.advance(331.0)
             return httpx.Response(200, json=_manifest(receptor, ligand, pose))
+        if request.url.path.endswith("/cancel"):
+            return httpx.Response(202, json=_job("cancelled", receptor, ligand))
         raise AssertionError("deadline expiry must prevent artifact access")
 
     monkeypatch.setattr(runner_module.time, "monotonic", clock.monotonic)
@@ -315,6 +654,7 @@ def test_slow_manifest_response_hits_absolute_deadline_before_download(
     assert requests == [
         "/v1/docking/jobs",
         f"/v1/docking/jobs/{BROKER_JOB_ID}/manifest",
+        f"/v1/docking/jobs/{BROKER_JOB_ID}/cancel",
     ]
 
 

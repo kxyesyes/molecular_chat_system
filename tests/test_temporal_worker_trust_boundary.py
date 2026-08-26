@@ -20,6 +20,7 @@ HELPER_PATH = ROOT / "deployment" / "libexec" / "validate-temporal-worker-env.py
 SYSTEMD_INTEGRATION_PATH = ROOT / "tests" / "test_temporal_systemd_integration.py"
 DEPLOYMENT_README = ROOT / "deployment" / "README.md"
 WORKER_ENV_EXAMPLE = ROOT / "deployment" / "temporal-worker.env.example"
+GIT_ATTRIBUTES = ROOT / ".gitattributes"
 ALLOWED_KEYS = {
     "MEDCHAT_TASK_BACKEND",
     "MEDCHAT_TEMPORAL_CANARY_PERCENT",
@@ -123,8 +124,9 @@ def test_parser_accepts_only_canonical_allowlisted_assignments(helper) -> None:
 
 
 def test_real_helper_parses_complete_worker_environment_example(helper) -> None:
-    payload = WORKER_ENV_EXAMPLE.read_text(encoding="utf-8").encode("utf-8")
+    payload = WORKER_ENV_EXAMPLE.read_bytes()
 
+    assert b"\r" not in payload
     parsed = helper.parse_environment_payload(payload)
 
     assert set(parsed) == ALLOWED_KEYS
@@ -132,6 +134,12 @@ def test_real_helper_parses_complete_worker_environment_example(helper) -> None:
     assert parsed["MEDCHAT_SANDBOX_BROKER_SOCKET"] == (
         "/run/medchat-sandbox/broker.sock"
     )
+
+
+def test_worker_environment_example_is_forced_to_lf_by_git_attributes() -> None:
+    rules = GIT_ATTRIBUTES.read_text(encoding="utf-8").splitlines()
+
+    assert "deployment/temporal-worker.env.example text eol=lf" in rules
 
 
 @pytest.mark.parametrize(

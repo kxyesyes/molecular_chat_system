@@ -8,12 +8,14 @@ import math
 import os
 import re
 import secrets
+import socket
 import stat
 import time
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping
 
 import httpx
+import httpcore
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 from src.agent.contracts import (
@@ -42,11 +44,13 @@ _ARTIFACT_MAX_BYTES = 100 * 1024 * 1024
 _JSON_MAX_BYTES = 1024 * 1024
 _POLL_SECONDS = 0.5
 _TOTAL_DEADLINE_SECONDS = 330.0
+_CANCEL_DEADLINE_SECONDS = 0.05
 _RENAME_NOREPLACE = 1
 _SUBMIT_TIMEOUT = httpx.Timeout(connect=2.0, read=30.0, write=30.0, pool=2.0)
 _POLL_TIMEOUT = httpx.Timeout(connect=2.0, read=5.0, write=5.0, pool=2.0)
 _DOWNLOAD_TIMEOUT = httpx.Timeout(connect=2.0, read=15.0, write=5.0, pool=2.0)
 _BASE_URL = "http://medchat-sandbox-broker"
+_HTTP_TRANSPORT_TYPE = httpx.HTTPTransport
 
 
 class _Cancelled(RuntimeError):
@@ -267,6 +271,133 @@ def _deadline_timeout(template: httpx.Timeout, deadline: float) -> httpx.Timeout
     )
 
 
+def _remaining_timeout(
+    deadline: float,
+    requested: float | None,
+    timeout_error: type[Exception],
+) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise timeout_error
+    return remaining if requested is None else min(requested, remaining)
+
+
+class _AbsoluteDeadlineNetworkStream:
+    """Recompute the absolute deadline before every blocking socket operation."""
+
+    def __init__(self, stream: Any, *, deadline: float) -> None:
+        self._stream = stream
+        self._deadline = deadline
+        candidate = stream.get_extra_info("socket")
+        self._socket = candidate if isinstance(candidate, socket.socket) else None
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        bounded = _remaining_timeout(self._deadline, timeout, httpcore.ReadTimeout)
+        if self._socket is None:
+            content = self._stream.read(max_bytes, timeout=bounded)
+        else:
+            try:
+                self._socket.settimeout(bounded)
+                content = self._socket.recv(max_bytes)
+            except socket.timeout:
+                raise httpcore.ReadTimeout from None
+            except OSError:
+                raise httpcore.ReadError from None
+        if time.monotonic() >= self._deadline:
+            self.close()
+            raise httpcore.ReadTimeout
+        return content
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        if self._socket is None:
+            bounded = _remaining_timeout(
+                self._deadline,
+                timeout,
+                httpcore.WriteTimeout,
+            )
+            self._stream.write(buffer, timeout=bounded)
+            if time.monotonic() >= self._deadline:
+                self.close()
+                raise httpcore.WriteTimeout
+            return
+        view = memoryview(buffer)
+        while view:
+            bounded = _remaining_timeout(
+                self._deadline,
+                timeout,
+                httpcore.WriteTimeout,
+            )
+            try:
+                self._socket.settimeout(bounded)
+                written = self._socket.send(view)
+            except socket.timeout:
+                raise httpcore.WriteTimeout from None
+            except OSError:
+                raise httpcore.WriteError from None
+            if written <= 0:
+                raise httpcore.WriteError
+            view = view[written:]
+
+    def close(self) -> None:
+        self._stream.close()
+
+    def start_tls(
+        self,
+        ssl_context: Any,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> "_AbsoluteDeadlineNetworkStream":
+        bounded = _remaining_timeout(
+            self._deadline,
+            timeout,
+            httpcore.ConnectTimeout,
+        )
+        stream = self._stream.start_tls(
+            ssl_context,
+            server_hostname=server_hostname,
+            timeout=bounded,
+        )
+        return _AbsoluteDeadlineNetworkStream(stream, deadline=self._deadline)
+
+    def get_extra_info(self, info: str) -> Any:
+        return self._stream.get_extra_info(info)
+
+
+class _AbsoluteDeadlineNetworkBackend:
+    """UDS-only httpcore backend carrying one immutable absolute deadline."""
+
+    def __init__(self, backend: Any, *, deadline: float, socket_path: str) -> None:
+        self._backend = backend
+        self._deadline = deadline
+        self._socket_path = socket_path
+
+    def connect_tcp(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise httpcore.ConnectError
+
+    def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Any = None,
+    ) -> _AbsoluteDeadlineNetworkStream:
+        if path != self._socket_path:
+            raise httpcore.ConnectError
+        bounded = _remaining_timeout(
+            self._deadline,
+            timeout,
+            httpcore.ConnectTimeout,
+        )
+        stream = self._backend.connect_unix_socket(
+            path,
+            timeout=bounded,
+            socket_options=socket_options,
+        )
+        if time.monotonic() >= self._deadline:
+            stream.close()
+            raise httpcore.ConnectTimeout
+        return _AbsoluteDeadlineNetworkStream(stream, deadline=self._deadline)
+
+
 def _rename_noreplace(
     source: Path | str,
     destination: Path | str,
@@ -370,6 +501,8 @@ def _response_model(
         validated = model.model_validate(_json_payload(response, deadline))
         _check_absolute_deadline(deadline)
         return validated
+    except (TimeoutError, httpx.TimeoutException):
+        raise
     except Exception:
         raise ValueError("invalid broker response") from None
 
@@ -513,7 +646,7 @@ class SandboxDockingRunner:
                 raise _Cancelled
 
             with httpx.Client(
-                transport=self._new_transport(),
+                transport=self._new_transport(deadline),
                 base_url=_BASE_URL,
                 timeout=_POLL_TIMEOUT,
                 follow_redirects=False,
@@ -688,6 +821,16 @@ class SandboxDockingRunner:
                 status=ObservationStatus.CANCELLED,
                 quality={"real_execution": False, "execution_backend": "opensandbox"},
             )
+        except (TimeoutError, httpx.TimeoutException):
+            if broker_job_id is not None:
+                self._cancel_best_effort(broker_job_id)
+            return ToolResult.error_result(
+                "molecular_docking",
+                AgentErrorCode.INVALID_OUTPUT,
+                "OpenSandbox docking failed before a verified result was produced.",
+                details={"reason": "sandbox_execution_failed"},
+                quality={"real_execution": False, "execution_backend": "opensandbox"},
+            )
         except Exception:
             return ToolResult.error_result(
                 "molecular_docking",
@@ -723,9 +866,9 @@ class SandboxDockingRunner:
 
     def _cancel_best_effort(self, broker_job_id: str) -> None:
         try:
-            deadline = time.monotonic() + _POLL_TIMEOUT.read
+            deadline = time.monotonic() + _CANCEL_DEADLINE_SECONDS
             with httpx.Client(
-                transport=self._new_transport(),
+                transport=self._new_transport(deadline),
                 base_url=_BASE_URL,
                 timeout=_POLL_TIMEOUT,
                 follow_redirects=False,
@@ -745,11 +888,25 @@ class SandboxDockingRunner:
         except Exception:
             pass
 
-    def _new_transport(self) -> httpx.BaseTransport:
+    def _new_transport(self, deadline: float) -> httpx.BaseTransport:
         if self._transport_injected:
             assert self._transport is not None
             return self._transport
-        return httpx.HTTPTransport(uds=str(self.socket_path))
+        transport = httpx.HTTPTransport(uds=str(self.socket_path))
+        if not isinstance(transport, _HTTP_TRANSPORT_TYPE):
+            return transport
+        try:
+            pool = transport._pool
+            backend = pool._network_backend
+            pool._network_backend = _AbsoluteDeadlineNetworkBackend(
+                backend,
+                deadline=deadline,
+                socket_path=str(self.socket_path),
+            )
+        except Exception:
+            transport.close()
+            raise ValueError("invalid sandbox runner transport") from None
+        return transport
 
     def _download_and_publish(
         self,
