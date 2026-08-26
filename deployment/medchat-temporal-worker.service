@@ -8,6 +8,7 @@ Requires=medchat-temporal-worker-prepare.service
 Type=simple
 User=medchat
 Group=medchat
+SupplementaryGroups=medchat-sandbox
 WorkingDirectory=/opt/medchat/molecular_chat_system
 EnvironmentFile=/etc/medchat/temporal-worker.env
 Environment=PATH=/opt/conda/envs/medchat/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -25,8 +26,9 @@ UMask=0077
 PrivateTmp=true
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/opt/medchat/molecular_chat_system/scratch /opt/medchat/molecular_chat_system/temp_docking
+ReadWritePaths=/opt/medchat/molecular_chat_system/scratch /opt/medchat/molecular_chat_system/temp_docking /run/medchat-sandbox
 ReadOnlyPaths=/opt/medchat/molecular_chat_system /opt/conda/envs/medchat
+InaccessiblePaths=/var/run/docker.sock /etc/medchat/opensandbox.env /etc/medchat/opensandbox.toml /var/lib/opensandbox/approved-empty
 
 [Install]
 WantedBy=multi-user.target
