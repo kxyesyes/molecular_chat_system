@@ -1268,6 +1268,17 @@ def test_cleanup_pending_jobs_fails_closed_on_corrupt_matching_row(
         "prefix/１２/结果",
         "C:\\数据\\结果",
         r"\\服务器\共享\结果",
+        "1\u29f52",
+        "1\u29f92",
+        "1\u20442",
+        "1\u22152",
+        "1\u29f82",
+        "1\uff0f2",
+        "1\ufe682",
+        "1\uff3c2",
+        "prefix\uff1a数据",
+        "prefix\ufe13数据",
+        "１/２",
     ],
 )
 def test_store_rejects_embedded_paths_in_warnings_and_provenance_without_echo(
@@ -1310,6 +1321,19 @@ def test_store_allows_fraction_text_in_warning_and_provenance(tmp_path: Path) ->
 
     assert terminal.warnings == ["score ratio 1/2", "decimal ratio 0.5/1.25"]
     assert terminal.provenance == {"scientific_note": "signed ratio -1/2"}
+
+
+def test_store_allows_plain_unicode_scientific_warning(tmp_path: Path) -> None:
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    job, _ = store.create_or_get("idem-unicode-text", SHA256_A, "trace-unicode-text")
+
+    terminal = store.fail(
+        job.job_id,
+        BrokerErrorCode.INVALID_INPUT,
+        warnings=["科学计算结果正常"],
+    )
+
+    assert terminal.warnings == ["科学计算结果正常"]
 
 
 def test_service_store_expire_and_manual_audit_delete_obey_fk_order(

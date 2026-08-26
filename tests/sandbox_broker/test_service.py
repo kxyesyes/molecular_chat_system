@@ -1720,6 +1720,17 @@ def test_terminal_wait_index_is_constant_after_one_thousand_jobs(
         "prefix/１２/结果",
         "C:\\数据\\结果",
         r"\\服务器\共享\结果",
+        "1\u29f52",
+        "1\u29f92",
+        "1\u20442",
+        "1\u22152",
+        "1\u29f82",
+        "1\uff0f2",
+        "1\ufe682",
+        "1\uff3c2",
+        "prefix\uff1a数据",
+        "prefix\ufe13数据",
+        "１/２",
     ],
 )
 def test_unicode_reassembled_warning_fails_end_to_end_without_manifest(
@@ -1743,3 +1754,22 @@ def test_unicode_reassembled_warning_fails_end_to_end_without_manifest(
     assert warning not in repr(terminal)
     with pytest.raises(KeyError):
         service.get_manifest(terminal.job_id)
+
+
+def test_plain_unicode_warning_persists_in_success_manifest(tmp_path: Path) -> None:
+    async def scenario() -> tuple[object, DockingManifest]:
+        service, _, config = _service(
+            tmp_path,
+            FakeSandboxClient(result_extras={"warnings": ["科学计算结果正常"]}),
+        )
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-plain-unicode-warning")
+        terminal = await service.wait_terminal(job.job_id)
+        manifest = service.get_manifest(job.job_id)
+        await service.stop()
+        return terminal, manifest
+
+    terminal, manifest = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.SUCCEEDED
+    assert terminal.warnings == ("科学计算结果正常",)
+    assert manifest.warnings == ["科学计算结果正常"]

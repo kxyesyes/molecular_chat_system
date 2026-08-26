@@ -5,6 +5,20 @@ import pytest
 from src.sandbox_broker.safety import is_safe_metadata_text
 
 
+UNICODE_PATH_CONFUSABLES = (
+    "\u29f5",  # REVERSE SOLIDUS OPERATOR
+    "\u29f9",  # BIG REVERSE SOLIDUS
+    "\u2044",  # FRACTION SLASH
+    "\u2215",  # DIVISION SLASH
+    "\u29f8",  # BIG SOLIDUS
+    "\uff0f",  # FULLWIDTH SOLIDUS
+    "\ufe68",  # SMALL REVERSE SOLIDUS
+    "\uff3c",  # FULLWIDTH REVERSE SOLIDUS
+    "\uff1a",  # FULLWIDTH COLON
+    "\ufe13",  # PRESENTATION FORM FOR VERTICAL COLON
+)
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -60,3 +74,19 @@ def test_metadata_safety_is_strict_about_type_empty_and_control_text(
     value: object,
 ) -> None:
     assert is_safe_metadata_text(value) is False
+
+
+@pytest.mark.parametrize("confusable", UNICODE_PATH_CONFUSABLES)
+def test_metadata_safety_rejects_unicode_named_path_confusables(
+    confusable: str,
+) -> None:
+    assert is_safe_metadata_text(f"1{confusable}2") is False
+    assert is_safe_metadata_text(f"prefix{confusable}数据") is False
+
+
+def test_metadata_safety_does_not_grant_fraction_exemption_after_nfkc() -> None:
+    assert is_safe_metadata_text("１/２") is False
+
+
+def test_metadata_safety_does_not_reject_plain_unicode_scientific_text() -> None:
+    assert is_safe_metadata_text("科学计算结果正常 αβ é ß") is True

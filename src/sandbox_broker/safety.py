@@ -18,19 +18,35 @@ _SENSITIVE_TEXT_PATTERN = re.compile(
     r"(?i)(?:api[_ -]?key|api[_ -]?token|access[_ -]?token|token|password|"
     r"secret|credential|bearer\s+)"
 )
-_SLASH_TRANSLATION = str.maketrans(
-    {
-        "\\": "/",
-        "\u2044": "/",
-        "\u2215": "/",
-        "\u29f8": "/",
-        "\uff0f": "/",
-    }
-)
+_SLASH_TRANSLATION = str.maketrans({"\\": "/"})
+_PATH_CONFUSABLE_NAME_MARKERS = ("SLASH", "SOLIDUS", "COLON")
+
+
+def _contains_raw_path_or_unicode_confusable(value: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", value)
+    for source in (value, normalized):
+        for character in source:
+            if ord(character) <= 0x7F:
+                continue
+            name = unicodedata.name(character, "")
+            if any(marker in name for marker in _PATH_CONFUSABLE_NAME_MARKERS):
+                return True
+    if any(
+        ord(character) > 0x7F
+        and any(
+            separator in unicodedata.normalize("NFKC", character)
+            for separator in "/\\:"
+        )
+        for character in value
+    ):
+        return True
+    return _contains_absolute_like_path(value.translate(_SLASH_TRANSLATION))
 
 
 def _normalized_metadata_view(value: object) -> tuple[str, bool] | None:
     if type(value) is not str or not value.strip():
+        return None
+    if _contains_raw_path_or_unicode_confusable(value):
         return None
     normalized = unicodedata.normalize("NFKC", value)
     without_ansi = _ANSI_ESCAPE_PATTERN.sub("", normalized)
