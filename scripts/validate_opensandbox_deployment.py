@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -230,7 +231,7 @@ def _validate_opensandbox_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
         and _single(unit, "RuntimeDirectory") == "opensandbox"
         and _single(unit, "RuntimeDirectoryMode") == "0700"
         and _single(unit, "RestrictAddressFamilies") == "AF_UNIX AF_INET AF_INET6"
-        and "docker" in _service_words(unit, "SupplementaryGroups")
+        and _service_words(unit, "SupplementaryGroups") == {"docker"}
         and "/var/run/docker.sock" in _service_words(unit, "ReadWritePaths")
         and "/var/lib/opensandbox/approved-empty"
         in _service_words(unit, "InaccessiblePaths")
@@ -252,7 +253,7 @@ def _validate_broker_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
         and _service_words(unit, "ReadWritePaths")
         == {"/var/lib/medchat-sandbox", "/run/medchat-sandbox"}
         and "/var/run/docker.sock" not in _service_words(unit, "ReadWritePaths")
-        and "docker" not in _service_words(unit, "SupplementaryGroups")
+        and not _service_words(unit, "SupplementaryGroups")
         and "/etc/medchat/opensandbox.env"
         not in _service_values(unit, "EnvironmentFile")
     )
@@ -264,7 +265,7 @@ def _validate_worker_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
         + _service_values(unit, "Environment")
     )
     return bool(
-        "medchat-sandbox" in _service_words(unit, "SupplementaryGroups")
+        _service_words(unit, "SupplementaryGroups") == {"medchat-sandbox"}
         and "/run/medchat-sandbox" in _service_words(unit, "ReadWritePaths")
         and "/var/run/docker.sock" not in _service_words(unit, "ReadWritePaths")
         and "docker" not in _service_words(unit, "SupplementaryGroups")
@@ -280,6 +281,26 @@ def _validate_worker_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
     )
 
 
+def _assigns_persistent_broker_membership(text: str) -> bool:
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "medchat-sandbox" not in line:
+            continue
+        try:
+            tokens = shlex.split(line.removesuffix("\\").rstrip(), comments=True, posix=True)
+        except ValueError:
+            return True
+        token_set = set(tokens)
+        if not {"medchat", "medchat-sandbox"}.issubset(token_set):
+            continue
+        commands = {Path(token).name for token in tokens}
+        if commands.intersection({"usermod", "adduser"}):
+            return True
+        if "gpasswd" in commands and token_set.intersection({"-a", "--add"}):
+            return True
+    return False
+
+
 def _validate_installer(text: str) -> bool:
     forbidden = (
         "mktemp",
@@ -289,6 +310,11 @@ def _validate_installer(text: str) -> bool:
         "eval ",
         ". /etc/medchat/opensandbox.env",
         "source /etc/medchat/opensandbox.env",
+        "usermod --append --groups medchat-sandbox medchat",
+        "usermod -a -G medchat-sandbox medchat",
+        "adduser medchat medchat-sandbox",
+        "gpasswd --add medchat medchat-sandbox",
+        "gpasswd -a medchat medchat-sandbox",
     )
     required = (
         "set +x",
@@ -311,9 +337,16 @@ def _validate_installer(text: str) -> bool:
         "os.fchmod",
         "os.fsync",
         "systemctl daemon-reload",
+        "GROUP_MIGRATION_INTENT=remove-medchat-from-medchat-sandbox",
+        "remove_legacy_medchat_membership",
+        "gpasswd --delete medchat medchat-sandbox",
+        "group_migration_intent = sys.argv[5]",
+        'group_migration_intent != "remove-medchat-from-medchat-sandbox"',
     )
-    return all(value in text for value in required) and not any(
-        value in text for value in forbidden
+    return bool(
+        all(value in text for value in required)
+        and not any(value in text for value in forbidden)
+        and not _assigns_persistent_broker_membership(text)
     )
 
 

@@ -270,6 +270,43 @@ def test_installer_supports_approved_zero_arg_live_command() -> None:
     assert 'elif [ "$#" -eq 2 ] && [ "$1" = "--destdir" ]; then' in installer
 
 
+def test_installer_does_not_persist_broker_group_on_shared_medchat_user() -> None:
+    installer = INSTALLER.read_text(encoding="utf-8")
+
+    forbidden_membership_assignments = (
+        "usermod --append --groups medchat-sandbox medchat",
+        "usermod -a -G medchat-sandbox medchat",
+        "adduser medchat medchat-sandbox",
+        "gpasswd --add medchat medchat-sandbox",
+        "gpasswd -a medchat medchat-sandbox",
+    )
+    assert not any(value in installer for value in forbidden_membership_assignments)
+
+
+def test_installer_migrates_legacy_membership_and_models_preview_intent() -> None:
+    installer = INSTALLER.read_text(encoding="utf-8")
+
+    assert "GROUP_MIGRATION_INTENT=remove-medchat-from-medchat-sandbox" in installer
+    assert 'if [ "$DESTDIR" = / ]; then' in installer
+    assert 'remove_legacy_medchat_membership' in installer
+    assert 'gpasswd --delete medchat medchat-sandbox' in installer
+    assert 'group_migration_intent = sys.argv[5]' in installer
+    assert 'group_migration_intent != "remove-medchat-from-medchat-sandbox"' in installer
+
+
+def test_only_temporal_worker_gets_broker_group_as_a_unit_scoped_group() -> None:
+    opensandbox = _unit_sections(OPENSANDBOX_SERVICE)
+    broker = _unit_sections(BROKER_SERVICE)
+    worker = _unit_sections(TEMPORAL_WORKER_SERVICE)
+
+    assert "medchat-sandbox" not in _words(opensandbox, "SupplementaryGroups")
+    assert "medchat-sandbox" not in _words(broker, "SupplementaryGroups")
+    assert _values(worker, "SupplementaryGroups") == ["medchat-sandbox"]
+    assert "/etc/medchat/sandbox-broker.env" in _words(
+        worker, "InaccessiblePaths"
+    )
+
+
 def _write_preview_environment(root: Path, *, secret: str) -> Path:
     environment = root / "etc/medchat/opensandbox.env"
     environment.parent.mkdir(parents=True, exist_ok=True)
@@ -441,6 +478,54 @@ def test_static_validator_rejects_installer_without_directory_guards(
     installer.write_text(
         installer.read_text(encoding="utf-8").replace(
             "def ensure_directory(", "def unsafe_directory("
+        ),
+        encoding="utf-8",
+    )
+
+    assert validator.validate_static(root) == "installer_unsafe"
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "usermod --append --groups medchat-sandbox medchat",
+        "usermod -aG medchat-sandbox medchat",
+        "usermod --groups medchat-sandbox --append medchat",
+        "adduser medchat medchat-sandbox",
+        "gpasswd --add medchat medchat-sandbox",
+    ],
+)
+def test_static_validator_rejects_persistent_broker_group_membership(
+    tmp_path: Path,
+    assignment: str,
+) -> None:
+    validator = _load_validator()
+    root = _asset_root(tmp_path)
+    installer = root / "deployment/opensandbox/install.sh"
+    text = installer.read_text(encoding="utf-8")
+    migration = "gpasswd --delete medchat medchat-sandbox"
+    installer.write_text(
+        text.replace(
+            migration,
+            migration + "\n" + assignment,
+        ),
+        encoding="utf-8",
+    )
+
+    assert validator.validate_static(root) == "installer_unsafe"
+
+
+def test_static_validator_rejects_missing_legacy_group_migration(
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator()
+    root = _asset_root(tmp_path)
+    installer = root / "deployment/opensandbox/install.sh"
+    text = installer.read_text(encoding="utf-8")
+    installer.write_text(
+        text.replace(
+            "gpasswd --delete medchat medchat-sandbox",
+            "true # migration removed",
         ),
         encoding="utf-8",
     )

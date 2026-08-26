@@ -4,6 +4,7 @@ set -eu
 umask 077
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
+GROUP_MIGRATION_INTENT=remove-medchat-from-medchat-sandbox
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 
@@ -48,6 +49,20 @@ source_is_regular_and_locked() {
     [ $((0$permissions & 0022)) -eq 0 ] || return 1
 }
 
+remove_legacy_medchat_membership() {
+    memberships=$(id -nG medchat) || fail group_membership_query_failed
+    case " $memberships " in
+        *" medchat-sandbox "*)
+            gpasswd --delete medchat medchat-sandbox >/dev/null 2>&1 || \
+                fail group_migration_failed
+            memberships=$(id -nG medchat) || fail group_membership_query_failed
+            case " $memberships " in
+                *" medchat-sandbox "*) fail group_migration_failed ;;
+            esac
+            ;;
+    esac
+}
+
 if [ "$DESTDIR" = / ]; then
     [ "$(id -u)" -eq 0 ] || fail root_required
     for source_path in \
@@ -77,14 +92,15 @@ if [ "$DESTDIR" = / ]; then
             --shell /usr/sbin/nologin medchat-opensandbox
 
     usermod --append --groups docker medchat-opensandbox
-    usermod --append --groups medchat-sandbox medchat
+    remove_legacy_medchat_membership
 
 fi
 
 /usr/bin/env -i PATH="$PATH" /usr/bin/python3 -I - \
     "$DESTDIR" "$SCRIPT_DIR/sandbox.toml" \
     "$SCRIPT_DIR/medchat-opensandbox.service" \
-    "$SCRIPT_DIR/medchat-sandbox-broker.service" <<'PY'
+    "$SCRIPT_DIR/medchat-sandbox-broker.service" \
+    "$GROUP_MIGRATION_INTENT" <<'PY'
 import json
 import os
 import re
@@ -96,6 +112,10 @@ root = Path(sys.argv[1])
 template_path = Path(sys.argv[2])
 opensandbox_unit_path = Path(sys.argv[3])
 broker_unit_path = Path(sys.argv[4])
+group_migration_intent = sys.argv[5]
+
+if group_migration_intent != "remove-medchat-from-medchat-sandbox":
+    raise SystemExit(1)
 
 
 def rooted(absolute: str) -> Path:
