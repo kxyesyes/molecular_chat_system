@@ -948,6 +948,37 @@ def test_opensandbox_broker_failure_never_calls_real_local_tool_seam(
     assert "secret" not in json.dumps(result).lower()
 
 
+def test_opensandbox_connect_timeout_keeps_environment_unavailable_legacy_reason(
+    tmp_path: Path,
+) -> None:
+    import src.docking.sandbox_runner as sandbox_module
+
+    manifest = _stage(tmp_path)
+    output_root = _allowed_output_root(tmp_path)
+
+    def unavailable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout(
+            "secret broker socket timeout",
+            request=request,
+        )
+
+    sandbox = sandbox_module.SandboxDockingRunner(
+        tmp_path / "broker.sock",
+        output_root,
+        transport=httpx.MockTransport(unavailable),
+    )
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=sandbox.execute,
+        allowed_output_root=output_root,
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert result["error"]["code"] == AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE.value
+    assert result["error"]["details"] == {"reason": "environment_unavailable"}
+    assert "secret" not in json.dumps(result).lower()
+
+
 def test_invalid_docking_execution_backend_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

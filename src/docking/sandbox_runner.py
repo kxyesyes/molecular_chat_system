@@ -67,8 +67,13 @@ class _BrokerFailure(RuntimeError):
 
 
 class _BrokerHttpFailure(RuntimeError):
-    def __init__(self, status_code: int) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        stage: Literal["submit", "poll", "manifest", "artifact", "cancel"],
+    ) -> None:
         self.status_code = status_code
+        self.stage = stage
 
 
 class _StrictModel(BaseModel):
@@ -515,9 +520,10 @@ def _response_model(
     status_code: int,
     model: type[_StrictModel],
     deadline: float,
+    stage: Literal["submit", "poll", "manifest", "cancel"],
 ) -> _StrictModel:
     if response.status_code != status_code or response.is_redirect:
-        raise _BrokerHttpFailure(response.status_code)
+        raise _BrokerHttpFailure(response.status_code, stage)
     try:
         validated = model.model_validate(_json_payload(response, deadline))
         _check_absolute_deadline(deadline)
@@ -666,15 +672,20 @@ def _broker_error_result(code: BrokerErrorCode) -> ToolResult:
     )
 
 
-def _http_failure_code(status_code: int) -> BrokerErrorCode:
+def _http_failure_code(
+    status_code: int,
+    stage: Literal["submit", "poll", "manifest", "artifact", "cancel"],
+) -> BrokerErrorCode:
     if status_code in {401, 403}:
         return BrokerErrorCode.UNAUTHORIZED
-    if status_code == 409:
-        return BrokerErrorCode.IDEMPOTENCY_CONFLICT
-    if status_code in {400, 404, 405, 415, 422}:
-        return BrokerErrorCode.INVALID_INPUT
     if status_code == 429:
         return BrokerErrorCode.QUEUE_SATURATED
+    if status_code in {404, 405}:
+        return BrokerErrorCode.OPENSANDBOX_UNAVAILABLE
+    if stage == "submit" and status_code == 409:
+        return BrokerErrorCode.IDEMPOTENCY_CONFLICT
+    if stage == "submit" and status_code in {400, 415, 422}:
+        return BrokerErrorCode.INVALID_INPUT
     return BrokerErrorCode.OPENSANDBOX_UNAVAILABLE
 
 
@@ -790,6 +801,7 @@ class SandboxDockingRunner:
                         status_code=202,
                         model=_PublicJob,
                         deadline=deadline,
+                        stage="submit",
                     )
                 assert isinstance(submitted, _PublicJob)
                 broker_job_id = submitted.job_id
@@ -812,6 +824,7 @@ class SandboxDockingRunner:
                             status_code=200,
                             model=_PublicJob,
                             deadline=deadline,
+                            stage="poll",
                         )
                     assert isinstance(current, _PublicJob)
                     if current.job_id != broker_job_id or current.trace_id != trace_id:
@@ -844,6 +857,7 @@ class SandboxDockingRunner:
                         status_code=200,
                         model=_Manifest,
                         deadline=deadline,
+                        stage="manifest",
                     )
                 assert isinstance(manifest, _Manifest)
                 if (
@@ -936,7 +950,11 @@ class SandboxDockingRunner:
         except _BrokerFailure as exc:
             return _broker_error_result(exc.code)
         except _BrokerHttpFailure as exc:
-            return _broker_error_result(_http_failure_code(exc.status_code))
+            return _broker_error_result(
+                _http_failure_code(exc.status_code, exc.stage)
+            )
+        except httpx.ConnectTimeout:
+            return _broker_error_result(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
         except (TimeoutError, httpx.TimeoutException):
             return ToolResult.error_result(
                 "molecular_docking",
@@ -1003,6 +1021,7 @@ class SandboxDockingRunner:
                         status_code=202,
                         model=_PublicJob,
                         deadline=deadline,
+                        stage="cancel",
                     )
         except Exception:
             pass
@@ -1115,7 +1134,10 @@ class SandboxDockingRunner:
             ) as response:
                 self._check_deadline(deadline)
                 if response.status_code != 200 or response.is_redirect:
-                    raise ValueError("invalid artifact response")
+                    raise _BrokerHttpFailure(
+                        response.status_code,
+                        "artifact",
+                    )
                 lengths = response.headers.get_list("content-length")
                 if (
                     len(lengths) != 1

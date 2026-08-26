@@ -236,6 +236,26 @@ def test_connect_failure_has_stable_unavailable_mapping_without_raw_error(
     assert "private" not in result.message.lower()
 
 
+def test_connect_timeout_maps_to_unavailable_instead_of_execution_timeout(
+    tmp_path: Path,
+) -> None:
+    payload, _, _ = _inputs(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout(
+            "secret broker socket timeout",
+            request=request,
+        )
+
+    result = _runner(tmp_path, handler).execute(payload, job_id="connect-timeout")
+
+    assert result.success is False
+    assert result.error is not None
+    assert result.error.code is AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE
+    assert result.error.details == {"reason": "opensandbox_unavailable"}
+    assert "secret" not in result.message.lower()
+
+
 @pytest.mark.parametrize(
     ("broker_code", "status", "agent_code", "reason"),
     [
@@ -356,6 +376,92 @@ def test_terminal_broker_error_code_has_stable_agent_mapping(
     assert result.error.code is agent_code
     assert result.error.details == {"reason": reason}
     assert requests[-1] == f"/v1/docking/jobs/{BROKER_JOB_ID}/cancel"
+
+
+@pytest.mark.parametrize("status_code", [404, 405])
+def test_submit_missing_broker_api_maps_to_unavailable(
+    tmp_path: Path,
+    status_code: int,
+) -> None:
+    payload, _, _ = _inputs(tmp_path)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, text="secret raw broker response")
+
+    result = _runner(tmp_path, handler).execute(
+        payload,
+        job_id=f"submit-{status_code}",
+    )
+
+    assert result.success is False
+    assert result.error is not None
+    assert result.error.code is AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE
+    assert result.error.details == {"reason": "opensandbox_unavailable"}
+    assert "secret" not in result.message.lower()
+
+
+def test_submit_unprocessable_input_remains_invalid_input(tmp_path: Path) -> None:
+    payload, _, _ = _inputs(tmp_path)
+
+    result = _runner(
+        tmp_path,
+        lambda _request: httpx.Response(422, text="secret raw broker response"),
+    ).execute(payload, job_id="submit-422")
+
+    assert result.success is False
+    assert result.error is not None
+    assert result.error.code is AgentErrorCode.INVALID_INPUT
+    assert result.error.details == {"reason": "input_invalid"}
+    assert "secret" not in result.message.lower()
+
+
+@pytest.mark.parametrize("stage", ["poll", "manifest", "artifact"])
+@pytest.mark.parametrize("status_code", [404, 405, 422])
+def test_post_submit_http_contract_failure_is_not_user_input_and_cancels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    status_code: int,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    pose = _pose(-7.2)
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/v1/docking/jobs":
+            status = "queued" if stage == "poll" else "succeeded"
+            return httpx.Response(202, json=_job(status, receptor, ligand))
+        if request.url.path == f"/v1/docking/jobs/{BROKER_JOB_ID}":
+            assert stage == "poll"
+            return httpx.Response(status_code, text="secret raw poll response")
+        if request.url.path.endswith("/manifest"):
+            if stage == "manifest":
+                return httpx.Response(
+                    status_code,
+                    text="secret raw manifest response",
+                )
+            return httpx.Response(200, json=_manifest(receptor, ligand, pose))
+        if request.url.path.endswith(f"/artifacts/{ARTIFACT_ID}"):
+            assert stage == "artifact"
+            return httpx.Response(status_code, text="secret raw artifact response")
+        if request.url.path.endswith("/cancel"):
+            return httpx.Response(202, json=_job("cancelled", receptor, ligand))
+        raise AssertionError(request.url.path)
+
+    monkeypatch.setattr(runner_module.time, "sleep", lambda _seconds: None)
+
+    result = _runner(tmp_path, handler).execute(
+        payload,
+        job_id=f"{stage}-{status_code}",
+    )
+
+    assert result.success is False
+    assert result.error is not None
+    assert result.error.code is AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE
+    assert result.error.details == {"reason": "opensandbox_unavailable"}
+    assert requests[-1] == f"/v1/docking/jobs/{BROKER_JOB_ID}/cancel"
+    assert "secret" not in result.message.lower()
 
 
 class _DripStream(httpx.SyncByteStream):
