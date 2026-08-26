@@ -33,6 +33,8 @@ ALLOWED_KEYS = {
     "MEDCHAT_TEMPORAL_WORKER_METRICS_PORT",
     "MEDCHAT_TEMPORAL_BASELINE_P95_SECONDS",
     "MEDCHAT_TEMPORAL_BACKUP_STATE",
+    "MEDCHAT_DOCKING_EXECUTION_BACKEND",
+    "MEDCHAT_SANDBOX_BROKER_SOCKET",
     "MOLECULAR_DOCKING_ROOT",
     "MOLECULAR_DOCKING_VINA",
     "MOLECULAR_DOCKING_ADFR_BIN",
@@ -118,6 +120,18 @@ def test_parser_accepts_only_canonical_allowlisted_assignments(helper) -> None:
     }
     assert helper.ALLOWED_KEYS == frozenset(ALLOWED_KEYS)
     assert helper.MAX_ENVIRONMENT_BYTES == 65_536
+
+
+def test_real_helper_parses_complete_worker_environment_example(helper) -> None:
+    payload = WORKER_ENV_EXAMPLE.read_text(encoding="utf-8").encode("utf-8")
+
+    parsed = helper.parse_environment_payload(payload)
+
+    assert set(parsed) == ALLOWED_KEYS
+    assert parsed["MEDCHAT_DOCKING_EXECUTION_BACKEND"] == "opensandbox"
+    assert parsed["MEDCHAT_SANDBOX_BROKER_SOCKET"] == (
+        "/run/medchat-sandbox/broker.sock"
+    )
 
 
 @pytest.mark.parametrize(

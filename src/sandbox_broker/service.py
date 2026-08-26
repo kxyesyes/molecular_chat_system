@@ -1855,7 +1855,7 @@ class SandboxBrokerService:
                 }
                 for item in pose_records
             ]
-            if manifest.artifacts != expected or manifest.pose_count != len(expected):
+            if manifest.artifacts != expected:
                 raise ValueError
             return manifest
         except Exception:

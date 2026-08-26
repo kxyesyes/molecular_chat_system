@@ -40,7 +40,6 @@ _RECEPTOR_MAX_BYTES = 50 * 1024 * 1024
 _LIGAND_MAX_BYTES = 10 * 1024 * 1024
 _ARTIFACT_MAX_BYTES = 100 * 1024 * 1024
 _JSON_MAX_BYTES = 1024 * 1024
-_DOWNLOAD_CHUNK_BYTES = 64 * 1024
 _POLL_SECONDS = 0.5
 _TOTAL_DEADLINE_SECONDS = 330.0
 _SUBMIT_TIMEOUT = httpx.Timeout(connect=2.0, read=30.0, write=30.0, pool=2.0)
@@ -247,16 +246,69 @@ def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _json_payload(response: httpx.Response) -> object:
-    content = response.content
-    if not content or len(content) > _JSON_MAX_BYTES:
-        raise ValueError("invalid broker response")
+def _check_absolute_deadline(deadline: float) -> None:
+    if time.monotonic() >= deadline:
+        raise TimeoutError("sandbox docking deadline exceeded")
+
+
+def _deadline_timeout(template: httpx.Timeout, deadline: float) -> httpx.Timeout:
+    _check_absolute_deadline(deadline)
+    remaining = deadline - time.monotonic()
+
+    def clipped(value: float | None) -> float:
+        return remaining if value is None else min(value, remaining)
+
+    return httpx.Timeout(
+        connect=clipped(template.connect),
+        read=clipped(template.read),
+        write=clipped(template.write),
+        pool=clipped(template.pool),
+    )
+
+
+def _json_payload(response: httpx.Response, deadline: float) -> object:
     media_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-    if media_type != "application/json":
+    lengths = response.headers.get_list("content-length")
+    if (
+        media_type != "application/json"
+        or "content-encoding" in response.headers
+        or len(lengths) > 1
+        or (
+            lengths
+            and (
+                not lengths[0].isascii()
+                or not lengths[0].isdigit()
+                or int(lengths[0]) > _JSON_MAX_BYTES
+            )
+        )
+    ):
+        raise ValueError("invalid broker response")
+    content = bytearray()
+    if response.is_stream_consumed:
+        _check_absolute_deadline(deadline)
+        content.extend(response.content)
+        if len(content) > _JSON_MAX_BYTES:
+            raise ValueError("invalid broker response")
+    else:
+        iterator = response.iter_raw()
+        while True:
+            _check_absolute_deadline(deadline)
+            try:
+                chunk = next(iterator)
+            except StopIteration:
+                break
+            _check_absolute_deadline(deadline)
+            if type(chunk) is not bytes or not chunk:
+                raise ValueError("invalid broker response")
+            content.extend(chunk)
+            if len(content) > _JSON_MAX_BYTES:
+                raise ValueError("invalid broker response")
+    _check_absolute_deadline(deadline)
+    if not content or (lengths and int(lengths[0]) != len(content)):
         raise ValueError("invalid broker response")
     try:
         return json.loads(
-            content.decode("utf-8", errors="strict"),
+            bytes(content).decode("utf-8", errors="strict"),
             parse_constant=_reject_json_constant,
             object_pairs_hook=_unique_json_object,
         )
@@ -269,11 +321,14 @@ def _response_model(
     *,
     status_code: int,
     model: type[_StrictModel],
+    deadline: float,
 ) -> _StrictModel:
     if response.status_code != status_code or response.is_redirect:
         raise ValueError("invalid broker response")
     try:
-        return model.model_validate(_json_payload(response))
+        validated = model.model_validate(_json_payload(response, deadline))
+        _check_absolute_deadline(deadline)
+        return validated
     except Exception:
         raise ValueError("invalid broker response") from None
 
@@ -393,7 +448,18 @@ class SandboxDockingRunner:
                 raise ValueError("invalid docking job")
             if not isinstance(payload, Mapping):
                 raise ValueError("invalid docking payload")
-            if "smiles" in payload or type(payload.get("ligand_path")) is not str:
+            if "smiles" in payload:
+                return ToolResult.error_result(
+                    "molecular_docking",
+                    AgentErrorCode.INVALID_INPUT,
+                    "SMILES docking is not supported by the OpenSandbox runner.",
+                    details={"reason": "smiles_not_supported_by_opensandbox"},
+                    quality={
+                        "real_execution": False,
+                        "execution_backend": "opensandbox",
+                    },
+                )
+            if type(payload.get("ligand_path")) is not str:
                 raise ValueError("sandbox docking requires a verified ligand file")
             receptor, receptor_sha256 = _file_snapshot(
                 payload.get("receptor_path"), _RECEPTOR_SUFFIXES, _RECEPTOR_MAX_BYTES
@@ -412,20 +478,37 @@ class SandboxDockingRunner:
                 follow_redirects=False,
                 trust_env=False,
             ) as client:
-                submitted = _response_model(
-                    client.post(
-                        "/v1/docking/jobs",
-                        headers={"Idempotency-Key": job_id},
-                        data={"request_json": json.dumps(parameters, separators=(",", ":"), allow_nan=False)},
-                        files={
-                            "receptor": (f"receptor{Path(str(payload['receptor_path'])).suffix.lower()}", receptor, "application/octet-stream"),
-                            "ligand": (f"ligand{Path(str(payload['ligand_path'])).suffix.lower()}", ligand, "application/octet-stream"),
-                        },
-                        timeout=_SUBMIT_TIMEOUT,
-                    ),
-                    status_code=202,
-                    model=_PublicJob,
-                )
+                with client.stream(
+                    "POST",
+                    "/v1/docking/jobs",
+                    headers={"Idempotency-Key": job_id},
+                    data={
+                        "request_json": json.dumps(
+                            parameters,
+                            separators=(",", ":"),
+                            allow_nan=False,
+                        )
+                    },
+                    files={
+                        "receptor": (
+                            f"receptor{Path(str(payload['receptor_path'])).suffix.lower()}",
+                            receptor,
+                            "application/octet-stream",
+                        ),
+                        "ligand": (
+                            f"ligand{Path(str(payload['ligand_path'])).suffix.lower()}",
+                            ligand,
+                            "application/octet-stream",
+                        ),
+                    },
+                    timeout=_deadline_timeout(_SUBMIT_TIMEOUT, deadline),
+                ) as response:
+                    submitted = _response_model(
+                        response,
+                        status_code=202,
+                        model=_PublicJob,
+                        deadline=deadline,
+                    )
                 assert isinstance(submitted, _PublicJob)
                 broker_job_id = submitted.job_id
                 trace_id = submitted.trace_id
@@ -435,16 +518,19 @@ class SandboxDockingRunner:
                     if _cancelled(cancel_event):
                         raise _Cancelled
                     self._check_deadline(deadline)
-                    time.sleep(_POLL_SECONDS)
+                    time.sleep(min(_POLL_SECONDS, deadline - time.monotonic()))
                     self._check_deadline(deadline)
-                    current = _response_model(
-                        client.get(
-                            f"/v1/docking/jobs/{broker_job_id}",
-                            timeout=_POLL_TIMEOUT,
-                        ),
-                        status_code=200,
-                        model=_PublicJob,
-                    )
+                    with client.stream(
+                        "GET",
+                        f"/v1/docking/jobs/{broker_job_id}",
+                        timeout=_deadline_timeout(_POLL_TIMEOUT, deadline),
+                    ) as response:
+                        current = _response_model(
+                            response,
+                            status_code=200,
+                            model=_PublicJob,
+                            deadline=deadline,
+                        )
                     assert isinstance(current, _PublicJob)
                     if current.job_id != broker_job_id or current.trace_id != trace_id:
                         raise ValueError("invalid broker response")
@@ -463,14 +549,17 @@ class SandboxDockingRunner:
                 if _cancelled(cancel_event):
                     raise _Cancelled
 
-                manifest = _response_model(
-                    client.get(
-                        f"/v1/docking/jobs/{broker_job_id}/manifest",
-                        timeout=_POLL_TIMEOUT,
-                    ),
-                    status_code=200,
-                    model=_Manifest,
-                )
+                with client.stream(
+                    "GET",
+                    f"/v1/docking/jobs/{broker_job_id}/manifest",
+                    timeout=_deadline_timeout(_POLL_TIMEOUT, deadline),
+                ) as response:
+                    manifest = _response_model(
+                        response,
+                        status_code=200,
+                        model=_Manifest,
+                        deadline=deadline,
+                    )
                 assert isinstance(manifest, _Manifest)
                 if (
                     manifest.job_id != broker_job_id
@@ -494,6 +583,10 @@ class SandboxDockingRunner:
                     cancel_event,
                 )
 
+            if _cancelled(cancel_event):
+                self._discard_uncommitted_pose(pose_path, artifact)
+                raise _Cancelled
+
             elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
             provenance = manifest.provenance
             data = {
@@ -506,7 +599,7 @@ class SandboxDockingRunner:
                 "pose_file": str(pose_path),
                 "warnings": list(manifest.warnings),
             }
-            return ToolResult.success_result(
+            result = ToolResult.success_result(
                 "molecular_docking",
                 message="Real AutoDock Vina docking completed in OpenSandbox.",
                 data=data,
@@ -540,6 +633,10 @@ class SandboxDockingRunner:
                     fallback_used=False,
                 ),
             )
+            if _cancelled(cancel_event):
+                self._discard_uncommitted_pose(pose_path, artifact)
+                raise _Cancelled
+            return result
         except _Cancelled:
             if broker_job_id is not None:
                 self._cancel_best_effort(broker_job_id)
@@ -581,11 +678,11 @@ class SandboxDockingRunner:
 
     @staticmethod
     def _check_deadline(deadline: float) -> None:
-        if time.monotonic() >= deadline:
-            raise TimeoutError("sandbox docking deadline exceeded")
+        _check_absolute_deadline(deadline)
 
     def _cancel_best_effort(self, broker_job_id: str) -> None:
         try:
+            deadline = time.monotonic() + _POLL_TIMEOUT.read
             with httpx.Client(
                 transport=self._new_transport(),
                 base_url=_BASE_URL,
@@ -593,13 +690,17 @@ class SandboxDockingRunner:
                 follow_redirects=False,
                 trust_env=False,
             ) as client:
-                response = client.post(
+                with client.stream(
+                    "POST",
                     f"/v1/docking/jobs/{broker_job_id}/cancel",
-                    timeout=_POLL_TIMEOUT,
-                )
-                if response.status_code != 202 or response.is_redirect:
-                    return
-                _PublicJob.model_validate(_json_payload(response))
+                    timeout=_deadline_timeout(_POLL_TIMEOUT, deadline),
+                ) as response:
+                    _response_model(
+                        response,
+                        status_code=202,
+                        model=_PublicJob,
+                        deadline=deadline,
+                    )
         except Exception:
             pass
 
@@ -619,17 +720,53 @@ class SandboxDockingRunner:
         deadline: float,
         cancel_event: Any,
     ) -> Path:
-        output_root, job_root = self._private_job_directory(original_job_id)
-        parent_identity = _stat_identity(job_root.lstat())
-        temporary = job_root / f".result.{secrets.token_hex(12)}.part"
+        (
+            output_root,
+            job_root,
+            root_descriptor,
+            parent_descriptor,
+            root_identity,
+            parent_identity,
+        ) = self._private_job_directory(original_job_id)
+        temporary_name = f".result.{secrets.token_hex(12)}.part"
+        temporary = job_root / temporary_name
+        final_name = "result.pdbqt"
         final = job_root / "result.pdbqt"
         descriptor: int | None = None
         published = False
-        replacement_identity: tuple[int, ...] | None = None
+        temporary_exists = False
+        final_linked = False
+        final_identity: tuple[int, ...] | None = None
         try:
+            self._verify_output_parent(
+                output_root,
+                job_root,
+                root_descriptor,
+                parent_descriptor,
+                root_identity,
+                parent_identity,
+            )
+            try:
+                if parent_descriptor is not None:
+                    os.stat(final_name, dir_fd=parent_descriptor, follow_symlinks=False)
+                else:
+                    final.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise ValueError("unsafe artifact output")
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
             flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-            descriptor = os.open(temporary, flags, 0o600)
+            if parent_descriptor is not None:
+                descriptor = os.open(
+                    temporary_name,
+                    flags,
+                    0o600,
+                    dir_fd=parent_descriptor,
+                )
+            else:
+                descriptor = os.open(temporary, flags, 0o600)
+            temporary_exists = True
             opened = os.fstat(descriptor)
             if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
                 raise ValueError("unsafe artifact output")
@@ -644,8 +781,9 @@ class SandboxDockingRunner:
             with client.stream(
                 "GET",
                 f"/v1/docking/jobs/{broker_job_id}/artifacts/{artifact.artifact_id}",
-                timeout=_DOWNLOAD_TIMEOUT,
+                timeout=_deadline_timeout(_DOWNLOAD_TIMEOUT, deadline),
             ) as response:
+                self._check_deadline(deadline)
                 if response.status_code != 200 or response.is_redirect:
                     raise ValueError("invalid artifact response")
                 lengths = response.headers.get_list("content-length")
@@ -661,7 +799,14 @@ class SandboxDockingRunner:
                     or "content-encoding" in response.headers
                 ):
                     raise ValueError("invalid artifact response")
-                for chunk in response.iter_raw(chunk_size=_DOWNLOAD_CHUNK_BYTES):
+                iterator = response.iter_raw()
+                while True:
+                    self._check_deadline(deadline)
+                    try:
+                        chunk = next(iterator)
+                    except StopIteration:
+                        break
+                    self._check_deadline(deadline)
                     if type(chunk) is not bytes or not chunk:
                         raise ValueError("invalid artifact response")
                     if _cancelled(cancel_event):
@@ -678,53 +823,125 @@ class SandboxDockingRunner:
                         view = view[written:]
                     digest.update(chunk)
                     validator.feed(chunk)
+                self._check_deadline(deadline)
+            self._check_deadline(deadline)
+            if _cancelled(cancel_event):
+                raise _Cancelled
             if total != artifact.size_bytes or digest.hexdigest() != artifact.sha256:
                 raise ValueError("invalid artifact identity")
             validator.finish()
+            self._check_deadline(deadline)
+            if _cancelled(cancel_event):
+                raise _Cancelled
+            os.fsync(descriptor)
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, 0o600)
+            else:
+                os.chmod(temporary, 0o600)
             os.fsync(descriptor)
             after = os.fstat(descriptor)
-            named = temporary.lstat()
+            named = (
+                os.stat(
+                    temporary_name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if parent_descriptor is not None
+                else temporary.lstat()
+            )
             if (
                 after.st_nlink != 1
                 or (_stat_identity(after), _stat_version(after))
                 != (_stat_identity(named), _stat_version(named))
-                or _stat_identity(job_root.lstat()) != parent_identity
+                or (os.name == "posix" and stat.S_IMODE(after.st_mode) != 0o600)
             ):
                 raise ValueError("unsafe artifact output")
-            os.close(descriptor)
-            descriptor = None
-            try:
-                existing = final.lstat()
-            except FileNotFoundError:
-                existing = None
-            if existing is not None and (
-                not stat.S_ISREG(existing.st_mode)
-                or stat.S_ISLNK(existing.st_mode)
-                or existing.st_nlink != 1
-                or bool(getattr(existing, "st_file_attributes", 0) & 0x400)
+            self._verify_output_parent(
+                output_root,
+                job_root,
+                root_descriptor,
+                parent_descriptor,
+                root_identity,
+                parent_identity,
+            )
+            if _cancelled(cancel_event):
+                raise _Cancelled
+            final_identity = _stat_identity(after)
+            if parent_descriptor is not None:
+                os.link(
+                    temporary_name,
+                    final_name,
+                    src_dir_fd=parent_descriptor,
+                    dst_dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            else:
+                os.link(temporary, final, follow_symlinks=False)
+            final_linked = True
+            self._check_deadline(deadline)
+            if _cancelled(cancel_event):
+                raise _Cancelled
+            linked_source = os.fstat(descriptor)
+            linked_final = (
+                os.stat(
+                    final_name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if parent_descriptor is not None
+                else final.lstat()
+            )
+            if (
+                not stat.S_ISREG(linked_final.st_mode)
+                or stat.S_ISLNK(linked_final.st_mode)
+                or bool(getattr(linked_final, "st_file_attributes", 0) & 0x400)
+                or linked_source.st_nlink != 2
+                or linked_final.st_nlink != 2
+                or _stat_identity(linked_source) != final_identity
+                or _stat_identity(linked_final) != final_identity
+                or linked_final.st_size != artifact.size_bytes
             ):
                 raise ValueError("unsafe artifact output")
-            replacement_identity = _stat_identity(after)
-            os.replace(temporary, final)
-            os.chmod(final, 0o600)
-            final_metadata = final.lstat()
+            if parent_descriptor is None:
+                os.close(descriptor)
+                descriptor = None
+            if parent_descriptor is not None:
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+            else:
+                temporary.unlink()
+            temporary_exists = False
+            final_metadata = (
+                os.stat(
+                    final_name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if parent_descriptor is not None
+                else final.lstat()
+            )
             if (
                 not stat.S_ISREG(final_metadata.st_mode)
                 or final_metadata.st_nlink != 1
-                or final_metadata.st_size != artifact.size_bytes
-                or _stat_identity(job_root.lstat()) != parent_identity
-                or job_root.parent != output_root
+                or _stat_identity(final_metadata) != final_identity
+                or (
+                    os.name == "posix"
+                    and stat.S_IMODE(final_metadata.st_mode) != 0o600
+                )
             ):
                 raise ValueError("unsafe artifact output")
-            if os.name == "posix":
-                directory = os.open(
-                    job_root,
-                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-                )
-                try:
-                    os.fsync(directory)
-                finally:
-                    os.close(directory)
+            self._verify_output_parent(
+                output_root,
+                job_root,
+                root_descriptor,
+                parent_descriptor,
+                root_identity,
+                parent_identity,
+            )
+            if parent_descriptor is not None:
+                os.fsync(parent_descriptor)
+            self._check_deadline(deadline)
+            if _cancelled(cancel_event):
+                raise _Cancelled
             published = True
             return final
         finally:
@@ -733,30 +950,47 @@ class SandboxDockingRunner:
                     os.close(descriptor)
                 except OSError:
                     pass
-            if not published:
+            if not published and final_linked and final_identity is not None:
                 try:
-                    temporary.unlink()
+                    current = (
+                        os.stat(
+                            final_name,
+                            dir_fd=parent_descriptor,
+                            follow_symlinks=False,
+                        )
+                        if parent_descriptor is not None
+                        else final.lstat()
+                    )
+                    if _stat_identity(current) == final_identity:
+                        if parent_descriptor is not None:
+                            os.unlink(final_name, dir_fd=parent_descriptor)
+                        else:
+                            final.unlink()
                 except (FileNotFoundError, OSError):
                     pass
-                if replacement_identity is not None:
-                    try:
-                        final_metadata = final.lstat()
-                        if (
-                            stat.S_ISREG(final_metadata.st_mode)
-                            and not stat.S_ISLNK(final_metadata.st_mode)
-                            and final_metadata.st_nlink == 1
-                            and not bool(
-                                getattr(final_metadata, "st_file_attributes", 0)
-                                & 0x400
-                            )
-                            and _stat_identity(final_metadata)
-                            == replacement_identity
-                        ):
-                            final.unlink()
-                    except (FileNotFoundError, OSError, RuntimeError):
-                        pass
+            if not published and temporary_exists:
+                try:
+                    if parent_descriptor is not None:
+                        os.unlink(temporary_name, dir_fd=parent_descriptor)
+                    else:
+                        temporary.unlink()
+                except (FileNotFoundError, OSError):
+                    pass
+            if parent_descriptor is not None:
+                try:
+                    os.close(parent_descriptor)
+                except OSError:
+                    pass
+            if root_descriptor is not None:
+                try:
+                    os.close(root_descriptor)
+                except OSError:
+                    pass
 
-    def _private_job_directory(self, job_id: str) -> tuple[Path, Path]:
+    def _private_job_directory(
+        self,
+        job_id: str,
+    ) -> tuple[Path, Path, int | None, int | None, tuple[int, ...], tuple[int, ...]]:
         root = self._allowed_output_root
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         root_metadata = root.lstat()
@@ -770,14 +1004,165 @@ class SandboxDockingRunner:
         job_root = root / f"docking_{job_id}"
         if job_root.parent != root:
             raise ValueError("unsafe artifact output")
+        if os.name == "posix":
+            if not getattr(os, "O_DIRECTORY", 0) or not getattr(os, "O_NOFOLLOW", 0):
+                raise ValueError("unsafe artifact output")
+            flags = (
+                os.O_RDONLY
+                | os.O_DIRECTORY
+                | os.O_NOFOLLOW
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            root_descriptor: int | None = None
+            parent_descriptor: int | None = None
+            try:
+                root_descriptor = os.open(root, flags)
+                opened_root = os.fstat(root_descriptor)
+                if (
+                    not stat.S_ISDIR(opened_root.st_mode)
+                    or _stat_identity(opened_root) != _stat_identity(root_metadata)
+                ):
+                    raise ValueError("unsafe artifact output")
+                try:
+                    os.mkdir(job_root.name, 0o700, dir_fd=root_descriptor)
+                except FileExistsError:
+                    pass
+                parent_descriptor = os.open(
+                    job_root.name,
+                    flags,
+                    dir_fd=root_descriptor,
+                )
+                parent_metadata = os.fstat(parent_descriptor)
+                named_parent = os.stat(
+                    job_root.name,
+                    dir_fd=root_descriptor,
+                    follow_symlinks=False,
+                )
+                if (
+                    not stat.S_ISDIR(parent_metadata.st_mode)
+                    or stat.S_ISLNK(named_parent.st_mode)
+                    or _stat_identity(parent_metadata) != _stat_identity(named_parent)
+                ):
+                    raise ValueError("unsafe artifact output")
+                os.fchmod(parent_descriptor, 0o700)
+                root_identity = _stat_identity(opened_root)
+                parent_identity = _stat_identity(parent_metadata)
+                self._verify_output_parent(
+                    root,
+                    job_root,
+                    root_descriptor,
+                    parent_descriptor,
+                    root_identity,
+                    parent_identity,
+                )
+                return (
+                    root,
+                    job_root,
+                    root_descriptor,
+                    parent_descriptor,
+                    root_identity,
+                    parent_identity,
+                )
+            except Exception:
+                if parent_descriptor is not None:
+                    os.close(parent_descriptor)
+                if root_descriptor is not None:
+                    os.close(root_descriptor)
+                raise
+
+        root_identity = _stat_identity(root_metadata)
         job_root.mkdir(mode=0o700, exist_ok=True)
-        os.chmod(job_root, 0o700)
         metadata = job_root.lstat()
         if (
             not stat.S_ISDIR(metadata.st_mode)
             or stat.S_ISLNK(metadata.st_mode)
             or bool(getattr(metadata, "st_file_attributes", 0) & 0x400)
             or job_root.resolve(strict=True).parent != root
+            or _stat_identity(root.lstat()) != root_identity
         ):
             raise ValueError("unsafe artifact output")
-        return root, job_root
+        os.chmod(job_root, 0o700)
+        after = job_root.lstat()
+        if _stat_identity(after) != _stat_identity(metadata):
+            raise ValueError("unsafe artifact output")
+        return root, job_root, None, None, root_identity, _stat_identity(after)
+
+    @staticmethod
+    def _verify_output_parent(
+        root: Path,
+        job_root: Path,
+        root_descriptor: int | None,
+        parent_descriptor: int | None,
+        root_identity: tuple[int, ...],
+        parent_identity: tuple[int, ...],
+    ) -> None:
+        root_named = root.lstat()
+        parent_named = job_root.lstat()
+        if (
+            not stat.S_ISDIR(root_named.st_mode)
+            or not stat.S_ISDIR(parent_named.st_mode)
+            or stat.S_ISLNK(root_named.st_mode)
+            or stat.S_ISLNK(parent_named.st_mode)
+            or bool(getattr(root_named, "st_file_attributes", 0) & 0x400)
+            or bool(getattr(parent_named, "st_file_attributes", 0) & 0x400)
+            or _stat_identity(root_named) != root_identity
+            or _stat_identity(parent_named) != parent_identity
+        ):
+            raise ValueError("unsafe artifact output")
+        if root_descriptor is not None and parent_descriptor is not None:
+            root_open = os.fstat(root_descriptor)
+            parent_open = os.fstat(parent_descriptor)
+            named_from_root = os.stat(
+                job_root.name,
+                dir_fd=root_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                _stat_identity(root_open) != root_identity
+                or _stat_identity(parent_open) != parent_identity
+                or _stat_identity(named_from_root) != parent_identity
+            ):
+                raise ValueError("unsafe artifact output")
+
+    def _discard_uncommitted_pose(self, path: Path, artifact: _Artifact) -> None:
+        try:
+            if path.parent.parent != self._allowed_output_root:
+                raise ValueError
+            snapshot = read_file_snapshot(path, _ARTIFACT_MAX_BYTES)
+            metadata = path.lstat()
+            if (
+                snapshot.sha256 != artifact.sha256
+                or len(snapshot.content) != artifact.size_bytes
+                or not stat.S_ISREG(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or bool(getattr(metadata, "st_file_attributes", 0) & 0x400)
+            ):
+                raise ValueError
+            identity = _stat_identity(metadata)
+            if os.name == "posix":
+                flags = (
+                    os.O_RDONLY
+                    | os.O_DIRECTORY
+                    | os.O_NOFOLLOW
+                    | getattr(os, "O_CLOEXEC", 0)
+                )
+                descriptor = os.open(path.parent, flags)
+                try:
+                    named = os.stat(
+                        path.name,
+                        dir_fd=descriptor,
+                        follow_symlinks=False,
+                    )
+                    if _stat_identity(named) != identity:
+                        raise ValueError
+                    os.unlink(path.name, dir_fd=descriptor)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            else:
+                if _stat_identity(path.lstat()) != identity:
+                    raise ValueError
+                path.unlink()
+        except Exception:
+            pass

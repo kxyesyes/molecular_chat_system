@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import threading
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ import httpx
 import pytest
 
 from src.agent.contracts import AgentErrorCode, ObservationStatus
+import src.docking.sandbox_runner as runner_module
 from src.docking.sandbox_runner import SandboxDockingRunner
 
 
@@ -133,6 +135,57 @@ def _runner(
     )
 
 
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _TrackingStream(httpx.SyncByteStream):
+    def __init__(
+        self,
+        chunks: list[bytes],
+        *,
+        after_eof=None,
+    ) -> None:
+        self.chunks = chunks
+        self.after_eof = after_eof
+        self.read_count = 0
+        self.closed = False
+
+    def __iter__(self):
+        for chunk in self.chunks:
+            self.read_count += 1
+            yield chunk
+        if self.after_eof is not None:
+            self.after_eof()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _DripStream(httpx.SyncByteStream):
+    def __init__(self, chunks: list[bytes], clock: _Clock) -> None:
+        self.chunks = chunks
+        self.clock = clock
+        self.read_count = 0
+        self.closed = False
+
+    def __iter__(self):
+        for chunk in self.chunks:
+            self.clock.advance(100.0)
+            self.read_count += 1
+            yield chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def test_runner_uses_broker_manifest_and_publishes_verified_pose(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -207,6 +260,217 @@ def test_runner_uses_broker_manifest_and_publishes_verified_pose(
         assert expected_pose.parent.stat().st_mode & 0o777 == 0o700
 
 
+def test_slow_poll_response_hits_absolute_deadline_before_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    clock = _Clock()
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/v1/docking/jobs":
+            return httpx.Response(202, json=_job("queued", receptor, ligand))
+        if request.url.path == f"/v1/docking/jobs/{BROKER_JOB_ID}":
+            clock.advance(331.0)
+            return httpx.Response(200, json=_job("succeeded", receptor, ligand))
+        raise AssertionError("deadline expiry must prevent manifest access")
+
+    monkeypatch.setattr(runner_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(runner_module.time, "sleep", lambda seconds: None)
+
+    result = _runner(tmp_path, handler).execute(payload, job_id="deadline-poll")
+
+    assert result.success is False
+    assert requests == [
+        "/v1/docking/jobs",
+        f"/v1/docking/jobs/{BROKER_JOB_ID}",
+    ]
+
+
+def test_slow_manifest_response_hits_absolute_deadline_before_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    pose = _pose(-7.2)
+    clock = _Clock()
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/v1/docking/jobs":
+            return httpx.Response(202, json=_job("succeeded", receptor, ligand))
+        if request.url.path.endswith("/manifest"):
+            clock.advance(331.0)
+            return httpx.Response(200, json=_manifest(receptor, ligand, pose))
+        raise AssertionError("deadline expiry must prevent artifact access")
+
+    monkeypatch.setattr(runner_module.time, "monotonic", clock.monotonic)
+
+    result = _runner(tmp_path, handler).execute(payload, job_id="deadline-manifest")
+
+    assert result.success is False
+    assert requests == [
+        "/v1/docking/jobs",
+        f"/v1/docking/jobs/{BROKER_JOB_ID}/manifest",
+    ]
+
+
+def test_artifact_eof_cannot_cross_absolute_deadline_and_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    pose = _pose(-7.2)
+    clock = _Clock()
+    stream = _TrackingStream([pose], after_eof=lambda: clock.advance(331.0))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/docking/jobs":
+            return httpx.Response(202, json=_job("succeeded", receptor, ligand))
+        if request.url.path.endswith("/manifest"):
+            return httpx.Response(200, json=_manifest(receptor, ligand, pose))
+        if request.url.path.endswith(f"/artifacts/{ARTIFACT_ID}"):
+            return httpx.Response(
+                200,
+                stream=stream,
+                headers={
+                    "Content-Length": str(len(pose)),
+                    "Content-Type": "chemical/x-pdbqt",
+                },
+            )
+        raise AssertionError
+
+    monkeypatch.setattr(runner_module.time, "monotonic", clock.monotonic)
+
+    result = _runner(tmp_path, handler).execute(payload, job_id="deadline-eof")
+
+    assert result.success is False
+    assert stream.closed is True
+    assert not (tmp_path / "output" / "docking_deadline-eof" / "result.pdbqt").exists()
+
+
+def test_drip_artifact_checks_deadline_for_each_transport_chunk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    pose = _pose(-7.2)
+    clock = _Clock()
+    width = max(1, len(pose) // 10)
+    chunks = [pose[index : index + width] for index in range(0, len(pose), width)]
+    stream = _DripStream(chunks, clock)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/docking/jobs":
+            return httpx.Response(202, json=_job("succeeded", receptor, ligand))
+        if request.url.path.endswith("/manifest"):
+            return httpx.Response(200, json=_manifest(receptor, ligand, pose))
+        if request.url.path.endswith(f"/artifacts/{ARTIFACT_ID}"):
+            return httpx.Response(
+                200,
+                stream=stream,
+                headers={
+                    "Content-Length": str(len(pose)),
+                    "Content-Type": "chemical/x-pdbqt",
+                },
+            )
+        raise AssertionError
+
+    monkeypatch.setattr(runner_module.time, "monotonic", clock.monotonic)
+
+    result = _runner(tmp_path, handler).execute(payload, job_id="deadline-drip")
+
+    assert result.success is False
+    assert stream.read_count <= 4
+    assert stream.closed is True
+    assert not (tmp_path / "output" / "docking_deadline-drip" / "result.pdbqt").exists()
+
+
+def test_remaining_deadline_clips_manifest_and_download_timeouts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    pose = _pose(-7.2)
+    clock = _Clock()
+    observed: dict[str, dict[str, float]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/docking/jobs":
+            clock.advance(329.0)
+            return httpx.Response(202, json=_job("succeeded", receptor, ligand))
+        if request.url.path.endswith("/manifest"):
+            observed["manifest"] = request.extensions["timeout"]
+            return httpx.Response(200, json=_manifest(receptor, ligand, pose))
+        if request.url.path.endswith(f"/artifacts/{ARTIFACT_ID}"):
+            observed["artifact"] = request.extensions["timeout"]
+            return httpx.Response(
+                200,
+                stream=httpx.ByteStream(pose),
+                headers={
+                    "Content-Length": str(len(pose)),
+                    "Content-Type": "chemical/x-pdbqt",
+                },
+            )
+        raise AssertionError
+
+    monkeypatch.setattr(runner_module.time, "monotonic", clock.monotonic)
+
+    result = _runner(tmp_path, handler).execute(payload, job_id="deadline-timeout")
+
+    assert result.success is True
+    assert all(value <= 1.0 for timeout in observed.values() for value in timeout.values())
+
+
+def test_poll_sleep_is_clipped_to_remaining_absolute_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    clock = _Clock()
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/docking/jobs"
+        clock.advance(329.8)
+        return httpx.Response(202, json=_job("queued", receptor, ligand))
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.advance(seconds)
+
+    monkeypatch.setattr(runner_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(runner_module.time, "sleep", sleep)
+
+    result = _runner(tmp_path, handler).execute(payload, job_id="deadline-sleep")
+
+    assert result.success is False
+    assert len(sleeps) == 1
+    assert 0 < sleeps[0] <= 0.2
+
+
+def test_json_response_is_streamed_and_closed_at_one_mib_cap(tmp_path: Path) -> None:
+    payload, _, _ = _inputs(tmp_path)
+    stream = _TrackingStream([b"x" * (64 * 1024)] * 40)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/docking/jobs"
+        return httpx.Response(
+            202,
+            stream=stream,
+            headers={"Content-Type": "application/json"},
+        )
+
+    result = _runner(tmp_path, handler).execute(payload, job_id="oversize-json")
+
+    assert result.success is False
+    assert stream.read_count == 17
+    assert stream.closed is True
+
+
 def test_runner_cancels_remotely_without_local_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -233,11 +497,6 @@ def test_runner_cancels_remotely_without_local_fallback(
             )
         raise AssertionError("cancelled execution must not poll, download, or fall back")
 
-    monkeypatch.setattr(
-        "src.docking.sandbox_runner.execute_tool_compat",
-        lambda *_args, **_kwargs: pytest.fail("local fallback is forbidden"),
-        raising=False,
-    )
     result = _runner(tmp_path, handler).execute(payload, job_id="task-7", cancel_event=cancel)
 
     assert result.success is False
@@ -333,6 +592,236 @@ def test_runner_rejects_untrusted_artifact_before_publish(
     assert not (tmp_path / "output" / "docking_task-7" / "result.pdbqt").exists()
 
 
+def test_existing_result_collision_fails_closed_without_overwrite(tmp_path: Path) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    pose = _pose(-7.2)
+    final = tmp_path / "output" / "docking_collision" / "result.pdbqt"
+    final.parent.mkdir(parents=True)
+    final.write_bytes(b"untrusted-existing-result\n")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/docking/jobs":
+            return httpx.Response(202, json=_job("succeeded", receptor, ligand))
+        if request.url.path.endswith("/manifest"):
+            return httpx.Response(200, json=_manifest(receptor, ligand, pose))
+        if request.url.path.endswith(f"/artifacts/{ARTIFACT_ID}"):
+            return httpx.Response(
+                200,
+                stream=httpx.ByteStream(pose),
+                headers={
+                    "Content-Length": str(len(pose)),
+                    "Content-Type": "chemical/x-pdbqt",
+                },
+            )
+        raise AssertionError
+
+    result = _runner(tmp_path, handler).execute(payload, job_id="collision")
+
+    assert result.success is False
+    assert final.read_bytes() == b"untrusted-existing-result\n"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlink mode semantics required")
+def test_output_symlink_is_rejected_before_chmod_side_effect(tmp_path: Path) -> None:
+    payload, _, _ = _inputs(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    (output / "docking_output-link").symlink_to(outside, target_is_directory=True)
+
+    result = _runner(
+        tmp_path,
+        lambda _request: pytest.fail("output rejection must precede network access"),
+    ).execute(payload, job_id="output-link")
+
+    assert result.success is False
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o755
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory-fd swap test")
+def test_parent_swap_during_descriptor_relative_publish_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    pose = _pose(-7.2)
+    job_root = tmp_path / "output" / "docking_parent-swap"
+    moved = tmp_path / "output" / "moved-parent-swap"
+    real_link = os.link
+    swapped = False
+
+    def swap_then_link(src, dst, *args, **kwargs):
+        nonlocal swapped
+        if dst == "result.pdbqt" and not swapped:
+            os.rename(job_root, moved)
+            job_root.mkdir(mode=0o700)
+            swapped = True
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(runner_module.os, "link", swap_then_link)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/docking/jobs":
+            return httpx.Response(202, json=_job("succeeded", receptor, ligand))
+        if request.url.path.endswith("/manifest"):
+            return httpx.Response(200, json=_manifest(receptor, ligand, pose))
+        if request.url.path.endswith(f"/artifacts/{ARTIFACT_ID}"):
+            return httpx.Response(
+                200,
+                stream=httpx.ByteStream(pose),
+                headers={
+                    "Content-Length": str(len(pose)),
+                    "Content-Type": "chemical/x-pdbqt",
+                },
+            )
+        raise AssertionError
+
+    result = _runner(tmp_path, handler).execute(payload, job_id="parent-swap")
+
+    assert swapped is True
+    assert result.success is False
+    assert not (job_root / "result.pdbqt").exists()
+    assert not (moved / "result.pdbqt").exists()
+
+
+@pytest.mark.parametrize("window", ["eof", "validator", "success-return"])
+def test_cancellation_windows_remove_uncommitted_pose_and_cancel_broker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    window: str,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    pose = _pose(-7.2)
+    cancel = threading.Event()
+    cancellations: list[str] = []
+    stream: httpx.SyncByteStream = httpx.ByteStream(pose)
+    if window == "eof":
+        stream = _TrackingStream([pose], after_eof=cancel.set)
+    if window == "validator":
+        from src.task_runtime.docking_execution import _VinaPoseStreamValidator
+
+        real_finish = _VinaPoseStreamValidator.finish
+
+        def finish_then_cancel(self) -> None:
+            real_finish(self)
+            cancel.set()
+
+        monkeypatch.setattr(_VinaPoseStreamValidator, "finish", finish_then_cancel)
+
+    runner = _runner(tmp_path, lambda _request: pytest.fail("handler not installed"))
+    if window == "success-return":
+        real_download = runner._download_and_publish
+
+        def download_then_cancel(*args, **kwargs):
+            path = real_download(*args, **kwargs)
+            cancel.set()
+            return path
+
+        monkeypatch.setattr(runner, "_download_and_publish", download_then_cancel)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/docking/jobs":
+            return httpx.Response(202, json=_job("succeeded", receptor, ligand))
+        if request.url.path.endswith("/manifest"):
+            return httpx.Response(200, json=_manifest(receptor, ligand, pose))
+        if request.url.path.endswith(f"/artifacts/{ARTIFACT_ID}"):
+            return httpx.Response(
+                200,
+                stream=stream,
+                headers={
+                    "Content-Length": str(len(pose)),
+                    "Content-Type": "chemical/x-pdbqt",
+                },
+            )
+        if request.url.path.endswith("/cancel"):
+            cancellations.append(request.url.path)
+            return httpx.Response(
+                202,
+                json=_job(
+                    "cancelled",
+                    receptor,
+                    ligand,
+                    cancel_requested=True,
+                    cleanup_status="succeeded",
+                ),
+            )
+        raise AssertionError
+
+    runner._transport = httpx.MockTransport(handler)
+    result = runner.execute(payload, job_id=f"cancel-{window}", cancel_event=cancel)
+
+    assert result.status == ObservationStatus.CANCELLED
+    assert cancellations == [f"/v1/docking/jobs/{BROKER_JOB_ID}/cancel"]
+    assert not (
+        tmp_path / "output" / f"docking_cancel-{window}" / "result.pdbqt"
+    ).exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX immutable link publication test")
+def test_cancellation_during_publish_removes_linked_pose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    pose = _pose(-7.2)
+    cancel = threading.Event()
+    cancellations: list[str] = []
+    real_link = os.link
+
+    def link_then_cancel(*args, **kwargs):
+        result = real_link(*args, **kwargs)
+        cancel.set()
+        return result
+
+    monkeypatch.setattr(runner_module.os, "link", link_then_cancel)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/docking/jobs":
+            return httpx.Response(202, json=_job("succeeded", receptor, ligand))
+        if request.url.path.endswith("/manifest"):
+            return httpx.Response(200, json=_manifest(receptor, ligand, pose))
+        if request.url.path.endswith(f"/artifacts/{ARTIFACT_ID}"):
+            return httpx.Response(
+                200,
+                stream=httpx.ByteStream(pose),
+                headers={
+                    "Content-Length": str(len(pose)),
+                    "Content-Type": "chemical/x-pdbqt",
+                },
+            )
+        if request.url.path.endswith("/cancel"):
+            cancellations.append(request.url.path)
+            return httpx.Response(202, json=_job("cancelled", receptor, ligand))
+        raise AssertionError
+
+    result = _runner(tmp_path, handler).execute(
+        payload, job_id="cancel-publish", cancel_event=cancel
+    )
+
+    assert result.status == ObservationStatus.CANCELLED
+    assert cancellations == [f"/v1/docking/jobs/{BROKER_JOB_ID}/cancel"]
+    assert not (
+        tmp_path / "output" / "docking_cancel-publish" / "result.pdbqt"
+    ).exists()
+
+
+def test_smiles_is_stable_invalid_input_without_network_access(tmp_path: Path) -> None:
+    payload, _, _ = _inputs(tmp_path)
+    payload.pop("ligand_path")
+    payload["smiles"] = "CCO"
+
+    result = _runner(
+        tmp_path,
+        lambda _request: pytest.fail("SMILES must be rejected before broker access"),
+    ).execute(payload, job_id="smiles")
+
+    assert result.success is False
+    assert result.error is not None
+    assert result.error.code == AgentErrorCode.INVALID_INPUT
+    assert result.error.details == {"reason": "smiles_not_supported_by_opensandbox"}
+
+
 def test_runner_rejects_linked_input_before_network_access(tmp_path: Path) -> None:
     payload, _, _ = _inputs(tmp_path)
     external = tmp_path / "external.pdb"
@@ -354,7 +843,7 @@ def test_runner_rejects_linked_input_before_network_access(tmp_path: Path) -> No
     assert str(external) not in result.message
 
 
-def test_post_replace_failure_removes_only_the_uncommitted_pose(
+def test_pre_publish_fchmod_failure_removes_only_the_uncommitted_pose(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -377,14 +866,16 @@ def test_post_replace_failure_removes_only_the_uncommitted_pose(
             )
         raise AssertionError
 
-    real_chmod = os.chmod
+    if not hasattr(os, "fchmod"):
+        pytest.skip("descriptor mode control is unavailable")
+    real_fchmod = os.fchmod
 
-    def fail_final_chmod(path: os.PathLike[str] | str, mode: int) -> None:
-        if Path(path).name == "result.pdbqt":
-            raise OSError("post-replace failure")
-        real_chmod(path, mode)
+    def fail_pose_fchmod(descriptor: int, mode: int) -> None:
+        if stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("pre-publish mode failure")
+        real_fchmod(descriptor, mode)
 
-    monkeypatch.setattr("src.docking.sandbox_runner.os.chmod", fail_final_chmod)
+    monkeypatch.setattr("src.docking.sandbox_runner.os.fchmod", fail_pose_fchmod)
     result = _runner(tmp_path, handler).execute(payload, job_id="task-7")
     job_root = tmp_path / "output" / "docking_task-7"
 

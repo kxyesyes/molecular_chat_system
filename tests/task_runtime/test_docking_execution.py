@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import httpx
 
 from src.agent.contracts import (
     AgentErrorCode,
@@ -745,6 +746,88 @@ def test_opensandbox_backend_delegates_to_runner_from_env(
 
     assert result["success"] is True
     assert len(calls) == 1
+
+
+def test_opensandbox_smiles_failure_keeps_stable_invalid_input_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.docking.sandbox_runner as sandbox_module
+
+    manifest = _stage(tmp_path, task_id="task-smiles", smiles=True)
+    output_root = _allowed_output_root(tmp_path)
+    runner = sandbox_module.SandboxDockingRunner(
+        tmp_path / "broker.sock",
+        output_root,
+        transport=httpx.MockTransport(
+            lambda _request: pytest.fail("SMILES must not reach the broker")
+        ),
+    )
+    monkeypatch.setenv("MEDCHAT_DOCKING_EXECUTION_BACKEND", "opensandbox")
+    monkeypatch.setattr(
+        sandbox_module.SandboxDockingRunner,
+        "from_env",
+        lambda _output_root: runner,
+    )
+
+    result = DockingExecution(
+        tmp_path,
+        allowed_output_root=output_root,
+    ).run_verified("task-smiles", manifest)
+
+    assert result["success"] is False
+    assert result["error"]["code"] == AgentErrorCode.INVALID_INPUT.value
+    assert result["error"]["details"]["reason"] == (
+        "smiles_not_supported_by_opensandbox"
+    )
+
+
+def test_opensandbox_broker_failure_never_calls_real_local_tool_seam(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.docking.sandbox_runner as sandbox_module
+    import src.task_runtime.docking_execution as execution_module
+
+    manifest = _stage(tmp_path)
+    output_root = _allowed_output_root(tmp_path)
+    local_calls = {"tool": 0, "compat": 0}
+
+    def molecular_docking():
+        local_calls["tool"] += 1
+        return object()
+
+    def compat(*_args, **_kwargs):
+        local_calls["compat"] += 1
+        pytest.fail("local fallback is forbidden")
+
+    def unavailable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(r"C:\private\secret-broker.sock", request=request)
+
+    runner = sandbox_module.SandboxDockingRunner(
+        tmp_path / "broker.sock",
+        output_root,
+        transport=httpx.MockTransport(unavailable),
+    )
+    monkeypatch.setenv("MEDCHAT_DOCKING_EXECUTION_BACKEND", "opensandbox")
+    monkeypatch.setattr(execution_module, "MolecularDocking", molecular_docking)
+    monkeypatch.setattr(execution_module, "execute_tool_compat", compat)
+    monkeypatch.setattr(
+        sandbox_module.SandboxDockingRunner,
+        "from_env",
+        lambda _output_root: runner,
+    )
+
+    result = DockingExecution(
+        tmp_path,
+        allowed_output_root=output_root,
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is False
+    assert result["error"]["details"]["reason"] == "artifact_invalid"
+    assert local_calls == {"tool": 0, "compat": 0}
+    assert "private" not in json.dumps(result).lower()
+    assert "secret" not in json.dumps(result).lower()
 
 
 def test_invalid_docking_execution_backend_is_rejected(

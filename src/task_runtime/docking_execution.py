@@ -369,7 +369,8 @@ class DockingExecution:
                 "Docking tool did not produce a verified scientific result.",
                 details={
                     "reason": _tool_failure_reason(
-                        tool_result.error.code if tool_result.error else None
+                        tool_result.error.code if tool_result.error else None,
+                        tool_result.error.details if tool_result.error else None,
                     )
                 },
             )
@@ -1241,7 +1242,10 @@ def _emit_progress(
         pass
 
 
-def _tool_failure_reason(code: AgentErrorCode | None) -> str:
+def _tool_failure_reason(
+    code: AgentErrorCode | None,
+    details: Mapping[str, Any] | None = None,
+) -> str:
     if code in {
         AgentErrorCode.TOOL_UNAVAILABLE,
         AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE,
@@ -1249,6 +1253,8 @@ def _tool_failure_reason(code: AgentErrorCode | None) -> str:
     }:
         return "environment_unavailable"
     if code is AgentErrorCode.INVALID_INPUT:
+        if details and details.get("reason") == "smiles_not_supported_by_opensandbox":
+            return "smiles_not_supported_by_opensandbox"
         return "input_invalid"
     if code is AgentErrorCode.VALIDATION_ERROR:
         return "validator_rejected"

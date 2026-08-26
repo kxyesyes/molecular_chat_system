@@ -36,15 +36,25 @@ PRODUCTION_ENV = {
     "MEDCHAT_TEMPORAL_BACKUP_STATE": (
         "scratch/temporal_backups/latest-verified.json"
     ),
+    "MEDCHAT_DOCKING_EXECUTION_BACKEND": "opensandbox",
+    "MEDCHAT_SANDBOX_BROKER_SOCKET": "/run/medchat-sandbox/broker.sock",
 }
 
 
 @pytest.fixture(autouse=True)
 def clear_runtime_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in tuple(os.environ):
-        if name.startswith(("MEDCHAT_TASK_", "MEDCHAT_TEMPORAL_")):
+        if name.startswith(("MEDCHAT_TASK_", "MEDCHAT_TEMPORAL_")) or name in {
+            "MEDCHAT_DOCKING_EXECUTION_BACKEND",
+            "MEDCHAT_SANDBOX_BROKER_SOCKET",
+        }:
             monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("PYTHONOPTIMIZE", raising=False)
+    monkeypatch.setenv("MEDCHAT_DOCKING_EXECUTION_BACKEND", "opensandbox")
+    monkeypatch.setenv(
+        "MEDCHAT_SANDBOX_BROKER_SOCKET",
+        "/run/medchat-sandbox/broker.sock",
+    )
 
 
 def apply_production_env(

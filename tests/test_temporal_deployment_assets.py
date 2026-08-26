@@ -346,6 +346,8 @@ def test_temporal_worker_environment_example_is_exact_non_secret_allowlist() -> 
         "MEDCHAT_TEMPORAL_WORKER_METRICS_PORT",
         "MEDCHAT_TEMPORAL_BASELINE_P95_SECONDS",
         "MEDCHAT_TEMPORAL_BACKUP_STATE",
+        "MEDCHAT_DOCKING_EXECUTION_BACKEND",
+        "MEDCHAT_SANDBOX_BROKER_SOCKET",
         "MOLECULAR_DOCKING_ROOT",
         "MOLECULAR_DOCKING_VINA",
         "MOLECULAR_DOCKING_ADFR_BIN",

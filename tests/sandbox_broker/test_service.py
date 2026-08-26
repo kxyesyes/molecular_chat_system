@@ -36,6 +36,12 @@ from src.sandbox_broker.validation import StagedInput
 
 
 POSE = "REMARK VINA RESULT: -7.4 0.0 0.0\nMODEL 1\nENDMDL\n"
+MULTI_MODE_POSE = (
+    "REMARK VINA RESULT: -8.1 0.0 0.0\n"
+    "MODEL 1\nENDMDL\n"
+    "REMARK VINA RESULT: -7.2 1.0 1.5\n"
+    "MODEL 2\nENDMDL\n"
+)
 
 
 class FakeSandboxClient:
@@ -122,6 +128,16 @@ class FakeSandboxClient:
 
     async def drain_cleanup(self) -> None:
         return None
+
+
+class MultiModeSandboxClient(FakeSandboxClient):
+    def __init__(self) -> None:
+        super().__init__(result_extras={"pose_count": 2, "best_energy": -8.1})
+
+    async def read_text(self, handle: SandboxHandle, path: str) -> str:
+        if path == "/workspace/output/poses/result.pdbqt":
+            return MULTI_MODE_POSE
+        return await super().read_text(handle, path)
 
 
 class _UploadRecordingFactory:
@@ -474,6 +490,25 @@ def test_job_runs_once_and_manifest_is_visible_only_after_cleanup(tmp_path: Path
     assert manifest.trace_id == "trace-1"
     assert len(manifest.artifacts) == 1
     assert pose == POSE.encode("utf-8")
+
+
+def test_single_pose_artifact_can_register_multiple_vina_modes(tmp_path: Path) -> None:
+    async def scenario() -> tuple[DockingManifest, bytes]:
+        service, _, config = _service(tmp_path, MultiModeSandboxClient())
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-multi-mode")
+        await service.wait_terminal(job.job_id)
+        manifest = service.get_manifest(job.job_id)
+        pose = service.read_artifact(job.job_id, manifest.artifacts[0]["artifact_id"])
+        await service.stop()
+        return manifest, pose
+
+    manifest, pose = asyncio.run(scenario())
+
+    assert manifest.pose_count == 2
+    assert manifest.best_energy == -8.1
+    assert len(manifest.artifacts) == 1
+    assert pose == MULTI_MODE_POSE.encode("utf-8")
 
 
 @pytest.mark.parametrize("receptor_suffix", [".pdb", ".pdbqt"])
