@@ -1,0 +1,625 @@
+#!/usr/bin/env python3
+"""Execute one fail-closed AutoDock Vina request inside the docking sandbox."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+import re
+import stat
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from importlib import metadata
+from pathlib import Path
+from typing import NoReturn
+
+
+INPUT_ROOT = Path("/workspace/input")
+OUTPUT_ROOT = Path("/workspace/output")
+
+_EXACT_ARGUMENTS = [
+    "--request",
+    "/workspace/input/request.json",
+    "--output",
+    "/workspace/output",
+]
+_REQUEST_NAME = "request.json"
+_RESULT_NAME = "result.json"
+_WORK_NAME = ".work"
+_POSES_NAME = "poses"
+_MAX_REQUEST_BYTES = 1024 * 1024
+_MAX_INPUT_BYTES = 128 * 1024 * 1024
+_MAX_POSE_BYTES = 16 * 1024 * 1024
+_MAX_POSE_LINE_BYTES = 4096
+_MAX_MODES = 256
+_DEADLINE_SECONDS = 180.0
+_WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_RECEPTOR_PATH = re.compile(r"^/workspace/input/receptor\.(pdb|pdbqt)$")
+_LIGAND_PATH = re.compile(r"^/workspace/input/ligand\.(sdf|mol|pdb|pdbqt)$")
+_ASCII_FLOAT = rb"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+_ENERGY_LINE = re.compile(
+    rb"^REMARK VINA RESULT:[ \t]+("
+    + _ASCII_FLOAT
+    + rb")[ \t]+("
+    + _ASCII_FLOAT
+    + rb")[ \t]+("
+    + _ASCII_FLOAT
+    + rb")[ \t]*$"
+)
+_ENERGY_CLAIM = re.compile(rb"^[ \t]*REMARK[ \t]+VINA[ \t]+RESULT(?=[: \t]|$)")
+_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+\-]{0,127}$")
+_REQUEST_FIELDS = frozenset(
+    {
+        "schema_version",
+        "parameters",
+        "receptor_path",
+        "ligand_path",
+        "receptor_sha256",
+        "ligand_sha256",
+    }
+)
+_PARAMETER_FIELDS = frozenset(
+    {"center", "size", "exhaustiveness", "num_modes", "energy_range"}
+)
+_MINIMAL_ENV = {
+    "PATH": "/opt/conda/bin:/usr/local/bin:/usr/bin:/bin",
+    "HOME": "/tmp",
+    "TMPDIR": "/tmp",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+}
+
+
+@dataclass(frozen=True)
+class Request:
+    receptor: Path
+    ligand: Path
+    receptor_sha256: str
+    ligand_sha256: str
+    center: tuple[float, float, float]
+    size: tuple[float, float, float]
+    exhaustiveness: int
+    num_modes: int
+    energy_range: int
+
+
+class DockingFailure(Exception):
+    def __init__(self, phase: str, error_code: str) -> None:
+        super().__init__(error_code)
+        self.phase = phase
+        self.error_code = error_code
+
+
+def _fail(phase: str, error_code: str) -> NoReturn:
+    raise DockingFailure(phase, error_code)
+
+
+def _is_reparse(value: os.stat_result) -> bool:
+    return bool(getattr(value, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT)
+
+
+def _identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _check_private_directory(path: Path) -> tuple[int, int, int, int, int]:
+    value = path.lstat()
+    if (
+        not path.is_absolute()
+        or ".." in path.parts
+        or not stat.S_ISDIR(value.st_mode)
+        or stat.S_ISLNK(value.st_mode)
+        or _is_reparse(value)
+        or (os.name == "posix" and stat.S_IMODE(value.st_mode) & 0o077)
+    ):
+        raise ValueError
+    if os.name == "posix" and value.st_uid != os.geteuid():
+        raise ValueError
+    return _identity(value)
+
+
+def _read_regular_snapshot(path: Path, maximum_bytes: int) -> tuple[bytes, str]:
+    before = path.lstat()
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or _is_reparse(before)
+        or before.st_nlink != 1
+        or before.st_size <= 0
+        or before.st_size > maximum_bytes
+        or (os.name == "posix" and stat.S_IMODE(before.st_mode) & 0o077)
+    ):
+        raise ValueError
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or _identity(opened) != _identity(before)
+        ):
+            raise ValueError
+        content = bytearray()
+        digest = hashlib.sha256()
+        while True:
+            remaining = maximum_bytes + 1 - len(content)
+            if remaining <= 0:
+                raise ValueError
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            content.extend(chunk)
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        named_after = path.lstat()
+        if (
+            len(content) != before.st_size
+            or after.st_nlink != 1
+            or named_after.st_nlink != 1
+            or _identity(after) != _identity(before)
+            or _identity(named_after) != _identity(before)
+            or _is_reparse(named_after)
+        ):
+            raise ValueError
+        return bytes(content), digest.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError
+        result[key] = value
+    return result
+
+
+def _reject_constant(_: str) -> NoReturn:
+    raise ValueError
+
+
+def _number_vector(value: object, *, positive: bool) -> tuple[float, float, float]:
+    if type(value) is not list or len(value) != 3:
+        raise ValueError
+    converted: list[float] = []
+    for item in value:
+        if type(item) not in {int, float}:
+            raise ValueError
+        number = float(item)
+        if not math.isfinite(number) or abs(number) > 1_000_000:
+            raise ValueError
+        if positive and not 0 < number <= 1_000:
+            raise ValueError
+        converted.append(number)
+    return converted[0], converted[1], converted[2]
+
+
+def _strict_integer(value: object, minimum: int, maximum: int) -> int:
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ValueError
+    return value
+
+
+def _path_from_contract(value: object, pattern: re.Pattern[str], role: str) -> Path:
+    if type(value) is not str or "\x00" in value or pattern.fullmatch(value) is None:
+        raise ValueError
+    name = value.rsplit("/", 1)[-1]
+    expected_prefix = f"{role}."
+    if not name.startswith(expected_prefix) or Path(name).name != name:
+        raise ValueError
+    return INPUT_ROOT / name
+
+
+def _parse_request() -> Request:
+    _check_private_directory(INPUT_ROOT)
+    raw, _ = _read_regular_snapshot(INPUT_ROOT / _REQUEST_NAME, _MAX_REQUEST_BYTES)
+    if b"\x00" in raw:
+        raise ValueError
+    text = raw.decode("utf-8", errors="strict")
+    payload = json.loads(
+        text,
+        object_pairs_hook=_unique_object,
+        parse_constant=_reject_constant,
+    )
+    if type(payload) is not dict or set(payload) != _REQUEST_FIELDS:
+        raise ValueError
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        raise ValueError
+    parameters = payload["parameters"]
+    if type(parameters) is not dict or set(parameters) != _PARAMETER_FIELDS:
+        raise ValueError
+    receptor = _path_from_contract(payload["receptor_path"], _RECEPTOR_PATH, "receptor")
+    ligand = _path_from_contract(payload["ligand_path"], _LIGAND_PATH, "ligand")
+    receptor_hash = payload["receptor_sha256"]
+    ligand_hash = payload["ligand_sha256"]
+    if (
+        type(receptor_hash) is not str
+        or _SHA256.fullmatch(receptor_hash) is None
+        or type(ligand_hash) is not str
+        or _SHA256.fullmatch(ligand_hash) is None
+    ):
+        raise ValueError
+    _, actual_receptor_hash = _read_regular_snapshot(receptor, _MAX_INPUT_BYTES)
+    _, actual_ligand_hash = _read_regular_snapshot(ligand, _MAX_INPUT_BYTES)
+    if actual_receptor_hash != receptor_hash or actual_ligand_hash != ligand_hash:
+        raise ValueError
+    return Request(
+        receptor=receptor,
+        ligand=ligand,
+        receptor_sha256=receptor_hash,
+        ligand_sha256=ligand_hash,
+        center=_number_vector(parameters["center"], positive=False),
+        size=_number_vector(parameters["size"], positive=True),
+        exhaustiveness=_strict_integer(parameters["exhaustiveness"], 1, 128),
+        num_modes=_strict_integer(parameters["num_modes"], 1, _MAX_MODES),
+        energy_range=_strict_integer(parameters["energy_range"], 0, 100),
+    )
+
+
+def _ensure_absent(path: Path) -> None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    raise ValueError
+
+
+def _make_private_directory(path: Path) -> tuple[int, int, int, int, int]:
+    path.mkdir(mode=0o700)
+    return _check_private_directory(path)
+
+
+def _safe_unlink_in_created_directory(path: Path, parent: Path) -> None:
+    try:
+        parent_value = parent.lstat()
+        value = path.lstat()
+        if (
+            stat.S_ISDIR(parent_value.st_mode)
+            and not stat.S_ISLNK(parent_value.st_mode)
+            and not _is_reparse(parent_value)
+            and path.parent == parent
+            and not stat.S_ISDIR(value.st_mode)
+        ):
+            path.unlink()
+    except (FileNotFoundError, OSError, RuntimeError):
+        pass
+
+
+def _clean_created_directory(
+    path: Path, created_identity: tuple[int, int, int, int, int] | None
+) -> None:
+    if created_identity is None:
+        return
+    try:
+        current = path.lstat()
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or stat.S_ISLNK(current.st_mode)
+            or _is_reparse(current)
+            or _identity(current)[:2] != created_identity[:2]
+        ):
+            return
+        for child in path.iterdir():
+            value = child.lstat()
+            if not stat.S_ISDIR(value.st_mode):
+                child.unlink()
+        path.rmdir()
+    except (FileNotFoundError, OSError, RuntimeError):
+        pass
+
+
+def _remaining(deadline: float, phase: str) -> float:
+    value = deadline - time.monotonic()
+    if value <= 0:
+        _fail(phase, "tool_timeout")
+    return value
+
+
+def _run_tool(argv: list[str], phase: str, deadline: float) -> None:
+    try:
+        completed = subprocess.run(
+            argv,
+            shell=False,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_remaining(deadline, phase),
+            env=dict(_MINIMAL_ENV),
+            cwd=str(OUTPUT_ROOT),
+            close_fds=True,
+        )
+    except subprocess.TimeoutExpired:
+        _fail(phase, "tool_timeout")
+    except (OSError, ValueError):
+        _fail(phase, "tool_failed")
+    if completed.returncode != 0:
+        _fail(phase, "tool_failed")
+
+
+def _validate_created_file(path: Path, maximum_bytes: int) -> None:
+    _read_regular_snapshot(path, maximum_bytes)
+
+
+def _verify_input_hash(path: Path, expected_hash: str) -> None:
+    try:
+        _, actual_hash = _read_regular_snapshot(path, _MAX_INPUT_BYTES)
+    except (OSError, ValueError):
+        _fail("input_validation", "invalid_input")
+    if actual_hash != expected_hash:
+        _fail("input_validation", "invalid_input")
+
+
+def _parse_pose(path: Path, maximum_modes: int) -> list[float]:
+    content, _ = _read_regular_snapshot(path, _MAX_POSE_BYTES)
+    energies: list[float] = []
+    for line in content.splitlines():
+        if len(line) > _MAX_POSE_LINE_BYTES:
+            raise ValueError
+        if any(value not in (9,) and not 32 <= value <= 126 for value in line):
+            raise ValueError
+        if _ENERGY_CLAIM.match(line) is None:
+            continue
+        match = _ENERGY_LINE.fullmatch(line)
+        if match is None:
+            raise ValueError
+        values = [float(match.group(index)) for index in (1, 2, 3)]
+        if any(not math.isfinite(value) for value in values):
+            raise ValueError
+        energies.append(values[0])
+        if len(energies) > maximum_modes or len(energies) > _MAX_MODES:
+            raise ValueError
+    if not energies:
+        raise ValueError
+    return energies
+
+
+def _trusted_version(distribution: str) -> str:
+    value = metadata.version(distribution)
+    if type(value) is not str or _VERSION.fullmatch(value) is None:
+        raise ValueError
+    return value
+
+
+def _write_all(descriptor: int, content: bytes) -> None:
+    view = memoryview(content)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError
+        view = view[written:]
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name != "posix":
+        return
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_result(payload: dict[str, object]) -> None:
+    _check_private_directory(OUTPUT_ROOT)
+    final = OUTPUT_ROOT / _RESULT_NAME
+    _ensure_absent(final)
+    content = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    temporary = OUTPUT_ROOT / f".result.{os.getpid()}.{time.monotonic_ns()}.tmp"
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    descriptor: int | None = None
+    published = False
+    try:
+        descriptor = os.open(temporary, flags, 0o600)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise OSError
+        _write_all(descriptor, content)
+        os.fsync(descriptor)
+        after = os.fstat(descriptor)
+        named = temporary.lstat()
+        if (
+            after.st_nlink != 1
+            or _identity(after) != _identity(named)
+            or _is_reparse(named)
+            or (os.name == "posix" and stat.S_IMODE(named.st_mode) != 0o600)
+        ):
+            raise OSError
+        os.close(descriptor)
+        descriptor = None
+        _ensure_absent(final)
+        os.replace(temporary, final)
+        published = True
+        _fsync_directory(OUTPUT_ROOT)
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if not published:
+            _safe_unlink_in_created_directory(temporary, OUTPUT_ROOT)
+
+
+def _failure_result(phase: str, error_code: str) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "status": "failed",
+        "phase": phase,
+        "error_code": error_code,
+        "warnings": [],
+    }
+
+
+def _execute(request: Request, deadline: float) -> tuple[dict[str, object], Path, Path]:
+    work = OUTPUT_ROOT / _WORK_NAME
+    poses = OUTPUT_ROOT / _POSES_NAME
+    _ensure_absent(work)
+    _ensure_absent(poses)
+    work_identity = _make_private_directory(work)
+    poses_identity: tuple[int, int, int, int, int] | None = None
+    receptor_pdbqt = work / "receptor.pdbqt"
+    ligand_pdbqt = work / "ligand.pdbqt"
+    pose_file = poses / "result.pdbqt"
+    try:
+        poses_identity = _make_private_directory(poses)
+        _verify_input_hash(request.receptor, request.receptor_sha256)
+        _run_tool(
+            [
+                "mk_prepare_receptor.py",
+                "-i",
+                str(request.receptor),
+                "--write_pdbqt",
+                str(receptor_pdbqt),
+            ],
+            "receptor_preparation",
+            deadline,
+        )
+        _validate_created_file(receptor_pdbqt, _MAX_INPUT_BYTES)
+        _verify_input_hash(request.ligand, request.ligand_sha256)
+        _run_tool(
+            [
+                "mk_prepare_ligand.py",
+                "-i",
+                str(request.ligand),
+                "-o",
+                str(ligand_pdbqt),
+            ],
+            "ligand_preparation",
+            deadline,
+        )
+        _validate_created_file(ligand_pdbqt, _MAX_INPUT_BYTES)
+        _run_tool(
+            [
+                "vina",
+                "--receptor",
+                str(receptor_pdbqt),
+                "--ligand",
+                str(ligand_pdbqt),
+                "--center_x",
+                str(request.center[0]),
+                "--center_y",
+                str(request.center[1]),
+                "--center_z",
+                str(request.center[2]),
+                "--size_x",
+                str(request.size[0]),
+                "--size_y",
+                str(request.size[1]),
+                "--size_z",
+                str(request.size[2]),
+                "--exhaustiveness",
+                str(request.exhaustiveness),
+                "--num_modes",
+                str(request.num_modes),
+                "--energy_range",
+                str(request.energy_range),
+                "--out",
+                str(pose_file),
+            ],
+            "docking",
+            deadline,
+        )
+        try:
+            energies = _parse_pose(pose_file, request.num_modes)
+            result = {
+                "schema_version": 1,
+                "status": "succeeded",
+                "receptor_sha256": request.receptor_sha256,
+                "ligand_sha256": request.ligand_sha256,
+                "pose_count": len(energies),
+                "best_energy": min(energies),
+                "pose_files": ["poses/result.pdbqt"],
+                "vina_version": _trusted_version("vina"),
+                "meeko_version": _trusted_version("meeko"),
+                "warnings": [],
+            }
+        except (OSError, ValueError, UnicodeError, metadata.PackageNotFoundError):
+            _fail("output_validation", "invalid_output")
+        _clean_created_directory(work, work_identity)
+        work_identity = None
+        return result, work, poses
+    except Exception:
+        _safe_unlink_in_created_directory(pose_file, poses)
+        _clean_created_directory(poses, poses_identity)
+        _clean_created_directory(work, work_identity)
+        raise
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments != _EXACT_ARGUMENTS:
+        raise SystemExit(2)
+    deadline = time.monotonic() + _DEADLINE_SECONDS
+    old_umask = os.umask(0o077)
+    work: Path | None = None
+    poses: Path | None = None
+    try:
+        try:
+            _check_private_directory(OUTPUT_ROOT)
+            _ensure_absent(OUTPUT_ROOT / _RESULT_NAME)
+            try:
+                request = _parse_request()
+            except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
+                _fail("input_validation", "invalid_input")
+            result, work, poses = _execute(request, deadline)
+            _atomic_result(result)
+            return 0
+        except DockingFailure as failure:
+            try:
+                _atomic_result(_failure_result(failure.phase, failure.error_code))
+            except (OSError, ValueError):
+                pass
+            return 1
+        except Exception:
+            try:
+                _atomic_result(_failure_result("internal", "internal_error"))
+            except (OSError, ValueError):
+                pass
+            return 1
+    finally:
+        if work is not None:
+            _clean_created_directory(work, None)
+        if poses is not None and not (poses / "result.pdbqt").exists():
+            _clean_created_directory(poses, None)
+        os.umask(old_umask)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
