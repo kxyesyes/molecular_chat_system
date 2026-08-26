@@ -1,7 +1,17 @@
+import hashlib
+import json
 from types import SimpleNamespace
 import math
 
-from src.agent.contracts import AgentErrorCode, ObservationStatus, ToolResult
+import pytest
+
+from src.agent.contracts import (
+    AgentErrorCode,
+    ObservationStatus,
+    ToolProvenance,
+    ToolResult,
+    WorkflowArtifact,
+)
 from src.agent.tools.admet_predictor import ADMETPredictor
 from src.agent.tools.reverse_target_tool import ReverseTargetTool
 from src.agent.tools.target_database_tool import TargetDatabaseTool
@@ -50,6 +60,180 @@ def test_docking_validator_accepts_redacted_verified_input_contract(tmp_path):
     validated = AgentResultValidator().validate_tool_result(result)
 
     assert validated.success is True
+
+
+def _opensandbox_docking_result(tmp_path, mutation=None):
+    pose = tmp_path / "opensandbox-pose.pdbqt"
+    pose.write_text(
+        "MODEL 1\nREMARK VINA RESULT: -7.200 0.000 0.000\nENDMDL\n",
+        encoding="ascii",
+    )
+    digest = hashlib.sha256(pose.read_bytes()).hexdigest()
+    values = {
+        "energy": -7.2,
+        "pose": pose,
+        "quality": {
+            "real_execution": True,
+            "execution_backend": "opensandbox",
+            "secure_runtime": "gvisor",
+            "sandbox_image_digest": "a" * 64,
+            "cleanup_status": "succeeded",
+            "docking_inputs": {
+                "receptor_provided": True,
+                "ligand_provided": True,
+                "ligand_mode": "file",
+                "center": [1.0, 2.0, 3.0],
+                "size": [20.0, 20.0, 20.0],
+            },
+        },
+        "artifacts": [
+            WorkflowArtifact(
+                artifact_type="docking_pose",
+                path=str(pose),
+                label="Verified docking pose",
+                mime_type="chemical/x-pdbqt",
+                metadata={"sha256": digest},
+            )
+        ],
+        "provenance": ToolProvenance(
+            tool_name="molecular_docking",
+            tool_version="1.2.5",
+            model_name="AutoDock Vina",
+            model_version="1.2.5",
+            demo_mode=False,
+            fallback_used=False,
+        ),
+    }
+    if mutation is not None:
+        mutation(values)
+    return ToolResult.success_result(
+        "molecular_docking",
+        data={
+            "total_poses": 1,
+            "pose_file": str(values["pose"]),
+            "best_pose": {
+                "binding_energy": values["energy"],
+                "pose_file": str(values["pose"]),
+            },
+        },
+        formatted=f"Binding energy: {values['energy']} kcal/mol",
+        quality=values["quality"],
+        artifacts=values["artifacts"],
+        provenance=values["provenance"],
+    )
+
+
+def test_docking_validator_accepts_complete_opensandbox_trust_contract(tmp_path):
+    validated = AgentResultValidator().validate_tool_result(
+        _opensandbox_docking_result(tmp_path)
+    )
+
+    assert validated.success is True
+    assert validated.status == ObservationStatus.SUCCEEDED
+
+
+def _set_quality(name, value):
+    def mutate(values):
+        if value is None:
+            values["quality"].pop(name, None)
+        else:
+            values["quality"][name] = value
+
+    return mutate
+
+
+def _set_energy(value):
+    return lambda values: values.__setitem__("energy", value)
+
+
+def _set_provenance(**updates):
+    def mutate(values):
+        source = values["provenance"].to_dict()
+        source.update(updates)
+        values["provenance"] = ToolProvenance.from_dict(source)
+
+    return mutate
+
+
+def _remove_pose_artifact(values):
+    values["artifacts"] = []
+
+
+def _invalidate_pose_hash(values):
+    artifact = values["artifacts"][0]
+    values["artifacts"] = [
+        WorkflowArtifact(
+            artifact_type=artifact.artifact_type,
+            path=artifact.path,
+            label=artifact.label,
+            mime_type=artifact.mime_type,
+            metadata={"sha256": "f" * 64},
+        )
+    ]
+
+
+def _remove_pose_file(values):
+    values["pose"].unlink()
+
+
+def _malform_pose_artifact(values):
+    values["artifacts"] = [object()]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        _set_quality("secure_runtime", "runc"),
+        _set_quality("sandbox_image_digest", None),
+        _set_quality("sandbox_image_digest", "A" * 64),
+        _set_quality("sandbox_image_digest", "a" * 63),
+        _set_quality("real_execution", False),
+        _set_quality("cleanup_status", "failed"),
+        _set_energy(math.nan),
+        _set_energy(math.inf),
+        _set_provenance(demo_mode=True),
+        _set_provenance(fallback_used=True),
+        lambda values: values.__setitem__("provenance", None),
+        _remove_pose_artifact,
+        _invalidate_pose_hash,
+        _remove_pose_file,
+        _malform_pose_artifact,
+    ],
+    ids=[
+        "runc",
+        "missing-digest",
+        "uppercase-digest",
+        "malformed-digest",
+        "not-real-execution",
+        "cleanup-failed",
+        "nan-energy",
+        "inf-energy",
+        "demo-mode",
+        "fallback-used",
+        "missing-provenance",
+        "missing-pose-artifact",
+        "invalid-pose-hash",
+        "missing-pose-file",
+        "malformed-pose-artifact",
+    ],
+)
+def test_docking_validator_rejects_incomplete_opensandbox_trust_contract(
+    tmp_path,
+    mutation,
+):
+    result = _opensandbox_docking_result(tmp_path, mutation)
+
+    validated = AgentResultValidator().validate_tool_result(result)
+
+    assert validated.success is False
+    assert validated.status == ObservationStatus.FAILED
+    assert validated.error.code == AgentErrorCode.INVALID_OUTPUT
+    assert validated.data is None
+    assert validated.artifacts == []
+    encoded = json.dumps(validated.to_legacy_dict(), ensure_ascii=False)
+    assert "binding_energy" not in encoded
+    assert "pose_file" not in encoded
+    assert "kcal/mol" not in encoded
 
 
 def test_docking_validator_rejects_non_finite_or_boolean_science(tmp_path):

@@ -893,6 +893,7 @@ def test_runner_uses_broker_manifest_and_publishes_verified_pose(
         "execution_backend": "opensandbox",
         "secure_runtime": "gvisor",
         "sandbox_image_digest": IMAGE_DIGEST,
+        "cleanup_status": "succeeded",
         "docking_inputs": {"receptor_provided": True, "ligand_provided": True},
     }
     assert sleeps == [0.5, 0.5]

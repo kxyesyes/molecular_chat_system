@@ -137,6 +137,7 @@ def summarize_runs(
     runs: list[dict[str, Any]],
     *,
     expected_backend: str | None = None,
+    expected_execution_backend: str | None = None,
 ) -> dict[str, Any]:
     """Normalize untrusted run data and apply non-negotiable science gates."""
 
@@ -156,6 +157,26 @@ def summarize_runs(
             failures.append("task_not_succeeded")
         if expected_backend is not None and source.get("backend") != expected_backend:
             failures.append("backend_mismatch")
+        execution_backend = _safe_code(source.get("execution_backend"))
+        secure_runtime = _safe_code(source.get("secure_runtime"))
+        sandbox_image_digest = source.get("sandbox_image_digest")
+        valid_image_digest = (
+            type(sandbox_image_digest) is str
+            and _SHA256.fullmatch(sandbox_image_digest) is not None
+        )
+        cleanup_status = _safe_code(source.get("cleanup_status"))
+        if (
+            expected_execution_backend is not None
+            and execution_backend != expected_execution_backend
+        ):
+            failures.append("execution_backend_mismatch")
+        if expected_execution_backend == "opensandbox":
+            if secure_runtime != "gvisor":
+                failures.append("secure_runtime_invalid")
+            if not valid_image_digest:
+                failures.append("sandbox_image_digest_invalid")
+            if cleanup_status != "succeeded":
+                failures.append("cleanup_status_invalid")
         attempts = source.get("vina_attempts")
         if type(attempts) is not int or attempts != 1:
             failures.append("duplicate_vina_execution" if type(attempts) is int and attempts > 1 else "vina_attempt_count_invalid")
@@ -210,6 +231,12 @@ def summarize_runs(
                 "run": index,
                 "status": "passed" if not failures else "failed",
                 "backend": _safe_code(source.get("backend")),
+                "execution_backend": execution_backend,
+                "secure_runtime": secure_runtime,
+                "sandbox_image_digest": (
+                    sandbox_image_digest if valid_image_digest else None
+                ),
+                "cleanup_status": cleanup_status,
                 "workflow_id": _safe_code(source.get("workflow_id")),
                 "vina_attempts": attempts if type(attempts) is int else None,
                 "terminal_event_count": terminal_count if type(terminal_count) is int else None,
@@ -362,6 +389,7 @@ def _contract_probe() -> tuple[dict[str, Any], dict[str, Any]]:
         )
         artifact = (first.get("artifacts") or [{}])[0]
         metadata = artifact.get("metadata") if isinstance(artifact, dict) else {}
+        quality = first.get("quality") if isinstance(first.get("quality"), dict) else {}
         pose_rel = first.get("data", {}).get("pose_file")
         checks = {
             "cancellation_confirmed": (
@@ -387,6 +415,10 @@ def _contract_probe() -> tuple[dict[str, Any], dict[str, Any]]:
         run = {
             "status": "succeeded" if passed else "failed",
             "backend": "contract",
+            "execution_backend": quality.get("execution_backend"),
+            "secure_runtime": quality.get("secure_runtime"),
+            "sandbox_image_digest": quality.get("sandbox_image_digest"),
+            "cleanup_status": quality.get("cleanup_status"),
             "workflow_id": "controlled-contract",
             "vina_attempts": len(raw_calls),
             "terminal_event_count": 1 if first.get("success") is True else 0,
@@ -471,6 +503,22 @@ def _project_real_record(
     return {
         "status": record.status.value,
         "backend": record.backend,
+        "execution_backend": (
+            result.get("execution_backend")
+            or provenance.get("execution_backend")
+        ),
+        "secure_runtime": (
+            result.get("secure_runtime")
+            or provenance.get("secure_runtime")
+        ),
+        "sandbox_image_digest": (
+            result.get("sandbox_image_digest")
+            or provenance.get("sandbox_image_digest")
+        ),
+        "cleanup_status": (
+            result.get("cleanup_status")
+            or provenance.get("cleanup_status")
+        ),
         "workflow_id": record.external_workflow_id,
         "vina_attempts": record.attempt,
         "terminal_event_count": len(terminal),

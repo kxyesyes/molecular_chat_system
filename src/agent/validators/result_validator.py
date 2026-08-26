@@ -71,6 +71,20 @@ class AgentResultValidator:
             result.status = ObservationStatus.FAILED
             result.message = domain_error
             result.formatted = ""
+            if result.tool_name in {
+                "molecular_docking",
+                "run_docking",
+                "get_docking_result",
+            }:
+                safe_file_warnings = (
+                    ["Referenced artifact file does not exist"]
+                    if any("file does not exist" in warning for warning in warnings)
+                    else []
+                )
+                warnings = [*safe_file_warnings, domain_error]
+                result.data = None
+                result.artifacts = []
+                result.evidence = []
             result.error = AgentExecutionError(
                 code=AgentErrorCode.INVALID_OUTPUT,
                 message=domain_error,

@@ -926,6 +926,7 @@ class SandboxDockingRunner:
                     "execution_backend": "opensandbox",
                     "secure_runtime": "gvisor",
                     "sandbox_image_digest": provenance.image_digest,
+                    "cleanup_status": provenance.cleanup_status,
                     "docking_inputs": {
                         "receptor_provided": True,
                         "ligand_provided": True,

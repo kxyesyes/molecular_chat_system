@@ -517,6 +517,7 @@ def _redact_normalized_output(value: str, config: BrokerConfig) -> str:
     sanitized = _AUTHORIZATION_HEADER_PATTERN.sub("[REDACTED]", value)
     sensitive_values = {
         config.opensandbox_api_key,
+        config.opensandbox_domain,
         str(config.state_root),
         str(config.socket_path),
         str(config.state_root).replace("\\", "/"),

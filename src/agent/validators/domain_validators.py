@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+import re
 from typing import Any
 
-from src.agent.contracts import ToolResult
+from src.agent.contracts import ToolResult, WorkflowArtifact
+from src.task_runtime.secure_io import read_file_snapshot
+
+
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+_MAX_VERIFIED_POSE_BYTES = 64 * 1024 * 1024
 
 
 class DockingResultValidator:
@@ -32,6 +38,60 @@ class DockingResultValidator:
         )
         return has_box and (legacy or redacted)
 
+    @staticmethod
+    def _has_verified_opensandbox_artifact(
+        result: ToolResult,
+        pose_path: object,
+    ) -> bool:
+        if type(pose_path) is not str:
+            return False
+        matching = [
+            artifact
+            for artifact in result.artifacts
+            if isinstance(artifact, WorkflowArtifact)
+            and artifact.artifact_type == "docking_pose"
+            and artifact.path == pose_path
+            and artifact.mime_type == "chemical/x-pdbqt"
+        ]
+        if len(matching) != 1:
+            return False
+        metadata = matching[0].metadata
+        if not isinstance(metadata, dict):
+            return False
+        digest = metadata.get("sha256")
+        if type(digest) is not str or _SHA256_PATTERN.fullmatch(digest) is None:
+            return False
+        try:
+            snapshot = read_file_snapshot(
+                Path(pose_path),
+                _MAX_VERIFIED_POSE_BYTES,
+            )
+        except ValueError:
+            return False
+        return bool(snapshot.content) and snapshot.sha256 == digest
+
+    @classmethod
+    def _has_opensandbox_trust_contract(
+        cls,
+        result: ToolResult,
+        pose_path: object,
+    ) -> bool:
+        quality = result.quality
+        digest = quality.get("sandbox_image_digest")
+        provenance = result.provenance
+        return bool(
+            quality.get("real_execution") is True
+            and quality.get("secure_runtime") == "gvisor"
+            and type(digest) is str
+            and _SHA256_PATTERN.fullmatch(digest) is not None
+            and quality.get("cleanup_status") == "succeeded"
+            and provenance is not None
+            and provenance.tool_name == "molecular_docking"
+            and provenance.demo_mode is False
+            and provenance.fallback_used is False
+            and cls._has_verified_opensandbox_artifact(result, pose_path)
+        )
+
     def validate(self, result: ToolResult) -> str | None:
         if result.tool_name not in {
             "molecular_docking",
@@ -55,18 +115,32 @@ class DockingResultValidator:
             or best_pose.get("output_file")
             or data.get("pose_file")
         )
-        has_inputs = self._has_verified_inputs(inputs)
+        is_opensandbox = (
+            data.get("execution_backend") == "opensandbox"
+            or result.quality.get("execution_backend") == "opensandbox"
+        )
+        has_inputs = (
+            inputs.get("receptor_provided") is True
+            and inputs.get("ligand_provided") is True
+            if is_opensandbox
+            else self._has_verified_inputs(inputs)
+        )
         pose_exists = bool(pose_path and Path(str(pose_path)).is_file())
         valid_energy = (
             type(energy) in (int, float) and math.isfinite(float(energy))
         )
         pose_count = data.get("total_poses")
         valid_pose_count = type(pose_count) is int and pose_count > 0
+        opensandbox_trusted = (
+            not is_opensandbox
+            or self._has_opensandbox_trust_contract(result, pose_path)
+        )
         if (
             not valid_energy
             or not valid_pose_count
             or not has_inputs
             or not pose_exists
+            or not opensandbox_trusted
         ):
             return (
                 "Docking evidence is incomplete: receptor, ligand, box, "

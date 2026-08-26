@@ -14,6 +14,10 @@ def _valid_run(**overrides):
     run = {
         "status": "succeeded",
         "backend": "temporal",
+        "execution_backend": "opensandbox",
+        "secure_runtime": "gvisor",
+        "sandbox_image_digest": "b" * 64,
+        "cleanup_status": "succeeded",
         "workflow_id": "medchat-docking-task-1",
         "vina_attempts": 1,
         "terminal_event_count": 1,
@@ -54,6 +58,54 @@ def test_report_requires_unique_execution_and_terminal_event():
         "model_version": "1.2.5",
     }
     assert report["runs"][0]["warnings"] == []
+
+
+def test_report_allowlists_verified_opensandbox_execution_contract():
+    from scripts.run_temporal_docking_acceptance import summarize_runs
+
+    report = summarize_runs(
+        [_valid_run(untrusted_internal={"container_id": "raw-container"})],
+        expected_execution_backend="opensandbox",
+    )
+
+    assert report["status"] == "passed"
+    projected = report["runs"][0]
+    assert projected["execution_backend"] == "opensandbox"
+    assert projected["secure_runtime"] == "gvisor"
+    assert projected["sandbox_image_digest"] == "b" * 64
+    assert projected["cleanup_status"] == "succeeded"
+    assert "untrusted_internal" not in projected
+    assert "raw-container" not in json.dumps(report)
+
+
+@pytest.mark.parametrize(
+    ("override", "failure"),
+    [
+        ({"execution_backend": None}, "execution_backend_mismatch"),
+        ({"execution_backend": "local"}, "execution_backend_mismatch"),
+        ({"secure_runtime": None}, "secure_runtime_invalid"),
+        ({"secure_runtime": "runc"}, "secure_runtime_invalid"),
+        ({"sandbox_image_digest": None}, "sandbox_image_digest_invalid"),
+        ({"sandbox_image_digest": "B" * 64}, "sandbox_image_digest_invalid"),
+        ({"sandbox_image_digest": "b" * 63}, "sandbox_image_digest_invalid"),
+        ({"cleanup_status": None}, "cleanup_status_invalid"),
+        ({"cleanup_status": "failed"}, "cleanup_status_invalid"),
+    ],
+)
+def test_report_fails_closed_on_incomplete_opensandbox_execution_contract(
+    override,
+    failure,
+):
+    from scripts.run_temporal_docking_acceptance import summarize_runs
+
+    report = summarize_runs(
+        [_valid_run(**override)],
+        expected_execution_backend="opensandbox",
+    )
+
+    assert report["status"] == "failed"
+    assert failure in report["runs"][0]["failures"]
+    assert report["failure_type_distribution"][failure] == 1
 
 
 def test_report_has_stable_failure_distribution() -> None:
@@ -114,6 +166,15 @@ def test_report_does_not_serialize_credentials_or_absolute_paths():
             _valid_run(
                 warnings=["sk-" + "contract-secret-value-123456789", "C:/private/input.pdb"],
                 debug_payload={"token": "AKIAABCDEFGHIJKLMNOP"},
+                opensandbox_api_key="sk-" + "fake-opensandbox-key-123456789",
+                opensandbox_endpoint="https://sandbox.internal.invalid:9443",
+                sandbox_id="sandbox-internal-id-123",
+                container_id="container-internal-id-456",
+                host_path="D:/private/receptor.pdb",
+                prompt="DO_NOT_SERIALIZE_THIS_PROMPT",
+                receptor_contents="ATOM DO_NOT SERIALIZE",
+                ligand_contents="$$$$ DO NOT SERIALIZE",
+                raw_stderr="RAW STDERR DO NOT SERIALIZE",
             )
         ]
     )
@@ -122,8 +183,38 @@ def test_report_does_not_serialize_credentials_or_absolute_paths():
     assert "sk-contract-secret" not in encoded
     assert "AKIA" not in encoded
     assert "C:/private" not in encoded
+    for forbidden in (
+        "fake-opensandbox-key",
+        "sandbox.internal.invalid",
+        "sandbox-internal-id",
+        "container-internal-id",
+        "D:/private",
+        "DO_NOT_SERIALIZE_THIS_PROMPT",
+        "ATOM DO NOT SERIALIZE",
+        "$$$$ DO NOT SERIALIZE",
+        "RAW STDERR DO NOT SERIALIZE",
+    ):
+        assert forbidden not in encoded
     assert report["status"] == "failed"
     assert "sensitive_output_detected" in report["runs"][0]["failures"]
+
+
+def test_unknown_fields_do_not_change_stable_failure_projection():
+    from scripts.run_temporal_docking_acceptance import summarize_runs
+
+    report = summarize_runs(
+        [
+            _valid_run(cleanup_status="failed", unknown="drop-me"),
+            _valid_run(cleanup_status="failed", another_unknown={"nested": True}),
+        ],
+        expected_execution_backend="opensandbox",
+    )
+
+    assert report["status"] == "failed"
+    assert report["failure_type_distribution"] == {"cleanup_status_invalid": 2}
+    encoded = json.dumps(report, sort_keys=True)
+    assert "unknown" not in encoded
+    assert "drop-me" not in encoded
 
 
 @pytest.mark.parametrize(
