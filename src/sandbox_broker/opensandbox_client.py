@@ -38,6 +38,7 @@ _ALLOWED_LIST_PATTERNS = frozenset({"*", "*.json", "*.pdbqt"})
 _SDK_REQUEST_TIMEOUT_SECONDS = 20
 _SDK_READY_TIMEOUT_SECONDS = 30
 _CLEANUP_COMPLETED_LIMIT = 4096
+_CLEANUP_DRAIN_MARGIN_SECONDS = 1.0
 _RECONCILE_PAGE_SIZE = 100
 _ANSI_OSC_PATTERN = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _ANSI_CSI_PATTERN = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-_])")
@@ -216,6 +217,9 @@ class SandboxClient(Protocol):
         raise NotImplementedError
 
     async def destroy_by_job_id(self, job_id: str) -> int:
+        raise NotImplementedError
+
+    async def drain_cleanup(self) -> None:
         raise NotImplementedError
 
 
@@ -674,9 +678,14 @@ class OpenSandboxClient:
             if sandbox_factory is None
             else sandbox_factory
         )
-        self._cleanup_in_flight: dict[str, asyncio.Task[None]] = {}
+        self._cleanup_in_flight: dict[tuple[str, str], asyncio.Task[Any]] = {}
         self._cleanup_completed: OrderedDict[str, None] = OrderedDict()
         self._cleanup_completed_limit = _CLEANUP_COMPLETED_LIMIT
+        self._cleanup_hard_timeout_seconds = float(_SDK_REQUEST_TIMEOUT_SECONDS)
+        self._cleanup_drain_margin_seconds = _CLEANUP_DRAIN_MARGIN_SECONDS
+        self._cleanup_generation = 0
+        self._cleanup_failure_generation = 0
+        self._cleanup_reported_failure_generation = 0
         self._cleanup_lock = asyncio.Lock()
 
     def _handle(self, handle: object) -> SandboxHandle:
@@ -715,8 +724,8 @@ class OpenSandboxClient:
         except SandboxProtocolError:
             if raw is not None:
                 try:
-                    await self._factory.destroy(raw)
-                except Exception:
+                    await self._perform_cleanup(lambda: self._factory.destroy(raw))
+                except BaseException:
                     raise SandboxProtocolError(
                         "the sandbox service returned an invalid identifier"
                     ) from None
@@ -894,13 +903,30 @@ class OpenSandboxClient:
             stderr=_finalize_command_output(stderr_buffer, self._config),
         )
 
-    async def _perform_cleanup(self, cleanup: Any) -> None:
+    async def _perform_cleanup(self, cleanup: Any) -> Any:
+        operation = asyncio.create_task(cleanup())
+        operation.add_done_callback(self._consume_cleanup_task)
         try:
-            await cleanup()
+            done, _ = await asyncio.wait(
+                {operation},
+                timeout=self._cleanup_hard_timeout_seconds,
+            )
+            if operation not in done:
+                operation.cancel()
+                # Deliver cancellation to normal SDK/httpx coroutines without
+                # waiting on cancellation-resistant third-party code.
+                await asyncio.sleep(0)
+                raise SandboxDestroyError("sandbox cleanup failed")
+            return operation.result()
+        except asyncio.CancelledError:
+            operation.cancel()
+            raise
         except SandboxDependencyUnavailableError:
             raise SandboxDependencyUnavailableError(
                 "the pinned OpenSandbox SDK is unavailable"
             ) from None
+        except SandboxDestroyError:
+            raise
         except Exception:
             raise SandboxDestroyError("sandbox cleanup failed") from None
 
@@ -917,33 +943,117 @@ class OpenSandboxClient:
         cleanup: Any,
     ) -> None:
         succeeded = False
+        cleanup_key = ("sandbox", sandbox_id)
         try:
             await self._perform_cleanup(cleanup)
             succeeded = True
         finally:
             task = asyncio.current_task()
             async with self._cleanup_lock:
-                if self._cleanup_in_flight.get(sandbox_id) is task:
-                    del self._cleanup_in_flight[sandbox_id]
+                if self._cleanup_in_flight.get(cleanup_key) is task:
+                    del self._cleanup_in_flight[cleanup_key]
                 if succeeded:
                     self._cleanup_completed[sandbox_id] = None
                     self._cleanup_completed.move_to_end(sandbox_id)
                     while len(self._cleanup_completed) > self._cleanup_completed_limit:
                         self._cleanup_completed.popitem(last=False)
+                else:
+                    self._cleanup_failure_generation += 1
 
     async def _cleanup_once(self, sandbox_id: str, cleanup: Any) -> None:
+        cleanup_key = ("sandbox", sandbox_id)
         async with self._cleanup_lock:
             if sandbox_id in self._cleanup_completed:
                 self._cleanup_completed.move_to_end(sandbox_id)
                 return
-            task = self._cleanup_in_flight.get(sandbox_id)
+            task = self._cleanup_in_flight.get(cleanup_key)
             if task is None:
                 task = asyncio.create_task(
                     self._perform_tracked_cleanup(sandbox_id, cleanup)
                 )
-                self._cleanup_in_flight[sandbox_id] = task
+                self._cleanup_generation += 1
+                self._cleanup_in_flight[cleanup_key] = task
                 task.add_done_callback(self._consume_cleanup_task)
         await asyncio.shield(task)
+
+    async def _perform_tracked_reconciliation(
+        self,
+        cleanup_key: tuple[str, str],
+        cleanup: Any,
+    ) -> Any:
+        succeeded = False
+        try:
+            result = await self._perform_cleanup(cleanup)
+            if (
+                type(result) is not int
+                or not 0 <= result <= _RECONCILE_PAGE_SIZE
+            ):
+                raise SandboxProtocolError(
+                    "the sandbox service returned an invalid reconciliation result"
+                )
+            succeeded = True
+            return result
+        finally:
+            task = asyncio.current_task()
+            async with self._cleanup_lock:
+                if self._cleanup_in_flight.get(cleanup_key) is task:
+                    del self._cleanup_in_flight[cleanup_key]
+                if not succeeded:
+                    self._cleanup_failure_generation += 1
+
+    async def drain_cleanup(self) -> None:
+        """Wait for a stable empty cleanup set within one fixed deadline."""
+
+        loop = asyncio.get_running_loop()
+        total_timeout = max(
+            0.001,
+            float(self._cleanup_hard_timeout_seconds)
+            + float(self._cleanup_drain_margin_seconds),
+        )
+        deadline = loop.time() + total_timeout
+        while True:
+            async with self._cleanup_lock:
+                snapshot = tuple(self._cleanup_in_flight.values())
+                generation = self._cleanup_generation
+                if not snapshot:
+                    failed = (
+                        self._cleanup_failure_generation
+                        > self._cleanup_reported_failure_generation
+                    )
+                    if failed:
+                        self._cleanup_reported_failure_generation = (
+                            self._cleanup_failure_generation
+                        )
+                        raise SandboxDestroyError("sandbox cleanup failed")
+            if snapshot:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise SandboxDestroyError("sandbox cleanup failed")
+                done, _ = await asyncio.wait(snapshot, timeout=remaining)
+                if len(done) != len(snapshot):
+                    raise SandboxDestroyError("sandbox cleanup failed")
+                continue
+
+            # A cleanup can start immediately after the first empty check.
+            # Yield once and require both emptiness and generation stability.
+            await asyncio.sleep(0)
+            async with self._cleanup_lock:
+                if (
+                    self._cleanup_in_flight
+                    or self._cleanup_generation != generation
+                ):
+                    if loop.time() >= deadline:
+                        raise SandboxDestroyError("sandbox cleanup failed")
+                    continue
+                if (
+                    self._cleanup_failure_generation
+                    > self._cleanup_reported_failure_generation
+                ):
+                    self._cleanup_reported_failure_generation = (
+                        self._cleanup_failure_generation
+                    )
+                    raise SandboxDestroyError("sandbox cleanup failed")
+                return
 
     async def destroy(self, handle: SandboxHandle) -> None:
         validated_handle = self._handle(handle)
@@ -970,14 +1080,18 @@ class OpenSandboxClient:
             raise SandboxDependencyUnavailableError(
                 "the pinned OpenSandbox SDK metadata filter is unavailable"
             )
-        try:
-            destroyed = await operation(validated_job_id)
-        except SandboxDependencyUnavailableError:
-            raise
-        except Exception:
-            raise SandboxDestroyError("sandbox cleanup failed") from None
-        if type(destroyed) is not int or not 0 <= destroyed <= _RECONCILE_PAGE_SIZE:
-            raise SandboxProtocolError(
-                "the sandbox service returned an invalid reconciliation result"
-            )
-        return destroyed
+        cleanup_key = ("job", validated_job_id)
+
+        async def cleanup() -> int:
+            return await operation(validated_job_id)
+
+        async with self._cleanup_lock:
+            task = self._cleanup_in_flight.get(cleanup_key)
+            if task is None:
+                task = asyncio.create_task(
+                    self._perform_tracked_reconciliation(cleanup_key, cleanup)
+                )
+                self._cleanup_generation += 1
+                self._cleanup_in_flight[cleanup_key] = task
+                task.add_done_callback(self._consume_cleanup_task)
+        return await asyncio.shield(task)

@@ -21,6 +21,7 @@ from src.sandbox_broker.models import (
 from src.sandbox_broker.opensandbox_client import (
     OpenSandboxClient,
     SandboxCommandResult,
+    SandboxDestroyError,
     SandboxHandle,
 )
 from src.sandbox_broker.service import (
@@ -118,6 +119,9 @@ class FakeSandboxClient:
 
     async def destroy_by_id(self, sandbox_id: str) -> None:
         self.destroyed_ids.append(sandbox_id)
+
+    async def drain_cleanup(self) -> None:
+        return None
 
 
 class _UploadRecordingFactory:
@@ -1675,6 +1679,52 @@ def test_stop_sanitizes_internal_baseexception_without_context_or_cause(
     assert "private-marker" not in repr(failure)
     assert failure.__cause__ is None
     assert failure.__context__ is None
+
+
+def test_stop_drains_adapter_cleanup_and_reports_timeout_once(tmp_path: Path) -> None:
+    class SlowAdapterFactory(_UploadRecordingFactory):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.cancelled = False
+
+        async def destroy_by_id(self, sandbox_id: str) -> None:
+            del sandbox_id
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+    async def scenario() -> tuple[OpenSandboxClient, SlowAdapterFactory, SandboxBrokerService]:
+        config = _config(tmp_path)
+        factory = SlowAdapterFactory()
+        client = OpenSandboxClient(config, sandbox_factory=factory)
+        client._cleanup_hard_timeout_seconds = 0.02
+        client._cleanup_drain_margin_seconds = 0.05
+        store = BrokerStore(config.state_root / "broker.sqlite")
+        service = SandboxBrokerService(
+            config,
+            store,
+            client,
+            ArtifactRegistry(config.state_root, store),
+        )
+        cleanup = asyncio.create_task(client.destroy_by_id("sandbox-stop-drain"))
+        await factory.started.wait()
+        with pytest.raises(StopIncomplete, match="shutdown is incomplete"):
+            await service.stop(timeout=0.5)
+        with pytest.raises(SandboxDestroyError):
+            await cleanup
+        assert client._cleanup_in_flight == {}
+        assert service._cleanup_tasks == {}
+        await service.stop(timeout=0.5)
+        return client, factory, service
+
+    client, factory, service = asyncio.run(scenario())
+    assert factory.cancelled is True
+    assert client._cleanup_in_flight == {}
+    assert service._cleanup_tasks == {}
 
 
 def test_terminal_wait_index_is_constant_after_one_thousand_jobs(

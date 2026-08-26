@@ -1313,6 +1313,152 @@ def test_cleanup_completion_cache_refreshes_recency_on_hit(tmp_path: Path) -> No
     assert fake.destroyed_by_id.count("sandbox-c") == 1
 
 
+@pytest.mark.parametrize("cleanup_count", [3, 6])
+def test_slow_cancellable_cleanups_timeout_drain_and_leave_no_inflight(
+    tmp_path: Path,
+    cleanup_count: int,
+) -> None:
+    class SlowCleanupFactory(FakeSandboxFactory):
+        def __init__(self) -> None:
+            super().__init__()
+            self.all_started = asyncio.Event()
+            self.started: list[str] = []
+            self.cancelled: list[str] = []
+            self.block = True
+
+        async def destroy_by_id(self, sandbox_id: str) -> None:
+            self.started.append(sandbox_id)
+            if len(self.started) == cleanup_count:
+                self.all_started.set()
+            if not self.block:
+                return
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.append(sandbox_id)
+                raise
+
+    async def scenario() -> tuple[OpenSandboxClient, SlowCleanupFactory, list[object]]:
+        fake = SlowCleanupFactory()
+        client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+        client._cleanup_hard_timeout_seconds = 0.02
+        client._cleanup_drain_margin_seconds = 0.05
+        calls = [
+            asyncio.create_task(client.destroy_by_id(f"sandbox-slow-{index}"))
+            for index in range(cleanup_count)
+        ]
+        await fake.all_started.wait()
+        results = await asyncio.gather(*calls, return_exceptions=True)
+        with pytest.raises(SandboxDestroyError, match="cleanup failed"):
+            await client.drain_cleanup()
+        await client.drain_cleanup()
+        fake.block = False
+        await client.destroy_by_id("sandbox-slow-0")
+        await asyncio.sleep(0)
+        return client, fake, results
+
+    client, fake, results = asyncio.run(scenario())
+
+    assert all(isinstance(result, SandboxDestroyError) for result in results)
+    assert len(fake.cancelled) == cleanup_count
+    assert fake.started.count("sandbox-slow-0") == 2
+    assert client._cleanup_in_flight == {}
+
+
+def test_cancelled_cleanup_caller_still_reaches_adapter_hard_timeout(
+    tmp_path: Path,
+) -> None:
+    class SlowCleanupFactory(FakeSandboxFactory):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.cancelled = False
+
+        async def destroy(self, raw: FakeRawSandbox) -> None:
+            del raw
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+    async def scenario() -> tuple[OpenSandboxClient, SlowCleanupFactory]:
+        fake = SlowCleanupFactory()
+        client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+        client._cleanup_hard_timeout_seconds = 0.02
+        client._cleanup_drain_margin_seconds = 0.05
+        caller = asyncio.create_task(
+            client.destroy(SandboxHandle("sandbox-caller", fake.raw))
+        )
+        await fake.started.wait()
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        with pytest.raises(SandboxDestroyError):
+            await client.drain_cleanup()
+        await client.drain_cleanup()
+        return client, fake
+
+    client, fake = asyncio.run(scenario())
+    assert fake.cancelled is True
+    assert client._cleanup_in_flight == {}
+
+
+def test_cancellation_resistant_cleanup_is_detached_and_exception_consumed(
+    tmp_path: Path,
+) -> None:
+    class ResistantCleanupFactory(FakeSandboxFactory):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.cancel_seen = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def destroy_by_id(self, sandbox_id: str) -> None:
+            del sandbox_id
+            self.started.set()
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancel_seen.set()
+                await self.release.wait()
+            raise RuntimeError("private-marker /private/cleanup")
+
+    async def scenario() -> tuple[OpenSandboxClient, ResistantCleanupFactory, list[dict[str, object]]]:
+        fake = ResistantCleanupFactory()
+        client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+        client._cleanup_hard_timeout_seconds = 0.02
+        client._cleanup_drain_margin_seconds = 0.05
+        loop_errors: list[dict[str, object]] = []
+        loop = asyncio.get_running_loop()
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+        try:
+            cleanup = asyncio.create_task(
+                client.destroy_by_id("sandbox-resistant")
+            )
+            await fake.started.wait()
+            with pytest.raises(SandboxDestroyError, match="cleanup failed"):
+                await cleanup
+            with pytest.raises(SandboxDestroyError, match="cleanup failed"):
+                await client.drain_cleanup()
+            await client.drain_cleanup()
+            assert client._cleanup_in_flight == {}
+            assert fake.cancel_seen.is_set()
+            fake.release.set()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(previous_handler)
+        return client, fake, loop_errors
+
+    client, fake, loop_errors = asyncio.run(scenario())
+    assert fake.cancel_seen.is_set()
+    assert client._cleanup_in_flight == {}
+    assert loop_errors == []
+
+
 def test_destroy_by_job_id_is_a_fixed_metadata_filtered_compensation(
     tmp_path: Path,
 ) -> None:
@@ -1333,6 +1479,43 @@ def test_destroy_by_job_id_is_a_fixed_metadata_filtered_compensation(
     destroyed, fake = asyncio.run(scenario())
     assert destroyed == 1
     assert fake.job_ids == ["job-1"]
+
+
+def test_destroy_by_job_id_is_hard_bounded_and_visible_to_drain(
+    tmp_path: Path,
+) -> None:
+    class SlowCompensationFactory(FakeSandboxFactory):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.cancelled = False
+
+        async def destroy_by_job_id(self, job_id: str) -> int:
+            del job_id
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+    async def scenario() -> tuple[OpenSandboxClient, SlowCompensationFactory]:
+        fake = SlowCompensationFactory()
+        client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+        client._cleanup_hard_timeout_seconds = 0.02
+        client._cleanup_drain_margin_seconds = 0.05
+        cleanup = asyncio.create_task(client.destroy_by_job_id("job-slow"))
+        await fake.started.wait()
+        with pytest.raises(SandboxDestroyError, match="cleanup failed"):
+            await cleanup
+        with pytest.raises(SandboxDestroyError, match="cleanup failed"):
+            await client.drain_cleanup()
+        await client.drain_cleanup()
+        return client, fake
+
+    client, fake = asyncio.run(scenario())
+    assert fake.cancelled is True
+    assert client._cleanup_in_flight == {}
 
 
 def test_official_reconciliation_lists_only_fixed_job_metadata_then_kills(

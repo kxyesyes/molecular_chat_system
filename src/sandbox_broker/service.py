@@ -298,14 +298,13 @@ class SandboxBrokerService:
         else:
             wait_seconds = float(timeout)
 
-        completed_shutdown_failed = False
         async with self._lifecycle_lock:
             shutdown = self._shutdown_task
             if shutdown is not None and shutdown.done():
                 try:
                     shutdown.result()
                 except BaseException:
-                    completed_shutdown_failed = True
+                    pass
                 self._shutdown_task = None
                 self._stopping = False
                 if self._consumer_task is not None and self._consumer_task.done():
@@ -319,9 +318,9 @@ class SandboxBrokerService:
                     and not self._create_tasks
                     and not self._cleanup_tasks
                 ):
-                    if completed_shutdown_failed:
-                        raise StopIncomplete()
-                    return
+                    drain_cleanup = getattr(self.client, "drain_cleanup", None)
+                    if not callable(drain_cleanup):
+                        return
                 self._started = False
                 self._stopping = True
                 shutdown = asyncio.create_task(
@@ -412,6 +411,13 @@ class SandboxBrokerService:
             except asyncio.TimeoutError:
                 for task in tracked:
                     self._consume_task_exception(task) if task.done() else None
+                raise RuntimeError("broker cleanup did not finish") from None
+        drain_cleanup = getattr(self.client, "drain_cleanup", None)
+        if callable(drain_cleanup):
+            try:
+                await drain_cleanup()
+            except BaseException:
+                raise RuntimeError("broker cleanup drain failed") from None
         self._consumer_task = None
 
     async def _drain_unserviceable_queue(self) -> None:
@@ -1487,8 +1493,15 @@ class SandboxBrokerService:
             )
         except asyncio.TimeoutError:
             cleanup_task.cancel()
-            if self._cleanup_tasks.get(job_id) is cleanup_task:
-                del self._cleanup_tasks[job_id]
+            await asyncio.sleep(0)
+            if not cleanup_task.done():
+                # A non-production fake/third-party coroutine may suppress
+                # cancellation.  Its exception is still consumed by the done
+                # callback, but it cannot retain an unbounded service registry
+                # entry or block the broker's hard shutdown boundary.
+                cleanup_task.set_name(f"sandbox-cleanup-isolated-{job_id}")
+                if self._cleanup_tasks.get(job_id) is cleanup_task:
+                    del self._cleanup_tasks[job_id]
             if not cleanup_task.done():
                 cleanup_task.add_done_callback(self._consume_task_exception)
             if cleanup_tracking_active:
