@@ -262,6 +262,7 @@ def test_dependency_profiles_are_exact_and_sdk_compatible() -> None:
         "pydantic",
         "python-dateutil",
         "python-multipart",
+        "starlette",
         "uvicorn",
     }
     expected_versions = {
@@ -272,6 +273,7 @@ def test_dependency_profiles_are_exact_and_sdk_compatible() -> None:
         "pydantic": "2.5.0",
         "python-dateutil": "2.8.2",
         "python-multipart": "0.0.6",
+        "starlette": "0.27.0",
         "uvicorn": "0.24.0",
     }
     for name, version in expected_versions.items():

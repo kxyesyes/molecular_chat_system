@@ -1518,6 +1518,145 @@ def test_parser_cleanup_swallows_close_failure_and_is_repeat_safe() -> None:
     assert parser._files_to_close_on_error == []
 
 
+def test_owned_multipart_parser_supports_legacy_signature_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.sandbox_broker.app as app_module
+
+    observed: list[dict[str, object]] = []
+
+    class LegacyParser:
+        def __init__(
+            self,
+            headers: object,
+            stream: object,
+            *,
+            max_files: int,
+            max_fields: int,
+        ) -> None:
+            observed.append(
+                {
+                    "headers": headers,
+                    "stream": stream,
+                    "max_files": max_files,
+                    "max_fields": max_fields,
+                }
+            )
+            self._files_to_close_on_error: list[object] = []
+
+        async def parse(self) -> FormData:
+            return FormData()
+
+    async def stream() -> object:
+        if False:
+            yield b""
+
+    stream_value = stream()
+    request = SimpleNamespace(headers=object(), stream=lambda: stream_value)
+    monkeypatch.setattr(app_module, "MultiPartParser", LegacyParser)
+
+    result = asyncio.run(app_module._parse_owned_multipart(request))
+    assert isinstance(result, FormData)
+    assert len(observed) == 1
+    assert observed[0]["headers"] is request.headers
+    assert observed[0]["stream"] is stream_value
+    assert observed[0]["max_files"] == 2
+    assert observed[0]["max_fields"] == 1
+    assert "max_part_size" not in observed[0]
+
+
+def test_owned_multipart_parser_passes_supported_limit_and_never_retries_typeerror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.sandbox_broker.app as app_module
+
+    calls: list[dict[str, object]] = []
+
+    class ModernParser:
+        def __init__(
+            self,
+            headers: object,
+            stream: object,
+            *,
+            max_files: int,
+            max_fields: int,
+            max_part_size: int,
+        ) -> None:
+            calls.append(
+                {
+                    "headers": headers,
+                    "stream": stream,
+                    "max_files": max_files,
+                    "max_fields": max_fields,
+                    "max_part_size": max_part_size,
+                }
+            )
+            raise TypeError("parser-internal-typeerror")
+
+    async def stream() -> object:
+        if False:
+            yield b""
+
+    request = SimpleNamespace(headers=object(), stream=lambda: stream())
+    monkeypatch.setattr(app_module, "MultiPartParser", ModernParser)
+
+    with pytest.raises(TypeError, match="parser-internal-typeerror"):
+        asyncio.run(app_module._parse_owned_multipart(request))
+    assert len(calls) == 1
+    assert calls[0]["max_files"] == 2
+    assert calls[0]["max_fields"] == 1
+    assert calls[0]["max_part_size"] == 64 * 1024
+
+
+def test_full_api_rejects_one_file_over_input_max_below_transport_total_and_closes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import starlette.formparsers as formparsers
+    from src.sandbox_broker.app import create_app
+
+    service, store, config, _ = _service(tmp_path)
+    real_spooled_temporary_file = tempfile.SpooledTemporaryFile
+    created: list[object] = []
+
+    def tracked_spool(*args: object, **kwargs: object) -> object:
+        spool = real_spooled_temporary_file(*args, **kwargs)
+        created.append(spool)
+        return spool
+
+    monkeypatch.setattr(formparsers, "SpooledTemporaryFile", tracked_spool)
+    ligand = b"L" * (config.ligand_max_bytes + 1)
+    declared_payload = len(ligand) + len(b"ATOM\n")
+    transport_limit = (
+        config.receptor_max_bytes
+        + config.ligand_max_bytes
+        + 64 * 1024
+        + 2 * 1024 * 1024
+    )
+    assert declared_payload < transport_limit
+    app = create_app(config, service=service)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/docking/jobs",
+            headers={"Idempotency-Key": "single-file-over-input-max"},
+            data={
+                "request_json": json.dumps(
+                    {"center": [1, 2, 3], "size": [20, 20, 20]}
+                )
+            },
+            files={
+                "receptor": ("target.pdb", b"ATOM\n"),
+                "ligand": ("compound.sdf", ligand),
+            },
+        )
+    assert response.status_code == 422
+    assert response.json() == {"error": {"code": "invalid_input"}}
+    assert len(created) == 2
+    assert all(spool.closed for spool in created)
+    assert store.active_jobs() == []
+
+
 @pytest.mark.parametrize("disconnect", [False, True])
 def test_transport_gate_propagates_cancellation_and_client_disconnect_without_state(
     disconnect: bool,

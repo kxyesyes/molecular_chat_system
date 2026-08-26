@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Callable
@@ -237,13 +238,15 @@ async def _close_form_uploads(form: FormData) -> None:
 
 
 async def _parse_owned_multipart(request: Request) -> FormData:
-    parser = MultiPartParser(
-        headers=request.headers,
-        stream=request.stream(),
-        max_files=2,
-        max_fields=1,
-        max_part_size=_REQUEST_JSON_MAX_CHARS,
-    )
+    parser_arguments: dict[str, object] = {
+        "headers": request.headers,
+        "stream": request.stream(),
+        "max_files": 2,
+        "max_fields": 1,
+    }
+    if "max_part_size" in inspect.signature(MultiPartParser).parameters:
+        parser_arguments["max_part_size"] = _REQUEST_JSON_MAX_CHARS
+    parser = MultiPartParser(**parser_arguments)
     try:
         return await parser.parse()
     except BaseException:
