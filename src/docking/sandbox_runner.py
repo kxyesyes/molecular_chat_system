@@ -42,6 +42,7 @@ _ARTIFACT_MAX_BYTES = 100 * 1024 * 1024
 _JSON_MAX_BYTES = 1024 * 1024
 _POLL_SECONDS = 0.5
 _TOTAL_DEADLINE_SECONDS = 330.0
+_RENAME_NOREPLACE = 1
 _SUBMIT_TIMEOUT = httpx.Timeout(connect=2.0, read=30.0, write=30.0, pool=2.0)
 _POLL_TIMEOUT = httpx.Timeout(connect=2.0, read=5.0, write=5.0, pool=2.0)
 _DOWNLOAD_TIMEOUT = httpx.Timeout(connect=2.0, read=15.0, write=5.0, pool=2.0)
@@ -264,6 +265,46 @@ def _deadline_timeout(template: httpx.Timeout, deadline: float) -> httpx.Timeout
         write=clipped(template.write),
         pool=clipped(template.pool),
     )
+
+
+def _rename_noreplace(
+    source: Path | str,
+    destination: Path | str,
+    parent_descriptor: int | None,
+) -> None:
+    """Atomically publish without replacement on Linux and Windows."""
+
+    if parent_descriptor is None:
+        if os.name == "posix":
+            raise ValueError("unsafe artifact output")
+        os.rename(source, destination)
+        return
+    if os.name != "posix":
+        raise ValueError("unsafe artifact output")
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise ValueError("unsafe artifact output")
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        parent_descriptor,
+        os.fsencode(source),
+        parent_descriptor,
+        os.fsencode(destination),
+        _RENAME_NOREPLACE,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
 
 
 def _json_payload(response: httpx.Response, deadline: float) -> object:
@@ -867,21 +908,19 @@ class SandboxDockingRunner:
             if _cancelled(cancel_event):
                 raise _Cancelled
             final_identity = _stat_identity(after)
-            if parent_descriptor is not None:
-                os.link(
-                    temporary_name,
-                    final_name,
-                    src_dir_fd=parent_descriptor,
-                    dst_dir_fd=parent_descriptor,
-                    follow_symlinks=False,
-                )
-            else:
-                os.link(temporary, final, follow_symlinks=False)
+            if parent_descriptor is None:
+                os.close(descriptor)
+                descriptor = None
+            _rename_noreplace(
+                temporary_name if parent_descriptor is not None else temporary,
+                final_name if parent_descriptor is not None else final,
+                parent_descriptor,
+            )
             final_linked = True
+            temporary_exists = False
             self._check_deadline(deadline)
             if _cancelled(cancel_event):
                 raise _Cancelled
-            linked_source = os.fstat(descriptor)
             linked_final = (
                 os.stat(
                     final_name,
@@ -895,21 +934,11 @@ class SandboxDockingRunner:
                 not stat.S_ISREG(linked_final.st_mode)
                 or stat.S_ISLNK(linked_final.st_mode)
                 or bool(getattr(linked_final, "st_file_attributes", 0) & 0x400)
-                or linked_source.st_nlink != 2
-                or linked_final.st_nlink != 2
-                or _stat_identity(linked_source) != final_identity
+                or linked_final.st_nlink != 1
                 or _stat_identity(linked_final) != final_identity
                 or linked_final.st_size != artifact.size_bytes
             ):
                 raise ValueError("unsafe artifact output")
-            if parent_descriptor is None:
-                os.close(descriptor)
-                descriptor = None
-            if parent_descriptor is not None:
-                os.unlink(temporary_name, dir_fd=parent_descriptor)
-            else:
-                temporary.unlink()
-            temporary_exists = False
             final_metadata = (
                 os.stat(
                     final_name,

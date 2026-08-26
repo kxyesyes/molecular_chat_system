@@ -621,6 +621,13 @@ def test_existing_result_collision_fails_closed_without_overwrite(tmp_path: Path
     assert final.read_bytes() == b"untrusted-existing-result\n"
 
 
+def test_posix_publish_uses_descriptor_relative_rename_noreplace() -> None:
+    source = Path(runner_module.__file__).read_text(encoding="utf-8")
+
+    assert "renameat2" in source
+    assert "RENAME_NOREPLACE" in source
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX symlink mode semantics required")
 def test_output_symlink_is_rejected_before_chmod_side_effect(tmp_path: Path) -> None:
     payload, _, _ = _inputs(tmp_path)
@@ -648,18 +655,18 @@ def test_parent_swap_during_descriptor_relative_publish_fails_closed(
     pose = _pose(-7.2)
     job_root = tmp_path / "output" / "docking_parent-swap"
     moved = tmp_path / "output" / "moved-parent-swap"
-    real_link = os.link
+    real_rename = runner_module._rename_noreplace
     swapped = False
 
-    def swap_then_link(src, dst, *args, **kwargs):
+    def swap_then_rename(src, dst, parent_descriptor):
         nonlocal swapped
         if dst == "result.pdbqt" and not swapped:
             os.rename(job_root, moved)
             job_root.mkdir(mode=0o700)
             swapped = True
-        return real_link(src, dst, *args, **kwargs)
+        return real_rename(src, dst, parent_descriptor)
 
-    monkeypatch.setattr(runner_module.os, "link", swap_then_link)
+    monkeypatch.setattr(runner_module, "_rename_noreplace", swap_then_rename)
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/docking/jobs":
@@ -758,7 +765,7 @@ def test_cancellation_windows_remove_uncommitted_pose_and_cancel_broker(
     ).exists()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX immutable link publication test")
+@pytest.mark.skipif(os.name != "posix", reason="POSIX immutable rename publication test")
 def test_cancellation_during_publish_removes_linked_pose(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -767,14 +774,14 @@ def test_cancellation_during_publish_removes_linked_pose(
     pose = _pose(-7.2)
     cancel = threading.Event()
     cancellations: list[str] = []
-    real_link = os.link
+    real_rename = runner_module._rename_noreplace
 
-    def link_then_cancel(*args, **kwargs):
-        result = real_link(*args, **kwargs)
+    def rename_then_cancel(*args, **kwargs):
+        result = real_rename(*args, **kwargs)
         cancel.set()
         return result
 
-    monkeypatch.setattr(runner_module.os, "link", link_then_cancel)
+    monkeypatch.setattr(runner_module, "_rename_noreplace", rename_then_cancel)
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/docking/jobs":
