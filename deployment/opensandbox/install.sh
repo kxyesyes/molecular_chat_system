@@ -812,6 +812,8 @@ def stage_generation(
                 != (staged_metadata.st_dev, staged_metadata.st_ino)
             ):
                 fail()
+            if read_source(path) != content:
+                fail()
             if preview_fail_after and len(committed) == preview_fail_after:
                 fail()
     except BaseException:
@@ -888,12 +890,26 @@ if image_match.group(1).startswith("registry.invalid/"):
     fail()
 
 try:
-    template = read_source(template_path).decode("utf-8")
+    template_source = read_source(template_path)
     opensandbox_unit = read_source(opensandbox_unit_path)
     broker_unit = read_source(broker_unit_path)
     firewall_unit = read_source(firewall_unit_path)
     firewall_script = read_source(firewall_script_path)
     worker_unit = read_source(worker_unit_path)
+except UnicodeError:
+    fail()
+committed_assets = (
+    template_source,
+    opensandbox_unit,
+    broker_unit,
+    firewall_unit,
+    firewall_script,
+    worker_unit,
+)
+if any(b"\r" in content for content in committed_assets):
+    fail()
+try:
+    template = template_source.decode("utf-8")
 except UnicodeError:
     fail()
 token = '"${' + 'OPEN_SANDBOX_API_KEY' + '}"'

@@ -76,7 +76,7 @@ _ASSET_PATHS = (
 )
 _PINNED_ASSET_SHA256 = {
     "deployment/opensandbox/sandbox.toml": (
-        "f39656f50a5ed7736f47a0a79c9404e7296f89c81ac15edaf8a0205d124ca128"
+        "03362ff1a7fdea840a23a15397be611c8aca1efeef5b18231b1242368f1f84aa"
     ),
     "deployment/opensandbox/medchat-opensandbox.service": (
         "c9292d8ffb7703a5a23f812719f52b092eba98cca9d289d699ad9bd84b5ffa6f"
@@ -88,13 +88,13 @@ _PINNED_ASSET_SHA256 = {
         "d08a8ed8795d2c505099fd9ddf8660831fc9780d251d46c3f8132d99ce86a3e1"
     ),
     "deployment/opensandbox/configure-firewall.sh": (
-        "266baaa6b74a6a55987b5e30e6b57c80e724379458d5c2d8c74cce94e157199f"
+        "826e06ab4a45fc8f2e3f9728287db89ee806a3389cd619b055dde2c18406261f"
     ),
     "deployment/opensandbox/opensandbox.env.example": (
         "bdd4b347aacd786c555250f5733566d5fd8723e15c44aeb048af237852d089bf"
     ),
     "deployment/opensandbox/install.sh": (
-        "79bcc3b2b5a5b80770549160aea9ae0fd3304c522d5ded34072daa5189913b20"
+        "81c959af77f9e7fdaab438347883c8711dba75cb1479cb034fa7ff0ecd634c90"
     ),
     "deployment/medchat-temporal-worker.service": (
         "15fb8b7faa079b9a33328081c751a75c72a2d68e1b92b676b55150438064f982"
@@ -121,6 +121,7 @@ _STABLE_CODES = frozenset(
         "env_template_unsafe",
         "runsc_unavailable",
         "docker_runtime_unregistered",
+        "docker_network_unsafe",
         "firewall_rule_missing",
         "opensandbox_unhealthy",
         "socket_invalid",
@@ -220,24 +221,27 @@ _PATH_ENVIRONMENT = (
 )
 
 
-def _load_assets(root: Path) -> dict[str, str] | None:
+def _load_assets(root: Path) -> tuple[dict[str, str], dict[str, bytes]] | None:
     assets: dict[str, str] = {}
+    raw_assets: dict[str, bytes] = {}
     try:
         for relative in _ASSET_PATHS:
             path = root / relative
             if not path.is_file() or path.is_symlink():
                 return None
-            assets[relative] = path.read_text(encoding="utf-8")
+            raw = path.read_bytes()
+            raw_assets[relative] = raw
+            assets[relative] = raw.decode("utf-8").replace("\r\n", "\n")
     except (OSError, UnicodeError):
         return None
-    return assets
+    return assets, raw_assets
 
 
-def _asset_identity_matches(assets: dict[str, str]) -> bool:
+def _asset_identity_matches(assets: dict[str, bytes]) -> bool:
     return bool(
         set(assets) == set(_PINNED_ASSET_SHA256)
         and all(
-            hashlib.sha256(content.encode("utf-8")).hexdigest()
+            hashlib.sha256(content).hexdigest()
             == _PINNED_ASSET_SHA256[relative]
             for relative, content in assets.items()
         )
@@ -265,7 +269,7 @@ def _validate_config(text: str) -> str | None:
         return "runtime_not_gvisor"
     docker = config.get("docker", {})
     if (
-        docker.get("network_mode") != "bridge"
+        docker.get("network_mode") != "medchat-opensandbox"
         or type(docker.get("pids_limit")) is not int
         or docker.get("pids_limit") != 128
         or docker.get("no_new_privileges") is not True
@@ -278,10 +282,7 @@ def _validate_config(text: str) -> str | None:
         "/var/lib/opensandbox/approved-empty"
     ]:
         return "host_path_allowlist_unsafe"
-    if config.get("egress") != {
-        "image": "opensandbox/egress:v1.1.4",
-        "mode": "dns",
-    }:
+    if "egress" in config:
         return "docker_policy_unsafe"
     return None
 
@@ -494,37 +495,45 @@ def _validate_firewall_script(text: str) -> bool:
         "set -eu",
         "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
         "PORT_RANGE=40000:60000",
-        "CHAIN=MEDCHAT-OPENSANDBOX",
+        "NETWORK_NAME=medchat-opensandbox",
+        "BRIDGE_INTERFACE=br-medchat-sbox",
+        "NETWORK_LABEL=com.medchat.opensandbox.network=v1",
+        "SANDBOX_LABEL=opensandbox.io/sandbox-id",
+        "LEGACY_CHAIN=MEDCHAT-OPENSANDBOX",
         "MAX_LEGACY_RULES=64",
-        "configure_ingress_gate iptables 127.0.0.0/8",
-        "configure_ingress_gate ip6tables ::1/128",
+        "docker network create --driver bridge --internal --ipv6",
+        "docker network inspect",
+        "docker container inspect",
+        "docker ps -aq --no-trunc",
+        '--filter "label=$SANDBOX_LABEL"',
+        "com.docker.network.bridge.name=$BRIDGE_INTERFACE",
+        "com.docker.network.bridge.enable_icc=false",
+        "legacy_sandboxes_present",
+        "configure_family iptables 127.0.0.0/8",
+        "configure_family ip6tables ::1/128",
         "-S DOCKER-USER",
-        "-D DOCKER-USER",
+        '-D "$chain"',
+        "-S INPUT",
+        "-i \"$BRIDGE_INTERFACE\" ! -o \"$BRIDGE_INTERFACE\"",
+        "--ctstate ESTABLISHED,RELATED -j RETURN",
+        "--ctstate NEW -j DROP",
         "--ctdir ORIGINAL",
         "--ctorigdstport",
         "--ctstatus DNAT",
-        "-o br-medchat-sbox",
-        "-j RETURN",
+        "-o \"$BRIDGE_INTERFACE\" ! -s \"$loopback_source\"",
         '"$tool" -w "$WAIT_SECONDS" -t raw',
-        "-S PREROUTING",
-        "-I PREROUTING 1",
+        "-D \"$LEGACY_CHAIN\" -j DROP",
+        "-X \"$LEGACY_CHAIN\"",
         "! -i lo -m addrtype --dst-type LOCAL",
-        '-p tcp -m tcp --dport "$PORT_RANGE"',
-        '"$CHAIN" -j DROP',
-        "-j DROP",
         "firewall_configuration_failed",
         "firewall_migration_failed",
         ">/dev/null 2>&1",
     )
     return bool(
         all(value in text for value in required)
-        and "docker network" not in text
-        and "NETWORK_NAME=" not in text
-        and "BRIDGE_INTERFACE=" not in text
         and "-j ACCEPT" not in text
-        and "-F " not in text
+        and "-F DOCKER-USER" not in text
         and "--flush" not in text
-        and "-X " not in text
         and "--delete-chain" not in text
     )
 
@@ -849,6 +858,8 @@ def _validate_installer(text: str) -> bool:
         "os.fsync(parent_descriptor)",
         "os.O_EXCL",
         "os.replace",
+        "if read_source(path) != content:",
+        'if any(b"\\r" in content for content in committed_assets):',
         "def stage_generation(",
         "def rollback_generation(",
         "MEDCHAT_INSTALL_PREVIEW_FAIL_AFTER",
@@ -939,9 +950,10 @@ def validate_static(root: Path) -> str | None:
 
     try:
         root = Path(root)
-        assets = _load_assets(root)
-        if assets is None:
+        loaded = _load_assets(root)
+        if loaded is None:
             return "asset_missing"
+        assets, raw_assets = loaded
         config_code = _validate_config(
             assets["deployment/opensandbox/sandbox.toml"]
         )
@@ -982,7 +994,7 @@ def validate_static(root: Path) -> str | None:
             assets["deployment/opensandbox/opensandbox.env.example"]
         ):
             return "env_template_unsafe"
-        if not _asset_identity_matches(assets):
+        if not _asset_identity_matches(raw_assets):
             return "asset_identity_mismatch"
         return None
     except Exception:
@@ -1117,89 +1129,163 @@ def _runtime_image_reference() -> str | None:
         return None
 
 
+_NETWORK_NAME = "medchat-opensandbox"
+_BRIDGE_INTERFACE = "br-medchat-sbox"
+_NETWORK_LABEL = "com.medchat.opensandbox.network"
+_SANDBOX_LABEL = "opensandbox.io/sandbox-id"
+
+
+def _docker_network_is_safe() -> bool:
+    formats = {
+        "Name": "{{.Name}}",
+        "Driver": "{{.Driver}}",
+        "Internal": "{{json .Internal}}",
+        "EnableIPv6": "{{json .EnableIPv6}}",
+        "Options": "{{json .Options}}",
+        "Labels": "{{json .Labels}}",
+        "Containers": "{{json .Containers}}",
+    }
+    network: dict[str, object] = {}
+    for name, format_value in formats.items():
+        result = _run_command(
+            (
+                "docker", "network", "inspect", "--format", format_value,
+                _NETWORK_NAME,
+            )
+        )
+        if not result.ok:
+            return False
+        if name in {"Name", "Driver"}:
+            network[name] = result.stdout.strip()
+            continue
+        try:
+            network[name] = json.loads(result.stdout)
+        except (json.JSONDecodeError, TypeError):
+            return False
+    if (
+        not isinstance(network, dict)
+        or network.get("Name") != _NETWORK_NAME
+        or network.get("Driver") != "bridge"
+        or network.get("Internal") is not True
+        or network.get("EnableIPv6") is not True
+        or network.get("Options")
+        != {
+            "com.docker.network.bridge.name": _BRIDGE_INTERFACE,
+            "com.docker.network.bridge.enable_icc": "false",
+        }
+        or network.get("Labels") != {_NETWORK_LABEL: "v1"}
+        or not isinstance(network.get("Containers"), dict)
+    ):
+        return False
+
+    attached = set(network["Containers"])
+    if any(re.fullmatch(r"[0-9a-f]{12,64}", item) is None for item in attached):
+        return False
+    for container_id in sorted(attached):
+        label_result = _run_command(
+            (
+                "docker", "container", "inspect", "--format",
+                '{{index .Config.Labels "opensandbox.io/sandbox-id"}}',
+                container_id,
+            )
+        )
+        networks_result = _run_command(
+            (
+                "docker", "container", "inspect", "--format",
+                "{{json .NetworkSettings.Networks}}", container_id,
+            )
+        )
+        if not label_result.ok or not networks_result.ok:
+            return False
+        try:
+            networks = json.loads(networks_result.stdout)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        sandbox_id = label_result.stdout.strip()
+        if (
+            re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", sandbox_id)
+            is None
+            or not isinstance(networks, dict)
+            or _NETWORK_NAME not in networks
+        ):
+            return False
+
+    labeled_result = _run_command(
+        (
+            "docker", "ps", "-aq", "--no-trunc", "--filter",
+            f"label={_SANDBOX_LABEL}",
+        )
+    )
+    if not labeled_result.ok:
+        return False
+    labeled = {
+        line.strip() for line in labeled_result.stdout.splitlines() if line.strip()
+    }
+    return bool(
+        all(re.fullmatch(r"[0-9a-f]{12,64}", item) for item in labeled)
+        and labeled == attached
+    )
+
+
 def _firewall_rules_present() -> bool:
-    chain = "MEDCHAT-OPENSANDBOX"
-    rule = (
-        "!",
-        "-i",
-        "lo",
-        "-m",
-        "addrtype",
-        "--dst-type",
-        "LOCAL",
-        "-p",
-        "tcp",
-        "-m",
-        "tcp",
-        "--dport",
-        "40000:60000",
-        "-j",
-        chain,
-    )
-    expected_first = (
-        "-A PREROUTING ! -i lo -m addrtype --dst-type LOCAL "
-        "-p tcp -m tcp --dport 40000:60000 -j MEDCHAT-OPENSANDBOX"
-    )
-    expected_chain = (
-        "-N MEDCHAT-OPENSANDBOX\n"
-        "-A MEDCHAT-OPENSANDBOX -j DROP"
-    )
-    for executable in ("iptables", "ip6tables"):
-        present = _run_command(
+    for executable, loopback in (
+        ("iptables", "127.0.0.0/8"),
+        ("ip6tables", "::1/128"),
+    ):
+        docker_rules = (
             (
-                executable,
-                "-w",
-                "5",
-                "-t",
-                "raw",
-                "-C",
-                "PREROUTING",
-                *rule,
-            )
-        )
-        first = _run_command(
+                "-i", _BRIDGE_INTERFACE, "!", "-o", _BRIDGE_INTERFACE,
+                "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
+                "-j", "RETURN",
+            ),
             (
-                executable,
-                "-w",
-                "5",
-                "-t",
-                "raw",
-                "-S",
-                "PREROUTING",
-                "1",
-            )
-        )
-        chain_state = _run_command(
+                "-o", _BRIDGE_INTERFACE, "!", "-s", loopback,
+                "-p", "tcp", "-m", "conntrack", "--ctstatus", "DNAT",
+                "--ctdir", "ORIGINAL", "--ctorigdstport", "40000:60000",
+                "-j", "DROP",
+            ),
             (
-                executable,
-                "-w",
-                "5",
-                "-t",
-                "raw",
-                "-S",
-                chain,
+                "-i", _BRIDGE_INTERFACE, "!", "-o", _BRIDGE_INTERFACE,
+                "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP",
+            ),
+        )
+        input_rule = (
+            "-i", _BRIDGE_INTERFACE, "-m", "conntrack", "--ctstate", "NEW",
+            "-j", "DROP",
+        )
+        docker_state = _run_command(
+            (executable, "-w", "5", "-S", "DOCKER-USER")
+        )
+        input_state = _run_command((executable, "-w", "5", "-S", "INPUT"))
+        if not docker_state.ok or not input_state.ok:
+            return False
+        for position, rule in enumerate(docker_rules, 1):
+            expected = "-A DOCKER-USER " + " ".join(rule)
+            present = _run_command(
+                (executable, "-w", "5", "-C", "DOCKER-USER", *rule)
             )
+            positioned = _run_command(
+                (executable, "-w", "5", "-S", "DOCKER-USER", str(position))
+            )
+            if (
+                not present.ok
+                or not positioned.ok
+                or positioned.stdout.strip() != expected
+                or docker_state.stdout.splitlines().count(expected) != 1
+            ):
+                return False
+        expected_input = "-A INPUT " + " ".join(input_rule)
+        input_present = _run_command(
+            (executable, "-w", "5", "-C", "INPUT", *input_rule)
         )
-        raw_state = _run_command(
-            (executable, "-w", "5", "-t", "raw", "-S")
-        )
-        references = (
-            [
-                line
-                for line in raw_state.stdout.splitlines()
-                if re.search(rf"-[jg] {re.escape(chain)}(?:\s|$)", line)
-            ]
-            if raw_state.ok
-            else []
+        input_first = _run_command(
+            (executable, "-w", "5", "-S", "INPUT", "1")
         )
         if (
-            not present.ok
-            or not first.ok
-            or not chain_state.ok
-            or not raw_state.ok
-            or first.stdout.strip() != expected_first
-            or chain_state.stdout.strip() != expected_chain
-            or references != [expected_first]
+            not input_present.ok
+            or not input_first.ok
+            or input_first.stdout.strip() != expected_input
+            or input_state.stdout.splitlines().count(expected_input) != 1
         ):
             return False
     return True
@@ -1224,6 +1310,9 @@ def validate_runtime() -> str | None:
             return "docker_runtime_unregistered"
         if not isinstance(runtimes, dict) or "runsc" not in runtimes:
             return "docker_runtime_unregistered"
+
+        if not _docker_network_is_safe():
+            return "docker_network_unsafe"
 
         if not _firewall_rules_present():
             return "firewall_rule_missing"

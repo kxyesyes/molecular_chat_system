@@ -185,7 +185,6 @@ def test_adapter_uses_only_pinned_policy_and_fixed_command(tmp_path: Path) -> No
             "image": "medchat-docking@sha256:" + "a" * 64,
             "timeout_seconds": 300,
             "resource": {"cpu": "2", "memory": "4Gi"},
-            "network_default": "deny",
             "entrypoint": ["sleep", "infinity"],
             "metadata": {
                 "medchat.operation": "molecular_docking",
@@ -200,7 +199,7 @@ def test_adapter_uses_only_pinned_policy_and_fixed_command(tmp_path: Path) -> No
     assert fake.destroyed == [handle.sandbox_id]
 
 
-def test_deny_network_policy_has_compatible_pinned_server_egress(
+def test_production_request_uses_gvisor_compatible_internal_network_contract(
     tmp_path: Path,
 ) -> None:
     root = Path(__file__).parents[2]
@@ -211,12 +210,10 @@ def test_deny_network_policy_has_compatible_pinned_server_egress(
 
     asyncio.run(OpenSandboxClient(config(tmp_path), sandbox_factory=fake).create("job-1"))
 
-    assert server_config["docker"]["network_mode"] == "bridge"
-    assert server_config["egress"] == {
-        "image": "opensandbox/egress:v1.1.4",
-        "mode": "dns",
-    }
-    assert fake.create_calls[0]["network_default"] == "deny"
+    assert server_config["docker"]["network_mode"] == "medchat-opensandbox"
+    assert "egress" not in server_config
+    assert "network_default" not in fake.create_calls[0]
+    assert "network_policy" not in fake.create_calls[0]
 
 
 def test_public_api_has_no_dynamic_sandbox_policy_parameters() -> None:
@@ -908,7 +905,6 @@ def test_official_factory_builds_async_nonaccumulating_execution_handlers(
         SandboxManager=object,
         WriteEntry=object,
         SearchEntry=object,
-        NetworkPolicy=object,
         ExecutionHandlers=FakeExecutionHandlers,
         RunCommandOpts=FakeRunCommandOpts,
     )
@@ -985,7 +981,6 @@ def test_official_factory_uses_streaming_read_and_fixed_bounded_list_helper(
         SandboxManager=object,
         WriteEntry=object,
         SearchEntry=ForbiddenSearchEntry,
-        NetworkPolicy=object,
         ExecutionHandlers=FakeExecutionHandlers,
         RunCommandOpts=lambda **values: SimpleNamespace(**values),
     )
@@ -1268,10 +1263,6 @@ def test_official_create_sets_explicit_bounded_transport_and_ready_timeouts(
         def __init__(self, **values: object) -> None:
             connections.append(values)
 
-    class NetworkPolicy:
-        def __init__(self, **values: object) -> None:
-            self.values = values
-
     class Sandbox:
         @classmethod
         async def create(cls, image: str, **values: object) -> object:
@@ -1284,7 +1275,6 @@ def test_official_create_sets_explicit_bounded_transport_and_ready_timeouts(
         SandboxManager=object,
         WriteEntry=object,
         SearchEntry=object,
-        NetworkPolicy=NetworkPolicy,
         ExecutionHandlers=object,
     )
     monkeypatch.setattr(opensandbox_client_module, "_load_official_sdk", lambda: sdk)
@@ -1298,6 +1288,7 @@ def test_official_create_sets_explicit_bounded_transport_and_ready_timeouts(
     assert request_timeout.total_seconds() == 20  # type: ignore[union-attr]
     assert ready_timeout.total_seconds() == 30  # type: ignore[union-attr]
     assert remote_lifetime.total_seconds() == 300  # type: ignore[union-attr]
+    assert "network_policy" not in creates[0]
 
 
 def test_cleanup_completion_memory_is_bounded_and_evicted_ids_retry(
@@ -1720,7 +1711,6 @@ def test_official_reconciliation_lists_only_fixed_job_metadata_then_kills(
         SandboxManager=Manager,
         WriteEntry=object,
         SearchEntry=object,
-        NetworkPolicy=object,
         ExecutionHandlers=object,
         SandboxFilter=SandboxFilter,
     )

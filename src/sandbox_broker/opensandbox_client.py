@@ -231,7 +231,6 @@ class _SandboxFactory(Protocol):
         image: str,
         timeout_seconds: int,
         resource: dict[str, str],
-        network_default: str,
         entrypoint: list[str],
         metadata: dict[str, str],
     ) -> Any:
@@ -273,7 +272,6 @@ class _OfficialSDK:
     SandboxManager: Any
     WriteEntry: Any
     SearchEntry: Any
-    NetworkPolicy: Any
     ExecutionHandlers: Any
     SandboxFilter: Any = None
     RunCommandOpts: Any = None
@@ -285,7 +283,7 @@ def _load_official_sdk() -> _OfficialSDK:
     try:
         from opensandbox import Sandbox, SandboxManager
         from opensandbox.config import ConnectionConfig
-        from opensandbox.models import NetworkPolicy, SandboxFilter, SearchEntry, WriteEntry
+        from opensandbox.models import SandboxFilter, SearchEntry, WriteEntry
         from opensandbox.models.execd import ExecutionHandlers, RunCommandOpts
     except (ImportError, ModuleNotFoundError):
         raise SandboxDependencyUnavailableError(
@@ -297,7 +295,6 @@ def _load_official_sdk() -> _OfficialSDK:
         SandboxManager=SandboxManager,
         WriteEntry=WriteEntry,
         SearchEntry=SearchEntry,
-        NetworkPolicy=NetworkPolicy,
         ExecutionHandlers=ExecutionHandlers,
         SandboxFilter=SandboxFilter,
         RunCommandOpts=RunCommandOpts,
@@ -335,20 +332,14 @@ class _OfficialSandboxFactory:
         image: str,
         timeout_seconds: int,
         resource: dict[str, str],
-        network_default: str,
         entrypoint: list[str],
         metadata: dict[str, str],
     ) -> Any:
         sdk = self._sdk()
-        network_policy = sdk.NetworkPolicy(
-            defaultAction=network_default,
-            egress=[],
-        )
         return await sdk.Sandbox.create(
             image,
             timeout=timedelta(seconds=timeout_seconds),
             resource=resource,
-            network_policy=network_policy,
             entrypoint=entrypoint,
             metadata=metadata,
             connection_config=self._connection(sdk),
@@ -710,7 +701,6 @@ class OpenSandboxClient:
                 ),
                 timeout_seconds=self._config.sandbox_timeout_seconds,
                 resource={"cpu": self._config.cpu, "memory": self._config.memory},
-                network_default="deny",
                 entrypoint=list(_FIXED_ENTRYPOINT),
                 metadata={
                     "medchat.operation": "molecular_docking",

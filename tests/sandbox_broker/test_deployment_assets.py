@@ -120,29 +120,53 @@ def test_firewall_gate_precedes_and_is_required_by_opensandbox() -> None:
     )
 
 
-def test_firewall_uses_raw_local_ingress_chain_and_exact_reserved_range() -> None:
+def test_firewall_owns_internal_network_and_scopes_docker_user_rules() -> None:
     script = FIREWALL_SCRIPT.read_text(encoding="utf-8")
     config = tomllib.loads(SANDBOX_TOML.read_text(encoding="utf-8"))
 
     assert "40000:60000" in script
     assert config["docker"]["port_range_min"] == 40000
     assert config["docker"]["port_range_max"] == 60000
-    assert "CHAIN=MEDCHAT-OPENSANDBOX" in script
-    assert '"$tool" -w "$WAIT_SECONDS" -t raw' in script
-    assert "PREROUTING" in script
-    assert "! -i lo" in script
-    assert "-m addrtype --dst-type LOCAL" in script
-    assert '-p tcp -m tcp --dport "$PORT_RANGE"' in script
+    assert config["docker"]["network_mode"] == "medchat-opensandbox"
+    assert "egress" not in config
+    assert "NETWORK_NAME=medchat-opensandbox" in script
+    assert "BRIDGE_INTERFACE=br-medchat-sbox" in script
+    assert "NETWORK_LABEL=com.medchat.opensandbox.network=v1" in script
+    assert "SANDBOX_LABEL=opensandbox.io/sandbox-id" in script
+    assert "docker network create" in script
+    assert "--driver bridge" in script
+    assert "--internal" in script
+    assert "--ipv6" in script
+    assert "com.docker.network.bridge.name=$BRIDGE_INTERFACE" in script
+    assert "com.docker.network.bridge.enable_icc=false" in script
+    assert "docker network inspect" in script
+    assert 'docker ps -aq --no-trunc --filter "label=$SANDBOX_LABEL"' in script
+    assert '-o "$BRIDGE_INTERFACE"' in script
+    assert '-i "$BRIDGE_INTERFACE" ! -o "$BRIDGE_INTERFACE"' in script
+    assert "--ctstatus DNAT" in script
+    assert "--ctdir ORIGINAL" in script
+    assert '--ctorigdstport "$PORT_RANGE"' in script
+    assert "--ctstate NEW" in script
     assert "-j DROP" in script
-    assert "docker network create" not in script
-    assert "docker network inspect" not in script
+    assert "-t raw" in script  # exact legacy migration only
+    assert "PREROUTING" in script  # exact legacy migration only
     assert "-j RETURN" in script  # exact legacy rule deletion only
     assert "-j ACCEPT" not in script
     assert "-F DOCKER-USER" not in script
     assert "iptables" in script and "ip6tables" in script
     assert "firewall_configuration_failed" in script
     assert "firewall_migration_failed" in script
+    assert "legacy_sandboxes_present" in script
     assert ">/dev/null 2>&1" in script
+
+
+def test_static_validator_hashes_canonical_assets_as_raw_bytes(tmp_path: Path) -> None:
+    validator = _load_validator()
+    root = _asset_root(tmp_path)
+    target = root / "deployment/opensandbox/medchat-opensandbox-firewall.service"
+    target.write_bytes(target.read_bytes().replace(b"\n", b"\r\n"))
+
+    assert validator.validate_static(root) == "asset_identity_mismatch"
 
 
 def _write_fake_firewall_tool(directory: Path) -> Path:
@@ -165,7 +189,7 @@ try:
 except (FileNotFoundError, json.JSONDecodeError):
     data = {
         name: {
-            "filter": {"DOCKER-USER": []},
+            "filter": {"DOCKER-USER": [], "INPUT": []},
             "raw": {"PREROUTING": []},
         }
         for name in ("iptables", "ip6tables")
@@ -175,8 +199,8 @@ args = sys.argv[1:]
 if args[:2] == ["-w", "5"]:
     args = args[2:]
 table = "filter"
-if args[:2] == ["-t", "raw"]:
-    table = "raw"
+if args[:1] == ["-t"]:
+    table = args[1]
     args = args[2:]
 action = args[0]
 chains = data[family][table]
@@ -205,12 +229,18 @@ if action == "-S":
         print("-A " + chain + " " + " ".join(rule))
     raise SystemExit(0)
 
-chain = args[1]
 if action == "-N":
+    chain = args[1]
     if chain in chains:
         raise SystemExit(1)
     chains[chain] = []
+elif action == "-X":
+    chain = args[1]
+    if chain not in chains or chains[chain]:
+        raise SystemExit(1)
+    del chains[chain]
 elif action in {"-A", "-C", "-D", "-I"}:
+    chain = args[1]
     if chain not in chains:
         raise SystemExit(1)
     if action == "-I" and len(args) > 2 and args[2].isdigit():
@@ -247,6 +277,83 @@ os.replace(temporary, state_path)
     implementation.chmod(0o755)
     for name in ("iptables", "ip6tables"):
         (directory / name).symlink_to(implementation.name)
+    docker = directory / "docker"
+    docker.write_text(
+        """#!/usr/bin/python3
+import json
+import os
+import sys
+
+state_path = os.environ["FAKE_FIREWALL_STATE"]
+with open(state_path, encoding="utf-8") as handle:
+    data = json.load(handle)
+docker_state = data.setdefault("docker", {"network_exists": False})
+args = sys.argv[1:]
+
+if args[:2] == ["network", "create"]:
+    docker_state["network_exists"] = True
+    temporary = state_path + ".new"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(data, handle)
+    os.replace(temporary, state_path)
+    print("network-id")
+    raise SystemExit(0)
+
+if args[:2] == ["network", "inspect"]:
+    if not docker_state.get("network_exists"):
+        raise SystemExit(1)
+    if "--format" not in args:
+        print("[]")
+        raise SystemExit(0)
+    value = args[args.index("--format") + 1]
+    values = {
+        "{{.Name}}": "medchat-opensandbox",
+        "{{.Driver}}": "bridge",
+        "{{.Internal}}": "true",
+        "{{.EnableIPv6}}": "true",
+        '{{index .Options "com.docker.network.bridge.name"}}': "br-medchat-sbox",
+        '{{index .Options "com.docker.network.bridge.enable_icc"}}': "false",
+        "{{json .Labels}}": '{"com.medchat.opensandbox.network":"v1"}',
+        '{{range $id, $_ := .Containers}}{{$id}}{{"\\n"}}{{end}}': "",
+    }
+    if value not in values:
+        raise SystemExit(2)
+    print(values[value])
+    raise SystemExit(0)
+
+if args[:2] == ["ps", "-aq"]:
+    value = os.environ.get("FAKE_LEGACY_CONTAINER", "")
+    if value:
+        print(value)
+    raise SystemExit(0)
+
+if args[:2] == ["container", "inspect"]:
+    if "NetworkSettings.Networks" in args[args.index("--format") + 1]:
+        print("bridge")
+    else:
+        print("sandbox-legacy")
+    raise SystemExit(0)
+
+raise SystemExit(2)
+""",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    state.write_text(
+        json.dumps(
+            {
+                **{
+                    family: {
+                        "filter": {"DOCKER-USER": [], "INPUT": []},
+                        "raw": {"PREROUTING": []},
+                    }
+                    for family in ("iptables", "ip6tables")
+                },
+                "docker": {"network_exists": False},
+            }
+        ),
+        encoding="utf-8",
+    )
     return state
 
 
@@ -281,17 +388,23 @@ def test_firewall_migrates_legacy_rules_and_is_idempotently_ingress_scoped(
                 "-p", "tcp", "-m", "conntrack", "--ctdir", "ORIGINAL",
                 "--ctorigdstport", "40000:60000", "-j", "DROP",
             ],
-            [
-                "-o", "br-medchat-sbox", "!", "-s", source_network,
-                "-p", "tcp", "-m", "conntrack", "--ctstatus", "DNAT",
-                "--ctdir", "ORIGINAL", "--ctorigdstport", "40000:60000",
-                "-j", "DROP",
-            ],
+        ]
+        legacy_jump = [
+            "!", "-i", "lo", "-m", "addrtype", "--dst-type", "LOCAL",
+            "-p", "tcp", "-m", "tcp", "--dport", "40000:60000",
+            "-j", "MEDCHAT-OPENSANDBOX",
         ]
         initial[family] = {
-            "filter": {"DOCKER-USER": [unrelated, *legacy, *legacy]},
-            "raw": {"PREROUTING": [unrelated_raw]},
+            "filter": {
+                "DOCKER-USER": [unrelated, *legacy, *legacy],
+                "INPUT": [],
+            },
+            "raw": {
+                "PREROUTING": [legacy_jump, unrelated_raw, legacy_jump],
+                "MEDCHAT-OPENSANDBOX": [["-j", "DROP"]],
+            },
         }
+    initial["docker"] = {"network_exists": False}
     state.write_text(json.dumps(initial), encoding="utf-8")
 
     results = [
@@ -310,17 +423,35 @@ def test_firewall_migrates_legacy_rules_and_is_idempotently_ingress_scoped(
     assert all(result.stdout == "opensandbox_firewall=passed\n" for result in results)
     assert all(result.stderr == "" for result in results)
     rules = json.loads(state.read_text(encoding="utf-8"))
-    for family in ("iptables", "ip6tables"):
-        assert rules[family]["filter"]["DOCKER-USER"] == [unrelated]
-        assert rules[family]["raw"]["MEDCHAT-OPENSANDBOX"] == [["-j", "DROP"]]
-        assert rules[family]["raw"]["PREROUTING"] == [
+    for family, source_network in (
+        ("iptables", "127.0.0.0/8"),
+        ("ip6tables", "::1/128"),
+    ):
+        assert rules[family]["filter"]["DOCKER-USER"] == [
             [
-                "!", "-i", "lo", "-m", "addrtype", "--dst-type", "LOCAL",
-                "-p", "tcp", "-m", "tcp", "--dport", "40000:60000",
-                "-j", "MEDCHAT-OPENSANDBOX",
+                "-i", "br-medchat-sbox", "!", "-o", "br-medchat-sbox",
+                "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
+                "-j", "RETURN",
             ],
-            unrelated_raw,
+            [
+                "-o", "br-medchat-sbox", "!", "-s", source_network,
+                "-p", "tcp", "-m", "conntrack", "--ctstatus", "DNAT",
+                "--ctdir", "ORIGINAL", "--ctorigdstport", "40000:60000",
+                "-j", "DROP",
+            ],
+            [
+                "-i", "br-medchat-sbox", "!", "-o", "br-medchat-sbox",
+                "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP",
+            ],
+            unrelated,
         ]
+        assert rules[family]["filter"]["INPUT"] == [[
+            "-i", "br-medchat-sbox", "-m", "conntrack", "--ctstate", "NEW",
+            "-j", "DROP",
+        ]]
+        assert "MEDCHAT-OPENSANDBOX" not in rules[family]["raw"]
+        assert rules[family]["raw"]["PREROUTING"] == [unrelated_raw]
+    assert rules["docker"] == {"network_exists": True}
 
 
 @pytest.mark.skipif(os.name != "posix", reason="firewall behavior requires POSIX")
@@ -338,6 +469,14 @@ def test_firewall_ipv6_failure_is_redacted_and_fails_closed(tmp_path: Path) -> N
     environment = os.environ.copy()
     environment["FAKE_FIREWALL_STATE"] = str(state)
     environment["FAIL_FAMILY"] = "ip6tables"
+    legacy = [
+        "-p", "tcp", "-m", "conntrack", "--ctdir", "ORIGINAL",
+        "--ctorigdstport", "40000:60000", "-j", "DROP",
+    ]
+    data = json.loads(state.read_text(encoding="utf-8"))
+    for family in ("iptables", "ip6tables"):
+        data[family]["filter"]["DOCKER-USER"] = [legacy]
+    state.write_text(json.dumps(data), encoding="utf-8")
 
     result = subprocess.run(
         ["sh", str(script)],
@@ -354,6 +493,54 @@ def test_firewall_ipv6_failure_is_redacted_and_fails_closed(tmp_path: Path) -> N
         "opensandbox_firewall=failed code=firewall_configuration_failed\n"
     )
     assert "RAW_FIREWALL_CANARY" not in result.stderr
+    final = json.loads(state.read_text(encoding="utf-8"))
+    for family in ("iptables", "ip6tables"):
+        assert legacy in final[family]["filter"]["DOCKER-USER"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="firewall behavior requires POSIX")
+def test_firewall_rejects_legacy_sandbox_before_rule_migration(
+    tmp_path: Path,
+) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    state = _write_fake_firewall_tool(tools)
+    script = tmp_path / "configure-firewall.sh"
+    script.write_text(
+        FIREWALL_SCRIPT.read_text(encoding="utf-8").replace(
+            "PATH=/usr/sbin:/usr/bin:/sbin:/bin", f"PATH={tools}"
+        ),
+        encoding="utf-8",
+    )
+    legacy = [
+        "-p", "tcp", "-m", "conntrack", "--ctdir", "ORIGINAL",
+        "--ctorigdstport", "40000:60000", "-j", "DROP",
+    ]
+    data = json.loads(state.read_text(encoding="utf-8"))
+    for family in ("iptables", "ip6tables"):
+        data[family]["filter"]["DOCKER-USER"] = [legacy]
+    state.write_text(json.dumps(data), encoding="utf-8")
+    environment = os.environ.copy()
+    environment["FAKE_FIREWALL_STATE"] = str(state)
+    environment["FAKE_LEGACY_CONTAINER"] = "a" * 64
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert result.stderr == (
+        "opensandbox_firewall=failed code=legacy_sandboxes_present\n"
+    )
+    final = json.loads(state.read_text(encoding="utf-8"))
+    for family in ("iptables", "ip6tables"):
+        assert legacy in final[family]["filter"]["DOCKER-USER"]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="firewall behavior requires POSIX")
@@ -378,11 +565,11 @@ def test_firewall_legacy_rule_deletion_failure_is_redacted_and_fails_closed(
         json.dumps(
             {
                 family: {
-                    "filter": {"DOCKER-USER": [legacy]},
+                    "filter": {"DOCKER-USER": [legacy], "INPUT": []},
                     "raw": {"PREROUTING": []},
                 }
                 for family in ("iptables", "ip6tables")
-            }
+            } | {"docker": {"network_exists": False}}
         ),
         encoding="utf-8",
     )
@@ -405,6 +592,13 @@ def test_firewall_legacy_rule_deletion_failure_is_redacted_and_fails_closed(
         "opensandbox_firewall=failed code=firewall_migration_failed\n"
     )
     assert "RAW_MIGRATION_CANARY" not in result.stderr
+    final = json.loads(state.read_text(encoding="utf-8"))
+    assert legacy in final["iptables"]["filter"]["DOCKER-USER"]
+    assert any(
+        rule[-2:] == ["-j", "DROP"]
+        and "br-medchat-sbox" in rule
+        for rule in final["iptables"]["filter"]["DOCKER-USER"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -512,11 +706,8 @@ def test_server_config_is_authenticated_loopback_gvisor_and_mount_safe() -> None
         "docker_runtime": "runsc",
     }
     assert config["docker"]["pids_limit"] == 128
-    assert config["docker"]["network_mode"] == "bridge"
-    assert config["egress"] == {
-        "image": "opensandbox/egress:v1.1.4",
-        "mode": "dns",
-    }
+    assert config["docker"]["network_mode"] == "medchat-opensandbox"
+    assert "egress" not in config
     assert config["docker"]["no_new_privileges"] is True
     assert set(config["docker"]["drop_capabilities"]) == {
         "AUDIT_WRITE",
@@ -718,6 +909,22 @@ def test_installer_uses_atomic_durable_replacement_without_truncation() -> None:
     fsync = generation.index("fsync_parent(path)", replace)
     installed_lstat = generation.index("installed = path.lstat()", replace)
     assert replace < committed < fsync < installed_lstat
+
+
+def test_installer_verifies_committed_assets_and_preserves_canonical_lf() -> None:
+    installer = INSTALLER.read_text(encoding="utf-8")
+
+    assert "if read_source(path) != content:" in installer
+    assert 'if any(b"\\r" in content for content in committed_assets):' in installer
+    for source in (
+        SANDBOX_TOML,
+        OPENSANDBOX_SERVICE,
+        BROKER_SERVICE,
+        FIREWALL_SERVICE,
+        FIREWALL_SCRIPT,
+        TEMPORAL_WORKER_SERVICE,
+    ):
+        assert b"\r" not in source.read_bytes()
 
 
 def test_rotation_failure_injection_is_confined_to_preview_mode() -> None:
@@ -1183,6 +1390,11 @@ def test_preview_install_renders_bootable_secret_scoped_assets(
     assert rendered_toml.stat().st_uid == os.getuid()
     assert stat.S_IMODE(broker_environment.stat().st_mode) == 0o640
     assert broker_environment.stat().st_uid == os.getuid()
+    installed_firewall = (
+        tmp_path / "usr/local/libexec/medchat/configure-opensandbox-firewall"
+    )
+    assert installed_firewall.read_bytes() == FIREWALL_SCRIPT.read_bytes()
+    assert b"\r" not in installed_firewall.read_bytes()
 
     rendered = tomllib.loads(rendered_toml.read_text(encoding="utf-8"))
     assert rendered["server"]["api_key"] == secret
@@ -1413,8 +1625,8 @@ def test_static_validator_pins_every_committed_deployment_asset() -> None:
         )
     }
     for relative, expected in validator._PINNED_ASSET_SHA256.items():
-        content = (ROOT / relative).read_text(encoding="utf-8")
-        assert hashlib.sha256(content.encode("utf-8")).hexdigest() == expected
+        content = (ROOT / relative).read_bytes()
+        assert hashlib.sha256(content).hexdigest() == expected
 
 
 @pytest.mark.parametrize(
@@ -1837,6 +2049,96 @@ def test_validator_runtime_environment_requires_broker_key() -> None:
         ) is None
 
 
+def test_runtime_network_accepts_only_owned_internal_sandbox_attachments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = _load_validator()
+    sandbox_id = "a" * 64
+    network_fields: dict[str, object] = {
+        "{{.Name}}": "medchat-opensandbox",
+        "{{.Driver}}": "bridge",
+        "{{json .Internal}}": True,
+        "{{json .EnableIPv6}}": True,
+        "{{json .Options}}": {
+            "com.docker.network.bridge.name": "br-medchat-sbox",
+            "com.docker.network.bridge.enable_icc": "false",
+        },
+        "{{json .Labels}}": {"com.medchat.opensandbox.network": "v1"},
+        "{{json .Containers}}": {sandbox_id: {"Name": "sandbox"}},
+    }
+    calls: list[tuple[str, ...]] = []
+
+    def command(argv: tuple[str, ...]) -> validator._CommandResult:
+        calls.append(argv)
+        if argv[:3] == ("docker", "network", "inspect"):
+            value = network_fields[argv[4]]
+            output = value if isinstance(value, str) else json.dumps(value)
+            return validator._CommandResult(True, output)
+        if argv[:3] == ("docker", "container", "inspect"):
+            if argv[4].startswith("{{index .Config.Labels"):
+                return validator._CommandResult(True, "sandbox-123")
+            return validator._CommandResult(
+                True, json.dumps({"medchat-opensandbox": {}})
+            )
+        if argv[:2] == ("docker", "ps"):
+            return validator._CommandResult(True, sandbox_id + "\n")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(validator, "_run_command", command)
+
+    assert validator._docker_network_is_safe()
+    assert (
+        "docker",
+        "network",
+        "inspect",
+        "--format",
+        "{{.Name}}",
+        "medchat-opensandbox",
+    ) in calls
+    assert (
+        "docker",
+        "ps",
+        "-aq",
+        "--no-trunc",
+        "--filter",
+        "label=opensandbox.io/sandbox-id",
+    ) in calls
+    assert not any("{{json .}}" in call for call in calls)
+    assert not any(call[0] in {"sh", "bash"} for call in calls)
+
+
+def test_runtime_network_rejects_legacy_sandbox_outside_owned_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = _load_validator()
+    sandbox_id = "b" * 64
+    network_fields: dict[str, object] = {
+        "{{.Name}}": "medchat-opensandbox",
+        "{{.Driver}}": "bridge",
+        "{{json .Internal}}": True,
+        "{{json .EnableIPv6}}": True,
+        "{{json .Options}}": {
+            "com.docker.network.bridge.name": "br-medchat-sbox",
+            "com.docker.network.bridge.enable_icc": "false",
+        },
+        "{{json .Labels}}": {"com.medchat.opensandbox.network": "v1"},
+        "{{json .Containers}}": {},
+    }
+
+    def command(argv: tuple[str, ...]) -> validator._CommandResult:
+        if argv[:3] == ("docker", "network", "inspect"):
+            value = network_fields[argv[4]]
+            output = value if isinstance(value, str) else json.dumps(value)
+            return validator._CommandResult(True, output)
+        if argv[:2] == ("docker", "ps"):
+            return validator._CommandResult(True, sandbox_id + "\n")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(validator, "_run_command", command)
+
+    assert not validator._docker_network_is_safe()
+
+
 def test_safe_mocked_runtime_checks_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     validator = _load_validator()
     calls: list[tuple[str, ...]] = []
@@ -1882,6 +2184,8 @@ def test_safe_mocked_runtime_checks_pass(monkeypatch: pytest.MonkeyPatch) -> Non
         raise AssertionError(f"unexpected fixed command shape: {argv!r}")
 
     monkeypatch.setattr(validator, "_run_command", command)
+    monkeypatch.setattr(validator, "_docker_network_is_safe", lambda: True)
+    monkeypatch.setattr(validator, "_firewall_rules_present", lambda: True)
     monkeypatch.setattr(validator, "_opensandbox_health_is_ok", lambda: True)
     monkeypatch.setattr(
         validator,
@@ -1909,18 +2213,6 @@ def test_safe_mocked_runtime_checks_pass(monkeypatch: pytest.MonkeyPatch) -> Non
         image_reference,
     ) in calls
     assert not any(call[:3] == ("docker", "image", "ls") for call in calls)
-    for executable in ("iptables", "ip6tables"):
-        assert any(
-            call[0] == executable
-            and "raw" in call
-            and "PREROUTING" in call
-            and "--dst-type" in call
-            and "LOCAL" in call
-            and "--dport" in call
-            and "40000:60000" in call
-            for call in calls
-        )
-    assert not any(call[:3] == ("docker", "network", "inspect") for call in calls)
 
 
 def test_runtime_rejects_mismatched_raw_ingress_chain_without_raw_output(
@@ -1941,6 +2233,7 @@ def test_runtime_rejects_mismatched_raw_ingress_chain_without_raw_output(
         raise AssertionError(argv)
 
     monkeypatch.setattr(validator, "_run_command", command)
+    monkeypatch.setattr(validator, "_docker_network_is_safe", lambda: True)
 
     code = validator.validate_runtime()
 
@@ -2004,6 +2297,8 @@ def test_runtime_socket_contract_rejects_wrong_type_owner_or_mode(
         raise AssertionError(argv)
 
     monkeypatch.setattr(validator, "_run_command", command)
+    monkeypatch.setattr(validator, "_docker_network_is_safe", lambda: True)
+    monkeypatch.setattr(validator, "_firewall_rules_present", lambda: True)
     monkeypatch.setattr(validator, "_opensandbox_health_is_ok", lambda: True)
     monkeypatch.setattr(
         validator,
@@ -2030,6 +2325,7 @@ def test_runtime_rejects_missing_firewall_rule_without_raw_output(
         raise AssertionError(argv)
 
     monkeypatch.setattr(validator, "_run_command", command)
+    monkeypatch.setattr(validator, "_docker_network_is_safe", lambda: True)
 
     code = validator.validate_runtime()
 
