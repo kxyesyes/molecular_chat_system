@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -73,10 +74,37 @@ _ASSET_PATHS = (
     "deployment/opensandbox/install.sh",
     "deployment/medchat-temporal-worker.service",
 )
+_PINNED_ASSET_SHA256 = {
+    "deployment/opensandbox/sandbox.toml": (
+        "f39656f50a5ed7736f47a0a79c9404e7296f89c81ac15edaf8a0205d124ca128"
+    ),
+    "deployment/opensandbox/medchat-opensandbox.service": (
+        "c9292d8ffb7703a5a23f812719f52b092eba98cca9d289d699ad9bd84b5ffa6f"
+    ),
+    "deployment/opensandbox/medchat-sandbox-broker.service": (
+        "24229d6d5c4181fbcd5162c52515f26e133cf9bf6558788806a1fa43692165fb"
+    ),
+    "deployment/opensandbox/medchat-opensandbox-firewall.service": (
+        "d08a8ed8795d2c505099fd9ddf8660831fc9780d251d46c3f8132d99ce86a3e1"
+    ),
+    "deployment/opensandbox/configure-firewall.sh": (
+        "266baaa6b74a6a55987b5e30e6b57c80e724379458d5c2d8c74cce94e157199f"
+    ),
+    "deployment/opensandbox/opensandbox.env.example": (
+        "bdd4b347aacd786c555250f5733566d5fd8723e15c44aeb048af237852d089bf"
+    ),
+    "deployment/opensandbox/install.sh": (
+        "79bcc3b2b5a5b80770549160aea9ae0fd3304c522d5ded34072daa5189913b20"
+    ),
+    "deployment/medchat-temporal-worker.service": (
+        "15fb8b7faa079b9a33328081c751a75c72a2d68e1b92b676b55150438064f982"
+    ),
+}
 _STABLE_CODES = frozenset(
     {
         "usage",
         "asset_missing",
+        "asset_identity_mismatch",
         "config_malformed",
         "server_not_loopback",
         "api_key_template_invalid",
@@ -93,7 +121,6 @@ _STABLE_CODES = frozenset(
         "env_template_unsafe",
         "runsc_unavailable",
         "docker_runtime_unregistered",
-        "docker_network_unsafe",
         "firewall_rule_missing",
         "opensandbox_unhealthy",
         "socket_invalid",
@@ -206,6 +233,17 @@ def _load_assets(root: Path) -> dict[str, str] | None:
     return assets
 
 
+def _asset_identity_matches(assets: dict[str, str]) -> bool:
+    return bool(
+        set(assets) == set(_PINNED_ASSET_SHA256)
+        and all(
+            hashlib.sha256(content.encode("utf-8")).hexdigest()
+            == _PINNED_ASSET_SHA256[relative]
+            for relative, content in assets.items()
+        )
+    )
+
+
 def _validate_config(text: str) -> str | None:
     try:
         config = tomllib.loads(text)
@@ -227,7 +265,7 @@ def _validate_config(text: str) -> str | None:
         return "runtime_not_gvisor"
     docker = config.get("docker", {})
     if (
-        docker.get("network_mode") != "medchat-opensandbox"
+        docker.get("network_mode") != "bridge"
         or type(docker.get("pids_limit")) is not int
         or docker.get("pids_limit") != 128
         or docker.get("no_new_privileges") is not True
@@ -240,6 +278,11 @@ def _validate_config(text: str) -> str | None:
         "/var/lib/opensandbox/approved-empty"
     ]:
         return "host_path_allowlist_unsafe"
+    if config.get("egress") != {
+        "image": "opensandbox/egress:v1.1.4",
+        "mode": "dns",
+    }:
+        return "docker_policy_unsafe"
     return None
 
 
@@ -451,84 +494,38 @@ def _validate_firewall_script(text: str) -> bool:
         "set -eu",
         "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
         "PORT_RANGE=40000:60000",
-        "NETWORK_NAME=medchat-opensandbox",
-        "BRIDGE_INTERFACE=br-medchat-sbox",
-        "docker network create --driver bridge --ipv6",
-        "docker network inspect",
-        "iptables 127.0.0.0/8",
-        "ip6tables ::1/128",
+        "CHAIN=MEDCHAT-OPENSANDBOX",
+        "MAX_LEGACY_RULES=64",
+        "configure_ingress_gate iptables 127.0.0.0/8",
+        "configure_ingress_gate ip6tables ::1/128",
         "-S DOCKER-USER",
-        "-S DOCKER-USER 1",
-        '-o "$BRIDGE_INTERFACE"',
-        '! -s "$loopback_source"',
-        "--ctstatus DNAT",
-        "-C DOCKER-USER",
-        "-I DOCKER-USER 1",
+        "-D DOCKER-USER",
         "--ctdir ORIGINAL",
         "--ctorigdstport",
+        "--ctstatus DNAT",
+        "-o br-medchat-sbox",
+        "-j RETURN",
+        '"$tool" -w "$WAIT_SECONDS" -t raw',
+        "-S PREROUTING",
+        "-I PREROUTING 1",
+        "! -i lo -m addrtype --dst-type LOCAL",
+        '-p tcp -m tcp --dport "$PORT_RANGE"',
+        '"$CHAIN" -j DROP',
         "-j DROP",
         "firewall_configuration_failed",
+        "firewall_migration_failed",
         ">/dev/null 2>&1",
-    )
-    direct_firewall = re.search(
-        r"(?m)^\s*(?:(?:env|command|sudo)\s+)*(?:iptables|ip6tables)\b",
-        text,
-    )
-    logical_commands = [line.strip() for line in _shell_logical_commands(text)]
-    firewall_commands = [
-        line
-        for line in logical_commands
-        if re.search(r'(?<!command -v )"\$tool"\s', line)
-        or re.search(r"(?:^|!\s)docker\s+network\s", line)
-    ]
-    expected_firewall_commands = [
-        'if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then',
-        (
-            'docker network create --driver bridge --ipv6 --opt '
-            '"com.docker.network.bridge.name=$BRIDGE_INTERFACE" '
-            '"$NETWORK_NAME" >/dev/null 2>&1 || fail'
-        ),
-        "docker network inspect --format '{{.Driver}}' \"$NETWORK_NAME\" 2>/dev/null",
-        (
-            "docker network inspect --format '{{json .Options}}' "
-            '"$NETWORK_NAME" 2>/dev/null'
-        ),
-        (
-            "docker network inspect --format '{{.EnableIPv6}}' "
-            '"$NETWORK_NAME" 2>/dev/null'
-        ),
-        (
-            '"$tool" -w "$WAIT_SECONDS" -S DOCKER-USER '
-            '>/dev/null 2>&1 || fail'
-        ),
-        '"$tool" -w "$WAIT_SECONDS" -S DOCKER-USER 1 2>/dev/null',
-        (
-            '"$tool" -w "$WAIT_SECONDS" -I DOCKER-USER 1 '
-            '-o "$BRIDGE_INTERFACE" ! -s "$loopback_source" -p tcp '
-            '-m conntrack --ctstatus DNAT --ctdir ORIGINAL '
-            '--ctorigdstport "$PORT_RANGE" -j DROP >/dev/null 2>&1 || fail'
-        ),
-        (
-            '"$tool" -w "$WAIT_SECONDS" -C DOCKER-USER '
-            '-o "$BRIDGE_INTERFACE" ! -s "$loopback_source" -p tcp '
-            '-m conntrack --ctstatus DNAT --ctdir ORIGINAL '
-            '--ctorigdstport "$PORT_RANGE" -j DROP >/dev/null 2>&1 || fail'
-        ),
-        '"$tool" -w "$WAIT_SECONDS" -S DOCKER-USER 1 2>/dev/null',
-    ]
-    docker_network_operations = re.findall(
-        r"\bdocker\s+network\s+([a-z-]+)", text
     )
     return bool(
         all(value in text for value in required)
-        and "--dport" not in text
-        and "-j RETURN" not in text
+        and "docker network" not in text
+        and "NETWORK_NAME=" not in text
+        and "BRIDGE_INTERFACE=" not in text
         and "-j ACCEPT" not in text
-        and direct_firewall is None
-        and firewall_commands == expected_firewall_commands
-        and text.count("docker network inspect") == 4
-        and text.count("docker network create") == 1
-        and set(docker_network_operations) == {"inspect", "create"}
+        and "-F " not in text
+        and "--flush" not in text
+        and "-X " not in text
+        and "--delete-chain" not in text
     )
 
 
@@ -861,6 +858,7 @@ def _validate_installer(text: str) -> bool:
         'if root == Path("/") and preview_fail_after != 0',
         'if root == Path("/") and preview_fail_point != "none"',
         "systemctl daemon-reload",
+        "run_systemctl restart medchat-opensandbox-firewall.service",
         "GROUP_MIGRATION_INTENT=remove-medchat-from-medchat-sandbox",
         "remove_legacy_medchat_membership",
         "gpasswd --delete medchat medchat-sandbox",
@@ -984,6 +982,8 @@ def validate_static(root: Path) -> str | None:
             assets["deployment/opensandbox/opensandbox.env.example"]
         ):
             return "env_template_unsafe"
+        if not _asset_identity_matches(assets):
+            return "asset_identity_mismatch"
         return None
     except Exception:
         return "validation_internal_error"
@@ -1118,78 +1118,91 @@ def _runtime_image_reference() -> str | None:
 
 
 def _firewall_rules_present() -> bool:
-    families = (("iptables", "127.0.0.0/8"), ("ip6tables", "::1/128"))
-    for executable, loopback_source in families:
-        rule = (
-            "-o",
-            "br-medchat-sbox",
-            "!",
-            "-s",
-            loopback_source,
-            "-p",
-            "tcp",
-            "-m",
-            "conntrack",
-            "--ctstatus",
-            "DNAT",
-            "--ctdir",
-            "ORIGINAL",
-            "--ctorigdstport",
-            "40000:60000",
-        )
+    chain = "MEDCHAT-OPENSANDBOX"
+    rule = (
+        "!",
+        "-i",
+        "lo",
+        "-m",
+        "addrtype",
+        "--dst-type",
+        "LOCAL",
+        "-p",
+        "tcp",
+        "-m",
+        "tcp",
+        "--dport",
+        "40000:60000",
+        "-j",
+        chain,
+    )
+    expected_first = (
+        "-A PREROUTING ! -i lo -m addrtype --dst-type LOCAL "
+        "-p tcp -m tcp --dport 40000:60000 -j MEDCHAT-OPENSANDBOX"
+    )
+    expected_chain = (
+        "-N MEDCHAT-OPENSANDBOX\n"
+        "-A MEDCHAT-OPENSANDBOX -j DROP"
+    )
+    for executable in ("iptables", "ip6tables"):
         present = _run_command(
             (
                 executable,
                 "-w",
                 "5",
+                "-t",
+                "raw",
                 "-C",
-                "DOCKER-USER",
+                "PREROUTING",
                 *rule,
-                "-j",
-                "DROP",
             )
         )
-        expected = (
-            f"-A DOCKER-USER -o br-medchat-sbox ! -s {loopback_source} "
-            "-p tcp -m conntrack --ctstatus DNAT --ctdir ORIGINAL "
-            "--ctorigdstport 40000:60000 -j DROP"
-        )
         first = _run_command(
-            (executable, "-w", "5", "-S", "DOCKER-USER", "1")
+            (
+                executable,
+                "-w",
+                "5",
+                "-t",
+                "raw",
+                "-S",
+                "PREROUTING",
+                "1",
+            )
+        )
+        chain_state = _run_command(
+            (
+                executable,
+                "-w",
+                "5",
+                "-t",
+                "raw",
+                "-S",
+                chain,
+            )
+        )
+        raw_state = _run_command(
+            (executable, "-w", "5", "-t", "raw", "-S")
+        )
+        references = (
+            [
+                line
+                for line in raw_state.stdout.splitlines()
+                if re.search(rf"-[jg] {re.escape(chain)}(?:\s|$)", line)
+            ]
+            if raw_state.ok
+            else []
         )
         if (
             not present.ok
             or not first.ok
-            or first.stdout.strip() != expected
+            or not chain_state.ok
+            or not raw_state.ok
+            or first.stdout.strip() != expected_first
+            or chain_state.stdout.strip() != expected_chain
+            or references != [expected_first]
         ):
             return False
     return True
-
-
-def _docker_network_is_safe() -> bool:
-    result = _run_command(
-        (
-            "docker",
-            "network",
-            "inspect",
-            "--format",
-            "{{json .}}",
-            "medchat-opensandbox",
-        )
-    )
-    if not result.ok:
-        return False
-    try:
-        network = json.loads(result.stdout)
-    except (json.JSONDecodeError, TypeError):
-        return False
-    return bool(
-        isinstance(network, dict)
-        and network.get("Driver") == "bridge"
-        and network.get("EnableIPv6") is True
-        and network.get("Options")
-        == {"com.docker.network.bridge.name": "br-medchat-sbox"}
-    )
 
 
 def validate_runtime() -> str | None:
@@ -1211,9 +1224,6 @@ def validate_runtime() -> str | None:
             return "docker_runtime_unregistered"
         if not isinstance(runtimes, dict) or "runsc" not in runtimes:
             return "docker_runtime_unregistered"
-
-        if not _docker_network_is_safe():
-            return "docker_network_unsafe"
 
         if not _firewall_rules_present():
             return "firewall_rule_missing"

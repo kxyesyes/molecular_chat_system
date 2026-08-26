@@ -964,6 +964,7 @@ if [ "$DESTDIR" = / ]; then
     run_systemctl daemon-reload
     run_systemctl enable medchat-opensandbox-firewall.service \
         medchat-opensandbox.service medchat-sandbox-broker.service
+    run_systemctl restart medchat-opensandbox-firewall.service
     restore_prior_medchat_services || fail service_restore_failed
     trap - EXIT HUP INT TERM
 fi

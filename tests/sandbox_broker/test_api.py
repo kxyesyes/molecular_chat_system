@@ -1983,6 +1983,55 @@ def test_prebound_broker_socket_is_real_owned_and_mode_0660(tmp_path: Path) -> N
         listener.close()
 
 
+@pytest.mark.parametrize("failure_point", ["initial_lstat", "chmod", "final_lstat"])
+@pytest.mark.skipif(os.name != "posix", reason="real Unix sockets require POSIX")
+def test_bind_failure_closes_and_unlinks_only_created_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    import scripts.run_sandbox_broker as entrypoint
+
+    target = tmp_path / "broker.sock"
+    real_lstat = entrypoint.os.lstat
+    real_socket = entrypoint.socket.socket
+    created: list[socket.socket] = []
+    target_lstats = 0
+
+    def socket_factory(*args: object, **kwargs: object) -> socket.socket:
+        listener = real_socket(*args, **kwargs)
+        created.append(listener)
+        return listener
+
+    def lstat(path: object) -> os.stat_result:
+        nonlocal target_lstats
+        if Path(path) == target:
+            target_lstats += 1
+            if failure_point == "initial_lstat" and target_lstats == 2:
+                raise OSError("injected initial lstat failure")
+            if failure_point == "final_lstat" and target_lstats == 3:
+                raise OSError("injected final lstat failure")
+        return real_lstat(path)
+
+    monkeypatch.setattr(entrypoint.socket, "socket", socket_factory)
+    monkeypatch.setattr(entrypoint.os, "lstat", lstat)
+    if failure_point == "chmod":
+        monkeypatch.setattr(
+            entrypoint.os,
+            "chmod",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("injected chmod failure")
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="^sandbox broker socket binding failed$"):
+        entrypoint.bind_runtime_socket(target)
+
+    assert len(created) == 1
+    assert created[0].fileno() == -1
+    assert not target.exists()
+
+
 @pytest.mark.skipif(os.name != "posix", reason="real Unix sockets require POSIX")
 def test_post_bind_lstat_failure_still_closes_and_unlinks_socket(
     tmp_path: Path,

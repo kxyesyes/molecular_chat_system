@@ -290,31 +290,76 @@ def _bound_socket_is_ready(socket_path: Path) -> bool:
         return False
 
 
+def _cleanup_failed_bind(
+    target: Path,
+    parent_identity: tuple[int, int, int],
+    bound_identity: tuple[int, int] | None,
+) -> None:
+    first = os.lstat(target)
+    parent_before = os.lstat(target.parent)
+    if (
+        not _verified_socket(first)
+        or _identity(parent_before) != parent_identity
+        or (
+            os.name == "posix"
+            and (first.st_uid != os.geteuid() or first.st_gid != os.getegid())
+        )
+    ):
+        raise ValueError
+    observed_identity = _node_identity(first)
+    if bound_identity is not None and observed_identity != bound_identity:
+        raise ValueError
+    quarantine = target.with_name(
+        f".{target.name}.{uuid.uuid4().hex}.bind-failed"
+    )
+    os.replace(target, quarantine)
+    quarantined = os.lstat(quarantine)
+    parent_after = os.lstat(target.parent)
+    if (
+        not _verified_socket(quarantined)
+        or _node_identity(quarantined) != observed_identity
+        or _identity(parent_after) != parent_identity
+    ):
+        raise ValueError
+    os.unlink(quarantine)
+
+
 def bind_runtime_socket(
     socket_path: Path,
 ) -> tuple[socket.socket, tuple[int, int]]:
     """Bind a non-listening UDS and return its verified filesystem identity."""
 
     listener: socket.socket | None = None
+    target: Path | None = None
+    parent_identity: tuple[int, int, int] | None = None
+    bound_identity: tuple[int, int] | None = None
+    bound = False
     try:
         target, parent_identity = _trusted_socket_parent(socket_path)
+        try:
+            os.lstat(target)
+        except FileNotFoundError:
+            pass
+        else:
+            raise ValueError
         listener = socket.socket(_AF_UNIX, socket.SOCK_STREAM)
         listener.bind(str(target))
-        bound = os.lstat(target)
+        bound = True
+        bound_metadata = os.lstat(target)
         parent_before = os.lstat(target.parent)
         if (
-            not _verified_socket(bound)
+            not _verified_socket(bound_metadata)
             or _identity(parent_before) != parent_identity
             or (
                 os.name == "posix"
                 and (
-                    bound.st_uid != os.geteuid()
-                    or bound.st_gid != os.getegid()
+                    bound_metadata.st_uid != os.geteuid()
+                    or bound_metadata.st_gid != os.getegid()
                 )
             )
         ):
             raise ValueError
-        bound_identity = _node_identity(bound)
+        bound_identity = _node_identity(bound_metadata)
         os.chmod(target, _BROKER_SOCKET_MODE)
         final = os.lstat(target)
         parent_after = os.lstat(target.parent)
@@ -326,6 +371,11 @@ def bind_runtime_socket(
             raise ValueError
         return listener, bound_identity
     except Exception:
+        if bound and target is not None and parent_identity is not None:
+            try:
+                _cleanup_failed_bind(target, parent_identity, bound_identity)
+            except Exception:
+                pass
         if listener is not None:
             try:
                 listener.close()

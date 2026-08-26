@@ -32,6 +32,11 @@ from src.sandbox_broker.opensandbox_client import (
     SandboxUploadError,
 )
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 deployment baseline
+    import tomli as tomllib
+
 
 SHA256 = "a" * 64
 FIXED_COMMAND = (
@@ -193,6 +198,25 @@ def test_adapter_uses_only_pinned_policy_and_fixed_command(tmp_path: Path) -> No
     assert result.stdout == ""
     assert result.stderr == ""
     assert fake.destroyed == [handle.sandbox_id]
+
+
+def test_deny_network_policy_has_compatible_pinned_server_egress(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).parents[2]
+    server_config = tomllib.loads(
+        (root / "deployment/opensandbox/sandbox.toml").read_text(encoding="utf-8")
+    )
+    fake = FakeSandboxFactory()
+
+    asyncio.run(OpenSandboxClient(config(tmp_path), sandbox_factory=fake).create("job-1"))
+
+    assert server_config["docker"]["network_mode"] == "bridge"
+    assert server_config["egress"] == {
+        "image": "opensandbox/egress:v1.1.4",
+        "mode": "dns",
+    }
+    assert fake.create_calls[0]["network_default"] == "deny"
 
 
 def test_public_api_has_no_dynamic_sandbox_policy_parameters() -> None:
