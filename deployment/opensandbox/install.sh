@@ -271,6 +271,12 @@ warn_credentials_locked_services_not_restored() {
         >&2
 }
 
+warn_credential_lockdown_failed_services_not_restored() {
+    printf '%s\n' \
+        'opensandbox_install=warning code=credential_lockdown_failed_services_not_restored' \
+        >&2
+}
+
 restore_stopped_services_on_failure() {
     status=$?
     trap - EXIT HUP INT TERM
@@ -285,8 +291,11 @@ restore_stopped_services_on_failure() {
                 force_quiesce_known_medchat_services || :
             fi
         fi
-        secure_broker_credentials || :
-        warn_credentials_locked_services_not_restored
+        if secure_broker_credentials >/dev/null 2>&1; then
+            warn_credentials_locked_services_not_restored
+        else
+            warn_credential_lockdown_failed_services_not_restored
+        fi
     fi
     exit "$status"
 }

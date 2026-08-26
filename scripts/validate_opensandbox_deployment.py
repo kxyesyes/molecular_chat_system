@@ -519,6 +519,7 @@ def _failure_trap_is_safe(text: str) -> bool:
             trap.index("restore_prior_medchat_services"),
             trap.index("secure_broker_credentials"),
             trap.index("warn_credentials_locked_services_not_restored"),
+            trap.index("warn_credential_lockdown_failed_services_not_restored"),
         ]
     except ValueError:
         return False
@@ -594,6 +595,7 @@ def _validate_installer(text: str) -> bool:
         "BROKER_ENV_DIRECTORY=/etc/medchat",
         "BROKER_ENV_NAME=sandbox-broker.env",
         "credentials_locked_services_not_restored",
+        "credential_lockdown_failed_services_not_restored",
         "O_NOFOLLOW",
         "follow_symlinks=False",
         "os.fchmod(descriptor, 0o600)",

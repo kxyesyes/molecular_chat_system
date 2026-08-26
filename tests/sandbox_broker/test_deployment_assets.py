@@ -412,6 +412,24 @@ def test_failure_trap_force_quiesces_before_restore_or_locks_credentials() -> No
     assert locked_path != restore_path
 
 
+def test_failure_trap_reports_lockdown_result_without_ignoring_failure() -> None:
+    installer = INSTALLER.read_text(encoding="utf-8")
+
+    assert (
+        "opensandbox_install=warning "
+        "code=credential_lockdown_failed_services_not_restored"
+    ) in installer
+    trap_start = installer.index("restore_stopped_services_on_failure() {")
+    trap_end = installer.index("\n}\n", trap_start)
+    failure_trap = installer[trap_start:trap_end]
+    assert "secure_broker_credentials || :" not in failure_trap
+    assert (
+        "if secure_broker_credentials >/dev/null 2>&1; then" in failure_trap
+    )
+    assert "warn_credentials_locked_services_not_restored" in failure_trap
+    assert "warn_credential_lockdown_failed_services_not_restored" in failure_trap
+
+
 def test_credential_lockdown_is_root_only_and_symlink_safe() -> None:
     installer = INSTALLER.read_text(encoding="utf-8")
 
@@ -466,6 +484,52 @@ def test_force_quiesce_still_active_never_restarts_services(tmp_path: Path) -> N
     assert any(event.startswith("stop ") for event in events)
     assert any("kill --kill-whom=all --signal=SIGKILL" in event for event in events)
     assert not any(event.startswith(("start ", "restart ")) for event in events)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="shell behavior requires POSIX")
+def test_lockdown_failure_emits_exact_warning_without_restore_or_leak(
+    tmp_path: Path,
+) -> None:
+    event_log = tmp_path / "events"
+    script = tmp_path / "lockdown-failure.sh"
+    script.write_text(
+        "#!/bin/sh\nset -u\n"
+        "EVENT_LOG=$1\nSERVICE_STATE_CAPTURED=1\n"
+        "BOTH_SERVICES_INACTIVE=0\nGROUP_MEMBERSHIP_REVOKED=0\n"
+        "force_quiesce_known_medchat_services() { return 1; }\n"
+        "remove_legacy_medchat_membership() { return 1; }\n"
+        "restore_prior_medchat_services() { printf 'start medchat.service\\n' "
+        ">>\"$EVENT_LOG\"; }\n"
+        "secure_broker_credentials() { printf 'RAW_SECRET_AND_PATH\\n'; "
+        "printf 'RAW_SYSTEMCTL_ERROR\\n' >&2; return 1; }\n"
+        + _installer_function_source(
+            "warn_credentials_locked_services_not_restored"
+        )
+        + _installer_function_source(
+            "warn_credential_lockdown_failed_services_not_restored"
+        )
+        + _installer_function_source("restore_stopped_services_on_failure")
+        + "false\nrestore_stopped_services_on_failure\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["sh", str(script), str(event_log)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert result.stderr == (
+        "opensandbox_install=warning "
+        "code=credential_lockdown_failed_services_not_restored\n"
+    )
+    assert "RAW_SECRET" not in result.stdout + result.stderr
+    assert "RAW_SYSTEMCTL" not in result.stdout + result.stderr
+    assert not event_log.exists()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="credential mode requires POSIX")
@@ -787,6 +851,7 @@ def test_static_validator_rejects_missing_legacy_group_migration(
         "force_quiesce_known_medchat_services",
         "secure_broker_credentials",
         "credentials_locked_services_not_restored",
+        "credential_lockdown_failed_services_not_restored",
     ],
 )
 def test_static_validator_rejects_missing_failure_lockdown(
