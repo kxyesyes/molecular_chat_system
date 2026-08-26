@@ -716,6 +716,64 @@ def test_default_executor_uses_compat_boundary(
     assert len(calls) == 1
 
 
+def test_opensandbox_backend_delegates_to_runner_from_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.docking.sandbox_runner as sandbox_module
+
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    raw = _executor(tmp_path, calls)
+    output_root = _allowed_output_root(tmp_path)
+
+    class FakeRunner:
+        def execute(self, payload: dict[str, Any], **control: Any) -> ToolResult:
+            return raw(payload, **control)
+
+    def from_env(allowed_output_root: Path) -> FakeRunner:
+        assert allowed_output_root == output_root.resolve()
+        return FakeRunner()
+
+    monkeypatch.setenv("MEDCHAT_DOCKING_EXECUTION_BACKEND", "opensandbox")
+    monkeypatch.setattr(sandbox_module.SandboxDockingRunner, "from_env", from_env)
+
+    result = DockingExecution(
+        tmp_path,
+        allowed_output_root=output_root,
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is True
+    assert len(calls) == 1
+
+
+def test_invalid_docking_execution_backend_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MEDCHAT_DOCKING_EXECUTION_BACKEND", "tcp")
+
+    with pytest.raises(ValueError, match="^invalid docking execution backend$"):
+        DockingExecution(tmp_path)
+
+
+def test_injected_executor_ignores_backend_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _stage(tmp_path)
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setenv("MEDCHAT_DOCKING_EXECUTION_BACKEND", "invalid")
+
+    result = DockingExecution(
+        tmp_path,
+        raw_executor=_executor(tmp_path, calls),
+    ).run_verified("task-1", manifest)
+
+    assert result["success"] is True
+    assert len(calls) == 1
+
+
 def test_default_executor_does_not_invent_missing_compat_provenance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

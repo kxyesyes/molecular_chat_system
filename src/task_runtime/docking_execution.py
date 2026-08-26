@@ -96,14 +96,30 @@ class DockingExecution:
             else Path(allowed_output_root)
         )
         self._allowed_output_root = Path(os.path.abspath(output_root))
-        self.raw_executor = raw_executor or self._execute_production_tool
+        if raw_executor is not None:
+            self.raw_executor = raw_executor
+        else:
+            backend = os.environ.get("MEDCHAT_DOCKING_EXECUTION_BACKEND", "local")
+            if backend == "local":
+                self.raw_executor = self._execute_local_tool
+            elif backend == "opensandbox":
+                from src.docking.sandbox_runner import SandboxDockingRunner
+
+                self.raw_executor = SandboxDockingRunner.from_env(
+                    self._allowed_output_root
+                ).execute
+            else:
+                raise ValueError("invalid docking execution backend")
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(root=<redacted>)"
 
     @staticmethod
-    def _execute_production_tool(payload: Mapping[str, Any], **control: Any) -> ToolResult:
+    def _execute_local_tool(payload: Mapping[str, Any], **control: Any) -> ToolResult:
         return execute_tool_compat(MolecularDocking(), payload, **control)
+
+    # Compatibility identity for the existing Temporal process-boundary guard.
+    _execute_production_tool = _execute_local_tool
 
     def run_verified(
         self,

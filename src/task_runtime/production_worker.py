@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+import stat
+from pathlib import Path, PurePosixPath
 
 from .config import PROJECT_ROOT, TaskRuntimeConfig
 from .database import get_task_db_path
@@ -30,6 +31,9 @@ _STABLE_CODES = frozenset(
         "environment_file_wrong_owner",
         "environment_file_wrong_mode",
         "environment_file_unavailable",
+        "docking_backend_not_opensandbox",
+        "sandbox_socket_not_configured",
+        "sandbox_socket_outside_runtime",
     }
 )
 
@@ -66,6 +70,79 @@ def _resolved(path: Path) -> Path | None:
         return _absolute(path).resolve(strict=False)
     except (OSError, RuntimeError, TypeError, ValueError):
         return None
+
+
+_SANDBOX_RUNTIME_ROOT = PurePosixPath("/run/medchat-sandbox")
+_WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def _sandbox_socket_parent_is_trusted(path: Path) -> bool:
+    """Inspect the fixed Linux runtime directory without following aliases."""
+
+    if os.name != "posix":
+        return True
+    descriptors: list[int] = []
+    try:
+        flags = (
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        if not os.O_DIRECTORY or not os.O_NOFOLLOW:
+            return False
+        current = os.open("/", flags)
+        descriptors.append(current)
+        for component in ("run", "medchat-sandbox"):
+            current = os.open(component, flags, dir_fd=current)
+            descriptors.append(current)
+            metadata = os.fstat(current)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or bool(getattr(metadata, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT)
+            ):
+                return False
+        try:
+            target = os.stat(path.name, dir_fd=current, follow_symlinks=False)
+        except FileNotFoundError:
+            return True
+        return stat.S_ISSOCK(target.st_mode) and not bool(
+            getattr(target, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _validate_sandbox_environment() -> tuple[str, ...]:
+    codes: list[str] = []
+    if os.environ.get("MEDCHAT_DOCKING_EXECUTION_BACKEND") != "opensandbox":
+        codes.append("docking_backend_not_opensandbox")
+    raw_socket = os.environ.get("MEDCHAT_SANDBOX_BROKER_SOCKET")
+    if raw_socket is None or not raw_socket.strip():
+        codes.append("sandbox_socket_not_configured")
+        return tuple(codes)
+    try:
+        lexical = PurePosixPath(raw_socket)
+        valid = (
+            raw_socket == str(lexical)
+            and lexical.is_absolute()
+            and lexical.parent == _SANDBOX_RUNTIME_ROOT
+            and lexical.name not in {"", ".", ".."}
+            and ".." not in lexical.parts
+            and "\\" not in raw_socket
+            and not any(ord(character) < 32 or ord(character) == 127 for character in raw_socket)
+        )
+        if not valid or not _sandbox_socket_parent_is_trusted(Path(raw_socket)):
+            codes.append("sandbox_socket_outside_runtime")
+    except (OSError, RuntimeError, TypeError, ValueError):
+        codes.append("sandbox_socket_outside_runtime")
+    return tuple(codes)
 
 
 def _validate_worker_paths(
@@ -187,5 +264,6 @@ def validate_production_worker_config(
             docking_output_root=actual_output,
         )
     )
+    codes.extend(_validate_sandbox_environment())
     if codes:
         raise ProductionWorkerValidationError(*codes)

@@ -5,14 +5,21 @@ import importlib.util
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+from src.task_runtime.production_worker import (
+    ProductionWorkerValidationError,
+    validate_production_worker_config,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER_PATH = ROOT / "deployment" / "libexec" / "validate-temporal-worker-env.py"
 SYSTEMD_INTEGRATION_PATH = ROOT / "tests" / "test_temporal_systemd_integration.py"
 DEPLOYMENT_README = ROOT / "deployment" / "README.md"
+WORKER_ENV_EXAMPLE = ROOT / "deployment" / "temporal-worker.env.example"
 ALLOWED_KEYS = {
     "MEDCHAT_TASK_BACKEND",
     "MEDCHAT_TEMPORAL_CANARY_PERCENT",
@@ -303,3 +310,90 @@ def test_cli_rejects_path_argument_without_echo_or_traceback() -> None:
     assert "private" not in result.stderr.lower()
     assert "secret" not in result.stderr.lower()
     assert "traceback" not in result.stderr.lower()
+
+
+def _production_config(project_root: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        backend="temporal_canary",
+        canary_percent=0,
+        temporal_namespace="default",
+        docking_queue="medchat-docking",
+        docking_concurrency=1,
+        warnings=(),
+        _temporal_address_configured=True,
+        _staging_root_configured=True,
+        _worker_metrics_address_configured=True,
+        _backup_state_path_configured=True,
+        worker_metrics_address="127.0.0.1",
+        staging_root=project_root / "scratch" / "task_inputs",
+        backup_state_path=project_root / "scratch" / "backups" / "latest.json",
+    )
+
+
+def _validate_production(project_root: Path) -> None:
+    validate_production_worker_config(
+        _production_config(project_root),
+        project_root=project_root,
+        task_db_path=project_root / "scratch" / "tasks.sqlite",
+        docking_output_root=project_root / "temp_docking",
+    )
+
+
+def test_production_worker_requires_explicit_opensandbox_docking_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MEDCHAT_DOCKING_EXECUTION_BACKEND", raising=False)
+    monkeypatch.setenv(
+        "MEDCHAT_SANDBOX_BROKER_SOCKET", "/run/medchat-sandbox/broker.sock"
+    )
+
+    with pytest.raises(ProductionWorkerValidationError) as raised:
+        _validate_production(tmp_path)
+
+    assert "docking_backend_not_opensandbox" in raised.value.codes
+
+
+def test_production_worker_requires_explicit_sandbox_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MEDCHAT_DOCKING_EXECUTION_BACKEND", "opensandbox")
+    monkeypatch.delenv("MEDCHAT_SANDBOX_BROKER_SOCKET", raising=False)
+
+    with pytest.raises(ProductionWorkerValidationError) as raised:
+        _validate_production(tmp_path)
+
+    assert "sandbox_socket_not_configured" in raised.value.codes
+
+
+@pytest.mark.parametrize(
+    "socket_path",
+    [
+        "run/medchat-sandbox/broker.sock",
+        "/run/medchat-sandbox/../private/broker.sock",
+        "/tmp/broker.sock",
+        "/run/medchat-sandbox",
+    ],
+)
+def test_production_worker_rejects_socket_outside_fixed_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    socket_path: str,
+) -> None:
+    monkeypatch.setenv("MEDCHAT_DOCKING_EXECUTION_BACKEND", "opensandbox")
+    monkeypatch.setenv("MEDCHAT_SANDBOX_BROKER_SOCKET", socket_path)
+
+    with pytest.raises(ProductionWorkerValidationError) as raised:
+        _validate_production(tmp_path)
+
+    assert "sandbox_socket_outside_runtime" in raised.value.codes
+
+
+def test_worker_environment_example_appends_only_non_secret_broker_settings() -> None:
+    lines = WORKER_ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+    assert lines[-2:] == [
+        "MEDCHAT_DOCKING_EXECUTION_BACKEND=opensandbox",
+        "MEDCHAT_SANDBOX_BROKER_SOCKET=/run/medchat-sandbox/broker.sock",
+    ]
+    assert "OPEN_SANDBOX_API_KEY" not in WORKER_ENV_EXAMPLE.read_text(encoding="utf-8")
