@@ -1715,6 +1715,11 @@ def test_terminal_wait_index_is_constant_after_one_thousand_jobs(
         "prefix/dev/null",
         "prefix/\u200bdata/model.bin",
         "to\u200bken=private-marker",
+        "/数据/结果",
+        "prefix/é/ß",
+        "prefix/１２/结果",
+        "C:\\数据\\结果",
+        r"\\服务器\共享\结果",
     ],
 )
 def test_unicode_reassembled_warning_fails_end_to_end_without_manifest(

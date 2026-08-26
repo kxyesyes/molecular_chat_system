@@ -1263,6 +1263,11 @@ def test_cleanup_pending_jobs_fails_closed_on_corrupt_matching_row(
         "prefix/\u200bdata/model.bin",
         "api\u200b_key=private-marker",
         "token=private-marker",
+        "/数据/结果",
+        "prefix/é/ß",
+        "prefix/１２/结果",
+        "C:\\数据\\结果",
+        r"\\服务器\共享\结果",
     ],
 )
 def test_store_rejects_embedded_paths_in_warnings_and_provenance_without_echo(
@@ -1299,12 +1304,12 @@ def test_store_allows_fraction_text_in_warning_and_provenance(tmp_path: Path) ->
     terminal = store.fail(
         job.job_id,
         BrokerErrorCode.INVALID_INPUT,
-        warnings=["score ratio 1/2"],
-        provenance={"scientific_note": "score ratio 1/2"},
+        warnings=["score ratio 1/2", "decimal ratio 0.5/1.25"],
+        provenance={"scientific_note": "signed ratio -1/2"},
     )
 
-    assert terminal.warnings == ["score ratio 1/2"]
-    assert terminal.provenance == {"scientific_note": "score ratio 1/2"}
+    assert terminal.warnings == ["score ratio 1/2", "decimal ratio 0.5/1.25"]
+    assert terminal.provenance == {"scientific_note": "signed ratio -1/2"}
 
 
 def test_service_store_expire_and_manual_audit_delete_obey_fk_order(

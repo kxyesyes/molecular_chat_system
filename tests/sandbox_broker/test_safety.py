@@ -25,6 +25,12 @@ from src.sandbox_broker.safety import is_safe_metadata_text
         "prefix/\u200bdata/model.bin",
         "prefix\u2060C:\\Users\\runner\\result.json",
         "prefix/standalone.ext",
+        "/数据/结果",
+        "prefix/é/ß",
+        "prefix/ｅ́/ｓｓ",
+        "prefix/１２/结果",
+        "C:\\数据\\结果",
+        r"\\服务器\共享\结果",
         "prefix／tmp／result.json",
         "prefix∕etc∕passwd",
     ],
@@ -37,10 +43,12 @@ def test_metadata_safety_rejects_absolute_path_fragments_anywhere(value: str) ->
     "value",
     [
         "score ratio 1/2",
+        "decimal ratio 0.5/1.25",
+        "signed ratio -1/2",
         "plain scientific warning",
     ],
 )
-def test_metadata_safety_allows_fractions_smiles_and_relative_text(value: str) -> None:
+def test_metadata_safety_allows_numeric_fractions_and_plain_text(value: str) -> None:
     assert is_safe_metadata_text(value) is True
 
 

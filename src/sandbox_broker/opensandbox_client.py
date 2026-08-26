@@ -677,6 +677,7 @@ class OpenSandboxClient:
         self._cleanup_in_flight: dict[str, asyncio.Task[None]] = {}
         self._cleanup_completed: OrderedDict[str, None] = OrderedDict()
         self._cleanup_completed_limit = _CLEANUP_COMPLETED_LIMIT
+        self._cleanup_lock = asyncio.Lock()
 
     def _handle(self, handle: object) -> SandboxHandle:
         if type(handle) is not SandboxHandle or handle.raw is None:
@@ -903,37 +904,45 @@ class OpenSandboxClient:
         except Exception:
             raise SandboxDestroyError("sandbox cleanup failed") from None
 
-    def _cleanup_finished(
+    @staticmethod
+    def _consume_cleanup_task(task: asyncio.Task[None]) -> None:
+        try:
+            task.exception()
+        except BaseException:
+            pass
+
+    async def _perform_tracked_cleanup(
         self,
         sandbox_id: str,
-        task: asyncio.Task[None],
+        cleanup: Any,
     ) -> None:
-        if self._cleanup_in_flight.get(sandbox_id) is not task:
-            return
-        del self._cleanup_in_flight[sandbox_id]
+        succeeded = False
         try:
-            failure = task.exception()
-        except BaseException:
-            return
-        if failure is None:
-            self._cleanup_completed[sandbox_id] = None
-            self._cleanup_completed.move_to_end(sandbox_id)
-            while len(self._cleanup_completed) > self._cleanup_completed_limit:
-                self._cleanup_completed.popitem(last=False)
+            await self._perform_cleanup(cleanup)
+            succeeded = True
+        finally:
+            task = asyncio.current_task()
+            async with self._cleanup_lock:
+                if self._cleanup_in_flight.get(sandbox_id) is task:
+                    del self._cleanup_in_flight[sandbox_id]
+                if succeeded:
+                    self._cleanup_completed[sandbox_id] = None
+                    self._cleanup_completed.move_to_end(sandbox_id)
+                    while len(self._cleanup_completed) > self._cleanup_completed_limit:
+                        self._cleanup_completed.popitem(last=False)
 
     async def _cleanup_once(self, sandbox_id: str, cleanup: Any) -> None:
-        if sandbox_id in self._cleanup_completed:
-            return
-        task = self._cleanup_in_flight.get(sandbox_id)
-        if task is None:
-            task = asyncio.create_task(self._perform_cleanup(cleanup))
-            self._cleanup_in_flight[sandbox_id] = task
-            task.add_done_callback(
-                lambda completed, sandbox_id=sandbox_id: self._cleanup_finished(
-                    sandbox_id,
-                    completed,
+        async with self._cleanup_lock:
+            if sandbox_id in self._cleanup_completed:
+                self._cleanup_completed.move_to_end(sandbox_id)
+                return
+            task = self._cleanup_in_flight.get(sandbox_id)
+            if task is None:
+                task = asyncio.create_task(
+                    self._perform_tracked_cleanup(sandbox_id, cleanup)
                 )
-            )
+                self._cleanup_in_flight[sandbox_id] = task
+                task.add_done_callback(self._consume_cleanup_task)
         await asyncio.shield(task)
 
     async def destroy(self, handle: SandboxHandle) -> None:

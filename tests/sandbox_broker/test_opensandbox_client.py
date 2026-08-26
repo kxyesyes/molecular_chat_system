@@ -1292,6 +1292,27 @@ def test_cleanup_completion_memory_is_bounded_and_evicted_ids_retry(
     assert fake.destroyed_by_id.count("sandbox-0") == 2
 
 
+def test_cleanup_completion_cache_refreshes_recency_on_hit(tmp_path: Path) -> None:
+    async def scenario() -> tuple[OpenSandboxClient, FakeSandboxFactory]:
+        fake = FakeSandboxFactory()
+        client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+        client._cleanup_completed_limit = 2
+        await client.destroy_by_id("sandbox-a")
+        await client.destroy_by_id("sandbox-b")
+        await client.destroy_by_id("sandbox-a")
+        await client.destroy_by_id("sandbox-c")
+        await client.destroy_by_id("sandbox-a")
+        await client.destroy_by_id("sandbox-b")
+        return client, fake
+
+    client, fake = asyncio.run(scenario())
+
+    assert list(client._cleanup_completed) == ["sandbox-a", "sandbox-b"]
+    assert fake.destroyed_by_id.count("sandbox-a") == 1
+    assert fake.destroyed_by_id.count("sandbox-b") == 2
+    assert fake.destroyed_by_id.count("sandbox-c") == 1
+
+
 def test_destroy_by_job_id_is_a_fixed_metadata_filtered_compensation(
     tmp_path: Path,
 ) -> None:

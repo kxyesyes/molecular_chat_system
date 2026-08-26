@@ -7,14 +7,13 @@ import unicodedata
 
 
 _ANSI_ESCAPE_PATTERN = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-_])")
-_ABSOLUTE_PATH_PATTERN = re.compile(
-    r"/(?:[A-Za-z._~-][A-Za-z0-9._~-]*/|"
-    r"[A-Za-z._~-][A-Za-z0-9._~-]*\.[A-Za-z0-9._~-]{1,32}(?=$|[^A-Za-z0-9._~-])|"
-    r"[A-Za-z._~-][A-Za-z0-9._~-]*(?=$|[\s\]\[(){}'\",;:=]))",
-    re.IGNORECASE,
-)
 _WINDOWS_DRIVE_PATTERN = re.compile(r"[A-Za-z]:/")
 _UNC_PATTERN = re.compile(r"//[^/\s]+/[^/\s]+")
+_ASCII_NUMBER = r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)"
+_NUMERIC_FRACTION_PATTERN = re.compile(
+    rf"{_ASCII_NUMBER}/{_ASCII_NUMBER}"
+)
+_TOKEN_BOUNDARIES = frozenset(" \t\r\n=,:;!?()[]{}\"'")
 _SENSITIVE_TEXT_PATTERN = re.compile(
     r"(?i)(?:api[_ -]?key|api[_ -]?token|access[_ -]?token|token|password|"
     r"secret|credential|bearer\s+)"
@@ -51,6 +50,28 @@ def contains_sensitive_metadata_text(value: object) -> bool:
     return normalized is None or _SENSITIVE_TEXT_PATTERN.search(normalized[0]) is not None
 
 
+def _slash_is_numeric_fraction(path_view: str, slash_index: int) -> bool:
+    start = slash_index
+    while start > 0 and path_view[start - 1] not in _TOKEN_BOUNDARIES:
+        start -= 1
+    end = slash_index + 1
+    while end < len(path_view) and path_view[end] not in _TOKEN_BOUNDARIES:
+        end += 1
+    token = path_view[start:end]
+    if token.endswith("."):
+        token = token[:-1]
+    return _NUMERIC_FRACTION_PATTERN.fullmatch(token) is not None
+
+
+def _contains_absolute_like_path(path_view: str) -> bool:
+    if _WINDOWS_DRIVE_PATTERN.search(path_view) or _UNC_PATTERN.search(path_view):
+        return True
+    return any(
+        character == "/" and not _slash_is_numeric_fraction(path_view, index)
+        for index, character in enumerate(path_view)
+    )
+
+
 def is_safe_metadata_text(value: object) -> bool:
     """Reject Unicode controls and absolute path-like metadata fragments."""
 
@@ -60,8 +81,4 @@ def is_safe_metadata_text(value: object) -> bool:
     path_view, altered = normalized
     if altered:
         return False
-    return not (
-        _ABSOLUTE_PATH_PATTERN.search(path_view)
-        or _WINDOWS_DRIVE_PATTERN.search(path_view)
-        or _UNC_PATTERN.search(path_view)
-    )
+    return not _contains_absolute_like_path(path_view)
