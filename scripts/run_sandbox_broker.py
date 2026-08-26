@@ -44,6 +44,28 @@ def _absolute_components(path: Path) -> list[Path]:
     return components
 
 
+def _runtime_parent_metadata_is_safe(metadata: object) -> bool:
+    try:
+        mode = stat.S_IMODE(metadata.st_mode)
+        allowed_permissions = stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or _is_reparse(metadata)
+            or mode & stat.S_IRWXU != stat.S_IRWXU
+            or mode & ~allowed_permissions
+        ):
+            return False
+        if os.name == "posix" and (
+            metadata.st_uid != os.geteuid()
+            or metadata.st_gid != os.getegid()
+        ):
+            return False
+        return True
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
 def _trusted_socket_parent(socket_path: object) -> tuple[Path, tuple[int, int, int]]:
     try:
         if (
@@ -67,12 +89,10 @@ def _trusted_socket_parent(socket_path: object) -> tuple[Path, tuple[int, int, i
             ):
                 raise ValueError
         parent_metadata = os.lstat(parent)
-        if os.name == "posix":
-            if (
-                parent_metadata.st_uid != os.geteuid()
-                or parent_metadata.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
-            ):
-                raise ValueError
+        if os.name == "posix" and not _runtime_parent_metadata_is_safe(
+            parent_metadata
+        ):
+            raise ValueError
         return lexical, _identity(parent_metadata)
     except (OSError, RuntimeError, TypeError, ValueError):
         raise RuntimeError("unsafe sandbox broker runtime parent") from None
@@ -124,12 +144,10 @@ def acquire_runtime_lock(socket_path: Path) -> int:
             or _is_reparse(named)
             or opened.st_nlink != 1
             or named.st_nlink != 1
-            or named.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or stat.S_IMODE(named.st_mode) != 0o600
             or _identity(opened) != _identity(named)
-            or not stat.S_ISDIR(parent.st_mode)
-            or stat.S_ISLNK(parent.st_mode)
-            or _is_reparse(parent)
-            or parent.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+            or not _runtime_parent_metadata_is_safe(parent)
             or _identity(parent) != parent_identity
         ):
             raise ValueError
@@ -142,6 +160,9 @@ def acquire_runtime_lock(socket_path: Path) -> int:
             or _identity(named_after) != _identity(named)
             or opened_after.st_nlink != 1
             or named_after.st_nlink != 1
+            or stat.S_IMODE(opened_after.st_mode) != 0o600
+            or stat.S_IMODE(named_after.st_mode) != 0o600
+            or not _runtime_parent_metadata_is_safe(parent_after)
             or _identity(parent_after) != parent_identity
         ):
             raise ValueError
@@ -246,7 +267,7 @@ def remove_stale_socket(socket_path: Path) -> None:
 
 
 def main() -> None:
-    os.umask(0o077)
+    os.umask(0o007)
     try:
         config = BrokerConfig.from_env()
     except Exception:

@@ -38,8 +38,9 @@ _REQUEST_JSON_MAX_CHARS = 64 * 1024
 _MULTIPART_OVERHEAD_BYTES = 2 * 1024 * 1024
 
 
-class _MultipartBodyLimitExceeded(Exception):
-    pass
+class _MultipartBodyLimitExceeded(StarletteHTTPException):
+    def __init__(self) -> None:
+        super().__init__(status_code=413)
 
 
 class _MultipartBodyLimitMiddleware:
@@ -315,6 +316,8 @@ def create_app(
         request: Request,
         failure: StarletteHTTPException,
     ) -> JSONResponse:
+        if isinstance(failure, _MultipartBodyLimitExceeded):
+            raise failure
         del request
         if failure.status_code == 404:
             return _error(404, "not_found")
@@ -325,6 +328,8 @@ def create_app(
         request: Request,
         failure: Exception,
     ) -> JSONResponse:
+        if isinstance(failure, _MultipartBodyLimitExceeded):
+            raise failure
         del request, failure
         logger.error("sandbox broker request failed")
         return _error(500, "internal_error")
@@ -341,6 +346,8 @@ def create_app(
             names = [name for name, _ in form.multi_items()]
             if sorted(names) != ["ligand", "receptor", "request_json"]:
                 raise ValueError
+        except _MultipartBodyLimitExceeded:
+            raise
         except Exception:
             raise BrokerFailure(BrokerErrorCode.INVALID_INPUT) from None
 

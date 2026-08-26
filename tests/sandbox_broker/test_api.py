@@ -1128,6 +1128,79 @@ def test_transport_gate_allows_missing_length_but_rejects_actual_overflow() -> N
     assert sent[0]["status"] == 413
 
 
+def test_full_stack_chunked_upload_without_length_stays_413_and_skips_service(
+    tmp_path: Path,
+) -> None:
+    from src.sandbox_broker.app import (
+        _MultipartBodyLimitMiddleware,
+        create_app,
+    )
+
+    boundary = b"task6-limit-probe"
+    payload = b"".join(
+        [
+            b"--" + boundary + b"\r\n",
+            b'Content-Disposition: form-data; name="request_json"\r\n\r\n',
+            b'{"center":[1,2,3],"size":[20,20,20]}\r\n',
+            b"--" + boundary + b"\r\n",
+            (
+                b'Content-Disposition: form-data; name="receptor"; '
+                b'filename="receptor.pdbqt"\r\n'
+            ),
+            b"Content-Type: chemical/x-pdbqt\r\n\r\n",
+            b"R" * 256 + b"\r\n",
+            b"--" + boundary + b"\r\n",
+            (
+                b'Content-Disposition: form-data; name="ligand"; '
+                b'filename="ligand.sdf"\r\n'
+            ),
+            b"Content-Type: chemical/x-mdl-sdfile\r\n\r\n",
+            b"LIGAND\r\n",
+            b"--" + boundary + b"--\r\n",
+        ]
+    )
+    chunks = [payload[index : index + 31] for index in range(0, len(payload), 31)]
+    service = _ApiService()
+    app = create_app(_config(tmp_path), service=service)
+    limited = _MultipartBodyLimitMiddleware(app, maximum_bytes=127)
+    sent: list[dict[str, object]] = []
+    receive_count = 0
+
+    async def receive() -> dict[str, object]:
+        nonlocal receive_count
+        chunk = chunks[receive_count]
+        receive_count += 1
+        return {
+            "type": "http.request",
+            "body": chunk,
+            "more_body": receive_count < len(chunks),
+        }
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    scope = _http_scope(
+        [
+            (b"content-type", b"multipart/form-data; boundary=" + boundary),
+            (b"idempotency-key", b"chunked-probe"),
+        ]
+    )
+
+    async def exercise() -> None:
+        async with app.router.lifespan_context(app):
+            await limited(scope, receive, send)
+
+    asyncio.run(exercise())
+
+    assert all(name != b"content-length" for name, _ in scope["headers"])
+    assert receive_count == 5
+    assert service.submitted_keys == []
+    assert sent[0]["status"] == 413
+    assert json.loads(sent[1]["body"]) == {
+        "error": {"code": "payload_too_large"}
+    }
+
+
 @pytest.mark.parametrize("disconnect", [False, True])
 def test_transport_gate_propagates_cancellation_and_client_disconnect_without_state(
     disconnect: bool,
@@ -1273,7 +1346,7 @@ def test_uds_main_sets_umask_before_config_and_uses_only_exact_uds_args(
     entrypoint.main()
 
     assert events == [
-        ("umask", 0o077),
+        ("umask", 0o007),
         "config",
         ("lock", config.socket_path),
         ("stale", config.socket_path),
@@ -1434,6 +1507,78 @@ def test_stale_socket_cleanup_removes_real_unix_socket(tmp_path: Path) -> None:
     assert not target.exists()
 
 
+@pytest.mark.parametrize("mode", [0o700, 0o750])
+def test_runtime_parent_accepts_single_user_or_shared_group_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: int,
+) -> None:
+    import scripts.run_sandbox_broker as entrypoint
+
+    target = tmp_path / "broker.sock"
+    metadata = SimpleNamespace(
+        st_mode=stat.S_IFDIR | mode,
+        st_dev=9,
+        st_ino=2,
+        st_uid=101,
+        st_gid=202,
+        st_file_attributes=0,
+    )
+    fake_os = SimpleNamespace(
+        name="posix",
+        path=entrypoint.os.path,
+        lstat=lambda path: metadata,
+        geteuid=lambda: 101,
+        getegid=lambda: 202,
+    )
+    monkeypatch.setattr(entrypoint, "os", fake_os)
+
+    observed, identity = entrypoint._trusted_socket_parent(target)
+    assert observed == target
+    assert identity == entrypoint._identity(metadata)
+
+
+@pytest.mark.parametrize(
+    ("mode", "uid", "gid"),
+    [
+        (0o770, 101, 202),
+        (0o751, 101, 202),
+        (0o650, 101, 202),
+        (0o750, 999, 202),
+        (0o750, 101, 999),
+    ],
+)
+def test_runtime_parent_rejects_unsafe_mode_owner_or_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: int,
+    uid: int,
+    gid: int,
+) -> None:
+    import scripts.run_sandbox_broker as entrypoint
+
+    target = tmp_path / "broker.sock"
+    metadata = SimpleNamespace(
+        st_mode=stat.S_IFDIR | mode,
+        st_dev=9,
+        st_ino=2,
+        st_uid=uid,
+        st_gid=gid,
+        st_file_attributes=0,
+    )
+    fake_os = SimpleNamespace(
+        name="posix",
+        path=entrypoint.os.path,
+        lstat=lambda path: metadata,
+        geteuid=lambda: 101,
+        getegid=lambda: 202,
+    )
+    monkeypatch.setattr(entrypoint, "os", fake_os)
+
+    with pytest.raises(RuntimeError, match="unsafe sandbox broker runtime parent"):
+        entrypoint._trusted_socket_parent(target)
+
+
 def test_runtime_lock_uses_secure_open_identity_checks_and_nonblocking_flock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1443,7 +1588,7 @@ def test_runtime_lock_uses_secure_open_identity_checks_and_nonblocking_flock(
     socket_path = tmp_path / "broker.sock"
     lock_path = tmp_path / ".sandbox-broker.lock"
     parent_stat = SimpleNamespace(
-        st_mode=stat.S_IFDIR | 0o700,
+        st_mode=stat.S_IFDIR | 0o750,
         st_dev=9,
         st_ino=2,
         st_file_attributes=0,
@@ -1541,6 +1686,51 @@ def test_runtime_lock_rejects_nonprivate_parent_before_flock(
     assert closed == [43]
 
 
+@pytest.mark.parametrize("lock_mode", [0o640, 0o700])
+def test_runtime_lock_rejects_existing_lock_unless_mode_is_exactly_0600(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lock_mode: int,
+) -> None:
+    import scripts.run_sandbox_broker as entrypoint
+
+    socket_path = tmp_path / "broker.sock"
+    parent_stat = SimpleNamespace(
+        st_mode=stat.S_IFDIR | 0o700,
+        st_dev=9,
+        st_ino=2,
+        st_file_attributes=0,
+    )
+    lock_stat = SimpleNamespace(
+        st_mode=stat.S_IFREG | lock_mode,
+        st_dev=9,
+        st_ino=4,
+        st_nlink=1,
+        st_file_attributes=0,
+    )
+    monkeypatch.setattr(
+        entrypoint,
+        "_trusted_socket_parent",
+        lambda path: (socket_path, entrypoint._identity(parent_stat)),
+    )
+    monkeypatch.setattr(entrypoint.os, "open", lambda *args: 44)
+    monkeypatch.setattr(entrypoint.os, "fstat", lambda descriptor: lock_stat)
+    monkeypatch.setattr(
+        entrypoint.os,
+        "lstat",
+        lambda path: parent_stat if Path(path) == tmp_path else lock_stat,
+    )
+    monkeypatch.setattr(
+        entrypoint,
+        "_flock_exclusive_nonblocking",
+        lambda descriptor: pytest.fail("flocked an incorrectly-mode lock file"),
+    )
+    monkeypatch.setattr(entrypoint.os, "close", lambda descriptor: None)
+
+    with pytest.raises(RuntimeError, match="sandbox broker lock unavailable"):
+        entrypoint.acquire_runtime_lock(socket_path)
+
+
 def test_lock_failure_never_touches_stale_socket(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1601,7 +1791,7 @@ def test_main_redacts_configuration_failure_before_filesystem_actions(
         match="sandbox broker configuration unavailable",
     ) as raised:
         entrypoint.main()
-    assert events == [("umask", 0o077)]
+    assert events == [("umask", 0o007)]
     assert "secret" not in str(raised.value).lower()
     assert "runtime" not in str(raised.value).lower()
 
