@@ -290,8 +290,111 @@ def test_installer_migrates_legacy_membership_and_models_preview_intent() -> Non
     assert 'if [ "$DESTDIR" = / ]; then' in installer
     assert 'remove_legacy_medchat_membership' in installer
     assert 'gpasswd --delete medchat medchat-sandbox' in installer
-    assert 'group_migration_intent = sys.argv[5]' in installer
+    assert 'group_migration_intent = sys.argv[6]' in installer
     assert 'group_migration_intent != "remove-medchat-from-medchat-sandbox"' in installer
+
+
+def test_live_install_quiesces_shared_user_services_before_credential_write() -> None:
+    installer = INSTALLER.read_text(encoding="utf-8")
+
+    assert "MEDCHAT_SERVICE_STATE=unknown" in installer
+    assert "TEMPORAL_WORKER_SERVICE_STATE=unknown" in installer
+    assert "SYSTEMCTL_TIMEOUT_SECONDS=15" in installer
+    assert "systemctl show --property=ActiveState --value medchat.service" in installer
+    assert (
+        "systemctl show --property=ActiveState --value "
+        "medchat-temporal-worker.service"
+    ) in installer
+
+    lifecycle = [
+        installer.index("\n    quiesce_shared_medchat_services\n"),
+        installer.index("\n    remove_legacy_medchat_membership"),
+        installer.index("\n/usr/bin/env -i PATH=",),
+        installer.index('rooted("/etc/medchat/sandbox-broker.env")'),
+    ]
+    assert lifecycle == sorted(lifecycle)
+
+    quiesce_start = installer.index("quiesce_shared_medchat_services() {")
+    quiesce_end = installer.index("\n}\n", quiesce_start)
+    quiesce = installer[quiesce_start:quiesce_end]
+    operations = [
+        quiesce.index("MEDCHAT_SERVICE_STATE=$(query_medchat_service_state)"),
+        quiesce.index(
+            "TEMPORAL_WORKER_SERVICE_STATE=$(query_temporal_worker_service_state)"
+        ),
+        quiesce.index("run_systemctl stop medchat-temporal-worker.service"),
+        quiesce.index("run_systemctl stop medchat.service"),
+        quiesce.index("confirm_inactive medchat-temporal-worker.service"),
+        quiesce.index("confirm_inactive medchat.service"),
+    ]
+    assert operations == sorted(operations)
+
+
+def test_live_install_restores_only_prior_active_services_after_unit_reload() -> None:
+    installer = INSTALLER.read_text(encoding="utf-8")
+
+    assert '"$SCRIPT_DIR/../medchat-temporal-worker.service"' in installer
+    assert 'rooted("/etc/systemd/system/medchat-temporal-worker.service")' in installer
+    restore_start = installer.index("restore_prior_medchat_services() {")
+    restore_end = installer.index("\n}\n", restore_start)
+    restore = installer[restore_start:restore_end]
+    assert 'if [ "$MEDCHAT_SERVICE_STATE" = active ]; then' in restore
+    assert "run_systemctl start medchat.service" in restore
+    assert 'if [ "$TEMPORAL_WORKER_SERVICE_STATE" = active ]; then' in restore
+    assert "run_systemctl start medchat-temporal-worker.service" in restore
+    assert "run_systemctl start medchat-sandbox-broker.service" not in restore
+
+    reload_position = installer.index("\n    run_systemctl daemon-reload\n")
+    restore_position = installer.index(
+        "\n    restore_prior_medchat_services", reload_position
+    )
+    assert reload_position < restore_position
+    assert "trap restore_stopped_services_on_failure EXIT" in installer
+    assert ">/dev/null 2>&1" in installer
+
+
+def test_failure_restoration_is_gated_on_verified_group_revocation() -> None:
+    installer = INSTALLER.read_text(encoding="utf-8")
+
+    assert "GROUP_MEMBERSHIP_REVOKED=0" in installer
+    migration_start = installer.index("remove_legacy_medchat_membership() {")
+    migration_end = installer.index("\n}\n", migration_start)
+    migration = installer[migration_start:migration_end]
+    assert "GROUP_MEMBERSHIP_REVOKED=1" in migration
+
+    trap_start = installer.index("restore_stopped_services_on_failure() {")
+    trap_end = installer.index("\n}\n", trap_start)
+    failure_trap = installer[trap_start:trap_end]
+    failure_order = [
+        failure_trap.index("run_systemctl stop medchat-temporal-worker.service"),
+        failure_trap.index("run_systemctl stop medchat.service"),
+        failure_trap.index("remove_legacy_medchat_membership"),
+        failure_trap.index('if [ "$GROUP_MEMBERSHIP_REVOKED" -eq 1 ]; then'),
+        failure_trap.index("restore_prior_medchat_services"),
+    ]
+    assert failure_order == sorted(failure_order)
+
+
+def test_live_install_revokes_group_unconditionally_but_preview_only_models_intent() -> None:
+    installer = INSTALLER.read_text(encoding="utf-8")
+
+    migration_start = installer.index("remove_legacy_medchat_membership() {")
+    migration_end = installer.index("\n}\n", migration_start)
+    migration = installer[migration_start:migration_end]
+    assert "gpasswd --delete medchat medchat-sandbox" in migration
+    assert "id -nG medchat" in migration
+    migration_order = [
+        migration.index("gpasswd --delete medchat medchat-sandbox"),
+        migration.index("memberships="),
+        migration.index('case " $memberships "'),
+    ]
+    assert migration_order == sorted(migration_order)
+
+    live_call = installer.index("\n    remove_legacy_medchat_membership")
+    live_block = installer.rfind('if [ "$DESTDIR" = / ]; then', 0, live_call)
+    live_end = installer.index("\nfi\n", live_call)
+    assert live_block < live_call < live_end
+    assert installer.index("$GROUP_MIGRATION_INTENT", live_end) > live_end
 
 
 def test_only_temporal_worker_gets_broker_group_as_a_unit_scoped_group() -> None:
@@ -490,9 +593,14 @@ def test_static_validator_rejects_installer_without_directory_guards(
     [
         "usermod --append --groups medchat-sandbox medchat",
         "usermod -aG medchat-sandbox medchat",
+        "usermod -aGmedchat-sandbox medchat",
+        "usermod --append --groups=medchat-sandbox medchat",
         "usermod --groups medchat-sandbox --append medchat",
         "adduser medchat medchat-sandbox",
+        "addgroup medchat medchat-sandbox",
         "gpasswd --add medchat medchat-sandbox",
+        "usermod \\" + "\n  --append \\" + "\n  --groups=medchat-sandbox \\" + "\n  medchat",
+        "adduser \\" + "\n  medchat \\" + "\n  medchat-sandbox",
     ],
 )
 def test_static_validator_rejects_persistent_broker_group_membership(

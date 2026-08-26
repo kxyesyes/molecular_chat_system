@@ -5,6 +5,11 @@ umask 077
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 GROUP_MIGRATION_INTENT=remove-medchat-from-medchat-sandbox
+SYSTEMCTL_TIMEOUT_SECONDS=15
+MEDCHAT_SERVICE_STATE=unknown
+TEMPORAL_WORKER_SERVICE_STATE=unknown
+LIVE_SERVICES_QUIESCED=0
+GROUP_MEMBERSHIP_REVOKED=0
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 
@@ -49,18 +54,94 @@ source_is_regular_and_locked() {
     [ $((0$permissions & 0022)) -eq 0 ] || return 1
 }
 
-remove_legacy_medchat_membership() {
-    memberships=$(id -nG medchat) || fail group_membership_query_failed
-    case " $memberships " in
-        *" medchat-sandbox "*)
-            gpasswd --delete medchat medchat-sandbox >/dev/null 2>&1 || \
-                fail group_migration_failed
-            memberships=$(id -nG medchat) || fail group_membership_query_failed
-            case " $memberships " in
-                *" medchat-sandbox "*) fail group_migration_failed ;;
-            esac
-            ;;
+run_systemctl() {
+    timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
+        systemctl "$@" >/dev/null 2>&1
+}
+
+query_medchat_service_state() {
+    state=$(
+        timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
+            systemctl show --property=ActiveState --value medchat.service \
+            2>/dev/null
+    ) || fail service_state_query_failed
+    case "$state" in
+        active|inactive) printf '%s\n' "$state" ;;
+        *) fail service_state_invalid ;;
     esac
+}
+
+query_temporal_worker_service_state() {
+    state=$(
+        timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
+            systemctl show --property=ActiveState --value medchat-temporal-worker.service \
+            2>/dev/null
+    ) || fail service_state_query_failed
+    case "$state" in
+        active|inactive) printf '%s\n' "$state" ;;
+        *) fail service_state_invalid ;;
+    esac
+}
+
+confirm_inactive() {
+    case "$1" in
+        medchat.service) state=$(query_medchat_service_state) ;;
+        medchat-temporal-worker.service)
+            state=$(query_temporal_worker_service_state)
+            ;;
+        *) fail service_name_invalid ;;
+    esac
+    [ "$state" = inactive ] || fail service_stop_unconfirmed
+}
+
+quiesce_shared_medchat_services() {
+    MEDCHAT_SERVICE_STATE=$(query_medchat_service_state)
+    TEMPORAL_WORKER_SERVICE_STATE=$(query_temporal_worker_service_state)
+    LIVE_SERVICES_QUIESCED=1
+    if [ "$TEMPORAL_WORKER_SERVICE_STATE" = active ]; then
+        run_systemctl stop medchat-temporal-worker.service || fail service_stop_failed
+    fi
+    if [ "$MEDCHAT_SERVICE_STATE" = active ]; then
+        run_systemctl stop medchat.service || fail service_stop_failed
+    fi
+    confirm_inactive medchat-temporal-worker.service
+    confirm_inactive medchat.service
+}
+
+restore_prior_medchat_services() {
+    if [ "$MEDCHAT_SERVICE_STATE" = active ]; then
+        run_systemctl start medchat.service || return 1
+    fi
+    if [ "$TEMPORAL_WORKER_SERVICE_STATE" = active ]; then
+        run_systemctl start medchat-temporal-worker.service || return 1
+    fi
+}
+
+restore_stopped_services_on_failure() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    if [ "$LIVE_SERVICES_QUIESCED" -eq 1 ]; then
+        run_systemctl stop medchat-temporal-worker.service || :
+        run_systemctl stop medchat.service || :
+        remove_legacy_medchat_membership >/dev/null 2>&1 || :
+        if [ "$GROUP_MEMBERSHIP_REVOKED" -eq 1 ]; then
+            restore_prior_medchat_services || :
+        fi
+    fi
+    exit "$status"
+}
+
+remove_legacy_medchat_membership() {
+    timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
+        gpasswd --delete medchat medchat-sandbox >/dev/null 2>&1 || :
+    memberships=$(
+        timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
+            id -nG medchat 2>/dev/null
+    ) || return 1
+    case " $memberships " in
+        *" medchat-sandbox "*) return 1 ;;
+    esac
+    GROUP_MEMBERSHIP_REVOKED=1
 }
 
 if [ "$DESTDIR" = / ]; then
@@ -69,7 +150,8 @@ if [ "$DESTDIR" = / ]; then
         "$0" \
         "$SCRIPT_DIR/sandbox.toml" \
         "$SCRIPT_DIR/medchat-opensandbox.service" \
-        "$SCRIPT_DIR/medchat-sandbox-broker.service"
+        "$SCRIPT_DIR/medchat-sandbox-broker.service" \
+        "$SCRIPT_DIR/../medchat-temporal-worker.service"
     do
         source_is_regular_and_locked "$source_path" || fail source_untrusted
     done
@@ -92,7 +174,10 @@ if [ "$DESTDIR" = / ]; then
             --shell /usr/sbin/nologin medchat-opensandbox
 
     usermod --append --groups docker medchat-opensandbox
-    remove_legacy_medchat_membership
+    trap restore_stopped_services_on_failure EXIT
+    trap 'exit 1' HUP INT TERM
+    quiesce_shared_medchat_services
+    remove_legacy_medchat_membership || fail group_migration_failed
 
 fi
 
@@ -100,6 +185,7 @@ fi
     "$DESTDIR" "$SCRIPT_DIR/sandbox.toml" \
     "$SCRIPT_DIR/medchat-opensandbox.service" \
     "$SCRIPT_DIR/medchat-sandbox-broker.service" \
+    "$SCRIPT_DIR/../medchat-temporal-worker.service" \
     "$GROUP_MIGRATION_INTENT" <<'PY'
 import json
 import os
@@ -112,7 +198,8 @@ root = Path(sys.argv[1])
 template_path = Path(sys.argv[2])
 opensandbox_unit_path = Path(sys.argv[3])
 broker_unit_path = Path(sys.argv[4])
-group_migration_intent = sys.argv[5]
+worker_unit_path = Path(sys.argv[5])
+group_migration_intent = sys.argv[6]
 
 if group_migration_intent != "remove-medchat-from-medchat-sandbox":
     raise SystemExit(1)
@@ -398,6 +485,7 @@ try:
     template = read_source(template_path).decode("utf-8")
     opensandbox_unit = read_source(opensandbox_unit_path)
     broker_unit = read_source(broker_unit_path)
+    worker_unit = read_source(worker_unit_path)
 except UnicodeError:
     fail()
 token = '"${' + 'OPEN_SANDBOX_API_KEY' + '}"'
@@ -437,11 +525,21 @@ write_locked(
     0,
     0,
 )
+write_locked(
+    rooted("/etc/systemd/system/medchat-temporal-worker.service"),
+    worker_unit,
+    0o644,
+    0,
+    0,
+)
 PY
 
 if [ "$DESTDIR" = / ]; then
-    systemctl daemon-reload
-    systemctl enable medchat-opensandbox.service medchat-sandbox-broker.service
+    run_systemctl daemon-reload
+    run_systemctl enable medchat-opensandbox.service medchat-sandbox-broker.service
+    restore_prior_medchat_services || fail service_restore_failed
+    LIVE_SERVICES_QUIESCED=0
+    trap - EXIT HUP INT TERM
 fi
 
 printf '%s\n' 'opensandbox_install=passed'

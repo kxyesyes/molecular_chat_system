@@ -281,24 +281,98 @@ def _validate_worker_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
     )
 
 
-def _assigns_persistent_broker_membership(text: str) -> bool:
+def _shell_logical_commands(text: str) -> list[str]:
+    commands: list[str] = []
+    pending = ""
     for raw_line in text.splitlines():
         line = raw_line.strip()
-        if not line or line.startswith("#") or "medchat-sandbox" not in line:
+        continued = line.endswith("\\")
+        if continued:
+            line = line[:-1].rstrip()
+        pending = " ".join(part for part in (pending, line) if part)
+        if not continued:
+            if pending:
+                commands.append(pending)
+            pending = ""
+    if pending:
+        commands.append(pending)
+    return commands
+
+
+def _group_list_contains(value: str, group: str) -> bool:
+    return group in {item.strip() for item in value.split(",") if item.strip()}
+
+
+def _usermod_assigns_group(tokens: list[str], group: str) -> bool:
+    if "medchat" not in tokens:
+        return False
+    for index, token in enumerate(tokens):
+        value: str | None = None
+        if token in {"-G", "--groups"} and index + 1 < len(tokens):
+            value = tokens[index + 1]
+        elif token.startswith("--groups="):
+            value = token.partition("=")[2]
+        elif token.startswith("-") and not token.startswith("--") and "G" in token:
+            suffix = token.partition("G")[2]
+            if suffix:
+                value = suffix
+            elif index + 1 < len(tokens):
+                value = tokens[index + 1]
+        if value is not None and _group_list_contains(value, group):
+            return True
+    return False
+
+
+def _assigns_persistent_broker_membership(text: str) -> bool:
+    for line in _shell_logical_commands(text):
+        if line.startswith("#") or "medchat-sandbox" not in line:
             continue
         try:
-            tokens = shlex.split(line.removesuffix("\\").rstrip(), comments=True, posix=True)
+            tokens = shlex.split(line, comments=True, posix=True)
         except ValueError:
             return True
         token_set = set(tokens)
-        if not {"medchat", "medchat-sandbox"}.issubset(token_set):
-            continue
         commands = {Path(token).name for token in tokens}
-        if commands.intersection({"usermod", "adduser"}):
+        if "usermod" in commands and _usermod_assigns_group(
+            tokens, "medchat-sandbox"
+        ):
             return True
-        if "gpasswd" in commands and token_set.intersection({"-a", "--add"}):
+        if (
+            commands.intersection({"adduser", "addgroup"})
+            and {"medchat", "medchat-sandbox"}.issubset(token_set)
+        ):
+            return True
+        if (
+            "gpasswd" in commands
+            and {"medchat", "medchat-sandbox"}.issubset(token_set)
+            and token_set.intersection({"-a", "--add"})
+        ):
             return True
     return False
+
+
+def _live_migration_order_is_safe(text: str) -> bool:
+    try:
+        quiesce = text.index("\n    quiesce_shared_medchat_services\n")
+        revoke = text.index("\n    remove_legacy_medchat_membership", quiesce)
+        render = text.index("\n/usr/bin/env -i PATH=", revoke)
+        credential = text.index(
+            'rooted("/etc/medchat/sandbox-broker.env")', render
+        )
+        reload_units = text.index("\n    run_systemctl daemon-reload\n", credential)
+        restore = text.index(
+            "\n    restore_prior_medchat_services", reload_units
+        )
+        guarded_start = text.rfind('if [ "$DESTDIR" = / ]; then', 0, quiesce)
+        guarded_end = text.index("\nfi\n", revoke)
+        restore_guard = text.rfind('if [ "$DESTDIR" = / ]; then', 0, reload_units)
+        restore_guard_end = text.index("\nfi\n", restore)
+    except ValueError:
+        return False
+    return bool(
+        guarded_start < quiesce < revoke < guarded_end < render < credential
+        and credential < restore_guard < reload_units < restore < restore_guard_end
+    )
 
 
 def _validate_installer(text: str) -> bool:
@@ -315,6 +389,7 @@ def _validate_installer(text: str) -> bool:
         "adduser medchat medchat-sandbox",
         "gpasswd --add medchat medchat-sandbox",
         "gpasswd -a medchat medchat-sandbox",
+        "addgroup medchat medchat-sandbox",
     )
     required = (
         "set +x",
@@ -340,13 +415,20 @@ def _validate_installer(text: str) -> bool:
         "GROUP_MIGRATION_INTENT=remove-medchat-from-medchat-sandbox",
         "remove_legacy_medchat_membership",
         "gpasswd --delete medchat medchat-sandbox",
-        "group_migration_intent = sys.argv[5]",
+        "group_migration_intent = sys.argv[6]",
         'group_migration_intent != "remove-medchat-from-medchat-sandbox"',
+        "SYSTEMCTL_TIMEOUT_SECONDS=15",
+        "quiesce_shared_medchat_services",
+        "restore_stopped_services_on_failure",
+        "run_systemctl daemon-reload",
+        '"$SCRIPT_DIR/../medchat-temporal-worker.service"',
+        'rooted("/etc/systemd/system/medchat-temporal-worker.service")',
     )
     return bool(
         all(value in text for value in required)
         and not any(value in text for value in forbidden)
         and not _assigns_persistent_broker_membership(text)
+        and _live_migration_order_is_safe(text)
     )
 
 
