@@ -57,6 +57,16 @@ def _words(unit: dict[str, dict[str, list[str]]], key: str) -> set[str]:
     }
 
 
+def _section_words(
+    unit: dict[str, dict[str, list[str]]], section: str, key: str
+) -> set[str]:
+    return {
+        word
+        for value in unit[section].get(key, [])
+        for word in value.split()
+    }
+
+
 def _load_validator() -> ModuleType:
     spec = importlib.util.spec_from_file_location("opensandbox_deployment_validator", VALIDATOR)
     assert spec is not None and spec.loader is not None
@@ -161,12 +171,37 @@ def test_broker_and_worker_have_only_required_shared_runtime_access() -> None:
     assert "medchat-sandbox" in _words(worker, "SupplementaryGroups")
     assert "/run/medchat-sandbox" in _words(worker, "ReadWritePaths")
 
-    for unit in (broker, worker):
-        exposed_environment = "\n".join(
-            _values(unit, "EnvironmentFile") + _values(unit, "Environment")
-        )
-        assert "opensandbox.env" not in exposed_environment
-        assert "OPEN_SANDBOX_API_KEY" not in exposed_environment
+    assert _values(broker, "EnvironmentFile") == [
+        "/etc/medchat/sandbox-broker.env"
+    ]
+    worker_environment = "\n".join(
+        _values(worker, "EnvironmentFile") + _values(worker, "Environment")
+    )
+    assert "opensandbox.env" not in worker_environment
+    assert "sandbox-broker.env" not in worker_environment
+    assert "OPEN_SANDBOX_API_KEY" not in worker_environment
+
+
+def test_systemd_runtime_directories_and_worker_ordering_survive_reboot() -> None:
+    opensandbox = _unit_sections(OPENSANDBOX_SERVICE)
+    broker = _unit_sections(BROKER_SERVICE)
+    worker = _unit_sections(TEMPORAL_WORKER_SERVICE)
+
+    assert _values(opensandbox, "RuntimeDirectory") == ["opensandbox"]
+    assert _values(opensandbox, "RuntimeDirectoryMode") == ["0700"]
+    assert _values(broker, "RuntimeDirectory") == ["medchat-sandbox"]
+    assert _values(broker, "RuntimeDirectoryMode") == ["0750"]
+    assert _values(broker, "Type") == ["notify"]
+    assert _values(broker, "NotifyAccess") == ["main"]
+    assert "medchat-sandbox-broker.service" in _section_words(
+        worker, "Unit", "After"
+    )
+    assert "medchat-sandbox-broker.service" in _section_words(
+        worker, "Unit", "Requires"
+    )
+    assert "/etc/medchat/sandbox-broker.env" in _words(
+        worker, "InaccessiblePaths"
+    )
 
 
 def test_opensandbox_service_is_loopback_configured_and_key_scoped() -> None:
@@ -213,9 +248,7 @@ def test_installer_keeps_token_literal_and_uses_safe_rendering_contract() -> Non
     assert "eval " not in installer
     assert ". /etc/medchat/opensandbox.env" not in installer
     assert "source /etc/medchat/opensandbox.env" not in installer
-    assert "OPEN_SANDBOX_API_KEY=" not in "\n".join(
-        line for line in installer.splitlines() if "example" not in line
-    )
+    assert "print(secret" not in installer
 
 
 def test_installer_rejects_symlinked_directories_and_targets() -> None:
@@ -226,7 +259,125 @@ def test_installer_rejects_symlinked_directories_and_targets() -> None:
     assert "stat.S_ISDIR" in installer
     assert "O_NOFOLLOW" in installer
     assert "install -d" not in installer
-    assert "while [ \"$parent\" != / ]" in installer
+    assert "while [ \"$parent\" != / ]" not in installer
+
+
+def test_installer_supports_approved_zero_arg_live_command() -> None:
+    installer = INSTALLER.read_text(encoding="utf-8")
+
+    assert 'if [ "$#" -eq 0 ]; then' in installer
+    assert "DESTDIR=/" in installer
+    assert 'elif [ "$#" -eq 2 ] && [ "$1" = "--destdir" ]; then' in installer
+
+
+def _write_preview_environment(root: Path, *, secret: str) -> Path:
+    environment = root / "etc/medchat/opensandbox.env"
+    environment.parent.mkdir(parents=True, exist_ok=True)
+    environment.write_text(
+        "OPEN_SANDBOX_API_KEY=" + secret + "\n"
+        "MEDCHAT_SANDBOX_IMAGE=registry.example/medchat-docking:approved@sha256:"
+        + "a" * 64
+        + "\n",
+        encoding="utf-8",
+    )
+    environment.chmod(0o600)
+    return environment
+
+
+@pytest.mark.skipif(os.name != "posix", reason="installer preview requires POSIX")
+def test_preview_install_renders_bootable_secret_scoped_assets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.sandbox_broker.config import BrokerConfig
+
+    secret = "test-only-secret-" + "b" * 32
+    _write_preview_environment(tmp_path, secret=secret)
+    result = subprocess.run(
+        ["sh", str(INSTALLER), "--destdir", str(tmp_path)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "opensandbox_install=passed\n"
+    assert result.stderr == ""
+    assert secret not in result.stdout + result.stderr
+
+    rendered_toml = tmp_path / "etc/medchat/opensandbox.toml"
+    broker_environment = tmp_path / "etc/medchat/sandbox-broker.env"
+    assert stat.S_IMODE(rendered_toml.stat().st_mode) == 0o600
+    assert rendered_toml.stat().st_uid == os.getuid()
+    assert stat.S_IMODE(broker_environment.stat().st_mode) == 0o640
+    assert broker_environment.stat().st_uid == os.getuid()
+
+    rendered = tomllib.loads(rendered_toml.read_text(encoding="utf-8"))
+    assert rendered["server"]["api_key"] == secret
+    assignments = dict(
+        line.split("=", 1)
+        for line in broker_environment.read_text(encoding="utf-8").splitlines()
+    )
+    assert assignments == {
+        "OPEN_SANDBOX_API_KEY": secret,
+        "MEDCHAT_SANDBOX_IMAGE": (
+            "registry.example/medchat-docking:approved@sha256:" + "a" * 64
+        ),
+    }
+
+    monkeypatch.setenv(
+        "MEDCHAT_SANDBOX_BROKER_STATE",
+        str((tmp_path / "var/lib/medchat-sandbox").resolve()),
+    )
+    monkeypatch.setenv(
+        "MEDCHAT_SANDBOX_BROKER_SOCKET",
+        str((tmp_path / "run/medchat-sandbox/broker.sock").resolve()),
+    )
+    monkeypatch.setenv("OPEN_SANDBOX_DOMAIN", "127.0.0.1:8080")
+    for name, value in assignments.items():
+        monkeypatch.setenv(name, value)
+    config = BrokerConfig.from_env()
+    assert config.opensandbox_api_key == secret
+    assert config.image_digest == "a" * 64
+
+    repeated = subprocess.run(
+        ["sh", str(INSTALLER), "--destdir", str(tmp_path)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert repeated.returncode == 0
+    assert repeated.stdout == "opensandbox_install=passed\n"
+    assert secret not in repeated.stdout + repeated.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="installer preview requires POSIX")
+def test_preview_install_rejects_nonempty_approved_mount_directory(
+    tmp_path: Path,
+) -> None:
+    secret = "test-only-secret-" + "c" * 32
+    _write_preview_environment(tmp_path, secret=secret)
+    approved = tmp_path / "var/lib/opensandbox/approved-empty"
+    approved.mkdir(parents=True)
+    marker = approved / "must-survive"
+    marker.write_text("sentinel", encoding="utf-8")
+
+    result = subprocess.run(
+        ["sh", str(INSTALLER), "--destdir", str(tmp_path)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert marker.read_text(encoding="utf-8") == "sentinel"
+    assert secret not in result.stdout + result.stderr
 
 
 def test_static_validator_passes_and_cli_output_is_exact() -> None:
@@ -297,6 +448,69 @@ def test_static_validator_rejects_installer_without_directory_guards(
     assert validator.validate_static(root) == "installer_unsafe"
 
 
+def test_static_validator_rejects_broker_environment_without_key(
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator()
+    root = _asset_root(tmp_path)
+    installer = root / "deployment/opensandbox/install.sh"
+    text = installer.read_text(encoding="utf-8")
+    installer.write_text(
+        text.replace(
+            '"OPEN_SANDBOX_API_KEY=" + secret + "\\n"',
+            '"REMOVED_BROKER_KEY=" + secret + "\\n"',
+        ),
+        encoding="utf-8",
+    )
+
+    assert validator.validate_static(root) == "installer_unsafe"
+
+
+def test_static_validator_rejects_root_owned_rendered_server_config(
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator()
+    root = _asset_root(tmp_path)
+    installer = root / "deployment/opensandbox/install.sh"
+    text = installer.read_text(encoding="utf-8")
+    owner_contract = (
+        '    rooted("/etc/medchat/opensandbox.toml"),\n'
+        '    rendered.encode("utf-8"),\n'
+        "    0o600,\n"
+        "    opensandbox_uid,\n"
+        "    opensandbox_gid,\n"
+    )
+    installer.write_text(
+        text.replace(
+            owner_contract,
+            owner_contract.replace("opensandbox_uid", "0").replace(
+                "opensandbox_gid", "0"
+            ),
+        ),
+        encoding="utf-8",
+    )
+
+    assert validator.validate_static(root) == "installer_unsafe"
+
+
+def test_static_validator_rejects_worker_broker_key_exposure(
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator()
+    root = _asset_root(tmp_path)
+    worker = root / "deployment/medchat-temporal-worker.service"
+    worker.write_text(
+        worker.read_text(encoding="utf-8").replace(
+            "EnvironmentFile=/etc/medchat/temporal-worker.env",
+            "EnvironmentFile=/etc/medchat/temporal-worker.env\n"
+            "EnvironmentFile=/etc/medchat/sandbox-broker.env",
+        ),
+        encoding="utf-8",
+    )
+
+    assert validator.validate_static(root) == "worker_unit_unsafe"
+
+
 def test_validator_never_emits_exception_or_secret_text(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -317,6 +531,20 @@ def test_validator_never_emits_exception_or_secret_text(
     )
     assert captured.err == ""
     assert secret not in captured.out
+
+
+def test_validator_runtime_environment_requires_broker_key() -> None:
+    validator = _load_validator()
+    image_assignment = (
+        "MEDCHAT_SANDBOX_IMAGE=registry.example/medchat-docking:approved@sha256:"
+        + "a" * 64
+        + "\n"
+    )
+
+    assert validator._parse_runtime_environment(image_assignment) is None
+    assert validator._parse_runtime_environment(
+        "OPEN_SANDBOX_API_KEY=" + "b" * 32 + "\n" + image_assignment
+    ) == ("registry.example/medchat-docking:approved@sha256:" + "a" * 64)
 
 
 def test_safe_mocked_runtime_checks_pass(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -417,6 +645,15 @@ def test_installer_has_valid_posix_shell_syntax() -> None:
         timeout=10,
     )
     assert result.returncode == 0
+
+
+def test_installer_embedded_python_has_valid_syntax() -> None:
+    installer = INSTALLER.read_text(encoding="utf-8")
+    embedded = installer.split("<<'PY'", 1)[1].split("\nPY\n", 1)[0].lstrip(
+        "\r\n"
+    )
+
+    compile(embedded, "deployment/opensandbox/install.sh:<python>", "exec")
 
 
 def test_installer_is_not_executable_on_windows_checkout() -> None:

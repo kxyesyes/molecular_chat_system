@@ -159,6 +159,16 @@ def _single(unit: dict[str, dict[str, list[str]]], key: str) -> str | None:
     return values[0] if len(values) == 1 else None
 
 
+def _section_words(
+    unit: dict[str, dict[str, list[str]]], section: str, key: str
+) -> set[str]:
+    return {
+        word
+        for value in unit.get(section, {}).get(key, [])
+        for word in value.split()
+    }
+
+
 def _hardened(unit: dict[str, dict[str, list[str]]]) -> bool:
     return all(_single(unit, key) == value for key, value in _REQUIRED_HARDENING.items())
 
@@ -217,6 +227,8 @@ def _validate_opensandbox_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
         and _single(unit, "User") == "medchat-opensandbox"
         and _single(unit, "Group") == "medchat-opensandbox"
         and _single(unit, "EnvironmentFile") == "/etc/medchat/opensandbox.env"
+        and _single(unit, "RuntimeDirectory") == "opensandbox"
+        and _single(unit, "RuntimeDirectoryMode") == "0700"
         and _single(unit, "RestrictAddressFamilies") == "AF_UNIX AF_INET AF_INET6"
         and "docker" in _service_words(unit, "SupplementaryGroups")
         and "/var/run/docker.sock" in _service_words(unit, "ReadWritePaths")
@@ -226,21 +238,23 @@ def _validate_opensandbox_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
 
 
 def _validate_broker_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
-    exposed_environment = "\n".join(
-        _service_values(unit, "EnvironmentFile")
-        + _service_values(unit, "Environment")
-    )
     return bool(
         _hardened(unit)
         and _single(unit, "User") == "medchat-sandbox"
         and _single(unit, "Group") == "medchat-sandbox"
+        and _single(unit, "Type") == "notify"
+        and _single(unit, "NotifyAccess") == "main"
+        and _single(unit, "RuntimeDirectory") == "medchat-sandbox"
+        and _single(unit, "RuntimeDirectoryMode") == "0750"
+        and _single(unit, "EnvironmentFile")
+        == "/etc/medchat/sandbox-broker.env"
         and _single(unit, "RestrictAddressFamilies") == "AF_UNIX AF_INET AF_INET6"
         and _service_words(unit, "ReadWritePaths")
         == {"/var/lib/medchat-sandbox", "/run/medchat-sandbox"}
         and "/var/run/docker.sock" not in _service_words(unit, "ReadWritePaths")
         and "docker" not in _service_words(unit, "SupplementaryGroups")
-        and "opensandbox.env" not in exposed_environment
-        and "OPEN_SANDBOX_API_KEY" not in exposed_environment
+        and "/etc/medchat/opensandbox.env"
+        not in _service_values(unit, "EnvironmentFile")
     )
 
 
@@ -255,7 +269,14 @@ def _validate_worker_unit(unit: dict[str, dict[str, list[str]]]) -> bool:
         and "/var/run/docker.sock" not in _service_words(unit, "ReadWritePaths")
         and "docker" not in _service_words(unit, "SupplementaryGroups")
         and "opensandbox.env" not in exposed_environment
+        and "sandbox-broker.env" not in exposed_environment
         and "OPEN_SANDBOX_API_KEY" not in exposed_environment
+        and "medchat-sandbox-broker.service"
+        in _section_words(unit, "Unit", "After")
+        and "medchat-sandbox-broker.service"
+        in _section_words(unit, "Unit", "Requires")
+        and "/etc/medchat/sandbox-broker.env"
+        in _service_words(unit, "InaccessiblePaths")
     )
 
 
@@ -263,6 +284,7 @@ def _validate_installer(text: str) -> bool:
     forbidden = (
         "mktemp",
         "install -d",
+        "while [ \"$parent\" != / ]",
         "sed ",
         "eval ",
         ". /etc/medchat/opensandbox.env",
@@ -274,9 +296,15 @@ def _validate_installer(text: str) -> bool:
         "umask 077",
         "/etc/medchat/opensandbox.env",
         "/etc/medchat/opensandbox.toml",
+        'if [ "$#" -eq 0 ]; then',
+        "DESTDIR=/",
         "approved-empty",
         "def ensure_directory(",
-        "while [ \"$parent\" != / ]",
+        "require_empty=True",
+        "def read_source(",
+        '"OPEN_SANDBOX_API_KEY=" + secret + "\\n"',
+        "opensandbox_uid,",
+        "opensandbox_gid,",
         "os.lstat",
         "stat.S_ISDIR",
         "O_NOFOLLOW",
@@ -431,29 +459,55 @@ def _broker_socket_status() -> _SocketStatus:
         return _SocketStatus(False, "", "", 0)
 
 
+def _parse_runtime_environment(content: str) -> str | None:
+    try:
+        assignments: dict[str, str] = {}
+        for line in content.splitlines():
+            if not line or line.startswith("#"):
+                continue
+            name, separator, value = line.partition("=")
+            if not separator or name in assignments or not value:
+                return None
+            assignments[name] = value
+        if set(assignments) != {
+            "OPEN_SANDBOX_API_KEY",
+            "MEDCHAT_SANDBOX_IMAGE",
+        }:
+            return None
+        key = assignments["OPEN_SANDBOX_API_KEY"]
+        if (
+            len(key) < 32
+            or len(key) > 256
+            or any(ord(character) < 32 or ord(character) == 127 for character in key)
+        ):
+            return None
+        image = assignments["MEDCHAT_SANDBOX_IMAGE"]
+        match = re.fullmatch(r"([^\s@]+)@sha256:([0-9a-f]{64})", image)
+        if match is None:
+            return None
+        return image
+    except (TypeError, ValueError):
+        return None
+
+
 def _runtime_image_reference() -> str | None:
     try:
+        if grp is None:
+            return None
         metadata = os.lstat(_RUNTIME_ENV)
+        broker_gid = grp.getgrnam("medchat-sandbox").gr_gid
         if (
             not stat.S_ISREG(metadata.st_mode)
             or stat.S_ISLNK(metadata.st_mode)
             or metadata.st_nlink != 1
-            or stat.S_IMODE(metadata.st_mode) & 0o027
+            or stat.S_IMODE(metadata.st_mode) != 0o640
+            or metadata.st_uid != 0
+            or metadata.st_gid != broker_gid
         ):
             return None
         content = _RUNTIME_ENV.read_text(encoding="utf-8")
-        matches = [
-            line.partition("=")[2]
-            for line in content.splitlines()
-            if line.startswith("MEDCHAT_SANDBOX_IMAGE=")
-        ]
-        if len(matches) != 1:
-            return None
-        match = re.fullmatch(r"([^\s@]+)@sha256:([0-9a-f]{64})", matches[0])
-        if match is None:
-            return None
-        return matches[0]
-    except (OSError, UnicodeError):
+        return _parse_runtime_environment(content)
+    except (KeyError, OSError, UnicodeError):
         return None
 
 

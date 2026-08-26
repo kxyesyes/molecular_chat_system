@@ -1901,7 +1901,7 @@ def test_uvicorn_lifespan_logs_never_include_service_canary_or_path(
     )
 
 
-def test_uds_main_sets_umask_before_config_and_uses_only_exact_uds_args(
+def test_uds_main_sets_umask_before_config_and_uses_hardened_server_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1942,10 +1942,11 @@ def test_uds_main_sets_umask_before_config_and_uses_only_exact_uds_args(
         lambda observed: events.append(("app", observed)) or application,
     )
 
-    def run(app: object, **kwargs: object) -> None:
-        events.append(("uvicorn", app, kwargs))
-
-    monkeypatch.setattr(entrypoint.uvicorn, "run", run)
+    monkeypatch.setattr(
+        entrypoint,
+        "serve_application",
+        lambda app, path: events.append(("serve", app, path)),
+    )
     entrypoint.main()
 
     assert events == [
@@ -1955,17 +1956,55 @@ def test_uds_main_sets_umask_before_config_and_uses_only_exact_uds_args(
         ("stale", config.socket_path),
         ("app", config),
         (
-            "uvicorn",
+            "serve",
             application,
-            {
-                "uds": str(config.socket_path),
-                "workers": 1,
-                "access_log": False,
-                "log_level": "info",
-            },
+            config.socket_path,
         ),
         ("release", 91),
     ]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="real Unix sockets require POSIX")
+def test_prebound_broker_socket_is_real_owned_and_mode_0660(tmp_path: Path) -> None:
+    from scripts.run_sandbox_broker import bind_runtime_socket
+
+    target = tmp_path / "broker.sock"
+    listener = bind_runtime_socket(target)
+    try:
+        metadata = os.lstat(target)
+        assert stat.S_ISSOCK(metadata.st_mode)
+        assert stat.S_IMODE(metadata.st_mode) == 0o660
+        assert metadata.st_uid == os.geteuid()
+        assert metadata.st_gid == os.getegid()
+        assert listener.family == socket.AF_UNIX
+        assert listener.type & socket.SOCK_STREAM
+    finally:
+        listener.close()
+
+
+def test_ready_server_notifies_only_after_uvicorn_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_sandbox_broker as entrypoint
+
+    events: list[str] = []
+
+    async def startup(server: object, sockets: object = None) -> None:
+        del sockets
+        events.append("uvicorn_started")
+        server.started = True
+        server.should_exit = False
+
+    monkeypatch.setattr(entrypoint.uvicorn.Server, "startup", startup)
+    configuration = entrypoint.uvicorn.Config(object(), log_config=None)
+    server = entrypoint._ReadyServer(
+        configuration,
+        readiness_callback=lambda: events.append("systemd_ready"),
+    )
+
+    asyncio.run(server.startup(sockets=[]))
+
+    assert events == ["uvicorn_started", "systemd_ready"]
 
 
 @pytest.mark.parametrize("kind", ["file", "directory", "symlink"])
@@ -2513,8 +2552,8 @@ def test_main_releases_lock_when_uvicorn_fails_and_redacts_exception(
     monkeypatch.setattr(entrypoint, "remove_stale_socket", lambda path: None)
     monkeypatch.setattr(entrypoint, "create_app", lambda observed: object())
     monkeypatch.setattr(
-        entrypoint.uvicorn,
-        "run",
+        entrypoint,
+        "serve_application",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             RuntimeError(r"OPEN_SANDBOX_API_KEY=secret C:\runtime\broker.sock")
         ),

@@ -1,8 +1,8 @@
 [Unit]
 Description=MedChat Temporal Docking Worker
-After=network-online.target docker.service medchat-temporal-worker-prepare.service
+After=network-online.target docker.service medchat-temporal-worker-prepare.service medchat-sandbox-broker.service
 Wants=network-online.target
-Requires=medchat-temporal-worker-prepare.service
+Requires=medchat-temporal-worker-prepare.service medchat-sandbox-broker.service
 
 [Service]
 Type=simple
@@ -28,7 +28,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/opt/medchat/molecular_chat_system/scratch /opt/medchat/molecular_chat_system/temp_docking /run/medchat-sandbox
 ReadOnlyPaths=/opt/medchat/molecular_chat_system /opt/conda/envs/medchat
-InaccessiblePaths=/var/run/docker.sock /etc/medchat/opensandbox.env /etc/medchat/opensandbox.toml /var/lib/opensandbox/approved-empty
+InaccessiblePaths=/var/run/docker.sock /etc/medchat/opensandbox.env /etc/medchat/opensandbox.toml /etc/medchat/sandbox-broker.env /var/lib/opensandbox/approved-empty
 
 [Install]
 WantedBy=multi-user.target

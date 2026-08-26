@@ -17,14 +17,16 @@ usage() {
     exit 2
 }
 
-[ "$#" -eq 2 ] && [ "$1" = "--destdir" ] || usage
-case "$2" in
-    /*) ;;
-    *) usage ;;
-esac
+if [ "$#" -eq 0 ]; then
+    DESTDIR=/
+elif [ "$#" -eq 2 ] && [ "$1" = "--destdir" ]; then
+    case "$2" in
+        /*) ;;
+        *) usage ;;
+    esac
 
-DESTDIR=$(
-    /usr/bin/env -i PATH="$PATH" /usr/bin/python3 -I -c '
+    DESTDIR=$(
+        /usr/bin/env -i PATH="$PATH" /usr/bin/python3 -I -c '
 import os
 import sys
 candidate = sys.argv[1]
@@ -32,25 +34,18 @@ if not candidate.startswith("/") or any(ord(char) < 32 for char in candidate):
     raise SystemExit(2)
 print(os.path.realpath(candidate))
 ' "$2"
-) || usage
+    ) || usage
+else
+    usage
+fi
 [ -n "$DESTDIR" ] || usage
 
-source_is_root_owned_and_locked() {
+source_is_regular_and_locked() {
     source_path=$1
     [ ! -L "$source_path" ] || return 1
     [ -f "$source_path" ] || return 1
-    [ "$(stat -c %u:%g -- "$source_path")" = "0:0" ] || return 1
     permissions=$(stat -c %a -- "$source_path")
     [ $((0$permissions & 0022)) -eq 0 ] || return 1
-    parent=$source_path
-    while [ "$parent" != / ]; do
-        parent=$(dirname -- "$parent")
-        [ ! -L "$parent" ] || return 1
-        [ -d "$parent" ] || return 1
-        [ "$(stat -c %u:%g -- "$parent")" = "0:0" ] || return 1
-        permissions=$(stat -c %a -- "$parent")
-        [ $((0$permissions & 0022)) -eq 0 ] || return 1
-    done
 }
 
 if [ "$DESTDIR" = / ]; then
@@ -61,7 +56,7 @@ if [ "$DESTDIR" = / ]; then
         "$SCRIPT_DIR/medchat-opensandbox.service" \
         "$SCRIPT_DIR/medchat-sandbox-broker.service"
     do
-        source_is_root_owned_and_locked "$source_path" || fail source_not_root_owned
+        source_is_regular_and_locked "$source_path" || fail source_untrusted
     done
 
     getent group docker >/dev/null 2>&1 || fail docker_group_missing
@@ -111,7 +106,12 @@ def fail() -> None:
     raise SystemExit(1)
 
 
-def require_locked_regular(path: Path, maximum_mode: int) -> os.stat_result:
+def require_locked_regular(
+    path: Path,
+    maximum_mode: int,
+    *,
+    expected_uid: int | None = None,
+) -> os.stat_result:
     try:
         metadata = path.lstat()
     except OSError:
@@ -123,12 +123,23 @@ def require_locked_regular(path: Path, maximum_mode: int) -> os.stat_result:
         or stat.S_IMODE(metadata.st_mode) & ~maximum_mode
     ):
         fail()
-    if root == Path("/") and metadata.st_uid != 0:
+    if (
+        root == Path("/")
+        and expected_uid is not None
+        and metadata.st_uid != expected_uid
+    ):
         fail()
     return metadata
 
 
-def ensure_directory(path: Path, mode: int, uid: int, gid: int) -> None:
+def ensure_directory(
+    path: Path,
+    mode: int,
+    uid: int,
+    gid: int,
+    *,
+    require_empty: bool = False,
+) -> None:
     descriptor = None
     try:
         relative = path.relative_to(root)
@@ -145,12 +156,37 @@ def ensure_directory(path: Path, mode: int, uid: int, gid: int) -> None:
                 metadata = os.lstat(current)
             if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
                 fail()
-        descriptor = os.open(
-            path,
+        open_flags = (
             os.O_RDONLY
             | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
+            | getattr(os, "O_NOFOLLOW", 0)
         )
+        try:
+            descriptor = os.open(path, open_flags)
+        except PermissionError:
+            # A non-root preview may be repeating an earlier mode-0000 install.
+            # Its private, same-owner staging parent makes this recovery local
+            # to preview mode; production root never needs this path.
+            parent = os.lstat(path.parent)
+            candidate = os.lstat(path)
+            if (
+                root == Path("/")
+                or not require_empty
+                or not stat.S_ISDIR(candidate.st_mode)
+                or stat.S_ISLNK(candidate.st_mode)
+                or candidate.st_uid != os.getuid()
+                or not stat.S_ISDIR(parent.st_mode)
+                or stat.S_ISLNK(parent.st_mode)
+                or parent.st_uid != os.getuid()
+                or stat.S_IMODE(parent.st_mode) & 0o022
+            ):
+                fail()
+            candidate_identity = (candidate.st_dev, candidate.st_ino)
+            os.chmod(path, 0o700)
+            descriptor = os.open(path, open_flags)
+            recovered = os.fstat(descriptor)
+            if (recovered.st_dev, recovered.st_ino) != candidate_identity:
+                fail()
         opened = os.fstat(descriptor)
         named = os.lstat(path)
         if (
@@ -158,6 +194,8 @@ def ensure_directory(path: Path, mode: int, uid: int, gid: int) -> None:
             or stat.S_ISLNK(named.st_mode)
             or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
         ):
+            fail()
+        if require_empty and os.listdir(descriptor):
             fail()
         os.fchmod(descriptor, mode)
         if root == Path("/"):
@@ -181,7 +219,7 @@ def ensure_directory(path: Path, mode: int, uid: int, gid: int) -> None:
 
 
 def parse_environment(path: Path) -> dict[str, str]:
-    require_locked_regular(path, 0o600)
+    require_locked_regular(path, 0o600, expected_uid=0)
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
@@ -202,14 +240,56 @@ def parse_environment(path: Path) -> dict[str, str]:
     return values
 
 
+def read_source(path: Path) -> bytes:
+    descriptor = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(descriptor)
+        named = os.lstat(path)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(named.st_mode)
+            or opened.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) & 0o022
+            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+        ):
+            fail()
+        content = bytearray()
+        while len(content) <= 1024 * 1024:
+            chunk = os.read(descriptor, min(65536, 1024 * 1024 + 1 - len(content)))
+            if not chunk:
+                break
+            content.extend(chunk)
+        if len(content) > 1024 * 1024:
+            fail()
+        after = os.fstat(descriptor)
+        if (
+            (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_size)
+            != (after.st_dev, after.st_ino, after.st_mode, after.st_size)
+        ):
+            fail()
+        return bytes(content)
+    except OSError:
+        fail()
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
 def write_locked(path: Path, content: bytes, mode: int, uid: int, gid: int) -> None:
     flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     descriptor = None
     try:
         if path.exists() or path.is_symlink():
-            existing = require_locked_regular(path, mode)
-            if root == Path("/") and existing.st_uid != uid:
-                fail()
+            require_locked_regular(path, mode, expected_uid=uid)
         descriptor = os.open(path, flags, mode)
         opened = os.fstat(descriptor)
         named = path.lstat()
@@ -265,7 +345,13 @@ ensure_directory(
 ensure_directory(
     rooted("/run/opensandbox"), 0o700, opensandbox_uid, opensandbox_gid
 )
-ensure_directory(rooted("/var/lib/opensandbox/approved-empty"), 0o000, 0, 0)
+ensure_directory(
+    rooted("/var/lib/opensandbox/approved-empty"),
+    0o000,
+    0,
+    0,
+    require_empty=True,
+)
 ensure_directory(
     rooted("/var/lib/medchat-sandbox"), 0o700, broker_uid, broker_gid
 )
@@ -289,10 +375,10 @@ if image_match.group(1).startswith("registry.invalid/"):
     fail()
 
 try:
-    template = template_path.read_text(encoding="utf-8")
-    opensandbox_unit = opensandbox_unit_path.read_bytes()
-    broker_unit = broker_unit_path.read_bytes()
-except (OSError, UnicodeError):
+    template = read_source(template_path).decode("utf-8")
+    opensandbox_unit = read_source(opensandbox_unit_path)
+    broker_unit = read_source(broker_unit_path)
+except UnicodeError:
     fail()
 token = '"${' + 'OPEN_SANDBOX_API_KEY' + '}"'
 if template.count(token) != 1:
@@ -303,10 +389,13 @@ write_locked(
     rooted("/etc/medchat/opensandbox.toml"),
     rendered.encode("utf-8"),
     0o600,
-    0,
-    0,
+    opensandbox_uid,
+    opensandbox_gid,
 )
-broker_environment = ("MEDCHAT_SANDBOX_IMAGE=" + image + "\n").encode("utf-8")
+broker_environment = (
+    "OPEN_SANDBOX_API_KEY=" + secret + "\n"
+    "MEDCHAT_SANDBOX_IMAGE=" + image + "\n"
+).encode("utf-8")
 write_locked(
     rooted("/etc/medchat/sandbox-broker.env"),
     broker_environment,

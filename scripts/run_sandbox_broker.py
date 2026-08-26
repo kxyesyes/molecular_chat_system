@@ -8,6 +8,7 @@ import socket
 import stat
 import uuid
 from pathlib import Path
+from typing import Callable
 
 import uvicorn
 
@@ -19,6 +20,7 @@ _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _AF_UNIX = getattr(socket, "AF_UNIX", 1)
 _LOCK_NAME = ".sandbox-broker.lock"
 _CONNECT_TIMEOUT_SECONDS = 0.2
+_BROKER_SOCKET_MODE = 0o660
 
 
 def _is_reparse(metadata: object) -> bool:
@@ -266,6 +268,136 @@ def remove_stale_socket(socket_path: Path) -> None:
         raise RuntimeError("stale socket removal failed") from None
 
 
+def _node_identity(metadata: object) -> tuple[int, int]:
+    return (int(getattr(metadata, "st_dev")), int(getattr(metadata, "st_ino")))
+
+
+def _bound_socket_is_ready(socket_path: Path) -> bool:
+    try:
+        metadata = os.lstat(socket_path)
+        return bool(
+            _verified_socket(metadata)
+            and stat.S_IMODE(metadata.st_mode) == _BROKER_SOCKET_MODE
+            and (
+                os.name != "posix"
+                or (
+                    metadata.st_uid == os.geteuid()
+                    and metadata.st_gid == os.getegid()
+                )
+            )
+        )
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
+def bind_runtime_socket(socket_path: Path) -> socket.socket:
+    """Bind a non-listening UDS and make its final permissions explicit."""
+
+    listener: socket.socket | None = None
+    try:
+        target, parent_identity = _trusted_socket_parent(socket_path)
+        listener = socket.socket(_AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(target))
+        bound = os.lstat(target)
+        parent_before = os.lstat(target.parent)
+        if (
+            not _verified_socket(bound)
+            or _identity(parent_before) != parent_identity
+            or (
+                os.name == "posix"
+                and (
+                    bound.st_uid != os.geteuid()
+                    or bound.st_gid != os.getegid()
+                )
+            )
+        ):
+            raise ValueError
+        bound_identity = _node_identity(bound)
+        os.chmod(target, _BROKER_SOCKET_MODE)
+        final = os.lstat(target)
+        parent_after = os.lstat(target.parent)
+        if (
+            not _bound_socket_is_ready(target)
+            or _node_identity(final) != bound_identity
+            or _identity(parent_after) != parent_identity
+        ):
+            raise ValueError
+        return listener
+    except Exception:
+        if listener is not None:
+            try:
+                listener.close()
+            except OSError:
+                pass
+        raise RuntimeError("sandbox broker socket binding failed") from None
+
+
+def _notify_systemd_ready() -> None:
+    raw_address = os.environ.get("NOTIFY_SOCKET")
+    if raw_address is None:
+        return
+    notifier: socket.socket | None = None
+    try:
+        if (
+            not raw_address
+            or len(raw_address) > 107
+            or any(ord(character) < 32 for character in raw_address)
+            or raw_address[0] not in {"/", "@"}
+        ):
+            raise ValueError
+        address = "\0" + raw_address[1:] if raw_address.startswith("@") else raw_address
+        notifier = socket.socket(_AF_UNIX, socket.SOCK_DGRAM)
+        notifier.connect(address)
+        notifier.sendall(b"READY=1")
+    except Exception:
+        raise RuntimeError("sandbox broker readiness notification failed") from None
+    finally:
+        if notifier is not None:
+            try:
+                notifier.close()
+            except OSError:
+                pass
+
+
+class _ReadyServer(uvicorn.Server):
+    def __init__(
+        self,
+        config: uvicorn.Config,
+        *,
+        readiness_callback: Callable[[], None],
+    ) -> None:
+        super().__init__(config)
+        self._readiness_callback = readiness_callback
+
+    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        await super().startup(sockets=sockets)
+        if self.started and not self.should_exit:
+            self._readiness_callback()
+
+
+def serve_application(application: object, socket_path: Path) -> None:
+    """Serve from a pre-bound mode-0660 UDS and notify only when ready."""
+
+    listener = bind_runtime_socket(socket_path)
+    try:
+        configuration = uvicorn.Config(
+            application,
+            workers=1,
+            access_log=False,
+            log_level="info",
+        )
+        server = _ReadyServer(
+            configuration,
+            readiness_callback=_notify_systemd_ready,
+        )
+        server.run(sockets=[listener])
+    finally:
+        try:
+            listener.close()
+        except OSError:
+            pass
+
+
 def main() -> None:
     os.umask(0o007)
     try:
@@ -278,13 +410,7 @@ def main() -> None:
         remove_stale_socket(config.socket_path)
         try:
             application = create_app(config)
-            uvicorn.run(
-                application,
-                uds=str(config.socket_path),
-                workers=1,
-                access_log=False,
-                log_level="info",
-            )
+            serve_application(application, config.socket_path)
         except Exception:
             raise RuntimeError("sandbox broker server failed") from None
     finally:
