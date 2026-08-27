@@ -193,7 +193,7 @@ class SandboxClient(Protocol):
         self,
         handle: SandboxHandle,
         path: str,
-        data: str,
+        data: str | bytes,
     ) -> None:
         raise NotImplementedError
 
@@ -236,7 +236,7 @@ class _SandboxFactory(Protocol):
     ) -> Any:
         raise NotImplementedError
 
-    async def upload_text(self, raw: Any, path: str, data: str) -> None:
+    async def upload_text(self, raw: Any, path: str, data: str | bytes) -> None:
         raise NotImplementedError
 
     async def read_bytes_stream(
@@ -347,7 +347,7 @@ class _OfficialSandboxFactory:
             ready_timeout=timedelta(seconds=_SDK_READY_TIMEOUT_SECONDS),
         )
 
-    async def upload_text(self, raw: Any, path: str, data: str) -> None:
+    async def upload_text(self, raw: Any, path: str, data: str | bytes) -> None:
         sdk = self._sdk()
         entry = sdk.WriteEntry(path=path, data=data, mode=600, encoding="utf-8")
         await raw.files.write_files([entry])
@@ -734,7 +734,7 @@ class OpenSandboxClient:
         self,
         handle: SandboxHandle,
         path: str,
-        data: str,
+        data: str | bytes,
     ) -> None:
         validated_handle = self._handle(handle)
         parts = _path_parts(path)
@@ -750,9 +750,16 @@ class OpenSandboxClient:
             "request.json": _REQUEST_MAX_BYTES,
         }
         limit = limits.get(parts[-1])
-        if limit is None or type(data) is not str or not data:
-            raise SandboxInputError("only fixed non-empty text inputs may be uploaded")
-        if _utf8_size(data, SandboxInputError) > limit:
+        if limit is None or type(data) not in {str, bytes} or not data:
+            raise SandboxInputError("only fixed non-empty inputs may be uploaded")
+        if parts[-1] == "request.json" and type(data) is not str:
+            raise SandboxInputError("the fixed request must be UTF-8 text")
+        size = (
+            _utf8_size(data, SandboxInputError)
+            if type(data) is str
+            else len(data)
+        )
+        if size > limit:
             raise SandboxInputError("the fixed input exceeds its byte limit")
         try:
             await self._factory.upload_text(validated_handle.raw, path, data)

@@ -1517,8 +1517,6 @@ class SandboxBrokerService:
         receptor = self._snapshot_input(prepared.receptor, self.config.receptor_max_bytes)
         ligand = self._snapshot_input(prepared.ligand, self.config.ligand_max_bytes)
         try:
-            receptor_text = receptor.decode("utf-8", errors="strict")
-            ligand_text = ligand.decode("utf-8", errors="strict")
             receptor_suffix = PurePosixPath(prepared.receptor.relative_path).suffix.lower()
             ligand_suffix = PurePosixPath(prepared.ligand.relative_path).suffix.lower()
             request = json.dumps(
@@ -1538,10 +1536,10 @@ class SandboxBrokerService:
         except Exception:
             raise BrokerFailure(BrokerErrorCode.UPLOAD_FAILED) from None
         await self.client.upload_text(
-            handle, f"/workspace/input/receptor{receptor_suffix}", receptor_text
+            handle, f"/workspace/input/receptor{receptor_suffix}", receptor
         )
         await self.client.upload_text(
-            handle, f"/workspace/input/ligand{ligand_suffix}", ligand_text
+            handle, f"/workspace/input/ligand{ligand_suffix}", ligand
         )
         await self.client.upload_text(handle, "/workspace/input/request.json", request)
 

@@ -54,7 +54,7 @@ class FakeSandboxFactory:
     def __init__(self) -> None:
         self.create_calls: list[dict[str, Any]] = []
         self.commands: list[str] = []
-        self.uploads: list[tuple[str, str]] = []
+        self.uploads: list[tuple[str, str | bytes]] = []
         self.reads: list[tuple[str, int]] = []
         self.destroyed: list[str] = []
         self.destroyed_by_id: list[str] = []
@@ -83,7 +83,9 @@ class FakeSandboxFactory:
         self.create_calls.append(policy)
         return self.raw
 
-    async def upload_text(self, raw: FakeRawSandbox, path: str, data: str) -> None:
+    async def upload_text(
+        self, raw: FakeRawSandbox, path: str, data: str | bytes
+    ) -> None:
         self._fail("upload")
         del raw
         self.uploads.append((path, data))
@@ -459,6 +461,29 @@ def test_upload_accepts_every_fixed_server_input_name(
 
     assert fake.uploads == [
         (f"/workspace/input/{name}", "fixed input\n")
+    ]
+
+
+def test_upload_preserves_non_utf8_scientific_input_bytes(tmp_path: Path) -> None:
+    fake = FakeSandboxFactory()
+    client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+    handle = SandboxHandle("sandbox-1", fake.raw)
+    legacy_encoded_pdb = (
+        b"REMARK legacy path: "
+        + bytes([0xC9, 0xA3, 0xC0, 0xCF])
+        + b"\nATOM\n"
+    )
+
+    asyncio.run(
+        client.upload_text(
+            handle,
+            "/workspace/input/receptor.pdb",
+            legacy_encoded_pdb,
+        )
+    )
+
+    assert fake.uploads == [
+        ("/workspace/input/receptor.pdb", legacy_encoded_pdb)
     ]
 
 

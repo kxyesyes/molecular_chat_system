@@ -77,7 +77,7 @@ class FakeSandboxClient:
         self.run_count = 0
         self.destroy_count = 0
         self.destroyed_ids: list[str] = []
-        self.uploads: list[tuple[str, str]] = []
+        self.uploads: list[tuple[str, str | bytes]] = []
         self.running = asyncio.Event()
         self.release = asyncio.Event()
         self.active_runs = 0
@@ -87,7 +87,9 @@ class FakeSandboxClient:
         self.create_count += 1
         return SandboxHandle(f"sandbox-{job_id}", object())
 
-    async def upload_text(self, handle: SandboxHandle, path: str, data: str) -> None:
+    async def upload_text(
+        self, handle: SandboxHandle, path: str, data: str | bytes
+    ) -> None:
         del handle
         self.uploads.append((path, data))
 
@@ -112,6 +114,7 @@ class FakeSandboxClient:
 
     def _request_hashes(self) -> tuple[str, str]:
         request = next(data for path, data in self.uploads if path.endswith("request.json"))
+        assert isinstance(request, str)
         payload = json.loads(request)
         return payload["receptor_sha256"], payload["ligand_sha256"]
 
@@ -160,9 +163,9 @@ class MultiModeSandboxClient(FakeSandboxClient):
 
 class _UploadRecordingFactory:
     def __init__(self) -> None:
-        self.uploads: list[tuple[str, str]] = []
+        self.uploads: list[tuple[str, str | bytes]] = []
 
-    async def upload_text(self, raw: object, path: str, data: str) -> None:
+    async def upload_text(self, raw: object, path: str, data: str | bytes) -> None:
         del raw
         self.uploads.append((path, data))
 
@@ -176,12 +179,14 @@ class AdapterUploadSandboxClient(FakeSandboxClient):
         self.adapter = OpenSandboxClient(config, sandbox_factory=self.factory)
         self.uploads = self.factory.uploads
 
-    async def upload_text(self, handle: SandboxHandle, path: str, data: str) -> None:
+    async def upload_text(
+        self, handle: SandboxHandle, path: str, data: str | bytes
+    ) -> None:
         await self.adapter.upload_text(handle, path, data)
 
 
 def _run_uploaded_request_through_wrapper(
-    tmp_path: Path, uploads: list[tuple[str, str]]
+    tmp_path: Path, uploads: list[tuple[str, str | bytes]]
 ) -> dict[str, object]:
     spec = importlib.util.spec_from_file_location("service_wrapper_contract", RUNNER)
     assert spec is not None and spec.loader is not None
@@ -196,7 +201,7 @@ def _run_uploaded_request_through_wrapper(
     module.OUTPUT_ROOT = output_root
     for remote_path, data in uploads:
         destination = input_root / Path(remote_path).name
-        destination.write_bytes(data.encode("utf-8"))
+        destination.write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
         destination.chmod(0o600)
 
     class FakeProcess:
@@ -748,6 +753,54 @@ def test_every_accepted_suffix_combination_reaches_the_production_adapter_and_ru
     assert wrapper_result["status"] == "succeeded"
     assert wrapper_result["vina_version"] == "1.2.5"
     assert wrapper_result["meeko_version"] == "0.7.1"
+
+
+def test_non_utf8_receptor_bytes_reach_the_production_adapter_unchanged(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> tuple[object, AdapterUploadSandboxClient, bytes]:
+        config = _config(tmp_path)
+        base = _prepared(config)
+        legacy_receptor = b"REMARK legacy path: " + bytes([0xC9, 0xA3, 0xC0, 0xCF]) + b"\nATOM\n"
+        receptor_path = config.state_root / base.receptor.relative_path
+        receptor_path.write_bytes(legacy_receptor)
+        receptor = StagedInput(
+            relative_path=base.receptor.relative_path,
+            size_bytes=len(legacy_receptor),
+            sha256=hashlib.sha256(legacy_receptor).hexdigest(),
+        )
+        prepared = PreparedDockingSubmission(
+            parameters=base.parameters,
+            receptor=receptor,
+            ligand=base.ligand,
+            canonical_input_sha256=canonical_submission_sha256(
+                base.parameters,
+                receptor,
+                base.ligand,
+            ),
+            trace_id="trace-legacy-receptor",
+        )
+        sdk = AdapterUploadSandboxClient(config)
+        store = BrokerStore(config.state_root / "broker.sqlite")
+        service = SandboxBrokerService(
+            config,
+            store,
+            sdk,
+            ArtifactRegistry(config.state_root, store),
+        )
+        await service.start()
+        job = await service.submit(prepared, "idem-legacy-receptor")
+        terminal = await service.wait_terminal(job.job_id)
+        await service.stop()
+        return terminal, sdk, legacy_receptor
+
+    terminal, sdk, legacy_receptor = asyncio.run(scenario())
+
+    assert terminal.status is BrokerJobStatus.SUCCEEDED
+    assert sdk.uploads[0] == (
+        "/workspace/input/receptor.pdb",
+        legacy_receptor,
+    )
 
 
 def test_invalid_scientific_output_fails_without_manifest(tmp_path: Path) -> None:
