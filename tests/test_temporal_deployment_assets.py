@@ -2246,6 +2246,10 @@ def test_temporal_worker_installer_has_live_source_guard_and_no_service_actions(
     assert "stat -c %u" in source
     assert "022" in source
     assert "source_not_root_owned" in source
+    assert 'case "$source_path" in' in source
+    assert '"$SCRIPT_DIR/install-temporal-worker.sh"' in source
+    live_sources = source[source.index("for source_path in ") : source.index("    do\n", source.index("for source_path in "))]
+    assert '"$0"' not in live_sources
     assert "/etc/medchat/temporal-worker.env" not in source
     assert not re.search(r"systemctl\s+(?:start|restart|reload|enable)", source)
 

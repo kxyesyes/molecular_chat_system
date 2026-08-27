@@ -32,6 +32,10 @@ print(os.path.realpath(path))
 
 source_is_root_owned_and_locked() {
     source_path=$1
+    case "$source_path" in
+        /*) ;;
+        *) return 1 ;;
+    esac
     [ ! -L "$source_path" ] || return 1
     [ -f "$source_path" ] || return 1
     [ "$(stat -c %u:%g -- "$source_path")" = "0:0" ] || return 1
@@ -54,7 +58,7 @@ if [ "$DESTDIR" = / ]; then
         exit 1
     }
     for source_path in \
-        "$0" \
+        "$SCRIPT_DIR/install-temporal-worker.sh" \
         "$SCRIPT_DIR/medchat-temporal-worker.service" \
         "$SCRIPT_DIR/medchat-temporal-worker-prepare.service" \
         "$SCRIPT_DIR/libexec/validate-temporal-worker-env.py" \
