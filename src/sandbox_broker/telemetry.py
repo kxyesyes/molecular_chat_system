@@ -328,6 +328,15 @@ class PhaseToken:
             object.__setattr__(self, "_claimed", True)
 
 
+@dataclass(slots=True)
+class _HistogramAggregate:
+    count: int = 0
+    sum_seconds: float = 0.0
+    bucket_counts: list[int] = field(
+        default_factory=lambda: [0] * len(_DURATION_BUCKETS)
+    )
+
+
 class BrokerTelemetry:
     def __init__(
         self,
@@ -346,6 +355,9 @@ class BrokerTelemetry:
         self._lock = threading.RLock()
         self._counters: Counter[tuple[str, ...]] = Counter()
         self._latencies: dict[tuple[str, str], list[int]] = defaultdict(list)
+        self._histogram_aggregates: dict[
+            tuple[str, str], _HistogramAggregate
+        ] = {}
         self._events: deque[dict[str, object]] = deque(maxlen=1024)
         self._runtime: dict[str, int | str] = {
             "queue_depth": 0,
@@ -356,60 +368,79 @@ class BrokerTelemetry:
         }
         self._projection_dirty = False
         self._registered_collectors: tuple[object, ...] = ()
-        self._install_projection_locked()
+        projection = self._create_projection(self._registry)
+        self._activate_projection(self._registry, projection)
 
-    def _install_projection_locked(self) -> None:
-        self._jobs = PromCounter(
+    @staticmethod
+    def _create_projection(registry: CollectorRegistry) -> tuple[object, ...]:
+        jobs = PromCounter(
             "medchat_sandbox_jobs_total",
             "Terminal Broker jobs",
             ("terminal_status", "failure_class"),
-            registry=self._registry,
+            registry=registry,
         )
-        self._phase_duration = Histogram(
+        phase_duration = Histogram(
             "medchat_sandbox_phase_duration_seconds",
             "Broker phase latency",
             ("phase", "outcome"),
             buckets=_DURATION_BUCKETS,
-            registry=self._registry,
+            registry=registry,
         )
-        self._control_failures = PromCounter(
+        control_failures = PromCounter(
             "medchat_sandbox_control_plane_failures_total",
             "OpenSandbox failures",
             ("operation", "failure_class"),
-            registry=self._registry,
+            registry=registry,
         )
-        self._retries = PromCounter(
+        retries = PromCounter(
             "medchat_sandbox_retry_total",
             "Bounded control-plane retries",
             ("operation", "outcome"),
-            registry=self._registry,
+            registry=registry,
         )
-        self._queue_depth = Gauge(
+        queue_depth = Gauge(
             "medchat_sandbox_queue_depth",
             "Queued jobs",
-            registry=self._registry,
+            registry=registry,
         )
-        self._active_jobs = Gauge(
+        active_jobs = Gauge(
             "medchat_sandbox_active_jobs",
             "Active jobs",
-            registry=self._registry,
+            registry=registry,
         )
-        self._cleanup_tasks = Gauge(
+        cleanup_tasks = Gauge(
             "medchat_sandbox_cleanup_tasks",
             "Cleanup tasks",
-            registry=self._registry,
+            registry=registry,
         )
-        self._isolated_tasks = Gauge(
+        isolated_tasks = Gauge(
             "medchat_sandbox_isolated_tasks",
             "Isolated tasks",
-            registry=self._registry,
+            registry=registry,
         )
-        self._breaker_state = Gauge(
+        breaker_state = Gauge(
             "medchat_sandbox_circuit_breaker_state",
             "0 closed, 1 open, 2 half-open",
-            registry=self._registry,
+            registry=registry,
         )
-        self._registered_collectors = (
+        return (
+            jobs,
+            phase_duration,
+            control_failures,
+            retries,
+            queue_depth,
+            active_jobs,
+            cleanup_tasks,
+            isolated_tasks,
+            breaker_state,
+        )
+
+    def _activate_projection(
+        self,
+        registry: CollectorRegistry,
+        projection: tuple[object, ...],
+    ) -> None:
+        (
             self._jobs,
             self._phase_duration,
             self._control_failures,
@@ -419,64 +450,73 @@ class BrokerTelemetry:
             self._cleanup_tasks,
             self._isolated_tasks,
             self._breaker_state,
-        )
+        ) = projection
+        self._registry = registry
+        self._registered_collectors = projection
+
+    def _external_collectors_locked(self) -> tuple[object, ...]:
+        registered = getattr(self._registry, "_collector_to_names", {})
+        owned = set(self._registered_collectors)
+        return tuple(collector for collector in registered if collector not in owned)
+
+    def _populate_projection_locked(self, projection: tuple[object, ...]) -> None:
+        (
+            jobs,
+            phase_duration,
+            control_failures,
+            retries,
+            queue_depth,
+            active_jobs,
+            cleanup_tasks,
+            isolated_tasks,
+            breaker_state,
+        ) = projection
+        for key, value in self._counters.items():
+            category, first, second = key
+            if category == "control_failure":
+                control_failures.labels(
+                    operation=first,
+                    failure_class=second,
+                ).inc(value)
+            elif category == "retry":
+                retries.labels(operation=first, outcome=second).inc(value)
+            elif category == "terminal":
+                jobs.labels(
+                    terminal_status=first,
+                    failure_class=second,
+                ).inc(value)
+        for (phase, outcome), aggregate in self._histogram_aggregates.items():
+            histogram = phase_duration.labels(phase=phase, outcome=outcome)
+            previous = 0
+            cumulative = (*aggregate.bucket_counts, aggregate.count)
+            if len(histogram._buckets) != len(cumulative):
+                raise RuntimeError("unexpected Prometheus histogram buckets")
+            for bucket, count in zip(histogram._buckets, cumulative):
+                bucket.set(count - previous)
+                previous = count
+            histogram._sum.set(aggregate.sum_seconds)
+        state_value = {
+            "closed": 0,
+            "open": 1,
+            "half_open": 2,
+        }[str(self._runtime["breaker_state"])]
+        queue_depth.set(int(self._runtime["queue_depth"]))
+        active_jobs.set(int(self._runtime["active_job_count"]))
+        cleanup_tasks.set(int(self._runtime["cleanup_task_count"]))
+        isolated_tasks.set(int(self._runtime["isolated_task_count"]))
+        breaker_state.set(state_value)
 
     def _rebuild_projection_locked(self) -> None:
-        previous = self._registered_collectors
-        removed: list[object] = []
         try:
-            for collector in previous:
-                self._registry.unregister(collector)
-                removed.append(collector)
-            self._install_projection_locked()
-            for key, value in self._counters.items():
-                category, first, second = key
-                if category == "control_failure":
-                    self._control_failures.labels(
-                        operation=first,
-                        failure_class=second,
-                    ).inc(value)
-                elif category == "retry":
-                    self._retries.labels(
-                        operation=first,
-                        outcome=second,
-                    ).inc(value)
-                elif category == "terminal":
-                    self._jobs.labels(
-                        terminal_status=first,
-                        failure_class=second,
-                    ).inc(value)
-            for (phase, outcome), values in self._latencies.items():
-                histogram = self._phase_duration.labels(
-                    phase=phase,
-                    outcome=outcome,
-                )
-                for duration_ms in values:
-                    histogram.observe(duration_ms / 1000.0)
-            state_value = {
-                "closed": 0,
-                "open": 1,
-                "half_open": 2,
-            }[str(self._runtime["breaker_state"])]
-            self._queue_depth.set(int(self._runtime["queue_depth"]))
-            self._active_jobs.set(int(self._runtime["active_job_count"]))
-            self._cleanup_tasks.set(int(self._runtime["cleanup_task_count"]))
-            self._isolated_tasks.set(int(self._runtime["isolated_task_count"]))
-            self._breaker_state.set(state_value)
+            candidate_registry = CollectorRegistry()
+            for collector in self._external_collectors_locked():
+                candidate_registry.register(collector)
+            candidate = self._create_projection(candidate_registry)
+            self._populate_projection_locked(candidate)
         except BaseException:
-            for collector in self._registered_collectors:
-                try:
-                    self._registry.unregister(collector)
-                except BaseException:
-                    pass
-            for collector in removed:
-                try:
-                    self._registry.register(collector)
-                except BaseException:
-                    pass
-            self._registered_collectors = previous
             self._projection_dirty = True
             return
+        self._activate_projection(candidate_registry, candidate)
         self._projection_dirty = False
 
     def _clock_value(self) -> float:
@@ -601,6 +641,15 @@ class BrokerTelemetry:
             values = self._latencies[(token.phase, outcome)]
             values.append(duration_ms)
             del values[:-256]
+            aggregate = self._histogram_aggregates.setdefault(
+                (token.phase, outcome),
+                _HistogramAggregate(),
+            )
+            aggregate.count += 1
+            aggregate.sum_seconds += elapsed
+            for index, upper_bound in enumerate(_DURATION_BUCKETS):
+                if elapsed <= upper_bound:
+                    aggregate.bucket_counts[index] += 1
             self._events.append(payload)
             projected = self._safe_sink(
                 lambda: self._phase_duration.labels(

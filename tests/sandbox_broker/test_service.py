@@ -4142,6 +4142,131 @@ def test_persistent_pending_rejection_blocks_stop_and_restart_recovers(
     assert restarted_creates == 0
 
 
+def test_pending_rejection_capacity_is_reserved_before_durable_create(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    breaker = ControlPlaneCircuitBreaker()
+    sdk = FakeSandboxClient(block=True)
+    allow_persistence = [False]
+
+    def upload(name: str, payload: bytes) -> object:
+        return type(
+            "Upload",
+            (),
+            {"filename": name, "file": io.BytesIO(payload)},
+        )()
+
+    async def scenario() -> tuple[int, int, int]:
+        service, store, config = _service(
+            tmp_path,
+            sdk,
+            queue_capacity=2,
+            circuit_breaker=breaker,
+        )
+        await service.start()
+        running = await service.submit(_prepared(config), "idem-capacity-running")
+        await asyncio.wait_for(sdk.running.wait(), timeout=1.0)
+        queued = [
+            await service.submit(_prepared(config), f"idem-capacity-queued-{index}")
+            for index in range(2)
+        ]
+        _trip_breaker(breaker)
+        original_fail = store.fail
+
+        def fail_discard(record: object) -> bool:
+            del record
+            raise sqlite3.OperationalError("injected discard failure")
+
+        def persistent_fail(
+            job_id: str,
+            error_code: BrokerErrorCode,
+            *args: object,
+            **kwargs: object,
+        ) -> object:
+            if (
+                error_code is BrokerErrorCode.QUEUE_SATURATED
+                and not allow_persistence[0]
+            ):
+                raise sqlite3.OperationalError("injected terminal failure")
+            return original_fail(job_id, error_code, *args, **kwargs)
+
+        monkeypatch.setattr(store, "discard_pristine_queued", fail_discard)
+        monkeypatch.setattr(store, "fail", persistent_fail)
+
+        outcomes = await asyncio.gather(
+            *(
+                service.submit_uploads(
+                    DockingParameters(center=[1, 2, 3], size=[20, 20, 20]),
+                    upload("receptor.pdb", b"ATOM\n"),
+                    upload("ligand.sdf", VALID_SDF),
+                    f"idem-capacity-rejected-{index}",
+                )
+                for index in range(5)
+            ),
+            return_exceptions=True,
+        )
+        accepted = [item for item in outcomes if not isinstance(item, BaseException)]
+        rejected = [item for item in outcomes if isinstance(item, BrokerFailure)]
+
+        assert len(accepted) == 2
+        assert len(rejected) == 3
+        assert {
+            item.code for item in rejected
+        } == {BrokerErrorCode.OPENSANDBOX_UNAVAILABLE}
+        assert len(service._pending_rejections) <= config.queue_capacity
+        assert service._pending_rejection_reservations == 0
+        assert len(store.active_jobs()) == 3 + config.queue_capacity
+        for index in range(config.queue_capacity, 5):
+            assert store.get_by_idempotency(
+                f"idem-capacity-rejected-{index}"
+            ) is None
+
+        first = accepted[0]
+        reused = await service.submit_uploads(
+            DockingParameters(center=[1, 2, 3], size=[20, 20, 20]),
+            upload("receptor.pdb", b"ATOM\n"),
+            upload("ligand.sdf", VALID_SDF),
+            "idem-capacity-rejected-0",
+        )
+        assert reused.job_id == first.job_id
+        with pytest.raises(BrokerFailure) as conflict:
+            await service.submit_uploads(
+                DockingParameters(center=[1, 2, 3], size=[20, 20, 20]),
+                upload("receptor.pdb", b"ATOM\n"),
+                upload("ligand.sdf", VALID_SDF + b"\n"),
+                "idem-capacity-rejected-0",
+            )
+        assert conflict.value.code is BrokerErrorCode.IDEMPOTENCY_CONFLICT
+        assert len(service._pending_rejections) <= config.queue_capacity
+        for item in accepted:
+            assert not (config.state_root / "jobs" / item.job_id).exists()
+
+        allow_persistence[0] = True
+        await service._drain_pending_rejections()
+        terminals = [
+            await service.wait_terminal(item.job_id, timeout=2.0)
+            for item in accepted
+        ]
+        assert all(
+            item.error_code == BrokerErrorCode.QUEUE_SATURATED.value
+            for item in terminals
+        )
+        assert service._pending_rejections == {}
+
+        sdk.release.set()
+        await service.wait_terminal(running.job_id, timeout=3.0)
+        for item in queued:
+            await service.wait_terminal(item.job_id, timeout=3.0)
+        await service.stop()
+        return len(accepted), len(store.active_jobs()), sdk.create_count
+
+    accepted_count, active_count, create_count = asyncio.run(scenario())
+    assert accepted_count == 2
+    assert active_count == 0
+    assert create_count == 1
+
+
 def test_breaker_rejected_upload_cleanup_runs_once_and_reused_row_is_untouched(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

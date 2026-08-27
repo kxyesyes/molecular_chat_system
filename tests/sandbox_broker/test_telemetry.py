@@ -16,6 +16,7 @@ from prometheus_client.core import GaugeMetricFamily
 from prometheus_client.parser import text_string_to_metric_families
 from pydantic import ValidationError
 
+import src.sandbox_broker.telemetry as telemetry_module
 from src.sandbox_broker.telemetry import (
     BrokerTelemetry,
     BrokerTelemetryEvent,
@@ -1653,14 +1654,22 @@ def test_dirty_projection_rebuild_is_atomic_with_snapshot_and_scrape(
 
     rebuild_entered = threading.Event()
     release_rebuild = threading.Event()
-    original_unregister = registry.unregister
+    original_register = CollectorRegistry.register
 
-    def blocking_unregister(collector: object) -> object:
-        rebuild_entered.set()
-        assert release_rebuild.wait(timeout=2.0)
-        return original_unregister(collector)  # type: ignore[arg-type]
+    def blocking_candidate_register(
+        candidate_registry: CollectorRegistry,
+        collector: object,
+    ) -> None:
+        if candidate_registry is not registry and not rebuild_entered.is_set():
+            rebuild_entered.set()
+            assert release_rebuild.wait(timeout=2.0)
+        original_register(candidate_registry, collector)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(registry, "unregister", blocking_unregister)
+    monkeypatch.setattr(
+        CollectorRegistry,
+        "register",
+        blocking_candidate_register,
+    )
     scrape_result: dict[str, bytes] = {}
     snapshot_done = threading.Event()
 
@@ -1695,6 +1704,230 @@ def test_dirty_projection_rebuild_is_atomic_with_snapshot_and_scrape(
         == {"terminal_status": "failed", "failure_class": "proxy_502"}
     ]
     assert samples == [1.0]
+
+
+def test_dirty_histogram_rebuild_preserves_all_cumulative_observations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailBeforeMutation:
+        def labels(self, **labels: object) -> "FailBeforeMutation":
+            del labels
+            return self
+
+        def observe(self, value: object) -> None:
+            del value
+            raise KeyboardInterrupt
+
+    clock = Clock()
+    telemetry = BrokerTelemetry(registry=CollectorRegistry(), monotonic=clock)
+    original_histogram = telemetry._phase_duration
+    telemetry._phase_duration = FailBeforeMutation()  # type: ignore[assignment]
+    for index in range(320):
+        token = telemetry.start_phase(
+            trace_id=f"trace-cumulative-{index}",
+            job_id=f"job-cumulative-{index}",
+            phase="command",
+            attempt=1,
+            queue_depth=0,
+            active_job_count=1,
+            image_digest="c" * 64,
+        )
+        clock.advance(1.0)
+        telemetry.finish_phase(token, outcome="passed")
+    telemetry._phase_duration = original_histogram
+
+    replay_calls = 0
+    original_observe = telemetry_module.Histogram.observe
+
+    def counted_observe(metric: object, value: float) -> None:
+        nonlocal replay_calls
+        replay_calls += 1
+        original_observe(metric, value)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(telemetry_module.Histogram, "observe", counted_observe)
+    encoded = telemetry.prometheus_text()
+    samples = [
+        sample
+        for family in text_string_to_metric_families(encoded.decode("utf-8"))
+        for sample in family.samples
+        if sample.labels.get("phase") == "command"
+        and sample.labels.get("outcome") == "passed"
+    ]
+    by_name = {sample.name: sample.value for sample in samples}
+    buckets = {
+        float(sample.labels["le"]): sample.value
+        for sample in samples
+        if sample.name == "medchat_sandbox_phase_duration_seconds_bucket"
+    }
+
+    assert telemetry.snapshot()["phase_latency_ms"]["command|passed"] == [
+        1_000
+    ] * 256
+    assert by_name["medchat_sandbox_phase_duration_seconds_count"] == 320.0
+    assert by_name["medchat_sandbox_phase_duration_seconds_sum"] == 320.0
+    assert set(buckets) == {*telemetry_module._DURATION_BUCKETS, math.inf}
+    assert all(
+        count == (0.0 if upper_bound < 1.0 else 320.0)
+        for upper_bound, count in buckets.items()
+    )
+    assert replay_calls == 0
+    assert len(telemetry._histogram_aggregates) == 1
+    aggregate = telemetry._histogram_aggregates[("command", "passed")]
+    assert aggregate.count == 320
+    assert aggregate.sum_seconds == 320.0
+    assert len(aggregate.bucket_counts) == len(telemetry_module._DURATION_BUCKETS)
+
+
+@pytest.mark.parametrize(
+    ("failure_point", "ordinal"),
+    [
+        ("registration", 1),
+        ("registration", 5),
+        ("registration", 9),
+        ("counter_population", 1),
+        ("histogram_population", 1),
+    ],
+)
+def test_failed_projection_replacement_retains_complete_live_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+    ordinal: int,
+) -> None:
+    clock = Clock()
+    telemetry = BrokerTelemetry(registry=CollectorRegistry(), monotonic=clock)
+    token = telemetry.start_phase(
+        trace_id="trace-atomic",
+        job_id="job-atomic",
+        phase="upload",
+        attempt=1,
+        queue_depth=0,
+        active_job_count=1,
+        image_digest="d" * 64,
+    )
+    clock.advance(0.5)
+    telemetry.finish_phase(token, outcome="passed")
+    telemetry.record_control_plane_failure(
+        operation="create",
+        failure_class=FailureClass.PROXY_502,
+    )
+    telemetry.record_retry("create", "attempted")
+    telemetry.record_terminal("failed", FailureClass.PROXY_502)
+    telemetry.update_runtime_gauges(
+        queue_depth=2,
+        active_job_count=1,
+        cleanup_task_count=3,
+        isolated_task_count=4,
+        breaker_state="open",
+    )
+
+    class FailBeforeMutation:
+        def labels(self, **labels: object) -> "FailBeforeMutation":
+            del labels
+            return self
+
+        def inc(self, amount: object = 1) -> None:
+            del amount
+            raise KeyboardInterrupt
+
+    original_jobs = telemetry._jobs
+    telemetry._jobs = FailBeforeMutation()  # type: ignore[assignment]
+    telemetry.record_terminal("failed", FailureClass.PROXY_502)
+    telemetry._jobs = original_jobs
+    live_registry = telemetry._registry
+    old_projection = telemetry._registered_collectors
+    old_collectors = set(old_projection)
+    unregister_calls = 0
+    original_unregister = live_registry.unregister
+
+    def counted_unregister(collector: object) -> object:
+        nonlocal unregister_calls
+        unregister_calls += 1
+        return original_unregister(collector)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(live_registry, "unregister", counted_unregister)
+    failed = False
+    calls = 0
+    if failure_point == "registration":
+        original_register = CollectorRegistry.register
+
+        def failing_register(registry: CollectorRegistry, collector: object) -> None:
+            nonlocal failed, calls
+            if registry is not live_registry and not failed:
+                calls += 1
+                if calls == ordinal:
+                    failed = True
+                    raise KeyboardInterrupt
+            original_register(registry, collector)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(CollectorRegistry, "register", failing_register)
+    elif failure_point == "counter_population":
+        original_labels = telemetry_module.PromCounter.labels
+
+        def failing_counter_labels(metric: object, *args: object, **kwargs: object):
+            nonlocal failed
+            if metric not in old_collectors and not failed:
+                failed = True
+                raise KeyboardInterrupt
+            return original_labels(metric, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(
+            telemetry_module.PromCounter,
+            "labels",
+            failing_counter_labels,
+        )
+    else:
+        original_labels = telemetry_module.Histogram.labels
+
+        def failing_histogram_labels(
+            metric: object,
+            *args: object,
+            **kwargs: object,
+        ):
+            nonlocal failed
+            if metric not in old_collectors and not failed:
+                failed = True
+                raise KeyboardInterrupt
+            return original_labels(metric, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(
+            telemetry_module.Histogram,
+            "labels",
+            failing_histogram_labels,
+        )
+
+    first = telemetry.prometheus_text()
+    assert telemetry._registry is live_registry
+    assert telemetry._registered_collectors is old_projection
+    second = telemetry.prometheus_text()
+    expected_help = {
+        b"medchat_sandbox_jobs_total",
+        b"medchat_sandbox_phase_duration_seconds",
+        b"medchat_sandbox_control_plane_failures_total",
+        b"medchat_sandbox_retry_total",
+        b"medchat_sandbox_queue_depth",
+        b"medchat_sandbox_active_jobs",
+        b"medchat_sandbox_cleanup_tasks",
+        b"medchat_sandbox_isolated_tasks",
+        b"medchat_sandbox_circuit_breaker_state",
+    }
+    for encoded in (first, second):
+        for family in expected_help:
+            assert encoded.count(b"# HELP " + family + b" ") == 1
+
+    def terminal_value(encoded: bytes) -> float:
+        return next(
+            sample.value
+            for family in text_string_to_metric_families(encoded.decode("utf-8"))
+            for sample in family.samples
+            if sample.name == "medchat_sandbox_jobs_total"
+            and sample.labels
+            == {"terminal_status": "failed", "failure_class": "proxy_502"}
+        )
+
+    assert failed is True
+    assert unregister_calls == 0
+    assert terminal_value(first) == 1.0
+    assert terminal_value(second) == 2.0
 
 
 @pytest.mark.parametrize(

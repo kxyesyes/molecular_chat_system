@@ -450,6 +450,9 @@ class SandboxBrokerService:
         self._prepared: dict[str, PreparedDockingSubmission] = {}
         self._rejected_work: set[str] = set()
         self._pending_rejections: dict[str, asyncio.Task[bool]] = {}
+        self._pending_rejection_capacity = config.queue_capacity
+        self._pending_rejection_reservations = 0
+        self._rejection_ownership: set[str] = set()
         self._terminal_condition = asyncio.Condition()
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._lifecycle_lock = asyncio.Lock()
@@ -960,6 +963,30 @@ class SandboxBrokerService:
         self._refresh_runtime_metrics()
         return True
 
+    def _try_reserve_pending_rejection(self) -> bool:
+        if (
+            self._pending_rejection_reservations
+            + len(self._rejection_ownership)
+            >= self._pending_rejection_capacity
+        ):
+            return False
+        self._pending_rejection_reservations += 1
+        return True
+
+    def _release_pending_rejection_reservation(self) -> None:
+        if self._pending_rejection_reservations <= 0:
+            raise RuntimeError("missing pending rejection reservation")
+        self._pending_rejection_reservations -= 1
+
+    def _assign_rejection_ownership(self, job_id: str) -> None:
+        if job_id in self._rejection_ownership:
+            raise RuntimeError("duplicate pending rejection ownership")
+        self._release_pending_rejection_reservation()
+        self._rejection_ownership.add(job_id)
+
+    def _release_rejection_ownership(self, job_id: str) -> None:
+        self._rejection_ownership.discard(job_id)
+
     async def submit(
         self,
         prepared: PreparedDockingSubmission,
@@ -990,23 +1017,41 @@ class SandboxBrokerService:
         ):
             raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
         try:
+            existing = self.store.get_by_idempotency(checked_key)
+        except Exception:
+            raise BrokerFailure(BrokerErrorCode.INVALID_INPUT) from None
+        if existing is not None:
+            if existing.canonical_input_sha256 != prepared.canonical_input_sha256:
+                raise BrokerFailure(BrokerErrorCode.IDEMPOTENCY_CONFLICT)
+            return _record_view(existing)
+        if not self._try_reserve_pending_rejection():
+            raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
+        reservation_held = True
+        try:
             record, reused = self.store.create_or_get(
                 checked_key,
                 prepared.canonical_input_sha256,
                 prepared.trace_id,
             )
         except Exception as failure:
+            self._release_pending_rejection_reservation()
             if isinstance(failure, IdempotencyConflict):
                 raise BrokerFailure(BrokerErrorCode.IDEMPOTENCY_CONFLICT) from None
             raise BrokerFailure(BrokerErrorCode.INVALID_INPUT) from None
         if reused:
+            self._release_pending_rejection_reservation()
             return _record_view(record)
         if not self._accepts_new_work():
             if self._discard_new_submission(record):
+                self._release_pending_rejection_reservation()
                 self._remove_job_tree(record.job_id)
                 raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
+            self._assign_rejection_ownership(record.job_id)
+            reservation_held = False
             return await self._enqueue_rejected(record)
 
+        if reservation_held:
+            self._release_pending_rejection_reservation()
         return await self._enqueue_created(record, prepared)
 
     async def _copy_upload_to_temporary(
@@ -1083,6 +1128,7 @@ class SandboxBrokerService:
         ligand_temporary: BinaryIO | None = None
         record: BrokerJobRecord | None = None
         created = False
+        reservation_held = False
         try:
             receptor_temporary, receptor_size, receptor_sha256 = (
                 await self._copy_upload_to_temporary(
@@ -1112,6 +1158,17 @@ class SandboxBrokerService:
                 ligand_placeholder,
             )
             try:
+                existing = self.store.get_by_idempotency(checked_key)
+            except Exception:
+                raise BrokerFailure(BrokerErrorCode.INVALID_INPUT) from None
+            if existing is not None:
+                if existing.canonical_input_sha256 != canonical_hash:
+                    raise BrokerFailure(BrokerErrorCode.IDEMPOTENCY_CONFLICT)
+                return _record_view(existing)
+            if not self._try_reserve_pending_rejection():
+                raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
+            reservation_held = True
+            try:
                 record, reused = self.store.create_or_get(
                     checked_key,
                     canonical_hash,
@@ -1127,8 +1184,12 @@ class SandboxBrokerService:
             if not self._accepts_new_work():
                 if self._discard_new_submission(record):
                     raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
+                self._assign_rejection_ownership(record.job_id)
+                reservation_held = False
                 return await self._enqueue_rejected(record)
 
+            self._release_pending_rejection_reservation()
+            reservation_held = False
             receptor_temporary.seek(0)
             receptor = stage_input(
                 self.config.state_root,
@@ -1156,7 +1217,11 @@ class SandboxBrokerService:
             )
             return await self._enqueue_created(record, prepared)
         except asyncio.CancelledError:
-            if created and record is not None:
+            if (
+                created
+                and record is not None
+                and record.job_id not in self._rejection_ownership
+            ):
                 self._fail_unqueued_submission(record.job_id)
             raise
         except BrokerFailure:
@@ -1171,6 +1236,8 @@ class SandboxBrokerService:
                 self._fail_unqueued_submission(record.job_id)
             raise BrokerFailure(BrokerErrorCode.INVALID_INPUT) from None
         finally:
+            if reservation_held:
+                self._release_pending_rejection_reservation()
             if receptor_temporary is not None:
                 receptor_temporary.close()
             if ligand_temporary is not None:
@@ -1264,20 +1331,23 @@ class SandboxBrokerService:
         try:
             self._queue.put_nowait(record.job_id)
         except asyncio.QueueFull:
-            persisted = await self._persist_pending_rejection(
+            first_attempt = self._schedule_pending_rejection(
                 record.job_id,
                 attempts=1,
             )
+            persisted = await asyncio.shield(first_attempt)
             if persisted:
                 raise BrokerFailure(BrokerErrorCode.QUEUE_SATURATED) from None
-            self._schedule_pending_rejection(record.job_id)
+            self._schedule_pending_rejection(record.job_id, attempts=3)
             return _record_view(record)
+        self._release_rejection_ownership(record.job_id)
         self._refresh_runtime_metrics()
         self._emit_job_event(record, Phase.QUEUE_ENTERED)
         return _record_view(record)
 
     def _finish_pending_rejection_ownership(self, job_id: str) -> None:
         self._pending_rejections.pop(job_id, None)
+        self._release_rejection_ownership(job_id)
         self._rejected_work.discard(job_id)
         self._cancel_events.pop(job_id, None)
         self._remove_job_tree(job_id)
@@ -1310,12 +1380,19 @@ class SandboxBrokerService:
             return True
         return False
 
-    def _schedule_pending_rejection(self, job_id: str) -> asyncio.Task[bool]:
+    def _schedule_pending_rejection(
+        self,
+        job_id: str,
+        *,
+        attempts: int = 3,
+    ) -> asyncio.Task[bool]:
+        if job_id not in self._rejection_ownership:
+            raise RuntimeError("pending rejection has no ownership slot")
         existing = self._pending_rejections.get(job_id)
         if existing is not None and not existing.done():
             return existing
         task = asyncio.create_task(
-            self._persist_pending_rejection(job_id, attempts=3),
+            self._persist_pending_rejection(job_id, attempts=attempts),
             name=f"sandbox-broker-rejection-{job_id}",
         )
         self._pending_rejections[job_id] = task
