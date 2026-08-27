@@ -476,7 +476,7 @@ def test_real_vina_git_banner_uses_independent_package_metadata(
             }
             return acceptance._CommandResult(True, values[call[4]])
         if call[:3] == ("docker", "exec", container_id):
-            if call[-2:] == ("vina", "--version"):
+            if call[-2:] == ("/opt/conda/bin/vina", "--version"):
                 return acceptance._CommandResult(True, "AutoDock Vina 4c3644e-mod")
             if "m.version('vina')" in call[-1]:
                 return acceptance._CommandResult(True, "1.2.5")
@@ -495,7 +495,9 @@ def test_real_vina_git_banner_uses_independent_package_metadata(
         "vina": "1.2.5",
         "meeko": "0.7.1",
     }
-    assert any(call[-2:] == ("vina", "--version") for call in calls)
+    assert any(
+        call[-2:] == ("/opt/conda/bin/vina", "--version") for call in calls
+    )
     assert any("m.version('vina')" in call[-1] for call in calls)
 
     pose, digest = _pose(tmp_path)
@@ -808,8 +810,22 @@ def test_real_probes_use_the_pinned_image_python_interpreter() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
     assert '_SANDBOX_PYTHON = "/opt/conda/bin/python"' in source
+    assert '_VINA_BINARY = "/opt/conda/bin/vina"' in source
     assert 'self._exec(container_id, "python"' not in source
     assert 'container_id,\n            "python",' not in source
+
+
+def test_real_fixture_uses_stable_nonmaximal_exhaustiveness() -> None:
+    acceptance = _module()
+
+    payload = acceptance._payload(
+        ROOT / "data/samples/MAGL_5zun.pdb",
+        ROOT / "data/samples/5.sdf",
+        (5.99, 3.01, 17.345),
+        (20.0, 20.0, 20.0),
+    )
+
+    assert payload["exhaustiveness"] == 32
 
 
 def test_readme_covers_qemu_install_secret_image_validation_and_rollback() -> None:

@@ -80,6 +80,7 @@ _CLEANUP_WAIT_SECONDS = 30.0
 _EXPECTED_NETWORK = "medchat-opensandbox"
 _EXPECTED_NETWORK_LABEL = "com.medchat.opensandbox.network=v1"
 _SANDBOX_PYTHON = "/opt/conda/bin/python"
+_VINA_BINARY = "/opt/conda/bin/vina"
 
 
 @dataclass(frozen=True)
@@ -799,7 +800,9 @@ raise SystemExit(0 if accepted and pids and not remaining else 1)
         ):
             self.failure_codes.append("setsid_probe_failed")
 
-        vina_cli = self._docker("exec", container_id, "vina", "--version")
+        vina_cli = self._docker(
+            "exec", container_id, _VINA_BINARY, "--version"
+        )
         vina_package = self._docker(
             "exec",
             container_id,
@@ -833,7 +836,7 @@ def _payload(receptor: Path, ligand: Path, center: Sequence[float], size: Sequen
         "ligand_path": str(ligand),
         "center": list(center),
         "size": list(size),
-        "exhaustiveness": 64,
+        "exhaustiveness": 32,
         "num_modes": 9,
         "energy_range": 3.0,
     }
