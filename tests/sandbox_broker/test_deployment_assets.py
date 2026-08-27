@@ -28,6 +28,7 @@ FIREWALL_SERVICE = DEPLOYMENT / "medchat-opensandbox-firewall.service"
 FIREWALL_SCRIPT = DEPLOYMENT / "configure-firewall.sh"
 ENV_EXAMPLE = DEPLOYMENT / "opensandbox.env.example"
 INSTALLER = DEPLOYMENT / "install.sh"
+OPEN_SANDBOX_README = DEPLOYMENT / "README.md"
 TEMPORAL_WORKER_SERVICE = ROOT / "deployment" / "medchat-temporal-worker.service"
 VALIDATOR = ROOT / "scripts" / "validate_opensandbox_deployment.py"
 
@@ -1009,7 +1010,9 @@ def test_installer_uses_atomic_durable_replacement_without_truncation() -> None:
 def test_installer_verifies_committed_assets_and_preserves_canonical_lf() -> None:
     installer = INSTALLER.read_text(encoding="utf-8")
 
-    assert "if read_source(path) != content:" in installer
+    assert "staged.append((path, temporary, content))" in installer
+    assert "for path, temporary, expected_content in staged:" in installer
+    assert "if read_source(path) != expected_content:" in installer
     assert 'if any(b"\\r" in content for content in committed_assets):' in installer
     for source in (
         SANDBOX_TOML,
@@ -1126,11 +1129,10 @@ def test_live_install_quiesces_shared_user_services_before_credential_write() ->
     assert "MEDCHAT_SERVICE_STATE=unknown" in installer
     assert "TEMPORAL_WORKER_SERVICE_STATE=unknown" in installer
     assert "SYSTEMCTL_TIMEOUT_SECONDS=15" in installer
-    assert "systemctl show --property=ActiveState --value medchat.service" in installer
-    assert (
-        "systemctl show --property=ActiveState --value "
-        "medchat-temporal-worker.service"
-    ) in installer
+    assert "query_service_state()" in installer
+    assert "--property=LoadState --property=ActiveState" in installer
+    assert "LoadState=not-found" in installer
+    assert 'printf \'%s\\n\' absent' in installer
 
     lifecycle = [
         installer.index("\n    quiesce_deployment_services\n"),
@@ -1154,6 +1156,71 @@ def test_live_install_quiesces_shared_user_services_before_credential_write() ->
         quiesce.index("confirm_inactive medchat.service"),
     ]
     assert operations == sorted(operations)
+
+
+def test_first_install_absent_units_are_inactive_without_weakening_query_errors() -> None:
+    installer = INSTALLER.read_text(encoding="utf-8")
+    query_start = installer.index("query_service_state() {")
+    query_end = installer.index("\n}\n", query_start)
+    query = installer[query_start:query_end]
+
+    assert "LoadState=not-found" in query
+    assert "ActiveState=inactive" in query
+    assert 'printf \'%s\\n\' absent' in query
+    assert "fail service_state_query_failed" in query
+    assert "fail service_state_invalid" in query
+    assert '[ "$query_status" -eq 0 ]' in query
+    assert '[ "$query_status" -eq 1 ]' in query
+
+    confirm_start = installer.index("confirm_inactive() {")
+    confirm_end = installer.index("\n}\n", confirm_start)
+    confirm = installer[confirm_start:confirm_end]
+    assert "inactive|absent" in confirm
+
+    restore_start = installer.index("restore_prior_medchat_services() {")
+    restore_end = installer.index("\n}\n", restore_start)
+    restore = installer[restore_start:restore_end]
+    assert "= absent" not in restore
+    assert restore.count("= active") >= 4
+
+
+def test_readme_locks_exact_installer_source_chain_before_sudo_execution() -> None:
+    readme = OPEN_SANDBOX_README.read_text(encoding="utf-8")
+    installer_position = readme.index("sudo deployment/opensandbox/install.sh")
+    ownership_position = readme.index("sudo chown root:root --")
+    mode_position = readme.index("sudo chmod go-w --")
+    verification_position = readme.index("source_untrusted")
+    ownership_block = readme[ownership_position:mode_position]
+    mode_block = readme[mode_position:verification_position]
+
+    assert ownership_position < mode_position < verification_position < installer_position
+    for source in (
+        "/opt/medchat/molecular_chat_system",
+        "/opt/medchat/molecular_chat_system/deployment",
+        "/opt/medchat/molecular_chat_system/deployment/opensandbox",
+        "/opt/medchat/molecular_chat_system/deployment/opensandbox/install.sh",
+        "/opt/medchat/molecular_chat_system/deployment/opensandbox/sandbox.toml",
+        "/opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-opensandbox.service",
+        "/opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-sandbox-broker.service",
+        "/opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-opensandbox-firewall.service",
+        "/opt/medchat/molecular_chat_system/deployment/opensandbox/configure-firewall.sh",
+        "/opt/medchat/molecular_chat_system/deployment/medchat-temporal-worker.service",
+    ):
+        assert source in ownership_block
+        assert source in mode_block
+
+    assert 'owner=$(stat -c %u -- "$source")' in readme
+    assert 'permissions=$(stat -c %a -- "$source")' in readme
+    assert "0022" in readme
+
+    installer = INSTALLER.read_text(encoding="utf-8")
+    source_check_start = installer.index("source_is_regular_and_locked() {")
+    source_check_end = installer.index("\n}\n", source_check_start)
+    source_check = installer[source_check_start:source_check_end]
+    assert 'owner=$(stat -c %u -- "$source_path")' in source_check
+    assert '[ "$owner" -eq 0 ]' in source_check
+    assert 'permissions=$(stat -c %a -- "$source_path")' in source_check
+    assert "0022" in source_check
 
 
 def test_live_install_restores_prior_active_services_after_unit_reload() -> None:
@@ -1277,6 +1344,88 @@ def _installer_function_source(name: str) -> str:
     start = installer.index(name + "() {")
     end = installer.index("\n}\n", start) + len("\n}\n")
     return installer[start:end]
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_code", "expected_stdout", "expected_stderr"),
+    [
+        ("absent", 0, "absent\n", ""),
+        ("active", 0, "active\n", ""),
+        ("inactive", 0, "inactive\n", ""),
+        ("query-error", 91, "", "service_state_query_failed\n"),
+        ("unknown-load", 91, "", "service_state_invalid\n"),
+    ],
+)
+@pytest.mark.skipif(os.name != "posix", reason="systemd query model requires POSIX")
+def test_service_state_query_accepts_only_exact_absent_or_loaded_states(
+    tmp_path: Path,
+    scenario: str,
+    expected_code: int,
+    expected_stdout: str,
+    expected_stderr: str,
+) -> None:
+    script = tmp_path / "query-service-state.sh"
+    script.write_text(
+        "#!/bin/sh\nset -eu\n"
+        "SCENARIO=$1\nSYSTEMCTL_TIMEOUT_SECONDS=15\n"
+        "fail() { printf '%s\\n' \"$1\" >&2; exit 91; }\n"
+        "timeout() {\n"
+        " case \"$SCENARIO\" in\n"
+        "  absent) printf 'LoadState=not-found\\nActiveState=inactive\\n'; return 1 ;;\n"
+        "  active) printf 'LoadState=loaded\\nActiveState=active\\n'; return 0 ;;\n"
+        "  inactive) printf 'LoadState=loaded\\nActiveState=inactive\\n'; return 0 ;;\n"
+        "  query-error) return 124 ;;\n"
+        "  unknown-load) printf 'LoadState=masked\\nActiveState=inactive\\n'; return 0 ;;\n"
+        " esac\n"
+        "}\n"
+        + _installer_function_source("query_service_state")
+        + "query_service_state medchat.service\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["sh", str(script), scenario],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == expected_code
+    assert result.stdout == expected_stdout
+    assert result.stderr == expected_stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="service restoration requires POSIX")
+def test_absent_first_install_units_are_never_started_during_restore(
+    tmp_path: Path,
+) -> None:
+    event_log = tmp_path / "events"
+    script = tmp_path / "restore-absent.sh"
+    script.write_text(
+        "#!/bin/sh\nset -eu\n"
+        "EVENT_LOG=$1\n"
+        "MEDCHAT_SERVICE_STATE=absent\n"
+        "TEMPORAL_WORKER_SERVICE_STATE=absent\n"
+        "OPENSANDBOX_SERVICE_STATE=absent\n"
+        "SANDBOX_BROKER_SERVICE_STATE=absent\n"
+        "run_systemctl() { printf '%s\\n' \"$*\" >>\"$EVENT_LOG\"; }\n"
+        + _installer_function_source("restore_prior_medchat_services")
+        + "restore_prior_medchat_services\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["sh", str(script), str(event_log)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == ""
+    assert not event_log.exists()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="shell behavior requires POSIX")
@@ -1454,6 +1603,52 @@ def _write_preview_environment(root: Path, *, secret: str) -> Path:
     )
     environment.chmod(0o600)
     return environment
+
+
+@pytest.mark.skipif(os.name != "posix", reason="installer preview requires POSIX")
+def test_preview_distinct_payload_generation_commits_and_verifies_every_entry(
+    tmp_path: Path,
+) -> None:
+    secret = "D" * 40
+    _write_preview_environment(tmp_path, secret=secret)
+
+    result = subprocess.run(
+        ["sh", str(INSTALLER), "--destdir", str(tmp_path)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "opensandbox_install=passed\n"
+    assert result.stderr == ""
+    rendered_toml = (tmp_path / "etc/medchat/opensandbox.toml").read_bytes()
+    broker_environment = (tmp_path / "etc/medchat/sandbox-broker.env").read_bytes()
+    expected = {
+        tmp_path / "etc/systemd/system/medchat-opensandbox-firewall.service": (
+            FIREWALL_SERVICE.read_bytes()
+        ),
+        tmp_path / "etc/systemd/system/medchat-opensandbox.service": (
+            OPENSANDBOX_SERVICE.read_bytes()
+        ),
+        tmp_path / "etc/systemd/system/medchat-sandbox-broker.service": (
+            BROKER_SERVICE.read_bytes()
+        ),
+        tmp_path / "etc/systemd/system/medchat-temporal-worker.service": (
+            TEMPORAL_WORKER_SERVICE.read_bytes()
+        ),
+        tmp_path / "usr/local/libexec/medchat/configure-opensandbox-firewall": (
+            FIREWALL_SCRIPT.read_bytes()
+        ),
+    }
+    payloads = [rendered_toml, broker_environment, *expected.values()]
+    assert len(set(payloads)) == len(payloads)
+    assert secret.encode("ascii") in rendered_toml
+    assert secret.encode("ascii") in broker_environment
+    assert all(path.read_bytes() == content for path, content in expected.items())
+    assert not list(tmp_path.rglob("*.stage"))
 
 
 @pytest.mark.skipif(os.name != "posix", reason="installer preview requires POSIX")

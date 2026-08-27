@@ -71,6 +71,8 @@ source_is_regular_and_locked() {
     source_path=$1
     [ ! -L "$source_path" ] || return 1
     [ -f "$source_path" ] || return 1
+    owner=$(stat -c %u -- "$source_path") || return 1
+    [ "$owner" -eq 0 ] || return 1
     permissions=$(stat -c %a -- "$source_path")
     [ $((0$permissions & 0022)) -eq 0 ] || return 1
 }
@@ -80,52 +82,70 @@ run_systemctl() {
         systemctl "$@" >/dev/null 2>&1
 }
 
-query_medchat_service_state() {
-    state=$(
+query_service_state() {
+    service_name=$1
+    state_output=
+    query_status=0
+    if state_output=$(
         timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
-            systemctl show --property=ActiveState --value medchat.service \
-            2>/dev/null
-    ) || fail service_state_query_failed
-    case "$state" in
-        active|inactive) printf '%s\n' "$state" ;;
+            systemctl show --property=LoadState --property=ActiveState \
+            "$service_name" 2>/dev/null
+    ); then
+        :
+    else
+        query_status=$?
+    fi
+
+    load_state=
+    active_state=
+    state_invalid=0
+    while IFS= read -r property; do
+        case "$property" in
+            LoadState=loaded|LoadState=not-found)
+                [ -z "$load_state" ] || state_invalid=1
+                load_state=${property#LoadState=}
+                ;;
+            ActiveState=active|ActiveState=inactive)
+                [ -z "$active_state" ] || state_invalid=1
+                active_state=${property#ActiveState=}
+                ;;
+            *) state_invalid=1 ;;
+        esac
+    done <<EOF
+$state_output
+EOF
+
+    if { [ "$query_status" -eq 0 ] || [ "$query_status" -eq 1 ]; } \
+        && [ "$state_invalid" -eq 0 ] \
+        && [ "$load_state" = not-found ] \
+        && [ "$active_state" = inactive ]
+    then
+        printf '%s\n' absent
+        return 0
+    fi
+    [ "$query_status" -eq 0 ] || fail service_state_query_failed
+    [ "$state_invalid" -eq 0 ] || fail service_state_invalid
+    [ "$load_state" = loaded ] || fail service_state_invalid
+    case "$active_state" in
+        active|inactive) printf '%s\n' "$active_state" ;;
         *) fail service_state_invalid ;;
     esac
+}
+
+query_medchat_service_state() {
+    query_service_state medchat.service
 }
 
 query_temporal_worker_service_state() {
-    state=$(
-        timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
-            systemctl show --property=ActiveState --value medchat-temporal-worker.service \
-            2>/dev/null
-    ) || fail service_state_query_failed
-    case "$state" in
-        active|inactive) printf '%s\n' "$state" ;;
-        *) fail service_state_invalid ;;
-    esac
+    query_service_state medchat-temporal-worker.service
 }
 
 query_opensandbox_service_state() {
-    state=$(
-        timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
-            systemctl show --property=ActiveState --value \
-            medchat-opensandbox.service 2>/dev/null
-    ) || fail service_state_query_failed
-    case "$state" in
-        active|inactive) printf '%s\n' "$state" ;;
-        *) fail service_state_invalid ;;
-    esac
+    query_service_state medchat-opensandbox.service
 }
 
 query_sandbox_broker_service_state() {
-    state=$(
-        timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
-            systemctl show --property=ActiveState --value \
-            medchat-sandbox-broker.service 2>/dev/null
-    ) || fail service_state_query_failed
-    case "$state" in
-        active|inactive) printf '%s\n' "$state" ;;
-        *) fail service_state_invalid ;;
-    esac
+    query_service_state medchat-sandbox-broker.service
 }
 
 confirm_inactive() {
@@ -140,43 +160,34 @@ confirm_inactive() {
             ;;
         *) fail service_name_invalid ;;
     esac
-    [ "$state" = inactive ] || fail service_stop_unconfirmed
+    case "$state" in
+        inactive|absent) ;;
+        *) fail service_stop_unconfirmed ;;
+    esac
 }
 
 medchat_service_is_inactive() {
-    state=$(
-        timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
-            systemctl show --property=ActiveState --value medchat.service \
-            2>/dev/null
-    ) || return 1
-    [ "$state" = inactive ]
+    state=$(query_medchat_service_state) || return 1
+    case "$state" in inactive|absent) return 0 ;; esac
+    return 1
 }
 
 temporal_worker_service_is_inactive() {
-    state=$(
-        timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
-            systemctl show --property=ActiveState --value medchat-temporal-worker.service \
-            2>/dev/null
-    ) || return 1
-    [ "$state" = inactive ]
+    state=$(query_temporal_worker_service_state) || return 1
+    case "$state" in inactive|absent) return 0 ;; esac
+    return 1
 }
 
 opensandbox_service_is_inactive() {
-    state=$(
-        timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
-            systemctl show --property=ActiveState --value \
-            medchat-opensandbox.service 2>/dev/null
-    ) || return 1
-    [ "$state" = inactive ]
+    state=$(query_opensandbox_service_state) || return 1
+    case "$state" in inactive|absent) return 0 ;; esac
+    return 1
 }
 
 sandbox_broker_service_is_inactive() {
-    state=$(
-        timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
-            systemctl show --property=ActiveState --value \
-            medchat-sandbox-broker.service 2>/dev/null
-    ) || return 1
-    [ "$state" = inactive ]
+    state=$(query_sandbox_broker_service_state) || return 1
+    case "$state" in inactive|absent) return 0 ;; esac
+    return 1
 }
 
 force_quiesce_known_medchat_services() {
@@ -787,14 +798,14 @@ def stage_generation(
     entries: list[tuple[Path, bytes, int, int, int]],
 ) -> None:
     snapshots: dict[Path, tuple[bytes, int, int, int] | None] = {}
-    staged: list[tuple[Path, Path]] = []
+    staged: list[tuple[Path, Path, bytes]] = []
     committed: list[tuple[Path, tuple[int, int]]] = []
     try:
         for path, content, mode, uid, gid in entries:
             snapshots[path] = snapshot_target(path, mode, uid)
             temporary = stage_locked(path, content, mode, uid, gid)
-            staged.append((path, temporary))
-        for path, temporary in staged:
+            staged.append((path, temporary, content))
+        for path, temporary, expected_content in staged:
             staged_metadata = temporary.lstat()
             os.replace(temporary, path)
             committed.append(
@@ -812,7 +823,7 @@ def stage_generation(
                 != (staged_metadata.st_dev, staged_metadata.st_ino)
             ):
                 fail()
-            if read_source(path) != content:
+            if read_source(path) != expected_content:
                 fail()
             if preview_fail_after and len(committed) == preview_fail_after:
                 fail()
@@ -823,7 +834,7 @@ def stage_generation(
             pass
         raise
     finally:
-        for _path, temporary in staged:
+        for _path, temporary, _expected_content in staged:
             try:
                 os.unlink(temporary)
                 fsync_parent(temporary)

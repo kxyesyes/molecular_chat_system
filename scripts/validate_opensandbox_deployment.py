@@ -94,7 +94,7 @@ _PINNED_ASSET_SHA256 = {
         "bdd4b347aacd786c555250f5733566d5fd8723e15c44aeb048af237852d089bf"
     ),
     "deployment/opensandbox/install.sh": (
-        "81c959af77f9e7fdaab438347883c8711dba75cb1479cb034fa7ff0ecd634c90"
+        "85ac192c30980e4b6fcd13ad1be7de57166bb80c90d3c128bf657458fd599a0d"
     ),
     "deployment/medchat-temporal-worker.service": (
         "15fb8b7faa079b9a33328081c751a75c72a2d68e1b92b676b55150438064f982"
@@ -863,7 +863,9 @@ def _validate_installer(text: str) -> bool:
         "os.fsync(parent_descriptor)",
         "os.O_EXCL",
         "os.replace",
-        "if read_source(path) != content:",
+        "staged.append((path, temporary, content))",
+        "for path, temporary, expected_content in staged:",
+        "if read_source(path) != expected_content:",
         'if any(b"\\r" in content for content in committed_assets):',
         "def stage_generation(",
         "def rollback_generation(",

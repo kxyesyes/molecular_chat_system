@@ -153,8 +153,60 @@ root-owned service files required by the final Broker architecture.
 
 ## 6. Install and enable the service chain
 
-With both pinned environments provisioned, run the transactional installer.
-It validates identities, modes, configuration, and the image digest:
+Before invoking the installer with `sudo`, lock its complete source chain. A
+clean clone created with umask `0002` commonly has group-writable `775/664`
+modes; the installer rejects those assets before installation. The following
+explicit list locks only the checkout directories and files the installer
+reads, without recursively changing unrelated repository assets:
+
+```bash
+sudo chown root:root -- \
+  /opt/medchat/molecular_chat_system \
+  /opt/medchat/molecular_chat_system/deployment \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/install.sh \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/sandbox.toml \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-opensandbox.service \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-sandbox-broker.service \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-opensandbox-firewall.service \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/configure-firewall.sh \
+  /opt/medchat/molecular_chat_system/deployment/medchat-temporal-worker.service
+sudo chmod go-w -- \
+  /opt/medchat/molecular_chat_system \
+  /opt/medchat/molecular_chat_system/deployment \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/install.sh \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/sandbox.toml \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-opensandbox.service \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-sandbox-broker.service \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-opensandbox-firewall.service \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/configure-firewall.sh \
+  /opt/medchat/molecular_chat_system/deployment/medchat-temporal-worker.service
+
+for source in \
+  /opt/medchat/molecular_chat_system \
+  /opt/medchat/molecular_chat_system/deployment \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/install.sh \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/sandbox.toml \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-opensandbox.service \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-sandbox-broker.service \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-opensandbox-firewall.service \
+  /opt/medchat/molecular_chat_system/deployment/opensandbox/configure-firewall.sh \
+  /opt/medchat/molecular_chat_system/deployment/medchat-temporal-worker.service
+do
+  owner=$(stat -c %u -- "$source")
+  permissions=$(stat -c %a -- "$source")
+  [ "$owner" -eq 0 ] && [ $((0$permissions & 0022)) -eq 0 ] || exit 1
+done
+```
+
+A failed ownership or mode check must be corrected; otherwise the installer
+reports `source_untrusted` and exits without installing the generation.
+
+With both pinned environments provisioned and the source chain locked, run the
+transactional installer. It validates identities, modes, configuration, and
+the image digest:
 
 ```bash
 sudo deployment/opensandbox/install.sh
