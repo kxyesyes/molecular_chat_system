@@ -158,17 +158,22 @@ def test_temporal_worker_systemd_unit_has_full_hardened_contract() -> None:
     assert parse_systemd_directives(WORKER_SYSTEMD_UNIT) == {
         "Unit": {
             "Description": ["MedChat Temporal Docking Worker"],
-            "After": [
-                "network-online.target docker.service "
-                "medchat-temporal-worker-prepare.service"
-            ],
-            "Wants": ["network-online.target"],
-            "Requires": ["medchat-temporal-worker-prepare.service"],
+                "After": [
+                    "network-online.target docker.service "
+                    "medchat-temporal-worker-prepare.service "
+                    "medchat-sandbox-broker.service"
+                ],
+                "Wants": ["network-online.target"],
+                "Requires": [
+                    "medchat-temporal-worker-prepare.service "
+                    "medchat-sandbox-broker.service"
+                ],
         },
         "Service": {
             "Type": ["simple"],
             "User": ["medchat"],
-            "Group": ["medchat"],
+                "Group": ["medchat"],
+                "SupplementaryGroups": ["medchat-sandbox"],
             "WorkingDirectory": ["/opt/medchat/molecular_chat_system"],
             "EnvironmentFile": ["/etc/medchat/temporal-worker.env"],
             "Environment": [
@@ -195,14 +200,21 @@ def test_temporal_worker_systemd_unit_has_full_hardened_contract() -> None:
             "PrivateTmp": ["true"],
             "NoNewPrivileges": ["true"],
             "ProtectSystem": ["strict"],
-            "ReadWritePaths": [
-                "/opt/medchat/molecular_chat_system/scratch "
-                "/opt/medchat/molecular_chat_system/temp_docking"
-            ],
+                "ReadWritePaths": [
+                    "/opt/medchat/molecular_chat_system/scratch "
+                    "/opt/medchat/molecular_chat_system/temp_docking "
+                    "/run/medchat-sandbox"
+                ],
             "ReadOnlyPaths": [
                 "/opt/medchat/molecular_chat_system "
-                "/opt/conda/envs/medchat"
-            ],
+                    "/opt/conda/envs/medchat"
+                ],
+                "InaccessiblePaths": [
+                    "/var/run/docker.sock /etc/medchat/opensandbox.env "
+                    "/etc/medchat/opensandbox.toml "
+                    "/etc/medchat/sandbox-broker.env "
+                    "/var/lib/opensandbox/approved-empty"
+                ],
         },
         "Install": {"WantedBy": ["multi-user.target"]},
     }
@@ -1717,10 +1729,12 @@ cache=$TEST_TEMPORAL_CACHE
 case "$command" in
     is-active)
         [ "$1" = --quiet ]
+        [ -L "$TEST_TEMPORAL_ROOT/usr/lib/medchat/temporal-worker/current" ] || exit 4
         grep -qx "$2" "$state" 2>/dev/null && exit 0
         exit 3
         ;;
     stop)
+        [ -L "$TEST_TEMPORAL_ROOT/usr/lib/medchat/temporal-worker/current" ] || exit 5
         unit=$1
         if [ -f "$state" ]; then grep -vx "$unit" "$state" > "$state.next" || true; mv "$state.next" "$state"; fi
         ;;

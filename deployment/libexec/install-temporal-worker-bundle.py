@@ -1210,14 +1210,19 @@ def activate_generation(
         created_links = _bootstrap_unit_links(root, uid, gid)
         _raise_if_interrupted(state)
         generation = os.open(digest, _DIRECTORY_FLAGS, dir_fd=releases)
-        old_active[WORKER_UNIT] = _unit_is_active(systemctl, WORKER_UNIT, state)
-        old_active[PREPARE_UNIT] = _unit_is_active(systemctl, PREPARE_UNIT, state)
         state.phase = PHASE_STOPPING
         stopped = True
-        _run_systemctl(systemctl, ["stop", WORKER_UNIT], state)
-        _run_systemctl(systemctl, ["stop", PREPARE_UNIT], state)
-        _confirm_inactive(systemctl, WORKER_UNIT, state)
-        _confirm_inactive(systemctl, PREPARE_UNIT, state)
+        if old_digest is not None:
+            old_active[WORKER_UNIT] = _unit_is_active(
+                systemctl, WORKER_UNIT, state
+            )
+            old_active[PREPARE_UNIT] = _unit_is_active(
+                systemctl, PREPARE_UNIT, state
+            )
+            _run_systemctl(systemctl, ["stop", WORKER_UNIT], state)
+            _run_systemctl(systemctl, ["stop", PREPARE_UNIT], state)
+            _confirm_inactive(systemctl, WORKER_UNIT, state)
+            _confirm_inactive(systemctl, PREPARE_UNIT, state)
         state.phase = PHASE_PRE_SWITCH
         _set_current(base, digest)
         switched = True
