@@ -109,7 +109,13 @@ class ControlPlaneCircuitBreaker:
         if type(permit) is not BreakerPermit:
             raise ValueError("invalid circuit-breaker permit")
         with self._lock:
-            if permit.generation == self._generation and permit.half_open:
+            if (
+                permit.generation == self._generation
+                and permit.half_open
+                and self._state is BreakerState.HALF_OPEN
+                and self._probe_in_flight
+            ):
+                self._generation += 1
                 self._probe_in_flight = False
 
     def record_success(self, permit: BreakerPermit) -> None:
@@ -118,10 +124,17 @@ class ControlPlaneCircuitBreaker:
         with self._lock:
             if permit.generation != self._generation:
                 return
+            completed_probe = (
+                permit.half_open
+                and self._state is BreakerState.HALF_OPEN
+                and self._probe_in_flight
+            )
             self._state = BreakerState.CLOSED
             self._failures.clear()
             self._opened_at = None
             self._probe_in_flight = False
+            if completed_probe:
+                self._generation += 1
 
     def record_failure(
         self,

@@ -59,7 +59,7 @@ def test_breaker_opens_after_three_qualifying_failures_and_closes_after_probe() 
     breaker.record_success(probe)
 
     assert breaker.state is BreakerState.CLOSED
-    assert breaker.acquire() == BreakerPermit(probe.generation, False)
+    assert breaker.acquire() == BreakerPermit(probe.generation + 1, False)
 
 
 def test_qualifying_half_open_failure_reopens_for_full_cooldown() -> None:
@@ -171,7 +171,7 @@ def test_stale_permits_cannot_change_new_generation() -> None:
     assert breaker.acquire() is None
 
 
-def test_released_half_open_permit_allows_one_replacement() -> None:
+def test_released_half_open_permit_is_stale_and_cannot_affect_replacement() -> None:
     clock = Clock()
     breaker = ControlPlaneCircuitBreaker(monotonic=clock)
     _record_failures(breaker, 3)
@@ -184,6 +184,47 @@ def test_released_half_open_permit_allows_one_replacement() -> None:
 
     replacement = breaker.acquire()
     assert replacement is not None and replacement.half_open is True
+    assert replacement.generation == abandoned.generation + 1
+    assert breaker.acquire() is None
+
+    breaker.record_success(abandoned)
+    breaker.record_failure(abandoned, FailureClass.SERVER_500)
+    breaker.release(abandoned)
+
+    assert breaker.state is BreakerState.HALF_OPEN
+    assert breaker.acquire() is None
+    breaker.record_success(replacement)
+    closed = breaker.acquire()
+    assert closed == BreakerPermit(replacement.generation + 1, False)
+
+
+def test_successful_half_open_permit_cannot_affect_a_new_open_cycle() -> None:
+    clock = Clock()
+    breaker = ControlPlaneCircuitBreaker(monotonic=clock)
+    _record_failures(breaker, 3)
+    clock.advance(30.0)
+    completed = breaker.acquire()
+    assert completed is not None and completed.half_open is True
+
+    breaker.record_success(completed)
+
+    ordinary = breaker.acquire()
+    assert ordinary == BreakerPermit(completed.generation + 1, False)
+    breaker.record_success(ordinary)
+    assert breaker.acquire() == ordinary
+    _record_failures(breaker, 3)
+    assert breaker.state is BreakerState.OPEN
+
+    breaker.record_success(completed)
+    breaker.record_failure(completed, FailureClass.PROXY_502)
+    breaker.release(completed)
+
+    assert breaker.state is BreakerState.OPEN
+    assert breaker.acquire() is None
+    clock.advance(30.0)
+    new_probe = breaker.acquire()
+    assert new_probe is not None and new_probe.half_open is True
+    assert new_probe.generation == ordinary.generation + 1
     assert breaker.acquire() is None
 
 
