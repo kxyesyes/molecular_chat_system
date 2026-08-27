@@ -88,6 +88,20 @@ _LISTENER_CALLS = {
     "uvicorn.run",
     "wsgiref.simple_server.make_server",
 }
+_SENSITIVE_LISTENER_REFERENCES = _LISTENER_CALLS | {
+    "_socket.socket",
+    "prometheus_client.start_http_server",
+    "prometheus_client.start_wsgi_server",
+    "socket.socket",
+}
+_FAIL_CLOSED_METHOD_REFERENCES = {
+    "bind": "socket.socket.bind",
+    "create_server": "socket.create_server",
+    "listen": "socket.socket.listen",
+    "start_http_server": "prometheus_client.start_http_server",
+    "start_server": "asyncio.start_server",
+    "start_wsgi_server": "prometheus_client.start_wsgi_server",
+}
 _PROTECTED_SOCKET_FAMILY_ATTRIBUTES = {"AF_INET", "AF_UNIX"}
 
 
@@ -131,6 +145,7 @@ class _LexicalScope:
 class _SourceAnalysis:
     tree: ast.Module
     calls: tuple[tuple[ast.Call, str, str | None], ...]
+    references: tuple[tuple[ast.expr, str, str | None], ...]
     violations: frozenset[str]
     environment_names: frozenset[str]
 
@@ -228,6 +243,7 @@ class _StatementOrderedAnalyzer:
     def __init__(self, tree: ast.Module) -> None:
         self.tree = tree
         self.calls: list[tuple[ast.Call, str, str | None]] = []
+        self.references: list[tuple[ast.expr, str, str | None]] = []
         self.violations: set[str] = set()
         self.environment_names: set[str] = set()
         self.scopes: list[_LexicalScope] = []
@@ -254,6 +270,7 @@ class _StatementOrderedAnalyzer:
         return _SourceAnalysis(
             tree=self.tree,
             calls=tuple(self.calls),
+            references=tuple(self.references),
             violations=frozenset(self.violations),
             environment_names=frozenset(self.environment_names),
         )
@@ -601,7 +618,16 @@ class _StatementOrderedAnalyzer:
     def _visit_expr(self, node: ast.expr | None, scope: _LexicalScope) -> None:
         if node is None:
             return
+        if (
+            isinstance(node, (ast.Name, ast.Attribute, ast.Subscript))
+            and isinstance(node.ctx, ast.Load)
+        ):
+            self.references.append((node, self._resolve(node, scope), scope.function))
         if isinstance(node, ast.Call):
+            reflected = self._resolve(node, scope)
+            direct = self._resolve(node.func, scope)
+            if reflected != direct:
+                self.references.append((node, reflected, scope.function))
             self._visit_call(node, scope)
             return
         if isinstance(node, ast.Lambda):
@@ -1142,6 +1168,99 @@ def _allowed_entrypoint_call(
     return False
 
 
+_EXPECTED_ENTRYPOINT_ALLOWLIST_COUNTS = {
+    "_notify_systemd_ready:socket.socket": 1,
+    "_socket_stale_candidate:socket.socket": 1,
+    "bind_runtime_socket:socket.socket": 1,
+    "bind_runtime_socket:socket.socket.bind": 1,
+    "serve_application:uvicorn.Config": 1,
+    "serve_application:uvicorn.Server": 1,
+    "serve_application:uvicorn.Server.run": 1,
+}
+
+
+def _verified_entrypoint_reference_nodes(
+    analysis: _SourceAnalysis,
+) -> set[int]:
+    if not _has_verified_af_unix_binding(analysis.tree):
+        return set()
+
+    allowed_calls = [
+        (call, symbol, function)
+        for call, symbol, function in analysis.calls
+        if _allowed_entrypoint_call(call, symbol, function)
+    ]
+    counts: dict[str, int] = {}
+    for _, symbol, function in allowed_calls:
+        key = f"{function}:{symbol}"
+        counts[key] = counts.get(key, 0) + 1
+    if counts != _EXPECTED_ENTRYPOINT_ALLOWLIST_COUNTS:
+        return set()
+
+    ready_server_classes = [
+        node
+        for node in analysis.tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "_ReadyServer"
+    ]
+    if len(ready_server_classes) != 1:
+        return set()
+    ready_server = ready_server_classes[0]
+    if not (
+        len(ready_server.bases) == 1
+        and not ready_server.keywords
+        and not ready_server.decorator_list
+        and _is_attribute(ready_server.bases[0], "uvicorn", "Server")
+    ):
+        return set()
+
+    return {
+        *(id(call.func) for call, _, _ in allowed_calls),
+        id(ready_server.bases[0]),
+    }
+
+
+def _sensitive_reference_prepass(
+    analysis: _SourceAnalysis,
+    *,
+    allow_entrypoint_uds: bool,
+) -> set[str]:
+    allowed_nodes = (
+        _verified_entrypoint_reference_nodes(analysis)
+        if allow_entrypoint_uds
+        else set()
+    )
+    imported_names = {
+        (
+            imported.asname or imported.name,
+            _normalize_symbol(f"{node.module or ''}.{imported.name}"),
+        )
+        for node in ast.walk(analysis.tree)
+        if isinstance(node, ast.ImportFrom)
+        for imported in node.names
+    }
+    return {
+        _FAIL_CLOSED_METHOD_REFERENCES.get(
+            symbol.rsplit(".", 1)[-1],
+            symbol,
+        )
+        for node, symbol, _ in analysis.references
+        if (
+            symbol in _SENSITIVE_LISTENER_REFERENCES
+            or (
+                isinstance(node, (ast.Attribute, ast.Call))
+                and symbol.rsplit(".", 1)[-1]
+                in _FAIL_CLOSED_METHOD_REFERENCES
+            )
+        )
+        and id(node) not in allowed_nodes
+        and (
+            not isinstance(node, ast.Name)
+            or (node.id, symbol) in imported_names
+            or (allow_entrypoint_uds and node.id == "_ReadyServer")
+        )
+    }
+
+
 def _listener_contract_violations(
     source: str,
     *,
@@ -1149,25 +1268,17 @@ def _listener_contract_violations(
 ) -> set[str]:
     analysis = _analyze_source(source)
     violations = set(analysis.violations)
+    violations.update(
+        _sensitive_reference_prepass(
+            analysis,
+            allow_entrypoint_uds=allow_entrypoint_uds,
+        )
+    )
     if allow_entrypoint_uds and not _has_verified_af_unix_binding(analysis.tree):
         violations.add("entrypoint._AF_UNIX")
     if allow_entrypoint_uds and "socket_family" in violations:
         violations.remove("socket_family")
         violations.add("entrypoint.socket_family")
-    for call, symbol, function in analysis.calls:
-        forbidden = (
-            symbol in _LISTENER_CALLS
-            or symbol in {
-                "prometheus_client.start_http_server",
-                "prometheus_client.start_wsgi_server",
-            }
-            or symbol == "socket.socket"
-        )
-        if forbidden and not (
-            allow_entrypoint_uds
-            and _allowed_entrypoint_call(call, symbol, function)
-        ):
-            violations.add(symbol)
     return violations
 
 
@@ -1199,15 +1310,10 @@ def test_broker_metrics_cannot_start_a_second_listener_or_use_tcp_configuration(
         and ("HOST" in name.upper() or "PORT" in name.upper())
     }
 
-    assert _entrypoint_allowlist_counts(_entrypoint_source()) == {
-        "_notify_systemd_ready:socket.socket": 1,
-        "_socket_stale_candidate:socket.socket": 1,
-        "bind_runtime_socket:socket.socket": 1,
-        "bind_runtime_socket:socket.socket.bind": 1,
-        "serve_application:uvicorn.Config": 1,
-        "serve_application:uvicorn.Server": 1,
-        "serve_application:uvicorn.Server.run": 1,
-    }
+    assert (
+        _entrypoint_allowlist_counts(_entrypoint_source())
+        == _EXPECTED_ENTRYPOINT_ALLOWLIST_COUNTS
+    )
 
 
 @pytest.mark.parametrize(
@@ -1409,6 +1515,149 @@ def test_listener_contract_rejects_adversarial_source_fixtures(
         source,
         allow_entrypoint_uds=True,
     )
+
+
+@pytest.mark.parametrize(
+    ("source", "violation"),
+    [
+        (
+            "from prometheus_client import start_http_server\n"
+            "callbacks = [start_http_server]\n",
+            "prometheus_client.start_http_server",
+        ),
+        (
+            "from prometheus_client import start_wsgi_server as serve\n"
+            "for callback in (serve,):\n"
+            "    registry.add(callback)\n",
+            "prometheus_client.start_wsgi_server",
+        ),
+        (
+            "from asyncio import start_server\n"
+            "callbacks = [start_server for _ in names]\n",
+            "asyncio.start_server",
+        ),
+        (
+            "from socket import create_server\n"
+            "create, fallback = create_server, safe_factory\n",
+            "socket.create_server",
+        ),
+        (
+            "import socket\n"
+            "factory = (selected := socket.socket)\n",
+            "socket.socket",
+        ),
+        (
+            "import socket\n"
+            "factory = socket.socket if enabled else safe_factory\n",
+            "socket.socket",
+        ),
+        (
+            "import socket\n"
+            "register(socket.socket)\n",
+            "socket.socket",
+        ),
+        (
+            "import socket\n"
+            "factory = getattr(socket, 'socket')\n",
+            "socket.socket",
+        ),
+        (
+            "import socket\n"
+            "factory = vars(socket)['socket']\n",
+            "socket.socket",
+        ),
+        (
+            "import socket\n"
+            "listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+            "callback = listener.bind\n",
+            "socket.socket.bind",
+        ),
+        (
+            "import socket\n"
+            "listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+            "callback = getattr(listener, 'listen')\n",
+            "socket.socket.listen",
+        ),
+        (
+            "callbacks = [candidate.bind for candidate in listeners]\n",
+            "socket.socket.bind",
+        ),
+        (
+            "callback = getattr(candidate, 'listen')\n",
+            "socket.socket.listen",
+        ),
+        (
+            "import _socket\n"
+            "factory = _socket.socket\n",
+            "_socket.socket",
+        ),
+        (
+            "import uvicorn\n"
+            "launchers = {'run': uvicorn.run}\n",
+            "uvicorn.run",
+        ),
+        (
+            "from uvicorn import Server as ServerType\n"
+            "server_types = (ServerType,)\n",
+            "uvicorn.Server",
+        ),
+        (
+            "import uvicorn\n"
+            "configuration_types = [uvicorn.Config]\n",
+            "uvicorn.Config",
+        ),
+    ],
+    ids=[
+        "list",
+        "loop",
+        "comprehension",
+        "unpacking",
+        "named-expression",
+        "if-expression",
+        "passed-callable",
+        "getattr",
+        "vars-subscript",
+        "bind-reference",
+        "reflected-listen",
+        "unresolved-bind-reference",
+        "unresolved-reflected-listen",
+        "low-level-socket",
+        "uvicorn-run",
+        "uvicorn-server",
+        "uvicorn-config",
+    ],
+)
+def test_listener_reference_prepass_fails_closed_without_callable_execution(
+    source: str,
+    violation: str,
+) -> None:
+    assert violation in _listener_contract_violations(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "import socket\n"
+            "def harmless(socket):\n"
+            "    callbacks = [socket.socket]\n"
+        ),
+        (
+            "from prometheus_client import start_http_server as serve\n"
+            "def harmless(serve):\n"
+            "    return (serve,)\n"
+        ),
+        (
+            "import socket\n"
+            "callbacks = [socket.socket for socket in adapters]\n"
+        ),
+    ],
+    ids=["parameter-module-shadow", "parameter-import-shadow", "comprehension-shadow"],
+)
+def test_listener_reference_prepass_respects_inverse_lexical_shadowing(
+    source: str,
+) -> None:
+    assert not _listener_contract_violations(source)
 
 
 def test_listener_analysis_reviewer_false_negative_keeps_module_scope_order() -> None:
@@ -1970,6 +2219,30 @@ setattr(unrelated, "AF_UNIX", 1)
 
     assert not _listener_contract_violations(
         source,
+        allow_entrypoint_uds=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("reference", "violation"),
+    [
+        ("extra = socket.socket", "socket.socket"),
+        ("extra = getattr(socket, 'socket')", "socket.socket"),
+        ("extra = candidate.bind", "socket.socket.bind"),
+        ("extra = candidate.listen", "socket.socket.listen"),
+        ("extra = uvicorn.run", "uvicorn.run"),
+        ("extra = uvicorn.Server", "uvicorn.Server"),
+        ("extra = uvicorn.Config", "uvicorn.Config"),
+    ],
+)
+def test_entrypoint_rejects_sensitive_references_outside_verified_ast_nodes(
+    reference: str,
+    violation: str,
+) -> None:
+    mutated = _insert_before_af_unix(_entrypoint_source(), reference)
+
+    assert violation in _listener_contract_violations(
+        mutated,
         allow_entrypoint_uds=True,
     )
 
