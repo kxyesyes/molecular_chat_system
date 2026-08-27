@@ -965,6 +965,8 @@ def _exercise_fault_contracts(
 ) -> list[str]:
     failures: list[str] = []
     nonce = secrets.token_hex(8)
+    probe_payload = dict(payload)
+    probe_payload["exhaustiveness"] = 8
 
     idempotency_observer = observer_factory()
     disable_idempotency_probes = getattr(idempotency_observer, "disable_intrusive_probes", None)
@@ -972,8 +974,8 @@ def _exercise_fault_contracts(
         disable_idempotency_probes()
     idempotency_observer.start()
     key = f"acceptance-idempotency-{nonce}"
-    first = runner.execute(payload, job_id=key)
-    second = runner.execute(payload, job_id=key)
+    first = runner.execute(probe_payload, job_id=key)
+    second = runner.execute(probe_payload, job_id=key)
     idempotency_observer.stop()
     if not getattr(first, "success", False) or not getattr(second, "success", False):
         failures.append("idempotency_execution_failed")
@@ -997,7 +999,11 @@ def _exercise_fault_contracts(
 
     cancel_thread = threading.Thread(target=request_cancel, daemon=True)
     cancel_thread.start()
-    cancelled = runner.execute(payload, job_id=f"acceptance-cancel-{nonce}", cancel_event=cancel_event)
+    cancelled = runner.execute(
+        probe_payload,
+        job_id=f"acceptance-cancel-{nonce}",
+        cancel_event=cancel_event,
+    )
     cancel_thread.join(timeout=1.0)
     cancel_observer.stop()
     if cancellation_state != [True]:
@@ -1018,7 +1024,10 @@ def _exercise_fault_contracts(
     original_deadline = worker_runner_module._TOTAL_DEADLINE_SECONDS
     try:
         worker_runner_module._TOTAL_DEADLINE_SECONDS = 5.0
-        timed_out = runner.execute(payload, job_id=f"acceptance-timeout-{nonce}")
+        timed_out = runner.execute(
+            probe_payload,
+            job_id=f"acceptance-timeout-{nonce}",
+        )
     finally:
         worker_runner_module._TOTAL_DEADLINE_SECONDS = original_deadline
     timeout_observer.stop()

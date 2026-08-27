@@ -828,6 +828,60 @@ def test_real_fixture_uses_stable_nonmaximal_exhaustiveness() -> None:
     assert payload["exhaustiveness"] == 32
 
 
+def test_fault_contracts_use_fast_real_probe_parameters(tmp_path: Path) -> None:
+    acceptance = _module()
+    pose, digest = _pose(tmp_path)
+    payloads: list[dict[str, object]] = []
+
+    class ProbeRunner:
+        def execute(
+            self,
+            payload,
+            *,
+            job_id,
+            progress_callback=None,
+            cancel_event=None,
+        ):
+            del progress_callback
+            payloads.append(dict(payload))
+            if cancel_event is not None:
+                cancel_event.wait(1)
+                return SimpleNamespace(
+                    success=False,
+                    error=SimpleNamespace(
+                        code=SimpleNamespace(value="cancelled")
+                    ),
+                    warnings=[],
+                )
+            if "timeout" in job_id:
+                return SimpleNamespace(
+                    success=False,
+                    error=SimpleNamespace(
+                        code=SimpleNamespace(value="tool_timeout")
+                    ),
+                    warnings=[],
+                )
+            return _success_result(pose, digest)
+
+    failures = acceptance._exercise_fault_contracts(
+        ProbeRunner(),
+        {
+            "receptor_path": "receptor.pdb",
+            "ligand_path": "ligand.sdf",
+            "center": [5.99, 3.01, 17.345],
+            "size": [20.0, 20.0, 20.0],
+            "exhaustiveness": 32,
+            "num_modes": 9,
+            "energy_range": 3.0,
+        },
+        _FakeObserver,
+    )
+
+    assert failures == []
+    assert len(payloads) == 4
+    assert all(payload["exhaustiveness"] == 8 for payload in payloads)
+
+
 def test_readme_covers_qemu_install_secret_image_validation_and_rollback() -> None:
     text = README.read_text(encoding="utf-8")
     required = (
