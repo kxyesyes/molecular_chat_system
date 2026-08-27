@@ -2034,19 +2034,14 @@ class SandboxBrokerService:
         except asyncio.CancelledError:
             cleanup_task.cancel()
             await asyncio.sleep(0)
-            if not cleanup_task.done():
-                cleanup_task.set_name(f"sandbox-cleanup-isolated-{job_id}")
-                if self._cleanup_tasks.get(job_id) is cleanup_task:
-                    del self._cleanup_tasks[job_id]
+            # The done callback retains sole ownership of registry removal so
+            # shutdown continues to drain cancellation-resistant cleanup.
             return "failed"
         if cleanup_task not in done:
             cleanup_task.cancel()
             await asyncio.sleep(0)
-            if not cleanup_task.done():
-                # Completion is unknown, so another destroy must not overlap it.
-                cleanup_task.set_name(f"sandbox-cleanup-isolated-{job_id}")
-                if self._cleanup_tasks.get(job_id) is cleanup_task:
-                    del self._cleanup_tasks[job_id]
+            # Completion is unknown. Keep the task tracked until its done
+            # callback runs so shutdown cannot lose ownership of it.
             return "failed"
         try:
             cleanup_task.result()

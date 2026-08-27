@@ -2009,16 +2009,27 @@ def test_cancellation_resistant_cleanup_is_quarantined_until_completion(
             self.started = asyncio.Event()
             self.cancel_seen = asyncio.Event()
             self.release = asyncio.Event()
+            self.destroy_count = 0
+            self.active_destroy = 0
+            self.max_active_destroy = 0
 
         async def destroy_by_id(self, sandbox_id: str) -> None:
             del sandbox_id
+            self.destroy_count += 1
+            self.active_destroy += 1
+            self.max_active_destroy = max(
+                self.max_active_destroy, self.active_destroy
+            )
             self.started.set()
             try:
-                await self.release.wait()
-            except asyncio.CancelledError:
-                self.cancel_seen.set()
-                await self.release.wait()
-            raise RuntimeError("private-marker /private/cleanup")
+                try:
+                    await self.release.wait()
+                except asyncio.CancelledError:
+                    self.cancel_seen.set()
+                    await self.release.wait()
+                raise RuntimeError("private-marker /private/cleanup")
+            finally:
+                self.active_destroy -= 1
 
     async def scenario() -> tuple[OpenSandboxClient, ResistantCleanupFactory, list[dict[str, object]]]:
         fake = ResistantCleanupFactory()
@@ -2034,13 +2045,22 @@ def test_cancellation_resistant_cleanup_is_quarantined_until_completion(
                 client.destroy_by_id("sandbox-resistant")
             )
             await fake.started.wait()
-            with pytest.raises(SandboxDestroyError, match="cleanup failed"):
+            with pytest.raises(SandboxDestroyError, match="cleanup failed") as first:
                 await cleanup
+            with pytest.raises(SandboxDestroyError, match="cleanup failed") as second:
+                await client.destroy_by_id("sandbox-resistant")
+            assert first.value.completion_known is False
+            assert second.value.completion_known is False
+            assert second.value.__cause__ is None
+            assert "private-marker" not in str(second.value)
+            assert "private-marker" not in repr(second.value)
+            assert fake.destroy_count == 1
+            assert fake.max_active_destroy == 1
             with pytest.raises(SandboxDestroyError, match="cleanup failed"):
                 await client.drain_cleanup()
             with pytest.raises(SandboxDestroyError, match="cleanup failed"):
                 await client.drain_cleanup()
-            assert client._cleanup_in_flight == {}
+            assert len(client._cleanup_in_flight) == 1
             assert len(client._cleanup_quarantine) == 1
             assert fake.cancel_seen.is_set()
         finally:
@@ -2053,6 +2073,8 @@ def test_cancellation_resistant_cleanup_is_quarantined_until_completion(
 
     client, fake, loop_errors = asyncio.run(scenario())
     assert fake.cancel_seen.is_set()
+    assert fake.destroy_count == 1
+    assert fake.max_active_destroy == 1
     assert client._cleanup_in_flight == {}
     assert client._cleanup_quarantine == set()
     assert loop_errors == []

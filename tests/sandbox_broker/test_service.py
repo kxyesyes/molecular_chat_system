@@ -2261,6 +2261,77 @@ def test_timed_out_cancellation_resistant_destroy_is_never_overlapped(
     assert sdk.max_active_destroy == 1
 
 
+def test_stop_tracks_cancellation_resistant_cleanup_until_it_terminates(
+    tmp_path: Path,
+) -> None:
+    class ResistantDestroyClient(FakeSandboxClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.destroy_started = asyncio.Event()
+            self.destroy_cancelled = asyncio.Event()
+            self.destroy_release = asyncio.Event()
+
+        async def destroy(self, handle: SandboxHandle) -> None:
+            self.destroy_count += 1
+            self.destroy_started.set()
+            try:
+                await self.destroy_release.wait()
+            except asyncio.CancelledError:
+                self.destroy_cancelled.set()
+                await self.destroy_release.wait()
+            self.destroyed_ids.append(handle.sandbox_id)
+
+    async def scenario() -> tuple[object, ResistantDestroyClient, list[str], bool]:
+        sdk = ResistantDestroyClient()
+        service, store, config = _service(tmp_path, sdk)
+        service._destroy_hard_timeout_seconds = 0.02
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-stop-drains-cleanup")
+        await sdk.destroy_started.wait()
+        terminal = await service.wait_terminal(job.job_id)
+        assert sdk.destroy_cancelled.is_set()
+
+        stop_incomplete = False
+        try:
+            await service.stop(timeout=0.05)
+        except StopIncomplete:
+            stop_incomplete = True
+        tracked_before_release = list(service._cleanup_tasks)
+        shutdown_pending = (
+            service._shutdown_task is not None
+            and not service._shutdown_task.done()
+        )
+
+        sdk.destroy_release.set()
+        await service.stop(timeout=1.0)
+        await asyncio.sleep(0)
+        leaked = [
+            task.get_name()
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and (
+                task.get_name().startswith("sandbox-broker-")
+                or task.get_name().startswith("sandbox-cleanup-")
+            )
+        ]
+        persisted = store.get(job.job_id)
+        assert persisted is not None
+        assert persisted.cleanup_status == "failed"
+        assert service._cleanup_tasks == {}
+        assert service._isolated_tasks == set()
+        return terminal, sdk, leaked, stop_incomplete and shutdown_pending and bool(
+            tracked_before_release
+        )
+
+    terminal, sdk, leaked, shutdown_waited = asyncio.run(scenario())
+    assert shutdown_waited is True
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.cleanup_status == "failed"
+    assert sdk.create_count == 1
+    assert sdk.destroy_count == 1
+    assert leaked == []
+
+
 def test_successful_destroy_is_invoked_once_without_replacement(tmp_path: Path) -> None:
     async def scenario() -> tuple[object, FakeSandboxClient]:
         sdk = FakeSandboxClient()
@@ -2746,7 +2817,7 @@ def test_hung_create_hits_hard_deadline_and_never_claims_cleanup_success(
     assert leaked == []
 
 
-def test_hung_run_and_destroy_are_detached_after_hard_deadlines(
+def test_hung_run_and_destroy_keep_shutdown_pending_after_hard_deadlines(
     tmp_path: Path,
 ) -> None:
     class ResistantRunAndDestroy(FakeSandboxClient):
@@ -2787,12 +2858,15 @@ def test_hung_run_and_destroy_are_detached_after_hard_deadlines(
         await sdk.running.wait()
         started = asyncio.get_running_loop().time()
         await service.cancel(job.job_id)
-        await service.stop(timeout=0.5)
+        await sdk.destroy_started.wait()
+        terminal = await service.wait_terminal(job.job_id)
+        with pytest.raises(StopIncomplete, match="shutdown is incomplete"):
+            await service.stop(timeout=0.05)
         elapsed = asyncio.get_running_loop().time() - started
-        terminal = service.get_job(job.job_id)
         sdk.release_run.set()
         sdk.release_destroy.set()
-        await asyncio.sleep(0.03)
+        await service.stop(timeout=0.5)
+        await asyncio.sleep(0)
         leaked = [
             task.get_name()
             for task in asyncio.all_tasks()
@@ -2911,7 +2985,7 @@ def test_stop_stays_incomplete_until_adapter_quarantine_is_empty(tmp_path: Path)
             await service.stop(timeout=0.5)
         with pytest.raises(SandboxDestroyError):
             await cleanup
-        assert client._cleanup_in_flight == {}
+        assert len(client._cleanup_in_flight) == 1
         assert len(client._cleanup_quarantine) == 1
         assert service._cleanup_tasks == {}
         with pytest.raises(StopIncomplete, match="shutdown is incomplete"):

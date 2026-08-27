@@ -1387,7 +1387,12 @@ class OpenSandboxClient:
             stderr=_finalize_command_output(stderr_buffer, self._config),
         )
 
-    async def _perform_cleanup(self, cleanup: Any) -> Any:
+    async def _perform_cleanup(
+        self,
+        cleanup: Any,
+        *,
+        retain_uncertain_operation: Callable[[asyncio.Task[Any]], None] | None = None,
+    ) -> Any:
         async with self._cleanup_lock:
             breaker_open = (
                 self._cleanup_breaker_generation
@@ -1416,6 +1421,8 @@ class OpenSandboxClient:
             )
             if operation not in done:
                 await self._cancel_or_quarantine_cleanup(operation)
+                if not operation.done() and retain_uncertain_operation is not None:
+                    retain_uncertain_operation(operation)
                 raise SandboxDestroyError(
                     "sandbox cleanup failed",
                     operation="destroy",
@@ -1424,6 +1431,8 @@ class OpenSandboxClient:
             return operation.result()
         except asyncio.CancelledError:
             await self._cancel_or_quarantine_cleanup(operation)
+            if not operation.done() and retain_uncertain_operation is not None:
+                retain_uncertain_operation(operation)
             raise
         except SandboxDependencyUnavailableError:
             raise SandboxDependencyUnavailableError(
@@ -1473,6 +1482,17 @@ class OpenSandboxClient:
                 self._cleanup_breaker_generation
             )
 
+    def _release_uncertain_cleanup_identity(
+        self,
+        cleanup_key: tuple[str, str],
+        owner: asyncio.Task[Any],
+        _operation: asyncio.Task[Any],
+    ) -> None:
+        """Release identity ownership only after the raw SDK operation terminates."""
+
+        if self._cleanup_in_flight.get(cleanup_key) is owner:
+            del self._cleanup_in_flight[cleanup_key]
+
     async def _cancel_or_quarantine_cleanup(
         self,
         operation: asyncio.Task[Any],
@@ -1493,13 +1513,34 @@ class OpenSandboxClient:
     ) -> None:
         succeeded = False
         cleanup_key = ("sandbox", sandbox_id)
+        task = asyncio.current_task()
+        uncertain_operation: asyncio.Task[Any] | None = None
+
+        def retain_identity(operation: asyncio.Task[Any]) -> None:
+            nonlocal uncertain_operation
+            if uncertain_operation is not None:
+                return
+            uncertain_operation = operation
+            operation.add_done_callback(
+                lambda completed: self._release_uncertain_cleanup_identity(
+                    cleanup_key,
+                    task,
+                    completed,
+                )
+            )
+
         try:
-            await self._perform_cleanup(cleanup)
+            await self._perform_cleanup(
+                cleanup,
+                retain_uncertain_operation=retain_identity,
+            )
             succeeded = True
         finally:
-            task = asyncio.current_task()
             async with self._cleanup_lock:
-                if self._cleanup_in_flight.get(cleanup_key) is task:
+                if (
+                    uncertain_operation is None
+                    and self._cleanup_in_flight.get(cleanup_key) is task
+                ):
                     del self._cleanup_in_flight[cleanup_key]
                 if succeeded:
                     self._cleanup_completed[sandbox_id] = None
