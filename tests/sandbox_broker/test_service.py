@@ -17,6 +17,7 @@ import src.sandbox_broker.service as service_module
 from src.sandbox_broker.artifacts import ArtifactRegistry
 from src.sandbox_broker.config import BrokerConfig
 from src.sandbox_broker.models import (
+    TERMINAL_STATUSES,
     BrokerErrorCode,
     BrokerJobStatus,
     DockingManifest,
@@ -29,6 +30,7 @@ from src.sandbox_broker.opensandbox_client import (
     SandboxDestroyError,
     SandboxHandle,
 )
+from src.sandbox_broker.resilience import ControlPlaneCircuitBreaker
 from src.sandbox_broker.service import (
     BrokerFailure,
     PreparedDockingSubmission,
@@ -37,7 +39,7 @@ from src.sandbox_broker.service import (
     canonical_submission_sha256,
 )
 from src.sandbox_broker.store import BrokerStore
-from src.sandbox_broker.telemetry import FailureClass
+from src.sandbox_broker.telemetry import BrokerTelemetry, FailureClass
 from src.sandbox_broker.validation import StagedInput
 
 
@@ -582,6 +584,8 @@ def _service(
     sdk: object,
     *,
     queue_capacity: int | None = None,
+    telemetry: BrokerTelemetry | None = None,
+    circuit_breaker: ControlPlaneCircuitBreaker | None = None,
 ) -> tuple[SandboxBrokerService, BrokerStore, BrokerConfig]:
     config = _config(tmp_path)
     if queue_capacity is not None:
@@ -592,8 +596,100 @@ def _service(
         store,
         sdk,
         ArtifactRegistry(config.state_root, store),
+        telemetry=telemetry,
+        circuit_breaker=circuit_breaker,
     )
     return service, store, config
+
+
+class RecordingTelemetry(BrokerTelemetry):
+    def __init__(self) -> None:
+        super().__init__()
+        self.runtime_updates: list[dict[str, object]] = []
+
+    def update_runtime_gauges(self, **values: object) -> None:
+        self.runtime_updates.append(dict(values))
+        super().update_runtime_gauges(**values)  # type: ignore[arg-type]
+
+
+class BaseExceptionTelemetry(BrokerTelemetry):
+    @staticmethod
+    def _fail() -> None:
+        raise KeyboardInterrupt("telemetry-sensitive-detail")
+
+    def emit(self, event: object) -> None:
+        del event
+        self._fail()
+
+    def start_phase(self, **values: object) -> object:
+        del values
+        self._fail()
+
+    def finish_phase(self, token: object, **values: object) -> object:
+        del token, values
+        self._fail()
+
+    def record_control_plane_failure(self, **values: object) -> None:
+        del values
+        self._fail()
+
+    def record_retry(self, operation: str, outcome: str) -> None:
+        del operation, outcome
+        self._fail()
+
+    def record_terminal(
+        self,
+        status: str,
+        failure_class: FailureClass = FailureClass.NONE,
+    ) -> None:
+        del status, failure_class
+        self._fail()
+
+    def update_runtime_gauges(self, **values: object) -> None:
+        del values
+        self._fail()
+
+
+class TrackingCircuitBreaker(ControlPlaneCircuitBreaker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.successes = 0
+        self.failures: list[FailureClass] = []
+        self.releases = 0
+        self.on_acquire: object | None = None
+
+    def acquire(self) -> object | None:
+        permit = super().acquire()
+        callback = self.on_acquire
+        if permit is not None and callable(callback):
+            callback()
+        return permit
+
+    def record_success(self, permit: object) -> None:
+        self.successes += 1
+        super().record_success(permit)  # type: ignore[arg-type]
+
+    def record_failure(
+        self,
+        permit: object,
+        failure_class: FailureClass,
+    ) -> None:
+        self.failures.append(failure_class)
+        super().record_failure(permit, failure_class)  # type: ignore[arg-type]
+
+    def release(self, permit: object) -> None:
+        self.releases += 1
+        super().release(permit)  # type: ignore[arg-type]
+
+
+def _trip_breaker(breaker: ControlPlaneCircuitBreaker) -> None:
+    for _ in range(3):
+        permit = breaker.acquire()
+        assert permit is not None
+        breaker.record_failure(
+            permit,
+            FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+        )
 
 
 def _seed_running(store: BrokerStore, key: str = "idem-recovery") -> object:
@@ -1956,9 +2052,11 @@ def test_demo_or_fallback_markers_can_never_reach_success(
 def test_concurrent_recovery_destroys_orphan_once_and_fails_closed(
     tmp_path: Path, destroy_fails: bool
 ) -> None:
+    telemetry = RecordingTelemetry()
+
     async def scenario() -> tuple[object, RecoverySandboxClient]:
         sdk = RecoverySandboxClient(destroy_fails=destroy_fails)
-        service, store, _ = _service(tmp_path, sdk)
+        service, store, _ = _service(tmp_path, sdk, telemetry=telemetry)
         seeded = _seed_running(store)
         await asyncio.gather(service.recover(), service.recover(), service.recover())
         terminal = store.get(seeded.job_id)
@@ -1974,6 +2072,14 @@ def test_concurrent_recovery_destroys_orphan_once_and_fails_closed(
     else:
         assert terminal.error_code == BrokerErrorCode.OPENSANDBOX_UNAVAILABLE.value
         assert terminal.cleanup_status == "succeeded"
+    terminal_events = [
+        event
+        for event in telemetry.snapshot()["recent_events"]
+        if event["phase"] == "job_terminal"
+    ]
+    assert len(terminal_events) == 1
+    assert terminal_events[0]["job_id"] == terminal.job_id
+    assert telemetry.snapshot()["runtime"]["active_job_count"] == 0
 
 
 def test_manifest_survives_service_reopen_and_tamper_and_cross_job_fail_closed(
@@ -2368,9 +2474,11 @@ def test_completed_destroy_failure_retries_same_identity_then_succeeds(
                     completion_known=True,
                 )
 
+    telemetry = RecordingTelemetry()
+
     async def scenario() -> tuple[object, TransientDestroyClient, list[str]]:
         sdk = TransientDestroyClient()
-        service, store, config = _service(tmp_path, sdk)
+        service, store, config = _service(tmp_path, sdk, telemetry=telemetry)
         service._destroy_retry_delay_seconds = 0.0
         statuses: list[str] = []
         original_record_cleanup = store.record_cleanup
@@ -2394,6 +2502,24 @@ def test_completed_destroy_failure_retries_same_identity_then_succeeds(
     assert sdk.destroy_count == 2
     assert sdk.destroyed_ids == [terminal.sandbox_id, terminal.sandbox_id]
     assert statuses == ["in_progress", "succeeded"]
+    counters = telemetry.snapshot()["counters"]
+    assert counters["retry|destroy|attempted"] == 1
+    assert counters["retry|destroy|succeeded"] == 1
+    assert "retry|destroy|exhausted" not in counters
+    cleanup_events = [
+        event
+        for event in telemetry.snapshot()["recent_events"]
+        if event["phase"] in {"cleanup_started", "cleanup_completed"}
+    ]
+    assert [event["attempt"] for event in cleanup_events] == [1, 1, 2, 2]
+    assert [event.get("outcome") for event in cleanup_events] == [
+        None,
+        "failed",
+        None,
+        "passed",
+    ]
+    assert cleanup_events[1]["cleanup_status"] == "failed"
+    assert cleanup_events[3]["cleanup_status"] == "succeeded"
 
 
 def test_two_completed_destroy_failures_mark_cleanup_failed(tmp_path: Path) -> None:
@@ -2408,9 +2534,11 @@ def test_two_completed_destroy_failures_mark_cleanup_failed(tmp_path: Path) -> N
                 completion_known=True,
             )
 
+    telemetry = RecordingTelemetry()
+
     async def scenario() -> tuple[object, FailingDestroyClient, list[str]]:
         sdk = FailingDestroyClient()
-        service, store, config = _service(tmp_path, sdk)
+        service, store, config = _service(tmp_path, sdk, telemetry=telemetry)
         service._destroy_retry_delay_seconds = 0.0
         statuses: list[str] = []
         original_record_cleanup = store.record_cleanup
@@ -2435,6 +2563,10 @@ def test_two_completed_destroy_failures_mark_cleanup_failed(tmp_path: Path) -> N
     assert sdk.destroy_count == 2
     assert sdk.destroyed_ids == [terminal.sandbox_id, terminal.sandbox_id]
     assert statuses == ["in_progress", "failed"]
+    counters = telemetry.snapshot()["counters"]
+    assert counters["retry|destroy|attempted"] == 1
+    assert counters["retry|destroy|exhausted"] == 1
+    assert "retry|destroy|succeeded" not in counters
 
 
 def test_timed_out_cancellation_resistant_destroy_is_never_overlapped(
@@ -3311,6 +3443,520 @@ def test_unicode_reassembled_warning_fails_end_to_end_without_manifest(
     assert warning not in repr(terminal)
     with pytest.raises(KeyError):
         service.get_manifest(terminal.job_id)
+
+
+def test_successful_job_emits_exact_ordered_logical_lifecycle(
+    tmp_path: Path,
+) -> None:
+    telemetry = RecordingTelemetry()
+
+    async def scenario() -> tuple[object, dict[str, object]]:
+        service, _, config = _service(
+            tmp_path,
+            FakeSandboxClient(),
+            telemetry=telemetry,
+        )
+        await service.start()
+        submitted = await service.submit(_prepared(config), "idem-telemetry-success")
+        terminal = await service.wait_terminal(submitted.job_id)
+        snapshot = telemetry.snapshot()
+        await service.stop()
+        return terminal, snapshot
+
+    terminal, snapshot = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.SUCCEEDED
+    events = snapshot["recent_events"]
+    assert isinstance(events, list)
+    assert [event["phase"] for event in events] == [
+        "job_received",
+        "queue_entered",
+        "provisioning_started",
+        "provisioning_completed",
+        "upload_started",
+        "upload_completed",
+        "command_started",
+        "command_completed",
+        "validation_started",
+        "validation_completed",
+        "cleanup_started",
+        "cleanup_completed",
+        "job_terminal",
+    ]
+    assert events[3]["outcome"] == "passed"
+    assert events[9]["outcome"] == "passed"
+    assert events[9]["vina_version"] == "1.2.5"
+    assert events[9]["meeko_version"] == "0.6.1"
+    assert events[-1]["outcome"] == "passed"
+    assert events[-1]["cleanup_status"] == "succeeded"
+    assert snapshot["counters"]["terminal|succeeded|none"] == 1
+
+
+def test_command_failure_is_single_shot_then_cleans_and_terminalizes(
+    tmp_path: Path,
+) -> None:
+    telemetry = RecordingTelemetry()
+    sdk = FaultSandboxClient("nonzero")
+
+    async def scenario() -> object:
+        service, _, config = _service(tmp_path, sdk, telemetry=telemetry)
+        await service.start()
+        submitted = await service.submit(_prepared(config), "idem-command-failure")
+        terminal = await service.wait_terminal(submitted.job_id)
+        await service.stop()
+        return terminal
+
+    terminal = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.COMMAND_FAILED.value
+    assert sdk.run_count == 1
+    events = telemetry.snapshot()["recent_events"]
+    phases = [event["phase"] for event in events]
+    command_completed = phases.index("command_completed")
+    assert events[command_completed]["outcome"] == "failed"
+    assert phases[command_completed:] == [
+        "command_completed",
+        "cleanup_started",
+        "cleanup_completed",
+        "job_terminal",
+    ]
+
+
+def test_open_breaker_reuses_existing_job_but_rejects_new_submission(
+    tmp_path: Path,
+) -> None:
+    telemetry = RecordingTelemetry()
+    breaker = ControlPlaneCircuitBreaker()
+
+    async def scenario() -> tuple[object, object, BrokerStore, BrokerFailure]:
+        service, store, config = _service(
+            tmp_path,
+            FakeSandboxClient(),
+            telemetry=telemetry,
+            circuit_breaker=breaker,
+        )
+        await service.start()
+        first = await service.submit(_prepared(config), "idem-breaker-reuse")
+        terminal = await service.wait_terminal(first.job_id)
+        _trip_breaker(breaker)
+        reused = await service.submit(_prepared(config), "idem-breaker-reuse")
+        with pytest.raises(BrokerFailure) as raised:
+            await service.submit(_prepared(config), "idem-breaker-new")
+        await service.stop()
+        return terminal, reused, store, raised.value
+
+    terminal, reused, store, failure = asyncio.run(scenario())
+    assert reused.job_id == terminal.job_id
+    assert failure.code is BrokerErrorCode.OPENSANDBOX_UNAVAILABLE
+    rejected = store.get_by_idempotency("idem-breaker-new")
+    assert rejected is None
+    assert store.active_jobs() == []
+    assert sum(
+        event["phase"] == "job_received"
+        for event in telemetry.snapshot()["recent_events"]
+    ) == 1
+
+
+def test_telemetry_baseexceptions_cannot_change_success_or_skip_cleanup(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sdk = FakeSandboxClient()
+
+    async def scenario() -> object:
+        service, _, config = _service(
+            tmp_path,
+            sdk,
+            telemetry=BaseExceptionTelemetry(),
+        )
+        await service.start()
+        submitted = await service.submit(_prepared(config), "idem-telemetry-errors")
+        terminal = await service.wait_terminal(submitted.job_id)
+        await service.stop()
+        return terminal
+
+    terminal = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.SUCCEEDED
+    assert terminal.cleanup_status == "succeeded"
+    assert sdk.destroy_count == 1
+    assert "telemetry-sensitive-detail" not in caplog.text
+    assert "sandbox broker telemetry observation failed" in caplog.text
+
+
+def test_queued_job_obeys_breaker_opened_before_authoritative_create(
+    tmp_path: Path,
+) -> None:
+    telemetry = RecordingTelemetry()
+    breaker = ControlPlaneCircuitBreaker()
+    sdk = FakeSandboxClient(block=True)
+
+    async def scenario() -> tuple[object, object]:
+        service, _, config = _service(
+            tmp_path,
+            sdk,
+            telemetry=telemetry,
+            circuit_breaker=breaker,
+        )
+        await service.start()
+        first = await service.submit(_prepared(config), "idem-breaker-first")
+        await sdk.running.wait()
+        second = await service.submit(_prepared(config), "idem-breaker-queued")
+        _trip_breaker(breaker)
+        sdk.release.set()
+        first_terminal = await service.wait_terminal(first.job_id)
+        second_terminal = await service.wait_terminal(second.job_id)
+        await service.stop()
+        return first_terminal, second_terminal
+
+    first_terminal, second_terminal = asyncio.run(scenario())
+    assert first_terminal.status is BrokerJobStatus.SUCCEEDED
+    assert second_terminal.status is BrokerJobStatus.FAILED
+    assert second_terminal.error_code == BrokerErrorCode.OPENSANDBOX_UNAVAILABLE.value
+    assert second_terminal.cleanup_status == "succeeded"
+    assert sdk.create_count == 1
+    second_events = [
+        event
+        for event in telemetry.snapshot()["recent_events"]
+        if event["job_id"] == second_terminal.job_id
+    ]
+    assert [event["phase"] for event in second_events] == [
+        "job_received",
+        "queue_entered",
+        "provisioning_started",
+        "provisioning_completed",
+        "cleanup_started",
+        "cleanup_completed",
+        "job_terminal",
+    ]
+    assert second_events[3]["failure_class"] == "unknown_control_plane_failure"
+
+
+def test_breaker_records_only_final_provisioning_result_and_create_retry(
+    tmp_path: Path,
+) -> None:
+    class RetryCreateClient(FakeSandboxClient):
+        async def create(self, job_id: str) -> SandboxHandle:
+            self.create_count += 1
+            if self.create_count == 1:
+                raise SandboxCreateError(
+                    "classified create failure",
+                    operation="create",
+                    failure_class=FailureClass.CONNECTION_FAILED,
+                )
+            return SandboxHandle(f"sandbox-{job_id}", object())
+
+        async def destroy_by_job_id(self, job_id: str) -> int:
+            del job_id
+            return 0
+
+    telemetry = RecordingTelemetry()
+    breaker = TrackingCircuitBreaker()
+    sdk = RetryCreateClient()
+
+    async def scenario() -> object:
+        service, _, config = _service(
+            tmp_path,
+            sdk,
+            telemetry=telemetry,
+            circuit_breaker=breaker,
+        )
+        service._create_retry_delay_seconds = 0.0
+        await service.start()
+        submitted = await service.submit(_prepared(config), "idem-create-retry-metric")
+        terminal = await service.wait_terminal(submitted.job_id)
+        await service.stop()
+        return terminal
+
+    terminal = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.SUCCEEDED
+    assert sdk.create_count == 2
+    assert breaker.successes == 1
+    assert breaker.failures == []
+    counters = telemetry.snapshot()["counters"]
+    assert counters["retry|create|attempted"] == 1
+    assert counters["retry|create|succeeded"] == 1
+    assert "retry|create|exhausted" not in counters
+
+
+def test_final_classified_create_failure_records_breaker_failure_once(
+    tmp_path: Path,
+) -> None:
+    class FinalCreateFailureClient(FakeSandboxClient):
+        async def create(self, job_id: str) -> SandboxHandle:
+            del job_id
+            self.create_count += 1
+            raise SandboxCreateError(
+                "classified create failure",
+                operation="create",
+                failure_class=FailureClass.PROXY_502,
+            )
+
+        async def destroy_by_job_id(self, job_id: str) -> int:
+            del job_id
+            return 0
+
+    telemetry = RecordingTelemetry()
+    breaker = TrackingCircuitBreaker()
+    sdk = FinalCreateFailureClient()
+
+    async def scenario() -> object:
+        service, _, config = _service(
+            tmp_path,
+            sdk,
+            telemetry=telemetry,
+            circuit_breaker=breaker,
+        )
+        service._create_retry_delay_seconds = 0.0
+        await service.start()
+        submitted = await service.submit(_prepared(config), "idem-create-final-failure")
+        terminal = await service.wait_terminal(submitted.job_id)
+        await service.stop()
+        return terminal
+
+    terminal = asyncio.run(scenario())
+    assert terminal.error_code == BrokerErrorCode.PROVISIONING_FAILED.value
+    assert sdk.create_count == 2
+    assert breaker.successes == 0
+    assert breaker.failures == [FailureClass.PROXY_502]
+    assert telemetry.snapshot()["counters"]["retry|create|exhausted"] == 1
+
+
+def test_cancellation_before_create_releases_authoritative_permit(
+    tmp_path: Path,
+) -> None:
+    telemetry = RecordingTelemetry()
+    breaker = TrackingCircuitBreaker()
+    sdk = FakeSandboxClient()
+
+    async def scenario() -> object:
+        service, _, config = _service(
+            tmp_path,
+            sdk,
+            telemetry=telemetry,
+            circuit_breaker=breaker,
+        )
+        await service.start()
+        prepared = _prepared(config)
+
+        def cancel_at_acquire() -> None:
+            for event in service._cancel_events.values():
+                event.set()
+
+        breaker.on_acquire = cancel_at_acquire
+        submitted = await service.submit(prepared, "idem-cancel-before-create")
+        terminal = await service.wait_terminal(submitted.job_id)
+        await service.stop()
+        return terminal
+
+    terminal = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.CANCELLED
+    assert sdk.create_count == 0
+    assert breaker.releases == 1
+    assert breaker.successes == 0
+    assert breaker.failures == []
+
+
+@pytest.mark.parametrize(
+    ("sdk", "expected_error"),
+    [
+        (FakeSandboxClient(valid_result=False), BrokerErrorCode.SCIENTIFIC_OUTPUT_INVALID),
+        (
+            FaultSandboxClient(
+                "create",
+                failure=SandboxCreateError(
+                    "resource limited",
+                    operation="create",
+                    failure_class=FailureClass.RESOURCE_LIMIT,
+                ),
+            ),
+            BrokerErrorCode.CLEANUP_FAILED,
+        ),
+    ],
+)
+def test_scientific_and_resource_failures_do_not_trip_breaker(
+    tmp_path: Path,
+    sdk: FakeSandboxClient,
+    expected_error: BrokerErrorCode,
+) -> None:
+    breaker = TrackingCircuitBreaker()
+
+    async def scenario() -> object:
+        service, _, config = _service(
+            tmp_path,
+            sdk,
+            telemetry=RecordingTelemetry(),
+            circuit_breaker=breaker,
+        )
+        service._create_retry_delay_seconds = 0.0
+        await service.start()
+        submitted = await service.submit(_prepared(config), "idem-nonbreaker-failure")
+        terminal = await service.wait_terminal(submitted.job_id)
+        await service.stop()
+        return terminal
+
+    terminal = asyncio.run(scenario())
+    assert terminal.error_code == expected_error.value
+    assert breaker.failures == []
+    assert breaker.state.value == "closed"
+
+
+def test_invalid_input_never_acquires_or_updates_breaker(tmp_path: Path) -> None:
+    breaker = TrackingCircuitBreaker()
+
+    async def scenario() -> BrokerFailure:
+        service, _, _ = _service(
+            tmp_path,
+            FakeSandboxClient(),
+            telemetry=RecordingTelemetry(),
+            circuit_breaker=breaker,
+        )
+        await service.start()
+        with pytest.raises(BrokerFailure) as raised:
+            await service.submit(object(), "idem-invalid-no-breaker")  # type: ignore[arg-type]
+        await service.stop()
+        return raised.value
+
+    failure = asyncio.run(scenario())
+    assert failure.code is BrokerErrorCode.INVALID_INPUT
+    assert breaker.successes == 0
+    assert breaker.failures == []
+    assert breaker.releases == 0
+
+
+def test_runtime_gauges_cover_queue_job_cleanup_isolation_and_terminal(
+    tmp_path: Path,
+) -> None:
+    telemetry = RecordingTelemetry()
+
+    async def scenario() -> object:
+        service, _, config = _service(
+            tmp_path,
+            FakeSandboxClient(),
+            telemetry=telemetry,
+        )
+        service._run_cancel_grace_seconds = 0.01
+        await service.start()
+        submitted = await service.submit(_prepared(config), "idem-runtime-gauges")
+        terminal = await service.wait_terminal(submitted.job_id)
+
+        release = asyncio.Event()
+
+        async def resistant() -> None:
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    continue
+
+        task = asyncio.create_task(resistant())
+        await asyncio.sleep(0)
+        await service._cancel_with_grace(task)
+        release.set()
+        await task
+        await asyncio.sleep(0)
+        await service.stop()
+        return terminal
+
+    terminal = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.SUCCEEDED
+    updates = telemetry.runtime_updates
+    assert any(item["queue_depth"] == 1 for item in updates)
+    assert any(item["queue_depth"] == 0 for item in updates)
+    assert any(item["active_job_count"] == 1 for item in updates)
+    assert any(item["active_job_count"] == 0 for item in updates)
+    assert any(item["cleanup_task_count"] == 1 for item in updates)
+    assert any(item["cleanup_task_count"] == 0 for item in updates)
+    assert any(item["isolated_task_count"] == 1 for item in updates)
+    assert updates[-1] == {
+        "queue_depth": 0,
+        "active_job_count": 0,
+        "cleanup_task_count": 0,
+        "isolated_task_count": 0,
+        "breaker_state": "closed",
+    }
+
+
+def test_diagnostics_and_prometheus_share_injected_runtime_objects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.sandbox_broker.app as app_module
+
+    telemetry = RecordingTelemetry()
+    breaker = ControlPlaneCircuitBreaker()
+    service, _, _ = _service(
+        tmp_path / "service",
+        FakeSandboxClient(),
+        telemetry=telemetry,
+        circuit_breaker=breaker,
+    )
+    diagnostics = service.diagnostics()
+    assert diagnostics == {
+        "schema_version": 1,
+        "telemetry": telemetry.snapshot(),
+        "circuit_breaker": breaker.snapshot(),
+    }
+    assert service.prometheus_text() == telemetry.prometheus_text()
+
+    captured: dict[str, object] = {}
+
+    def fake_client(config: BrokerConfig, *, telemetry: object) -> object:
+        del config
+        captured["client_telemetry"] = telemetry
+        return object()
+
+    def fake_service(
+        config: BrokerConfig,
+        store: BrokerStore,
+        client: object,
+        artifacts: ArtifactRegistry,
+        *,
+        telemetry: object,
+        circuit_breaker: object,
+    ) -> object:
+        del config, store, client, artifacts
+        captured["service_telemetry"] = telemetry
+        captured["breaker"] = circuit_breaker
+        return object()
+
+    monkeypatch.setattr(app_module, "OpenSandboxClient", fake_client)
+    monkeypatch.setattr(app_module, "SandboxBrokerService", fake_service)
+    config = _config(tmp_path / "app")
+    app_module._default_service(config)
+    assert isinstance(captured["client_telemetry"], BrokerTelemetry)
+    assert captured["client_telemetry"] is captured["service_telemetry"]
+    assert isinstance(captured["breaker"], ControlPlaneCircuitBreaker)
+
+
+def test_diagnostic_telemetry_errors_return_safe_fallback_without_job_mutation(
+    tmp_path: Path,
+) -> None:
+    class DiagnosticFailureTelemetry(BaseExceptionTelemetry):
+        def snapshot(self) -> dict[str, object]:
+            self._fail()
+
+        def prometheus_text(self) -> bytes:
+            self._fail()
+
+    telemetry = DiagnosticFailureTelemetry()
+    sdk = FakeSandboxClient()
+
+    async def scenario() -> tuple[object, dict[str, object], bytes]:
+        service, _, config = _service(tmp_path, sdk, telemetry=telemetry)
+        await service.start()
+        submitted = await service.submit(_prepared(config), "idem-diagnostic-errors")
+        terminal = await service.wait_terminal(submitted.job_id)
+        diagnostics = service.diagnostics()
+        prometheus = service.prometheus_text()
+        after = service.get_job(submitted.job_id)
+        await service.stop()
+        assert after == terminal
+        return terminal, diagnostics, prometheus
+
+    terminal, diagnostics, prometheus = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.SUCCEEDED
+    assert diagnostics["schema_version"] == 1
+    assert diagnostics["telemetry"] == {"schema_version": 1, "unavailable": True}
+    assert prometheus == b""
 
 
 def test_plain_unicode_warning_persists_in_success_manifest(tmp_path: Path) -> None:

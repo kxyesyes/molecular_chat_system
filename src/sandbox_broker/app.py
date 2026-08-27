@@ -27,12 +27,14 @@ from .models import (
     DockingParameters,
 )
 from .opensandbox_client import OpenSandboxClient
+from .resilience import ControlPlaneCircuitBreaker
 from .service import (
     BrokerFailure,
     BrokerJobView,
     SandboxBrokerService,
 )
 from .store import BrokerStore
+from .telemetry import BrokerTelemetry
 
 
 logger = logging.getLogger(__name__)
@@ -318,8 +320,16 @@ def _default_service(config: BrokerConfig) -> SandboxBrokerService:
         store,
         max_artifact_bytes=config.output_max_bytes,
     )
-    client = OpenSandboxClient(config)
-    return SandboxBrokerService(config, store, client, artifacts)
+    telemetry = BrokerTelemetry()
+    client = OpenSandboxClient(config, telemetry=telemetry)
+    return SandboxBrokerService(
+        config,
+        store,
+        client,
+        artifacts,
+        telemetry=telemetry,
+        circuit_breaker=ControlPlaneCircuitBreaker(),
+    )
 
 
 def create_app(
