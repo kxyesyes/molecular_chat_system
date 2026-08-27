@@ -516,6 +516,14 @@ def test_temporal_worker_activation_wrapper_is_fixed_and_execs_writer() -> None:
     assert "install-temporal-worker-bundle.py" in source
     assert "--activate" in source
     assert "--migrate-legacy" in source
+    assert 'case "$source_path" in' in source
+    assert '"$SCRIPT_DIR/activate-temporal-worker-generation.sh"' in source
+    guarded_sources = source[
+        source.index("for source_path in ") : source.index(
+            "\ndo\n", source.index("for source_path in ")
+        )
+    ]
+    assert '"$0"' not in guarded_sources
     assert "--destdir" not in source
     assert "eval" not in source
 

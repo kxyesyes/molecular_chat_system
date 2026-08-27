@@ -27,6 +27,10 @@ esac
 
 source_is_root_owned_and_locked() {
     source_path=$1
+    case "$source_path" in
+        /*) ;;
+        *) return 1 ;;
+    esac
     [ ! -L "$source_path" ] || return 1
     [ -f "$source_path" ] || return 1
     [ "$(stat -c %u:%g -- "$source_path")" = 0:0 ] || return 1
@@ -43,7 +47,9 @@ source_is_root_owned_and_locked() {
     done
 }
 
-for source_path in "$0" "$SCRIPT_DIR/libexec/install-temporal-worker-bundle.py"
+for source_path in \
+    "$SCRIPT_DIR/activate-temporal-worker-generation.sh" \
+    "$SCRIPT_DIR/libexec/install-temporal-worker-bundle.py"
 do
     source_is_root_owned_and_locked "$source_path" || \
         fail activation_source_untrusted
