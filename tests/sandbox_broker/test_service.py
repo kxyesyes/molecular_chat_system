@@ -25,6 +25,7 @@ from src.sandbox_broker.models import (
 from src.sandbox_broker.opensandbox_client import (
     OpenSandboxClient,
     SandboxCommandResult,
+    SandboxCreateError,
     SandboxDestroyError,
     SandboxHandle,
 )
@@ -1014,6 +1015,72 @@ def test_cancel_during_provisioning_waits_for_create_then_attaches_and_destroys(
     assert sdk.create_cancelled is False
     assert sdk.destroyed_ids == [terminal.sandbox_id]
     assert sdk.live_ids == set()
+
+
+def test_transient_create_retries_once_after_confirmed_reconciliation(
+    tmp_path: Path,
+) -> None:
+    class TransientCreateSandboxClient(FakeSandboxClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reconciled: list[str] = []
+
+        async def create(self, job_id: str) -> SandboxHandle:
+            self.create_count += 1
+            if self.create_count == 1:
+                raise SandboxCreateError("sandbox provisioning failed")
+            return SandboxHandle(f"sandbox-{job_id}-retry", object())
+
+        async def destroy_by_job_id(self, job_id: str) -> int:
+            self.reconciled.append(job_id)
+            return 0
+
+    async def scenario() -> tuple[object, TransientCreateSandboxClient]:
+        sdk = TransientCreateSandboxClient()
+        service, _, config = _service(tmp_path, sdk)
+        service._create_retry_delay_seconds = 0.0
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-create-retry")
+        terminal = await service.wait_terminal(job.job_id)
+        await service.stop()
+        return terminal, sdk
+
+    terminal, sdk = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.SUCCEEDED
+    assert sdk.create_count == 2
+    assert sdk.reconciled == [terminal.job_id]
+    assert sdk.run_count == sdk.destroy_count == 1
+
+
+def test_transient_create_does_not_retry_without_confirmed_reconciliation(
+    tmp_path: Path,
+) -> None:
+    class UnreconciledCreateSandboxClient(FakeSandboxClient):
+        async def create(self, job_id: str) -> SandboxHandle:
+            del job_id
+            self.create_count += 1
+            raise SandboxCreateError("sandbox provisioning failed")
+
+        async def destroy_by_job_id(self, job_id: str) -> int:
+            del job_id
+            raise SandboxDestroyError("sandbox cleanup failed")
+
+    async def scenario() -> tuple[object, UnreconciledCreateSandboxClient]:
+        sdk = UnreconciledCreateSandboxClient()
+        service, _, config = _service(tmp_path, sdk)
+        service._create_retry_delay_seconds = 0.0
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-create-unreconciled")
+        terminal = await service.wait_terminal(job.job_id)
+        await service.stop()
+        return terminal, sdk
+
+    terminal, sdk = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.CLEANUP_FAILED.value
+    assert sdk.create_count == 1
+    assert terminal.cleanup_status == "failed"
+    assert "sandbox_auto_expires_within_configured_remote_lifetime" in terminal.warnings
 
 
 def test_execution_timeout_and_command_failure_are_stable_and_cleanup(

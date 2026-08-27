@@ -29,7 +29,7 @@ from .models import (
     DockingManifest,
     DockingParameters,
 )
-from .opensandbox_client import SandboxCommandResult, SandboxHandle
+from .opensandbox_client import SandboxCommandResult, SandboxCreateError, SandboxHandle
 from .safety import contains_sensitive_metadata_text, is_safe_metadata_text
 from .store import ArtifactRecord, BrokerJobRecord, BrokerStore, IdempotencyConflict
 from .validation import (
@@ -336,6 +336,7 @@ class SandboxBrokerService:
         self._retention_lock = asyncio.Lock()
         self._cleanup_timeout_margin_seconds = 30.0
         self._create_hard_timeout_seconds = float(config.sandbox_timeout_seconds)
+        self._create_retry_delay_seconds = 0.5
         self._run_cancel_grace_seconds = 5.0
         self._destroy_hard_timeout_seconds = 30.0
 
@@ -903,7 +904,7 @@ class SandboxBrokerService:
                 cancelled = True
                 return
             try:
-                created, create_interrupted = await self._create_without_cancelling(
+                created, create_interrupted = await self._create_with_retry(
                     job_id
                 )
                 if type(created) is not SandboxHandle:
@@ -1161,6 +1162,24 @@ class SandboxBrokerService:
             if self._create_tasks.get(job_id) is create_task:
                 del self._create_tasks[job_id]
 
+    async def _create_with_retry(self, job_id: str) -> tuple[object, bool]:
+        try:
+            return await self._create_without_cancelling(job_id)
+        except SandboxCreateError:
+            if not await self._reconcile_unknown_create(job_id):
+                raise _CreateHardDeadline(False) from None
+            if self._cancellation_requested(job_id):
+                raise asyncio.CancelledError
+            await asyncio.sleep(self._create_retry_delay_seconds)
+            if self._cancellation_requested(job_id):
+                raise asyncio.CancelledError
+            try:
+                return await self._create_without_cancelling(job_id)
+            except SandboxCreateError:
+                if not await self._reconcile_unknown_create(job_id):
+                    raise _CreateHardDeadline(False) from None
+                raise
+
     async def _reconcile_unknown_create(self, job_id: str) -> bool:
         reconcile = getattr(self.client, "destroy_by_job_id", None)
         if not callable(reconcile):
@@ -1172,7 +1191,7 @@ class SandboxBrokerService:
             destroyed = await asyncio.wait_for(
                 asyncio.shield(task), timeout=self._destroy_hard_timeout_seconds
             )
-            return type(destroyed) is int and destroyed > 0
+            return type(destroyed) is int and destroyed >= 0
         except BaseException:
             if not task.done():
                 task.cancel()

@@ -301,6 +301,7 @@ def test_post_deadline_cancel_has_independent_qemu_budget(
 
     assert len(deadlines) == 1
     assert 1.5 <= deadlines[0] <= 2.0
+    assert runner_module._TOTAL_DEADLINE_SECONDS == 420.0
 
 
 def test_connect_failure_has_stable_unavailable_mapping_without_raw_error(
@@ -949,7 +950,7 @@ def test_slow_poll_response_hits_absolute_deadline_before_manifest(
         if request.url.path == "/v1/docking/jobs":
             return httpx.Response(202, json=_job("queued", receptor, ligand))
         if request.url.path == f"/v1/docking/jobs/{BROKER_JOB_ID}":
-            clock.advance(331.0)
+            clock.advance(runner_module._TOTAL_DEADLINE_SECONDS + 1.0)
             return httpx.Response(200, json=_job("succeeded", receptor, ligand))
         if request.url.path.endswith("/cancel"):
             return httpx.Response(202, json=_job("cancelled", receptor, ligand))
@@ -982,7 +983,7 @@ def test_slow_manifest_response_hits_absolute_deadline_before_download(
         if request.url.path == "/v1/docking/jobs":
             return httpx.Response(202, json=_job("succeeded", receptor, ligand))
         if request.url.path.endswith("/manifest"):
-            clock.advance(331.0)
+            clock.advance(runner_module._TOTAL_DEADLINE_SECONDS + 1.0)
             return httpx.Response(200, json=_manifest(receptor, ligand, pose))
         if request.url.path.endswith("/cancel"):
             return httpx.Response(202, json=_job("cancelled", receptor, ligand))
@@ -1007,7 +1008,12 @@ def test_artifact_eof_cannot_cross_absolute_deadline_and_publish(
     payload, receptor, ligand = _inputs(tmp_path)
     pose = _pose(-7.2)
     clock = _Clock()
-    stream = _TrackingStream([pose], after_eof=lambda: clock.advance(331.0))
+    stream = _TrackingStream(
+        [pose],
+        after_eof=lambda: clock.advance(
+            runner_module._TOTAL_DEADLINE_SECONDS + 1.0
+        ),
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/docking/jobs":
@@ -1066,7 +1072,9 @@ def test_drip_artifact_checks_deadline_for_each_transport_chunk(
     result = _runner(tmp_path, handler).execute(payload, job_id="deadline-drip")
 
     assert result.success is False
-    assert stream.read_count <= 4
+    assert stream.read_count <= int(
+        runner_module._TOTAL_DEADLINE_SECONDS // 100.0
+    ) + 1
     assert stream.closed is True
     assert not (tmp_path / "output" / "docking_deadline-drip" / "result.pdbqt").exists()
 
@@ -1082,7 +1090,7 @@ def test_remaining_deadline_clips_manifest_and_download_timeouts(
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/docking/jobs":
-            clock.advance(329.0)
+            clock.advance(runner_module._TOTAL_DEADLINE_SECONDS - 1.0)
             return httpx.Response(202, json=_job("succeeded", receptor, ligand))
         if request.url.path.endswith("/manifest"):
             observed["manifest"] = request.extensions["timeout"]
@@ -1117,7 +1125,7 @@ def test_poll_sleep_is_clipped_to_remaining_absolute_deadline(
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/docking/jobs"
-        clock.advance(329.8)
+        clock.advance(runner_module._TOTAL_DEADLINE_SECONDS - 0.2)
         return httpx.Response(202, json=_job("queued", receptor, ligand))
 
     def sleep(seconds: float) -> None:
