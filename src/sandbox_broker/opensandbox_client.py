@@ -79,7 +79,7 @@ def inside_output(candidate):
 if not inside_output(resolved_root):
     raise SystemExit(76)
 
-count = 0
+matches = []
 for current, directories, files in os.walk(root, topdown=True, followlinks=False):
     directories[:] = sorted(
         name
@@ -102,13 +102,10 @@ for current, directories, files in os.walk(root, topdown=True, followlinks=False
         if not inside_output(os.path.realpath(candidate)):
             raise SystemExit(76)
         if fnmatch.fnmatchcase(name, pattern):
-            count += 1
-            if count > 256:
+            matches.append(candidate)
+            if len(matches) > 256:
                 raise SystemExit(75)
-            sys.stdout.write(
-                json.dumps(candidate, separators=(",", ":"), ensure_ascii=True)
-                + "\n"
-            )
+sys.stdout.write(json.dumps(matches, separators=(",", ":"), ensure_ascii=True))
 '''.strip()
 _LIST_HELPER_B64 = base64.b64encode(_LIST_HELPER_SOURCE.encode("utf-8")).decode(
     "ascii"
@@ -836,21 +833,18 @@ class OpenSandboxClient:
             raise SandboxListError("sandbox output listing failed")
 
         serialized = stdout_buffer.text()
-        if serialized and not serialized.endswith("\n"):
+        try:
+            candidates = json.loads(serialized)
+        except (json.JSONDecodeError, UnicodeError):
             raise SandboxProtocolError("the sandbox service returned an invalid file list")
-        lines = serialized.splitlines()
-        if len(lines) > _LIST_MAX_FILES:
+        if type(candidates) is not list:
+            raise SandboxProtocolError("the sandbox service returned an invalid file list")
+        if len(candidates) > _LIST_MAX_FILES:
             raise SandboxListError("sandbox output listing exceeded its file limit")
 
         paths: list[str] = []
         seen: set[str] = set()
-        for line in lines:
-            try:
-                candidate = json.loads(line)
-            except (json.JSONDecodeError, UnicodeError):
-                raise SandboxProtocolError(
-                    "the sandbox service returned an invalid file list"
-                ) from None
+        for candidate in candidates:
             if type(candidate) is not str:
                 raise SandboxProtocolError(
                     "the sandbox service returned an invalid file path"

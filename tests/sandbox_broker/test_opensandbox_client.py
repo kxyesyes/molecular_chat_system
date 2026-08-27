@@ -609,9 +609,9 @@ def test_list_revalidates_deduplicates_and_bounds_server_paths(tmp_path: Path) -
     handle = SandboxHandle("sandbox-1", fake.raw)
     valid = "/workspace/output/poses/result.pdbqt"
     fake.list_stdout_chunks = [
-        "".join(
-            json.dumps(candidate) + "\n"
-            for candidate in (valid, valid, "/workspace/output/result.json")
+        json.dumps(
+            [valid, valid, "/workspace/output/result.json"],
+            separators=(",", ":"),
         )
     ]
 
@@ -631,11 +631,23 @@ def test_list_revalidates_deduplicates_and_bounds_server_paths(tmp_path: Path) -
         if type(unsafe) is str:
             fake.list_stdout_chunks = [unsafe]
         else:
-            fake.list_stdout_chunks = [
-                "".join(json.dumps(candidate) + "\n" for candidate in unsafe)
-            ]
+            fake.list_stdout_chunks = [json.dumps(unsafe, separators=(",", ":"))]
         with pytest.raises((SandboxProtocolError, SandboxListError)):
             asyncio.run(client.list_files(handle, "/workspace/output", "*"))
+
+
+def test_list_accepts_bounded_json_array_when_execd_strips_trailing_newline(
+    tmp_path: Path,
+) -> None:
+    fake = FakeSandboxFactory()
+    client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+    handle = SandboxHandle("sandbox-1", fake.raw)
+    valid = "/workspace/output/poses/result.pdbqt"
+    fake.list_stdout_chunks = [json.dumps([valid], separators=(",", ":"))]
+
+    assert asyncio.run(
+        client.list_files(handle, "/workspace/output/poses", "*.pdbqt")
+    ) == [valid]
 
 
 def test_list_257th_file_and_transport_overflow_fail_without_returning_prefix(
@@ -650,9 +662,9 @@ def test_list_257th_file_and_transport_overflow_fail_without_returning_prefix(
         asyncio.run(client.list_files(handle, "/workspace/output", "*.json"))
 
     fake.list_stdout_chunks = [
-        "".join(
-            json.dumps(f"/workspace/output/file-{index}.json") + "\n"
-            for index in range(256)
+        json.dumps(
+            [f"/workspace/output/file-{index}.json" for index in range(256)],
+            separators=(",", ":"),
         )
     ]
     fake.list_execution = SimpleNamespace(exit_code=75)
@@ -996,13 +1008,15 @@ def test_official_factory_uses_streaming_read_and_fixed_bounded_list_helper(
 
     class FakeCommands:
         async def run(self, command: str, *, opts: object, handlers: object) -> object:
-            commands.append((command, handlers))
-            assert opts is not None
-            assert handlers.skip_accumulation is True
-            await handlers.on_stdout(
-                SimpleNamespace(text=json.dumps("/workspace/output/result.json") + "\n")
-            )
-            return SimpleNamespace(exit_code=0)
+                commands.append((command, handlers))
+                assert opts is not None
+                assert handlers.skip_accumulation is True
+                await handlers.on_stdout(
+                    SimpleNamespace(
+                        text=json.dumps(["/workspace/output/result.json"])
+                    )
+                )
+                return SimpleNamespace(exit_code=0)
 
     sdk = opensandbox_client_module._OfficialSDK(
         ConnectionConfig=object,
