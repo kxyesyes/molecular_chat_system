@@ -88,6 +88,14 @@ _CREDENTIAL_LIKE_PATTERNS = (
         r"(?i)(?<![A-Za-z0-9_])(?:authorization|token|api[-_]?key|"
         r"password|secret)\s*[:=]\s*[^\s,;&}\]]{4,}"
     ),
+    re.compile(
+        r"(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}"
+        r"(?![A-Za-z0-9_])"
+    ),
+    re.compile(
+        r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|"
+        r"github_pat_[A-Za-z0-9_]{20,})(?![A-Za-z0-9_])"
+    ),
 )
 
 

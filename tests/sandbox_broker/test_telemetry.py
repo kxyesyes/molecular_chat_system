@@ -15,6 +15,7 @@ from src.sandbox_broker.telemetry import (
     BrokerTelemetryEvent,
     FailureClass,
     Phase,
+    _contains_credential_like,
 )
 
 
@@ -176,6 +177,71 @@ def test_event_schema_rejects_local_credential_like_assignments(
 ) -> None:
     with pytest.raises(ValidationError):
         BrokerTelemetryEvent.model_validate(valid_event_payload(**{field: value}))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("trace_id", "AKIA" + "A1" * 8),
+        ("job_id", "ASIA" + "B2" * 8),
+        ("vina_version", "ghp_" + "A1" * 18),
+        (
+            "meeko_version",
+            "github_pat_" + "B2" * 11 + "_" + "C3" * 20,
+        ),
+    ],
+)
+def test_event_schema_rejects_credential_families_in_every_string_field(
+    field: str,
+    value: str,
+) -> None:
+    assert _contains_credential_like(value) is True
+    with pytest.raises(ValidationError):
+        BrokerTelemetryEvent.model_validate(valid_event_payload(**{field: value}))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "AKIA" + "A1" * 8,
+        "ASIA" + "B2" * 8,
+        "ghp_" + "A1" * 18,
+        "gho_" + "B2" * 18,
+        "ghu_" + "C3" * 18,
+        "ghs_" + "D4" * 18,
+        "ghr_" + "E5" * 18,
+        "github_pat_" + "F6" * 11 + "_" + "G7" * 20,
+    ],
+)
+def test_local_detector_rejects_all_required_credential_families(
+    value: str,
+) -> None:
+    assert _contains_credential_like(value) is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "AKIA-release-1",
+        "ASIA.2026.08",
+        "AKIA" + "A" * 15,
+        "ghp_release_candidate",
+        "gho_" + "A" * 19,
+        "github_pat_schema",
+        "Vina 1.2.3",
+        "Meeko release_2026",
+    ],
+)
+def test_local_detector_preserves_normal_identifiers_and_versions(
+    value: str,
+) -> None:
+    assert _contains_credential_like(value) is False
+
+
+def test_local_credential_detector_has_a_fixed_scan_bound() -> None:
+    value = "v" * 256 + "AKIA" + "A1" * 8
+
+    assert _contains_credential_like(value) is False
 
 
 def test_importing_telemetry_does_not_initialize_agent_persistence() -> None:
