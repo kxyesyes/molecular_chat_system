@@ -1963,10 +1963,12 @@ class SandboxBrokerService:
             if observed_generation != self._recovery_generation:
                 return
             for record in self.store.cleanup_pending_jobs():
+                was_terminal = record.status in TERMINAL_STATUSES
                 try:
                     current = self.store.get(record.job_id)
                     if current is None or current.cleanup_status == "succeeded":
                         continue
+                    was_terminal = current.status in TERMINAL_STATUSES
                     if current.sandbox_id is None:
                         continue
                     if current.cleanup_status != "in_progress":
@@ -1994,16 +1996,17 @@ class SandboxBrokerService:
                                 BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
                                 cleanup_status="succeeded",
                             )
-                    latest = self.store.get(current.job_id)
-                    self._record_terminal_observation(
-                        current.job_id,
-                        (
-                            FailureClass.DESTROY_FAILED
-                            if latest is not None
-                            and latest.cleanup_status == "failed"
-                            else FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE
-                        ),
-                    )
+                    if not was_terminal:
+                        latest = self.store.get(current.job_id)
+                        self._record_terminal_observation(
+                            current.job_id,
+                            (
+                                FailureClass.DESTROY_FAILED
+                                if latest is not None
+                                and latest.cleanup_status == "failed"
+                                else FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE
+                            ),
+                        )
                     await self._notify_terminal()
                 except BaseException:
                     current = self.store.get(record.job_id)
@@ -2017,10 +2020,11 @@ class SandboxBrokerService:
                             )
                         except BaseException:
                             pass
-                    self._record_terminal_observation(
-                        record.job_id,
-                        FailureClass.DESTROY_FAILED,
-                    )
+                    if not was_terminal:
+                        self._record_terminal_observation(
+                            record.job_id,
+                            FailureClass.DESTROY_FAILED,
+                        )
 
             for record in self.store.active_jobs():
                 try:

@@ -2079,6 +2079,12 @@ def test_concurrent_recovery_destroys_orphan_once_and_fails_closed(
     ]
     assert len(terminal_events) == 1
     assert terminal_events[0]["job_id"] == terminal.job_id
+    terminal_counters = {
+        key: value
+        for key, value in telemetry.snapshot()["counters"].items()
+        if key.startswith("terminal|")
+    }
+    assert sum(terminal_counters.values()) == 1
     assert telemetry.snapshot()["runtime"]["active_job_count"] == 0
 
 
@@ -2843,9 +2849,15 @@ def test_recovery_retries_a_persisted_failed_cleanup_before_terminalizing(
 def test_recovery_retries_terminal_cleanup_pending_without_rewriting_audit(
     tmp_path: Path,
 ) -> None:
+    telemetry = RecordingTelemetry()
+
     async def scenario() -> tuple[object, object, RecoverySandboxClient, list[object]]:
         failing = FaultSandboxClient("destroy")
-        service, store, config = _service(tmp_path, failing)
+        service, store, config = _service(
+            tmp_path,
+            failing,
+            telemetry=telemetry,
+        )
         await service.start()
         job = await service.submit(_prepared(config), "idem-terminal-cleanup-retry")
         before = await service.wait_terminal(job.job_id)
@@ -2858,6 +2870,7 @@ def test_recovery_retries_terminal_cleanup_pending_without_rewriting_audit(
             store,
             recovery,
             ArtifactRegistry(config.state_root, store),
+            telemetry=telemetry,
         )
         await reopened.recover()
         after = reopened.get_job(job.job_id)
@@ -2873,6 +2886,18 @@ def test_recovery_retries_terminal_cleanup_pending_without_rewriting_audit(
     assert after.cleanup_status == "succeeded"
     assert recovery.recovery_calls == 1
     assert pending == []
+    terminal_events = [
+        event
+        for event in telemetry.snapshot()["recent_events"]
+        if event["phase"] == "job_terminal" and event["job_id"] == before.job_id
+    ]
+    assert len(terminal_events) == 1
+    terminal_counters = {
+        key: value
+        for key, value in telemetry.snapshot()["counters"].items()
+        if key.startswith("terminal|")
+    }
+    assert sum(terminal_counters.values()) == 1
 
 
 @pytest.mark.parametrize(
