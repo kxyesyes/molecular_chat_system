@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import math
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
 from prometheus_client import CollectorRegistry
-from prometheus_client.parser import text_string_to_metric_families
 from pydantic import ValidationError
 
 from src.sandbox_broker.telemetry import (
@@ -157,6 +159,45 @@ def test_event_schema_rejects_unsafe_ids_and_credentials(
         BrokerTelemetryEvent.model_validate(valid_event_payload(**{field: value}))
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("trace_id", "token:abcdefghijk"),
+        ("trace_id", "api-key:abcdefghijk"),
+        ("job_id", "password:abcdefghijk"),
+        ("job_id", "secret:abcdefghijk"),
+        ("job_id", "authorization:Bearer_abcdefghijk"),
+        ("vina_version", "Bearer abcdefghijk"),
+    ],
+)
+def test_event_schema_rejects_local_credential_like_assignments(
+    field: str,
+    value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        BrokerTelemetryEvent.model_validate(valid_event_payload(**{field: value}))
+
+
+def test_importing_telemetry_does_not_initialize_agent_persistence() -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import src.sandbox_broker.telemetry; "
+                "assert 'src.agent.persistence' not in sys.modules"
+            ),
+        ],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize("attempt", [0, 3, True, 1.0, "1"])
 def test_event_schema_rejects_invalid_attempts(attempt: object) -> None:
     with pytest.raises(ValidationError):
@@ -253,11 +294,11 @@ def test_recent_events_and_phase_latency_retention_are_bounded() -> None:
     assert latencies["command|passed"] == [1] * 256
 
 
-def test_prometheus_projection_uses_exact_names_and_only_fixed_labels() -> None:
-    telemetry = BrokerTelemetry(registry=CollectorRegistry())
+def test_prometheus_projection_has_exact_family_names_and_label_keys() -> None:
+    registry = CollectorRegistry()
     clock = Clock()
-    timed = BrokerTelemetry(registry=CollectorRegistry(), monotonic=clock)
-    token = timed.start_phase(
+    telemetry = BrokerTelemetry(registry=registry, monotonic=clock)
+    token = telemetry.start_phase(
         trace_id="trace-private",
         job_id="job-private",
         phase="upload",
@@ -267,7 +308,7 @@ def test_prometheus_projection_uses_exact_names_and_only_fixed_labels() -> None:
         image_digest="d" * 64,
     )
     clock.advance(0.125)
-    timed.finish_phase(token, outcome="passed")
+    telemetry.finish_phase(token, outcome="passed")
 
     telemetry.record_control_plane_failure(
         operation="create",
@@ -283,46 +324,103 @@ def test_prometheus_projection_uses_exact_names_and_only_fixed_labels() -> None:
         breaker_state="open",
     )
 
-    samples: dict[str, list[dict[str, str]]] = {}
-    for family in text_string_to_metric_families(
-        telemetry.prometheus_text().decode("utf-8")
-    ):
-        for sample in family.samples:
-            samples.setdefault(sample.name, []).append(sample.labels)
-    timed_samples: dict[str, list[dict[str, str]]] = {}
-    for family in text_string_to_metric_families(
-        timed.prometheus_text().decode("utf-8")
-    ):
-        for sample in family.samples:
-            timed_samples.setdefault(sample.name, []).append(sample.labels)
-
-    assert {name for name in samples if name.startswith("medchat_sandbox_")} >= {
-        "medchat_sandbox_jobs_total",
-        "medchat_sandbox_control_plane_failures_total",
-        "medchat_sandbox_retry_total",
+    families = {family.name: family for family in registry.collect()}
+    assert set(families) == {
+        "medchat_sandbox_jobs",
+        "medchat_sandbox_phase_duration_seconds",
+        "medchat_sandbox_control_plane_failures",
+        "medchat_sandbox_retry",
         "medchat_sandbox_queue_depth",
         "medchat_sandbox_active_jobs",
         "medchat_sandbox_cleanup_tasks",
         "medchat_sandbox_isolated_tasks",
         "medchat_sandbox_circuit_breaker_state",
     }
-    assert "medchat_sandbox_phase_duration_seconds_count" in timed_samples
-    assert samples["medchat_sandbox_jobs_total"] == [
-        {"failure_class": "proxy_502", "terminal_status": "failed"}
-    ]
-    assert samples["medchat_sandbox_control_plane_failures_total"] == [
-        {"failure_class": "proxy_502", "operation": "create"}
-    ]
-    assert samples["medchat_sandbox_retry_total"] == [
-        {"operation": "metadata", "outcome": "attempted"}
-    ]
-    assert timed_samples["medchat_sandbox_phase_duration_seconds_count"] == [
-        {"outcome": "passed", "phase": "upload"}
-    ]
-    encoded = telemetry.prometheus_text() + timed.prometheus_text()
+    expected_label_keys = {
+        "medchat_sandbox_jobs": {"terminal_status", "failure_class"},
+        "medchat_sandbox_control_plane_failures": {
+            "operation",
+            "failure_class",
+        },
+        "medchat_sandbox_retry": {"operation", "outcome"},
+    }
+    for family_name, label_keys in expected_label_keys.items():
+        assert family_name in families
+        assert families[family_name].samples
+        assert {
+            frozenset(sample.labels) for sample in families[family_name].samples
+        } == {frozenset(label_keys)}
+
+    histogram = families["medchat_sandbox_phase_duration_seconds"]
+    assert histogram.samples
+    for sample in histogram.samples:
+        expected = {"phase", "outcome", "le"}
+        if not sample.name.endswith("_bucket"):
+            expected.remove("le")
+        assert set(sample.labels) == expected
+    for gauge_name in {
+        "medchat_sandbox_queue_depth",
+        "medchat_sandbox_active_jobs",
+        "medchat_sandbox_cleanup_tasks",
+        "medchat_sandbox_isolated_tasks",
+        "medchat_sandbox_circuit_breaker_state",
+    }:
+        assert [sample.labels for sample in families[gauge_name].samples] == [{}]
+
+    sample_names = {
+        sample.name
+        for family in families.values()
+        for sample in family.samples
+    }
+    assert sample_names == {
+        "medchat_sandbox_jobs_total",
+        "medchat_sandbox_jobs_created",
+        "medchat_sandbox_phase_duration_seconds_bucket",
+        "medchat_sandbox_phase_duration_seconds_count",
+        "medchat_sandbox_phase_duration_seconds_sum",
+        "medchat_sandbox_phase_duration_seconds_created",
+        "medchat_sandbox_control_plane_failures_total",
+        "medchat_sandbox_control_plane_failures_created",
+        "medchat_sandbox_retry_total",
+        "medchat_sandbox_retry_created",
+        "medchat_sandbox_queue_depth",
+        "medchat_sandbox_active_jobs",
+        "medchat_sandbox_cleanup_tasks",
+        "medchat_sandbox_isolated_tasks",
+        "medchat_sandbox_circuit_breaker_state",
+    }
+    encoded = telemetry.prometheus_text()
     assert b"trace-private" not in encoded
     assert b"job-private" not in encoded
     assert b"sk-" not in encoded
+
+
+def test_public_attributes_cannot_expose_collectors_or_inject_metric_labels() -> None:
+    telemetry = BrokerTelemetry(registry=CollectorRegistry())
+    public_collectors = {
+        name
+        for name in dir(telemetry)
+        if not name.startswith("_")
+        and callable(getattr(getattr(telemetry, name), "labels", None))
+    }
+
+    assert public_collectors == set()
+    assert not hasattr(telemetry, "registry")
+
+    with pytest.raises(ValueError):
+        telemetry.record_control_plane_failure(
+            operation="trace-injected",
+            failure_class=FailureClass.PROXY_502,
+        )
+    with pytest.raises(ValueError):
+        telemetry.record_retry("job-injected", "attempted")
+    with pytest.raises(ValueError):
+        telemetry.record_terminal("credential-injected")
+
+    encoded = telemetry.prometheus_text()
+    assert b"trace-injected" not in encoded
+    assert b"job-injected" not in encoded
+    assert b"credential-injected" not in encoded
 
 
 def test_snapshot_has_strict_shape_and_runtime_bounds() -> None:

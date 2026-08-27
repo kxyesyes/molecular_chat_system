@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import threading
 import time
 from collections import Counter, defaultdict, deque
@@ -14,8 +15,6 @@ from typing import Callable, Literal
 from prometheus_client import CollectorRegistry, Counter as PromCounter
 from prometheus_client import Gauge, Histogram, generate_latest
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-
-from src.agent.persistence.redaction import contains_credential
 
 
 class Phase(str, Enum):
@@ -75,6 +74,26 @@ _DURATION_BUCKETS = (
     270,
     300,
 )
+_CREDENTIAL_SCAN_CHARS = 256
+_CREDENTIAL_LIKE_PATTERNS = (
+    re.compile(
+        r"(?i)(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{8,}"
+        r"(?![A-Za-z0-9_])"
+    ),
+    re.compile(
+        r"(?i)(?<![A-Za-z0-9_])bearer[\s._:+-]+"
+        r"[A-Za-z0-9._~+/=-]{8,}(?![A-Za-z0-9_])"
+    ),
+    re.compile(
+        r"(?i)(?<![A-Za-z0-9_])(?:authorization|token|api[-_]?key|"
+        r"password|secret)\s*[:=]\s*[^\s,;&}\]]{4,}"
+    ),
+)
+
+
+def _contains_credential_like(value: str) -> bool:
+    bounded = value[:_CREDENTIAL_SCAN_CHARS]
+    return any(pattern.search(bounded) for pattern in _CREDENTIAL_LIKE_PATTERNS)
 
 
 class BrokerTelemetryEvent(BaseModel):
@@ -124,7 +143,7 @@ class BrokerTelemetryEvent(BaseModel):
     @field_validator("trace_id", "job_id", "vina_version", "meeko_version")
     @classmethod
     def reject_credentials(cls, value: str | None) -> str | None:
-        if value is not None and contains_credential(value):
+        if value is not None and _contains_credential_like(value):
             raise ValueError("sensitive telemetry value")
         return value
 
@@ -152,7 +171,7 @@ class BrokerTelemetry:
     ) -> None:
         if not callable(monotonic):
             raise ValueError("invalid telemetry clock")
-        self.registry = registry if registry is not None else CollectorRegistry()
+        self._registry = registry if registry is not None else CollectorRegistry()
         self._monotonic = monotonic
         self._logger = logger or logging.getLogger(
             "medchat.sandbox_broker.telemetry"
@@ -169,55 +188,55 @@ class BrokerTelemetry:
             "breaker_state": "closed",
         }
 
-        self.jobs = PromCounter(
+        self._jobs = PromCounter(
             "medchat_sandbox_jobs_total",
             "Terminal Broker jobs",
             ("terminal_status", "failure_class"),
-            registry=self.registry,
+            registry=self._registry,
         )
-        self.phase_duration = Histogram(
+        self._phase_duration = Histogram(
             "medchat_sandbox_phase_duration_seconds",
             "Broker phase latency",
             ("phase", "outcome"),
             buckets=_DURATION_BUCKETS,
-            registry=self.registry,
+            registry=self._registry,
         )
-        self.control_failures = PromCounter(
+        self._control_failures = PromCounter(
             "medchat_sandbox_control_plane_failures_total",
             "OpenSandbox failures",
             ("operation", "failure_class"),
-            registry=self.registry,
+            registry=self._registry,
         )
-        self.retries = PromCounter(
+        self._retries = PromCounter(
             "medchat_sandbox_retry_total",
             "Bounded control-plane retries",
             ("operation", "outcome"),
-            registry=self.registry,
+            registry=self._registry,
         )
-        self.queue_depth = Gauge(
+        self._queue_depth = Gauge(
             "medchat_sandbox_queue_depth",
             "Queued jobs",
-            registry=self.registry,
+            registry=self._registry,
         )
-        self.active_jobs = Gauge(
+        self._active_jobs = Gauge(
             "medchat_sandbox_active_jobs",
             "Active jobs",
-            registry=self.registry,
+            registry=self._registry,
         )
-        self.cleanup_tasks = Gauge(
+        self._cleanup_tasks = Gauge(
             "medchat_sandbox_cleanup_tasks",
             "Cleanup tasks",
-            registry=self.registry,
+            registry=self._registry,
         )
-        self.isolated_tasks = Gauge(
+        self._isolated_tasks = Gauge(
             "medchat_sandbox_isolated_tasks",
             "Isolated tasks",
-            registry=self.registry,
+            registry=self._registry,
         )
-        self.breaker_state = Gauge(
+        self._breaker_state = Gauge(
             "medchat_sandbox_circuit_breaker_state",
             "0 closed, 1 open, 2 half-open",
-            registry=self.registry,
+            registry=self._registry,
         )
 
     def _clock_value(self) -> float:
@@ -324,7 +343,7 @@ class BrokerTelemetry:
             values = self._latencies[(token.phase, outcome)]
             values.append(duration_ms)
             del values[:-256]
-        self.phase_duration.labels(
+        self._phase_duration.labels(
             phase=token.phase,
             outcome=outcome,
         ).observe(elapsed)
@@ -343,7 +362,7 @@ class BrokerTelemetry:
             or type(failure_class) is not FailureClass
         ):
             raise ValueError("invalid control-plane metric")
-        self.control_failures.labels(
+        self._control_failures.labels(
             operation=operation,
             failure_class=failure_class.value,
         ).inc()
@@ -360,7 +379,7 @@ class BrokerTelemetry:
             or outcome not in _RETRY_OUTCOMES
         ):
             raise ValueError("invalid retry metric")
-        self.retries.labels(operation=operation, outcome=outcome).inc()
+        self._retries.labels(operation=operation, outcome=outcome).inc()
         with self._lock:
             self._counters[("retry", operation, outcome)] += 1
 
@@ -375,7 +394,7 @@ class BrokerTelemetry:
             or type(failure_class) is not FailureClass
         ):
             raise ValueError("invalid terminal metric")
-        self.jobs.labels(
+        self._jobs.labels(
             terminal_status=status,
             failure_class=failure_class.value,
         ).inc()
@@ -409,11 +428,11 @@ class BrokerTelemetry:
         ):
             raise ValueError("invalid Broker runtime gauge")
         state_value = {"closed": 0, "open": 1, "half_open": 2}[breaker_state]
-        self.queue_depth.set(queue_depth)
-        self.active_jobs.set(active_job_count)
-        self.cleanup_tasks.set(cleanup_task_count)
-        self.isolated_tasks.set(isolated_task_count)
-        self.breaker_state.set(state_value)
+        self._queue_depth.set(queue_depth)
+        self._active_jobs.set(active_job_count)
+        self._cleanup_tasks.set(cleanup_task_count)
+        self._isolated_tasks.set(isolated_task_count)
+        self._breaker_state.set(state_value)
         with self._lock:
             self._runtime = {
                 "queue_depth": queue_depth,
@@ -444,4 +463,4 @@ class BrokerTelemetry:
         }
 
     def prometheus_text(self) -> bytes:
-        return generate_latest(self.registry)
+        return generate_latest(self._registry)
