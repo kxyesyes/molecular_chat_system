@@ -515,6 +515,51 @@ def test_valid_fake_tools_execute_exact_sequence_and_emit_validator_schema(
     assert not (output_root / ".work").exists()
 
 
+def test_legacy_encoded_pdb_header_is_normalized_without_changing_coordinates_or_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receptor = (
+        b"HEADER    LEGACY ENCODED SAMPLE\n"
+        b"COMPND    D:\\Desktop\\\xc9\xa3\xc0\xcf\xca\xa6\xb7\xd6\xd7\xd3\xb6\xd4\xbd\xd3\\MAGL.pdbqt\n"
+        b"ATOM      1  N   GLY A   1      11.104  13.207   9.154  1.00 20.00           N  \n"
+        b"END\n"
+    )
+    coordinate = next(
+        line for line in receptor.splitlines(keepends=True) if line.startswith(b"ATOM  ")
+    )
+    module = _load_runner()
+    input_root, output_root = _configure_roots(module, monkeypatch, tmp_path)
+    _write_inputs(
+        input_root,
+        _request(receptor=receptor),
+        receptor=receptor,
+    )
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    _fake_tools(monkeypatch, module, calls)
+    original_run_tool = module._run_tool
+    prepared_inputs: list[bytes] = []
+
+    def require_utf8_receptor(
+        argv: list[str], phase: str, deadline: float, cleanup_deadline: float
+    ) -> None:
+        if argv[0] == "mk_prepare_receptor.py":
+            prepared = Path(argv[2]).read_bytes()
+            prepared.decode("utf-8", errors="strict")
+            prepared_inputs.append(prepared)
+        original_run_tool(argv, phase, deadline, cleanup_deadline)
+
+    monkeypatch.setattr(module, "_run_tool", require_utf8_receptor)
+
+    assert module.main(REQUEST_ARGUMENTS) == 0
+    assert len(prepared_inputs) == 1
+    assert coordinate in prepared_inputs[0]
+    assert all(value < 128 for value in prepared_inputs[0])
+    assert (input_root / "receptor.pdb").read_bytes() == receptor
+    assert _result(output_root)["receptor_sha256"] == _sha(receptor)
+    assert calls[0][0][2] != str(input_root / "receptor.pdb")
+    assert not (output_root / ".work").exists()
+
+
 @pytest.mark.parametrize(
     "parameters",
     [

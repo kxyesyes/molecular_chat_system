@@ -36,6 +36,7 @@ _REQUEST_NAME = "request.json"
 _RESULT_NAME = "result.json"
 _WORK_NAME = ".work"
 _POSES_NAME = "poses"
+_NORMALIZED_RECEPTOR_NAME = "receptor.utf8.pdb"
 _MAX_REQUEST_BYTES = 1024 * 1024
 _MAX_INPUT_BYTES = 128 * 1024 * 1024
 _MAX_POSE_BYTES = 16 * 1024 * 1024
@@ -78,6 +79,20 @@ _REQUEST_FIELDS = frozenset(
 )
 _PARAMETER_FIELDS = frozenset(
     {"center", "size", "exhaustiveness", "num_modes", "energy_range"}
+)
+_PDB_NARRATIVE_RECORDS = frozenset(
+    {
+        b"HEADER",
+        b"TITLE ",
+        b"COMPND",
+        b"SOURCE",
+        b"KEYWDS",
+        b"EXPDTA",
+        b"AUTHOR",
+        b"REVDAT",
+        b"JRNL  ",
+        b"REMARK",
+    }
 )
 _MINIMAL_ENV = {
     "PATH": "/opt/conda/bin:/usr/local/bin:/usr/bin:/bin",
@@ -1038,6 +1053,128 @@ def _write_all(descriptor: int, content: bytes) -> None:
         view = view[written:]
 
 
+def _create_private_file(
+    path: Path,
+    parent: Path,
+    parent_identity: tuple[int, ...],
+    content: bytes,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    if path.parent != parent or path.name != _NORMALIZED_RECEPTOR_NAME or not content:
+        raise OSError
+    current_parent = parent.lstat()
+    if (
+        not stat.S_ISDIR(current_parent.st_mode)
+        or stat.S_ISLNK(current_parent.st_mode)
+        or _is_reparse(current_parent)
+        or _identity(current_parent) != parent_identity
+    ):
+        raise OSError
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise OSError
+        _write_all(descriptor, content)
+        os.fsync(descriptor)
+        after = os.fstat(descriptor)
+        named = path.lstat()
+        if (
+            after.st_nlink != 1
+            or _snapshot_identity(after) != _snapshot_identity(named)
+            or _is_reparse(named)
+            or (os.name == "posix" and stat.S_IMODE(named.st_mode) != 0o600)
+            or _identity(parent.lstat()) != parent_identity
+        ):
+            raise OSError
+        return _snapshot_identity(after)
+    except BaseException:
+        _safe_unlink_in_created_directory(path, parent)
+        raise
+    finally:
+        os.close(descriptor)
+
+
+def _prepare_receptor_for_prody(
+    source: Path,
+    expected_hash: str,
+    work: Path,
+    work_identity: tuple[int, ...],
+) -> tuple[Path, tuple[tuple[int, ...], tuple[int, ...]] | None]:
+    try:
+        content, actual_hash = _read_regular_snapshot(source, _MAX_INPUT_BYTES)
+    except (OSError, ValueError):
+        _fail("input_validation", "invalid_input")
+    if actual_hash != expected_hash:
+        _fail("input_validation", "invalid_input")
+    try:
+        content.decode("utf-8", errors="strict")
+        return source, None
+    except UnicodeError:
+        pass
+
+    normalized = bytearray()
+    for line in content.splitlines(keepends=True):
+        try:
+            line.decode("utf-8", errors="strict")
+            normalized.extend(line)
+            continue
+        except UnicodeError:
+            record = (line + b" " * 6)[:6]
+            if record not in _PDB_NARRATIVE_RECORDS:
+                _fail("input_validation", "invalid_input")
+        normalized.extend(value if value < 128 else 0x20 for value in line)
+    normalized_bytes = bytes(normalized)
+    try:
+        normalized_bytes.decode("utf-8", errors="strict")
+        destination = work / _NORMALIZED_RECEPTOR_NAME
+        identity = _create_private_file(
+            destination,
+            work,
+            work_identity,
+            normalized_bytes,
+        )
+    except (OSError, UnicodeError, ValueError):
+        _fail("receptor_preparation", "tool_failed")
+    return destination, identity
+
+
+def _remove_normalized_receptor(
+    path: Path,
+    expected_identity: tuple[tuple[int, ...], tuple[int, ...]],
+    work: Path,
+    work_identity: tuple[int, ...],
+) -> None:
+    try:
+        value = path.lstat()
+        if (
+            path.parent != work
+            or path.name != _NORMALIZED_RECEPTOR_NAME
+            or _identity(work.lstat()) != work_identity
+            or _snapshot_identity(value) != expected_identity
+            or not stat.S_ISREG(value.st_mode)
+            or stat.S_ISLNK(value.st_mode)
+            or _is_reparse(value)
+        ):
+            raise OSError
+        path.unlink()
+        _fsync_directory(work)
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return
+        raise OSError
+    except (FileNotFoundError, OSError, RuntimeError):
+        _fail("output_validation", "invalid_output")
+
+
 def _fsync_directory(path: Path) -> None:
     if os.name != "posix":
         return
@@ -1263,12 +1400,17 @@ def _execute(
     pose_file = poses / "result.pdbqt"
     try:
         poses_identity = _make_private_directory(poses)
-        _verify_input_hash(request.receptor, request.receptor_sha256)
+        receptor_input, normalized_receptor_identity = _prepare_receptor_for_prody(
+            request.receptor,
+            request.receptor_sha256,
+            work,
+            work_identity,
+        )
         _run_tool(
             [
                 "mk_prepare_receptor.py",
                 "-i",
-                str(request.receptor),
+                str(receptor_input),
                 "--write_pdbqt",
                 str(receptor_pdbqt),
             ],
@@ -1277,7 +1419,18 @@ def _execute(
             cleanup_deadline,
         )
         _validate_created_file(receptor_pdbqt, _MAX_INPUT_BYTES)
-        _require_exact_created_files(work, work_identity, {"receptor.pdbqt"})
+        expected_receptor_files = {"receptor.pdbqt"}
+        if normalized_receptor_identity is not None:
+            expected_receptor_files.add(_NORMALIZED_RECEPTOR_NAME)
+        _require_exact_created_files(work, work_identity, expected_receptor_files)
+        if normalized_receptor_identity is not None:
+            _remove_normalized_receptor(
+                receptor_input,
+                normalized_receptor_identity,
+                work,
+                work_identity,
+            )
+            _require_exact_created_files(work, work_identity, {"receptor.pdbqt"})
         _verify_input_hash(request.ligand, request.ligand_sha256)
         _run_tool(
             [
