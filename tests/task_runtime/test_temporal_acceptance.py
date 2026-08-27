@@ -78,6 +78,168 @@ def test_report_allowlists_verified_opensandbox_execution_contract():
     assert "raw-container" not in json.dumps(report)
 
 
+def test_verified_completion_projects_opensandbox_trust_into_temporal_report(
+    tmp_path: Path,
+):
+    from scripts.run_temporal_docking_acceptance import (
+        _project_real_record,
+        summarize_runs,
+    )
+    from src.agent.contracts import ToolProvenance, ToolResult, WorkflowArtifact
+    from src.task_runtime.docking_execution import DockingExecution
+    from src.task_runtime.models import TaskStatus
+    from src.task_runtime.staging import DockingInputStager
+    from src.task_runtime.store import TaskStore
+    from src.task_runtime.temporal.activities import (
+        TemporalDockingActivities,
+        _safe_execution_contract,
+        _safe_provenance,
+        _summarize_docking_result,
+    )
+
+    task_id = "00000000-0000-4000-8000-000000000099"
+    staging_root = tmp_path / "staging"
+    output_root = tmp_path / "worker-output"
+    manifest = DockingInputStager(staging_root).stage(
+        task_id,
+        "receptor.pdb",
+        b"ATOM\n",
+        "ligand.sdf",
+        b"$$$$\n",
+        None,
+        {
+            "center": [1, 2, 3],
+            "size": [20, 20, 20],
+            "exhaustiveness": 8,
+            "num_modes": 10,
+        },
+    )
+    image_digest = "b" * 64
+
+    def execute(_payload, **_control):
+        pose = output_root / f"docking_{task_id}" / "result.pdbqt"
+        pose.parent.mkdir(parents=True)
+        pose.write_text(
+            "MODEL 1\nREMARK VINA RESULT: -7.200 0.000 0.000\n"
+            "ROOT\nATOM      1  C   LIG A   1       0.000   0.000   0.000"
+            "  0.00  0.00    +0.000 C\nENDROOT\nTORSDOF 0\nENDMDL\n",
+            encoding="ascii",
+        )
+        pose_digest = hashlib.sha256(pose.read_bytes()).hexdigest()
+        return ToolResult.success_result(
+            "molecular_docking",
+            data={
+                "total_poses": 1,
+                "pose_file": str(pose),
+                "best_pose": {"binding_energy": -7.2, "pose_file": str(pose)},
+            },
+            artifacts=[
+                WorkflowArtifact(
+                    "docking_pose",
+                    str(pose),
+                    "Verified docking pose",
+                    mime_type="chemical/x-pdbqt",
+                    metadata={"sha256": pose_digest},
+                )
+            ],
+            quality={
+                "real_execution": True,
+                "execution_backend": "opensandbox",
+                "secure_runtime": "gvisor",
+                "sandbox_image_digest": image_digest,
+                "cleanup_status": "succeeded",
+                "raw_endpoint": "https://sandbox.internal.invalid",
+                "container_id": "container-internal-123",
+                "host_path": str(tmp_path.resolve()),
+            },
+            provenance=ToolProvenance(
+                tool_name="molecular_docking",
+                tool_version="molecular-docking-adapter-1",
+                model_name="AutoDock Vina",
+                demo_mode=False,
+                fallback_used=False,
+            ),
+        )
+
+    execution = DockingExecution(
+        staging_root,
+        raw_executor=execute,
+        allowed_output_root=output_root,
+    )
+    completed = execution.run_verified(task_id, manifest, attempt=1)
+    reused = execution.run_verified(task_id, manifest, attempt=2)
+    assert completed["success"] is True, completed
+    assert reused["reused_completion"] is True
+    for result in (completed, reused):
+        assert {
+            key: result["quality"].get(key)
+            for key in (
+                "execution_backend",
+                "secure_runtime",
+                "sandbox_image_digest",
+                "cleanup_status",
+            )
+        } == {
+            "execution_backend": "opensandbox",
+            "secure_runtime": "gvisor",
+            "sandbox_image_digest": image_digest,
+            "cleanup_status": "succeeded",
+        }
+        encoded = json.dumps(result)
+        assert "sandbox.internal.invalid" not in encoded
+        assert "container-internal-123" not in encoded
+        assert str(tmp_path.resolve()) not in encoded
+
+    assert _safe_provenance(completed["provenance"], 1) is not None
+    assert _safe_execution_contract(completed["quality"]) is not None
+    outcome = _summarize_docking_result(completed, task_id=task_id, attempt=1)
+    assert outcome["status"] == "succeeded", (outcome, completed)
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create(
+        task_id=task_id,
+        task_type="docking",
+        payload={},
+        backend="temporal",
+        external_workflow_id=f"medchat-docking-{task_id}",
+    )
+    assert store.claim_running(task_id, attempt=1)
+    activities = TemporalDockingActivities(store, execution)
+    projected = asyncio.run(
+        activities._project_terminal({"operation": "terminal", **outcome})
+    )
+    assert projected["applied"] is True
+    record = store.get(task_id)
+    assert record.status is TaskStatus.SUCCEEDED
+    assert record.result == {
+        "best_energy": -7.2,
+        "cleanup_status": "succeeded",
+        "execution_backend": "opensandbox",
+        "pose_count": 1,
+        "sandbox_image_digest": image_digest,
+        "secure_runtime": "gvisor",
+        "warnings": [],
+    }
+
+    run = _project_real_record(
+        record,
+        store.events(task_id),
+        staging_root=staging_root,
+        task_id=task_id,
+        latency_ms=10,
+    )
+    report = summarize_runs(
+        [run],
+        expected_backend="temporal",
+        expected_execution_backend="opensandbox",
+    )
+
+    assert report["status"] == "passed"
+    assert report["runs"][0]["execution_backend"] == "opensandbox"
+    assert report["runs"][0]["secure_runtime"] == "gvisor"
+    assert report["runs"][0]["sandbox_image_digest"] == image_digest
+    assert report["runs"][0]["cleanup_status"] == "succeeded"
+
+
 @pytest.mark.parametrize(
     ("override", "failure"),
     [
@@ -815,6 +977,34 @@ def test_contract_cli_marks_report_as_non_scientific(tmp_path: Path):
         "raw_executor_calls": 2,
         "startup_fallback_only": True,
     }
+
+
+def test_real_cli_requires_opensandbox_execution_contract(tmp_path: Path, monkeypatch):
+    import scripts.run_temporal_docking_acceptance as acceptance
+
+    captured = {}
+    original = acceptance.summarize_runs
+
+    async def fake_real_runs(_repeat, _timeout_seconds):
+        return [_valid_run(execution_backend=None)]
+
+    def capture(runs, **kwargs):
+        captured.update(kwargs)
+        return original(runs, **kwargs)
+
+    monkeypatch.setattr(acceptance, "_real_runs_with_signal_cancellation", fake_real_runs)
+    monkeypatch.setattr(acceptance, "summarize_runs", capture)
+    output = tmp_path / "real.json"
+
+    exit_code = acceptance.main(
+        ["--mode", "real", "--repeat", "1", "--output", str(output)]
+    )
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert exit_code == 1
+    assert captured["expected_execution_backend"] == "opensandbox"
+    assert report["status"] == "failed"
+    assert "execution_backend_mismatch" in report["runs"][0]["failures"]
 
 
 def test_cli_projection_failure_writes_safe_report_without_crashing(

@@ -88,8 +88,16 @@ _RESULT_METADATA_KEYS = frozenset(
 _ARTIFACT_KEYS = frozenset(
     {"artifact_type", "path", "label", "mime_type", "metadata", "size", "sha256"}
 )
-_QUALITY_KEYS = frozenset(
+_BASE_QUALITY_KEYS = frozenset(
     {"real_execution", "engine", "execution_status", "validated"}
+)
+_SANDBOX_TRUST_QUALITY_KEYS = frozenset(
+    {
+        "execution_backend",
+        "secure_runtime",
+        "sandbox_image_digest",
+        "cleanup_status",
+    }
 )
 _EVIDENCE_KEYS = frozenset(
     {"source", "description", "method", "version", "identifier", "type", "label", "sha256"}
@@ -1088,7 +1096,10 @@ def _parse_result_metadata(value: Any) -> DockingResultMetadata:
         )
 
     quality = value.get("quality")
-    if type(quality) is not dict or set(quality) != _QUALITY_KEYS:
+    if type(quality) is not dict or set(quality) not in {
+        _BASE_QUALITY_KEYS,
+        _BASE_QUALITY_KEYS | _SANDBOX_TRUST_QUALITY_KEYS,
+    }:
         raise CompletionError("completion_schema_invalid")
     if quality.get("real_execution") is not True or type(quality.get("validated")) is not bool:
         raise CompletionError("completion_schema_invalid")
@@ -1101,6 +1112,24 @@ def _parse_result_metadata(value: Any) -> DockingResultMetadata:
         if item is not None:
             item = _bounded_text(item, 128)
         normalized_quality[key] = item
+    if set(quality) == _BASE_QUALITY_KEYS | _SANDBOX_TRUST_QUALITY_KEYS:
+        digest = quality.get("sandbox_image_digest")
+        if (
+            quality.get("execution_backend") != "opensandbox"
+            or quality.get("secure_runtime") != "gvisor"
+            or type(digest) is not str
+            or _SHA256.fullmatch(digest) is None
+            or quality.get("cleanup_status") != "succeeded"
+        ):
+            raise CompletionError("completion_schema_invalid")
+        normalized_quality.update(
+            {
+                "execution_backend": "opensandbox",
+                "secure_runtime": "gvisor",
+                "sandbox_image_digest": digest,
+                "cleanup_status": "succeeded",
+            }
+        )
     return DockingResultMetadata(
         elapsed_ms=elapsed_ms,
         formatted=formatted,

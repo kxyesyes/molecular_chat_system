@@ -791,6 +791,9 @@ def main(argv: list[str] | None = None) -> int:
     report = summarize_runs(
         runs,
         expected_backend="contract" if args.mode == "contract" else "temporal",
+        expected_execution_backend=(
+            None if args.mode == "contract" else "opensandbox"
+        ),
     )
     report["mode"] = args.mode
     report["scientific_execution"] = args.mode == "real"

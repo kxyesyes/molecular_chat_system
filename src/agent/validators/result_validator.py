@@ -35,6 +35,9 @@ _GENERATOR_QUALITY_FIELDS = {
     "validation_available",
     "validation_method",
 }
+_DOCKING_TOOL_NAMES = frozenset(
+    {"molecular_docking", "run_docking", "get_docking_result"}
+)
 
 
 class AgentResultValidator:
@@ -51,6 +54,8 @@ class AgentResultValidator:
                 result,
                 trusted_checkpoint=trusted_checkpoint,
             )
+        if not result.success and result.tool_name in _DOCKING_TOOL_NAMES:
+            return self._scrub_docking_failure(result, rejected=False)
         if not result.success:
             return result
 
@@ -71,30 +76,69 @@ class AgentResultValidator:
             result.status = ObservationStatus.FAILED
             result.message = domain_error
             result.formatted = ""
-            if result.tool_name in {
-                "molecular_docking",
-                "run_docking",
-                "get_docking_result",
-            }:
-                safe_file_warnings = (
-                    ["Referenced artifact file does not exist"]
-                    if any("file does not exist" in warning for warning in warnings)
-                    else []
-                )
-                warnings = [*safe_file_warnings, domain_error]
-                result.data = None
-                result.artifacts = []
-                result.evidence = []
             result.error = AgentExecutionError(
                 code=AgentErrorCode.INVALID_OUTPUT,
                 message=domain_error,
                 details={"tool_name": result.tool_name},
             )
+            if result.tool_name in _DOCKING_TOOL_NAMES:
+                return self._scrub_docking_failure(
+                    result,
+                    rejected=True,
+                    missing_artifact=any(
+                        "file does not exist" in warning for warning in warnings
+                    ),
+                )
         result.warnings = warnings
         result.quality = {
             **result.quality,
             "validated": not bool(warnings) and result.success,
         }
+        return result
+
+    @staticmethod
+    def _scrub_docking_failure(
+        result: ToolResult,
+        *,
+        rejected: bool,
+        missing_artifact: bool = False,
+    ) -> ToolResult:
+        code = result.error.code if result.error else AgentErrorCode.INVALID_OUTPUT
+        cancelled = code == AgentErrorCode.CANCELLED
+        if cancelled:
+            message = "Docking was cancelled without a verified scientific result."
+            warning_code = "docking_execution_cancelled"
+        elif rejected:
+            message = "Docking evidence failed scientific validation."
+            warning_code = "docking_result_rejected"
+        else:
+            message = "Docking failed without a verified scientific result."
+            warning_code = "docking_execution_failed"
+        result.success = False
+        result.status = (
+            ObservationStatus.CANCELLED if cancelled else ObservationStatus.FAILED
+        )
+        result.message = message
+        result.data = None
+        result.formatted = ""
+        result.artifacts = []
+        result.evidence = []
+        result.provenance = None
+        result.warnings = (
+            ["Referenced artifact file does not exist", warning_code]
+            if missing_artifact
+            else [warning_code]
+        )
+        result.quality = {
+            "validated": False,
+            "failure_category": "docking_failure",
+            "failure_code": code.value,
+        }
+        result.error = AgentExecutionError(
+            code=code,
+            message=message,
+            details={"category": "docking_failure"},
+        )
         return result
 
     def _validate_generator_result(

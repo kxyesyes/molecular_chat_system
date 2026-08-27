@@ -820,6 +820,8 @@ _RESULT_ENUM_VALUES = frozenset(
         "completed",
         "uncertain",
         "reusable",
+        "opensandbox",
+        "gvisor",
     }
 )
 
@@ -894,6 +896,7 @@ _STRICT_DIGEST_RESULT_KEYS = frozenset(
         "output_hash",
         "pose_sha256",
         "sha256",
+        "sandbox_image_digest",
     }
 )
 _STRICT_ENUM_RESULT_KEYS = frozenset(
@@ -904,6 +907,9 @@ _STRICT_ENUM_RESULT_KEYS = frozenset(
         "execution_status",
         "quality",
         "validator_status",
+        "execution_backend",
+        "secure_runtime",
+        "cleanup_status",
     }
 )
 _STRICT_RESULT_OBJECT_SCHEMAS: dict[str, frozenset[str]] = {
@@ -926,6 +932,10 @@ _STRICT_RESULT_OBJECT_SCHEMAS: dict[str, frozenset[str]] = {
             "data",
             "quality",
             "validator_status",
+            "execution_backend",
+            "secure_runtime",
+            "sandbox_image_digest",
+            "cleanup_status",
         }
     ),
     "completion": frozenset(

@@ -308,6 +308,14 @@ def _summarize_docking_result(
             "status": TaskStatus.FAILED.value,
             "error_code": TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value,
         }
+    execution_contract = _safe_execution_contract(result.get("quality"))
+    if execution_contract is None:
+        return {
+            "task_id": task_id,
+            "attempt": attempt,
+            "status": TaskStatus.FAILED.value,
+            "error_code": TaskErrorCode.SCIENTIFIC_VALIDATION_FAILED.value,
+        }
     return {
         "task_id": task_id,
         "attempt": attempt,
@@ -316,10 +324,31 @@ def _summarize_docking_result(
             "pose_count": pose_count,
             "best_energy": float(best_energy),
             "pose_file": pose_file,
+            **execution_contract,
         },
         "artifacts": artifacts,
         "warnings": ([{"code": "TOOL_WARNING"}] if result.get("warnings") else []),
         "provenance": provenance,
+    }
+
+
+def _safe_execution_contract(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict) or value.get("execution_backend") is None:
+        return {}
+    digest = value.get("sandbox_image_digest")
+    if (
+        value.get("execution_backend") != "opensandbox"
+        or value.get("secure_runtime") != "gvisor"
+        or type(digest) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        or value.get("cleanup_status") != "succeeded"
+    ):
+        return None
+    return {
+        "execution_backend": "opensandbox",
+        "secure_runtime": "gvisor",
+        "sandbox_image_digest": digest,
+        "cleanup_status": "succeeded",
     }
 
 

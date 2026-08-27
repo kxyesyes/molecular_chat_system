@@ -132,6 +132,120 @@ def test_docking_validator_accepts_complete_opensandbox_trust_contract(tmp_path)
     assert validated.status == ObservationStatus.SUCCEEDED
 
 
+def test_docking_validator_scrubs_adversarial_already_failed_result(tmp_path):
+    secret = "sk-fake-task10-secret-123456789"
+    host_path = str((tmp_path / "private" / "pose.pdbqt").resolve())
+    result = ToolResult.error_result(
+        "molecular_docking",
+        AgentErrorCode.TOOL_TIMEOUT,
+        f"timeout at https://sandbox.internal.invalid container-raw-123 {secret}",
+        details={"pose_file": host_path, "binding_energy": -99.0},
+        warnings=[f"affinity -99 kcal/mol at {host_path} {secret}"],
+        evidence=[{"raw_stderr": f"pose bytes {secret}"}],
+        artifacts=[WorkflowArtifact("docking_pose", host_path, "Untrusted pose")],
+        quality={
+            "binding_energy": -99.0,
+            "affinity": "-99 kcal/mol",
+            "pose_file": host_path,
+            "container_id": "container-raw-123",
+        },
+        provenance=ToolProvenance(
+            tool_name="molecular_docking",
+            tool_version=f"endpoint-{secret}",
+        ),
+    )
+    result.data = {"binding_energy": -99.0, "pose": b"POSE BYTES"}
+    result.formatted = f"-99 kcal/mol {host_path}"
+    result.status = ObservationStatus.SUCCEEDED
+
+    validated = AgentResultValidator().validate_tool_result(result)
+    serialized = json.dumps(validated.to_legacy_dict(), default=str)
+
+    assert validated.success is False
+    assert validated.status == ObservationStatus.FAILED
+    assert validated.data is None
+    assert validated.formatted == ""
+    assert validated.artifacts == []
+    assert validated.evidence == []
+    assert validated.provenance is None
+    assert validated.warnings == ["docking_execution_failed"]
+    assert validated.quality == {
+        "validated": False,
+        "failure_category": "docking_failure",
+        "failure_code": "tool_timeout",
+    }
+    for forbidden in (
+        "binding_energy",
+        "affinity",
+        "kcal/mol",
+        "pose_file",
+        "POSE BYTES",
+        host_path,
+        secret,
+        "sandbox.internal.invalid",
+        "container-raw-123",
+    ):
+        assert forbidden not in serialized
+
+
+def test_docking_validator_scrubs_adversarial_rejected_success(tmp_path):
+    secret = "sk-fake-task10-rejected-123456789"
+    host_path = str((tmp_path / "missing" / "pose.pdbqt").resolve())
+    result = ToolResult.success_result(
+        "molecular_docking",
+        data={
+            "total_poses": 1,
+            "pose_file": host_path,
+            "best_pose": {"binding_energy": -88.0, "pose_file": host_path},
+        },
+        formatted=f"Affinity -88 kcal/mol {secret}",
+        warnings=[f"raw endpoint https://sandbox.internal.invalid {secret}"],
+        evidence=[{"pose": b"POSE BYTES", "path": host_path}],
+        artifacts=[WorkflowArtifact("docking_pose", host_path, "Untrusted pose")],
+        quality={
+            "real_execution": True,
+            "binding_energy": -88.0,
+            "affinity": "-88 kcal/mol",
+            "container_id": "container-raw-456",
+        },
+        provenance=ToolProvenance(
+            tool_name="molecular_docking",
+            tool_version="raw-endpoint",
+        ),
+    )
+
+    validated = AgentResultValidator().validate_tool_result(result)
+    serialized = json.dumps(validated.to_legacy_dict(), default=str)
+
+    assert validated.success is False
+    assert validated.data is None
+    assert validated.formatted == ""
+    assert validated.artifacts == []
+    assert validated.evidence == []
+    assert validated.provenance is None
+    assert validated.warnings == [
+        "Referenced artifact file does not exist",
+        "docking_result_rejected",
+    ]
+    assert validated.quality == {
+        "validated": False,
+        "failure_category": "docking_failure",
+        "failure_code": "invalid_output",
+    }
+    for forbidden in (
+        "binding_energy",
+        "affinity",
+        "kcal/mol",
+        "pose_file",
+        "POSE BYTES",
+        host_path,
+        secret,
+        "sandbox.internal.invalid",
+        "container-raw-456",
+    ):
+        assert forbidden not in serialized
+
+
 def _set_quality(name, value):
     def mutate(values):
         if value is None:

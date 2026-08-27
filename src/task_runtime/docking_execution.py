@@ -495,22 +495,34 @@ class DockingExecution:
             or not 0 <= elapsed_ms <= 7 * 24 * 60 * 60 * 1000
         ):
             elapsed_ms = None
+        quality = {
+            "real_execution": True,
+            "engine": _safe_optional_text(
+                result.quality.get("engine"), sensitive_values, 128
+            ),
+            "execution_status": _safe_optional_text(
+                result.quality.get("execution_status"), sensitive_values, 128
+            ),
+            "validated": bool(result.quality.get("validated")),
+        }
+        if result.quality.get("execution_backend") == "opensandbox":
+            quality.update(
+                {
+                    "execution_backend": "opensandbox",
+                    "secure_runtime": result.quality.get("secure_runtime"),
+                    "sandbox_image_digest": result.quality.get(
+                        "sandbox_image_digest"
+                    ),
+                    "cleanup_status": result.quality.get("cleanup_status"),
+                }
+            )
         return DockingResultMetadata(
             elapsed_ms=elapsed_ms,
             formatted=_sanitize_text(result.formatted, sensitive_values, 2048),
             warnings=warnings,
             evidence=evidence,
             artifacts=artifacts,
-            quality={
-                "real_execution": True,
-                "engine": _safe_optional_text(
-                    result.quality.get("engine"), sensitive_values, 128
-                ),
-                "execution_status": _safe_optional_text(
-                    result.quality.get("execution_status"), sensitive_values, 128
-                ),
-                "validated": bool(result.quality.get("validated")),
-            },
+            quality=quality,
         )
 
     def _finalize_prepared(
