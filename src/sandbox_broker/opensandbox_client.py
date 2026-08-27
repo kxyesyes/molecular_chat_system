@@ -1421,9 +1421,9 @@ class OpenSandboxClient:
                 timeout=self._cleanup_hard_timeout_seconds,
             )
             if operation not in done:
-                await self._cancel_or_quarantine_cleanup(operation)
-                if not operation.done() and retain_uncertain_operation is not None:
+                if retain_uncertain_operation is not None:
                     retain_uncertain_operation(operation)
+                await self._cancel_or_quarantine_cleanup(operation)
                 raise SandboxDestroyError(
                     "sandbox cleanup failed",
                     operation="destroy",
@@ -1431,9 +1431,9 @@ class OpenSandboxClient:
                 )
             return operation.result()
         except asyncio.CancelledError:
-            await self._cancel_or_quarantine_cleanup(operation)
             if not operation.done() and retain_uncertain_operation is not None:
                 retain_uncertain_operation(operation)
+            await self._cancel_or_quarantine_cleanup(operation)
             raise
         except SandboxDependencyUnavailableError:
             raise SandboxDependencyUnavailableError(
@@ -1613,6 +1613,14 @@ class OpenSandboxClient:
             failure.__traceback__ = None
             raise
         finally:
+            if (
+                uncertain_operation is None
+                and isinstance(self._factory, _OfficialSandboxFactory)
+            ):
+                for operation in self._factory_metadata_lifecycle_tasks():
+                    if not operation.done():
+                        retain_identity(operation)
+                        break
             async with self._cleanup_lock:
                 if (
                     uncertain_operation is None
@@ -1804,14 +1812,20 @@ class OpenSandboxClient:
             cancelled = True
             raise
         finally:
-            cancel_owner = False
-            async with self._cleanup_lock:
-                remaining_waiters = self._cleanup_waiters.get(task, 1) - 1
-                if remaining_waiters > 0:
-                    self._cleanup_waiters[task] = remaining_waiters
-                else:
-                    self._cleanup_waiters.pop(task, None)
-                    cancel_owner = cancelled and not task.done()
-            if cancel_owner:
-                task.cancel()
-                await asyncio.sleep(0)
+            self._release_cleanup_waiter(task, cancelled=cancelled)
+
+    def _release_cleanup_waiter(
+        self,
+        task: asyncio.Task[Any],
+        *,
+        cancelled: bool,
+    ) -> None:
+        """Release one waiter without introducing a cancellation point."""
+
+        remaining_waiters = self._cleanup_waiters.get(task, 1) - 1
+        if remaining_waiters > 0:
+            self._cleanup_waiters[task] = remaining_waiters
+            return
+        self._cleanup_waiters.pop(task, None)
+        if cancelled and not task.done():
+            task.cancel()

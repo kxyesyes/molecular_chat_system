@@ -2273,6 +2273,126 @@ def test_cancelled_metadata_waiter_does_not_cancel_shared_reconciliation(
     assert client._cleanup_waiters == {}
 
 
+def test_cancelled_official_waiter_retains_job_key_until_lifecycle_terminates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> tuple[OpenSandboxClient, int, int, int]:
+        list_started = asyncio.Event()
+        list_cancelled = asyncio.Event()
+        release = asyncio.Event()
+
+        class Manager:
+            create_calls = 0
+            list_calls = 0
+            close_calls = 0
+
+            @classmethod
+            async def create(cls, **_values: object) -> "Manager":
+                cls.create_calls += 1
+                return cls()
+
+            async def list_sandbox_infos(self, _filter: object) -> object:
+                type(self).list_calls += 1
+                list_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    list_cancelled.set()
+                    await release.wait()
+                return SimpleNamespace(sandbox_infos=[])
+
+            async def close(self) -> None:
+                type(self).close_calls += 1
+
+        monkeypatch.setattr(
+            opensandbox_client_module,
+            "_load_official_sdk",
+            lambda: _reconciliation_sdk(Manager),
+        )
+        client = OpenSandboxClient(config(tmp_path))
+        first = asyncio.create_task(client.destroy_by_job_id("job-official-owner"))
+        await list_started.wait()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        await list_cancelled.wait()
+        retained_before_second = len(client._cleanup_in_flight)
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await client.destroy_by_job_id("job-official-owner")
+            retained_after_second = len(client._cleanup_in_flight)
+        finally:
+            release.set()
+            for _ in range(20):
+                if not client._factory_metadata_lifecycle_tasks():
+                    break
+                await asyncio.sleep(0)
+        try:
+            await client.drain_cleanup()
+        except SandboxDestroyError:
+            await client.drain_cleanup()
+        assert client._cleanup_waiters == {}
+        return client, retained_before_second, retained_after_second, Manager.list_calls
+
+    client, retained_before, retained_after, list_calls = asyncio.run(scenario())
+    assert retained_before == 1
+    assert retained_after == 1
+    assert list_calls == 1
+    assert client._cleanup_in_flight == {}
+    assert client._factory_metadata_lifecycle_tasks() == ()
+
+
+def test_metadata_waiter_cleanup_survives_lock_contention_and_double_cancel(
+    tmp_path: Path,
+) -> None:
+    class ResistantCompensationFactory(FakeSandboxFactory):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def destroy_by_job_id(self, job_id: str) -> int:
+            del job_id
+            self.started.set()
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                await self.release.wait()
+            return 0
+
+    async def scenario() -> OpenSandboxClient:
+        fake = ResistantCompensationFactory()
+        client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+        waiter = asyncio.create_task(client.destroy_by_job_id("job-double-cancel"))
+        await fake.started.wait()
+        await client._cleanup_lock.acquire()
+        try:
+            waiter.cancel()
+            await asyncio.sleep(0)
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+        finally:
+            client._cleanup_lock.release()
+            fake.release.set()
+            for _ in range(20):
+                await asyncio.sleep(0)
+        try:
+            await client.drain_cleanup()
+        except SandboxDestroyError:
+            await client.drain_cleanup()
+        assert fake.cancelled.is_set()
+        return client
+
+    client = asyncio.run(scenario())
+    assert client._cleanup_waiters == {}
+    assert client._cleanup_in_flight == {}
+    assert client._cleanup_quarantine == set()
+
+
 def test_resistant_metadata_timeout_retains_job_identity_until_raw_completion(
     tmp_path: Path,
 ) -> None:

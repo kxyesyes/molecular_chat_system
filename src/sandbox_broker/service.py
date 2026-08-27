@@ -1339,8 +1339,8 @@ class SandboxBrokerService:
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     create_task.cancel()
-                    await asyncio.sleep(0)
                     self._retain_late_create(job_id, create_task)
+                    await asyncio.sleep(0)
                     confirmed = await self._reconcile_unknown_create(
                         job_id, deadline
                     )
@@ -1351,13 +1351,13 @@ class SandboxBrokerService:
                     )
                 except asyncio.CancelledError:
                     create_task.cancel()
-                    await asyncio.sleep(0)
                     self._retain_late_create(job_id, create_task)
+                    await asyncio.sleep(0)
                     raise
                 except asyncio.TimeoutError:
                     create_task.cancel()
-                    await asyncio.sleep(0)
                     self._retain_late_create(job_id, create_task)
+                    await asyncio.sleep(0)
                     confirmed = await self._reconcile_unknown_create(
                         job_id, deadline
                     )
@@ -1466,8 +1466,6 @@ class SandboxBrokerService:
     ) -> None:
         if not task.done():
             task.cancel()
-            await asyncio.sleep(0)
-        if not task.done():
             self._isolated_tasks.add(task)
 
             def reconcile_finished(completed: asyncio.Task[Any]) -> None:
@@ -1475,6 +1473,7 @@ class SandboxBrokerService:
                 self._consume_task_exception(completed)
 
             task.add_done_callback(reconcile_finished)
+            await asyncio.sleep(0)
         else:
             self._consume_task_exception(task)
 

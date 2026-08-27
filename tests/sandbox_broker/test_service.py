@@ -1284,6 +1284,7 @@ def test_create_cancellation_after_reconciliation_blocks_second_create(
 
 def test_create_retry_preserves_cancellation_during_reconciliation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class ResistantReconciliationClient(FakeSandboxClient):
         def __init__(self) -> None:
@@ -1313,7 +1314,25 @@ def test_create_retry_preserves_cancellation_during_reconciliation(
         service._create_retry_delay_seconds = 0.0
         service._run_cancel_grace_seconds = 0.01
         retry = asyncio.create_task(service._create_with_retry("job-cancel-reconcile"))
+        original_sleep = asyncio.sleep
+        handoff_started = asyncio.Event()
+        handoff_release = asyncio.Event()
+
+        async def controlled_sleep(delay: float) -> None:
+            if (
+                delay == 0
+                and asyncio.current_task() is retry
+                and not handoff_started.is_set()
+            ):
+                handoff_started.set()
+                await handoff_release.wait()
+                return
+            await original_sleep(delay)
+
+        monkeypatch.setattr(service_module.asyncio, "sleep", controlled_sleep)
         await sdk.reconcile_started.wait()
+        retry.cancel()
+        await handoff_started.wait()
         retry.cancel()
         try:
             with pytest.raises(asyncio.CancelledError):
@@ -1321,6 +1340,7 @@ def test_create_retry_preserves_cancellation_during_reconciliation(
             assert sdk.reconcile_cancelled.is_set()
             assert len(service._isolated_tasks) == 1
         finally:
+            handoff_release.set()
             sdk.reconcile_release.set()
             for _ in range(20):
                 if not service._isolated_tasks:
@@ -1330,6 +1350,86 @@ def test_create_retry_preserves_cancellation_during_reconciliation(
 
     service, sdk = asyncio.run(scenario())
     assert sdk.create_count == 1
+    assert service._isolated_tasks == set()
+
+
+def test_double_cancel_at_create_handoff_retains_and_cleans_late_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ResistantCreateClient(FakeSandboxClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.create_started = asyncio.Event()
+            self.create_cancelled = asyncio.Event()
+            self.create_release = asyncio.Event()
+            self.live_ids: set[str] = set()
+
+        async def create(self, job_id: str) -> SandboxHandle:
+            self.create_count += 1
+            self.create_started.set()
+            try:
+                await self.create_release.wait()
+            except asyncio.CancelledError:
+                self.create_cancelled.set()
+                await self.create_release.wait()
+            sandbox_id = f"sandbox-{job_id}-late"
+            self.live_ids.add(sandbox_id)
+            return SandboxHandle(sandbox_id, object())
+
+        async def destroy(self, handle: SandboxHandle) -> None:
+            self.destroy_count += 1
+            self.destroyed_ids.append(handle.sandbox_id)
+            self.live_ids.discard(handle.sandbox_id)
+
+    async def scenario() -> tuple[SandboxBrokerService, ResistantCreateClient, bool]:
+        sdk = ResistantCreateClient()
+        service, _, _ = _service(tmp_path, sdk)
+        create = asyncio.create_task(service._create_with_retry("job-create-handoff"))
+        original_sleep = asyncio.sleep
+        handoff_started = asyncio.Event()
+        handoff_release = asyncio.Event()
+
+        async def controlled_sleep(delay: float) -> None:
+            if (
+                delay == 0
+                and asyncio.current_task() is create
+                and not handoff_started.is_set()
+            ):
+                handoff_started.set()
+                await handoff_release.wait()
+                return
+            await original_sleep(delay)
+
+        monkeypatch.setattr(service_module.asyncio, "sleep", controlled_sleep)
+        await sdk.create_started.wait()
+        create.cancel()
+        await handoff_started.wait()
+        create.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(create), timeout=0.5)
+        handoff_release.set()
+        assert sdk.create_cancelled.is_set()
+
+        stop_incomplete = False
+        try:
+            await service.stop(timeout=0.05)
+        except StopIncomplete:
+            stop_incomplete = True
+        tracked_before_release = bool(service._create_tasks)
+        sdk.create_release.set()
+        await service.stop(timeout=1.0)
+        await asyncio.sleep(0)
+        return service, sdk, stop_incomplete and tracked_before_release
+
+    service, sdk, shutdown_waited = asyncio.run(scenario())
+    assert shutdown_waited is True
+    assert sdk.create_count == 1
+    assert sdk.destroy_count == 1
+    assert sdk.destroyed_ids == ["sandbox-job-create-handoff-late"]
+    assert sdk.live_ids == set()
+    assert service._create_tasks == {}
+    assert service._cleanup_tasks == {}
     assert service._isolated_tasks == set()
 
 
