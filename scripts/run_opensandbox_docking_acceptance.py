@@ -891,14 +891,14 @@ def _exercise_sacrificial_security_contract(
     runner: object,
     payload: Mapping[str, Any],
     observer_factory: Callable[[], object],
-) -> tuple[list[str], dict[str, str]]:
+) -> tuple[list[str], dict[str, str], str | None]:
     """Run workload-altering probes in one dedicated worker/Broker sandbox."""
 
     failures: list[str] = []
     observer = observer_factory()
     enable_probes = getattr(observer, "enable_intrusive_probes", None)
     if not callable(enable_probes):
-        return ["sacrificial_probe_control_unavailable"], {}
+        return ["sacrificial_probe_control_unavailable"], {}, None
     enable_probes()
     cancel_event = threading.Event()
     observer.start()
@@ -939,9 +939,14 @@ def _exercise_sacrificial_security_contract(
             versions["meeko"] = meeko_version
     if set(versions) != {"vina", "meeko"}:
         failures.append("tool_probe_failed")
+    image_digest = getattr(observer, "image_digest", None)
+    if type(image_digest) is not str or _SHA256.fullmatch(image_digest) is None:
+        failures.append("sacrificial_image_digest_invalid")
+        image_digest = None
     return (
         [_safe_code(code, "sacrificial_probe_failed") for code in failures],
         versions,
+        image_digest,
     )
 
 
@@ -1065,8 +1070,9 @@ def run_real_acceptance(
     )
 
     reference_tool_versions: dict[str, str] | None = None
+    reference_image_digest: str | None = None
     if exercise_faults:
-        sacrificial_failures, reference_tool_versions = (
+        sacrificial_failures, reference_tool_versions, reference_image_digest = (
             _exercise_sacrificial_security_contract(
                 runner,
                 request,
@@ -1085,7 +1091,10 @@ def run_real_acceptance(
         result = runner.execute(request, job_id=trace_id)
         observer.stop()
         if reference_tool_versions is not None:
-            observer.tool_versions = dict(reference_tool_versions)
+            if getattr(observer, "image_digest", None) == reference_image_digest:
+                observer.tool_versions = dict(reference_tool_versions)
+            else:
+                security_failures.append("tool_provenance_image_mismatch")
         run = _project_result(
             result,
             trace_id=trace_id,

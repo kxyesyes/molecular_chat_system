@@ -658,7 +658,7 @@ def test_destructive_probes_use_dedicated_worker_broker_sandbox() -> None:
                 warnings=[],
             )
 
-    failures, versions = acceptance._exercise_sacrificial_security_contract(
+    failures, versions, image_digest = acceptance._exercise_sacrificial_security_contract(
         SacrificialRunner(),
         {"center": [5.99, 3.01, 17.345]},
         lambda: observer,
@@ -666,9 +666,80 @@ def test_destructive_probes_use_dedicated_worker_broker_sandbox() -> None:
 
     assert failures == []
     assert versions == observer.tool_versions
+    assert image_digest == observer.image_digest
     assert len(calls) == 1
     assert calls[0][1].startswith("acceptance-sacrificial-")
     assert observer.intrusive_enabled
+
+
+def test_measured_image_must_match_sacrificial_tool_provenance_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    acceptance = _module()
+    pose, digest = _pose(tmp_path)
+    result = _success_result(pose, digest)
+
+    class Runner:
+        def execute(
+            self,
+            payload,
+            *,
+            job_id,
+            progress_callback=None,
+            cancel_event=None,
+        ):
+            if cancel_event is not None:
+                deadline = time.monotonic() + 1.0
+                while not cancel_event.is_set():
+                    if time.monotonic() >= deadline:
+                        raise AssertionError("sacrificial cancellation was not requested")
+                    time.sleep(0.001)
+                return SimpleNamespace(
+                    success=False,
+                    error=SimpleNamespace(code=SimpleNamespace(value="cancelled")),
+                    warnings=[],
+                )
+            return result
+
+    class SacrificialObserver(_FakeObserver):
+        def __init__(self, image_digest: str) -> None:
+            super().__init__()
+            self.image_digest = image_digest
+            self.probes_complete = threading.Event()
+
+        def enable_intrusive_probes(self) -> None:
+            pass
+
+        def start(self) -> None:
+            self.probes_complete.set()
+
+        def wait_for_probes_complete(self, timeout=30.0) -> bool:
+            return self.probes_complete.wait(timeout)
+
+    observers = iter(
+        [
+            SacrificialObserver("a" * 64),
+            SacrificialObserver("b" * 64),
+        ]
+    )
+    monkeypatch.setattr(acceptance, "_exercise_fault_contracts", lambda *_args: [])
+
+    report = acceptance.run_real_acceptance(
+        receptor=ROOT / "data/samples/MAGL_5zun.pdb",
+        ligand=ROOT / "data/samples/5.sdf",
+        center=(5.99, 3.01, 17.345),
+        size=(20.0, 20.0, 20.0),
+        repeat=1,
+        report_path=tmp_path / "report.json",
+        runner_factory=lambda _root: Runner(),
+        deployment_validator=lambda: [],
+        observer_factory=lambda: next(observers),
+        exercise_faults=True,
+    )
+
+    assert report["status"] == "failed"
+    assert "tool_provenance_image_mismatch" in report["security_failures"]
 
 
 def test_fault_observer_can_skip_intrusive_exec_probes() -> None:
