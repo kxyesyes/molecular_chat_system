@@ -260,6 +260,73 @@ def test_projection_rejects_pose_count_energy_and_inspected_digest_mismatch(
     assert "pose_energy_mismatch" in failed["failure_codes"]
 
 
+def test_raw_vina_package_version_matches_equivalent_version_banner(
+    tmp_path: Path,
+) -> None:
+    acceptance = _module()
+    pose, digest = _pose(tmp_path)
+    result = _success_result(pose, digest)
+    result.provenance.tool_version = "1.2.5"
+    observer = _FakeObserver()
+    observer.tool_versions["vina"] = "AutoDock Vina v1.2.5"
+
+    projected = acceptance._project_result(
+        result,
+        trace_id="acceptance-version-equivalent",
+        project_root=tmp_path,
+        observer=observer,
+    )
+
+    assert projected["status"] == "passed"
+    assert "tool_version_mismatch" not in projected["failure_codes"]
+    assert projected["tool_versions"]["vina"] == "1.2.5"
+
+
+@pytest.mark.parametrize(
+    "observed_version",
+    ["AutoDock Vina v1.2.6", "AutoDock Vina development"],
+)
+def test_vina_version_comparison_remains_fail_closed(
+    tmp_path: Path,
+    observed_version: str,
+) -> None:
+    acceptance = _module()
+    pose, digest = _pose(tmp_path)
+    result = _success_result(pose, digest)
+    result.provenance.tool_version = "1.2.5"
+    observer = _FakeObserver()
+    observer.tool_versions["vina"] = observed_version
+
+    projected = acceptance._project_result(
+        result,
+        trace_id="acceptance-version-rejected",
+        project_root=tmp_path,
+        observer=observer,
+    )
+
+    assert projected["status"] == "failed"
+    assert "tool_version_mismatch" in projected["failure_codes"]
+
+
+def test_identical_unparseable_vina_versions_are_rejected(tmp_path: Path) -> None:
+    acceptance = _module()
+    pose, digest = _pose(tmp_path)
+    result = _success_result(pose, digest)
+    result.provenance.tool_version = "development"
+    observer = _FakeObserver()
+    observer.tool_versions["vina"] = "development"
+
+    projected = acceptance._project_result(
+        result,
+        trace_id="acceptance-version-unparseable",
+        project_root=tmp_path,
+        observer=observer,
+    )
+
+    assert projected["status"] == "failed"
+    assert "tool_version_invalid" in projected["failure_codes"]
+
+
 def test_fake_failure_and_security_failures_are_stable_and_counted(
     tmp_path: Path,
 ) -> None:

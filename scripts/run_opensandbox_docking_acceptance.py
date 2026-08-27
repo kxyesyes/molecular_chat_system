@@ -35,6 +35,12 @@ _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _SAFE_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _TRACE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .+_()-]{0,127}\Z")
+_VINA_VERSION = re.compile(
+    r"(?:(?:AutoDock Vina )(?:v)?|v)?"
+    r"(0|[1-9][0-9]{0,8})\."
+    r"(0|[1-9][0-9]{0,8})\."
+    r"(0|[1-9][0-9]{0,8})\Z"
+)
 _IMAGE_REFERENCE = re.compile(r"[^\s@]+@sha256:([0-9a-f]{64})\Z")
 _VINA_RESULT = re.compile(
     rb"^REMARK VINA RESULT:\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)\s*$"
@@ -135,6 +141,16 @@ def _safe_version(value: object) -> str | None:
         return None
     sanitized, changed = sanitize_sensitive_text(candidate, max_chars=128)
     return candidate if not changed and sanitized == candidate else None
+
+
+def _canonical_vina_version(value: object) -> tuple[int, int, int] | None:
+    candidate = _safe_version(value)
+    if candidate is None:
+        return None
+    match = _VINA_VERSION.fullmatch(candidate)
+    if match is None:
+        return None
+    return tuple(int(component) for component in match.groups())
 
 
 def _error_code(result: object) -> str:
@@ -307,15 +323,21 @@ def _project_result(
 
     versions: dict[str, str] = {}
     vina_version = _safe_version(getattr(provenance, "tool_version", None))
-    if vina_version is None:
+    canonical_vina_version = _canonical_vina_version(vina_version)
+    if vina_version is None or canonical_vina_version is None:
         failures.append("tool_version_invalid")
     else:
         versions["vina"] = vina_version
     observed_versions = getattr(observer, "tool_versions", {})
     if isinstance(observed_versions, Mapping):
         observed_vina = _safe_version(observed_versions.get("vina"))
+        canonical_observed_vina = _canonical_vina_version(observed_vina)
         meeko_version = _safe_version(observed_versions.get("meeko"))
-        if observed_vina is None or observed_vina != vina_version:
+        if (
+            observed_vina is None
+            or canonical_observed_vina is None
+            or canonical_observed_vina != canonical_vina_version
+        ):
             failures.append("tool_version_mismatch")
         if meeko_version is not None:
             versions["meeko"] = meeko_version
