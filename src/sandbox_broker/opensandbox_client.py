@@ -18,8 +18,9 @@ from typing import Any, Protocol
 from .config import BrokerConfig
 
 
+_SANDBOX_PYTHON = "/opt/conda/bin/python"
 _FIXED_COMMAND = (
-    "python /opt/medchat/run_docking.py "
+    f"{_SANDBOX_PYTHON} /opt/medchat/run_docking.py "
     "--request /workspace/input/request.json --output /workspace/output"
 )
 _FIXED_ENTRYPOINT = ("sleep", "infinity")
@@ -621,7 +622,7 @@ def _fixed_list_command(path: str, pattern: str) -> str:
     """Build the one internal discovery command from already-validated tokens."""
 
     return (
-        "python -c \"import base64;"
+        f"{_SANDBOX_PYTHON} -c \"import base64;"
         f"exec(base64.b64decode('{_LIST_HELPER_B64}'))\" "
         f"'{path}' '{pattern}'"
     )

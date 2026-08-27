@@ -804,6 +804,14 @@ def test_script_has_no_direct_opensandbox_or_unopted_docker_execution() -> None:
     assert "scientific_mock" not in source.lower()
 
 
+def test_real_probes_use_the_pinned_image_python_interpreter() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert '_SANDBOX_PYTHON = "/opt/conda/bin/python"' in source
+    assert 'self._exec(container_id, "python"' not in source
+    assert 'container_id,\n            "python",' not in source
+
+
 def test_readme_covers_qemu_install_secret_image_validation_and_rollback() -> None:
     text = README.read_text(encoding="utf-8")
     required = (

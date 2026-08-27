@@ -40,7 +40,7 @@ except ModuleNotFoundError:  # Python 3.10 deployment baseline
 
 SHA256 = "a" * 64
 FIXED_COMMAND = (
-    "python /opt/medchat/run_docking.py "
+    "/opt/conda/bin/python /opt/medchat/run_docking.py "
     "--request /workspace/input/request.json --output /workspace/output"
 )
 

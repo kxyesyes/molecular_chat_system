@@ -79,6 +79,7 @@ _CONTAINER_WAIT_SECONDS = 45.0
 _CLEANUP_WAIT_SECONDS = 30.0
 _EXPECTED_NETWORK = "medchat-opensandbox"
 _EXPECTED_NETWORK_LABEL = "com.medchat.opensandbox.network=v1"
+_SANDBOX_PYTHON = "/opt/conda/bin/python"
 
 
 @dataclass(frozen=True)
@@ -686,7 +687,7 @@ class DockerSandboxObserver:
             "sys.exit(1 if any(os.path.exists(p) and "
             "(os.access(p,os.R_OK) or os.access(p,os.W_OK)) for p in paths) else 0)"
         )
-        if not self._exec(container_id, "python", "-c", read_probe):
+        if not self._exec(container_id, _SANDBOX_PYTHON, "-c", read_probe):
             self.failure_codes.append("host_data_exposed")
 
         filesystem_probe = (
@@ -698,7 +699,7 @@ class DockerSandboxObserver:
             "\nout='/workspace/output/acceptance-write';open(out,'wb').write(b'ok');os.unlink(out);"
             "sys.exit(1 if bad else 0)"
         )
-        if not self._exec(container_id, "python", "-c", filesystem_probe):
+        if not self._exec(container_id, _SANDBOX_PYTHON, "-c", filesystem_probe):
             self.failure_codes.append("filesystem_policy_invalid")
 
         network_probe = (
@@ -712,7 +713,9 @@ class DockerSandboxObserver:
             "\n except OSError: pass"
             "\nsys.exit(0 if ok else 1)"
         )
-        if not self._exec(container_id, "python", "-c", network_probe, timeout=15.0):
+        if not self._exec(
+            container_id, _SANDBOX_PYTHON, "-c", network_probe, timeout=15.0
+        ):
             self.failure_codes.append("outbound_network_accessible")
 
         pid_probe = (
@@ -727,7 +730,9 @@ class DockerSandboxObserver:
             "\n  except Exception: p.kill();p.wait()"
             "\nsys.exit(0 if limited else 1)"
         )
-        if not self._exec(container_id, "python", "-c", pid_probe, timeout=20.0):
+        if not self._exec(
+            container_id, _SANDBOX_PYTHON, "-c", pid_probe, timeout=20.0
+        ):
             self.failure_codes.append("pid_limit_not_enforced")
 
         descendant_probe = r'''
@@ -787,7 +792,7 @@ raise SystemExit(0 if accepted and pids and not remaining else 1)
 '''.strip()
         if not self._exec(
             container_id,
-            "python",
+            _SANDBOX_PYTHON,
             "-c",
             descendant_probe,
             timeout=8.0,
@@ -798,14 +803,14 @@ raise SystemExit(0 if accepted and pids and not remaining else 1)
         vina_package = self._docker(
             "exec",
             container_id,
-            "python",
+            _SANDBOX_PYTHON,
             "-c",
             "import importlib.metadata as m;print(m.version('vina'))",
         )
         meeko = self._docker(
             "exec",
             container_id,
-            "python",
+            _SANDBOX_PYTHON,
             "-c",
             "import importlib.metadata as m;print(m.version('meeko'))",
         )
