@@ -171,6 +171,26 @@ def config(tmp_path: Path) -> BrokerConfig:
     )
 
 
+def _reconciliation_sdk(manager: object) -> object:
+    class ConnectionConfig:
+        def __init__(self, **_values: object) -> None:
+            pass
+
+    class SandboxFilter:
+        def __init__(self, **_values: object) -> None:
+            pass
+
+    return opensandbox_client_module._OfficialSDK(
+        ConnectionConfig=ConnectionConfig,
+        Sandbox=object,
+        SandboxManager=manager,
+        WriteEntry=object,
+        SearchEntry=object,
+        ExecutionHandlers=object,
+        SandboxFilter=SandboxFilter,
+    )
+
+
 def test_adapter_uses_only_pinned_policy_and_fixed_command(tmp_path: Path) -> None:
     async def scenario() -> tuple[FakeSandboxFactory, object, object]:
         fake = FakeSandboxFactory()
@@ -2287,6 +2307,367 @@ def test_official_reconciliation_lists_only_fixed_job_metadata_then_kills(
         }
     ]
     assert killed == ["sandbox-1"]
+
+
+def test_official_metadata_observation_retries_once_then_records_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retries: list[tuple[str, str]] = []
+    sleeps: list[float] = []
+
+    class Telemetry:
+        def record_retry(self, operation: str, outcome: str) -> None:
+            retries.append((operation, outcome))
+
+    class Manager:
+        list_calls = 0
+        killed: list[str] = []
+        close_calls = 0
+
+        @classmethod
+        async def create(cls, **_values: object) -> "Manager":
+            return cls()
+
+        async def list_sandbox_infos(self, _filter: object) -> object:
+            type(self).list_calls += 1
+            if type(self).list_calls == 1:
+                raise ConnectionError("private metadata transport detail")
+            return SimpleNamespace(
+                sandbox_infos=[
+                    SimpleNamespace(
+                        id="sandbox-1",
+                        metadata={
+                            "medchat.operation": "molecular_docking",
+                            "medchat.job_id": "job-1",
+                        },
+                    )
+                ]
+            )
+
+        async def kill_sandbox(self, sandbox_id: str) -> None:
+            type(self).killed.append(sandbox_id)
+
+        async def close(self) -> None:
+            type(self).close_calls += 1
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(
+        opensandbox_client_module,
+        "_load_official_sdk",
+        lambda: _reconciliation_sdk(Manager),
+    )
+    client = OpenSandboxClient(
+        config(tmp_path),
+        telemetry=Telemetry(),
+        metadata_retry_sleep=sleep,
+        metadata_retry_backoff=lambda _attempt: 0.0,
+    )
+
+    destroyed = asyncio.run(client.destroy_by_job_id("job-1"))
+
+    assert destroyed == 1
+    assert Manager.list_calls == 2
+    assert Manager.killed == ["sandbox-1"]
+    assert Manager.close_calls == 1
+    assert sleeps == [0.0]
+    assert retries == [("metadata", "attempted"), ("metadata", "succeeded")]
+
+
+def test_official_metadata_observation_exhaustion_is_sanitized_and_closes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retries: list[tuple[str, str]] = []
+
+    class Telemetry:
+        def record_retry(self, operation: str, outcome: str) -> None:
+            retries.append((operation, outcome))
+
+    class Manager:
+        list_calls = 0
+        close_calls = 0
+
+        @classmethod
+        async def create(cls, **_values: object) -> "Manager":
+            return cls()
+
+        async def list_sandbox_infos(self, _filter: object) -> object:
+            type(self).list_calls += 1
+            raise ConnectionError("private-marker C:\\private\\metadata")
+
+        async def close(self) -> None:
+            type(self).close_calls += 1
+
+    monkeypatch.setattr(
+        opensandbox_client_module,
+        "_load_official_sdk",
+        lambda: _reconciliation_sdk(Manager),
+    )
+    client = OpenSandboxClient(
+        config(tmp_path),
+        telemetry=Telemetry(),
+        metadata_retry_sleep=lambda _delay: asyncio.sleep(0),
+        metadata_retry_backoff=lambda _attempt: 0.0,
+    )
+
+    with pytest.raises(SandboxListError) as raised:
+        asyncio.run(client.destroy_by_job_id("job-1"))
+
+    assert Manager.list_calls == 2
+    assert Manager.close_calls == 1
+    assert retries == [("metadata", "attempted"), ("metadata", "exhausted")]
+    assert raised.value.operation == "metadata"
+    assert raised.value.failure_class is FailureClass.CONNECTION_FAILED
+    assert "private-marker" not in str(raised.value)
+    assert "private-marker" not in repr(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_error"),
+    [
+        (
+            SandboxInputError("invalid metadata input", operation="metadata"),
+            SandboxDestroyError,
+        ),
+        (
+            SandboxProtocolError("invalid metadata", operation="metadata"),
+            SandboxProtocolError,
+        ),
+        (
+            SandboxDependencyUnavailableError(
+                "dependency unavailable", operation="metadata"
+            ),
+            SandboxDependencyUnavailableError,
+        ),
+    ],
+)
+def test_official_metadata_protocol_and_dependency_failures_are_not_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    expected_error: type[Exception],
+) -> None:
+    class Manager:
+        list_calls = 0
+        close_calls = 0
+
+        @classmethod
+        async def create(cls, **_values: object) -> "Manager":
+            return cls()
+
+        async def list_sandbox_infos(self, _filter: object) -> object:
+            type(self).list_calls += 1
+            raise failure
+
+        async def close(self) -> None:
+            type(self).close_calls += 1
+
+    monkeypatch.setattr(
+        opensandbox_client_module,
+        "_load_official_sdk",
+        lambda: _reconciliation_sdk(Manager),
+    )
+    client = OpenSandboxClient(
+        config(tmp_path),
+        metadata_retry_sleep=lambda _delay: asyncio.sleep(0),
+        metadata_retry_backoff=lambda _attempt: 0.0,
+    )
+
+    with pytest.raises(expected_error):
+        asyncio.run(client.destroy_by_job_id("job-1"))
+
+    assert Manager.list_calls == 1
+    assert Manager.close_calls == 1
+
+
+def test_official_metadata_retry_sleep_cancellation_propagates_and_closes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Manager:
+        list_calls = 0
+        close_calls = 0
+
+        @classmethod
+        async def create(cls, **_values: object) -> "Manager":
+            return cls()
+
+        async def list_sandbox_infos(self, _filter: object) -> object:
+            type(self).list_calls += 1
+            raise ConnectionError("metadata transport failed")
+
+        async def close(self) -> None:
+            type(self).close_calls += 1
+
+    async def cancelled_sleep(_delay: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        opensandbox_client_module,
+        "_load_official_sdk",
+        lambda: _reconciliation_sdk(Manager),
+    )
+    client = OpenSandboxClient(
+        config(tmp_path),
+        metadata_retry_sleep=cancelled_sleep,
+        metadata_retry_backoff=lambda _attempt: 0.0,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(client.destroy_by_job_id("job-1"))
+
+    assert Manager.list_calls == 1
+    assert Manager.close_calls == 1
+
+
+def test_official_metadata_deadline_prevents_second_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retries: list[tuple[str, str]] = []
+    sleep_called = False
+
+    class Telemetry:
+        def record_retry(self, operation: str, outcome: str) -> None:
+            retries.append((operation, outcome))
+
+    class Manager:
+        list_calls = 0
+
+        @classmethod
+        async def create(cls, **_values: object) -> "Manager":
+            return cls()
+
+        async def list_sandbox_infos(self, _filter: object) -> object:
+            type(self).list_calls += 1
+            raise ConnectionError("metadata transport failed")
+
+        async def close(self) -> None:
+            pass
+
+    async def sleep(_delay: float) -> None:
+        nonlocal sleep_called
+        sleep_called = True
+
+    monkeypatch.setattr(
+        opensandbox_client_module,
+        "_load_official_sdk",
+        lambda: _reconciliation_sdk(Manager),
+    )
+    client = OpenSandboxClient(
+        config(tmp_path),
+        telemetry=Telemetry(),
+        metadata_retry_sleep=sleep,
+        metadata_retry_backoff=lambda _attempt: 21.0,
+    )
+
+    with pytest.raises(SandboxListError):
+        asyncio.run(client.destroy_by_job_id("job-1"))
+
+    assert Manager.list_calls == 1
+    assert sleep_called is False
+    assert retries == [("metadata", "attempted"), ("metadata", "exhausted")]
+
+
+def test_official_metadata_telemetry_failure_does_not_change_retry_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Telemetry:
+        def record_retry(self, operation: str, outcome: str) -> None:
+            del operation, outcome
+            raise RuntimeError("telemetry unavailable")
+
+    class Manager:
+        list_calls = 0
+
+        @classmethod
+        async def create(cls, **_values: object) -> "Manager":
+            return cls()
+
+        async def list_sandbox_infos(self, _filter: object) -> object:
+            type(self).list_calls += 1
+            if type(self).list_calls == 1:
+                raise ConnectionResetError("metadata transport failed")
+            return SimpleNamespace(sandbox_infos=[])
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        opensandbox_client_module,
+        "_load_official_sdk",
+        lambda: _reconciliation_sdk(Manager),
+    )
+    client = OpenSandboxClient(
+        config(tmp_path),
+        telemetry=Telemetry(),
+        metadata_retry_sleep=lambda _delay: asyncio.sleep(0),
+        metadata_retry_backoff=lambda _attempt: 0.0,
+    )
+
+    destroyed = asyncio.run(client.destroy_by_job_id("job-1"))
+
+    assert destroyed == 0
+    assert Manager.list_calls == 2
+
+
+def test_official_kill_failure_is_not_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Manager:
+        list_calls = 0
+        kill_calls = 0
+        close_calls = 0
+
+        @classmethod
+        async def create(cls, **_values: object) -> "Manager":
+            return cls()
+
+        async def list_sandbox_infos(self, _filter: object) -> object:
+            type(self).list_calls += 1
+            return SimpleNamespace(
+                sandbox_infos=[
+                    SimpleNamespace(
+                        id="sandbox-1",
+                        metadata={
+                            "medchat.operation": "molecular_docking",
+                            "medchat.job_id": "job-1",
+                        },
+                    )
+                ]
+            )
+
+        async def kill_sandbox(self, _sandbox_id: str) -> None:
+            type(self).kill_calls += 1
+            raise ConnectionError("kill failed")
+
+        async def close(self) -> None:
+            type(self).close_calls += 1
+
+    monkeypatch.setattr(
+        opensandbox_client_module,
+        "_load_official_sdk",
+        lambda: _reconciliation_sdk(Manager),
+    )
+    client = OpenSandboxClient(
+        config(tmp_path),
+        metadata_retry_sleep=lambda _delay: asyncio.sleep(0),
+        metadata_retry_backoff=lambda _attempt: 0.0,
+    )
+
+    with pytest.raises(SandboxDestroyError):
+        asyncio.run(client.destroy_by_job_id("job-1"))
+
+    assert Manager.list_calls == 1
+    assert Manager.kill_calls == 1
+    assert Manager.close_calls == 1
 
 
 def test_all_domain_errors_share_one_narrow_base() -> None:

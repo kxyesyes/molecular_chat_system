@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import random
 import re
 import unicodedata
 from collections import OrderedDict
@@ -116,6 +117,19 @@ _LIST_HELPER_B64 = base64.b64encode(_LIST_HELPER_SOURCE.encode("utf-8")).decode(
 _CONTROL_PLANE_OPERATIONS = frozenset(
     {"create", "readiness", "metadata", "upload", "command", "destroy"}
 )
+_RETRYABLE_METADATA_FAILURES = frozenset(
+    {
+        FailureClass.CONNECTION_FAILED,
+        FailureClass.SERVER_500,
+        FailureClass.PROXY_502,
+        FailureClass.RESOURCE_LIMIT,
+        FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+    }
+)
+
+
+def _default_metadata_retry_backoff(_attempt: int) -> float:
+    return random.uniform(0.05, 0.15)
 
 
 def _http_status(failure: object) -> int | None:
@@ -384,8 +398,116 @@ def _load_official_sdk() -> _OfficialSDK:
 class _OfficialSandboxFactory:
     """Translate fixed primitive policy into OpenSandbox 0.1.15 objects."""
 
-    def __init__(self, config: BrokerConfig) -> None:
+    def __init__(
+        self,
+        config: BrokerConfig,
+        *,
+        telemetry: object | None = None,
+        metadata_retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        metadata_retry_backoff: Callable[[int], float] = (
+            _default_metadata_retry_backoff
+        ),
+    ) -> None:
         self._config = config
+        self._telemetry = telemetry
+        self._metadata_retry_sleep = metadata_retry_sleep
+        self._metadata_retry_backoff = metadata_retry_backoff
+
+    def _record_metadata_retry(self, outcome: str) -> None:
+        if self._telemetry is None:
+            return
+        try:
+            self._telemetry.record_retry("metadata", outcome)
+        except BaseException:
+            pass
+
+    async def _list_sandbox_infos(
+        self,
+        manager: Any,
+        sandbox_filter: Any,
+        deadline: float,
+    ) -> object:
+        retried = False
+        loop = asyncio.get_running_loop()
+        for attempt in (1, 2):
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                if retried:
+                    self._record_metadata_retry("exhausted")
+                raise SandboxListError(
+                    "sandbox metadata observation failed",
+                    operation="metadata",
+                ) from None
+            try:
+                page = await asyncio.wait_for(
+                    manager.list_sandbox_infos(sandbox_filter),
+                    timeout=remaining,
+                )
+            except (
+                SandboxInputError,
+                SandboxDependencyUnavailableError,
+                SandboxProtocolError,
+            ):
+                raise
+            except Exception as failure:
+                failure_class = classify_control_plane_failure(
+                    "metadata", failure
+                )
+                if (
+                    attempt == 2
+                    or failure_class not in _RETRYABLE_METADATA_FAILURES
+                ):
+                    if retried:
+                        self._record_metadata_retry("exhausted")
+                    raise SandboxListError(
+                        "sandbox metadata observation failed",
+                        operation="metadata",
+                        failure_class=failure_class,
+                    ) from None
+                retried = True
+                self._record_metadata_retry("attempted")
+                try:
+                    delay = self._metadata_retry_backoff(attempt)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self._record_metadata_retry("exhausted")
+                    raise SandboxListError(
+                        "sandbox metadata observation failed",
+                        operation="metadata",
+                        failure_class=failure_class,
+                    ) from None
+                remaining = deadline - loop.time()
+                if (
+                    type(delay) not in {int, float}
+                    or delay < 0
+                    or delay >= remaining
+                ):
+                    self._record_metadata_retry("exhausted")
+                    raise SandboxListError(
+                        "sandbox metadata observation failed",
+                        operation="metadata",
+                        failure_class=failure_class,
+                    ) from None
+                try:
+                    await asyncio.wait_for(
+                        self._metadata_retry_sleep(float(delay)),
+                        timeout=remaining,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self._record_metadata_retry("exhausted")
+                    raise SandboxListError(
+                        "sandbox metadata observation failed",
+                        operation="metadata",
+                        failure_class=failure_class,
+                    ) from None
+                continue
+            if retried:
+                self._record_metadata_retry("succeeded")
+            return page
+        raise AssertionError("unreachable metadata retry state")
 
     def _sdk(self) -> _OfficialSDK:
         try:
@@ -491,11 +613,15 @@ class _OfficialSandboxFactory:
                 "the pinned OpenSandbox SDK metadata filter is unavailable",
                 operation="destroy",
             )
+        deadline = (
+            asyncio.get_running_loop().time() + _SDK_REQUEST_TIMEOUT_SECONDS
+        )
         manager = await sdk.SandboxManager.create(
             connection_config=self._connection(sdk)
         )
         try:
-            page = await manager.list_sandbox_infos(
+            page = await self._list_sandbox_infos(
+                manager,
                 sdk.SandboxFilter(
                     metadata={
                         "medchat.operation": "molecular_docking",
@@ -503,7 +629,8 @@ class _OfficialSandboxFactory:
                     },
                     page=1,
                     page_size=_RECONCILE_PAGE_SIZE,
-                )
+                ),
+                deadline,
             )
             infos = getattr(page, "sandbox_infos", None)
             if type(infos) is not list or len(infos) > _RECONCILE_PAGE_SIZE:
@@ -800,12 +927,22 @@ class OpenSandboxClient:
         config: BrokerConfig,
         *,
         sandbox_factory: _SandboxFactory | None = None,
+        telemetry: object | None = None,
+        metadata_retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        metadata_retry_backoff: Callable[[int], float] = (
+            _default_metadata_retry_backoff
+        ),
     ) -> None:
         if type(config) is not BrokerConfig:
             raise SandboxInputError("config must be a validated BrokerConfig")
         self._config = config
         self._factory: _SandboxFactory = (
-            _OfficialSandboxFactory(config)
+            _OfficialSandboxFactory(
+                config,
+                telemetry=telemetry,
+                metadata_retry_sleep=metadata_retry_sleep,
+                metadata_retry_backoff=metadata_retry_backoff,
+            )
             if sandbox_factory is None
             else sandbox_factory
         )
@@ -1146,6 +1283,16 @@ class OpenSandboxClient:
         except SandboxDependencyUnavailableError:
             raise SandboxDependencyUnavailableError(
                 "the pinned OpenSandbox SDK is unavailable",
+                operation="destroy",
+            ) from None
+        except SandboxListError as failure:
+            failure.__cause__ = None
+            failure.__context__ = None
+            failure.__traceback__ = None
+            raise
+        except SandboxProtocolError:
+            raise SandboxProtocolError(
+                "the sandbox service returned an invalid reconciliation result",
                 operation="destroy",
             ) from None
         except SandboxDestroyError:

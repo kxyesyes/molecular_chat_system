@@ -29,9 +29,15 @@ from .models import (
     DockingManifest,
     DockingParameters,
 )
-from .opensandbox_client import SandboxCommandResult, SandboxCreateError, SandboxHandle
+from .opensandbox_client import (
+    SandboxCommandResult,
+    SandboxCreateError,
+    SandboxDestroyError,
+    SandboxHandle,
+)
 from .safety import contains_sensitive_metadata_text, is_safe_metadata_text
 from .store import ArtifactRecord, BrokerJobRecord, BrokerStore, IdempotencyConflict
+from .telemetry import FailureClass
 from .validation import (
     ScientificOutputError,
     StagedInput,
@@ -56,6 +62,16 @@ _UPLOAD_SUFFIXES = {
     "receptor": frozenset({".pdb"}),
     "ligand": frozenset({".sdf", ".mol"}),
 }
+_RETRYABLE_DESTROY_FAILURES = frozenset(
+    {
+        FailureClass.CONNECTION_FAILED,
+        FailureClass.SERVER_500,
+        FailureClass.PROXY_502,
+        FailureClass.RESOURCE_LIMIT,
+        FailureClass.DESTROY_FAILED,
+        FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+    }
+)
 _FAILURE_RESULT_FIELDS = frozenset(
     {"schema_version", "status", "phase", "error_code", "warnings"}
 )
@@ -418,6 +434,7 @@ class SandboxBrokerService:
         self._failure_result_read_timeout_seconds = 20.0
         self._output_validation_timeout_seconds = 60.0
         self._destroy_hard_timeout_seconds = 30.0
+        self._destroy_retry_delay_seconds = 0.1
 
     @staticmethod
     def _consume_task_exception(task: asyncio.Task[Any]) -> None:
@@ -1308,6 +1325,7 @@ class SandboxBrokerService:
     async def _create_without_cancelling(
         self,
         job_id: str,
+        deadline: float,
     ) -> tuple[object, bool]:
         """Let the bounded SDK create finish even when its caller is cancelled."""
 
@@ -1317,9 +1335,6 @@ class SandboxBrokerService:
         )
         self._create_tasks[job_id] = create_task
         interrupted = False
-        deadline = (
-            asyncio.get_running_loop().time() + self._create_hard_timeout_seconds
-        )
         try:
             while not create_task.done():
                 remaining = deadline - asyncio.get_running_loop().time()
@@ -1354,18 +1369,25 @@ class SandboxBrokerService:
                 del self._create_tasks[job_id]
 
     async def _create_with_retry(self, job_id: str) -> tuple[object, bool]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._create_hard_timeout_seconds
         try:
-            return await self._create_without_cancelling(job_id)
+            return await self._create_without_cancelling(job_id, deadline)
         except SandboxCreateError:
             if not await self._reconcile_unknown_create(job_id):
                 raise _CreateHardDeadline(False) from None
             if self._cancellation_requested(job_id):
                 raise asyncio.CancelledError
+            remaining = deadline - loop.time()
+            if remaining <= self._create_retry_delay_seconds:
+                raise _CreateHardDeadline(True) from None
             await asyncio.sleep(self._create_retry_delay_seconds)
             if self._cancellation_requested(job_id):
                 raise asyncio.CancelledError
+            if loop.time() >= deadline:
+                raise _CreateHardDeadline(True) from None
             try:
-                return await self._create_without_cancelling(job_id)
+                return await self._create_without_cancelling(job_id, deadline)
             except SandboxCreateError:
                 if not await self._reconcile_unknown_create(job_id):
                     raise _CreateHardDeadline(False) from None
@@ -1969,6 +1991,53 @@ class SandboxBrokerService:
             job_id, "manifest", content, "application/json"
         )
 
+    async def _destroy_once(
+        self,
+        job_id: str,
+        handle: SandboxHandle,
+    ) -> str:
+        cleanup_task = asyncio.create_task(self.client.destroy(handle))
+        cleanup_task.set_name(f"sandbox-broker-cleanup-{job_id}")
+        self._cleanup_tasks[job_id] = cleanup_task
+
+        def cleanup_finished(task: asyncio.Task[Any]) -> None:
+            if self._cleanup_tasks.get(job_id) is task:
+                del self._cleanup_tasks[job_id]
+            self._consume_task_exception(task)
+
+        cleanup_task.add_done_callback(cleanup_finished)
+        try:
+            done, _ = await asyncio.wait(
+                {cleanup_task},
+                timeout=self._destroy_hard_timeout_seconds,
+            )
+        except asyncio.CancelledError:
+            cleanup_task.cancel()
+            await asyncio.sleep(0)
+            if not cleanup_task.done():
+                cleanup_task.set_name(f"sandbox-cleanup-isolated-{job_id}")
+                if self._cleanup_tasks.get(job_id) is cleanup_task:
+                    del self._cleanup_tasks[job_id]
+            return "failed"
+        if cleanup_task not in done:
+            cleanup_task.cancel()
+            await asyncio.sleep(0)
+            if not cleanup_task.done():
+                # Completion is unknown, so another destroy must not overlap it.
+                cleanup_task.set_name(f"sandbox-cleanup-isolated-{job_id}")
+                if self._cleanup_tasks.get(job_id) is cleanup_task:
+                    del self._cleanup_tasks[job_id]
+            return "failed"
+        try:
+            cleanup_task.result()
+        except SandboxDestroyError as failure:
+            if failure.failure_class in _RETRYABLE_DESTROY_FAILURES:
+                return "retryable_failed"
+            return "failed"
+        except BaseException:
+            return "failed"
+        return "succeeded"
+
     async def _destroy_best_effort(
         self,
         job_id: str,
@@ -1992,56 +2061,29 @@ class SandboxBrokerService:
             # A concurrent terminal state or persistence failure must never
             # suppress destruction of a handle already returned by the SDK.
             cleanup_tracking_active = False
-        cleanup_task = asyncio.create_task(self.client.destroy(handle))
-        cleanup_task.set_name(f"sandbox-broker-cleanup-{job_id}")
-        self._cleanup_tasks[job_id] = cleanup_task
-
-        def cleanup_finished(task: asyncio.Task[Any]) -> None:
-            if self._cleanup_tasks.get(job_id) is task:
-                del self._cleanup_tasks[job_id]
+        outcome = await self._destroy_once(job_id, handle)
+        if outcome == "retryable_failed" and not self._stopping:
             try:
-                task.exception()
-            except BaseException:
-                pass
-
-        cleanup_task.add_done_callback(cleanup_finished)
-        try:
-            await asyncio.wait_for(
-                asyncio.shield(cleanup_task),
-                timeout=self._destroy_hard_timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            cleanup_task.cancel()
-            await asyncio.sleep(0)
-            if not cleanup_task.done():
-                # A non-production fake/third-party coroutine may suppress
-                # cancellation.  Its exception is still consumed by the done
-                # callback, but it cannot retain an unbounded service registry
-                # entry or block the broker's hard shutdown boundary.
-                cleanup_task.set_name(f"sandbox-cleanup-isolated-{job_id}")
-                if self._cleanup_tasks.get(job_id) is cleanup_task:
-                    del self._cleanup_tasks[job_id]
-            if not cleanup_task.done():
-                cleanup_task.add_done_callback(self._consume_task_exception)
-            if cleanup_tracking_active:
-                try:
-                    self.store.record_cleanup(job_id, "failed")
-                except BaseException:
-                    pass
-            return "failed"
-        except BaseException:
-            if cleanup_tracking_active:
-                try:
-                    self.store.record_cleanup(job_id, "failed")
-                except BaseException:
-                    pass
-            return "failed"
-        if cleanup_tracking_active:
+                await asyncio.sleep(self._destroy_retry_delay_seconds)
+            except asyncio.CancelledError:
+                outcome = "failed"
+            else:
+                if self._stopping:
+                    outcome = "failed"
+                else:
+                    outcome = await self._destroy_once(job_id, handle)
+        cleanup_succeeded = outcome == "succeeded"
+        if cleanup_tracking_active and cleanup_succeeded:
             try:
                 self.store.record_cleanup(job_id, "succeeded")
             except BaseException:
                 return "failed"
-        return "succeeded"
+        elif cleanup_tracking_active:
+            try:
+                self.store.record_cleanup(job_id, "failed")
+            except BaseException:
+                pass
+        return "succeeded" if cleanup_succeeded else "failed"
 
     def get_manifest(self, job_id: str) -> DockingManifest:
         try:
