@@ -16,6 +16,7 @@ from pathlib import PurePosixPath
 from typing import Any, Protocol
 
 from .config import BrokerConfig
+from .telemetry import FailureClass
 
 
 _SANDBOX_PYTHON = "/opt/conda/bin/python"
@@ -112,10 +113,76 @@ sys.stdout.write(
 _LIST_HELPER_B64 = base64.b64encode(_LIST_HELPER_SOURCE.encode("utf-8")).decode(
     "ascii"
 )
+_CONTROL_PLANE_OPERATIONS = frozenset(
+    {"create", "readiness", "metadata", "upload", "command", "destroy"}
+)
+
+
+def _http_status(failure: object) -> int | None:
+    try:
+        direct = getattr(failure, "status_code", None)
+    except Exception:
+        direct = None
+    if type(direct) is int:
+        return direct
+    try:
+        response = getattr(failure, "response", None)
+        nested = getattr(response, "status_code", None)
+    except Exception:
+        return None
+    return nested if type(nested) is int else None
+
+
+def classify_control_plane_failure(
+    operation: str,
+    failure: object,
+) -> FailureClass:
+    """Classify bounded exception metadata without inspecting raw text."""
+
+    if type(operation) is not str or operation not in _CONTROL_PLANE_OPERATIONS:
+        return FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE
+    status = _http_status(failure)
+    if status == 500:
+        return FailureClass.SERVER_500
+    if status == 502:
+        return FailureClass.PROXY_502
+    if status in {413, 429}:
+        return FailureClass.RESOURCE_LIMIT
+    if isinstance(
+        failure,
+        (ConnectionError, ConnectionRefusedError, ConnectionResetError),
+    ):
+        return FailureClass.CONNECTION_FAILED
+    if isinstance(failure, (asyncio.TimeoutError, TimeoutError)):
+        return {
+            "create": FailureClass.CREATE_TIMEOUT,
+            "readiness": FailureClass.READINESS_TIMEOUT,
+            "command": FailureClass.COMMAND_TIMEOUT,
+        }.get(operation, FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE)
+    if operation == "command":
+        return FailureClass.COMMAND_TRANSPORT_FAILED
+    if operation == "destroy":
+        return FailureClass.DESTROY_FAILED
+    return FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE
 
 
 class SandboxClientError(Exception):
     """Base class for sanitized OpenSandbox adapter failures."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        operation: str = "metadata",
+        failure_class: FailureClass = FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+    ) -> None:
+        if type(operation) is not str or operation not in _CONTROL_PLANE_OPERATIONS:
+            raise ValueError("invalid sandbox operation")
+        if type(failure_class) is not FailureClass:
+            raise ValueError("invalid sandbox failure class")
+        super().__init__(message)
+        self.operation = operation
+        self.failure_class = failure_class
 
 
 class SandboxInputError(SandboxClientError):
@@ -713,8 +780,12 @@ class OpenSandboxClient:
             raise SandboxDependencyUnavailableError(
                 "the pinned OpenSandbox SDK is unavailable"
             ) from None
-        except Exception:
-            raise SandboxCreateError("sandbox provisioning failed") from None
+        except Exception as failure:
+            raise SandboxCreateError(
+                "sandbox provisioning failed",
+                operation="create",
+                failure_class=classify_control_plane_failure("create", failure),
+            ) from None
 
         raw_id = getattr(raw, "id", None)
         try:
@@ -767,8 +838,12 @@ class OpenSandboxClient:
             raise SandboxDependencyUnavailableError(
                 "the pinned OpenSandbox SDK is unavailable"
             ) from None
-        except Exception:
-            raise SandboxUploadError("sandbox input upload failed") from None
+        except Exception as failure:
+            raise SandboxUploadError(
+                "sandbox input upload failed",
+                operation="upload",
+                failure_class=classify_control_plane_failure("upload", failure),
+            ) from None
 
     async def read_text(self, handle: SandboxHandle, path: str) -> str:
         validated_handle = self._handle(handle)
@@ -783,14 +858,22 @@ class OpenSandboxClient:
             raise SandboxDependencyUnavailableError(
                 "the pinned OpenSandbox SDK is unavailable"
             ) from None
-        except Exception:
-            raise SandboxReadError("sandbox output read failed") from None
+        except Exception as failure:
+            raise SandboxReadError(
+                "sandbox output read failed",
+                operation="metadata",
+                failure_class=classify_control_plane_failure("metadata", failure),
+            ) from None
         try:
             return await _consume_bounded_read_stream(stream)
         except (SandboxProtocolError, SandboxReadError):
             raise
-        except Exception:
-            raise SandboxReadError("sandbox output read failed") from None
+        except Exception as failure:
+            raise SandboxReadError(
+                "sandbox output read failed",
+                operation="metadata",
+                failure_class=classify_control_plane_failure("metadata", failure),
+            ) from None
 
     async def list_files(
         self,
@@ -823,8 +906,12 @@ class OpenSandboxClient:
             raise SandboxDependencyUnavailableError(
                 "the pinned OpenSandbox SDK is unavailable"
             ) from None
-        except Exception:
-            raise SandboxListError("sandbox output listing failed") from None
+        except Exception as failure:
+            raise SandboxListError(
+                "sandbox output listing failed",
+                operation="metadata",
+                failure_class=classify_control_plane_failure("metadata", failure),
+            ) from None
 
         exit_code = getattr(execution, "exit_code", None)
         if type(exit_code) is not int or not -(2**31) <= exit_code < 2**31:
@@ -893,8 +980,12 @@ class OpenSandboxClient:
             raise SandboxDependencyUnavailableError(
                 "the pinned OpenSandbox SDK is unavailable"
             ) from None
-        except Exception:
-            raise SandboxRunError("sandbox command execution failed") from None
+        except Exception as failure:
+            raise SandboxRunError(
+                "sandbox command execution failed",
+                operation="command",
+                failure_class=classify_control_plane_failure("command", failure),
+            ) from None
 
         exit_code = getattr(execution, "exit_code", None)
         if type(exit_code) is not int or not -(2**31) <= exit_code < 2**31:
@@ -941,8 +1032,12 @@ class OpenSandboxClient:
             ) from None
         except SandboxDestroyError:
             raise
-        except Exception:
-            raise SandboxDestroyError("sandbox cleanup failed") from None
+        except Exception as failure:
+            raise SandboxDestroyError(
+                "sandbox cleanup failed",
+                operation="destroy",
+                failure_class=classify_control_plane_failure("destroy", failure),
+            ) from None
 
     @staticmethod
     def _consume_cleanup_task(task: asyncio.Task[Any]) -> None:

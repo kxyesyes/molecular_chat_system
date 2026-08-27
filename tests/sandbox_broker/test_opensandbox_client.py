@@ -30,7 +30,9 @@ from src.sandbox_broker.opensandbox_client import (
     SandboxReadError,
     SandboxRunError,
     SandboxUploadError,
+    classify_control_plane_failure,
 )
+from src.sandbox_broker.telemetry import FailureClass
 
 try:
     import tomllib
@@ -736,6 +738,259 @@ def test_operation_errors_are_narrow_and_do_not_disclose_secrets_or_paths(
     for name, coroutine in calls.items():
         if name != operation:
             coroutine.close()
+
+
+class ExplosiveFailure(Exception):
+    def __str__(self) -> str:
+        raise AssertionError("failure text must not be inspected")
+
+    @property
+    def body(self) -> object:
+        raise AssertionError("failure body must not be inspected")
+
+    @property
+    def headers(self) -> object:
+        raise AssertionError("failure headers must not be inspected")
+
+
+@pytest.mark.parametrize(
+    ("operation", "failure", "expected"),
+    [
+        ("create", SimpleNamespace(status_code=500), FailureClass.SERVER_500),
+        (
+            "metadata",
+            SimpleNamespace(response=SimpleNamespace(status_code=502)),
+            FailureClass.PROXY_502,
+        ),
+        ("upload", SimpleNamespace(status_code=413), FailureClass.RESOURCE_LIMIT),
+        (
+            "command",
+            SimpleNamespace(response=SimpleNamespace(status_code=429)),
+            FailureClass.RESOURCE_LIMIT,
+        ),
+        ("create", ConnectionError("private endpoint"), FailureClass.CONNECTION_FAILED),
+        (
+            "readiness",
+            ConnectionRefusedError("private endpoint"),
+            FailureClass.CONNECTION_FAILED,
+        ),
+        (
+            "destroy",
+            ConnectionResetError("private endpoint"),
+            FailureClass.CONNECTION_FAILED,
+        ),
+        ("create", asyncio.TimeoutError(), FailureClass.CREATE_TIMEOUT),
+        ("readiness", TimeoutError(), FailureClass.READINESS_TIMEOUT),
+        ("command", asyncio.TimeoutError(), FailureClass.COMMAND_TIMEOUT),
+        (
+            "metadata",
+            TimeoutError(),
+            FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+        ),
+        (
+            "upload",
+            TimeoutError(),
+            FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+        ),
+        (
+            "destroy",
+            TimeoutError(),
+            FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+        ),
+        (
+            "command",
+            RuntimeError("secret body"),
+            FailureClass.COMMAND_TRANSPORT_FAILED,
+        ),
+        (
+            "destroy",
+            RuntimeError("secret body"),
+            FailureClass.DESTROY_FAILED,
+        ),
+        (
+            "metadata",
+            RuntimeError("Authorization: bearer private"),
+            FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+        ),
+        (
+            "upload",
+            RuntimeError("secret body"),
+            FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+        ),
+        (
+            "invalid",
+            SimpleNamespace(status_code=500),
+            FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+        ),
+        (
+            "create",
+            SimpleNamespace(status_code=True),
+            FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+        ),
+        (
+            "create",
+            SimpleNamespace(
+                status_code="500",
+                response=SimpleNamespace(status_code=502),
+            ),
+            FailureClass.PROXY_502,
+        ),
+    ],
+)
+def test_classify_control_plane_failure_is_bounded_and_sanitized(
+    operation: str,
+    failure: object,
+    expected: FailureClass,
+) -> None:
+    assert classify_control_plane_failure(operation, failure) is expected
+
+
+def test_classifier_never_inspects_failure_text_body_or_headers() -> None:
+    assert (
+        classify_control_plane_failure("metadata", ExplosiveFailure())
+        is FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE
+    )
+
+
+def test_sandbox_client_error_one_argument_compatibility_and_stable_attributes() -> None:
+    failure = SandboxCreateError("sandbox provisioning failed")
+
+    assert str(failure) == "sandbox provisioning failed"
+    assert failure.operation == "metadata"
+    assert failure.failure_class is FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE
+
+
+def test_sandbox_client_error_accepts_strict_classification_attributes() -> None:
+    failure = SandboxCreateError(
+        "sandbox provisioning failed",
+        operation="create",
+        failure_class=FailureClass.PROXY_502,
+    )
+
+    assert str(failure) == "sandbox provisioning failed"
+    assert failure.operation == "create"
+    assert failure.failure_class is FailureClass.PROXY_502
+
+
+@pytest.mark.parametrize(
+    ("operation", "failure_class"),
+    [
+        ("invalid", FailureClass.SERVER_500),
+        (1, FailureClass.SERVER_500),
+        ("create", "server_500"),
+        ("create", None),
+    ],
+)
+def test_sandbox_client_error_rejects_invalid_classification_attributes(
+    operation: object,
+    failure_class: object,
+) -> None:
+    with pytest.raises(ValueError):
+        SandboxCreateError(
+            "sandbox provisioning failed",
+            operation=operation,  # type: ignore[arg-type]
+            failure_class=failure_class,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("factory_operation", "client_operation", "status", "error_type", "message", "operation", "failure_class"),
+    [
+        (
+            "create",
+            "create",
+            502,
+            SandboxCreateError,
+            "sandbox provisioning failed",
+            "create",
+            FailureClass.PROXY_502,
+        ),
+        (
+            "upload",
+            "upload",
+            None,
+            SandboxUploadError,
+            "sandbox input upload failed",
+            "upload",
+            FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+        ),
+        (
+            "read",
+            "read",
+            None,
+            SandboxReadError,
+            "sandbox output read failed",
+            "metadata",
+            FailureClass.CONNECTION_FAILED,
+        ),
+        (
+            "list",
+            "list",
+            None,
+            SandboxListError,
+            "sandbox output listing failed",
+            "metadata",
+            FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+        ),
+        (
+            "run",
+            "run",
+            None,
+            SandboxRunError,
+            "sandbox command execution failed",
+            "command",
+            FailureClass.COMMAND_TRANSPORT_FAILED,
+        ),
+        (
+            "destroy",
+            "destroy",
+            None,
+            SandboxDestroyError,
+            "sandbox cleanup failed",
+            "destroy",
+            FailureClass.DESTROY_FAILED,
+        ),
+    ],
+)
+def test_generic_adapter_failures_carry_sanitized_classification(
+    tmp_path: Path,
+    factory_operation: str,
+    client_operation: str,
+    status: int | None,
+    error_type: type[SandboxClientError],
+    message: str,
+    operation: str,
+    failure_class: FailureClass,
+) -> None:
+    class AdapterFailure(ConnectionError if client_operation == "read" else RuntimeError):
+        status_code = status
+
+        def __str__(self) -> str:
+            return "Authorization: bearer private C:\\Users\\private"
+
+    fake = FakeSandboxFactory()
+    fake.failures[factory_operation] = AdapterFailure()
+    client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+    handle = SandboxHandle("sandbox-1", fake.raw)
+    calls = {
+        "create": lambda: client.create("job-1"),
+        "upload": lambda: client.upload_text(
+            handle, "/workspace/input/receptor.pdb", "ATOM\n"
+        ),
+        "read": lambda: client.read_text(handle, "/workspace/output/result.json"),
+        "list": lambda: client.list_files(handle, "/workspace/output", "*"),
+        "run": lambda: client.run(handle),
+        "destroy": lambda: client.destroy(handle),
+    }
+
+    with pytest.raises(error_type) as raised:
+        asyncio.run(calls[client_operation]())
+
+    assert str(raised.value) == message
+    assert raised.value.operation == operation
+    assert raised.value.failure_class is failure_class
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__ is True
 
 
 def test_factory_domain_error_messages_are_also_remapped_and_sanitized(
