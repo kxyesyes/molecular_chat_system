@@ -272,6 +272,119 @@ def _exact_keywords(call: ast.Call) -> dict[str, ast.expr] | None:
     return values if len(values) == len(call.keywords) else None
 
 
+def _import_bindings(node: ast.AST) -> list[tuple[str, ast.alias]]:
+    bindings: list[tuple[str, ast.alias]] = []
+    if isinstance(node, ast.Import):
+        bindings.extend(
+            (imported.asname or imported.name.split(".", 1)[0], imported)
+            for imported in node.names
+        )
+    elif isinstance(node, ast.ImportFrom):
+        bindings.extend(
+            (imported.asname or imported.name, imported)
+            for imported in node.names
+        )
+    return bindings
+
+
+def _name_has_unapproved_binding(
+    tree: ast.Module,
+    name: str,
+    *,
+    allowed_name_node: ast.Name | None = None,
+    allowed_import: ast.alias | None = None,
+) -> bool:
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Name)
+            and node.id == name
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and node is not allowed_name_node
+        ):
+            return True
+        if isinstance(node, ast.arg) and node.arg == name:
+            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == name:
+                return True
+        if isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names:
+            return True
+        if isinstance(node, ast.ExceptHandler) and node.name == name:
+            return True
+        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name == name:
+            return True
+        if isinstance(node, ast.MatchMapping) and node.rest == name:
+            return True
+        for bound_name, imported in _import_bindings(node):
+            if bound_name == name and imported is not allowed_import:
+                return True
+    return False
+
+
+def _has_verified_af_unix_binding(tree: ast.Module) -> bool:
+    candidates = [
+        (index, statement)
+        for index, statement in enumerate(tree.body)
+        if isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and _is_name(statement.targets[0], "_AF_UNIX")
+    ]
+    if len(candidates) != 1:
+        return False
+    assignment_index, assignment = candidates[0]
+    target = assignment.targets[0]
+    if not isinstance(target, ast.Name):  # narrowed by _is_name above
+        return False
+
+    value = assignment.value
+    if not (
+        isinstance(value, ast.Call)
+        and _is_name(value.func, "getattr")
+        and len(value.args) == 3
+        and not value.keywords
+        and _is_name(value.args[0], "socket")
+        and isinstance(value.args[1], ast.Constant)
+        and type(value.args[1].value) is str
+        and value.args[1].value == "AF_UNIX"
+        and isinstance(value.args[2], ast.Constant)
+        and type(value.args[2].value) is int
+        and value.args[2].value == 1
+    ):
+        return False
+
+    socket_imports = [
+        (index, imported)
+        for index, statement in enumerate(tree.body)
+        for bound_name, imported in _import_bindings(statement)
+        if bound_name == "socket"
+    ]
+    if len(socket_imports) != 1:
+        return False
+    socket_import_index, socket_import = socket_imports[0]
+    if not (
+        socket_import_index < assignment_index
+        and socket_import.name == "socket"
+        and socket_import.asname is None
+    ):
+        return False
+
+    return not any(
+        (
+            _name_has_unapproved_binding(
+                tree,
+                "_AF_UNIX",
+                allowed_name_node=target,
+            ),
+            _name_has_unapproved_binding(
+                tree,
+                "socket",
+                allowed_import=socket_import,
+            ),
+            _name_has_unapproved_binding(tree, "getattr"),
+        )
+    )
+
+
 def _allowed_entrypoint_call(
     call: ast.Call,
     symbol: str,
@@ -353,6 +466,8 @@ def _listener_contract_violations(
     tree = ast.parse(source)
     aliases = _resolved_aliases(tree)
     violations: set[str] = set()
+    if allow_entrypoint_uds and not _has_verified_af_unix_binding(tree):
+        violations.add("entrypoint._AF_UNIX")
     for call, symbol, function in _call_records(tree, aliases):
         forbidden = (
             symbol in _LISTENER_CALLS
@@ -626,7 +741,7 @@ def test_listener_contract_allows_only_existing_prebound_uds_pattern() -> None:
 import socket
 import uvicorn
 
-_AF_UNIX = socket.AF_UNIX
+_AF_UNIX = getattr(socket, "AF_UNIX", 1)
 
 def _socket_stale_candidate(socket_path):
     client = socket.socket(_AF_UNIX, socket.SOCK_STREAM)
@@ -671,6 +786,83 @@ def serve_application(application, socket_path):
         "serve_application:uvicorn.Server": 1,
         "serve_application:uvicorn.Server.run": 1,
     }
+
+
+def _mutate_af_unix_binding(source: str, mutation: str) -> str:
+    approved = '_AF_UNIX = getattr(socket, "AF_UNIX", 1)'
+    assert source.count(approved) == 1
+    if mutation == "reviewer-probe":
+        replacement = "_AF_UNIX = socket.AF_INET"
+    elif mutation == "literal":
+        replacement = "_AF_UNIX = 1"
+    elif mutation == "imported-binding":
+        replacement = "from socket import AF_UNIX as _AF_UNIX"
+    elif mutation == "imported-socket-alias":
+        replacement = (
+            "import socket as network_socket\n"
+            '_AF_UNIX = getattr(network_socket, "AF_UNIX", 1)'
+        )
+    elif mutation == "reassignment":
+        replacement = f"{approved}\n_AF_UNIX = socket.AF_INET"
+    elif mutation == "annotated-reassignment":
+        replacement = f"{approved}\n_AF_UNIX: int = socket.AF_INET"
+    elif mutation == "conditional-reassignment":
+        replacement = (
+            f"{approved}\n"
+            "if os.name == 'posix':\n"
+            "    _AF_UNIX = socket.AF_INET"
+        )
+    elif mutation in {"function-shadow", "named-expression-shadow"}:
+        replacement = approved
+    else:  # pragma: no cover - protects the parametrized test itself
+        raise AssertionError(mutation)
+
+    mutated = source.replace(approved, replacement, 1)
+    listener_line = "        listener = socket.socket(_AF_UNIX, socket.SOCK_STREAM)"
+    if mutation == "function-shadow":
+        assert mutated.count(listener_line) == 1
+        mutated = mutated.replace(
+            listener_line,
+            "        _AF_UNIX = socket.AF_INET\n" + listener_line,
+            1,
+        )
+    elif mutation == "named-expression-shadow":
+        assert mutated.count(listener_line) == 1
+        mutated = mutated.replace(
+            listener_line,
+            "        (_AF_UNIX := socket.AF_INET)\n" + listener_line,
+            1,
+        )
+    return mutated
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "reviewer-probe",
+        "literal",
+        "imported-binding",
+        "imported-socket-alias",
+        "reassignment",
+        "annotated-reassignment",
+        "conditional-reassignment",
+        "function-shadow",
+        "named-expression-shadow",
+    ],
+)
+def test_entrypoint_uds_allowlist_rejects_af_unix_binding_mutations(
+    mutation: str,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    source = (root / "scripts" / "run_sandbox_broker.py").read_text(
+        encoding="utf-8"
+    )
+    mutated = _mutate_af_unix_binding(source, mutation)
+
+    assert "entrypoint._AF_UNIX" in _listener_contract_violations(
+        mutated,
+        allow_entrypoint_uds=True,
+    )
 
 
 def _assert_non_scientific(result: Any) -> None:
