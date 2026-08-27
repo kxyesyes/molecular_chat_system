@@ -3961,6 +3961,187 @@ def test_upload_rejection_fallback_never_provisions_after_breaker_cooldown(
     assert not (config.state_root / "jobs" / terminal.job_id).exists()
 
 
+def test_queue_full_rejection_persistence_failure_remains_owned_until_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    breaker = ControlPlaneCircuitBreaker()
+    sdk = FakeSandboxClient(block=True)
+    allow_persistence = [False]
+    rejected_job_ids: list[str] = []
+
+    async def scenario() -> tuple[object, object, int]:
+        service, store, config = _service(
+            tmp_path,
+            sdk,
+            queue_capacity=1,
+            circuit_breaker=breaker,
+        )
+        await service.start()
+        running = await service.submit(_prepared(config), "idem-pending-running")
+        await asyncio.wait_for(sdk.running.wait(), timeout=1.0)
+        queued = await service.submit(_prepared(config), "idem-pending-queued")
+        del queued
+        _trip_breaker(breaker)
+
+        original_fail = store.fail
+
+        def fail_discard(record: object) -> bool:
+            del record
+            raise sqlite3.OperationalError("injected discard failure")
+
+        def controlled_fail(job_id: str, *args: object, **kwargs: object) -> object:
+            if job_id not in {running.job_id} and not allow_persistence[0]:
+                rejected_job_ids.append(job_id)
+                raise sqlite3.OperationalError("injected terminal failure")
+            return original_fail(job_id, *args, **kwargs)
+
+        monkeypatch.setattr(store, "discard_pristine_queued", fail_discard)
+        monkeypatch.setattr(store, "fail", controlled_fail)
+        submitted = await service.submit_uploads(
+            DockingParameters(center=[1, 2, 3], size=[20, 20, 20]),
+            type(
+                "Upload",
+                (),
+                {"filename": "receptor.pdb", "file": io.BytesIO(b"ATOM\n")},
+            )(),
+            type(
+                "Upload",
+                (),
+                {"filename": "ligand.sdf", "file": io.BytesIO(VALID_SDF)},
+            )(),
+            "idem-pending-rejection",
+        )
+        assert submitted.job_id in service._pending_rejections
+        assert submitted.job_id in service._rejected_work
+
+        reused = await service.submit_uploads(
+            DockingParameters(center=[1, 2, 3], size=[20, 20, 20]),
+            type(
+                "Upload",
+                (),
+                {"filename": "receptor.pdb", "file": io.BytesIO(b"ATOM\n")},
+            )(),
+            type(
+                "Upload",
+                (),
+                {"filename": "ligand.sdf", "file": io.BytesIO(VALID_SDF)},
+            )(),
+            "idem-pending-rejection",
+        )
+        assert reused.job_id == submitted.job_id
+        assert list(service._pending_rejections) == [submitted.job_id]
+
+        allow_persistence[0] = True
+        terminal = await service.wait_terminal(submitted.job_id, timeout=3.0)
+        assert submitted.job_id not in service._pending_rejections
+        assert submitted.job_id not in service._rejected_work
+        sdk.release.set()
+        await service.wait_terminal(running.job_id, timeout=3.0)
+        await service.stop()
+        return terminal, reused, len(set(rejected_job_ids))
+
+    terminal, reused, rejected_count = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.QUEUE_SATURATED.value
+    assert reused.job_id == terminal.job_id
+    assert rejected_count == 1
+    assert sdk.create_count == 1
+    assert sdk.run_count == 1
+
+
+def test_persistent_pending_rejection_blocks_stop_and_restart_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    breaker = ControlPlaneCircuitBreaker()
+    sdk = FakeSandboxClient(block=True)
+    rejected_job_id = [""]
+
+    async def scenario() -> tuple[object, int, int]:
+        service, store, config = _service(
+            tmp_path,
+            sdk,
+            queue_capacity=1,
+            circuit_breaker=breaker,
+        )
+        await service.start()
+        running = await service.submit(_prepared(config), "idem-persistent-running")
+        await asyncio.wait_for(sdk.running.wait(), timeout=1.0)
+        queued = await service.submit(_prepared(config), "idem-persistent-queued")
+        _trip_breaker(breaker)
+        original_fail = store.fail
+
+        def fail_discard(record: object) -> bool:
+            del record
+            raise sqlite3.OperationalError("injected discard failure")
+
+        def persistent_fail(
+            job_id: str,
+            error_code: BrokerErrorCode,
+            *args: object,
+            **kwargs: object,
+        ) -> object:
+            if (
+                error_code is BrokerErrorCode.QUEUE_SATURATED
+                or job_id == rejected_job_id[0]
+            ):
+                rejected_job_id[0] = job_id
+                raise sqlite3.OperationalError("injected terminal failure")
+            return original_fail(job_id, error_code, *args, **kwargs)
+
+        monkeypatch.setattr(store, "discard_pristine_queued", fail_discard)
+        monkeypatch.setattr(store, "fail", persistent_fail)
+        submitted = await service.submit_uploads(
+            DockingParameters(center=[1, 2, 3], size=[20, 20, 20]),
+            type(
+                "Upload",
+                (),
+                {"filename": "receptor.pdb", "file": io.BytesIO(b"ATOM\n")},
+            )(),
+            type(
+                "Upload",
+                (),
+                {"filename": "ligand.sdf", "file": io.BytesIO(VALID_SDF)},
+            )(),
+            "idem-persistent-rejection",
+        )
+        assert rejected_job_id == [submitted.job_id]
+        pending = service._pending_rejections[submitted.job_id]
+        await asyncio.wait_for(asyncio.shield(pending), timeout=1.0)
+        assert pending.done()
+        assert submitted.job_id in service._pending_rejections
+        active = store.get(submitted.job_id)
+        assert active is not None and active.status not in TERMINAL_STATUSES
+
+        sdk.release.set()
+        await service.wait_terminal(running.job_id, timeout=3.0)
+        await service.wait_terminal(queued.job_id, timeout=3.0)
+        with pytest.raises(StopIncomplete):
+            await service.stop(timeout=1.0)
+        assert submitted.job_id in service._pending_rejections
+
+        monkeypatch.setattr(store, "fail", original_fail)
+        reopened_store = BrokerStore(config.state_root / "broker.sqlite")
+        restarted_sdk = FakeSandboxClient()
+        restarted = SandboxBrokerService(
+            config,
+            reopened_store,
+            restarted_sdk,
+            ArtifactRegistry(config.state_root, reopened_store),
+        )
+        await restarted.recover()
+        terminal = restarted.get_job(submitted.job_id)
+        await restarted.stop()
+        return terminal, sdk.create_count, restarted_sdk.create_count
+
+    terminal, original_creates, restarted_creates = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.OPENSANDBOX_UNAVAILABLE.value
+    assert original_creates == 1
+    assert restarted_creates == 0
+
+
 def test_breaker_rejected_upload_cleanup_runs_once_and_reused_row_is_untouched(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

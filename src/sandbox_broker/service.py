@@ -449,6 +449,7 @@ class SandboxBrokerService:
         self._isolated_tasks: set[asyncio.Task[Any]] = set()
         self._prepared: dict[str, PreparedDockingSubmission] = {}
         self._rejected_work: set[str] = set()
+        self._pending_rejections: dict[str, asyncio.Task[bool]] = {}
         self._terminal_condition = asyncio.Condition()
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._lifecycle_lock = asyncio.Lock()
@@ -463,6 +464,7 @@ class SandboxBrokerService:
         self._output_validation_timeout_seconds = 60.0
         self._destroy_hard_timeout_seconds = 30.0
         self._destroy_retry_delay_seconds = 0.1
+        self._rejection_retry_delay_seconds = 0.05
         if telemetry is not None and not isinstance(telemetry, BrokerTelemetry):
             raise ValueError("invalid sandbox broker telemetry")
         if circuit_breaker is not None and not isinstance(
@@ -883,6 +885,9 @@ class SandboxBrokerService:
                 *(self._cancel_with_grace(task) for task in isolated),
                 return_exceptions=True,
             )
+        await self._drain_pending_rejections()
+        if self._pending_rejections:
+            raise RuntimeError("broker rejection persistence did not finish")
         drain_cleanup = getattr(self.client, "drain_cleanup", None)
         if callable(drain_cleanup):
             try:
@@ -1259,19 +1264,75 @@ class SandboxBrokerService:
         try:
             self._queue.put_nowait(record.job_id)
         except asyncio.QueueFull:
-            self._rejected_work.discard(record.job_id)
-            self._cancel_events.pop(record.job_id, None)
-            self.store.fail(
+            persisted = await self._persist_pending_rejection(
                 record.job_id,
-                BrokerErrorCode.QUEUE_SATURATED,
-                cleanup_status="succeeded",
+                attempts=1,
             )
-            await self._notify_terminal()
-            self._record_terminal_observation(record.job_id)
-            raise BrokerFailure(BrokerErrorCode.QUEUE_SATURATED) from None
+            if persisted:
+                raise BrokerFailure(BrokerErrorCode.QUEUE_SATURATED) from None
+            self._schedule_pending_rejection(record.job_id)
+            return _record_view(record)
         self._refresh_runtime_metrics()
         self._emit_job_event(record, Phase.QUEUE_ENTERED)
         return _record_view(record)
+
+    def _finish_pending_rejection_ownership(self, job_id: str) -> None:
+        self._pending_rejections.pop(job_id, None)
+        self._rejected_work.discard(job_id)
+        self._cancel_events.pop(job_id, None)
+        self._remove_job_tree(job_id)
+        self._refresh_runtime_metrics()
+
+    async def _persist_pending_rejection(
+        self,
+        job_id: str,
+        *,
+        attempts: int,
+    ) -> bool:
+        for attempt in range(attempts):
+            try:
+                current = self.store.get(job_id)
+                if current is None or current.status in TERMINAL_STATUSES:
+                    self._finish_pending_rejection_ownership(job_id)
+                    return True
+                self.store.fail(
+                    job_id,
+                    BrokerErrorCode.QUEUE_SATURATED,
+                    cleanup_status="succeeded",
+                )
+            except BaseException:
+                if attempt + 1 < attempts:
+                    await asyncio.sleep(self._rejection_retry_delay_seconds)
+                continue
+            self._record_terminal_observation(job_id)
+            self._finish_pending_rejection_ownership(job_id)
+            await self._notify_terminal()
+            return True
+        return False
+
+    def _schedule_pending_rejection(self, job_id: str) -> asyncio.Task[bool]:
+        existing = self._pending_rejections.get(job_id)
+        if existing is not None and not existing.done():
+            return existing
+        task = asyncio.create_task(
+            self._persist_pending_rejection(job_id, attempts=3),
+            name=f"sandbox-broker-rejection-{job_id}",
+        )
+        self._pending_rejections[job_id] = task
+        task.add_done_callback(self._consume_task_exception)
+        self._refresh_runtime_metrics()
+        return task
+
+    async def _drain_pending_rejections(self) -> None:
+        tasks = [
+            self._schedule_pending_rejection(job_id)
+            for job_id in tuple(self._pending_rejections)
+        ]
+        if tasks:
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in tasks),
+                return_exceptions=True,
+            )
 
     def get_job(self, job_id: str) -> BrokerJobView:
         try:
@@ -2152,6 +2213,7 @@ class SandboxBrokerService:
         async with self._recovery_lock:
             if observed_generation != self._recovery_generation:
                 return
+            await self._drain_pending_rejections()
             for record in self.store.cleanup_pending_jobs():
                 was_terminal = record.status in TERMINAL_STATUSES
                 try:

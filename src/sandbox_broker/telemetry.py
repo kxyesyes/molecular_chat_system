@@ -354,7 +354,11 @@ class BrokerTelemetry:
             "isolated_task_count": 0,
             "breaker_state": "closed",
         }
+        self._projection_dirty = False
+        self._registered_collectors: tuple[object, ...] = ()
+        self._install_projection_locked()
 
+    def _install_projection_locked(self) -> None:
         self._jobs = PromCounter(
             "medchat_sandbox_jobs_total",
             "Terminal Broker jobs",
@@ -405,6 +409,75 @@ class BrokerTelemetry:
             "0 closed, 1 open, 2 half-open",
             registry=self._registry,
         )
+        self._registered_collectors = (
+            self._jobs,
+            self._phase_duration,
+            self._control_failures,
+            self._retries,
+            self._queue_depth,
+            self._active_jobs,
+            self._cleanup_tasks,
+            self._isolated_tasks,
+            self._breaker_state,
+        )
+
+    def _rebuild_projection_locked(self) -> None:
+        previous = self._registered_collectors
+        removed: list[object] = []
+        try:
+            for collector in previous:
+                self._registry.unregister(collector)
+                removed.append(collector)
+            self._install_projection_locked()
+            for key, value in self._counters.items():
+                category, first, second = key
+                if category == "control_failure":
+                    self._control_failures.labels(
+                        operation=first,
+                        failure_class=second,
+                    ).inc(value)
+                elif category == "retry":
+                    self._retries.labels(
+                        operation=first,
+                        outcome=second,
+                    ).inc(value)
+                elif category == "terminal":
+                    self._jobs.labels(
+                        terminal_status=first,
+                        failure_class=second,
+                    ).inc(value)
+            for (phase, outcome), values in self._latencies.items():
+                histogram = self._phase_duration.labels(
+                    phase=phase,
+                    outcome=outcome,
+                )
+                for duration_ms in values:
+                    histogram.observe(duration_ms / 1000.0)
+            state_value = {
+                "closed": 0,
+                "open": 1,
+                "half_open": 2,
+            }[str(self._runtime["breaker_state"])]
+            self._queue_depth.set(int(self._runtime["queue_depth"]))
+            self._active_jobs.set(int(self._runtime["active_job_count"]))
+            self._cleanup_tasks.set(int(self._runtime["cleanup_task_count"]))
+            self._isolated_tasks.set(int(self._runtime["isolated_task_count"]))
+            self._breaker_state.set(state_value)
+        except BaseException:
+            for collector in self._registered_collectors:
+                try:
+                    self._registry.unregister(collector)
+                except BaseException:
+                    pass
+            for collector in removed:
+                try:
+                    self._registry.register(collector)
+                except BaseException:
+                    pass
+            self._registered_collectors = previous
+            self._projection_dirty = True
+            return
+        self._projection_dirty = False
 
     def _clock_value(self) -> float:
         value = self._monotonic()
@@ -416,14 +489,15 @@ class BrokerTelemetry:
         return parsed
 
     @staticmethod
-    def _safe_sink(callback: Callable[[], object]) -> None:
+    def _safe_sink(callback: Callable[[], object]) -> bool:
         try:
             callback()
         except BaseException:
             # Telemetry sinks are observational only.  In particular, never
             # include an exception string here because it can contain remote
             # control-plane details.
-            return
+            return False
+        return True
 
     def _log_payload(self, payload: dict[str, object]) -> None:
         self._safe_sink(
@@ -528,12 +602,14 @@ class BrokerTelemetry:
             values.append(duration_ms)
             del values[:-256]
             self._events.append(payload)
-            self._safe_sink(
+            projected = self._safe_sink(
                 lambda: self._phase_duration.labels(
                     phase=token.phase,
                     outcome=outcome,
                 ).observe(elapsed)
             )
+            if not projected:
+                self._projection_dirty = True
         self._log_payload(payload)
         return completed_event
 
@@ -553,12 +629,14 @@ class BrokerTelemetry:
             self._counters[
                 ("control_failure", operation, failure_class.value)
             ] += 1
-            self._safe_sink(
+            projected = self._safe_sink(
                 lambda: self._control_failures.labels(
                     operation=operation,
                     failure_class=failure_class.value,
                 ).inc()
             )
+            if not projected:
+                self._projection_dirty = True
 
     def record_retry(self, operation: str, outcome: str) -> None:
         if (
@@ -570,12 +648,14 @@ class BrokerTelemetry:
             raise ValueError("invalid retry metric")
         with self._lock:
             self._counters[("retry", operation, outcome)] += 1
-            self._safe_sink(
+            projected = self._safe_sink(
                 lambda: self._retries.labels(
                     operation=operation,
                     outcome=outcome,
                 ).inc()
             )
+            if not projected:
+                self._projection_dirty = True
 
     def record_terminal(
         self,
@@ -590,12 +670,14 @@ class BrokerTelemetry:
             raise ValueError("invalid terminal metric")
         with self._lock:
             self._counters[("terminal", status, failure_class.value)] += 1
-            self._safe_sink(
+            projected = self._safe_sink(
                 lambda: self._jobs.labels(
                     terminal_status=status,
                     failure_class=failure_class.value,
                 ).inc()
             )
+            if not projected:
+                self._projection_dirty = True
 
     def update_runtime_gauges(
         self,
@@ -632,6 +714,7 @@ class BrokerTelemetry:
                 "isolated_task_count": isolated_task_count,
                 "breaker_state": breaker_state,
             }
+            projected = True
             for metric, value in (
                 (self._queue_depth, queue_depth),
                 (self._active_jobs, active_job_count),
@@ -639,9 +722,12 @@ class BrokerTelemetry:
                 (self._isolated_tasks, isolated_task_count),
                 (self._breaker_state, state_value),
             ):
-                self._safe_sink(
+                updated = self._safe_sink(
                     lambda metric=metric, value=value: metric.set(value)
                 )
+                projected = updated and projected
+            if not projected:
+                self._projection_dirty = True
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:
@@ -665,4 +751,9 @@ class BrokerTelemetry:
 
     def prometheus_text(self) -> bytes:
         with self._lock:
-            return generate_latest(self._registry)
+            if self._projection_dirty:
+                self._rebuild_projection_locked()
+            try:
+                return generate_latest(self._registry)
+            except BaseException:
+                return b""

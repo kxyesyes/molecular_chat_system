@@ -116,8 +116,8 @@ def test_transition_methods_sample_clock_only_after_acquiring_lock() -> None:
     breaker.record_failure(permit, FailureClass.SERVER_500)
 
 
-@pytest.mark.parametrize("action", ["success", "failure", "release"])
-def test_half_open_completion_clock_failure_does_not_claim_or_wedge(
+@pytest.mark.parametrize("action", ["success", "release"])
+def test_half_open_success_and_release_do_not_sample_failing_clock(
     action: str,
 ) -> None:
     clock = Clock()
@@ -127,49 +127,65 @@ def test_half_open_completion_clock_failure_does_not_claim_or_wedge(
     permit = breaker.acquire()
     assert permit is not None and permit.half_open is True
 
-    observed_claimed: list[bool] = []
+    clock_calls = 0
 
     def failing_clock() -> float:
-        observed_claimed.append(permit._claimed)
+        nonlocal clock_calls
+        clock_calls += 1
         raise RuntimeError("injected clock failure")
 
     breaker._clock = failing_clock
-    with pytest.raises(RuntimeError, match="injected clock failure"):
-        if action == "success":
-            breaker.record_success(permit)
-        elif action == "failure":
-            breaker.record_failure(permit, FailureClass.PROXY_502)
-        else:
-            breaker.release(permit)
+    if action == "success":
+        breaker.record_success(permit)
+    else:
+        breaker.release(permit)
 
-    assert observed_claimed == [False]
-    assert permit._claimed is False
-    assert breaker._state is BreakerState.HALF_OPEN
-    assert breaker._probe_in_flight is True
+    assert clock_calls == 0
+    assert permit._claimed is True
+    assert permit._completed is True
 
     breaker._clock = clock
     if action == "success":
-        breaker.record_success(permit)
         assert breaker.state is BreakerState.CLOSED
         replacement = breaker.acquire()
         assert replacement is not None and replacement.half_open is False
-    elif action == "failure":
-        breaker.record_failure(permit, FailureClass.PROXY_502)
-        assert breaker.state is BreakerState.OPEN
-        clock.advance(30.0)
-        replacement = breaker.acquire()
-        assert replacement is not None and replacement.half_open is True
     else:
-        breaker.release(permit)
         assert breaker.state is BreakerState.HALF_OPEN
         replacement = breaker.acquire()
         assert replacement is not None and replacement.half_open is True
 
 
-@pytest.mark.parametrize("action", ["success", "failure", "release"])
-def test_half_open_completion_rolls_back_clock_side_effect_before_raise(
-    action: str,
-) -> None:
+def test_half_open_failure_with_persistently_failing_clock_never_wedges() -> None:
+    clock = Clock()
+    breaker = ControlPlaneCircuitBreaker(monotonic=clock)
+    _record_failures(breaker, 3, FailureClass.PROXY_502)
+    clock.advance(30.0)
+    permit = breaker.acquire()
+    assert permit is not None and permit.half_open is True
+    clock_calls = 0
+
+    def failing_clock() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        raise RuntimeError("injected persistent clock failure")
+
+    breaker._clock = failing_clock
+    breaker.record_failure(permit, FailureClass.PROXY_502)
+    breaker.record_failure(permit, FailureClass.PROXY_502)
+
+    assert clock_calls == 1
+    assert permit._claimed is True
+    assert permit._completed is True
+    assert breaker._state is BreakerState.OPEN
+    assert breaker._probe_in_flight is False
+
+    breaker._clock = clock
+    clock.now = 60.0
+    replacement = breaker.acquire()
+    assert replacement is not None and replacement.half_open is True
+
+
+def test_half_open_failure_rolls_back_clock_side_effect_then_reopens() -> None:
     clock = Clock()
     breaker = ControlPlaneCircuitBreaker(monotonic=clock)
     _record_failures(breaker, 3, FailureClass.PROXY_502)
@@ -185,23 +201,12 @@ def test_half_open_completion_rolls_back_clock_side_effect_before_raise(
         raise RuntimeError("injected post-side-effect clock failure")
 
     breaker._clock = mutating_clock
-    with pytest.raises(RuntimeError, match="post-side-effect"):
-        if action == "success":
-            breaker.record_success(permit)
-        elif action == "failure":
-            breaker.record_failure(permit, FailureClass.PROXY_502)
-        else:
-            breaker.release(permit)
+    breaker.record_failure(permit, FailureClass.PROXY_502)
 
-    assert permit._claimed is False
-    assert breaker._state is BreakerState.HALF_OPEN
-    assert breaker._probe_in_flight is True
-    assert breaker._generation == expected_generation
-
-    breaker._clock = clock
-    breaker.release(permit)
-    replacement = breaker.acquire()
-    assert replacement is not None and replacement.half_open is True
+    assert permit._completed is True
+    assert breaker._state is BreakerState.OPEN
+    assert breaker._probe_in_flight is False
+    assert breaker._generation == expected_generation + 1
 
 
 def test_concurrent_failure_samples_are_linearized_before_window_and_cooldown() -> None:

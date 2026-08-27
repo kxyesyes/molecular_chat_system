@@ -1529,6 +1529,174 @@ def test_mutations_keep_in_memory_coherence_when_sinks_fail_after_side_effect() 
         )
 
 
+def test_pre_side_effect_sink_failures_converge_to_canonical_scrape() -> None:
+    class FailBeforeMutation:
+        def labels(self, **labels: object) -> "FailBeforeMutation":
+            del labels
+            return self
+
+        def observe(self, value: object) -> None:
+            del value
+            raise KeyboardInterrupt
+
+        def inc(self, amount: object = 1) -> None:
+            del amount
+            raise KeyboardInterrupt
+
+        def set(self, value: object) -> None:
+            del value
+            raise KeyboardInterrupt
+
+    registry = CollectorRegistry()
+    clock = Clock()
+    telemetry = BrokerTelemetry(registry=registry, monotonic=clock)
+    failing = FailBeforeMutation()
+    telemetry._phase_duration = failing  # type: ignore[assignment]
+    telemetry._control_failures = failing  # type: ignore[assignment]
+    telemetry._retries = failing  # type: ignore[assignment]
+    telemetry._jobs = failing  # type: ignore[assignment]
+    telemetry._queue_depth = failing  # type: ignore[assignment]
+    telemetry._active_jobs = failing  # type: ignore[assignment]
+    telemetry._cleanup_tasks = failing  # type: ignore[assignment]
+    telemetry._isolated_tasks = failing  # type: ignore[assignment]
+    telemetry._breaker_state = failing  # type: ignore[assignment]
+
+    token = telemetry.start_phase(
+        trace_id="trace-1",
+        job_id="a" * 32,
+        phase="upload",
+        attempt=1,
+        queue_depth=0,
+        active_job_count=1,
+        image_digest="b" * 64,
+    )
+    clock.advance(0.125)
+    telemetry.finish_phase(token, outcome="passed")
+    telemetry.record_control_plane_failure(
+        operation="create",
+        failure_class=FailureClass.PROXY_502,
+    )
+    telemetry.record_retry("create", "attempted")
+    telemetry.record_terminal("failed", FailureClass.PROXY_502)
+    telemetry.update_runtime_gauges(
+        queue_depth=2,
+        active_job_count=1,
+        cleanup_task_count=3,
+        isolated_task_count=4,
+        breaker_state="half_open",
+    )
+
+    snapshot = telemetry.snapshot()
+    encoded = telemetry.prometheus_text()
+    samples = {
+        (sample.name, tuple(sorted(sample.labels.items()))): sample.value
+        for family in text_string_to_metric_families(encoded.decode("utf-8"))
+        for sample in family.samples
+    }
+
+    assert snapshot["counters"] == {
+        "control_failure|create|proxy_502": 1,
+        "retry|create|attempted": 1,
+        "terminal|failed|proxy_502": 1,
+    }
+    assert snapshot["phase_latency_ms"] == {"upload|passed": [125]}
+    assert samples[
+        (
+            "medchat_sandbox_control_plane_failures_total",
+            (("failure_class", "proxy_502"), ("operation", "create")),
+        )
+    ] == 1.0
+    assert samples[
+        (
+            "medchat_sandbox_retry_total",
+            (("operation", "create"), ("outcome", "attempted")),
+        )
+    ] == 1.0
+    assert samples[
+        (
+            "medchat_sandbox_jobs_total",
+            (("failure_class", "proxy_502"), ("terminal_status", "failed")),
+        )
+    ] == 1.0
+    phase_labels = (("outcome", "passed"), ("phase", "upload"))
+    assert samples[
+        ("medchat_sandbox_phase_duration_seconds_count", phase_labels)
+    ] == 1.0
+    assert samples[
+        ("medchat_sandbox_phase_duration_seconds_sum", phase_labels)
+    ] == 0.125
+    assert samples[("medchat_sandbox_queue_depth", ())] == 2.0
+    assert samples[("medchat_sandbox_active_jobs", ())] == 1.0
+    assert samples[("medchat_sandbox_cleanup_tasks", ())] == 3.0
+    assert samples[("medchat_sandbox_isolated_tasks", ())] == 4.0
+    assert samples[("medchat_sandbox_circuit_breaker_state", ())] == 2.0
+
+
+def test_dirty_projection_rebuild_is_atomic_with_snapshot_and_scrape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailBeforeMutation:
+        def labels(self, **labels: object) -> "FailBeforeMutation":
+            del labels
+            return self
+
+        def inc(self, amount: object = 1) -> None:
+            del amount
+            raise SystemExit
+
+    registry = CollectorRegistry()
+    telemetry = BrokerTelemetry(registry=registry)
+    original_jobs = telemetry._jobs
+    telemetry._jobs = FailBeforeMutation()  # type: ignore[assignment]
+    telemetry.record_terminal("failed", FailureClass.PROXY_502)
+    telemetry._jobs = original_jobs
+
+    rebuild_entered = threading.Event()
+    release_rebuild = threading.Event()
+    original_unregister = registry.unregister
+
+    def blocking_unregister(collector: object) -> object:
+        rebuild_entered.set()
+        assert release_rebuild.wait(timeout=2.0)
+        return original_unregister(collector)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(registry, "unregister", blocking_unregister)
+    scrape_result: dict[str, bytes] = {}
+    snapshot_done = threading.Event()
+
+    scraper = threading.Thread(
+        target=lambda: scrape_result.setdefault(
+            "value",
+            telemetry.prometheus_text(),
+        ),
+        daemon=True,
+    )
+    snapshot_reader = threading.Thread(
+        target=lambda: (telemetry.snapshot(), snapshot_done.set()),
+        daemon=True,
+    )
+    scraper.start()
+    assert rebuild_entered.wait(timeout=1.0)
+    snapshot_reader.start()
+    snapshot_was_blocked = not snapshot_done.wait(timeout=0.2)
+    release_rebuild.set()
+    scraper.join(timeout=2.0)
+    snapshot_reader.join(timeout=2.0)
+
+    assert snapshot_was_blocked is True
+    samples = [
+        sample.value
+        for family in text_string_to_metric_families(
+            scrape_result["value"].decode("utf-8")
+        )
+        for sample in family.samples
+        if sample.name == "medchat_sandbox_jobs_total"
+        and sample.labels
+        == {"terminal_status": "failed", "failure_class": "proxy_502"}
+    ]
+    assert samples == [1.0]
+
+
 @pytest.mark.parametrize(
     "call",
     [

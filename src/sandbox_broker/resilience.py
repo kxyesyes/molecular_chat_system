@@ -103,6 +103,7 @@ class ControlPlaneCircuitBreaker:
         self._probe_in_flight = False
         self._generation = 0
         self._permit_owner = object()
+        self._last_now = 0.0
 
     def _now(self) -> float:
         value = self._clock()
@@ -111,6 +112,7 @@ class ControlPlaneCircuitBreaker:
         parsed = float(value)
         if not math.isfinite(parsed) or parsed < 0:
             raise ValueError("invalid circuit-breaker clock")
+        self._last_now = parsed
         return parsed
 
     def _refresh_locked(self, now: float) -> None:
@@ -213,7 +215,6 @@ class ControlPlaneCircuitBreaker:
                 return
             snapshot = self._completion_snapshot_locked(permit)
             try:
-                self._now()
                 if not permit._claim(self._permit_owner):
                     return
                 if (
@@ -238,7 +239,6 @@ class ControlPlaneCircuitBreaker:
                 return
             snapshot = self._completion_snapshot_locked(permit)
             try:
-                self._now()
                 if not permit._claim(self._permit_owner):
                     return
                 if permit.generation == self._generation:
@@ -271,7 +271,18 @@ class ControlPlaneCircuitBreaker:
                 return
             snapshot = self._completion_snapshot_locked(permit)
             try:
-                now = self._now()
+                if failure_class in _QUALIFYING_FAILURES:
+                    try:
+                        now = self._now()
+                    except BaseException:
+                        self._restore_completion_locked(permit, snapshot)
+                        now = (
+                            self._opened_at + _OPEN_SECONDS
+                            if permit.half_open and self._opened_at is not None
+                            else self._last_now
+                        )
+                else:
+                    now = self._last_now
                 if not permit._claim(self._permit_owner):
                     return
                 if permit.generation == self._generation:
