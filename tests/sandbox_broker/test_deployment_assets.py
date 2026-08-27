@@ -254,7 +254,7 @@ def normalize_rule(rule):
         if normalized[index] == "ESTABLISHED,RELATED":
             normalized[index] = "RELATED,ESTABLISHED"
     if normalized[:4] == ["-o", "br-medchat-sbox", "!", "-s"]:
-        normalized = normalized[2:6] + normalized[:2] + normalized[6:]
+        normalized = normalized[2:5] + normalized[:2] + normalized[5:]
     if "--ctdir" in normalized and "--ctorigdstport" in normalized:
         direction = normalized.index("--ctdir")
         port = normalized.index("--ctorigdstport")
@@ -516,9 +516,9 @@ def test_firewall_migrates_legacy_rules_and_is_idempotently_ingress_scoped(
                 "-j", "RETURN",
             ],
             [
-                "-o", "br-medchat-sbox", "!", "-s", source_network,
-                "-p", "tcp", "-m", "conntrack", "--ctdir", "ORIGINAL",
-                "--ctorigdstport", "40000:60000", "-j", "DROP",
+                "!", "-s", source_network, "-o", "br-medchat-sbox",
+                "-p", "tcp", "-m", "conntrack", "--ctorigdstport",
+                "40000:60000", "--ctdir", "ORIGINAL", "-j", "DROP",
             ],
             [
                 "-i", "br-medchat-sbox", "!", "-o", "br-medchat-sbox",
