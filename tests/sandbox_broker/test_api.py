@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -40,6 +41,31 @@ from src.sandbox_broker.service import (
     StopIncomplete,
 )
 from src.sandbox_broker.store import ArtifactRecord, BrokerStore
+
+
+def test_broker_entrypoint_imports_from_an_isolated_working_directory(
+    tmp_path: Path,
+) -> None:
+    entrypoint = Path(__file__).resolve().parents[2] / "scripts" / "run_sandbox_broker.py"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            (
+                "import runpy,sys; "
+                "runpy.run_path(sys.argv[1], run_name='broker_entrypoint_import_test')"
+            ),
+            str(entrypoint),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 class _HoldingSandboxClient:
