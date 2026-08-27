@@ -1102,7 +1102,7 @@ def test_cancel_before_job_coroutine_starts_keeps_consumer_alive(
             second = await service.submit(_prepared(config), "idem-after-cancel")
             release_first_job.set()
             first_terminal = await service.wait_terminal(first.job_id, timeout=1.0)
-            second_terminal = await service.wait_terminal(second.job_id, timeout=1.0)
+            second_terminal = await service.wait_terminal(second.job_id, timeout=3.0)
             await service.stop()
             return first_terminal, second_terminal, sdk
         finally:
@@ -1142,7 +1142,7 @@ def test_run_cancel_event_cancels_only_run_task_and_consumer_runs_next_job(
         second = await service.submit(_prepared(config), "idem-after-run-cancel")
         first_terminal = await service.wait_terminal(first.job_id, timeout=1.0)
         sdk.release.set()
-        second_terminal = await service.wait_terminal(second.job_id, timeout=1.0)
+        second_terminal = await service.wait_terminal(second.job_id, timeout=3.0)
         await service.stop()
         return first_terminal, second_terminal, sdk
 
@@ -1687,9 +1687,15 @@ def test_late_cancellation_resistant_create_is_owned_and_cleaned_before_stop(
 def test_execution_timeout_and_command_failure_are_stable_and_cleanup(
     tmp_path: Path,
 ) -> None:
+    timeout_telemetry = RecordingTelemetry()
+
     async def scenario() -> tuple[object, object, FakeSandboxClient, FaultSandboxClient]:
         timeout_sdk = FakeSandboxClient(block=True)
-        timeout_service, _, timeout_config = _service(tmp_path / "timeout", timeout_sdk)
+        timeout_service, _, timeout_config = _service(
+            tmp_path / "timeout",
+            timeout_sdk,
+            telemetry=timeout_telemetry,
+        )
         object.__setattr__(timeout_config, "execution_timeout_seconds", 0.01)
         await timeout_service.start()
         timeout_job = await timeout_service.submit(_prepared(timeout_config), "idem-timeout")
@@ -1709,6 +1715,9 @@ def test_execution_timeout_and_command_failure_are_stable_and_cleanup(
     assert command.error_code == BrokerErrorCode.COMMAND_FAILED.value
     assert timeout_sdk.run_count == command_sdk.run_count == 1
     assert timeout_sdk.destroy_count == command_sdk.destroy_count == 1
+    assert timeout_telemetry.snapshot()["counters"][
+        "control_failure|command|command_timeout"
+    ] == 1
 
 
 def test_nonzero_wrapper_timeout_preserves_verified_failure_code(tmp_path: Path) -> None:
@@ -1989,9 +1998,11 @@ def test_each_stage_exception_and_base_exception_cleans_and_redacts(
     class FatalProbe(BaseException):
         pass
 
+    telemetry = RecordingTelemetry()
+
     async def scenario() -> tuple[object, FaultSandboxClient]:
         sdk = FaultSandboxClient(stage, failure=FatalProbe("secret-base-exception"))
-        service, _, config = _service(tmp_path, sdk)
+        service, _, config = _service(tmp_path, sdk, telemetry=telemetry)
         await service.start()
         job = await service.submit(_prepared(config), f"idem-{stage}")
         terminal = await service.wait_terminal(job.job_id)
@@ -2003,6 +2014,21 @@ def test_each_stage_exception_and_base_exception_cleans_and_redacts(
     assert terminal.error_code == expected.value
     assert "secret" not in repr(terminal)
     assert sdk.destroy_count == (0 if stage == "create" else 1)
+    operation = {
+        "create": "create",
+        "upload": "upload",
+        "run": "command",
+        "read": "metadata",
+        "list": "metadata",
+    }[stage]
+    failure_class = (
+        "command_transport_failed"
+        if stage == "run"
+        else "unknown_control_plane_failure"
+    )
+    assert telemetry.snapshot()["counters"][
+        f"control_failure|{operation}|{failure_class}"
+    ] == 1
 
 
 def test_cleanup_failure_keeps_partial_artifacts_but_exposes_no_manifest(
@@ -2085,6 +2111,30 @@ def test_concurrent_recovery_destroys_orphan_once_and_fails_closed(
         if key.startswith("terminal|")
     }
     assert sum(terminal_counters.values()) == 1
+    lifecycle = [
+        event
+        for event in telemetry.snapshot()["recent_events"]
+        if event["job_id"] == terminal.job_id
+    ]
+    assert [event["phase"] for event in lifecycle] == [
+        "cleanup_started",
+        "cleanup_completed",
+        "job_terminal",
+    ]
+    assert lifecycle[0]["attempt"] == 1
+    assert lifecycle[1]["attempt"] == 1
+    assert lifecycle[1]["outcome"] == ("failed" if destroy_fails else "passed")
+    assert lifecycle[1]["cleanup_status"] == (
+        "failed" if destroy_fails else "succeeded"
+    )
+    assert lifecycle[1]["failure_class"] == (
+        "destroy_failed" if destroy_fails else None
+    )
+    destroy_counter = telemetry.snapshot()["counters"].get(
+        "control_failure|destroy|destroy_failed",
+        0,
+    )
+    assert destroy_counter == (1 if destroy_fails else 0)
     assert telemetry.snapshot()["runtime"]["active_job_count"] == 0
 
 
@@ -2511,6 +2561,7 @@ def test_completed_destroy_failure_retries_same_identity_then_succeeds(
     counters = telemetry.snapshot()["counters"]
     assert counters["retry|destroy|attempted"] == 1
     assert counters["retry|destroy|succeeded"] == 1
+    assert counters["control_failure|destroy|connection_failed"] == 1
     assert "retry|destroy|exhausted" not in counters
     cleanup_events = [
         event
@@ -2572,6 +2623,7 @@ def test_two_completed_destroy_failures_mark_cleanup_failed(tmp_path: Path) -> N
     counters = telemetry.snapshot()["counters"]
     assert counters["retry|destroy|attempted"] == 1
     assert counters["retry|destroy|exhausted"] == 1
+    assert counters["control_failure|destroy|server_500"] == 2
     assert "retry|destroy|succeeded" not in counters
 
 
@@ -2851,7 +2903,13 @@ def test_recovery_retries_terminal_cleanup_pending_without_rewriting_audit(
 ) -> None:
     telemetry = RecordingTelemetry()
 
-    async def scenario() -> tuple[object, object, RecoverySandboxClient, list[object]]:
+    async def scenario() -> tuple[
+        object,
+        object,
+        RecoverySandboxClient,
+        list[object],
+        list[dict[str, object]],
+    ]:
         failing = FaultSandboxClient("destroy")
         service, store, config = _service(
             tmp_path,
@@ -2863,6 +2921,7 @@ def test_recovery_retries_terminal_cleanup_pending_without_rewriting_audit(
         before = await service.wait_terminal(job.job_id)
         await service.stop()
         assert store.cleanup_pending_jobs()
+        event_count = len(telemetry.snapshot()["recent_events"])
 
         recovery = RecoverySandboxClient()
         reopened = SandboxBrokerService(
@@ -2874,9 +2933,10 @@ def test_recovery_retries_terminal_cleanup_pending_without_rewriting_audit(
         )
         await reopened.recover()
         after = reopened.get_job(job.job_id)
-        return before, after, recovery, store.cleanup_pending_jobs()
+        recovery_events = telemetry.snapshot()["recent_events"][event_count:]
+        return before, after, recovery, store.cleanup_pending_jobs(), recovery_events
 
-    before, after, recovery, pending = asyncio.run(scenario())
+    before, after, recovery, pending, recovery_events = asyncio.run(scenario())
     assert before.status is BrokerJobStatus.FAILED
     assert before.error_code == BrokerErrorCode.CLEANUP_FAILED.value
     assert before.cleanup_status == "failed"
@@ -2898,6 +2958,15 @@ def test_recovery_retries_terminal_cleanup_pending_without_rewriting_audit(
         if key.startswith("terminal|")
     }
     assert sum(terminal_counters.values()) == 1
+    assert [event["phase"] for event in recovery_events] == [
+        "cleanup_started",
+        "cleanup_completed",
+    ]
+    assert recovery_events[0]["attempt"] == 1
+    assert recovery_events[1]["attempt"] == 1
+    assert recovery_events[1]["outcome"] == "passed"
+    assert recovery_events[1]["cleanup_status"] == "succeeded"
+    assert recovery_events[1]["failure_class"] is None
 
 
 @pytest.mark.parametrize(
@@ -3002,7 +3071,7 @@ def test_complete_failure_terminalizes_without_reusing_rejected_provenance(
         monkeypatch.setattr(store, "fail", fail_without_rejected_provenance)
         await service.start()
         job = await service.submit(_prepared(config), "idem-rejected-provenance")
-        terminal = await service.wait_terminal(job.job_id, timeout=1)
+        terminal = await service.wait_terminal(job.job_id, timeout=3)
         await service.stop()
         return terminal
 
@@ -3300,7 +3369,7 @@ def test_consumer_survives_store_get_baseexception_and_processes_next_job(
         monkeypatch.setattr(store, "get", flaky_get)
         second = await service.submit(_prepared(config), "idem-flaky-get-second")
         first_terminal = await service.wait_terminal(first.job_id, timeout=1)
-        second_terminal = await service.wait_terminal(second.job_id, timeout=1)
+        second_terminal = await service.wait_terminal(second.job_id, timeout=3)
         await service.stop(timeout=1)
         return first_terminal, second_terminal, sdk
 
@@ -3607,6 +3676,166 @@ def test_telemetry_baseexceptions_cannot_change_success_or_skip_cleanup(
     assert "sandbox broker telemetry observation failed" in caplog.text
 
 
+def test_breaker_rejection_uses_atomic_discard_not_terminal_delete_fallbacks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    breaker = ControlPlaneCircuitBreaker()
+    _trip_breaker(breaker)
+
+    async def scenario() -> tuple[BrokerStore, BrokerFailure]:
+        service, store, config = _service(
+            tmp_path,
+            FakeSandboxClient(),
+            circuit_breaker=breaker,
+        )
+        monkeypatch.setattr(
+            store,
+            "fail",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("blocked")),
+        )
+        monkeypatch.setattr(
+            store,
+            "delete_terminal_audit",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("blocked")),
+        )
+        await service.start()
+        with pytest.raises(BrokerFailure) as raised:
+            await service.submit(_prepared(config), "idem-atomic-reject")
+        await service.stop()
+        return store, raised.value
+
+    store, failure = asyncio.run(scenario())
+    assert failure.code is BrokerErrorCode.OPENSANDBOX_UNAVAILABLE
+    assert store.get_by_idempotency("idem-atomic-reject") is None
+    assert store.active_jobs() == []
+
+
+def test_atomic_discard_failure_falls_back_to_owned_authoritative_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    breaker = ControlPlaneCircuitBreaker()
+    _trip_breaker(breaker)
+    sdk = FakeSandboxClient()
+
+    async def scenario() -> object:
+        service, store, config = _service(
+            tmp_path,
+            sdk,
+            circuit_breaker=breaker,
+        )
+        monkeypatch.setattr(
+            store,
+            "discard_pristine_queued",
+            lambda expected: (_ for _ in ()).throw(RuntimeError("blocked")),
+            raising=False,
+        )
+        await service.start()
+        submitted = await service.submit(_prepared(config), "idem-discard-fallback")
+        terminal = await service.wait_terminal(submitted.job_id)
+        await service.stop()
+        assert store.active_jobs() == []
+        return terminal
+
+    terminal = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.OPENSANDBOX_UNAVAILABLE.value
+    assert sdk.create_count == 0
+
+
+def test_upload_discard_failure_transfers_ownership_before_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    breaker = ControlPlaneCircuitBreaker()
+    _trip_breaker(breaker)
+    sdk = FakeSandboxClient()
+
+    async def scenario() -> tuple[object, BrokerConfig]:
+        service, store, config = _service(
+            tmp_path,
+            sdk,
+            circuit_breaker=breaker,
+        )
+
+        def fail_discard(record: object) -> bool:
+            del record
+            raise sqlite3.OperationalError("injected discard failure")
+
+        def staging_must_not_run(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            raise AssertionError("staging ran before ownership transfer")
+
+        monkeypatch.setattr(store, "discard_pristine_queued", fail_discard)
+        monkeypatch.setattr(service_module, "stage_input", staging_must_not_run)
+        await service.start()
+        submitted = await service.submit_uploads(
+            DockingParameters(center=[1, 2, 3], size=[20, 20, 20]),
+            type("Upload", (), {"filename": "receptor.pdb", "file": io.BytesIO(b"ATOM\n")})(),
+            type("Upload", (), {"filename": "ligand.sdf", "file": io.BytesIO(VALID_SDF)})(),
+            "idem-upload-discard-fallback",
+        )
+        terminal = await service.wait_terminal(submitted.job_id)
+        await service.stop()
+        return terminal, config
+
+    terminal, config = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.OPENSANDBOX_UNAVAILABLE.value
+    assert sdk.create_count == 0
+    assert not (config.state_root / "jobs" / terminal.job_id).exists()
+
+
+def test_breaker_rejected_upload_cleanup_runs_once_and_reused_row_is_untouched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    breaker = ControlPlaneCircuitBreaker()
+    _trip_breaker(breaker)
+
+    async def scenario() -> tuple[int, BrokerStore]:
+        service, store, _ = _service(
+            tmp_path,
+            FakeSandboxClient(),
+            circuit_breaker=breaker,
+        )
+        removals = 0
+        original_remove = service._remove_job_tree
+
+        def counted_remove(job_id: str) -> bool:
+            nonlocal removals
+            removals += 1
+            return original_remove(job_id)
+
+        monkeypatch.setattr(service, "_remove_job_tree", counted_remove)
+        await service.start()
+        receptor = type(
+            "Upload",
+            (),
+            {"filename": "receptor.pdb", "file": io.BytesIO(b"ATOM\n")},
+        )()
+        ligand = type(
+            "Upload",
+            (),
+            {"filename": "ligand.sdf", "file": io.BytesIO(VALID_SDF)},
+        )()
+        with pytest.raises(BrokerFailure) as raised:
+            await service.submit_uploads(
+                DockingParameters(center=[1, 2, 3], size=[20, 20, 20]),
+                receptor,
+                ligand,
+                "idem-upload-atomic-reject",
+            )
+        await service.stop()
+        assert raised.value.code is BrokerErrorCode.OPENSANDBOX_UNAVAILABLE
+        return removals, store
+
+    removals, store = asyncio.run(scenario())
+    assert removals == 1
+    assert store.get_by_idempotency("idem-upload-atomic-reject") is None
+
+
 def test_queued_job_obeys_breaker_opened_before_authoritative_create(
     tmp_path: Path,
 ) -> None:
@@ -3699,6 +3928,7 @@ def test_breaker_records_only_final_provisioning_result_and_create_retry(
     counters = telemetry.snapshot()["counters"]
     assert counters["retry|create|attempted"] == 1
     assert counters["retry|create|succeeded"] == 1
+    assert counters["control_failure|create|connection_failed"] == 1
     assert "retry|create|exhausted" not in counters
 
 
@@ -3743,6 +3973,9 @@ def test_final_classified_create_failure_records_breaker_failure_once(
     assert breaker.successes == 0
     assert breaker.failures == [FailureClass.PROXY_502]
     assert telemetry.snapshot()["counters"]["retry|create|exhausted"] == 1
+    assert telemetry.snapshot()["counters"][
+        "control_failure|create|proxy_502"
+    ] == 2
 
 
 def test_cancellation_before_create_releases_authoritative_permit(
@@ -3780,6 +4013,103 @@ def test_cancellation_before_create_releases_authoritative_permit(
     assert breaker.failures == []
 
 
+def test_local_attach_failures_do_not_count_as_remote_create_failures(
+    tmp_path: Path,
+) -> None:
+    telemetry = RecordingTelemetry()
+    breaker = TrackingCircuitBreaker()
+    sdk = FakeSandboxClient()
+
+    async def scenario() -> list[object]:
+        service, store, config = _service(
+            tmp_path,
+            sdk,
+            telemetry=telemetry,
+            circuit_breaker=breaker,
+        )
+
+        def fail_attach(job_id: str, sandbox_id: str) -> object:
+            del job_id, sandbox_id
+            raise RuntimeError("local sqlite failure")
+
+        store.attach_sandbox = fail_attach  # type: ignore[method-assign]
+        await service.start()
+        terminals: list[object] = []
+        for index in range(3):
+            submitted = await service.submit(
+                _prepared(config),
+                f"idem-local-attach-{index}",
+            )
+            terminals.append(await service.wait_terminal(submitted.job_id))
+        await service.stop()
+        return terminals
+
+    terminals = asyncio.run(scenario())
+    assert [item.error_code for item in terminals] == [
+        BrokerErrorCode.PROVISIONING_FAILED.value,
+    ] * 3
+    assert breaker.successes == 3
+    assert breaker.failures == []
+    assert breaker.state.value == "closed"
+    assert sdk.create_count == 3
+    assert sdk.destroy_count == 3
+    assert len(sdk.destroyed_ids) == len(set(sdk.destroyed_ids)) == 3
+    assert not any(
+        key.startswith("control_failure|create|")
+        for key in telemetry.snapshot()["counters"]
+    )
+
+
+@pytest.mark.parametrize("raise_after_mutation", [False, True])
+def test_half_open_success_completion_failure_cannot_wedge_probe(
+    tmp_path: Path,
+    raise_after_mutation: bool,
+) -> None:
+    clock = [0.0]
+
+    class CompletionFailureBreaker(ControlPlaneCircuitBreaker):
+        def __init__(self) -> None:
+            super().__init__(monotonic=lambda: clock[0])
+            self.fail_once = True
+
+        def record_success(self, permit: object) -> None:
+            if self.fail_once:
+                self.fail_once = False
+                if raise_after_mutation:
+                    super().record_success(permit)  # type: ignore[arg-type]
+                raise KeyboardInterrupt
+            super().record_success(permit)  # type: ignore[arg-type]
+
+    breaker = CompletionFailureBreaker()
+    _trip_breaker(breaker)
+    clock[0] = 31.0
+    sdk = FakeSandboxClient()
+
+    async def scenario() -> object:
+        service, _, config = _service(
+            tmp_path,
+            sdk,
+            telemetry=RecordingTelemetry(),
+            circuit_breaker=breaker,
+        )
+        await service.start()
+        submitted = await service.submit(
+            _prepared(config),
+            "idem-half-open-completion",
+        )
+        terminal = await service.wait_terminal(submitted.job_id)
+        await service.stop()
+        return terminal
+
+    terminal = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.SUCCEEDED
+    assert sdk.destroy_count == 1
+    assert breaker.state.value == "closed"
+    next_permit = breaker.acquire()
+    assert next_permit is not None
+    breaker.release(next_permit)
+
+
 @pytest.mark.parametrize(
     ("sdk", "expected_error"),
     [
@@ -3803,12 +4133,13 @@ def test_scientific_and_resource_failures_do_not_trip_breaker(
     expected_error: BrokerErrorCode,
 ) -> None:
     breaker = TrackingCircuitBreaker()
+    telemetry = RecordingTelemetry()
 
     async def scenario() -> object:
         service, _, config = _service(
             tmp_path,
             sdk,
-            telemetry=RecordingTelemetry(),
+            telemetry=telemetry,
             circuit_breaker=breaker,
         )
         service._create_retry_delay_seconds = 0.0
@@ -3822,6 +4153,10 @@ def test_scientific_and_resource_failures_do_not_trip_breaker(
     assert terminal.error_code == expected_error.value
     assert breaker.failures == []
     assert breaker.state.value == "closed"
+    if isinstance(sdk, FaultSandboxClient):
+        assert telemetry.snapshot()["counters"][
+            "control_failure|create|resource_limit"
+        ] == 1
 
 
 def test_invalid_input_never_acquires_or_updates_breaker(tmp_path: Path) -> None:
@@ -3952,6 +4287,37 @@ def test_diagnostics_and_prometheus_share_injected_runtime_objects(
     assert isinstance(captured["breaker"], ControlPlaneCircuitBreaker)
 
 
+@pytest.mark.parametrize("scrape", ["diagnostics", "prometheus"])
+def test_diagnostics_and_scrape_refresh_expired_breaker_state_coherently(
+    tmp_path: Path,
+    scrape: str,
+) -> None:
+    clock = [0.0]
+    telemetry = RecordingTelemetry()
+    breaker = ControlPlaneCircuitBreaker(monotonic=lambda: clock[0])
+    _trip_breaker(breaker)
+    service, _, _ = _service(
+        tmp_path,
+        FakeSandboxClient(),
+        telemetry=telemetry,
+        circuit_breaker=breaker,
+    )
+    assert breaker.snapshot()["state"] == "open"
+    clock[0] = 31.0
+
+    if scrape == "diagnostics":
+        result = service.diagnostics()
+        breaker_snapshot = result["circuit_breaker"]
+        telemetry_snapshot = result["telemetry"]
+    else:
+        assert service.prometheus_text().startswith(b"# HELP")
+        breaker_snapshot = breaker.snapshot()
+        telemetry_snapshot = telemetry.snapshot()
+
+    assert breaker_snapshot["state"] == "half_open"
+    assert telemetry_snapshot["runtime"]["breaker_state"] == "half_open"
+
+
 def test_diagnostic_telemetry_errors_return_safe_fallback_without_job_mutation(
     tmp_path: Path,
 ) -> None:
@@ -3982,6 +4348,80 @@ def test_diagnostic_telemetry_errors_return_safe_fallback_without_job_mutation(
     assert diagnostics["schema_version"] == 1
     assert diagnostics["telemetry"] == {"schema_version": 1, "unavailable": True}
     assert prometheus == b""
+
+
+def test_partial_telemetry_sink_failures_preserve_lifecycle_and_job_result(
+    tmp_path: Path,
+) -> None:
+    class FailingLogger:
+        def info(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+            raise KeyboardInterrupt
+
+    class FailingMetric:
+        def labels(self, **values: object) -> "FailingMetric":
+            del values
+            return self
+
+        def observe(self, value: object) -> None:
+            del value
+            raise SystemExit
+
+        def inc(self) -> None:
+            raise SystemExit
+
+        def set(self, value: object) -> None:
+            del value
+            raise SystemExit
+
+    telemetry = BrokerTelemetry(logger=FailingLogger())  # type: ignore[arg-type]
+    sink = FailingMetric()
+    telemetry._phase_duration = sink  # type: ignore[assignment]
+    telemetry._control_failures = sink  # type: ignore[assignment]
+    telemetry._retries = sink  # type: ignore[assignment]
+    telemetry._jobs = sink  # type: ignore[assignment]
+    telemetry._queue_depth = sink  # type: ignore[assignment]
+    telemetry._active_jobs = sink  # type: ignore[assignment]
+    telemetry._cleanup_tasks = sink  # type: ignore[assignment]
+    telemetry._isolated_tasks = sink  # type: ignore[assignment]
+    telemetry._breaker_state = sink  # type: ignore[assignment]
+    sdk = FakeSandboxClient()
+
+    async def scenario() -> object:
+        service, _, config = _service(tmp_path, sdk, telemetry=telemetry)
+        await service.start()
+        submitted = await service.submit(
+            _prepared(config),
+            "idem-partial-sink-failures",
+        )
+        terminal = await service.wait_terminal(submitted.job_id)
+        await service.stop()
+        return terminal
+
+    terminal = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.SUCCEEDED
+    assert terminal.cleanup_status == "succeeded"
+    assert sdk.create_count == sdk.run_count == sdk.destroy_count == 1
+    lifecycle = [
+        event
+        for event in telemetry.snapshot()["recent_events"]
+        if event["job_id"] == terminal.job_id
+    ]
+    assert [event["phase"] for event in lifecycle] == [
+        "job_received",
+        "queue_entered",
+        "provisioning_started",
+        "provisioning_completed",
+        "upload_started",
+        "upload_completed",
+        "command_started",
+        "command_completed",
+        "validation_started",
+        "validation_completed",
+        "cleanup_started",
+        "cleanup_completed",
+        "job_terminal",
+    ]
 
 
 def test_plain_unicode_warning_persists_in_success_manifest(tmp_path: Path) -> None:

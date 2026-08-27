@@ -504,6 +504,50 @@ class SandboxBrokerService:
                 pass
             return default
 
+    def _complete_breaker_permit(
+        self,
+        permit: BreakerPermit,
+        action: str,
+        failure_class: FailureClass | None = None,
+    ) -> bool:
+        if type(permit) is not BreakerPermit:
+            return False
+
+        def complete(bound: bool) -> None:
+            breaker = self.circuit_breaker
+            if action == "success":
+                callback = (
+                    ControlPlaneCircuitBreaker.record_success
+                    if bound
+                    else breaker.record_success
+                )
+                callback(breaker, permit) if bound else callback(permit)
+            elif action == "failure" and type(failure_class) is FailureClass:
+                callback = (
+                    ControlPlaneCircuitBreaker.record_failure
+                    if bound
+                    else breaker.record_failure
+                )
+                if bound:
+                    callback(breaker, permit, failure_class)
+                else:
+                    callback(permit, failure_class)
+            elif action == "release":
+                callback = (
+                    ControlPlaneCircuitBreaker.release
+                    if bound
+                    else breaker.release
+                )
+                callback(breaker, permit) if bound else callback(permit)
+            else:
+                raise ValueError("invalid circuit-breaker completion")
+
+        self._breaker_observe(lambda: complete(False))
+        if permit._claimed:
+            return True
+        self._breaker_observe(lambda: complete(True))
+        return permit._claimed
+
     def _active_job_count(self) -> int:
         return min(1, sum(not task.done() for task in self._job_tasks.values()))
 
@@ -598,6 +642,18 @@ class SandboxBrokerService:
         except BaseException:
             return FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE
 
+    def _record_control_plane_failure(
+        self,
+        operation: str,
+        failure_class: FailureClass,
+    ) -> None:
+        self._observe(
+            lambda: self.telemetry.record_control_plane_failure(
+                operation=operation,
+                failure_class=failure_class,
+            )
+        )
+
     def _record_terminal_observation(
         self,
         job_id: str,
@@ -642,6 +698,7 @@ class SandboxBrokerService:
         self._refresh_runtime_metrics()
 
     def diagnostics(self) -> dict[str, object]:
+        self._refresh_runtime_metrics()
         telemetry = self._observe(
             self.telemetry.snapshot,
             {"schema_version": 1, "unavailable": True},
@@ -657,6 +714,7 @@ class SandboxBrokerService:
         }
 
     def prometheus_text(self) -> bytes:
+        self._refresh_runtime_metrics()
         encoded = self._observe(self.telemetry.prometheus_text, b"")
         return encoded if type(encoded) is bytes else b""
 
@@ -881,25 +939,17 @@ class SandboxBrokerService:
         )
         return accepted is True
 
-    def _reject_new_submission(self, job_id: str) -> None:
+    def _discard_new_submission(self, record: BrokerJobRecord) -> bool:
         try:
-            current = self.store.get(job_id)
-            if current is not None and current.status not in TERMINAL_STATUSES:
-                terminal = self.store.fail(
-                    job_id,
-                    BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
-                    cleanup_status="succeeded",
-                )
-                self.store.delete_terminal_audit(
-                    job_id,
-                    cutoff=terminal.updated_at,
-                )
+            discarded = self.store.discard_pristine_queued(record)
         except BaseException:
-            pass
-        self._prepared.pop(job_id, None)
-        self._cancel_events.pop(job_id, None)
-        self._remove_job_tree(job_id)
+            return False
+        if not discarded:
+            return False
+        self._prepared.pop(record.job_id, None)
+        self._cancel_events.pop(record.job_id, None)
         self._refresh_runtime_metrics()
+        return True
 
     async def submit(
         self,
@@ -943,8 +993,9 @@ class SandboxBrokerService:
         if reused:
             return _record_view(record)
         if not self._accepts_new_work():
-            self._reject_new_submission(record.job_id)
-            raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
+            if self._discard_new_submission(record):
+                self._remove_job_tree(record.job_id)
+                raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
 
         return await self._enqueue_created(record, prepared)
 
@@ -1064,8 +1115,16 @@ class SandboxBrokerService:
                 return _record_view(record)
             created = True
             if not self._accepts_new_work():
-                self._reject_new_submission(record.job_id)
-                raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
+                if self._discard_new_submission(record):
+                    raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
+                authoritative = PreparedDockingSubmission(
+                    parameters=parameters,
+                    receptor=receptor_placeholder,
+                    ligand=ligand_placeholder,
+                    canonical_input_sha256=canonical_hash,
+                    trace_id=record.trace_id,
+                )
+                return await self._enqueue_created(record, authoritative)
 
             receptor_temporary.seek(0)
             receptor = stage_input(
@@ -1301,10 +1360,8 @@ class SandboxBrokerService:
             if self._cancellation_requested(job_id):
                 provisioning = self._start_phase(job_id, "provisioning")
                 self._finish_phase(provisioning, outcome="cancelled")
-                self._breaker_observe(
-                    lambda: self.circuit_breaker.release(permit)
-                )
-                permit = None
+                if self._complete_breaker_permit(permit, "release"):
+                    permit = None
                 cancelled = True
                 return
             try:
@@ -1314,14 +1371,6 @@ class SandboxBrokerService:
                 if type(created) is not SandboxHandle:
                     raise ValueError
                 handle = created
-                self.store.attach_sandbox(job_id, handle.sandbox_id)
-                self._breaker_observe(
-                    lambda: self.circuit_breaker.record_success(permit)
-                )
-                permit = None
-                if create_interrupted or self._cancellation_requested(job_id):
-                    cancelled = True
-                    return
             except _CreateHardDeadline as deadline:
                 remote_identity_unknown = not deadline.cleanup_confirmed
                 if remote_identity_unknown:
@@ -1332,17 +1381,18 @@ class SandboxBrokerService:
                         deadline.failure_class
                         in _BREAKER_QUALIFYING_PROVISIONING_FAILURES
                     ):
-                        self._breaker_observe(
-                            lambda: self.circuit_breaker.record_failure(
-                                permit,
-                                deadline.failure_class,
-                            )
+                        completed = self._complete_breaker_permit(
+                            permit,
+                            "failure",
+                            deadline.failure_class,
                         )
                     else:
-                        self._breaker_observe(
-                            lambda: self.circuit_breaker.release(permit)
+                        completed = self._complete_breaker_permit(
+                            permit,
+                            "release",
                         )
-                    permit = None
+                    if completed:
+                        permit = None
                 failure = BrokerErrorCode.PROVISIONING_FAILED
                 return
             except asyncio.CancelledError:
@@ -1352,18 +1402,33 @@ class SandboxBrokerService:
                 terminal_failure_class = classified
                 if permit is not None:
                     if classified in _BREAKER_QUALIFYING_PROVISIONING_FAILURES:
-                        self._breaker_observe(
-                            lambda: self.circuit_breaker.record_failure(
-                                permit,
-                                classified,
-                            )
+                        completed = self._complete_breaker_permit(
+                            permit,
+                            "failure",
+                            classified,
                         )
                     else:
-                        self._breaker_observe(
-                            lambda: self.circuit_breaker.release(permit)
+                        completed = self._complete_breaker_permit(
+                            permit,
+                            "release",
                         )
-                    permit = None
+                    if completed:
+                        permit = None
                 failure = BrokerErrorCode.PROVISIONING_FAILED
+                return
+
+            if permit is not None and self._complete_breaker_permit(
+                permit,
+                "success",
+            ):
+                permit = None
+            try:
+                self.store.attach_sandbox(job_id, handle.sandbox_id)
+            except BaseException:
+                failure = BrokerErrorCode.PROVISIONING_FAILED
+                return
+            if create_interrupted or self._cancellation_requested(job_id):
+                cancelled = True
                 return
 
             self.store.transition(job_id, BrokerJobStatus.UPLOADING)
@@ -1378,6 +1443,7 @@ class SandboxBrokerService:
                 raise
             except BaseException as upload_failure:
                 classified = self._classified_failure("upload", upload_failure)
+                self._record_control_plane_failure("upload", classified)
                 self._finish_phase(
                     upload,
                     outcome="failed",
@@ -1399,6 +1465,10 @@ class SandboxBrokerService:
                     handle,
                 )
             except asyncio.TimeoutError:
+                self._record_control_plane_failure(
+                    "command",
+                    FailureClass.COMMAND_TIMEOUT,
+                )
                 self._finish_phase(
                     command_phase,
                     outcome="failed",
@@ -1412,6 +1482,7 @@ class SandboxBrokerService:
                 raise
             except BaseException as command_failure:
                 classified = self._classified_failure("command", command_failure)
+                self._record_control_plane_failure("command", classified)
                 self._finish_phase(
                     command_phase,
                     outcome="failed",
@@ -1425,6 +1496,10 @@ class SandboxBrokerService:
                 cancelled = True
                 return
             if type(command) is not SandboxCommandResult:
+                self._record_control_plane_failure(
+                    "command",
+                    FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+                )
                 self._finish_phase(
                     command_phase,
                     outcome="failed",
@@ -1499,10 +1574,8 @@ class SandboxBrokerService:
             terminal_failure_class = FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE
         finally:
             if permit is not None:
-                self._breaker_observe(
-                    lambda: self.circuit_breaker.release(permit)
-                )
-                permit = None
+                if self._complete_breaker_permit(permit, "release"):
+                    permit = None
             try:
                 cleanup = await self._destroy_best_effort(
                     job_id,
@@ -1655,10 +1728,18 @@ class SandboxBrokerService:
                 return None, True
             if read_task not in done:
                 await self._cancel_with_grace(read_task)
+                self._record_control_plane_failure(
+                    "metadata",
+                    FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+                )
                 return None, False
             try:
                 value = read_task.result()
-            except BaseException:
+            except BaseException as read_failure:
+                self._record_control_plane_failure(
+                    "metadata",
+                    self._classified_failure("metadata", read_failure),
+                )
                 return None, False
             return (value if type(value) is str else None), False
         except asyncio.CancelledError:
@@ -1696,8 +1777,19 @@ class SandboxBrokerService:
                 return None, True
             if validation_task not in done:
                 await self._cancel_with_grace(validation_task)
+                self._record_control_plane_failure(
+                    "metadata",
+                    FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+                )
                 raise asyncio.TimeoutError
-            downloaded = validation_task.result()
+            try:
+                downloaded = validation_task.result()
+            except BaseException as metadata_failure:
+                self._record_control_plane_failure(
+                    "metadata",
+                    self._classified_failure("metadata", metadata_failure),
+                )
+                raise
             if self._cancellation_requested(job_id):
                 return None, True
             return self._validate_publish_downloaded(job_id, downloaded), False
@@ -1741,10 +1833,12 @@ class SandboxBrokerService:
         job_id: str,
         deadline: float,
         attempt: int,
+        provisioning: PhaseToken | None = None,
     ) -> tuple[object, bool]:
         """Run one create while retaining ownership of any late SDK result."""
 
-        provisioning = self._start_phase(job_id, "provisioning", attempt)
+        if provisioning is None:
+            provisioning = self._start_phase(job_id, "provisioning", attempt)
         create_task = asyncio.create_task(
             self.client.create(job_id),
             name=f"sandbox-broker-create-{job_id}",
@@ -1789,13 +1883,14 @@ class SandboxBrokerService:
             self._finish_phase(provisioning, outcome="cancelled")
             raise
         except BaseException as create_failure:
+            classified = self._classified_failure(
+                "create",
+                create_failure,
+            )
             self._finish_phase(
                 provisioning,
                 outcome="failed",
-                failure_class=self._classified_failure(
-                    "create",
-                    create_failure,
-                ),
+                failure_class=classified,
             )
             raise
         self._finish_phase(provisioning, outcome="passed")
@@ -1842,12 +1937,22 @@ class SandboxBrokerService:
 
     async def _create_with_retry(self, job_id: str) -> tuple[object, bool]:
         loop = asyncio.get_running_loop()
+        provisioning = self._start_phase(job_id, "provisioning", 1)
         deadline = loop.time() + self._create_hard_timeout_seconds
         try:
-            return await self._create_without_cancelling(job_id, deadline, 1)
+            return await self._create_without_cancelling(
+                job_id,
+                deadline,
+                1,
+                provisioning,
+            )
         except SandboxCreateError as first_failure:
             first_class = self._classified_failure("create", first_failure)
-            if not await self._reconcile_unknown_create(job_id, deadline):
+            try:
+                reconciled = await self._reconcile_unknown_create(job_id, deadline)
+            finally:
+                self._record_control_plane_failure("create", first_class)
+            if not reconciled:
                 raise _CreateHardDeadline(False, first_class) from None
             if self._cancellation_requested(job_id):
                 raise asyncio.CancelledError
@@ -1879,18 +1984,47 @@ class SandboxBrokerService:
                 self._observe(
                     lambda: self.telemetry.record_retry("create", "exhausted")
                 )
-                if not await self._reconcile_unknown_create(job_id, deadline):
+                try:
+                    reconciled = await self._reconcile_unknown_create(
+                        job_id,
+                        deadline,
+                    )
+                finally:
+                    self._record_control_plane_failure("create", final_class)
+                if not reconciled:
                     raise _CreateHardDeadline(False, final_class) from None
                 raise
-            except _CreateHardDeadline:
+            except _CreateHardDeadline as final_deadline:
+                self._record_control_plane_failure(
+                    "create",
+                    final_deadline.failure_class,
+                )
                 self._observe(
                     lambda: self.telemetry.record_retry("create", "exhausted")
+                )
+                raise
+            except BaseException as final_failure:
+                self._record_control_plane_failure(
+                    "create",
+                    self._classified_failure("create", final_failure),
                 )
                 raise
             self._observe(
                 lambda: self.telemetry.record_retry("create", "succeeded")
             )
             return result
+        except _CreateHardDeadline as first_deadline:
+            self._record_control_plane_failure(
+                "create",
+                first_deadline.failure_class,
+            )
+            raise
+        except BaseException as first_failure:
+            self._record_control_plane_failure(
+                "create",
+                self._classified_failure("create", first_failure),
+            )
+            raise
 
     async def _reconcile_unknown_create(
         self,
@@ -1911,11 +2045,25 @@ class SandboxBrokerService:
                 asyncio.shield(task),
                 timeout=min(self._destroy_hard_timeout_seconds, remaining),
             )
-            return type(destroyed) is int and destroyed == 0
+            valid = type(destroyed) is int and destroyed == 0
+            if not valid:
+                self._record_control_plane_failure(
+                    "destroy",
+                    FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+                )
+            return valid
         except asyncio.CancelledError:
             await self._cancel_and_isolate_reconciliation(task)
             raise
-        except BaseException:
+        except BaseException as reconcile_failure:
+            self._record_control_plane_failure(
+                "destroy",
+                (
+                    FailureClass.DESTROY_FAILED
+                    if isinstance(reconcile_failure, asyncio.TimeoutError)
+                    else self._classified_failure("destroy", reconcile_failure)
+                ),
+            )
             await self._cancel_and_isolate_reconciliation(task)
             return False
 
@@ -1974,7 +2122,10 @@ class SandboxBrokerService:
                     if current.cleanup_status != "in_progress":
                         self.store.record_cleanup(current.job_id, "in_progress")
                     try:
-                        await self._destroy_by_id_hard(current.sandbox_id)
+                        await self._recover_destroy(
+                            current.job_id,
+                            current.sandbox_id,
+                        )
                     except BaseException:
                         latest = self.store.get(current.job_id)
                         if latest is not None and latest.cleanup_status != "succeeded":
@@ -2067,6 +2218,32 @@ class SandboxBrokerService:
                     continue
             self._recovery_generation += 1
 
+    async def _recover_destroy(self, job_id: str, sandbox_id: str) -> None:
+        cleanup = self._start_phase(job_id, "cleanup", 1)
+        try:
+            await self._destroy_by_id_hard(sandbox_id)
+        except asyncio.CancelledError:
+            self._finish_phase(
+                cleanup,
+                outcome="cancelled",
+                failure_class=FailureClass.DESTROY_FAILED,
+                cleanup_status="failed",
+            )
+            raise
+        except BaseException:
+            self._finish_phase(
+                cleanup,
+                outcome="failed",
+                failure_class=FailureClass.DESTROY_FAILED,
+                cleanup_status="failed",
+            )
+            raise
+        self._finish_phase(
+            cleanup,
+            outcome="passed",
+            cleanup_status="succeeded",
+        )
+
     async def _destroy_by_id_hard(self, sandbox_id: str) -> None:
         task = asyncio.create_task(
             self.client.destroy_by_id(sandbox_id),
@@ -2076,12 +2253,25 @@ class SandboxBrokerService:
             await asyncio.wait_for(
                 asyncio.shield(task), timeout=self._destroy_hard_timeout_seconds
             )
-        except BaseException:
+        except asyncio.CancelledError:
             if not task.done():
                 task.cancel()
                 task.add_done_callback(self._consume_task_exception)
             else:
                 self._consume_task_exception(task)
+            raise
+        except BaseException as destroy_failure:
+            if not task.done():
+                task.cancel()
+                task.add_done_callback(self._consume_task_exception)
+            else:
+                self._consume_task_exception(task)
+            classified = (
+                FailureClass.DESTROY_FAILED
+                if isinstance(destroy_failure, asyncio.TimeoutError)
+                else self._classified_failure("destroy", destroy_failure)
+            )
+            self._record_control_plane_failure("destroy", classified)
             raise BrokerFailure(BrokerErrorCode.CLEANUP_FAILED) from None
 
     async def expire(self, now: float) -> None:
@@ -2584,19 +2774,31 @@ class SandboxBrokerService:
         if cleanup_task not in done:
             cleanup_task.cancel()
             await asyncio.sleep(0)
+            self._record_control_plane_failure(
+                "destroy",
+                FailureClass.DESTROY_FAILED,
+            )
             # Completion is unknown. Keep the task tracked until its done
             # callback runs so shutdown cannot lose ownership of it.
             return "failed"
         try:
             cleanup_task.result()
         except SandboxDestroyError as failure:
+            self._record_control_plane_failure(
+                "destroy",
+                failure.failure_class,
+            )
             if (
                 failure.completion_known is True
                 and failure.failure_class in _RETRYABLE_DESTROY_FAILURES
             ):
                 return "retryable_failed"
             return "failed"
-        except BaseException:
+        except BaseException as destroy_failure:
+            self._record_control_plane_failure(
+                "destroy",
+                self._classified_failure("destroy", destroy_failure),
+            )
             return "failed"
         return "succeeded"
 

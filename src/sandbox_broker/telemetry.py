@@ -415,16 +415,31 @@ class BrokerTelemetry:
             raise ValueError("invalid telemetry clock")
         return parsed
 
+    @staticmethod
+    def _safe_sink(callback: Callable[[], object]) -> None:
+        try:
+            callback()
+        except BaseException:
+            # Telemetry sinks are observational only.  In particular, never
+            # include an exception string here because it can contain remote
+            # control-plane details.
+            return
+
+    def _log_payload(self, payload: dict[str, object]) -> None:
+        self._safe_sink(
+            lambda: self._logger.info(
+                "sandbox_broker_event",
+                extra={"event": dict(payload)},
+            )
+        )
+
     def emit(self, event: BrokerTelemetryEvent) -> None:
         if type(event) is not BrokerTelemetryEvent:
             raise ValueError("invalid telemetry event")
         payload = event.model_dump(mode="json")
         with self._lock:
             self._events.append(payload)
-        self._logger.info(
-            "sandbox_broker_event",
-            extra={"event": dict(payload)},
-        )
+        self._log_payload(payload)
 
     def start_phase(
         self,
@@ -507,15 +522,19 @@ class BrokerTelemetry:
             meeko_version=meeko_version,
         )
         token._claim_once()
+        payload = completed_event.model_dump(mode="json")
         with self._lock:
             values = self._latencies[(token.phase, outcome)]
             values.append(duration_ms)
             del values[:-256]
-        self._phase_duration.labels(
-            phase=token.phase,
-            outcome=outcome,
-        ).observe(elapsed)
-        self.emit(completed_event)
+            self._events.append(payload)
+        self._safe_sink(
+            lambda: self._phase_duration.labels(
+                phase=token.phase,
+                outcome=outcome,
+            ).observe(elapsed)
+        )
+        self._log_payload(payload)
         return completed_event
 
     def record_control_plane_failure(
@@ -530,14 +549,16 @@ class BrokerTelemetry:
             or type(failure_class) is not FailureClass
         ):
             raise ValueError("invalid control-plane metric")
-        self._control_failures.labels(
-            operation=operation,
-            failure_class=failure_class.value,
-        ).inc()
         with self._lock:
             self._counters[
                 ("control_failure", operation, failure_class.value)
             ] += 1
+        self._safe_sink(
+            lambda: self._control_failures.labels(
+                operation=operation,
+                failure_class=failure_class.value,
+            ).inc()
+        )
 
     def record_retry(self, operation: str, outcome: str) -> None:
         if (
@@ -547,9 +568,14 @@ class BrokerTelemetry:
             or outcome not in _RETRY_OUTCOMES
         ):
             raise ValueError("invalid retry metric")
-        self._retries.labels(operation=operation, outcome=outcome).inc()
         with self._lock:
             self._counters[("retry", operation, outcome)] += 1
+        self._safe_sink(
+            lambda: self._retries.labels(
+                operation=operation,
+                outcome=outcome,
+            ).inc()
+        )
 
     def record_terminal(
         self,
@@ -562,12 +588,14 @@ class BrokerTelemetry:
             or type(failure_class) is not FailureClass
         ):
             raise ValueError("invalid terminal metric")
-        self._jobs.labels(
-            terminal_status=status,
-            failure_class=failure_class.value,
-        ).inc()
         with self._lock:
             self._counters[("terminal", status, failure_class.value)] += 1
+        self._safe_sink(
+            lambda: self._jobs.labels(
+                terminal_status=status,
+                failure_class=failure_class.value,
+            ).inc()
+        )
 
     def update_runtime_gauges(
         self,
@@ -597,11 +625,6 @@ class BrokerTelemetry:
             raise ValueError("invalid Broker runtime gauge")
         state_value = {"closed": 0, "open": 1, "half_open": 2}[breaker_state]
         with self._lock:
-            self._queue_depth.set(queue_depth)
-            self._active_jobs.set(active_job_count)
-            self._cleanup_tasks.set(cleanup_task_count)
-            self._isolated_tasks.set(isolated_task_count)
-            self._breaker_state.set(state_value)
             self._runtime = {
                 "queue_depth": queue_depth,
                 "active_job_count": active_job_count,
@@ -609,6 +632,16 @@ class BrokerTelemetry:
                 "isolated_task_count": isolated_task_count,
                 "breaker_state": breaker_state,
             }
+            for metric, value in (
+                (self._queue_depth, queue_depth),
+                (self._active_jobs, active_job_count),
+                (self._cleanup_tasks, cleanup_task_count),
+                (self._isolated_tasks, isolated_task_count),
+                (self._breaker_state, state_value),
+            ):
+                self._safe_sink(
+                    lambda metric=metric, value=value: metric.set(value)
+                )
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:

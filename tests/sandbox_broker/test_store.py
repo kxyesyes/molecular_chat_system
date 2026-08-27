@@ -1385,6 +1385,56 @@ def test_service_store_expire_and_manual_audit_delete_obey_fk_order(
     assert store.list_artifacts(job.job_id) == []
 
 
+def test_discard_pristine_queued_atomically_removes_only_created_graph(
+    tmp_path: Path,
+) -> None:
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    created, reused = store.create_or_get("idem-discard", SHA256_A, "trace-discard")
+    assert reused is False
+
+    assert store.discard_pristine_queued(created) is True
+    assert store.get(created.job_id) is None
+    with sqlite3.connect(store.db_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM transitions WHERE job_id=?",
+            (created.job_id,),
+        ).fetchone()[0] == 0
+
+
+def test_discard_pristine_queued_rejects_advanced_or_mismatched_record(
+    tmp_path: Path,
+) -> None:
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    created, _ = store.create_or_get("idem-advanced", SHA256_A, "trace-advanced")
+    advanced = store.transition(created.job_id, BrokerJobStatus.PROVISIONING)
+
+    assert store.discard_pristine_queued(created) is False
+    assert store.discard_pristine_queued(advanced) is False
+    assert store.get(created.job_id) == advanced
+
+
+def test_discard_pristine_queued_rolls_back_both_tables_on_delete_failure(
+    tmp_path: Path,
+) -> None:
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    created, _ = store.create_or_get("idem-rollback", SHA256_A, "trace-rollback")
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            "CREATE TRIGGER reject_transition_delete BEFORE DELETE ON transitions "
+            "BEGIN SELECT RAISE(ABORT, 'blocked'); END"
+        )
+
+    with pytest.raises(sqlite3.DatabaseError):
+        store.discard_pristine_queued(created)
+
+    assert store.get(created.job_id) == created
+    with sqlite3.connect(store.db_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM transitions WHERE job_id=?",
+            (created.job_id,),
+        ).fetchone()[0] == 1
+
+
 def test_artifact_store_register_get_and_list_are_job_scoped(tmp_path: Path) -> None:
     store = BrokerStore(tmp_path / "broker.sqlite")
     first, _ = store.create_or_get("idem-a", SHA256_A, "trace-a")

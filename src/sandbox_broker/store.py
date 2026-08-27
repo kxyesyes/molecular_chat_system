@@ -597,6 +597,81 @@ class BrokerStore:
                     connection.rollback()
                 raise
 
+    def discard_pristine_queued(self, expected: BrokerJobRecord) -> bool:
+        """Atomically discard one exact, newly-created queued job graph.
+
+        The caller must retain the snapshot returned by ``create_or_get``.  Any
+        mutation, transition, artifact, or identity mismatch makes the record
+        ineligible for deletion so this boundary cannot remove reused or
+        already-owned work.
+        """
+
+        if type(expected) is not BrokerJobRecord:
+            raise TypeError("expected must be BrokerJobRecord")
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT * FROM jobs WHERE job_id=?",
+                    (expected.job_id,),
+                ).fetchone()
+                if row is None:
+                    connection.commit()
+                    return False
+                current = self._row_to_record(row)
+                if (
+                    current != expected
+                    or current.status is not BrokerJobStatus.QUEUED
+                    or current.phase != BrokerJobStatus.QUEUED.value
+                    or current.sandbox_id is not None
+                    or current.error_code is not None
+                    or current.warnings
+                    or current.provenance is not None
+                    or current.cancel_requested
+                    or current.cleanup_status != "not_started"
+                    or current.created_at != current.updated_at
+                ):
+                    connection.commit()
+                    return False
+                artifact_count = connection.execute(
+                    "SELECT COUNT(*) FROM artifacts WHERE job_id=?",
+                    (expected.job_id,),
+                ).fetchone()[0]
+                transitions = connection.execute(
+                    "SELECT status, phase, created_at FROM transitions "
+                    "WHERE job_id=? ORDER BY sequence",
+                    (expected.job_id,),
+                ).fetchall()
+                if artifact_count != 0 or len(transitions) != 1:
+                    connection.commit()
+                    return False
+                transition = transitions[0]
+                if (
+                    transition["status"] != BrokerJobStatus.QUEUED.value
+                    or transition["phase"] != BrokerJobStatus.QUEUED.value
+                    or transition["created_at"] != expected.created_at
+                ):
+                    connection.commit()
+                    return False
+                deleted_transitions = connection.execute(
+                    "DELETE FROM transitions WHERE job_id=?",
+                    (expected.job_id,),
+                )
+                if deleted_transitions.rowcount != 1:
+                    raise RuntimeError("concurrent pristine transition deletion")
+                deleted_job = connection.execute(
+                    "DELETE FROM jobs WHERE job_id=?",
+                    (expected.job_id,),
+                )
+                if deleted_job.rowcount != 1:
+                    raise RuntimeError("concurrent pristine job deletion")
+                connection.commit()
+                return True
+            except BaseException:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
+
     @staticmethod
     def _validate_create_inputs(
         idempotency_key: object,

@@ -1248,6 +1248,120 @@ def test_prometheus_collector_can_reenter_snapshot_without_deadlock() -> None:
     assert b"medchat_test_reentrant_snapshot 1.0" in result["value"]
 
 
+def test_mutations_keep_in_memory_coherence_when_sinks_fail_after_side_effect() -> None:
+    class FailingLogger:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def info(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+            self.calls += 1
+            raise KeyboardInterrupt
+
+    class FailingMetric:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def labels(self, **labels: object) -> "FailingMetric":
+            del labels
+            return self
+
+        def observe(self, value: object) -> None:
+            del value
+            self.calls += 1
+            raise SystemExit
+
+        def inc(self) -> None:
+            self.calls += 1
+            raise SystemExit
+
+        def set(self, value: object) -> None:
+            del value
+            self.calls += 1
+            raise SystemExit
+
+    logger = FailingLogger()
+    telemetry = BrokerTelemetry(
+        registry=CollectorRegistry(),
+        monotonic=iter((10.0, 10.25)).__next__,
+        logger=logger,  # type: ignore[arg-type]
+    )
+    phase_metric = FailingMetric()
+    control_metric = FailingMetric()
+    retry_metric = FailingMetric()
+    terminal_metric = FailingMetric()
+    gauges = [FailingMetric() for _ in range(5)]
+    telemetry._phase_duration = phase_metric  # type: ignore[assignment]
+    telemetry._control_failures = control_metric  # type: ignore[assignment]
+    telemetry._retries = retry_metric  # type: ignore[assignment]
+    telemetry._jobs = terminal_metric  # type: ignore[assignment]
+    (
+        telemetry._queue_depth,
+        telemetry._active_jobs,
+        telemetry._cleanup_tasks,
+        telemetry._isolated_tasks,
+        telemetry._breaker_state,
+    ) = gauges  # type: ignore[assignment]
+
+    token = telemetry.start_phase(
+        trace_id="trace-1",
+        job_id="a" * 32,
+        phase="cleanup",
+        attempt=1,
+        queue_depth=0,
+        active_job_count=1,
+        image_digest="b" * 64,
+    )
+    completed = telemetry.finish_phase(
+        token,
+        outcome="passed",
+        cleanup_status="succeeded",
+    )
+    telemetry.record_control_plane_failure(
+        operation="destroy",
+        failure_class=FailureClass.DESTROY_FAILED,
+    )
+    telemetry.record_retry("destroy", "attempted")
+    telemetry.record_terminal("succeeded")
+    telemetry.update_runtime_gauges(
+        queue_depth=1,
+        active_job_count=1,
+        cleanup_task_count=2,
+        isolated_task_count=3,
+        breaker_state="half_open",
+    )
+
+    snapshot = telemetry.snapshot()
+    assert [item["phase"] for item in snapshot["recent_events"]] == [
+        "cleanup_started",
+        "cleanup_completed",
+    ]
+    assert completed.outcome == "passed"
+    assert snapshot["phase_latency_ms"]["cleanup|passed"] == [250]
+    assert snapshot["counters"] == {
+        "control_failure|destroy|destroy_failed": 1,
+        "retry|destroy|attempted": 1,
+        "terminal|succeeded|none": 1,
+    }
+    assert snapshot["runtime"] == {
+        "queue_depth": 1,
+        "active_job_count": 1,
+        "cleanup_task_count": 2,
+        "isolated_task_count": 3,
+        "breaker_state": "half_open",
+    }
+    assert logger.calls == 2
+    assert phase_metric.calls == 1
+    assert control_metric.calls == retry_metric.calls == terminal_metric.calls == 1
+    assert [gauge.calls for gauge in gauges] == [1, 1, 1, 1, 1]
+    with pytest.raises(RuntimeError, match="already finished"):
+        telemetry.finish_phase(
+            token,
+            outcome="passed",
+            cleanup_status="succeeded",
+        )
+
+
 @pytest.mark.parametrize(
     "call",
     [
