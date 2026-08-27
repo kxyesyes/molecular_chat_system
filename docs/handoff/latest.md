@@ -1,4 +1,137 @@
-# Temporal production canary readiness handoff
+# OpenSandbox docking broker handoff
+
+Date: 2026-08-27
+
+Branch: `codex/opensandbox-docking-broker`
+
+Workspace: isolated task worktree
+
+## Objective and current state
+
+This stage added a docking-only OpenSandbox Broker between the Temporal worker
+and AutoDock Vina. The Broker is reachable only through a protected Unix domain
+socket, runs one fixed digest-pinned docking image under gVisor, denies outbound
+network access, enforces CPU/memory/PID and timeout limits, validates all input,
+scientific output, artifacts, hashes and provenance, and always performs bounded
+sandbox cleanup. The Web process receives no OpenSandbox credential.
+
+The implementation and the Ubuntu 24.04 QEMU pre-production deployment have a
+verified functional and security baseline. This is not a production promotion:
+later smoke runs exposed intermittent OpenSandbox execution latency/failures,
+so rollout remains gated by both that stability issue and the existing Temporal
+canary, production-host observation and backup gates documented below.
+
+## Final stability fixes
+
+- Acceptance now uses the production default Vina `exhaustiveness=8`. The
+  previous value 32 was a stress workload that intermittently exceeded the
+  fixed 267-second tool deadline on a 2-CPU gVisor sandbox and produced only
+  1/3 successful measured runs. Stress testing must be a separate explicit
+  profile, not the baseline availability gate.
+- A non-zero sandbox command no longer automatically loses the wrapper's
+  structured failure. The Broker reads only the fixed `result.json` path and
+  accepts only an exact allowlisted schema plus valid phase/error-code pairs.
+  Verified `tool_timeout` becomes `execution_timeout`; missing, malformed or
+  impossible output remains fail-closed as `command_failed`. A verified Vina or
+  Meeko failure retains the existing `command_failed` persistence/API value plus
+  a safe `sandbox_tool_failed` warning marker; the new worker maps that marker to
+  a provider/tool failure while an older worker remains fail-closed and can still
+  read the record.
+- OpenSandbox creation readiness failures are reconciled by metadata and retried
+  once only after cleanup is confirmed. Acceptance observers synchronize with
+  sandbox readiness, and cancellation waits long enough for bounded cleanup.
+- Both failure-result reads and successful output download/validation now have
+  hard deadlines and cooperative cancellation. A cancellation-resistant SDK
+  coroutine is tracked after a short grace period so external sandbox cleanup
+  can proceed without leaving the Broker job indefinitely non-terminal. Remote
+  download is side-effect-free; local validation and artifact publication occur
+  only after the bounded download completes, preventing writes after terminal.
+- The destructive PID-exhaustion probe now runs after the setsid and tool-version
+  probes. This prevents a deliberately exhausted sandbox from destabilizing
+  subsequent security observations in the same acceptance run.
+
+## Real QEMU evidence
+
+The final command ran through the worker-side UDS client, Broker, OpenSandbox,
+gVisor and real Vina; it did not call Vina directly and did not use demo or
+fallback results.
+
+```text
+status=passed
+repeat=3
+pass_rate=1.0
+p50_latency_ms=24412
+p95_latency_ms=26142
+security_failures=0
+Vina=1.2.5
+Meeko=0.7.1
+secure_runtime=gvisor
+pose_count=7,9,9
+best_energy=-3.348,-3.360,-3.313
+cleanup_status=succeeded,succeeded,succeeded
+```
+
+Each run produced a verified repository-relative pose artifact and SHA-256.
+Warnings accurately record receptor normalization, duplicate-atom conformer
+selection, and ligand hydrogen/3D preparation. The report is a local ignored
+artifact at `outputs/agent_evaluation/opensandbox_docking_acceptance.json` and
+is not committed.
+
+## Post-deployment bounded smoke
+
+After deploying the final timeout/cancellation and failure-semantics changes, a
+single non-retried `repeat=1` smoke was run. Its measured scientific run passed
+through gVisor and real Vina with 9 poses, best energy `-3.388`, verified
+artifact/provenance, 90.924-second latency and successful cleanup. The later
+idempotency probe exceeded the fixed 267-second execution deadline, was recorded
+as `execution_timeout`, and also cleaned up successfully. The overall smoke is
+therefore honestly `failed` with `idempotency_execution_failed`, despite a
+scientific run pass rate of 1.0. No retry was used to turn this result green.
+
+This is consistent with other late pre-production observations of intermittent
+OpenSandbox command/server-proxy 500/502 responses and variable execution time.
+The Broker now terminates these paths with bounded, typed failures and cleanup,
+but the OpenSandbox daemon/proxy stability issue remains an explicit production
+blocker rather than an application-level success.
+
+After the final review fixes were deployed, one focused real Vina task (without
+re-running the full destructive/idempotency probe suite) succeeded with 10
+poses, best energy `-3.391`, a present pose artifact and successful cleanup.
+There were no running `opensandbox.io/id` containers afterward. This confirms
+the refactored success publication path; it does not erase the failed bounded
+smoke or the remaining infrastructure stability blocker above.
+
+## Verification
+
+```powershell
+$PY -m pytest tests\sandbox_broker -q -p no:cacheprovider
+# 1247 passed, 73 skipped
+
+$PY -m compileall -q src scripts deployment\opensandbox\run_docking.py
+# passed
+```
+
+The deployment validator passed both static and runtime checks after the final
+source synchronization and service restart. The formal repeat-3 acceptance
+exercised same-key reuse, cooperative cancellation, worker timeout cleanup,
+read-only filesystem checks, PID limits, host-data isolation, fixed tool
+versions, digest pinning and denied outbound networking with no security
+failure. The later bounded smoke result and its idempotency timeout are recorded
+separately above and must not be conflated with that earlier passing evidence.
+
+## Operational state and boundaries
+
+- QEMU pre-production runtime: `/opt/medchat/molecular_chat_system`.
+- Release source: `/usr/local/src/medchat-release`.
+- Active services: OpenSandbox, Sandbox Broker, Temporal worker and firewall.
+- Active image digest:
+  `sha256:5370d55a6e667bb78c8bf5d24c3c8d797879416032c5f56b8855133e5a820509`.
+- OpenSandbox and Broker secrets remain only in root-managed runtime environment
+  files; no key, token or raw environment value is present in Git or reports.
+- The original mixed workspace was not modified. All edits and commands used
+  this isolated worktree; no reset, clean or broad staging command was used.
+
+## Previous handoff: Temporal production canary readiness
 
 Date: 2026-08-25
 

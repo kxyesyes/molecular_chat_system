@@ -467,6 +467,39 @@ def test_terminal_broker_error_code_has_stable_agent_mapping(
     assert requests[-1] == f"/v1/docking/jobs/{BROKER_JOB_ID}/cancel"
 
 
+def test_verified_tool_failure_warning_has_stable_agent_mapping(
+    tmp_path: Path,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/docking/jobs":
+            return httpx.Response(
+                202,
+                json=_job(
+                    "failed",
+                    receptor,
+                    ligand,
+                    error_code=BrokerErrorCode.COMMAND_FAILED.value,
+                    warnings=["sandbox_tool_failed"],
+                    cleanup_status="succeeded",
+                ),
+            )
+        if request.url.path.endswith("/cancel"):
+            return httpx.Response(202, json=_job("cancelled", receptor, ligand))
+        raise AssertionError(request.url.path)
+
+    result = _runner(tmp_path, handler).execute(
+        payload,
+        job_id="verified-tool-failure",
+    )
+
+    assert result.success is False
+    assert result.error is not None
+    assert result.error.code is AgentErrorCode.PROVIDER_ERROR
+    assert result.error.details == {"reason": "sandbox_tool_failed"}
+
+
 @pytest.mark.parametrize("status_code", [404, 405])
 def test_submit_missing_broker_api_maps_to_unavailable(
     tmp_path: Path,

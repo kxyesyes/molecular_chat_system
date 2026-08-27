@@ -301,6 +301,76 @@ class FaultSandboxClient(FakeSandboxClient):
         self.destroyed_ids.append(handle.sandbox_id)
 
 
+class StructuredFailureSandboxClient(FaultSandboxClient):
+    def __init__(self, payload: dict[str, object]) -> None:
+        super().__init__("nonzero")
+        self.payload = payload
+        self.read_paths: list[str] = []
+
+    async def read_text(self, handle: SandboxHandle, path: str) -> str:
+        del handle
+        self.read_paths.append(path)
+        return json.dumps(self.payload, sort_keys=True)
+
+
+class BlockingFailureReadSandboxClient(FaultSandboxClient):
+    def __init__(self) -> None:
+        super().__init__("nonzero")
+        self.read_started = asyncio.Event()
+        self.read_release = asyncio.Event()
+        self.read_cancellations = 0
+
+    async def read_text(self, handle: SandboxHandle, path: str) -> str:
+        del handle, path
+        self.read_started.set()
+        try:
+            await self.read_release.wait()
+        except asyncio.CancelledError:
+            self.read_cancellations += 1
+            raise
+        return ""
+
+
+class ResistantFailureReadSandboxClient(BlockingFailureReadSandboxClient):
+    async def read_text(self, handle: SandboxHandle, path: str) -> str:
+        del handle, path
+        self.read_started.set()
+        while not self.read_release.is_set():
+            try:
+                await self.read_release.wait()
+            except asyncio.CancelledError:
+                self.read_cancellations += 1
+        return ""
+
+
+class BlockingValidationSandboxClient(FakeSandboxClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.read_started = asyncio.Event()
+        self.read_release = asyncio.Event()
+        self.read_cancellations = 0
+
+    async def read_text(self, handle: SandboxHandle, path: str) -> str:
+        self.read_started.set()
+        try:
+            await self.read_release.wait()
+        except asyncio.CancelledError:
+            self.read_cancellations += 1
+            raise
+        return await super().read_text(handle, path)
+
+
+class ResistantValidationSandboxClient(BlockingValidationSandboxClient):
+    async def read_text(self, handle: SandboxHandle, path: str) -> str:
+        self.read_started.set()
+        while not self.read_release.is_set():
+            try:
+                await self.read_release.wait()
+            except asyncio.CancelledError:
+                self.read_cancellations += 1
+        return await FakeSandboxClient.read_text(self, handle, path)
+
+
 class RecoverySandboxClient(FakeSandboxClient):
     def __init__(self, *, destroy_fails: bool = False) -> None:
         super().__init__()
@@ -1107,6 +1177,266 @@ def test_execution_timeout_and_command_failure_are_stable_and_cleanup(
     assert timeout.error_code == BrokerErrorCode.EXECUTION_TIMEOUT.value
     assert command.error_code == BrokerErrorCode.COMMAND_FAILED.value
     assert timeout_sdk.destroy_count == command_sdk.destroy_count == 1
+
+
+def test_nonzero_wrapper_timeout_preserves_verified_failure_code(tmp_path: Path) -> None:
+    async def scenario() -> tuple[object, StructuredFailureSandboxClient]:
+        sdk = StructuredFailureSandboxClient(
+            {
+                "schema_version": 1,
+                "status": "failed",
+                "phase": "docking",
+                "error_code": "tool_timeout",
+                "warnings": [],
+            }
+        )
+        service, _, config = _service(tmp_path, sdk)
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-wrapper-timeout")
+        terminal = await service.wait_terminal(job.job_id)
+        await service.stop()
+        return terminal, sdk
+
+    terminal, sdk = asyncio.run(scenario())
+
+    assert terminal.error_code == BrokerErrorCode.EXECUTION_TIMEOUT.value
+    assert terminal.cleanup_status == "succeeded"
+    assert sdk.read_paths == ["/workspace/output/result.json"]
+    assert sdk.destroy_count == 1
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "receptor_preparation",
+        "ligand_geometry_preparation",
+        "ligand_preparation",
+        "docking",
+    ],
+)
+def test_nonzero_wrapper_tool_failure_preserves_verified_failure_code(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    async def scenario() -> object:
+        sdk = StructuredFailureSandboxClient(
+            {
+                "schema_version": 1,
+                "status": "failed",
+                "phase": phase,
+                "error_code": "tool_failed",
+                "warnings": [],
+            }
+        )
+        service, _, config = _service(tmp_path, sdk)
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-wrapper-tool-failed")
+        terminal = await service.wait_terminal(job.job_id)
+        await service.stop()
+        return terminal
+
+    terminal = asyncio.run(scenario())
+
+    assert terminal.error_code == BrokerErrorCode.COMMAND_FAILED.value
+    assert terminal.warnings == ("sandbox_tool_failed",)
+    assert terminal.cleanup_status == "succeeded"
+
+
+def test_verified_failure_result_rejects_impossible_phase_code_pair() -> None:
+    forged = json.dumps(
+        {
+            "schema_version": 1,
+            "status": "failed",
+            "phase": "docking",
+            "error_code": "invalid_input",
+            "warnings": [],
+        }
+    )
+
+    assert service_module._verified_failure_result(forged) is BrokerErrorCode.COMMAND_FAILED
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "[" * 1100 + "0" + "]" * 1100,
+        '{"schema_version":1,"status":"failed","phase":"input_validation",'
+        '"phase":"docking","error_code":"tool_timeout","warnings":[]}',
+        "\ud800",
+        "x" * (1024 * 1024 + 1),
+    ],
+    ids=("deep-json", "duplicate-key", "unpaired-surrogate", "oversized"),
+)
+def test_verified_failure_result_rejects_ambiguous_or_hostile_json(
+    payload: str,
+) -> None:
+    assert service_module._verified_failure_result(payload) is BrokerErrorCode.COMMAND_FAILED
+
+
+def test_cancel_during_failure_result_read_is_bounded_and_cleans(tmp_path: Path) -> None:
+    async def scenario() -> tuple[object, BlockingFailureReadSandboxClient]:
+        sdk = BlockingFailureReadSandboxClient()
+        service, _, config = _service(tmp_path, sdk)
+        service._run_cancel_grace_seconds = 0.02
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-failure-read-cancel")
+        await sdk.read_started.wait()
+        await service.cancel(job.job_id)
+        terminal = await service.wait_terminal(job.job_id, timeout=1.0)
+        await service.stop()
+        return terminal, sdk
+
+    terminal, sdk = asyncio.run(scenario())
+
+    assert terminal.status is BrokerJobStatus.CANCELLED
+    assert terminal.cleanup_status == "succeeded"
+    assert sdk.read_cancellations == 1
+    assert sdk.destroy_count == 1
+
+
+def test_failure_result_read_timeout_is_bounded_and_cleans(tmp_path: Path) -> None:
+    async def scenario() -> tuple[object, BlockingFailureReadSandboxClient]:
+        sdk = BlockingFailureReadSandboxClient()
+        service, _, config = _service(tmp_path, sdk)
+        service._failure_result_read_timeout_seconds = 0.01
+        service._run_cancel_grace_seconds = 0.02
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-failure-read-timeout")
+        terminal = await service.wait_terminal(job.job_id, timeout=1.0)
+        await service.stop()
+        return terminal, sdk
+
+    terminal, sdk = asyncio.run(scenario())
+
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.COMMAND_FAILED.value
+    assert terminal.cleanup_status == "succeeded"
+    assert sdk.read_cancellations == 1
+    assert sdk.destroy_count == 1
+
+
+def test_resistant_failure_result_read_does_not_block_cleanup(tmp_path: Path) -> None:
+    async def scenario() -> tuple[object, ResistantFailureReadSandboxClient, list[str]]:
+        sdk = ResistantFailureReadSandboxClient()
+        service, _, config = _service(tmp_path, sdk)
+        service._failure_result_read_timeout_seconds = 0.01
+        service._run_cancel_grace_seconds = 0.01
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-resistant-failure-read")
+        terminal = await service.wait_terminal(job.job_id, timeout=1.0)
+        await service.stop()
+        sdk.read_release.set()
+        await asyncio.sleep(0.03)
+        leaked = [
+            task.get_name()
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith("sandbox-broker-failure-")
+            and not task.done()
+        ]
+        return terminal, sdk, leaked
+
+    terminal, sdk, leaked = asyncio.run(scenario())
+
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.COMMAND_FAILED.value
+    assert terminal.cleanup_status == "succeeded"
+    assert sdk.read_cancellations >= 1
+    assert sdk.destroy_count == 1
+    assert leaked == []
+
+
+def test_cancel_during_output_validation_is_bounded_and_cleans(tmp_path: Path) -> None:
+    async def scenario() -> tuple[object, BlockingValidationSandboxClient]:
+        sdk = BlockingValidationSandboxClient()
+        service, _, config = _service(tmp_path, sdk)
+        service._run_cancel_grace_seconds = 0.02
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-validation-cancel")
+        await sdk.read_started.wait()
+        await service.cancel(job.job_id)
+        terminal = await service.wait_terminal(job.job_id, timeout=1.0)
+        await service.stop()
+        return terminal, sdk
+
+    terminal, sdk = asyncio.run(scenario())
+
+    assert terminal.status is BrokerJobStatus.CANCELLED
+    assert terminal.cleanup_status == "succeeded"
+    assert sdk.read_cancellations == 1
+    assert sdk.destroy_count == 1
+
+
+def test_output_validation_timeout_is_bounded_and_cleans(tmp_path: Path) -> None:
+    async def scenario() -> tuple[object, BlockingValidationSandboxClient]:
+        sdk = BlockingValidationSandboxClient()
+        service, _, config = _service(tmp_path, sdk)
+        service._output_validation_timeout_seconds = 0.01
+        service._run_cancel_grace_seconds = 0.02
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-validation-timeout")
+        terminal = await service.wait_terminal(job.job_id, timeout=1.0)
+        await service.stop()
+        return terminal, sdk
+
+    terminal, sdk = asyncio.run(scenario())
+
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.ARTIFACT_FAILED.value
+    assert terminal.cleanup_status == "succeeded"
+    assert sdk.read_cancellations == 1
+    assert sdk.destroy_count == 1
+
+
+def test_resistant_output_validation_does_not_publish_after_terminal(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> tuple[
+        object,
+        ResistantValidationSandboxClient,
+        list[str],
+        int,
+        int,
+    ]:
+        sdk = ResistantValidationSandboxClient()
+        service, store, config = _service(tmp_path, sdk)
+        service._output_validation_timeout_seconds = 0.01
+        service._run_cancel_grace_seconds = 0.01
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-resistant-validation")
+        terminal = await service.wait_terminal(job.job_id, timeout=1.0)
+        artifacts_at_terminal = len(store.list_artifacts(job.job_id))
+        await service.stop()
+        sdk.read_release.set()
+        await asyncio.sleep(0.03)
+        artifacts_after_release = len(store.list_artifacts(job.job_id))
+        leaked = [
+            task.get_name()
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith("sandbox-broker-validation-")
+            and not task.done()
+        ]
+        return (
+            terminal,
+            sdk,
+            leaked,
+            artifacts_at_terminal,
+            artifacts_after_release,
+        )
+
+    terminal, sdk, leaked, artifacts_at_terminal, artifacts_after_release = (
+        asyncio.run(scenario())
+    )
+
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.ARTIFACT_FAILED.value
+    assert terminal.cleanup_status == "succeeded"
+    assert sdk.read_cancellations >= 1
+    assert sdk.destroy_count == 1
+    assert artifacts_at_terminal == 0
+    assert artifacts_after_release == 0
+    assert leaked == []
 
 
 @pytest.mark.parametrize(

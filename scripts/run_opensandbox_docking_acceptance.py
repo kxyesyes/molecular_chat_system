@@ -744,23 +744,6 @@ class DockerSandboxObserver:
         ):
             self.failure_codes.append("outbound_network_accessible")
 
-        pid_probe = (
-            "import subprocess,sys;children=[];limited=False;"
-            "\ntry:"
-            "\n for _ in range(256): children.append(subprocess.Popen(['sleep','5']))"
-            "\nexcept OSError: limited=True"
-            "\nfinally:"
-            "\n for p in children: p.terminate()"
-            "\n for p in children:"
-            "\n  try: p.wait(timeout=2)"
-            "\n  except Exception: p.kill();p.wait()"
-            "\nsys.exit(0 if limited else 1)"
-        )
-        if not self._exec(
-            container_id, _SANDBOX_PYTHON, "-c", pid_probe, timeout=20.0
-        ):
-            self.failure_codes.append("pid_limit_not_enforced")
-
         descendant_probe = r'''
 import importlib.util
 import json
@@ -854,6 +837,25 @@ raise SystemExit(0 if accepted and pids and not remaining else 1)
         else:
             self.tool_versions = {"vina": vina_version, "meeko": meeko_version}
 
+        # Resource exhaustion is intentionally last because reaching the PID
+        # ceiling can make execd temporarily unable to serve later probes.
+        pid_probe = (
+            "import subprocess,sys;children=[];limited=False;"
+            "\ntry:"
+            "\n for _ in range(256): children.append(subprocess.Popen(['sleep','5']))"
+            "\nexcept OSError: limited=True"
+            "\nfinally:"
+            "\n for p in children: p.terminate()"
+            "\n for p in children:"
+            "\n  try: p.wait(timeout=2)"
+            "\n  except Exception: p.kill();p.wait()"
+            "\nsys.exit(0 if limited else 1)"
+        )
+        if not self._exec(
+            container_id, _SANDBOX_PYTHON, "-c", pid_probe, timeout=20.0
+        ):
+            self.failure_codes.append("pid_limit_not_enforced")
+
 
 def _payload(receptor: Path, ligand: Path, center: Sequence[float], size: Sequence[float]) -> dict[str, Any]:
     return {
@@ -861,7 +863,7 @@ def _payload(receptor: Path, ligand: Path, center: Sequence[float], size: Sequen
         "ligand_path": str(ligand),
         "center": list(center),
         "size": list(size),
-        "exhaustiveness": 32,
+        "exhaustiveness": 8,
         "num_modes": 9,
         "energy_range": 3.0,
     }

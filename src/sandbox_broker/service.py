@@ -50,10 +50,33 @@ _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _REMOTE_AUTO_EXPIRY_WARNING = (
     "sandbox_auto_expires_within_configured_remote_lifetime"
 )
+_TOOL_FAILED_WARNING = "sandbox_tool_failed"
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 _UPLOAD_SUFFIXES = {
     "receptor": frozenset({".pdb"}),
     "ligand": frozenset({".sdf", ".mol"}),
+}
+_FAILURE_RESULT_FIELDS = frozenset(
+    {"schema_version", "status", "phase", "error_code", "warnings"}
+)
+_FAILURE_RESULT_CODES = {
+    ("cleanup", "cleanup_failed"): BrokerErrorCode.CLEANUP_FAILED,
+    ("environment_setup", "environment_unavailable"): (
+        BrokerErrorCode.OPENSANDBOX_UNAVAILABLE
+    ),
+    ("input_validation", "invalid_input"): BrokerErrorCode.INVALID_INPUT,
+    ("internal", "internal_error"): BrokerErrorCode.COMMAND_FAILED,
+    ("output_validation", "invalid_output"): (
+        BrokerErrorCode.SCIENTIFIC_OUTPUT_INVALID
+    ),
+    ("receptor_preparation", "tool_failed"): BrokerErrorCode.COMMAND_FAILED,
+    ("receptor_preparation", "tool_timeout"): BrokerErrorCode.EXECUTION_TIMEOUT,
+    ("ligand_geometry_preparation", "tool_failed"): BrokerErrorCode.COMMAND_FAILED,
+    ("ligand_geometry_preparation", "tool_timeout"): BrokerErrorCode.EXECUTION_TIMEOUT,
+    ("ligand_preparation", "tool_failed"): BrokerErrorCode.COMMAND_FAILED,
+    ("ligand_preparation", "tool_timeout"): BrokerErrorCode.EXECUTION_TIMEOUT,
+    ("docking", "tool_failed"): BrokerErrorCode.COMMAND_FAILED,
+    ("docking", "tool_timeout"): BrokerErrorCode.EXECUTION_TIMEOUT,
 }
 
 
@@ -82,6 +105,52 @@ class _CreateHardDeadline(Exception):
 
 class _UploadCopyCancelled(Exception):
     pass
+
+
+def _verified_failure_details(
+    value: object,
+) -> tuple[BrokerErrorCode, tuple[str, ...]]:
+    if type(value) is not str or not value or len(value) > _MANIFEST_MAX_BYTES:
+        return BrokerErrorCode.COMMAND_FAILED, ()
+
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        parsed: dict[str, object] = {}
+        for key, item in pairs:
+            if key in parsed:
+                raise ValueError("duplicate JSON field")
+            parsed[key] = item
+        return parsed
+
+    try:
+        if len(value.encode("utf-8")) > _MANIFEST_MAX_BYTES:
+            return BrokerErrorCode.COMMAND_FAILED, ()
+        payload = json.loads(value, object_pairs_hook=reject_duplicate_keys)
+    except Exception:
+        return BrokerErrorCode.COMMAND_FAILED, ()
+    if (
+        type(payload) is not dict
+        or set(payload) != _FAILURE_RESULT_FIELDS
+        or type(payload.get("schema_version")) is not int
+        or payload["schema_version"] != 1
+        or payload.get("status") != "failed"
+        or type(payload.get("phase")) is not str
+        or type(payload.get("error_code")) is not str
+        or type(payload.get("warnings")) is not list
+        or payload["warnings"] != []
+    ):
+        return BrokerErrorCode.COMMAND_FAILED, ()
+    pair = (payload["phase"], payload["error_code"])
+    code = _FAILURE_RESULT_CODES.get(pair, BrokerErrorCode.COMMAND_FAILED)
+    warnings = (
+        (_TOOL_FAILED_WARNING,)
+        if pair[1] == "tool_failed" and pair in _FAILURE_RESULT_CODES
+        else ()
+    )
+    return code, warnings
+
+
+def _verified_failure_result(value: object) -> BrokerErrorCode:
+    return _verified_failure_details(value)[0]
 
 
 def _validated_idempotency_key(value: object) -> str:
@@ -270,6 +339,13 @@ class _PreparedCompletion:
     manifest: DockingManifest
 
 
+@dataclass(frozen=True)
+class _DownloadedScientificOutput:
+    result_text: object
+    pose_paths: object
+    pose_text: object
+
+
 def _is_reparse(metadata: os.stat_result) -> bool:
     return bool(getattr(metadata, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT)
 
@@ -327,6 +403,7 @@ class SandboxBrokerService:
         self._job_tasks: dict[str, asyncio.Task[None]] = {}
         self._create_tasks: dict[str, asyncio.Task[Any]] = {}
         self._cleanup_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._isolated_tasks: set[asyncio.Task[Any]] = set()
         self._prepared: dict[str, PreparedDockingSubmission] = {}
         self._terminal_condition = asyncio.Condition()
         self._cancel_events: dict[str, asyncio.Event] = {}
@@ -338,6 +415,8 @@ class SandboxBrokerService:
         self._create_hard_timeout_seconds = float(config.sandbox_timeout_seconds)
         self._create_retry_delay_seconds = 0.5
         self._run_cancel_grace_seconds = 5.0
+        self._failure_result_read_timeout_seconds = 20.0
+        self._output_validation_timeout_seconds = 60.0
         self._destroy_hard_timeout_seconds = 30.0
 
     @staticmethod
@@ -401,6 +480,7 @@ class SandboxBrokerService:
                     and not self._job_tasks
                     and not self._create_tasks
                     and not self._cleanup_tasks
+                    and not self._isolated_tasks
                 ):
                     drain_cleanup = getattr(self.client, "drain_cleanup", None)
                     if not callable(drain_cleanup):
@@ -496,6 +576,12 @@ class SandboxBrokerService:
                 for task in tracked:
                     self._consume_task_exception(task) if task.done() else None
                 raise RuntimeError("broker cleanup did not finish") from None
+        isolated = tuple(self._isolated_tasks)
+        if isolated:
+            await asyncio.gather(
+                *(self._cancel_with_grace(task) for task in isolated),
+                return_exceptions=True,
+            )
         drain_cleanup = getattr(self.client, "drain_cleanup", None)
         if callable(drain_cleanup):
             try:
@@ -957,7 +1043,17 @@ class SandboxBrokerService:
                 failure = BrokerErrorCode.OPENSANDBOX_UNAVAILABLE
                 return
             if command.exit_code != 0:
-                failure = BrokerErrorCode.COMMAND_FAILED
+                if self._cancellation_requested(job_id):
+                    cancelled = True
+                    return
+                failure_result, read_cancelled = (
+                    await self._read_failure_result_with_cancellation(job_id, handle)
+                )
+                if read_cancelled:
+                    cancelled = True
+                    return
+                failure, verified_warnings = _verified_failure_details(failure_result)
+                failure_warnings += verified_warnings
                 return
             if self._cancellation_requested(job_id):
                 cancelled = True
@@ -968,9 +1064,17 @@ class SandboxBrokerService:
                 cancelled = True
                 return
             try:
-                completion = await self._download_validate_publish(job_id, handle)
+                completion, validation_cancelled = (
+                    await self._download_validation_with_cancellation(job_id, handle)
+                )
+                if validation_cancelled:
+                    cancelled = True
+                    return
             except ScientificOutputError:
                 failure = BrokerErrorCode.SCIENTIFIC_OUTPUT_INVALID
+                return
+            except asyncio.TimeoutError:
+                failure = BrokerErrorCode.ARTIFACT_FAILED
                 return
             except asyncio.CancelledError:
                 raise
@@ -1098,6 +1202,87 @@ class SandboxBrokerService:
             except BaseException:
                 pass
 
+    async def _read_failure_result_with_cancellation(
+        self,
+        job_id: str,
+        handle: SandboxHandle,
+    ) -> tuple[str | None, bool]:
+        read_task = asyncio.create_task(
+            self.client.read_text(handle, "/workspace/output/result.json"),
+            name=f"sandbox-broker-failure-result-{job_id}",
+        )
+        cancel_wait = asyncio.create_task(
+            self._cancel_events.setdefault(job_id, asyncio.Event()).wait(),
+            name=f"sandbox-broker-failure-cancel-{job_id}",
+        )
+        try:
+            done, _ = await asyncio.wait(
+                {read_task, cancel_wait},
+                timeout=self._failure_result_read_timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancel_wait in done and cancel_wait.result():
+                await self._cancel_with_grace(read_task)
+                return None, True
+            if read_task not in done:
+                await self._cancel_with_grace(read_task)
+                return None, False
+            try:
+                value = read_task.result()
+            except BaseException:
+                return None, False
+            return (value if type(value) is str else None), False
+        except asyncio.CancelledError:
+            await self._cancel_with_grace(read_task)
+            raise
+        finally:
+            if not cancel_wait.done():
+                cancel_wait.cancel()
+            try:
+                await cancel_wait
+            except BaseException:
+                pass
+
+    async def _download_validation_with_cancellation(
+        self,
+        job_id: str,
+        handle: SandboxHandle,
+    ) -> tuple[_PreparedCompletion | None, bool]:
+        validation_task = asyncio.create_task(
+            self._download_scientific_output(handle),
+            name=f"sandbox-broker-validation-{job_id}",
+        )
+        cancel_wait = asyncio.create_task(
+            self._cancel_events.setdefault(job_id, asyncio.Event()).wait(),
+            name=f"sandbox-broker-validation-cancel-{job_id}",
+        )
+        try:
+            done, _ = await asyncio.wait(
+                {validation_task, cancel_wait},
+                timeout=self._output_validation_timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancel_wait in done and cancel_wait.result():
+                await self._cancel_with_grace(validation_task)
+                return None, True
+            if validation_task not in done:
+                await self._cancel_with_grace(validation_task)
+                raise asyncio.TimeoutError
+            downloaded = validation_task.result()
+            if self._cancellation_requested(job_id):
+                return None, True
+            return self._validate_publish_downloaded(job_id, downloaded), False
+        except asyncio.CancelledError:
+            await self._cancel_with_grace(validation_task)
+            raise
+        finally:
+            if not cancel_wait.done():
+                cancel_wait.cancel()
+            try:
+                await cancel_wait
+            except BaseException:
+                pass
+
     async def _cancel_with_grace(self, task: asyncio.Task[Any]) -> None:
         if task.done():
             self._consume_task_exception(task)
@@ -1110,7 +1295,13 @@ class SandboxBrokerService:
         except BaseException:
             pass
         if not task.done():
-            task.add_done_callback(self._consume_task_exception)
+            self._isolated_tasks.add(task)
+
+            def isolated_finished(completed: asyncio.Task[Any]) -> None:
+                self._isolated_tasks.discard(completed)
+                self._consume_task_exception(completed)
+
+            task.add_done_callback(isolated_finished)
         else:
             self._consume_task_exception(task)
 
@@ -1634,14 +1825,10 @@ class SandboxBrokerService:
             except (FileNotFoundError, OSError):
                 pass
 
-    async def _download_validate_publish(
+    async def _download_scientific_output(
         self,
-        job_id: str,
         handle: SandboxHandle,
-    ) -> _PreparedCompletion:
-        prepared = self._prepared.get(job_id)
-        if prepared is None:
-            raise ScientificOutputError("scientific output validation failed")
+    ) -> _DownloadedScientificOutput:
         result_text = await self.client.read_text(handle, "/workspace/output/result.json")
         pose_paths = await self.client.list_files(
             handle, "/workspace/output/poses", "*.pdbqt"
@@ -1649,9 +1836,25 @@ class SandboxBrokerService:
         if pose_paths != ["/workspace/output/poses/result.pdbqt"]:
             raise ScientificOutputError("scientific output validation failed")
         pose_text = await self.client.read_text(handle, pose_paths[0])
+        return _DownloadedScientificOutput(result_text, pose_paths, pose_text)
+
+    def _validate_publish_downloaded(
+        self,
+        job_id: str,
+        downloaded: _DownloadedScientificOutput,
+    ) -> _PreparedCompletion:
+        prepared = self._prepared.get(job_id)
+        if prepared is None:
+            raise ScientificOutputError("scientific output validation failed")
+        if (
+            type(downloaded.result_text) is not str
+            or downloaded.pose_paths != ["/workspace/output/poses/result.pdbqt"]
+            or type(downloaded.pose_text) is not str
+        ):
+            raise ScientificOutputError("scientific output validation failed")
         try:
-            result_bytes = result_text.encode("utf-8", errors="strict")
-            pose_bytes = pose_text.encode("utf-8", errors="strict")
+            result_bytes = downloaded.result_text.encode("utf-8", errors="strict")
+            pose_bytes = downloaded.pose_text.encode("utf-8", errors="strict")
         except Exception:
             raise ScientificOutputError("scientific output validation failed") from None
         if len(result_bytes) + len(pose_bytes) > self.config.output_max_bytes:

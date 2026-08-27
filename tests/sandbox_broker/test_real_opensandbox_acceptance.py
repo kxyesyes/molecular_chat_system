@@ -521,6 +521,25 @@ def test_real_vina_git_banner_uses_independent_package_metadata(
     assert "/opt/medchat/run_docking.py" in probe_sources
     assert "_run_tool" in probe_sources
     assert "os.setsid" in probe_sources
+    exec_calls = [
+        call for call in calls if call[:3] == ("docker", "exec", container_id)
+    ]
+    pid_probe_index = next(
+        index for index, call in enumerate(exec_calls) if "range(256)" in call[-1]
+    )
+    setsid_probe_index = next(
+        index for index, call in enumerate(exec_calls) if "_run_tool" in call[-1]
+    )
+    version_probe_indices = [
+        index
+        for index, call in enumerate(exec_calls)
+        if call[-2:] == (acceptance._VINA_BINARY, "--version")
+        or "m.version('vina')" in call[-1]
+        or "m.version('meeko')" in call[-1]
+    ]
+    assert pid_probe_index > setsid_probe_index
+    assert version_probe_indices
+    assert pid_probe_index > max(version_probe_indices)
 
 
 def test_intrusive_observer_waits_for_container_exec_readiness() -> None:
@@ -867,7 +886,7 @@ def test_real_probes_use_the_pinned_image_python_interpreter() -> None:
     assert 'container_id,\n            "python",' not in source
 
 
-def test_real_fixture_uses_stable_nonmaximal_exhaustiveness() -> None:
+def test_real_fixture_uses_production_default_exhaustiveness() -> None:
     acceptance = _module()
 
     payload = acceptance._payload(
@@ -877,7 +896,7 @@ def test_real_fixture_uses_stable_nonmaximal_exhaustiveness() -> None:
         (20.0, 20.0, 20.0),
     )
 
-    assert payload["exhaustiveness"] == 32
+    assert payload["exhaustiveness"] == 8
 
 
 def test_fault_contracts_use_fast_real_probe_parameters(tmp_path: Path) -> None:

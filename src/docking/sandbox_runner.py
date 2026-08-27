@@ -62,8 +62,13 @@ class _Cancelled(RuntimeError):
 
 
 class _BrokerFailure(RuntimeError):
-    def __init__(self, code: BrokerErrorCode) -> None:
+    def __init__(
+        self,
+        code: BrokerErrorCode,
+        warnings: tuple[str, ...] = (),
+    ) -> None:
         self.code = code
+        self.warnings = warnings
 
 
 class _BrokerHttpFailure(RuntimeError):
@@ -599,7 +604,10 @@ def _emit_progress(callback: Callable[..., Any] | None, status: BrokerJobStatus)
         pass
 
 
-def _broker_error_result(code: BrokerErrorCode) -> ToolResult:
+def _broker_error_result(
+    code: BrokerErrorCode,
+    warnings: tuple[str, ...] = (),
+) -> ToolResult:
     quality = {"real_execution": False, "execution_backend": "opensandbox"}
     if code is BrokerErrorCode.CANCELLED:
         return ToolResult.error_result(
@@ -661,6 +669,14 @@ def _broker_error_result(code: BrokerErrorCode) -> ToolResult:
                     else "input_invalid"
                 )
             },
+            quality=quality,
+        )
+    if code is BrokerErrorCode.COMMAND_FAILED and "sandbox_tool_failed" in warnings:
+        return ToolResult.error_result(
+            "molecular_docking",
+            AgentErrorCode.PROVIDER_ERROR,
+            "The sandboxed scientific tool failed before producing a verified result.",
+            details={"reason": "sandbox_tool_failed"},
             quality=quality,
         )
     return ToolResult.error_result(
@@ -842,7 +858,10 @@ class SandboxDockingRunner:
                     raise _Cancelled
                 if current.status is not BrokerJobStatus.SUCCEEDED:
                     if current.error_code is not None:
-                        raise _BrokerFailure(current.error_code)
+                        raise _BrokerFailure(
+                            current.error_code,
+                            tuple(current.warnings),
+                        )
                     raise ValueError("sandbox docking did not succeed")
                 if (
                     current.error_code is not None
@@ -956,7 +975,7 @@ class SandboxDockingRunner:
                 quality={"real_execution": False, "execution_backend": "opensandbox"},
             )
         except _BrokerFailure as exc:
-            return _broker_error_result(exc.code)
+            return _broker_error_result(exc.code, exc.warnings)
         except _BrokerHttpFailure as exc:
             return _broker_error_result(
                 _http_failure_code(exc.status_code, exc.stage)
