@@ -319,6 +319,10 @@ elif action in {"-A", "-C", "-D", "-I"}:
         rule = args[2:]
     rule = normalize_rule(rule)
     rules = chains[chain]
+    if action in {"-C", "-D"} and "-j" in rule:
+        target = rule[rule.index("-j") + 1]
+        if target == "MEDCHAT-OPENSANDBOX" and target not in chains:
+            raise SystemExit(2)
     matching_index = next(
         (
             index
