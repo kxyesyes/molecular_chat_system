@@ -10,7 +10,7 @@ from typing import AsyncIterator, Callable
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 from starlette.datastructures import FormData, UploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -441,8 +441,10 @@ def create_app(
         request: Request,
         failure: StarletteHTTPException,
     ) -> JSONResponse:
-        del request
-        if failure.status_code == 404:
+        if failure.status_code == 404 or (
+            failure.status_code == 405
+            and request.url.path in {"/v1/diagnostics", "/metrics"}
+        ):
             return _error(404, "not_found")
         return _error(422, BrokerErrorCode.INVALID_INPUT.value)
 
@@ -546,6 +548,37 @@ def create_app(
         broker: object = Depends(get_service),
     ) -> PublicJob:
         return PublicJob.from_view(await broker.cancel(job_id))
+
+    @app.get("/v1/diagnostics")
+    async def diagnostics(
+        broker: object = Depends(get_service),
+    ) -> dict[str, object]:
+        try:
+            result = broker.diagnostics()
+            if (
+                type(result) is not dict
+                or type(result.get("schema_version")) is not int
+                or result["schema_version"] != 1
+            ):
+                raise ValueError
+            return result
+        except BaseException:
+            raise RuntimeError("sandbox broker diagnostics unavailable") from None
+
+    @app.get("/metrics")
+    async def metrics(
+        broker: object = Depends(get_service),
+    ) -> Response:
+        try:
+            content = broker.prometheus_text()
+            if type(content) is not bytes:
+                raise ValueError
+            return Response(
+                content=content,
+                media_type="text/plain; version=0.0.4; charset=utf-8",
+            )
+        except BaseException:
+            raise RuntimeError("sandbox broker metrics unavailable") from None
 
     @app.get("/healthz")
     async def health() -> dict[str, str]:

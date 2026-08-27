@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import logging
 import math
@@ -65,6 +66,206 @@ _DANGEROUS_POLICY_ATTEMPTS = [
         id="nested-runtime",
     ),
 ]
+
+
+def _resolved_python_calls(source: str) -> tuple[ast.Module, list[str]]:
+    tree = ast.parse(source)
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for imported in node.names:
+                aliases[imported.asname or imported.name] = imported.name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for imported in node.names:
+                aliases[imported.asname or imported.name] = (
+                    f"{node.module}.{imported.name}"
+                )
+
+    def resolve(node: ast.expr) -> str:
+        if isinstance(node, ast.Name):
+            return aliases.get(node.id, node.id)
+        if isinstance(node, ast.Attribute):
+            owner = resolve(node.value)
+            return f"{owner}.{node.attr}" if owner else node.attr
+        return ""
+
+    return tree, [
+        resolve(node.func)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+    ]
+
+
+def _environment_names(tree: ast.Module) -> set[str]:
+    os_modules: set[str] = set()
+    getenv_functions: set[str] = set()
+    environ_objects: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for imported in node.names:
+                if imported.name == "os":
+                    os_modules.add(imported.asname or imported.name)
+        elif isinstance(node, ast.ImportFrom) and node.module == "os":
+            for imported in node.names:
+                if imported.name == "getenv":
+                    getenv_functions.add(imported.asname or imported.name)
+                elif imported.name == "environ":
+                    environ_objects.add(imported.asname or imported.name)
+
+    def constant_string(node: ast.expr) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return None
+
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and node.args:
+            target = node.func
+            reads_environment = (
+                isinstance(target, ast.Name)
+                and target.id in getenv_functions
+            ) or (
+                isinstance(target, ast.Attribute)
+                and target.attr == "getenv"
+                and isinstance(target.value, ast.Name)
+                and target.value.id in os_modules
+            ) or (
+                isinstance(target, ast.Attribute)
+                and target.attr == "get"
+                and isinstance(target.value, ast.Name)
+                and target.value.id in environ_objects
+            ) or (
+                isinstance(target, ast.Attribute)
+                and target.attr == "get"
+                and isinstance(target.value, ast.Attribute)
+                and target.value.attr == "environ"
+                and isinstance(target.value.value, ast.Name)
+                and target.value.value.id in os_modules
+            )
+            if reads_environment:
+                value = constant_string(node.args[0])
+                if value is not None:
+                    names.add(value)
+        elif isinstance(node, ast.Subscript):
+            target = node.value
+            reads_environment = (
+                isinstance(target, ast.Name)
+                and target.id in environ_objects
+            ) or (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id in os_modules
+                and target.attr == "environ"
+            )
+            if reads_environment:
+                value = constant_string(node.slice)
+                if value is not None:
+                    names.add(value)
+    return names
+
+
+def test_broker_metrics_cannot_start_a_second_listener_or_use_tcp_configuration() -> None:
+    root = Path(__file__).resolve().parents[2]
+    broker_sources = sorted((root / "src" / "sandbox_broker").rglob("*.py"))
+    forbidden_calls = {
+        "prometheus_client.start_http_server",
+        "prometheus_client.start_wsgi_server",
+        "uvicorn.Config",
+        "uvicorn.Server",
+        "uvicorn.run",
+        "socket.socket",
+        "asyncio.start_server",
+        "asyncio.start_unix_server",
+    }
+    observed_environment: set[str] = set()
+
+    for path in broker_sources:
+        tree, calls = _resolved_python_calls(path.read_text(encoding="utf-8"))
+        assert forbidden_calls.isdisjoint(calls), (path, forbidden_calls & set(calls))
+        assert not any(call.endswith(".listen") for call in calls), path
+        observed_environment.update(_environment_names(tree))
+
+    assert not {
+        name
+        for name in observed_environment
+        if ("METRIC" in name.upper() or "PROMETHEUS" in name.upper())
+        and ("HOST" in name.upper() or "PORT" in name.upper())
+    }
+
+    entrypoint = root / "scripts" / "run_sandbox_broker.py"
+    _, entrypoint_calls = _resolved_python_calls(entrypoint.read_text(encoding="utf-8"))
+    assert "uvicorn.run" not in entrypoint_calls
+    entrypoint_tree = ast.parse(entrypoint.read_text(encoding="utf-8"))
+    uds_runs = [
+        node
+        for node in ast.walk(entrypoint_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "run"
+        and len(node.keywords) == 1
+        and node.keywords[0].arg == "sockets"
+        and isinstance(node.keywords[0].value, ast.List)
+        and len(node.keywords[0].value.elts) == 1
+        and isinstance(node.keywords[0].value.elts[0], ast.Name)
+        and node.keywords[0].value.elts[0].id == "listener"
+    ]
+    assert len(uds_runs) == 1
+
+
+@pytest.mark.parametrize(
+    ("source", "forbidden"),
+    [
+        (
+            "import prometheus_client as metrics\nmetrics.start_http_server(9000)\n",
+            "prometheus_client.start_http_server",
+        ),
+        (
+            "from prometheus_client import start_wsgi_server as serve\nserve(9000)\n",
+            "prometheus_client.start_wsgi_server",
+        ),
+        (
+            "import socket as network\nnetwork.socket()\n",
+            "socket.socket",
+        ),
+        (
+            "from uvicorn import run as serve\nserve('module:app')\n",
+            "uvicorn.run",
+        ),
+    ],
+)
+def test_listener_static_contract_resolves_import_aliases(
+    source: str,
+    forbidden: str,
+) -> None:
+    _, calls = _resolved_python_calls(source)
+    assert forbidden in calls
+
+
+@pytest.mark.parametrize(
+    ("source", "environment_name"),
+    [
+        (
+            "import os as operating_system\n"
+            "operating_system.getenv('PROMETHEUS_METRICS_PORT')\n",
+            "PROMETHEUS_METRICS_PORT",
+        ),
+        (
+            "from os import getenv as read_environment\n"
+            "read_environment('METRICS_HOST')\n",
+            "METRICS_HOST",
+        ),
+        (
+            "from os import environ as process_environment\n"
+            "process_environment.get('METRICS_PORT')\n",
+            "METRICS_PORT",
+        ),
+    ],
+)
+def test_metrics_environment_static_contract_resolves_import_aliases(
+    source: str,
+    environment_name: str,
+) -> None:
+    assert environment_name in _environment_names(ast.parse(source))
 
 
 def _assert_non_scientific(result: Any) -> None:

@@ -133,11 +133,39 @@ class _BlockingFile:
 class _ApiService:
     job_id = "1" * 32
     artifact_id = "2" * 32
+    diagnostics_payload = {
+        "schema_version": 1,
+        "telemetry": {
+            "schema_version": 1,
+            "counters": {"job_terminal|passed|none": 1},
+            "phase_latency_ms": {},
+            "runtime": {
+                "queue_depth": 0,
+                "active_job_count": 0,
+            },
+            "recent_events": [
+                {
+                    "trace_id": "bounded-diagnostic-trace",
+                    "job_id": "bounded-diagnostic-job",
+                    "phase": "job_terminal",
+                    "outcome": "passed",
+                }
+            ],
+        },
+        "circuit_breaker": {"state": "closed"},
+    }
+    prometheus_payload = (
+        b"# HELP medchat_sandbox_broker_queue_depth Current queue depth.\n"
+        b"# TYPE medchat_sandbox_broker_queue_depth gauge\n"
+        b"medchat_sandbox_broker_queue_depth 0.0\n"
+    )
 
     def __init__(self, *, stop_failure: BaseException | None = None) -> None:
         self.events: list[str] = []
         self.stop_failure = stop_failure
         self.submitted_keys: list[str] = []
+        self.diagnostics_calls = 0
+        self.prometheus_calls = 0
 
     async def recover(self) -> None:
         self.events.append("recover")
@@ -243,6 +271,14 @@ class _ApiService:
         if job_id != self.job_id:
             raise KeyError("job not found")
         return self._view(BrokerJobStatus.CANCELLED)
+
+    def diagnostics(self) -> dict[str, object]:
+        self.diagnostics_calls += 1
+        return self.diagnostics_payload
+
+    def prometheus_text(self) -> bytes:
+        self.prometheus_calls += 1
+        return self.prometheus_payload
 
 
 def _config(tmp_path: Path) -> BrokerConfig:
@@ -776,6 +812,199 @@ def test_api_happy_path_public_fields_stream_headers_and_lifecycle(tmp_path: Pat
     assert service.events == ["recover", "start", "stop"]
 
 
+def test_private_diagnostics_and_metrics_are_exact_uds_service_views(
+    tmp_path: Path,
+) -> None:
+    from src.sandbox_broker.app import create_app
+
+    service = _ApiService()
+    config = _config(tmp_path)
+    app = create_app(config, service=service)
+    supplied_trace = "caller-supplied-trace-must-not-reflect"
+    supplied_job = "caller-supplied-job-must-not-reflect"
+    supplied_secret = "caller-supplied-secret-must-not-reflect"
+    with TestClient(app) as client:
+        before = (list(service.events), list(service.submitted_keys))
+        diagnostics = client.get(
+            f"/v1/diagnostics?trace_id={supplied_trace}&job_id={supplied_job}"
+            f"&secret={supplied_secret}",
+            headers={
+                "Authorization": f"Bearer {supplied_secret}",
+                "X-Trace-ID": supplied_trace,
+                "X-Job-ID": supplied_job,
+            },
+        )
+        metrics = client.get(
+            f"/metrics?trace_id={supplied_trace}&job_id={supplied_job}"
+            f"&secret={supplied_secret}",
+            headers={
+                "Authorization": f"Bearer {supplied_secret}",
+                "X-Trace-ID": supplied_trace,
+                "X-Job-ID": supplied_job,
+            },
+        )
+        after = (list(service.events), list(service.submitted_keys))
+
+        assert diagnostics.status_code == 200
+        assert diagnostics.json() == service.diagnostics_payload
+        assert metrics.status_code == 200
+        assert metrics.content == service.prometheus_payload
+        content_type = {
+            part.strip().lower()
+            for part in metrics.headers["content-type"].split(";")
+        }
+        assert content_type == {"text/plain", "version=0.0.4", "charset=utf-8"}
+        assert "bounded-diagnostic-trace" in diagnostics.text
+        assert "bounded-diagnostic-job" in diagnostics.text
+        for forbidden in (supplied_trace, supplied_job, supplied_secret):
+            assert forbidden not in diagnostics.text
+            assert forbidden.encode() not in metrics.content
+        for forbidden in (
+            service.job_id.encode(),
+            b"bounded-diagnostic-trace",
+            b"bounded-diagnostic-job",
+            b"secret",
+        ):
+            assert forbidden not in metrics.content.lower()
+        assert before == after == (["recover", "start"], [])
+        assert list(config.state_root.iterdir()) == []
+
+    assert service.diagnostics_calls == 1
+    assert service.prometheus_calls == 1
+
+
+@pytest.mark.parametrize("path", ["/v1/diagnostics", "/metrics"])
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+def test_private_observability_endpoints_reject_mutating_methods_without_service_calls(
+    tmp_path: Path,
+    path: str,
+    method: str,
+) -> None:
+    from src.sandbox_broker.app import create_app
+
+    service = _ApiService()
+    app = create_app(_config(tmp_path), service=service)
+    with TestClient(app) as client:
+        before = (list(service.events), list(service.submitted_keys))
+        response = client.request(method, path, json={"job_id": service.job_id})
+        after = (list(service.events), list(service.submitted_keys))
+
+    assert response.status_code in {404, 405}
+    assert before == after == (["recover", "start"], [])
+    assert service.diagnostics_calls == 0
+    assert service.prometheus_calls == 0
+
+
+class _DiagnosticsDictSubclass(dict[str, object]):
+    pass
+
+
+class _DiagnosticsIntSubclass(int):
+    pass
+
+
+class _MetricsBytesSubclass(bytes):
+    pass
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        None,
+        [],
+        _DiagnosticsDictSubclass(schema_version=1),
+        {},
+        {"schema_version": True},
+        {"schema_version": _DiagnosticsIntSubclass(1)},
+        {"schema_version": 0},
+        {"schema_version": 1.0},
+    ],
+)
+def test_diagnostics_rejects_non_exact_builtin_schema(
+    tmp_path: Path,
+    result: object,
+) -> None:
+    from src.sandbox_broker.app import create_app
+
+    service = _ApiService()
+    service.diagnostics = lambda: result  # type: ignore[method-assign]
+    app = create_app(_config(tmp_path), service=service)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/v1/diagnostics")
+
+    assert response.status_code == 500
+    assert response.json() == {"error": {"code": "internal_error"}}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        None,
+        "metric 1\n",
+        bytearray(b"metric 1\n"),
+        memoryview(b"metric 1\n"),
+        _MetricsBytesSubclass(b"metric 1\n"),
+        SimpleNamespace(content=b"metric 1\n"),
+        (chunk for chunk in (b"metric 1\n",)),
+    ],
+)
+def test_metrics_rejects_non_exact_builtin_bytes(
+    tmp_path: Path,
+    result: object,
+) -> None:
+    from src.sandbox_broker.app import create_app
+
+    service = _ApiService()
+    service.prometheus_text = lambda: result  # type: ignore[method-assign]
+    app = create_app(_config(tmp_path), service=service)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/metrics")
+
+    assert response.status_code == 500
+    assert response.json() == {"error": {"code": "internal_error"}}
+
+
+class _SecretDiagnosticBaseFailure(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("path", ["/v1/diagnostics", "/metrics"])
+@pytest.mark.parametrize("failure_type", [RuntimeError, _SecretDiagnosticBaseFailure])
+def test_private_observability_failures_are_sanitized_without_exception_context(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    path: str,
+    failure_type: type[BaseException],
+) -> None:
+    from src.sandbox_broker.app import create_app
+
+    secret = "DIAGNOSTIC_SECRET_MUST_NOT_ESCAPE"
+    service = _ApiService()
+
+    def fail() -> object:
+        try:
+            raise ValueError(f"context-{secret}")
+        except ValueError as cause:
+            raise failure_type(f"cause-{secret}") from cause
+
+    if path == "/v1/diagnostics":
+        service.diagnostics = fail  # type: ignore[method-assign]
+    else:
+        service.prometheus_text = fail  # type: ignore[method-assign]
+    app = create_app(_config(tmp_path), service=service)
+    caplog.set_level(logging.DEBUG)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get(path)
+
+    assert response.status_code == 500
+    assert response.json() == {"error": {"code": "internal_error"}}
+    rendered = response.text.lower()
+    assert secret.lower() not in rendered
+    for forbidden in ("traceback", "context", "cause"):
+        assert forbidden not in rendered
+    assert secret not in caplog.text
+
+
 def test_api_validation_and_multipart_shape_are_stable(tmp_path: Path) -> None:
     from src.sandbox_broker.app import create_app
 
@@ -957,13 +1186,17 @@ def test_openapi_contains_only_narrow_routes_and_no_dangerous_schema_fields(
 ) -> None:
     from src.sandbox_broker.app import create_app
 
-    schema = create_app(_config(tmp_path), service=_ApiService()).openapi()
+    app = create_app(_config(tmp_path), service=_ApiService())
+    assert app.openapi_url is None
+    schema = app.openapi()
     assert set(schema["paths"]) == {
         "/v1/docking/jobs",
         "/v1/docking/jobs/{job_id}",
         "/v1/docking/jobs/{job_id}/manifest",
         "/v1/docking/jobs/{job_id}/artifacts/{artifact_id}",
         "/v1/docking/jobs/{job_id}/cancel",
+        "/v1/diagnostics",
+        "/metrics",
         "/healthz",
     }
     serialized = json.dumps(schema, sort_keys=True).lower()
@@ -971,22 +1204,31 @@ def test_openapi_contains_only_narrow_routes_and_no_dangerous_schema_fields(
         assert forbidden not in serialized
 
 
-def test_app_registers_exactly_six_http_paths_without_docs_or_redirects(
+def test_app_registers_exact_private_http_paths_without_docs_or_redirects(
     tmp_path: Path,
 ) -> None:
     from src.sandbox_broker.app import create_app
 
     app = create_app(_config(tmp_path), service=_ApiService())
-    assert {route.path for route in app.routes} == {
+    assert [route.path for route in app.routes] == [
         "/v1/docking/jobs",
         "/v1/docking/jobs/{job_id}",
         "/v1/docking/jobs/{job_id}/manifest",
         "/v1/docking/jobs/{job_id}/artifacts/{artifact_id}",
         "/v1/docking/jobs/{job_id}/cancel",
+        "/v1/diagnostics",
+        "/metrics",
         "/healthz",
-    }
+    ]
     with TestClient(app, follow_redirects=False) as client:
-        for path in ("/docs", "/openapi.json", "/redoc", "/healthz/"):
+        for path in (
+            "/docs",
+            "/openapi.json",
+            "/redoc",
+            "/healthz/",
+            "/v1/diagnostics/",
+            "/metrics/",
+        ):
             response = client.get(path)
             assert response.status_code == 404
             assert "location" not in response.headers
