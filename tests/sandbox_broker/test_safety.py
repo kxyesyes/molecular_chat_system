@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from src.sandbox_broker.safety import is_safe_metadata_text
+from src.sandbox_broker.safety import (
+    is_safe_container_image_uri,
+    is_safe_metadata_text,
+)
 
 
 UNICODE_PATH_CONFUSABLES = (
@@ -90,3 +93,32 @@ def test_metadata_safety_does_not_grant_fraction_exemption_after_nfkc() -> None:
 
 def test_metadata_safety_does_not_reject_plain_unicode_scientific_text() -> None:
     assert is_safe_metadata_text("科学计算结果正常 αβ é ß") is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "medchat-docking",
+        "registry.example/medchat/vina:1",
+        "127.0.0.1:5000/medchat-docking",
+        "localhost:5000/team/medchat_docking:release-1",
+    ],
+)
+def test_container_image_uri_accepts_strict_registry_references(value: str) -> None:
+    assert is_safe_container_image_uri(value) is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/etc/passwd",
+        "../medchat-docking",
+        "registry.example/../secret",
+        "registry.example/medchat@sha256:deadbeef",
+        "registry.example/medchat image",
+        "registry.example/secret-token",
+        "registry.example/medchat\u200b-docking",
+    ],
+)
+def test_container_image_uri_rejects_paths_secrets_and_ambiguous_text(value: str) -> None:
+    assert is_safe_container_image_uri(value) is False

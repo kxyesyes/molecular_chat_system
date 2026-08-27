@@ -8,9 +8,10 @@ import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .safety import is_safe_container_image_uri
+
 
 _IMAGE_PATTERN = re.compile(r"^([^\s@]+)@sha256:([0-9a-f]{64})$")
-_IMAGE_URI_PATTERN = re.compile(r"^[^\s@]+$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _APPROVED_DOMAINS = frozenset({"127.0.0.1:8080", "localhost:8080"})
 _APPROVED_LIMITS = {
@@ -116,7 +117,7 @@ class BrokerConfig:
         object.__setattr__(self, "state_root", state_root)
         object.__setattr__(self, "socket_path", socket_path)
 
-        if not isinstance(self.image_uri, str) or _IMAGE_URI_PATTERN.fullmatch(self.image_uri) is None:
+        if not is_safe_container_image_uri(self.image_uri):
             raise ValueError("image_uri must be non-empty and contain no whitespace or @")
         if (
             not isinstance(self.image_digest, str)

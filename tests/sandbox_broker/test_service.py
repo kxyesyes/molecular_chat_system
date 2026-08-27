@@ -1654,6 +1654,39 @@ def test_complete_failure_falls_back_to_terminal_artifact_failure(
     assert "secret" not in repr(terminal)
 
 
+def test_complete_failure_terminalizes_without_reusing_rejected_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> object:
+        service, store, config = _service(tmp_path, FakeSandboxClient())
+        real_fail = store.fail
+
+        def fail_complete(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            raise ValueError("rejected provenance")
+
+        def fail_without_rejected_provenance(
+            *args: object, **kwargs: object
+        ) -> object:
+            if kwargs.get("provenance") is not None:
+                raise ValueError("rejected provenance")
+            return real_fail(*args, **kwargs)
+
+        monkeypatch.setattr(store, "complete", fail_complete)
+        monkeypatch.setattr(store, "fail", fail_without_rejected_provenance)
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-rejected-provenance")
+        terminal = await service.wait_terminal(job.job_id, timeout=1)
+        await service.stop()
+        return terminal
+
+    terminal = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.ARTIFACT_FAILED.value
+    assert terminal.provenance is None
+
+
 def test_get_manifest_maps_corrupt_job_json_to_key_error(
     tmp_path: Path,
 ) -> None:

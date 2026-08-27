@@ -24,7 +24,11 @@ from .models import (
     BrokerJobStatus,
     transition_allowed,
 )
-from .safety import contains_sensitive_metadata_text, is_safe_metadata_text
+from .safety import (
+    contains_sensitive_metadata_text,
+    is_safe_container_image_uri,
+    is_safe_metadata_text,
+)
 
 
 _BUSY_TIMEOUT_MS = 500
@@ -951,7 +955,7 @@ class BrokerStore:
                 if type(provenance) is not dict:
                     raise ValueError
                 cls._validate_json_value(provenance)
-                cls._reject_sensitive_json(provenance)
+                cls._reject_sensitive_json(provenance, allow_image_uri=True)
             warnings_json = json.dumps(
                 normalized_warnings,
                 sort_keys=True,
@@ -975,7 +979,12 @@ class BrokerStore:
             raise ValueError("persisted job metadata is invalid") from None
 
     @classmethod
-    def _reject_sensitive_json(cls, value: object) -> None:
+    def _reject_sensitive_json(
+        cls,
+        value: object,
+        *,
+        allow_image_uri: bool = False,
+    ) -> None:
         if type(value) is str:
             if (
                 not is_safe_metadata_text(value)
@@ -994,6 +1003,10 @@ class BrokerStore:
                     or contains_sensitive_metadata_text(key)
                 ):
                     raise ValueError
+                if allow_image_uri and key == "image_uri":
+                    if not is_safe_container_image_uri(item):
+                        raise ValueError
+                    continue
                 cls._reject_sensitive_json(item)
 
     def jobs_updated_before(self, cutoff: float) -> list[BrokerJobRecord]:
@@ -1435,7 +1448,10 @@ class BrokerStore:
                 if type(provenance) is not dict:
                     raise ValueError
                 BrokerStore._validate_json_value(provenance)
-                BrokerStore._reject_sensitive_json(provenance)
+                BrokerStore._reject_sensitive_json(
+                    provenance,
+                    allow_image_uri=True,
+                )
 
             created_at = row["created_at"]
             updated_at = row["updated_at"]

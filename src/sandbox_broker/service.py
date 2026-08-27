@@ -1046,7 +1046,6 @@ class SandboxBrokerService:
                                 job_id,
                                 BrokerErrorCode.ARTIFACT_FAILED,
                                 warnings=(),
-                                provenance=succeeded_provenance.model_dump(mode="json"),
                                 cleanup_status="succeeded",
                             )
             except BaseException:

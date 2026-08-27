@@ -20,6 +20,12 @@ _SENSITIVE_TEXT_PATTERN = re.compile(
 )
 _SLASH_TRANSLATION = str.maketrans({"\\": "/"})
 _PATH_CONFUSABLE_NAME_MARKERS = ("SLASH", "SOLIDUS", "COLON")
+_IMAGE_REGISTRY_PATTERN = re.compile(
+    r"^(?:localhost|[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?)"
+    r"(?::[1-9][0-9]{0,4})?$"
+)
+_IMAGE_COMPONENT_PATTERN = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
+_IMAGE_TAG_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 
 
 def _contains_raw_path_or_unicode_confusable(value: str) -> bool:
@@ -98,3 +104,37 @@ def is_safe_metadata_text(value: object) -> bool:
     if altered:
         return False
     return not _contains_absolute_like_path(path_view)
+
+
+def is_safe_container_image_uri(value: object) -> bool:
+    """Accept a narrow Docker image name while rejecting paths and secrets."""
+
+    if (
+        type(value) is not str
+        or not 1 <= len(value) <= 255
+        or value != unicodedata.normalize("NFKC", value)
+        or any(unicodedata.category(character) in {"Cc", "Cf"} for character in value)
+        or any(character.isspace() for character in value)
+        or "\\" in value
+        or "@" in value
+        or _SENSITIVE_TEXT_PATTERN.search(value) is not None
+    ):
+        return False
+    parts = value.split("/")
+    if any(not part for part in parts):
+        return False
+    if len(parts) > 1 and (
+        "." in parts[0] or ":" in parts[0] or parts[0] == "localhost"
+    ):
+        if _IMAGE_REGISTRY_PATTERN.fullmatch(parts[0]) is None:
+            return False
+        parts = parts[1:]
+    last = parts[-1]
+    if ":" in last:
+        name, tag = last.rsplit(":", 1)
+        if _IMAGE_TAG_PATTERN.fullmatch(tag) is None:
+            return False
+        parts[-1] = name
+    return bool(parts) and all(
+        _IMAGE_COMPONENT_PATTERN.fullmatch(part) is not None for part in parts
+    )

@@ -1180,6 +1180,27 @@ def test_service_store_rejects_invalid_cleanup_and_sensitive_json(tmp_path: Path
         )
 
 
+def test_store_accepts_strict_container_image_uri_in_provenance(tmp_path: Path) -> None:
+    store = BrokerStore(tmp_path / "broker.sqlite")
+    job, _ = store.create_or_get("idem-registry", SHA256_A, "trace-registry")
+    _advance_to(store, job.job_id, BrokerJobStatus.VALIDATING)
+
+    terminal = store.complete(
+        job.job_id,
+        warnings=[],
+        provenance={
+            "image_uri": "127.0.0.1:5000/medchat-docking",
+            "cleanup_status": "succeeded",
+        },
+    )
+
+    assert terminal.status is BrokerJobStatus.SUCCEEDED
+    assert terminal.provenance == {
+        "cleanup_status": "succeeded",
+        "image_uri": "127.0.0.1:5000/medchat-docking",
+    }
+
+
 def test_terminal_cleanup_retry_preserves_terminal_audit_and_clears_pending(
     tmp_path: Path,
 ) -> None:
