@@ -37,6 +37,7 @@ _RESULT_NAME = "result.json"
 _WORK_NAME = ".work"
 _POSES_NAME = "poses"
 _NORMALIZED_RECEPTOR_NAME = "receptor.utf8.pdb"
+_PREPARED_LIGAND_NAME = "ligand.prepared.sdf"
 _MAX_REQUEST_BYTES = 1024 * 1024
 _MAX_INPUT_BYTES = 128 * 1024 * 1024
 _MAX_POSE_BYTES = 16 * 1024 * 1024
@@ -112,6 +113,7 @@ class Request:
     ligand: Path
     receptor_sha256: str
     ligand_sha256: str
+    ligand_requires_3d_preparation: bool
     center: tuple[float, float, float]
     size: tuple[float, float, float]
     exhaustiveness: int
@@ -293,7 +295,7 @@ def _path_from_contract(value: object, pattern: re.Pattern[str], role: str) -> P
     return INPUT_ROOT / name
 
 
-def _validate_single_ligand(content: bytes, suffix: str) -> None:
+def _validate_single_ligand(content: bytes, suffix: str) -> bool:
     try:
         from rdkit import Chem, rdBase
     except Exception:
@@ -316,17 +318,27 @@ def _validate_single_ligand(content: bytes, suffix: str) -> None:
                         raise ValueError
                 if len(molecules) != 1:
                     raise ValueError
+                molecule = molecules[0]
             elif suffix == ".mol":
                 text = content.decode("utf-8", errors="strict")
-                if "$$$$" in text or Chem.MolFromMolBlock(
+                molecule = Chem.MolFromMolBlock(
                     text,
                     sanitize=True,
                     removeHs=False,
                     strictParsing=True,
-                ) is None:
+                )
+                if "$$$$" in text or molecule is None:
                     raise ValueError
             else:  # pragma: no cover - guarded by the fixed path contract
                 raise ValueError
+            has_implicit_hydrogens = any(
+                atom.GetNumImplicitHs() > 0 for atom in molecule.GetAtoms()
+            )
+            is_3d = (
+                molecule.GetNumConformers() == 1
+                and bool(molecule.GetConformer().Is3D())
+            )
+            return has_implicit_hydrogens or not is_3d
     except Exception:
         raise ValueError from None
 
@@ -366,12 +378,15 @@ def _parse_request() -> Request:
     )
     if actual_receptor_hash != receptor_hash or actual_ligand_hash != ligand_hash:
         raise ValueError
-    _validate_single_ligand(ligand_content, ligand.suffix)
+    ligand_requires_3d_preparation = _validate_single_ligand(
+        ligand_content, ligand.suffix
+    )
     return Request(
         receptor=receptor,
         ligand=ligand,
         receptor_sha256=receptor_hash,
         ligand_sha256=ligand_hash,
+        ligand_requires_3d_preparation=ligand_requires_3d_preparation,
         center=_number_vector(parameters["center"], size=False),
         size=_number_vector(parameters["size"], size=True),
         exhaustiveness=_strict_integer(parameters["exhaustiveness"], 1, 64),
@@ -1178,7 +1193,7 @@ def _prepare_receptor_for_prody(
     return destination, identity, tuple(warnings)
 
 
-def _remove_normalized_receptor(
+def _remove_transient_work_file(
     path: Path,
     expected_identity: tuple[tuple[int, ...], tuple[int, ...]],
     work: Path,
@@ -1188,7 +1203,7 @@ def _remove_normalized_receptor(
         value = path.lstat()
         if (
             path.parent != work
-            or path.name != _NORMALIZED_RECEPTOR_NAME
+            or path.name not in {_NORMALIZED_RECEPTOR_NAME, _PREPARED_LIGAND_NAME}
             or _identity(work.lstat()) != work_identity
             or _snapshot_identity(value) != expected_identity
             or not stat.S_ISREG(value.st_mode)
@@ -1460,7 +1475,7 @@ def _execute(
             expected_receptor_files.add(_NORMALIZED_RECEPTOR_NAME)
         _require_exact_created_files(work, work_identity, expected_receptor_files)
         if normalized_receptor_identity is not None:
-            _remove_normalized_receptor(
+            _remove_transient_work_file(
                 receptor_input,
                 normalized_receptor_identity,
                 work,
@@ -1468,11 +1483,39 @@ def _execute(
             )
             _require_exact_created_files(work, work_identity, {"receptor.pdbqt"})
         _verify_input_hash(request.ligand, request.ligand_sha256)
+        ligand_input = request.ligand
+        ligand_input_identity: tuple[tuple[int, ...], tuple[int, ...]] | None = None
+        execution_warnings = list(receptor_warnings)
+        if request.ligand_requires_3d_preparation:
+            ligand_input = work / _PREPARED_LIGAND_NAME
+            _run_tool(
+                [
+                    "obabel",
+                    str(request.ligand),
+                    "-O",
+                    str(ligand_input),
+                    "-h",
+                    "--gen3d",
+                ],
+                "ligand_geometry_preparation",
+                deadline,
+                cleanup_deadline,
+            )
+            _validate_created_file(ligand_input, _MAX_INPUT_BYTES)
+            ligand_input_identity = _snapshot_identity(ligand_input.lstat())
+            _require_exact_created_files(
+                work,
+                work_identity,
+                {"receptor.pdbqt", _PREPARED_LIGAND_NAME},
+            )
+            execution_warnings.append(
+                "ligand_hydrogens_and_3d_coordinates_prepared"
+            )
         _run_tool(
             [
                 "mk_prepare_ligand.py",
                 "-i",
-                str(request.ligand),
+                str(ligand_input),
                 "-o",
                 str(ligand_pdbqt),
             ],
@@ -1481,9 +1524,22 @@ def _execute(
             cleanup_deadline,
         )
         _validate_created_file(ligand_pdbqt, _MAX_INPUT_BYTES)
+        expected_ligand_files = {"receptor.pdbqt", "ligand.pdbqt"}
+        if ligand_input_identity is not None:
+            expected_ligand_files.add(_PREPARED_LIGAND_NAME)
         _require_exact_created_files(
-            work, work_identity, {"receptor.pdbqt", "ligand.pdbqt"}
+            work, work_identity, expected_ligand_files
         )
+        if ligand_input_identity is not None:
+            _remove_transient_work_file(
+                ligand_input,
+                ligand_input_identity,
+                work,
+                work_identity,
+            )
+            _require_exact_created_files(
+                work, work_identity, {"receptor.pdbqt", "ligand.pdbqt"}
+            )
         _run_tool(
             [
                 "vina",
@@ -1534,7 +1590,7 @@ def _execute(
                 "pose_files": ["poses/result.pdbqt"],
                 "vina_version": _trusted_version("vina"),
                 "meeko_version": _trusted_version("meeko"),
-                "warnings": list(receptor_warnings),
+                "warnings": execution_warnings,
             }
         except (OSError, ValueError, UnicodeError, metadata.PackageNotFoundError):
             _fail("output_validation", "invalid_output")

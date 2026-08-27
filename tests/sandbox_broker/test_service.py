@@ -215,6 +215,8 @@ def _run_uploaded_request_through_wrapper(
             self.returncode: int | None = None
             if self.argv[0] == "mk_prepare_receptor.py":
                 Path(self.argv[4]).write_text("RECEPTOR PDBQT\n", encoding="ascii")
+            elif self.argv[0] == "obabel":
+                Path(self.argv[self.argv.index("-O") + 1]).write_bytes(VALID_SDF)
             elif self.argv[0] == "mk_prepare_ligand.py":
                 Path(self.argv[4]).write_text("LIGAND PDBQT\n", encoding="ascii")
             elif self.argv[0] == "vina":

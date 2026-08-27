@@ -190,6 +190,8 @@ def _fake_tools(
             tool = self.argv[0]
             if tool == "mk_prepare_receptor.py":
                 Path(self.argv[4]).write_bytes(b"RECEPTOR PDBQT\n")
+            elif tool == "obabel":
+                Path(self.argv[self.argv.index("-O") + 1]).write_bytes(VALID_SDF)
             elif tool == "mk_prepare_ligand.py":
                 Path(self.argv[4]).write_bytes(b"LIGAND PDBQT\n")
             elif tool == "vina":
@@ -454,7 +456,7 @@ def test_valid_fake_tools_execute_exact_sequence_and_emit_validator_schema(
         "pose_files": ["poses/result.pdbqt"],
         "vina_version": "1.2.5",
         "meeko_version": "0.7.1",
-        "warnings": [],
+        "warnings": ["ligand_hydrogens_and_3d_coordinates_prepared"],
     }
     validated = validate_scientific_output(
         output_root,
@@ -466,6 +468,7 @@ def test_valid_fake_tools_execute_exact_sequence_and_emit_validator_schema(
     assert validated.best_energy == -8.2
     assert [call[0][0] for call in calls] == [
         "mk_prepare_receptor.py",
+        "obabel",
         "mk_prepare_ligand.py",
         "vina",
     ]
@@ -478,14 +481,23 @@ def test_valid_fake_tools_execute_exact_sequence_and_emit_validator_schema(
         "--write_pdbqt",
         str(receptor_pdbqt),
     ]
+    ligand_prepared = output_root / ".work" / "ligand.prepared.sdf"
     assert calls[1][0] == [
+        "obabel",
+        str(tmp_path / "input" / "ligand.sdf"),
+        "-O",
+        str(ligand_prepared),
+        "-h",
+        "--gen3d",
+    ]
+    assert calls[2][0] == [
         "mk_prepare_ligand.py",
         "-i",
-        str(tmp_path / "input" / "ligand.sdf"),
+        str(ligand_prepared),
         "-o",
         str(ligand_pdbqt),
     ]
-    assert calls[2][0] == [
+    assert calls[3][0] == [
         "vina",
         "--receptor",
         str(receptor_pdbqt),
@@ -557,7 +569,10 @@ def test_legacy_encoded_pdb_header_is_normalized_without_changing_coordinates_or
     assert (input_root / "receptor.pdb").read_bytes() == receptor
     payload = _result(output_root)
     assert payload["receptor_sha256"] == _sha(receptor)
-    assert payload["warnings"] == ["receptor_header_encoding_normalized"]
+    assert payload["warnings"] == [
+        "receptor_header_encoding_normalized",
+        "ligand_hydrogens_and_3d_coordinates_prepared",
+    ]
     assert calls[0][0][2] != str(input_root / "receptor.pdb")
     assert not (output_root / ".work").exists()
 
@@ -608,7 +623,8 @@ def test_unlabelled_duplicate_receptor_atoms_select_first_conformer_with_warning
     payload = _result(output_root)
     assert payload["receptor_sha256"] == _sha(receptor)
     assert payload["warnings"] == [
-        "receptor_duplicate_atoms_first_conformer_selected"
+        "receptor_duplicate_atoms_first_conformer_selected",
+        "ligand_hydrogens_and_3d_coordinates_prepared",
     ]
     assert calls[0][0][2] != str(input_root / "receptor.pdb")
     assert not (output_root / ".work").exists()
@@ -940,7 +956,7 @@ def test_ligand_must_be_exactly_one_valid_rdkit_molecule_before_meeko(
     assert calls == []
 
 
-def test_valid_single_record_mol_reaches_meeko(
+def test_valid_single_record_mol_reaches_geometry_preparation_then_meeko(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = _load_runner()
@@ -957,7 +973,10 @@ def test_valid_single_record_mol_reaches_meeko(
 
     assert module.main(REQUEST_ARGUMENTS) == 0
     assert _result(output_root)["status"] == "succeeded"
-    assert calls[1][0][2] == str(input_root / "ligand.mol")
+    assert calls[1][0][0] == "obabel"
+    assert calls[1][0][1] == str(input_root / "ligand.mol")
+    assert calls[2][0][0] == "mk_prepare_ligand.py"
+    assert calls[2][0][2] == str(output_root / ".work" / "ligand.prepared.sdf")
 
 
 def test_cli_subreaper_failure_is_stable_and_prevents_tool_spawn(
