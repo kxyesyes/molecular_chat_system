@@ -1,0 +1,3 @@
+# Direct production input for the isolated Ubuntu 24.04 x86_64 server env.
+# Regenerate the adjacent .lock on Python 3.10 only.
+opensandbox-server==0.2.2

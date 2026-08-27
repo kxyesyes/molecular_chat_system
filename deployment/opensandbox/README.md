@@ -72,27 +72,34 @@ actual requirement files from the checkout root:
 
 ```bash
 MINIFORGE_VERSION=24.7.1-2
+MINIFORGE_SHA256=636f7faca2d51ee42b4640ce160c751a46d57621ef4bf14378704c87c5db4fe3
 curl -fsSLo /tmp/miniforge.sh \
   "https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-${MINIFORGE_VERSION}-Linux-x86_64.sh"
+printf '%s  %s\n' "$MINIFORGE_SHA256" /tmp/miniforge.sh | \
+  sha256sum --check --strict -
 sudo bash /tmp/miniforge.sh -b -p /opt/conda
 rm -f /tmp/miniforge.sh
 
 sudo /opt/conda/bin/conda config --system --set channel_priority strict
 sudo /opt/conda/bin/conda create --yes --prefix /opt/conda/envs/medchat python=3.10.14 pip
 sudo /opt/conda/envs/medchat/bin/python -m pip install --disable-pip-version-check \
-  --requirement requirements.txt
-sudo /opt/conda/envs/medchat/bin/python -m pip install --disable-pip-version-check \
-  --requirement requirements-agent-temporal.txt
-sudo /opt/conda/envs/medchat/bin/python -m pip install --disable-pip-version-check \
-  --requirement requirements-opensandbox-broker.txt
+  --require-hashes \
+  --requirement deployment/opensandbox/requirements-medchat-linux-x86_64.lock
 sudo /opt/conda/envs/medchat/bin/python -m pip check
+sudo install -o root -g root -m 0444 \
+  deployment/opensandbox/requirements-medchat-linux-x86_64.lock \
+  /opt/conda/envs/medchat/.medchat-requirements.lock
 
 sudo /opt/conda/bin/conda create --yes --prefix /opt/conda/envs/opensandbox-server python=3.10.14 pip
 sudo /opt/conda/envs/opensandbox-server/bin/python -m pip install \
-  --disable-pip-version-check --requirement requirements-opensandbox-server.txt
+  --disable-pip-version-check --require-hashes \
+  --requirement deployment/opensandbox/requirements-opensandbox-server-linux-x86_64.lock
 sudo /opt/conda/envs/opensandbox-server/bin/python -m pip check
 sudo /opt/conda/envs/opensandbox-server/bin/python -c \
   "import importlib.metadata as m; assert m.version('opensandbox-server') == '0.2.2'"
+sudo install -o root -g root -m 0444 \
+  deployment/opensandbox/requirements-opensandbox-server-linux-x86_64.lock \
+  /opt/conda/envs/opensandbox-server/.medchat-requirements.lock
 
 sudo ln -sfn /opt/conda/envs/opensandbox-server/bin/opensandbox-server \
   /opt/conda/envs/medchat/bin/opensandbox-server
@@ -102,9 +109,17 @@ sudo chown -R root:root /opt/conda
 sudo chmod -R go-w /opt/conda
 ```
 
-The final symlink preserves the server unit's validated executable path while
-keeping its dependency resolver isolated. Stop if either `python -m pip check`,
-the exact 0.2.2 assertion, or the resolved-link check fails.
+The MedChat lock is generated from `requirements.txt`,
+`requirements-agent-temporal.txt`, and
+`requirements-opensandbox-broker.txt`; the isolated server lock is generated
+from `requirements-opensandbox-server.txt`. Their adjacent `.in` files record
+the conflict-resolved direct inputs. Regenerate both locks only on the declared
+Python 3.10 / Ubuntu x86_64 target with `pip-compile --generate-hashes`, review
+the complete diff, and update the deployment validator's pinned digests in the
+same change. The final symlink preserves the server unit's validated executable
+path while keeping its dependency resolver isolated. Stop if the bootstrap
+checksum, a hash-locked install, either `python -m pip check`, the exact 0.2.2
+assertion, or the resolved-link check fails.
 
 ## 4. Build and pin the QEMU-only docking image
 

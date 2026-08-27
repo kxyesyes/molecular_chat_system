@@ -31,6 +31,16 @@ INSTALLER = DEPLOYMENT / "install.sh"
 OPEN_SANDBOX_README = DEPLOYMENT / "README.md"
 TEMPORAL_WORKER_SERVICE = ROOT / "deployment" / "medchat-temporal-worker.service"
 VALIDATOR = ROOT / "scripts" / "validate_opensandbox_deployment.py"
+MEDCHAT_DEPENDENCY_LOCK = (
+    DEPLOYMENT / "requirements-medchat-linux-x86_64.lock"
+)
+OPENSANDBOX_SERVER_DEPENDENCY_LOCK = (
+    DEPLOYMENT / "requirements-opensandbox-server-linux-x86_64.lock"
+)
+MEDCHAT_DEPENDENCY_INPUT = DEPLOYMENT / "requirements-medchat-linux-x86_64.in"
+OPENSANDBOX_SERVER_DEPENDENCY_INPUT = (
+    DEPLOYMENT / "requirements-opensandbox-server-linux-x86_64.in"
+)
 
 
 def _unit_sections(path: Path) -> dict[str, dict[str, list[str]]]:
@@ -91,6 +101,10 @@ def _asset_root(tmp_path: Path) -> Path:
         ENV_EXAMPLE,
         INSTALLER,
         TEMPORAL_WORKER_SERVICE,
+        MEDCHAT_DEPENDENCY_INPUT,
+        OPENSANDBOX_SERVER_DEPENDENCY_INPUT,
+        MEDCHAT_DEPENDENCY_LOCK,
+        OPENSANDBOX_SERVER_DEPENDENCY_LOCK,
     ):
         relative = source.relative_to(ROOT)
         target = tmp_path / relative
@@ -1253,6 +1267,73 @@ def test_readme_locks_exact_installer_source_chain_before_sudo_execution() -> No
     assert "git rev-parse --verify HEAD" in readme
     assert "git diff --exit-code" in readme
 
+
+def test_service_dependency_locks_are_transitive_and_hash_complete() -> None:
+    for dependency_lock in (
+        MEDCHAT_DEPENDENCY_LOCK,
+        OPENSANDBOX_SERVER_DEPENDENCY_LOCK,
+    ):
+        text = dependency_lock.read_text(encoding="utf-8")
+        logical_lines: list[str] = []
+        pending = ""
+        for raw_line in text.splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            pending += stripped.removesuffix("\\").strip() + " "
+            if not stripped.endswith("\\"):
+                logical_lines.append(pending.strip())
+                pending = ""
+        assert pending == ""
+        assert logical_lines
+        assert all("==" in line for line in logical_lines)
+        assert all("--hash=sha256:" in line for line in logical_lines)
+        assert all("http://" not in line and "https://" not in line for line in logical_lines)
+
+
+def test_static_validator_rejects_dependency_entry_without_hash(tmp_path: Path) -> None:
+    validator = _load_validator()
+    root = _asset_root(tmp_path)
+    target = root / MEDCHAT_DEPENDENCY_LOCK.relative_to(ROOT)
+    text = target.read_text(encoding="utf-8")
+    target.write_text(text.replace("--hash=sha256:", "--missing=sha256:", 1), encoding="utf-8")
+
+    assert validator.validate_static(root) == "dependency_lock_unsafe"
+
+
+def test_readme_verifies_bootstrap_and_installs_only_hash_locked_dependencies() -> None:
+    readme = OPEN_SANDBOX_README.read_text(encoding="utf-8")
+
+    assert "636f7faca2d51ee42b4640ce160c751a46d57621ef4bf14378704c87c5db4fe3" in readme
+    assert "sha256sum --check" in readme
+    assert readme.count("--require-hashes") >= 2
+    assert "requirements-medchat-linux-x86_64.lock" in readme
+    assert "requirements-opensandbox-server-linux-x86_64.lock" in readme
+    assert "/opt/conda/envs/medchat/.medchat-requirements.lock" in readme
+    assert "/opt/conda/envs/opensandbox-server/.medchat-requirements.lock" in readme
+
+
+def test_runtime_dependency_lock_check_matches_only_exact_installed_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = _load_validator()
+    installed = tmp_path / "installed.lock"
+    installed.write_bytes(b"locked dependency bytes\n")
+    installed.chmod(0o444)
+    expected = hashlib.sha256(installed.read_bytes()).hexdigest()
+    monkeypatch.setattr(
+        validator,
+        "_RUNTIME_DEPENDENCY_LOCKS",
+        ((installed, expected),),
+    )
+
+    assert validator._runtime_dependency_locks_match()
+    installed.chmod(0o644)
+    installed.write_bytes(b"changed\n")
+    installed.chmod(0o444)
+    assert not validator._runtime_dependency_locks_match()
+
     installer = INSTALLER.read_text(encoding="utf-8")
     source_check_start = installer.index("source_is_regular_and_locked() {")
     source_check_end = installer.index("\n}\n", source_check_start)
@@ -2039,6 +2120,10 @@ def test_static_validator_pins_every_committed_deployment_asset() -> None:
             ENV_EXAMPLE,
             INSTALLER,
             TEMPORAL_WORKER_SERVICE,
+            MEDCHAT_DEPENDENCY_INPUT,
+            OPENSANDBOX_SERVER_DEPENDENCY_INPUT,
+            MEDCHAT_DEPENDENCY_LOCK,
+            OPENSANDBOX_SERVER_DEPENDENCY_LOCK,
         )
     }
     for relative, expected in validator._PINNED_ASSET_SHA256.items():
@@ -2747,6 +2832,7 @@ def test_safe_mocked_runtime_checks_pass(monkeypatch: pytest.MonkeyPatch) -> Non
             "registry.invalid/medchat-docking:approved@sha256:" + "a" * 64
         ),
     )
+    monkeypatch.setattr(validator, "_runtime_dependency_locks_match", lambda: True)
 
     assert validator.validate_runtime() is None
     assert all(isinstance(call, tuple) and call for call in calls)

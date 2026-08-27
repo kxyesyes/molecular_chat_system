@@ -840,16 +840,19 @@ def test_readme_keeps_server_dependencies_isolated_behind_validated_launcher() -
     text = README.read_text(encoding="utf-8")
     broker_install = re.compile(
         r"/opt/conda/envs/medchat/bin/python -m pip install[^\n]*\\\n"
-        r"\s+--requirement requirements-opensandbox-broker\.txt"
+        r"\s+--require-hashes\s*\\\n"
+        r"\s+--requirement deployment/opensandbox/"
+        r"requirements-medchat-linux-x86_64\.lock"
     )
     server_install = re.compile(
         r"/opt/conda/envs/opensandbox-server/bin/python -m pip install\s*\\\n"
-        r"\s+--disable-pip-version-check --requirement "
-        r"requirements-opensandbox-server\.txt"
+        r"\s+--disable-pip-version-check --require-hashes\s*\\\n"
+        r"\s+--requirement deployment/opensandbox/"
+        r"requirements-opensandbox-server-linux-x86_64\.lock"
     )
     server_in_medchat = re.compile(
         r"/opt/conda/envs/medchat/bin/python -m pip install[^\n]*(?:\\\n[^\n]*)?"
-        r"requirements-opensandbox-server\.txt"
+        r"requirements-opensandbox-server-linux-x86_64\.lock"
     )
 
     assert broker_install.search(text)

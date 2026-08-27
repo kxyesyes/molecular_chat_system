@@ -73,6 +73,10 @@ _ASSET_PATHS = (
     "deployment/opensandbox/opensandbox.env.example",
     "deployment/opensandbox/install.sh",
     "deployment/medchat-temporal-worker.service",
+    "deployment/opensandbox/requirements-medchat-linux-x86_64.in",
+    "deployment/opensandbox/requirements-opensandbox-server-linux-x86_64.in",
+    "deployment/opensandbox/requirements-medchat-linux-x86_64.lock",
+    "deployment/opensandbox/requirements-opensandbox-server-linux-x86_64.lock",
 )
 _PINNED_ASSET_SHA256 = {
     "deployment/opensandbox/sandbox.toml": (
@@ -99,7 +103,33 @@ _PINNED_ASSET_SHA256 = {
     "deployment/medchat-temporal-worker.service": (
         "15fb8b7faa079b9a33328081c751a75c72a2d68e1b92b676b55150438064f982"
     ),
+    "deployment/opensandbox/requirements-medchat-linux-x86_64.in": (
+        "2b31fcf26d0cc568acefae388800f1f07cca5337f55168b08c51b0a00128a166"
+    ),
+    "deployment/opensandbox/requirements-opensandbox-server-linux-x86_64.in": (
+        "e9c8fd13106a0aa7490cb449b45ad16a96eb401bd38574fd9d5f5e2d2ea91e3b"
+    ),
+    "deployment/opensandbox/requirements-medchat-linux-x86_64.lock": (
+        "d5db4d8b615ef823d6d0e2e5f07d845e470a3a57de6be31457bb87596df530cc"
+    ),
+    "deployment/opensandbox/requirements-opensandbox-server-linux-x86_64.lock": (
+        "8b47a103312205f51ee8109a7280d9ca113c78fc1090cdf3bbc6b2f2bcd8fc4b"
+    ),
 }
+_RUNTIME_DEPENDENCY_LOCKS = (
+    (
+        Path("/opt/conda/envs/medchat/.medchat-requirements.lock"),
+        _PINNED_ASSET_SHA256[
+            "deployment/opensandbox/requirements-medchat-linux-x86_64.lock"
+        ],
+    ),
+    (
+        Path("/opt/conda/envs/opensandbox-server/.medchat-requirements.lock"),
+        _PINNED_ASSET_SHA256[
+            "deployment/opensandbox/requirements-opensandbox-server-linux-x86_64.lock"
+        ],
+    ),
+)
 _STABLE_CODES = frozenset(
     {
         "usage",
@@ -119,6 +149,7 @@ _STABLE_CODES = frozenset(
         "firewall_asset_unsafe",
         "installer_unsafe",
         "env_template_unsafe",
+        "dependency_lock_unsafe",
         "runsc_unavailable",
         "docker_runtime_unregistered",
         "docker_version_unsafe",
@@ -130,6 +161,7 @@ _STABLE_CODES = frozenset(
         "socket_mode_invalid",
         "image_reference_invalid",
         "image_digest_missing",
+        "dependency_lock_mismatch",
         "service_inactive",
         "runtime_check_failed",
         "validation_internal_error",
@@ -956,6 +988,32 @@ def _validate_environment_example(text: str) -> bool:
     )
 
 
+def _validate_dependency_lock(text: str) -> bool:
+    logical_lines: list[str] = []
+    pending = ""
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        pending += stripped.removesuffix("\\").strip() + " "
+        if not stripped.endswith("\\"):
+            logical_lines.append(pending.strip())
+            pending = ""
+    if pending or not logical_lines:
+        return False
+    requirement = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*==[^\s/@]+")
+    digest = re.compile(r"--hash=sha256:[0-9a-f]{64}")
+    for line in logical_lines:
+        tokens = line.split()
+        if (
+            len(tokens) < 2
+            or requirement.fullmatch(tokens[0]) is None
+            or any(digest.fullmatch(token) is None for token in tokens[1:])
+        ):
+            return False
+    return True
+
+
 def validate_static(root: Path) -> str | None:
     """Return a stable failure code, or ``None`` when static assets are safe."""
 
@@ -1005,6 +1063,12 @@ def validate_static(root: Path) -> str | None:
             assets["deployment/opensandbox/opensandbox.env.example"]
         ):
             return "env_template_unsafe"
+        for dependency_lock in (
+            "deployment/opensandbox/requirements-medchat-linux-x86_64.lock",
+            "deployment/opensandbox/requirements-opensandbox-server-linux-x86_64.lock",
+        ):
+            if not _validate_dependency_lock(assets[dependency_lock]):
+                return "dependency_lock_unsafe"
         if not _asset_identity_matches(raw_assets):
             return "asset_identity_mismatch"
         return None
@@ -1138,6 +1202,64 @@ def _runtime_image_reference() -> str | None:
         return _parse_runtime_environment(content)
     except (KeyError, OSError, UnicodeError):
         return None
+
+
+def _runtime_dependency_locks_match() -> bool:
+    for path, expected_digest in _RUNTIME_DEPENDENCY_LOCKS:
+        descriptor = None
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+            opened = os.fstat(descriptor)
+            named = path.lstat()
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or stat.S_ISLNK(named.st_mode)
+                or opened.st_nlink != 1
+                or stat.S_IMODE(opened.st_mode) & 0o222
+                or (os.name == "posix" and opened.st_uid != 0)
+                or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+                or opened.st_size > 512 * 1024
+            ):
+                return False
+            digest = hashlib.sha256()
+            remaining = opened.st_size
+            while remaining:
+                chunk = os.read(descriptor, min(65536, remaining))
+                if not chunk:
+                    return False
+                digest.update(chunk)
+                remaining -= len(chunk)
+            if os.read(descriptor, 1):
+                return False
+            after = os.fstat(descriptor)
+            if (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_mode,
+                opened.st_size,
+            ) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_mode,
+                after.st_size,
+            ):
+                return False
+            if digest.hexdigest() != expected_digest:
+                return False
+        except OSError:
+            return False
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+    return True
 
 
 _NETWORK_NAME = "medchat-opensandbox"
@@ -1395,6 +1517,9 @@ def validate_runtime() -> str | None:
             or expected_repo_digest not in repo_digests
         ):
             return "image_digest_missing"
+
+        if not _runtime_dependency_locks_match():
+            return "dependency_lock_mismatch"
 
         for service in _SERVICES:
             active = _run_command(
