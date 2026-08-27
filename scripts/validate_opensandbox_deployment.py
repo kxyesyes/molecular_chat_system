@@ -98,7 +98,7 @@ _PINNED_ASSET_SHA256 = {
         "bdd4b347aacd786c555250f5733566d5fd8723e15c44aeb048af237852d089bf"
     ),
     "deployment/opensandbox/install.sh": (
-        "8261deb8324938ad39981ebc2af6b92a38b3a7f785cf5ef45c87e106b857c731"
+        "c53ec699988c188bba55419b35509797daa157a1279f184555442db915bf20d0"
     ),
     "deployment/medchat-temporal-worker.service": (
         "15fb8b7faa079b9a33328081c751a75c72a2d68e1b92b676b55150438064f982"
@@ -887,7 +887,10 @@ def _validate_installer(text: str) -> bool:
         "def ensure_directory(",
         "require_empty=True",
         "def read_source(",
-        'root == Path("/") and opened.st_uid != 0',
+        "expected_uid is not None and opened.st_uid != expected_uid",
+        "read_source(path, expected_uid=uid)",
+        'source_expected_uid = 0 if root == Path("/") else None',
+        "expected_uid=source_expected_uid",
         '"OPEN_SANDBOX_API_KEY=" + secret + "\\n"',
         "opensandbox_uid,",
         "opensandbox_gid,",

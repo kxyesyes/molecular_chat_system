@@ -1356,10 +1356,15 @@ def test_installer_rejects_untrusted_source_ancestors_and_rechecks_opened_uid() 
     assert "0022" in ancestor_check
     assert 'source_ancestors_are_locked "$source_path"' in installer
 
-    read_start = installer.index("def read_source(path: Path) -> bytes:")
+    read_start = installer.index(
+        "def read_source(path: Path, *, expected_uid: int | None = None) -> bytes:"
+    )
     read_end = installer.index("\n\ndef fsync_parent", read_start)
     read_source = installer[read_start:read_end]
-    assert 'root == Path("/") and opened.st_uid != 0' in read_source
+    assert "expected_uid is not None and opened.st_uid != expected_uid" in read_source
+    assert "read_source(path, expected_uid=uid)" in installer
+    assert "source_expected_uid = 0 if root == Path(\"/\") else None" in installer
+    assert installer.count("expected_uid=source_expected_uid") == 6
 
 
 @pytest.mark.parametrize(
@@ -1370,7 +1375,7 @@ def test_installer_rejects_untrusted_source_ancestors_and_rechecks_opened_uid() 
             ":",
         ),
         lambda text: text.replace(
-            'or (root == Path("/") and opened.st_uid != 0)',
+            "or (expected_uid is not None and opened.st_uid != expected_uid)",
             "or False",
         ),
     ],
@@ -1420,6 +1425,51 @@ def test_source_swap_through_writable_parent_fails_closed(tmp_path: Path) -> Non
 
     result = subprocess.run(
         ["sh", str(probe), str(writable_parent)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() != 0,
+    reason="opened-source UID behavior requires POSIX root ownership",
+)
+def test_read_source_accepts_declared_nonroot_snapshot_owner_only(
+    tmp_path: Path,
+) -> None:
+    import pwd
+
+    installer = INSTALLER.read_text(encoding="utf-8")
+    start = installer.index("def read_source(")
+    end = installer.index("\n\ndef fsync_parent", start)
+    function = installer[start:end]
+    owner = pwd.getpwnam("nobody").pw_uid
+    source = tmp_path / "service-owned.snapshot"
+    source.write_bytes(b"service-owned\n")
+    source.chmod(0o444)
+    os.chown(source, owner, owner)
+    probe = tmp_path / "read-source.py"
+    probe.write_text(
+        "import os\nimport stat\nimport sys\nfrom pathlib import Path\n"
+        'root = Path("/")\n'
+        "def fail(): raise SystemExit(91)\n"
+        + function
+        + "\npath = Path(sys.argv[1])\nuid = int(sys.argv[2])\n"
+        + "assert read_source(path, expected_uid=uid) == b'service-owned\\n'\n"
+        + "try:\n    read_source(path, expected_uid=0)\n"
+        + "except SystemExit as error:\n    assert error.code == 91\n"
+        + "else:\n    raise AssertionError('wrong owner accepted')\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(probe), str(source), str(owner)],
         check=False,
         capture_output=True,
         text=True,

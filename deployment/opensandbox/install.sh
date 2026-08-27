@@ -664,7 +664,7 @@ def parse_environment(path: Path) -> dict[str, str]:
     return values
 
 
-def read_source(path: Path) -> bytes:
+def read_source(path: Path, *, expected_uid: int | None = None) -> bytes:
     descriptor = None
     try:
         descriptor = os.open(
@@ -680,7 +680,7 @@ def read_source(path: Path) -> bytes:
             or stat.S_ISLNK(named.st_mode)
             or opened.st_nlink != 1
             or stat.S_IMODE(opened.st_mode) & 0o022
-            or (root == Path("/") and opened.st_uid != 0)
+            or (expected_uid is not None and opened.st_uid != expected_uid)
             or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
         ):
             fail()
@@ -791,7 +791,7 @@ def snapshot_target(path: Path, mode: int, uid: int) -> tuple[bytes, int, int, i
     require_locked_regular(path, mode, expected_uid=uid)
     metadata = path.lstat()
     return (
-        read_source(path),
+        read_source(path, expected_uid=uid),
         stat.S_IMODE(metadata.st_mode),
         metadata.st_uid,
         metadata.st_gid,
@@ -924,12 +924,19 @@ if image_match.group(1).startswith("registry.invalid/"):
     fail()
 
 try:
-    template_source = read_source(template_path)
-    opensandbox_unit = read_source(opensandbox_unit_path)
-    broker_unit = read_source(broker_unit_path)
-    firewall_unit = read_source(firewall_unit_path)
-    firewall_script = read_source(firewall_script_path)
-    worker_unit = read_source(worker_unit_path)
+    source_expected_uid = 0 if root == Path("/") else None
+    template_source = read_source(template_path, expected_uid=source_expected_uid)
+    opensandbox_unit = read_source(
+        opensandbox_unit_path, expected_uid=source_expected_uid
+    )
+    broker_unit = read_source(broker_unit_path, expected_uid=source_expected_uid)
+    firewall_unit = read_source(
+        firewall_unit_path, expected_uid=source_expected_uid
+    )
+    firewall_script = read_source(
+        firewall_script_path, expected_uid=source_expected_uid
+    )
+    worker_unit = read_source(worker_unit_path, expected_uid=source_expected_uid)
 except UnicodeError:
     fail()
 committed_assets = (
