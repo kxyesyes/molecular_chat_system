@@ -61,7 +61,52 @@ docker info --format '{{json .Runtimes}}'
 The final JSON must contain `runsc`. Do not configure `runsc` as Docker's
 global default runtime; the OpenSandbox policy selects it explicitly.
 
-## 3. Build and pin the QEMU-only docking image
+## 3. Provision the pinned Python service environments
+
+The repository intentionally has separate dependency profiles for the MedChat
+worker/Broker and OpenSandbox server. Do not install them into one environment:
+the Broker profile pins FastAPI 0.104.1, while `opensandbox-server==0.2.2`
+requires its own deployment-isolated environment. Install a fixed Miniforge
+release, create both Python 3.10 environments, and apply the repository's
+actual requirement files from the checkout root:
+
+```bash
+MINIFORGE_VERSION=24.7.1-2
+curl -fsSLo /tmp/miniforge.sh \
+  "https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-${MINIFORGE_VERSION}-Linux-x86_64.sh"
+sudo bash /tmp/miniforge.sh -b -p /opt/conda
+rm -f /tmp/miniforge.sh
+
+sudo /opt/conda/bin/conda config --system --set channel_priority strict
+sudo /opt/conda/bin/conda create --yes --prefix /opt/conda/envs/medchat python=3.10.14 pip
+sudo /opt/conda/envs/medchat/bin/python -m pip install --disable-pip-version-check \
+  --requirement requirements.txt
+sudo /opt/conda/envs/medchat/bin/python -m pip install --disable-pip-version-check \
+  --requirement requirements-agent-temporal.txt
+sudo /opt/conda/envs/medchat/bin/python -m pip install --disable-pip-version-check \
+  --requirement requirements-opensandbox-broker.txt
+sudo /opt/conda/envs/medchat/bin/python -m pip check
+
+sudo /opt/conda/bin/conda create --yes --prefix /opt/conda/envs/opensandbox-server python=3.10.14 pip
+sudo /opt/conda/envs/opensandbox-server/bin/python -m pip install \
+  --disable-pip-version-check --requirement requirements-opensandbox-server.txt
+sudo /opt/conda/envs/opensandbox-server/bin/python -m pip check
+sudo /opt/conda/envs/opensandbox-server/bin/python -c \
+  "import importlib.metadata as m; assert m.version('opensandbox-server') == '0.2.2'"
+
+sudo ln -sfn /opt/conda/envs/opensandbox-server/bin/opensandbox-server \
+  /opt/conda/envs/medchat/bin/opensandbox-server
+test "$(readlink -f /opt/conda/envs/medchat/bin/opensandbox-server)" = \
+  /opt/conda/envs/opensandbox-server/bin/opensandbox-server
+sudo chown -R root:root /opt/conda
+sudo chmod -R go-w /opt/conda
+```
+
+The final symlink preserves the server unit's validated executable path while
+keeping its dependency resolver isolated. Stop if either `python -m pip check`,
+the exact 0.2.2 assertion, or the resolved-link check fails.
+
+## 4. Build and pin the QEMU-only docking image
 
 The approved workflow uses a registry reachable only inside the QEMU host. A
 loopback local registry avoids mutable local image tags crossing host
@@ -82,7 +127,7 @@ environment. It is not secret, but the digest must not be replaced by a tag.
 This local registry/image digest workflow is QEMU-only; do not substitute a
 developer workstation daemon or copy its image ID.
 
-## 4. Create the root-only runtime secret without shell history
+## 5. Create the root-only runtime secret without shell history
 
 Create the file through a root-owned process and feed the generated key over
 stdin. The key is never expanded into the interactive command line, and
@@ -106,11 +151,10 @@ paste the key into Git, shell history, a report, logs, chat, or a test command.
 Do not display the file. The installer projects the secret to the separate
 root-owned service files required by the final Broker architecture.
 
-## 5. Install and enable the service chain
+## 6. Install and enable the service chain
 
-Install the pinned Python environment and OpenSandbox package according to the
-repository deployment lock before running the transactional installer. The
-installer validates identities, modes, configuration, and the image digest:
+With both pinned environments provisioned, run the transactional installer.
+It validates identities, modes, configuration, and the image digest:
 
 ```bash
 sudo deployment/opensandbox/install.sh
@@ -133,7 +177,7 @@ sudo systemctl is-active --quiet medchat-sandbox-broker.service
 sudo systemctl is-active --quiet medchat-temporal-worker.service
 ```
 
-## 6. Validate runtime and run real acceptance
+## 7. Validate runtime and run real acceptance
 
 First run the static/runtime deployment validator. It checks Docker >=25.0.5,
 the registered gVisor runtime, root-owned internal network

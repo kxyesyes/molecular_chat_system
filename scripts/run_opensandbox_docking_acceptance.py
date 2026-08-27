@@ -393,19 +393,21 @@ def _report(
     security_failures: Sequence[str],
     status_override: str | None = None,
 ) -> dict[str, Any]:
-    safe_security = sorted({_safe_code(code, "security_probe_failed") for code in security_failures})
+    safe_security_sequence = [
+        _safe_code(code, "security_probe_failed") for code in security_failures
+    ]
+    safe_security = sorted(set(safe_security_sequence))
     passed = sum(run.get("status") == "passed" for run in runs)
     latencies = [
         int(run["latency_ms"])
         for run in runs
         if type(run.get("latency_ms")) is int and int(run["latency_ms"]) >= 0
     ]
-    distribution: Counter[str] = Counter()
+    distribution: Counter[str] = Counter(safe_security_sequence)
     for run in runs:
-        distribution.update(run.get("failure_codes", []))
-    for code in safe_security:
-        if code not in distribution:
-            distribution[code] = 1
+        distribution.update(
+            code for code in run.get("failure_codes", []) if code not in safe_security
+        )
     status = status_override or (
         "passed" if len(runs) == repeat and passed == repeat and not safe_security else "failed"
     )
@@ -515,6 +517,8 @@ class DockerSandboxObserver:
         self._command = command_runner
         self._stop = threading.Event()
         self._seen = threading.Event()
+        self._inspection_ready = threading.Event()
+        self._probes_complete = threading.Event()
         self._thread: threading.Thread | None = None
         self._baseline: set[str] = set()
         self._observed: set[str] = set()
@@ -522,7 +526,7 @@ class DockerSandboxObserver:
         self.tool_versions: dict[str, str] = {}
         self.image_digest: str | None = None
         self._network_gateway: str | None = None
-        self._intrusive_probes_enabled = True
+        self._intrusive_probes_enabled = False
 
     @property
     def sandbox_count(self) -> int:
@@ -547,6 +551,17 @@ class DockerSandboxObserver:
     def wait_for_seen(self, timeout: float = _CONTAINER_WAIT_SECONDS) -> bool:
         return self._seen.wait(timeout)
 
+    def wait_for_inspection_ready(self, timeout: float = _CONTAINER_WAIT_SECONDS) -> bool:
+        return self._inspection_ready.wait(timeout)
+
+    def wait_for_probes_complete(self, timeout: float = _CONTAINER_WAIT_SECONDS) -> bool:
+        return self._probes_complete.wait(timeout)
+
+    def enable_intrusive_probes(self) -> None:
+        """Enable workload-altering probes for a dedicated sacrificial sandbox."""
+
+        self._intrusive_probes_enabled = True
+
     def disable_intrusive_probes(self) -> None:
         """Keep lifecycle inspection active without racing cancellation cleanup."""
 
@@ -560,6 +575,8 @@ class DockerSandboxObserver:
                 self.failure_codes.append("observer_shutdown_failed")
         if not self._seen.is_set():
             self.failure_codes.append("sandbox_not_observed")
+        elif not self._inspection_ready.is_set():
+            self.failure_codes.append("sandbox_inspection_incomplete")
         if not self.assert_no_running():
             self.failure_codes.append("sandbox_cleanup_failed")
         self.failure_codes = sorted(set(self.failure_codes))
@@ -592,34 +609,44 @@ class DockerSandboxObserver:
         return self._docker("exec", container_id, *argv, timeout=timeout).ok
 
     def _inspect_and_probe(self, container_id: str) -> None:
-        if self._inspect_field(container_id, "{{.HostConfig.Runtime}}") != "runsc":
-            self.failure_codes.append("container_runtime_not_runsc")
-
-        cpu = self._inspect_field(container_id, "{{.HostConfig.NanoCpus}}")
-        memory = self._inspect_field(container_id, "{{.HostConfig.Memory}}")
-        pids = self._inspect_field(container_id, "{{.HostConfig.PidsLimit}}")
-        if (cpu, memory, pids) != ("2000000000", "4294967296", "128"):
-            self.failure_codes.append("resource_limits_invalid")
-
-        image = self._inspect_field(container_id, "{{.Config.Image}}")
-        image_match = _IMAGE_REFERENCE.fullmatch(image or "")
-        if image_match is None:
-            self.failure_codes.append("container_image_not_immutable")
-        else:
-            self.image_digest = image_match.group(1)
-
-        networks = self._inspect_field(container_id, "{{json .NetworkSettings.Networks}}")
         try:
-            if networks is None or set(json.loads(networks)) != {_EXPECTED_NETWORK}:
-                raise ValueError
-        except (TypeError, ValueError, json.JSONDecodeError):
-            self.failure_codes.append("container_network_invalid")
+            if self._inspect_field(container_id, "{{.HostConfig.Runtime}}") != "runsc":
+                self.failure_codes.append("container_runtime_not_runsc")
 
-        self._validate_network()
-        if self._network_gateway is not None and self._intrusive_probes_enabled:
-            self._run_security_probes(container_id, self._network_gateway)
-        elif self._network_gateway is None:
-            self.failure_codes.append("host_service_probe_unavailable")
+            cpu = self._inspect_field(container_id, "{{.HostConfig.NanoCpus}}")
+            memory = self._inspect_field(container_id, "{{.HostConfig.Memory}}")
+            pids = self._inspect_field(container_id, "{{.HostConfig.PidsLimit}}")
+            if (cpu, memory, pids) != ("2000000000", "4294967296", "128"):
+                self.failure_codes.append("resource_limits_invalid")
+
+            image = self._inspect_field(container_id, "{{.Config.Image}}")
+            image_match = _IMAGE_REFERENCE.fullmatch(image or "")
+            if image_match is None:
+                self.failure_codes.append("container_image_not_immutable")
+            else:
+                self.image_digest = image_match.group(1)
+
+            networks = self._inspect_field(container_id, "{{json .NetworkSettings.Networks}}")
+            try:
+                if networks is None or set(json.loads(networks)) != {_EXPECTED_NETWORK}:
+                    raise ValueError
+            except (TypeError, ValueError, json.JSONDecodeError):
+                self.failure_codes.append("container_network_invalid")
+
+            self._validate_network()
+            if self._network_gateway is None:
+                self.failure_codes.append("host_service_probe_unavailable")
+        finally:
+            self._inspection_ready.set()
+
+        if not self._intrusive_probes_enabled:
+            self._probes_complete.set()
+            return
+        try:
+            if self._network_gateway is not None:
+                self._run_security_probes(container_id, self._network_gateway)
+        finally:
+            self._probes_complete.set()
 
     def _validate_network(self) -> None:
         checks = {
@@ -818,6 +845,94 @@ def _validate_inputs(
         raise ValueError("size values must be positive")
 
 
+def _request_cancellation_after_inspection(
+    observer: object,
+    cancel_event: threading.Event,
+    timeout: float = _CONTAINER_WAIT_SECONDS,
+) -> bool:
+    """Cancel only after the observer has completed non-intrusive inspection."""
+
+    wait = getattr(observer, "wait_for_inspection_ready", None)
+    ready = bool(callable(wait) and wait(timeout))
+    if ready:
+        cancel_event.set()
+    return ready
+
+
+def _request_cancellation_after_probes(
+    observer: object,
+    cancel_event: threading.Event,
+    timeout: float = _CONTAINER_WAIT_SECONDS,
+) -> bool:
+    """Cancel a sacrificial workload after inspection and intrusive probes."""
+
+    wait_for_inspection = getattr(observer, "wait_for_inspection_ready", None)
+    if not callable(wait_for_inspection) or not wait_for_inspection(timeout):
+        return False
+    wait_for_probes = getattr(observer, "wait_for_probes_complete", None)
+    probes_complete = bool(callable(wait_for_probes) and wait_for_probes(timeout))
+    cancel_event.set()
+    return probes_complete
+
+
+def _exercise_sacrificial_security_contract(
+    runner: object,
+    payload: Mapping[str, Any],
+    observer_factory: Callable[[], object],
+) -> tuple[list[str], dict[str, str]]:
+    """Run workload-altering probes in one dedicated worker/Broker sandbox."""
+
+    failures: list[str] = []
+    observer = observer_factory()
+    enable_probes = getattr(observer, "enable_intrusive_probes", None)
+    if not callable(enable_probes):
+        return ["sacrificial_probe_control_unavailable"], {}
+    enable_probes()
+    cancel_event = threading.Event()
+    observer.start()
+    probe_state: list[bool] = []
+
+    def request_cancel() -> None:
+        probe_state.append(
+            _request_cancellation_after_probes(observer, cancel_event)
+        )
+
+    cancel_thread = threading.Thread(target=request_cancel, daemon=True)
+    cancel_thread.start()
+    result = runner.execute(
+        payload,
+        job_id=f"acceptance-sacrificial-{secrets.token_hex(8)}",
+        cancel_event=cancel_event,
+    )
+    cancel_thread.join(timeout=1.0)
+    observer.stop()
+
+    if probe_state != [True]:
+        failures.append("sacrificial_probes_incomplete")
+    if getattr(observer, "sandbox_count", 0) != 1:
+        failures.append("sacrificial_sandbox_count_invalid")
+    if getattr(result, "success", True) or _error_code(result) != "cancelled":
+        failures.append("sacrificial_cancellation_failed")
+    if not observer.assert_no_running():
+        failures.append("sacrificial_cleanup_failed")
+    failures.extend(getattr(observer, "failure_codes", []))
+    versions: dict[str, str] = {}
+    observed_versions = getattr(observer, "tool_versions", {})
+    if isinstance(observed_versions, Mapping):
+        vina_version = _safe_version(observed_versions.get("vina"))
+        meeko_version = _safe_version(observed_versions.get("meeko"))
+        if _canonical_vina_version(vina_version) is not None:
+            versions["vina"] = vina_version
+        if meeko_version is not None:
+            versions["meeko"] = meeko_version
+    if set(versions) != {"vina", "meeko"}:
+        failures.append("tool_probe_failed")
+    return (
+        [_safe_code(code, "sacrificial_probe_failed") for code in failures],
+        versions,
+    )
+
+
 def _exercise_fault_contracts(
     runner: object,
     payload: Mapping[str, Any],
@@ -827,6 +942,9 @@ def _exercise_fault_contracts(
     nonce = secrets.token_hex(8)
 
     idempotency_observer = observer_factory()
+    disable_idempotency_probes = getattr(idempotency_observer, "disable_intrusive_probes", None)
+    if callable(disable_idempotency_probes):
+        disable_idempotency_probes()
     idempotency_observer.start()
     key = f"acceptance-idempotency-{nonce}"
     first = runner.execute(payload, job_id=key)
@@ -845,15 +963,20 @@ def _exercise_fault_contracts(
     cancel_event = threading.Event()
     cancel_observer.start()
 
+    cancellation_state: list[bool] = []
+
     def request_cancel() -> None:
-        cancel_observer.wait_for_seen(_CONTAINER_WAIT_SECONDS)
-        cancel_event.set()
+        cancellation_state.append(
+            _request_cancellation_after_inspection(cancel_observer, cancel_event)
+        )
 
     cancel_thread = threading.Thread(target=request_cancel, daemon=True)
     cancel_thread.start()
     cancelled = runner.execute(payload, job_id=f"acceptance-cancel-{nonce}", cancel_event=cancel_event)
     cancel_thread.join(timeout=1.0)
     cancel_observer.stop()
+    if cancellation_state != [True]:
+        failures.append("cancellation_inspection_incomplete")
     if getattr(cancelled, "success", True) or _error_code(cancelled) != "cancelled":
         failures.append("cancellation_contract_failed")
     if not cancel_observer.assert_no_running():
@@ -929,12 +1052,28 @@ def run_real_acceptance(
         else PROJECT_ROOT
     )
 
+    reference_tool_versions: dict[str, str] | None = None
+    if exercise_faults:
+        sacrificial_failures, reference_tool_versions = (
+            _exercise_sacrificial_security_contract(
+                runner,
+                request,
+                observer_factory,
+            )
+        )
+        security_failures.extend(sacrificial_failures)
+
     for index in range(repeat):
         trace_id = f"acceptance-{nonce}-{index + 1:02d}"
         observer = observer_factory()
+        disable_measured_probes = getattr(observer, "disable_intrusive_probes", None)
+        if callable(disable_measured_probes):
+            disable_measured_probes()
         observer.start()
         result = runner.execute(request, job_id=trace_id)
         observer.stop()
+        if reference_tool_versions is not None:
+            observer.tool_versions = dict(reference_tool_versions)
         run = _project_result(
             result,
             trace_id=trace_id,

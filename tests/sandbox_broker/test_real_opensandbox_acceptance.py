@@ -5,6 +5,8 @@ import hashlib
 import json
 import math
 import os
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -101,6 +103,9 @@ class _FakeObserver:
         pass
 
     def wait_for_seen(self, _timeout=30.0) -> bool:
+        return self.seen
+
+    def wait_for_inspection_ready(self, _timeout=30.0) -> bool:
         return self.seen
 
     def assert_no_running(self) -> bool:
@@ -363,6 +368,19 @@ def test_fake_failure_and_security_failures_are_stable_and_counted(
     assert report["runs"][0]["warning_codes"] == ["warning_redacted"]
 
 
+def test_failure_distribution_counts_repeated_security_failures() -> None:
+    acceptance = _module()
+
+    report = acceptance._report(
+        repeat=1,
+        runs=[],
+        security_failures=["network_probe_failed"] * 3,
+    )
+
+    assert report["security_failures"] == ["network_probe_failed"]
+    assert report["failure_type_distribution"] == {"network_probe_failed": 3}
+
+
 def test_invalid_arguments_and_disabled_gate_never_pass(tmp_path: Path) -> None:
     acceptance = _module()
     with pytest.raises(ValueError, match="repeat"):
@@ -457,6 +475,7 @@ def test_fake_docker_inspection_uses_owned_gateway_and_fixed_security_probes() -
         raise AssertionError(call)
 
     observer = acceptance.DockerSandboxObserver(command)
+    observer.enable_intrusive_probes()
     observer._inspect_and_probe(container_id)
 
     assert observer.failure_codes == []
@@ -475,6 +494,156 @@ def test_fake_docker_inspection_uses_owned_gateway_and_fixed_security_probes() -
     assert "/opt/medchat/run_docking.py" in probe_sources
     assert "_run_tool" in probe_sources
     assert "os.setsid" in probe_sources
+
+
+def test_measured_observer_never_executes_destructive_probes() -> None:
+    acceptance = _module()
+    container_id = "a" * 64
+    calls: list[tuple[str, ...]] = []
+
+    def command(argv, *, timeout=12.0):
+        call = tuple(argv)
+        calls.append(call)
+        if call[:3] == ("docker", "exec", container_id):
+            raise AssertionError("measured scientific sandbox received docker exec probe")
+        if call[:4] == ("docker", "container", "inspect", "--format"):
+            values = {
+                "{{.HostConfig.Runtime}}": "runsc",
+                "{{.HostConfig.NanoCpus}}": "2000000000",
+                "{{.HostConfig.Memory}}": "4294967296",
+                "{{.HostConfig.PidsLimit}}": "128",
+                "{{.Config.Image}}": "registry.test/medchat@sha256:" + "b" * 64,
+                "{{json .NetworkSettings.Networks}}": json.dumps(
+                    {"medchat-opensandbox": {}}
+                ),
+            }
+            return acceptance._CommandResult(True, values[call[4]])
+        if call[:4] == ("docker", "network", "inspect", "--format"):
+            values = {
+                "{{.Name}}": "medchat-opensandbox",
+                "{{json .Internal}}": "true",
+                '{{index .Labels "com.medchat.opensandbox.network"}}': "v1",
+                "{{(index .IPAM.Config 0).Gateway}}": "172.30.0.1",
+            }
+            return acceptance._CommandResult(True, values[call[4]])
+        raise AssertionError(call)
+
+    observer = acceptance.DockerSandboxObserver(command)
+    observer._inspect_and_probe(container_id)
+
+    assert observer.failure_codes == []
+    assert observer.wait_for_inspection_ready(0.0)
+    assert not any(call[:3] == ("docker", "exec", container_id) for call in calls)
+
+
+def test_cancellation_waits_for_inspection_before_immediate_removal() -> None:
+    acceptance = _module()
+    container_id = "a" * 64
+    removed = threading.Event()
+
+    def command(argv, *, timeout=12.0):
+        call = tuple(argv)
+        if removed.is_set():
+            return acceptance._CommandResult(False, "")
+        if call[:4] == ("docker", "container", "inspect", "--format"):
+            values = {
+                "{{.HostConfig.Runtime}}": "runsc",
+                "{{.HostConfig.NanoCpus}}": "2000000000",
+                "{{.HostConfig.Memory}}": "4294967296",
+                "{{.HostConfig.PidsLimit}}": "128",
+                "{{.Config.Image}}": "registry.test/medchat@sha256:" + "b" * 64,
+                "{{json .NetworkSettings.Networks}}": json.dumps(
+                    {"medchat-opensandbox": {}}
+                ),
+            }
+            return acceptance._CommandResult(True, values[call[4]])
+        if call[:4] == ("docker", "network", "inspect", "--format"):
+            values = {
+                "{{.Name}}": "medchat-opensandbox",
+                "{{json .Internal}}": "true",
+                '{{index .Labels "com.medchat.opensandbox.network"}}': "v1",
+                "{{(index .IPAM.Config 0).Gateway}}": "172.30.0.1",
+            }
+            return acceptance._CommandResult(True, values[call[4]])
+        raise AssertionError(call)
+
+    class ImmediateRemovalEvent(threading.Event):
+        def set(self) -> None:
+            removed.set()
+            super().set()
+
+    observer = acceptance.DockerSandboxObserver(command)
+    cancel_event = ImmediateRemovalEvent()
+    inspection = threading.Thread(
+        target=observer._inspect_and_probe,
+        args=(container_id,),
+    )
+    cancellation = threading.Thread(
+        target=acceptance._request_cancellation_after_inspection,
+        args=(observer, cancel_event),
+    )
+
+    cancellation.start()
+    time.sleep(0.01)
+    assert not removed.is_set()
+    inspection.start()
+    inspection.join(timeout=2.0)
+    cancellation.join(timeout=2.0)
+
+    assert not inspection.is_alive()
+    assert not cancellation.is_alive()
+    assert cancel_event.is_set()
+    assert removed.is_set()
+    assert observer.failure_codes == []
+
+
+def test_destructive_probes_use_dedicated_worker_broker_sandbox() -> None:
+    acceptance = _module()
+
+    class SacrificialObserver(_FakeObserver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.intrusive_enabled = False
+            self.probes_complete = threading.Event()
+
+        def enable_intrusive_probes(self) -> None:
+            self.intrusive_enabled = True
+
+        def start(self) -> None:
+            assert self.intrusive_enabled
+            self.probes_complete.set()
+
+        def wait_for_probes_complete(self, timeout=30.0) -> bool:
+            return self.probes_complete.wait(timeout)
+
+    observer = SacrificialObserver()
+    calls: list[tuple[dict, str]] = []
+
+    class SacrificialRunner:
+        def execute(self, payload, *, job_id, progress_callback=None, cancel_event=None):
+            calls.append((dict(payload), job_id))
+            deadline = time.monotonic() + 1.0
+            while cancel_event is not None and not cancel_event.is_set():
+                if time.monotonic() >= deadline:
+                    raise AssertionError("sacrificial cancellation was not requested")
+                time.sleep(0.001)
+            return SimpleNamespace(
+                success=False,
+                error=SimpleNamespace(code=SimpleNamespace(value="cancelled")),
+                warnings=[],
+            )
+
+    failures, versions = acceptance._exercise_sacrificial_security_contract(
+        SacrificialRunner(),
+        {"center": [5.99, 3.01, 17.345]},
+        lambda: observer,
+    )
+
+    assert failures == []
+    assert versions == observer.tool_versions
+    assert len(calls) == 1
+    assert calls[0][1].startswith("acceptance-sacrificial-")
+    assert observer.intrusive_enabled
 
 
 def test_fault_observer_can_skip_intrusive_exec_probes() -> None:
@@ -558,6 +727,14 @@ def test_readme_covers_qemu_install_secret_image_validation_and_rollback() -> No
         "local registry",
         "@sha256:",
         "rollback",
+        "conda create --yes --prefix /opt/conda/envs/medchat python=3.10.14",
+        "requirements-opensandbox-broker.txt",
+        "requirements-agent-temporal.txt",
+        "conda create --yes --prefix /opt/conda/envs/opensandbox-server python=3.10.14",
+        "requirements-opensandbox-server.txt",
+        "opensandbox-server==0.2.2",
+        "/opt/conda/envs/opensandbox-server/bin/opensandbox-server",
+        "python -m pip check",
     )
     assert all(value in text for value in required)
     assert "never" in text.lower()
