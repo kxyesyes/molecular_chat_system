@@ -7,14 +7,15 @@ import math
 import re
 import threading
 import time
+from _thread import LockType
 from collections import Counter, defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Literal
 
 from prometheus_client import CollectorRegistry, Counter as PromCounter
 from prometheus_client import Gauge, Histogram, generate_latest
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class Phase(str, Enum):
@@ -86,7 +87,9 @@ _CREDENTIAL_LIKE_PATTERNS = (
     ),
     re.compile(
         r"(?i)(?<![A-Za-z0-9_])(?:authorization|token|api[-_]?key|"
-        r"password|secret)\s*[:=]\s*[^\s,;&}\]]{4,}"
+        r"password|secret|access[-_]?key|client[-_]?secret|passwd|pwd|"
+        r"credentials?|cookie|session[-_]?cookie|private[-_]?key)"
+        r"[ \t]{0,8}[:=][ \t]{0,8}[^\s,;&}\]]+"
     ),
     re.compile(
         r"(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}"
@@ -105,7 +108,7 @@ def _contains_credential_like(value: str) -> bool:
 
 
 class BrokerTelemetryEvent(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal[1] = 1
     trace_id: str = Field(
@@ -148,6 +151,68 @@ class BrokerTelemetryEvent(BaseModel):
         pattern=r"^[A-Za-z0-9 .+_()-]+$",
     )
 
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def require_exact_schema_version(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("schema_version must be an integer")
+        return value
+
+    @field_validator(
+        "trace_id",
+        "job_id",
+        "image_digest",
+        "vina_version",
+        "meeko_version",
+        mode="before",
+    )
+    @classmethod
+    def require_exact_strings(cls, value: object) -> object:
+        if value is not None and type(value) is not str:
+            raise ValueError("telemetry string must be a string")
+        return value
+
+    @field_validator("phase", mode="before")
+    @classmethod
+    def require_exact_phase(cls, value: object) -> object:
+        if type(value) is not Phase:
+            raise ValueError("phase must be a Phase")
+        return value
+
+    @field_validator("failure_class", mode="before")
+    @classmethod
+    def require_exact_failure_class(cls, value: object) -> object:
+        if value is not None and type(value) is not FailureClass:
+            raise ValueError("failure_class must be a FailureClass")
+        return value
+
+    @field_validator("outcome", mode="before")
+    @classmethod
+    def require_exact_outcome(cls, value: object) -> object:
+        if value is not None and type(value) is not str:
+            raise ValueError("outcome must be a string")
+        return value
+
+    @field_validator("cleanup_status", mode="before")
+    @classmethod
+    def require_exact_cleanup_status(cls, value: object) -> object:
+        if type(value) is not str:
+            raise ValueError("cleanup_status must be a string")
+        return value
+
+    @field_validator(
+        "attempt",
+        "duration_ms",
+        "queue_depth",
+        "active_job_count",
+        mode="before",
+    )
+    @classmethod
+    def require_exact_integers(cls, value: object) -> object:
+        if value is not None and type(value) is not int:
+            raise ValueError("telemetry integer must be an integer")
+        return value
+
     @field_validator("trace_id", "job_id", "vina_version", "meeko_version")
     @classmethod
     def reject_credentials(cls, value: str | None) -> str | None:
@@ -155,8 +220,81 @@ class BrokerTelemetryEvent(BaseModel):
             raise ValueError("sensitive telemetry value")
         return value
 
+    @model_validator(mode="after")
+    def validate_lifecycle_coherence(self) -> "BrokerTelemetryEvent":
+        versions_present = (
+            self.vina_version is not None or self.meeko_version is not None
+        )
+        if self.phase.value.endswith("_started"):
+            if (
+                self.outcome is not None
+                or self.failure_class is not None
+                or self.duration_ms is not None
+                or versions_present
+            ):
+                raise ValueError("started phase contains completion fields")
+            expected_status = (
+                "in_progress"
+                if self.phase is Phase.CLEANUP_STARTED
+                else "not_started"
+            )
+            if self.cleanup_status != expected_status:
+                raise ValueError("started phase has incoherent cleanup status")
+            return self
 
-@dataclass
+        if self.phase.value.endswith("_completed"):
+            if self.outcome is None or self.duration_ms is None:
+                raise ValueError("completed phase requires outcome and duration")
+            self._validate_outcome_failure_class()
+            if versions_present and not (
+                self.phase is Phase.VALIDATION_COMPLETED
+                and self.outcome == "passed"
+            ):
+                raise ValueError("versions require passed validation completion")
+            if self.phase is Phase.CLEANUP_COMPLETED:
+                if self.cleanup_status not in {"succeeded", "failed"}:
+                    raise ValueError("cleanup completion requires terminal status")
+                expected_status = (
+                    "succeeded" if self.outcome == "passed" else "failed"
+                )
+                if self.cleanup_status != expected_status:
+                    raise ValueError("cleanup completion status is incoherent")
+            elif self.cleanup_status != "not_started":
+                raise ValueError("non-cleanup phase must not report cleanup")
+            return self
+
+        if self.phase in {Phase.JOB_RECEIVED, Phase.QUEUE_ENTERED}:
+            if (
+                self.outcome is not None
+                or self.failure_class is not None
+                or self.duration_ms is not None
+                or versions_present
+                or self.cleanup_status != "not_started"
+            ):
+                raise ValueError("job admission event contains lifecycle result")
+            return self
+
+        if self.phase is Phase.JOB_TERMINAL:
+            if self.outcome is None:
+                raise ValueError("terminal event requires outcome")
+            if self.duration_ms is not None or versions_present:
+                raise ValueError("terminal event contains phase result fields")
+            if self.cleanup_status not in {"succeeded", "failed"}:
+                raise ValueError("terminal event requires cleanup status")
+            self._validate_outcome_failure_class()
+            return self
+
+        raise ValueError("unsupported telemetry lifecycle phase")
+
+    def _validate_outcome_failure_class(self) -> None:
+        if self.outcome == "failed":
+            if self.failure_class in {None, FailureClass.NONE}:
+                raise ValueError("failed outcome requires failure class")
+        elif self.failure_class is not None:
+            raise ValueError("non-failed outcome cannot contain failure class")
+
+
+@dataclass(frozen=True, slots=True)
 class PhaseToken:
     trace_id: str
     job_id: str
@@ -166,7 +304,29 @@ class PhaseToken:
     queue_depth: int
     active_job_count: int
     image_digest: str
-    finished: bool = False
+    _claim_lock: LockType = field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _claimed: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def _ensure_unclaimed(self) -> None:
+        with self._claim_lock:
+            if self._claimed:
+                raise RuntimeError("telemetry phase already finished")
+
+    def _claim_once(self) -> None:
+        with self._claim_lock:
+            if self._claimed:
+                raise RuntimeError("telemetry phase already finished")
+            object.__setattr__(self, "_claimed", True)
 
 
 class BrokerTelemetry:
@@ -312,17 +472,20 @@ class BrokerTelemetry:
         *,
         outcome: str,
         failure_class: FailureClass | None = None,
-        cleanup_status: str = "not_started",
+        cleanup_status: str | None = None,
         vina_version: str | None = None,
         meeko_version: str | None = None,
     ) -> BrokerTelemetryEvent:
         if type(token) is not PhaseToken:
             raise ValueError("invalid telemetry phase token")
-        with self._lock:
-            if token.finished:
-                raise RuntimeError("telemetry phase already finished")
+        token._ensure_unclaimed()
         if type(outcome) is not str or outcome not in _OUTCOMES:
             raise ValueError("invalid telemetry outcome")
+        if token.phase == "cleanup":
+            if cleanup_status is None:
+                raise ValueError("cleanup status required")
+        elif cleanup_status is None:
+            cleanup_status = "not_started"
         elapsed = self._clock_value() - token.started_at
         if not math.isfinite(elapsed) or elapsed < 0:
             raise ValueError("invalid telemetry duration")
@@ -344,10 +507,8 @@ class BrokerTelemetry:
             vina_version=vina_version,
             meeko_version=meeko_version,
         )
+        token._claim_once()
         with self._lock:
-            if token.finished:
-                raise RuntimeError("telemetry phase already finished")
-            token.finished = True
             values = self._latencies[(token.phase, outcome)]
             values.append(duration_ms)
             del values[:-256]
@@ -436,12 +597,12 @@ class BrokerTelemetry:
         ):
             raise ValueError("invalid Broker runtime gauge")
         state_value = {"closed": 0, "open": 1, "half_open": 2}[breaker_state]
-        self._queue_depth.set(queue_depth)
-        self._active_jobs.set(active_job_count)
-        self._cleanup_tasks.set(cleanup_task_count)
-        self._isolated_tasks.set(isolated_task_count)
-        self._breaker_state.set(state_value)
         with self._lock:
+            self._queue_depth.set(queue_depth)
+            self._active_jobs.set(active_job_count)
+            self._cleanup_tasks.set(cleanup_task_count)
+            self._isolated_tasks.set(isolated_task_count)
+            self._breaker_state.set(state_value)
             self._runtime = {
                 "queue_depth": queue_depth,
                 "active_job_count": active_job_count,
@@ -471,4 +632,5 @@ class BrokerTelemetry:
         }
 
     def prometheus_text(self) -> bytes:
-        return generate_latest(self._registry)
+        with self._lock:
+            return generate_latest(self._registry)

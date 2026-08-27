@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import logging
 import math
 import subprocess
 import sys
+import threading
+from dataclasses import FrozenInstanceError
+from enum import IntEnum
 from pathlib import Path
 from typing import Any
 
 import pytest
 from prometheus_client import CollectorRegistry
+from prometheus_client.parser import text_string_to_metric_families
 from pydantic import ValidationError
 
 from src.sandbox_broker.telemetry import (
@@ -36,6 +41,10 @@ class CapturingLogger:
 
     def info(self, message: str, *args: object, **kwargs: object) -> None:
         self.calls.append((message, args, kwargs))
+
+
+class NumericValue(IntEnum):
+    ONE = 1
 
 
 def valid_event_payload(**overrides: object) -> dict[str, object]:
@@ -142,6 +151,51 @@ def test_event_schema_rejects_invalid_fixed_values(
 @pytest.mark.parametrize(
     ("field", "value"),
     [
+        ("schema_version", True),
+        ("schema_version", b"1"),
+        ("schema_version", "1"),
+        ("schema_version", 1.0),
+        ("schema_version", NumericValue.ONE),
+        ("trace_id", True),
+        ("trace_id", b"trace-1"),
+        ("trace_id", 123),
+        ("trace_id", NumericValue.ONE),
+        ("job_id", b"job-1"),
+        ("phase", "provisioning_started"),
+        ("phase", b"provisioning_started"),
+        ("phase", "1"),
+        ("phase", 1),
+        ("phase", NumericValue.ONE),
+        ("failure_class", "none"),
+        ("failure_class", b"none"),
+        ("failure_class", NumericValue.ONE),
+        ("outcome", b"passed"),
+        ("outcome", 1),
+        ("outcome", NumericValue.ONE),
+        ("cleanup_status", b"not_started"),
+        ("cleanup_status", 1),
+        ("image_digest", b"b" * 64),
+        ("image_digest", 123),
+        ("image_digest", NumericValue.ONE),
+        ("vina_version", b"1.2.3"),
+        ("vina_version", 123),
+        ("vina_version", NumericValue.ONE),
+        ("meeko_version", b"1.2.3"),
+        ("meeko_version", 123),
+        ("meeko_version", NumericValue.ONE),
+    ],
+)
+def test_event_schema_rejects_all_coercible_input_types(
+    field: str,
+    value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        BrokerTelemetryEvent.model_validate(valid_event_payload(**{field: value}))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
         ("trace_id", ""),
         ("trace_id", "-starts-with-punctuation"),
         ("trace_id", "contains space"),
@@ -177,6 +231,69 @@ def test_event_schema_rejects_local_credential_like_assignments(
 ) -> None:
     with pytest.raises(ValidationError):
         BrokerTelemetryEvent.model_validate(valid_event_payload(**{field: value}))
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "authorization",
+        "token",
+        "api_key",
+        "api-key",
+        "apikey",
+        "password",
+        "secret",
+        "access_key",
+        "accesskey",
+        "client_secret",
+        "clientsecret",
+        "passwd",
+        "pwd",
+        "credential",
+        "credentials",
+        "cookie",
+        "session_cookie",
+        "private_key",
+    ],
+)
+@pytest.mark.parametrize("delimiter", [":", " = "])
+def test_local_detector_rejects_all_bounded_assignment_families(
+    name: str,
+    delimiter: str,
+) -> None:
+    value = f"{name.upper()}{delimiter}Abcd1234"
+
+    assert _contains_credential_like(value) is True
+
+
+def test_local_detector_rejects_short_assignment_values() -> None:
+    assert _contains_credential_like("pwd=x") is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "access_key_rotation",
+        "accesskey format",
+        "client_secretary",
+        "clientsecret migration",
+        "password_policy",
+        "passwdless",
+        "pwdless-login",
+        "credential schema",
+        "credentials guide",
+        "cookie format",
+        "session_cookie_policy",
+        "private_key_format",
+        "token bucket",
+        "secret sharing",
+        "access_key         :value",
+    ],
+)
+def test_local_detector_allows_ordinary_assignment_family_words(
+    value: str,
+) -> None:
+    assert _contains_credential_like(value) is False
 
 
 @pytest.mark.parametrize(
@@ -264,6 +381,303 @@ def test_importing_telemetry_does_not_initialize_agent_persistence() -> None:
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param(
+            {"phase": Phase.UPLOAD_STARTED, "outcome": "passed"},
+            id="started-outcome",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.COMMAND_STARTED,
+                "failure_class": FailureClass.NONE,
+            },
+            id="started-failure",
+        ),
+        pytest.param(
+            {"phase": Phase.VALIDATION_STARTED, "duration_ms": 0},
+            id="started-duration",
+        ),
+        pytest.param(
+            {"phase": Phase.PROVISIONING_STARTED, "vina_version": "1.2"},
+            id="started-vina-version",
+        ),
+        pytest.param(
+            {"phase": Phase.PROVISIONING_STARTED, "meeko_version": "0.6"},
+            id="started-meeko-version",
+        ),
+        pytest.param(
+            {"phase": Phase.CLEANUP_STARTED, "cleanup_status": "not_started"},
+            id="cleanup-started-status",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.PROVISIONING_STARTED,
+                "cleanup_status": "in_progress",
+            },
+            id="non-cleanup-started-status",
+        ),
+        pytest.param(
+            {"phase": Phase.UPLOAD_COMPLETED, "duration_ms": 1},
+            id="completed-missing-outcome",
+        ),
+        pytest.param(
+            {"phase": Phase.UPLOAD_COMPLETED, "outcome": "passed"},
+            id="completed-missing-duration",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.COMMAND_COMPLETED,
+                "outcome": "passed",
+                "failure_class": FailureClass.COMMAND_TIMEOUT,
+                "duration_ms": 1,
+            },
+            id="passed-completed-failure",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.COMMAND_COMPLETED,
+                "outcome": "failed",
+                "duration_ms": 1,
+            },
+            id="failed-completed-missing-failure",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.COMMAND_COMPLETED,
+                "outcome": "failed",
+                "failure_class": FailureClass.NONE,
+                "duration_ms": 1,
+            },
+            id="failed-completed-none-failure",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.COMMAND_COMPLETED,
+                "outcome": "cancelled",
+                "failure_class": FailureClass.COMMAND_TIMEOUT,
+                "duration_ms": 1,
+            },
+            id="cancelled-completed-failure",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.COMMAND_COMPLETED,
+                "outcome": "passed",
+                "duration_ms": 1,
+                "vina_version": "1.2",
+            },
+            id="version-on-non-validation",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.VALIDATION_COMPLETED,
+                "outcome": "failed",
+                "failure_class": FailureClass.RESOURCE_LIMIT,
+                "duration_ms": 1,
+                "meeko_version": "0.6",
+            },
+            id="version-on-failed-validation",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.CLEANUP_COMPLETED,
+                "outcome": "passed",
+                "duration_ms": 1,
+                "cleanup_status": "not_started",
+            },
+            id="cleanup-completed-status-required",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.CLEANUP_COMPLETED,
+                "outcome": "passed",
+                "duration_ms": 1,
+                "cleanup_status": "failed",
+            },
+            id="passed-cleanup-status",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.CLEANUP_COMPLETED,
+                "outcome": "failed",
+                "failure_class": FailureClass.DESTROY_FAILED,
+                "duration_ms": 1,
+                "cleanup_status": "succeeded",
+            },
+            id="failed-cleanup-status",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.CLEANUP_COMPLETED,
+                "outcome": "cancelled",
+                "duration_ms": 1,
+                "cleanup_status": "succeeded",
+            },
+            id="cancelled-cleanup-status",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.PROVISIONING_COMPLETED,
+                "outcome": "passed",
+                "duration_ms": 1,
+                "cleanup_status": "succeeded",
+            },
+            id="non-cleanup-completed-status",
+        ),
+        pytest.param(
+            {"phase": Phase.JOB_RECEIVED, "outcome": "passed"},
+            id="job-received-outcome",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.QUEUE_ENTERED,
+                "failure_class": FailureClass.NONE,
+            },
+            id="queue-entered-failure",
+        ),
+        pytest.param(
+            {"phase": Phase.JOB_RECEIVED, "duration_ms": 0},
+            id="job-received-duration",
+        ),
+        pytest.param(
+            {"phase": Phase.QUEUE_ENTERED, "vina_version": "1.2"},
+            id="queue-entered-version",
+        ),
+        pytest.param(
+            {"phase": Phase.JOB_RECEIVED, "cleanup_status": "in_progress"},
+            id="job-received-cleanup-status",
+        ),
+        pytest.param(
+            {"phase": Phase.JOB_TERMINAL, "cleanup_status": "succeeded"},
+            id="terminal-missing-outcome",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.JOB_TERMINAL,
+                "outcome": "passed",
+                "duration_ms": 1,
+                "cleanup_status": "succeeded",
+            },
+            id="terminal-duration",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.JOB_TERMINAL,
+                "outcome": "passed",
+                "vina_version": "1.2",
+                "cleanup_status": "succeeded",
+            },
+            id="terminal-version",
+        ),
+        pytest.param(
+            {"phase": Phase.JOB_TERMINAL, "outcome": "passed"},
+            id="terminal-cleanup-status",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.JOB_TERMINAL,
+                "outcome": "failed",
+                "cleanup_status": "failed",
+            },
+            id="failed-terminal-missing-failure",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.JOB_TERMINAL,
+                "outcome": "failed",
+                "failure_class": FailureClass.NONE,
+                "cleanup_status": "failed",
+            },
+            id="failed-terminal-none-failure",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.JOB_TERMINAL,
+                "outcome": "passed",
+                "failure_class": FailureClass.SERVER_500,
+                "cleanup_status": "succeeded",
+            },
+            id="passed-terminal-failure",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.JOB_TERMINAL,
+                "outcome": "cancelled",
+                "failure_class": FailureClass.SERVER_500,
+                "cleanup_status": "failed",
+            },
+            id="cancelled-terminal-failure",
+        ),
+    ],
+)
+def test_event_schema_rejects_incoherent_lifecycle_combinations(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        BrokerTelemetryEvent.model_validate(valid_event_payload(**overrides))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"phase": Phase.JOB_RECEIVED},
+        {"phase": Phase.QUEUE_ENTERED},
+        {
+            "phase": Phase.JOB_TERMINAL,
+            "outcome": "passed",
+            "cleanup_status": "succeeded",
+        },
+        {
+            "phase": Phase.JOB_TERMINAL,
+            "outcome": "failed",
+            "failure_class": FailureClass.SERVER_500,
+            "cleanup_status": "failed",
+        },
+        {
+            "phase": Phase.JOB_TERMINAL,
+            "outcome": "cancelled",
+            "cleanup_status": "failed",
+        },
+        {
+            "phase": Phase.VALIDATION_COMPLETED,
+            "outcome": "passed",
+            "duration_ms": 1,
+            "vina_version": "1.2",
+            "meeko_version": "0.6",
+        },
+        {
+            "phase": Phase.CLEANUP_COMPLETED,
+            "outcome": "passed",
+            "duration_ms": 1,
+            "cleanup_status": "succeeded",
+        },
+        {
+            "phase": Phase.CLEANUP_COMPLETED,
+            "outcome": "failed",
+            "failure_class": FailureClass.DESTROY_FAILED,
+            "duration_ms": 1,
+            "cleanup_status": "failed",
+        },
+        {
+            "phase": Phase.CLEANUP_COMPLETED,
+            "outcome": "cancelled",
+            "duration_ms": 1,
+            "cleanup_status": "failed",
+        },
+    ],
+)
+def test_event_schema_accepts_coherent_lifecycle_combinations(
+    overrides: dict[str, object],
+) -> None:
+    telemetry_event = BrokerTelemetryEvent.model_validate(
+        valid_event_payload(**overrides)
+    )
+
+    assert telemetry_event.phase is overrides["phase"]
+
+
 @pytest.mark.parametrize("attempt", [0, 3, True, 1.0, "1"])
 def test_event_schema_rejects_invalid_attempts(attempt: object) -> None:
     with pytest.raises(ValidationError):
@@ -327,6 +741,110 @@ def test_phase_timer_emits_matching_events_and_finishes_exactly_once() -> None:
     ]
     with pytest.raises(RuntimeError, match="already finished"):
         telemetry.finish_phase(token, outcome="passed")
+
+
+def test_phase_token_identity_is_frozen_and_has_no_public_finished_state() -> None:
+    telemetry = BrokerTelemetry(registry=CollectorRegistry())
+    token = telemetry.start_phase(
+        trace_id="trace-1",
+        job_id="a" * 32,
+        phase="provisioning",
+        attempt=1,
+        queue_depth=0,
+        active_job_count=1,
+        image_digest="b" * 64,
+    )
+
+    with pytest.raises((FrozenInstanceError, AttributeError)):
+        token.trace_id = "changed"
+    with pytest.raises((FrozenInstanceError, AttributeError)):
+        token.phase = "command"
+    assert not hasattr(token, "finished")
+
+
+def test_sixteen_threads_can_finish_one_token_exactly_once() -> None:
+    registry = CollectorRegistry()
+    clock = Clock()
+    telemetry = BrokerTelemetry(registry=registry, monotonic=clock)
+    token = telemetry.start_phase(
+        trace_id="trace-1",
+        job_id="a" * 32,
+        phase="command",
+        attempt=1,
+        queue_depth=0,
+        active_job_count=1,
+        image_digest="b" * 64,
+    )
+    clock.advance(0.125)
+    barrier = threading.Barrier(16)
+    result_lock = threading.Lock()
+    successes: list[BrokerTelemetryEvent] = []
+    failures: list[BaseException] = []
+
+    def finish() -> None:
+        barrier.wait()
+        try:
+            completed = telemetry.finish_phase(token, outcome="passed")
+        except BaseException as failure:
+            with result_lock:
+                failures.append(failure)
+        else:
+            with result_lock:
+                successes.append(completed)
+
+    threads = [threading.Thread(target=finish) for _ in range(16)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(successes) == 1
+    assert len(failures) == 15
+    assert all(isinstance(failure, RuntimeError) for failure in failures)
+    completed_events = [
+        item
+        for item in telemetry.snapshot()["recent_events"]
+        if item["phase"] == "command_completed"
+    ]
+    assert len(completed_events) == 1
+    histogram = next(
+        family
+        for family in registry.collect()
+        if family.name == "medchat_sandbox_phase_duration_seconds"
+    )
+    count_samples = [
+        sample
+        for sample in histogram.samples
+        if sample.name == "medchat_sandbox_phase_duration_seconds_count"
+    ]
+    assert len(count_samples) == 1
+    assert count_samples[0].value == 1
+
+
+def test_cleanup_finish_requires_explicit_coherent_status() -> None:
+    clock = Clock()
+    telemetry = BrokerTelemetry(registry=CollectorRegistry(), monotonic=clock)
+    token = telemetry.start_phase(
+        trace_id="trace-1",
+        job_id="a" * 32,
+        phase="cleanup",
+        attempt=1,
+        queue_depth=0,
+        active_job_count=1,
+        image_digest="b" * 64,
+    )
+    clock.advance(0.125)
+
+    with pytest.raises(ValueError, match="cleanup status"):
+        telemetry.finish_phase(token, outcome="passed")
+
+    completed = telemetry.finish_phase(
+        token,
+        outcome="passed",
+        cleanup_status="succeeded",
+    )
+    assert completed.cleanup_status == "succeeded"
 
 
 def test_recent_events_and_phase_latency_retention_are_bounded() -> None:
@@ -517,6 +1035,103 @@ def test_snapshot_has_strict_shape_and_runtime_bounds() -> None:
     }
 
 
+def test_runtime_gauge_group_and_observers_are_atomic(monkeypatch) -> None:
+    telemetry = BrokerTelemetry(registry=CollectorRegistry())
+    telemetry.update_runtime_gauges(
+        queue_depth=0,
+        active_job_count=0,
+        cleanup_task_count=0,
+        isolated_task_count=0,
+        breaker_state="closed",
+    )
+    set_entered = threading.Event()
+    release_set = threading.Event()
+    original_set = telemetry._active_jobs.set
+
+    def blocking_active_set(value: int) -> None:
+        set_entered.set()
+        assert release_set.wait(timeout=2)
+        original_set(value)
+
+    monkeypatch.setattr(telemetry._active_jobs, "set", blocking_active_set)
+    errors: list[BaseException] = []
+
+    def update() -> None:
+        try:
+            telemetry.update_runtime_gauges(
+                queue_depth=8,
+                active_job_count=1,
+                cleanup_task_count=2,
+                isolated_task_count=3,
+                breaker_state="open",
+            )
+        except BaseException as failure:
+            errors.append(failure)
+
+    writer = threading.Thread(target=update, daemon=True)
+    writer.start()
+    assert set_entered.wait(timeout=1)
+
+    snapshot_started = threading.Event()
+    snapshot_done = threading.Event()
+    scrape_started = threading.Event()
+    scrape_done = threading.Event()
+    snapshot_result: dict[str, object] = {}
+    scrape_result: dict[str, bytes] = {}
+
+    def read_snapshot() -> None:
+        snapshot_started.set()
+        snapshot_result["value"] = telemetry.snapshot()
+        snapshot_done.set()
+
+    def scrape_metrics() -> None:
+        scrape_started.set()
+        scrape_result["value"] = telemetry.prometheus_text()
+        scrape_done.set()
+
+    snapshot_reader = threading.Thread(target=read_snapshot, daemon=True)
+    scraper = threading.Thread(target=scrape_metrics, daemon=True)
+    snapshot_reader.start()
+    scraper.start()
+    assert snapshot_started.wait(timeout=1)
+    assert scrape_started.wait(timeout=1)
+    snapshot_was_blocked = not snapshot_done.wait(timeout=0.2)
+    scrape_was_blocked = not scrape_done.wait(timeout=0.2)
+    release_set.set()
+    writer.join(timeout=2)
+    snapshot_reader.join(timeout=2)
+    scraper.join(timeout=2)
+
+    assert snapshot_was_blocked is True
+    assert scrape_was_blocked is True
+    assert not errors
+    assert not writer.is_alive()
+    assert not snapshot_reader.is_alive()
+    assert not scraper.is_alive()
+    assert snapshot_result["value"]["runtime"] == {
+        "queue_depth": 8,
+        "active_job_count": 1,
+        "cleanup_task_count": 2,
+        "isolated_task_count": 3,
+        "breaker_state": "open",
+    }
+    gauge_values = {
+        sample.name: sample.value
+        for family in text_string_to_metric_families(
+            scrape_result["value"].decode("utf-8")
+        )
+        for sample in family.samples
+        if not sample.labels
+    }
+    assert gauge_values == {
+        "medchat_sandbox_queue_depth": 8,
+        "medchat_sandbox_active_jobs": 1,
+        "medchat_sandbox_cleanup_tasks": 2,
+        "medchat_sandbox_isolated_tasks": 3,
+        "medchat_sandbox_circuit_breaker_state": 1,
+    }
+
+
 def test_emit_logs_only_the_validated_structured_event() -> None:
     logger = CapturingLogger()
     telemetry = BrokerTelemetry(
@@ -546,6 +1161,34 @@ def test_emit_logs_only_the_validated_structured_event() -> None:
         "stdout",
         "stderr",
     }.intersection(expected)
+
+
+def test_logger_handler_can_reenter_snapshot_without_deadlock() -> None:
+    logger = logging.getLogger(f"test.telemetry.reentry.{id(object())}")
+    logger.handlers.clear()
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+    telemetry = BrokerTelemetry(registry=CollectorRegistry(), logger=logger)
+    handled = threading.Event()
+
+    class SnapshotHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            del record
+            telemetry.snapshot()
+            handled.set()
+
+    handler = SnapshotHandler()
+    logger.addHandler(handler)
+    worker = threading.Thread(
+        target=lambda: telemetry.emit(event()),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=1)
+    logger.removeHandler(handler)
+
+    assert not worker.is_alive()
+    assert handled.is_set()
 
 
 @pytest.mark.parametrize(
@@ -626,12 +1269,23 @@ def test_invalid_clock_and_finish_calls_raise_without_finishing_token() -> None:
     )
     with pytest.raises(ValueError, match="outcome"):
         telemetry.finish_phase(token, outcome="unknown")
-    assert token.finished is False
 
     clock.advance(-1.0)
     with pytest.raises(ValueError, match="duration"):
-        telemetry.finish_phase(token, outcome="failed")
-    assert token.finished is False
+        telemetry.finish_phase(
+            token,
+            outcome="failed",
+            failure_class=FailureClass.DESTROY_FAILED,
+            cleanup_status="failed",
+        )
+    clock.value = 10.125
+    completed = telemetry.finish_phase(
+        token,
+        outcome="failed",
+        failure_class=FailureClass.DESTROY_FAILED,
+        cleanup_status="failed",
+    )
+    assert completed.duration_ms == 125
 
 
 def test_large_finite_phase_duration_is_safely_capped() -> None:
