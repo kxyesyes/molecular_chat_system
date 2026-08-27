@@ -86,6 +86,7 @@ _LISTENER_CALLS = {
     "uvicorn.run",
     "wsgiref.simple_server.make_server",
 }
+_PROTECTED_SOCKET_FAMILY_ATTRIBUTES = {"AF_INET", "AF_UNIX"}
 
 
 def _normalize_symbol(symbol: str) -> str:
@@ -168,6 +169,173 @@ def _resolve_symbol(node: ast.expr, aliases: dict[str, str]) -> str:
     if isinstance(node, ast.Call):
         return _resolve_symbol(node.func, aliases)
     return ""
+
+
+def _resolved_string_constants(tree: ast.Module) -> dict[str, str]:
+    constants: dict[str, str] = {}
+    assignments: list[tuple[str, ast.expr]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            assignments.extend(
+                (target.id, node.value)
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            )
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+        ):
+            assignments.append((node.target.id, node.value))
+
+    for _ in range(len(assignments) + 1):
+        changed = False
+        for target, value in assignments:
+            resolved: str | None = None
+            if isinstance(value, ast.Constant) and type(value.value) is str:
+                resolved = value.value
+            elif isinstance(value, ast.Name):
+                resolved = constants.get(value.id)
+            if resolved is not None and constants.get(target) != resolved:
+                constants[target] = resolved
+                changed = True
+        if not changed:
+            break
+    return constants
+
+
+def _constant_string(
+    node: ast.expr,
+    constants: dict[str, str],
+) -> str | None:
+    if isinstance(node, ast.Constant) and type(node.value) is str:
+        return node.value
+    if isinstance(node, ast.Name):
+        return constants.get(node.id)
+    return None
+
+
+def _namespace_lookup(
+    node: ast.expr,
+    aliases: dict[str, str],
+    constants: dict[str, str],
+) -> str | None:
+    if not isinstance(node, ast.Subscript):
+        return None
+    if _resolve_symbol(node.value, aliases) not in {"globals", "locals"}:
+        return None
+    return _constant_string(node.slice, constants)
+
+
+def _is_socket_module_reference(
+    node: ast.expr,
+    aliases: dict[str, str],
+    constants: dict[str, str],
+) -> bool:
+    return (
+        _resolve_symbol(node, aliases) == "socket"
+        or _namespace_lookup(node, aliases, constants) == "socket"
+    )
+
+
+def _is_socket_namespace(
+    node: ast.expr,
+    aliases: dict[str, str],
+    constants: dict[str, str],
+) -> bool:
+    if _resolve_symbol(node, aliases) == "socket.__dict__":
+        return True
+    return bool(
+        isinstance(node, ast.Attribute)
+        and node.attr == "__dict__"
+        and _is_socket_module_reference(node.value, aliases, constants)
+    )
+
+
+def _mutates_socket_family_target(
+    target: ast.expr,
+    aliases: dict[str, str],
+    constants: dict[str, str],
+) -> bool:
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return any(
+            _mutates_socket_family_target(element, aliases, constants)
+            for element in target.elts
+        )
+    if isinstance(target, ast.Starred):
+        return _mutates_socket_family_target(target.value, aliases, constants)
+    if isinstance(target, ast.Attribute):
+        return (
+            target.attr in _PROTECTED_SOCKET_FAMILY_ATTRIBUTES
+            and _is_socket_module_reference(target.value, aliases, constants)
+        )
+    if not isinstance(target, ast.Subscript):
+        return False
+
+    key = _constant_string(target.slice, constants)
+    if key in {"_AF_UNIX", "socket"} and _resolve_symbol(
+        target.value,
+        aliases,
+    ) in {"globals", "locals"}:
+        return True
+    return bool(
+        key in _PROTECTED_SOCKET_FAMILY_ATTRIBUTES
+        and (
+            _is_socket_namespace(target.value, aliases, constants)
+            or _is_socket_module_reference(target.value, aliases, constants)
+        )
+    )
+
+
+def _mutates_socket_family_call(
+    call: ast.Call,
+    aliases: dict[str, str],
+    constants: dict[str, str],
+) -> bool:
+    symbol = _resolve_symbol(call.func, aliases)
+    leaf = symbol.rsplit(".", 1)[-1]
+    if leaf in {"setattr", "delattr"} and len(call.args) >= 2:
+        return bool(
+            _is_socket_module_reference(call.args[0], aliases, constants)
+            and _constant_string(call.args[1], constants)
+            in _PROTECTED_SOCKET_FAMILY_ATTRIBUTES
+        )
+    if leaf in {"__setattr__", "__delattr__"} and call.args:
+        owner = call.func.value if isinstance(call.func, ast.Attribute) else None
+        return bool(
+            owner is not None
+            and _is_socket_module_reference(owner, aliases, constants)
+            and _constant_string(call.args[0], constants)
+            in _PROTECTED_SOCKET_FAMILY_ATTRIBUTES
+        )
+    return False
+
+
+def _has_protected_socket_family_mutation(
+    tree: ast.Module,
+    aliases: dict[str, str],
+) -> bool:
+    constants = _resolved_string_constants(tree)
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets.extend(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+            targets.append(node.target)
+        elif isinstance(node, ast.Delete):
+            targets.extend(node.targets)
+        if any(
+            _mutates_socket_family_target(target, aliases, constants)
+            for target in targets
+        ):
+            return True
+        if isinstance(node, ast.Call) and _mutates_socket_family_call(
+            node,
+            aliases,
+            constants,
+        ):
+            return True
+    return False
 
 
 def _resolved_python_calls(source: str) -> tuple[ast.Module, list[str]]:
@@ -468,6 +636,10 @@ def _listener_contract_violations(
     violations: set[str] = set()
     if allow_entrypoint_uds and not _has_verified_af_unix_binding(tree):
         violations.add("entrypoint._AF_UNIX")
+    if _has_protected_socket_family_mutation(tree, aliases):
+        violations.add(
+            "entrypoint.socket_family" if allow_entrypoint_uds else "socket_family"
+        )
     for call, symbol, function in _call_records(tree, aliases):
         forbidden = (
             symbol in _LISTENER_CALLS
@@ -863,6 +1035,128 @@ def test_entrypoint_uds_allowlist_rejects_af_unix_binding_mutations(
         mutated,
         allow_entrypoint_uds=True,
     )
+
+
+def _mutate_socket_family(source: str, mutation: str) -> str:
+    approved = '_AF_UNIX = getattr(socket, "AF_UNIX", 1)'
+    assert source.count(approved) == 1
+    mutations = {
+        "reviewer-probe": "socket.AF_UNIX = socket.AF_INET",
+        "annotated-attribute": "socket.AF_UNIX: int = socket.AF_INET",
+        "augmented-attribute": "socket.AF_UNIX |= 1",
+        "deleted-attribute": "del socket.AF_UNIX",
+        "af-inet-target": "socket.AF_INET = 1",
+        "transitive-module-alias": (
+            "network = socket\n"
+            "network_alias = network\n"
+            "network_alias.AF_UNIX = socket.AF_INET"
+        ),
+        "setattr-direct": "setattr(socket, 'AF_UNIX', socket.AF_INET)",
+        "setattr-transitive": (
+            "network = socket\n"
+            "network_alias = network\n"
+            "mutate = setattr\n"
+            "mutate_alias = mutate\n"
+            "mutate_alias(network_alias, 'AF_UNIX', socket.AF_INET)"
+        ),
+        "delattr-transitive": (
+            "network = socket\n"
+            "remove = delattr\n"
+            "remove_alias = remove\n"
+            "remove_alias(network, 'AF_INET')"
+        ),
+        "monkeypatch-direct": (
+            "monkeypatch.setattr(socket, 'AF_UNIX', socket.AF_INET)"
+        ),
+        "monkeypatch-transitive": (
+            "patch = monkeypatch.setattr\n"
+            "patch_alias = patch\n"
+            "patch_alias(socket, 'AF_INET', 1)"
+        ),
+        "globals-socket": "globals()['socket'] = replacement_socket",
+        "globals-af-unix": "globals()['_AF_UNIX'] = socket.AF_INET",
+        "locals-socket": "locals()['socket'] = replacement_socket",
+        "socket-dict": "socket.__dict__['AF_UNIX'] = socket.AF_INET",
+        "aliased-socket-dict": (
+            "network = socket\n"
+            "namespace = network.__dict__\n"
+            "namespace['AF_INET'] = 1"
+        ),
+        "deleted-socket-dict": "del socket.__dict__['AF_UNIX']",
+    }
+    return source.replace(
+        approved,
+        f"{mutations[mutation]}\n{approved}",
+        1,
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "reviewer-probe",
+        "annotated-attribute",
+        "augmented-attribute",
+        "deleted-attribute",
+        "af-inet-target",
+        "transitive-module-alias",
+        "setattr-direct",
+        "setattr-transitive",
+        "delattr-transitive",
+        "monkeypatch-direct",
+        "monkeypatch-transitive",
+        "globals-socket",
+        "globals-af-unix",
+        "locals-socket",
+        "socket-dict",
+        "aliased-socket-dict",
+        "deleted-socket-dict",
+    ],
+)
+def test_entrypoint_rejects_protected_socket_family_mutations(
+    mutation: str,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    source = (root / "scripts" / "run_sandbox_broker.py").read_text(
+        encoding="utf-8"
+    )
+    mutated = _mutate_socket_family(source, mutation)
+
+    assert "entrypoint.socket_family" in _listener_contract_violations(
+        mutated,
+        allow_entrypoint_uds=True,
+    )
+
+
+def test_entrypoint_socket_family_guard_allows_benign_reads() -> None:
+    root = Path(__file__).resolve().parents[2]
+    source = (root / "scripts" / "run_sandbox_broker.py").read_text(
+        encoding="utf-8"
+    )
+    approved = '_AF_UNIX = getattr(socket, "AF_UNIX", 1)'
+    benign = """observed_family = socket.AF_UNIX
+observed_fallback = getattr(socket, "AF_UNIX", 1)
+socket_namespace = socket.__dict__
+observed_from_namespace = socket_namespace["AF_UNIX"]
+class Unrelated:
+    pass
+unrelated = Unrelated()
+setattr(unrelated, "AF_UNIX", 1)
+"""
+    source = source.replace(approved, f"{benign}{approved}", 1)
+
+    assert not _listener_contract_violations(
+        source,
+        allow_entrypoint_uds=True,
+    )
+
+
+def test_socket_family_guard_applies_to_all_production_source_scans() -> None:
+    source = """import socket
+socket.AF_UNIX = socket.AF_INET
+"""
+
+    assert "socket_family" in _listener_contract_violations(source)
 
 
 def _assert_non_scientific(result: Any) -> None:
