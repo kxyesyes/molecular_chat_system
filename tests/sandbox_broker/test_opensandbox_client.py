@@ -1063,7 +1063,13 @@ def test_dependency_failures_carry_truthful_public_operation(
             "metadata",
             FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
         ),
-        ("list", "list", SandboxListError, "command", FailureClass.COMMAND_TIMEOUT),
+        (
+            "list",
+            "list",
+            SandboxListError,
+            "metadata",
+            FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+        ),
         ("run", "run", SandboxRunError, "command", FailureClass.COMMAND_TIMEOUT),
     ],
 )

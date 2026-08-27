@@ -1012,15 +1012,10 @@ class OpenSandboxClient:
                 operation="metadata",
             ) from None
         except Exception as failure:
-            operation = (
-                "command"
-                if isinstance(failure, (asyncio.TimeoutError, TimeoutError))
-                else "metadata"
-            )
             raise SandboxListError(
                 "sandbox output listing failed",
-                operation=operation,
-                failure_class=classify_control_plane_failure(operation, failure),
+                operation="metadata",
+                failure_class=classify_control_plane_failure("metadata", failure),
             ) from None
 
         exit_code = getattr(execution, "exit_code", None)
