@@ -610,7 +610,28 @@ class DockerSandboxObserver:
     def _exec(self, container_id: str, *argv: str, timeout: float = _DOCKER_TIMEOUT_SECONDS) -> bool:
         return self._docker("exec", container_id, *argv, timeout=timeout).ok
 
+    def _wait_for_exec_ready(self, container_id: str) -> bool:
+        deadline = time.monotonic() + _CONTAINER_WAIT_SECONDS
+        while not self._stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            result = self._docker(
+                "exec",
+                container_id,
+                _SANDBOX_PYTHON,
+                "-c",
+                "raise SystemExit(0)",
+                timeout=min(3.0, remaining),
+            )
+            if result.ok:
+                return True
+            if self._stop.wait(min(0.1, remaining)):
+                return False
+        return False
+
     def _inspect_and_probe(self, container_id: str) -> None:
+        exec_ready = not self._intrusive_probes_enabled
         try:
             if self._inspect_field(container_id, "{{.HostConfig.Runtime}}") != "runsc":
                 self.failure_codes.append("container_runtime_not_runsc")
@@ -638,6 +659,10 @@ class DockerSandboxObserver:
             self._validate_network()
             if self._network_gateway is None:
                 self.failure_codes.append("host_service_probe_unavailable")
+            if self._intrusive_probes_enabled:
+                exec_ready = self._wait_for_exec_ready(container_id)
+                if not exec_ready:
+                    self.failure_codes.append("sandbox_exec_not_ready")
         finally:
             self._inspection_ready.set()
 
@@ -645,7 +670,7 @@ class DockerSandboxObserver:
             self._probes_complete.set()
             return
         try:
-            if self._network_gateway is not None:
+            if self._network_gateway is not None and exec_ready:
                 self._run_security_probes(container_id, self._network_gateway)
         finally:
             self._probes_complete.set()

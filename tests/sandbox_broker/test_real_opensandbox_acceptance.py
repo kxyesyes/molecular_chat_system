@@ -523,6 +523,58 @@ def test_real_vina_git_banner_uses_independent_package_metadata(
     assert "os.setsid" in probe_sources
 
 
+def test_intrusive_observer_waits_for_container_exec_readiness() -> None:
+    acceptance = _module()
+    container_id = "a" * 64
+    image_digest = "b" * 64
+    readiness_attempts = 0
+
+    def command(argv, *, timeout=12.0):
+        nonlocal readiness_attempts
+        call = tuple(argv)
+        if call[:4] == ("docker", "container", "inspect", "--format"):
+            values = {
+                "{{.HostConfig.Runtime}}": "runsc",
+                "{{.HostConfig.NanoCpus}}": "2000000000",
+                "{{.HostConfig.Memory}}": "4294967296",
+                "{{.HostConfig.PidsLimit}}": "128",
+                "{{.Config.Image}}": "registry.test/medchat@sha256:" + image_digest,
+                "{{json .NetworkSettings.Networks}}": json.dumps(
+                    {"medchat-opensandbox": {}}
+                ),
+            }
+            return acceptance._CommandResult(True, values[call[4]])
+        if call[:4] == ("docker", "network", "inspect", "--format"):
+            values = {
+                "{{.Name}}": "medchat-opensandbox",
+                "{{json .Internal}}": "true",
+                '{{index .Labels "com.medchat.opensandbox.network"}}': "v1",
+                "{{(index .IPAM.Config 0).Gateway}}": "172.30.0.1",
+            }
+            return acceptance._CommandResult(True, values[call[4]])
+        if call[:3] == ("docker", "exec", container_id):
+            if call[-1] == "raise SystemExit(0)":
+                readiness_attempts += 1
+                return acceptance._CommandResult(readiness_attempts >= 3, "")
+            if call[-2:] == ("/opt/conda/bin/vina", "--version"):
+                return acceptance._CommandResult(True, "AutoDock Vina 1.2.5")
+            if "m.version('vina')" in call[-1]:
+                return acceptance._CommandResult(True, "1.2.5")
+            if "m.version('meeko')" in call[-1]:
+                return acceptance._CommandResult(True, "0.7.1")
+            return acceptance._CommandResult(True, "")
+        raise AssertionError(call)
+
+    observer = acceptance.DockerSandboxObserver(command)
+    observer.enable_intrusive_probes()
+    observer._inspect_and_probe(container_id)
+
+    assert readiness_attempts == 3
+    assert observer.wait_for_inspection_ready(0.0)
+    assert observer.wait_for_probes_complete(0.0)
+    assert observer.failure_codes == []
+
+
 def test_measured_observer_never_executes_destructive_probes() -> None:
     acceptance = _module()
     container_id = "a" * 64

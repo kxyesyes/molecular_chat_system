@@ -270,6 +270,39 @@ def test_stream_timeout_keeps_type_and_triggers_bounded_broker_cancel(
     ]
 
 
+def test_post_deadline_cancel_has_independent_qemu_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, receptor, ligand = _inputs(tmp_path)
+    deadlines: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/v1/docking/jobs/{BROKER_JOB_ID}/cancel"
+        return httpx.Response(
+            202,
+            json=_job(
+                "cancelled",
+                receptor,
+                ligand,
+                error_code="cancelled",
+                cancel_requested=True,
+            ),
+        )
+
+    runner = _runner(tmp_path, handler)
+
+    def transport(deadline: float) -> httpx.BaseTransport:
+        deadlines.append(deadline - time.monotonic())
+        return httpx.MockTransport(handler)
+
+    monkeypatch.setattr(runner, "_new_transport", transport)
+    runner._cancel_best_effort(BROKER_JOB_ID)
+
+    assert len(deadlines) == 1
+    assert 1.5 <= deadlines[0] <= 2.0
+
+
 def test_connect_failure_has_stable_unavailable_mapping_without_raw_error(
     tmp_path: Path,
 ) -> None:
