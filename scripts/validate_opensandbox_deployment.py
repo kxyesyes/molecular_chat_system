@@ -88,7 +88,7 @@ _PINNED_ASSET_SHA256 = {
         "d08a8ed8795d2c505099fd9ddf8660831fc9780d251d46c3f8132d99ce86a3e1"
     ),
     "deployment/opensandbox/configure-firewall.sh": (
-        "77aa53b08dcf0a75fef4b6d6d4acaa70345f1d65181f5773174f6a025ba20f5c"
+        "1ac2dead88d8f52f4199c34feae3f3d2ff7aca49682ed5b94687884d9029fafa"
     ),
     "deployment/opensandbox/opensandbox.env.example": (
         "bdd4b347aacd786c555250f5733566d5fd8723e15c44aeb048af237852d089bf"
@@ -524,7 +524,6 @@ def _validate_firewall_script(text: str) -> bool:
         "--ctstate NEW -j DROP",
         "--ctdir ORIGINAL",
         "--ctorigdstport",
-        "--ctstatus DNAT",
         "-o \"$BRIDGE_INTERFACE\" ! -s \"$loopback_source\"",
         '"$tool" -w "$WAIT_SECONDS" -t raw',
         "-D \"$LEGACY_CHAIN\" -j DROP",
@@ -536,6 +535,7 @@ def _validate_firewall_script(text: str) -> bool:
     )
     return bool(
         all(value in text for value in required)
+        and "--ctstatus" not in text
         and "-j ACCEPT" not in text
         and "-F DOCKER-USER" not in text
         and "--flush" not in text
@@ -1255,9 +1255,8 @@ def _firewall_rules_present() -> bool:
             ),
             (
                 "-o", _BRIDGE_INTERFACE, "!", "-s", loopback,
-                "-p", "tcp", "-m", "conntrack", "--ctstatus", "DNAT",
-                "--ctdir", "ORIGINAL", "--ctorigdstport", "40000:60000",
-                "-j", "DROP",
+                "-p", "tcp", "-m", "conntrack", "--ctdir", "ORIGINAL",
+                "--ctorigdstport", "40000:60000", "-j", "DROP",
             ),
             (
                 "-i", _BRIDGE_INTERFACE, "!", "-o", _BRIDGE_INTERFACE,

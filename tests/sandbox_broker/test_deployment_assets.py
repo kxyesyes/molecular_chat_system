@@ -149,7 +149,7 @@ def test_firewall_owns_internal_network_and_scopes_docker_user_rules() -> None:
     assert 'docker ps -aq --no-trunc --filter "label=$SANDBOX_LABEL"' in script
     assert '-o "$BRIDGE_INTERFACE"' in script
     assert '-i "$BRIDGE_INTERFACE" ! -o "$BRIDGE_INTERFACE"' in script
-    assert "--ctstatus DNAT" in script
+    assert "--ctstatus" not in script
     assert "--ctdir ORIGINAL" in script
     assert '--ctorigdstport "$PORT_RANGE"' in script
     assert "--ctstate NEW" in script
@@ -204,6 +204,8 @@ except (FileNotFoundError, json.JSONDecodeError):
 args = sys.argv[1:]
 if args[:2] == ["-w", "5"]:
     args = args[2:]
+if "--ctstatus" in args:
+    raise SystemExit(2)
 table = "filter"
 if args[:1] == ["-t"]:
     table = args[1]
@@ -447,9 +449,8 @@ def test_firewall_migrates_legacy_rules_and_is_idempotently_ingress_scoped(
             ],
             [
                 "-o", "br-medchat-sbox", "!", "-s", source_network,
-                "-p", "tcp", "-m", "conntrack", "--ctstatus", "DNAT",
-                "--ctdir", "ORIGINAL", "--ctorigdstport", "40000:60000",
-                "-j", "DROP",
+                "-p", "tcp", "-m", "conntrack", "--ctdir", "ORIGINAL",
+                "--ctorigdstport", "40000:60000", "-j", "DROP",
             ],
             [
                 "-i", "br-medchat-sbox", "!", "-o", "br-medchat-sbox",
@@ -708,6 +709,13 @@ def test_firewall_legacy_rule_deletion_failure_is_redacted_and_fails_closed(
         (
             FIREWALL_SCRIPT,
             lambda text: text.replace("40000:60000", "40000:61000"),
+            "firewall_asset_unsafe",
+        ),
+        (
+            FIREWALL_SCRIPT,
+            lambda text: text.replace(
+                "--ctdir ORIGINAL", "--ctstatus DNAT --ctdir ORIGINAL", 1
+            ),
             "firewall_asset_unsafe",
         ),
         (
