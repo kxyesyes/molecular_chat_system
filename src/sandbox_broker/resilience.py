@@ -7,7 +7,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from .telemetry import FailureClass
@@ -37,10 +37,39 @@ _WINDOW_SECONDS = 60.0
 _OPEN_SECONDS = 30.0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BreakerPermit:
     generation: int
     half_open: bool
+    _owner: object | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _claimed: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    @classmethod
+    def _issue(
+        cls,
+        generation: int,
+        half_open: bool,
+        owner: object,
+    ) -> "BreakerPermit":
+        permit = cls(generation, half_open)
+        object.__setattr__(permit, "_owner", owner)
+        return permit
+
+    def _claim(self, owner: object) -> bool:
+        if self._owner is not owner or self._claimed:
+            return False
+        object.__setattr__(self, "_claimed", True)
+        return True
 
 
 class ControlPlaneCircuitBreaker:
@@ -60,6 +89,7 @@ class ControlPlaneCircuitBreaker:
         self._opened_at: float | None = None
         self._probe_in_flight = False
         self._generation = 0
+        self._permit_owner = object()
 
     def _now(self) -> float:
         value = self._clock()
@@ -81,20 +111,20 @@ class ControlPlaneCircuitBreaker:
 
     @property
     def state(self) -> BreakerState:
-        now = self._now()
         with self._lock:
+            now = self._now()
             self._refresh_locked(now)
             return self._state
 
     def accepts_new_work(self) -> bool:
-        now = self._now()
         with self._lock:
+            now = self._now()
             self._refresh_locked(now)
             return self._state is not BreakerState.OPEN
 
     def acquire(self) -> BreakerPermit | None:
-        now = self._now()
         with self._lock:
+            now = self._now()
             self._refresh_locked(now)
             if self._state is BreakerState.OPEN:
                 return None
@@ -102,13 +132,23 @@ class ControlPlaneCircuitBreaker:
                 if self._probe_in_flight:
                     return None
                 self._probe_in_flight = True
-                return BreakerPermit(self._generation, True)
-            return BreakerPermit(self._generation, False)
+                return BreakerPermit._issue(
+                    self._generation,
+                    True,
+                    self._permit_owner,
+                )
+            return BreakerPermit._issue(
+                self._generation,
+                False,
+                self._permit_owner,
+            )
 
     def release(self, permit: BreakerPermit) -> None:
         if type(permit) is not BreakerPermit:
             raise ValueError("invalid circuit-breaker permit")
         with self._lock:
+            if not permit._claim(self._permit_owner):
+                return
             if (
                 permit.generation == self._generation
                 and permit.half_open
@@ -122,6 +162,8 @@ class ControlPlaneCircuitBreaker:
         if type(permit) is not BreakerPermit:
             raise ValueError("invalid circuit-breaker permit")
         with self._lock:
+            if not permit._claim(self._permit_owner):
+                return
             if permit.generation != self._generation:
                 return
             completed_probe = (
@@ -143,12 +185,21 @@ class ControlPlaneCircuitBreaker:
     ) -> None:
         if type(permit) is not BreakerPermit or type(failure_class) is not FailureClass:
             raise ValueError("invalid circuit-breaker observation")
-        if failure_class not in _QUALIFYING_FAILURES:
-            return
-        now = self._now()
         with self._lock:
+            if not permit._claim(self._permit_owner):
+                return
             if permit.generation != self._generation:
                 return
+            if failure_class not in _QUALIFYING_FAILURES:
+                if (
+                    permit.half_open
+                    and self._state is BreakerState.HALF_OPEN
+                    and self._probe_in_flight
+                ):
+                    self._generation += 1
+                    self._probe_in_flight = False
+                return
+            now = self._now()
             if permit.half_open:
                 self._state = BreakerState.OPEN
                 self._opened_at = now

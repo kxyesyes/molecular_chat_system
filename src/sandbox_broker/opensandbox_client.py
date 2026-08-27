@@ -240,16 +240,29 @@ class SandboxCommandResult:
 
     def __post_init__(self) -> None:
         if type(self.exit_code) is not int or not -(2**31) <= self.exit_code < 2**31:
-            raise SandboxProtocolError("the command service returned an invalid result")
+            raise SandboxProtocolError(
+                "the command service returned an invalid result",
+                operation="command",
+            )
         if type(self.stdout) is not str or type(self.stderr) is not str:
-            raise SandboxProtocolError("the command service returned invalid logs")
+            raise SandboxProtocolError(
+                "the command service returned invalid logs",
+                operation="command",
+            )
         if (
-            _utf8_size(self.stdout, SandboxProtocolError)
+            _utf8_size(self.stdout, SandboxProtocolError, operation="command")
             > _COMMAND_OUTPUT_MAX_BYTES
-            or _utf8_size(self.stderr, SandboxProtocolError)
+            or _utf8_size(
+                self.stderr,
+                SandboxProtocolError,
+                operation="command",
+            )
             > _COMMAND_OUTPUT_MAX_BYTES
         ):
-            raise SandboxProtocolError("the command service returned oversized logs")
+            raise SandboxProtocolError(
+                "the command service returned oversized logs",
+                operation="command",
+            )
 
 
 class SandboxClient(Protocol):
@@ -379,7 +392,8 @@ class _OfficialSandboxFactory:
             return _load_official_sdk()
         except SandboxDependencyUnavailableError:
             raise SandboxDependencyUnavailableError(
-                "the pinned OpenSandbox SDK is unavailable"
+                "the pinned OpenSandbox SDK is unavailable",
+                operation="metadata",
             ) from None
         except Exception:
             raise SandboxDependencyUnavailableError(
@@ -449,7 +463,8 @@ class _OfficialSandboxFactory:
         )
         if sdk.RunCommandOpts is None:
             raise SandboxDependencyUnavailableError(
-                "the pinned OpenSandbox SDK command timeout is unavailable"
+                "the pinned OpenSandbox SDK command timeout is unavailable",
+                operation="command",
             )
         opts = sdk.RunCommandOpts(
             timeout=timedelta(seconds=self._config.execution_timeout_seconds)
@@ -473,7 +488,8 @@ class _OfficialSandboxFactory:
         sdk = self._sdk()
         if sdk.SandboxFilter is None:
             raise SandboxDependencyUnavailableError(
-                "the pinned OpenSandbox SDK metadata filter is unavailable"
+                "the pinned OpenSandbox SDK metadata filter is unavailable",
+                operation="destroy",
             )
         manager = await sdk.SandboxManager.create(
             connection_config=self._connection(sdk)
@@ -492,7 +508,8 @@ class _OfficialSandboxFactory:
             infos = getattr(page, "sandbox_infos", None)
             if type(infos) is not list or len(infos) > _RECONCILE_PAGE_SIZE:
                 raise SandboxProtocolError(
-                    "the sandbox service returned an invalid reconciliation result"
+                    "the sandbox service returned an invalid reconciliation result",
+                    operation="destroy",
                 )
             destroyed = 0
             for info in infos:
@@ -503,9 +520,14 @@ class _OfficialSandboxFactory:
                     or metadata.get("medchat.job_id") != job_id
                 ):
                     raise SandboxProtocolError(
-                        "the sandbox service returned an invalid reconciliation result"
+                        "the sandbox service returned an invalid reconciliation result",
+                        operation="destroy",
                     )
-                sandbox_id = _validate_id(getattr(info, "id", None), server_value=True)
+                sandbox_id = _validate_id(
+                    getattr(info, "id", None),
+                    server_value=True,
+                    operation="destroy",
+                )
                 await manager.kill_sandbox(sandbox_id)
                 destroyed += 1
             return destroyed
@@ -513,17 +535,35 @@ class _OfficialSandboxFactory:
             await manager.close()
 
 
-def _validate_id(value: object, *, server_value: bool) -> str:
+def _validate_id(
+    value: object,
+    *,
+    server_value: bool,
+    operation: str = "metadata",
+) -> str:
     if type(value) is not str or _ID_PATTERN.fullmatch(value) is None:
         if server_value:
-            raise SandboxProtocolError("the sandbox service returned an invalid identifier")
-        raise SandboxInputError("the identifier is outside the fixed contract")
+            raise SandboxProtocolError(
+                "the sandbox service returned an invalid identifier",
+                operation=operation,
+            )
+        raise SandboxInputError(
+            "the identifier is outside the fixed contract",
+            operation=operation,
+        )
     return value
 
 
-def _path_parts(path: object) -> tuple[str, ...]:
+def _path_parts(
+    path: object,
+    *,
+    operation: str = "metadata",
+) -> tuple[str, ...]:
     if type(path) is not str:
-        raise SandboxInputError("the sandbox path is outside the fixed contract")
+        raise SandboxInputError(
+            "the sandbox path is outside the fixed contract",
+            operation=operation,
+        )
     if (
         not path.startswith("/")
         or len(path) > _PATH_MAX_CHARACTERS
@@ -532,31 +572,53 @@ def _path_parts(path: object) -> tuple[str, ...]:
         or "\x00" in path
         or "//" in path
     ):
-        raise SandboxInputError("the sandbox path is outside the fixed contract")
+        raise SandboxInputError(
+            "the sandbox path is outside the fixed contract",
+            operation=operation,
+        )
     components = tuple(path.split("/")[1:])
     if not components or any(
         component in {"", ".", ".."}
         or _PATH_COMPONENT_PATTERN.fullmatch(component) is None
         for component in components
     ):
-        raise SandboxInputError("the sandbox path is outside the fixed contract")
+        raise SandboxInputError(
+            "the sandbox path is outside the fixed contract",
+            operation=operation,
+        )
     if str(PurePosixPath(path)) != path:
-        raise SandboxInputError("the sandbox path is outside the fixed contract")
+        raise SandboxInputError(
+            "the sandbox path is outside the fixed contract",
+            operation=operation,
+        )
     return components
 
 
-def _validate_output_path(path: object, *, allow_root: bool) -> tuple[str, ...]:
-    parts = _path_parts(path)
+def _validate_output_path(
+    path: object,
+    *,
+    allow_root: bool,
+    operation: str = "metadata",
+) -> tuple[str, ...]:
+    parts = _path_parts(path, operation=operation)
     if parts[:2] != _OUTPUT_ROOT_PARTS or (not allow_root and len(parts) == 2):
-        raise SandboxInputError("the sandbox path is outside the output root")
+        raise SandboxInputError(
+            "the sandbox path is outside the output root",
+            operation=operation,
+        )
     return parts
 
 
-def _utf8_size(value: str, error: type[SandboxClientError]) -> int:
+def _utf8_size(
+    value: str,
+    error: type[SandboxClientError],
+    *,
+    operation: str = "metadata",
+) -> int:
     try:
         return len(value.encode("utf-8", errors="strict"))
     except UnicodeError:
-        raise error("text is not valid UTF-8") from None
+        raise error("text is not valid UTF-8", operation=operation) from None
 
 
 def _truncate_utf8(value: str, max_bytes: int) -> str:
@@ -669,7 +731,15 @@ def _finalize_command_output(
         guard = max(512, known_secret_bytes)
         value = _truncate_utf8(
             value,
-            max(0, _utf8_size(value, SandboxProtocolError) - guard),
+            max(
+                0,
+                _utf8_size(
+                    value,
+                    SandboxProtocolError,
+                    operation="command",
+                )
+                - guard,
+            ),
         )
     sanitized = _sanitize_output(value, config)
     if buffer.truncated:
@@ -754,14 +824,25 @@ class OpenSandboxClient:
         self._cleanup_breaker_resolved_generation = 0
         self._cleanup_lock = asyncio.Lock()
 
-    def _handle(self, handle: object) -> SandboxHandle:
+    def _handle(self, handle: object, *, operation: str) -> SandboxHandle:
         if type(handle) is not SandboxHandle or handle.raw is None:
-            raise SandboxInputError("the sandbox handle is outside the fixed contract")
-        _validate_id(handle.sandbox_id, server_value=False)
+            raise SandboxInputError(
+                "the sandbox handle is outside the fixed contract",
+                operation=operation,
+            )
+        _validate_id(
+            handle.sandbox_id,
+            server_value=False,
+            operation=operation,
+        )
         return handle
 
     async def create(self, job_id: str) -> SandboxHandle:
-        validated_job_id = _validate_id(job_id, server_value=False)
+        validated_job_id = _validate_id(
+            job_id,
+            server_value=False,
+            operation="create",
+        )
         try:
             raw = await self._factory.create(
                 image=(
@@ -778,7 +859,8 @@ class OpenSandboxClient:
             )
         except SandboxDependencyUnavailableError:
             raise SandboxDependencyUnavailableError(
-                "the pinned OpenSandbox SDK is unavailable"
+                "the pinned OpenSandbox SDK is unavailable",
+                operation="create",
             ) from None
         except Exception as failure:
             raise SandboxCreateError(
@@ -789,16 +871,24 @@ class OpenSandboxClient:
 
         raw_id = getattr(raw, "id", None)
         try:
-            sandbox_id = _validate_id(raw_id, server_value=True)
+            sandbox_id = _validate_id(
+                raw_id,
+                server_value=True,
+                operation="create",
+            )
         except SandboxProtocolError:
             if raw is not None:
                 try:
                     await self._perform_cleanup(lambda: self._factory.destroy(raw))
                 except BaseException:
                     raise SandboxProtocolError(
-                        "the sandbox service returned an invalid identifier"
+                        "the sandbox service returned an invalid identifier",
+                        operation="create",
                     ) from None
-            raise
+            raise SandboxProtocolError(
+                "the sandbox service returned an invalid identifier",
+                operation="create",
+            ) from None
         return SandboxHandle(sandbox_id=sandbox_id, raw=raw)
 
     async def upload_text(
@@ -807,10 +897,13 @@ class OpenSandboxClient:
         path: str,
         data: str | bytes,
     ) -> None:
-        validated_handle = self._handle(handle)
-        parts = _path_parts(path)
+        validated_handle = self._handle(handle, operation="upload")
+        parts = _path_parts(path, operation="upload")
         if parts[:2] != _INPUT_ROOT_PARTS or len(parts) != 3:
-            raise SandboxInputError("only fixed broker inputs may be uploaded")
+            raise SandboxInputError(
+                "only fixed broker inputs may be uploaded",
+                operation="upload",
+            )
         limits = {
             "receptor.pdb": self._config.receptor_max_bytes,
             "receptor.pdbqt": self._config.receptor_max_bytes,
@@ -822,21 +915,31 @@ class OpenSandboxClient:
         }
         limit = limits.get(parts[-1])
         if limit is None or type(data) not in {str, bytes} or not data:
-            raise SandboxInputError("only fixed non-empty inputs may be uploaded")
+            raise SandboxInputError(
+                "only fixed non-empty inputs may be uploaded",
+                operation="upload",
+            )
         if parts[-1] == "request.json" and type(data) is not str:
-            raise SandboxInputError("the fixed request must be UTF-8 text")
+            raise SandboxInputError(
+                "the fixed request must be UTF-8 text",
+                operation="upload",
+            )
         size = (
-            _utf8_size(data, SandboxInputError)
+            _utf8_size(data, SandboxInputError, operation="upload")
             if type(data) is str
             else len(data)
         )
         if size > limit:
-            raise SandboxInputError("the fixed input exceeds its byte limit")
+            raise SandboxInputError(
+                "the fixed input exceeds its byte limit",
+                operation="upload",
+            )
         try:
             await self._factory.upload_text(validated_handle.raw, path, data)
         except SandboxDependencyUnavailableError:
             raise SandboxDependencyUnavailableError(
-                "the pinned OpenSandbox SDK is unavailable"
+                "the pinned OpenSandbox SDK is unavailable",
+                operation="upload",
             ) from None
         except Exception as failure:
             raise SandboxUploadError(
@@ -846,7 +949,7 @@ class OpenSandboxClient:
             ) from None
 
     async def read_text(self, handle: SandboxHandle, path: str) -> str:
-        validated_handle = self._handle(handle)
+        validated_handle = self._handle(handle, operation="metadata")
         _validate_output_path(path, allow_root=False)
         try:
             stream = await self._factory.read_bytes_stream(
@@ -856,7 +959,8 @@ class OpenSandboxClient:
             )
         except SandboxDependencyUnavailableError:
             raise SandboxDependencyUnavailableError(
-                "the pinned OpenSandbox SDK is unavailable"
+                "the pinned OpenSandbox SDK is unavailable",
+                operation="metadata",
             ) from None
         except Exception as failure:
             raise SandboxReadError(
@@ -881,7 +985,7 @@ class OpenSandboxClient:
         path: str,
         pattern: str,
     ) -> list[str]:
-        validated_handle = self._handle(handle)
+        validated_handle = self._handle(handle, operation="metadata")
         requested_parts = _validate_output_path(path, allow_root=True)
         if type(pattern) is not str or pattern not in _ALLOWED_LIST_PATTERNS:
             raise SandboxInputError("the search pattern is outside the fixed contract")
@@ -904,13 +1008,19 @@ class OpenSandboxClient:
             )
         except SandboxDependencyUnavailableError:
             raise SandboxDependencyUnavailableError(
-                "the pinned OpenSandbox SDK is unavailable"
+                "the pinned OpenSandbox SDK is unavailable",
+                operation="metadata",
             ) from None
         except Exception as failure:
+            operation = (
+                "command"
+                if isinstance(failure, (asyncio.TimeoutError, TimeoutError))
+                else "metadata"
+            )
             raise SandboxListError(
                 "sandbox output listing failed",
-                operation="metadata",
-                failure_class=classify_control_plane_failure("metadata", failure),
+                operation=operation,
+                failure_class=classify_control_plane_failure(operation, failure),
             ) from None
 
         exit_code = getattr(execution, "exit_code", None)
@@ -958,7 +1068,7 @@ class OpenSandboxClient:
         return paths
 
     async def run(self, handle: SandboxHandle) -> SandboxCommandResult:
-        validated_handle = self._handle(handle)
+        validated_handle = self._handle(handle, operation="command")
         stdout_buffer = _BoundedUtf8Buffer(_COMMAND_OUTPUT_MAX_BYTES)
         stderr_buffer = _BoundedUtf8Buffer(_COMMAND_OUTPUT_MAX_BYTES)
 
@@ -978,7 +1088,8 @@ class OpenSandboxClient:
             )
         except SandboxDependencyUnavailableError:
             raise SandboxDependencyUnavailableError(
-                "the pinned OpenSandbox SDK is unavailable"
+                "the pinned OpenSandbox SDK is unavailable",
+                operation="command",
             ) from None
         except Exception as failure:
             raise SandboxRunError(
@@ -989,7 +1100,10 @@ class OpenSandboxClient:
 
         exit_code = getattr(execution, "exit_code", None)
         if type(exit_code) is not int or not -(2**31) <= exit_code < 2**31:
-            raise SandboxProtocolError("the command service returned an invalid result")
+            raise SandboxProtocolError(
+                "the command service returned an invalid result",
+                operation="command",
+            )
         return SandboxCommandResult(
             exit_code=exit_code,
             stdout=_finalize_command_output(stdout_buffer, self._config),
@@ -1009,7 +1123,11 @@ class OpenSandboxClient:
             ):
                 if not breaker_open:
                     self._cleanup_breaker_generation += 1
-                raise SandboxDestroyError("sandbox cleanup failed")
+                raise SandboxDestroyError(
+                    "sandbox cleanup failed",
+                    operation="destroy",
+                    failure_class=FailureClass.DESTROY_FAILED,
+                )
             operation = asyncio.create_task(cleanup())
             self._cleanup_generation += 1
             self._cleanup_active_operations.add(operation)
@@ -1021,17 +1139,26 @@ class OpenSandboxClient:
             )
             if operation not in done:
                 await self._cancel_or_quarantine_cleanup(operation)
-                raise SandboxDestroyError("sandbox cleanup failed")
+                raise SandboxDestroyError(
+                    "sandbox cleanup failed",
+                    operation="destroy",
+                    failure_class=FailureClass.DESTROY_FAILED,
+                )
             return operation.result()
         except asyncio.CancelledError:
             await self._cancel_or_quarantine_cleanup(operation)
             raise
         except SandboxDependencyUnavailableError:
             raise SandboxDependencyUnavailableError(
-                "the pinned OpenSandbox SDK is unavailable"
+                "the pinned OpenSandbox SDK is unavailable",
+                operation="destroy",
             ) from None
         except SandboxDestroyError:
-            raise
+            raise SandboxDestroyError(
+                "sandbox cleanup failed",
+                operation="destroy",
+                failure_class=FailureClass.DESTROY_FAILED,
+            ) from None
         except Exception as failure:
             raise SandboxDestroyError(
                 "sandbox cleanup failed",
@@ -1122,7 +1249,8 @@ class OpenSandboxClient:
                 or not 0 <= result <= _RECONCILE_PAGE_SIZE
             ):
                 raise SandboxProtocolError(
-                    "the sandbox service returned an invalid reconciliation result"
+                    "the sandbox service returned an invalid reconciliation result",
+                    operation="destroy",
                 )
             succeeded = True
             return result
@@ -1163,7 +1291,11 @@ class OpenSandboxClient:
                         self._cleanup_reported_failure_generation = (
                             self._cleanup_failure_generation
                         )
-                        raise SandboxDestroyError("sandbox cleanup failed")
+                        raise SandboxDestroyError(
+                            "sandbox cleanup failed",
+                            operation="destroy",
+                            failure_class=FailureClass.DESTROY_FAILED,
+                        )
                     failed = (
                         self._cleanup_failure_generation
                         > self._cleanup_reported_failure_generation
@@ -1172,7 +1304,11 @@ class OpenSandboxClient:
                         self._cleanup_reported_failure_generation = (
                             self._cleanup_failure_generation
                         )
-                        raise SandboxDestroyError("sandbox cleanup failed")
+                        raise SandboxDestroyError(
+                            "sandbox cleanup failed",
+                            operation="destroy",
+                            failure_class=FailureClass.DESTROY_FAILED,
+                        )
             if snapshot:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
@@ -1180,14 +1316,22 @@ class OpenSandboxClient:
                         self._cleanup_reported_failure_generation = (
                             self._cleanup_failure_generation
                         )
-                    raise SandboxDestroyError("sandbox cleanup failed")
+                    raise SandboxDestroyError(
+                        "sandbox cleanup failed",
+                        operation="destroy",
+                        failure_class=FailureClass.DESTROY_FAILED,
+                    )
                 done, _ = await asyncio.wait(snapshot, timeout=remaining)
                 if len(done) != len(snapshot):
                     async with self._cleanup_lock:
                         self._cleanup_reported_failure_generation = (
                             self._cleanup_failure_generation
                         )
-                    raise SandboxDestroyError("sandbox cleanup failed")
+                    raise SandboxDestroyError(
+                        "sandbox cleanup failed",
+                        operation="destroy",
+                        failure_class=FailureClass.DESTROY_FAILED,
+                    )
                 await asyncio.sleep(0)
                 continue
 
@@ -1210,7 +1354,11 @@ class OpenSandboxClient:
                         self._cleanup_reported_failure_generation = (
                             self._cleanup_failure_generation
                         )
-                        raise SandboxDestroyError("sandbox cleanup failed")
+                        raise SandboxDestroyError(
+                            "sandbox cleanup failed",
+                            operation="destroy",
+                            failure_class=FailureClass.DESTROY_FAILED,
+                        )
                     continue
                 if (
                     self._cleanup_failure_generation
@@ -1219,11 +1367,15 @@ class OpenSandboxClient:
                     self._cleanup_reported_failure_generation = (
                         self._cleanup_failure_generation
                     )
-                    raise SandboxDestroyError("sandbox cleanup failed")
+                    raise SandboxDestroyError(
+                        "sandbox cleanup failed",
+                        operation="destroy",
+                        failure_class=FailureClass.DESTROY_FAILED,
+                    )
                 return
 
     async def destroy(self, handle: SandboxHandle) -> None:
-        validated_handle = self._handle(handle)
+        validated_handle = self._handle(handle, operation="destroy")
 
         async def cleanup() -> None:
             await self._factory.destroy(validated_handle.raw)
@@ -1231,7 +1383,11 @@ class OpenSandboxClient:
         await self._cleanup_once(validated_handle.sandbox_id, cleanup)
 
     async def destroy_by_id(self, sandbox_id: str) -> None:
-        validated_id = _validate_id(sandbox_id, server_value=False)
+        validated_id = _validate_id(
+            sandbox_id,
+            server_value=False,
+            operation="destroy",
+        )
 
         async def cleanup() -> None:
             await self._factory.destroy_by_id(validated_id)
@@ -1241,11 +1397,16 @@ class OpenSandboxClient:
     async def destroy_by_job_id(self, job_id: str) -> int:
         """Compensate only sandboxes carrying this broker's fixed job metadata."""
 
-        validated_job_id = _validate_id(job_id, server_value=False)
+        validated_job_id = _validate_id(
+            job_id,
+            server_value=False,
+            operation="destroy",
+        )
         operation = getattr(self._factory, "destroy_by_job_id", None)
         if not callable(operation):
             raise SandboxDependencyUnavailableError(
-                "the pinned OpenSandbox SDK metadata filter is unavailable"
+                "the pinned OpenSandbox SDK metadata filter is unavailable",
+                operation="destroy",
             )
         cleanup_key = ("job", validated_job_id)
 

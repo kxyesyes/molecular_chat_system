@@ -993,6 +993,233 @@ def test_generic_adapter_failures_carry_sanitized_classification(
     assert raised.value.__suppress_context__ is True
 
 
+@pytest.mark.parametrize(
+    ("factory_operation", "client_operation", "expected_operation"),
+    [
+        ("create", "create", "create"),
+        ("upload", "upload", "upload"),
+        ("read", "read", "metadata"),
+        ("list", "list", "metadata"),
+        ("run", "run", "command"),
+        ("destroy", "destroy", "destroy"),
+    ],
+)
+def test_dependency_failures_carry_truthful_public_operation(
+    tmp_path: Path,
+    factory_operation: str,
+    client_operation: str,
+    expected_operation: str,
+) -> None:
+    fake = FakeSandboxFactory()
+    fake.failures[factory_operation] = SandboxDependencyUnavailableError(
+        "private dependency detail"
+    )
+    client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+    handle = SandboxHandle("sandbox-1", fake.raw)
+
+    async def invoke() -> None:
+        if client_operation == "create":
+            await client.create("job-1")
+        elif client_operation == "upload":
+            await client.upload_text(
+                handle, "/workspace/input/receptor.pdb", "ATOM\n"
+            )
+        elif client_operation == "read":
+            await client.read_text(handle, "/workspace/output/result.json")
+        elif client_operation == "list":
+            await client.list_files(handle, "/workspace/output", "*")
+        elif client_operation == "run":
+            await client.run(handle)
+        else:
+            await client.destroy(handle)
+
+    with pytest.raises(SandboxDependencyUnavailableError) as raised:
+        asyncio.run(invoke())
+
+    assert str(raised.value) == "the pinned OpenSandbox SDK is unavailable"
+    assert raised.value.operation == expected_operation
+    assert (
+        raised.value.failure_class
+        is FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE
+    )
+    assert "private dependency detail" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("factory_operation", "client_operation", "error_type", "expected_operation", "failure_class"),
+    [
+        ("create", "create", SandboxCreateError, "create", FailureClass.CREATE_TIMEOUT),
+        (
+            "upload",
+            "upload",
+            SandboxUploadError,
+            "upload",
+            FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+        ),
+        (
+            "read",
+            "read",
+            SandboxReadError,
+            "metadata",
+            FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+        ),
+        ("list", "list", SandboxListError, "command", FailureClass.COMMAND_TIMEOUT),
+        ("run", "run", SandboxRunError, "command", FailureClass.COMMAND_TIMEOUT),
+    ],
+)
+def test_adapter_timeouts_carry_truthful_operation_and_class(
+    tmp_path: Path,
+    factory_operation: str,
+    client_operation: str,
+    error_type: type[SandboxClientError],
+    expected_operation: str,
+    failure_class: FailureClass,
+) -> None:
+    fake = FakeSandboxFactory()
+    fake.failures[factory_operation] = asyncio.TimeoutError()
+    client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+    handle = SandboxHandle("sandbox-1", fake.raw)
+
+    async def invoke() -> None:
+        if client_operation == "create":
+            await client.create("job-1")
+        elif client_operation == "upload":
+            await client.upload_text(
+                handle, "/workspace/input/receptor.pdb", "ATOM\n"
+            )
+        elif client_operation == "read":
+            await client.read_text(handle, "/workspace/output/result.json")
+        elif client_operation == "list":
+            await client.list_files(handle, "/workspace/output", "*")
+        else:
+            await client.run(handle)
+
+    with pytest.raises(error_type) as raised:
+        asyncio.run(invoke())
+
+    assert raised.value.operation == expected_operation
+    assert raised.value.failure_class is failure_class
+
+
+def test_internal_cleanup_timeout_carries_destroy_classification(tmp_path: Path) -> None:
+    class BlockingCleanupFactory(FakeSandboxFactory):
+        async def destroy(self, raw: FakeRawSandbox) -> None:
+            del raw
+            await asyncio.Event().wait()
+
+    async def scenario() -> SandboxDestroyError:
+        fake = BlockingCleanupFactory()
+        client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+        client._cleanup_hard_timeout_seconds = 0.01
+        try:
+            await client.destroy(SandboxHandle("sandbox-timeout", fake.raw))
+        except SandboxDestroyError as raised:
+            return raised
+        raise AssertionError("cleanup timeout was not surfaced")
+
+    raised = asyncio.run(scenario())
+    assert str(raised) == "sandbox cleanup failed"
+    assert raised.operation == "destroy"
+    assert raised.failure_class is FailureClass.DESTROY_FAILED
+
+
+def test_internal_cleanup_breaker_failure_carries_destroy_classification(
+    tmp_path: Path,
+) -> None:
+    fake = FakeSandboxFactory()
+    client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+    client._cleanup_breaker_generation = 1
+
+    with pytest.raises(SandboxDestroyError) as raised:
+        asyncio.run(client.destroy(SandboxHandle("sandbox-1", fake.raw)))
+
+    assert str(raised.value) == "sandbox cleanup failed"
+    assert raised.value.operation == "destroy"
+    assert raised.value.failure_class is FailureClass.DESTROY_FAILED
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_operation"),
+    [
+        ("create", "create"),
+        ("read", "metadata"),
+        ("list", "metadata"),
+        ("run", "command"),
+    ],
+)
+def test_internal_protocol_errors_carry_truthful_operation(
+    tmp_path: Path,
+    operation: str,
+    expected_operation: str,
+) -> None:
+    fake = FakeSandboxFactory()
+    client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+    handle = SandboxHandle("sandbox-1", fake.raw)
+    if operation == "create":
+        fake.raw.id = "invalid identifier"
+        call = client.create("job-1")
+    elif operation == "read":
+        fake.read_chunks = [object()]
+        call = client.read_text(handle, "/workspace/output/result.json")
+    elif operation == "list":
+        fake.list_execution = SimpleNamespace(exit_code="invalid")
+        call = client.list_files(handle, "/workspace/output", "*")
+    else:
+        fake.execution = SimpleNamespace(exit_code="invalid")
+        call = client.run(handle)
+
+    with pytest.raises(SandboxProtocolError) as raised:
+        asyncio.run(call)
+
+    assert raised.value.operation == expected_operation
+    assert (
+        raised.value.failure_class
+        is FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_operation"),
+    [
+        ("create", "create"),
+        ("upload", "upload"),
+        ("read", "metadata"),
+        ("list", "metadata"),
+        ("run", "command"),
+        ("destroy", "destroy"),
+    ],
+)
+def test_public_input_errors_carry_truthful_operation(
+    tmp_path: Path,
+    operation: str,
+    expected_operation: str,
+) -> None:
+    fake = FakeSandboxFactory()
+    client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+    handle = SandboxHandle("sandbox-1", fake.raw)
+    if operation == "create":
+        call = client.create("invalid identifier")
+    elif operation == "upload":
+        call = client.upload_text(handle, "/outside/input.pdb", "ATOM\n")
+    elif operation == "read":
+        call = client.read_text(handle, "/outside/result.json")
+    elif operation == "list":
+        call = client.list_files(handle, "/workspace/output", "**")
+    elif operation == "run":
+        call = client.run(None)  # type: ignore[arg-type]
+    else:
+        call = client.destroy(None)  # type: ignore[arg-type]
+
+    with pytest.raises(SandboxInputError) as raised:
+        asyncio.run(call)
+
+    assert raised.value.operation == expected_operation
+    assert (
+        raised.value.failure_class
+        is FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE
+    )
+
+
 def test_factory_domain_error_messages_are_also_remapped_and_sanitized(
     tmp_path: Path,
 ) -> None:

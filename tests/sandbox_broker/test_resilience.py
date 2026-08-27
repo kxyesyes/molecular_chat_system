@@ -101,6 +101,84 @@ def test_exactly_one_concurrent_half_open_probe_is_permitted() -> None:
     assert granted[0].half_open is True
 
 
+def test_transition_methods_sample_clock_only_after_acquiring_lock() -> None:
+    breaker = ControlPlaneCircuitBreaker(monotonic=Clock())
+
+    def checked_clock() -> float:
+        assert breaker._lock.locked()
+        return 0.0
+
+    breaker._clock = checked_clock
+    permit = breaker.acquire()
+    assert permit is not None
+    assert breaker.state is BreakerState.CLOSED
+    assert breaker.accepts_new_work() is True
+    breaker.record_failure(permit, FailureClass.SERVER_500)
+
+
+def test_concurrent_failure_samples_are_linearized_before_window_and_cooldown() -> None:
+    class OrchestratedClock:
+        def __init__(self) -> None:
+            self._calls = 0
+            self._lock = threading.Lock()
+            self.first_sampled = threading.Event()
+            self.second_sampled = threading.Event()
+            self.allow_first = threading.Event()
+            self.now = 100.0
+
+        def __call__(self) -> float:
+            with self._lock:
+                call = self._calls
+                self._calls += 1
+            if call == 0:
+                self.first_sampled.set()
+                assert self.allow_first.wait(timeout=2.0)
+                return 0.0
+            if call == 1:
+                self.second_sampled.set()
+                return 100.0
+            return self.now
+
+    breaker = ControlPlaneCircuitBreaker(monotonic=Clock())
+    permits = [breaker.acquire() for _ in range(4)]
+    assert all(permit is not None for permit in permits)
+    first, second, third, fourth = permits
+    assert first is not None
+    assert second is not None
+    assert third is not None
+    assert fourth is not None
+    clock = OrchestratedClock()
+    breaker._clock = clock
+    first_done = threading.Event()
+    second_done = threading.Event()
+
+    def fail(permit: BreakerPermit, done: threading.Event) -> None:
+        breaker.record_failure(permit, FailureClass.SERVER_500)
+        done.set()
+
+    older = threading.Thread(target=fail, args=(first, first_done))
+    newer = threading.Thread(target=fail, args=(second, second_done))
+    older.start()
+    assert clock.first_sampled.wait(timeout=2.0)
+    newer.start()
+    sampled_before_linearization = clock.second_sampled.wait(timeout=0.1)
+    clock.allow_first.set()
+    older.join(timeout=2.0)
+    newer.join(timeout=2.0)
+
+    assert sampled_before_linearization is False
+    assert first_done.is_set() and second_done.is_set()
+    breaker.record_failure(third, FailureClass.SERVER_500)
+    assert breaker.state is BreakerState.CLOSED
+    breaker.record_failure(fourth, FailureClass.SERVER_500)
+    assert breaker.state is BreakerState.OPEN
+
+    clock.now = 129.999
+    assert breaker.state is BreakerState.OPEN
+    clock.now = 130.0
+    assert breaker.state is BreakerState.HALF_OPEN
+
+
 def test_failures_more_than_sixty_seconds_apart_do_not_accumulate() -> None:
     clock = Clock()
     breaker = ControlPlaneCircuitBreaker(monotonic=clock)
@@ -137,6 +215,85 @@ def test_success_resets_consecutive_failure_history() -> None:
     assert breaker.state is BreakerState.CLOSED
 
 
+def test_duplicate_ordinary_failure_permit_counts_exactly_once() -> None:
+    breaker = ControlPlaneCircuitBreaker(monotonic=Clock())
+    permit = breaker.acquire()
+    assert permit is not None
+
+    for _ in range(3):
+        breaker.record_failure(permit, FailureClass.SERVER_500)
+
+    assert breaker.state is BreakerState.CLOSED
+    _record_failures(breaker, 2)
+    assert breaker.state is BreakerState.OPEN
+
+
+def test_consumed_ordinary_failure_cannot_later_reset_newer_failures() -> None:
+    breaker = ControlPlaneCircuitBreaker(monotonic=Clock())
+    old = breaker.acquire()
+    assert old is not None
+    breaker.record_failure(old, FailureClass.SERVER_500)
+    _record_failures(breaker, 1)
+
+    breaker.record_success(old)
+    _record_failures(breaker, 1)
+
+    assert breaker.state is BreakerState.OPEN
+
+
+def test_racing_success_and_failure_claim_ordinary_permit_once() -> None:
+    breaker = ControlPlaneCircuitBreaker(monotonic=Clock())
+    permit = breaker.acquire()
+    assert permit is not None
+    barrier = threading.Barrier(3)
+
+    def succeed() -> None:
+        barrier.wait()
+        breaker.record_success(permit)
+
+    def fail() -> None:
+        barrier.wait()
+        breaker.record_failure(permit, FailureClass.SERVER_500)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        success = executor.submit(succeed)
+        failure = executor.submit(fail)
+        barrier.wait()
+        success.result()
+        failure.result()
+
+    observed_failures = len(breaker._failures)
+    assert observed_failures in {0, 1}
+    assert permit._claimed is True
+    breaker.record_failure(permit, FailureClass.SERVER_500)
+    breaker.record_success(permit)
+    breaker.release(permit)
+    assert len(breaker._failures) == observed_failures
+    assert breaker.state is BreakerState.CLOSED
+
+
+def test_cross_breaker_and_forged_permits_are_ignored_without_claiming_owner_token() -> None:
+    first = ControlPlaneCircuitBreaker(monotonic=Clock())
+    second = ControlPlaneCircuitBreaker(monotonic=Clock())
+    owned = first.acquire()
+    assert owned is not None
+    forged = BreakerPermit(owned.generation, owned.half_open)
+
+    second.record_failure(owned, FailureClass.SERVER_500)
+    second.record_success(owned)
+    second.release(owned)
+    first.record_failure(forged, FailureClass.SERVER_500)
+
+    assert second.state is BreakerState.CLOSED
+    assert first.state is BreakerState.CLOSED
+    assert owned._claimed is False
+    assert not hasattr(owned, "__dict__")
+
+    first.record_failure(owned, FailureClass.SERVER_500)
+    assert owned._claimed is True
+    assert len(first._failures) == 1
+
+
 @pytest.mark.parametrize(
     "failure_class",
     [FailureClass.RESOURCE_LIMIT, FailureClass.NONE],
@@ -147,6 +304,34 @@ def test_excluded_failure_classes_do_not_count(failure_class: FailureClass) -> N
     _record_failures(breaker, 10, failure_class)
 
     assert breaker.state is BreakerState.CLOSED
+
+
+@pytest.mark.parametrize(
+    "failure_class",
+    [FailureClass.RESOURCE_LIMIT, FailureClass.NONE],
+)
+def test_excluded_half_open_observation_consumes_probe_and_allows_replacement(
+    failure_class: FailureClass,
+) -> None:
+    clock = Clock()
+    breaker = ControlPlaneCircuitBreaker(monotonic=clock)
+    _record_failures(breaker, 3)
+    clock.advance(30.0)
+    excluded = breaker.acquire()
+    assert excluded is not None and excluded.half_open is True
+
+    breaker.record_failure(excluded, failure_class)
+
+    assert breaker.state is BreakerState.HALF_OPEN
+    replacement = breaker.acquire()
+    assert replacement is not None and replacement.half_open is True
+    assert replacement.generation == excluded.generation + 1
+    assert breaker.acquire() is None
+    breaker.record_success(excluded)
+    breaker.record_failure(excluded, FailureClass.SERVER_500)
+    breaker.release(excluded)
+    assert breaker.state is BreakerState.HALF_OPEN
+    assert breaker.acquire() is None
 
 
 def test_stale_permits_cannot_change_new_generation() -> None:
