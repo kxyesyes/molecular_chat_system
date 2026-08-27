@@ -287,7 +287,11 @@ def test_dependency_profiles_are_exact_and_sdk_compatible() -> None:
         "uvicorn",
     }
     expected_versions = {
-        "attrs": "21.3.0",
+        # OpenSandbox 0.1.15's generated API clients use
+        # ``attrs.field(alias=...)`` even though its wheel metadata only
+        # declares attrs>=21.3.0.  attrs 21.3.0 therefore resolves cleanly but
+        # crashes while importing the SDK.  Keep the runtime-verified pin.
+        "attrs": "26.1.0",
         "fastapi": "0.104.1",
         "httpx": "0.27.0",
         "opensandbox": "0.1.15",

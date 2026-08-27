@@ -104,13 +104,13 @@ _PINNED_ASSET_SHA256 = {
         "15fb8b7faa079b9a33328081c751a75c72a2d68e1b92b676b55150438064f982"
     ),
     "deployment/opensandbox/requirements-medchat-linux-x86_64.in": (
-        "2b31fcf26d0cc568acefae388800f1f07cca5337f55168b08c51b0a00128a166"
+        "97095a2e2ecd80e64b2a7bd890a0345b00c510cae049698aa7d7463369ffb903"
     ),
     "deployment/opensandbox/requirements-opensandbox-server-linux-x86_64.in": (
         "e9c8fd13106a0aa7490cb449b45ad16a96eb401bd38574fd9d5f5e2d2ea91e3b"
     ),
     "deployment/opensandbox/requirements-medchat-linux-x86_64.lock": (
-        "d5db4d8b615ef823d6d0e2e5f07d845e470a3a57de6be31457bb87596df530cc"
+        "f540ee4bee831faa1e6590a051d36061ff301bdf0bbf9a49510253bc6f28ea8f"
     ),
     "deployment/opensandbox/requirements-opensandbox-server-linux-x86_64.lock": (
         "8b47a103312205f51ee8109a7280d9ca113c78fc1090cdf3bbc6b2f2bcd8fc4b"
