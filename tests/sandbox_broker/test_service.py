@@ -1154,7 +1154,7 @@ def test_transient_create_does_not_retry_without_confirmed_reconciliation(
     assert "sandbox_auto_expires_within_configured_remote_lifetime" in terminal.warnings
 
 
-@pytest.mark.parametrize("reconciliation", [True, -1, 1.0, "0", None])
+@pytest.mark.parametrize("reconciliation", [True, -1, 1, 1.0, "0", None])
 def test_transient_create_does_not_retry_after_invalid_reconciliation_result(
     tmp_path: Path,
     reconciliation: object,
@@ -1282,6 +1282,57 @@ def test_create_cancellation_after_reconciliation_blocks_second_create(
     assert sdk.create_count == 1
 
 
+def test_create_retry_preserves_cancellation_during_reconciliation(
+    tmp_path: Path,
+) -> None:
+    class ResistantReconciliationClient(FakeSandboxClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reconcile_started = asyncio.Event()
+            self.reconcile_cancelled = asyncio.Event()
+            self.reconcile_release = asyncio.Event()
+
+        async def create(self, job_id: str) -> SandboxHandle:
+            del job_id
+            self.create_count += 1
+            raise SandboxCreateError("sandbox provisioning failed")
+
+        async def destroy_by_job_id(self, job_id: str) -> int:
+            del job_id
+            self.reconcile_started.set()
+            try:
+                await self.reconcile_release.wait()
+            except asyncio.CancelledError:
+                self.reconcile_cancelled.set()
+                await self.reconcile_release.wait()
+            return 0
+
+    async def scenario() -> tuple[SandboxBrokerService, ResistantReconciliationClient]:
+        sdk = ResistantReconciliationClient()
+        service, _, _ = _service(tmp_path, sdk)
+        service._create_retry_delay_seconds = 0.0
+        service._run_cancel_grace_seconds = 0.01
+        retry = asyncio.create_task(service._create_with_retry("job-cancel-reconcile"))
+        await sdk.reconcile_started.wait()
+        retry.cancel()
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(retry), timeout=0.5)
+            assert sdk.reconcile_cancelled.is_set()
+            assert len(service._isolated_tasks) == 1
+        finally:
+            sdk.reconcile_release.set()
+            for _ in range(20):
+                if not service._isolated_tasks:
+                    break
+                await asyncio.sleep(0)
+        return service, sdk
+
+    service, sdk = asyncio.run(scenario())
+    assert sdk.create_count == 1
+    assert service._isolated_tasks == set()
+
+
 def test_reconciliation_cannot_extend_absolute_create_retry_deadline(
     tmp_path: Path,
 ) -> None:
@@ -1338,28 +1389,103 @@ def test_blocking_reconciliation_is_bounded_by_absolute_create_deadline(
                 await self.reconcile_release.wait()
             return 0
 
-    async def scenario() -> tuple[object, ResistantReconciliationClient, float]:
+    async def scenario() -> tuple[object, ResistantReconciliationClient, bool]:
         sdk = ResistantReconciliationClient()
         service, _, config = _service(tmp_path, sdk)
         service._create_hard_timeout_seconds = 0.02
         service._destroy_hard_timeout_seconds = 0.2
         service._create_retry_delay_seconds = 0.0
         await service.start()
-        started = asyncio.get_running_loop().time()
         job = await service.submit(_prepared(config), "idem-create-bounded-reconcile")
-        terminal = await service.wait_terminal(job.job_id)
-        elapsed = asyncio.get_running_loop().time() - started
         await sdk.reconcile_cancelled.wait()
+        terminal = await asyncio.wait_for(
+            service.wait_terminal(job.job_id), timeout=0.5
+        )
+        completed_before_release = not sdk.reconcile_release.is_set()
         sdk.reconcile_release.set()
         await asyncio.sleep(0)
         await service.stop()
-        return terminal, sdk, elapsed
+        return terminal, sdk, completed_before_release
 
-    terminal, sdk, elapsed = asyncio.run(scenario())
+    terminal, sdk, completed_before_release = asyncio.run(scenario())
     assert terminal.status is BrokerJobStatus.FAILED
     assert terminal.cleanup_status == "failed"
     assert sdk.create_count == 1
-    assert elapsed < 0.1
+    assert completed_before_release is True
+
+
+def test_late_cancellation_resistant_create_is_owned_and_cleaned_before_stop(
+    tmp_path: Path,
+) -> None:
+    class LateCreateClient(FakeSandboxClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.create_started = asyncio.Event()
+            self.create_cancelled = asyncio.Event()
+            self.create_release = asyncio.Event()
+            self.live_ids: set[str] = set()
+
+        async def create(self, job_id: str) -> SandboxHandle:
+            self.create_count += 1
+            self.create_started.set()
+            try:
+                await self.create_release.wait()
+            except asyncio.CancelledError:
+                self.create_cancelled.set()
+                await self.create_release.wait()
+            sandbox_id = f"sandbox-{job_id}-late"
+            self.live_ids.add(sandbox_id)
+            return SandboxHandle(sandbox_id, object())
+
+        async def destroy(self, handle: SandboxHandle) -> None:
+            self.destroy_count += 1
+            self.destroyed_ids.append(handle.sandbox_id)
+            self.live_ids.discard(handle.sandbox_id)
+
+    async def scenario() -> tuple[object, LateCreateClient, bool, list[str]]:
+        sdk = LateCreateClient()
+        service, _, config = _service(tmp_path, sdk)
+        service._create_hard_timeout_seconds = 0.02
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-late-create-cleanup")
+        await sdk.create_started.wait()
+        terminal = await asyncio.wait_for(
+            service.wait_terminal(job.job_id), timeout=0.5
+        )
+        assert sdk.create_cancelled.is_set()
+
+        stop_incomplete = False
+        try:
+            await service.stop(timeout=0.05)
+        except StopIncomplete:
+            stop_incomplete = True
+        tracked_before_release = bool(service._create_tasks)
+
+        sdk.create_release.set()
+        await service.stop(timeout=1.0)
+        await asyncio.sleep(0)
+        leaked = [
+            task.get_name()
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith("sandbox-broker-")
+        ]
+        assert service._create_tasks == {}
+        assert service._cleanup_tasks == {}
+        assert service._isolated_tasks == set()
+        return terminal, sdk, stop_incomplete and tracked_before_release, leaked
+
+    terminal, sdk, shutdown_waited, leaked = asyncio.run(scenario())
+    assert shutdown_waited is True
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.CLEANUP_FAILED.value
+    assert terminal.cleanup_status == "failed"
+    assert "sandbox_auto_expires_within_configured_remote_lifetime" in terminal.warnings
+    assert sdk.create_count == 1
+    assert sdk.destroy_count == 1
+    assert sdk.destroyed_ids == [f"sandbox-{terminal.job_id}-late"]
+    assert sdk.live_ids == set()
+    assert leaked == []
 
 
 def test_execution_timeout_and_command_failure_are_stable_and_cleanup(
@@ -2786,7 +2912,7 @@ def test_hung_create_hits_hard_deadline_and_never_claims_cleanup_success(
                     continue
             return SandboxHandle(f"sandbox-{job_id}", object())
 
-    async def scenario() -> tuple[object, float, list[str]]:
+    async def scenario() -> tuple[object, CancellationResistantCreate, list[str]]:
         sdk = CancellationResistantCreate()
         service, _, config = _service(tmp_path, sdk)
         service._create_hard_timeout_seconds = 0.03
@@ -2794,12 +2920,15 @@ def test_hung_create_hits_hard_deadline_and_never_claims_cleanup_success(
         await service.start()
         job = await service.submit(_prepared(config), "idem-hung-create")
         await sdk.started.wait()
-        started = asyncio.get_running_loop().time()
-        await service.stop(timeout=0.5)
-        elapsed = asyncio.get_running_loop().time() - started
-        terminal = service.get_job(job.job_id)
+        terminal = await asyncio.wait_for(
+            service.wait_terminal(job.job_id), timeout=0.5
+        )
+        with pytest.raises(StopIncomplete, match="shutdown is incomplete"):
+            await service.stop(timeout=0.05)
+        assert service._create_tasks
         sdk.release_create.set()
-        await asyncio.sleep(0.02)
+        await service.stop(timeout=0.5)
+        await asyncio.sleep(0)
         leaked = [
             task.get_name()
             for task in asyncio.all_tasks()
@@ -2807,13 +2936,15 @@ def test_hung_create_hits_hard_deadline_and_never_claims_cleanup_success(
             and task.get_name().startswith("sandbox-broker-")
             and not task.done()
         ]
-        return terminal, elapsed, leaked
+        return terminal, sdk, leaked
 
-    terminal, elapsed, leaked = asyncio.run(scenario())
-    assert elapsed < 0.5
+    terminal, sdk, leaked = asyncio.run(scenario())
     assert terminal.status is BrokerJobStatus.FAILED
     assert terminal.cleanup_status == "failed"
     assert "sandbox_auto_expires_within_configured_remote_lifetime" in terminal.warnings
+    assert sdk.create_count == 1
+    assert sdk.destroy_count == 1
+    assert sdk.destroyed_ids == [f"sandbox-{terminal.job_id}"]
     assert leaked == []
 
 

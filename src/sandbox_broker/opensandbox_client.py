@@ -1092,6 +1092,7 @@ class OpenSandboxClient:
             else sandbox_factory
         )
         self._cleanup_in_flight: dict[tuple[str, str], asyncio.Task[Any]] = {}
+        self._cleanup_waiters: dict[asyncio.Task[Any], int] = {}
         self._cleanup_completed: OrderedDict[str, None] = OrderedDict()
         self._cleanup_completed_limit = _CLEANUP_COMPLETED_LIMIT
         self._cleanup_hard_timeout_seconds = float(_SDK_REQUEST_TIMEOUT_SECONDS)
@@ -1572,11 +1573,30 @@ class OpenSandboxClient:
         cleanup: Any,
     ) -> Any:
         succeeded = False
+        task = asyncio.current_task()
+        uncertain_operation: asyncio.Task[Any] | None = None
+
+        def retain_identity(operation: asyncio.Task[Any]) -> None:
+            nonlocal uncertain_operation
+            if uncertain_operation is not None:
+                return
+            uncertain_operation = operation
+            operation.add_done_callback(
+                lambda completed: self._release_uncertain_cleanup_identity(
+                    cleanup_key,
+                    task,
+                    completed,
+                )
+            )
+
         try:
             if isinstance(self._factory, _OfficialSandboxFactory):
                 result = await cleanup()
             else:
-                result = await self._perform_cleanup(cleanup)
+                result = await self._perform_cleanup(
+                    cleanup,
+                    retain_uncertain_operation=retain_identity,
+                )
             if (
                 type(result) is not int
                 or not 0 <= result <= _RECONCILE_PAGE_SIZE
@@ -1593,9 +1613,11 @@ class OpenSandboxClient:
             failure.__traceback__ = None
             raise
         finally:
-            task = asyncio.current_task()
             async with self._cleanup_lock:
-                if self._cleanup_in_flight.get(cleanup_key) is task:
+                if (
+                    uncertain_operation is None
+                    and self._cleanup_in_flight.get(cleanup_key) is task
+                ):
                     del self._cleanup_in_flight[cleanup_key]
                 if not succeeded:
                     self._cleanup_failure_generation += 1
@@ -1774,9 +1796,22 @@ class OpenSandboxClient:
                 self._cleanup_generation += 1
                 self._cleanup_in_flight[cleanup_key] = task
                 task.add_done_callback(self._consume_cleanup_task)
+            self._cleanup_waiters[task] = self._cleanup_waiters.get(task, 0) + 1
+        cancelled = False
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
-            task.cancel()
-            await asyncio.sleep(0)
+            cancelled = True
             raise
+        finally:
+            cancel_owner = False
+            async with self._cleanup_lock:
+                remaining_waiters = self._cleanup_waiters.get(task, 1) - 1
+                if remaining_waiters > 0:
+                    self._cleanup_waiters[task] = remaining_waiters
+                else:
+                    self._cleanup_waiters.pop(task, None)
+                    cancel_owner = cancelled and not task.done()
+            if cancel_owner:
+                task.cancel()
+                await asyncio.sleep(0)

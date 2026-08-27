@@ -1327,50 +1327,86 @@ class SandboxBrokerService:
         job_id: str,
         deadline: float,
     ) -> tuple[object, bool]:
-        """Let the bounded SDK create finish even when its caller is cancelled."""
+        """Run one create while retaining ownership of any late SDK result."""
 
         create_task = asyncio.create_task(
             self.client.create(job_id),
             name=f"sandbox-broker-create-{job_id}",
         )
         self._create_tasks[job_id] = create_task
-        interrupted = False
         try:
             while not create_task.done():
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     create_task.cancel()
+                    await asyncio.sleep(0)
+                    self._retain_late_create(job_id, create_task)
                     confirmed = await self._reconcile_unknown_create(
                         job_id, deadline
                     )
-                    if not create_task.done():
-                        create_task.add_done_callback(self._consume_task_exception)
-                    else:
-                        self._consume_task_exception(create_task)
                     raise _CreateHardDeadline(confirmed)
                 try:
                     await asyncio.wait_for(
                         asyncio.shield(create_task), timeout=remaining
                     )
                 except asyncio.CancelledError:
-                    interrupted = True
-                    continue
+                    create_task.cancel()
+                    await asyncio.sleep(0)
+                    self._retain_late_create(job_id, create_task)
+                    raise
                 except asyncio.TimeoutError:
                     create_task.cancel()
+                    await asyncio.sleep(0)
+                    self._retain_late_create(job_id, create_task)
                     confirmed = await self._reconcile_unknown_create(
                         job_id, deadline
                     )
-                    if not create_task.done():
-                        create_task.add_done_callback(self._consume_task_exception)
-                    else:
-                        self._consume_task_exception(create_task)
                     raise _CreateHardDeadline(confirmed) from None
                 except BaseException:
                     break
-            return create_task.result(), interrupted
+            return create_task.result(), False
         finally:
             if self._create_tasks.get(job_id) is create_task:
                 del self._create_tasks[job_id]
+
+    def _retain_late_create(
+        self,
+        job_id: str,
+        create_task: asyncio.Task[Any],
+    ) -> None:
+        lifecycle = asyncio.create_task(
+            self._drain_late_create(job_id, create_task),
+            name=f"sandbox-broker-late-create-{job_id}",
+        )
+        self._create_tasks[job_id] = lifecycle
+
+        def late_create_finished(task: asyncio.Task[Any]) -> None:
+            if self._create_tasks.get(job_id) is task:
+                del self._create_tasks[job_id]
+            self._consume_task_exception(task)
+
+        lifecycle.add_done_callback(late_create_finished)
+
+    async def _drain_late_create(
+        self,
+        job_id: str,
+        create_task: asyncio.Task[Any],
+    ) -> None:
+        try:
+            created = await create_task
+        except BaseException:
+            return
+        if type(created) is not SandboxHandle:
+            return
+        try:
+            await self._destroy_once(job_id, created)
+        finally:
+            cleanup_task = self._cleanup_tasks.get(job_id)
+            if cleanup_task is not None:
+                try:
+                    await asyncio.shield(cleanup_task)
+                except BaseException:
+                    pass
 
     async def _create_with_retry(self, job_id: str) -> tuple[object, bool]:
         loop = asyncio.get_running_loop()
@@ -1416,22 +1452,31 @@ class SandboxBrokerService:
                 asyncio.shield(task),
                 timeout=min(self._destroy_hard_timeout_seconds, remaining),
             )
-            return type(destroyed) is int and destroyed >= 0
+            return type(destroyed) is int and destroyed == 0
+        except asyncio.CancelledError:
+            await self._cancel_and_isolate_reconciliation(task)
+            raise
         except BaseException:
-            if not task.done():
-                task.cancel()
-                await asyncio.sleep(0)
-            if not task.done():
-                self._isolated_tasks.add(task)
-
-                def reconcile_finished(completed: asyncio.Task[Any]) -> None:
-                    self._isolated_tasks.discard(completed)
-                    self._consume_task_exception(completed)
-
-                task.add_done_callback(reconcile_finished)
-            else:
-                self._consume_task_exception(task)
+            await self._cancel_and_isolate_reconciliation(task)
             return False
+
+    async def _cancel_and_isolate_reconciliation(
+        self,
+        task: asyncio.Task[Any],
+    ) -> None:
+        if not task.done():
+            task.cancel()
+            await asyncio.sleep(0)
+        if not task.done():
+            self._isolated_tasks.add(task)
+
+            def reconcile_finished(completed: asyncio.Task[Any]) -> None:
+                self._isolated_tasks.discard(completed)
+                self._consume_task_exception(completed)
+
+            task.add_done_callback(reconcile_finished)
+        else:
+            self._consume_task_exception(task)
 
     async def cancel(self, job_id: str) -> BrokerJobView:
         """Persist and signal cancellation without cancelling lifecycle tasks."""

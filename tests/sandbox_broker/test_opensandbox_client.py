@@ -2228,6 +2228,111 @@ def test_destroy_by_job_id_is_a_fixed_metadata_filtered_compensation(
     assert fake.job_ids == ["job-1"]
 
 
+def test_cancelled_metadata_waiter_does_not_cancel_shared_reconciliation(
+    tmp_path: Path,
+) -> None:
+    class SharedCompensationFactory(FakeSandboxFactory):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.count = 0
+
+        async def destroy_by_job_id(self, job_id: str) -> int:
+            del job_id
+            self.count += 1
+            self.started.set()
+            await self.release.wait()
+            return 0
+
+    async def scenario() -> tuple[OpenSandboxClient, SharedCompensationFactory, object]:
+        fake = SharedCompensationFactory()
+        client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+        cancelled = asyncio.create_task(client.destroy_by_job_id("job-shared"))
+        survivor = asyncio.create_task(client.destroy_by_job_id("job-shared"))
+        await fake.started.wait()
+        cancelled.cancel()
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await cancelled
+            await asyncio.sleep(0)
+            survivor_was_pending = not survivor.done()
+        finally:
+            fake.release.set()
+        result = await asyncio.gather(survivor, return_exceptions=True)
+        try:
+            await client.drain_cleanup()
+        except SandboxDestroyError:
+            pass
+        return client, fake, (survivor_was_pending, result[0])
+
+    client, fake, outcome = asyncio.run(scenario())
+    assert outcome == (True, 0)
+    assert fake.count == 1
+    assert client._cleanup_in_flight == {}
+    assert client._cleanup_waiters == {}
+
+
+def test_resistant_metadata_timeout_retains_job_identity_until_raw_completion(
+    tmp_path: Path,
+) -> None:
+    class ResistantCompensationFactory(FakeSandboxFactory):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+            self.release = asyncio.Event()
+            self.count = 0
+            self.active = 0
+            self.max_active = 0
+
+        async def destroy_by_job_id(self, job_id: str) -> int:
+            del job_id
+            self.count += 1
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            self.started.set()
+            try:
+                try:
+                    await self.release.wait()
+                except asyncio.CancelledError:
+                    self.cancelled.set()
+                    await self.release.wait()
+                return 0
+            finally:
+                self.active -= 1
+
+    async def scenario() -> tuple[OpenSandboxClient, ResistantCompensationFactory, int]:
+        fake = ResistantCompensationFactory()
+        client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+        client._cleanup_hard_timeout_seconds = 0.02
+        client._cleanup_drain_margin_seconds = 0.05
+        try:
+            with pytest.raises(SandboxDestroyError, match="cleanup failed"):
+                await client.destroy_by_job_id("job-resistant")
+            with pytest.raises(SandboxDestroyError, match="cleanup failed") as second:
+                await client.destroy_by_job_id("job-resistant")
+            assert "private" not in str(second.value)
+            retained = len(client._cleanup_in_flight)
+        finally:
+            fake.release.set()
+            for _ in range(10):
+                await asyncio.sleep(0)
+        with pytest.raises(SandboxDestroyError, match="cleanup failed"):
+            await client.drain_cleanup()
+        await client.drain_cleanup()
+        return client, fake, retained
+
+    client, fake, retained = asyncio.run(scenario())
+    assert fake.cancelled.is_set()
+    assert fake.count == 1
+    assert fake.max_active == 1
+    assert retained == 1
+    assert client._cleanup_in_flight == {}
+    assert client._cleanup_waiters == {}
+    assert client._cleanup_quarantine == set()
+
+
 def test_destroy_by_job_id_is_hard_bounded_and_visible_to_drain(
     tmp_path: Path,
 ) -> None:
