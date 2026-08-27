@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 from prometheus_client import CollectorRegistry
+from prometheus_client.core import GaugeMetricFamily
 from prometheus_client.parser import text_string_to_metric_families
 from pydantic import ValidationError
 
@@ -438,23 +439,6 @@ def test_importing_telemetry_does_not_initialize_agent_persistence() -> None:
         pytest.param(
             {
                 "phase": Phase.COMMAND_COMPLETED,
-                "outcome": "failed",
-                "duration_ms": 1,
-            },
-            id="failed-completed-missing-failure",
-        ),
-        pytest.param(
-            {
-                "phase": Phase.COMMAND_COMPLETED,
-                "outcome": "failed",
-                "failure_class": FailureClass.NONE,
-                "duration_ms": 1,
-            },
-            id="failed-completed-none-failure",
-        ),
-        pytest.param(
-            {
-                "phase": Phase.COMMAND_COMPLETED,
                 "outcome": "cancelled",
                 "failure_class": FailureClass.COMMAND_TIMEOUT,
                 "duration_ms": 1,
@@ -578,23 +562,6 @@ def test_importing_telemetry_does_not_initialize_agent_persistence() -> None:
         pytest.param(
             {
                 "phase": Phase.JOB_TERMINAL,
-                "outcome": "failed",
-                "cleanup_status": "failed",
-            },
-            id="failed-terminal-missing-failure",
-        ),
-        pytest.param(
-            {
-                "phase": Phase.JOB_TERMINAL,
-                "outcome": "failed",
-                "failure_class": FailureClass.NONE,
-                "cleanup_status": "failed",
-            },
-            id="failed-terminal-none-failure",
-        ),
-        pytest.param(
-            {
-                "phase": Phase.JOB_TERMINAL,
                 "outcome": "passed",
                 "failure_class": FailureClass.SERVER_500,
                 "cleanup_status": "succeeded",
@@ -676,6 +643,64 @@ def test_event_schema_accepts_coherent_lifecycle_combinations(
     )
 
     assert telemetry_event.phase is overrides["phase"]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param(
+            {
+                "phase": Phase.VALIDATION_COMPLETED,
+                "outcome": "failed",
+                "duration_ms": 1,
+            },
+            id="failed-scientific-validation-without-control-plane-class",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.UPLOAD_COMPLETED,
+                "outcome": "failed",
+                "failure_class": FailureClass.NONE,
+                "duration_ms": 1,
+            },
+            id="failed-artifact-business-outcome-with-none-class",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.JOB_TERMINAL,
+                "outcome": "failed",
+                "cleanup_status": "failed",
+            },
+            id="failed-terminal-without-control-plane-class",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.JOB_TERMINAL,
+                "outcome": "failed",
+                "failure_class": FailureClass.NONE,
+                "cleanup_status": "failed",
+            },
+            id="failed-terminal-with-none-class",
+        ),
+        pytest.param(
+            {
+                "phase": Phase.COMMAND_COMPLETED,
+                "outcome": "failed",
+                "failure_class": FailureClass.COMMAND_TIMEOUT,
+                "duration_ms": 1,
+            },
+            id="failed-control-plane-outcome-with-concrete-class",
+        ),
+    ],
+)
+def test_event_schema_accepts_failed_outcomes_with_truthful_classification(
+    overrides: dict[str, object],
+) -> None:
+    telemetry_event = BrokerTelemetryEvent.model_validate(
+        valid_event_payload(**overrides)
+    )
+
+    assert telemetry_event.outcome == "failed"
 
 
 @pytest.mark.parametrize("attempt", [0, 3, True, 1.0, "1"])
@@ -1189,6 +1214,38 @@ def test_logger_handler_can_reenter_snapshot_without_deadlock() -> None:
 
     assert not worker.is_alive()
     assert handled.is_set()
+
+
+def test_prometheus_collector_can_reenter_snapshot_without_deadlock() -> None:
+    registry = CollectorRegistry()
+    telemetry = BrokerTelemetry(registry=registry)
+
+    class SnapshotCollector:
+        def collect(self):
+            snapshot = telemetry.snapshot()
+            yield GaugeMetricFamily(
+                "medchat_test_reentrant_snapshot",
+                "Reentrant telemetry snapshot schema",
+                value=snapshot["schema_version"],
+            )
+
+    registry.register(SnapshotCollector())
+    result: dict[str, bytes] = {}
+    failures: list[BaseException] = []
+
+    def scrape() -> None:
+        try:
+            result["value"] = telemetry.prometheus_text()
+        except BaseException as failure:
+            failures.append(failure)
+
+    worker = threading.Thread(target=scrape, daemon=True)
+    worker.start()
+    worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert not failures
+    assert b"medchat_test_reentrant_snapshot 1.0" in result["value"]
 
 
 @pytest.mark.parametrize(

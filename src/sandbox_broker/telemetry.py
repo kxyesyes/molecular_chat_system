@@ -288,9 +288,8 @@ class BrokerTelemetryEvent(BaseModel):
 
     def _validate_outcome_failure_class(self) -> None:
         if self.outcome == "failed":
-            if self.failure_class in {None, FailureClass.NONE}:
-                raise ValueError("failed outcome requires failure class")
-        elif self.failure_class is not None:
+            return
+        if self.failure_class is not None:
             raise ValueError("non-failed outcome cannot contain failure class")
 
 
@@ -344,7 +343,7 @@ class BrokerTelemetry:
         self._logger = logger or logging.getLogger(
             "medchat.sandbox_broker.telemetry"
         )
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._counters: Counter[tuple[str, ...]] = Counter()
         self._latencies: dict[tuple[str, str], list[int]] = defaultdict(list)
         self._events: deque[dict[str, object]] = deque(maxlen=1024)
