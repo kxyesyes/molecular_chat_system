@@ -394,7 +394,7 @@ if args[:2] == ["network", "inspect"]:
         '{{index .Options "com.docker.network.bridge.name"}}': "br-medchat-sbox",
         '{{index .Options "com.docker.network.bridge.enable_icc"}}': "false",
         "{{json .Labels}}": '{"com.medchat.opensandbox.network":"v1"}',
-        '{{range $id, $_ := .Containers}}{{$id}}{{"\\n"}}{{end}}': os.environ.get(
+        '{{range $id, $_ := .Containers}}{{$id}}{{"\\\\n"}}{{end}}': os.environ.get(
             "FAKE_ATTACHED_CONTAINER", ""
         ),
     }
