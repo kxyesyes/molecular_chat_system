@@ -9,6 +9,8 @@ import logging
 import math
 import threading
 import time
+from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -97,328 +99,540 @@ def _normalize_symbol(symbol: str) -> str:
     return symbol
 
 
-def _resolved_aliases(tree: ast.Module) -> dict[str, str]:
-    aliases: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for imported in node.names:
-                aliases[imported.asname or imported.name] = imported.name
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            for imported in node.names:
-                aliases[imported.asname or imported.name] = _normalize_symbol(
-                    f"{node.module}.{imported.name}"
-                )
+@dataclass(frozen=True)
+class _PartialString:
+    fragments: tuple[str, ...] = ()
+    unresolved: bool = True
 
-    def resolve(node: ast.expr) -> str:
+    @property
+    def exact(self) -> str | None:
+        return None if self.unresolved else "".join(self.fragments)
+
+    @property
+    def known(self) -> str:
+        return "".join(self.fragments)
+
+
+@dataclass
+class _LexicalScope:
+    parent: _LexicalScope | None
+    kind: str
+    function: str | None
+    symbols: dict[str, str | None] = field(default_factory=dict)
+    strings: dict[str, _PartialString | None] = field(default_factory=dict)
+    environment: list[_PartialString] = field(default_factory=list)
+    starts_listener: bool = False
+
+
+@dataclass(frozen=True)
+class _SourceAnalysis:
+    tree: ast.Module
+    calls: tuple[tuple[ast.Call, str, str | None], ...]
+    violations: frozenset[str]
+    environment_names: frozenset[str]
+
+
+class _StatementOrderedAnalyzer:
+    def __init__(self, tree: ast.Module) -> None:
+        self.tree = tree
+        self.calls: list[tuple[ast.Call, str, str | None]] = []
+        self.violations: set[str] = set()
+        self.environment_names: set[str] = set()
+        self.scopes: list[_LexicalScope] = []
+
+    def analyze(self) -> _SourceAnalysis:
+        module = _LexicalScope(None, "module", None)
+        self.scopes.append(module)
+        self._visit_block(self.tree.body, module)
+        for scope in self.scopes:
+            if scope.starts_listener and any(
+                value.unresolved for value in scope.environment
+            ):
+                self.violations.add("metrics.environment")
+        return _SourceAnalysis(
+            tree=self.tree,
+            calls=tuple(self.calls),
+            violations=frozenset(self.violations),
+            environment_names=frozenset(self.environment_names),
+        )
+
+    @staticmethod
+    def _lookup_symbol(scope: _LexicalScope, name: str) -> str:
+        current: _LexicalScope | None = scope
+        while current is not None:
+            if name in current.symbols:
+                return current.symbols[name] or ""
+            current = current.parent
+        return name
+
+    @staticmethod
+    def _lookup_string(
+        scope: _LexicalScope,
+        name: str,
+    ) -> _PartialString:
+        current: _LexicalScope | None = scope
+        while current is not None:
+            if name in current.strings:
+                return current.strings[name] or _PartialString()
+            current = current.parent
+        return _PartialString()
+
+    def _partial_string(
+        self,
+        node: ast.expr,
+        scope: _LexicalScope,
+    ) -> _PartialString:
+        if isinstance(node, ast.Constant) and type(node.value) is str:
+            return _PartialString((node.value,), False)
         if isinstance(node, ast.Name):
-            symbol = node.id
-            visited: set[str] = set()
-            while symbol in aliases and symbol not in visited:
-                visited.add(symbol)
-                symbol = aliases[symbol]
-            return _normalize_symbol(symbol)
+            return self._lookup_string(scope, node.id)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = self._partial_string(node.left, scope)
+            right = self._partial_string(node.right, scope)
+            return _PartialString(
+                left.fragments + right.fragments,
+                left.unresolved or right.unresolved,
+            )
+        if isinstance(node, ast.JoinedStr):
+            fragments: list[str] = []
+            unresolved = False
+            for value in node.values:
+                if isinstance(value, ast.Constant) and type(value.value) is str:
+                    fragments.append(value.value)
+                elif isinstance(value, ast.FormattedValue):
+                    observed = self._partial_string(value.value, scope)
+                    fragments.extend(observed.fragments)
+                    unresolved = unresolved or observed.unresolved
+                else:
+                    unresolved = True
+            return _PartialString(tuple(fragments), unresolved)
+        return _PartialString()
+
+    def _resolve(self, node: ast.expr, scope: _LexicalScope) -> str:
+        if isinstance(node, ast.Name):
+            return _normalize_symbol(self._lookup_symbol(scope, node.id))
         if isinstance(node, ast.Attribute):
-            owner = resolve(node.value)
-            symbol = f"{owner}.{node.attr}" if owner else node.attr
-            return _normalize_symbol(symbol)
+            owner = self._resolve(node.value, scope)
+            return _normalize_symbol(f"{owner}.{node.attr}" if owner else node.attr)
+        if isinstance(node, ast.Subscript):
+            owner = self._resolve(node.value, scope)
+            key = self._partial_string(node.slice, scope).exact
+            if owner in {"globals", "locals"} and key:
+                return self._lookup_symbol(scope, key)
+            if owner == "socket.__dict__" and key:
+                return f"socket.{key}"
+            return ""
         if isinstance(node, ast.Call):
-            return resolve(node.func)
+            function = self._resolve(node.func, scope)
+            if function in {"getattr", "builtins.getattr"} and len(node.args) >= 2:
+                owner = self._resolve(node.args[0], scope)
+                attribute = self._partial_string(node.args[1], scope).exact
+                if owner and attribute:
+                    return _normalize_symbol(f"{owner}.{attribute}")
+            if function in {"vars", "builtins.vars"} and len(node.args) == 1:
+                owner = self._resolve(node.args[0], scope)
+                return f"{owner}.__dict__" if owner else ""
+            if function in {"vars", "builtins.vars"} and not node.args:
+                return "locals"
+            return function
         return ""
 
-    assignments: list[tuple[str, ast.expr]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            assignments.extend(
-                (target.id, node.value)
-                for target in node.targets
-                if isinstance(target, ast.Name)
-            )
-        elif (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and node.value is not None
-        ):
-            assignments.append((node.target.id, node.value))
-        elif isinstance(node, ast.ClassDef) and len(node.bases) == 1:
-            assignments.append((node.name, node.bases[0]))
-
-    for _ in range(len(assignments) + 1):
-        changed = False
-        for target, value in assignments:
-            resolved = resolve(value)
-            if resolved and resolved != target and aliases.get(target) != resolved:
-                aliases[target] = resolved
-                changed = True
-        if not changed:
-            break
-    return aliases
-
-
-def _resolve_symbol(node: ast.expr, aliases: dict[str, str]) -> str:
-    if isinstance(node, ast.Name):
-        symbol = node.id
-        visited: set[str] = set()
-        while symbol in aliases and symbol not in visited:
-            visited.add(symbol)
-            symbol = aliases[symbol]
-        return _normalize_symbol(symbol)
-    if isinstance(node, ast.Attribute):
-        owner = _resolve_symbol(node.value, aliases)
-        symbol = f"{owner}.{node.attr}" if owner else node.attr
-        return _normalize_symbol(symbol)
-    if isinstance(node, ast.Call):
-        return _resolve_symbol(node.func, aliases)
-    return ""
-
-
-def _resolved_string_constants(tree: ast.Module) -> dict[str, str]:
-    constants: dict[str, str] = {}
-    assignments: list[tuple[str, ast.expr]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            assignments.extend(
-                (target.id, node.value)
-                for target in node.targets
-                if isinstance(target, ast.Name)
-            )
-        elif (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and node.value is not None
-        ):
-            assignments.append((node.target.id, node.value))
-
-    for _ in range(len(assignments) + 1):
-        changed = False
-        for target, value in assignments:
-            resolved: str | None = None
-            if isinstance(value, ast.Constant) and type(value.value) is str:
-                resolved = value.value
-            elif isinstance(value, ast.Name):
-                resolved = constants.get(value.id)
-            if resolved is not None and constants.get(target) != resolved:
-                constants[target] = resolved
-                changed = True
-        if not changed:
-            break
-    return constants
-
-
-def _constant_string(
-    node: ast.expr,
-    constants: dict[str, str],
-) -> str | None:
-    if isinstance(node, ast.Constant) and type(node.value) is str:
-        return node.value
-    if isinstance(node, ast.Name):
-        return constants.get(node.id)
-    return None
-
-
-def _namespace_lookup(
-    node: ast.expr,
-    aliases: dict[str, str],
-    constants: dict[str, str],
-) -> str | None:
-    if not isinstance(node, ast.Subscript):
-        return None
-    if _resolve_symbol(node.value, aliases) not in {"globals", "locals"}:
-        return None
-    return _constant_string(node.slice, constants)
-
-
-def _is_socket_module_reference(
-    node: ast.expr,
-    aliases: dict[str, str],
-    constants: dict[str, str],
-) -> bool:
-    return (
-        _resolve_symbol(node, aliases) == "socket"
-        or _namespace_lookup(node, aliases, constants) == "socket"
-    )
-
-
-def _is_socket_namespace(
-    node: ast.expr,
-    aliases: dict[str, str],
-    constants: dict[str, str],
-) -> bool:
-    if _resolve_symbol(node, aliases) == "socket.__dict__":
-        return True
-    return bool(
-        isinstance(node, ast.Attribute)
-        and node.attr == "__dict__"
-        and _is_socket_module_reference(node.value, aliases, constants)
-    )
-
-
-def _mutates_socket_family_target(
-    target: ast.expr,
-    aliases: dict[str, str],
-    constants: dict[str, str],
-) -> bool:
-    if isinstance(target, (ast.Tuple, ast.List)):
-        return any(
-            _mutates_socket_family_target(element, aliases, constants)
-            for element in target.elts
+    def _bind_name(
+        self,
+        scope: _LexicalScope,
+        name: str,
+        value: ast.expr | None = None,
+        *,
+        symbol: str | None = None,
+    ) -> None:
+        explicit_symbol = symbol is not None
+        resolved = symbol if explicit_symbol else (
+            self._resolve(value, scope) if value is not None else ""
         )
-    if isinstance(target, ast.Starred):
-        return _mutates_socket_family_target(target.value, aliases, constants)
-    if isinstance(target, ast.Attribute):
-        return (
-            target.attr in _PROTECTED_SOCKET_FAMILY_ATTRIBUTES
-            and _is_socket_module_reference(target.value, aliases, constants)
+        scope.symbols[name] = (
+            resolved
+            if resolved and (explicit_symbol or resolved != name)
+            else None
         )
-    if not isinstance(target, ast.Subscript):
+        scope.strings[name] = (
+            self._partial_string(value, scope) if value is not None else None
+        )
+
+    def _bind_target(
+        self,
+        target: ast.expr,
+        scope: _LexicalScope,
+        value: ast.expr | None = None,
+    ) -> None:
+        if isinstance(target, ast.Name):
+            self._bind_name(scope, target.id, value)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                self._bind_target(element, scope)
+        elif isinstance(target, ast.Starred):
+            self._bind_target(target.value, scope)
+
+    def _is_socket_reference(
+        self,
+        node: ast.expr,
+        scope: _LexicalScope,
+    ) -> bool:
+        return self._resolve(node, scope) == "socket"
+
+    def _target_mutates_socket(
+        self,
+        target: ast.expr,
+        scope: _LexicalScope,
+    ) -> bool:
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return any(
+                self._target_mutates_socket(element, scope)
+                for element in target.elts
+            )
+        if isinstance(target, ast.Starred):
+            return self._target_mutates_socket(target.value, scope)
+        if isinstance(target, ast.Attribute):
+            return bool(
+                target.attr in _PROTECTED_SOCKET_FAMILY_ATTRIBUTES
+                and self._is_socket_reference(target.value, scope)
+            )
+        if not isinstance(target, ast.Subscript):
+            return False
+        owner = self._resolve(target.value, scope)
+        key = self._partial_string(target.slice, scope).exact
+        return bool(
+            (owner in {"globals", "locals"} and key in {"_AF_UNIX", "socket"})
+            or (
+                owner in {"socket", "socket.__dict__"}
+                and key in _PROTECTED_SOCKET_FAMILY_ATTRIBUTES
+            )
+        )
+
+    def _call_mutates_socket(
+        self,
+        call: ast.Call,
+        symbol: str,
+        scope: _LexicalScope,
+    ) -> bool:
+        leaf = symbol.rsplit(".", 1)[-1]
+        if leaf in {"setattr", "delattr"} and len(call.args) >= 2:
+            return bool(
+                self._is_socket_reference(call.args[0], scope)
+                and self._partial_string(call.args[1], scope).exact
+                in _PROTECTED_SOCKET_FAMILY_ATTRIBUTES
+            )
+        if leaf in {"__setattr__", "__delattr__"}:
+            owner = (
+                self._resolve(call.func.value, scope)
+                if isinstance(call.func, ast.Attribute)
+                else ""
+            )
+            if owner == "socket" and call.args:
+                return self._partial_string(call.args[0], scope).exact in (
+                    _PROTECTED_SOCKET_FAMILY_ATTRIBUTES
+                )
+            if len(call.args) >= 2:
+                return bool(
+                    self._is_socket_reference(call.args[0], scope)
+                    and self._partial_string(call.args[1], scope).exact
+                    in _PROTECTED_SOCKET_FAMILY_ATTRIBUTES
+                )
+
+        owner = (
+            self._resolve(call.func.value, scope)
+            if isinstance(call.func, ast.Attribute)
+            else ""
+        )
+        protected = (
+            {"_AF_UNIX", "socket"}
+            if owner in {"globals", "locals"}
+            else _PROTECTED_SOCKET_FAMILY_ATTRIBUTES
+            if owner == "socket.__dict__"
+            else set()
+        )
+        if not protected:
+            return False
+        if leaf in {"__setitem__", "pop", "setdefault"} and call.args:
+            return self._partial_string(call.args[0], scope).exact in protected
+        if leaf == "update" and call.args and isinstance(call.args[0], ast.Dict):
+            return any(
+                key is not None
+                and self._partial_string(key, scope).exact in protected
+                for key in call.args[0].keys
+            )
         return False
 
-    key = _constant_string(target.slice, constants)
-    if key in {"_AF_UNIX", "socket"} and _resolve_symbol(
-        target.value,
-        aliases,
-    ) in {"globals", "locals"}:
-        return True
-    return bool(
-        key in _PROTECTED_SOCKET_FAMILY_ATTRIBUTES
-        and (
-            _is_socket_namespace(target.value, aliases, constants)
-            or _is_socket_module_reference(target.value, aliases, constants)
-        )
+    def _observe_environment(
+        self,
+        value: _PartialString,
+        scope: _LexicalScope,
+    ) -> None:
+        scope.environment.append(value)
+        if value.exact is not None:
+            self.environment_names.add(value.exact)
+        upper = value.known.upper()
+        metrics_fragment = "METRIC" in upper or "PROMETHEUS" in upper
+        host_port_fragment = "HOST" in upper or "PORT" in upper
+        if metrics_fragment and (host_port_fragment or value.unresolved):
+            self.violations.add("metrics.environment")
+
+    def _visit_call(self, call: ast.Call, scope: _LexicalScope) -> None:
+        self._visit_expr(call.func, scope)
+        for argument in call.args:
+            self._visit_expr(argument, scope)
+        for keyword in call.keywords:
+            self._visit_expr(keyword.value, scope)
+
+        symbol = self._resolve(call.func, scope)
+        self.calls.append((call, symbol, scope.function))
+        if symbol.startswith("_socket."):
+            self.violations.add("_socket")
+            scope.starts_listener = True
+        if symbol in _LISTENER_CALLS or symbol in {
+            "prometheus_client.start_http_server",
+            "prometheus_client.start_wsgi_server",
+            "socket.socket",
+        }:
+            scope.starts_listener = True
+        if self._call_mutates_socket(call, symbol, scope):
+            self.violations.add("socket_family")
+        if symbol in {"os.environ.get", "os.getenv"} and call.args:
+            self._observe_environment(
+                self._partial_string(call.args[0], scope),
+                scope,
+            )
+
+    def _visit_comprehension(
+        self,
+        node: ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp,
+        scope: _LexicalScope,
+    ) -> None:
+        child = _LexicalScope(scope, "comprehension", scope.function)
+        self.scopes.append(child)
+        for index, generator in enumerate(node.generators):
+            self._visit_expr(generator.iter, scope if index == 0 else child)
+            self._bind_target(generator.target, child)
+            for condition in generator.ifs:
+                self._visit_expr(condition, child)
+        if isinstance(node, ast.DictComp):
+            self._visit_expr(node.key, child)
+            self._visit_expr(node.value, child)
+        else:
+            self._visit_expr(node.elt, child)
+
+    def _visit_expr(self, node: ast.expr | None, scope: _LexicalScope) -> None:
+        if node is None:
+            return
+        if isinstance(node, ast.Call):
+            self._visit_call(node, scope)
+            return
+        if isinstance(node, ast.Lambda):
+            for default in (*node.args.defaults, *node.args.kw_defaults):
+                self._visit_expr(default, scope)
+            child = _LexicalScope(scope, "lambda", scope.function)
+            self.scopes.append(child)
+            self._bind_arguments(node.args, child)
+            self._visit_expr(node.body, child)
+            return
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            self._visit_comprehension(node, scope)
+            return
+        if isinstance(node, ast.NamedExpr):
+            self._visit_expr(node.value, scope)
+            if self._target_mutates_socket(node.target, scope):
+                self.violations.add("socket_family")
+            self._bind_target(node.target, scope, node.value)
+            return
+        if isinstance(node, ast.Subscript):
+            self._visit_expr(node.value, scope)
+            self._visit_expr(node.slice, scope)
+            if (
+                isinstance(node.ctx, ast.Load)
+                and self._resolve(node.value, scope) == "os.environ"
+            ):
+                self._observe_environment(
+                    self._partial_string(node.slice, scope),
+                    scope,
+                )
+            return
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.expr):
+                self._visit_expr(child, scope)
+
+    def _bind_arguments(self, arguments: ast.arguments, scope: _LexicalScope) -> None:
+        for argument in (
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+        ):
+            self._bind_name(scope, argument.arg)
+        if arguments.vararg is not None:
+            self._bind_name(scope, arguments.vararg.arg)
+        if arguments.kwarg is not None:
+            self._bind_name(scope, arguments.kwarg.arg)
+
+    def _branch(self, statements: list[ast.stmt], scope: _LexicalScope) -> None:
+        child = _LexicalScope(scope, "block", scope.function)
+        self.scopes.append(child)
+        self._visit_block(statements, child)
+
+    def _visit_statement(self, node: ast.stmt, scope: _LexicalScope) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for expression in (
+                *node.decorator_list,
+                *node.args.defaults,
+                *node.args.kw_defaults,
+            ):
+                self._visit_expr(expression, scope)
+            self._bind_name(scope, node.name)
+            parent = scope.parent if scope.kind == "class" else scope
+            child = _LexicalScope(parent, "function", node.name)
+            self.scopes.append(child)
+            self._bind_arguments(node.args, child)
+            self._visit_block(node.body, child)
+            return
+        if isinstance(node, ast.ClassDef):
+            for expression in (*node.decorator_list, *node.bases):
+                self._visit_expr(expression, scope)
+            class_symbol = self._resolve(node.bases[0], scope) if len(node.bases) == 1 else ""
+            self._bind_name(scope, node.name, symbol=class_symbol or None)
+            child = _LexicalScope(scope, "class", scope.function)
+            self.scopes.append(child)
+            self._visit_block(node.body, child)
+            return
+        if isinstance(node, ast.Import):
+            for imported in node.names:
+                bound = imported.asname or imported.name.split(".", 1)[0]
+                self._bind_name(scope, bound, symbol=imported.name)
+                if imported.name == "_socket":
+                    self.violations.add("_socket")
+            return
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            for imported in node.names:
+                bound = imported.asname or imported.name
+                symbol = _normalize_symbol(f"{module}.{imported.name}")
+                self._bind_name(scope, bound, symbol=symbol)
+                if module == "_socket":
+                    self.violations.add("_socket")
+            return
+        if isinstance(node, ast.Assign):
+            self._visit_expr(node.value, scope)
+            if any(self._target_mutates_socket(target, scope) for target in node.targets):
+                self.violations.add("socket_family")
+            for target in node.targets:
+                self._bind_target(target, scope, node.value)
+            return
+        if isinstance(node, ast.AnnAssign):
+            self._visit_expr(node.value, scope)
+            if self._target_mutates_socket(node.target, scope):
+                self.violations.add("socket_family")
+            self._bind_target(node.target, scope, node.value)
+            return
+        if isinstance(node, ast.AugAssign):
+            self._visit_expr(node.target, scope)
+            self._visit_expr(node.value, scope)
+            if self._target_mutates_socket(node.target, scope):
+                self.violations.add("socket_family")
+            self._bind_target(node.target, scope)
+            return
+        if isinstance(node, ast.Delete):
+            if any(self._target_mutates_socket(target, scope) for target in node.targets):
+                self.violations.add("socket_family")
+            for target in node.targets:
+                self._bind_target(target, scope)
+            return
+        if isinstance(node, ast.Expr):
+            self._visit_expr(node.value, scope)
+            return
+        if isinstance(node, (ast.Return, ast.Raise, ast.Assert)):
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, ast.expr):
+                    self._visit_expr(child, scope)
+            return
+        if isinstance(node, ast.If):
+            self._visit_expr(node.test, scope)
+            self._branch(node.body, scope)
+            self._branch(node.orelse, scope)
+            return
+        if isinstance(node, (ast.For, ast.AsyncFor)):
+            self._visit_expr(node.iter, scope)
+            body = _LexicalScope(scope, "block", scope.function)
+            self.scopes.append(body)
+            self._bind_target(node.target, body)
+            self._visit_block(node.body, body)
+            self._branch(node.orelse, scope)
+            return
+        if isinstance(node, ast.While):
+            self._visit_expr(node.test, scope)
+            self._branch(node.body, scope)
+            self._branch(node.orelse, scope)
+            return
+        if isinstance(node, (ast.With, ast.AsyncWith)):
+            child = _LexicalScope(scope, "block", scope.function)
+            self.scopes.append(child)
+            for item in node.items:
+                self._visit_expr(item.context_expr, scope)
+                if item.optional_vars is not None:
+                    self._bind_target(item.optional_vars, child)
+            self._visit_block(node.body, child)
+            return
+        if isinstance(node, ast.Try):
+            self._branch(node.body, scope)
+            for handler in node.handlers:
+                child = _LexicalScope(scope, "block", scope.function)
+                self.scopes.append(child)
+                if handler.name:
+                    self._bind_name(child, handler.name)
+                self._visit_block(handler.body, child)
+            self._branch(node.orelse, scope)
+            self._branch(node.finalbody, scope)
+            return
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.expr):
+                self._visit_expr(child, scope)
+
+    def _visit_block(
+        self,
+        statements: list[ast.stmt],
+        scope: _LexicalScope,
+    ) -> None:
+        for statement in statements:
+            self._visit_statement(statement, scope)
+
+
+def _analyze_tree(tree: ast.Module) -> _SourceAnalysis:
+    return _StatementOrderedAnalyzer(tree).analyze()
+
+
+@lru_cache(maxsize=256)
+def _analyze_source(source: str) -> _SourceAnalysis:
+    return _analyze_tree(ast.parse(source))
+
+
+@lru_cache(maxsize=1)
+def _broker_production_sources() -> tuple[tuple[Path, str, bool], ...]:
+    root = Path(__file__).resolve().parents[2]
+    entrypoint = root / "scripts" / "run_sandbox_broker.py"
+    paths = (*sorted((root / "src" / "sandbox_broker").rglob("*.py")), entrypoint)
+    return tuple(
+        (path, path.read_text(encoding="utf-8"), path == entrypoint)
+        for path in paths
+        if path.is_file()
     )
 
 
-def _mutates_socket_family_call(
-    call: ast.Call,
-    aliases: dict[str, str],
-    constants: dict[str, str],
-) -> bool:
-    symbol = _resolve_symbol(call.func, aliases)
-    leaf = symbol.rsplit(".", 1)[-1]
-    if leaf in {"setattr", "delattr"} and len(call.args) >= 2:
-        return bool(
-            _is_socket_module_reference(call.args[0], aliases, constants)
-            and _constant_string(call.args[1], constants)
-            in _PROTECTED_SOCKET_FAMILY_ATTRIBUTES
-        )
-    if leaf in {"__setattr__", "__delattr__"} and call.args:
-        owner = call.func.value if isinstance(call.func, ast.Attribute) else None
-        return bool(
-            owner is not None
-            and _is_socket_module_reference(owner, aliases, constants)
-            and _constant_string(call.args[0], constants)
-            in _PROTECTED_SOCKET_FAMILY_ATTRIBUTES
-        )
-    return False
-
-
-def _has_protected_socket_family_mutation(
-    tree: ast.Module,
-    aliases: dict[str, str],
-) -> bool:
-    constants = _resolved_string_constants(tree)
-    for node in ast.walk(tree):
-        targets: list[ast.expr] = []
-        if isinstance(node, ast.Assign):
-            targets.extend(node.targets)
-        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
-            targets.append(node.target)
-        elif isinstance(node, ast.Delete):
-            targets.extend(node.targets)
-        if any(
-            _mutates_socket_family_target(target, aliases, constants)
-            for target in targets
-        ):
-            return True
-        if isinstance(node, ast.Call) and _mutates_socket_family_call(
-            node,
-            aliases,
-            constants,
-        ):
-            return True
-    return False
+def _entrypoint_source() -> str:
+    return _broker_production_sources()[-1][1]
 
 
 def _resolved_python_calls(source: str) -> tuple[ast.Module, list[str]]:
-    tree = ast.parse(source)
-    aliases = _resolved_aliases(tree)
-    return tree, [
-        _resolve_symbol(node.func, aliases)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-    ]
+    analysis = _analyze_source(source)
+    return analysis.tree, [symbol for _, symbol, _ in analysis.calls]
 
 
 def _environment_names(tree: ast.Module) -> set[str]:
-    aliases = _resolved_aliases(tree)
-    constants: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        constants[target.id] = node.value.value
-            elif isinstance(node.value, ast.Name) and node.value.id in constants:
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        constants[target.id] = constants[node.value.id]
-
-    def constant_string(node: ast.expr) -> str | None:
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
-        if isinstance(node, ast.Name):
-            return constants.get(node.id)
-        return None
-
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and node.args:
-            if _resolve_symbol(node.func, aliases) in {
-                "os.environ.get",
-                "os.getenv",
-            }:
-                value = constant_string(node.args[0])
-                if value is not None:
-                    names.add(value)
-        elif isinstance(node, ast.Subscript):
-            if _resolve_symbol(node.value, aliases) == "os.environ":
-                value = constant_string(node.slice)
-                if value is not None:
-                    names.add(value)
-    return names
-
-
-def _call_records(
-    tree: ast.Module,
-    aliases: dict[str, str],
-) -> list[tuple[ast.Call, str, str | None]]:
-    records: list[tuple[ast.Call, str, str | None]] = []
-
-    class CallVisitor(ast.NodeVisitor):
-        def __init__(self) -> None:
-            self.functions: list[str] = []
-
-        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-            self.functions.append(node.name)
-            self.generic_visit(node)
-            self.functions.pop()
-
-        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-            self.functions.append(node.name)
-            self.generic_visit(node)
-            self.functions.pop()
-
-        def visit_Call(self, node: ast.Call) -> None:
-            records.append(
-                (
-                    node,
-                    _resolve_symbol(node.func, aliases),
-                    self.functions[-1] if self.functions else None,
-                )
-            )
-            self.generic_visit(node)
-
-    CallVisitor().visit(tree)
-    return records
+    return set(_analyze_tree(tree).environment_names)
 
 
 def _is_name(node: ast.expr, name: str) -> bool:
@@ -631,16 +845,14 @@ def _listener_contract_violations(
     *,
     allow_entrypoint_uds: bool = False,
 ) -> set[str]:
-    tree = ast.parse(source)
-    aliases = _resolved_aliases(tree)
-    violations: set[str] = set()
-    if allow_entrypoint_uds and not _has_verified_af_unix_binding(tree):
+    analysis = _analyze_source(source)
+    violations = set(analysis.violations)
+    if allow_entrypoint_uds and not _has_verified_af_unix_binding(analysis.tree):
         violations.add("entrypoint._AF_UNIX")
-    if _has_protected_socket_family_mutation(tree, aliases):
-        violations.add(
-            "entrypoint.socket_family" if allow_entrypoint_uds else "socket_family"
-        )
-    for call, symbol, function in _call_records(tree, aliases):
+    if allow_entrypoint_uds and "socket_family" in violations:
+        violations.remove("socket_family")
+        violations.add("entrypoint.socket_family")
+    for call, symbol, function in analysis.calls:
         forbidden = (
             symbol in _LISTENER_CALLS
             or symbol in {
@@ -658,10 +870,8 @@ def _listener_contract_violations(
 
 
 def _entrypoint_allowlist_counts(source: str) -> dict[str, int]:
-    tree = ast.parse(source)
-    aliases = _resolved_aliases(tree)
     counts: dict[str, int] = {}
-    for call, symbol, function in _call_records(tree, aliases):
+    for call, symbol, function in _analyze_source(source).calls:
         if _allowed_entrypoint_call(call, symbol, function):
             key = f"{function}:{symbol}"
             counts[key] = counts.get(key, 0) + 1
@@ -669,25 +879,16 @@ def _entrypoint_allowlist_counts(source: str) -> dict[str, int]:
 
 
 def test_broker_metrics_cannot_start_a_second_listener_or_use_tcp_configuration() -> None:
-    root = Path(__file__).resolve().parents[2]
-    entrypoint = root / "scripts" / "run_sandbox_broker.py"
-    broker_sources = [
-        *sorted((root / "src" / "sandbox_broker").rglob("*.py")),
-        entrypoint,
-    ]
     observed_environment: set[str] = set()
 
-    for path in broker_sources:
-        if not path.is_file():
-            continue
-        source = path.read_text(encoding="utf-8")
-        tree = ast.parse(source)
+    for path, source, allow_entrypoint_uds in _broker_production_sources():
+        analysis = _analyze_source(source)
         violations = _listener_contract_violations(
             source,
-            allow_entrypoint_uds=path == entrypoint,
+            allow_entrypoint_uds=allow_entrypoint_uds,
         )
         assert not violations, (path, violations)
-        observed_environment.update(_environment_names(tree))
+        observed_environment.update(analysis.environment_names)
 
     assert not {
         name
@@ -696,7 +897,7 @@ def test_broker_metrics_cannot_start_a_second_listener_or_use_tcp_configuration(
         and ("HOST" in name.upper() or "PORT" in name.upper())
     }
 
-    assert _entrypoint_allowlist_counts(entrypoint.read_text(encoding="utf-8")) == {
+    assert _entrypoint_allowlist_counts(_entrypoint_source()) == {
         "_notify_systemd_ready:socket.socket": 1,
         "_socket_stale_candidate:socket.socket": 1,
         "bind_runtime_socket:socket.socket": 1,
@@ -908,6 +1109,191 @@ def test_listener_contract_rejects_adversarial_source_fixtures(
     )
 
 
+def test_listener_analysis_reviewer_false_negative_keeps_module_scope_order() -> None:
+    source = """import socket
+
+def harmless():
+    socket = object()
+    return socket
+
+listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+listener.bind(("127.0.0.1", 9000))
+"""
+
+    violations = _listener_contract_violations(source)
+
+    assert "socket.socket" in violations
+    assert "socket.socket.bind" in violations
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def harmless(socket):\n    socket.socket()\n",
+        "harmless = lambda socket: socket.socket()\n",
+        "results = [socket.socket() for socket in values]\n",
+        (
+            "def harmless():\n"
+            "    class LocalSocket:\n"
+            "        def socket(self):\n"
+            "            return None\n"
+            "    socket = LocalSocket()\n"
+            "    socket.socket()\n"
+        ),
+    ],
+)
+def test_listener_analysis_reviewer_false_positive_respects_lexical_shadowing(
+    source: str,
+) -> None:
+    assert not _listener_contract_violations(source)
+
+
+def test_listener_aliases_apply_only_after_the_binding_statement() -> None:
+    source = """serve()
+from prometheus_client import start_http_server as serve
+serve(9000)
+"""
+
+    _, calls = _resolved_python_calls(source)
+
+    assert calls == ["serve", "prometheus_client.start_http_server"]
+
+
+@pytest.mark.parametrize(
+    ("source", "violation"),
+    [
+        (
+            "import socket\n"
+            "open_socket = getattr(socket, 'socket')\n"
+            "open_socket(socket.AF_INET, socket.SOCK_STREAM)\n",
+            "socket.socket",
+        ),
+        (
+            "import socket\n"
+            "listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+            "bind = getattr(listener, 'bind')\n"
+            "bind(('127.0.0.1', 9000))\n",
+            "socket.socket.bind",
+        ),
+        (
+            "import socket\n"
+            "listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+            "getattr(listener, 'listen')(8)\n",
+            "socket.socket.listen",
+        ),
+        (
+            "import _socket\n"
+            "_socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)\n",
+            "_socket",
+        ),
+        (
+            "from _socket import socket as open_socket\n"
+            "open_socket(AF_INET, SOCK_STREAM)\n",
+            "_socket",
+        ),
+        (
+            "import socket\n"
+            "namespace = vars(socket)\n"
+            "namespace['AF_UNIX'] = socket.AF_INET\n",
+            "socket_family",
+        ),
+        (
+            "import socket\n"
+            "vars()['_AF_UNIX'] = socket.AF_INET\n",
+            "socket_family",
+        ),
+        (
+            "import socket\n"
+            "globals().update({'_AF_UNIX': socket.AF_INET})\n",
+            "socket_family",
+        ),
+        (
+            "import socket\n"
+            "locals().__setitem__('socket', replacement)\n",
+            "socket_family",
+        ),
+        (
+            "import builtins\nimport socket\n"
+            "mutate = getattr(builtins, 'setattr')\n"
+            "mutate(socket, 'AF_UNIX', socket.AF_INET)\n",
+            "socket_family",
+        ),
+    ],
+)
+def test_listener_contract_rejects_reflection_and_low_level_socket_bypasses(
+    source: str,
+    violation: str,
+) -> None:
+    assert violation in _listener_contract_violations(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "import os\n"
+            "kind = unresolved\n"
+            "os.getenv('PROMETHEUS_METRICS_' + kind)\n"
+        ),
+        (
+            "import os\n"
+            "kind = unresolved\n"
+            "os.environ.get(f'METRICS_{kind}')\n"
+        ),
+        (
+            "from os import getenv as read_environment\n"
+            "prefix = 'PROMETHEUS_'\n"
+            "middle = 'METRICS_'\n"
+            "kind = unresolved\n"
+            "key = prefix + middle + kind\n"
+            "read_environment(key)\n"
+        ),
+    ],
+)
+def test_metrics_environment_contract_rejects_partially_computed_keys(
+    source: str,
+) -> None:
+    assert "metrics.environment" in _listener_contract_violations(source)
+
+
+def test_metrics_environment_contract_fails_closed_only_in_listener_scope() -> None:
+    listener_source = """import os
+from prometheus_client import start_http_server
+
+def launch_metrics(kind):
+    os.getenv("BIND_" + kind)
+    start_http_server(9000)
+"""
+    separate_scopes = """import os
+from prometheus_client import start_http_server
+
+def read_application_setting(kind):
+    os.getenv("APPLICATION_" + kind)
+
+def launch_metrics():
+    start_http_server(9000)
+"""
+
+    assert "metrics.environment" in _listener_contract_violations(listener_source)
+    assert "metrics.environment" not in _listener_contract_violations(
+        separate_scopes
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import os\nos.getenv('APPLICATION_' + kind)\n",
+        "import os\nos.environ.get(f'SERVICE_{kind}')\n",
+        "import os\nos.environ['NORMAL_STATIC_KEY']\n",
+    ],
+)
+def test_metrics_environment_contract_allows_unrelated_environment_reads(
+    source: str,
+) -> None:
+    assert not _listener_contract_violations(source)
+
+
 def test_listener_contract_allows_only_existing_prebound_uds_pattern() -> None:
     source = """
 import socket
@@ -1025,11 +1411,7 @@ def _mutate_af_unix_binding(source: str, mutation: str) -> str:
 def test_entrypoint_uds_allowlist_rejects_af_unix_binding_mutations(
     mutation: str,
 ) -> None:
-    root = Path(__file__).resolve().parents[2]
-    source = (root / "scripts" / "run_sandbox_broker.py").read_text(
-        encoding="utf-8"
-    )
-    mutated = _mutate_af_unix_binding(source, mutation)
+    mutated = _mutate_af_unix_binding(_entrypoint_source(), mutation)
 
     assert "entrypoint._AF_UNIX" in _listener_contract_violations(
         mutated,
@@ -1116,11 +1498,7 @@ def _mutate_socket_family(source: str, mutation: str) -> str:
 def test_entrypoint_rejects_protected_socket_family_mutations(
     mutation: str,
 ) -> None:
-    root = Path(__file__).resolve().parents[2]
-    source = (root / "scripts" / "run_sandbox_broker.py").read_text(
-        encoding="utf-8"
-    )
-    mutated = _mutate_socket_family(source, mutation)
+    mutated = _mutate_socket_family(_entrypoint_source(), mutation)
 
     assert "entrypoint.socket_family" in _listener_contract_violations(
         mutated,
@@ -1129,10 +1507,7 @@ def test_entrypoint_rejects_protected_socket_family_mutations(
 
 
 def test_entrypoint_socket_family_guard_allows_benign_reads() -> None:
-    root = Path(__file__).resolve().parents[2]
-    source = (root / "scripts" / "run_sandbox_broker.py").read_text(
-        encoding="utf-8"
-    )
+    source = _entrypoint_source()
     approved = '_AF_UNIX = getattr(socket, "AF_UNIX", 1)'
     benign = """observed_family = socket.AF_UNIX
 observed_fallback = getattr(socket, "AF_UNIX", 1)

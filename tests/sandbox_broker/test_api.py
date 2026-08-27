@@ -873,6 +873,192 @@ def test_private_diagnostics_and_metrics_are_exact_uds_service_views(
     assert service.prometheus_calls == 1
 
 
+def test_real_service_observability_gets_refresh_telemetry_only_without_mutating_jobs_queue_tasks_staged_files_or_tools(
+    tmp_path: Path,
+) -> None:
+    from src.sandbox_broker.app import create_app
+
+    service, store, config, sandbox_client = _service(tmp_path)
+    record, _ = store.create_or_get(
+        "observability-read-only",
+        "b" * 64,
+        "trace-observability-read-only",
+    )
+    store.fail(
+        record.job_id,
+        BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
+        cleanup_status="succeeded",
+    )
+    staged = config.state_root / "jobs" / record.job_id / "staged"
+    staged.mkdir(parents=True)
+    (staged / "receptor.pdb").write_bytes(b"ATOM\n")
+    (staged / "ligand.sdf").write_bytes(b"ligand\n")
+
+    def snapshot_store() -> tuple[tuple[str, tuple[tuple[object, ...], ...]], ...]:
+        with store._connect() as connection:
+            return tuple(
+                (
+                    table,
+                    tuple(
+                        tuple(row)
+                        for row in connection.execute(
+                            f"SELECT * FROM {table} ORDER BY rowid"
+                        ).fetchall()
+                    ),
+                )
+                for table in ("jobs", "transitions", "artifacts")
+            )
+
+    def snapshot_runtime() -> tuple[object, ...]:
+        return (
+            snapshot_store(),
+            (
+                service._queue.qsize(),
+                service._queue._unfinished_tasks,
+                tuple(service._queue._queue),
+            ),
+            tuple(
+                sorted(
+                    (job_id, id(task), task.done())
+                    for job_id, task in service._job_tasks.items()
+                )
+            ),
+            tuple(
+                (path.relative_to(staged).as_posix(), path.read_bytes())
+                for path in sorted(staged.rglob("*"))
+                if path.is_file()
+            ),
+            (sandbox_client.create_count, sandbox_client.run_count),
+        )
+
+    app = create_app(config, service=service)
+    with TestClient(app) as client:
+        before = snapshot_runtime()
+
+        diagnostics = client.get("/v1/diagnostics")
+        metrics = client.get("/metrics")
+
+        after = snapshot_runtime()
+        assert diagnostics.status_code == 200
+        assert diagnostics.json()["schema_version"] == 1
+        assert metrics.status_code == 200
+        assert before == after
+
+
+def test_actual_entrypoint_startup_prebinds_one_af_unix_socket_without_tcp_or_second_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.run_sandbox_broker as entrypoint
+
+    target = tmp_path / "broker.sock"
+    events: list[tuple[object, ...]] = []
+    target_reads = 0
+    socket_metadata = SimpleNamespace(
+        st_mode=stat.S_IFSOCK | 0o660,
+        st_dev=7,
+        st_ino=11,
+        st_uid=getattr(os, "geteuid", lambda: 0)(),
+        st_gid=getattr(os, "getegid", lambda: 0)(),
+        st_file_attributes=0,
+    )
+    parent_metadata = SimpleNamespace(
+        st_mode=stat.S_IFDIR | 0o770,
+        st_dev=7,
+        st_ino=3,
+        st_uid=getattr(os, "geteuid", lambda: 0)(),
+        st_gid=getattr(os, "getegid", lambda: 0)(),
+        st_file_attributes=0,
+    )
+
+    class InterceptedSocket:
+        def bind(self, address: str) -> None:
+            events.append(("bind", address))
+
+        def listen(self, backlog: int) -> None:
+            pytest.fail(f"entrypoint called listen({backlog})")
+
+        def close(self) -> None:
+            events.append(("close",))
+
+    intercepted = InterceptedSocket()
+
+    def socket_factory(family: int, socket_type: int) -> InterceptedSocket:
+        events.append(("socket", family, socket_type))
+        return intercepted
+
+    def lstat(path: object) -> object:
+        nonlocal target_reads
+        observed = Path(path)
+        if observed == target:
+            target_reads += 1
+            if target_reads == 1:
+                raise FileNotFoundError
+            return socket_metadata
+        if observed == target.parent:
+            return parent_metadata
+        raise AssertionError(f"unexpected lstat path: {observed}")
+
+    class InterceptedConfig:
+        def __init__(self, application: object, **kwargs: object) -> None:
+            events.append(("uvicorn-config", application, kwargs))
+
+    class InterceptedServer:
+        def __init__(
+            self,
+            configuration: object,
+            *,
+            readiness_callback: object,
+        ) -> None:
+            events.append(("uvicorn-server", configuration, readiness_callback))
+
+        def run(self, *, sockets: list[object]) -> None:
+            events.append(("uvicorn-run", tuple(sockets)))
+
+    monkeypatch.setattr(
+        entrypoint,
+        "_trusted_socket_parent",
+        lambda path: (target, entrypoint._identity(parent_metadata)),
+    )
+    monkeypatch.setattr(entrypoint.os, "lstat", lstat)
+    monkeypatch.setattr(
+        entrypoint.os,
+        "chmod",
+        lambda path, mode: events.append(("chmod", Path(path), mode)),
+    )
+    monkeypatch.setattr(entrypoint, "_bound_socket_is_ready", lambda path: True)
+    monkeypatch.setattr(
+        entrypoint,
+        "_remove_owned_bound_socket",
+        lambda path, identity: events.append(("cleanup", path, identity)),
+    )
+    monkeypatch.setattr(entrypoint.socket, "socket", socket_factory)
+    monkeypatch.setattr(
+        entrypoint.socket,
+        "create_server",
+        lambda *args, **kwargs: pytest.fail("entrypoint called create_server"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        entrypoint.uvicorn,
+        "run",
+        lambda *args, **kwargs: pytest.fail("entrypoint called uvicorn.run"),
+    )
+    monkeypatch.setattr(entrypoint.uvicorn, "Config", InterceptedConfig)
+    monkeypatch.setattr(entrypoint, "_ReadyServer", InterceptedServer)
+
+    application = object()
+    entrypoint.serve_application(application, target)
+
+    socket_events = [event for event in events if event[0] == "socket"]
+    assert socket_events == [
+        ("socket", entrypoint._AF_UNIX, entrypoint.socket.SOCK_STREAM)
+    ]
+    assert socket_events[0][1] != entrypoint.socket.AF_INET
+    assert ("bind", str(target)) in events
+    assert ("uvicorn-run", (intercepted,)) in events
+
+
 @pytest.mark.parametrize("path", ["/v1/diagnostics", "/metrics"])
 @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
 def test_private_observability_endpoints_reject_mutating_methods_without_service_calls(
