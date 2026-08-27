@@ -528,12 +528,12 @@ class BrokerTelemetry:
             values.append(duration_ms)
             del values[:-256]
             self._events.append(payload)
-        self._safe_sink(
-            lambda: self._phase_duration.labels(
-                phase=token.phase,
-                outcome=outcome,
-            ).observe(elapsed)
-        )
+            self._safe_sink(
+                lambda: self._phase_duration.labels(
+                    phase=token.phase,
+                    outcome=outcome,
+                ).observe(elapsed)
+            )
         self._log_payload(payload)
         return completed_event
 
@@ -553,12 +553,12 @@ class BrokerTelemetry:
             self._counters[
                 ("control_failure", operation, failure_class.value)
             ] += 1
-        self._safe_sink(
-            lambda: self._control_failures.labels(
-                operation=operation,
-                failure_class=failure_class.value,
-            ).inc()
-        )
+            self._safe_sink(
+                lambda: self._control_failures.labels(
+                    operation=operation,
+                    failure_class=failure_class.value,
+                ).inc()
+            )
 
     def record_retry(self, operation: str, outcome: str) -> None:
         if (
@@ -570,12 +570,12 @@ class BrokerTelemetry:
             raise ValueError("invalid retry metric")
         with self._lock:
             self._counters[("retry", operation, outcome)] += 1
-        self._safe_sink(
-            lambda: self._retries.labels(
-                operation=operation,
-                outcome=outcome,
-            ).inc()
-        )
+            self._safe_sink(
+                lambda: self._retries.labels(
+                    operation=operation,
+                    outcome=outcome,
+                ).inc()
+            )
 
     def record_terminal(
         self,
@@ -590,12 +590,12 @@ class BrokerTelemetry:
             raise ValueError("invalid terminal metric")
         with self._lock:
             self._counters[("terminal", status, failure_class.value)] += 1
-        self._safe_sink(
-            lambda: self._jobs.labels(
-                terminal_status=status,
-                failure_class=failure_class.value,
-            ).inc()
-        )
+            self._safe_sink(
+                lambda: self._jobs.labels(
+                    terminal_status=status,
+                    failure_class=failure_class.value,
+                ).inc()
+            )
 
     def update_runtime_gauges(
         self,

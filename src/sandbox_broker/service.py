@@ -448,6 +448,7 @@ class SandboxBrokerService:
         self._cleanup_tasks: dict[str, asyncio.Task[Any]] = {}
         self._isolated_tasks: set[asyncio.Task[Any]] = set()
         self._prepared: dict[str, PreparedDockingSubmission] = {}
+        self._rejected_work: set[str] = set()
         self._terminal_condition = asyncio.Condition()
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._lifecycle_lock = asyncio.Lock()
@@ -543,10 +544,10 @@ class SandboxBrokerService:
                 raise ValueError("invalid circuit-breaker completion")
 
         self._breaker_observe(lambda: complete(False))
-        if permit._claimed:
+        if permit._completed:
             return True
         self._breaker_observe(lambda: complete(True))
-        return permit._claimed
+        return permit._completed
 
     def _active_job_count(self) -> int:
         return min(1, sum(not task.done() for task in self._job_tasks.values()))
@@ -898,9 +899,12 @@ class SandboxBrokerService:
                 return
             try:
                 self._fail_queue_item(job_id)
+                if job_id in self._rejected_work:
+                    self._remove_job_tree(job_id)
                 await self._notify_terminal()
             finally:
                 self._prepared.pop(job_id, None)
+                self._rejected_work.discard(job_id)
                 self._cancel_events.pop(job_id, None)
                 self._queue.task_done()
                 self._refresh_runtime_metrics()
@@ -996,6 +1000,7 @@ class SandboxBrokerService:
             if self._discard_new_submission(record):
                 self._remove_job_tree(record.job_id)
                 raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
+            return await self._enqueue_rejected(record)
 
         return await self._enqueue_created(record, prepared)
 
@@ -1117,14 +1122,7 @@ class SandboxBrokerService:
             if not self._accepts_new_work():
                 if self._discard_new_submission(record):
                     raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
-                authoritative = PreparedDockingSubmission(
-                    parameters=parameters,
-                    receptor=receptor_placeholder,
-                    ligand=ligand_placeholder,
-                    canonical_input_sha256=canonical_hash,
-                    trace_id=record.trace_id,
-                )
-                return await self._enqueue_created(record, authoritative)
+                return await self._enqueue_rejected(record)
 
             receptor_temporary.seek(0)
             receptor = stage_input(
@@ -1236,6 +1234,45 @@ class SandboxBrokerService:
         self._emit_job_event(record, Phase.QUEUE_ENTERED)
         return _record_view(record)
 
+    async def _enqueue_rejected(self, record: BrokerJobRecord) -> BrokerJobView:
+        if (
+            type(record) is not BrokerJobRecord
+            or record.status is not BrokerJobStatus.QUEUED
+        ):
+            raise BrokerFailure(BrokerErrorCode.INVALID_INPUT)
+        if (
+            not self._started
+            or self._stopping
+            or self._consumer_task is None
+            or self._consumer_task.done()
+        ):
+            self.store.fail(
+                record.job_id,
+                BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
+                cleanup_status="succeeded",
+            )
+            raise BrokerFailure(BrokerErrorCode.OPENSANDBOX_UNAVAILABLE)
+
+        self._emit_job_event(record, Phase.JOB_RECEIVED)
+        self._rejected_work.add(record.job_id)
+        self._cancel_events.setdefault(record.job_id, asyncio.Event())
+        try:
+            self._queue.put_nowait(record.job_id)
+        except asyncio.QueueFull:
+            self._rejected_work.discard(record.job_id)
+            self._cancel_events.pop(record.job_id, None)
+            self.store.fail(
+                record.job_id,
+                BrokerErrorCode.QUEUE_SATURATED,
+                cleanup_status="succeeded",
+            )
+            await self._notify_terminal()
+            self._record_terminal_observation(record.job_id)
+            raise BrokerFailure(BrokerErrorCode.QUEUE_SATURATED) from None
+        self._refresh_runtime_metrics()
+        self._emit_job_event(record, Phase.QUEUE_ENTERED)
+        return _record_view(record)
+
     def get_job(self, job_id: str) -> BrokerJobView:
         try:
             record = self.store.get(job_id)
@@ -1289,6 +1326,10 @@ class SandboxBrokerService:
                 record = self.store.get(job_id)
                 if record is None or record.status in TERMINAL_STATUSES:
                     continue
+                if job_id in self._rejected_work:
+                    self._fail_queue_item(job_id)
+                    self._remove_job_tree(job_id)
+                    continue
                 current = asyncio.create_task(
                     self._run_job(job_id),
                     name=f"sandbox-broker-job-{job_id}",
@@ -1318,6 +1359,7 @@ class SandboxBrokerService:
                 self._job_tasks.pop(job_id, None)
                 self._refresh_runtime_metrics()
                 self._prepared.pop(job_id, None)
+                self._rejected_work.discard(job_id)
                 self._cancel_events.pop(job_id, None)
                 try:
                     await self._notify_terminal()
@@ -2126,6 +2168,8 @@ class SandboxBrokerService:
                             current.job_id,
                             current.sandbox_id,
                         )
+                    except asyncio.CancelledError:
+                        raise
                     except BaseException:
                         latest = self.store.get(current.job_id)
                         if latest is not None and latest.cleanup_status != "succeeded":
@@ -2159,6 +2203,8 @@ class SandboxBrokerService:
                             ),
                         )
                     await self._notify_terminal()
+                except asyncio.CancelledError:
+                    raise
                 except BaseException:
                     current = self.store.get(record.job_id)
                     if current is not None and current.status not in TERMINAL_STATUSES:
@@ -2214,6 +2260,8 @@ class SandboxBrokerService:
                         ),
                     )
                     await self._notify_terminal()
+                except asyncio.CancelledError:
+                    raise
                 except BaseException:
                     continue
             self._recovery_generation += 1
@@ -2226,7 +2274,6 @@ class SandboxBrokerService:
             self._finish_phase(
                 cleanup,
                 outcome="cancelled",
-                failure_class=FailureClass.DESTROY_FAILED,
                 cleanup_status="failed",
             )
             raise
@@ -2254,18 +2301,10 @@ class SandboxBrokerService:
                 asyncio.shield(task), timeout=self._destroy_hard_timeout_seconds
             )
         except asyncio.CancelledError:
-            if not task.done():
-                task.cancel()
-                task.add_done_callback(self._consume_task_exception)
-            else:
-                self._consume_task_exception(task)
+            await self._cancel_and_isolate_reconciliation(task)
             raise
         except BaseException as destroy_failure:
-            if not task.done():
-                task.cancel()
-                task.add_done_callback(self._consume_task_exception)
-            else:
-                self._consume_task_exception(task)
+            await self._cancel_and_isolate_reconciliation(task)
             classified = (
                 FailureClass.DESTROY_FAILED
                 if isinstance(destroy_failure, asyncio.TimeoutError)

@@ -1063,6 +1063,8 @@ def test_queued_and_running_cancellation_are_idempotent_and_cleanup(
 def test_cancel_before_job_coroutine_starts_keeps_consumer_alive(
     tmp_path: Path,
 ) -> None:
+    checkpoint = ["scenario_not_started"]
+
     async def scenario() -> tuple[object, object, FakeSandboxClient]:
         loop = asyncio.get_running_loop()
         release_first_job = asyncio.Event()
@@ -1095,23 +1097,37 @@ def test_cancel_before_job_coroutine_starts_keeps_consumer_alive(
         sdk = FakeSandboxClient()
         service, _, config = _service(tmp_path, sdk)
         try:
+            checkpoint[0] = "starting_service"
             await service.start()
+            checkpoint[0] = "submitting_first"
             first = await service.submit(_prepared(config), "idem-prestart-cancel")
-            await first_job_wrapped.wait()
+            checkpoint[0] = "waiting_for_delayed_job_task"
+            await asyncio.wait_for(first_job_wrapped.wait(), timeout=1.0)
+            checkpoint[0] = "cancelling_first"
             await service.cancel(first.job_id)
+            checkpoint[0] = "submitting_second"
             second = await service.submit(_prepared(config), "idem-after-cancel")
             release_first_job.set()
+            checkpoint[0] = "waiting_for_first_terminal"
             first_terminal = await service.wait_terminal(first.job_id, timeout=1.0)
+            checkpoint[0] = "waiting_for_second_terminal"
             second_terminal = await service.wait_terminal(second.job_id, timeout=3.0)
-            await service.stop()
+            checkpoint[0] = "stopping_service"
+            await asyncio.wait_for(service.stop(timeout=3.0), timeout=5.0)
+            checkpoint[0] = "completed"
             return first_terminal, second_terminal, sdk
         finally:
             release_first_job.set()
             loop.set_task_factory(None)
 
-    first, second, sdk = asyncio.run(scenario())
+    try:
+        first, second, sdk = asyncio.run(
+            asyncio.wait_for(scenario(), timeout=10.0)
+        )
+    except asyncio.TimeoutError:
+        pytest.fail(f"cancellation watchdog expired at {checkpoint[0]}")
     assert first.status is BrokerJobStatus.CANCELLED
-    assert second.status is BrokerJobStatus.SUCCEEDED
+    assert second.status is BrokerJobStatus.SUCCEEDED, second
     assert sdk.create_count == 1
     assert sdk.run_count == 1
     assert sdk.destroy_count == 1
@@ -2136,6 +2152,102 @@ def test_concurrent_recovery_destroys_orphan_once_and_fails_closed(
     )
     assert destroy_counter == (1 if destroy_fails else 0)
     assert telemetry.snapshot()["runtime"]["active_job_count"] == 0
+
+
+def test_recovery_cancellation_pairs_cleanup_and_preserves_active_state(
+    tmp_path: Path,
+) -> None:
+    telemetry = RecordingTelemetry()
+
+    class ResistantRecoveryClient(FakeSandboxClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.destroy_started = asyncio.Event()
+            self.destroy_release = asyncio.Event()
+            self.destroy_finished = asyncio.Event()
+            self.destroy_calls = 0
+            self.destroy_cancellations = 0
+
+        async def destroy_by_id(self, sandbox_id: str) -> None:
+            self.destroy_calls += 1
+            if self.destroy_calls == 1:
+                self.destroy_started.set()
+                while not self.destroy_release.is_set():
+                    try:
+                        await self.destroy_release.wait()
+                    except asyncio.CancelledError:
+                        self.destroy_cancellations += 1
+                self.destroy_finished.set()
+            self.destroyed_ids.append(sandbox_id)
+
+    async def scenario() -> tuple[object, list[dict[str, object]], int, int]:
+        sdk = ResistantRecoveryClient()
+        service, store, _ = _service(tmp_path, sdk, telemetry=telemetry)
+        await service.start()
+        seeded = _seed_running(store, "idem-cancelled-recovery")
+        recovery = asyncio.create_task(service.recover())
+        await asyncio.wait_for(sdk.destroy_started.wait(), timeout=1.0)
+        recovery.cancel()
+        cancellation_propagated = False
+        try:
+            await asyncio.wait_for(recovery, timeout=1.0)
+        except asyncio.CancelledError:
+            cancellation_propagated = True
+
+        after_cancel = store.get(seeded.job_id)
+        assert after_cancel is not None
+        events_after_cancel = [
+            event
+            for event in telemetry.snapshot()["recent_events"]
+            if event["job_id"] == seeded.job_id
+        ]
+        isolated_after_cancel = len(service._isolated_tasks)
+
+        sdk.destroy_release.set()
+        await asyncio.wait_for(sdk.destroy_finished.wait(), timeout=1.0)
+        for _ in range(20):
+            if not service._isolated_tasks:
+                break
+            await asyncio.sleep(0)
+        await service.recover()
+        terminal = store.get(seeded.job_id)
+        assert terminal is not None
+        isolated_after_recovery = len(service._isolated_tasks)
+        await service.stop()
+
+        assert cancellation_propagated is True
+        assert after_cancel.status not in TERMINAL_STATUSES
+        assert after_cancel.cleanup_status == "in_progress"
+        return (
+            terminal,
+            events_after_cancel,
+            isolated_after_cancel,
+            isolated_after_recovery,
+        )
+
+    terminal, events, isolated_during, isolated_after = asyncio.run(scenario())
+    assert [event["phase"] for event in events] == [
+        "cleanup_started",
+        "cleanup_completed",
+    ]
+    assert events[1]["outcome"] == "cancelled"
+    assert events[1]["failure_class"] is None
+    assert isolated_during == 1
+    assert isolated_after == 0
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.OPENSANDBOX_UNAVAILABLE.value
+    lifecycle = [
+        event
+        for event in telemetry.snapshot()["recent_events"]
+        if event["job_id"] == terminal.job_id
+    ]
+    assert [event["phase"] for event in lifecycle] == [
+        "cleanup_started",
+        "cleanup_completed",
+        "cleanup_started",
+        "cleanup_completed",
+        "job_terminal",
+    ]
 
 
 def test_manifest_survives_service_reopen_and_tamper_and_cross_job_fail_closed(
@@ -3784,6 +3896,68 @@ def test_upload_discard_failure_transfers_ownership_before_staging(
     assert terminal.status is BrokerJobStatus.FAILED
     assert terminal.error_code == BrokerErrorCode.OPENSANDBOX_UNAVAILABLE.value
     assert sdk.create_count == 0
+    assert not (config.state_root / "jobs" / terminal.job_id).exists()
+
+
+def test_upload_rejection_fallback_never_provisions_after_breaker_cooldown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    breaker = ControlPlaneCircuitBreaker(monotonic=lambda: clock[0])
+    sdk = FakeSandboxClient(block=True)
+    removed_job_ids: list[str] = []
+
+    async def scenario() -> tuple[object, BrokerConfig]:
+        service, store, config = _service(
+            tmp_path,
+            sdk,
+            circuit_breaker=breaker,
+        )
+        original_remove = service._remove_job_tree
+
+        def record_remove(job_id: str) -> bool:
+            removed_job_ids.append(job_id)
+            return original_remove(job_id)
+
+        def fail_discard(record: object) -> bool:
+            del record
+            raise sqlite3.OperationalError("injected discard failure")
+
+        monkeypatch.setattr(service, "_remove_job_tree", record_remove)
+        monkeypatch.setattr(store, "discard_pristine_queued", fail_discard)
+        await service.start()
+        first = await service.submit(_prepared(config), "idem-cooldown-owner")
+        await asyncio.wait_for(sdk.running.wait(), timeout=1.0)
+        _trip_breaker(breaker)
+
+        rejected = await service.submit_uploads(
+            DockingParameters(center=[1, 2, 3], size=[20, 20, 20]),
+            type(
+                "Upload",
+                (),
+                {"filename": "receptor.pdb", "file": io.BytesIO(b"ATOM\n")},
+            )(),
+            type(
+                "Upload",
+                (),
+                {"filename": "ligand.sdf", "file": io.BytesIO(VALID_SDF)},
+            )(),
+            "idem-upload-cooldown-fallback",
+        )
+        clock[0] = 31.0
+        sdk.release.set()
+        await service.wait_terminal(first.job_id, timeout=3.0)
+        terminal = await service.wait_terminal(rejected.job_id, timeout=3.0)
+        await service.stop()
+        return terminal, config
+
+    terminal, config = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.OPENSANDBOX_UNAVAILABLE.value
+    assert sdk.create_count == 1
+    assert sdk.run_count == 1
+    assert removed_job_ids.count(terminal.job_id) == 1
     assert not (config.state_root / "jobs" / terminal.job_id).exists()
 
 

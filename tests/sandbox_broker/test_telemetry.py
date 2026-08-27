@@ -1157,6 +1157,173 @@ def test_runtime_gauge_group_and_observers_are_atomic(monkeypatch) -> None:
     }
 
 
+@pytest.mark.parametrize("kind", ["control_failure", "retry", "terminal"])
+def test_counter_projection_and_snapshot_share_one_atomic_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    telemetry = BrokerTelemetry(registry=CollectorRegistry())
+    if kind == "control_failure":
+        metric = telemetry._control_failures.labels(
+            operation="create",
+            failure_class="proxy_502",
+        )
+        mutate = lambda: telemetry.record_control_plane_failure(
+            operation="create",
+            failure_class=FailureClass.PROXY_502,
+        )
+        counter_key = "control_failure|create|proxy_502"
+        sample_name = "medchat_sandbox_control_plane_failures_total"
+        sample_labels = {"operation": "create", "failure_class": "proxy_502"}
+    elif kind == "retry":
+        metric = telemetry._retries.labels(operation="create", outcome="attempted")
+        mutate = lambda: telemetry.record_retry("create", "attempted")
+        counter_key = "retry|create|attempted"
+        sample_name = "medchat_sandbox_retry_total"
+        sample_labels = {"operation": "create", "outcome": "attempted"}
+    else:
+        metric = telemetry._jobs.labels(
+            terminal_status="failed",
+            failure_class="proxy_502",
+        )
+        mutate = lambda: telemetry.record_terminal(
+            "failed",
+            FailureClass.PROXY_502,
+        )
+        counter_key = "terminal|failed|proxy_502"
+        sample_name = "medchat_sandbox_jobs_total"
+        sample_labels = {
+            "terminal_status": "failed",
+            "failure_class": "proxy_502",
+        }
+
+    projection_entered = threading.Event()
+    release_projection = threading.Event()
+    original_inc = metric.inc
+
+    def blocking_inc() -> None:
+        projection_entered.set()
+        assert release_projection.wait(timeout=2.0)
+        original_inc()
+
+    monkeypatch.setattr(metric, "inc", blocking_inc)
+    writer = threading.Thread(target=mutate, daemon=True)
+    writer.start()
+    assert projection_entered.wait(timeout=1.0)
+
+    snapshot_result: dict[str, object] = {}
+    scrape_result: dict[str, bytes] = {}
+    snapshot_done = threading.Event()
+    scrape_done = threading.Event()
+
+    def read_snapshot() -> None:
+        snapshot_result["value"] = telemetry.snapshot()
+        snapshot_done.set()
+
+    def scrape() -> None:
+        scrape_result["value"] = telemetry.prometheus_text()
+        scrape_done.set()
+
+    snapshot_reader = threading.Thread(target=read_snapshot, daemon=True)
+    scraper = threading.Thread(target=scrape, daemon=True)
+    snapshot_reader.start()
+    scraper.start()
+    snapshot_was_blocked = not snapshot_done.wait(timeout=0.2)
+    scrape_was_blocked = not scrape_done.wait(timeout=0.2)
+    release_projection.set()
+    writer.join(timeout=2.0)
+    snapshot_reader.join(timeout=2.0)
+    scraper.join(timeout=2.0)
+
+    assert snapshot_was_blocked is True
+    assert scrape_was_blocked is True
+    assert snapshot_result["value"]["counters"][counter_key] == 1
+    matching = [
+        sample.value
+        for family in text_string_to_metric_families(
+            scrape_result["value"].decode("utf-8")
+        )
+        for sample in family.samples
+        if sample.name == sample_name and sample.labels == sample_labels
+    ]
+    assert matching == [1.0]
+
+
+def test_phase_histogram_projection_and_snapshot_share_one_atomic_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock()
+    telemetry = BrokerTelemetry(registry=CollectorRegistry(), monotonic=clock)
+    token = telemetry.start_phase(
+        trace_id="trace-1",
+        job_id="a" * 32,
+        phase="upload",
+        attempt=1,
+        queue_depth=0,
+        active_job_count=1,
+        image_digest="b" * 64,
+    )
+    clock.advance(0.125)
+    metric = telemetry._phase_duration.labels(phase="upload", outcome="passed")
+    projection_entered = threading.Event()
+    release_projection = threading.Event()
+    original_observe = metric.observe
+
+    def blocking_observe(value: float) -> None:
+        projection_entered.set()
+        assert release_projection.wait(timeout=2.0)
+        original_observe(value)
+
+    monkeypatch.setattr(metric, "observe", blocking_observe)
+    writer = threading.Thread(
+        target=lambda: telemetry.finish_phase(token, outcome="passed"),
+        daemon=True,
+    )
+    writer.start()
+    assert projection_entered.wait(timeout=1.0)
+
+    snapshot_result: dict[str, object] = {}
+    scrape_result: dict[str, bytes] = {}
+    snapshot_done = threading.Event()
+    scrape_done = threading.Event()
+    snapshot_reader = threading.Thread(
+        target=lambda: (
+            snapshot_result.setdefault("value", telemetry.snapshot()),
+            snapshot_done.set(),
+        ),
+        daemon=True,
+    )
+    scraper = threading.Thread(
+        target=lambda: (
+            scrape_result.setdefault("value", telemetry.prometheus_text()),
+            scrape_done.set(),
+        ),
+        daemon=True,
+    )
+    snapshot_reader.start()
+    scraper.start()
+    snapshot_was_blocked = not snapshot_done.wait(timeout=0.2)
+    scrape_was_blocked = not scrape_done.wait(timeout=0.2)
+    release_projection.set()
+    writer.join(timeout=2.0)
+    snapshot_reader.join(timeout=2.0)
+    scraper.join(timeout=2.0)
+
+    assert snapshot_was_blocked is True
+    assert scrape_was_blocked is True
+    assert snapshot_result["value"]["phase_latency_ms"]["upload|passed"] == [125]
+    samples = {
+        (sample.name, tuple(sorted(sample.labels.items()))): sample.value
+        for family in text_string_to_metric_families(
+            scrape_result["value"].decode("utf-8")
+        )
+        for sample in family.samples
+    }
+    labels = (("outcome", "passed"), ("phase", "upload"))
+    assert samples[("medchat_sandbox_phase_duration_seconds_count", labels)] == 1.0
+    assert samples[("medchat_sandbox_phase_duration_seconds_sum", labels)] == 0.125
+
+
 def test_emit_logs_only_the_validated_structured_event() -> None:
     logger = CapturingLogger()
     telemetry = BrokerTelemetry(

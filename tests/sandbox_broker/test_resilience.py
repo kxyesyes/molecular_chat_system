@@ -116,6 +116,94 @@ def test_transition_methods_sample_clock_only_after_acquiring_lock() -> None:
     breaker.record_failure(permit, FailureClass.SERVER_500)
 
 
+@pytest.mark.parametrize("action", ["success", "failure", "release"])
+def test_half_open_completion_clock_failure_does_not_claim_or_wedge(
+    action: str,
+) -> None:
+    clock = Clock()
+    breaker = ControlPlaneCircuitBreaker(monotonic=clock)
+    _record_failures(breaker, 3, FailureClass.PROXY_502)
+    clock.advance(30.0)
+    permit = breaker.acquire()
+    assert permit is not None and permit.half_open is True
+
+    observed_claimed: list[bool] = []
+
+    def failing_clock() -> float:
+        observed_claimed.append(permit._claimed)
+        raise RuntimeError("injected clock failure")
+
+    breaker._clock = failing_clock
+    with pytest.raises(RuntimeError, match="injected clock failure"):
+        if action == "success":
+            breaker.record_success(permit)
+        elif action == "failure":
+            breaker.record_failure(permit, FailureClass.PROXY_502)
+        else:
+            breaker.release(permit)
+
+    assert observed_claimed == [False]
+    assert permit._claimed is False
+    assert breaker._state is BreakerState.HALF_OPEN
+    assert breaker._probe_in_flight is True
+
+    breaker._clock = clock
+    if action == "success":
+        breaker.record_success(permit)
+        assert breaker.state is BreakerState.CLOSED
+        replacement = breaker.acquire()
+        assert replacement is not None and replacement.half_open is False
+    elif action == "failure":
+        breaker.record_failure(permit, FailureClass.PROXY_502)
+        assert breaker.state is BreakerState.OPEN
+        clock.advance(30.0)
+        replacement = breaker.acquire()
+        assert replacement is not None and replacement.half_open is True
+    else:
+        breaker.release(permit)
+        assert breaker.state is BreakerState.HALF_OPEN
+        replacement = breaker.acquire()
+        assert replacement is not None and replacement.half_open is True
+
+
+@pytest.mark.parametrize("action", ["success", "failure", "release"])
+def test_half_open_completion_rolls_back_clock_side_effect_before_raise(
+    action: str,
+) -> None:
+    clock = Clock()
+    breaker = ControlPlaneCircuitBreaker(monotonic=clock)
+    _record_failures(breaker, 3, FailureClass.PROXY_502)
+    clock.advance(30.0)
+    permit = breaker.acquire()
+    assert permit is not None and permit.half_open is True
+    expected_generation = breaker._generation
+
+    def mutating_clock() -> float:
+        breaker._state = BreakerState.CLOSED
+        breaker._probe_in_flight = False
+        breaker._generation += 100
+        raise RuntimeError("injected post-side-effect clock failure")
+
+    breaker._clock = mutating_clock
+    with pytest.raises(RuntimeError, match="post-side-effect"):
+        if action == "success":
+            breaker.record_success(permit)
+        elif action == "failure":
+            breaker.record_failure(permit, FailureClass.PROXY_502)
+        else:
+            breaker.release(permit)
+
+    assert permit._claimed is False
+    assert breaker._state is BreakerState.HALF_OPEN
+    assert breaker._probe_in_flight is True
+    assert breaker._generation == expected_generation
+
+    breaker._clock = clock
+    breaker.release(permit)
+    replacement = breaker.acquire()
+    assert replacement is not None and replacement.half_open is True
+
+
 def test_concurrent_failure_samples_are_linearized_before_window_and_cooldown() -> None:
     class OrchestratedClock:
         def __init__(self) -> None:

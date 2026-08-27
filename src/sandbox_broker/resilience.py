@@ -53,6 +53,12 @@ class BreakerPermit:
         repr=False,
         compare=False,
     )
+    _completed: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     @classmethod
     def _issue(
@@ -66,9 +72,16 @@ class BreakerPermit:
         return permit
 
     def _claim(self, owner: object) -> bool:
-        if self._owner is not owner or self._claimed:
+        if self._owner is not owner or self._completed:
             return False
-        object.__setattr__(self, "_claimed", True)
+        if not self._claimed:
+            object.__setattr__(self, "_claimed", True)
+        return True
+
+    def _confirm(self, owner: object) -> bool:
+        if self._owner is not owner or not self._claimed or self._completed:
+            return False
+        object.__setattr__(self, "_completed", True)
         return True
 
 
@@ -143,40 +156,108 @@ class ControlPlaneCircuitBreaker:
                 self._permit_owner,
             )
 
+    def _completion_snapshot_locked(
+        self,
+        permit: BreakerPermit,
+    ) -> tuple[
+        BreakerState,
+        tuple[float, ...],
+        float | None,
+        bool,
+        int,
+        bool,
+        bool,
+    ]:
+        return (
+            self._state,
+            tuple(self._failures),
+            self._opened_at,
+            self._probe_in_flight,
+            self._generation,
+            permit._claimed,
+            permit._completed,
+        )
+
+    def _restore_completion_locked(
+        self,
+        permit: BreakerPermit,
+        snapshot: tuple[
+            BreakerState,
+            tuple[float, ...],
+            float | None,
+            bool,
+            int,
+            bool,
+            bool,
+        ],
+    ) -> None:
+        (
+            self._state,
+            failures,
+            self._opened_at,
+            self._probe_in_flight,
+            self._generation,
+            claimed,
+            completed,
+        ) = snapshot
+        self._failures.clear()
+        self._failures.extend(failures)
+        object.__setattr__(permit, "_claimed", claimed)
+        object.__setattr__(permit, "_completed", completed)
+
     def release(self, permit: BreakerPermit) -> None:
         if type(permit) is not BreakerPermit:
             raise ValueError("invalid circuit-breaker permit")
         with self._lock:
-            if not permit._claim(self._permit_owner):
+            if permit._completed:
                 return
-            if (
-                permit.generation == self._generation
-                and permit.half_open
-                and self._state is BreakerState.HALF_OPEN
-                and self._probe_in_flight
-            ):
-                self._generation += 1
-                self._probe_in_flight = False
+            snapshot = self._completion_snapshot_locked(permit)
+            try:
+                self._now()
+                if not permit._claim(self._permit_owner):
+                    return
+                if (
+                    permit.generation == self._generation
+                    and permit.half_open
+                    and self._state is BreakerState.HALF_OPEN
+                    and self._probe_in_flight
+                ):
+                    self._generation += 1
+                    self._probe_in_flight = False
+                if not permit._confirm(self._permit_owner):
+                    raise RuntimeError("circuit-breaker completion failed")
+            except BaseException:
+                self._restore_completion_locked(permit, snapshot)
+                raise
 
     def record_success(self, permit: BreakerPermit) -> None:
         if type(permit) is not BreakerPermit:
             raise ValueError("invalid circuit-breaker permit")
         with self._lock:
-            if not permit._claim(self._permit_owner):
+            if permit._completed:
                 return
-            if permit.generation != self._generation:
-                return
-            completed_probe = (
-                permit.half_open
-                and self._state is BreakerState.HALF_OPEN
-                and self._probe_in_flight
-            )
-            self._state = BreakerState.CLOSED
-            self._failures.clear()
-            self._opened_at = None
-            self._probe_in_flight = False
-            if completed_probe:
-                self._generation += 1
+            snapshot = self._completion_snapshot_locked(permit)
+            try:
+                self._now()
+                if not permit._claim(self._permit_owner):
+                    return
+                if permit.generation == self._generation:
+                    completed_probe = (
+                        permit.half_open
+                        and self._state is BreakerState.HALF_OPEN
+                        and self._probe_in_flight
+                    )
+                    self._state = BreakerState.CLOSED
+                    self._failures.clear()
+                    self._opened_at = None
+                    self._probe_in_flight = False
+                    if completed_probe:
+                        self._generation += 1
+                if not permit._confirm(self._permit_owner):
+                    raise RuntimeError("circuit-breaker completion failed")
+            except BaseException:
+                self._restore_completion_locked(permit, snapshot)
+                raise
 
     def record_failure(
         self,
@@ -186,33 +267,43 @@ class ControlPlaneCircuitBreaker:
         if type(permit) is not BreakerPermit or type(failure_class) is not FailureClass:
             raise ValueError("invalid circuit-breaker observation")
         with self._lock:
-            if not permit._claim(self._permit_owner):
+            if permit._completed:
                 return
-            if permit.generation != self._generation:
-                return
-            if failure_class not in _QUALIFYING_FAILURES:
-                if (
-                    permit.half_open
-                    and self._state is BreakerState.HALF_OPEN
-                    and self._probe_in_flight
-                ):
-                    self._generation += 1
-                    self._probe_in_flight = False
-                return
-            now = self._now()
-            if permit.half_open:
-                self._state = BreakerState.OPEN
-                self._opened_at = now
-                self._probe_in_flight = False
-                self._generation += 1
-                return
-            self._failures.append(now)
-            while self._failures and now - self._failures[0] > _WINDOW_SECONDS:
-                self._failures.popleft()
-            if len(self._failures) == _FAILURE_THRESHOLD:
-                self._state = BreakerState.OPEN
-                self._opened_at = now
-                self._generation += 1
+            snapshot = self._completion_snapshot_locked(permit)
+            try:
+                now = self._now()
+                if not permit._claim(self._permit_owner):
+                    return
+                if permit.generation == self._generation:
+                    if failure_class not in _QUALIFYING_FAILURES:
+                        if (
+                            permit.half_open
+                            and self._state is BreakerState.HALF_OPEN
+                            and self._probe_in_flight
+                        ):
+                            self._generation += 1
+                            self._probe_in_flight = False
+                    elif permit.half_open:
+                        self._state = BreakerState.OPEN
+                        self._opened_at = now
+                        self._probe_in_flight = False
+                        self._generation += 1
+                    else:
+                        self._failures.append(now)
+                        while (
+                            self._failures
+                            and now - self._failures[0] > _WINDOW_SECONDS
+                        ):
+                            self._failures.popleft()
+                        if len(self._failures) == _FAILURE_THRESHOLD:
+                            self._state = BreakerState.OPEN
+                            self._opened_at = now
+                            self._generation += 1
+                if not permit._confirm(self._permit_owner):
+                    raise RuntimeError("circuit-breaker completion failed")
+            except BaseException:
+                self._restore_completion_locked(permit, snapshot)
+                raise
 
     def snapshot(self) -> dict[str, object]:
         return {
