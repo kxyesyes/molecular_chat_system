@@ -51,6 +51,7 @@ TARGET_PACKAGES = {
     "prody",
     "numpy",
     "openbabel",
+    "setuptools",
 }
 TARGET_PACKAGE_PINS = {
     "python": "3.10.14=hd12c33a_0_cpython",
@@ -60,6 +61,7 @@ TARGET_PACKAGE_PINS = {
     "prody": "2.4.1=pyh5e1b82b_2",
     "numpy": "1.26.4=py310hb13e2d6_0",
     "openbabel": "3.1.1=py310hbff9852_9",
+    "setuptools": "81.0.0=pyh332efcf_0",
 }
 MINIMAL_ENV_KEYS = {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"}
 VALID_MOL = b"""ethanol
@@ -293,6 +295,7 @@ def test_dockerfile_is_exact_non_root_and_has_narrow_copy_scope() -> None:
         "RUN micromamba install -y -n base -f /tmp/environment-exact.yml "
         "&& micromamba clean --all --yes"
     ) in lines
+    assert 'RUN /opt/conda/bin/python -c "import pkg_resources, prody"' in lines
     assert "USER root" in lines
     assert any(
         "install -d -o 65532 -g 65532 -m 0700 /workspace/input /workspace/output" in line

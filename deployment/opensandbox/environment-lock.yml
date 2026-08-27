@@ -4,6 +4,8 @@ channels:
 # Generated mechanically from:
 # conda create --dry-run --json --platform linux-64 -c conda-forge --strict-channel-priority -n medchat-task8-exact-solve python=3.10.14 vina=1.2.5 meeko=0.7.1 rdkit=2023.09.6 prody=2.4.1 numpy=1.26.4 openbabel=3.1.1
 # Solver result: success=true; LINK actions=128; platforms=linux-64,noarch
+# Compatibility override: setuptools is held below 82 because Meeko 0.7.1's
+# receptor preparation still imports pkg_resources, removed in setuptools 82.
 dependencies:
   - _libgcc_mutex=0.1=conda_forge
   - _openmp_mutex=4.5=2_gnu
@@ -106,7 +108,7 @@ dependencies:
   - requests=2.34.2=pyhcf101f3_0
   - rlpycairo=0.4.0=pyh6c17108_0
   - scipy=1.14.0=py310h93e2701_1
-  - setuptools=84.0.0=pyh332efcf_0
+  - setuptools=81.0.0=pyh332efcf_0
   - six=1.17.0=pyhe01879c_1
   - sqlalchemy=2.0.31=py310hc51659f_0
   - tk=8.6.13=noxft_h4845f30_101
