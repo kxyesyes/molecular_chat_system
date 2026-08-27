@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 import random
 import re
 import unicodedata
@@ -230,9 +231,38 @@ class SandboxRunError(SandboxClientError):
 class SandboxDestroyError(SandboxClientError):
     """Sandbox cleanup failed after one best-effort invocation."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        operation: str = "destroy",
+        failure_class: FailureClass = FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+        completion_known: bool = False,
+    ) -> None:
+        if type(completion_known) is not bool:
+            raise ValueError("invalid sandbox destroy completion certainty")
+        super().__init__(
+            message,
+            operation=operation,
+            failure_class=failure_class,
+        )
+        self._completion_known = completion_known
+
+    @property
+    def completion_known(self) -> bool:
+        return self._completion_known
+
 
 class SandboxProtocolError(SandboxClientError):
     """The SDK or server returned data outside the expected contract."""
+
+
+class _MetadataObservationFailure(Exception):
+    """Carry only classified list failure data between official lifecycle layers."""
+
+    def __init__(self, failure_class: FailureClass) -> None:
+        self.failure_class = failure_class
+        super().__init__("sandbox metadata observation failed")
 
 
 @dataclass(frozen=True)
@@ -412,6 +442,7 @@ class _OfficialSandboxFactory:
         self._telemetry = telemetry
         self._metadata_retry_sleep = metadata_retry_sleep
         self._metadata_retry_backoff = metadata_retry_backoff
+        self._metadata_lifecycle_tasks: set[asyncio.Task[Any]] = set()
 
     def _record_metadata_retry(self, outcome: str) -> None:
         if self._telemetry is None:
@@ -421,93 +452,187 @@ class _OfficialSandboxFactory:
         except BaseException:
             pass
 
-    async def _list_sandbox_infos(
+    @staticmethod
+    def _consume_metadata_lifecycle_task(task: asyncio.Task[Any]) -> None:
+        try:
+            task.exception()
+        except BaseException:
+            pass
+
+    def _metadata_lifecycle_finished(self, task: asyncio.Task[Any]) -> None:
+        self._consume_metadata_lifecycle_task(task)
+        self._metadata_lifecycle_tasks.discard(task)
+
+    def metadata_lifecycle_tasks(self) -> tuple[asyncio.Task[Any], ...]:
+        return tuple(self._metadata_lifecycle_tasks)
+
+    def _track_metadata_lifecycle(
         self,
-        manager: Any,
-        sandbox_filter: Any,
-        deadline: float,
-    ) -> object:
-        retried = False
-        loop = asyncio.get_running_loop()
-        for attempt in (1, 2):
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                if retried:
-                    self._record_metadata_retry("exhausted")
-                raise SandboxListError(
-                    "sandbox metadata observation failed",
-                    operation="metadata",
-                ) from None
+        operation: Awaitable[Any],
+    ) -> asyncio.Task[Any]:
+        task = asyncio.create_task(operation)
+        self._metadata_lifecycle_tasks.add(task)
+        task.add_done_callback(self._metadata_lifecycle_finished)
+        return task
+
+    async def _cancel_metadata_lifecycle(self, task: asyncio.Task[Any]) -> None:
+        task.cancel()
+        await asyncio.sleep(0)
+
+    async def _metadata_lifecycle(self, sdk: _OfficialSDK, job_id: str) -> int:
+        manager: Any = None
+        result = 0
+        pending: BaseException | None = None
+        try:
+            manager = await sdk.SandboxManager.create(
+                connection_config=self._connection(sdk)
+            )
             try:
-                page = await asyncio.wait_for(
-                    manager.list_sandbox_infos(sandbox_filter),
-                    timeout=remaining,
+                page = await manager.list_sandbox_infos(
+                    sdk.SandboxFilter(
+                        metadata={
+                            "medchat.operation": "molecular_docking",
+                            "medchat.job_id": job_id,
+                        },
+                        page=1,
+                        page_size=_RECONCILE_PAGE_SIZE,
+                    )
                 )
             except (
                 SandboxInputError,
                 SandboxDependencyUnavailableError,
                 SandboxProtocolError,
+                asyncio.CancelledError,
             ):
                 raise
             except Exception as failure:
-                failure_class = classify_control_plane_failure(
-                    "metadata", failure
+                raise _MetadataObservationFailure(
+                    classify_control_plane_failure("metadata", failure)
+                ) from None
+            infos = getattr(page, "sandbox_infos", None)
+            if type(infos) is not list or len(infos) > _RECONCILE_PAGE_SIZE:
+                raise SandboxProtocolError(
+                    "the sandbox service returned an invalid reconciliation result",
+                    operation="destroy",
                 )
+            sandbox_ids: list[str] = []
+            for info in infos:
+                metadata = getattr(info, "metadata", None)
                 if (
-                    attempt == 2
-                    or failure_class not in _RETRYABLE_METADATA_FAILURES
+                    type(metadata) is not dict
+                    or metadata.get("medchat.operation") != "molecular_docking"
+                    or metadata.get("medchat.job_id") != job_id
                 ):
-                    if retried:
-                        self._record_metadata_retry("exhausted")
-                    raise SandboxListError(
-                        "sandbox metadata observation failed",
-                        operation="metadata",
-                        failure_class=failure_class,
-                    ) from None
-                retried = True
-                self._record_metadata_retry("attempted")
-                try:
-                    delay = self._metadata_retry_backoff(attempt)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    self._record_metadata_retry("exhausted")
-                    raise SandboxListError(
-                        "sandbox metadata observation failed",
-                        operation="metadata",
-                        failure_class=failure_class,
-                    ) from None
-                remaining = deadline - loop.time()
-                if (
-                    type(delay) not in {int, float}
-                    or delay < 0
-                    or delay >= remaining
-                ):
-                    self._record_metadata_retry("exhausted")
-                    raise SandboxListError(
-                        "sandbox metadata observation failed",
-                        operation="metadata",
-                        failure_class=failure_class,
-                    ) from None
-                try:
-                    await asyncio.wait_for(
-                        self._metadata_retry_sleep(float(delay)),
-                        timeout=remaining,
+                    raise SandboxProtocolError(
+                        "the sandbox service returned an invalid reconciliation result",
+                        operation="destroy",
                     )
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    self._record_metadata_retry("exhausted")
-                    raise SandboxListError(
-                        "sandbox metadata observation failed",
-                        operation="metadata",
-                        failure_class=failure_class,
-                    ) from None
-                continue
-            if retried:
-                self._record_metadata_retry("succeeded")
-            return page
-        raise AssertionError("unreachable metadata retry state")
+                sandbox_ids.append(
+                    _validate_id(
+                        getattr(info, "id", None),
+                        server_value=True,
+                        operation="destroy",
+                    )
+                )
+            for sandbox_id in sandbox_ids:
+                await manager.kill_sandbox(sandbox_id)
+                result += 1
+        except BaseException as failure:
+            pending = failure
+        if manager is not None:
+            try:
+                await manager.close()
+            except BaseException as close_failure:
+                if pending is None:
+                    pending = close_failure
+        if pending is not None:
+            pending.__traceback__ = None
+            raise pending
+        return result
+
+    async def _await_metadata_lifecycle(
+        self,
+        sdk: _OfficialSDK,
+        job_id: str,
+        deadline: float,
+    ) -> int:
+        loop = asyncio.get_running_loop()
+        if any(not task.done() for task in self._metadata_lifecycle_tasks):
+            raise SandboxListError(
+                "sandbox metadata observation failed",
+                operation="metadata",
+            )
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise SandboxListError(
+                "sandbox metadata observation failed",
+                operation="metadata",
+            )
+        task = self._track_metadata_lifecycle(
+            self._metadata_lifecycle(sdk, job_id)
+        )
+        try:
+            done, _ = await asyncio.wait({task}, timeout=remaining)
+        except asyncio.CancelledError:
+            await self._cancel_metadata_lifecycle(task)
+            raise
+        if task not in done:
+            await self._cancel_metadata_lifecycle(task)
+            raise SandboxListError(
+                "sandbox metadata observation failed",
+                operation="metadata",
+            ) from None
+        try:
+            return task.result()
+        except (
+            _MetadataObservationFailure,
+            SandboxDependencyUnavailableError,
+            SandboxProtocolError,
+        ):
+            raise
+        except SandboxInputError:
+            raise SandboxDestroyError(
+                "sandbox cleanup failed",
+                operation="destroy",
+                failure_class=FailureClass.DESTROY_FAILED,
+                completion_known=True,
+            ) from None
+        except Exception as failure:
+            raise SandboxDestroyError(
+                "sandbox cleanup failed",
+                operation="destroy",
+                failure_class=classify_control_plane_failure(
+                    "destroy", failure
+                ),
+                completion_known=True,
+            ) from None
+
+    async def _sleep_for_metadata_retry(
+        self,
+        delay: float,
+        deadline: float,
+    ) -> None:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= delay:
+            raise SandboxListError(
+                "sandbox metadata observation failed",
+                operation="metadata",
+            )
+        task = self._track_metadata_lifecycle(
+            self._metadata_retry_sleep(delay)
+        )
+        try:
+            done, _ = await asyncio.wait({task}, timeout=remaining)
+        except asyncio.CancelledError:
+            await self._cancel_metadata_lifecycle(task)
+            raise
+        if task not in done:
+            await self._cancel_metadata_lifecycle(task)
+            raise SandboxListError(
+                "sandbox metadata observation failed",
+                operation="metadata",
+            ) from None
+        task.result()
 
     def _sdk(self) -> _OfficialSDK:
         try:
@@ -616,50 +741,70 @@ class _OfficialSandboxFactory:
         deadline = (
             asyncio.get_running_loop().time() + _SDK_REQUEST_TIMEOUT_SECONDS
         )
-        manager = await sdk.SandboxManager.create(
-            connection_config=self._connection(sdk)
-        )
-        try:
-            page = await self._list_sandbox_infos(
-                manager,
-                sdk.SandboxFilter(
-                    metadata={
-                        "medchat.operation": "molecular_docking",
-                        "medchat.job_id": job_id,
-                    },
-                    page=1,
-                    page_size=_RECONCILE_PAGE_SIZE,
-                ),
-                deadline,
-            )
-            infos = getattr(page, "sandbox_infos", None)
-            if type(infos) is not list or len(infos) > _RECONCILE_PAGE_SIZE:
-                raise SandboxProtocolError(
-                    "the sandbox service returned an invalid reconciliation result",
-                    operation="destroy",
+        retried = False
+        for attempt in (1, 2):
+            try:
+                result = await self._await_metadata_lifecycle(
+                    sdk, job_id, deadline
                 )
-            destroyed = 0
-            for info in infos:
-                metadata = getattr(info, "metadata", None)
+            except _MetadataObservationFailure as failure:
+                failure_class = failure.failure_class
                 if (
-                    type(metadata) is not dict
-                    or metadata.get("medchat.operation") != "molecular_docking"
-                    or metadata.get("medchat.job_id") != job_id
+                    attempt == 2
+                    or failure_class not in _RETRYABLE_METADATA_FAILURES
                 ):
-                    raise SandboxProtocolError(
-                        "the sandbox service returned an invalid reconciliation result",
-                        operation="destroy",
+                    if retried:
+                        self._record_metadata_retry("exhausted")
+                    raise SandboxListError(
+                        "sandbox metadata observation failed",
+                        operation="metadata",
+                        failure_class=failure_class,
+                    ) from None
+                retried = True
+                self._record_metadata_retry("attempted")
+                try:
+                    delay = self._metadata_retry_backoff(attempt)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self._record_metadata_retry("exhausted")
+                    raise SandboxListError(
+                        "sandbox metadata observation failed",
+                        operation="metadata",
+                        failure_class=failure_class,
+                    ) from None
+                if (
+                    type(delay) not in {int, float}
+                    or not math.isfinite(delay)
+                    or not 0 <= delay <= 0.15
+                ):
+                    self._record_metadata_retry("exhausted")
+                    raise SandboxListError(
+                        "sandbox metadata observation failed",
+                        operation="metadata",
+                        failure_class=failure_class,
+                    ) from None
+                try:
+                    await self._sleep_for_metadata_retry(
+                        float(delay), deadline
                     )
-                sandbox_id = _validate_id(
-                    getattr(info, "id", None),
-                    server_value=True,
-                    operation="destroy",
-                )
-                await manager.kill_sandbox(sandbox_id)
-                destroyed += 1
-            return destroyed
-        finally:
-            await manager.close()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self._record_metadata_retry("exhausted")
+                    raise SandboxListError(
+                        "sandbox metadata observation failed",
+                        operation="metadata",
+                        failure_class=failure_class,
+                    ) from None
+                continue
+            except SandboxListError:
+                self._record_metadata_retry("exhausted")
+                raise
+            if retried:
+                self._record_metadata_retry("succeeded")
+            return result
+        raise AssertionError("unreachable metadata retry state")
 
 
 def _validate_id(
@@ -1295,17 +1440,19 @@ class OpenSandboxClient:
                 "the sandbox service returned an invalid reconciliation result",
                 operation="destroy",
             ) from None
-        except SandboxDestroyError:
+        except SandboxDestroyError as failure:
             raise SandboxDestroyError(
                 "sandbox cleanup failed",
                 operation="destroy",
                 failure_class=FailureClass.DESTROY_FAILED,
+                completion_known=failure.completion_known,
             ) from None
         except Exception as failure:
             raise SandboxDestroyError(
                 "sandbox cleanup failed",
                 operation="destroy",
                 failure_class=classify_control_plane_failure("destroy", failure),
+                completion_known=operation.done() and not operation.cancelled(),
             ) from None
 
     @staticmethod
@@ -1385,7 +1532,10 @@ class OpenSandboxClient:
     ) -> Any:
         succeeded = False
         try:
-            result = await self._perform_cleanup(cleanup)
+            if isinstance(self._factory, _OfficialSandboxFactory):
+                result = await cleanup()
+            else:
+                result = await self._perform_cleanup(cleanup)
             if (
                 type(result) is not int
                 or not 0 <= result <= _RECONCILE_PAGE_SIZE
@@ -1396,6 +1546,11 @@ class OpenSandboxClient:
                 )
             succeeded = True
             return result
+        except (SandboxListError, SandboxDestroyError) as failure:
+            failure.__cause__ = None
+            failure.__context__ = None
+            failure.__traceback__ = None
+            raise
         finally:
             task = asyncio.current_task()
             async with self._cleanup_lock:
@@ -1403,6 +1558,18 @@ class OpenSandboxClient:
                     del self._cleanup_in_flight[cleanup_key]
                 if not succeeded:
                     self._cleanup_failure_generation += 1
+
+    def _factory_metadata_lifecycle_tasks(self) -> tuple[asyncio.Task[Any], ...]:
+        snapshot = getattr(self._factory, "metadata_lifecycle_tasks", None)
+        if not callable(snapshot):
+            return ()
+        try:
+            tasks = snapshot()
+        except BaseException:
+            return ()
+        if type(tasks) is not tuple:
+            return ()
+        return tuple(task for task in tasks if isinstance(task, asyncio.Task))
 
     async def drain_cleanup(self) -> None:
         """Wait for a stable empty cleanup set within one fixed deadline."""
@@ -1421,6 +1588,7 @@ class OpenSandboxClient:
                         *self._cleanup_in_flight.values(),
                         *self._cleanup_active_operations,
                         *self._cleanup_quarantine,
+                        *self._factory_metadata_lifecycle_tasks(),
                     }
                 )
                 generation = self._cleanup_generation
@@ -1489,6 +1657,7 @@ class OpenSandboxClient:
                     self._cleanup_in_flight
                     or self._cleanup_active_operations
                     or self._cleanup_quarantine
+                    or self._factory_metadata_lifecycle_tasks()
                     or self._cleanup_generation != generation
                     or breaker_open
                 ):
@@ -1564,4 +1733,9 @@ class OpenSandboxClient:
                 self._cleanup_generation += 1
                 self._cleanup_in_flight[cleanup_key] = task
                 task.add_done_callback(self._consume_cleanup_task)
-        return await asyncio.shield(task)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task.cancel()
+            await asyncio.sleep(0)
+            raise

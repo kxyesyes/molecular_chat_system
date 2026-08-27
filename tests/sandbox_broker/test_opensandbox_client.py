@@ -2371,7 +2371,7 @@ def test_official_metadata_observation_retries_once_then_records_success(
     assert destroyed == 1
     assert Manager.list_calls == 2
     assert Manager.killed == ["sandbox-1"]
-    assert Manager.close_calls == 1
+    assert Manager.close_calls == 2
     assert sleeps == [0.0]
     assert retries == [("metadata", "attempted"), ("metadata", "succeeded")]
 
@@ -2417,7 +2417,7 @@ def test_official_metadata_observation_exhaustion_is_sanitized_and_closes(
         asyncio.run(client.destroy_by_job_id("job-1"))
 
     assert Manager.list_calls == 2
-    assert Manager.close_calls == 1
+    assert Manager.close_calls == 2
     assert retries == [("metadata", "attempted"), ("metadata", "exhausted")]
     assert raised.value.operation == "metadata"
     assert raised.value.failure_class is FailureClass.CONNECTION_FAILED
@@ -2559,11 +2559,12 @@ def test_official_metadata_deadline_prevents_second_observation(
         "_load_official_sdk",
         lambda: _reconciliation_sdk(Manager),
     )
+    monkeypatch.setattr(opensandbox_client_module, "_SDK_REQUEST_TIMEOUT_SECONDS", 0.1)
     client = OpenSandboxClient(
         config(tmp_path),
         telemetry=Telemetry(),
         metadata_retry_sleep=sleep,
-        metadata_retry_backoff=lambda _attempt: 21.0,
+        metadata_retry_backoff=lambda _attempt: 0.15,
     )
 
     with pytest.raises(SandboxListError):
@@ -2662,12 +2663,333 @@ def test_official_kill_failure_is_not_retried(
         metadata_retry_backoff=lambda _attempt: 0.0,
     )
 
-    with pytest.raises(SandboxDestroyError):
+    with pytest.raises(SandboxDestroyError) as raised:
         asyncio.run(client.destroy_by_job_id("job-1"))
 
     assert Manager.list_calls == 1
     assert Manager.kill_calls == 1
     assert Manager.close_calls == 1
+    assert "kill failed" not in repr(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+@pytest.mark.parametrize("blocked_stage", ["create", "list", "close"])
+def test_official_metadata_lifecycle_deadline_tracks_suppressed_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    blocked_stage: str,
+) -> None:
+    async def scenario() -> tuple[
+        SandboxClientError,
+        float,
+        int,
+        int,
+        int,
+        int,
+        bool,
+        list[tuple[str, str]],
+    ]:
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        release = asyncio.Event()
+        retries: list[tuple[str, str]] = []
+
+        class Telemetry:
+            def record_retry(self, operation: str, outcome: str) -> None:
+                retries.append((operation, outcome))
+
+        async def block(stage: str) -> None:
+            if blocked_stage != stage:
+                return
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await release.wait()
+
+        class Manager:
+            create_calls = 0
+            list_calls = 0
+            close_calls = 0
+
+            @classmethod
+            async def create(cls, **_values: object) -> "Manager":
+                cls.create_calls += 1
+                await block("create")
+                return cls()
+
+            async def list_sandbox_infos(self, _filter: object) -> object:
+                type(self).list_calls += 1
+                await block("list")
+                return SimpleNamespace(sandbox_infos=[])
+
+            async def close(self) -> None:
+                type(self).close_calls += 1
+                await block("close")
+
+        monkeypatch.setattr(opensandbox_client_module, "_SDK_REQUEST_TIMEOUT_SECONDS", 0.02)
+        monkeypatch.setattr(
+            opensandbox_client_module,
+            "_load_official_sdk",
+            lambda: _reconciliation_sdk(Manager),
+        )
+        client = OpenSandboxClient(
+            config(tmp_path),
+            telemetry=Telemetry(),
+            metadata_retry_sleep=lambda _delay: asyncio.sleep(0),
+            metadata_retry_backoff=lambda _attempt: 0.0,
+        )
+        client._cleanup_hard_timeout_seconds = 0.08
+        started_at = asyncio.get_running_loop().time()
+        try:
+            await client.destroy_by_job_id("job-1")
+        except SandboxClientError as raised:
+            failure = raised
+        else:
+            raise AssertionError("metadata lifecycle did not hit its deadline")
+        elapsed = asyncio.get_running_loop().time() - started_at
+        await cancelled.wait()
+        lifecycle_tasks = getattr(client._factory, "_metadata_lifecycle_tasks", set())
+        tracked = len(lifecycle_tasks)
+        release.set()
+        for _ in range(20):
+            await asyncio.sleep(0)
+            lifecycle_tasks = getattr(
+                client._factory, "_metadata_lifecycle_tasks", set()
+            )
+            if Manager.close_calls and not lifecycle_tasks:
+                break
+        with pytest.raises(SandboxDestroyError):
+            await client.drain_cleanup()
+        await client.drain_cleanup()
+        return (
+            failure,
+            elapsed,
+            Manager.create_calls,
+            Manager.list_calls,
+            Manager.close_calls,
+            tracked,
+            not getattr(client._factory, "_metadata_lifecycle_tasks", set()),
+            retries,
+        )
+
+    failure, elapsed, creates, lists, closes, tracked, drained, retries = asyncio.run(
+        scenario()
+    )
+    assert isinstance(failure, SandboxListError)
+    assert failure.operation == "metadata"
+    assert elapsed < 0.06
+    assert creates == 1
+    assert lists <= 1
+    assert closes == 1
+    assert tracked == 1
+    assert drained is True
+    assert retries == [("metadata", "exhausted")]
+
+
+def test_official_metadata_caller_cancellation_is_preserved_and_drained(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> tuple[int, int, int, bool]:
+        list_started = asyncio.Event()
+        list_cancelled = asyncio.Event()
+        release = asyncio.Event()
+
+        class Manager:
+            list_calls = 0
+            close_calls = 0
+
+            @classmethod
+            async def create(cls, **_values: object) -> "Manager":
+                return cls()
+
+            async def list_sandbox_infos(self, _filter: object) -> object:
+                type(self).list_calls += 1
+                list_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    list_cancelled.set()
+                    await release.wait()
+                return SimpleNamespace(sandbox_infos=[])
+
+            async def close(self) -> None:
+                type(self).close_calls += 1
+
+        monkeypatch.setattr(
+            opensandbox_client_module,
+            "_load_official_sdk",
+            lambda: _reconciliation_sdk(Manager),
+        )
+        client = OpenSandboxClient(config(tmp_path))
+        task = asyncio.create_task(client.destroy_by_job_id("job-1"))
+        await list_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        try:
+            await asyncio.wait_for(list_cancelled.wait(), timeout=0.05)
+            cancellation_preserved = True
+        except asyncio.TimeoutError:
+            cancellation_preserved = False
+        tracked = len(
+            getattr(client._factory, "_metadata_lifecycle_tasks", set())
+        )
+        release.set()
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if not getattr(client._factory, "_metadata_lifecycle_tasks", set()):
+                break
+        try:
+            await client.drain_cleanup()
+        except SandboxDestroyError:
+            await client.drain_cleanup()
+        return (
+            Manager.list_calls,
+            Manager.close_calls,
+            tracked,
+            cancellation_preserved
+            and not getattr(client._factory, "_metadata_lifecycle_tasks", set()),
+        )
+
+    lists, closes, tracked, drained = asyncio.run(scenario())
+    assert lists == 1
+    assert closes == 1
+    assert tracked == 1
+    assert drained is True
+
+
+def test_official_metadata_list_failure_precedes_close_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Manager:
+        create_calls = 0
+        list_calls = 0
+        close_calls = 0
+
+        @classmethod
+        async def create(cls, **_values: object) -> "Manager":
+            cls.create_calls += 1
+            return cls()
+
+        async def list_sandbox_infos(self, _filter: object) -> object:
+            type(self).list_calls += 1
+            raise ConnectionError("private list detail")
+
+        async def close(self) -> None:
+            type(self).close_calls += 1
+            raise RuntimeError("private close detail")
+
+    monkeypatch.setattr(
+        opensandbox_client_module,
+        "_load_official_sdk",
+        lambda: _reconciliation_sdk(Manager),
+    )
+    client = OpenSandboxClient(
+        config(tmp_path),
+        metadata_retry_sleep=lambda _delay: asyncio.sleep(0),
+        metadata_retry_backoff=lambda _attempt: 0.0,
+    )
+
+    with pytest.raises(SandboxListError) as raised:
+        asyncio.run(client.destroy_by_job_id("job-1"))
+
+    assert raised.value.failure_class is FailureClass.CONNECTION_FAILED
+    assert "private" not in str(raised.value)
+    assert Manager.create_calls == Manager.list_calls == Manager.close_calls == 2
+
+
+@pytest.mark.parametrize(
+    "delay",
+    [float("nan"), float("inf"), float("-inf"), -0.001, 0.150001, 1, True, "0"],
+)
+def test_official_metadata_rejects_invalid_retry_delay_without_sleeping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    delay: object,
+) -> None:
+    sleeps: list[float] = []
+
+    class Manager:
+        list_calls = 0
+
+        @classmethod
+        async def create(cls, **_values: object) -> "Manager":
+            return cls()
+
+        async def list_sandbox_infos(self, _filter: object) -> object:
+            type(self).list_calls += 1
+            raise ConnectionError("metadata unavailable")
+
+        async def close(self) -> None:
+            pass
+
+    async def sleep(value: float) -> None:
+        sleeps.append(value)
+
+    monkeypatch.setattr(
+        opensandbox_client_module,
+        "_load_official_sdk",
+        lambda: _reconciliation_sdk(Manager),
+    )
+    client = OpenSandboxClient(
+        config(tmp_path),
+        metadata_retry_sleep=sleep,
+        metadata_retry_backoff=lambda _attempt: delay,  # type: ignore[return-value]
+    )
+
+    with pytest.raises(SandboxListError):
+        asyncio.run(client.destroy_by_job_id("job-1"))
+
+    assert Manager.list_calls == 1
+    assert sleeps == []
+
+
+def test_official_metadata_accepts_exact_maximum_retry_delay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    class Manager:
+        list_calls = 0
+
+        @classmethod
+        async def create(cls, **_values: object) -> "Manager":
+            return cls()
+
+        async def list_sandbox_infos(self, _filter: object) -> object:
+            type(self).list_calls += 1
+            if type(self).list_calls == 1:
+                raise ConnectionError("metadata unavailable")
+            return SimpleNamespace(sandbox_infos=[])
+
+        async def close(self) -> None:
+            pass
+
+    async def sleep(value: float) -> None:
+        sleeps.append(value)
+
+    monkeypatch.setattr(
+        opensandbox_client_module,
+        "_load_official_sdk",
+        lambda: _reconciliation_sdk(Manager),
+    )
+    client = OpenSandboxClient(
+        config(tmp_path),
+        metadata_retry_sleep=sleep,
+        metadata_retry_backoff=lambda _attempt: 0.15,
+    )
+
+    destroyed = asyncio.run(client.destroy_by_job_id("job-1"))
+
+    assert destroyed == 0
+    assert Manager.list_calls == 2
+    assert sleeps == [0.15]
 
 
 def test_all_domain_errors_share_one_narrow_base() -> None:
@@ -2685,3 +3007,36 @@ def test_all_domain_errors_share_one_narrow_base() -> None:
             SandboxProtocolError,
         )
     )
+
+
+def test_destroy_error_completion_certainty_defaults_fail_closed() -> None:
+    failure = SandboxDestroyError(
+        "sandbox cleanup failed",
+        operation="destroy",
+        failure_class=FailureClass.CONNECTION_FAILED,
+    )
+
+    assert failure.completion_known is False
+    with pytest.raises(AttributeError):
+        failure.completion_known = True  # type: ignore[misc]
+    with pytest.raises((TypeError, ValueError)):
+        SandboxDestroyError(
+            "sandbox cleanup failed",
+            operation="destroy",
+            completion_known=1,  # type: ignore[arg-type]
+        )
+
+
+def test_terminal_underlying_destroy_failure_marks_completion_known(
+    tmp_path: Path,
+) -> None:
+    fake = FakeSandboxFactory()
+    fake.failures["destroy"] = ConnectionError("private destroy transport")
+    client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+
+    with pytest.raises(SandboxDestroyError) as raised:
+        asyncio.run(client.destroy(SandboxHandle("sandbox-1", fake.raw)))
+
+    assert raised.value.completion_known is True
+    assert raised.value.failure_class is FailureClass.CONNECTION_FAILED
+    assert "private destroy transport" not in str(raised.value)

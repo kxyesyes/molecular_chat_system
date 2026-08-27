@@ -1340,7 +1340,9 @@ class SandboxBrokerService:
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     create_task.cancel()
-                    confirmed = await self._reconcile_unknown_create(job_id)
+                    confirmed = await self._reconcile_unknown_create(
+                        job_id, deadline
+                    )
                     if not create_task.done():
                         create_task.add_done_callback(self._consume_task_exception)
                     else:
@@ -1355,7 +1357,9 @@ class SandboxBrokerService:
                     continue
                 except asyncio.TimeoutError:
                     create_task.cancel()
-                    confirmed = await self._reconcile_unknown_create(job_id)
+                    confirmed = await self._reconcile_unknown_create(
+                        job_id, deadline
+                    )
                     if not create_task.done():
                         create_task.add_done_callback(self._consume_task_exception)
                     else:
@@ -1374,7 +1378,7 @@ class SandboxBrokerService:
         try:
             return await self._create_without_cancelling(job_id, deadline)
         except SandboxCreateError:
-            if not await self._reconcile_unknown_create(job_id):
+            if not await self._reconcile_unknown_create(job_id, deadline):
                 raise _CreateHardDeadline(False) from None
             if self._cancellation_requested(job_id):
                 raise asyncio.CancelledError
@@ -1389,26 +1393,42 @@ class SandboxBrokerService:
             try:
                 return await self._create_without_cancelling(job_id, deadline)
             except SandboxCreateError:
-                if not await self._reconcile_unknown_create(job_id):
+                if not await self._reconcile_unknown_create(job_id, deadline):
                     raise _CreateHardDeadline(False) from None
                 raise
 
-    async def _reconcile_unknown_create(self, job_id: str) -> bool:
+    async def _reconcile_unknown_create(
+        self,
+        job_id: str,
+        deadline: float,
+    ) -> bool:
         reconcile = getattr(self.client, "destroy_by_job_id", None)
         if not callable(reconcile):
+            return False
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
             return False
         task = asyncio.create_task(
             reconcile(job_id), name=f"sandbox-broker-reconcile-{job_id}"
         )
         try:
             destroyed = await asyncio.wait_for(
-                asyncio.shield(task), timeout=self._destroy_hard_timeout_seconds
+                asyncio.shield(task),
+                timeout=min(self._destroy_hard_timeout_seconds, remaining),
             )
             return type(destroyed) is int and destroyed >= 0
         except BaseException:
             if not task.done():
                 task.cancel()
-                task.add_done_callback(self._consume_task_exception)
+                await asyncio.sleep(0)
+            if not task.done():
+                self._isolated_tasks.add(task)
+
+                def reconcile_finished(completed: asyncio.Task[Any]) -> None:
+                    self._isolated_tasks.discard(completed)
+                    self._consume_task_exception(completed)
+
+                task.add_done_callback(reconcile_finished)
             else:
                 self._consume_task_exception(task)
             return False
@@ -2031,7 +2051,10 @@ class SandboxBrokerService:
         try:
             cleanup_task.result()
         except SandboxDestroyError as failure:
-            if failure.failure_class in _RETRYABLE_DESTROY_FAILURES:
+            if (
+                failure.completion_known is True
+                and failure.failure_class in _RETRYABLE_DESTROY_FAILURES
+            ):
                 return "retryable_failed"
             return "failed"
         except BaseException:
@@ -2062,16 +2085,13 @@ class SandboxBrokerService:
             # suppress destruction of a handle already returned by the SDK.
             cleanup_tracking_active = False
         outcome = await self._destroy_once(job_id, handle)
-        if outcome == "retryable_failed" and not self._stopping:
+        if outcome == "retryable_failed":
             try:
                 await asyncio.sleep(self._destroy_retry_delay_seconds)
             except asyncio.CancelledError:
                 outcome = "failed"
             else:
-                if self._stopping:
-                    outcome = "failed"
-                else:
-                    outcome = await self._destroy_once(job_id, handle)
+                outcome = await self._destroy_once(job_id, handle)
         cleanup_succeeded = outcome == "succeeded"
         if cleanup_tracking_active and cleanup_succeeded:
             try:
