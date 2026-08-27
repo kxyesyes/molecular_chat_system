@@ -187,6 +187,24 @@ def test_firewall_uses_iptables_nft_canonical_conntrack_state_order() -> None:
     assert "--ctstate ESTABLISHED,RELATED" not in script
 
 
+def test_firewall_positioning_uses_semantic_rule_operations_not_rendered_text() -> None:
+    script = FIREWALL_SCRIPT.read_text(encoding="utf-8")
+    ensure_start = script.index("ensure_rule_at() {")
+    ensure_end = script.index("\n}\n", ensure_start)
+    ensure = script[ensure_start:ensure_end]
+    verify_start = script.index("verify_unique_rule() {")
+    verify_end = script.index("\n}\n", verify_start)
+    verify = script[verify_start:verify_end]
+
+    assert '"$tool" -w "$WAIT_SECONDS" -D "$chain" "$@"' in ensure
+    assert '"$tool" -w "$WAIT_SECONDS" -I "$chain" "$position" "$@"' in ensure
+    assert "MAX_LEGACY_RULES" in ensure
+    assert 'if rule_present "$tool" "$chain" "$@"; then' in verify
+    assert 'current=' not in ensure
+    assert 'expected=' not in ensure
+    assert "grep -Fxc" not in verify
+
+
 def test_static_validator_hashes_canonical_assets_as_raw_bytes(tmp_path: Path) -> None:
     validator = _load_validator()
     root = _asset_root(tmp_path)
@@ -235,6 +253,16 @@ def normalize_rule(rule):
         index = normalized.index("--ctstate") + 1
         if normalized[index] == "ESTABLISHED,RELATED":
             normalized[index] = "RELATED,ESTABLISHED"
+    if normalized[:4] == ["-o", "br-medchat-sbox", "!", "-s"]:
+        normalized = normalized[2:6] + normalized[:2] + normalized[6:]
+    if "--ctdir" in normalized and "--ctorigdstport" in normalized:
+        direction = normalized.index("--ctdir")
+        port = normalized.index("--ctorigdstport")
+        if direction < port:
+            direction_pair = normalized[direction:direction + 2]
+            del normalized[direction:direction + 2]
+            port = normalized.index("--ctorigdstport")
+            normalized[port + 2:port + 2] = direction_pair
     return normalized
 
 
@@ -756,6 +784,15 @@ def test_firewall_legacy_rule_deletion_failure_is_redacted_and_fails_closed(
             lambda text: text.replace(
                 "--ctstate RELATED,ESTABLISHED",
                 "--ctstate ESTABLISHED,RELATED",
+            ),
+            "firewall_asset_unsafe",
+        ),
+        (
+            FIREWALL_SCRIPT,
+            lambda text: text.replace(
+                'while rule_present "$tool" "$chain" "$@"; do',
+                "while false; do",
+                1,
             ),
             "firewall_asset_unsafe",
         ),

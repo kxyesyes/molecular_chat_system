@@ -92,7 +92,7 @@ _PINNED_ASSET_SHA256 = {
         "d08a8ed8795d2c505099fd9ddf8660831fc9780d251d46c3f8132d99ce86a3e1"
     ),
     "deployment/opensandbox/configure-firewall.sh": (
-        "573a5ca7f4288677189a61cf18a84308be5b713b8368be52abb53eec7344739c"
+        "9e7fd8ff1734d2a3968e93e1840cfbf999589df7c30b34fd12f08e716a5c0aa9"
     ),
     "deployment/opensandbox/opensandbox.env.example": (
         "bdd4b347aacd786c555250f5733566d5fd8723e15c44aeb048af237852d089bf"
@@ -550,6 +550,10 @@ def _validate_firewall_script(text: str) -> bool:
         "configure_family ip6tables ::1/128",
         "-S DOCKER-USER",
         '-D "$chain"',
+        'while rule_present "$tool" "$chain" "$@"; do',
+        '"$tool" -w "$WAIT_SECONDS" -D "$chain" "$@"',
+        '"$tool" -w "$WAIT_SECONDS" -I "$chain" "$position" "$@"',
+        'rule_present "$tool" "$chain" "$@" || fail',
         "-S INPUT",
         "-i \"$BRIDGE_INTERFACE\" ! -o \"$BRIDGE_INTERFACE\"",
         "--ctstate RELATED,ESTABLISHED -j RETURN",
@@ -573,6 +577,8 @@ def _validate_firewall_script(text: str) -> bool:
         and "-F DOCKER-USER" not in text
         and "--flush" not in text
         and "--delete-chain" not in text
+        and 'expected="-A $chain $*"' not in text
+        and "grep -Fxc" not in text
     )
 
 

@@ -159,30 +159,26 @@ ensure_rule_at() {
     chain=$2
     position=$3
     shift 3
-    expected="-A $chain $*"
-    current=$(
-        "$tool" -w "$WAIT_SECONDS" -S "$chain" "$position" 2>/dev/null
-    ) || current=
-    if [ "$current" = "$expected" ]; then
-        return
-    fi
-    if rule_present "$tool" "$chain" "$@"; then
-        fail
-    fi
+    deleted=0
+    while rule_present "$tool" "$chain" "$@"; do
+        deleted=$((deleted + 1))
+        [ "$deleted" -le "$MAX_LEGACY_RULES" ] || fail
+        "$tool" -w "$WAIT_SECONDS" -D "$chain" "$@" \
+            >/dev/null 2>&1 || fail
+    done
     "$tool" -w "$WAIT_SECONDS" -I "$chain" "$position" "$@" \
         >/dev/null 2>&1 || fail
-    [ "$("$tool" -w "$WAIT_SECONDS" -S "$chain" "$position" 2>/dev/null)" \
-        = "$expected" ] || fail
+    rule_present "$tool" "$chain" "$@" || fail
 }
 
 verify_unique_rule() {
     tool=$1
     chain=$2
     shift 2
-    expected="-A $chain $*"
-    state=$("$tool" -w "$WAIT_SECONDS" -S "$chain" 2>/dev/null) || fail
-    count=$(printf '%s\n' "$state" | grep -Fxc -- "$expected" || :)
-    [ "$count" -eq 1 ] || fail
+    if rule_present "$tool" "$chain" "$@"; then
+        return
+    fi
+    fail
 }
 
 configure_family() {
