@@ -453,8 +453,7 @@ if [ "$DESTDIR" = / ]; then
         "$SCRIPT_DIR/medchat-opensandbox.service" \
         "$SCRIPT_DIR/medchat-sandbox-broker.service" \
         "$SCRIPT_DIR/medchat-opensandbox-firewall.service" \
-        "$SCRIPT_DIR/configure-firewall.sh" \
-        "$SCRIPT_DIR/../medchat-temporal-worker.service"
+        "$SCRIPT_DIR/configure-firewall.sh"
     do
         source_ancestors_are_locked "$source_path" || fail source_untrusted
         source_is_regular_and_locked "$source_path" || fail source_untrusted
@@ -490,7 +489,6 @@ fi
     "$SCRIPT_DIR/medchat-sandbox-broker.service" \
     "$SCRIPT_DIR/medchat-opensandbox-firewall.service" \
     "$SCRIPT_DIR/configure-firewall.sh" \
-    "$SCRIPT_DIR/../medchat-temporal-worker.service" \
     "$GROUP_MIGRATION_INTENT" "$PREVIEW_FAIL_AFTER" \
     "$PREVIEW_FAIL_POINT" <<'PY'
 import json
@@ -507,10 +505,9 @@ opensandbox_unit_path = Path(sys.argv[3])
 broker_unit_path = Path(sys.argv[4])
 firewall_unit_path = Path(sys.argv[5])
 firewall_script_path = Path(sys.argv[6])
-worker_unit_path = Path(sys.argv[7])
-group_migration_intent = sys.argv[8]
-preview_fail_after = int(sys.argv[9])
-preview_fail_point = sys.argv[10]
+group_migration_intent = sys.argv[7]
+preview_fail_after = int(sys.argv[8])
+preview_fail_point = sys.argv[9]
 
 if group_migration_intent != "remove-medchat-from-medchat-sandbox":
     raise SystemExit(1)
@@ -936,7 +933,6 @@ try:
     firewall_script = read_source(
         firewall_script_path, expected_uid=source_expected_uid
     )
-    worker_unit = read_source(worker_unit_path, expected_uid=source_expected_uid)
 except UnicodeError:
     fail()
 committed_assets = (
@@ -945,7 +941,6 @@ committed_assets = (
     broker_unit,
     firewall_unit,
     firewall_script,
-    worker_unit,
 )
 if any(b"\r" in content for content in committed_assets):
     fail()
@@ -995,13 +990,6 @@ stage_generation(
         (
             rooted("/etc/systemd/system/medchat-sandbox-broker.service"),
             broker_unit,
-            0o644,
-            0,
-            0,
-        ),
-        (
-            rooted("/etc/systemd/system/medchat-temporal-worker.service"),
-            worker_unit,
             0o644,
             0,
             0,

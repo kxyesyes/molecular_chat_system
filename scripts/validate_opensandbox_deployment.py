@@ -98,7 +98,7 @@ _PINNED_ASSET_SHA256 = {
         "bdd4b347aacd786c555250f5733566d5fd8723e15c44aeb048af237852d089bf"
     ),
     "deployment/opensandbox/install.sh": (
-        "c53ec699988c188bba55419b35509797daa157a1279f184555442db915bf20d0"
+        "13ff0284fec2da14216f197e4cb667aabe3af78cf0faec1b38917da04edbeaec"
     ),
     "deployment/medchat-temporal-worker.service": (
         "15fb8b7faa079b9a33328081c751a75c72a2d68e1b92b676b55150438064f982"
@@ -916,8 +916,8 @@ def _validate_installer(text: str) -> bool:
         "def rollback_generation(",
         "MEDCHAT_INSTALL_PREVIEW_FAIL_AFTER",
         "MEDCHAT_INSTALL_PREVIEW_FAIL_POINT",
-        "preview_fail_after = int(sys.argv[9])",
-        "preview_fail_point = sys.argv[10]",
+        "preview_fail_after = int(sys.argv[8])",
+        "preview_fail_point = sys.argv[9]",
         'if root == Path("/") and preview_fail_after != 0',
         'if root == Path("/") and preview_fail_point != "none"',
         "systemctl daemon-reload",
@@ -925,15 +925,13 @@ def _validate_installer(text: str) -> bool:
         "GROUP_MIGRATION_INTENT=remove-medchat-from-medchat-sandbox",
         "remove_legacy_medchat_membership",
         "gpasswd --delete medchat medchat-sandbox",
-        "group_migration_intent = sys.argv[8]",
+        "group_migration_intent = sys.argv[7]",
         'group_migration_intent != "remove-medchat-from-medchat-sandbox"',
         "SYSTEMCTL_TIMEOUT_SECONDS=15",
         "quiesce_shared_medchat_services",
         "quiesce_deployment_services",
         "restore_stopped_services_on_failure",
         "run_systemctl daemon-reload",
-        '"$SCRIPT_DIR/../medchat-temporal-worker.service"',
-        'rooted("/etc/systemd/system/medchat-temporal-worker.service")',
         'rooted("/etc/systemd/system/medchat-opensandbox-firewall.service")',
         'rooted("/usr/local/libexec/medchat/configure-opensandbox-firewall")',
         "SERVICE_STATE_CAPTURED=0",
@@ -967,6 +965,9 @@ def _validate_installer(text: str) -> bool:
         and opensandbox_owner_contract in text
         and not any(value in text for value in forbidden)
         and "os.ftruncate" not in text
+        and '"$SCRIPT_DIR/../medchat-temporal-worker.service"' not in text
+        and 'rooted("/etc/systemd/system/medchat-temporal-worker.service")'
+        not in text
         and not _assigns_persistent_broker_membership(text)
         and _live_migration_order_is_safe(text)
         and _failure_trap_is_safe(text)

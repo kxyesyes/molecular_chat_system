@@ -1127,10 +1127,10 @@ def test_rotation_failure_injection_is_confined_to_preview_mode() -> None:
 
     assert "MEDCHAT_INSTALL_PREVIEW_FAIL_AFTER" in installer
     assert 'if [ "$DESTDIR" = / ]; then' in installer
-    assert "preview_fail_after = int(sys.argv[9])" in installer
+    assert "preview_fail_after = int(sys.argv[8])" in installer
     assert "if root == Path(\"/\") and preview_fail_after != 0" in installer
     assert "MEDCHAT_INSTALL_PREVIEW_FAIL_POINT" in installer
-    assert "preview_fail_point = sys.argv[10]" in installer
+    assert "preview_fail_point = sys.argv[9]" in installer
 
 
 def test_live_rotation_quiesces_all_services_and_activates_in_dependency_order() -> None:
@@ -1216,7 +1216,7 @@ def test_installer_migrates_legacy_membership_and_models_preview_intent() -> Non
     assert 'if [ "$DESTDIR" = / ]; then' in installer
     assert 'remove_legacy_medchat_membership' in installer
     assert 'gpasswd --delete medchat medchat-sandbox' in installer
-    assert 'group_migration_intent = sys.argv[8]' in installer
+    assert 'group_migration_intent = sys.argv[7]' in installer
     assert 'group_migration_intent != "remove-medchat-from-medchat-sandbox"' in installer
 
 
@@ -1412,7 +1412,7 @@ def test_installer_rejects_untrusted_source_ancestors_and_rechecks_opened_uid() 
     assert "expected_uid is not None and opened.st_uid != expected_uid" in read_source
     assert "read_source(path, expected_uid=uid)" in installer
     assert "source_expected_uid = 0 if root == Path(\"/\") else None" in installer
-    assert installer.count("expected_uid=source_expected_uid") == 6
+    assert installer.count("expected_uid=source_expected_uid") == 5
 
 
 @pytest.mark.parametrize(
@@ -1532,8 +1532,8 @@ def test_read_source_accepts_declared_nonroot_snapshot_owner_only(
 def test_live_install_restores_prior_active_services_after_unit_reload() -> None:
     installer = INSTALLER.read_text(encoding="utf-8")
 
-    assert '"$SCRIPT_DIR/../medchat-temporal-worker.service"' in installer
-    assert 'rooted("/etc/systemd/system/medchat-temporal-worker.service")' in installer
+    assert '"$SCRIPT_DIR/../medchat-temporal-worker.service"' not in installer
+    assert 'rooted("/etc/systemd/system/medchat-temporal-worker.service")' not in installer
     restore_start = installer.index("restore_prior_medchat_services() {")
     restore_end = installer.index("\n}\n", restore_start)
     restore = installer[restore_start:restore_end]
@@ -1942,9 +1942,6 @@ def test_preview_distinct_payload_generation_commits_and_verifies_every_entry(
         tmp_path / "etc/systemd/system/medchat-sandbox-broker.service": (
             BROKER_SERVICE.read_bytes()
         ),
-        tmp_path / "etc/systemd/system/medchat-temporal-worker.service": (
-            TEMPORAL_WORKER_SERVICE.read_bytes()
-        ),
         tmp_path / "usr/local/libexec/medchat/configure-opensandbox-firewall": (
             FIREWALL_SCRIPT.read_bytes()
         ),
@@ -1954,6 +1951,9 @@ def test_preview_distinct_payload_generation_commits_and_verifies_every_entry(
     assert secret.encode("ascii") in rendered_toml
     assert secret.encode("ascii") in broker_environment
     assert all(path.read_bytes() == content for path, content in expected.items())
+    assert not (
+        tmp_path / "etc/systemd/system/medchat-temporal-worker.service"
+    ).exists()
     assert not list(tmp_path.rglob("*.stage"))
 
 
