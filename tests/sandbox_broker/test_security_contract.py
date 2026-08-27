@@ -68,8 +68,35 @@ _DANGEROUS_POLICY_ATTEMPTS = [
 ]
 
 
-def _resolved_python_calls(source: str) -> tuple[ast.Module, list[str]]:
-    tree = ast.parse(source)
+_PROMETHEUS_SERVER_CALLS = {
+    "start_http_server",
+    "start_wsgi_server",
+}
+_LISTENER_CALLS = {
+    "asyncio.start_server",
+    "asyncio.start_unix_server",
+    "http.server.HTTPServer",
+    "socket.create_server",
+    "socket.socket.bind",
+    "socket.socket.listen",
+    "socketserver.TCPServer",
+    "uvicorn.Config",
+    "uvicorn.Server",
+    "uvicorn.Server.run",
+    "uvicorn.run",
+    "wsgiref.simple_server.make_server",
+}
+
+
+def _normalize_symbol(symbol: str) -> str:
+    if symbol.startswith("prometheus_client."):
+        leaf = symbol.rsplit(".", 1)[-1]
+        if leaf in _PROMETHEUS_SERVER_CALLS:
+            return f"prometheus_client.{leaf}"
+    return symbol
+
+
+def _resolved_aliases(tree: ast.Module) -> dict[str, str]:
     aliases: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -77,112 +104,302 @@ def _resolved_python_calls(source: str) -> tuple[ast.Module, list[str]]:
                 aliases[imported.asname or imported.name] = imported.name
         elif isinstance(node, ast.ImportFrom) and node.module:
             for imported in node.names:
-                aliases[imported.asname or imported.name] = (
+                aliases[imported.asname or imported.name] = _normalize_symbol(
                     f"{node.module}.{imported.name}"
                 )
 
     def resolve(node: ast.expr) -> str:
         if isinstance(node, ast.Name):
-            return aliases.get(node.id, node.id)
+            symbol = node.id
+            visited: set[str] = set()
+            while symbol in aliases and symbol not in visited:
+                visited.add(symbol)
+                symbol = aliases[symbol]
+            return _normalize_symbol(symbol)
         if isinstance(node, ast.Attribute):
             owner = resolve(node.value)
-            return f"{owner}.{node.attr}" if owner else node.attr
+            symbol = f"{owner}.{node.attr}" if owner else node.attr
+            return _normalize_symbol(symbol)
+        if isinstance(node, ast.Call):
+            return resolve(node.func)
         return ""
 
+    assignments: list[tuple[str, ast.expr]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            assignments.extend(
+                (target.id, node.value)
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            )
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+        ):
+            assignments.append((node.target.id, node.value))
+        elif isinstance(node, ast.ClassDef) and len(node.bases) == 1:
+            assignments.append((node.name, node.bases[0]))
+
+    for _ in range(len(assignments) + 1):
+        changed = False
+        for target, value in assignments:
+            resolved = resolve(value)
+            if resolved and resolved != target and aliases.get(target) != resolved:
+                aliases[target] = resolved
+                changed = True
+        if not changed:
+            break
+    return aliases
+
+
+def _resolve_symbol(node: ast.expr, aliases: dict[str, str]) -> str:
+    if isinstance(node, ast.Name):
+        symbol = node.id
+        visited: set[str] = set()
+        while symbol in aliases and symbol not in visited:
+            visited.add(symbol)
+            symbol = aliases[symbol]
+        return _normalize_symbol(symbol)
+    if isinstance(node, ast.Attribute):
+        owner = _resolve_symbol(node.value, aliases)
+        symbol = f"{owner}.{node.attr}" if owner else node.attr
+        return _normalize_symbol(symbol)
+    if isinstance(node, ast.Call):
+        return _resolve_symbol(node.func, aliases)
+    return ""
+
+
+def _resolved_python_calls(source: str) -> tuple[ast.Module, list[str]]:
+    tree = ast.parse(source)
+    aliases = _resolved_aliases(tree)
     return tree, [
-        resolve(node.func)
+        _resolve_symbol(node.func, aliases)
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
     ]
 
 
 def _environment_names(tree: ast.Module) -> set[str]:
-    os_modules: set[str] = set()
-    getenv_functions: set[str] = set()
-    environ_objects: set[str] = set()
+    aliases = _resolved_aliases(tree)
+    constants: dict[str, str] = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for imported in node.names:
-                if imported.name == "os":
-                    os_modules.add(imported.asname or imported.name)
-        elif isinstance(node, ast.ImportFrom) and node.module == "os":
-            for imported in node.names:
-                if imported.name == "getenv":
-                    getenv_functions.add(imported.asname or imported.name)
-                elif imported.name == "environ":
-                    environ_objects.add(imported.asname or imported.name)
+        if isinstance(node, ast.Assign):
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        constants[target.id] = node.value.value
+            elif isinstance(node.value, ast.Name) and node.value.id in constants:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        constants[target.id] = constants[node.value.id]
 
     def constant_string(node: ast.expr) -> str | None:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             return node.value
+        if isinstance(node, ast.Name):
+            return constants.get(node.id)
         return None
 
     names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and node.args:
-            target = node.func
-            reads_environment = (
-                isinstance(target, ast.Name)
-                and target.id in getenv_functions
-            ) or (
-                isinstance(target, ast.Attribute)
-                and target.attr == "getenv"
-                and isinstance(target.value, ast.Name)
-                and target.value.id in os_modules
-            ) or (
-                isinstance(target, ast.Attribute)
-                and target.attr == "get"
-                and isinstance(target.value, ast.Name)
-                and target.value.id in environ_objects
-            ) or (
-                isinstance(target, ast.Attribute)
-                and target.attr == "get"
-                and isinstance(target.value, ast.Attribute)
-                and target.value.attr == "environ"
-                and isinstance(target.value.value, ast.Name)
-                and target.value.value.id in os_modules
-            )
-            if reads_environment:
+            if _resolve_symbol(node.func, aliases) in {
+                "os.environ.get",
+                "os.getenv",
+            }:
                 value = constant_string(node.args[0])
                 if value is not None:
                     names.add(value)
         elif isinstance(node, ast.Subscript):
-            target = node.value
-            reads_environment = (
-                isinstance(target, ast.Name)
-                and target.id in environ_objects
-            ) or (
-                isinstance(target, ast.Attribute)
-                and isinstance(target.value, ast.Name)
-                and target.value.id in os_modules
-                and target.attr == "environ"
-            )
-            if reads_environment:
+            if _resolve_symbol(node.value, aliases) == "os.environ":
                 value = constant_string(node.slice)
                 if value is not None:
                     names.add(value)
     return names
 
 
+def _call_records(
+    tree: ast.Module,
+    aliases: dict[str, str],
+) -> list[tuple[ast.Call, str, str | None]]:
+    records: list[tuple[ast.Call, str, str | None]] = []
+
+    class CallVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.functions: list[str] = []
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self.functions.append(node.name)
+            self.generic_visit(node)
+            self.functions.pop()
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self.functions.append(node.name)
+            self.generic_visit(node)
+            self.functions.pop()
+
+        def visit_Call(self, node: ast.Call) -> None:
+            records.append(
+                (
+                    node,
+                    _resolve_symbol(node.func, aliases),
+                    self.functions[-1] if self.functions else None,
+                )
+            )
+            self.generic_visit(node)
+
+    CallVisitor().visit(tree)
+    return records
+
+
+def _is_name(node: ast.expr, name: str) -> bool:
+    return isinstance(node, ast.Name) and node.id == name
+
+
+def _is_attribute(node: ast.expr, owner: str, attribute: str) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == attribute
+        and _is_name(node.value, owner)
+    )
+
+
+def _exact_keywords(call: ast.Call) -> dict[str, ast.expr] | None:
+    if any(keyword.arg is None for keyword in call.keywords):
+        return None
+    values = {keyword.arg: keyword.value for keyword in call.keywords}
+    return values if len(values) == len(call.keywords) else None
+
+
+def _allowed_entrypoint_call(
+    call: ast.Call,
+    symbol: str,
+    function: str | None,
+) -> bool:
+    if symbol == "socket.socket":
+        expected_socket_type = {
+            "_socket_stale_candidate": "SOCK_STREAM",
+            "bind_runtime_socket": "SOCK_STREAM",
+            "_notify_systemd_ready": "SOCK_DGRAM",
+        }.get(function)
+        return bool(
+            expected_socket_type
+            and _is_attribute(call.func, "socket", "socket")
+            and len(call.args) == 2
+            and not call.keywords
+            and _is_name(call.args[0], "_AF_UNIX")
+            and _is_attribute(call.args[1], "socket", expected_socket_type)
+        )
+    if symbol == "socket.socket.bind":
+        return bool(
+            function == "bind_runtime_socket"
+            and _is_attribute(call.func, "listener", "bind")
+            and len(call.args) == 1
+            and not call.keywords
+            and isinstance(call.args[0], ast.Call)
+            and _is_name(call.args[0].func, "str")
+            and len(call.args[0].args) == 1
+            and _is_name(call.args[0].args[0], "target")
+            and not call.args[0].keywords
+        )
+    if symbol == "uvicorn.Config":
+        keywords = _exact_keywords(call)
+        return bool(
+            function == "serve_application"
+            and _is_attribute(call.func, "uvicorn", "Config")
+            and len(call.args) == 1
+            and _is_name(call.args[0], "application")
+            and keywords is not None
+            and set(keywords) == {"workers", "access_log", "log_level"}
+            and isinstance(keywords["workers"], ast.Constant)
+            and keywords["workers"].value == 1
+            and isinstance(keywords["access_log"], ast.Constant)
+            and keywords["access_log"].value is False
+            and isinstance(keywords["log_level"], ast.Constant)
+            and keywords["log_level"].value == "info"
+        )
+    if symbol == "uvicorn.Server":
+        keywords = _exact_keywords(call)
+        return bool(
+            function == "serve_application"
+            and _is_name(call.func, "_ReadyServer")
+            and len(call.args) == 1
+            and _is_name(call.args[0], "configuration")
+            and keywords is not None
+            and set(keywords) == {"readiness_callback"}
+            and _is_name(keywords["readiness_callback"], "_notify_systemd_ready")
+        )
+    if symbol == "uvicorn.Server.run":
+        keywords = _exact_keywords(call)
+        return bool(
+            function == "serve_application"
+            and _is_attribute(call.func, "server", "run")
+            and not call.args
+            and keywords is not None
+            and set(keywords) == {"sockets"}
+            and isinstance(keywords["sockets"], ast.List)
+            and len(keywords["sockets"].elts) == 1
+            and _is_name(keywords["sockets"].elts[0], "listener")
+        )
+    return False
+
+
+def _listener_contract_violations(
+    source: str,
+    *,
+    allow_entrypoint_uds: bool = False,
+) -> set[str]:
+    tree = ast.parse(source)
+    aliases = _resolved_aliases(tree)
+    violations: set[str] = set()
+    for call, symbol, function in _call_records(tree, aliases):
+        forbidden = (
+            symbol in _LISTENER_CALLS
+            or symbol in {
+                "prometheus_client.start_http_server",
+                "prometheus_client.start_wsgi_server",
+            }
+            or symbol == "socket.socket"
+        )
+        if forbidden and not (
+            allow_entrypoint_uds
+            and _allowed_entrypoint_call(call, symbol, function)
+        ):
+            violations.add(symbol)
+    return violations
+
+
+def _entrypoint_allowlist_counts(source: str) -> dict[str, int]:
+    tree = ast.parse(source)
+    aliases = _resolved_aliases(tree)
+    counts: dict[str, int] = {}
+    for call, symbol, function in _call_records(tree, aliases):
+        if _allowed_entrypoint_call(call, symbol, function):
+            key = f"{function}:{symbol}"
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def test_broker_metrics_cannot_start_a_second_listener_or_use_tcp_configuration() -> None:
     root = Path(__file__).resolve().parents[2]
-    broker_sources = sorted((root / "src" / "sandbox_broker").rglob("*.py"))
-    forbidden_calls = {
-        "prometheus_client.start_http_server",
-        "prometheus_client.start_wsgi_server",
-        "uvicorn.Config",
-        "uvicorn.Server",
-        "uvicorn.run",
-        "socket.socket",
-        "asyncio.start_server",
-        "asyncio.start_unix_server",
-    }
+    entrypoint = root / "scripts" / "run_sandbox_broker.py"
+    broker_sources = [
+        *sorted((root / "src" / "sandbox_broker").rglob("*.py")),
+        entrypoint,
+    ]
     observed_environment: set[str] = set()
 
     for path in broker_sources:
-        tree, calls = _resolved_python_calls(path.read_text(encoding="utf-8"))
-        assert forbidden_calls.isdisjoint(calls), (path, forbidden_calls & set(calls))
-        assert not any(call.endswith(".listen") for call in calls), path
+        if not path.is_file():
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        violations = _listener_contract_violations(
+            source,
+            allow_entrypoint_uds=path == entrypoint,
+        )
+        assert not violations, (path, violations)
         observed_environment.update(_environment_names(tree))
 
     assert not {
@@ -192,24 +409,15 @@ def test_broker_metrics_cannot_start_a_second_listener_or_use_tcp_configuration(
         and ("HOST" in name.upper() or "PORT" in name.upper())
     }
 
-    entrypoint = root / "scripts" / "run_sandbox_broker.py"
-    _, entrypoint_calls = _resolved_python_calls(entrypoint.read_text(encoding="utf-8"))
-    assert "uvicorn.run" not in entrypoint_calls
-    entrypoint_tree = ast.parse(entrypoint.read_text(encoding="utf-8"))
-    uds_runs = [
-        node
-        for node in ast.walk(entrypoint_tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "run"
-        and len(node.keywords) == 1
-        and node.keywords[0].arg == "sockets"
-        and isinstance(node.keywords[0].value, ast.List)
-        and len(node.keywords[0].value.elts) == 1
-        and isinstance(node.keywords[0].value.elts[0], ast.Name)
-        and node.keywords[0].value.elts[0].id == "listener"
-    ]
-    assert len(uds_runs) == 1
+    assert _entrypoint_allowlist_counts(entrypoint.read_text(encoding="utf-8")) == {
+        "_notify_systemd_ready:socket.socket": 1,
+        "_socket_stale_candidate:socket.socket": 1,
+        "bind_runtime_socket:socket.socket": 1,
+        "bind_runtime_socket:socket.socket.bind": 1,
+        "serve_application:uvicorn.Config": 1,
+        "serve_application:uvicorn.Server": 1,
+        "serve_application:uvicorn.Server.run": 1,
+    }
 
 
 @pytest.mark.parametrize(
@@ -229,6 +437,54 @@ def test_broker_metrics_cannot_start_a_second_listener_or_use_tcp_configuration(
         ),
         (
             "from uvicorn import run as serve\nserve('module:app')\n",
+            "uvicorn.run",
+        ),
+        (
+            "from prometheus_client import start_http_server\n"
+            "serve = start_http_server\n"
+            "alias2 = serve\n"
+            "alias2(9000)\n",
+            "prometheus_client.start_http_server",
+        ),
+        (
+            "import prometheus_client as metrics\n"
+            "serve = metrics.exposition.start_http_server\n"
+            "serve(9000)\n",
+            "prometheus_client.start_http_server",
+        ),
+        (
+            "from prometheus_client.exposition import start_wsgi_server as serve\n"
+            "serve(9000)\n",
+            "prometheus_client.start_wsgi_server",
+        ),
+        (
+            "import socket\n"
+            "listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+            "bind = listener.bind\n"
+            "alias2 = bind\n"
+            "alias2(('0.0.0.0', 9000))\n",
+            "socket.socket.bind",
+        ),
+        (
+            "import socket\n"
+            "listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+            "listen = listener.listen\n"
+            "alias2 = listen\n"
+            "alias2(8)\n",
+            "socket.socket.listen",
+        ),
+        (
+            "import asyncio\n"
+            "serve = asyncio.start_server\n"
+            "alias2 = serve\n"
+            "alias2(handler, '127.0.0.1', 9000)\n",
+            "asyncio.start_server",
+        ),
+        (
+            "import uvicorn\n"
+            "serve = uvicorn.run\n"
+            "alias2 = serve\n"
+            "alias2('module:app', host='127.0.0.1', port=9000)\n",
             "uvicorn.run",
         ),
     ],
@@ -259,6 +515,21 @@ def test_listener_static_contract_resolves_import_aliases(
             "process_environment.get('METRICS_PORT')\n",
             "METRICS_PORT",
         ),
+        (
+            "import os\n"
+            "read_environment = os.environ.get\n"
+            "alias2 = read_environment\n"
+            "name = 'PROMETHEUS_METRICS_HOST'\n"
+            "alias2(name)\n",
+            "PROMETHEUS_METRICS_HOST",
+        ),
+        (
+            "from os import environ\n"
+            "environment = environ\n"
+            "name = 'METRICS_PORT'\n"
+            "environment[name]\n",
+            "METRICS_PORT",
+        ),
     ],
 )
 def test_metrics_environment_static_contract_resolves_import_aliases(
@@ -266,6 +537,140 @@ def test_metrics_environment_static_contract_resolves_import_aliases(
     environment_name: str,
 ) -> None:
     assert environment_name in _environment_names(ast.parse(source))
+
+
+@pytest.mark.parametrize(
+    ("source", "violation"),
+    [
+        (
+            "from prometheus_client import start_http_server\n"
+            "serve = start_http_server\n"
+            "alias2 = serve\n"
+            "alias2(9000)\n",
+            "prometheus_client.start_http_server",
+        ),
+        (
+            "import prometheus_client as metrics\n"
+            "serve = metrics.exposition.start_wsgi_server\n"
+            "serve(9000)\n",
+            "prometheus_client.start_wsgi_server",
+        ),
+        (
+            "import socket\n"
+            "listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+            "bind = listener.bind\n"
+            "alias2 = bind\n"
+            "alias2(('0.0.0.0', 9000))\n",
+            "socket.socket.bind",
+        ),
+        (
+            "import socket\n"
+            "listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+            "listen = listener.listen\n"
+            "alias2 = listen\n"
+            "alias2(8)\n",
+            "socket.socket.listen",
+        ),
+        (
+            "import socket\n"
+            "create = socket.create_server\n"
+            "alias2 = create\n"
+            "alias2(('127.0.0.1', 9000))\n",
+            "socket.create_server",
+        ),
+        (
+            "import asyncio\n"
+            "serve = asyncio.start_server\n"
+            "alias2 = serve\n"
+            "alias2(handler, '127.0.0.1', 9000)\n",
+            "asyncio.start_server",
+        ),
+        (
+            "import uvicorn\n"
+            "serve = uvicorn.run\n"
+            "alias2 = serve\n"
+            "alias2('module:app', host='127.0.0.1', port=9000)\n",
+            "uvicorn.run",
+        ),
+        (
+            "import uvicorn\n"
+            "configuration = uvicorn.Config(application)\n"
+            "build = uvicorn.Server\n"
+            "server = build(configuration)\n"
+            "launch = server.run\n"
+            "launch()\n",
+            "uvicorn.Server.run",
+        ),
+        (
+            "import socket\n"
+            "_AF_UNIX = socket.AF_UNIX\n"
+            "def extra_listener(target):\n"
+            "    listener = socket.socket(_AF_UNIX, socket.SOCK_STREAM)\n"
+            "    listener.bind(str(target))\n",
+            "socket.socket.bind",
+        ),
+    ],
+)
+def test_listener_contract_rejects_adversarial_source_fixtures(
+    source: str,
+    violation: str,
+) -> None:
+    assert violation in _listener_contract_violations(
+        source,
+        allow_entrypoint_uds=True,
+    )
+
+
+def test_listener_contract_allows_only_existing_prebound_uds_pattern() -> None:
+    source = """
+import socket
+import uvicorn
+
+_AF_UNIX = socket.AF_UNIX
+
+def _socket_stale_candidate(socket_path):
+    client = socket.socket(_AF_UNIX, socket.SOCK_STREAM)
+
+def bind_runtime_socket(socket_path):
+    target = socket_path
+    listener = socket.socket(_AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(target))
+    return listener, (1, 2)
+
+def _notify_systemd_ready():
+    notifier = socket.socket(_AF_UNIX, socket.SOCK_DGRAM)
+
+class _ReadyServer(uvicorn.Server):
+    pass
+
+def serve_application(application, socket_path):
+    listener, bound_identity = bind_runtime_socket(socket_path)
+    configuration = uvicorn.Config(
+        application,
+        workers=1,
+        access_log=False,
+        log_level="info",
+    )
+    server = _ReadyServer(
+        configuration,
+        readiness_callback=_notify_systemd_ready,
+    )
+    server.run(sockets=[listener])
+"""
+
+    assert not _listener_contract_violations(
+        source,
+        allow_entrypoint_uds=True,
+    )
+    assert _entrypoint_allowlist_counts(source) == {
+        "_notify_systemd_ready:socket.socket": 1,
+        "_socket_stale_candidate:socket.socket": 1,
+        "bind_runtime_socket:socket.socket": 1,
+        "bind_runtime_socket:socket.socket.bind": 1,
+        "serve_application:uvicorn.Config": 1,
+        "serve_application:uvicorn.Server": 1,
+        "serve_application:uvicorn.Server.run": 1,
+    }
 
 
 def _assert_non_scientific(result: Any) -> None:
