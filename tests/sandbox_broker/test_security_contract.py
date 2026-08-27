@@ -120,6 +120,9 @@ class _LexicalScope:
     function: str | None
     symbols: dict[str, str | None] = field(default_factory=dict)
     strings: dict[str, _PartialString | None] = field(default_factory=dict)
+    local_names: set[str] = field(default_factory=set)
+    global_names: set[str] = field(default_factory=set)
+    nonlocal_names: set[str] = field(default_factory=set)
     environment: list[_PartialString] = field(default_factory=list)
     starts_listener: bool = False
 
@@ -132,6 +135,95 @@ class _SourceAnalysis:
     environment_names: frozenset[str]
 
 
+class _FunctionBindingCollector(ast.NodeVisitor):
+    def __init__(self, arguments: ast.arguments | None = None) -> None:
+        self.locals: set[str] = set()
+        self.globals: set[str] = set()
+        self.nonlocals: set[str] = set()
+        if arguments is not None:
+            self.locals.update(
+                argument.arg
+                for argument in (
+                    *arguments.posonlyargs,
+                    *arguments.args,
+                    *arguments.kwonlyargs,
+                )
+            )
+            if arguments.vararg is not None:
+                self.locals.add(arguments.vararg.arg)
+            if arguments.kwarg is not None:
+                self.locals.add(arguments.kwarg.arg)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.locals.add(node.id)
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self.globals.update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self.nonlocals.update(node.names)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        self.locals.update(
+            imported.asname or imported.name.split(".", 1)[0]
+            for imported in node.names
+        )
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        self.locals.update(imported.asname or imported.name for imported in node.names)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.locals.add(node.name)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.locals.add(node.name)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.locals.add(node.name)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        del node
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        del node
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        del node
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        del node
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        del node
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name:
+            self.locals.add(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> None:
+        if node.name:
+            self.locals.add(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> None:
+        if node.name:
+            self.locals.add(node.name)
+
+    def visit_MatchMapping(self, node: ast.MatchMapping) -> None:
+        if node.rest:
+            self.locals.add(node.rest)
+        self.generic_visit(node)
+
+    def result(self) -> tuple[set[str], set[str], set[str]]:
+        return (
+            self.locals - self.globals - self.nonlocals,
+            self.globals,
+            self.nonlocals,
+        )
+
+
 class _StatementOrderedAnalyzer:
     def __init__(self, tree: ast.Module) -> None:
         self.tree = tree
@@ -139,11 +231,21 @@ class _StatementOrderedAnalyzer:
         self.violations: set[str] = set()
         self.environment_names: set[str] = set()
         self.scopes: list[_LexicalScope] = []
+        self.deferred: list[
+            tuple[ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda, _LexicalScope]
+        ] = []
+        self.module_scope: _LexicalScope | None = None
 
     def analyze(self) -> _SourceAnalysis:
         module = _LexicalScope(None, "module", None)
+        self.module_scope = module
         self.scopes.append(module)
         self._visit_block(self.tree.body, module)
+        index = 0
+        while index < len(self.deferred):
+            node, parent = self.deferred[index]
+            index += 1
+            self._visit_deferred_callable(node, parent)
         for scope in self.scopes:
             if scope.starts_listener and any(
                 value.unresolved for value in scope.environment
@@ -160,6 +262,16 @@ class _StatementOrderedAnalyzer:
     def _lookup_symbol(scope: _LexicalScope, name: str) -> str:
         current: _LexicalScope | None = scope
         while current is not None:
+            if current.kind in {"function", "lambda"}:
+                if name in current.global_names:
+                    while current.parent is not None:
+                        current = current.parent
+                    return current.symbols.get(name) or name
+                if name in current.nonlocal_names:
+                    current = current.parent
+                    continue
+                if name in current.local_names:
+                    return current.symbols.get(name) or ""
             if name in current.symbols:
                 return current.symbols[name] or ""
             current = current.parent
@@ -172,6 +284,16 @@ class _StatementOrderedAnalyzer:
     ) -> _PartialString:
         current: _LexicalScope | None = scope
         while current is not None:
+            if current.kind in {"function", "lambda"}:
+                if name in current.global_names:
+                    while current.parent is not None:
+                        current = current.parent
+                    return current.strings.get(name) or _PartialString()
+                if name in current.nonlocal_names:
+                    current = current.parent
+                    continue
+                if name in current.local_names:
+                    return current.strings.get(name) or _PartialString()
             if name in current.strings:
                 return current.strings[name] or _PartialString()
             current = current.parent
@@ -237,6 +359,24 @@ class _StatementOrderedAnalyzer:
             return function
         return ""
 
+    @staticmethod
+    def _assignment_scope(scope: _LexicalScope, name: str) -> _LexicalScope:
+        if name in scope.global_names:
+            current = scope
+            while current.parent is not None:
+                current = current.parent
+            return current
+        if name in scope.nonlocal_names:
+            current = scope.parent
+            while current is not None:
+                if (
+                    current.kind in {"function", "lambda"}
+                    and name in current.local_names
+                ):
+                    return current
+                current = current.parent
+        return scope
+
     def _bind_name(
         self,
         scope: _LexicalScope,
@@ -245,9 +385,11 @@ class _StatementOrderedAnalyzer:
         *,
         symbol: str | None = None,
     ) -> None:
+        source_scope = scope
+        scope = self._assignment_scope(source_scope, name)
         explicit_symbol = symbol is not None
         resolved = symbol if explicit_symbol else (
-            self._resolve(value, scope) if value is not None else ""
+            self._resolve(value, source_scope) if value is not None else ""
         )
         scope.symbols[name] = (
             resolved
@@ -255,8 +397,44 @@ class _StatementOrderedAnalyzer:
             else None
         )
         scope.strings[name] = (
-            self._partial_string(value, scope) if value is not None else None
+            self._partial_string(value, source_scope) if value is not None else None
         )
+
+    @staticmethod
+    def _function_bindings(
+        node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda,
+    ) -> tuple[set[str], set[str], set[str]]:
+        collector = _FunctionBindingCollector(node.args)
+        if isinstance(node, ast.Lambda):
+            collector.visit(node.body)
+        else:
+            for statement in node.body:
+                collector.visit(statement)
+        return collector.result()
+
+    def _visit_deferred_callable(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda,
+        parent: _LexicalScope,
+    ) -> None:
+        local_names, global_names, nonlocal_names = self._function_bindings(node)
+        function_name = node.name if not isinstance(node, ast.Lambda) else parent.function
+        child = _LexicalScope(
+            parent,
+            "lambda" if isinstance(node, ast.Lambda) else "function",
+            function_name,
+            local_names=local_names,
+            global_names=global_names,
+            nonlocal_names=nonlocal_names,
+        )
+        child.symbols.update({name: None for name in local_names})
+        child.strings.update({name: None for name in local_names})
+        self.scopes.append(child)
+        self._bind_arguments(node.args, child)
+        if isinstance(node, ast.Lambda):
+            self._visit_expr(node.body, child)
+        else:
+            self._visit_block(node.body, child)
 
     def _bind_target(
         self,
@@ -429,10 +607,7 @@ class _StatementOrderedAnalyzer:
         if isinstance(node, ast.Lambda):
             for default in (*node.args.defaults, *node.args.kw_defaults):
                 self._visit_expr(default, scope)
-            child = _LexicalScope(scope, "lambda", scope.function)
-            self.scopes.append(child)
-            self._bind_arguments(node.args, child)
-            self._visit_expr(node.body, child)
+            self.deferred.append((node, scope))
             return
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
             self._visit_comprehension(node, scope)
@@ -471,10 +646,107 @@ class _StatementOrderedAnalyzer:
         if arguments.kwarg is not None:
             self._bind_name(scope, arguments.kwarg.arg)
 
-    def _branch(self, statements: list[ast.stmt], scope: _LexicalScope) -> None:
-        child = _LexicalScope(scope, "block", scope.function)
-        self.scopes.append(child)
-        self._visit_block(statements, child)
+    @staticmethod
+    def _security_relevant_symbol(symbol: str) -> bool:
+        return bool(
+            symbol == "socket"
+            or symbol.startswith(("socket.", "_socket.", "prometheus_client."))
+            or symbol in _LISTENER_CALLS
+        )
+
+    @classmethod
+    def _merge_symbol_values(cls, values: list[str | None]) -> str | None:
+        if values and all(value == values[0] for value in values):
+            return values[0]
+        known = {value for value in values if value}
+        dangerous = sorted(
+            value for value in known if cls._security_relevant_symbol(value)
+        )
+        if dangerous:
+            return dangerous[0]
+        return next(iter(known)) if len(known) == 1 else None
+
+    @staticmethod
+    def _merge_string_values(
+        values: list[_PartialString | None],
+    ) -> _PartialString | None:
+        if values and all(value == values[0] for value in values):
+            return values[0]
+        fragments = tuple(
+            fragment
+            for value in values
+            if value is not None
+            for fragment in value.fragments
+            if fragment
+        )
+        return _PartialString(tuple(dict.fromkeys(fragments)), True) if fragments else None
+
+    @staticmethod
+    def _scope_state(
+        scope: _LexicalScope,
+    ) -> tuple[dict[str, str | None], dict[str, _PartialString | None]]:
+        return dict(scope.symbols), dict(scope.strings)
+
+    @staticmethod
+    def _restore_scope(
+        scope: _LexicalScope,
+        state: tuple[dict[str, str | None], dict[str, _PartialString | None]],
+    ) -> None:
+        scope.symbols = dict(state[0])
+        scope.strings = dict(state[1])
+
+    def _run_path(
+        self,
+        scope: _LexicalScope,
+        initial: tuple[dict[str, str | None], dict[str, _PartialString | None]],
+        statements: list[ast.stmt],
+    ) -> tuple[dict[str, str | None], dict[str, _PartialString | None]]:
+        self._restore_scope(scope, initial)
+        self._visit_block(statements, scope)
+        return self._scope_state(scope)
+
+    def _merge_paths(
+        self,
+        scope: _LexicalScope,
+        states: list[
+            tuple[dict[str, str | None], dict[str, _PartialString | None]]
+        ],
+    ) -> None:
+        symbol_names = set().union(*(state[0] for state in states))
+        string_names = set().union(*(state[1] for state in states))
+        scope.symbols = {
+            name: self._merge_symbol_values(
+                [symbols.get(name) for symbols, _ in states]
+            )
+            for name in symbol_names
+        }
+        scope.strings = {
+            name: self._merge_string_values(
+                [strings.get(name) for _, strings in states]
+            )
+            for name in string_names
+        }
+
+    def _bind_pattern(self, pattern: ast.pattern, scope: _LexicalScope) -> None:
+        if isinstance(pattern, ast.MatchAs):
+            if pattern.pattern is not None:
+                self._bind_pattern(pattern.pattern, scope)
+            if pattern.name:
+                self._bind_name(scope, pattern.name)
+            return
+        if isinstance(pattern, ast.MatchStar):
+            if pattern.name:
+                self._bind_name(scope, pattern.name)
+            return
+        if isinstance(pattern, ast.MatchMapping):
+            for nested in pattern.patterns:
+                self._bind_pattern(nested, scope)
+            if pattern.rest:
+                self._bind_name(scope, pattern.rest)
+            return
+        for child in ast.iter_child_nodes(pattern):
+            if isinstance(child, ast.pattern):
+                self._bind_pattern(child, scope)
 
     def _visit_statement(self, node: ast.stmt, scope: _LexicalScope) -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -486,10 +758,9 @@ class _StatementOrderedAnalyzer:
                 self._visit_expr(expression, scope)
             self._bind_name(scope, node.name)
             parent = scope.parent if scope.kind == "class" else scope
-            child = _LexicalScope(parent, "function", node.name)
-            self.scopes.append(child)
-            self._bind_arguments(node.args, child)
-            self._visit_block(node.body, child)
+            if parent is None:  # pragma: no cover - classes always have a parent
+                parent = scope
+            self.deferred.append((node, parent))
             return
         if isinstance(node, ast.ClassDef):
             for expression in (*node.decorator_list, *node.bases):
@@ -552,41 +823,72 @@ class _StatementOrderedAnalyzer:
             return
         if isinstance(node, ast.If):
             self._visit_expr(node.test, scope)
-            self._branch(node.body, scope)
-            self._branch(node.orelse, scope)
+            initial = self._scope_state(scope)
+            states = [self._run_path(scope, initial, node.body)]
+            states.append(
+                self._run_path(scope, initial, node.orelse)
+                if node.orelse
+                else initial
+            )
+            self._merge_paths(scope, states)
             return
         if isinstance(node, (ast.For, ast.AsyncFor)):
             self._visit_expr(node.iter, scope)
-            body = _LexicalScope(scope, "block", scope.function)
-            self.scopes.append(body)
-            self._bind_target(node.target, body)
-            self._visit_block(node.body, body)
-            self._branch(node.orelse, scope)
+            initial = self._scope_state(scope)
+            self._restore_scope(scope, initial)
+            self._bind_target(node.target, scope)
+            self._visit_block(node.body, scope)
+            body_state = self._scope_state(scope)
+            self._merge_paths(scope, [initial, body_state])
+            if node.orelse:
+                before_else = self._scope_state(scope)
+                else_state = self._run_path(scope, before_else, node.orelse)
+                self._merge_paths(scope, [before_else, else_state])
             return
         if isinstance(node, ast.While):
             self._visit_expr(node.test, scope)
-            self._branch(node.body, scope)
-            self._branch(node.orelse, scope)
+            initial = self._scope_state(scope)
+            body_state = self._run_path(scope, initial, node.body)
+            self._merge_paths(scope, [initial, body_state])
+            if node.orelse:
+                before_else = self._scope_state(scope)
+                else_state = self._run_path(scope, before_else, node.orelse)
+                self._merge_paths(scope, [before_else, else_state])
             return
         if isinstance(node, (ast.With, ast.AsyncWith)):
-            child = _LexicalScope(scope, "block", scope.function)
-            self.scopes.append(child)
             for item in node.items:
                 self._visit_expr(item.context_expr, scope)
                 if item.optional_vars is not None:
-                    self._bind_target(item.optional_vars, child)
-            self._visit_block(node.body, child)
+                    self._bind_target(item.optional_vars, scope)
+            self._visit_block(node.body, scope)
             return
         if isinstance(node, ast.Try):
-            self._branch(node.body, scope)
+            initial = self._scope_state(scope)
+            self._restore_scope(scope, initial)
+            self._visit_block(node.body, scope)
+            self._visit_block(node.orelse, scope)
+            states = [self._scope_state(scope)]
             for handler in node.handlers:
-                child = _LexicalScope(scope, "block", scope.function)
-                self.scopes.append(child)
+                self._restore_scope(scope, initial)
+                self._visit_expr(handler.type, scope)
                 if handler.name:
-                    self._bind_name(child, handler.name)
-                self._visit_block(handler.body, child)
-            self._branch(node.orelse, scope)
-            self._branch(node.finalbody, scope)
+                    self._bind_name(scope, handler.name)
+                self._visit_block(handler.body, scope)
+                states.append(self._scope_state(scope))
+            self._merge_paths(scope, states)
+            self._visit_block(node.finalbody, scope)
+            return
+        if isinstance(node, ast.Match):
+            self._visit_expr(node.subject, scope)
+            initial = self._scope_state(scope)
+            states = [initial]
+            for case in node.cases:
+                self._restore_scope(scope, initial)
+                self._bind_pattern(case.pattern, scope)
+                self._visit_expr(case.guard, scope)
+                self._visit_block(case.body, scope)
+                states.append(self._scope_state(scope))
+            self._merge_paths(scope, states)
             return
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.expr):
@@ -1160,6 +1462,101 @@ serve(9000)
 
 
 @pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "from prometheus_client import start_http_server\n"
+            "if enabled:\n"
+            "    serve = start_http_server\n"
+            "else:\n"
+            "    serve = start_http_server\n"
+            "serve(9000)\n"
+        ),
+        (
+            "from prometheus_client import start_http_server\n"
+            "try:\n"
+            "    serve = start_http_server\n"
+            "except RuntimeError:\n"
+            "    serve = start_http_server\n"
+            "serve(9000)\n"
+        ),
+        (
+            "def launch_metrics():\n"
+            "    serve(9000)\n"
+            "from prometheus_client import start_http_server as serve\n"
+        ),
+    ],
+    ids=["if-alias-after", "try-alias-after", "module-late-binding"],
+)
+def test_listener_analysis_merges_control_flow_and_late_module_bindings(
+    source: str,
+) -> None:
+    assert "prometheus_client.start_http_server" in (
+        _listener_contract_violations(source)
+    )
+
+
+def test_listener_analysis_traverses_match_subject_guards_and_case_bodies() -> None:
+    source = """import socket
+match mode:
+    case candidate if allowed(candidate):
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 9000))
+    case _:
+        pass
+"""
+
+    violations = _listener_contract_violations(source)
+
+    assert "socket.socket" in violations
+    assert "socket.socket.bind" in violations
+
+
+def test_listener_analysis_precollects_function_locals_before_first_use() -> None:
+    source = """import socket
+def harmless():
+    socket.socket()
+    socket = local_adapter
+"""
+
+    assert not _listener_contract_violations(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "def harmless(flag):\n"
+            "    if flag:\n"
+            "        adapter = first_adapter\n"
+            "    else:\n"
+            "        adapter = second_adapter\n"
+            "    adapter.socket()\n"
+        ),
+        (
+            "import socket\n"
+            "def harmless():\n"
+            "    try:\n"
+            "        socket.socket()\n"
+            "    finally:\n"
+            "        socket = local_adapter\n"
+        ),
+        (
+            "match value:\n"
+            "    case {'adapter': adapter} if adapter.ready():\n"
+            "        adapter.socket()\n"
+            "    case _:\n"
+            "        pass\n"
+        ),
+    ],
+)
+def test_listener_analysis_control_flow_benign_shadowing_is_not_a_listener(
+    source: str,
+) -> None:
+    assert not _listener_contract_violations(source)
+
+
+@pytest.mark.parametrize(
     ("source", "violation"),
     [
         (
@@ -1346,52 +1743,111 @@ def serve_application(application, socket_path):
     }
 
 
+def _af_unix_assignment_index(tree: ast.Module) -> int:
+    candidates = [
+        index
+        for index, statement in enumerate(tree.body)
+        if isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and _is_name(statement.targets[0], "_AF_UNIX")
+    ]
+    assert len(candidates) == 1
+    return candidates[0]
+
+
+def _statements(source: str) -> list[ast.stmt]:
+    return ast.parse(source).body
+
+
+def _render_mutation(tree: ast.Module) -> str:
+    ast.fix_missing_locations(tree)
+    return ast.unparse(tree)
+
+
+def _replace_af_unix_statement(source: str, replacement: str) -> str:
+    tree = ast.parse(source)
+    index = _af_unix_assignment_index(tree)
+    tree.body[index : index + 1] = _statements(replacement)
+    return _render_mutation(tree)
+
+
+def _insert_before_af_unix(source: str, addition: str) -> str:
+    tree = ast.parse(source)
+    index = _af_unix_assignment_index(tree)
+    tree.body[index:index] = _statements(addition)
+    return _render_mutation(tree)
+
+
+def _insert_before_listener_socket(source: str, addition: str) -> str:
+    tree = ast.parse(source)
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "bind_runtime_socket"
+    ]
+    assert len(functions) == 1
+    function = functions[0]
+    candidates = [
+        statement
+        for statement in ast.walk(function)
+        if isinstance(statement, ast.Assign)
+        and isinstance(statement.value, ast.Call)
+        and _is_attribute(statement.value.func, "socket", "socket")
+    ]
+    assert len(candidates) == 1
+    listener_assignment = candidates[0]
+    containing_lists = [
+        values
+        for node in ast.walk(function)
+        for _, values in ast.iter_fields(node)
+        if isinstance(values, list) and listener_assignment in values
+    ]
+    assert len(containing_lists) == 1
+    statements = containing_lists[0]
+    index = statements.index(listener_assignment)
+    statements[index:index] = _statements(addition)
+    return _render_mutation(tree)
+
+
 def _mutate_af_unix_binding(source: str, mutation: str) -> str:
-    approved = '_AF_UNIX = getattr(socket, "AF_UNIX", 1)'
-    assert source.count(approved) == 1
-    if mutation == "reviewer-probe":
-        replacement = "_AF_UNIX = socket.AF_INET"
-    elif mutation == "literal":
-        replacement = "_AF_UNIX = 1"
-    elif mutation == "imported-binding":
-        replacement = "from socket import AF_UNIX as _AF_UNIX"
-    elif mutation == "imported-socket-alias":
-        replacement = (
+    replacements = {
+        "reviewer-probe": "_AF_UNIX = socket.AF_INET",
+        "literal": "_AF_UNIX = 1",
+        "imported-binding": "from socket import AF_UNIX as _AF_UNIX",
+        "imported-socket-alias": (
             "import socket as network_socket\n"
             '_AF_UNIX = getattr(network_socket, "AF_UNIX", 1)'
-        )
-    elif mutation == "reassignment":
-        replacement = f"{approved}\n_AF_UNIX = socket.AF_INET"
-    elif mutation == "annotated-reassignment":
-        replacement = f"{approved}\n_AF_UNIX: int = socket.AF_INET"
-    elif mutation == "conditional-reassignment":
-        replacement = (
-            f"{approved}\n"
+        ),
+        "reassignment": (
+            '_AF_UNIX = getattr(socket, "AF_UNIX", 1)\n'
+            "_AF_UNIX = socket.AF_INET"
+        ),
+        "annotated-reassignment": (
+            '_AF_UNIX = getattr(socket, "AF_UNIX", 1)\n'
+            "_AF_UNIX: int = socket.AF_INET"
+        ),
+        "conditional-reassignment": (
+            '_AF_UNIX = getattr(socket, "AF_UNIX", 1)\n'
             "if os.name == 'posix':\n"
             "    _AF_UNIX = socket.AF_INET"
-        )
-    elif mutation in {"function-shadow", "named-expression-shadow"}:
-        replacement = approved
-    else:  # pragma: no cover - protects the parametrized test itself
-        raise AssertionError(mutation)
-
-    mutated = source.replace(approved, replacement, 1)
-    listener_line = "        listener = socket.socket(_AF_UNIX, socket.SOCK_STREAM)"
+        ),
+    }
     if mutation == "function-shadow":
-        assert mutated.count(listener_line) == 1
-        mutated = mutated.replace(
-            listener_line,
-            "        _AF_UNIX = socket.AF_INET\n" + listener_line,
-            1,
+        return _insert_before_listener_socket(
+            source,
+            "_AF_UNIX = socket.AF_INET",
         )
-    elif mutation == "named-expression-shadow":
-        assert mutated.count(listener_line) == 1
-        mutated = mutated.replace(
-            listener_line,
-            "        (_AF_UNIX := socket.AF_INET)\n" + listener_line,
-            1,
+    if mutation == "named-expression-shadow":
+        return _insert_before_listener_socket(
+            source,
+            "(_AF_UNIX := socket.AF_INET)",
         )
-    return mutated
+    try:
+        replacement = replacements[mutation]
+    except KeyError as error:  # pragma: no cover - protects parametrization
+        raise AssertionError(mutation) from error
+    return _replace_af_unix_statement(source, replacement)
 
 
 @pytest.mark.parametrize(
@@ -1420,8 +1876,6 @@ def test_entrypoint_uds_allowlist_rejects_af_unix_binding_mutations(
 
 
 def _mutate_socket_family(source: str, mutation: str) -> str:
-    approved = '_AF_UNIX = getattr(socket, "AF_UNIX", 1)'
-    assert source.count(approved) == 1
     mutations = {
         "reviewer-probe": "socket.AF_UNIX = socket.AF_INET",
         "annotated-attribute": "socket.AF_UNIX: int = socket.AF_INET",
@@ -1466,11 +1920,7 @@ def _mutate_socket_family(source: str, mutation: str) -> str:
         ),
         "deleted-socket-dict": "del socket.__dict__['AF_UNIX']",
     }
-    return source.replace(
-        approved,
-        f"{mutations[mutation]}\n{approved}",
-        1,
-    )
+    return _insert_before_af_unix(source, mutations[mutation])
 
 
 @pytest.mark.parametrize(
@@ -1507,8 +1957,6 @@ def test_entrypoint_rejects_protected_socket_family_mutations(
 
 
 def test_entrypoint_socket_family_guard_allows_benign_reads() -> None:
-    source = _entrypoint_source()
-    approved = '_AF_UNIX = getattr(socket, "AF_UNIX", 1)'
     benign = """observed_family = socket.AF_UNIX
 observed_fallback = getattr(socket, "AF_UNIX", 1)
 socket_namespace = socket.__dict__
@@ -1518,7 +1966,7 @@ class Unrelated:
 unrelated = Unrelated()
 setattr(unrelated, "AF_UNIX", 1)
 """
-    source = source.replace(approved, f"{benign}{approved}", 1)
+    source = _insert_before_af_unix(_entrypoint_source(), benign)
 
     assert not _listener_contract_violations(
         source,
@@ -1532,6 +1980,22 @@ socket.AF_UNIX = socket.AF_INET
 """
 
     assert "socket_family" in _listener_contract_violations(source)
+
+
+def test_entrypoint_mutation_harness_is_independent_of_source_formatting() -> None:
+    reformatted = ast.unparse(ast.parse(_entrypoint_source()))
+
+    af_unix_mutation = _mutate_af_unix_binding(reformatted, "reviewer-probe")
+    socket_mutation = _mutate_socket_family(reformatted, "reviewer-probe")
+
+    assert "entrypoint._AF_UNIX" in _listener_contract_violations(
+        af_unix_mutation,
+        allow_entrypoint_uds=True,
+    )
+    assert "entrypoint.socket_family" in _listener_contract_violations(
+        socket_mutation,
+        allow_entrypoint_uds=True,
+    )
 
 
 def _assert_non_scientific(result: Any) -> None:

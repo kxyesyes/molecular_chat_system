@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hashlib
 import io
 import json
 import logging
@@ -73,28 +74,68 @@ class _HoldingSandboxClient:
         self.create_count = 0
         self.run_count = 0
         self.running = asyncio.Event()
+        self.calls = {
+            operation: 0
+            for operation in (
+                "create",
+                "upload_text",
+                "read_text",
+                "list_files",
+                "run",
+                "destroy",
+                "destroy_by_id",
+                "destroy_by_job_id",
+                "drain_cleanup",
+            )
+        }
 
     async def create(self, job_id: str) -> SandboxHandle:
+        self.calls["create"] += 1
         self.create_count += 1
         return SandboxHandle(f"sandbox-{job_id}", object())
 
     async def upload_text(self, handle: SandboxHandle, path: str, data: str) -> None:
+        self.calls["upload_text"] += 1
         del handle, path, data
+
+    async def read_text(self, handle: SandboxHandle, path: str) -> str:
+        self.calls["read_text"] += 1
+        del handle, path
+        return ""
+
+    async def list_files(
+        self,
+        handle: SandboxHandle,
+        root: str,
+        pattern: str,
+    ) -> list[str]:
+        self.calls["list_files"] += 1
+        del handle, root, pattern
+        return []
 
     async def run(self, handle: SandboxHandle) -> object:
         del handle
+        self.calls["run"] += 1
         self.run_count += 1
         self.running.set()
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
     async def destroy(self, handle: SandboxHandle) -> None:
+        self.calls["destroy"] += 1
         del handle
 
     async def destroy_by_id(self, sandbox_id: str) -> None:
+        self.calls["destroy_by_id"] += 1
         del sandbox_id
 
+    async def destroy_by_job_id(self, job_id: str) -> int:
+        self.calls["destroy_by_job_id"] += 1
+        del job_id
+        return 0
+
     async def drain_cleanup(self) -> None:
+        self.calls["drain_cleanup"] += 1
         return None
 
 
@@ -889,10 +930,19 @@ def test_real_service_observability_gets_refresh_telemetry_only_without_mutating
         BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
         cleanup_status="succeeded",
     )
-    staged = config.state_root / "jobs" / record.job_id / "staged"
-    staged.mkdir(parents=True)
-    (staged / "receptor.pdb").write_bytes(b"ATOM\n")
-    (staged / "ligand.sdf").write_bytes(b"ligand\n")
+    jobs_root = config.state_root / "jobs"
+    job_root = jobs_root / record.job_id
+    fixture_files = {
+        "staged/receptor.pdb": b"ATOM\n",
+        "staged/ligand.sdf": b"ligand\n",
+        "output/result.json": b'{"status":"fixture"}\n',
+        "published/pose.pdbqt": b"MODEL 1\nENDMDL\n",
+        "scientific/audit.txt": b"immutable scientific fixture\n",
+    }
+    for relative_path, content in fixture_files.items():
+        path = job_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
 
     def snapshot_store() -> tuple[tuple[str, tuple[tuple[object, ...], ...]], ...]:
         with store._connect() as connection:
@@ -909,27 +959,97 @@ def test_real_service_observability_gets_refresh_telemetry_only_without_mutating
                 for table in ("jobs", "transitions", "artifacts")
             )
 
-    def snapshot_runtime() -> tuple[object, ...]:
+    def snapshot_task(task: object) -> object:
+        if task is None:
+            return None
         return (
-            snapshot_store(),
-            (
+            id(task),
+            task.get_name(),
+            task.done(),
+            task.cancelled(),
+        )
+
+    def snapshot_task_map(tasks: dict[str, object]) -> tuple[object, ...]:
+        return tuple(
+            sorted((key, snapshot_task(task)) for key, task in tasks.items())
+        )
+
+    def snapshot_job_tree() -> tuple[tuple[object, ...], ...]:
+        entries: list[tuple[object, ...]] = []
+        for path in sorted((jobs_root, *jobs_root.rglob("*"))):
+            relative = (
+                "."
+                if path == jobs_root
+                else path.relative_to(jobs_root).as_posix()
+            )
+            if path.is_symlink():
+                entries.append((relative, "symlink", os.readlink(path)))
+            elif path.is_dir():
+                entries.append((relative, "directory"))
+            else:
+                content = path.read_bytes()
+                entries.append(
+                    (
+                        relative,
+                        "file",
+                        len(content),
+                        hashlib.sha256(content).hexdigest(),
+                    )
+                )
+        return tuple(entries)
+
+    def snapshot_runtime() -> dict[str, object]:
+        condition_waiters = tuple(
+            (id(waiter), waiter.done(), waiter.cancelled())
+            for waiter in service._terminal_condition._waiters
+        )
+        return {
+            "store": snapshot_store(),
+            "job_tree": snapshot_job_tree(),
+            "queue": (
                 service._queue.qsize(),
                 service._queue._unfinished_tasks,
                 tuple(service._queue._queue),
             ),
-            tuple(
+            "prepared": tuple(
                 sorted(
-                    (job_id, id(task), task.done())
-                    for job_id, task in service._job_tasks.items()
+                    (key, id(value), repr(value))
+                    for key, value in service._prepared.items()
                 )
             ),
-            tuple(
-                (path.relative_to(staged).as_posix(), path.read_bytes())
-                for path in sorted(staged.rglob("*"))
-                if path.is_file()
+            "rejected_work": tuple(sorted(service._rejected_work)),
+            "pending_rejections": snapshot_task_map(service._pending_rejections),
+            "rejection_capacity": (
+                service._pending_rejection_reservations,
+                service._pending_rejection_capacity,
+                tuple(sorted(service._rejection_ownership)),
             ),
-            (sandbox_client.create_count, sandbox_client.run_count),
-        )
+            "job_tasks": snapshot_task_map(service._job_tasks),
+            "create_tasks": snapshot_task_map(service._create_tasks),
+            "cleanup_tasks": snapshot_task_map(service._cleanup_tasks),
+            "isolated_tasks": tuple(
+                sorted(snapshot_task(task) for task in service._isolated_tasks)
+            ),
+            "lifecycle_tasks": (
+                snapshot_task(service._consumer_task),
+                snapshot_task(service._shutdown_task),
+                service._started,
+                service._stopping,
+            ),
+            "cancel_events": tuple(
+                sorted(
+                    (key, id(event), event.is_set())
+                    for key, event in service._cancel_events.items()
+                )
+            ),
+            "terminal": (
+                id(service._terminal_condition),
+                condition_waiters,
+                tuple(sorted(service._terminal_observed)),
+                service._recovery_generation,
+            ),
+            "client_calls": tuple(sorted(sandbox_client.calls.items())),
+        }
 
     app = create_app(config, service=service)
     with TestClient(app) as client:
