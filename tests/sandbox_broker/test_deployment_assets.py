@@ -319,16 +319,23 @@ elif action in {"-A", "-C", "-D", "-I"}:
         rule = args[2:]
     rule = normalize_rule(rule)
     rules = chains[chain]
+    matching_index = next(
+        (
+            index
+            for index, candidate in enumerate(rules)
+            if normalize_rule(candidate) == rule
+        ),
+        None,
+    )
     if action == "-C":
-        raise SystemExit(0 if rule in rules else 1)
+        raise SystemExit(0 if matching_index is not None else 1)
     if action == "-D":
         if os.environ.get("FAIL_DELETE_FAMILY") == family:
             print("RAW_MIGRATION_CANARY", file=sys.stderr)
             raise SystemExit(1)
-        try:
-            rules.remove(rule)
-        except ValueError:
+        if matching_index is None:
             raise SystemExit(1)
+        del rules[matching_index]
     elif action == "-I":
         rules.insert(position, rule)
     else:
