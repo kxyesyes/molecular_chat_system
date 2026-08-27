@@ -1107,20 +1107,21 @@ def _prepare_receptor_for_prody(
     expected_hash: str,
     work: Path,
     work_identity: tuple[int, ...],
-) -> tuple[Path, tuple[tuple[int, ...], tuple[int, ...]] | None]:
+) -> tuple[
+    Path,
+    tuple[tuple[int, ...], tuple[int, ...]] | None,
+    tuple[str, ...],
+]:
     try:
         content, actual_hash = _read_regular_snapshot(source, _MAX_INPUT_BYTES)
     except (OSError, ValueError):
         _fail("input_validation", "invalid_input")
     if actual_hash != expected_hash:
         _fail("input_validation", "invalid_input")
-    try:
-        content.decode("utf-8", errors="strict")
-        return source, None
-    except UnicodeError:
-        pass
 
     normalized = bytearray()
+    warnings: list[str] = []
+    encoding_normalized = False
     for line in content.splitlines(keepends=True):
         try:
             line.decode("utf-8", errors="strict")
@@ -1130,8 +1131,39 @@ def _prepare_receptor_for_prody(
             record = (line + b" " * 6)[:6]
             if record not in _PDB_NARRATIVE_RECORDS:
                 _fail("input_validation", "invalid_input")
+            encoding_normalized = True
         normalized.extend(value if value < 128 else 0x20 for value in line)
-    normalized_bytes = bytes(normalized)
+    if encoding_normalized:
+        warnings.append("receptor_header_encoding_normalized")
+
+    deduplicated = bytearray()
+    seen_unlabelled_atoms: set[tuple[bytes, ...]] = set()
+    duplicate_atoms_removed = False
+    for line in bytes(normalized).splitlines(keepends=True):
+        if (
+            line.startswith((b"ATOM  ", b"HETATM"))
+            and len(line) >= 27
+            and line[16:17] == b" "
+        ):
+            atom_identity = (
+                line[:6],
+                line[12:16],
+                line[17:20],
+                line[21:22],
+                line[22:26],
+                line[26:27],
+            )
+            if atom_identity in seen_unlabelled_atoms:
+                duplicate_atoms_removed = True
+                continue
+            seen_unlabelled_atoms.add(atom_identity)
+        deduplicated.extend(line)
+    if duplicate_atoms_removed:
+        warnings.append("receptor_duplicate_atoms_first_conformer_selected")
+
+    normalized_bytes = bytes(deduplicated)
+    if not warnings:
+        return source, None, ()
     try:
         normalized_bytes.decode("utf-8", errors="strict")
         destination = work / _NORMALIZED_RECEPTOR_NAME
@@ -1143,7 +1175,7 @@ def _prepare_receptor_for_prody(
         )
     except (OSError, UnicodeError, ValueError):
         _fail("receptor_preparation", "tool_failed")
-    return destination, identity
+    return destination, identity, tuple(warnings)
 
 
 def _remove_normalized_receptor(
@@ -1400,7 +1432,11 @@ def _execute(
     pose_file = poses / "result.pdbqt"
     try:
         poses_identity = _make_private_directory(poses)
-        receptor_input, normalized_receptor_identity = _prepare_receptor_for_prody(
+        (
+            receptor_input,
+            normalized_receptor_identity,
+            receptor_warnings,
+        ) = _prepare_receptor_for_prody(
             request.receptor,
             request.receptor_sha256,
             work,
@@ -1498,7 +1534,7 @@ def _execute(
                 "pose_files": ["poses/result.pdbqt"],
                 "vina_version": _trusted_version("vina"),
                 "meeko_version": _trusted_version("meeko"),
-                "warnings": [],
+                "warnings": list(receptor_warnings),
             }
         except (OSError, ValueError, UnicodeError, metadata.PackageNotFoundError):
             _fail("output_validation", "invalid_output")

@@ -555,7 +555,61 @@ def test_legacy_encoded_pdb_header_is_normalized_without_changing_coordinates_or
     assert coordinate in prepared_inputs[0]
     assert all(value < 128 for value in prepared_inputs[0])
     assert (input_root / "receptor.pdb").read_bytes() == receptor
-    assert _result(output_root)["receptor_sha256"] == _sha(receptor)
+    payload = _result(output_root)
+    assert payload["receptor_sha256"] == _sha(receptor)
+    assert payload["warnings"] == ["receptor_header_encoding_normalized"]
+    assert calls[0][0][2] != str(input_root / "receptor.pdb")
+    assert not (output_root / ".work").exists()
+
+
+def test_unlabelled_duplicate_receptor_atoms_select_first_conformer_with_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_ca = (
+        b"ATOM      2  CA  SER A  13      11.000  12.000  13.000  1.00 20.00           C  \n"
+    )
+    second_ca = (
+        b"ATOM      3  CA  SER A  13      21.000  22.000  23.000  1.00 20.00           C  \n"
+    )
+    receptor = (
+        b"HEADER    UNLABELLED ALTERNATE CONFORMERS\n"
+        b"ATOM      1  N   SER A  13      10.000  12.000  13.000  1.00 20.00           N  \n"
+        + first_ca
+        + second_ca
+        + b"ATOM      4  C   SER A  13      12.000  12.000  13.000  1.00 20.00           C  \n"
+        + b"END\n"
+    )
+    module = _load_runner()
+    input_root, output_root = _configure_roots(module, monkeypatch, tmp_path)
+    _write_inputs(
+        input_root,
+        _request(receptor=receptor),
+        receptor=receptor,
+    )
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    _fake_tools(monkeypatch, module, calls)
+    original_run_tool = module._run_tool
+    prepared_inputs: list[bytes] = []
+
+    def capture_receptor(
+        argv: list[str], phase: str, deadline: float, cleanup_deadline: float
+    ) -> None:
+        if argv[0] == "mk_prepare_receptor.py":
+            prepared_inputs.append(Path(argv[2]).read_bytes())
+        original_run_tool(argv, phase, deadline, cleanup_deadline)
+
+    monkeypatch.setattr(module, "_run_tool", capture_receptor)
+
+    assert module.main(REQUEST_ARGUMENTS) == 0
+    assert len(prepared_inputs) == 1
+    assert first_ca in prepared_inputs[0]
+    assert second_ca not in prepared_inputs[0]
+    assert (input_root / "receptor.pdb").read_bytes() == receptor
+    payload = _result(output_root)
+    assert payload["receptor_sha256"] == _sha(receptor)
+    assert payload["warnings"] == [
+        "receptor_duplicate_atoms_first_conformer_selected"
+    ]
     assert calls[0][0][2] != str(input_root / "receptor.pdb")
     assert not (output_root / ".work").exists()
 
