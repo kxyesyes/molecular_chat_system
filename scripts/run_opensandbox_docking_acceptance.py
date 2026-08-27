@@ -794,17 +794,29 @@ raise SystemExit(0 if accepted and pids and not remaining else 1)
         ):
             self.failure_codes.append("setsid_probe_failed")
 
-        vina = self._docker("exec", container_id, "vina", "--version")
+        vina_cli = self._docker("exec", container_id, "vina", "--version")
+        vina_package = self._docker(
+            "exec",
+            container_id,
+            "python",
+            "-c",
+            "import importlib.metadata as m;print(m.version('vina'))",
+        )
         meeko = self._docker(
             "exec",
             container_id,
             "python",
             "-c",
-            "import importlib.metadata as m;print('Meeko '+m.version('meeko'))",
+            "import importlib.metadata as m;print(m.version('meeko'))",
         )
-        vina_version = _safe_version(vina.stdout) if vina.ok else None
+        vina_banner = _safe_version(vina_cli.stdout) if vina_cli.ok else None
+        vina_version = _safe_version(vina_package.stdout) if vina_package.ok else None
         meeko_version = _safe_version(meeko.stdout) if meeko.ok else None
-        if vina_version is None or meeko_version is None:
+        if (
+            vina_banner is None
+            or _canonical_vina_version(vina_version) is None
+            or meeko_version is None
+        ):
             self.failure_codes.append("tool_probe_failed")
         else:
             self.tool_versions = {"vina": vina_version, "meeko": meeko_version}

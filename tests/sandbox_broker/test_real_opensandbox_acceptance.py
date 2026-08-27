@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -16,6 +17,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/run_opensandbox_docking_acceptance.py"
 README = ROOT / "deployment/opensandbox/README.md"
+OPENSANDBOX_SERVICE = ROOT / "deployment/opensandbox/medchat-opensandbox.service"
+DEPLOYMENT_VALIDATOR = ROOT / "scripts/validate_opensandbox_deployment.py"
 RUN_REAL = os.environ.get("MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE") == "1"
 
 
@@ -289,7 +292,11 @@ def test_raw_vina_package_version_matches_equivalent_version_banner(
 
 @pytest.mark.parametrize(
     "observed_version",
-    ["AutoDock Vina v1.2.6", "AutoDock Vina development"],
+    [
+        "AutoDock Vina v1.2.6",
+        "AutoDock Vina development",
+        "AutoDock Vina 4c3644e-mod",
+    ],
 )
 def test_vina_version_comparison_remains_fail_closed(
     tmp_path: Path,
@@ -437,7 +444,9 @@ def test_default_dependency_failure_short_circuits_without_runner(
     assert report["runs"] == []
 
 
-def test_fake_docker_inspection_uses_owned_gateway_and_fixed_security_probes() -> None:
+def test_real_vina_git_banner_uses_independent_package_metadata(
+    tmp_path: Path,
+) -> None:
     acceptance = _module()
     calls: list[tuple[str, ...]] = []
     container_id = "a" * 64
@@ -468,9 +477,11 @@ def test_fake_docker_inspection_uses_owned_gateway_and_fixed_security_probes() -
             return acceptance._CommandResult(True, values[call[4]])
         if call[:3] == ("docker", "exec", container_id):
             if call[-2:] == ("vina", "--version"):
-                return acceptance._CommandResult(True, "AutoDock Vina 1.2.5")
-            if "importlib.metadata" in call[-1]:
-                return acceptance._CommandResult(True, "Meeko 0.6.1")
+                return acceptance._CommandResult(True, "AutoDock Vina 4c3644e-mod")
+            if "m.version('vina')" in call[-1]:
+                return acceptance._CommandResult(True, "1.2.5")
+            if "m.version('meeko')" in call[-1]:
+                return acceptance._CommandResult(True, "0.7.1")
             return acceptance._CommandResult(True, "")
         raise AssertionError(call)
 
@@ -481,9 +492,23 @@ def test_fake_docker_inspection_uses_owned_gateway_and_fixed_security_probes() -
     assert observer.failure_codes == []
     assert observer.image_digest == image_digest
     assert observer.tool_versions == {
-        "vina": "AutoDock Vina 1.2.5",
-        "meeko": "Meeko 0.6.1",
+        "vina": "1.2.5",
+        "meeko": "0.7.1",
     }
+    assert any(call[-2:] == ("vina", "--version") for call in calls)
+    assert any("m.version('vina')" in call[-1] for call in calls)
+
+    pose, digest = _pose(tmp_path)
+    result = _success_result(pose, digest)
+    result.provenance.tool_version = "1.2.5"
+    projected = acceptance._project_result(
+        result,
+        trace_id="acceptance-real-vina-banner",
+        project_root=tmp_path,
+        observer=observer,
+    )
+    assert projected["status"] == "passed"
+    assert projected["tool_versions"]["vina"] == "1.2.5"
     probe_sources = "\n".join(
         call[-1]
         for call in calls
@@ -738,3 +763,36 @@ def test_readme_covers_qemu_install_secret_image_validation_and_rollback() -> No
     )
     assert all(value in text for value in required)
     assert "never" in text.lower()
+
+
+def test_readme_keeps_server_dependencies_isolated_behind_validated_launcher() -> None:
+    text = README.read_text(encoding="utf-8")
+    broker_install = re.compile(
+        r"/opt/conda/envs/medchat/bin/python -m pip install[^\n]*\\\n"
+        r"\s+--requirement requirements-opensandbox-broker\.txt"
+    )
+    server_install = re.compile(
+        r"/opt/conda/envs/opensandbox-server/bin/python -m pip install\s*\\\n"
+        r"\s+--disable-pip-version-check --requirement "
+        r"requirements-opensandbox-server\.txt"
+    )
+    server_in_medchat = re.compile(
+        r"/opt/conda/envs/medchat/bin/python -m pip install[^\n]*(?:\\\n[^\n]*)?"
+        r"requirements-opensandbox-server\.txt"
+    )
+
+    assert broker_install.search(text)
+    assert server_install.search(text)
+    assert not server_in_medchat.search(text)
+    assert (
+        "sudo ln -sfn /opt/conda/envs/opensandbox-server/bin/opensandbox-server"
+        in text
+    )
+    assert "readlink -f /opt/conda/envs/medchat/bin/opensandbox-server" in text
+
+    launcher = "/opt/conda/envs/medchat/bin/opensandbox-server"
+    service = OPENSANDBOX_SERVICE.read_text(encoding="utf-8")
+    validator = DEPLOYMENT_VALIDATOR.read_text(encoding="utf-8")
+    assert f"ExecStart={launcher} --config /etc/medchat/opensandbox.toml" in service
+    assert f'"{launcher} --config "' in validator
+    assert '"/etc/medchat/opensandbox.toml"' in validator
