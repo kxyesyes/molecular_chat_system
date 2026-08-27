@@ -194,7 +194,7 @@ configure_family() {
 
     ensure_rule_at "$tool" DOCKER-USER 1 \
         -i "$BRIDGE_INTERFACE" ! -o "$BRIDGE_INTERFACE" \
-        -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+        -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
     ensure_rule_at "$tool" DOCKER-USER 2 \
         -o "$BRIDGE_INTERFACE" ! -s "$loopback_source" \
         -p tcp -m conntrack --ctdir ORIGINAL \
@@ -207,7 +207,7 @@ configure_family() {
 
     verify_unique_rule "$tool" DOCKER-USER \
         -i "$BRIDGE_INTERFACE" ! -o "$BRIDGE_INTERFACE" \
-        -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+        -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
     verify_unique_rule "$tool" DOCKER-USER \
         -o "$BRIDGE_INTERFACE" ! -s "$loopback_source" \
         -p tcp -m conntrack --ctdir ORIGINAL \

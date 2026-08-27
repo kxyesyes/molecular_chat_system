@@ -88,7 +88,7 @@ _PINNED_ASSET_SHA256 = {
         "d08a8ed8795d2c505099fd9ddf8660831fc9780d251d46c3f8132d99ce86a3e1"
     ),
     "deployment/opensandbox/configure-firewall.sh": (
-        "1ac2dead88d8f52f4199c34feae3f3d2ff7aca49682ed5b94687884d9029fafa"
+        "573a5ca7f4288677189a61cf18a84308be5b713b8368be52abb53eec7344739c"
     ),
     "deployment/opensandbox/opensandbox.env.example": (
         "bdd4b347aacd786c555250f5733566d5fd8723e15c44aeb048af237852d089bf"
@@ -520,7 +520,7 @@ def _validate_firewall_script(text: str) -> bool:
         '-D "$chain"',
         "-S INPUT",
         "-i \"$BRIDGE_INTERFACE\" ! -o \"$BRIDGE_INTERFACE\"",
-        "--ctstate ESTABLISHED,RELATED -j RETURN",
+        "--ctstate RELATED,ESTABLISHED -j RETURN",
         "--ctstate NEW -j DROP",
         "--ctdir ORIGINAL",
         "--ctorigdstport",
@@ -536,6 +536,7 @@ def _validate_firewall_script(text: str) -> bool:
     return bool(
         all(value in text for value in required)
         and "--ctstatus" not in text
+        and "--ctstate ESTABLISHED,RELATED" not in text
         and "-j ACCEPT" not in text
         and "-F DOCKER-USER" not in text
         and "--flush" not in text
@@ -1250,7 +1251,7 @@ def _firewall_rules_present() -> bool:
         docker_rules = (
             (
                 "-i", _BRIDGE_INTERFACE, "!", "-o", _BRIDGE_INTERFACE,
-                "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
+                "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED",
                 "-j", "RETURN",
             ),
             (

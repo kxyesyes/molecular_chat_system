@@ -166,6 +166,13 @@ def test_firewall_owns_internal_network_and_scopes_docker_user_rules() -> None:
     assert ">/dev/null 2>&1" in script
 
 
+def test_firewall_uses_iptables_nft_canonical_conntrack_state_order() -> None:
+    script = FIREWALL_SCRIPT.read_text(encoding="utf-8")
+
+    assert "--ctstate RELATED,ESTABLISHED -j RETURN" in script
+    assert "--ctstate ESTABLISHED,RELATED" not in script
+
+
 def test_static_validator_hashes_canonical_assets_as_raw_bytes(tmp_path: Path) -> None:
     validator = _load_validator()
     root = _asset_root(tmp_path)
@@ -206,6 +213,17 @@ if args[:2] == ["-w", "5"]:
     args = args[2:]
 if "--ctstatus" in args:
     raise SystemExit(2)
+
+
+def normalize_rule(rule):
+    normalized = list(rule)
+    if "--ctstate" in normalized:
+        index = normalized.index("--ctstate") + 1
+        if normalized[index] == "ESTABLISHED,RELATED":
+            normalized[index] = "RELATED,ESTABLISHED"
+    return normalized
+
+
 table = "filter"
 if args[:1] == ["-t"]:
     table = args[1]
@@ -257,6 +275,7 @@ elif action in {"-A", "-C", "-D", "-I"}:
     else:
         position = 0
         rule = args[2:]
+    rule = normalize_rule(rule)
     rules = chains[chain]
     if action == "-C":
         raise SystemExit(0 if rule in rules else 1)
@@ -444,7 +463,7 @@ def test_firewall_migrates_legacy_rules_and_is_idempotently_ingress_scoped(
         assert rules[family]["filter"]["DOCKER-USER"] == [
             [
                 "-i", "br-medchat-sbox", "!", "-o", "br-medchat-sbox",
-                "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
+                "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED",
                 "-j", "RETURN",
             ],
             [
@@ -715,6 +734,14 @@ def test_firewall_legacy_rule_deletion_failure_is_redacted_and_fails_closed(
             FIREWALL_SCRIPT,
             lambda text: text.replace(
                 "--ctdir ORIGINAL", "--ctstatus DNAT --ctdir ORIGINAL", 1
+            ),
+            "firewall_asset_unsafe",
+        ),
+        (
+            FIREWALL_SCRIPT,
+            lambda text: text.replace(
+                "--ctstate RELATED,ESTABLISHED",
+                "--ctstate ESTABLISHED,RELATED",
             ),
             "firewall_asset_unsafe",
         ),
