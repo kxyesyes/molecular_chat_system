@@ -2963,7 +2963,7 @@ def test_runtime_rejects_mismatched_raw_ingress_chain_without_raw_output(
         if argv == ("runsc", "--version"):
             return validator._CommandResult(True, "runsc version 1")
         if argv[:3] == ("docker", "info", "--format"):
-            return validator._CommandResult(True, '{"runsc":{"path":"runsc"}}')
+            return validator._CommandResult(True, "runsc\nrunc\n")
         if argv[:3] == ("docker", "version", "--format"):
             return validator._CommandResult(True, "26.0.0")
         if argv[0] in {"iptables", "ip6tables"}:
@@ -3008,7 +3008,7 @@ def test_runtime_socket_contract_rejects_wrong_type_owner_or_mode(
         if argv == ("runsc", "--version"):
             return validator._CommandResult(True, "runsc version 1")
         if argv[:3] == ("docker", "info", "--format"):
-            return validator._CommandResult(True, '{"runsc":{"path":"runsc"}}')
+            return validator._CommandResult(True, "runsc\nrunc\n")
         if argv[:3] == ("docker", "version", "--format"):
             return validator._CommandResult(True, "26.0.0")
         if argv[0] in {"iptables", "ip6tables"}:
@@ -3061,7 +3061,7 @@ def test_runtime_rejects_missing_firewall_rule_without_raw_output(
         if argv == ("runsc", "--version"):
             return validator._CommandResult(True, "runsc version 1")
         if argv[:3] == ("docker", "info", "--format"):
-            return validator._CommandResult(True, '{"runsc":{"path":"runsc"}}')
+            return validator._CommandResult(True, "runsc\nrunc\n")
         if argv[:3] == ("docker", "version", "--format"):
             return validator._CommandResult(True, "26.0.0")
         if argv[0] in {"iptables", "ip6tables"}:

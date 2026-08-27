@@ -1379,6 +1379,40 @@ def _docker_network_is_safe() -> bool:
 
 
 def _firewall_rules_present() -> bool:
+    def normalized(arguments: Sequence[str]) -> tuple[tuple[str, ...], ...] | None:
+        value_options = {
+            "-i", "-o", "-s", "-p", "-m", "--ctstate", "--ctdir",
+            "--ctorigdstport", "-j",
+        }
+        atoms: list[tuple[str, ...]] = []
+        index = 0
+        while index < len(arguments):
+            negated = False
+            if arguments[index] == "!":
+                negated = True
+                index += 1
+            if index + 1 >= len(arguments) or arguments[index] not in value_options:
+                return None
+            option, value = arguments[index], arguments[index + 1]
+            if option == "--ctstate":
+                states = value.split(",")
+                if not states or any(not state for state in states):
+                    return None
+                value = ",".join(sorted(states))
+            atoms.append(("!" if negated else "", option, value))
+            index += 2
+        return tuple(sorted(atoms))
+
+    def rendered_matches(line: str, chain: str, rule: Sequence[str]) -> bool:
+        try:
+            tokens = shlex.split(line)
+        except ValueError:
+            return False
+        return bool(
+            tokens[:2] == ["-A", chain]
+            and normalized(tokens[2:]) == normalized(rule)
+        )
+
     for executable, loopback in (
         ("iptables", "127.0.0.0/8"),
         ("ip6tables", "::1/128"),
@@ -1410,7 +1444,6 @@ def _firewall_rules_present() -> bool:
         if not docker_state.ok or not input_state.ok:
             return False
         for position, rule in enumerate(docker_rules, 1):
-            expected = "-A DOCKER-USER " + " ".join(rule)
             present = _run_command(
                 (executable, "-w", "5", "-C", "DOCKER-USER", *rule)
             )
@@ -1420,11 +1453,16 @@ def _firewall_rules_present() -> bool:
             if (
                 not present.ok
                 or not positioned.ok
-                or positioned.stdout.strip() != expected
-                or docker_state.stdout.splitlines().count(expected) != 1
+                or not rendered_matches(
+                    positioned.stdout.strip(), "DOCKER-USER", rule
+                )
+                or sum(
+                    rendered_matches(line, "DOCKER-USER", rule)
+                    for line in docker_state.stdout.splitlines()
+                )
+                != 1
             ):
                 return False
-        expected_input = "-A INPUT " + " ".join(input_rule)
         input_present = _run_command(
             (executable, "-w", "5", "-C", "INPUT", *input_rule)
         )
@@ -1434,8 +1472,12 @@ def _firewall_rules_present() -> bool:
         if (
             not input_present.ok
             or not input_first.ok
-            or input_first.stdout.strip() != expected_input
-            or input_state.stdout.splitlines().count(expected_input) != 1
+            or not rendered_matches(input_first.stdout.strip(), "INPUT", input_rule)
+            or sum(
+                rendered_matches(line, "INPUT", input_rule)
+                for line in input_state.stdout.splitlines()
+            )
+            != 1
         ):
             return False
     return True
