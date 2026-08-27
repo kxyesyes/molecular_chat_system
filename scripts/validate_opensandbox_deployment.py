@@ -1450,15 +1450,19 @@ def validate_runtime() -> str | None:
             return "runsc_unavailable"
 
         docker_info = _run_command(
-            ("docker", "info", "--format", "{{json .Runtimes}}")
+            (
+                "docker",
+                "info",
+                "--format",
+                '{{range $name, $_ := .Runtimes}}{{$name}}{{"\\n"}}{{end}}',
+            )
         )
         if not docker_info.ok:
             return "docker_runtime_unregistered"
-        try:
-            runtimes = json.loads(docker_info.stdout)
-        except (json.JSONDecodeError, TypeError):
-            return "docker_runtime_unregistered"
-        if not isinstance(runtimes, dict) or "runsc" not in runtimes:
+        runtimes = {
+            line.strip() for line in docker_info.stdout.splitlines() if line.strip()
+        }
+        if "runsc" not in runtimes:
             return "docker_runtime_unregistered"
 
         docker_version = _run_command(

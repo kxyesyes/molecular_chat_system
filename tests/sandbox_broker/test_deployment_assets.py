@@ -2854,7 +2854,7 @@ def test_runtime_rejects_unpatched_docker_with_stable_redacted_code(
         if argv == ("runsc", "--version"):
             return validator._CommandResult(True, "runsc version 1")
         if argv[:3] == ("docker", "info", "--format"):
-            return validator._CommandResult(True, '{"runsc":{}}')
+            return validator._CommandResult(True, "runsc\nrunc\n")
         if argv[:3] == ("docker", "version", "--format"):
             return validator._CommandResult(True, "25.0.4")
         return validator._CommandResult(False, canary)
@@ -2877,7 +2877,7 @@ def test_safe_mocked_runtime_checks_pass(monkeypatch: pytest.MonkeyPatch) -> Non
         if argv == ("runsc", "--version"):
             return validator._CommandResult(True, "runsc version 20260801")
         if argv[:3] == ("docker", "info", "--format"):
-            return validator._CommandResult(True, '{"runsc":{"path":"runsc"}}')
+            return validator._CommandResult(True, "runsc\nrunc\n")
         if argv[:3] == ("docker", "version", "--format"):
             return validator._CommandResult(True, "26.0.0")
         if argv[:3] == ("docker", "image", "inspect"):
@@ -2945,6 +2945,12 @@ def test_safe_mocked_runtime_checks_pass(monkeypatch: pytest.MonkeyPatch) -> Non
         image_reference,
     ) in calls
     assert not any(call[:3] == ("docker", "image", "ls") for call in calls)
+    assert (
+        "docker",
+        "info",
+        "--format",
+        '{{range $name, $_ := .Runtimes}}{{$name}}{{"\\n"}}{{end}}',
+    ) in calls
 
 
 def test_runtime_rejects_mismatched_raw_ingress_chain_without_raw_output(
