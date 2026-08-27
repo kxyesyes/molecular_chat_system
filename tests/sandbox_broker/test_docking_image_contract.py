@@ -666,7 +666,7 @@ def test_subprocess_has_cumulative_deadline_silent_streams_and_secret_free_env(
     _, _, calls, exit_code = _run_valid(tmp_path, monkeypatch)
     assert exit_code == 0
     timeouts = [float(kwargs["wait_timeout"]) for _, kwargs in calls]
-    assert all(0 < value <= 180 for value in timeouts)
+    assert all(0 < value <= 270 for value in timeouts)
     assert timeouts == sorted(timeouts, reverse=True)
     for _, kwargs in calls:
         assert kwargs["shell"] is False
@@ -858,7 +858,7 @@ def test_absolute_deadline_includes_input_validation_time(
 
     def slow_parse() -> object:
         parsed = original_parse()
-        now[0] = 175.0
+        now[0] = 265.0
         return parsed
 
     monkeypatch.setattr(module, "_parse_request", slow_parse)
@@ -875,7 +875,10 @@ def test_deadline_layers_reserve_cleanup_and_result_publication() -> None:
     tool_deadline, cleanup_deadline, wrapper_deadline = module._deadline_layers(started)
 
     assert started < tool_deadline < cleanup_deadline < wrapper_deadline
-    assert wrapper_deadline < started + 180.0
+    assert module._OUTER_DEADLINE_SECONDS == 270.0
+    assert module._WRAPPER_DEADLINE_SECONDS == 267.0
+    assert wrapper_deadline == started + 267.0
+    assert wrapper_deadline < started + module._OUTER_DEADLINE_SECONDS
     assert cleanup_deadline - tool_deadline >= 0.5
     assert wrapper_deadline - cleanup_deadline >= 0.5
 

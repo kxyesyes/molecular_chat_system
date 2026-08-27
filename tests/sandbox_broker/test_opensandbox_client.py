@@ -981,7 +981,7 @@ def test_official_factory_builds_async_nonaccumulating_execution_handlers(
     assert handler_calls[0]["skip_accumulation"] is True
     assert callable(handler_calls[0]["on_stdout"])
     assert callable(handler_calls[0]["on_stderr"])
-    assert option_calls[0]["timeout"].total_seconds() == 180  # type: ignore[union-attr]
+    assert option_calls[0]["timeout"].total_seconds() == 270  # type: ignore[union-attr]
 
 
 def test_official_factory_uses_streaming_read_and_fixed_bounded_list_helper(
@@ -1355,7 +1355,7 @@ def test_official_create_sets_explicit_bounded_transport_and_ready_timeouts(
     # execd/files traffic must therefore traverse the loopback OpenSandbox
     # server instead of trying to dial published sandbox ports directly.
     assert connections[0]["use_server_proxy"] is True
-    assert ready_timeout.total_seconds() == 30  # type: ignore[union-attr]
+    assert ready_timeout.total_seconds() == 60  # type: ignore[union-attr]
     assert remote_lifetime.total_seconds() == 300  # type: ignore[union-attr]
     assert "network_policy" not in creates[0]
 

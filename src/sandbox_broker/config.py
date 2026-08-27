@@ -21,7 +21,7 @@ _APPROVED_LIMITS = {
     "receptor_max_bytes": 52_428_800,
     "ligand_max_bytes": 10_485_760,
     "output_max_bytes": 104_857_600,
-    "execution_timeout_seconds": 180,
+    "execution_timeout_seconds": 270,
     "sandbox_timeout_seconds": 300,
     "concurrency": 1,
     "queue_capacity": 8,
@@ -96,7 +96,7 @@ class BrokerConfig:
     receptor_max_bytes: int = 50 * 1024 * 1024
     ligand_max_bytes: int = 10 * 1024 * 1024
     output_max_bytes: int = 100 * 1024 * 1024
-    execution_timeout_seconds: int = 180
+    execution_timeout_seconds: int = 270
     sandbox_timeout_seconds: int = 300
     concurrency: int = 1
     queue_capacity: int = 8

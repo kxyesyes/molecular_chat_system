@@ -420,7 +420,7 @@ def test_broker_config_loads_required_environment_and_fixed_limits(
     assert config.receptor_max_bytes == 50 * 1024 * 1024
     assert config.ligand_max_bytes == 10 * 1024 * 1024
     assert config.output_max_bytes == 100 * 1024 * 1024
-    assert config.execution_timeout_seconds == 180
+    assert config.execution_timeout_seconds == 270
     assert config.sandbox_timeout_seconds == 300
     assert config.concurrency == 1
     assert config.queue_capacity == 8
@@ -440,7 +440,7 @@ def test_broker_config_loads_required_environment_and_fixed_limits(
         ("receptor_max_bytes", 52_428_800),
         ("ligand_max_bytes", 10_485_760),
         ("output_max_bytes", 104_857_600),
-        ("execution_timeout_seconds", 180),
+        ("execution_timeout_seconds", 270),
         ("sandbox_timeout_seconds", 300),
         ("concurrency", 1),
         ("queue_capacity", 8),
