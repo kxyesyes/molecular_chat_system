@@ -1230,16 +1230,19 @@ def test_readme_locks_exact_installer_source_chain_before_sudo_execution() -> No
 
     assert ownership_position < mode_position < verification_position < installer_position
     for source in (
-        "/opt/medchat/molecular_chat_system",
-        "/opt/medchat/molecular_chat_system/deployment",
-        "/opt/medchat/molecular_chat_system/deployment/opensandbox",
-        "/opt/medchat/molecular_chat_system/deployment/opensandbox/install.sh",
-        "/opt/medchat/molecular_chat_system/deployment/opensandbox/sandbox.toml",
-        "/opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-opensandbox.service",
-        "/opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-sandbox-broker.service",
-        "/opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-opensandbox-firewall.service",
-        "/opt/medchat/molecular_chat_system/deployment/opensandbox/configure-firewall.sh",
-        "/opt/medchat/molecular_chat_system/deployment/medchat-temporal-worker.service",
+        "/usr",
+        "/usr/local",
+        "/usr/local/src",
+        "/usr/local/src/medchat-release",
+        "/usr/local/src/medchat-release/deployment",
+        "/usr/local/src/medchat-release/deployment/opensandbox",
+        "/usr/local/src/medchat-release/deployment/opensandbox/install.sh",
+        "/usr/local/src/medchat-release/deployment/opensandbox/sandbox.toml",
+        "/usr/local/src/medchat-release/deployment/opensandbox/medchat-opensandbox.service",
+        "/usr/local/src/medchat-release/deployment/opensandbox/medchat-sandbox-broker.service",
+        "/usr/local/src/medchat-release/deployment/opensandbox/medchat-opensandbox-firewall.service",
+        "/usr/local/src/medchat-release/deployment/opensandbox/configure-firewall.sh",
+        "/usr/local/src/medchat-release/deployment/medchat-temporal-worker.service",
     ):
         assert source in ownership_block
         assert source in mode_block
@@ -1247,6 +1250,8 @@ def test_readme_locks_exact_installer_source_chain_before_sudo_execution() -> No
     assert 'owner=$(stat -c %u -- "$source")' in readme
     assert 'permissions=$(stat -c %a -- "$source")' in readme
     assert "0022" in readme
+    assert "git rev-parse --verify HEAD" in readme
+    assert "git diff --exit-code" in readme
 
     installer = INSTALLER.read_text(encoding="utf-8")
     source_check_start = installer.index("source_is_regular_and_locked() {")
@@ -1256,6 +1261,93 @@ def test_readme_locks_exact_installer_source_chain_before_sudo_execution() -> No
     assert '[ "$owner" -eq 0 ]' in source_check
     assert 'permissions=$(stat -c %a -- "$source_path")' in source_check
     assert "0022" in source_check
+
+
+def test_installer_rejects_untrusted_source_ancestors_and_rechecks_opened_uid() -> None:
+    installer = INSTALLER.read_text(encoding="utf-8")
+
+    ancestor_start = installer.index("source_ancestors_are_locked() {")
+    ancestor_end = installer.index("\n}\n", ancestor_start)
+    ancestor_check = installer[ancestor_start:ancestor_end]
+    assert 'owner=$(stat -c %u -- "$source_directory")' in ancestor_check
+    assert '[ "$owner" -eq 0 ]' in ancestor_check
+    assert 'permissions=$(stat -c %a -- "$source_directory")' in ancestor_check
+    assert "0022" in ancestor_check
+    assert 'source_ancestors_are_locked "$source_path"' in installer
+
+    read_start = installer.index("def read_source(path: Path) -> bytes:")
+    read_end = installer.index("\n\ndef fsync_parent", read_start)
+    read_source = installer[read_start:read_end]
+    assert 'root == Path("/") and opened.st_uid != 0' in read_source
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda text: text.replace(
+            'source_ancestors_are_locked "$source_path" || fail source_untrusted',
+            ":",
+        ),
+        lambda text: text.replace(
+            'or (root == Path("/") and opened.st_uid != 0)',
+            "or False",
+        ),
+    ],
+)
+def test_validator_rejects_removed_source_trust_guards(
+    tmp_path: Path,
+    mutation: object,
+) -> None:
+    validator = _load_validator()
+    root = _asset_root(tmp_path)
+    target = root / INSTALLER.relative_to(ROOT)
+    target.write_text(mutation(target.read_text(encoding="utf-8")), encoding="utf-8")
+
+    assert validator.validate_static(root) == "installer_unsafe"
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() != 0,
+    reason="source-swap trust test requires POSIX root ownership",
+)
+def test_source_swap_through_writable_parent_fails_closed(tmp_path: Path) -> None:
+    writable_parent = tmp_path / "operator-writable"
+    original = writable_parent / "checkout"
+    replacement = writable_parent / "replacement"
+    original.mkdir(parents=True)
+    replacement.mkdir()
+    original_asset = original / "install.sh"
+    replacement_asset = replacement / "install.sh"
+    original_asset.write_text("trusted\n", encoding="utf-8")
+    replacement_asset.write_text("substituted\n", encoding="utf-8")
+    original_asset.chmod(0o444)
+    replacement_asset.chmod(0o444)
+    writable_parent.chmod(0o777)
+
+    probe = tmp_path / "source-swap.sh"
+    probe.write_text(
+        "#!/bin/sh\nset -eu\n"
+        + _installer_function_source("source_is_regular_and_locked")
+        + _installer_function_source("source_ancestors_are_locked")
+        + 'source_path="$1/checkout/install.sh"\n'
+        + 'source_is_regular_and_locked "$source_path" || exit 10\n'
+        + 'mv "$1/checkout" "$1/validated-checkout"\n'
+        + 'mv "$1/replacement" "$1/checkout"\n'
+        + 'if source_ancestors_are_locked "$source_path"; then exit 11; fi\n',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["sh", str(probe), str(writable_parent)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
 
 
 def test_live_install_restores_prior_active_services_after_unit_reload() -> None:

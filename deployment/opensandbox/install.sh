@@ -77,6 +77,27 @@ source_is_regular_and_locked() {
     [ $((0$permissions & 0022)) -eq 0 ] || return 1
 }
 
+source_ancestors_are_locked() {
+    source_path=$1
+    case "$source_path" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    source_directory=$(dirname -- "$source_path") || return 1
+    while :; do
+        [ ! -L "$source_directory" ] || return 1
+        [ -d "$source_directory" ] || return 1
+        owner=$(stat -c %u -- "$source_directory") || return 1
+        [ "$owner" -eq 0 ] || return 1
+        permissions=$(stat -c %a -- "$source_directory") || return 1
+        [ $((0$permissions & 0022)) -eq 0 ] || return 1
+        [ "$source_directory" != / ] || break
+        parent_directory=$(dirname -- "$source_directory") || return 1
+        [ "$parent_directory" != "$source_directory" ] || return 1
+        source_directory=$parent_directory
+    done
+}
+
 run_systemctl() {
     timeout --signal=KILL "${SYSTEMCTL_TIMEOUT_SECONDS}s" \
         systemctl "$@" >/dev/null 2>&1
@@ -427,7 +448,7 @@ remove_legacy_medchat_membership() {
 if [ "$DESTDIR" = / ]; then
     [ "$(id -u)" -eq 0 ] || fail root_required
     for source_path in \
-        "$0" \
+        "$SCRIPT_DIR/install.sh" \
         "$SCRIPT_DIR/sandbox.toml" \
         "$SCRIPT_DIR/medchat-opensandbox.service" \
         "$SCRIPT_DIR/medchat-sandbox-broker.service" \
@@ -435,6 +456,7 @@ if [ "$DESTDIR" = / ]; then
         "$SCRIPT_DIR/configure-firewall.sh" \
         "$SCRIPT_DIR/../medchat-temporal-worker.service"
     do
+        source_ancestors_are_locked "$source_path" || fail source_untrusted
         source_is_regular_and_locked "$source_path" || fail source_untrusted
     done
 
@@ -658,6 +680,7 @@ def read_source(path: Path) -> bytes:
             or stat.S_ISLNK(named.st_mode)
             or opened.st_nlink != 1
             or stat.S_IMODE(opened.st_mode) & 0o022
+            or (root == Path("/") and opened.st_uid != 0)
             or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
         ):
             fail()

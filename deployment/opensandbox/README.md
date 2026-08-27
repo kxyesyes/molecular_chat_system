@@ -153,47 +153,68 @@ root-owned service files required by the final Broker architecture.
 
 ## 6. Install and enable the service chain
 
-Before invoking the installer with `sudo`, lock its complete source chain. A
+Before invoking the installer with `sudo`, copy the reviewed commit into the
+dedicated root-owned release hierarchy `/usr/local/src/medchat-release`. Do not
+run the privileged installer from `/opt/medchat`: that path may be the
+unprivileged service user's home and a writable ancestor would permit the whole
+checkout to be exchanged after validation. Verify the exact commit and clean
+tree before locking the release assets:
+
+```bash
+sudo install -d -o root -g root -m 0755 /usr/local/src
+sudo rm -rf /usr/local/src/medchat-release
+sudo cp -a -- /opt/medchat/molecular_chat_system /usr/local/src/medchat-release
+cd /usr/local/src/medchat-release
+git rev-parse --verify HEAD
+git diff --exit-code
+git diff --cached --exit-code
+```
+
+The copy source and expected commit are release inputs and must already have
+been reviewed; the commands above do not establish source authenticity. A
 clean clone created with umask `0002` commonly has group-writable `775/664`
-modes; the installer rejects those assets before installation. The following
-explicit list locks only the checkout directories and files the installer
-reads, without recursively changing unrelated repository assets:
+modes, so lock every ancestor and every asset read by the installer. The
+installer rejects the release if any ancestor from `/` to the asset directory,
+or any source file itself, is not root-owned or is group/other-writable:
 
 ```bash
 sudo chown root:root -- \
-  /opt/medchat/molecular_chat_system \
-  /opt/medchat/molecular_chat_system/deployment \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/install.sh \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/sandbox.toml \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-opensandbox.service \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-sandbox-broker.service \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-opensandbox-firewall.service \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/configure-firewall.sh \
-  /opt/medchat/molecular_chat_system/deployment/medchat-temporal-worker.service
+  /usr /usr/local /usr/local/src \
+  /usr/local/src/medchat-release \
+  /usr/local/src/medchat-release/deployment \
+  /usr/local/src/medchat-release/deployment/opensandbox \
+  /usr/local/src/medchat-release/deployment/opensandbox/install.sh \
+  /usr/local/src/medchat-release/deployment/opensandbox/sandbox.toml \
+  /usr/local/src/medchat-release/deployment/opensandbox/medchat-opensandbox.service \
+  /usr/local/src/medchat-release/deployment/opensandbox/medchat-sandbox-broker.service \
+  /usr/local/src/medchat-release/deployment/opensandbox/medchat-opensandbox-firewall.service \
+  /usr/local/src/medchat-release/deployment/opensandbox/configure-firewall.sh \
+  /usr/local/src/medchat-release/deployment/medchat-temporal-worker.service
 sudo chmod go-w -- \
-  /opt/medchat/molecular_chat_system \
-  /opt/medchat/molecular_chat_system/deployment \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/install.sh \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/sandbox.toml \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-opensandbox.service \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-sandbox-broker.service \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-opensandbox-firewall.service \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/configure-firewall.sh \
-  /opt/medchat/molecular_chat_system/deployment/medchat-temporal-worker.service
+  /usr /usr/local /usr/local/src \
+  /usr/local/src/medchat-release \
+  /usr/local/src/medchat-release/deployment \
+  /usr/local/src/medchat-release/deployment/opensandbox \
+  /usr/local/src/medchat-release/deployment/opensandbox/install.sh \
+  /usr/local/src/medchat-release/deployment/opensandbox/sandbox.toml \
+  /usr/local/src/medchat-release/deployment/opensandbox/medchat-opensandbox.service \
+  /usr/local/src/medchat-release/deployment/opensandbox/medchat-sandbox-broker.service \
+  /usr/local/src/medchat-release/deployment/opensandbox/medchat-opensandbox-firewall.service \
+  /usr/local/src/medchat-release/deployment/opensandbox/configure-firewall.sh \
+  /usr/local/src/medchat-release/deployment/medchat-temporal-worker.service
 
 for source in \
-  /opt/medchat/molecular_chat_system \
-  /opt/medchat/molecular_chat_system/deployment \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/install.sh \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/sandbox.toml \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-opensandbox.service \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-sandbox-broker.service \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/medchat-opensandbox-firewall.service \
-  /opt/medchat/molecular_chat_system/deployment/opensandbox/configure-firewall.sh \
-  /opt/medchat/molecular_chat_system/deployment/medchat-temporal-worker.service
+  /usr /usr/local /usr/local/src \
+  /usr/local/src/medchat-release \
+  /usr/local/src/medchat-release/deployment \
+  /usr/local/src/medchat-release/deployment/opensandbox \
+  /usr/local/src/medchat-release/deployment/opensandbox/install.sh \
+  /usr/local/src/medchat-release/deployment/opensandbox/sandbox.toml \
+  /usr/local/src/medchat-release/deployment/opensandbox/medchat-opensandbox.service \
+  /usr/local/src/medchat-release/deployment/opensandbox/medchat-sandbox-broker.service \
+  /usr/local/src/medchat-release/deployment/opensandbox/medchat-opensandbox-firewall.service \
+  /usr/local/src/medchat-release/deployment/opensandbox/configure-firewall.sh \
+  /usr/local/src/medchat-release/deployment/medchat-temporal-worker.service
 do
   owner=$(stat -c %u -- "$source")
   permissions=$(stat -c %a -- "$source")
