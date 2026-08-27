@@ -92,7 +92,7 @@ _PINNED_ASSET_SHA256 = {
         "d08a8ed8795d2c505099fd9ddf8660831fc9780d251d46c3f8132d99ce86a3e1"
     ),
     "deployment/opensandbox/configure-firewall.sh": (
-        "9e7fd8ff1734d2a3968e93e1840cfbf999589df7c30b34fd12f08e716a5c0aa9"
+        "1a637566231a36928dd0c025b42e4c81d871420f79c897c71e06afe1436b3fc9"
     ),
     "deployment/opensandbox/opensandbox.env.example": (
         "bdd4b347aacd786c555250f5733566d5fd8723e15c44aeb048af237852d089bf"

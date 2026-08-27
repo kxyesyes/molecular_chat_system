@@ -248,16 +248,15 @@ migrate_legacy_rules() {
         -p tcp -m conntrack --ctdir ORIGINAL \
         --ctorigdstport "$PORT_RANGE" -j DROP
 
-    delete_all_legacy_rules "$tool" raw PREROUTING \
-        ! -i lo -m addrtype --dst-type LOCAL -p tcp -m tcp \
-        --dport "$PORT_RANGE" -j "$LEGACY_CHAIN"
-
     if legacy_state=$("$tool" -w "$WAIT_SECONDS" -t raw \
         -S "$LEGACY_CHAIN" 2>/dev/null)
     then
         expected="-N $LEGACY_CHAIN
 -A $LEGACY_CHAIN -j DROP"
         [ "$legacy_state" = "$expected" ] || migration_fail
+        delete_all_legacy_rules "$tool" raw PREROUTING \
+            ! -i lo -m addrtype --dst-type LOCAL -p tcp -m tcp \
+            --dport "$PORT_RANGE" -j "$LEGACY_CHAIN"
         "$tool" -w "$WAIT_SECONDS" -t raw -D "$LEGACY_CHAIN" -j DROP \
             >/dev/null 2>&1 || migration_fail
         "$tool" -w "$WAIT_SECONDS" -t raw -X "$LEGACY_CHAIN" \
