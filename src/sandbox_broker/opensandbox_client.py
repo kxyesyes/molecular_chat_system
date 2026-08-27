@@ -105,7 +105,9 @@ for current, directories, files in os.walk(root, topdown=True, followlinks=False
             matches.append(candidate)
             if len(matches) > 256:
                 raise SystemExit(75)
-sys.stdout.write(json.dumps(matches, separators=(",", ":"), ensure_ascii=True))
+sys.stdout.write(
+    json.dumps(matches, separators=(",", ":"), ensure_ascii=True) + "\n"
+)
 '''.strip()
 _LIST_HELPER_B64 = base64.b64encode(_LIST_HELPER_SOURCE.encode("utf-8")).decode(
     "ascii"

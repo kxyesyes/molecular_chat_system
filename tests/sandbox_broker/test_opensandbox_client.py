@@ -650,6 +650,28 @@ def test_list_accepts_bounded_json_array_when_execd_strips_trailing_newline(
     ) == [valid]
 
 
+def test_list_helper_flushes_one_newline_terminated_array_frame() -> None:
+    tree = ast.parse(opensandbox_client_module._LIST_HELPER_SOURCE)
+    writes = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "write"
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "stdout"
+        and isinstance(node.func.value.value, ast.Name)
+        and node.func.value.value.id == "sys"
+    ]
+
+    assert len(writes) == 1
+    frame = writes[0].args[0]
+    assert isinstance(frame, ast.BinOp)
+    assert isinstance(frame.op, ast.Add)
+    assert isinstance(frame.right, ast.Constant)
+    assert frame.right.value == "\n"
+
+
 def test_list_257th_file_and_transport_overflow_fail_without_returning_prefix(
     tmp_path: Path,
 ) -> None:
