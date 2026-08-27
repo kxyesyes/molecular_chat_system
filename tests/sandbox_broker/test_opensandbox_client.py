@@ -1290,6 +1290,10 @@ def test_official_create_sets_explicit_bounded_transport_and_ready_timeouts(
     ready_timeout = creates[0]["ready_timeout"]
     remote_lifetime = creates[0]["timeout"]
     assert request_timeout.total_seconds() == 20  # type: ignore[union-attr]
+    # The Broker is intentionally outside the isolated Docker network.  All
+    # execd/files traffic must therefore traverse the loopback OpenSandbox
+    # server instead of trying to dial published sandbox ports directly.
+    assert connections[0]["use_server_proxy"] is True
     assert ready_timeout.total_seconds() == 30  # type: ignore[union-attr]
     assert remote_lifetime.total_seconds() == 300  # type: ignore[union-attr]
     assert "network_policy" not in creates[0]

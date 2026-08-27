@@ -324,6 +324,7 @@ class _OfficialSandboxFactory:
             api_key=self._config.opensandbox_api_key,
             domain=self._config.opensandbox_domain,
             request_timeout=timedelta(seconds=_SDK_REQUEST_TIMEOUT_SECONDS),
+            use_server_proxy=True,
         )
 
     async def create(
