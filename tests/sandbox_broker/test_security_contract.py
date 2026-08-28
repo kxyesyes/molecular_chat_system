@@ -200,17 +200,31 @@ class _FunctionBindingCollector(ast.NodeVisitor):
     def visit_Lambda(self, node: ast.Lambda) -> None:
         del node
 
+    def _visit_comprehension_walruses(
+        self,
+        node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp,
+    ) -> None:
+        for generator in node.generators:
+            self.visit(generator.iter)
+            for condition in generator.ifs:
+                self.visit(condition)
+        if isinstance(node, ast.DictComp):
+            self.visit(node.key)
+            self.visit(node.value)
+        else:
+            self.visit(node.elt)
+
     def visit_ListComp(self, node: ast.ListComp) -> None:
-        del node
+        self._visit_comprehension_walruses(node)
 
     def visit_SetComp(self, node: ast.SetComp) -> None:
-        del node
+        self._visit_comprehension_walruses(node)
 
     def visit_DictComp(self, node: ast.DictComp) -> None:
-        del node
+        self._visit_comprehension_walruses(node)
 
     def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
-        del node
+        self._visit_comprehension_walruses(node)
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         if node.name:
@@ -401,9 +415,10 @@ class _StatementOrderedAnalyzer:
         value: ast.expr | None = None,
         *,
         symbol: str | None = None,
+        source_scope: _LexicalScope | None = None,
     ) -> None:
-        source_scope = scope
-        scope = self._assignment_scope(source_scope, name)
+        source_scope = source_scope or scope
+        scope = self._assignment_scope(scope, name)
         explicit_symbol = symbol is not None
         resolved = symbol if explicit_symbol else (
             self._resolve(value, source_scope) if value is not None else ""
@@ -458,14 +473,21 @@ class _StatementOrderedAnalyzer:
         target: ast.expr,
         scope: _LexicalScope,
         value: ast.expr | None = None,
+        *,
+        source_scope: _LexicalScope | None = None,
     ) -> None:
         if isinstance(target, ast.Name):
-            self._bind_name(scope, target.id, value)
+            self._bind_name(
+                scope,
+                target.id,
+                value,
+                source_scope=source_scope,
+            )
         elif isinstance(target, (ast.Tuple, ast.List)):
             for element in target.elts:
-                self._bind_target(element, scope)
+                self._bind_target(element, scope, source_scope=source_scope)
         elif isinstance(target, ast.Starred):
-            self._bind_target(target.value, scope)
+            self._bind_target(target.value, scope, source_scope=source_scope)
 
     def _is_socket_reference(
         self,
@@ -642,7 +664,17 @@ class _StatementOrderedAnalyzer:
             self._visit_expr(node.value, scope)
             if self._target_mutates_socket(node.target, scope):
                 self.violations.add("socket_family")
-            self._bind_target(node.target, scope, node.value)
+            binding_scope = scope
+            while binding_scope.kind == "comprehension":
+                if binding_scope.parent is None:  # pragma: no cover
+                    break
+                binding_scope = binding_scope.parent
+            self._bind_target(
+                node.target,
+                binding_scope,
+                node.value,
+                source_scope=scope,
+            )
             return
         if isinstance(node, ast.Subscript):
             self._visit_expr(node.value, scope)
@@ -1658,6 +1690,69 @@ def test_listener_reference_prepass_respects_inverse_lexical_shadowing(
     source: str,
 ) -> None:
     assert not _listener_contract_violations(source)
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "[(socket := local_adapter) for item in values]",
+        "{(socket := local_adapter) for item in values}",
+        "{item: (socket := local_adapter) for item in values}",
+        "tuple((socket := local_adapter) for item in values)",
+    ],
+    ids=["list", "set", "dict", "generator"],
+)
+def test_comprehension_walrus_binds_enclosing_function_scope(
+    expression: str,
+) -> None:
+    source = f"""import socket
+def harmless(values, local_adapter):
+    {expression}
+    socket.socket()
+"""
+
+    assert not _listener_contract_violations(source)
+
+
+def test_nested_comprehension_walrus_binds_nearest_non_comprehension_scope() -> None:
+    source = """import socket
+def harmless(groups, local_adapter):
+    [[(socket := local_adapter) for item in group] for group in groups]
+    socket.socket()
+"""
+
+    assert not _listener_contract_violations(source)
+
+
+def test_nested_function_collects_its_comprehension_walrus_local() -> None:
+    source = """import socket
+def outer():
+    def harmless(values, local_adapter):
+        [(socket := local_adapter) for item in values]
+        socket.socket()
+"""
+
+    assert not _listener_contract_violations(source)
+
+
+def test_comprehension_generator_target_does_not_shadow_enclosing_scope() -> None:
+    source = """import socket
+def guarded(adapters):
+    [socket for socket in adapters]
+    callback = socket.socket
+"""
+
+    assert "socket.socket" in _listener_contract_violations(source)
+
+
+def test_comprehension_walrus_alias_to_socket_still_fails_closed() -> None:
+    source = """import socket
+def forbidden(values):
+    [(factory := socket.socket) for item in values]
+    return factory
+"""
+
+    assert "socket.socket" in _listener_contract_violations(source)
 
 
 def test_listener_analysis_reviewer_false_negative_keeps_module_scope_order() -> None:
