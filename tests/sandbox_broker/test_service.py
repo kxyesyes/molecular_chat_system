@@ -2722,6 +2722,20 @@ def test_completed_destroy_failure_retries_same_identity_then_succeeds(
     assert cleanup_events[1]["cleanup_status"] == "failed"
     assert cleanup_events[3]["cleanup_status"] == "succeeded"
 
+    from scripts import run_opensandbox_stability_soak as soak
+
+    lifecycle_events = [
+        event
+        for event in telemetry.snapshot()["recent_events"]
+        if event["job_id"] == terminal.job_id
+    ]
+    evidence = soak.evaluate_lifecycle(lifecycle_events, result_succeeded=True)
+
+    assert sdk.run_count == 1
+    assert evidence.events_complete is True
+    assert evidence.failure_codes == ("broker_retry_observed",)
+    assert evidence.failure_class == "none"
+
 
 def test_failed_science_keeps_terminal_truth_after_cleanup_retry_succeeds(
     tmp_path: Path,
@@ -4526,6 +4540,7 @@ def test_breaker_records_only_final_provisioning_result_and_create_retry(
     terminal = asyncio.run(scenario())
     assert terminal.status is BrokerJobStatus.SUCCEEDED
     assert sdk.create_count == 2
+    assert sdk.run_count == 1
     assert breaker.successes == 1
     assert breaker.failures == []
     counters = telemetry.snapshot()["counters"]
@@ -4533,6 +4548,19 @@ def test_breaker_records_only_final_provisioning_result_and_create_retry(
     assert counters["retry|create|succeeded"] == 1
     assert counters["control_failure|create|connection_failed"] == 1
     assert "retry|create|exhausted" not in counters
+
+    from scripts import run_opensandbox_stability_soak as soak
+
+    lifecycle_events = [
+        event
+        for event in telemetry.snapshot()["recent_events"]
+        if event["job_id"] == terminal.job_id
+    ]
+    evidence = soak.evaluate_lifecycle(lifecycle_events, result_succeeded=True)
+
+    assert evidence.events_complete is True
+    assert evidence.failure_codes == ("broker_retry_observed",)
+    assert evidence.failure_class == "none"
 
 
 def test_final_classified_create_failure_records_breaker_failure_once(

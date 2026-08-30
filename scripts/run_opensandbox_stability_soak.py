@@ -1189,11 +1189,12 @@ def _normalize_operation_pairs(
     events: Sequence[Mapping[str, object]],
     *,
     allow_retry: bool,
-) -> tuple[list[str], list[Mapping[str, object]]] | None:
+) -> tuple[list[str], list[Mapping[str, object]], bool] | None:
     """Fold one bounded retry pair per operation or fail closed."""
 
     normalized_phases: list[str] = []
     effective_events: list[Mapping[str, object]] = []
+    retry_observed = False
     index = 0
     while index < len(events):
         event = events[index]
@@ -1276,13 +1277,14 @@ def _normalize_operation_pairs(
                 return None
             final_started = retry_started
             final_completed = retry_completed
+            retry_observed = True
             next_index += 2
 
         normalized_phases.extend((phase, completed_phase))
         effective_events.extend((final_started, final_completed))
         index = next_index
 
-    return normalized_phases, effective_events
+    return normalized_phases, effective_events, retry_observed
 
 
 def evaluate_lifecycle(
@@ -1312,7 +1314,6 @@ def evaluate_lifecycle(
         return _unavailable_lifecycle()
 
     (trace_id, job_id) = next(iter(identities))
-    phases = [event.get("phase") for event in correlated]
     terminals: list[Mapping[str, object]] = []
     for event in correlated:
         phase = event.get("phase")
@@ -1326,9 +1327,13 @@ def evaluate_lifecycle(
     )
     normalization = _normalize_operation_pairs(
         correlated,
-        allow_retry=type(result_succeeded) is bool and not result_succeeded,
+        allow_retry=type(result_succeeded) is bool,
     )
-    normalized_phases, effective_events = normalization or ([], [])
+    normalized_phases, effective_events, retry_observed = normalization or (
+        [],
+        [],
+        False,
+    )
     lifecycle_events = effective_events if normalization is not None else correlated
 
     raw_failure_classes = [
@@ -1445,16 +1450,10 @@ def evaluate_lifecycle(
             or terminal_failure_class != prior_failure_classes[-1]
         )
     )
-    phases_exact = len(phases) == len(EXPECTED_PHASES) and all(
-        type(actual) is str and actual == expected
-        for actual, expected in zip(phases, EXPECTED_PHASES)
-    )
-
     complete = False
     if type(result_succeeded) is bool and result_succeeded:
         complete = (
-            phases_exact
-            and normalized_phases == list(EXPECTED_PHASES)
+            normalized_phases == list(EXPECTED_PHASES)
             and len(terminals) == 1
             and type(terminal_outcome) is str
             and terminal_outcome == "passed"
@@ -1466,10 +1465,12 @@ def evaluate_lifecycle(
             and set(tool_versions) == {"vina", "meeko"}
             and all(
                 event.get("outcome") == "passed"
-                for event in correlated
+                for event in lifecycle_events
                 if str(event.get("phase", "")).endswith("_completed")
             )
-            and all(event.get("failure_class") is None for event in correlated)
+            and all(
+                event.get("failure_class") is None for event in lifecycle_events
+            )
         )
     elif type(result_succeeded) is bool:
         phase_positions: list[int] = []
@@ -1495,6 +1496,12 @@ def evaluate_lifecycle(
             and terminal_failure_consistent
         )
 
+    if not complete:
+        failure_codes = ("events_incomplete",)
+    elif result_succeeded and retry_observed:
+        failure_codes = ("broker_retry_observed",)
+    else:
+        failure_codes = ()
     return LifecycleEvidence(
         trace_id=trace_id,
         job_id=job_id,
@@ -1503,7 +1510,7 @@ def evaluate_lifecycle(
         cleanup_status=cleanup_status if type(cleanup_status) is str else None,
         failure_class=failure_class,
         tool_versions=MappingProxyType(dict(tool_versions)),
-        failure_codes=() if complete else ("events_incomplete",),
+        failure_codes=failure_codes,
     )
 class StabilityExecutor:
     """One fixed real stability suite; methods never retry a scientific command."""

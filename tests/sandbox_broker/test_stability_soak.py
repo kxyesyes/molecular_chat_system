@@ -128,6 +128,52 @@ def successful_lifecycle(
     return events
 
 
+def successful_lifecycle_with_recovered_retry(
+    operation: str,
+    *,
+    trace_id: str = "broker-recovered-retry",
+    job_id: str = "b" * 32,
+) -> list[dict[str, object]]:
+    events = successful_lifecycle(trace_id, job_id)
+    started_phase = f"{operation}_started"
+    completed_phase = f"{operation}_completed"
+    started_index = next(
+        index for index, event in enumerate(events) if event["phase"] == started_phase
+    )
+    started = events[started_index]
+    completed = events[started_index + 1]
+    passed_completed = dict(completed)
+    started["attempt"] = 1
+    completed["attempt"] = 1
+    completed["outcome"] = "failed"
+    completed["failure_class"] = {
+        "provisioning": "connection_failed",
+        "upload": "command_transport_failed",
+        "command": "command_timeout",
+        "validation": None,
+        "cleanup": "destroy_failed",
+    }[operation]
+    if operation == "validation":
+        completed["vina_version"] = None
+        completed["meeko_version"] = None
+    if operation == "cleanup":
+        completed["cleanup_status"] = "failed"
+    retry_started = dict(started, attempt=2)
+    retry_completed = dict(
+        passed_completed,
+        attempt=2,
+        outcome="passed",
+        failure_class=None,
+    )
+    if operation == "cleanup":
+        retry_completed["cleanup_status"] = "succeeded"
+    events[started_index + 2 : started_index + 2] = [
+        retry_started,
+        retry_completed,
+    ]
+    return events
+
+
 def validate_broker_events(events: list[dict[str, object]]) -> None:
     for event in events:
         normalized = dict(event)
@@ -521,6 +567,83 @@ def test_measured_run_uses_single_broker_identity_and_validation_versions(
         "vina": "1.2.5",
         "meeko": "0.7.1",
     }
+
+
+@pytest.mark.parametrize("operation", ["provisioning", "cleanup"])
+def test_measured_run_fails_on_recovered_broker_retry_without_losing_completeness(
+    operation: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = diagnostics(0)
+    before["telemetry"]["phase_latency_ms"] = {}
+    after = diagnostics(1)
+    after["telemetry"]["recent_events"] = successful_lifecycle_with_recovered_retry(
+        operation
+    )
+
+    class DiagnosticsClient:
+        def __init__(self) -> None:
+            self.values = iter([before, after])
+
+        def snapshot(self) -> dict[str, object]:
+            return next(self.values)
+
+    class Runner:
+        def __init__(self) -> None:
+            self.run_count = 0
+
+        def execute(self, payload: object, *, job_id: str) -> object:
+            del payload, job_id
+            self.run_count += 1
+            return SimpleNamespace(success=True)
+
+    class Observer:
+        failure_codes: list[str] = []
+
+        def disable_intrusive_probes(self) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        soak,
+        "_project_result",
+        lambda *args, **kwargs: {
+            "status": "passed",
+            "latency_ms": 100,
+            "pose_count": 1,
+            "best_energy": -7.0,
+            "artifact_path": "outputs/opensandbox_stability/retry/result.pdbqt",
+            "artifact_sha256": HEX,
+            "cleanup_status": "succeeded",
+            "image_digest": HEX,
+            "secure_runtime": "gvisor",
+            "tool_versions": kwargs.get("validated_tool_versions", {}),
+            "warning_codes": [],
+            "failure_codes": [],
+        },
+    )
+    runner = Runner()
+    executor = soak.StabilityExecutor(
+        runner=runner,
+        payload={},
+        observer_factory=Observer,
+        diagnostics_client=DiagnosticsClient(),
+        project_root=tmp_path,
+    )
+
+    run = executor.measured_run(1)
+
+    assert runner.run_count == 1
+    assert run["status"] == "failed"
+    assert run["events_complete"] is True
+    assert run["failure_codes"] == ["broker_retry_observed"]
+    assert run["failure_class"] == "none"
 
 
 def test_measured_run_merges_scientific_and_lifecycle_failures_without_false_cleanup_mismatch(
@@ -1129,11 +1252,51 @@ def test_failed_retry_lifecycle_mutations_fail_closed(mutation: str) -> None:
     assert evidence.failure_codes == ("events_incomplete",)
 
 
-def test_success_lifecycle_does_not_accept_retry_phase_pairs() -> None:
-    events = successful_lifecycle()
-    events[2]["attempt"] = 1
-    events[3]["attempt"] = 1
-    events[4:4] = [dict(events[2], attempt=2), dict(events[3], attempt=2)]
+@pytest.mark.parametrize("operation", ["provisioning", "cleanup"])
+def test_success_lifecycle_preserves_recovered_broker_retry(operation: str) -> None:
+    events = successful_lifecycle_with_recovered_retry(operation)
+
+    validate_broker_events(events)
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=True)
+
+    assert evidence.events_complete is True
+    assert evidence.failure_codes == ("broker_retry_observed",)
+    assert evidence.failure_class == "none"
+
+
+@pytest.mark.parametrize("operation", ["upload", "command", "validation"])
+def test_success_lifecycle_rejects_non_control_plane_retry(operation: str) -> None:
+    events = successful_lifecycle_with_recovered_retry(operation)
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=True)
+
+    assert evidence.events_complete is False
+    assert evidence.failure_codes == ("events_incomplete",)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "second_attempt_failed",
+        "second_attempt_wrong_number",
+        "third_pair",
+        "retry_out_of_order",
+    ],
+)
+def test_success_recovered_retry_mutations_fail_closed(mutation: str) -> None:
+    events = successful_lifecycle_with_recovered_retry("provisioning")
+    if mutation == "second_attempt_failed":
+        events[5]["outcome"] = "failed"
+        events[5]["failure_class"] = "connection_failed"
+        events[-1]["outcome"] = "failed"
+        events[-1]["failure_class"] = "connection_failed"
+    elif mutation == "second_attempt_wrong_number":
+        events[4]["attempt"] = 3
+        events[5]["attempt"] = 3
+    elif mutation == "third_pair":
+        events[6:6] = [dict(events[4], attempt=3), dict(events[5], attempt=3)]
+    else:
+        events[4], events[6] = events[6], events[4]
 
     evidence = soak.evaluate_lifecycle(events, result_succeeded=True)
 
