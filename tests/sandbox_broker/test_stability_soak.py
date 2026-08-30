@@ -1003,6 +1003,11 @@ def test_corrected_report_shape_keeps_eighteen_successes_and_twelve_failures() -
     assert sum(run["status"] == "passed" for run in report_runs) == 18
     assert len(failed_runs) == 12
     assert all(run["events_complete"] is True for run in report_runs)
+    assert report["failure_type_distribution"] == {
+        "server_500": 5,
+        "command_timeout": 5,
+        "none": 2,
+    }
     assert Counter(
         code
         for run in failed_runs
@@ -1011,6 +1016,15 @@ def test_corrected_report_shape_keeps_eighteen_successes_and_twelve_failures() -
         "provider_error": 5,
         "tool_timeout": 5,
         "invalid_output": 2,
+    }
+    assert Counter(
+        (code, run["failure_class"])
+        for run in failed_runs
+        for code in run["failure_codes"]
+    ) == {
+        ("provider_error", "server_500"): 5,
+        ("tool_timeout", "command_timeout"): 5,
+        ("invalid_output", "none"): 2,
     }
     assert all(
         run["pose_count"] == 0
@@ -1301,7 +1315,11 @@ def test_corrected_replay_remains_redacted_and_non_clobbering(tmp_path: Path) ->
     with pytest.raises(soak.SafeReportError):
         soak.atomic_write_report(destination, unsafe_candidate)
     assert destination.read_bytes() == original
-    assert secret.encode() not in original
+    remaining = list(tmp_path.iterdir())
+    assert remaining == [destination]
+    regular_files = [path for path in remaining if path.is_file()]
+    assert regular_files == [destination]
+    assert all(secret.encode() not in path.read_bytes() for path in regular_files)
 
     with pytest.raises(soak.SafeReportError):
         soak.gate_report("passed", "runtime_failed")
@@ -1313,6 +1331,7 @@ def test_corrected_replay_remains_redacted_and_non_clobbering(tmp_path: Path) ->
 
     assert destination.read_bytes() == original
     assert secret.encode() not in original
+    assert list(tmp_path.iterdir()) == [destination]
 
 
 def test_artifact_path_rejects_symlink_escape(tmp_path: Path) -> None:
