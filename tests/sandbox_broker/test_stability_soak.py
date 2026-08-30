@@ -174,7 +174,9 @@ def failed_lifecycle(
     events[-1]["outcome"] = terminal_outcome
     events[-1]["cleanup_status"] = cleanup_status
     events[-1]["failure_class"] = (
-        failure_class if terminal_outcome == "failed" else None
+        (failure_class if failure_class is not None else "none")
+        if terminal_outcome == "failed"
+        else None
     )
     return events
 
@@ -822,6 +824,12 @@ def test_truthful_failed_or_cancelled_lifecycle_is_recorded(
         *PHASES[-3:],
     ]
     assert failure_class is None or failure_class in soak.FAILURE_CLASSES
+    terminal = next(event for event in events if event["phase"] == "job_terminal")
+    assert terminal["failure_class"] == (
+        (failure_class if failure_class is not None else "none")
+        if terminal_outcome == "failed"
+        else None
+    )
 
     evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
 
@@ -939,6 +947,20 @@ def test_corrected_report_shape_keeps_eighteen_successes_and_twelve_failures() -
                 events,
                 result_succeeded=False,
             )
+            if error_code == "invalid_output":
+                validation = next(
+                    event
+                    for event in events
+                    if event["phase"] == "validation_completed"
+                )
+                terminal = next(
+                    event for event in events if event["phase"] == "job_terminal"
+                )
+                assert validation["outcome"] == "failed"
+                assert validation["failure_class"] is None
+                assert terminal["failure_class"] == "none"
+                assert evidence.failure_class == "none"
+                assert evidence.events_complete is True
             runs.append(
                 valid_run(
                     index,
@@ -1262,6 +1284,24 @@ def test_corrected_replay_remains_redacted_and_non_clobbering(tmp_path: Path) ->
     failed = soak.gate_report("failed", "runtime_failed")
     soak.atomic_write_report(destination, failed)
     original = destination.read_bytes()
+
+    before = diagnostics(0)
+    before["telemetry"]["phase_latency_ms"] = {}
+    safe_candidate = soak.build_report(
+        runs=[valid_run(index) for index in range(1, 31)],
+        diagnostics=soak.diagnostics_delta(before, diagnostics(1)),
+        idempotency={"passed": True, "sandbox_count": 1},
+        queue={"passed": True, "accepted": 9, "saturated": 1},
+        probes={"cancellation": True, "timeout": True, "security": True},
+        running_labelled_containers=0,
+    )
+    unsafe_candidate = json.loads(json.dumps(safe_candidate))
+    unsafe_candidate["runs"][0]["warning_codes"] = [secret]
+
+    with pytest.raises(soak.SafeReportError):
+        soak.atomic_write_report(destination, unsafe_candidate)
+    assert destination.read_bytes() == original
+    assert secret.encode() not in original
 
     with pytest.raises(soak.SafeReportError):
         soak.gate_report("passed", "runtime_failed")
