@@ -707,7 +707,12 @@ def _http_failure_code(
 
 def _with_failure_elapsed(result: ToolResult, started: float) -> ToolResult:
     if not result.success:
-        result.elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+        try:
+            delta = time.monotonic() - started
+            elapsed_ms = max(0, int(delta * 1000)) if math.isfinite(delta) else 0
+        except Exception:
+            elapsed_ms = 0
+        result.elapsed_ms = elapsed_ms
     return result
 
 

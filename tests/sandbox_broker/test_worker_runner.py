@@ -216,6 +216,93 @@ class _FailureElapsedClock:
         return self._started if self._calls == 1 else self._finished
 
 
+@pytest.mark.parametrize(
+    ("failure", "expected_reason"),
+    [
+        ("smiles", "smiles_not_supported_by_opensandbox"),
+        ("invalid", "input_invalid"),
+    ],
+)
+@pytest.mark.parametrize(
+    "clock_outcome",
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="positive-inf"),
+        pytest.param(float("-inf"), id="negative-inf"),
+        pytest.param(OSError("secret clock failure"), id="clock-error"),
+    ],
+)
+def test_early_failure_invalid_elapsed_clock_falls_back_to_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    expected_reason: str,
+    clock_outcome: object,
+) -> None:
+    payload, _, _ = _inputs(tmp_path)
+    if failure == "smiles":
+        payload.pop("ligand_path")
+        payload["smiles"] = "CCO"
+    else:
+        payload["unexpected"] = True
+    calls = 0
+
+    def monotonic() -> float:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 10.0
+        if isinstance(clock_outcome, BaseException):
+            raise clock_outcome
+        assert type(clock_outcome) is float
+        return clock_outcome
+
+    monkeypatch.setattr(runner_module.time, "monotonic", monotonic)
+
+    result = _runner(
+        tmp_path,
+        lambda _request: pytest.fail("early failure must not reach the broker"),
+    ).execute(payload, job_id=f"clock-{failure}")
+
+    assert calls == 2
+    assert result.success is False
+    assert result.error is not None
+    assert result.error.code is AgentErrorCode.INVALID_INPUT
+    assert result.error.details == {"reason": expected_reason}
+    assert result.elapsed_ms == 0
+    assert "secret clock failure" not in json.dumps(
+        result.to_legacy_dict(), default=str
+    )
+
+
+def test_early_failure_negative_elapsed_delta_is_clamped_to_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload, _, _ = _inputs(tmp_path)
+    payload["unexpected"] = True
+    clock = _FailureElapsedClock(elapsed_seconds=-0.125)
+    monkeypatch.setattr(runner_module.time, "monotonic", clock.monotonic)
+
+    result = _runner(
+        tmp_path,
+        lambda _request: pytest.fail("invalid input must not reach the broker"),
+    ).execute(payload, job_id="negative-elapsed")
+
+    assert result.success is False
+    assert result.elapsed_ms == 0
+
+
+def test_failure_elapsed_does_not_swallow_result_logic_errors() -> None:
+    class BrokenResult:
+        @property
+        def success(self) -> bool:
+            raise RuntimeError("result logic failed")
+
+    with pytest.raises(RuntimeError, match="result logic failed"):
+        runner_module._with_failure_elapsed(BrokenResult(), 10.0)
+
+
 class _TrackingStream(httpx.SyncByteStream):
     def __init__(
         self,
