@@ -975,9 +975,13 @@ Assert:
 - an activation or cwd-verification failure is surfaced to the still-locked
   formal orchestrator, which invokes the one mode-correct `rollback_once()`;
   the activation primitive must not perform a hidden second rollback;
-- `--rollback` uses the recorded previous target and verifies old PID cwd;
+- `--stage` completes before any legacy capture or activation transaction and
+  never mutates live runtime state;
+- `--rollback` uses only the current transaction's fsynced `pending_previous`,
+  never a possibly stale long-term `previous`, and verifies restored PID cwd;
 - generation-to-generation activation requires a valid `current` symlink and
-  uses only `previous`; a first migration without `current` instead requires a
+  creates a recoverable generation transaction; a first migration without
+  `current` instead requires a
   verified `legacy.json` captured by `--capture-legacy`;
 - the historical `79860ec` unit fixtures retain
   `WorkingDirectory=/opt/medchat/molecular_chat_system`, are captured byte for
@@ -986,6 +990,15 @@ Assert:
   succeeds without a `previous` symlink;
 - legacy rollback restores the prior `current` state, unit enabled/active state,
   unit hashes, and both active PID cwd values to the captured legacy root;
+- legacy tests inject failures after the first unit replacement, after the
+  symlink replacement, during restart, and during verification; every case has
+  a durable `activating` record and restores successfully from snapshots;
+- generation tests inject failure both before and after long-term `previous`
+  publication; both restore this transaction's `pending_previous` and the prior
+  long-term metadata;
+- a process crash leaving either transaction in `activating` is recovered before
+  a new stage, acceptance, or claim; the recovery invocation writes fsynced
+  recovery evidence and stops;
 - malformed commit, symlinked source/release ancestors, dirty source, missing marker, owner/mode mismatch, or target outside `/opt/medchat/releases` fails closed.
 
 - [ ] **Step 2: Write RED formal attestation, external-output, and non-clobber tests**
@@ -1437,17 +1450,24 @@ before one `--rollback-legacy` call or to `generation` immediately before one
 `--rollback` call, then ends at `succeeded` only after the expected Broker and
 worker PID cwd values are verified. A failed call or cwd mismatch ends at
 `failed`; any second call raises `rollback_already_requested` without executing a
-command. Tests cover first migration without `previous`, later generation with a
-recorded previous target, success, command failure, PID-cwd mismatch, and an
-attempted second rollback.
+command. It selects mode and rollback target from the validated active
+transaction and its state, not from a gate-local boolean or the long-term
+`previous` file. It accepts legacy and generation transactions in `activating`
+or `activated`; `captured`, staging failures, capture conflicts, and all other
+pre-mutation states never request rollback. Tests cover first migration without
+`previous`, later generation with transaction-local `pending_previous`, success,
+command failure, PID-cwd mismatch, inherited `activating`, and an attempted
+second rollback.
 
 Use an injected event recorder to test this exact gate order:
 
 ```text
 gate_lock_acquired
 preownership_claim_result_check
-rollback_state_capture
+incomplete_activation_recovery_check
 release_stage
+rollback_state_capture_or_reuse
+activation_transaction_fsync
 release_activate
 release_verify
 pre_manifest
@@ -1487,12 +1507,38 @@ applies when claim and result both exist, with `activation_count == 0`,
 `acceptance_count == 0`, `soak_count == 0`, and `rollback_count == 0`. Run each
 test repeatedly to prove the refusal is deterministic.
 
-Add a parameterized ownership-boundary test for capture failure, stage failure,
+Add a parameterized ownership-boundary test for stage failure, capture failure,
 activation failure, and post-activation `--verify` failure. The first two assert
 `rollback_count == 0`; the latter two assert `rollback_count == 1`, the selected
 legacy/generation rollback command, restored PID-cwd verification before lock
 release, and no scientific worker invocation. RED must expose the old external
 activation/verify split; GREEN must pass through the one locked orchestrator.
+
+Add RED/GREEN crash-recovery and state-transition matrices using the historical
+legacy unit fixtures and two temporary generation commits:
+
+- stage failure occurs before capture, leaves no legacy/generation transaction,
+  performs zero live mutations and zero rollback, and a later gate can retry;
+- a process crash immediately after a valid legacy `captured` record is fsynced
+  is resumed by the next gate without a second capture only when snapshot hashes,
+  resolved legacy path, unit hashes, service enabled/active values, absent
+  `current`, live unit bytes, live service states, and active PID cwd all still
+  match; any mismatch returns `legacy_capture_conflict` with zero mutation and
+  zero rollback;
+- failure after the first unit replacement, after the `current` symlink switch,
+  during restart, and during installed `--verify` each starts from a fsynced
+  legacy `activating` record and restores snapshots, service states, unit hashes,
+  absent `current`, and legacy PID cwd exactly once;
+- an inherited legacy or generation `activating` record is rolled back and
+  verified before any new stage, validator, acceptance, claim, or soak; the gate
+  writes a separate atomic recovery result, creates no claim, and stops the
+  current invocation;
+- generation failure before long-term `previous` publication and after its
+  publication both restore `current` from this transaction's
+  `pending_previous`, restore the pre-transaction long-term `previous` state,
+  and never consult a stale `previous` value as the rollback source;
+- a generation crash after `activating` fsync follows the same entry recovery
+  path and stops; only a fully verified activation may reach `activated`.
 
 The atomic root-only gate result path is
 `/var/lib/medchat-opensandbox-runs/results/$FULL_COMMIT/gate-result.json`. Tests
@@ -1520,26 +1566,41 @@ parent fsync, and this strict no-raw-error schema:
 
 Passing gates use `rollback_mode="none"`, state `not_requested`, and retain the
 activated generation. A failure requests exactly one mode-correct rollback only
-after this invocation has crossed the activation boundary. Lock contention,
-existing claim/result refusal, unsafe pre-ownership paths, capture failure, and
-stage failure never request rollback; an owned pre-activation failure result uses
-`rollback_mode="none"`, `rollback_state="not_requested"`, and
-`rollback_verified=false`.
+when its validated transaction state is `activating` or `activated`. An inherited
+`activating` transaction is recovered once at entry even though the current gate
+did not create it; that recovery invocation stops afterward. Lock contention,
+existing claim/result refusal, unsafe pre-ownership paths, stage failure, capture
+failure, and `legacy_capture_conflict` never request rollback; an owned
+pre-mutation refusal returns its stable code without a formal soak claim or
+terminal `gate-result.json`, so a corrected later invocation can retry. No random
+scientific run directory is created on those paths.
 If rollback fails, the orchestrator stops and disables both services, records
 `rollback_failed`, writes the result if its trusted result path remains usable,
 and requires QEMU snapshot recovery; it never attempts another activation or
 rollback.
 
+Entry recovery does not publish the commit's terminal `gate-result.json`, because
+the current invocation is recovery-only and a corrected later gate must remain
+possible. Instead write once with `O_EXCL` under
+`/var/lib/medchat-opensandbox-runs/recoveries/$FULL_COMMIT/` using the canonical
+pre-recovery transaction SHA-256 as the filename. The strict fsynced object
+contains only `schema_version`, `release_commit`, `transaction_mode`,
+`transaction_sha256`, `status` (`recovered` or `recovery_failed`), stable
+`failure_codes`, `rollback_state`, and `rollback_verified`; it contains no raw
+errors or secrets. Tests prove recovery evidence cannot be replaced, creates no
+formal soak claim, and does not make the corrected later gate appear terminal.
+
 - [ ] **Step 4: Run deployment, attestation, and formal-gate RED tests**
 
 ```powershell
-python -m pytest tests/sandbox_broker/test_deployment_assets.py tests/sandbox_broker/test_real_opensandbox_acceptance.py tests/sandbox_broker/test_stability_soak.py tests/sandbox_broker/test_formal_qemu_gate.py -q -p no:cacheprovider -k "runtime_generation or legacy_migration or release_attestation or release_manifest or output_root or report_non_clobber or bytecode or formal_qemu_gate or formal_gate_lock or formal_gate_concurrent or formal_soak_claim or activation_verify_failure or rollback_once or command_builder or worker_gate_environment"
+python -m pytest tests/sandbox_broker/test_deployment_assets.py tests/sandbox_broker/test_real_opensandbox_acceptance.py tests/sandbox_broker/test_stability_soak.py tests/sandbox_broker/test_formal_qemu_gate.py -q -p no:cacheprovider -k "runtime_generation or legacy_migration or activation_transaction or crash_recovery or legacy_capture_conflict or pending_previous or release_attestation or release_manifest or output_root or report_non_clobber or bytecode or formal_qemu_gate or formal_gate_lock or formal_gate_concurrent or formal_soak_claim or activation_verify_failure or rollback_once or command_builder or worker_gate_environment"
 ```
 
 Expected: tests fail because the activation script, `/opt/medchat/current`
 units, legacy capture/rollback, canonical manifest, external output-root contract,
 formal gate, whole-transaction lock, permanent claim, isolated worker-gate
-environments, command builders, and rollback state machine do not yet exist.
+environments, command builders, recoverable activation transactions, and
+rollback state machine do not yet exist.
 
 - [ ] **Step 5: Implement the root-only generation mechanism**
 
@@ -1570,8 +1631,15 @@ Every activation-script invocation of the Python helper uses
 `PYTHONDONTWRITEBYTECODE=1 python -B`; staging fails if hygiene detects any
 cache or bytecode before the atomic rename.
 
-`--capture-legacy` is allowed only when `/opt/medchat/current` is absent and no
-legacy transaction already exists. It resolves and validates
+On every non-recovery invocation, the locked formal gate runs `--stage` before
+`--capture-legacy` or creation of a new generation transaction. An inherited
+`activating` transaction is recovered and that invocation stops before this
+rule is reached. Staging is immutable preparation only: failure cannot
+create or update `legacy.json`, a generation transaction, `current`, units,
+service state, or rollback state, and a later invocation may retry.
+
+After staging, `--capture-legacy` is allowed only when
+`/opt/medchat/current` is absent. It resolves and validates
 `/opt/medchat/molecular_chat_system`, atomically snapshots the complete Broker
 and worker unit bytes from
 `/etc/systemd/system/medchat-sandbox-broker.service` and
@@ -1611,29 +1679,78 @@ root-owned, non-symlink regular file, mode `0600`, outside the source/release
 trees; store only its SHA-256, never its contents. Unit snapshots are root-owned
 mode `0600`, and their stored hashes must match before activation or rollback.
 Unknown keys, missing keys, a pre-existing `current`, a different legacy root,
-unsafe file metadata, or an existing partial transaction fail closed.
-`transaction_state` is the closed enum `captured`, `activated`, or
-`rolled_back`; update it only through an atomic fsync-and-rename after the
-corresponding operation verifies. Activation requires `captured`, automatic or
-manual legacy rollback requires `activated`, and a completed `rolled_back`
-record is immutable evidence rather than a reusable transaction.
+or unsafe file metadata fail closed. `transaction_state` is the closed enum
+`captured`, `activating`, `activated`, or `rolled_back`; every transition writes
+a complete replacement file, fsyncs it, atomically renames it, and fsyncs the
+trusted parent before the next operation.
 
-In generation-to-generation mode, `--activate` verifies the staged tree, records
-the resolved old target in
-`/var/lib/medchat-runtime-generation/previous`, atomically replaces
-`/opt/medchat/current` through a temporary symlink plus `rename`, creates and
-verifies the two `/var/lib/medchat-worker` runtime directories, atomically
-installs the Broker and worker units from the staged release, runs daemon-reload,
-restarts `medchat-sandbox-broker.service` then
-`medchat-temporal-worker.service`, and verifies both service PID cwd values equal
-the expected release. It also installs its already verified source as
-`/usr/local/sbin/medchat-activate-runtime-generation`. Once `--activate` begins,
-every non-zero exit or subsequent `--verify` failure is returned to the
-whole-gate-lock owner; `--activate` and `--verify` never invoke rollback
-implicitly. The formal gate has already captured the exact rollback mode and is
-the sole caller of `rollback_once()`, preventing an internal restoration followed
-by a second orchestrator restoration. For first migration, activation requires
-the verified legacy transaction instead of creating `previous`.
+An existing `captured` record is not recaptured. The gate may reuse it only after
+recomputing and matching every immutable snapshot hash, the current gate's QEMU
+snapshot ID and operator-evidence SHA-256, the resolved legacy path, both live
+unit hashes, both recorded service enabled/active states, the absent `current`
+state, and each active service's current PID cwd. Any mismatch returns
+`legacy_capture_conflict` before a live mutation and performs no rollback. A
+matching record left by a crash after capture is safe to reuse. An existing
+`rolled_back` record remains immutable evidence: before a later corrected gate
+captures a new transaction, archive that record and its unit snapshots under a
+new root-owned O_EXCL history entry, fsync the history and parent, and then create
+a fresh `legacy.json`; never overwrite or delete rollback evidence.
+
+Immediately before the first live mutation (including replacing `current`,
+replacing either unit, stopping, enabling/disabling, daemon-reload, or restart),
+legacy activation atomically transitions `captured` to `activating` and
+fsyncs the record and parent. Only after the staged release, installed units,
+service states, marker, manifest, and both PID cwd values verify may it transition
+to `activated`. `--rollback-legacy` accepts both `activating` and `activated` and
+always restores from the immutable snapshots, never from partially changed live
+files.
+
+In generation-to-generation mode, use a separate root-owned mode `0600`
+transaction record at
+`/var/lib/medchat-runtime-generation/transactions/$FULL_COMMIT.json`.
+Before any live mutation, validate the staged tree and current generation, then
+atomically write and fsync this minimum transaction state:
+
+```json
+{
+  "schema_version": 1,
+  "transaction_mode": "generation",
+  "transaction_state": "activating",
+  "target_release": "/opt/medchat/releases/40-hex-target",
+  "pending_previous": "/opt/medchat/releases/40-hex-current",
+  "prior_previous_state": "absent",
+  "prior_previous": null
+}
+```
+
+The values shown are schema examples. `pending_previous` is the resolved
+`current` captured for this activation. `prior_previous_state` is the closed enum
+`absent` or `present`; `prior_previous` must be `null` for `absent` and the
+validated resolved release path for `present`, preserving the long-term metadata
+that existed before this transaction. Generation `transaction_state` is the
+closed enum `activating`, `activated`, or `rolled_back`, with every replacement
+and parent directory fsynced. Unknown fields, unsafe metadata, invalid release
+ancestry, or a non-matching live current fail closed before mutation. The activation then
+atomically replaces `/opt/medchat/current`, creates and verifies the two
+`/var/lib/medchat-worker` runtime directories, atomically installs the Broker and
+worker units from the staged release, runs daemon-reload, restarts
+`medchat-sandbox-broker.service` then `medchat-temporal-worker.service`, and
+verifies both service PID cwd values equal the expected release. Only after all
+activation verification passes may it atomically publish long-term `previous`
+from `pending_previous` and transition the transaction to `activated`, with both
+writes and parent directories fsynced. It also installs its already verified
+source as `/usr/local/sbin/medchat-activate-runtime-generation`.
+
+Once either mode reaches its fsynced `activating` boundary, every non-zero exit
+or subsequent `--verify` failure is returned to the whole-gate-lock owner;
+`--activate` and `--verify` never invoke rollback implicitly. The formal gate is
+the sole caller of `rollback_once()`. Generation `--rollback` accepts
+`activating` and `activated`, restores `current` only from that transaction's
+`pending_previous`, restores the recorded pre-transaction long-term `previous`
+state even if publication already occurred, verifies both restored PID cwd
+values, and then atomically marks the transaction `rolled_back`. It must never
+choose a target by reading the long-term `previous` file.
+
 `--rollback-legacy` stops the new worker then Broker,
 atomically restores both captured unit snapshots, restores the captured
 `current_state`, runs daemon-reload, restores each captured enabled/disabled and
@@ -1641,8 +1758,18 @@ active/inactive state in Broker-before-worker dependency order, verifies both
 unit hashes, and for each previously active service verifies its MainPID cwd is
 the captured `legacy_root`. A previously inactive service must remain inactive
 with MainPID zero. Only after all checks pass may it mark the legacy rollback
-complete. `--rollback` remains generation-only and transitions to `previous`.
-Never edit an activated release.
+`rolled_back`. Never edit an activated release.
+
+At gate entry, after the whole-gate lock and trusted claim/result checks but
+before any new stage, validation, acceptance, or claim, inspect both transaction
+stores. If either contains `activating`, call `rollback_once()` for that exact
+mode, verify snapshots/unit hashes/service state/PID cwd, atomically write a
+separate root-owned recovery result under the trusted external evidence root,
+fsync it and its parent, and stop the current invocation without creating a
+formal soak claim. It must not stage or activate the requested commit. The
+operator must correct the cause and start a later gate. A recovery failure stops
+and disables worker then Broker and requires the recorded QEMU snapshot; no
+second rollback is attempted.
 
 If automatic legacy rollback cannot restore unit hashes, service states, and PID
 cwd, stop and disable both services, retain `legacy.json` and unit snapshots,
@@ -1745,14 +1872,27 @@ The implementation performs, in order, under one outer `try/finally`:
    result, a trusted claim returns `formal_soak_already_claimed`. Either condition
    or any unsafe entry is a pre-ownership refusal: do not activate, run workers,
    publish/replace a result, or rollback.
-3. Capture the rollback state. With no `current`, invoke `--capture-legacy` using
-   the supplied snapshot ID/evidence file and set mode `legacy`; with a verified
-   current generation, validate it and set mode `generation`. Then invoke
-   `--stage SOURCE_REPOSITORY FULL_COMMIT`. Any failure before `--activate`,
-   including capture or stage failure, has `rollback_count == 0` because live
-   runtime ownership has not changed.
-4. Immediately before invoking `--activate FULL_COMMIT`, mark
-   `activation_started=True`. Invoke `--activate`, then the installed
+3. Inspect the trusted legacy and generation transaction records. If either is
+   `activating`, recover it with the one mode-correct `rollback_once()`, verify
+   the restored state, atomically write/fsync the separate recovery result, and
+   stop this invocation. Do not stage, validate, run acceptance, or create a
+   claim. A recovery failure follows the QEMU snapshot path and never attempts a
+   second rollback.
+4. Invoke `--stage SOURCE_REPOSITORY FULL_COMMIT` before capture or any live
+   activation transaction. Stage failure returns a stable pre-mutation code but
+   writes no terminal gate result: it performs no capture, live mutation, claim,
+   or rollback and remains safe to retry with a later invocation.
+5. Capture the rollback state. With no `current`, either safely reuse a matching
+   `captured` legacy record or invoke `--capture-legacy` using the supplied
+   snapshot ID/evidence file and set mode `legacy`; mismatch returns
+   `legacy_capture_conflict` with zero mutation and rollback. With a verified
+   current generation, validate it and set mode `generation`; the activation
+   primitive will persist this invocation's `pending_previous` before mutation.
+6. Immediately before the first live mutation inside `--activate FULL_COMMIT`,
+   require the activation primitive to persist and fsync mode-specific state
+   `activating`. Only that durable transition crosses the rollback boundary;
+   gate-local `activation_started` alone is not sufficient. Invoke `--activate`,
+   then the installed
    `--verify FULL_COMMIT`, and require marker, symlink target, service identity,
    and both PID cwd values to match the staged release. Any non-zero return,
    exception, or verification mismatch from this point onward is handled by the
@@ -1761,40 +1901,40 @@ The implementation performs, in order, under one outer `try/finally`:
    fails; assert the correct legacy/generation rollback runs once, restored PID
    cwd is verified, no validator/acceptance/claim runs, and the lock is released
    only afterward.
-5. Compute and retain the pre-command canonical manifest; require zero labelled
+7. Compute and retain the pre-command canonical manifest; require zero labelled
    containers and release hygiene on the now activated generation.
-6. Run the privileged deployment validator directly as root with
+8. Run the privileged deployment validator directly as root with
    `/opt/conda/envs/medchat/bin/python -B ... --runtime`; capture only return code
    and stable classifications, never stdout/stderr or environment values.
-7. Run the Broker-socket read/write probe in a collected transient unit built
+9. Run the Broker-socket read/write probe in a collected transient unit built
    with `User=medchat`, `Group=medchat`,
    `SupplementaryGroups=medchat-sandbox docker`, `NoNewPrivileges=true`,
    `ProtectSystem=strict`, read-only release paths, and only the external commit
    parent plus `/run/medchat-sandbox` writable.
-8. Create an absent acceptance run directory below the external commit parent
+10. Create an absent acceptance run directory below the external commit parent
    and run acceptance once in the same transient identity with `python -B` and
    `PYTHONDONTWRITEBYTECODE=1` plus only
    `MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE=1`.
-9. Regardless of acceptance return code, recompute the manifest before any
+11. Regardless of acceptance return code, recompute the manifest before any
    rollback, require the acceptance report, and hash it when present. Any return
    code, report, or mutation failure records stable codes and calls
    `rollback_once()` exactly once; it never creates a soak claim.
-10. Only after every prior gate passes, create and fsync the permanent full-commit
+12. Only after every prior gate passes, create and fsync the permanent full-commit
    claim. Create the random soak output directory only after the claim succeeds.
-11. Run the lower-level soak exactly once with `--repeat 30` in the same
+13. Run the lower-level soak exactly once with `--repeat 30` in the same
    transient identity and only
    `MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK=1`. A process crash after claim is
    evidence requiring human review and never authorizes another run for that
    commit.
-12. Regardless of soak return code, recompute the manifest before rollback,
+14. Regardless of soak return code, recompute the manifest before rollback,
    require the soak report, hash it when present, and collect only stable codes.
-13. On any failure after `activation_started=True`, call the mode-correct rollback
-    once and verify its target PID
+15. On any failure after a transaction has durably entered `activating`, call the
+     mode-correct rollback once and verify its target PID
     cwd. On rollback failure stop and disable worker then Broker and require the
     recorded QEMU snapshot. Failures before activation, lock contention, and
     existing claim/result refusals never call rollback. On success retain the
     activated generation.
-14. For an owned transaction, atomically publish one root-only strict
+16. For an owned transaction, atomically publish one root-only strict
     `gate-result.json` using an absent target, fsync the file and parent, and
     return non-zero for every failed gate. Release the whole-gate lock only after
     result fsync and rollback verification finish. Pre-ownership refusals return
@@ -1817,11 +1957,12 @@ and atomic gate-result publication are coordinated by
 Do not distribute rollback or exactly-once logic across shell traps, README
 snippets, acceptance, or soak. Map expected operating-system errors to stable
 codes; unexpected exceptions become `formal_gate_internal_error` without raw
-text. The outer `finally` invokes rollback only when this invocation crossed the
-activation boundary and has not already requested it, verifies the restored
-state, fsyncs an owned terminal result when possible, and finally releases the
-lock. It must never delete a claim, replace an existing result, or invoke a
-second rollback.
+text. The outer `finally` invokes rollback only when a validated transaction is
+`activating` or `activated` and rollback has not already been requested. It uses
+that transaction's mode and immutable rollback source, verifies the restored
+state, fsyncs an owned terminal or recovery result when possible, and finally
+releases the lock. It must never infer rollback ownership from a gate-local
+boolean, delete a claim, replace an existing result, or invoke a second rollback.
 
 - [ ] **Step 8: Run GREEN, full, static, and repetition gates**
 
@@ -1889,8 +2030,9 @@ sudo test "$(sudo stat -c '%u:%a' "$QEMU_OPERATOR_EVIDENCE_FILE")" = "0:600"
 The operator may create the QEMU snapshot and its root-owned evidence file, and
 may prepare this clean source checkout. There is no supported external formal
 `--capture-legacy`, `--stage`, `--activate`, or `--verify` command. The gate
-captures the installed legacy layout when required, stages the reviewed commit,
-activates it, and verifies the generation while holding its one lock. It never
+recovers any inherited `activating` transaction and stops, or else stages the
+reviewed commit before capturing/reusing the installed legacy layout, then
+activates and verifies the generation while holding its one lock. It never
 stages or activates `79860ec175f0d3235dfd0597f248d7d52788fc76`; that commit is
 used only by the RED/GREEN historical-unit fixture and preserved evidence.
 
@@ -1917,8 +2059,10 @@ sudo env PYTHONDONTWRITEBYTECODE=1 \
 This is the only operator command allowed to produce formal evidence. The CLI
 acquires the root-only non-blocking lock before inspecting transaction state and
 holds it through result fsync and rollback verification. Under that lock it
-refuses an existing claim/result before mutation, captures legacy or previous
-state, stages, activates, verifies, performs release/QEMU/PID attestation,
+refuses an existing claim/result before mutation, recovers and stops on an
+inherited `activating` transaction, stages, captures/reuses legacy state or
+persists generation `pending_previous`, activates, verifies, performs
+release/QEMU/PID attestation,
 privileged root runtime validation, the transient socket-permission probe,
 non-root real acceptance, post-acceptance manifest/report hashing, the permanent
 full-commit claim, the non-root 30-job soak, post-soak manifest/report hashing,
@@ -1948,9 +2092,10 @@ later generations use `--rollback`; both verify restored Broker and worker PID
 cwd. If rollback fails, the gate stops and disables worker then Broker, records
 `rollback_failed`, and requires restoration of the recorded QEMU snapshot.
 An activation return-code failure, an exception after activation starts, or an
-installed `--verify` failure follows the same one-rollback path. Capture/stage
-failure before activation does not roll back. Task 8 only reads the fsynced gate
-result and never invokes rollback.
+installed `--verify` failure follows the same one-rollback path. Stage failure,
+capture failure, and `legacy_capture_conflict` occur before live mutation and do
+not roll back. Task 8 only reads the fsynced gate result and never invokes
+rollback.
 
 ### Task 8: Record evidence, rollback decision, and promotion status
 
@@ -2071,7 +2216,8 @@ Implementation is complete only when all statements are true:
 - The socket probe receives neither scientific gate variable; acceptance receives
   only `MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE=1`; soak receives only
   `MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK=1`.
-- One root-only non-blocking `flock` covers source/state checks, capture/stage,
+- One root-only non-blocking `flock` covers source/state checks, inherited
+  transaction recovery, stage/capture,
   activation/verify, validation, acceptance, claim, soak, result fsync, and any
   rollback verification. Lock contention and existing claim/result refusals do
   not mutate runtime and never invoke rollback.
@@ -2082,11 +2228,13 @@ Implementation is complete only when all statements are true:
   non-zero, and a post-claim crash never authorizes a rerun.
 - The report truthfully records latency, failures, events, cleanup, provenance, artifacts, probes, and zero-leak state.
 - Any retry, scientific timeout, invalid output, cleanup uncertainty, dependency failure, probe failure, release mismatch, virtualization mismatch, or residual container prevents promotion.
-- First migration captures and can atomically restore the exact legacy units,
-  service states, absent `current`, unit hashes, and legacy PID cwd without
-  staging the old commit. Later rollback uses `previous`; the formal gate invokes
-  activation and verify inside its locked state machine, invokes at most one
-  rollback after the activation boundary, and verifies the restored PID cwd.
-  Capture/stage failures before activation do not roll back. QEMU snapshot
-  restoration is required only when that gate-owned rollback fails.
+- First migration stages before capture, safely reuses only an unchanged
+  `captured` snapshot, and can atomically restore the exact legacy units, service
+  states, absent `current`, unit hashes, and legacy PID cwd without staging the
+  old commit. Later rollback uses the active transaction's fsynced
+  `pending_previous`, not long-term `previous`. Both modes persist `activating`
+  before live mutation, recover inherited `activating` state before a new stage
+  and then stop, invoke at most one rollback, and verify restored PID cwd.
+  Stage/capture/conflict failures before live mutation do not roll back. QEMU
+  snapshot restoration is required only when that gate-owned rollback fails.
 - `docs/handoff/latest.md` distinguishes evaluator correctness from runtime stability and records either promotion evidence or rollback evidence.
