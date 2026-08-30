@@ -705,6 +705,12 @@ def _http_failure_code(
     return BrokerErrorCode.OPENSANDBOX_UNAVAILABLE
 
 
+def _with_failure_elapsed(result: ToolResult, started: float) -> ToolResult:
+    if not result.success:
+        result.elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+    return result
+
+
 class SandboxDockingRunner:
     """Submit verified docking inputs to a broker reachable only over one UDS."""
 
@@ -747,10 +753,28 @@ class SandboxDockingRunner:
         progress_callback: Callable[..., Any] | None = None,
         cancel_event: Any = None,
     ) -> ToolResult:
+        started = time.monotonic()
+        result = self._execute(
+            payload,
+            job_id=job_id,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
+            started=started,
+        )
+        return _with_failure_elapsed(result, started)
+
+    def _execute(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        job_id: str,
+        progress_callback: Callable[..., Any] | None,
+        cancel_event: Any,
+        started: float,
+    ) -> ToolResult:
         broker_job_id: str | None = None
         completed = False
         pose_published = False
-        started = time.monotonic()
         deadline = started + _TOTAL_DEADLINE_SECONDS
         try:
             if type(job_id) is not str or _JOB_ID_PATTERN.fullmatch(job_id) is None:

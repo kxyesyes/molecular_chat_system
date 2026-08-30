@@ -205,6 +205,17 @@ class _Clock:
         self.now += seconds
 
 
+class _FailureElapsedClock:
+    def __init__(self, elapsed_seconds: float = 0.125) -> None:
+        self._started = 10.0
+        self._finished = self._started + elapsed_seconds
+        self._calls = 0
+
+    def monotonic(self) -> float:
+        self._calls += 1
+        return self._started if self._calls == 1 else self._finished
+
+
 class _TrackingStream(httpx.SyncByteStream):
     def __init__(
         self,
@@ -465,6 +476,124 @@ def test_terminal_broker_error_code_has_stable_agent_mapping(
     assert result.error.code is agent_code
     assert result.error.details == {"reason": reason}
     assert requests[-1] == f"/v1/docking/jobs/{BROKER_JOB_ID}/cancel"
+
+
+@pytest.mark.parametrize(
+    ("broker_code", "status"),
+    [
+        (BrokerErrorCode.EXECUTION_TIMEOUT, "failed"),
+        (BrokerErrorCode.EXPIRED, "expired"),
+    ],
+)
+def test_terminal_broker_timeout_preserves_runner_elapsed_in_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    broker_code: BrokerErrorCode,
+    status: str,
+) -> None:
+    import scripts.run_opensandbox_docking_acceptance as acceptance
+
+    payload, receptor, ligand = _inputs(tmp_path)
+    clock = _Clock()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/docking/jobs":
+            clock.advance(300.125)
+            return httpx.Response(
+                202,
+                json=_job(
+                    status,
+                    receptor,
+                    ligand,
+                    error_code=broker_code.value,
+                    cleanup_status="succeeded",
+                ),
+            )
+        if request.url.path.endswith("/cancel"):
+            clock.advance(0.125)
+            return httpx.Response(202, json=_job("cancelled", receptor, ligand))
+        raise AssertionError(request.url.path)
+
+    monkeypatch.setattr(runner_module.time, "monotonic", clock.monotonic)
+
+    result = _runner(tmp_path, handler).execute(
+        payload,
+        job_id=f"secret-{broker_code.value}",
+    )
+
+    assert result.success is False
+    assert result.error is not None
+    assert result.error.code is AgentErrorCode.TOOL_TIMEOUT
+    assert type(result.elapsed_ms) is int
+    assert result.elapsed_ms == 300250
+
+    projected = acceptance._project_result(
+        result,
+        trace_id=f"projected-{broker_code.value}",
+        project_root=tmp_path,
+        observer=object(),
+    )
+    encoded = json.dumps(projected)
+    assert projected["latency_ms"] == 300250
+    assert projected["failure_codes"] == ["tool_timeout"]
+    assert "secret" not in encoded
+    assert str(tmp_path) not in encoded
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    [
+        ("cancel", AgentErrorCode.CANCELLED),
+        ("http", AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE),
+        ("invalid-output", AgentErrorCode.INVALID_OUTPUT),
+        ("exception", AgentErrorCode.INVALID_OUTPUT),
+    ],
+)
+def test_representative_runner_failure_exits_record_elapsed_without_leaks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    expected_code: AgentErrorCode,
+) -> None:
+    payload, _, _ = _inputs(tmp_path)
+    clock = _FailureElapsedClock()
+    cancel = threading.Event()
+    if failure == "cancel":
+        cancel.set()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if failure == "http":
+            return httpx.Response(
+                500,
+                text=f"secret traceback at {tmp_path / 'private' / 'broker.py'}",
+            )
+        if failure == "invalid-output":
+            return httpx.Response(
+                202,
+                json={"unexpected": f"secret {tmp_path / 'private' / 'job.json'}"},
+            )
+        if failure == "exception":
+            raise RuntimeError(
+                f"secret transport failure at {tmp_path / 'private' / 'broker.sock'}"
+            )
+        raise AssertionError("cancelled input must not reach the broker")
+
+    monkeypatch.setattr(runner_module.time, "monotonic", clock.monotonic)
+
+    result = _runner(tmp_path, handler).execute(
+        payload,
+        job_id=f"failure-{failure}",
+        cancel_event=cancel,
+    )
+
+    encoded = json.dumps(result.to_legacy_dict(), default=str)
+    assert result.success is False
+    assert result.error is not None
+    assert result.error.code is expected_code
+    assert type(result.elapsed_ms) is int
+    assert result.elapsed_ms == 125
+    assert "secret" not in encoded
+    assert str(tmp_path) not in encoded
 
 
 def test_verified_tool_failure_warning_has_stable_agent_mapping(
@@ -1249,19 +1378,29 @@ def test_submitted_job_failure_always_ends_with_bounded_cancel(
     assert "secret" not in result.message.lower()
 
 
-def test_pre_submit_input_failure_does_not_attempt_broker_cancel(tmp_path: Path) -> None:
+def test_pre_submit_input_failure_does_not_attempt_broker_cancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     payload, _, _ = _inputs(tmp_path)
-    payload["unexpected"] = True
+    payload["unexpected"] = f"secret {tmp_path / 'private' / 'input.json'}"
     requests: list[str] = []
+    clock = _FailureElapsedClock()
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request.url.path)
         raise AssertionError("input rejection must happen before submit")
 
+    monkeypatch.setattr(runner_module.time, "monotonic", clock.monotonic)
+
     result = _runner(tmp_path, handler).execute(payload, job_id="invalid-input")
 
     assert result.success is False
+    assert result.elapsed_ms == 125
     assert requests == []
+    encoded = json.dumps(result.to_legacy_dict(), default=str)
+    assert "secret" not in encoded
+    assert str(tmp_path) not in encoded
 
 
 def test_runner_cancels_remotely_without_local_fallback(
@@ -1750,10 +1889,16 @@ def test_cancellation_during_publish_removes_linked_pose(
     ).exists()
 
 
-def test_smiles_is_stable_invalid_input_without_network_access(tmp_path: Path) -> None:
+def test_smiles_is_stable_invalid_input_without_network_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     payload, _, _ = _inputs(tmp_path)
     payload.pop("ligand_path")
-    payload["smiles"] = "CCO"
+    payload["smiles"] = f"secret {tmp_path / 'private' / 'molecule.smi'}"
+    clock = _FailureElapsedClock()
+
+    monkeypatch.setattr(runner_module.time, "monotonic", clock.monotonic)
 
     result = _runner(
         tmp_path,
@@ -1764,6 +1909,10 @@ def test_smiles_is_stable_invalid_input_without_network_access(tmp_path: Path) -
     assert result.error is not None
     assert result.error.code == AgentErrorCode.INVALID_INPUT
     assert result.error.details == {"reason": "smiles_not_supported_by_opensandbox"}
+    assert result.elapsed_ms == 125
+    encoded = json.dumps(result.to_legacy_dict(), default=str)
+    assert "secret" not in encoded
+    assert str(tmp_path) not in encoded
 
 
 def test_runner_rejects_linked_input_before_network_access(tmp_path: Path) -> None:
