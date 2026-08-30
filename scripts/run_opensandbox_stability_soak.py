@@ -14,6 +14,7 @@ import sys
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping, Sequence
 
@@ -1028,27 +1029,232 @@ def atomic_write(path: Path, report: object) -> None:
     atomic_write_report(path, report)
 
 
-def _event_failure_class(events: Sequence[Mapping[str, object]], trace_id: str) -> str:
-    classes = {
+@dataclass(frozen=True)
+class LifecycleEvidence:
+    trace_id: str
+    job_id: str
+    events_complete: bool
+    terminal_outcome: str | None
+    cleanup_status: str | None
+    failure_class: str
+    tool_versions: dict[str, str]
+    failure_codes: tuple[str, ...]
+
+
+def _unavailable_lifecycle() -> LifecycleEvidence:
+    return LifecycleEvidence(
+        trace_id="trace-unavailable",
+        job_id="job-unavailable",
+        events_complete=False,
+        terminal_outcome=None,
+        cleanup_status=None,
+        failure_class="unknown_control_plane_failure",
+        tool_versions={},
+        failure_codes=("events_incomplete",),
+    )
+
+
+def evaluate_lifecycle(
+    events: Sequence[Mapping[str, object]],
+    *,
+    result_succeeded: bool,
+) -> LifecycleEvidence:
+    """Evaluate one Broker lifecycle using only its diagnostics delta events."""
+
+    identities: set[tuple[str, str]] = set()
+    correlated: list[Mapping[str, object]] = []
+    for event in events:
+        if not isinstance(event, Mapping):
+            return _unavailable_lifecycle()
+        trace_id = event.get("trace_id")
+        job_id = event.get("job_id")
+        if (
+            type(trace_id) is not str
+            or _SAFE_ID.fullmatch(trace_id) is None
+            or type(job_id) is not str
+            or _SAFE_ID.fullmatch(job_id) is None
+        ):
+            return _unavailable_lifecycle()
+        identities.add((trace_id, job_id))
+        correlated.append(event)
+    if len(identities) != 1:
+        return _unavailable_lifecycle()
+
+    (trace_id, job_id) = next(iter(identities))
+    phases = [event.get("phase") for event in correlated]
+    terminals = [event for event in correlated if event.get("phase") == "job_terminal"]
+    terminal = terminals[0] if len(terminals) == 1 else {}
+    terminal_outcome = terminal.get("outcome")
+    cleanup_status = terminal.get("cleanup_status")
+
+    raw_failure_classes = [
         event.get("failure_class")
-        for event in events
-        if event.get("trace_id") == trace_id and event.get("failure_class") is not None
+        for event in correlated
+        if event.get("failure_class") not in (None, "none")
+    ]
+    illegal_failure_class = any(
+        type(value) is not str or value not in FAILURE_CLASSES
+        for value in raw_failure_classes
+    )
+    legal_failure_classes = {
+        value
+        for value in raw_failure_classes
+        if type(value) is str and value in FAILURE_CLASSES
     }
-    if len(classes) == 1:
-        value = next(iter(classes))
-        return value if type(value) is str and value in FAILURE_CLASSES else "unknown_control_plane_failure"
-    return "none" if not classes else "unknown_control_plane_failure"
+    if illegal_failure_class or len(legal_failure_classes) > 1:
+        failure_class = "unknown_control_plane_failure"
+    elif legal_failure_classes:
+        failure_class = next(iter(legal_failure_classes))
+    else:
+        failure_class = "none"
+
+    validations = [
+        event for event in correlated if event.get("phase") == "validation_completed"
+    ]
+    tool_versions: dict[str, str] = {}
+    if len(validations) == 1:
+        vina_version = validations[0].get("vina_version")
+        meeko_version = validations[0].get("meeko_version")
+        if (
+            type(vina_version) is str
+            and _SAFE_VERSION.fullmatch(vina_version) is not None
+            and type(meeko_version) is str
+            and _SAFE_VERSION.fullmatch(meeko_version) is not None
+        ):
+            tool_versions = {"vina": vina_version, "meeko": meeko_version}
+
+    cleanup_started_events = [
+        event for event in correlated if event.get("phase") == "cleanup_started"
+    ]
+    cleanup_completed_events = [
+        event for event in correlated if event.get("phase") == "cleanup_completed"
+    ]
+    cleanup_completed = (
+        cleanup_completed_events[0] if len(cleanup_completed_events) == 1 else {}
+    )
+    expected_cleanup_outcome = (
+        {
+            "succeeded": "passed",
+            "failed": "failed",
+        }.get(cleanup_status)
+        if type(cleanup_status) is str
+        else None
+    )
+    cleanup_consistent = (
+        len(cleanup_started_events) == 1
+        and cleanup_started_events[0].get("cleanup_status") == "in_progress"
+        and len(cleanup_completed_events) == 1
+        and expected_cleanup_outcome is not None
+        and cleanup_completed.get("outcome") == expected_cleanup_outcome
+        and cleanup_completed.get("cleanup_status") == cleanup_status
+    )
+
+    failure_fields_coherent = not illegal_failure_class and all(
+        event.get("failure_class") is None
+        or (
+            type(event.get("failure_class")) is str
+            and event.get("failure_class") in FAILURE_CLASSES
+            and event.get("outcome") == "failed"
+        )
+        for event in correlated
+    )
+    prior_failure_classes = [
+        event.get("failure_class")
+        for event in correlated
+        if event.get("phase") != "job_terminal"
+        and type(event.get("failure_class")) is str
+        and event.get("failure_class") != "none"
+        and event.get("failure_class") in FAILURE_CLASSES
+    ]
+    terminal_failure_class = terminal.get("failure_class")
+    terminal_failure_consistent = not (
+        terminal_outcome == "failed"
+        and prior_failure_classes
+        and terminal_failure_class != prior_failure_classes[-1]
+    )
+
+    complete = False
+    if type(result_succeeded) is bool and result_succeeded:
+        complete = (
+            phases == list(EXPECTED_PHASES)
+            and len(terminals) == 1
+            and terminal_outcome == "passed"
+            and cleanup_status == "succeeded"
+            and cleanup_consistent
+            and len(validations) == 1
+            and set(tool_versions) == {"vina", "meeko"}
+            and all(
+                event.get("outcome") == "passed"
+                for event in correlated
+                if str(event.get("phase", "")).endswith("_completed")
+            )
+            and all(event.get("failure_class") is None for event in correlated)
+        )
+    elif type(result_succeeded) is bool:
+        phase_positions: list[int] = []
+        for phase in phases:
+            if type(phase) is not str or phase not in EXPECTED_PHASES:
+                phase_positions = []
+                break
+            phase_positions.append(EXPECTED_PHASES.index(phase))
+        ordered_lifecycle = bool(phase_positions) and all(
+            left < right
+            for left, right in zip(phase_positions, phase_positions[1:])
+        )
+        complete = (
+            phases[0:1] == ["job_received"]
+            and phases[-3:] == list(EXPECTED_PHASES[-3:])
+            and len(terminals) == 1
+            and type(terminal_outcome) is str
+            and terminal_outcome in {"failed", "cancelled"}
+            and cleanup_consistent
+            and ordered_lifecycle
+            and failure_fields_coherent
+            and terminal_failure_consistent
+        )
+
+    return LifecycleEvidence(
+        trace_id=trace_id,
+        job_id=job_id,
+        events_complete=complete,
+        terminal_outcome=terminal_outcome if type(terminal_outcome) is str else None,
+        cleanup_status=cleanup_status if type(cleanup_status) is str else None,
+        failure_class=failure_class,
+        tool_versions=tool_versions,
+        failure_codes=() if complete else ("events_incomplete",),
+    )
+
+
+def _event_failure_class(events: Sequence[Mapping[str, object]], trace_id: str) -> str:
+    correlated = [
+        event
+        for event in events
+        if isinstance(event, Mapping) and event.get("trace_id") == trace_id
+    ]
+    result_succeeded = any(
+        event.get("phase") == "job_terminal" and event.get("outcome") == "passed"
+        for event in correlated
+    )
+    return evaluate_lifecycle(
+        correlated,
+        result_succeeded=result_succeeded,
+    ).failure_class
 
 
 def _events_complete(events: Sequence[Mapping[str, object]], trace_id: str) -> bool:
-    correlated = [event for event in events if event.get("trace_id") == trace_id]
-    identities = {event.get("job_id") for event in correlated}
-    return (
-        len(correlated) == len(EXPECTED_PHASES)
-        and len(identities) == 1
-        and None not in identities
-        and [event.get("phase") for event in correlated] == list(EXPECTED_PHASES)
+    correlated = [
+        event
+        for event in events
+        if isinstance(event, Mapping) and event.get("trace_id") == trace_id
+    ]
+    result_succeeded = any(
+        event.get("phase") == "job_terminal" and event.get("outcome") == "passed"
+        for event in correlated
     )
+    return evaluate_lifecycle(
+        correlated,
+        result_succeeded=result_succeeded,
+    ).events_complete
 
 
 class StabilityExecutor:
