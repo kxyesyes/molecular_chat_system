@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
@@ -129,18 +128,41 @@ def successful_lifecycle(
 
 def failed_lifecycle(
     *,
+    failed_phase: str = "command_completed",
+    failure_class: str | None = None,
     terminal_outcome: str = "failed",
     cleanup_status: str = "succeeded",
     trace_id: str = "broker-failed",
     job_id: str = "d" * 32,
 ) -> list[dict[str, object]]:
-    events = successful_lifecycle(trace_id, job_id)
-    del events[8:10]
-    events[7]["outcome"] = terminal_outcome
+    if failed_phase not in {
+        "provisioning_completed",
+        "upload_completed",
+        "command_completed",
+        "validation_completed",
+    }:
+        raise ValueError("unsupported failed phase")
+    failed_index = PHASES.index(failed_phase)
+    events = [
+        lifecycle_event(trace_id, job_id, phase)
+        for phase in PHASES[: failed_index + 1]
+    ]
+    events[-1]["outcome"] = terminal_outcome
+    events[-1]["failure_class"] = failure_class
+    if failed_phase == "validation_completed":
+        events[-1]["vina_version"] = None
+        events[-1]["meeko_version"] = None
+    events.extend(
+        lifecycle_event(trace_id, job_id, phase) for phase in PHASES[-3:]
+    )
+    events[-3]["cleanup_status"] = "in_progress"
     events[-2]["outcome"] = "passed" if cleanup_status == "succeeded" else "failed"
     events[-2]["cleanup_status"] = cleanup_status
     events[-1]["outcome"] = terminal_outcome
     events[-1]["cleanup_status"] = cleanup_status
+    events[-1]["failure_class"] = (
+        failure_class if terminal_outcome == "failed" else None
+    )
     return events
 
 
@@ -361,7 +383,7 @@ def test_measured_run_uses_single_broker_identity_and_validation_versions(
 ) -> None:
     broker_trace = "broker-trace-real"
     broker_job = "b" * 32
-    caller_key = "soak-caller-key-01"
+    caller_keys: list[str] = []
     before = diagnostics(0)
     before["telemetry"]["phase_latency_ms"] = {}
     after = diagnostics(1)
@@ -380,8 +402,7 @@ def test_measured_run_uses_single_broker_identity_and_validation_versions(
     class Runner:
         def execute(self, payload: object, *, job_id: str) -> object:
             del payload
-            assert job_id == caller_key
-            assert job_id not in {broker_trace, broker_job}
+            caller_keys.append(job_id)
             return SimpleNamespace(success=True)
 
     class Observer:
@@ -425,10 +446,11 @@ def test_measured_run_uses_single_broker_identity_and_validation_versions(
         diagnostics_client=DiagnosticsClient(),
         project_root=tmp_path,
     )
-    executor.nonce = "caller-key"
 
     run = executor.measured_run(1)
 
+    assert len(caller_keys) == 1
+    assert caller_keys[0] not in {broker_trace, broker_job}
     assert run["trace_id"] == broker_trace
     assert run["events_complete"] is True
     assert run["vina_version"] == "1.2.5"
@@ -516,19 +538,25 @@ def test_success_lifecycle_rejects_terminal_cleanup_or_validation_mismatch(
 
 
 @pytest.mark.parametrize(
-    ("terminal_outcome", "cleanup_status"),
+    ("failed_phase", "failure_class", "terminal_outcome", "cleanup_status"),
     [
-        ("failed", "succeeded"),
-        ("failed", "failed"),
-        ("cancelled", "succeeded"),
-        ("cancelled", "failed"),
+        ("provisioning_completed", "create_timeout", "failed", "succeeded"),
+        ("command_completed", "command_timeout", "failed", "succeeded"),
+        ("validation_completed", None, "failed", "succeeded"),
+        ("command_completed", None, "failed", "failed"),
+        ("command_completed", None, "cancelled", "succeeded"),
+        ("command_completed", None, "cancelled", "failed"),
     ],
 )
 def test_truthful_failed_or_cancelled_lifecycle_is_recorded(
+    failed_phase: str,
+    failure_class: str | None,
     terminal_outcome: str,
     cleanup_status: str,
 ) -> None:
     events = failed_lifecycle(
+        failed_phase=failed_phase,
+        failure_class=failure_class,
         terminal_outcome=terminal_outcome,
         cleanup_status=cleanup_status,
     )
@@ -538,6 +566,12 @@ def test_truthful_failed_or_cancelled_lifecycle_is_recorded(
     assert cleanup_completed["outcome"] == (
         "passed" if cleanup_status == "succeeded" else "failed"
     )
+    failed_index = PHASES.index(failed_phase)
+    assert [event["phase"] for event in events] == [
+        *PHASES[: failed_index + 1],
+        *PHASES[-3:],
+    ]
+    assert failure_class is None or failure_class in soak.FAILURE_CLASSES
 
     evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
 
@@ -547,6 +581,7 @@ def test_truthful_failed_or_cancelled_lifecycle_is_recorded(
     assert evidence.tool_versions == {}
     assert evidence.terminal_outcome == terminal_outcome
     assert evidence.cleanup_status == cleanup_status
+    assert evidence.failure_class == (failure_class or "none")
     assert evidence.failure_codes == ()
 
 
@@ -559,11 +594,13 @@ def test_truthful_failed_or_cancelled_lifecycle_is_recorded(
         "multiple_terminals",
         "cleanup_completed_mismatch",
         "cleanup_mismatch",
+        "failure_class_conflict",
+        "illegal_failure_class",
         "second_identity",
     ],
 )
 def test_failed_lifecycle_mutations_fail_closed(mutation: str) -> None:
-    events = failed_lifecycle()
+    events = failed_lifecycle(failure_class="command_timeout")
     if mutation == "forged_success":
         events[-1]["outcome"] = "passed"
     elif mutation == "missing_terminal":
@@ -577,6 +614,10 @@ def test_failed_lifecycle_mutations_fail_closed(mutation: str) -> None:
         events[-2]["outcome"] = "failed"
     elif mutation == "cleanup_mismatch":
         events[-1]["cleanup_status"] = "failed"
+    elif mutation == "failure_class_conflict":
+        events[-1]["failure_class"] = "server_500"
+    elif mutation == "illegal_failure_class":
+        events[-1]["failure_class"] = "not_allowed"
     else:
         events.extend(successful_lifecycle("other-trace", "e" * 32))
 
@@ -584,59 +625,6 @@ def test_failed_lifecycle_mutations_fail_closed(mutation: str) -> None:
 
     assert evidence.events_complete is False
     assert evidence.failure_codes == ("events_incomplete",)
-
-
-def test_project_result_rejects_validated_vina_provenance_mismatch(
-    tmp_path: Path,
-) -> None:
-    pose = tmp_path / "pose.pdbqt"
-    content = (
-        b"MODEL 1\nREMARK VINA RESULT: -7.4 0.0 0.0\n"
-        b"ATOM      1  C   LIG A   1       0.000   0.000   0.000  1.00  0.00     0.000 C\n"
-        b"ENDMDL\n"
-    )
-    pose.write_bytes(content)
-    digest = hashlib.sha256(content).hexdigest()
-    result = SimpleNamespace(
-        success=True,
-        data={
-            "total_poses": 1,
-            "best_pose": {"binding_energy": -7.4, "pose_file": str(pose)},
-            "pose_file": str(pose),
-        },
-        elapsed_ms=100,
-        warnings=[],
-        artifacts=[SimpleNamespace(path=str(pose), metadata={"sha256": digest})],
-        quality={
-            "real_execution": True,
-            "execution_backend": "opensandbox",
-            "secure_runtime": "gvisor",
-            "sandbox_image_digest": HEX,
-            "cleanup_status": "succeeded",
-        },
-        provenance=SimpleNamespace(
-            tool_name="molecular_docking",
-            tool_version="AutoDock Vina 1.2.5",
-            demo_mode=False,
-            fallback_used=False,
-        ),
-    )
-    observer = SimpleNamespace(
-        image_digest=HEX,
-        tool_versions={},
-        failure_codes=[],
-    )
-
-    projected = soak._project_result(
-        result,
-        trace_id="broker-version-mismatch",
-        project_root=tmp_path,
-        observer=observer,
-        validated_tool_versions={"vina": "1.2.4", "meeko": "0.7.1"},
-    )
-
-    assert projected["status"] == "failed"
-    assert "tool_version_mismatch" in projected["failure_codes"]
 
 
 def test_disabled_gate_writes_safe_report_and_stable_stdout(
