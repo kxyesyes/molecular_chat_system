@@ -290,6 +290,20 @@ def test_static_validator_hashes_canonical_assets_as_raw_bytes(tmp_path: Path) -
     assert validator.validate_static(root) == "asset_identity_mismatch"
 
 
+@pytest.mark.parametrize(
+    "asset",
+    (
+        ENV_EXAMPLE,
+        MEDCHAT_DEPENDENCY_INPUT,
+        OPENSANDBOX_SERVER_DEPENDENCY_INPUT,
+        MEDCHAT_DEPENDENCY_LOCK,
+        OPENSANDBOX_SERVER_DEPENDENCY_LOCK,
+    ),
+)
+def test_pinned_deployment_assets_are_checked_out_with_lf(asset: Path) -> None:
+    assert b"\r" not in asset.read_bytes()
+
+
 def _write_fake_firewall_tool(directory: Path) -> Path:
     state = directory / "state.json"
     implementation = directory / "firewall-tool"

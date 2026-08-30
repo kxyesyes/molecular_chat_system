@@ -96,7 +96,7 @@ _PINNED_ASSET_SHA256 = {
         "1a637566231a36928dd0c025b42e4c81d871420f79c897c71e06afe1436b3fc9"
     ),
     "deployment/opensandbox/opensandbox.env.example": (
-        "d3e671b35ea2eb9d87e6f286a37233e878c4264a3e1789f7c6486c90aebcfc6a"
+        "bdd4b347aacd786c555250f5733566d5fd8723e15c44aeb048af237852d089bf"
     ),
     "deployment/opensandbox/install.sh": (
         "13ff0284fec2da14216f197e4cb667aabe3af78cf0faec1b38917da04edbeaec"
@@ -105,16 +105,16 @@ _PINNED_ASSET_SHA256 = {
         "15fb8b7faa079b9a33328081c751a75c72a2d68e1b92b676b55150438064f982"
     ),
     "deployment/opensandbox/requirements-medchat-linux-x86_64.in": (
-        "9d340e75b89a8b0588e28449b40b9e30ff129a366d07ad9050a8df3c05979758"
+        "97095a2e2ecd80e64b2a7bd890a0345b00c510cae049698aa7d7463369ffb903"
     ),
     "deployment/opensandbox/requirements-opensandbox-server-linux-x86_64.in": (
-        "6dd440bd8520c2e63d0be5d236679608f1f13a98e3a736f78ba66599e0b2376c"
+        "e9c8fd13106a0aa7490cb449b45ad16a96eb401bd38574fd9d5f5e2d2ea91e3b"
     ),
     "deployment/opensandbox/requirements-medchat-linux-x86_64.lock": (
-        "99161b7cc68a5468a0853e928df12e4587b4a2c19172ec3741b45198732f5769"
+        "f540ee4bee831faa1e6590a051d36061ff301bdf0bbf9a49510253bc6f28ea8f"
     ),
     "deployment/opensandbox/requirements-opensandbox-server-linux-x86_64.lock": (
-        "0ca0dc121c88e23735e6ef266ec5e4143eb81b74dd9f0978a64f8dda6a431724"
+        "8b47a103312205f51ee8109a7280d9ca113c78fc1090cdf3bbc6b2f2bcd8fc4b"
     ),
 }
 _RUNTIME_DEPENDENCY_LOCKS = (
