@@ -333,10 +333,8 @@ def test_executor_advances_after_one_measured_execution_raises(
             self.calls += 1
             if self.calls == 2:
                 raise RuntimeError("one measured execution failed")
-            diagnostics_client.events.extend(
-                soak.synthetic_event(job_id, phase) for phase in PHASES
-            )
-            return object()
+            diagnostics_client.events.extend(successful_lifecycle(job_id, job_id))
+            return SimpleNamespace(success=True)
 
     class Observer:
         failure_codes: list[str] = []
@@ -464,7 +462,10 @@ def test_measured_run_uses_single_broker_identity_and_validation_versions(
     assert len(caller_keys) == 1
     assert caller_keys[0] not in {broker_trace, broker_job}
     assert run["trace_id"] == broker_trace
+    assert run["status"] == "passed"
     assert run["events_complete"] is True
+    assert run["cleanup_status"] == "succeeded"
+    assert run["failure_class"] == "none"
     assert run["vina_version"] == "1.2.5"
     assert run["meeko_version"] == "0.7.1"
     assert captured["trace_id"] == broker_trace
@@ -472,6 +473,156 @@ def test_measured_run_uses_single_broker_identity_and_validation_versions(
         "vina": "1.2.5",
         "meeko": "0.7.1",
     }
+
+
+def test_measured_run_merges_scientific_and_lifecycle_failures_without_false_cleanup_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker_trace = "broker-trace-failed-result"
+    broker_job = "c" * 32
+    before = diagnostics(0)
+    before["telemetry"]["phase_latency_ms"] = {}
+    after = diagnostics(1)
+    after["telemetry"]["recent_events"] = successful_lifecycle(
+        broker_trace,
+        broker_job,
+    )
+
+    class DiagnosticsClient:
+        def __init__(self) -> None:
+            self.values = iter([before, after])
+
+        def snapshot(self) -> dict[str, object]:
+            return next(self.values)
+
+    class Runner:
+        def execute(self, payload: object, *, job_id: str) -> object:
+            del payload, job_id
+            return SimpleNamespace(success=False)
+
+    class Observer:
+        failure_codes: list[str] = []
+
+        def disable_intrusive_probes(self) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        soak,
+        "_project_result",
+        lambda *args, **kwargs: {
+            "status": "failed",
+            "latency_ms": 271000,
+            "pose_count": 0,
+            "best_energy": None,
+            "artifact_path": None,
+            "artifact_sha256": None,
+            "cleanup_status": None,
+            "image_digest": None,
+            "secure_runtime": None,
+            "tool_versions": {},
+            "warning_codes": [],
+            "failure_codes": ["docking_failed"],
+        },
+    )
+    executor = soak.StabilityExecutor(
+        runner=Runner(),
+        payload={},
+        observer_factory=Observer,
+        diagnostics_client=DiagnosticsClient(),
+        project_root=tmp_path,
+    )
+
+    run = executor.measured_run(1)
+
+    assert run["trace_id"] == broker_trace
+    assert run["status"] == "failed"
+    assert run["latency_ms"] == 271000
+    assert run["cleanup_status"] == "succeeded"
+    assert run["failure_class"] == "none"
+    assert run["events_complete"] is False
+    assert run["failure_codes"] == ["docking_failed", "events_incomplete"]
+    assert "cleanup_status_mismatch" not in run["failure_codes"]
+
+
+def test_measured_run_rejects_success_cleanup_evidence_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker_trace = "broker-trace-cleanup-mismatch"
+    broker_job = "e" * 32
+    before = diagnostics(0)
+    before["telemetry"]["phase_latency_ms"] = {}
+    after = diagnostics(1)
+    after["telemetry"]["recent_events"] = successful_lifecycle(
+        broker_trace,
+        broker_job,
+    )
+
+    class DiagnosticsClient:
+        def __init__(self) -> None:
+            self.values = iter([before, after])
+
+        def snapshot(self) -> dict[str, object]:
+            return next(self.values)
+
+    class Runner:
+        def execute(self, payload: object, *, job_id: str) -> object:
+            del payload, job_id
+            return SimpleNamespace(success=True)
+
+    class Observer:
+        failure_codes: list[str] = []
+
+        def disable_intrusive_probes(self) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        soak,
+        "_project_result",
+        lambda *args, **kwargs: {
+            "status": "passed",
+            "latency_ms": 100,
+            "pose_count": 9,
+            "best_energy": -7.0,
+            "artifact_path": None,
+            "artifact_sha256": HEX,
+            "cleanup_status": "failed",
+            "image_digest": HEX,
+            "secure_runtime": "gvisor",
+            "tool_versions": kwargs.get("validated_tool_versions", {}),
+            "warning_codes": [],
+            "failure_codes": [],
+        },
+    )
+    executor = soak.StabilityExecutor(
+        runner=Runner(),
+        payload={},
+        observer_factory=Observer,
+        diagnostics_client=DiagnosticsClient(),
+        project_root=tmp_path,
+    )
+
+    run = executor.measured_run(1)
+
+    assert run["trace_id"] == broker_trace
+    assert run["status"] == "failed"
+    assert run["cleanup_status"] == "succeeded"
+    assert run["failure_class"] == "none"
+    assert run["events_complete"] is True
+    assert run["failure_codes"] == ["cleanup_status_mismatch"]
 
 
 def test_success_lifecycle_has_exact_order_identity_cleanup_and_versions() -> None:

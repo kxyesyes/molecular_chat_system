@@ -205,6 +205,7 @@ def _project_result(
     trace_id: str,
     project_root: Path,
     observer: object,
+    validated_tool_versions: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     """Allowlist one worker result and independently verify its pose bytes."""
 
@@ -212,6 +213,9 @@ def _project_result(
         raise ValueError("invalid trace id")
     if not bool(getattr(result, "success", False)):
         failed = _empty_run(trace_id, [_error_code(result)])
+        latency = getattr(result, "elapsed_ms", None)
+        if type(latency) is int and 0 <= latency <= 420000:
+            failed["latency_ms"] = latency
         failed["warning_codes"] = _safe_warning_codes(getattr(result, "warnings", []))
         return failed
 
@@ -330,7 +334,11 @@ def _project_result(
         failures.append("tool_version_invalid")
     else:
         versions["vina"] = vina_version
-    observed_versions = getattr(observer, "tool_versions", {})
+    observed_versions = (
+        getattr(observer, "tool_versions", {})
+        if validated_tool_versions is None
+        else validated_tool_versions
+    )
     if isinstance(observed_versions, Mapping):
         observed_vina = _safe_version(observed_versions.get("vina"))
         canonical_observed_vina = _canonical_vina_version(observed_vina)

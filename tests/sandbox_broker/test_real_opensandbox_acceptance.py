@@ -339,6 +339,121 @@ def test_identical_unparseable_vina_versions_are_rejected(tmp_path: Path) -> Non
     assert "tool_version_invalid" in projected["failure_codes"]
 
 
+def test_projection_uses_explicit_broker_validated_tool_versions(
+    tmp_path: Path,
+) -> None:
+    acceptance = _module()
+    pose, digest = _pose(tmp_path)
+    result = _success_result(pose, digest)
+    result.provenance.tool_version = "1.2.5"
+    observer = _FakeObserver()
+    observer.tool_versions = {}
+
+    projected = acceptance._project_result(
+        result,
+        trace_id="acceptance-broker-versions",
+        project_root=tmp_path,
+        observer=observer,
+        validated_tool_versions={"vina": "1.2.5", "meeko": "0.7.1"},
+    )
+
+    assert projected["status"] == "passed"
+    assert projected["tool_versions"] == {"vina": "1.2.5", "meeko": "0.7.1"}
+    assert "tool_version_invalid" not in projected["failure_codes"]
+    assert "tool_version_mismatch" not in projected["failure_codes"]
+
+
+@pytest.mark.parametrize(
+    ("validated_tool_versions", "expected_failure"),
+    [
+        ({}, "tool_version_invalid"),
+        ({"vina": "1.2.5"}, "tool_version_invalid"),
+        ({"vina": "1.2.6", "meeko": "0.7.1"}, "tool_version_mismatch"),
+        ({"vina": "1.2.5", "meeko": "/private/meeko"}, "tool_version_invalid"),
+    ],
+)
+def test_projection_fails_closed_for_invalid_broker_validated_versions(
+    tmp_path: Path,
+    validated_tool_versions: dict[str, object],
+    expected_failure: str,
+) -> None:
+    acceptance = _module()
+    pose, digest = _pose(tmp_path)
+    result = _success_result(pose, digest)
+    observer = _FakeObserver()
+
+    projected = acceptance._project_result(
+        result,
+        trace_id="acceptance-broker-version-rejected",
+        project_root=tmp_path,
+        observer=observer,
+        validated_tool_versions=validated_tool_versions,
+    )
+
+    assert projected["status"] == "failed"
+    assert expected_failure in projected["failure_codes"]
+
+
+def test_failed_projection_preserves_safe_bounded_latency(tmp_path: Path) -> None:
+    acceptance = _module()
+    failure = SimpleNamespace(
+        success=False,
+        elapsed_ms=271000,
+        error=SimpleNamespace(
+            code=SimpleNamespace(value="tool_timeout"),
+            message=f"failed beside {tmp_path / 'private' / 'pose.pdbqt'}",
+        ),
+        warnings=[f"inspect {tmp_path / 'private' / 'runner.log'}"],
+    )
+
+    projected = acceptance._project_result(
+        failure,
+        trace_id="acceptance-failed-latency",
+        project_root=tmp_path,
+        observer=_FakeObserver(),
+    )
+
+    encoded = json.dumps(projected)
+    assert projected["status"] == "failed"
+    assert projected["latency_ms"] == 271000
+    assert projected["failure_codes"] == ["tool_timeout"]
+    assert projected["warning_codes"] == ["warning_redacted"]
+    assert "failed beside" not in encoded
+    assert str(tmp_path) not in encoded
+
+
+@pytest.mark.parametrize("elapsed_ms", [-1, True, 420001, "271000"])
+def test_failed_projection_rejects_unsafe_latency(
+    tmp_path: Path,
+    elapsed_ms: object,
+) -> None:
+    acceptance = _module()
+    failure = SimpleNamespace(
+        success=False,
+        elapsed_ms=elapsed_ms,
+        error=SimpleNamespace(
+            code=SimpleNamespace(value="tool_timeout"),
+            message=f"failed beside {tmp_path / 'private' / 'pose.pdbqt'}",
+        ),
+        warnings=[f"inspect {tmp_path / 'private' / 'runner.log'}"],
+    )
+
+    projected = acceptance._project_result(
+        failure,
+        trace_id="acceptance-failed-latency-rejected",
+        project_root=tmp_path,
+        observer=_FakeObserver(),
+    )
+
+    encoded = json.dumps(projected)
+    assert projected["status"] == "failed"
+    assert projected["latency_ms"] == 0
+    assert projected["failure_codes"] == ["tool_timeout"]
+    assert projected["warning_codes"] == ["warning_redacted"]
+    assert "failed beside" not in encoded
+    assert str(tmp_path) not in encoded
+
+
 def test_fake_failure_and_security_failures_are_stable_and_counted(
     tmp_path: Path,
 ) -> None:

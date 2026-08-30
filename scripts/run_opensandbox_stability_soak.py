@@ -1371,24 +1371,39 @@ class StabilityExecutor:
             observer.stop()
         after = self.diagnostics_client.snapshot()
         delta = diagnostics_delta(before, after)
+        result_succeeded = getattr(result, "success", False) is True
+        lifecycle = evaluate_lifecycle(
+            delta["events"],
+            result_succeeded=result_succeeded,
+        )
         projected = _project_result(
             result,
-            trace_id=trace_id,
+            trace_id=lifecycle.trace_id,
             project_root=self.project_root,
             observer=observer,
+            validated_tool_versions=lifecycle.tool_versions,
         )
         versions = projected.get("tool_versions", {})
-        failure_class = _event_failure_class(delta["events"], trace_id)
-        events_complete = _events_complete(delta["events"], trace_id)
-        failures = list(projected.get("failure_codes", []))
-        if not events_complete:
-            failures.append("events_incomplete")
-        if projected.get("status") != "passed" and failure_class == "none":
-            failure_class = "unknown_control_plane_failure"
+        failures = [
+            *projected.get("failure_codes", []),
+            *lifecycle.failure_codes,
+        ]
+        if (
+            result_succeeded
+            and projected.get("cleanup_status") != lifecycle.cleanup_status
+        ):
+            failures.append("cleanup_status_mismatch")
+        failure_codes = sorted(set(failures))
         run = {
             "run_index": index,
-            "trace_id": trace_id,
-            "status": "passed" if projected.get("status") == "passed" and events_complete else "failed",
+            "trace_id": lifecycle.trace_id,
+            "status": (
+                "passed"
+                if projected.get("status") == "passed"
+                and lifecycle.events_complete
+                and not failure_codes
+                else "failed"
+            ),
             "latency_ms": projected.get("latency_ms", 0),
             "pose_count": projected.get("pose_count", 0),
             "best_energy": projected.get("best_energy"),
@@ -1396,16 +1411,16 @@ class StabilityExecutor:
             "artifact_path": projected.get("artifact_path"),
             "artifact_sha256": projected.get("artifact_sha256"),
             "artifact_sha256_valid": bool(projected.get("artifact_sha256") and _SHA256.fullmatch(projected["artifact_sha256"])),
-            "cleanup_status": projected.get("cleanup_status"),
+            "cleanup_status": lifecycle.cleanup_status,
             "image_digest": projected.get("image_digest"),
             "image_digest_valid": bool(projected.get("image_digest") and _SHA256.fullmatch(projected["image_digest"])),
             "secure_runtime": projected.get("secure_runtime"),
             "vina_version": versions.get("vina") if isinstance(versions, Mapping) else None,
             "meeko_version": versions.get("meeko") if isinstance(versions, Mapping) else None,
             "warning_codes": list(projected.get("warning_codes", [])),
-            "failure_codes": sorted(set(failures)),
-            "failure_class": failure_class,
-            "events_complete": events_complete,
+            "failure_codes": failure_codes,
+            "failure_class": lifecycle.failure_class,
+            "events_complete": lifecycle.events_complete,
         }
         return validate_run(run, project_root=self.project_root)
 
