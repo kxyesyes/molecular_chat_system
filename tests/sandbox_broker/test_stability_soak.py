@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -85,6 +86,61 @@ def diagnostics(event_count: int = 0) -> dict[str, object]:
             "open_seconds": 30,
         },
     }
+
+
+def lifecycle_event(
+    trace_id: str,
+    job_id: str,
+    phase: str,
+    *,
+    outcome: str | None = None,
+    failure_class: str | None = None,
+    cleanup_status: str | None = None,
+    vina_version: str | None = None,
+    meeko_version: str | None = None,
+) -> dict[str, object]:
+    event = soak.synthetic_event(job_id, phase)
+    event["trace_id"] = trace_id
+    event["job_id"] = job_id
+    if outcome is not None:
+        event["outcome"] = outcome
+    if failure_class is not None:
+        event["failure_class"] = failure_class
+    if cleanup_status is not None:
+        event["cleanup_status"] = cleanup_status
+    if phase == "validation_completed":
+        event["vina_version"] = vina_version or "1.2.5"
+        event["meeko_version"] = meeko_version or "0.7.1"
+    return event
+
+
+def successful_lifecycle(
+    trace_id: str = "broker-trace-1",
+    job_id: str = "a" * 32,
+) -> list[dict[str, object]]:
+    events = [lifecycle_event(trace_id, job_id, phase) for phase in PHASES]
+    events[-3]["cleanup_status"] = "in_progress"
+    events[-2]["outcome"] = "passed"
+    events[-2]["cleanup_status"] = "succeeded"
+    events[-1]["outcome"] = "passed"
+    events[-1]["cleanup_status"] = "succeeded"
+    return events
+
+
+def failed_lifecycle(
+    *,
+    terminal_outcome: str = "failed",
+    cleanup_status: str = "succeeded",
+    trace_id: str = "broker-failed",
+    job_id: str = "d" * 32,
+) -> list[dict[str, object]]:
+    events = successful_lifecycle(trace_id, job_id)
+    del events[8:10]
+    events[7]["outcome"] = terminal_outcome
+    events[-2]["cleanup_status"] = cleanup_status
+    events[-1]["outcome"] = terminal_outcome
+    events[-1]["cleanup_status"] = cleanup_status
+    return events
 
 
 class FakeDiagnostics:
@@ -296,6 +352,281 @@ def test_executor_advances_after_one_measured_execution_raises(
     assert failures == 1
     assert runner.calls == 30
     assert executor.measured_calls == 30
+
+
+def test_measured_run_uses_single_broker_identity_and_validation_versions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker_trace = "broker-trace-real"
+    broker_job = "b" * 32
+    caller_key = "soak-caller-key-01"
+    before = diagnostics(0)
+    before["telemetry"]["phase_latency_ms"] = {}
+    after = diagnostics(1)
+    after["telemetry"]["recent_events"] = successful_lifecycle(
+        broker_trace,
+        broker_job,
+    )
+
+    class DiagnosticsClient:
+        def __init__(self) -> None:
+            self.values = iter([before, after])
+
+        def snapshot(self) -> dict[str, object]:
+            return next(self.values)
+
+    class Runner:
+        def execute(self, payload: object, *, job_id: str) -> object:
+            del payload
+            assert job_id == caller_key
+            assert job_id not in {broker_trace, broker_job}
+            return SimpleNamespace(success=True)
+
+    class Observer:
+        failure_codes: list[str] = []
+        tool_versions: dict[str, str] = {}
+
+        def disable_intrusive_probes(self) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    captured: dict[str, object] = {}
+
+    def project(*args: object, **kwargs: object) -> dict[str, object]:
+        del args
+        captured.update(kwargs)
+        return {
+            "status": "passed",
+            "latency_ms": 100,
+            "pose_count": 9,
+            "best_energy": -7.0,
+            "artifact_path": "outputs/opensandbox_stability/run/result.pdbqt",
+            "artifact_sha256": HEX,
+            "cleanup_status": "succeeded",
+            "image_digest": HEX,
+            "secure_runtime": "gvisor",
+            "tool_versions": kwargs.get("validated_tool_versions", {}),
+            "warning_codes": [],
+            "failure_codes": [],
+        }
+
+    monkeypatch.setattr(soak, "_project_result", project)
+    executor = soak.StabilityExecutor(
+        runner=Runner(),
+        payload={},
+        observer_factory=Observer,
+        diagnostics_client=DiagnosticsClient(),
+        project_root=tmp_path,
+    )
+    executor.nonce = "caller-key"
+
+    run = executor.measured_run(1)
+
+    assert run["trace_id"] == broker_trace
+    assert run["events_complete"] is True
+    assert run["vina_version"] == "1.2.5"
+    assert run["meeko_version"] == "0.7.1"
+    assert captured["trace_id"] == broker_trace
+    assert captured["validated_tool_versions"] == {
+        "vina": "1.2.5",
+        "meeko": "0.7.1",
+    }
+
+
+def test_success_lifecycle_has_exact_order_identity_cleanup_and_versions() -> None:
+    events = successful_lifecycle()
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=True)
+
+    assert [event["phase"] for event in events] == list(PHASES)
+    assert evidence.trace_id == "broker-trace-1"
+    assert evidence.job_id == "a" * 32
+    assert evidence.events_complete is True
+    assert evidence.terminal_outcome == "passed"
+    assert evidence.cleanup_status == "succeeded"
+    assert evidence.tool_versions == {"vina": "1.2.5", "meeko": "0.7.1"}
+    assert evidence.failure_codes == ()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_event",
+        "duplicate_validation",
+        "reordered_events",
+        "second_identity",
+        "missing_meeko",
+        "missing_vina",
+    ],
+)
+def test_success_lifecycle_mutations_fail_closed(mutation: str) -> None:
+    events = successful_lifecycle()
+    if mutation == "missing_event":
+        events.pop(4)
+    elif mutation == "duplicate_validation":
+        validation = next(
+            event for event in events if event["phase"] == "validation_completed"
+        )
+        events.insert(events.index(validation) + 1, dict(validation))
+    elif mutation == "reordered_events":
+        events[5], events[6] = events[6], events[5]
+    elif mutation == "second_identity":
+        events.extend(successful_lifecycle("other-trace", "c" * 32))
+    else:
+        field = "meeko_version" if mutation == "missing_meeko" else "vina_version"
+        next(
+            event for event in events if event["phase"] == "validation_completed"
+        )[field] = None
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=True)
+
+    assert evidence.events_complete is False
+    assert evidence.failure_codes == ("events_incomplete",)
+
+
+@pytest.mark.parametrize(
+    ("phase", "field", "value"),
+    [
+        ("job_terminal", "outcome", "failed"),
+        ("job_terminal", "cleanup_status", "failed"),
+        ("cleanup_started", "cleanup_status", "not_started"),
+        ("cleanup_completed", "cleanup_status", "failed"),
+        ("validation_completed", "outcome", "failed"),
+    ],
+)
+def test_success_lifecycle_rejects_terminal_cleanup_or_validation_mismatch(
+    phase: str,
+    field: str,
+    value: object,
+) -> None:
+    events = successful_lifecycle()
+    next(event for event in events if event["phase"] == phase)[field] = value
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=True)
+
+    assert evidence.events_complete is False
+    assert evidence.failure_codes == ("events_incomplete",)
+
+
+@pytest.mark.parametrize(
+    ("terminal_outcome", "cleanup_status"),
+    [
+        ("failed", "succeeded"),
+        ("failed", "failed"),
+        ("cancelled", "succeeded"),
+        ("cancelled", "failed"),
+    ],
+)
+def test_truthful_failed_or_cancelled_lifecycle_is_recorded(
+    terminal_outcome: str,
+    cleanup_status: str,
+) -> None:
+    events = failed_lifecycle(
+        terminal_outcome=terminal_outcome,
+        cleanup_status=cleanup_status,
+    )
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
+
+    assert evidence.trace_id == "broker-failed"
+    assert evidence.job_id == "d" * 32
+    assert evidence.events_complete is True
+    assert evidence.tool_versions == {}
+    assert evidence.terminal_outcome == terminal_outcome
+    assert evidence.cleanup_status == cleanup_status
+    assert evidence.failure_codes == ()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "forged_success",
+        "missing_terminal",
+        "terminal_too_early",
+        "multiple_terminals",
+        "cleanup_mismatch",
+        "second_identity",
+    ],
+)
+def test_failed_lifecycle_mutations_fail_closed(mutation: str) -> None:
+    events = failed_lifecycle()
+    if mutation == "forged_success":
+        events[-1]["outcome"] = "passed"
+    elif mutation == "missing_terminal":
+        events.pop()
+    elif mutation == "terminal_too_early":
+        terminal = events.pop()
+        events.insert(-2, terminal)
+    elif mutation == "multiple_terminals":
+        events.append(dict(events[-1]))
+    elif mutation == "cleanup_mismatch":
+        events[-1]["cleanup_status"] = "failed"
+    else:
+        events.extend(successful_lifecycle("other-trace", "e" * 32))
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
+
+    assert evidence.events_complete is False
+    assert evidence.failure_codes == ("events_incomplete",)
+
+
+def test_project_result_rejects_validated_vina_provenance_mismatch(
+    tmp_path: Path,
+) -> None:
+    pose = tmp_path / "pose.pdbqt"
+    content = (
+        b"MODEL 1\nREMARK VINA RESULT: -7.4 0.0 0.0\n"
+        b"ATOM      1  C   LIG A   1       0.000   0.000   0.000  1.00  0.00     0.000 C\n"
+        b"ENDMDL\n"
+    )
+    pose.write_bytes(content)
+    digest = hashlib.sha256(content).hexdigest()
+    result = SimpleNamespace(
+        success=True,
+        data={
+            "total_poses": 1,
+            "best_pose": {"binding_energy": -7.4, "pose_file": str(pose)},
+            "pose_file": str(pose),
+        },
+        elapsed_ms=100,
+        warnings=[],
+        artifacts=[SimpleNamespace(path=str(pose), metadata={"sha256": digest})],
+        quality={
+            "real_execution": True,
+            "execution_backend": "opensandbox",
+            "secure_runtime": "gvisor",
+            "sandbox_image_digest": HEX,
+            "cleanup_status": "succeeded",
+        },
+        provenance=SimpleNamespace(
+            tool_name="molecular_docking",
+            tool_version="AutoDock Vina 1.2.5",
+            demo_mode=False,
+            fallback_used=False,
+        ),
+    )
+    observer = SimpleNamespace(
+        image_digest=HEX,
+        tool_versions={},
+        failure_codes=[],
+    )
+
+    projected = soak._project_result(
+        result,
+        trace_id="broker-version-mismatch",
+        project_root=tmp_path,
+        observer=observer,
+        validated_tool_versions={"vina": "1.2.4", "meeko": "0.7.1"},
+    )
+
+    assert projected["status"] == "failed"
+    assert "tool_version_mismatch" in projected["failure_codes"]
 
 
 def test_disabled_gate_writes_safe_report_and_stable_stdout(
