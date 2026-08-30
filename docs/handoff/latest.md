@@ -335,3 +335,75 @@ traffic to 0; it does not delete or locally replay Temporal-accepted work.
 All commands and edits in this task used the isolated task worktree. No command
 was run against, and no file was changed in, the original mixed workspace.
 Runtime reports remain ignored and outside the documentation commit.
+
+## OpenSandbox stability hardening (2026-08-30)
+
+- Branch: `codex/opensandbox-stability-hardening`.
+- Locally tested source commit: `b4c912d8d5c0562fbbaaa6e47e0e58f95f297ab6`.
+- QEMU soak: `not run`. The Windows host exposes a stopped WSL2 Ubuntu
+  distribution, but no QEMU CLI or prepared Ubuntu 24.04 QEMU acceptance host.
+  WSL2 is not an allowed substitute for this production gate.
+- Runtime report: not created. No failed report was replaced and no passing
+  runtime status is inferred from unit tests.
+
+### Local verification
+
+All commands used `C:\Users\xkx52\.conda\envs\MedChat\python.exe` with the
+pytest cache disabled:
+
+```powershell
+python -m pytest tests/sandbox_broker/test_opensandbox_client.py tests/sandbox_broker/test_service.py tests/sandbox_broker/test_stability_soak.py -q -p no:cacheprovider
+# 436 passed, 2 skipped
+
+python -m pytest tests/sandbox_broker -q -p no:cacheprovider
+# 1878 passed, 75 skipped
+
+python -m pytest tests -q -p no:cacheprovider
+# 4873 passed, 230 skipped, 9 subtests passed, 6 dependency/deprecation warnings
+
+python -m compileall -q src scripts
+# passed with no output
+
+python scripts/validate_opensandbox_deployment.py --static
+# opensandbox_deployment_validation=passed
+```
+
+The first full-repository run encountered one transient Temporal test-server
+download failure and exposed a real stale Temporal worker-unit validator
+contract. The download succeeded on focused retry; the validator was aligned
+with the hardened Broker dependency and UDS access, after which the complete
+repository passed.
+
+Independent review of `c9eed10..0f68b3c` found no Critical issue and three
+Important issues: unknown remote sandbox identity could lose cleanup
+uncertainty, one raised measured run could prevent later submissions, and a
+later run could replace an existing failed report. Commit `58a0cb4` added
+regressions and closed all three. Reviewer re-verification found no remaining
+Critical or Important issue.
+
+### QEMU stability and scientific evidence
+
+Because the real 30-job suite was not run, the following values are unavailable
+and must remain `N/A`: pass rate, cleanup rate, event completeness, p50/p95
+latency, phase p95 latency, failure-class distribution, pose-count range,
+binding-energy range, Vina/Meeko runtime versions, image digest, and
+artifact/hash observations. No docking energy or pose count is reported from
+contract tests.
+
+Likewise, real runtime evidence is unavailable for the idempotency sandbox
+count, queue saturation count, cancellation/timeout/security probes, and final
+running labelled container count. Local tests verify the contracts and failure
+preservation only; they do not satisfy the production gate.
+
+### Remaining production blocker
+
+On the reviewed Ubuntu 24.04 QEMU generation, operators must verify source
+identity and service state, then run exactly one gated invocation of
+`scripts/run_opensandbox_stability_soak.py --repeat 30`. Promotion remains
+blocked until its report is `passed`, all gates are true, and an independent
+Docker label query reports zero running labelled containers. A `partial`,
+`failed`, `skipped`, Windows, or WSL result is non-promotable. Operators must
+preserve the first failed report and must not replace it with a passing rerun.
+
+No API key state or value is required for this stage, and no credential was
+recorded in source, tests, logs, or this handoff.
