@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -885,6 +886,166 @@ def test_compound_broker_failures_keep_truthful_lifecycle_complete() -> None:
     assert evidence.failure_codes == ()
 
 
+def test_corrected_report_shape_keeps_eighteen_successes_and_twelve_failures() -> None:
+    failure_specs = [
+        *(
+            ("provider_error", "provisioning_completed", "server_500")
+            for _ in range(5)
+        ),
+        *(
+            ("tool_timeout", "command_completed", "command_timeout")
+            for _ in range(5)
+        ),
+        *(
+            ("invalid_output", "validation_completed", None)
+            for _ in range(2)
+        ),
+    ]
+    runs: list[dict[str, object]] = []
+    broker_identities: list[tuple[str, str]] = []
+
+    for index in range(1, 31):
+        trace_id = f"broker-replay-{index:02d}"
+        job_id = f"{index:032x}"
+        if index <= 18:
+            events = successful_lifecycle(trace_id, job_id)
+            validate_broker_events(events)
+            evidence = soak.evaluate_lifecycle(
+                events,
+                result_succeeded=True,
+            )
+            runs.append(
+                valid_run(
+                    index,
+                    trace_id=evidence.trace_id,
+                    cleanup_status=evidence.cleanup_status,
+                    vina_version=evidence.tool_versions["vina"],
+                    meeko_version=evidence.tool_versions["meeko"],
+                    failure_class=evidence.failure_class,
+                    failure_codes=list(evidence.failure_codes),
+                    events_complete=evidence.events_complete,
+                )
+            )
+        else:
+            error_code, failed_phase, failure_class = failure_specs[index - 19]
+            events = failed_lifecycle(
+                failed_phase=failed_phase,
+                failure_class=failure_class,
+                trace_id=trace_id,
+                job_id=job_id,
+            )
+            validate_broker_events(events)
+            evidence = soak.evaluate_lifecycle(
+                events,
+                result_succeeded=False,
+            )
+            runs.append(
+                valid_run(
+                    index,
+                    trace_id=evidence.trace_id,
+                    status="failed",
+                    pose_count=0,
+                    best_energy=None,
+                    artifact_present=False,
+                    artifact_path=None,
+                    artifact_sha256=None,
+                    artifact_sha256_valid=False,
+                    cleanup_status=evidence.cleanup_status,
+                    vina_version=None,
+                    meeko_version=None,
+                    failure_codes=[error_code],
+                    failure_class=evidence.failure_class,
+                    events_complete=evidence.events_complete,
+                )
+            )
+        broker_identities.append((evidence.trace_id, evidence.job_id))
+
+    before = diagnostics(0)
+    before["telemetry"]["phase_latency_ms"] = {}
+    report = soak.build_report(
+        runs=runs,
+        diagnostics=soak.diagnostics_delta(before, diagnostics(1)),
+        idempotency={"passed": True, "sandbox_count": 1},
+        queue={"passed": True, "accepted": 9, "saturated": 1},
+        probes={"cancellation": True, "timeout": True, "security": True},
+        running_labelled_containers=0,
+    )
+
+    report_runs = report["runs"]
+    failed_runs = [run for run in report_runs if run["status"] == "failed"]
+    assert report["status"] == "failed"
+    assert report["pass_rate"] == 0.6
+    assert report["event_completeness_rate"] == 1.0
+    assert len(report_runs) == 30
+    assert len(broker_identities) == len(set(broker_identities)) == 30
+    assert sum(run["status"] == "passed" for run in report_runs) == 18
+    assert len(failed_runs) == 12
+    assert all(run["events_complete"] is True for run in report_runs)
+    assert Counter(
+        code
+        for run in failed_runs
+        for code in run["failure_codes"]
+    ) == {
+        "provider_error": 5,
+        "tool_timeout": 5,
+        "invalid_output": 2,
+    }
+    assert all(
+        run["pose_count"] == 0
+        and run["best_energy"] is None
+        and run["artifact_present"] is False
+        and run["artifact_path"] is None
+        and run["artifact_sha256"] is None
+        and run["artifact_sha256_valid"] is False
+        and run["vina_version"] is None
+        and run["meeko_version"] is None
+        and soak.scientific_success(run) is False
+        for run in failed_runs
+    )
+    assert all(
+        "tool_version_invalid" not in run["failure_codes"]
+        and "tool_version_mismatch" not in run["failure_codes"]
+        for run in report_runs
+        if run["status"] == "passed"
+    )
+
+
+@pytest.mark.parametrize("result_succeeded", [True, False])
+@pytest.mark.parametrize(
+    ("terminal_cleanup_status", "completed_cleanup_status", "completed_outcome"),
+    [
+        ("failed", "succeeded", "passed"),
+        ("succeeded", "failed", "failed"),
+    ],
+)
+def test_lifecycle_rejects_cleanup_terminal_disagreement(
+    result_succeeded: bool,
+    terminal_cleanup_status: str,
+    completed_cleanup_status: str,
+    completed_outcome: str,
+) -> None:
+    events = (
+        successful_lifecycle()
+        if result_succeeded
+        else failed_lifecycle(failure_class="command_timeout")
+    )
+    terminal = next(event for event in events if event["phase"] == "job_terminal")
+    cleanup = next(
+        event for event in events if event["phase"] == "cleanup_completed"
+    )
+    terminal["cleanup_status"] = terminal_cleanup_status
+    cleanup["cleanup_status"] = completed_cleanup_status
+    cleanup["outcome"] = completed_outcome
+
+    evidence = soak.evaluate_lifecycle(
+        events,
+        result_succeeded=result_succeeded,
+    )
+
+    assert evidence.events_complete is False
+    assert evidence.failure_codes == ("events_incomplete",)
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -1090,6 +1251,28 @@ def test_recursive_report_validation_rejects_sensitive_or_unsafe_strings(unsafe:
     run = valid_run(1, warning_codes=[unsafe])
     with pytest.raises(soak.SafeReportError):
         soak.validate_run(run)
+
+
+def test_corrected_replay_remains_redacted_and_non_clobbering(tmp_path: Path) -> None:
+    secret = "sk-" + "x" * 24
+    with pytest.raises(soak.SafeReportError):
+        soak.validate_run(valid_run(1, warning_codes=[secret]))
+
+    destination = tmp_path / "preserved-failed.json"
+    failed = soak.gate_report("failed", "runtime_failed")
+    soak.atomic_write_report(destination, failed)
+    original = destination.read_bytes()
+
+    with pytest.raises(soak.SafeReportError):
+        soak.gate_report("passed", "runtime_failed")
+    with pytest.raises(soak.SafeReportError):
+        soak.atomic_write_report(
+            destination,
+            soak.gate_report("skipped", "stability_gate_disabled"),
+        )
+
+    assert destination.read_bytes() == original
+    assert secret.encode() not in original
 
 
 def test_artifact_path_rejects_symlink_escape(tmp_path: Path) -> None:
