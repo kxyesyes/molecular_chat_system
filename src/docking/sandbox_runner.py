@@ -716,6 +716,16 @@ def _with_failure_elapsed(result: ToolResult, started: float) -> ToolResult:
     return result
 
 
+def _initial_clock_sample() -> float | None:
+    try:
+        value = time.monotonic()
+        if type(value) not in (int, float) or not math.isfinite(value):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
 class SandboxDockingRunner:
     """Submit verified docking inputs to a broker reachable only over one UDS."""
 
@@ -758,7 +768,16 @@ class SandboxDockingRunner:
         progress_callback: Callable[..., Any] | None = None,
         cancel_event: Any = None,
     ) -> ToolResult:
-        started = time.monotonic()
+        started = _initial_clock_sample()
+        if started is None:
+            return ToolResult.error_result(
+                "molecular_docking",
+                AgentErrorCode.INVALID_OUTPUT,
+                "OpenSandbox docking failed before a verified result was produced.",
+                details={"reason": "sandbox_execution_failed"},
+                elapsed_ms=0,
+                quality={"real_execution": False, "execution_backend": "opensandbox"},
+            )
         result = self._execute(
             payload,
             job_id=job_id,

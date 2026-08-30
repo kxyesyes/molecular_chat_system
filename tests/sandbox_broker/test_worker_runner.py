@@ -217,6 +217,64 @@ class _FailureElapsedClock:
 
 
 @pytest.mark.parametrize(
+    "clock_outcome",
+    [
+        pytest.param(OSError("secret clock failure"), id="clock-error"),
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="positive-inf"),
+        pytest.param(float("-inf"), id="negative-inf"),
+        pytest.param(True, id="bool"),
+    ],
+)
+def test_initial_clock_failure_returns_local_error_without_network_or_leaks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clock_outcome: object,
+) -> None:
+    payload, receptor, ligand = _inputs(tmp_path)
+    private_root = tmp_path / "secret-payload"
+    private_root.mkdir()
+    receptor_path = private_root / "private-receptor.pdb"
+    ligand_path = private_root / "private-ligand.sdf"
+    receptor_path.write_bytes(receptor)
+    ligand_path.write_bytes(ligand)
+    payload["receptor_path"] = str(receptor_path)
+    payload["ligand_path"] = str(ligand_path)
+    requests = 0
+    clock_calls = 0
+
+    def monotonic() -> object:
+        nonlocal clock_calls
+        clock_calls += 1
+        if isinstance(clock_outcome, BaseException):
+            raise clock_outcome
+        return clock_outcome
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        raise AssertionError("invalid initial clock must not reach the broker")
+
+    monkeypatch.setattr(runner_module.time, "monotonic", monotonic)
+
+    result = _runner(tmp_path, handler).execute(
+        payload,
+        job_id="secret-clock-job",
+    )
+
+    encoded = json.dumps(result.to_legacy_dict(), default=str)
+    assert clock_calls == 1
+    assert requests == 0
+    assert result.success is False
+    assert result.error is not None
+    assert result.error.code is AgentErrorCode.INVALID_OUTPUT
+    assert result.error.details == {"reason": "sandbox_execution_failed"}
+    assert result.elapsed_ms == 0
+    assert "secret" not in encoded
+    assert str(tmp_path) not in encoded
+
+
+@pytest.mark.parametrize(
     ("failure", "expected_reason"),
     [
         ("smiles", "smiles_not_supported_by_opensandbox"),
