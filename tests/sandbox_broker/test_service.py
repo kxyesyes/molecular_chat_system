@@ -2723,6 +2723,74 @@ def test_completed_destroy_failure_retries_same_identity_then_succeeds(
     assert cleanup_events[3]["cleanup_status"] == "succeeded"
 
 
+def test_failed_science_keeps_terminal_truth_after_cleanup_retry_succeeds(
+    tmp_path: Path,
+) -> None:
+    class InvalidResultTransientDestroyClient(FakeSandboxClient):
+        def __init__(self) -> None:
+            super().__init__(valid_result=False)
+
+        async def destroy(self, handle: SandboxHandle) -> None:
+            self.destroy_count += 1
+            self.destroyed_ids.append(handle.sandbox_id)
+            if self.destroy_count == 1:
+                raise SandboxDestroyError(
+                    "sandbox cleanup failed",
+                    operation="destroy",
+                    failure_class=FailureClass.CONNECTION_FAILED,
+                    completion_known=True,
+                )
+
+    telemetry = RecordingTelemetry()
+
+    async def scenario() -> tuple[object, InvalidResultTransientDestroyClient]:
+        sdk = InvalidResultTransientDestroyClient()
+        service, _, config = _service(tmp_path, sdk, telemetry=telemetry)
+        service._destroy_retry_delay_seconds = 0.0
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-invalid-cleanup-recovered")
+        terminal = await service.wait_terminal(job.job_id)
+        await service.stop()
+        return terminal, sdk
+
+    terminal, sdk = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.SCIENTIFIC_OUTPUT_INVALID.value
+    assert terminal.cleanup_status == "succeeded"
+    assert sdk.run_count == 1
+    assert sdk.destroy_count == 2
+    events = telemetry.snapshot()["recent_events"]
+    cleanup_events = [
+        event
+        for event in events
+        if event["phase"] in {"cleanup_started", "cleanup_completed"}
+    ]
+    assert [event["attempt"] for event in cleanup_events] == [1, 1, 2, 2]
+    assert [event["outcome"] for event in cleanup_events] == [
+        None,
+        "failed",
+        None,
+        "passed",
+    ]
+    assert cleanup_events[1]["failure_class"] == "destroy_failed"
+    assert cleanup_events[3]["failure_class"] is None
+    terminal_event = events[-1]
+    assert terminal_event["phase"] == "job_terminal"
+    assert terminal_event["outcome"] == "failed"
+    assert terminal_event["cleanup_status"] == "succeeded"
+    assert terminal_event["failure_class"] == "none"
+
+    from scripts import run_opensandbox_stability_soak as soak
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
+
+    assert evidence.events_complete is True
+    assert evidence.cleanup_status == "succeeded"
+    assert evidence.terminal_outcome == "failed"
+    assert evidence.failure_class == "none"
+    assert evidence.failure_codes == ()
+
+
 def test_two_completed_destroy_failures_mark_cleanup_failed(tmp_path: Path) -> None:
     class FailingDestroyClient(FakeSandboxClient):
         async def destroy(self, handle: SandboxHandle) -> None:

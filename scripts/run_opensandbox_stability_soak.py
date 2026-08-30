@@ -1172,15 +1172,15 @@ def _lifecycle_event_fields_valid(event: Mapping[str, object]) -> bool:
     return False
 
 
-def _normalize_failed_operation_pairs(
+def _normalize_operation_pairs(
     events: Sequence[Mapping[str, object]],
-) -> tuple[list[str], dict[str, tuple[Mapping[str, object], Mapping[str, object]]]] | None:
+    *,
+    allow_retry: bool,
+) -> tuple[list[str], list[Mapping[str, object]]] | None:
     """Fold one bounded retry pair per operation or fail closed."""
 
     normalized_phases: list[str] = []
-    final_pairs: dict[
-        str, tuple[Mapping[str, object], Mapping[str, object]]
-    ] = {}
+    effective_events: list[Mapping[str, object]] = []
     index = 0
     while index < len(events):
         event = events[index]
@@ -1190,7 +1190,8 @@ def _normalize_failed_operation_pairs(
         if phase in {"job_received", "queue_entered", "job_terminal"}:
             if event.get("attempt") is not None:
                 return None
-            normalized_phases.append(str(phase))
+            normalized_phases.append(phase)
+            effective_events.append(event)
             index += 1
             continue
         if not phase.endswith("_started"):
@@ -1222,7 +1223,8 @@ def _normalize_failed_operation_pairs(
             and events[next_index].get("phase") == phase
         ):
             if (
-                attempt != 1
+                not allow_retry
+                or attempt != 1
                 or completed.get("outcome") != "failed"
                 or next_index + 1 >= len(events)
             ):
@@ -1242,10 +1244,10 @@ def _normalize_failed_operation_pairs(
             next_index += 2
 
         normalized_phases.extend((phase, completed_phase))
-        final_pairs[operation] = (final_started, final_completed)
+        effective_events.extend((final_started, final_completed))
         index = next_index
 
-    return normalized_phases, final_pairs
+    return normalized_phases, effective_events
 
 
 def evaluate_lifecycle(
@@ -1283,6 +1285,12 @@ def evaluate_lifecycle(
     fields_semantically_valid = all(
         _lifecycle_event_fields_valid(event) for event in correlated
     )
+    normalization = _normalize_operation_pairs(
+        correlated,
+        allow_retry=type(result_succeeded) is bool and not result_succeeded,
+    )
+    normalized_phases, effective_events = normalization or ([], [])
+    lifecycle_events = effective_events if normalization is not None else correlated
 
     raw_failure_classes = [
         event.get("failure_class")
@@ -1293,9 +1301,14 @@ def evaluate_lifecycle(
         type(value) is not str or value not in FAILURE_CLASSES
         for value in raw_failure_classes
     )
+    effective_failure_classes = [
+        event.get("failure_class")
+        for event in lifecycle_events
+        if event.get("failure_class") is not None
+    ]
     legal_failure_classes = {
         value
-        for value in raw_failure_classes
+        for value in effective_failure_classes
         if type(value) is str and value in FAILURE_CLASSES
     }
     if illegal_failure_class or len(legal_failure_classes) > 1:
@@ -1306,7 +1319,9 @@ def evaluate_lifecycle(
         failure_class = "none"
 
     validations = [
-        event for event in correlated if event.get("phase") == "validation_completed"
+        event
+        for event in lifecycle_events
+        if event.get("phase") == "validation_completed"
     ]
     tool_versions: dict[str, str] = {}
     if fields_semantically_valid and len(validations) == 1:
@@ -1321,10 +1336,10 @@ def evaluate_lifecycle(
             tool_versions = {"vina": vina_version, "meeko": meeko_version}
 
     cleanup_started_events = [
-        event for event in correlated if event.get("phase") == "cleanup_started"
+        event for event in lifecycle_events if event.get("phase") == "cleanup_started"
     ]
     cleanup_completed_events = [
-        event for event in correlated if event.get("phase") == "cleanup_completed"
+        event for event in lifecycle_events if event.get("phase") == "cleanup_completed"
     ]
     cleanup_completed = (
         cleanup_completed_events[0] if len(cleanup_completed_events) == 1 else {}
@@ -1337,7 +1352,7 @@ def evaluate_lifecycle(
         if type(cleanup_status) is str
         else None
     )
-    single_cleanup_consistent = (
+    cleanup_consistent = (
         len(cleanup_started_events) == 1
         and cleanup_started_events[0].get("cleanup_status") == "in_progress"
         and len(cleanup_completed_events) == 1
@@ -1346,13 +1361,19 @@ def evaluate_lifecycle(
         and cleanup_completed.get("cleanup_status") == cleanup_status
     )
 
-    prior_failure_classes = [
-        event.get("failure_class")
-        for event in correlated
-        if event.get("phase") != "job_terminal"
-        and type(event.get("failure_class")) is str
-        and event.get("failure_class") in FAILURE_CLASSES
-    ]
+    prior_failure_classes: list[str] = []
+    for event in lifecycle_events:
+        phase = event.get("phase")
+        if (
+            type(phase) is str
+            and phase.endswith("_completed")
+            and event.get("outcome") == "failed"
+        ):
+            value = event.get("failure_class")
+            if value is None:
+                prior_failure_classes.append("none")
+            elif type(value) is str and value in FAILURE_CLASSES:
+                prior_failure_classes.append(value)
     terminal_failure_class = terminal.get("failure_class")
     terminal_failure_consistent = not (
         terminal_outcome == "failed"
@@ -1364,11 +1385,12 @@ def evaluate_lifecycle(
     if type(result_succeeded) is bool and result_succeeded:
         complete = (
             phases == list(EXPECTED_PHASES)
+            and normalized_phases == list(EXPECTED_PHASES)
             and len(terminals) == 1
             and terminal_outcome == "passed"
             and cleanup_status == "succeeded"
             and fields_semantically_valid
-            and single_cleanup_consistent
+            and cleanup_consistent
             and len(validations) == 1
             and set(tool_versions) == {"vina", "meeko"}
             and all(
@@ -1379,8 +1401,6 @@ def evaluate_lifecycle(
             and all(event.get("failure_class") is None for event in correlated)
         )
     elif type(result_succeeded) is bool:
-        normalized = _normalize_failed_operation_pairs(correlated)
-        normalized_phases, final_pairs = normalized or ([], {})
         phase_positions: list[int] = []
         for phase in normalized_phases:
             if type(phase) is not str or phase not in EXPECTED_PHASES:
@@ -1391,14 +1411,6 @@ def evaluate_lifecycle(
             left < right
             for left, right in zip(phase_positions, phase_positions[1:])
         )
-        final_cleanup_pair = final_pairs.get("cleanup")
-        failed_cleanup_consistent = bool(
-            final_cleanup_pair is not None
-            and final_cleanup_pair[0].get("cleanup_status") == "in_progress"
-            and expected_cleanup_outcome is not None
-            and final_cleanup_pair[1].get("outcome") == expected_cleanup_outcome
-            and final_cleanup_pair[1].get("cleanup_status") == cleanup_status
-        )
         complete = (
             normalized_phases[0:1] == ["job_received"]
             and normalized_phases[-3:] == list(EXPECTED_PHASES[-3:])
@@ -1406,7 +1418,7 @@ def evaluate_lifecycle(
             and type(terminal_outcome) is str
             and terminal_outcome in {"failed", "cancelled"}
             and fields_semantically_valid
-            and failed_cleanup_consistent
+            and cleanup_consistent
             and ordered_lifecycle
             and terminal_failure_consistent
         )

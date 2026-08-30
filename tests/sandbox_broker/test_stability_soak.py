@@ -720,6 +720,58 @@ def test_success_lifecycle_has_exact_order_identity_cleanup_and_versions() -> No
     assert evidence.failure_codes == ()
 
 
+def test_success_lifecycle_accepts_production_attempt_one_pairs() -> None:
+    events = successful_lifecycle()
+    for event in events:
+        if event["phase"].endswith(("_started", "_completed")):
+            event["attempt"] = 1
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=True)
+
+    assert evidence.events_complete is True
+    assert evidence.failure_codes == ()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "started_completed_mismatch",
+        "single_pair_attempt_two",
+        "bool_attempt",
+        "attempt_above_two",
+        "job_received_attempt",
+        "queue_entered_attempt",
+        "terminal_attempt",
+    ],
+)
+def test_success_lifecycle_attempt_mutations_fail_closed(mutation: str) -> None:
+    events = successful_lifecycle()
+    if mutation == "started_completed_mismatch":
+        events[2]["attempt"] = 1
+        events[3]["attempt"] = 2
+    elif mutation == "single_pair_attempt_two":
+        events[2]["attempt"] = 2
+        events[3]["attempt"] = 2
+    elif mutation == "bool_attempt":
+        events[2]["attempt"] = True
+        events[3]["attempt"] = True
+    elif mutation == "attempt_above_two":
+        events[2]["attempt"] = 3
+        events[3]["attempt"] = 3
+    else:
+        phase = {
+            "job_received_attempt": "job_received",
+            "queue_entered_attempt": "queue_entered",
+            "terminal_attempt": "job_terminal",
+        }[mutation]
+        next(event for event in events if event["phase"] == phase)["attempt"] = 1
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=True)
+
+    assert evidence.events_complete is False
+    assert evidence.failure_codes == ("events_incomplete",)
+
+
 def test_success_lifecycle_rejects_completion_fields_on_cleanup_started() -> None:
     events = successful_lifecycle()
     next(
