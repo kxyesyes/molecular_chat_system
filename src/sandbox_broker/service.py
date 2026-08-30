@@ -35,6 +35,7 @@ from .opensandbox_client import (
     SandboxCreateError,
     SandboxDestroyError,
     SandboxHandle,
+    SandboxProtocolError,
     classify_control_plane_failure,
 )
 from .resilience import BreakerPermit, ControlPlaneCircuitBreaker
@@ -1578,6 +1579,12 @@ class SandboxBrokerService:
             except asyncio.CancelledError:
                 raise
             except BaseException as create_failure:
+                if (
+                    isinstance(create_failure, SandboxProtocolError)
+                    and create_failure.cleanup_confirmed is False
+                ):
+                    remote_identity_unknown = True
+                    failure_warnings = (_REMOTE_AUTO_EXPIRY_WARNING,)
                 classified = self._classified_failure("create", create_failure)
                 terminal_failure_class = classified
                 if permit is not None:

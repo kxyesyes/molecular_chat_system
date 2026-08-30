@@ -427,6 +427,21 @@ def test_create_rejects_invalid_server_ids_and_destroys_returned_raw_once(
     assert len(fake.destroyed) == 1
 
 
+def test_invalid_server_id_preserves_failed_cleanup_certainty(
+    tmp_path: Path,
+) -> None:
+    fake = FakeSandboxFactory()
+    fake.failures["destroy"] = ConnectionError("private destroy failure")
+    fake.raw.id = "invalid/identifier"
+    client = OpenSandboxClient(config(tmp_path), sandbox_factory=fake)
+
+    with pytest.raises(SandboxProtocolError) as raised:
+        asyncio.run(client.create("job-1"))
+
+    assert raised.value.cleanup_confirmed is False
+    assert len(fake.destroyed) == 1
+
+
 @pytest.mark.parametrize(
     ("path", "data"),
     [

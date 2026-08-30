@@ -29,6 +29,7 @@ from src.sandbox_broker.opensandbox_client import (
     SandboxCreateError,
     SandboxDestroyError,
     SandboxHandle,
+    SandboxProtocolError,
 )
 from src.sandbox_broker.resilience import ControlPlaneCircuitBreaker
 from src.sandbox_broker.service import (
@@ -153,6 +154,17 @@ class FakeSandboxClient:
 
     async def drain_cleanup(self) -> None:
         return None
+
+
+class UnknownIdentitySandboxClient(FakeSandboxClient):
+    async def create(self, job_id: str) -> SandboxHandle:
+        del job_id
+        self.create_count += 1
+        raise SandboxProtocolError(
+            "the sandbox service returned an invalid identifier",
+            operation="create",
+            cleanup_confirmed=False,
+        )
 
 
 class MultiModeSandboxClient(FakeSandboxClient):
@@ -600,6 +612,26 @@ def _service(
         circuit_breaker=circuit_breaker,
     )
     return service, store, config
+
+
+def test_unknown_remote_identity_never_records_cleanup_success(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        sdk = UnknownIdentitySandboxClient()
+        service, _store, config = _service(tmp_path, sdk)
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-unknown-identity")
+        terminal = await service.wait_terminal(job.job_id, timeout=2.0)
+        await service.stop(timeout=2.0)
+
+        assert sdk.create_count == 1
+        assert terminal.status is BrokerJobStatus.FAILED
+        assert terminal.error_code == BrokerErrorCode.CLEANUP_FAILED.value
+        assert terminal.cleanup_status == "failed"
+        assert service_module._REMOTE_AUTO_EXPIRY_WARNING in terminal.warnings
+
+    asyncio.run(scenario())
 
 
 class RecordingTelemetry(BrokerTelemetry):

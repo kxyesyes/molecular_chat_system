@@ -219,6 +219,85 @@ def test_failed_run_never_reruns_full_suite() -> None:
     assert "Authorization" not in json.dumps(report)
 
 
+def test_executor_advances_after_one_measured_execution_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DiagnosticsClient:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        def snapshot(self) -> dict[str, object]:
+            value = diagnostics(len(self.events) // len(PHASES))
+            value["telemetry"]["recent_events"] = list(self.events)
+            return value
+
+    diagnostics_client = DiagnosticsClient()
+
+    class Runner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def execute(self, payload: object, *, job_id: str) -> object:
+            del payload
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("one measured execution failed")
+            diagnostics_client.events.extend(
+                soak.synthetic_event(job_id, phase) for phase in PHASES
+            )
+            return object()
+
+    class Observer:
+        failure_codes: list[str] = []
+
+        def disable_intrusive_probes(self) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        soak,
+        "_project_result",
+        lambda *args, **kwargs: {
+            "status": "passed",
+            "latency_ms": 100,
+            "pose_count": 1,
+            "best_energy": -7.0,
+            "artifact_path": "outputs/opensandbox_stability/pose.pdbqt",
+            "artifact_sha256": HEX,
+            "cleanup_status": "succeeded",
+            "image_digest": HEX,
+            "secure_runtime": "gvisor",
+            "tool_versions": {"vina": "1.2.5", "meeko": "0.6.1"},
+            "warning_codes": [],
+            "failure_codes": [],
+        },
+    )
+    runner = Runner()
+    executor = soak.StabilityExecutor(
+        runner=runner,
+        payload={},
+        observer_factory=Observer,
+        diagnostics_client=diagnostics_client,
+        project_root=Path.cwd(),
+    )
+
+    failures = 0
+    for index in range(1, 31):
+        try:
+            executor.measured_run(index)
+        except RuntimeError:
+            failures += 1
+
+    assert failures == 1
+    assert runner.calls == 30
+    assert executor.measured_calls == 30
+
+
 def test_disabled_gate_writes_safe_report_and_stable_stdout(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -386,19 +465,34 @@ def test_atomic_write_rejects_symlink_parent_and_existing_hardlink(tmp_path: Pat
     assert outside.read_text(encoding="utf-8") == "sentinel"
 
 
-def test_atomic_write_cleans_temp_when_replace_fails(
+def test_atomic_write_cleans_temp_when_link_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     destination = tmp_path / "report.json"
 
-    def fail_replace(source: object, target: object) -> None:
+    def fail_link(source: object, target: object) -> None:
         del source, target
         raise OSError("secret-bearing platform failure")
 
-    monkeypatch.setattr(soak.os, "replace", fail_replace)
+    monkeypatch.setattr(soak.os, "link", fail_link)
     with pytest.raises(soak.SafeReportError):
         soak.atomic_write_report(destination, soak.gate_report("failed", "write_failed"))
     assert list(tmp_path.iterdir()) == []
+
+
+def test_atomic_write_never_replaces_existing_failed_report(tmp_path: Path) -> None:
+    destination = tmp_path / "report.json"
+    failed = soak.gate_report("failed", "runtime_failed")
+    soak.atomic_write_report(destination, failed)
+    original = destination.read_bytes()
+
+    with pytest.raises(soak.SafeReportError):
+        soak.atomic_write_report(
+            destination,
+            soak.gate_report("skipped", "stability_gate_disabled"),
+        )
+
+    assert destination.read_bytes() == original
 
 
 def test_atomic_write_concurrent_target_creation_never_clobbers_hardlink(
@@ -407,14 +501,15 @@ def test_atomic_write_concurrent_target_creation_never_clobbers_hardlink(
     destination = tmp_path / "report.json"
     outside = tmp_path / "outside.json"
     outside.write_text("sentinel", encoding="utf-8")
-    original_replace = soak.os.replace
+    original_link = soak.os.link
 
     def race(source: object, target: object) -> None:
-        os.link(outside, destination)
-        original_replace(source, target)
+        original_link(outside, destination)
+        original_link(source, target)
 
-    monkeypatch.setattr(soak.os, "replace", race)
-    soak.atomic_write_report(destination, soak.gate_report("failed", "write_failed"))
+    monkeypatch.setattr(soak.os, "link", race)
+    with pytest.raises(soak.SafeReportError):
+        soak.atomic_write_report(destination, soak.gate_report("failed", "write_failed"))
     assert outside.read_text(encoding="utf-8") == "sentinel"
 
 

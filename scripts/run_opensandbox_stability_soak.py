@@ -950,11 +950,10 @@ def _validate_destination(path: Path) -> None:
     if path.is_symlink():
         raise SafeReportError("unsafe_report_path")
     try:
-        metadata = path.stat(follow_symlinks=False)
+        path.stat(follow_symlinks=False)
     except FileNotFoundError:
         return
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-        raise SafeReportError("unsafe_report_path")
+    raise SafeReportError("report_exists")
 
 
 def atomic_write_report(path: Path, report: object) -> None:
@@ -984,7 +983,11 @@ def atomic_write_report(path: Path, report: object) -> None:
         os.close(descriptor)
         descriptor = None
         _validate_destination(destination)
-        os.replace(temporary, destination)
+        try:
+            os.link(temporary, destination)
+        except FileExistsError:
+            raise SafeReportError("report_exists") from None
+        temporary.unlink()
         final = destination.stat(follow_symlinks=False)
         if (
             not stat.S_ISREG(final.st_mode)
@@ -1081,6 +1084,8 @@ class StabilityExecutor:
     def measured_run(self, index: int) -> dict[str, Any]:
         if type(index) is not int or index != self.measured_count + 1 or not 1 <= index <= REPEAT:
             raise SanitizedRuntimeError("measured_index_invalid")
+        self.measured_count += 1
+        self.measured_calls += 1
         trace_id = f"soak-{self.nonce}-{index:02d}"
         before = self.diagnostics_client.snapshot()
         observer = self.observer_factory()
@@ -1130,8 +1135,6 @@ class StabilityExecutor:
             "failure_class": failure_class,
             "events_complete": events_complete,
         }
-        self.measured_count += 1
-        self.measured_calls += 1
         return validate_run(run, project_root=self.project_root)
 
     execute_measured = measured_run

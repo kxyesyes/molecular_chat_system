@@ -256,6 +256,27 @@ class SandboxDestroyError(SandboxClientError):
 class SandboxProtocolError(SandboxClientError):
     """The SDK or server returned data outside the expected contract."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        operation: str = "metadata",
+        failure_class: FailureClass = FailureClass.UNKNOWN_CONTROL_PLANE_FAILURE,
+        cleanup_confirmed: bool = True,
+    ) -> None:
+        if type(cleanup_confirmed) is not bool:
+            raise ValueError("invalid sandbox cleanup certainty")
+        super().__init__(
+            message,
+            operation=operation,
+            failure_class=failure_class,
+        )
+        self._cleanup_confirmed = cleanup_confirmed
+
+    @property
+    def cleanup_confirmed(self) -> bool:
+        return self._cleanup_confirmed
+
 
 class _MetadataObservationFailure(Exception):
     """Carry only classified list failure data between official lifecycle layers."""
@@ -1160,17 +1181,16 @@ class OpenSandboxClient:
                 operation="create",
             )
         except SandboxProtocolError:
+            cleanup_confirmed = True
             if raw is not None:
                 try:
                     await self._perform_cleanup(lambda: self._factory.destroy(raw))
                 except BaseException:
-                    raise SandboxProtocolError(
-                        "the sandbox service returned an invalid identifier",
-                        operation="create",
-                    ) from None
+                    cleanup_confirmed = False
             raise SandboxProtocolError(
                 "the sandbox service returned an invalid identifier",
                 operation="create",
+                cleanup_confirmed=cleanup_confirmed,
             ) from None
         return SandboxHandle(sandbox_id=sandbox_id, raw=raw)
 
