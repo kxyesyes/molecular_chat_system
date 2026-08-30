@@ -304,7 +304,12 @@ def test_static_validator_hashes_canonical_assets_as_raw_bytes(tmp_path: Path) -
     ),
 )
 def test_pinned_deployment_assets_are_checked_out_with_lf(asset: Path) -> None:
-    assert b"\r" not in asset.read_bytes()
+    content = asset.read_bytes()
+
+    assert content.startswith(
+        b"# Reviewed deployment asset: LF line endings are part of its identity.\n"
+    )
+    assert b"\r" not in content
 
 
 def _write_fake_firewall_tool(directory: Path) -> Path:
