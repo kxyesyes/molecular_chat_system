@@ -311,6 +311,64 @@ A missing dependency or failed security probe produces `failed` with a stable
 reason; neither condition can produce a passing report. This procedure has not
 run merely because unit/contract tests pass on Windows.
 
+### Private Broker observability and the 30-run stability gate
+
+Broker diagnostics and Prometheus metrics are available only through the
+protected Unix-domain socket. They may not be proxied by nginx and must not be
+bound to a TCP host or port. Read them as the `medchat-sandbox` service user:
+
+```bash
+sudo -u medchat-sandbox curl --silent --show-error --unix-socket \
+  /run/medchat-sandbox/broker.sock http://localhost/v1/diagnostics
+
+sudo -u medchat-sandbox curl --silent --show-error --unix-socket \
+  /run/medchat-sandbox/broker.sock http://localhost/metrics
+```
+
+After the reviewed release is installed and the static/runtime validator passes,
+run the fixed stability suite exactly once:
+
+```bash
+sudo -u medchat-temporal env \
+  MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK=1 \
+  MEDCHAT_SANDBOX_BROKER_SOCKET=/run/medchat-sandbox/broker.sock \
+  /opt/conda/envs/medchat/bin/python scripts/run_opensandbox_stability_soak.py --repeat 30 \
+  --report outputs/agent_evaluation/opensandbox_stability_soak.json
+```
+
+A passing report requires all of the following gates:
+
+- 30/30 measured submissions produce positive pose counts, finite energies,
+  verified relative artifacts and SHA-256 hashes, gVisor provenance, the pinned
+  image digest, and Vina/Meeko versions;
+- 30/30 measured submissions complete cleanup and emit the complete lifecycle
+  event sequence;
+- the idempotency probe creates exactly one sandbox;
+- queue pressure accepts nine submissions and records exactly one saturation;
+- cancellation, timeout, and security probes all pass;
+- there are zero running labelled containers after the suite;
+- total p95 latency is below 300 seconds;
+- provisioning, upload, command, validation, and cleanup p95 latencies are each
+  below 300 seconds.
+
+The report preserves these stable failure classes without including exception
+bodies or environment values: `connection_failed`, `server_500`, `proxy_502`,
+`readiness_timeout`, `create_timeout`, `command_transport_failed`,
+`command_timeout`, `resource_limit`, `destroy_failed`, and
+`unknown_control_plane_failure`. A successful run uses `none`.
+
+The control-plane circuit breaker opens after 3 failures within 60 seconds,
+remains open for 30 seconds, and then permits one half-open probe. Cleanup is
+required on every terminal path, including cancellation, timeout, breaker
+rejection, and failed provisioning.
+
+Operators must not replace a failed report with a passing rerun. Preserve the first report and investigate its stable
+failure classes and failed gates.
+
+If any gate fails, stop promotion and roll back to the previous reviewed Broker
+and worker generation. Confirm both services use the previous release, then
+verify the UDS owner/mode and zero labelled containers before resuming traffic.
+
 ## Cleanup and rollback
 
 Preserve a failed report only if it contains no sensitive material. Never copy

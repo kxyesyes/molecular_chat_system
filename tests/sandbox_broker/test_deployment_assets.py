@@ -29,6 +29,7 @@ FIREWALL_SCRIPT = DEPLOYMENT / "configure-firewall.sh"
 ENV_EXAMPLE = DEPLOYMENT / "opensandbox.env.example"
 INSTALLER = DEPLOYMENT / "install.sh"
 OPEN_SANDBOX_README = DEPLOYMENT / "README.md"
+BROKER_APP_SOURCE = ROOT / "src" / "sandbox_broker" / "app.py"
 TEMPORAL_WORKER_SERVICE = ROOT / "deployment" / "medchat-temporal-worker.service"
 VALIDATOR = ROOT / "scripts" / "validate_opensandbox_deployment.py"
 MEDCHAT_DEPENDENCY_LOCK = (
@@ -105,12 +106,87 @@ def _asset_root(tmp_path: Path) -> Path:
         OPENSANDBOX_SERVER_DEPENDENCY_INPUT,
         MEDCHAT_DEPENDENCY_LOCK,
         OPENSANDBOX_SERVER_DEPENDENCY_LOCK,
+        BROKER_APP_SOURCE,
     ):
         relative = source.relative_to(ROOT)
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
     return tmp_path
+
+
+def test_stability_observability_remains_on_protected_uds() -> None:
+    broker_unit = BROKER_SERVICE.read_text(encoding="utf-8")
+    source = BROKER_APP_SOURCE.read_text(encoding="utf-8")
+
+    assert (
+        "MEDCHAT_SANDBOX_BROKER_SOCKET=/run/medchat-sandbox/broker.sock"
+        in broker_unit
+    )
+    assert '@app.get("/v1/diagnostics")' in source
+    assert '@app.get("/metrics")' in source
+    assert "start_http_server" not in source
+    assert "METRICS_HOST" not in broker_unit
+    assert "METRICS_PORT" not in broker_unit
+
+
+def test_readme_documents_fixed_thirty_run_gate_and_failure_preservation() -> None:
+    guide = OPEN_SANDBOX_README.read_text(encoding="utf-8")
+
+    assert "run_opensandbox_stability_soak.py --repeat 30" in guide
+    assert "30/30" in guide
+    assert "zero running labelled containers" in guide
+    assert "Operators must not replace a failed report with a passing rerun." in guide
+    assert "may not be proxied by nginx" in guide
+    assert "3 failures within 60 seconds" in guide
+    assert "one half-open probe" in guide
+
+
+@pytest.mark.parametrize(
+    ("target", "old", "new"),
+    [
+        (
+            "app",
+            '@app.get("/v1/diagnostics")',
+            '@app.get("/v1/diagnostics-disabled")',
+        ),
+        (
+            "app",
+            'logger = logging.getLogger(__name__)',
+            'logger = logging.getLogger(__name__)\nstart_http_server(9000)',
+        ),
+        (
+            "unit",
+            "Environment=PYTHONDONTWRITEBYTECODE=1",
+            "Environment=PYTHONDONTWRITEBYTECODE=1\n"
+            "Environment=MEDCHAT_SANDBOX_METRICS_HOST=0.0.0.0",
+        ),
+        (
+            "unit",
+            "ExecStart=/opt/conda/envs/medchat/bin/python scripts/run_sandbox_broker.py",
+            "ExecStart=/opt/conda/envs/medchat/bin/uvicorn src.sandbox_broker.app:app",
+        ),
+    ],
+)
+def test_static_validator_rejects_unsafe_broker_diagnostics(
+    tmp_path: Path,
+    target: str,
+    old: str,
+    new: str,
+) -> None:
+    validator = _load_validator()
+    root = _asset_root(tmp_path)
+    path = (
+        root / BROKER_APP_SOURCE.relative_to(ROOT)
+        if target == "app"
+        else root / BROKER_SERVICE.relative_to(ROOT)
+    )
+    text = path.read_text(encoding="utf-8")
+    assert old in text
+    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+    assert validator.validate_static(root) == "broker_diagnostics_unsafe"
+    assert "broker_diagnostics_unsafe" in validator._STABLE_CODES
 
 
 def test_firewall_gate_precedes_and_is_required_by_opensandbox() -> None:
