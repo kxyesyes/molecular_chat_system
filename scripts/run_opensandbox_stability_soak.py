@@ -1379,6 +1379,14 @@ def evaluate_lifecycle(
             and _SAFE_VERSION.fullmatch(meeko_version) is not None
         ):
             tool_versions = {"vina": vina_version, "meeko": meeko_version}
+    passed_validation_provenance_complete = not any(
+        type(validation.get("outcome")) is str
+        and validation.get("outcome") == "passed"
+        for validation in validations
+    ) or (
+        len(validations) == 1
+        and set(tool_versions) == {"vina", "meeko"}
+    )
 
     cleanup_started_events = [
         event
@@ -1494,11 +1502,12 @@ def evaluate_lifecycle(
             and cancelled_cleanup_consistent
             and ordered_lifecycle
             and terminal_failure_consistent
+            and passed_validation_provenance_complete
         )
 
     if not complete:
         failure_codes = ("events_incomplete",)
-    elif result_succeeded and retry_observed:
+    elif retry_observed:
         failure_codes = ("broker_retry_observed",)
     else:
         failure_codes = ()

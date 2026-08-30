@@ -174,6 +174,44 @@ def successful_lifecycle_with_recovered_retry(
     return events
 
 
+def failed_science_lifecycle_with_recovered_cleanup_retry(
+    *,
+    trace_id: str = "broker-failed-recovered-cleanup",
+    job_id: str = "9" * 32,
+) -> list[dict[str, object]]:
+    events = failed_lifecycle(
+        failed_phase="command_completed",
+        failure_class="command_timeout",
+        cleanup_status="succeeded",
+        trace_id=trace_id,
+        job_id=job_id,
+    )
+    cleanup_index = next(
+        index
+        for index, event in enumerate(events)
+        if event["phase"] == "cleanup_started"
+    )
+    cleanup_started = events[cleanup_index]
+    cleanup_completed = events[cleanup_index + 1]
+    recovered_cleanup = dict(cleanup_completed)
+    cleanup_started["attempt"] = 1
+    cleanup_completed["attempt"] = 1
+    cleanup_completed["outcome"] = "failed"
+    cleanup_completed["failure_class"] = "destroy_failed"
+    cleanup_completed["cleanup_status"] = "failed"
+    events[cleanup_index + 2 : cleanup_index + 2] = [
+        dict(cleanup_started, attempt=2),
+        dict(
+            recovered_cleanup,
+            attempt=2,
+            outcome="passed",
+            failure_class=None,
+            cleanup_status="succeeded",
+        ),
+    ]
+    return events
+
+
 def validate_broker_events(events: list[dict[str, object]]) -> None:
     for event in events:
         normalized = dict(event)
@@ -646,6 +684,81 @@ def test_measured_run_fails_on_recovered_broker_retry_without_losing_completenes
     assert run["failure_class"] == "none"
 
 
+def test_measured_run_preserves_scientific_failure_and_recovered_cleanup_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = diagnostics(0)
+    before["telemetry"]["phase_latency_ms"] = {}
+    after = diagnostics(1)
+    after["telemetry"]["recent_events"] = (
+        failed_science_lifecycle_with_recovered_cleanup_retry()
+    )
+
+    class DiagnosticsClient:
+        def __init__(self) -> None:
+            self.values = iter([before, after])
+
+        def snapshot(self) -> dict[str, object]:
+            return next(self.values)
+
+    class Runner:
+        def __init__(self) -> None:
+            self.run_count = 0
+
+        def execute(self, payload: object, *, job_id: str) -> object:
+            del payload, job_id
+            self.run_count += 1
+            return SimpleNamespace(success=False)
+
+    class Observer:
+        failure_codes: list[str] = []
+
+        def disable_intrusive_probes(self) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        soak,
+        "_project_result",
+        lambda *args, **kwargs: {
+            "status": "failed",
+            "latency_ms": 271000,
+            "pose_count": 0,
+            "best_energy": None,
+            "artifact_path": None,
+            "artifact_sha256": None,
+            "cleanup_status": None,
+            "image_digest": None,
+            "secure_runtime": None,
+            "tool_versions": kwargs.get("validated_tool_versions", {}),
+            "warning_codes": [],
+            "failure_codes": ["docking_failed"],
+        },
+    )
+    runner = Runner()
+    executor = soak.StabilityExecutor(
+        runner=runner,
+        payload={},
+        observer_factory=Observer,
+        diagnostics_client=DiagnosticsClient(),
+        project_root=tmp_path,
+    )
+
+    run = executor.measured_run(1)
+
+    assert runner.run_count == 1
+    assert run["status"] == "failed"
+    assert run["events_complete"] is True
+    assert run["failure_class"] == "command_timeout"
+    assert run["failure_codes"] == ["broker_retry_observed", "docking_failed"]
+
+
 def test_measured_run_merges_scientific_and_lifecycle_failures_without_false_cleanup_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1092,6 +1205,64 @@ def test_failed_lifecycle_rejects_versions_on_failed_validation() -> None:
     assert evidence.failure_codes == ("events_incomplete",)
 
 
+def test_failed_cleanup_after_passed_validation_requires_complete_tool_versions() -> None:
+    events = successful_lifecycle()
+    validation = next(
+        event for event in events if event["phase"] == "validation_completed"
+    )
+    validation["vina_version"] = None
+    validation["meeko_version"] = None
+    cleanup = next(
+        event for event in events if event["phase"] == "cleanup_completed"
+    )
+    cleanup["outcome"] = "failed"
+    cleanup["failure_class"] = "destroy_failed"
+    cleanup["cleanup_status"] = "failed"
+    terminal = events[-1]
+    terminal["outcome"] = "failed"
+    terminal["failure_class"] = "destroy_failed"
+    terminal["cleanup_status"] = "failed"
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
+
+    assert evidence.events_complete is False
+    assert evidence.tool_versions == {}
+    assert evidence.failure_codes == ("events_incomplete",)
+
+
+def test_failed_cleanup_after_passed_validation_keeps_complete_tool_versions() -> None:
+    events = successful_lifecycle()
+    cleanup = next(
+        event for event in events if event["phase"] == "cleanup_completed"
+    )
+    cleanup["outcome"] = "failed"
+    cleanup["failure_class"] = "destroy_failed"
+    cleanup["cleanup_status"] = "failed"
+    terminal = events[-1]
+    terminal["outcome"] = "failed"
+    terminal["failure_class"] = "destroy_failed"
+    terminal["cleanup_status"] = "failed"
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
+
+    assert evidence.events_complete is True
+    assert evidence.tool_versions == {"vina": "1.2.5", "meeko": "0.7.1"}
+    assert evidence.failure_codes == ()
+
+
+def test_validation_provenance_check_fails_closed_without_comparing_malformed_outcome() -> None:
+    events = successful_lifecycle()
+    validation = next(
+        event for event in events if event["phase"] == "validation_completed"
+    )
+    validation["outcome"] = ExplodingComparison()
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
+
+    assert evidence.events_complete is False
+    assert evidence.failure_codes == ("events_incomplete",)
+
+
 def test_compound_broker_failures_keep_truthful_lifecycle_complete() -> None:
     events = failed_lifecycle(
         failed_phase="command_completed",
@@ -1157,7 +1328,20 @@ def test_failed_cleanup_retry_pairs_fold_without_hiding_compound_failure() -> No
     assert evidence.cleanup_status == "failed"
     assert evidence.terminal_outcome == "failed"
     assert evidence.failure_class == "unknown_control_plane_failure"
-    assert evidence.failure_codes == ()
+    assert evidence.failure_codes == ("broker_retry_observed",)
+
+
+def test_failed_science_preserves_recovered_cleanup_retry_evidence() -> None:
+    events = failed_science_lifecycle_with_recovered_cleanup_retry()
+
+    validate_broker_events(events)
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
+
+    assert evidence.events_complete is True
+    assert evidence.cleanup_status == "succeeded"
+    assert evidence.terminal_outcome == "failed"
+    assert evidence.failure_class == "command_timeout"
+    assert evidence.failure_codes == ("broker_retry_observed",)
 
 
 @pytest.mark.parametrize("operation", ["upload", "command", "validation"])

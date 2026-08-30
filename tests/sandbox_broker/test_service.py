@@ -2802,7 +2802,7 @@ def test_failed_science_keeps_terminal_truth_after_cleanup_retry_succeeds(
     assert evidence.cleanup_status == "succeeded"
     assert evidence.terminal_outcome == "failed"
     assert evidence.failure_class == "none"
-    assert evidence.failure_codes == ()
+    assert evidence.failure_codes == ("broker_retry_observed",)
 
 
 def test_two_completed_destroy_failures_mark_cleanup_failed(tmp_path: Path) -> None:
