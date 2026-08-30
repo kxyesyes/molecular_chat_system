@@ -72,8 +72,10 @@ passed on rerun. Earlier, the full service test file also reported `169 passed,
 non-stably-reproduced test-timing signals, not evidence that a deterministic
 runtime defect was fixed or that runtime stability is proven.
 
-No API key, credential, raw environment value, user-specific absolute path, or
-other sensitive runtime value is recorded in this handoff.
+The `OpenSandbox soak evaluator correction` section added in this sub-project
+contains no API key, credential, raw environment value, user-specific absolute
+path, or other sensitive runtime value. Older historical handoff sections are
+outside this statement's scope.
 
 Date: 2026-08-27
 
