@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts import run_opensandbox_stability_soak as soak
+from src.sandbox_broker.telemetry import BrokerTelemetryEvent, FailureClass, Phase
 
 
 HEX = "a" * 64
@@ -124,6 +125,17 @@ def successful_lifecycle(
     events[-1]["outcome"] = "passed"
     events[-1]["cleanup_status"] = "succeeded"
     return events
+
+
+def validate_broker_events(events: list[dict[str, object]]) -> None:
+    for event in events:
+        normalized = dict(event)
+        normalized["phase"] = Phase(event["phase"])
+        failure_class = event["failure_class"]
+        normalized["failure_class"] = (
+            FailureClass(failure_class) if failure_class is not None else None
+        )
+        BrokerTelemetryEvent.model_validate(normalized)
 
 
 def failed_lifecycle(
@@ -582,6 +594,42 @@ def test_truthful_failed_or_cancelled_lifecycle_is_recorded(
     assert evidence.terminal_outcome == terminal_outcome
     assert evidence.cleanup_status == cleanup_status
     assert evidence.failure_class == (failure_class or "none")
+    assert evidence.failure_codes == ()
+
+
+def test_compound_broker_failures_keep_truthful_lifecycle_complete() -> None:
+    events = failed_lifecycle(
+        failed_phase="command_completed",
+        failure_class="command_timeout",
+        cleanup_status="failed",
+    )
+    cleanup_completed = next(
+        event for event in events if event["phase"] == "cleanup_completed"
+    )
+    terminal = next(event for event in events if event["phase"] == "job_terminal")
+    cleanup_completed["failure_class"] = "destroy_failed"
+    terminal["failure_class"] = "destroy_failed"
+
+    validate_broker_events(events)
+    assert [event["phase"] for event in events] == [
+        *PHASES[: PHASES.index("command_completed") + 1],
+        *PHASES[-3:],
+    ]
+    assert cleanup_completed["outcome"] == "failed"
+    assert cleanup_completed["cleanup_status"] == "failed"
+    assert terminal["outcome"] == "failed"
+    assert terminal["cleanup_status"] == "failed"
+    assert {
+        event["failure_class"]
+        for event in events
+        if event["failure_class"] is not None
+    } == {"command_timeout", "destroy_failed"}
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
+
+    assert evidence.events_complete is True
+    assert evidence.cleanup_status == "failed"
+    assert evidence.failure_class == "unknown_control_plane_failure"
     assert evidence.failure_codes == ()
 
 
