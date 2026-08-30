@@ -336,14 +336,14 @@ All commands and edits in this task used the isolated task worktree. No command
 was run against, and no file was changed in, the original mixed workspace.
 Runtime reports remain ignored and outside the documentation commit.
 
-## OpenSandbox stability hardening (2026-08-30)
+## OpenSandbox stability hardening pre-soak snapshot (2026-08-30)
 
 - Branch: `codex/opensandbox-stability-hardening`.
 - Locally tested source commit: `b4c912d8d5c0562fbbaaa6e47e0e58f95f297ab6`.
-- QEMU soak: `not run`. The Windows host exposes a stopped WSL2 Ubuntu
+- QEMU soak at this checkpoint: `not run`. The Windows host exposes a stopped WSL2 Ubuntu
   distribution, but no QEMU CLI or prepared Ubuntu 24.04 QEMU acceptance host.
   WSL2 is not an allowed substitute for this production gate.
-- Runtime report: not created. No failed report was replaced and no passing
+- Runtime report at this checkpoint: not created. No failed report was replaced and no passing
   runtime status is inferred from unit tests.
 
 ### Local verification
@@ -381,9 +381,9 @@ later run could replace an existing failed report. Commit `58a0cb4` added
 regressions and closed all three. Reviewer re-verification found no remaining
 Critical or Important issue.
 
-### QEMU stability and scientific evidence
+### Historical pre-soak QEMU evidence state
 
-Because the real 30-job suite was not run, the following values are unavailable
+Because the real 30-job suite had not yet run at this checkpoint, the following values were unavailable
 and must remain `N/A`: pass rate, cleanup rate, event completeness, p50/p95
 latency, phase p95 latency, failure-class distribution, pose-count range,
 binding-energy range, Vina/Meeko runtime versions, image digest, and
@@ -395,7 +395,7 @@ count, queue saturation count, cancellation/timeout/security probes, and final
 running labelled container count. Local tests verify the contracts and failure
 preservation only; they do not satisfy the production gate.
 
-### Remaining production blocker
+### Pre-soak production gate
 
 On the reviewed Ubuntu 24.04 QEMU generation, operators must verify source
 identity and service state, then run exactly one gated invocation of
@@ -404,6 +404,82 @@ blocked until its report is `passed`, all gates are true, and an independent
 Docker label query reports zero running labelled containers. A `partial`,
 `failed`, `skipped`, Windows, or WSL result is non-promotable. Operators must
 preserve the first failed report and must not replace it with a passing rerun.
+
+## OpenSandbox real 30-job QEMU soak (2026-08-30)
+
+- Branch: `codex/opensandbox-stability-hardening`.
+- Active QEMU release commit: `79860ec175f0d3235dfd0597f248d7d52788fc76`.
+- Ubuntu 24.04, 4 vCPU, approximately 12 GiB RAM, Docker 29.1.3 and gVisor
+  `runsc release-20260817.0` were observed. The Broker, OpenSandbox, Temporal
+  worker and firewall services remained active after the run.
+- Linux deployment exposed two acceptance blockers before the real suite:
+  five reviewed assets had Windows-CRLF hashes even though Linux Git checkouts
+  use LF, and the documented `medchat-temporal` soak user did not exist and
+  could not perform host-firewall validation. Commits `e3f4bde` and `79860ec`
+  fix the line-ending contract and document the operator/root execution model.
+- Post-run independent review found that an already-existing Windows checkout
+  would not automatically rewrite otherwise unchanged assets after the new
+  `.gitattributes` rules. Commit `f39bb7d` changes each of the five reviewed
+  blobs with a common LF identity marker and updates their pins, forcing safe
+  rematerialization on upgrade. This post-run commit passed local static/tests
+  but was not deployed to, and does not change the identity of, the completed
+  `79860ec` QEMU evidence.
+- The first `e3f4bde` invocation failed before submitting a job with
+  `deployment_validation_failed`. Its 0600 report remains preserved in the
+  prior runtime generation; it was not overwritten or reclassified.
+- The reviewed `79860ec` generation passed static/runtime deployment validation
+  and executed one fixed 30-job suite. The root-owned 0600 runtime report is
+  `outputs/agent_evaluation/opensandbox_stability_soak-79860ec.json` with
+  SHA-256 `c66e07c3e9ad4669a8ab703fa57e887d16b8d71b938ba8a0755725692ae3c67f`.
+
+The formal report is honestly `failed`:
+
+```text
+repeat=30
+report_pass_rate=0.0
+scientific_pose_artifacts=18/30
+cleanup_rate=0.6
+event_completeness_rate=0.0
+p50_latency_ms=22781
+p95_latency_ms=86924.55
+queue_accepted=7
+queue_saturated=1
+running_labelled_containers=0
+security_probe=true
+cancellation_probe=false
+timeout_probe=false
+```
+
+Eighteen measured submissions produced real gVisor/Vina artifacts with valid
+SHA-256 values, 8-9 poses and best energies between `-3.286` and `-3.452`.
+Twelve submissions did not produce accepted scientific output: five reported
+`provider_error`, five `tool_timeout`, and two `invalid_output`. These are real
+stability failures and block promotion. The queue gate also failed because only
+seven requests succeeded instead of nine, and the cancellation/timeout probes
+did not satisfy their contracts. The independent post-run Docker label query
+reported zero running OpenSandbox containers.
+
+The report runner also has two confirmed false-negative defects that do not
+erase the twelve real failures: it correlates Broker telemetry with the caller
+idempotency key instead of the Broker-generated trace ID, so all lifecycle
+sequences become `events_incomplete`; and measured observers disable intrusive
+version probes without sourcing the Meeko version from the Broker validation
+event, so valid pose runs receive `tool_version_invalid` and
+`tool_version_mismatch`. Fix these contracts with recorded-report unit tests
+before any new reviewed QEMU generation. Do not rerun the `79860ec` report.
+
+Local verification after the deployment fixes:
+
+```powershell
+python -m pytest tests/sandbox_broker/test_deployment_assets.py -q -p no:cacheprovider
+# 157 passed, 40 skipped
+
+python -m pytest tests/sandbox_broker -q -p no:cacheprovider
+# 1883 passed, 75 skipped
+
+python -m compileall -q src scripts
+# passed
+```
 
 No API key state or value is required for this stage, and no credential was
 recorded in source, tests, logs, or this handoff.
