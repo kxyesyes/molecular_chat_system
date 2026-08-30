@@ -4,7 +4,7 @@
 
 **Goal:** Remove the project-controlled causes behind the preserved real OpenSandbox run's 5 provider/readiness failures, 5 scientific-command timeouts, 2 invalid outputs, probe-timing failures, and approximately 50-second image-inspection delay without weakening scientific truth, cleanup, provenance, release identity, or promotion gates.
 
-**Architecture:** Keep the corrected soak evaluator as the evidence judge. Remediate sanitized telemetry, bounded control-plane retries, image-readiness caching, phase budgets, atomic scientific output, and deterministic probes first. Then install the reviewed commit as a root-owned immutable runtime generation and atomically activate both Broker and Temporal worker through `/opt/medchat/current`. A single tested root orchestrator owns privileged validation, non-root transient acceptance/soak, pre/post manifests, the permanent full-commit claim, evidence hashing, and at most one rollback; operators never call the formal workers directly.
+**Architecture:** Keep the corrected soak evaluator as the evidence judge. Remediate sanitized telemetry, bounded control-plane retries, image-readiness caching, phase budgets, atomic scientific output, and deterministic probes first. Then a single tested root orchestrator acquires a whole-transaction non-blocking lock, stages the reviewed commit as a root-owned immutable runtime generation, and atomically activates and verifies both Broker and Temporal worker through `/opt/medchat/current`. The same orchestrator owns privileged validation, isolated non-root transient acceptance/soak, pre/post manifests, the permanent full-commit claim, evidence hashing, terminal-result fsync, and at most one rollback; operators never call activation primitives or formal workers directly.
 
 **Tech Stack:** Python 3.10+, asyncio, FastAPI over Unix-domain socket, Pydantic 2, OpenSandbox SDK 0.1.15, Docker, gVisor/runsc, AutoDock Vina 1.2.5, Meeko 0.7.1, pytest, POSIX shell, systemd, Ubuntu 24.04 QEMU/KVM.
 
@@ -56,9 +56,9 @@ Every task must preserve these boundaries:
 | `scripts/run_opensandbox_docking_acceptance.py` | Real container observer, process-local image-preflight cache, lifecycle probes, unique diagnostics-delta identity discovery, and external formal output root. |
 | `scripts/run_opensandbox_stability_soak.py` | Corrected scientific report gate and external formal output root; callable formally only by the root orchestrator. |
 | `scripts/opensandbox_formal_runtime.py` | Canonical release manifest, release attestation, hygiene checks, and trusted external-output preparation shared by staging and the formal gate. |
-| `scripts/run_opensandbox_formal_qemu_gate.py` | Root-only, exactly-once formal QEMU orchestrator for privileged validation, non-root acceptance/soak, immutable-release checks, report hashing, and single rollback. |
+| `scripts/run_opensandbox_formal_qemu_gate.py` | Sole root-only formal QEMU entry; holds the process-wide gate lock while it stages, activates, verifies, validates, runs non-root acceptance/soak, hashes evidence, publishes the terminal result, and owns at most one rollback. |
 | `scripts/validate_opensandbox_deployment.py` | Static/runtime release, unit, image, socket, network, and container checks. |
-| `deployment/opensandbox/activate-runtime-generation.sh` | Future root-only staging, activation, verification, and rollback entry point. |
+| `deployment/opensandbox/activate-runtime-generation.sh` | Future root-only generation primitive invoked by the formal orchestrator for staging, activation, verification, and one mode-specific rollback; it is not an operator formal entry. |
 | `deployment/opensandbox/medchat-sandbox-broker.service` | Future Broker execution from `/opt/medchat/current`. |
 | `deployment/medchat-temporal-worker.service` | Future worker execution from the same `/opt/medchat/current` generation. |
 | `deployment/opensandbox/install.sh` | Future installation of units and the root-owned activation command. |
@@ -71,7 +71,7 @@ Every task must preserve these boundaries:
 | `tests/sandbox_broker/test_real_opensandbox_acceptance.py` | Observer and probe timing contracts. |
 | `tests/sandbox_broker/test_stability_soak.py` | Report, lifecycle, attestation, failure retention, and non-clobber gates. |
 | `tests/sandbox_broker/test_deployment_assets.py` | Units, activation/rollback, validator, and immutable-generation tests. |
-| `tests/sandbox_broker/test_formal_qemu_gate.py` | Formal command construction, production telemetry keys, commit claims, manifest ordering, rollback state machine, and atomic gate-result tests. |
+| `tests/sandbox_broker/test_formal_qemu_gate.py` | Formal command construction and environment isolation, production telemetry keys, whole-gate locking/concurrency, commit claims, activation/verify failures, manifest ordering, rollback state machine, and atomic gate-result tests. |
 | `docs/handoff/latest.md` | Final evidence and promotion or rollback decision. |
 
 ### Task 1: Lock the sanitized failure-evidence contract
@@ -595,6 +595,20 @@ class _BrokerObservationError(RuntimeError):
 
 
 _NO_ATTEMPT_PHASES = frozenset({"job_received", "queue_entered", "job_terminal"})
+_ATTEMPT_PHASES = frozenset(
+    {
+        "provisioning_started",
+        "provisioning_completed",
+        "upload_started",
+        "upload_completed",
+        "command_started",
+        "command_completed",
+        "validation_started",
+        "validation_completed",
+        "cleanup_started",
+        "cleanup_completed",
+    }
+)
 
 
 def _broker_event_key(
@@ -609,9 +623,9 @@ def _broker_event_key(
     if phase in _NO_ATTEMPT_PHASES:
         if attempt is not None:
             return None
-    elif not (phase.endswith("_started") or phase.endswith("_completed")):
+    elif phase not in _ATTEMPT_PHASES:
         return None
-    elif type(attempt) is not int or attempt < 1:
+    elif type(attempt) is not int or attempt not in (1, 2):
         return None
     return trace_id, job_id, phase, attempt
 
@@ -696,10 +710,13 @@ def _wait_for_unique_new_broker_event(
 Before starting the runner thread, validate one diagnostics snapshot and create
 `baseline` from every valid `(trace_id, job_id, phase, attempt)` key in its
 `recent_events`. Production phases `job_received`, `queue_entered`, and
-`job_terminal` must carry `attempt=None`; any attempt on those phases is invalid.
-Every `*_started` and `*_completed` phase must carry a positive integer attempt;
-a missing, Boolean, zero, or negative value is invalid. Any other phase is
-rejected until it is explicitly added to one of these schema sets. The helper
+`job_terminal` must carry `attempt=None`; any integer or Boolean attempt on those
+phases is invalid. Only provisioning, upload, command, validation, and cleanup
+`started`/`completed` phases are accepted, and each must carry an exact integer
+attempt in `{1, 2}`. Suffix matching is forbidden: `forged_started`,
+`forged_completed`, and every other unknown phase fail closed even when their
+attempt looks valid. A missing, Boolean, zero, negative, or greater-than-two
+attempt is invalid. The helper
 then polls only the diagnostics delta. Zero new
 identities at the single monotonic deadline is
 `broker_identity_timeout`; more than one is
@@ -709,7 +726,8 @@ second scientific command.
 
 Write a complete deterministic unit fixture whose fake diagnostics client starts
 with a real complete prior lifecycle containing `job_received(attempt=None)`,
-`queue_entered(attempt=None)`, all started/completed pairs with positive integer
+  `queue_entered(attempt=None)`, all started/completed pairs with attempts in
+  `{1, 2}`,
 attempts, and `job_terminal(attempt=None)`. It then returns, in order: that
 baseline, a delta containing one new identity's `job_received(attempt=None)`,
 `queue_entered(attempt=None)`, and `provisioning_started(attempt=1)`, followed by
@@ -721,12 +739,53 @@ calls `_wait_for_unique_new_broker_event(...)`; only after it returns the unique
 identity does the test set cancellation. Join both threads with bounded waits
 and assert `run_count == 1`.
 
-Add negative fixtures for a started phase with `attempt=None`, a terminal phase
-with an integer attempt, zero identity until deadline, two new identities in one
-delta, and `job_terminal(attempt=None)` before `command_started`; malformed
-attempts raise `diagnostics_invalid`, while the observation failures raise the
-exact typed codes above. Each fixture sets cancellation in `finally`, joins the
-runner thread, and still asserts `run_count == 1`. Use a `FakeSandboxClient` plus
+Use this explicit RED/GREEN parameter matrix for `_broker_event_key`; RED must
+fail against the suffix-based implementation, and GREEN must pass only after the
+closed production phase sets and exact attempt bounds are implemented:
+
+```python
+@pytest.mark.parametrize(
+    ("phase", "attempt", "accepted"),
+    [
+        ("job_received", None, True),
+        ("queue_entered", None, True),
+        ("job_terminal", None, True),
+        ("provisioning_started", 1, True),
+        ("provisioning_completed", 2, True),
+        ("upload_started", 1, True),
+        ("upload_completed", 2, True),
+        ("command_started", 1, True),
+        ("command_completed", 2, True),
+        ("validation_started", 1, True),
+        ("validation_completed", 2, True),
+        ("cleanup_started", 1, True),
+        ("cleanup_completed", 2, True),
+        ("forged_started", 1, False),
+        ("forged_completed", 2, False),
+        ("command_started", None, False),
+        ("command_started", True, False),
+        ("command_started", 0, False),
+        ("command_started", 3, False),
+        ("job_terminal", 1, False),
+        ("job_received", False, False),
+    ],
+)
+def test_broker_event_key_matches_production_phase_schema(
+    phase: str, attempt: object, accepted: bool
+) -> None:
+    event = {"trace_id": "trace-1", "job_id": "job-1", "phase": phase,
+             "attempt": attempt}
+    assert (_broker_event_key(event) is not None) is accepted
+```
+
+Also add observer-level negative fixtures for a started phase with
+`attempt=None`, an unknown `forged_started` and `forged_completed` phase, a
+terminal phase with an integer attempt, attempts `0` and `3`, zero identity until
+deadline, two new identities in one delta, and `job_terminal(attempt=None)`
+before `command_started`; malformed phases or attempts raise
+`diagnostics_invalid`, while the observation failures raise the exact typed
+codes above. Each fixture sets cancellation in `finally`, joins the runner
+thread, and still asserts `run_count == 1`. Use a `FakeSandboxClient` plus
 `RecordingTelemetry` service test for end-to-end cancellation evidence. Run the
 synchronous worker-side runner only through
 `await asyncio.to_thread(runner.execute, payload, job_id=caller_job_id,
@@ -913,7 +972,9 @@ Assert:
 - activation atomically installs the Broker and worker units from the staged
   release while both services are stopped, then runs `systemctl daemon-reload`;
 - `/proc/$PID/cwd` for both services resolves to the same expected release;
-- failed restart or cwd verification restores the old symlink and old services;
+- an activation or cwd-verification failure is surfaced to the still-locked
+  formal orchestrator, which invokes the one mode-correct `rollback_once()`;
+  the activation primitive must not perform a hidden second rollback;
 - `--rollback` uses the recorded previous target and verifies old PID cwd;
 - generation-to-generation activation requires a valid `current` symlink and
   uses only `previous`; a first migration without `current` instead requires a
@@ -1230,7 +1291,9 @@ from the future `scripts/run_opensandbox_formal_qemu_gate.py`; inject command,
 filesystem, clock, random-ID, and activation adapters so local tests never call
 systemd, Docker, OpenSandbox, Vina, or QEMU.
 
-The command-builder tests require these exact privilege boundaries:
+The command-builder tests require these exact privilege and environment
+boundaries. `FormalWorkerKind` is a closed enum with `SOCKET_PROBE`,
+`ACCEPTANCE`, and `SOAK`; callers cannot supply arbitrary environment pairs:
 
 ```python
 validator = build_runtime_validator_command(
@@ -1243,16 +1306,40 @@ assert validator == [
     "--runtime",
 ]
 
-worker = build_transient_worker_command(
-    unit_name="medchat-formal-acceptance-c0ffee12",
-    executable=["/opt/conda/envs/medchat/bin/python", "-B", "worker.py"],
+common = dict(
     run_base=Path("/var/lib/medchat-opensandbox-runs/" + "a" * 40),
 )
-assert "--uid=medchat" in worker
-assert "--gid=medchat" in worker
-assert "--property=SupplementaryGroups=medchat-sandbox docker" in worker
-assert "--setenv=PYTHONDONTWRITEBYTECODE=1" in worker
-assert "--property=ReadOnlyPaths=/opt/medchat/current /opt/medchat/releases" in worker
+probe = build_transient_worker_command(
+    kind=FormalWorkerKind.SOCKET_PROBE,
+    unit_name="medchat-formal-probe-c0ffee12",
+    executable=["/opt/conda/envs/medchat/bin/python", "-B", "probe.py"],
+    **common,
+)
+acceptance = build_transient_worker_command(
+    kind=FormalWorkerKind.ACCEPTANCE,
+    unit_name="medchat-formal-acceptance-c0ffee12",
+    executable=["/opt/conda/envs/medchat/bin/python", "-B", "acceptance.py"],
+    **common,
+)
+soak = build_transient_worker_command(
+    kind=FormalWorkerKind.SOAK,
+    unit_name="medchat-formal-soak-c0ffee12",
+    executable=["/opt/conda/envs/medchat/bin/python", "-B", "soak.py"],
+    **common,
+)
+
+for worker in (probe, acceptance, soak):
+    assert "--uid=medchat" in worker
+    assert "--gid=medchat" in worker
+    assert "--property=SupplementaryGroups=medchat-sandbox docker" in worker
+    assert "--setenv=PYTHONDONTWRITEBYTECODE=1" in worker
+    assert "--property=ReadOnlyPaths=/opt/medchat/current /opt/medchat/releases" in worker
+
+acceptance_gate = "--setenv=MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE=1"
+soak_gate = "--setenv=MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK=1"
+assert acceptance_gate not in probe and soak_gate not in probe
+assert acceptance_gate in acceptance and soak_gate not in acceptance
+assert soak_gate in soak and acceptance_gate not in soak
 ```
 
 The validator command is run directly by the root gate with `python -B`; it is
@@ -1263,6 +1350,42 @@ environment file. The gate first runs a transient socket probe under the same
 soak. The probe must prove read/write access to
 `/run/medchat-sandbox/broker.sock`; an ordinary `sudo -u medchat test` command is
 forbidden by a negative command-builder assertion.
+
+The socket probe receives only `PYTHONDONTWRITEBYTECODE=1` and the fixed Broker
+socket environment required by its closed probe implementation. Acceptance adds
+exactly `MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE=1`; soak adds exactly
+`MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK=1`. Neither scientific gate variable may
+leak into the probe or the other scientific worker, and no builder accepts an
+arbitrary environment mapping.
+
+Add a whole-gate lock helper with this exact live path and ownership boundary:
+
+```python
+FORMAL_GATE_LOCK = Path("/run/lock/medchat-opensandbox-formal.lock")
+
+
+@contextmanager
+def acquire_formal_gate_lock(
+    path: Path = FORMAL_GATE_LOCK,
+) -> Iterator[BinaryIO]:
+    """Hold one root-only non-blocking formal-gate lock for the full transaction."""
+```
+
+After parsing and the effective-UID-zero check, this is the first gate operation.
+Open the non-symlink regular file using `O_CREAT | O_RDWR | O_CLOEXEC |
+O_NOFOLLOW`, mode `0600`, verify root ownership and exact mode with `fstat`, then
+call `fcntl.flock(fd, LOCK_EX | LOCK_NB)`. A held lock returns the stable code
+`formal_gate_locked`; unsafe metadata returns `formal_lock_untrusted`. Both are
+pre-ownership refusals: they must not stage, activate, verify, run validation or
+acceptance, publish/replace a terminal result, or call rollback. Keep the open
+file description alive until the terminal `gate-result.json` and its parent are
+fsynced on owned runs and any required rollback plus restored-PID verification
+has completed. Release it only in the outermost `finally`.
+
+Import `fcntl` only in the POSIX live adapter. The real temporary-file flock and
+two whole-gate concurrency tests are POSIX-only with an explicit Windows skip;
+all pure ordering, refusal, command-builder, and rollback tests remain
+cross-platform through the injected `GateLockAdapter`.
 
 Add a root-only claim helper with this exact public contract:
 
@@ -1290,6 +1413,14 @@ claim, symlinked/untrusted parent, invalid commit, short write/fsync failure, an
 an injected exception immediately after successful claim: every case is
 fail-closed and a successfully created claim remains present.
 
+Existing trusted regular commit claims and existing trusted terminal
+`gate-result.json` files are checked while the whole-gate lock is held and before
+legacy capture, staging, activation, or random-ID allocation. Check the terminal
+result first: it returns `formal_gate_already_terminal`; only an existing claim
+without a terminal result returns `formal_soak_already_claimed`.
+Unsafe claim/result entries return their existing untrusted-path codes. These are
+also pre-ownership refusals and always leave `rollback_count == 0`.
+
 Define the rollback state exactly as:
 
 ```python
@@ -1313,6 +1444,12 @@ attempted second rollback.
 Use an injected event recorder to test this exact gate order:
 
 ```text
+gate_lock_acquired
+preownership_claim_result_check
+rollback_state_capture
+release_stage
+release_activate
+release_verify
 pre_manifest
 runtime_validator_root
 socket_probe_transient
@@ -1325,6 +1462,8 @@ post_soak_manifest
 soak_report_hash
 rollback_once_if_failed
 gate_result_write
+gate_result_parent_fsync
+gate_lock_release
 ```
 
 On acceptance non-zero, missing report, or manifest mutation, the sequence still
@@ -1335,6 +1474,25 @@ are attempted before one rollback, and no second soak command is possible. The
 only scientific soak command builder accepts `repeat == 30`; every other repeat
 returns `formal_repeat_invalid`. A second same-commit gate fails with
 `formal_soak_already_claimed` before creating a random artifact directory.
+
+Add two full `run_formal_qemu_gate()` concurrency regressions, not merely helper
+tests. In the first, G1 reaches an injected barrier immediately after acquiring
+the real temporary-file `flock`; G2 enters with the same commit and returns
+`formal_gate_locked`, with `activation_count == 0`, `acceptance_count == 0`, and
+`rollback_count == 0`. Release G1, join both boundedly, and verify G1 alone owns
+the transaction. In the second, let G1 complete successfully and fsync both the
+permanent claim and terminal result; G2 then obtains the lock but refuses before
+staging with `formal_gate_already_terminal` because terminal-result precedence
+applies when claim and result both exist, with `activation_count == 0`,
+`acceptance_count == 0`, `soak_count == 0`, and `rollback_count == 0`. Run each
+test repeatedly to prove the refusal is deterministic.
+
+Add a parameterized ownership-boundary test for capture failure, stage failure,
+activation failure, and post-activation `--verify` failure. The first two assert
+`rollback_count == 0`; the latter two assert `rollback_count == 1`, the selected
+legacy/generation rollback command, restored PID-cwd verification before lock
+release, and no scientific worker invocation. RED must expose the old external
+activation/verify split; GREEN must pass through the one locked orchestrator.
 
 The atomic root-only gate result path is
 `/var/lib/medchat-opensandbox-runs/results/$FULL_COMMIT/gate-result.json`. Tests
@@ -1361,7 +1519,12 @@ parent fsync, and this strict no-raw-error schema:
 ```
 
 Passing gates use `rollback_mode="none"`, state `not_requested`, and retain the
-activated generation. Any failure requests exactly one mode-correct rollback.
+activated generation. A failure requests exactly one mode-correct rollback only
+after this invocation has crossed the activation boundary. Lock contention,
+existing claim/result refusal, unsafe pre-ownership paths, capture failure, and
+stage failure never request rollback; an owned pre-activation failure result uses
+`rollback_mode="none"`, `rollback_state="not_requested"`, and
+`rollback_verified=false`.
 If rollback fails, the orchestrator stops and disables both services, records
 `rollback_failed`, writes the result if its trusted result path remains usable,
 and requires QEMU snapshot recovery; it never attempts another activation or
@@ -1370,13 +1533,13 @@ rollback.
 - [ ] **Step 4: Run deployment, attestation, and formal-gate RED tests**
 
 ```powershell
-python -m pytest tests/sandbox_broker/test_deployment_assets.py tests/sandbox_broker/test_real_opensandbox_acceptance.py tests/sandbox_broker/test_stability_soak.py tests/sandbox_broker/test_formal_qemu_gate.py -q -p no:cacheprovider -k "runtime_generation or legacy_migration or release_attestation or release_manifest or output_root or report_non_clobber or bytecode or formal_qemu_gate or formal_soak_claim or rollback_once or command_builder"
+python -m pytest tests/sandbox_broker/test_deployment_assets.py tests/sandbox_broker/test_real_opensandbox_acceptance.py tests/sandbox_broker/test_stability_soak.py tests/sandbox_broker/test_formal_qemu_gate.py -q -p no:cacheprovider -k "runtime_generation or legacy_migration or release_attestation or release_manifest or output_root or report_non_clobber or bytecode or formal_qemu_gate or formal_gate_lock or formal_gate_concurrent or formal_soak_claim or activation_verify_failure or rollback_once or command_builder or worker_gate_environment"
 ```
 
 Expected: tests fail because the activation script, `/opt/medchat/current`
 units, legacy capture/rollback, canonical manifest, external output-root contract,
-formal gate, permanent claim, command builders, and rollback state machine do not
-yet exist.
+formal gate, whole-transaction lock, permanent claim, isolated worker-gate
+environments, command builders, and rollback state machine do not yet exist.
 
 - [ ] **Step 5: Implement the root-only generation mechanism**
 
@@ -1464,12 +1627,14 @@ installs the Broker and worker units from the staged release, runs daemon-reload
 restarts `medchat-sandbox-broker.service` then
 `medchat-temporal-worker.service`, and verifies both service PID cwd values equal
 the expected release. It also installs its already verified source as
-`/usr/local/sbin/medchat-activate-runtime-generation`. On any failure it restores
-the previous unit snapshots and symlink, daemon-reloads, restarts in dependency
-order, verifies old PID cwd, and exits non-zero. For first migration it requires
-the verified legacy transaction instead of creating `previous`; on any
-activation or gate failure it invokes the same internal operation as
-`--rollback-legacy`. `--rollback-legacy` stops the new worker then Broker,
+`/usr/local/sbin/medchat-activate-runtime-generation`. Once `--activate` begins,
+every non-zero exit or subsequent `--verify` failure is returned to the
+whole-gate-lock owner; `--activate` and `--verify` never invoke rollback
+implicitly. The formal gate has already captured the exact rollback mode and is
+the sole caller of `rollback_once()`, preventing an internal restoration followed
+by a second orchestrator restoration. For first migration, activation requires
+the verified legacy transaction instead of creating `previous`.
+`--rollback-legacy` stops the new worker then Broker,
 atomically restores both captured unit snapshots, restores the captured
 `current_state`, runs daemon-reload, restores each captured enabled/disabled and
 active/inactive state in Broker-before-worker dependency order, verifies both
@@ -1493,8 +1658,11 @@ existing Temporal bundle installer remains unchanged for legacy deployments and
 must not overwrite units during a generation activation transaction.
 Update `deployment/opensandbox/README.md` with the exact capture, first
 activation, generation rollback, legacy rollback, single root formal-gate
-invocation, manifest verification, and QEMU snapshot disaster-recovery commands
-from Steps 10-11. State explicitly that the preserved `79860ec` checkout is
+invocation, whole-gate lock, manifest verification, and QEMU snapshot
+disaster-recovery commands from Steps 10-11. The README must not expose direct
+operator `--stage`, `--activate`, or `--verify` commands as a formal workflow;
+those are tested primitives called only by the locked orchestrator. State
+explicitly that the preserved `79860ec` checkout is
 evidence only and must never be fed to `--stage` during first migration.
 
 - [ ] **Step 6: Implement release, output, and virtualization attestation**
@@ -1534,16 +1702,21 @@ Create `scripts/run_opensandbox_formal_qemu_gate.py` with a `main()` that accept
 only these formal arguments:
 
 ```text
+--source-repository /usr/local/src/medchat-release
 --expected-release-commit FULL_40_HEX
 --output-base /var/lib/medchat-opensandbox-runs
 --repeat 30
 --require-virt qemu
+--qemu-snapshot-id VALIDATED_SNAPSHOT_ID
+--qemu-operator-evidence-file /root/medchat-qemu-snapshot-evidence.json
 ```
 
-Require effective UID zero, `sys.dont_write_bytecode`, a clean root-owned
-output/claims/results hierarchy, a matching activated marker, and `repeat == 30`.
-The operator must not directly call either lower-level formal script. Implement
-the gate as one explicit state machine with injected adapters and no shell=True:
+Require effective UID zero, `sys.dont_write_bytecode`, a clean root-owned source
+checkout whose `HEAD` exactly matches the full commit, a trusted QEMU evidence
+file, a clean root-owned output/claims/results hierarchy, and `repeat == 30`.
+The operator must not call the activation primitive or either lower-level formal
+worker directly. Implement the gate as one explicit state machine with injected
+lock, command, filesystem, activation, and clock adapters and no `shell=True`:
 
 ```python
 def run_formal_qemu_gate(
@@ -1552,65 +1725,103 @@ def run_formal_qemu_gate(
     commands: CommandExecutor,
     filesystem: FormalFilesystem,
     activation: ActivationAdapter,
+    gate_lock: GateLockAdapter,
     clock: Callable[[], float],
     run_id_factory: Callable[[str], str],
 ) -> FormalGateResult:
     ...
 ```
 
-The implementation performs, in order:
+The implementation performs, in order, under one outer `try/finally`:
 
-1. Validate root, full commit, QEMU requirement, activated release marker/path,
-   service identities, zero labelled containers, trusted directories, and
-   release hygiene; determine rollback mode from the verified legacy transaction
-   or generation `previous` record. Before calling `run_id_factory`, `lstat` the
-   deterministic full-commit claim and result paths. A verified existing regular
-   claim returns `formal_soak_already_claimed`; a symlink or unsafe entry returns
-   `formal_claim_untrusted`. Neither path may be removed or replaced.
-2. Compute and retain the pre-command canonical manifest.
-3. Run the privileged deployment validator directly as root with
+1. After argument parsing and the effective-UID-zero check, acquire
+   `/run/lock/medchat-opensandbox-formal.lock` non-blockingly. Hold the same open
+   file description through every following step, terminal-result fsync, and any
+   rollback verification. Lock refusal exits immediately without rollback.
+2. While locked and before capture, staging, activation, or `run_id_factory`,
+   validate the full commit, QEMU identity/evidence, source checkout and trusted
+   output hierarchy. `lstat` the deterministic full-commit result first and claim
+   second. A trusted result returns `formal_gate_already_terminal`; absent a
+   result, a trusted claim returns `formal_soak_already_claimed`. Either condition
+   or any unsafe entry is a pre-ownership refusal: do not activate, run workers,
+   publish/replace a result, or rollback.
+3. Capture the rollback state. With no `current`, invoke `--capture-legacy` using
+   the supplied snapshot ID/evidence file and set mode `legacy`; with a verified
+   current generation, validate it and set mode `generation`. Then invoke
+   `--stage SOURCE_REPOSITORY FULL_COMMIT`. Any failure before `--activate`,
+   including capture or stage failure, has `rollback_count == 0` because live
+   runtime ownership has not changed.
+4. Immediately before invoking `--activate FULL_COMMIT`, mark
+   `activation_started=True`. Invoke `--activate`, then the installed
+   `--verify FULL_COMMIT`, and require marker, symlink target, service identity,
+   and both PID cwd values to match the staged release. Any non-zero return,
+   exception, or verification mismatch from this point onward is handled by the
+   same outer failure path and calls the already selected `rollback_once()`
+   exactly once. Add a RED/GREEN test where activation succeeds but `--verify`
+   fails; assert the correct legacy/generation rollback runs once, restored PID
+   cwd is verified, no validator/acceptance/claim runs, and the lock is released
+   only afterward.
+5. Compute and retain the pre-command canonical manifest; require zero labelled
+   containers and release hygiene on the now activated generation.
+6. Run the privileged deployment validator directly as root with
    `/opt/conda/envs/medchat/bin/python -B ... --runtime`; capture only return code
    and stable classifications, never stdout/stderr or environment values.
-4. Run the Broker-socket read/write probe in a collected transient unit built
+7. Run the Broker-socket read/write probe in a collected transient unit built
    with `User=medchat`, `Group=medchat`,
    `SupplementaryGroups=medchat-sandbox docker`, `NoNewPrivileges=true`,
    `ProtectSystem=strict`, read-only release paths, and only the external commit
    parent plus `/run/medchat-sandbox` writable.
-5. Create an absent acceptance run directory below the external commit parent
+8. Create an absent acceptance run directory below the external commit parent
    and run acceptance once in the same transient identity with `python -B` and
-   `PYTHONDONTWRITEBYTECODE=1`.
-6. Regardless of acceptance return code, recompute the manifest before any
+   `PYTHONDONTWRITEBYTECODE=1` plus only
+   `MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE=1`.
+9. Regardless of acceptance return code, recompute the manifest before any
    rollback, require the acceptance report, and hash it when present. Any return
    code, report, or mutation failure records stable codes and calls
    `rollback_once()` exactly once; it never creates a soak claim.
-7. Only after every prior gate passes, create and fsync the permanent full-commit
+10. Only after every prior gate passes, create and fsync the permanent full-commit
    claim. Create the random soak output directory only after the claim succeeds.
-8. Run the lower-level soak exactly once with `--repeat 30` in the same transient
-   identity. A process crash after claim is evidence requiring human review and
-   never authorizes another run for that commit.
-9. Regardless of soak return code, recompute the manifest before rollback,
+11. Run the lower-level soak exactly once with `--repeat 30` in the same
+   transient identity and only
+   `MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK=1`. A process crash after claim is
+   evidence requiring human review and never authorizes another run for that
+   commit.
+12. Regardless of soak return code, recompute the manifest before rollback,
    require the soak report, hash it when present, and collect only stable codes.
-10. On any failure call the mode-correct rollback once and verify its target PID
+13. On any failure after `activation_started=True`, call the mode-correct rollback
+    once and verify its target PID
     cwd. On rollback failure stop and disable worker then Broker and require the
-    recorded QEMU snapshot. On success retain the activated generation.
-11. Atomically publish one root-only strict `gate-result.json` using an absent
-    target, fsync the file and parent, and return non-zero for every failed gate.
+    recorded QEMU snapshot. Failures before activation, lock contention, and
+    existing claim/result refusals never call rollback. On success retain the
+    activated generation.
+14. For an owned transaction, atomically publish one root-only strict
+    `gate-result.json` using an absent target, fsync the file and parent, and
+    return non-zero for every failed gate. Release the whole-gate lock only after
+    result fsync and rollback verification finish. Pre-ownership refusals return
+    their stable code without creating or replacing a terminal result.
 
 `build_transient_worker_command()` is the only constructor for socket probe,
 acceptance, and soak units. It includes both supplementary groups on every path,
 sets `PYTHONDONTWRITEBYTECODE=1`, uses `python -B`, rejects arbitrary writable
-paths, and assigns a unique bounded unit name. The acceptance and soak argument
-builders always include the expected commit, QEMU requirement, and external
-output root. The gate never receives API credentials and never copies the
-root-managed service environment into a transient unit.
+paths, and assigns a unique bounded unit name. The probe adds only the fixed
+socket environment; acceptance adds only its acceptance gate; soak adds only its
+soak gate. Tests assert both positive presence and cross-kind absence. The
+acceptance and soak argument builders always include the expected commit, QEMU
+requirement, and external output root. The gate never receives API credentials
+and never copies the root-managed service environment into a transient unit.
 
+`acquire_formal_gate_lock()`, activation/verification,
 `create_formal_soak_claim()`, `rollback_once()`, manifest checks, report hashing,
-and atomic gate-result publication are called from `run_formal_qemu_gate()` only.
+and atomic gate-result publication are coordinated by
+`run_formal_qemu_gate()` only.
 Do not distribute rollback or exactly-once logic across shell traps, README
 snippets, acceptance, or soak. Map expected operating-system errors to stable
 codes; unexpected exceptions become `formal_gate_internal_error` without raw
-text. The `finally` path may close handles, but must never delete a claim or
-invoke a second rollback.
+text. The outer `finally` invokes rollback only when this invocation crossed the
+activation boundary and has not already requested it, verifies the restored
+state, fsyncs an owned terminal result when possible, and finally releases the
+lock. It must never delete a claim, replace an existing result, or invoke a
+second rollback.
 
 - [ ] **Step 8: Run GREEN, full, static, and repetition gates**
 
@@ -1637,9 +1848,12 @@ output roots, bytecode
 suppression, current/previous atomic switches, first legacy capture/rollback,
 historical-unit restoration, PID cwd checks, root/read-only ownership, writable
 runtime bind mounts, root-only validator, transient worker supplementary groups,
-permanent O_EXCL claims, exact repeat 30, single rollback state, QEMU/KVM-only
-attestation, marker/path mismatch, atomic result schema, and the prohibition on
-direct formal worker invocation. No Critical or Important findings may remain.
+closed per-worker environment gates, the whole-transaction non-blocking lock,
+pre-ownership refusal without rollback, permanent O_EXCL claims, exact repeat
+30, activation/verify inside the locked state machine, single rollback state,
+QEMU/KVM-only attestation, marker/path mismatch, atomic result schema, and the
+prohibition on direct activation or formal-worker invocation. No Critical or
+Important findings may remain.
 
 ```powershell
 git add -- deployment/opensandbox/activate-runtime-generation.sh deployment/opensandbox/install.sh deployment/opensandbox/medchat-sandbox-broker.service deployment/medchat-temporal-worker.service scripts/opensandbox_formal_runtime.py scripts/run_opensandbox_formal_qemu_gate.py scripts/run_opensandbox_docking_acceptance.py scripts/run_opensandbox_stability_soak.py scripts/validate_opensandbox_deployment.py deployment/opensandbox/README.md tests/sandbox_broker/test_deployment_assets.py tests/sandbox_broker/test_formal_qemu_gate.py tests/sandbox_broker/test_real_opensandbox_acceptance.py tests/sandbox_broker/test_stability_soak.py
@@ -1648,63 +1862,75 @@ git commit -m "feat: activate immutable opensandbox runtime generation"
 git rev-parse HEAD
 ```
 
-The resulting full commit becomes `RELEASE_COMMIT`; do not amend it after
-staging on QEMU.
+The resulting full commit becomes `RELEASE_COMMIT`; do not amend it after this
+review or while preparing the QEMU source checkout.
 
-- [ ] **Step 10: Stage and activate one reviewed QEMU release**
+- [ ] **Step 10: Prepare one reviewed QEMU source and recovery record**
 
 Run on the snapshotted Ubuntu QEMU host from a root-owned clean checkout. This
-step only captures the legacy layout when required, stages the reviewed commit,
-activates it, and verifies the generation. The activation command owns rollback
-for an activation failure. Do not run runtime validation, acceptance, soak, or a
-separate rollback shell in this step:
+step prepares immutable operator inputs only. It must not capture legacy state,
+stage, activate, verify, restart, validate, run acceptance/soak, or invoke any
+rollback primitive; all runtime mutation belongs to the locked gate in Step 11:
 
 ```bash
 set -euo pipefail
 SOURCE_REPOSITORY=/usr/local/src/medchat-release
 RELEASE_COMMIT="$(git -C "$SOURCE_REPOSITORY" rev-parse HEAD)"
 test "${#RELEASE_COMMIT}" -eq 40
-ACTIVATOR="$SOURCE_REPOSITORY/deployment/opensandbox/activate-runtime-generation.sh"
-if [ ! -L /opt/medchat/current ]; then
-    : "${QEMU_SNAPSHOT_ID:?QEMU_SNAPSHOT_ID must identify the pre-activation snapshot}"
-    : "${QEMU_OPERATOR_EVIDENCE_FILE:?QEMU_OPERATOR_EVIDENCE_FILE must be a root-owned mode-0600 evidence file}"
-    sudo "$ACTIVATOR" --capture-legacy "$QEMU_SNAPSHOT_ID" "$QEMU_OPERATOR_EVIDENCE_FILE"
-fi
-sudo "$ACTIVATOR" --stage "$SOURCE_REPOSITORY" "$RELEASE_COMMIT"
-sudo "$ACTIVATOR" --activate "$RELEASE_COMMIT"
-sudo /usr/local/sbin/medchat-activate-runtime-generation --verify "$RELEASE_COMMIT"
+test -z "$(git -C "$SOURCE_REPOSITORY" status --porcelain)"
+test "$(git -C "$SOURCE_REPOSITORY" rev-parse "$RELEASE_COMMIT^{commit}")" = "$RELEASE_COMMIT"
+: "${QEMU_SNAPSHOT_ID:?QEMU_SNAPSHOT_ID must identify the pre-gate snapshot}"
+: "${QEMU_OPERATOR_EVIDENCE_FILE:?QEMU_OPERATOR_EVIDENCE_FILE must be a root-owned mode-0600 evidence file}"
+sudo test -f "$QEMU_OPERATOR_EVIDENCE_FILE"
+sudo test ! -L "$QEMU_OPERATOR_EVIDENCE_FILE"
+sudo test "$(sudo stat -c '%u:%a' "$QEMU_OPERATOR_EVIDENCE_FILE")" = "0:600"
 ```
 
-This is the only supported first-migration path. It captures the installed
-legacy layout and activates the current reviewed release directly. It never
+The operator may create the QEMU snapshot and its root-owned evidence file, and
+may prepare this clean source checkout. There is no supported external formal
+`--capture-legacy`, `--stage`, `--activate`, or `--verify` command. The gate
+captures the installed legacy layout when required, stages the reviewed commit,
+activates it, and verifies the generation while holding its one lock. It never
 stages or activates `79860ec175f0d3235dfd0597f248d7d52788fc76`; that commit is
 used only by the RED/GREEN historical-unit fixture and preserved evidence.
-Absence of `previous` during a verified first migration is expected. After this
-step succeeds, do not run ad hoc PID, socket, Docker, validator, acceptance,
-soak, or rollback commands: those checks and any failure rollback belong to the
-tested gate in Step 11.
 
 - [ ] **Step 11: Invoke the formal QEMU gate exactly once**
 
 ```bash
 set -euo pipefail
-RELEASE_COMMIT="$(sudo cat /opt/medchat/current/.medchat-release-commit)"
+SOURCE_REPOSITORY=/usr/local/src/medchat-release
+RELEASE_COMMIT="$(git -C "$SOURCE_REPOSITORY" rev-parse HEAD)"
+: "${QEMU_SNAPSHOT_ID:?QEMU_SNAPSHOT_ID must identify the pre-gate snapshot}"
+: "${QEMU_OPERATOR_EVIDENCE_FILE:?QEMU_OPERATOR_EVIDENCE_FILE must identify its root-owned evidence file}"
 sudo env PYTHONDONTWRITEBYTECODE=1 \
   /opt/conda/envs/medchat/bin/python -B \
-  /opt/medchat/current/scripts/run_opensandbox_formal_qemu_gate.py \
+  "$SOURCE_REPOSITORY/scripts/run_opensandbox_formal_qemu_gate.py" \
+  --source-repository "$SOURCE_REPOSITORY" \
   --expected-release-commit "$RELEASE_COMMIT" \
   --output-base /var/lib/medchat-opensandbox-runs \
   --repeat 30 \
-  --require-virt qemu
+  --require-virt qemu \
+  --qemu-snapshot-id "$QEMU_SNAPSHOT_ID" \
+  --qemu-operator-evidence-file "$QEMU_OPERATOR_EVIDENCE_FILE"
 ```
 
 This is the only operator command allowed to produce formal evidence. The CLI
-performs preflight, release/QEMU/PID attestation, privileged root runtime
-validation, the transient socket-permission probe, non-root real acceptance,
-post-acceptance manifest and report hashing, the permanent full-commit claim,
-the non-root 30-job soak, post-soak manifest and report hashing, atomic
-`gate-result.json`, and at most one mode-correct rollback. The operator must not
-invoke either lower-level runner directly.
+acquires the root-only non-blocking lock before inspecting transaction state and
+holds it through result fsync and rollback verification. Under that lock it
+refuses an existing claim/result before mutation, captures legacy or previous
+state, stages, activates, verifies, performs release/QEMU/PID attestation,
+privileged root runtime validation, the transient socket-permission probe,
+non-root real acceptance, post-acceptance manifest/report hashing, the permanent
+full-commit claim, the non-root 30-job soak, post-soak manifest/report hashing,
+atomic `gate-result.json`, and at most one mode-correct rollback. The operator
+must not invoke the activation primitive or either lower-level runner directly.
+
+Lock contention returns `formal_gate_locked`. A trusted existing claim or
+terminal result returns `formal_soak_already_claimed` or
+`formal_gate_already_terminal`. These pre-ownership refusals occur before source
+staging or runtime activation and always have `rollback_count == 0`. A second
+invocation after a successful gate therefore cannot interrupt or roll back the
+accepted generation.
 
 The claim is created only after every preflight, runtime validator, release
 attestation, real acceptance, acceptance-report, and post-acceptance-manifest
@@ -1721,7 +1947,10 @@ manifest check before rollback. It writes stable result codes and invokes
 later generations use `--rollback`; both verify restored Broker and worker PID
 cwd. If rollback fails, the gate stops and disables worker then Broker, records
 `rollback_failed`, and requires restoration of the recorded QEMU snapshot.
-Task 8 never invokes rollback.
+An activation return-code failure, an exception after activation starts, or an
+installed `--verify` failure follows the same one-rollback path. Capture/stage
+failure before activation does not roll back. Task 8 only reads the fsynced gate
+result and never invokes rollback.
 
 ### Task 8: Record evidence, rollback decision, and promotion status
 
@@ -1827,7 +2056,8 @@ Implementation is complete only when all statements are true:
 
 - Tasks 1-5 local tests, compileall, and static validation pass.
 - Timing-sensitive local groups pass 10 consecutive invocations.
-- Task 7's new deployment, attestation, formal command-builder, claim,
+- Task 7's new deployment, attestation, closed worker-environment builder,
+  whole-gate lock/concurrency, claim, activation/verify failure,
   manifest-ordering, gate-result, and rollback-state tests run RED before
   implementation and GREEN afterward.
 - The post-Task-7 full Broker, compileall, static, and independent-review gates pass.
@@ -1838,6 +2068,13 @@ Implementation is complete only when all statements are true:
   `SupplementaryGroups=medchat-sandbox docker`, `python -B`, and a trusted
   external run root. No report, pose, temporary file, cache, or bytecode enters
   the release.
+- The socket probe receives neither scientific gate variable; acceptance receives
+  only `MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE=1`; soak receives only
+  `MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK=1`.
+- One root-only non-blocking `flock` covers source/state checks, capture/stage,
+  activation/verify, validation, acceptance, claim, soak, result fsync, and any
+  rollback verification. Lock contention and existing claim/result refusals do
+  not mutate runtime and never invoke rollback.
 - Linux runtime validation and real acceptance pass on the activated immutable generation.
 - Exactly one new formal 30-job QEMU soak is attempted per full commit, enforced
   by a permanent root-only O_EXCL claim created immediately before the command;
@@ -1848,6 +2085,8 @@ Implementation is complete only when all statements are true:
 - First migration captures and can atomically restore the exact legacy units,
   service states, absent `current`, unit hashes, and legacy PID cwd without
   staging the old commit. Later rollback uses `previous`; the formal gate invokes
-  at most one rollback and verifies the restored PID cwd. QEMU snapshot
+  activation and verify inside its locked state machine, invokes at most one
+  rollback after the activation boundary, and verifies the restored PID cwd.
+  Capture/stage failures before activation do not roll back. QEMU snapshot
   restoration is required only when that gate-owned rollback fails.
 - `docs/handoff/latest.md` distinguishes evaluator correctness from runtime stability and records either promotion evidence or rollback evidence.
