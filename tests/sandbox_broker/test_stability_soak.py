@@ -489,6 +489,28 @@ def test_success_lifecycle_has_exact_order_identity_cleanup_and_versions() -> No
     assert evidence.failure_codes == ()
 
 
+def test_success_lifecycle_rejects_completion_fields_on_cleanup_started() -> None:
+    events = successful_lifecycle()
+    next(
+        event for event in events if event["phase"] == "cleanup_started"
+    )["outcome"] = "passed"
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=True)
+
+    assert evidence.events_complete is False
+    assert evidence.failure_codes == ("events_incomplete",)
+
+
+def test_lifecycle_evidence_tool_versions_are_immutable() -> None:
+    evidence = soak.evaluate_lifecycle(
+        successful_lifecycle(),
+        result_succeeded=True,
+    )
+
+    with pytest.raises(TypeError):
+        evidence.tool_versions["vina"] = "tampered"
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -595,6 +617,21 @@ def test_truthful_failed_or_cancelled_lifecycle_is_recorded(
     assert evidence.cleanup_status == cleanup_status
     assert evidence.failure_class == (failure_class or "none")
     assert evidence.failure_codes == ()
+
+
+def test_failed_lifecycle_rejects_versions_on_failed_validation() -> None:
+    events = failed_lifecycle(failed_phase="validation_completed")
+    validation = next(
+        event for event in events if event["phase"] == "validation_completed"
+    )
+    validation["vina_version"] = "1.2.5"
+    validation["meeko_version"] = "0.7.1"
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
+
+    assert evidence.events_complete is False
+    assert evidence.tool_versions == {}
+    assert evidence.failure_codes == ("events_incomplete",)
 
 
 def test_compound_broker_failures_keep_truthful_lifecycle_complete() -> None:

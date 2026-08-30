@@ -16,6 +16,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
 
@@ -1037,7 +1038,7 @@ class LifecycleEvidence:
     terminal_outcome: str | None
     cleanup_status: str | None
     failure_class: str
-    tool_versions: dict[str, str]
+    tool_versions: Mapping[str, str]
     failure_codes: tuple[str, ...]
 
 
@@ -1049,9 +1050,89 @@ def _unavailable_lifecycle() -> LifecycleEvidence:
         terminal_outcome=None,
         cleanup_status=None,
         failure_class="unknown_control_plane_failure",
-        tool_versions={},
+        tool_versions=MappingProxyType({}),
         failure_codes=("events_incomplete",),
     )
+
+
+def _lifecycle_event_fields_valid(event: Mapping[str, object]) -> bool:
+    phase = event.get("phase")
+    if type(phase) is not str or phase not in EXPECTED_PHASES:
+        return False
+
+    outcome = event.get("outcome")
+    failure_class = event.get("failure_class")
+    duration = event.get("duration_ms")
+    cleanup_status = event.get("cleanup_status")
+    vina_version = event.get("vina_version")
+    meeko_version = event.get("meeko_version")
+    versions = (vina_version, meeko_version)
+    if any(
+        value is not None
+        and (type(value) is not str or _SAFE_VERSION.fullmatch(value) is None)
+        for value in versions
+    ):
+        return False
+    versions_present = any(value is not None for value in versions)
+
+    if phase in {"job_received", "queue_entered"}:
+        return (
+            outcome is None
+            and failure_class is None
+            and duration is None
+            and not versions_present
+            and cleanup_status == "not_started"
+        )
+
+    if phase.endswith("_started"):
+        expected_cleanup_status = (
+            "in_progress" if phase == "cleanup_started" else "not_started"
+        )
+        return (
+            outcome is None
+            and failure_class is None
+            and duration is None
+            and not versions_present
+            and cleanup_status == expected_cleanup_status
+        )
+
+    valid_outcome = (
+        type(outcome) is str and outcome in {"passed", "failed", "cancelled"}
+    )
+    failure_class_valid = failure_class is None or (
+        type(failure_class) is str
+        and failure_class in FAILURE_CLASSES
+        and outcome == "failed"
+    )
+
+    if phase.endswith("_completed"):
+        if (
+            not valid_outcome
+            or not _safe_number(duration, integer=True)
+            or not failure_class_valid
+        ):
+            return False
+        if versions_present and not (
+            phase == "validation_completed" and outcome == "passed"
+        ):
+            return False
+        if phase == "cleanup_completed":
+            expected_cleanup_status = (
+                "succeeded" if outcome == "passed" else "failed"
+            )
+            return cleanup_status == expected_cleanup_status
+        return cleanup_status == "not_started"
+
+    if phase == "job_terminal":
+        return (
+            valid_outcome
+            and failure_class_valid
+            and duration is None
+            and not versions_present
+            and cleanup_status in ("succeeded", "failed")
+        )
+
+    return False
 
 
 def evaluate_lifecycle(
@@ -1086,6 +1167,9 @@ def evaluate_lifecycle(
     terminal = terminals[0] if len(terminals) == 1 else {}
     terminal_outcome = terminal.get("outcome")
     cleanup_status = terminal.get("cleanup_status")
+    fields_semantically_valid = all(
+        _lifecycle_event_fields_valid(event) for event in correlated
+    )
 
     raw_failure_classes = [
         event.get("failure_class")
@@ -1112,7 +1196,7 @@ def evaluate_lifecycle(
         event for event in correlated if event.get("phase") == "validation_completed"
     ]
     tool_versions: dict[str, str] = {}
-    if len(validations) == 1:
+    if fields_semantically_valid and len(validations) == 1:
         vina_version = validations[0].get("vina_version")
         meeko_version = validations[0].get("meeko_version")
         if (
@@ -1149,15 +1233,6 @@ def evaluate_lifecycle(
         and cleanup_completed.get("cleanup_status") == cleanup_status
     )
 
-    failure_fields_coherent = not illegal_failure_class and all(
-        event.get("failure_class") is None
-        or (
-            type(event.get("failure_class")) is str
-            and event.get("failure_class") in FAILURE_CLASSES
-            and event.get("outcome") == "failed"
-        )
-        for event in correlated
-    )
     prior_failure_classes = [
         event.get("failure_class")
         for event in correlated
@@ -1179,6 +1254,7 @@ def evaluate_lifecycle(
             and len(terminals) == 1
             and terminal_outcome == "passed"
             and cleanup_status == "succeeded"
+            and fields_semantically_valid
             and cleanup_consistent
             and len(validations) == 1
             and set(tool_versions) == {"vina", "meeko"}
@@ -1206,9 +1282,9 @@ def evaluate_lifecycle(
             and len(terminals) == 1
             and type(terminal_outcome) is str
             and terminal_outcome in {"failed", "cancelled"}
+            and fields_semantically_valid
             and cleanup_consistent
             and ordered_lifecycle
-            and failure_fields_coherent
             and terminal_failure_consistent
         )
 
@@ -1219,7 +1295,7 @@ def evaluate_lifecycle(
         terminal_outcome=terminal_outcome if type(terminal_outcome) is str else None,
         cleanup_status=cleanup_status if type(cleanup_status) is str else None,
         failure_class=failure_class,
-        tool_versions=tool_versions,
+        tool_versions=MappingProxyType(dict(tool_versions)),
         failure_codes=() if complete else ("events_incomplete",),
     )
 
