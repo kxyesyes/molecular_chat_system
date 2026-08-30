@@ -772,9 +772,9 @@ class SandboxDockingRunner:
         if started is None:
             return ToolResult.error_result(
                 "molecular_docking",
-                AgentErrorCode.INVALID_OUTPUT,
-                "OpenSandbox docking failed before a verified result was produced.",
-                details={"reason": "sandbox_execution_failed"},
+                AgentErrorCode.INTERNAL_ERROR,
+                "OpenSandbox docking could not start because the process clock was unavailable.",
+                details={"reason": "process_failed"},
                 elapsed_ms=0,
                 quality={"real_execution": False, "execution_backend": "opensandbox"},
             )

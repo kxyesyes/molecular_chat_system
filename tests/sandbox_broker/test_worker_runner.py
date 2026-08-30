@@ -231,6 +231,10 @@ def test_initial_clock_failure_returns_local_error_without_network_or_leaks(
     monkeypatch: pytest.MonkeyPatch,
     clock_outcome: object,
 ) -> None:
+    from src.task_runtime.backends.local import _AGENT_ERROR_MAP
+    from src.task_runtime.docking_execution import _tool_failure_reason
+    from src.task_runtime.errors import TaskErrorCode
+
     payload, receptor, ligand = _inputs(tmp_path)
     private_root = tmp_path / "secret-payload"
     private_root.mkdir()
@@ -267,8 +271,12 @@ def test_initial_clock_failure_returns_local_error_without_network_or_leaks(
     assert requests == 0
     assert result.success is False
     assert result.error is not None
-    assert result.error.code is AgentErrorCode.INVALID_OUTPUT
-    assert result.error.details == {"reason": "sandbox_execution_failed"}
+    assert result.error.code is AgentErrorCode.INTERNAL_ERROR
+    assert result.error.details == {"reason": "process_failed"}
+    assert _tool_failure_reason(result.error.code, result.error.details) == "process_failed"
+    task_error_code = _AGENT_ERROR_MAP[result.error.code.value]
+    assert task_error_code is TaskErrorCode.DOCKING_PROCESS_FAILED
+    assert task_error_code is not TaskErrorCode.DOCKING_ARTIFACT_INVALID
     assert result.elapsed_ms == 0
     assert "secret" not in encoded
     assert str(tmp_path) not in encoded
