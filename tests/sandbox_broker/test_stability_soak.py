@@ -194,6 +194,38 @@ def retrying_provisioning_failure_lifecycle() -> list[dict[str, object]]:
     return events
 
 
+def retrying_failed_operation_lifecycle(
+    operation: str,
+) -> list[dict[str, object]]:
+    completed_phase = f"{operation}_completed"
+    events = failed_lifecycle(
+        failed_phase=completed_phase,
+        failure_class="command_timeout",
+    )
+    started_index = next(
+        index
+        for index, event in enumerate(events)
+        if event["phase"] == f"{operation}_started"
+    )
+    events[started_index]["attempt"] = 1
+    events[started_index + 1]["attempt"] = 1
+    events[started_index + 2 : started_index + 2] = [
+        dict(events[started_index], attempt=2),
+        dict(events[started_index + 1], attempt=2),
+    ]
+    return events
+
+
+class ExplodingComparison:
+    def __eq__(self, other: object) -> bool:
+        del other
+        raise RuntimeError("comparison must not run")
+
+    def __ne__(self, other: object) -> bool:
+        del other
+        raise RuntimeError("comparison must not run")
+
+
 class FakeDiagnostics:
     def __init__(self) -> None:
         self.calls = 0
@@ -862,7 +894,6 @@ def test_success_lifecycle_rejects_terminal_cleanup_or_validation_mismatch(
         ("validation_completed", None, "failed", "succeeded"),
         ("command_completed", None, "failed", "failed"),
         ("command_completed", None, "cancelled", "succeeded"),
-        ("command_completed", None, "cancelled", "failed"),
     ],
 )
 def test_truthful_failed_or_cancelled_lifecycle_is_recorded(
@@ -906,6 +937,21 @@ def test_truthful_failed_or_cancelled_lifecycle_is_recorded(
     assert evidence.cleanup_status == cleanup_status
     assert evidence.failure_class == (failure_class or "none")
     assert evidence.failure_codes == ()
+
+
+def test_cancelled_lifecycle_rejects_failed_cleanup() -> None:
+    events = failed_lifecycle(
+        failed_phase="command_completed",
+        terminal_outcome="cancelled",
+        cleanup_status="failed",
+    )
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
+
+    assert evidence.events_complete is False
+    assert evidence.terminal_outcome == "cancelled"
+    assert evidence.cleanup_status == "failed"
+    assert evidence.failure_codes == ("events_incomplete",)
 
 
 def test_failed_lifecycle_rejects_versions_on_failed_validation() -> None:
@@ -989,6 +1035,46 @@ def test_failed_cleanup_retry_pairs_fold_without_hiding_compound_failure() -> No
     assert evidence.terminal_outcome == "failed"
     assert evidence.failure_class == "unknown_control_plane_failure"
     assert evidence.failure_codes == ()
+
+
+@pytest.mark.parametrize("operation", ["upload", "command", "validation"])
+def test_failed_lifecycle_rejects_retry_for_non_control_plane_operation(
+    operation: str,
+) -> None:
+    events = retrying_failed_operation_lifecycle(operation)
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
+
+    assert evidence.events_complete is False
+    assert evidence.failure_codes == ("events_incomplete",)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "completed_attempt",
+        "retry_next_phase",
+        "retry_outcome",
+        "terminal_outcome",
+    ],
+)
+def test_lifecycle_comparison_objects_fail_closed_without_raising(
+    mutation: str,
+) -> None:
+    events = retrying_provisioning_failure_lifecycle()
+    if mutation == "completed_attempt":
+        events[3]["attempt"] = ExplodingComparison()
+    elif mutation == "retry_next_phase":
+        events[4]["phase"] = ExplodingComparison()
+    elif mutation == "retry_outcome":
+        events[3]["outcome"] = ExplodingComparison()
+    else:
+        events[-1]["outcome"] = ExplodingComparison()
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
+
+    assert evidence.events_complete is False
+    assert evidence.failure_codes == ("events_incomplete",)
 
 
 @pytest.mark.parametrize(

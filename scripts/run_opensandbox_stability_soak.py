@@ -1103,6 +1103,23 @@ def _lifecycle_event_fields_valid(event: Mapping[str, object]) -> bool:
     cleanup_status = event.get("cleanup_status")
     vina_version = event.get("vina_version")
     meeko_version = event.get("meeko_version")
+    if outcome is not None and (
+        type(outcome) is not str
+        or outcome not in {"passed", "failed", "cancelled"}
+    ):
+        return False
+    if failure_class is not None and (
+        type(failure_class) is not str
+        or failure_class not in FAILURE_CLASSES
+    ):
+        return False
+    if type(cleanup_status) is not str or cleanup_status not in {
+        "not_started",
+        "in_progress",
+        "succeeded",
+        "failed",
+    }:
+        return False
     versions = (vina_version, meeko_version)
     if any(
         value is not None
@@ -1133,13 +1150,9 @@ def _lifecycle_event_fields_valid(event: Mapping[str, object]) -> bool:
             and cleanup_status == expected_cleanup_status
         )
 
-    valid_outcome = (
-        type(outcome) is str and outcome in {"passed", "failed", "cancelled"}
-    )
+    valid_outcome = type(outcome) is str
     failure_class_valid = failure_class is None or (
-        type(failure_class) is str
-        and failure_class in FAILURE_CLASSES
-        and outcome == "failed"
+        outcome == "failed"
     )
 
     if phase.endswith("_completed"):
@@ -1204,39 +1217,61 @@ def _normalize_operation_pairs(
         completed = events[index + 1]
         attempt = event.get("attempt")
         completed_attempt = completed.get("attempt")
+        actual_completed_phase = completed.get("phase")
+        completed_outcome = completed.get("outcome")
         if (
-            completed.get("phase") != completed_phase
-            or completed_attempt != attempt
+            type(actual_completed_phase) is not str
+            or actual_completed_phase != completed_phase
             or (attempt is not None and (type(attempt) is not int or attempt != 1))
             or (
                 completed_attempt is not None
-                and type(completed_attempt) is not int
+                and (type(completed_attempt) is not int or completed_attempt != 1)
             )
+            or (
+                attempt is None
+                and completed_attempt is not None
+            )
+            or (
+                type(attempt) is int
+                and completed_attempt != attempt
+            )
+            or type(completed_outcome) is not str
+            or completed_outcome not in {"passed", "failed", "cancelled"}
         ):
             return None
 
         final_started = event
         final_completed = completed
         next_index = index + 2
-        if (
-            next_index < len(events)
-            and events[next_index].get("phase") == phase
-        ):
+        if next_index < len(events):
+            next_phase = events[next_index].get("phase")
+            if type(next_phase) is not str:
+                return None
+        else:
+            next_phase = None
+        if next_phase == phase:
             if (
                 not allow_retry
+                or operation not in {"provisioning", "cleanup"}
                 or attempt != 1
-                or completed.get("outcome") != "failed"
+                or completed_outcome != "failed"
                 or next_index + 1 >= len(events)
             ):
                 return None
             retry_started = events[next_index]
             retry_completed = events[next_index + 1]
+            retry_completed_phase = retry_completed.get("phase")
+            retry_completed_outcome = retry_completed.get("outcome")
             if (
                 type(retry_started.get("attempt")) is not int
                 or retry_started.get("attempt") != 2
-                or retry_completed.get("phase") != completed_phase
+                or type(retry_completed_phase) is not str
+                or retry_completed_phase != completed_phase
                 or type(retry_completed.get("attempt")) is not int
                 or retry_completed.get("attempt") != 2
+                or type(retry_completed_outcome) is not str
+                or retry_completed_outcome
+                not in {"passed", "failed", "cancelled"}
             ):
                 return None
             final_started = retry_started
@@ -1278,7 +1313,11 @@ def evaluate_lifecycle(
 
     (trace_id, job_id) = next(iter(identities))
     phases = [event.get("phase") for event in correlated]
-    terminals = [event for event in correlated if event.get("phase") == "job_terminal"]
+    terminals: list[Mapping[str, object]] = []
+    for event in correlated:
+        phase = event.get("phase")
+        if type(phase) is str and phase == "job_terminal":
+            terminals.append(event)
     terminal = terminals[0] if len(terminals) == 1 else {}
     terminal_outcome = terminal.get("outcome")
     cleanup_status = terminal.get("cleanup_status")
@@ -1321,7 +1360,8 @@ def evaluate_lifecycle(
     validations = [
         event
         for event in lifecycle_events
-        if event.get("phase") == "validation_completed"
+        if type(event.get("phase")) is str
+        and event.get("phase") == "validation_completed"
     ]
     tool_versions: dict[str, str] = {}
     if fields_semantically_valid and len(validations) == 1:
@@ -1336,10 +1376,16 @@ def evaluate_lifecycle(
             tool_versions = {"vina": vina_version, "meeko": meeko_version}
 
     cleanup_started_events = [
-        event for event in lifecycle_events if event.get("phase") == "cleanup_started"
+        event
+        for event in lifecycle_events
+        if type(event.get("phase")) is str
+        and event.get("phase") == "cleanup_started"
     ]
     cleanup_completed_events = [
-        event for event in lifecycle_events if event.get("phase") == "cleanup_completed"
+        event
+        for event in lifecycle_events
+        if type(event.get("phase")) is str
+        and event.get("phase") == "cleanup_completed"
     ]
     cleanup_completed = (
         cleanup_completed_events[0] if len(cleanup_completed_events) == 1 else {}
@@ -1354,11 +1400,25 @@ def evaluate_lifecycle(
     )
     cleanup_consistent = (
         len(cleanup_started_events) == 1
+        and type(cleanup_started_events[0].get("cleanup_status")) is str
         and cleanup_started_events[0].get("cleanup_status") == "in_progress"
         and len(cleanup_completed_events) == 1
         and expected_cleanup_outcome is not None
+        and type(cleanup_completed.get("outcome")) is str
         and cleanup_completed.get("outcome") == expected_cleanup_outcome
+        and type(cleanup_completed.get("cleanup_status")) is str
         and cleanup_completed.get("cleanup_status") == cleanup_status
+    )
+    cancelled_cleanup_consistent = (
+        type(terminal_outcome) is str
+        and (
+            terminal_outcome != "cancelled"
+            or (
+                type(cleanup_status) is str
+                and cleanup_status == "succeeded"
+                and expected_cleanup_outcome == "passed"
+            )
+        )
     )
 
     prior_failure_classes: list[str] = []
@@ -1367,6 +1427,7 @@ def evaluate_lifecycle(
         if (
             type(phase) is str
             and phase.endswith("_completed")
+            and type(event.get("outcome")) is str
             and event.get("outcome") == "failed"
         ):
             value = event.get("failure_class")
@@ -1376,18 +1437,28 @@ def evaluate_lifecycle(
                 prior_failure_classes.append(value)
     terminal_failure_class = terminal.get("failure_class")
     terminal_failure_consistent = not (
-        terminal_outcome == "failed"
+        type(terminal_outcome) is str
+        and terminal_outcome == "failed"
         and prior_failure_classes
-        and terminal_failure_class != prior_failure_classes[-1]
+        and (
+            type(terminal_failure_class) is not str
+            or terminal_failure_class != prior_failure_classes[-1]
+        )
+    )
+    phases_exact = len(phases) == len(EXPECTED_PHASES) and all(
+        type(actual) is str and actual == expected
+        for actual, expected in zip(phases, EXPECTED_PHASES)
     )
 
     complete = False
     if type(result_succeeded) is bool and result_succeeded:
         complete = (
-            phases == list(EXPECTED_PHASES)
+            phases_exact
             and normalized_phases == list(EXPECTED_PHASES)
             and len(terminals) == 1
+            and type(terminal_outcome) is str
             and terminal_outcome == "passed"
+            and type(cleanup_status) is str
             and cleanup_status == "succeeded"
             and fields_semantically_valid
             and cleanup_consistent
@@ -1419,6 +1490,7 @@ def evaluate_lifecycle(
             and terminal_outcome in {"failed", "cancelled"}
             and fields_semantically_valid
             and cleanup_consistent
+            and cancelled_cleanup_consistent
             and ordered_lifecycle
             and terminal_failure_consistent
         )
