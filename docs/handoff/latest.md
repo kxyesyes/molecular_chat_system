@@ -1,5 +1,80 @@
 # OpenSandbox docking broker handoff
 
+## OpenSandbox soak evaluator correction (2026-08-30)
+
+Branch: `codex/opensandbox-stability-hardening`
+
+Tested commit: `2d4797ec54288b5b5e28a191621f7e2892a37010`
+
+This sub-project corrected the stability-soak evaluator without changing the
+meaning of real runtime failures. A measured submission is now correlated to
+the single Broker lifecycle found inside its diagnostics window by
+`(trace_id, job_id)`; the caller idempotency key remains an independent worker
+request key. Event order, attempt numbering, cleanup state, and terminal state
+are validated strictly. A valid recovered provisioning or cleanup retry keeps
+`events_complete=true`, but adds `broker_retry_observed`, so the stability gate
+still fails instead of silently treating recovery as a clean run.
+
+Validated tool provenance comes from the Broker `validation_completed` event.
+Vina must agree with `ToolResult` provenance and Meeko is mandatory. Invalid or
+missing clock samples fail closed; an initial clock failure is classified as
+`process_failed`. Failed-run latency is bounded before report aggregation. The
+report writer remains sanitized, atomic, and non-clobbering.
+
+### Corrected offline evidence
+
+The preserved-shape offline regression contains 30 runs:
+
+```text
+18 success
+5 provider_error / server_500
+5 tool_timeout / command_timeout
+2 invalid_output / none
+pass_rate=0.6
+event_completeness_rate=1.0
+overall_status=failed
+```
+
+This is an offline evaluator result, not a new real soak. It proves that the
+evaluator no longer turns complete Broker lifecycles into false negatives while
+retaining all 12 real failure outcomes.
+
+The prior real QEMU evidence remains immutable:
+
+```text
+runtime_commit=79860ec175f0d3235dfd0597f248d7d52788fc76
+report=/opt/medchat/molecular_chat_system/outputs/agent_evaluation/opensandbox_stability_soak-79860ec.json
+sha256=c66e07c3e9ad4669a8ab703fa57e887d16b8d71b938ba8a0755725692ae3c67f
+```
+
+This sub-project did not rerun QEMU, Docker, OpenSandbox, or Vina and did not
+overwrite that report.
+
+### Verification and review
+
+```text
+focused sandbox-broker tests: 688 passed, 14 skipped
+full tests/sandbox_broker: 2008 passed, 75 skipped
+compileall: passed
+static OpenSandbox deployment validation: passed
+independent review: APPROVED
+secret scan: clean
+placeholder scan: clean
+git diff --check: clean
+git status --short: clean
+```
+
+Before the final green verification, one focused run reported `686 passed,
+14 skipped, 2 failed` in a capacity-timing case and a worker-cancellation case.
+The two isolated tests then passed 5/5 and 10/10, and the complete focused suite
+passed on rerun. Earlier, the full service test file also reported `169 passed,
+1 failed`; that timing-sensitive case passed in isolation. These are
+non-stably-reproduced test-timing signals, not evidence that a deterministic
+runtime defect was fixed or that runtime stability is proven.
+
+No API key, credential, raw environment value, user-specific absolute path, or
+other sensitive runtime value is recorded in this handoff.
+
 Date: 2026-08-27
 
 Branch: `codex/opensandbox-docking-broker`
