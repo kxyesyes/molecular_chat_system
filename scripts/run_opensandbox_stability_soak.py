@@ -1090,7 +1090,7 @@ def evaluate_lifecycle(
     raw_failure_classes = [
         event.get("failure_class")
         for event in correlated
-        if event.get("failure_class") not in (None, "none")
+        if event.get("failure_class") is not None
     ]
     illegal_failure_class = any(
         type(value) is not str or value not in FAILURE_CLASSES
@@ -1163,7 +1163,6 @@ def evaluate_lifecycle(
         for event in correlated
         if event.get("phase") != "job_terminal"
         and type(event.get("failure_class")) is str
-        and event.get("failure_class") != "none"
         and event.get("failure_class") in FAILURE_CLASSES
     ]
     terminal_failure_class = terminal.get("failure_class")
@@ -1226,35 +1225,26 @@ def evaluate_lifecycle(
 
 
 def _event_failure_class(events: Sequence[Mapping[str, object]], trace_id: str) -> str:
-    correlated = [
-        event
+    classes = {
+        event.get("failure_class")
         for event in events
-        if isinstance(event, Mapping) and event.get("trace_id") == trace_id
-    ]
-    result_succeeded = any(
-        event.get("phase") == "job_terminal" and event.get("outcome") == "passed"
-        for event in correlated
-    )
-    return evaluate_lifecycle(
-        correlated,
-        result_succeeded=result_succeeded,
-    ).failure_class
+        if event.get("trace_id") == trace_id and event.get("failure_class") is not None
+    }
+    if len(classes) == 1:
+        value = next(iter(classes))
+        return value if type(value) is str and value in FAILURE_CLASSES else "unknown_control_plane_failure"
+    return "none" if not classes else "unknown_control_plane_failure"
 
 
 def _events_complete(events: Sequence[Mapping[str, object]], trace_id: str) -> bool:
-    correlated = [
-        event
-        for event in events
-        if isinstance(event, Mapping) and event.get("trace_id") == trace_id
-    ]
-    result_succeeded = any(
-        event.get("phase") == "job_terminal" and event.get("outcome") == "passed"
-        for event in correlated
+    correlated = [event for event in events if event.get("trace_id") == trace_id]
+    identities = {event.get("job_id") for event in correlated}
+    return (
+        len(correlated) == len(EXPECTED_PHASES)
+        and len(identities) == 1
+        and None not in identities
+        and [event.get("phase") for event in correlated] == list(EXPECTED_PHASES)
     )
-    return evaluate_lifecycle(
-        correlated,
-        result_succeeded=result_succeeded,
-    ).events_complete
 
 
 class StabilityExecutor:
