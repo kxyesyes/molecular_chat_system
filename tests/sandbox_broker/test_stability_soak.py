@@ -137,6 +137,7 @@ def failed_lifecycle(
     events = successful_lifecycle(trace_id, job_id)
     del events[8:10]
     events[7]["outcome"] = terminal_outcome
+    events[-2]["outcome"] = "passed" if cleanup_status == "succeeded" else "failed"
     events[-2]["cleanup_status"] = cleanup_status
     events[-1]["outcome"] = terminal_outcome
     events[-1]["cleanup_status"] = cleanup_status
@@ -531,6 +532,12 @@ def test_truthful_failed_or_cancelled_lifecycle_is_recorded(
         terminal_outcome=terminal_outcome,
         cleanup_status=cleanup_status,
     )
+    cleanup_completed = next(
+        event for event in events if event["phase"] == "cleanup_completed"
+    )
+    assert cleanup_completed["outcome"] == (
+        "passed" if cleanup_status == "succeeded" else "failed"
+    )
 
     evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
 
@@ -550,6 +557,7 @@ def test_truthful_failed_or_cancelled_lifecycle_is_recorded(
         "missing_terminal",
         "terminal_too_early",
         "multiple_terminals",
+        "cleanup_completed_mismatch",
         "cleanup_mismatch",
         "second_identity",
     ],
@@ -565,6 +573,8 @@ def test_failed_lifecycle_mutations_fail_closed(mutation: str) -> None:
         events.insert(-2, terminal)
     elif mutation == "multiple_terminals":
         events.append(dict(events[-1]))
+    elif mutation == "cleanup_completed_mismatch":
+        events[-2]["outcome"] = "failed"
     elif mutation == "cleanup_mismatch":
         events[-1]["cleanup_status"] = "failed"
     else:
