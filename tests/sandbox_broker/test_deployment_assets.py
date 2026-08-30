@@ -134,6 +134,9 @@ def test_readme_documents_fixed_thirty_run_gate_and_failure_preservation() -> No
     guide = OPEN_SANDBOX_README.read_text(encoding="utf-8")
 
     assert "run_opensandbox_stability_soak.py --repeat 30" in guide
+    assert "sudo env \\\n  MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK=1" in guide
+    assert "sudo -u medchat-temporal env" not in guide
+    assert "host firewall" in guide
     assert "30/30" in guide
     assert "zero running labelled containers" in guide
     assert "Operators must not replace a failed report with a passing rerun." in guide

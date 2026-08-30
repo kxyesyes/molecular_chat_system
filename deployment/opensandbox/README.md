@@ -326,10 +326,13 @@ sudo -u medchat-sandbox curl --silent --show-error --unix-socket \
 ```
 
 After the reviewed release is installed and the static/runtime validator passes,
-run the fixed stability suite exactly once:
+run the fixed stability suite exactly once. This operator-only acceptance command
+runs as root because it independently inspects Docker and the host firewall; the
+scientific job still enters through the worker-side Broker UDS and never invokes
+Vina directly on the host:
 
 ```bash
-sudo -u medchat-temporal env \
+sudo env \
   MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK=1 \
   MEDCHAT_SANDBOX_BROKER_SOCKET=/run/medchat-sandbox/broker.sock \
   /opt/conda/envs/medchat/bin/python scripts/run_opensandbox_stability_soak.py --repeat 30 \
