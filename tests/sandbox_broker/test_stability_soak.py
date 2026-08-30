@@ -551,6 +551,70 @@ def test_measured_run_merges_scientific_and_lifecycle_failures_without_false_cle
     assert "cleanup_status_mismatch" not in run["failure_codes"]
 
 
+def test_measured_run_preserves_bounded_long_failed_latency_with_complete_lifecycle(
+    tmp_path: Path,
+) -> None:
+    broker_trace = "broker-trace-long-timeout"
+    broker_job = "f" * 32
+    before = diagnostics(0)
+    before["telemetry"]["phase_latency_ms"] = {}
+    after = diagnostics(1)
+    after["telemetry"]["recent_events"] = failed_lifecycle(
+        failure_class="command_timeout",
+        trace_id=broker_trace,
+        job_id=broker_job,
+    )
+
+    class DiagnosticsClient:
+        def __init__(self) -> None:
+            self.values = iter([before, after])
+
+        def snapshot(self) -> dict[str, object]:
+            return next(self.values)
+
+    class Runner:
+        def execute(self, payload: object, *, job_id: str) -> object:
+            del payload, job_id
+            return SimpleNamespace(
+                success=False,
+                elapsed_ms=420000,
+                error=SimpleNamespace(
+                    code=SimpleNamespace(value="tool_timeout"),
+                ),
+                warnings=[],
+            )
+
+    class Observer:
+        failure_codes: list[str] = []
+
+        def disable_intrusive_probes(self) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    executor = soak.StabilityExecutor(
+        runner=Runner(),
+        payload={},
+        observer_factory=Observer,
+        diagnostics_client=DiagnosticsClient(),
+        project_root=tmp_path,
+    )
+
+    run = executor.measured_run(1)
+
+    assert run["trace_id"] == broker_trace
+    assert run["status"] == "failed"
+    assert run["latency_ms"] == 420000
+    assert run["failure_codes"] == ["tool_timeout"]
+    assert run["failure_class"] == "command_timeout"
+    assert run["events_complete"] is True
+    assert run["cleanup_status"] == "succeeded"
+
+
 def test_measured_run_rejects_success_cleanup_evidence_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -943,6 +1007,65 @@ def test_validate_report_rejects_unknown_fields_and_non_json_values() -> None:
         soak.validate_report(report)
     report.pop("unknown")
     report["runs"][0]["unknown"] = object()
+    with pytest.raises(soak.SafeReportError):
+        soak.validate_report(report)
+
+
+@pytest.mark.parametrize("latency_ms", [300001, 420000])
+def test_report_records_safe_long_latency_without_relaxing_performance_gate(
+    latency_ms: int,
+) -> None:
+    before = diagnostics(0)
+    before["telemetry"]["phase_latency_ms"] = {}
+    runs = [valid_run(index, latency_ms=latency_ms) for index in range(1, 31)]
+    runs[0].update(
+        status="failed",
+        failure_codes=["tool_timeout"],
+        failure_class="command_timeout",
+    )
+
+    report = soak.build_report(
+        runs=runs,
+        diagnostics=soak.diagnostics_delta(before, diagnostics(1)),
+        idempotency={"passed": True, "sandbox_count": 1},
+        queue={"passed": True, "accepted": 9, "saturated": 1},
+        probes={"cancellation": True, "timeout": True, "security": True},
+        running_labelled_containers=0,
+    )
+
+    assert report["status"] == "failed"
+    assert report["p50_latency_ms"] == latency_ms
+    assert report["p95_latency_ms"] == latency_ms
+    assert report["gates"]["latency"] is False
+    assert soak.validate_report(report) == report
+
+
+@pytest.mark.parametrize("latency_ms", [420001, True, -1])
+def test_validate_run_rejects_latency_outside_recorded_range(
+    latency_ms: object,
+) -> None:
+    with pytest.raises(soak.SafeReportError):
+        soak.validate_run(valid_run(1, latency_ms=latency_ms))
+
+
+@pytest.mark.parametrize("field", ["p50_latency_ms", "p95_latency_ms"])
+@pytest.mark.parametrize("latency_ms", [420001, True, -1])
+def test_validate_report_rejects_summary_latency_outside_recorded_range(
+    field: str,
+    latency_ms: object,
+) -> None:
+    before = diagnostics(0)
+    before["telemetry"]["phase_latency_ms"] = {}
+    report = soak.build_report(
+        runs=[valid_run(index) for index in range(1, 31)],
+        diagnostics=soak.diagnostics_delta(before, diagnostics(1)),
+        idempotency={"passed": True, "sandbox_count": 1},
+        queue={"passed": True, "accepted": 9, "saturated": 1},
+        probes={"cancellation": True, "timeout": True, "security": True},
+        running_labelled_containers=0,
+    )
+    report[field] = latency_ms
+
     with pytest.raises(soak.SafeReportError):
         soak.validate_report(report)
 

@@ -46,6 +46,8 @@ from src.docking.sandbox_runner import SandboxDockingRunner
 REPEAT = 30
 QUEUE_CAPACITY = 8
 QUEUE_OVERFLOW = 1
+MAX_RECORDED_LATENCY_MS = 420_000
+LATENCY_GATE_MS = 300_000
 SCHEMA_VERSION = 1
 GATE = "MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK"
 DEFAULT_REPORT = Path("outputs/agent_evaluation/opensandbox_stability_soak.json")
@@ -160,12 +162,22 @@ def _fail_report() -> None:
     raise SafeReportError("unsafe_report")
 
 
-def _safe_number(value: object, *, integer: bool = False, maximum: float = 300_000) -> bool:
+def _safe_number(
+    value: object,
+    *,
+    integer: bool = False,
+    maximum: float = LATENCY_GATE_MS,
+) -> bool:
     expected = (int,) if integer else (int, float)
     return type(value) in expected and math.isfinite(float(value)) and 0 <= float(value) <= maximum
 
 
-def percentile(values: Sequence[int | float], quantile: int | float) -> float:
+def percentile(
+    values: Sequence[int | float],
+    quantile: int | float,
+    *,
+    maximum: float = LATENCY_GATE_MS,
+) -> float:
     """Return a deterministic linearly interpolated percentile."""
 
     if (
@@ -177,7 +189,7 @@ def percentile(values: Sequence[int | float], quantile: int | float) -> float:
         raise ValueError("invalid_percentile")
     checked: list[float] = []
     for value in values:
-        if not _safe_number(value):
+        if not _safe_number(value, maximum=maximum):
             raise ValueError("invalid_percentile")
         checked.append(float(value))
     checked.sort()
@@ -278,7 +290,11 @@ def validate_run(run: object, *, project_root: Path = PROJECT_ROOT) -> dict[str,
         _fail_report()
     if run["status"] not in ALLOWED_STATUSES:
         _fail_report()
-    if not _safe_number(run["latency_ms"], integer=True):
+    if not _safe_number(
+        run["latency_ms"],
+        integer=True,
+        maximum=MAX_RECORDED_LATENCY_MS,
+    ):
         _fail_report()
     if type(run["pose_count"]) is not int or not 0 <= run["pose_count"] <= 256:
         _fail_report()
@@ -730,6 +746,24 @@ def build_report(
                 samples.extend(values)
         if samples:
             phase_p95[phase] = percentile(samples, 0.95)
+    p50_latency = (
+        percentile(
+            measured_latencies,
+            0.50,
+            maximum=MAX_RECORDED_LATENCY_MS,
+        )
+        if measured_latencies
+        else None
+    )
+    p95_latency = (
+        percentile(
+            measured_latencies,
+            0.95,
+            maximum=MAX_RECORDED_LATENCY_MS,
+        )
+        if measured_latencies
+        else None
+    )
     probes_valid = (
         type(probes) is dict
         and set(probes) == {"cancellation", "timeout", "security"}
@@ -746,9 +780,9 @@ def build_report(
         "timeout": probes_valid and probes["timeout"] is True,
         "security": probes_valid and probes["security"] is True,
         "no_orphans": orphan_valid,
-        "latency": bool(measured_latencies) and percentile(measured_latencies, 0.95) < 300_000,
+        "latency": p95_latency is not None and p95_latency < LATENCY_GATE_MS,
         "phase_latency": set(phase_p95) == set(PHASE_NAMES)
-        and all(value < 300_000 for value in phase_p95.values()),
+        and all(value < LATENCY_GATE_MS for value in phase_p95.values()),
     }
     status = status_override or ("passed" if all(gates.values()) else "failed")
     report = {
@@ -760,8 +794,8 @@ def build_report(
         "pass_rate": scientific / denominator,
         "cleanup_rate": cleanup / denominator,
         "event_completeness_rate": complete / denominator,
-        "p50_latency_ms": percentile(measured_latencies, 0.50) if measured_latencies else None,
-        "p95_latency_ms": percentile(measured_latencies, 0.95) if measured_latencies else None,
+        "p50_latency_ms": p50_latency,
+        "p95_latency_ms": p95_latency,
         "phase_p95_latency_ms": phase_p95,
         "failure_type_distribution": dict(
             sorted(
@@ -809,7 +843,10 @@ def validate_report(report: object) -> dict[str, Any]:
             _fail_report()
     for field in ("p50_latency_ms", "p95_latency_ms"):
         value = report[field]
-        if value is not None and not _safe_number(value):
+        if value is not None and not _safe_number(
+            value,
+            maximum=MAX_RECORDED_LATENCY_MS,
+        ):
             _fail_report()
     if type(report["phase_p95_latency_ms"]) is not dict or not set(report["phase_p95_latency_ms"]).issubset(PHASE_NAMES):
         _fail_report()
