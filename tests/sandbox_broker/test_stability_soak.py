@@ -181,6 +181,19 @@ def failed_lifecycle(
     return events
 
 
+def retrying_provisioning_failure_lifecycle() -> list[dict[str, object]]:
+    events = failed_lifecycle(
+        failed_phase="provisioning_completed",
+        failure_class="proxy_502",
+    )
+    events[2]["attempt"] = 1
+    events[3]["attempt"] = 1
+    retry_started = dict(events[2], attempt=2)
+    retry_completed = dict(events[3], attempt=2)
+    events[4:4] = [retry_started, retry_completed]
+    return events
+
+
 class FakeDiagnostics:
     def __init__(self) -> None:
         self.calls = 0
@@ -892,6 +905,102 @@ def test_compound_broker_failures_keep_truthful_lifecycle_complete() -> None:
     assert evidence.cleanup_status == "failed"
     assert evidence.failure_class == "unknown_control_plane_failure"
     assert evidence.failure_codes == ()
+
+
+def test_failed_cleanup_retry_pairs_fold_without_hiding_compound_failure() -> None:
+    events = failed_lifecycle(
+        failed_phase="command_completed",
+        failure_class="command_timeout",
+        cleanup_status="failed",
+    )
+    cleanup_started = next(
+        event for event in events if event["phase"] == "cleanup_started"
+    )
+    cleanup_completed = next(
+        event for event in events if event["phase"] == "cleanup_completed"
+    )
+    cleanup_started["attempt"] = 1
+    cleanup_completed["attempt"] = 1
+    cleanup_completed["failure_class"] = "destroy_failed"
+    terminal = events[-1]
+    terminal["failure_class"] = "destroy_failed"
+    events[-1:-1] = [
+        dict(cleanup_started, attempt=2),
+        dict(cleanup_completed, attempt=2),
+    ]
+
+    validate_broker_events(events)
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
+
+    assert evidence.events_complete is True
+    assert evidence.cleanup_status == "failed"
+    assert evidence.terminal_outcome == "failed"
+    assert evidence.failure_class == "unknown_control_plane_failure"
+    assert evidence.failure_codes == ()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "duplicate_attempt",
+        "skipped_attempt",
+        "attempt_above_two",
+        "attempt_wrong_type",
+        "unhashable_phase",
+        "started_completed_mismatch",
+        "nonadjacent_retry_pair",
+        "missing_completed",
+        "third_pair_before_terminal",
+    ],
+)
+def test_failed_retry_lifecycle_mutations_fail_closed(mutation: str) -> None:
+    events = retrying_provisioning_failure_lifecycle()
+    if mutation == "duplicate_attempt":
+        events[4]["attempt"] = 1
+        events[5]["attempt"] = 1
+    elif mutation == "skipped_attempt":
+        events[2]["attempt"] = None
+        events[3]["attempt"] = None
+    elif mutation == "attempt_above_two":
+        events[4]["attempt"] = 3
+        events[5]["attempt"] = 3
+    elif mutation == "attempt_wrong_type":
+        events[2]["attempt"] = True
+        events[3]["attempt"] = True
+    elif mutation == "unhashable_phase":
+        events[2]["phase"] = []
+    elif mutation == "started_completed_mismatch":
+        events[5]["attempt"] = 1
+    elif mutation == "nonadjacent_retry_pair":
+        events.insert(
+            4,
+            lifecycle_event(
+                "broker-failed",
+                "d" * 32,
+                "upload_started",
+            ),
+        )
+    elif mutation == "missing_completed":
+        events.pop(5)
+    else:
+        events[-1:-1] = [dict(events[4]), dict(events[5])]
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
+
+    assert evidence.events_complete is False
+    assert evidence.failure_codes == ("events_incomplete",)
+
+
+def test_success_lifecycle_does_not_accept_retry_phase_pairs() -> None:
+    events = successful_lifecycle()
+    events[2]["attempt"] = 1
+    events[3]["attempt"] = 1
+    events[4:4] = [dict(events[2], attempt=2), dict(events[3], attempt=2)]
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=True)
+
+    assert evidence.events_complete is False
+    assert evidence.failure_codes == ("events_incomplete",)
 
 
 def test_corrected_report_shape_keeps_eighteen_successes_and_twelve_failures() -> None:

@@ -2769,6 +2769,29 @@ def test_two_completed_destroy_failures_mark_cleanup_failed(tmp_path: Path) -> N
     assert counters["retry|destroy|exhausted"] == 1
     assert counters["control_failure|destroy|server_500"] == 2
     assert "retry|destroy|succeeded" not in counters
+    events = telemetry.snapshot()["recent_events"]
+    cleanup_events = [
+        event
+        for event in events
+        if event["phase"] in {"cleanup_started", "cleanup_completed"}
+    ]
+    assert [event["attempt"] for event in cleanup_events] == [1, 1, 2, 2]
+    assert [event["outcome"] for event in cleanup_events] == [
+        None,
+        "failed",
+        None,
+        "failed",
+    ]
+
+    from scripts import run_opensandbox_stability_soak as soak
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
+
+    assert evidence.events_complete is True
+    assert evidence.cleanup_status == "failed"
+    assert evidence.terminal_outcome == "failed"
+    assert evidence.failure_class == "destroy_failed"
+    assert "events_incomplete" not in evidence.failure_codes
 
 
 def test_timed_out_cancellation_resistant_destroy_is_never_overlapped(
@@ -4488,6 +4511,29 @@ def test_final_classified_create_failure_records_breaker_failure_once(
     assert telemetry.snapshot()["counters"][
         "control_failure|create|proxy_502"
     ] == 2
+    events = telemetry.snapshot()["recent_events"]
+    provisioning_events = [
+        event
+        for event in events
+        if event["phase"] in {"provisioning_started", "provisioning_completed"}
+    ]
+    assert [event["attempt"] for event in provisioning_events] == [1, 1, 2, 2]
+    assert [event["outcome"] for event in provisioning_events] == [
+        None,
+        "failed",
+        None,
+        "failed",
+    ]
+
+    from scripts import run_opensandbox_stability_soak as soak
+
+    evidence = soak.evaluate_lifecycle(events, result_succeeded=False)
+
+    assert evidence.events_complete is True
+    assert evidence.cleanup_status == "succeeded"
+    assert evidence.terminal_outcome == "failed"
+    assert evidence.failure_class == "proxy_502"
+    assert "events_incomplete" not in evidence.failure_codes
 
 
 def test_cancellation_before_create_releases_authoritative_permit(

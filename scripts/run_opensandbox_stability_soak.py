@@ -1172,6 +1172,82 @@ def _lifecycle_event_fields_valid(event: Mapping[str, object]) -> bool:
     return False
 
 
+def _normalize_failed_operation_pairs(
+    events: Sequence[Mapping[str, object]],
+) -> tuple[list[str], dict[str, tuple[Mapping[str, object], Mapping[str, object]]]] | None:
+    """Fold one bounded retry pair per operation or fail closed."""
+
+    normalized_phases: list[str] = []
+    final_pairs: dict[
+        str, tuple[Mapping[str, object], Mapping[str, object]]
+    ] = {}
+    index = 0
+    while index < len(events):
+        event = events[index]
+        phase = event.get("phase")
+        if type(phase) is not str:
+            return None
+        if phase in {"job_received", "queue_entered", "job_terminal"}:
+            if event.get("attempt") is not None:
+                return None
+            normalized_phases.append(str(phase))
+            index += 1
+            continue
+        if not phase.endswith("_started"):
+            return None
+
+        operation = phase[:-8]
+        if operation not in PHASE_NAMES or index + 1 >= len(events):
+            return None
+        completed_phase = f"{operation}_completed"
+        completed = events[index + 1]
+        attempt = event.get("attempt")
+        completed_attempt = completed.get("attempt")
+        if (
+            completed.get("phase") != completed_phase
+            or completed_attempt != attempt
+            or (attempt is not None and (type(attempt) is not int or attempt != 1))
+            or (
+                completed_attempt is not None
+                and type(completed_attempt) is not int
+            )
+        ):
+            return None
+
+        final_started = event
+        final_completed = completed
+        next_index = index + 2
+        if (
+            next_index < len(events)
+            and events[next_index].get("phase") == phase
+        ):
+            if (
+                attempt != 1
+                or completed.get("outcome") != "failed"
+                or next_index + 1 >= len(events)
+            ):
+                return None
+            retry_started = events[next_index]
+            retry_completed = events[next_index + 1]
+            if (
+                type(retry_started.get("attempt")) is not int
+                or retry_started.get("attempt") != 2
+                or retry_completed.get("phase") != completed_phase
+                or type(retry_completed.get("attempt")) is not int
+                or retry_completed.get("attempt") != 2
+            ):
+                return None
+            final_started = retry_started
+            final_completed = retry_completed
+            next_index += 2
+
+        normalized_phases.extend((phase, completed_phase))
+        final_pairs[operation] = (final_started, final_completed)
+        index = next_index
+
+    return normalized_phases, final_pairs
+
+
 def evaluate_lifecycle(
     events: Sequence[Mapping[str, object]],
     *,
@@ -1261,7 +1337,7 @@ def evaluate_lifecycle(
         if type(cleanup_status) is str
         else None
     )
-    cleanup_consistent = (
+    single_cleanup_consistent = (
         len(cleanup_started_events) == 1
         and cleanup_started_events[0].get("cleanup_status") == "in_progress"
         and len(cleanup_completed_events) == 1
@@ -1292,7 +1368,7 @@ def evaluate_lifecycle(
             and terminal_outcome == "passed"
             and cleanup_status == "succeeded"
             and fields_semantically_valid
-            and cleanup_consistent
+            and single_cleanup_consistent
             and len(validations) == 1
             and set(tool_versions) == {"vina", "meeko"}
             and all(
@@ -1303,8 +1379,10 @@ def evaluate_lifecycle(
             and all(event.get("failure_class") is None for event in correlated)
         )
     elif type(result_succeeded) is bool:
+        normalized = _normalize_failed_operation_pairs(correlated)
+        normalized_phases, final_pairs = normalized or ([], {})
         phase_positions: list[int] = []
-        for phase in phases:
+        for phase in normalized_phases:
             if type(phase) is not str or phase not in EXPECTED_PHASES:
                 phase_positions = []
                 break
@@ -1313,14 +1391,22 @@ def evaluate_lifecycle(
             left < right
             for left, right in zip(phase_positions, phase_positions[1:])
         )
+        final_cleanup_pair = final_pairs.get("cleanup")
+        failed_cleanup_consistent = bool(
+            final_cleanup_pair is not None
+            and final_cleanup_pair[0].get("cleanup_status") == "in_progress"
+            and expected_cleanup_outcome is not None
+            and final_cleanup_pair[1].get("outcome") == expected_cleanup_outcome
+            and final_cleanup_pair[1].get("cleanup_status") == cleanup_status
+        )
         complete = (
-            phases[0:1] == ["job_received"]
-            and phases[-3:] == list(EXPECTED_PHASES[-3:])
+            normalized_phases[0:1] == ["job_received"]
+            and normalized_phases[-3:] == list(EXPECTED_PHASES[-3:])
             and len(terminals) == 1
             and type(terminal_outcome) is str
             and terminal_outcome in {"failed", "cancelled"}
             and fields_semantically_valid
-            and cleanup_consistent
+            and failed_cleanup_consistent
             and ordered_lifecycle
             and terminal_failure_consistent
         )
@@ -1335,31 +1421,6 @@ def evaluate_lifecycle(
         tool_versions=MappingProxyType(dict(tool_versions)),
         failure_codes=() if complete else ("events_incomplete",),
     )
-
-
-def _event_failure_class(events: Sequence[Mapping[str, object]], trace_id: str) -> str:
-    classes = {
-        event.get("failure_class")
-        for event in events
-        if event.get("trace_id") == trace_id and event.get("failure_class") is not None
-    }
-    if len(classes) == 1:
-        value = next(iter(classes))
-        return value if type(value) is str and value in FAILURE_CLASSES else "unknown_control_plane_failure"
-    return "none" if not classes else "unknown_control_plane_failure"
-
-
-def _events_complete(events: Sequence[Mapping[str, object]], trace_id: str) -> bool:
-    correlated = [event for event in events if event.get("trace_id") == trace_id]
-    identities = {event.get("job_id") for event in correlated}
-    return (
-        len(correlated) == len(EXPECTED_PHASES)
-        and len(identities) == 1
-        and None not in identities
-        and [event.get("phase") for event in correlated] == list(EXPECTED_PHASES)
-    )
-
-
 class StabilityExecutor:
     """One fixed real stability suite; methods never retry a scientific command."""
 
