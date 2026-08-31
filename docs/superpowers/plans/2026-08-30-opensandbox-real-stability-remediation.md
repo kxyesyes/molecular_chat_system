@@ -59,9 +59,10 @@ Every task must preserve these boundaries:
 | `scripts/opensandbox_formal_runtime.py` | Canonical release manifest, release attestation, hygiene checks, and trusted external-output preparation shared by staging and the formal gate. |
 | `scripts/run_opensandbox_formal_qemu_gate.py` | Sole root-only formal QEMU entry; holds the process-wide gate lock while it stages, journals, activates, verifies, validates, runs non-root acceptance/soak, settles the journal, exports the result, and owns at most one rollback. |
 | `scripts/attest_opensandbox_formal_authority_boot.py` | Read-only authority-volume/journal attestation and current-boot token creation/verification. |
+| `scripts/medchat_formal_authority_exec_wrapper.py` | Root-owned protected-service start boundary; maps a closed systemd unit set to hash-attested executable/argv/cwd/environment/identity, revalidates authority under the shared lifecycle lock, drops privileges, and directly execs without a shell or caller argv. |
 | `scripts/validate_opensandbox_deployment.py` | Static/runtime release, unit, image, socket, network, and container checks. |
 | `deployment/opensandbox/activate-runtime-generation.sh` | Future root-only generation primitive invoked by the formal orchestrator for staging, activation, verification, and one mode-specific rollback; it is not an operator formal entry. |
-| `deployment/opensandbox/medchat-formal-authority-*` | Pre-snapshot systemd attestation service/target, root ExecCondition, diagnostics-only generator, and static fail-closed cold-boot interlock. |
+| `deployment/opensandbox/medchat-formal-authority-*` | Pre-snapshot systemd attestation service/target, root ExecCondition, guarded effective ExecStart, diagnostics-only generator, and static fail-closed cold-boot interlock. |
 | `deployment/opensandbox/systemd/*/10-formal-authority.conf` | Static fail-closed drop-ins for Broker, Temporal worker, OpenSandbox daemon, and both automatic formal-gate service/timer units. |
 | `deployment/opensandbox/opensandbox-server-0.2.2-formal-label.patch` | Minimal reviewed daemon-side create-time mapping for the reserved formal-run label. |
 | `deployment/opensandbox/opensandbox-server-formal-label-lock.json` | Pinned server source/version, reviewed artifact/wheel hash, and protected-transport deployment identity. |
@@ -930,6 +931,7 @@ the only commit eligible for Task 7. Do not create an empty commit.
 - Modify: `deployment/opensandbox/medchat-sandbox-broker.service`
 - Modify: `deployment/medchat-temporal-worker.service`
 - Create: `scripts/attest_opensandbox_formal_authority_boot.py`
+- Create: `scripts/medchat_formal_authority_exec_wrapper.py`
 - Create: `deployment/opensandbox/medchat-formal-authority-generator`
 - Create: `deployment/opensandbox/medchat-formal-authority-attestation.service`
 - Create: `deployment/opensandbox/medchat-formal-authority-attested.target`
@@ -1474,7 +1476,12 @@ Parameterize a hard process-kill failpoint immediately before and after:
 - token-lifecycle flock acquisition/release, automatic-gate receipt and runtime-token
   revocation, each authorization CAS, post-CAS formal-token publication, settled/
   rollback runtime-token plus eligibility-receipt publication, formal-token
-  revocation, every no-replace publication boundary, and every token-directory fsync;
+  revocation, every no-replace publication boundary, every token-directory fsync,
+  protected-service `ExecCondition` success, guard-wrapper shared-lock acquisition,
+  authority revalidation, identity reduction, and the final fixed `execve` boundary;
+- the deliberately long first-mutation lifecycle-lock interval: settled/initial proof
+  revocation, release stage/capture, output-locator binding, first `STAGED` INSERT,
+  `STAGED -> ACTIVATING` actor CAS, formal-token publication/fsync, and lock release;
 - permanent claim O_EXCL creation/fsync and the following DB CAS;
 - the single 30-job scientific soak dispatch, report hashing/sealing, and report
   settlement;
@@ -1507,6 +1514,12 @@ For every failpoint, restart through the public entry point and assert:
 - no protected service can start from a token published before its authorizing CAS,
   from a token whose state/row version/action/unit/generation is stale, or while a
   token/receipt publication or revocation is only partially durable;
+- passing `ExecCondition` never reserves admission: the root guard wrapper must
+  reject a queued start if a gate rotates the journal/capability before its shared-
+  lock revalidation and fixed-command `execve`;
+- while a live gate holds the first-mutation exclusive lifecycle lock, no settled
+  publisher, initial-proof publisher, condition, or guard wrapper can republish or
+  consume the old capability between revocation and durable `ACTIVATING` authority;
 - concurrent token publishers never overwrite one another, and an unexpected
   destination is either proved byte-identical under the lifecycle lock or blocks.
 
@@ -1626,9 +1639,12 @@ The RED suite must explicitly cover these named scenarios:
     drop-in or changing its target/condition fails installation and validation.
 27. Exercise token lifecycle failpoints for A -> B pass, B rollback -> A, and an
     inherited in-flight recovery. Mutation begins only after the automatic-gate
-    receipt and A runtime token are durably removed. Kill after revocation before
-    stage/capture and before the first INSERT: settled read-only recovery may restore
-    only the original A capability pair and no formal work has begun. `STAGED` alone authorizes no
+    receipt and A runtime token are durably removed. While the gate remains alive,
+    it retains the exclusive lifecycle lock across stage/capture and the first INSERT,
+    so no read-only publisher or protected start can restore/use A. Kill the gate
+    after revocation but before the first INSERT: only after kernel lock release may
+    settled read-only recovery restore the reattested original A capability pair,
+    because no authoritative formal row exists. `STAGED` alone authorizes no
     protected service. Only after `STAGED -> ACTIVATING` commits may the gate publish
     `formal-new-run(action=activate_target)` for that exact new row version,
     generation, and unit allowlist. Kill after CAS/before publication and after
@@ -1663,6 +1679,24 @@ The RED suite must explicitly cover these named scenarios:
     partial temp, or a conflicting destination blocks without overwrite. Crash
     before/after publish and revoke fsyncs leaves every static `ExecCondition`
     fail-closed until read-only reconstruction completes.
+30. Let the static root `ExecCondition` pass, pause the protected service before its
+    guard wrapper obtains the shared lifecycle lock, and have the gate acquire the
+    exclusive lock, revoke the old capability, CAS/rotate to a new state/version,
+    and release. The resumed wrapper rereads the authority and refuses the queued
+    stale start. Also verify the closed unit mapping, exact executable descriptor and
+    hash, fixed argv/cwd/environment, target UID/GID/supplementary groups,
+    `no_new_privs`, CLOEXEC lock release at successful `execve`, refusal on exec
+    failure, and fail-closed behavior when the wrapper is missing, writable,
+    replaced, or hash-mismatched. No shell, caller argv, or PATH lookup is accepted.
+31. With a gate process alive, pause after settled capability or initial-legacy
+    proof revocation but before the first `STAGED` INSERT. Concurrent settled/proof
+    publishers, `ExecCondition`, and guard wrappers block on the exclusive lifecycle
+    lock and cannot restore or use A. Killing the gate before `STAGED` releases the
+    kernel lock and permits only the fully reattested settled-A pair or a newly
+    attested empty-history initial proof. Killing it after `STAGED` or `ACTIVATING`
+    never restores settled capabilities or initial eligibility; journal recovery is
+    the only path. Repeat with pauses during stage, capture, locator preparation,
+    INSERT/CAS fsync, token no-clobber publication, and the final pre-dispatch release.
 
 - [ ] **Step 4: Run the journal and gate RED tests before implementation**
 
@@ -1787,11 +1821,34 @@ static drop-ins are installed for `medchat-sandbox-broker.service`,
 `medchat-opensandbox-formal-gate.service`, and
 `medchat-opensandbox-formal-gate.timer`. Every service drop-in permanently has
 `Requires=medchat-formal-authority-attested.target`, orders after both the
-attestation service and target, and contains the explicit root-prefixed condition:
+attestation service and target, contains the explicit root-prefixed condition, and
+clears the vendor command before replacing the effective start command with the
+root-owned guard wrapper:
 
 ```ini
 ExecCondition=+/usr/local/sbin/medchat-formal-authority-exec-condition --unit %n
+ExecStart=
+ExecStart=+/usr/local/sbin/medchat-formal-authority-exec-wrapper --unit %n
 ```
+
+The wrapper accepts only `--unit %n`; it rejects extra arguments, environment-based
+command overrides, path lookup, and unit aliases. Its closed mapping has two explicit
+classes. The static class covers exactly the Broker, Temporal worker, OpenSandbox
+daemon, and automatic formal-gate service. The journal-bound actor class accepts only
+the exact persisted unique transient-unit name and closed actor kind for activation,
+root validation, socket probe, acceptance, soak, ordinary rollback, or resolution
+rollback; each kind maps to one reviewed command shape and must match the actor
+identity hash already committed by CAS. For every entry it selects the one reviewed
+executable descriptor and SHA-256, fixed argv, working directory, minimal environment
+hash, target UID, GID, supplementary-group vector, and whether the target remains
+root. The automatic formal-gate mapping names the root-owned gate executable; the
+Broker, worker, daemon, and non-root actor mappings restore only their reviewed
+identities. No shell or caller-controlled argv is ever involved. Installation and
+validation inspect the
+effective `systemctl cat/show` result, prove the original `ExecStart` list was reset,
+and require the sole effective command to be this immutable wrapper with the exact
+unit argument. A missing, writable, replaced, or hash-mismatched wrapper or mapped
+executable fails before service execution.
 
 The timer drop-in permanently requires/orders after the same target, uses a
 fail-closed current-boot `ConditionPathExists` for
@@ -1799,11 +1856,13 @@ fail-closed current-boot `ConditionPathExists` for
 the statically guarded `medchat-opensandbox-formal-gate.service` as its `Unit=`.
 `ExecCondition=` is not a valid timer directive; the timer's static condition may
 queue only while the receipt exists, while the target service's root
-`ExecCondition` independently takes a shared token-lifecycle lock and validates the
-receipt, runtime token, journal, baseline, and exact service/timer unit names before
-execution. Thus a stale queued start is still blocked, both timer and service are
-guarded, and no alternate service name is accepted. For the automatic gate service
-only, the root condition may admit process startup from a complete current-boot
+`ExecCondition` performs an early shared-lock validation and the target service's
+guard wrapper repeats the complete validation immediately at the real start boundary.
+Thus a stale queued start is still blocked, both timer and service are guarded, and
+no alternate service name is accepted. The timer itself has no `ExecStart`; its only
+target is the statically mapped service whose effective `ExecStart` is the wrapper.
+For the automatic gate service only, the root condition may admit a service job to
+the guarded start boundary from a complete current-boot
 runtime-token/eligibility-receipt pair after independently proving the same clean
 settled baseline. Admission authorizes preflight and journal entry only. Before the
 first formal mutation, the gate must exclusively lock the token lifecycle and
@@ -1818,7 +1877,10 @@ dependency or condition. Installation and static/runtime validation enumerate th
 closed five-unit set and fail if any static drop-in, directive, target, condition
 binary, timer target, owner, mode, or hash is missing or different. Generator
 absence, non-zero exit, empty output, or partial output therefore cannot remove the
-static interlock and is explicitly tested with all restored units enabled.
+static interlock and is explicitly tested with all restored units enabled. Static
+validation also hashes the installed wrapper and closed command mapping and proves
+that each service's effective `ExecStart` is exactly the wrapper after an empty reset;
+the diagnostic generator cannot add an alternate unwrapped service command.
 
 `medchat-formal-authority-attestation.service` runs before the target. It first
 mounts the excluded authority volume read-only and descriptor-verifies its drive
@@ -1858,21 +1920,31 @@ All runtime, formal, automatic-gate, and initial-legacy proofs use distinct fixe
 filenames, closed canonical schemas, and one fixed root-only
 `/run/medchat-formal-authority/token-lifecycle.lock` (`root:root 0600`) on trusted
 tmpfs. The whole-gate orchestrator always acquires the whole-gate flock first. For
-each authorization-state CAS and associated capability publication/revocation it
-then takes the token-lifecycle flock exclusively, holds it through DB/file/parent
-fsync, and releases it before dispatching or waiting for a protected service. It
-reacquires in the same order for the next CAS/capability rotation. This avoids
-deadlocking a service whose root condition must read the capability. Cold-boot and
-settled-baseline read-only publishers acquire only the token-lifecycle flock. While
+the first formal mutation it then takes the token-lifecycle flock exclusively before
+verifying/revoking the settled capability pair or initial-legacy proof and deliberately
+holds that one lock continuously through release stage/capture, output-locator
+preparation, `insert_staged_if_absent()`, `STAGED -> ACTIVATING` actor binding,
+current-version `formal-new-run` no-clobber publication, every DB/file/parent fsync,
+and the final pre-dispatch boundary. Only after the formal token is durable and the
+gate is immediately ready to dispatch does it release the lifecycle lock. This long
+critical section is an intentional safety boundary: stage/capture code must not
+start, call, or wait for any protected service or any other operation requiring the
+shared lifecycle lock. For later authorization-state CAS and capability rotations,
+the orchestrator reacquires the locks in the same whole-gate-then-lifecycle order,
+holds the exclusive lifecycle lock across revoke -> CAS -> publish plus all fsyncs,
+and releases it only immediately before the corresponding protected dispatch. Cold-
+boot and settled-baseline read-only publishers acquire only the token-lifecycle
+flock. While
 they hold it, no gate can change eligibility; after they freeze the journal snapshot,
 any in-flight/non-settled row causes publication refusal. Conversely, before a gate
 changes eligibility it holds the lifecycle lock, revokes settled capabilities, and
 commits the new state, so a read-only publisher cannot race a mutation. Root
-`ExecCondition` readers take a shared lifecycle lock; publishers and revokers take it
-exclusively. This makes each condition observe either the old complete set or the
-new complete set, never an in-process intermediate set. Process death may leave a
-durable partial set, which all conditions reject until journal-driven read-only
-recovery repairs it.
+`ExecCondition` readers and root guard wrappers take the lifecycle lock shared;
+publishers and revokers take it exclusively. A condition observes either the old
+complete set or the new complete set, but condition success is only an early check
+and never reserves a future start. The wrapper's second check at the executable
+boundary is authoritative. Process death may leave a durable partial set, which all
+conditions and wrappers reject until journal-driven read-only recovery repairs it.
 
 Publication creates an unpredictable same-directory temporary file with
 `O_CREAT|O_EXCL|O_NOFOLLOW`, writes the exact canonical bytes at root-only mode
@@ -1899,6 +1971,33 @@ audit, current `boot_id`, target unit, token kind, action, state and row version
 applicable, and exact executable generation. The condition always rereads journal
 and token; a token is a bounded current-boot capability, never a substitute for
 journal truth. Failure to reopen either capability or authority evidence blocks.
+
+`scripts/medchat_formal_authority_exec_wrapper.py`, installed root-owned and
+non-writable as `/usr/local/sbin/medchat-formal-authority-exec-wrapper`, is the actual
+protected-service admission boundary. It opens the lifecycle lock without following
+symlinks and holds a shared flock while it descriptor-reopens and validates the
+authority volume, journal integrity/audit, token and receipt, `boot_id`, canonical
+static unit or exact journal-bound transient actor unit, action, state/version,
+actor, generation, and the closed command mapping. It
+opens the mapped executable by trusted descriptor, verifies owner/mode/hash and the
+fixed release identity, constructs only the reviewed argv and minimal environment,
+and validates the mapped cwd and exact UID/GID/supplementary groups. Still holding
+the same shared flock, it clears ambient capabilities, applies the fixed
+`setgroups`/`setgid`/`setuid` identity (or the mapped root identity), sets
+`no_new_privs`, changes to the descriptor-verified cwd, marks authority/token/lock
+descriptors `CLOEXEC`, and uses `execveat(AT_EMPTY_PATH)` or an equivalently pinned
+descriptor-based `fexecve` to enter the exact executable. The shared flock is
+released only by CLOEXEC at the successful exec boundary; if any preparation or exec
+fails, the wrapper starts nothing, closes descriptors, releases the lock, and exits
+non-zero. It never invokes a shell, accepts caller argv beyond canonical `--unit`,
+uses PATH lookup, or passes an unreviewed environment variable.
+
+Consequently, a service job that already passed `ExecCondition` but waits while the
+gate obtains the exclusive lifecycle lock cannot cross into the real command. After
+the gate completes revoke -> CAS -> token rotation and releases its lock, the wrapper
+acquires shared access, sees the new authority, and rejects the stale queued start.
+The condition remains defense in depth and an early failure path; it is never treated
+as proof that the later `ExecStart` is authorized.
 
 The manual formal-gate entry uses a separate root-only attestation mode. Under the
 whole-gate and exclusive token-lifecycle locks, and before the first formal
@@ -1966,18 +2065,21 @@ root-only current-boot `initial-legacy-eligible` proof binding those observation
 it creates no runtime token or automatic-gate receipt and starts no service. The
 manual gate acquires the whole-flow then token-lifecycle flocks, revalidates the
 proof and physical state, consumes the eligibility proof by verified unlink plus
-directory fsync, and releases the lifecycle lock before staging/capturing while all
-services remain blocked. It then reacquires the lifecycle lock, calls
-`insert_staged_if_absent()` to create the first `STAGED` row and initial audit, and
-still publishes no service-start token. It commits `STAGED -> ACTIVATING` with the
-exact activation actor. Only after that CAS may it publish
+directory fsync, and retains the exclusive lifecycle lock throughout staging,
+legacy capture, locator preparation, `insert_staged_if_absent()` creation of the
+first `STAGED` row/audit, and `STAGED -> ACTIVATING` with the exact activation actor.
+`STAGED` still publishes no service-start token. Only after the activation CAS may it
+publish
 `formal-new-run(action=activate_target)` bound to the new row version, commit,
 invocation, target generation, activation actor, and exact guarded service/action
-allowlist, then fsync and release before dispatch. Once the
+allowlist, then fsync and release immediately before dispatch. Stage/capture in this
+interval is filesystem/journal-only and must not call any protected service or wait
+for a shared lifecycle reader. Once the
 first row/audit exists, `clean_initial_legacy` can never be true again. A crash after
-the proof but before the insert may only revalidate the same empty-state branch;
-under the flock a new invocation removes the stale invocation-bound proof after
-read-only reattestation and publishes a new proof, never reuses its nonce. A
+proof revocation but before the insert releases the kernel lock and may only
+reattest the same still-empty branch and publish a new invocation-bound proof; it
+never reuses the prior nonce. While the original gate remains alive, no proof
+publisher can enter that interval. A
 crash after `STAGED` but before `ACTIVATING` publishes no token and resumes only the
 journal-authorized transition; a crash after `ACTIVATING` but before publication
 reconstructs only the matching current-version activation token. Neither path
@@ -2000,8 +2102,12 @@ Create `scripts/run_opensandbox_formal_qemu_gate.py`. The operator-visible entry
 keeps the whole-flow root-only non-blocking flock from preflight through final DB
 settlement and best-effort export. Every time it needs the separate token-lifecycle
 flock, the orchestrator acquires it only after the whole-flow flock, retains it
-through the relevant CAS/capability fsync boundary, and releases it before protected
-service dispatch. No other command may invoke a formal worker.
+through the relevant revoke/CAS/capability fsync boundary, and releases it only
+immediately before protected-service dispatch. The first such interval is longer by
+design: it begins before settled/initial capability revocation and continues without
+release through stage/capture, locator binding, first `STAGED`, `ACTIVATING`, and
+activation-token durability. Nothing in that interval may invoke a protected service
+or wait for a shared lifecycle lock. No other command may invoke a formal worker.
 The lock is `/run/lock/medchat-opensandbox-formal.lock`, opened without following
 symlinks as a root-owned regular file with mode `0600`; its file descriptor
 remains open for the entire flow. An untrusted path/type/owner/mode fails before
@@ -2045,22 +2151,33 @@ The main gate order is fixed:
 6. While holding the whole-gate flock, acquire the exclusive token-lifecycle flock.
    Before any formal filesystem, journal, output, or runtime mutation, descriptor-
    verify and durably revoke the automatic-gate eligibility receipt and old runtime
-   token, fsync, and release the lifecycle lock. Stage and attest the release and
-   capture/reuse the exact legacy or generation snapshot while all protected starts
-   remain blocked. Reacquire the lifecycle lock, call `insert_staged_if_absent()`,
-   and keep `STAGED` without a protected-service token. Commit `STAGED -> ACTIVATING`
+   token, or consume the one-time initial-legacy proof, and fsync. Do **not** release
+   the lifecycle lock. While continuously holding it, stage and attest the release,
+   capture/reuse the exact legacy or generation snapshot, finalize the unique safe
+   output locators, call `insert_staged_if_absent()`, and keep `STAGED` without a
+   protected-service token. Commit `STAGED -> ACTIVATING`
    while binding the exact activation actor; only after that CAS and DB fsync publish
    `formal-new-run(action=activate_target)` bound to the resulting state/row version,
    invocation, target generation, activation transient unit, exact guarded Broker/
    worker/daemon units required by that action, and actor identity. Fsync the
-   capability directory and release the lifecycle lock. Dispatch the unique
-   transient unit only afterward. Verify zero-live termination and
+   capability directory. Release the lifecycle lock only when the token is durable
+   and the gate is immediately ready; dispatch the unique transient unit only after
+   that release. Verify zero-live termination and
    activation, clear the actor, and CAS to `ACTIVE_PRECLAIM`; that version change
    invalidates the activation token. Before every later protected-service dispatch,
    perform its authorizing state/evidence/actor CAS first, then revoke any stale
    formal token and publish a current-version token for only that exact action/unit.
    A CAS-before-publication crash leaves services blocked and is reconstructed from
    the journal; token-before-CAS is forbidden.
+   Holding the lifecycle lock during potentially slow stage/capture is deliberate:
+   concurrent settled/proof publishers, conditions, and start wrappers must block
+   rather than recreate A's authority. The stage/capture implementation is therefore
+   restricted to local descriptor-confined filesystem/journal work and may not call
+   or wait for any protected service/shared-lock consumer. If the gate dies before
+   `STAGED`, kernel lock release leaves the journal settled and read-only recovery may
+   republish only the reattested prior baseline pair (or, for truly empty history, a
+   new initial-legacy proof). If `STAGED` or `ACTIVATING` committed, every publisher
+   sees in-flight authority and refuses settled/initial capability restoration.
 7. Descriptor-confined below the trusted output-base handle, create exactly the
     journal-bound run directory plus `acceptance/` and `soak/` subdirectories once,
     with no symlink traversal or pre-existing target. The report file itself must
@@ -2161,7 +2278,12 @@ unique run label, and independently observed OpenSandbox/Docker baseline hash.
 After that CAS and before `systemd-run`, the gate publishes the exact formal token
 for the resulting row version, actor unit, action, and generation; any token from
 the prior version/action is first durably revoked. After parent fsync it releases
-the lifecycle lock so the unit's root `ExecCondition` can acquire the shared lock.
+the lifecycle lock. The transient unit's generated `ExecStart` is not the actor
+command: it is the same root-owned wrapper with only `--unit %n`; the wrapper resolves
+the exact journal-bound actor kind/identity to its fixed command. Its root
+`ExecCondition` and, authoritatively, wrapper each acquire the shared lock and
+independently revalidate current authority. Condition success alone never reserves
+the dispatch.
 No actor dispatch may rely on a token created before its actor-binding CAS.
 The gate verifies the created unit/cgroup against that tuple and never identifies
 an actor by process-name search. Normal completion and inherited recovery both
@@ -2338,7 +2460,12 @@ duplicate claim, no stale CAS success, one initial `STAGED` audit, exact sealed
 report-locator reuse, correct A -> B -> C baseline history, persistent authority
 truth across OS/runtime rewind, no export-driven branch, no pre-CAS or stale-version
 formal-token start, correct `ROLLING_BACK` recovery-token rotation, and no-clobber
-runtime/receipt publication under concurrent publishers. Before a formal run,
+runtime/receipt publication under concurrent publishers. It must also show that a
+condition-passed queued service is rejected by the guard wrapper after a concurrent
+CAS/token rotation; that the wrapper executes only the hash-bound fixed command as
+the mapped UID/GID/groups/cwd/environment with `no_new_privs`; and that missing,
+tampered, wrong-hash, exec-failed, caller-argv, shell, and PATH cases fail closed.
+Before a formal run,
 the QEMU host integration preflight must additionally execute the real transient
 mount-namespace/DAC test as the actual `medchat` UID and the real independent
 OpenSandbox/Docker create-time label/observer test. That non-scientific preflight
@@ -2357,7 +2484,13 @@ legacy branch may produce only `initial-legacy-eligible`, never a runtime token.
 Only the same frozen clean-settled snapshot may produce the matching automatic-gate
 receipt, and the receipt is published last. Any failure or partial/conflicting
 capability set keeps the automatic gate disabled; absent required runtime capability
-also keeps Broker, worker, and daemon disabled.
+also keeps Broker, worker, and daemon disabled. The host preflight inspects every
+effective service command and proves it is the root guard wrapper, not the vendor
+`ExecStart`. A deterministic concurrency probe pauses a live gate after capability/
+proof revocation but before `STAGED`: publishers, conditions, and wrappers remain
+blocked until either the gate completes durable `ACTIVATING` plus token publication
+or is killed. Only a pre-`STAGED` death can restore the reattested settled pair or
+empty-history proof; post-`STAGED` death cannot.
 
 - [ ] **Step 10: Obtain independent review and commit Task 7 before formal execution**
 
@@ -2371,7 +2504,9 @@ rollback physical/DB gap, snapshot-ID/evidence binding, resolution crash, poison
 persistence and same-state shutdown, phase-specific single-RW output mount/DAC
 isolation and sealing, OpenSandbox/Docker atomic create-time labelled-resource
 observation, authority-volume identity and rewind exclusion, static cold-boot
-drop-ins, diagnostics-only generator failure, root ExecCondition, complete token
+drop-ins, diagnostics-only generator failure, root ExecCondition, guarded effective
+ExecStart and closed command/identity mapping, condition-to-exec race closure,
+complete token
 CAS-before-publication sequencing, lifecycle-lock ordering, true no-clobber
 revocation/publication/recovery, automatic-gate receipt creation/rotation, one-time
 clean-initial-legacy authorization,
@@ -2380,7 +2515,7 @@ manifest equality, external outputs, phase contracts, and old-report retention.
 No Critical or Important finding may remain.
 
 ```powershell
-git add -- src/sandbox_broker/formal_gate_state.py src/sandbox_broker/models.py src/sandbox_broker/opensandbox_client.py src/sandbox_broker/service.py scripts/attest_opensandbox_formal_authority_boot.py scripts/opensandbox_formal_runtime.py scripts/run_opensandbox_formal_qemu_gate.py scripts/run_opensandbox_docking_acceptance.py scripts/run_opensandbox_stability_soak.py scripts/validate_opensandbox_deployment.py deployment/opensandbox/activate-runtime-generation.sh deployment/opensandbox/install.sh deployment/opensandbox/medchat-formal-authority-generator deployment/opensandbox/medchat-formal-authority-attestation.service deployment/opensandbox/medchat-formal-authority-attested.target deployment/opensandbox/medchat-formal-authority-exec-condition deployment/opensandbox/medchat-opensandbox-formal-gate.service deployment/opensandbox/medchat-opensandbox-formal-gate.timer deployment/opensandbox/systemd/medchat-sandbox-broker.service.d/10-formal-authority.conf deployment/opensandbox/systemd/medchat-temporal-worker.service.d/10-formal-authority.conf deployment/opensandbox/systemd/medchat-opensandbox.service.d/10-formal-authority.conf deployment/opensandbox/systemd/medchat-opensandbox-formal-gate.service.d/10-formal-authority.conf deployment/opensandbox/systemd/medchat-opensandbox-formal-gate.timer.d/10-formal-authority.conf deployment/opensandbox/opensandbox-server-0.2.2-formal-label.patch deployment/opensandbox/opensandbox-server-formal-label-lock.json deployment/opensandbox/medchat-sandbox-broker.service deployment/medchat-temporal-worker.service deployment/opensandbox/README.md tests/sandbox_broker/test_formal_gate_state.py tests/sandbox_broker/test_deployment_assets.py tests/sandbox_broker/test_formal_qemu_gate.py tests/sandbox_broker/test_opensandbox_client.py tests/sandbox_broker/test_real_opensandbox_acceptance.py tests/sandbox_broker/test_service.py tests/sandbox_broker/test_stability_soak.py
+git add -- src/sandbox_broker/formal_gate_state.py src/sandbox_broker/models.py src/sandbox_broker/opensandbox_client.py src/sandbox_broker/service.py scripts/attest_opensandbox_formal_authority_boot.py scripts/medchat_formal_authority_exec_wrapper.py scripts/opensandbox_formal_runtime.py scripts/run_opensandbox_formal_qemu_gate.py scripts/run_opensandbox_docking_acceptance.py scripts/run_opensandbox_stability_soak.py scripts/validate_opensandbox_deployment.py deployment/opensandbox/activate-runtime-generation.sh deployment/opensandbox/install.sh deployment/opensandbox/medchat-formal-authority-generator deployment/opensandbox/medchat-formal-authority-attestation.service deployment/opensandbox/medchat-formal-authority-attested.target deployment/opensandbox/medchat-formal-authority-exec-condition deployment/opensandbox/medchat-opensandbox-formal-gate.service deployment/opensandbox/medchat-opensandbox-formal-gate.timer deployment/opensandbox/systemd/medchat-sandbox-broker.service.d/10-formal-authority.conf deployment/opensandbox/systemd/medchat-temporal-worker.service.d/10-formal-authority.conf deployment/opensandbox/systemd/medchat-opensandbox.service.d/10-formal-authority.conf deployment/opensandbox/systemd/medchat-opensandbox-formal-gate.service.d/10-formal-authority.conf deployment/opensandbox/systemd/medchat-opensandbox-formal-gate.timer.d/10-formal-authority.conf deployment/opensandbox/opensandbox-server-0.2.2-formal-label.patch deployment/opensandbox/opensandbox-server-formal-label-lock.json deployment/opensandbox/medchat-sandbox-broker.service deployment/medchat-temporal-worker.service deployment/opensandbox/README.md tests/sandbox_broker/test_formal_gate_state.py tests/sandbox_broker/test_deployment_assets.py tests/sandbox_broker/test_formal_qemu_gate.py tests/sandbox_broker/test_opensandbox_client.py tests/sandbox_broker/test_real_opensandbox_acceptance.py tests/sandbox_broker/test_service.py tests/sandbox_broker/test_stability_soak.py
 git diff --cached --check
 git commit -m "feat: add opensandbox formal gate journal"
 git rev-parse HEAD
@@ -2397,7 +2532,8 @@ and mount the distinct formal-authority block volume first; attest its drive
 serial, filesystem UUID, `major:minor`, hardening options, fixed bind mounts, and
 absence from the OS/runtime snapshot device set. The OS snapshot baseline must
 already contain the reviewed static drop-ins for all five units, attestation
-service/target, root ExecCondition, timer condition, and diagnostics-only generator.
+service/target, root ExecCondition, root guard wrapper plus closed unit-command
+mapping, timer condition, and diagnostics-only generator.
 Validation must prove the static layer remains effective with generator failure.
 Run the real
 non-scientific phase-mount/DAC, atomic-label observer, and cold-boot authority
@@ -2581,7 +2717,8 @@ Implementation is complete only when all statements are true:
 - Task 7's new deployment, static boot interlock, attestation, closed worker-environment builder,
   whole-gate lock/concurrency, first-STAGED insertion, actor orphan recovery,
   acceptance sealing/CAS recovery, claim, report sealing/recovery, token lifecycle,
-  CAS-before-token authorization, no-clobber capability publication, automatic-gate
+  CAS-before-token authorization, condition-to-exec guard-wrapper admission,
+  first-mutation long-lock exclusion, no-clobber capability publication, automatic-gate
   receipt creation/rotation, clean-initial-legacy authorization, live-baseline history, activation/verify failure,
   manifest-ordering, gate-result, and rollback-state tests run RED before
   implementation and GREEN afterward.
@@ -2596,7 +2733,10 @@ Implementation is complete only when all statements are true:
 - Activation, root validation, socket probe, acceptance, soak, and both rollback
   forms run only as uniquely named transient systemd actors whose exact unit,
   kind, expected cgroup, identity, private-mount mapping, run label, and observer
-  baseline are journaled before dispatch as applicable. Acceptance and soak use
+  baseline are journaled before dispatch as applicable. Their transient effective
+  `ExecStart` is only the root guard wrapper with canonical
+  `--unit %n`; the journal-bound actor kind/identity selects the fixed command and
+  target identity after shared-lock revalidation. Acceptance and soak use
   separate `PrivateMounts=yes` namespaces: each receives only its own phase subtree
   read/write at `/run/medchat-formal-output`; soak has no acceptance path, mount,
   descriptor, or content dependency and binds only the journaled seal hash as a
@@ -2623,11 +2763,18 @@ Implementation is complete only when all statements are true:
   settlement, export, and any rollback verification. Lock contention and trusted
   settled-row refusals do not mutate runtime and never invoke rollback. For each
   eligibility CAS/capability rotation the gate next acquires the fixed root-only
-  token-lifecycle flock, holds it through DB/file/parent fsync, and releases it
-  before protected dispatch; it always preserves whole-gate-then-lifecycle order.
+  token-lifecycle flock and always preserves whole-gate-then-lifecycle order. The
+  first interval starts before settled/initial capability revocation and remains
+  exclusive through stage/capture, locator binding, first `STAGED`, `ACTIVATING`,
+  current formal-token publication, and all fsyncs; only then is it released for
+  immediate dispatch. Later rotations hold it across revoke -> CAS -> publish and
+  release only before their protected dispatch. Stage/capture invokes no protected
+  service or shared-lock consumer.
   Cold-boot and settled-baseline publishers use only that lifecycle flock, root
-  `ExecCondition` readers take it shared, and journal state prevents read-only
-  publication during an in-flight mutation.
+  `ExecCondition` and guard-wrapper readers take it shared, and journal state plus
+  the uninterrupted pre-`STAGED` exclusive interval prevents read-only publication
+  during a live mutation. A pre-`STAGED` gate death may restore only reattested prior
+  authority after kernel lock release; a post-`STAGED` death may not.
 - Linux runtime validation and real acceptance pass on the activated immutable generation.
 - Exactly one new formal 30-job QEMU soak is attempted per full commit, enforced
   by a permanent root-only O_EXCL claim created immediately before the command;
@@ -2665,11 +2812,20 @@ Implementation is complete only when all statements are true:
   claim binds that seal. Seal-before-CAS recovery revalidates the exact tree and
   never reruns acceptance; wrong or mutable evidence fails closed.
 - Every relevant service has a pre-snapshot static authority drop-in with root
-  `ExecCondition=+...`; the automatic timer is separately static-gated and can
+  `ExecCondition=+...` and an emptied/replaced `ExecStart` that invokes only the
+  root-owned hash-attested guard wrapper; the automatic timer is separately static-
+  gated and can
   target only the guarded service. Generator absence, failure, empty output, or
   partial output cannot remove protection. Each condition reopens the authority
   journal and validates boot, volume, row, state/version/action, capability set,
-  target unit, and generation while holding the shared lifecycle lock.
+  target unit, and generation while holding the shared lifecycle lock, but condition
+  success never reserves a later start. The wrapper accepts only canonical `--unit`,
+  repeats that descriptor-confined validation under the shared lock, selects a closed
+  executable/argv/cwd/environment/UID/GID/groups mapping, drops privileges with
+  `no_new_privs`, and executes the pinned descriptor directly. CLOEXEC releases the
+  shared flock only at successful `execve`; shell, PATH, caller argv, missing/tampered
+  wrapper, stale authority, and exec failure start nothing. A condition-passed queued
+  job therefore cannot cross a concurrent CAS/token rotation.
 - The gate durably revokes the old automatic-gate receipt and runtime token before
   formal mutation. Every protected start is authorized by a CAS first and a formal
   token second, bound to the resulting state, row version, action, exact generation,
@@ -2697,7 +2853,9 @@ Implementation is complete only when all statements are true:
   first `STAGED` row/audit without a service token, then commits
   `STAGED -> ACTIVATING` with the exact actor before issuing
   `formal-new-run(action=activate_target)` for that resulting version. Any residue
-  or first history entry permanently disables this branch.
+  or first history entry permanently disables this branch. Proof consumption through
+  token publication is one uninterrupted exclusive lifecycle interval; only death
+  before first `STAGED` permits a newly reattested empty-history proof.
 - A claim without a trusted report/failure envelope reaches
   `RESOLUTION_REQUIRED`; ordinary gates make zero runtime mutations. The
   explicit root-only hash-bound resolution command retains the claim, proves
