@@ -1011,8 +1011,17 @@ Assert:
   during acceptance all leave `activated` transactions that are recovered once
   on the next invocation; that recovery invocation does not stage, validate,
   run acceptance, allocate a run ID, or create a claim;
+- the closed transaction states are exactly `captured`, `activating`, `activated`,
+  `resolving`, `committed`, `rolled_back`, `abandoned`, and `rollback_failed`; a
+  passed terminal result is fsynced before `committed`, and either a committed legacy A or
+  committed generation A permits generation B to stage;
+- a permanent claim without a terminal result is `unresolved_claim`: ordinary
+  gates refuse with zero mutation, while the explicit hash-bound root-only manual
+  resolution retains the claim, proves work stopped and evidence preserved,
+  performs one recovery rollback, writes its O_EXCL resolution/result, settles
+  `abandoned`, and never invokes acceptance or soak;
 - a failed rollback atomically marks the transaction `rollback_failed`, writes
-  and fsyncs the root-only poison marker
+  the primary poison before it writes and fsyncs the redundant root-only marker
   `/var/lib/medchat-runtime-generation/snapshot-required.json`, stops and
   disables both services, and makes every later gate return
   `qemu_snapshot_recovery_required` with zero mutation and zero rollback;
@@ -1388,6 +1397,39 @@ exactly `MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE=1`; soak adds exactly
 leak into the probe or the other scientific worker, and no builder accepts an
 arbitrary environment mapping.
 
+Before implementation, add failing transaction-settlement and manual-resolution
+tests against the wished-for pure orchestrator API:
+
+- assert the closed state enum contains exactly `captured`, `activating`,
+  `activated`, `resolving`, `committed`, `rolled_back`, `abandoned`, and
+  `rollback_failed`;
+- legacy first-migration A and generation A each pass, fsync a hash-linked passed
+  terminal result, become `committed`, and permit generation B to reach stage;
+- inject a crash after passed-result fsync but before `committed`; the next gate
+  validates current/manifest/claim/transaction/report hashes, performs only the
+  settlement fsync, and stops with zero stage, rollback, acceptance, or soak;
+- pre-claim failure settles `rolled_back`; post-claim failure settles `abandoned`;
+  both permit corrected commit B while A remains permanently non-rerunnable. A
+  crash after verified rollback but before failed-result fsync completes only the
+  hash-linked failed result/settlement and never invokes rollback twice;
+- A crashes after claim with no result; B refuses as `unresolved_claim` with zero
+  mutation. `--resolve-incomplete-claim` with exact old commit and claim,
+  transaction, and operator-evidence hashes plus independently verified stopped
+  process/unit and zero sandbox/container state publishes one O_EXCL resolution,
+  rolls back once, settles `abandoned`, runs no scientific command, permits B to
+  stage, and still refuses any rerun of A because its claim remains permanent.
+  This test records the exact sequence: A claim-after-fsync crash → unauthorized
+  B refusal → one authorized resolution rollback → B reaches stage;
+- wrong hashes, active transient unit/process, nonzero sandbox/container state,
+  untrusted evidence, or repeated resolution refuse before rollback; a resolution
+  rollback failure becomes `rollback_failed`; crashes after O_EXCL authorization
+  or durable `resolving` are treated as in-doubt poison and never retry rollback;
+- crash after `rollback_failed` transaction fsync but before marker publication,
+  and crash after marker fsync, both make every later gate return
+  `qemu_snapshot_recovery_required` with zero mutation/rollback;
+- a settled `committed`, `rolled_back`, or `abandoned` older transaction never
+  blocks a new commit, while unresolved or poisoned states do.
+
 Add a whole-gate lock helper with this exact live path and ownership boundary:
 
 ```python
@@ -1443,13 +1485,28 @@ claim, symlinked/untrusted parent, invalid commit, short write/fsync failure, an
 an injected exception immediately after successful claim: every case is
 fail-closed and a successfully created claim remains present.
 
-Existing trusted regular commit claims and existing trusted terminal
-`gate-result.json` files are checked while the whole-gate lock is held and before
-legacy capture, staging, activation, or random-ID allocation. Check the terminal
-result first: it returns `formal_gate_already_terminal`; only an existing claim
-without a terminal result returns `formal_soak_already_claimed`.
-Unsafe claim/result entries return their existing untrusted-path codes. These are
-also pre-ownership refusals and always leave `rollback_count == 0`.
+Existing trusted regular commit claims, trusted terminal `gate-result.json`
+files, transaction records, and manual resolution records are checked while the
+whole-gate lock is held and before legacy capture, staging, activation, or
+random-ID allocation. A terminal result is trusted only after its `claim_sha256`
+(when non-null), canonical pre-settlement `transaction_sha256`, report hashes,
+rollback fields, owner/mode, and full commit all cross-check against immutable
+evidence. A trusted terminal result for the requested commit returns
+`formal_gate_already_terminal`; only a claim without a terminal result is an
+`unresolved_claim` and returns `formal_soak_already_claimed` to an ordinary gate.
+Unsafe claim/result/resolution entries return their existing untrusted-path
+codes. These are pre-ownership refusals and always leave `rollback_count == 0`.
+
+The claim is permanent evidence, not the transaction settlement marker. A
+different, later commit may proceed past an older transaction only when that
+transaction is strictly settled as `committed`, `rolled_back`, or `abandoned`
+and all linked hashes verify. An older `committed` transaction must have a
+trusted `passed` terminal result and, when it is the live baseline, its current
+target and canonical release manifest must still match. An older `rolled_back`
+transaction must have a trusted `failed` terminal or recovery result proving the
+verified rollback. An older `abandoned` transaction must have a trusted manual
+resolution record. A claim with no terminal result never becomes settled merely
+because a later commit is requested.
 
 Define the rollback state exactly as:
 
@@ -1471,8 +1528,14 @@ then atomically publishes and fsyncs the root-only poison marker
 `/var/lib/medchat-runtime-generation/snapshot-required.json`. The marker schema
 contains exactly `schema_version`, stable `failure_code`, `transaction_mode`,
 and full `release_commit`; it contains no raw exception, command output,
-credential, path supplied by a user, or environment value. After marker
-publication, stop and disable worker then Broker. Any second call raises
+credential, path supplied by a user, or environment value. The fsynced
+`rollback_failed` transaction is the primary poison: every gate scans and
+strictly validates all transaction records before consulting the redundant
+marker, and any such state immediately returns
+`qemu_snapshot_recovery_required` with zero mutation and zero rollback. A crash
+after the transaction fsync but before marker publication therefore cannot
+reopen the gate. After marker publication, stop and disable worker then Broker.
+Any second call raises
 `rollback_already_requested` without executing a command. It selects mode and
 rollback target from the validated active
 transaction and its state, not from a gate-local boolean or the long-term
@@ -1482,8 +1545,9 @@ states, including `rollback_failed`, never request rollback. Tests cover first
 migration without
 `previous`, later generation with transaction-local `pending_previous`, success,
 command failure, PID-cwd mismatch, inherited `activating`, and an attempted
-second rollback. Tests also inject rollback failure, verify the transaction and
-poison marker are each fsynced, then invoke a second gate and assert
+second rollback. Tests also inject rollback failure, terminate once after the
+transaction fsync but before marker publication and once after marker fsync, then
+invoke a second gate and assert in both cases
 `qemu_snapshot_recovery_required`, `rollback_count == 0`, and no stage,
 activation, validator, acceptance, claim, or result mutation.
 
@@ -1506,8 +1570,9 @@ Use an injected event recorder to test this exact gate order:
 ```text
 gate_lock_acquired
 preownership_claim_result_check
+transaction_primary_poison_check
 snapshot_recovery_poison_check
-incomplete_activation_recovery_check
+transaction_settlement_or_recovery_check
 release_stage
 rollback_state_capture_or_reuse
 activation_transaction_fsync
@@ -1526,6 +1591,7 @@ soak_report_hash
 rollback_once_if_failed
 gate_result_write
 gate_result_parent_fsync
+transaction_settlement_fsync
 gate_lock_release
 ```
 
@@ -1583,27 +1649,55 @@ legacy unit fixtures and two temporary generation commits:
 - an inherited legacy or generation `activating` or `activated` record for a
   commit with neither claim nor terminal result is rolled back and verified
   before any new stage, validator, acceptance, claim, or soak; the gate writes a
-  separate atomic recovery-only gate result, creates no claim, and stops the
-  current invocation;
+  separate atomic recovery-only gate result, settles the transaction as
+  `rolled_back`, creates no claim, and stops the current invocation;
 - SIGKILL immediately after installed verification, during the privileged
   validator, and during acceptance leaves `activated`; each next invocation
   performs exactly one recovery rollback and stops with `stage_count == 0`,
   `validator_count == 0`, `acceptance_count == 0`, `claim_count == 0`, and no
-  run-ID allocation. If the same commit already has a trusted claim, claim
-  refusal takes precedence and performs zero rollback pending human review;
+  run-ID allocation. If the same commit already has a trusted claim but no
+  terminal result, ordinary-gate recovery is forbidden: classify it as
+  `unresolved_claim`, perform zero rollback, and require the explicit manual
+  resolution command defined below;
+- a successful legacy-first-migration commit A writes and fsyncs its `passed`
+  terminal result before replacing `activated` with `committed`; a crash between
+  those writes is completed on the next invocation only after the result's claim
+  hash, transaction hash, current target, manifest, and report hashes all verify.
+  It does not rerun validation, acceptance, or soak and does not rollback. The
+  settled legacy baseline then permits generation commit B to enter staging;
+- the same passed-result-before-`committed` crash and completion behavior applies
+  to generation A, and its `committed` baseline permits generation B to stage;
+- a failed pre-claim gate that rolled back successfully writes its `failed`
+  terminal result and remains settled as `rolled_back`; a failed post-claim gate
+  that rolled back successfully writes its `failed` terminal result and settles
+  as `abandoned`. Both permit a corrected later commit, while the old claim stays
+  permanent and the old commit remains non-rerunnable;
+- a claim-after-fsync crash leaves no terminal result and is unresolved. Commit B
+  is refused with zero mutation until an authorized manual resolution validates
+  the old full commit, claim SHA-256, transaction SHA-256, operator-evidence-file
+  SHA-256, stopped transient process/unit state, preserved external evidence
+  hashes, and zero active sandbox/container state. Resolution performs exactly
+  one recovery rollback, retains the claim, atomically writes a resolution result,
+  settles the transaction as `abandoned`, runs no acceptance/soak, and then allows
+  B to stage. Wrong hashes or a running process refuse with zero mutation; a
+  repeated resolution refuses with zero rollback; resolution rollback failure
+  enters `rollback_failed`;
 - generation failure before long-term `previous` publication and after its
   publication both restore `current` from this transaction's
   `pending_previous`, restore the pre-transaction long-term `previous` state,
   and never consult a stale `previous` value as the rollback source;
 - a generation crash after `activating` fsync follows the same entry recovery
   path and stops; only a fully verified activation may reach `activated`;
-- rollback failure in either mode atomically sets `rollback_failed`, creates the
-  strict root-only poison marker, and stops/disables both services. A second
-  gate, including one for a different commit, observes the poison marker before
-  stage or recovery rollback and returns `qemu_snapshot_recovery_required` with
-  `rollback_count == 0`. Only an operator may restore the recorded QEMU snapshot
-  and run a separately documented, independently verified cleanup procedure to
-  remove the poison marker; the formal gate has no cleanup path.
+- rollback failure in either mode atomically sets `rollback_failed` before it
+  creates the strict root-only poison marker and stops/disables both services. A
+  second gate, including one for a different commit, observes either the primary
+  transaction poison or the redundant marker before stage or recovery rollback
+  and returns `qemu_snapshot_recovery_required` with `rollback_count == 0`.
+  Tests crash both between transaction/marker fsync and after marker fsync. Only
+  QEMU snapshot restoration plus a separately reviewed operator cleanup may
+  archive this condition; the gate never performs that cleanup, and archival
+  never deletes historical claim, terminal result, resolution, or transaction
+  evidence.
 
 The atomic root-only gate result path is
 `/var/lib/medchat-opensandbox-runs/results/$FULL_COMMIT/gate-result.json`. Tests
@@ -1616,6 +1710,9 @@ parent fsync, and this strict no-raw-error schema:
   "release_commit": "40-lowercase-hex",
   "status": "passed-or-failed",
   "failure_codes": ["stable_code_only"],
+  "transaction_mode": "legacy-or-generation",
+  "transaction_sha256": "64-lowercase-hex",
+  "claim_sha256": "64-lowercase-hex-or-null",
   "acceptance_rc": 0,
   "soak_rc": 0,
   "claim_path": "/var/lib/medchat-opensandbox-runs/claims/40-lowercase-hex.json-or-null",
@@ -1630,26 +1727,45 @@ parent fsync, and this strict no-raw-error schema:
 ```
 
 Passing gates use `rollback_mode="none"`, state `not_requested`, and retain the
-activated generation. A failure requests exactly one mode-correct rollback only
+activated generation. Their terminal write order is strict: compute the canonical
+hash of the still-`activated` transaction, atomically publish/fsync the `passed`
+terminal result and parent, and only then atomically replace/fsync the transaction
+as `committed`. If a process stops between those two writes, the next gate may
+perform only settlement completion after validating the trusted passed result,
+claim hash, pre-settlement transaction hash, current target, canonical manifest,
+and report hashes. It must not rerun, rollback, or allocate output. A failure
+requests exactly one mode-correct rollback only
 when its validated transaction state is `activating` or `activated`. An inherited
-`activating` or unclaimed/unresolved `activated` transaction is recovered once
-at entry even though the current gate did not create it; that recovery invocation
-stops afterward. Lock contention,
-existing claim/result refusal, unsafe pre-ownership paths, stage failure, capture
+`activating` or unclaimed `activated` transaction is recovered once at entry even
+though the current gate did not create it; that recovery invocation stops
+afterward. An unresolved claim is refused until manual resolution. Lock contention,
+same-commit terminal/claim refusal, unsafe pre-ownership paths, stage failure, capture
 failure, and `legacy_capture_conflict` never request rollback; an owned
 pre-mutation refusal returns its stable code without a formal soak claim or
 terminal `gate-result.json`, so a corrected later invocation can retry. No random
 scientific run directory is created on those paths.
-If rollback fails, the orchestrator atomically records transaction state
+Before rollback, persist/fsync a strict stable failure envelope in the active
+transaction containing only failure codes, return codes, report hashes, claim
+hash, and the canonical pre-rollback transaction hash. A successful rollback
+marks `rolled_back` with a hash-linked verified rollback receipt; then
+publish/fsync the `failed` terminal result against that immutable envelope. A
+crash in this window may only complete the deterministic failed result from the
+envelope/receipt and must not repeat rollback. A pre-claim failure remains
+settled as `rolled_back`; a post-claim failure atomically transitions from
+`rolled_back` to `abandoned` after its result is durable. Neither state blocks a
+different corrected commit, while any permanent claim continues to block reruns
+of its own commit. If rollback fails, the orchestrator atomically records
+transaction state
 `rollback_failed`, publishes/fsyncs the strict poison marker, stops and disables
 both services, writes the result if its trusted result path remains usable, and
 requires QEMU snapshot recovery; it never attempts another activation or
-rollback. Every later gate checks the poison marker after lock and trusted
-claim/result precedence but before transaction recovery, stage, or rollback and
+rollback. Every later gate checks transaction state `rollback_failed` after lock
+and before the redundant poison marker, claim/result settlement, transaction
+recovery, stage, or rollback and
 returns `qemu_snapshot_recovery_required` with zero mutation. The gate never
 removes or replaces the poison marker.
 
-Entry recovery does not publish the commit's terminal formal `gate-result.json`,
+Entry recovery without a claim does not publish the commit's terminal formal `gate-result.json`,
 because the current invocation is recovery-only and a corrected later gate must
 remain possible. Instead write once with `O_EXCL` under
 `/var/lib/medchat-opensandbox-runs/recoveries/$FULL_COMMIT/` using the canonical
@@ -1661,17 +1777,79 @@ errors or secrets. This object is the atomic recovery-only gate result. Tests
 prove it cannot be replaced, creates no formal soak claim, and does not make the
 corrected later gate appear terminal.
 
+The transaction state vocabulary is closed across legacy and generation records:
+`captured`, `activating`, `activated`, `resolving`, `committed`, `rolled_back`,
+`abandoned`, and `rollback_failed`. `resolving` is used only as the durable
+at-most-once boundary for manual recovery rollback. Mode-specific schemas may
+make `captured` legacy-only, but
+must reject unknown states and illegal transitions. `committed`, `rolled_back`,
+and `abandoned` are settled and do not block a different commit after their linked
+evidence verifies. `activating`, `activated`, an `unresolved_claim`, and
+`rollback_failed` are not settled and follow only their explicit recovery or
+refusal path; state inference from file presence is forbidden.
+
+Add a separate root-only operator path to the same script:
+
+```text
+--resolve-incomplete-claim \
+  --old-release-commit FULL_COMMIT \
+  --claim-sha256 SHA256 \
+  --transaction-sha256 SHA256 \
+  --operator-evidence-file ROOT_ONLY_JSON \
+  --operator-evidence-sha256 SHA256
+```
+
+This command is not a formal run. It acquires the same whole-gate lock before
+reading evidence, accepts only a trusted claim with no terminal result and an
+`activating` or `activated` transaction for the supplied old full commit, and
+requires exact hashes for the canonical claim, canonical transaction, and the
+root-owned non-symlink mode-`0600` operator evidence file. The evidence JSON has
+a closed sanitized schema containing only `schema_version`, the old full commit,
+`transient_units_stopped=true`, `processes_stopped=true`,
+`external_run_evidence_preserved=true`, SHA-256 values for the preserved external
+run-directory manifest/report/log bundle (nullable only when independently
+proven absent), `active_sandboxes=0`, and `active_containers=0`; it contains no
+raw logs, commands, environment, credentials, or user-supplied paths. Live
+process/unit and sandbox/container checks must independently confirm the file.
+
+After validation, publish a root-only O_EXCL authorization bound to all four input
+hashes under
+`/var/lib/medchat-opensandbox-runs/resolutions/$OLD_COMMIT/$CLAIM_SHA256/authorization.json`,
+fsync file and parent, atomically bind its SHA-256 into the transaction and fsync
+state `resolving`, then call the mode-correct recovery rollback exactly once.
+On success, verify restored state, atomically publish/fsync a strict resolution
+result at the absent path
+`/var/lib/medchat-opensandbox-runs/resolutions/$OLD_COMMIT/$CLAIM_SHA256/resolution-result.json`
+containing
+only `schema_version`, old full commit, claim/transaction/operator-evidence
+SHA-256 values, `status="abandoned"`, resolution-object SHA-256, rollback
+mode/state/verification, and preserved evidence hashes, then atomically settle
+and fsync the transaction as `abandoned`. A crash between those two writes may
+only complete that settlement after every linked hash verifies; it cannot rerun
+rollback. It never creates a new
+claim or terminal formal result and never invokes acceptance or soak. A repeated
+resolution, wrong hash, active process/unit, nonzero sandbox/container count, or
+untrusted evidence refuses before rollback and cannot replace the resolution.
+Rollback failure transitions to `rollback_failed`, publishes the redundant poison
+marker, stops/disables services, and requires QEMU snapshot recovery.
+Because process death after authorization or `resolving` fsync makes rollback
+execution unknowable, either orphaned authorization or inherited `resolving` is
+an at-most-once poison that refuses all gate/resolution mutation and requires the
+same independently verified QEMU snapshot recovery procedure; it never retries
+rollback. Tests inject crashes before and after the `resolving` fsync.
+
 - [ ] **Step 4: Run deployment, attestation, and formal-gate RED tests**
 
 ```powershell
-python -m pytest tests/sandbox_broker/test_deployment_assets.py tests/sandbox_broker/test_real_opensandbox_acceptance.py tests/sandbox_broker/test_stability_soak.py tests/sandbox_broker/test_formal_qemu_gate.py -q -p no:cacheprovider -k "runtime_generation or legacy_migration or activation_transaction or crash_recovery or activated_recovery or legacy_capture_conflict or stage_idempotent or release_stage_conflict or rollback_failed or snapshot_required or pending_previous or release_attestation or release_manifest or output_root or report_non_clobber or bytecode or formal_qemu_gate or formal_gate_lock or formal_gate_concurrent or formal_soak_claim or activation_verify_failure or rollback_once or command_builder or worker_gate_environment"
+python -m pytest tests/sandbox_broker/test_deployment_assets.py tests/sandbox_broker/test_real_opensandbox_acceptance.py tests/sandbox_broker/test_stability_soak.py tests/sandbox_broker/test_formal_qemu_gate.py -q -p no:cacheprovider -k "runtime_generation or legacy_migration or activation_transaction or transaction_settlement or committed or abandoned or unresolved_claim or resolve_incomplete_claim or resolution_hash or crash_recovery or activated_recovery or legacy_capture_conflict or stage_idempotent or release_stage_conflict or rollback_failed or primary_poison or snapshot_required or pending_previous or release_attestation or release_manifest or output_root or report_non_clobber or bytecode or formal_qemu_gate or formal_gate_lock or formal_gate_concurrent or formal_soak_claim or activation_verify_failure or rollback_once or command_builder or worker_gate_environment"
 ```
 
 Expected: tests fail because the activation script, `/opt/medchat/current`
 units, legacy capture/rollback, canonical manifest, external output-root contract,
 formal gate, whole-transaction lock, permanent claim, isolated worker-gate
 environments, command builders, recoverable activation transactions, and
-rollback state machine do not yet exist.
+transaction settlement/manual resolution/primary-poison rollback state machine do
+not yet exist.
 
 - [ ] **Step 5: Implement the root-only generation mechanism**
 
@@ -1719,7 +1897,7 @@ or repaired by the gate.
 
 On every non-recovery invocation, the locked formal gate runs `--stage` before
 `--capture-legacy` or creation of a new generation transaction. An inherited
-`activating` or unclaimed/unresolved `activated` transaction is recovered and
+`activating` or unclaimed `activated` transaction is recovered and
 that invocation stops before this rule is reached. Staging is immutable
 preparation only: failure cannot
 create or update `legacy.json`, a generation transaction, `current`, units,
@@ -1767,7 +1945,8 @@ trees; store only its SHA-256, never its contents. Unit snapshots are root-owned
 mode `0600`, and their stored hashes must match before activation or rollback.
 Unknown keys, missing keys, a pre-existing `current`, a different legacy root,
 or unsafe file metadata fail closed. `transaction_state` is the closed enum
-`captured`, `activating`, `activated`, `rolled_back`, or `rollback_failed`; every transition writes
+`captured`, `activating`, `activated`, `resolving`, `committed`, `rolled_back`, `abandoned`, or
+`rollback_failed`; every transition writes
 a complete replacement file, fsyncs it, atomically renames it, and fsyncs the
 trusted parent before the next operation.
 
@@ -1778,8 +1957,9 @@ unit hashes, both recorded service enabled/active states, the absent `current`
 state, and each active service's current PID cwd. Any mismatch returns
 `legacy_capture_conflict` before a live mutation and performs no rollback. A
 matching record left by a crash after capture is safe to reuse. An existing
-`rolled_back` record remains immutable evidence: before a later corrected gate
-captures a new transaction, archive that record and its unit snapshots under a
+settled `committed`, `rolled_back`, or `abandoned` record remains immutable
+evidence: before a later corrected gate captures a new transaction, archive that
+record and its unit snapshots under a
 new root-owned O_EXCL history entry, fsync the history and parent, and then create
 a fresh `legacy.json`; never overwrite or delete rollback evidence.
 
@@ -1818,7 +1998,8 @@ The values shown are schema examples. `pending_previous` is the resolved
 `absent` or `present`; `prior_previous` must be `null` for `absent` and the
 validated resolved release path for `present`, preserving the long-term metadata
 that existed before this transaction. Generation `transaction_state` is the
-closed enum `activating`, `activated`, `rolled_back`, or `rollback_failed`, with
+closed enum `activating`, `activated`, `resolving`, `committed`, `rolled_back`, `abandoned`, or
+`rollback_failed`, with
 every replacement and parent directory fsynced. Unknown fields, unsafe metadata,
 invalid release ancestry, or a non-matching live current fail closed before
 mutation. The activation then atomically replaces `/opt/medchat/current`, creates
@@ -1851,23 +2032,35 @@ the captured `legacy_root`. A previously inactive service must remain inactive
 with MainPID zero. Only after all checks pass may it mark the legacy rollback
 `rolled_back`. Never edit an activated release.
 
-At gate entry, after the whole-gate lock and trusted claim/result checks but
-before any new stage, validation, acceptance, or claim, first validate the
-root-only poison marker. If present and strict, return
-`qemu_snapshot_recovery_required` with zero mutation and zero rollback; unsafe
-marker metadata fails closed. Then inspect both transaction stores. If either
-contains `activating` or `activated` for a commit with no trusted claim or
-terminal result, call `rollback_once()` for that exact mode, verify
-snapshots/unit hashes/service state/PID cwd, atomically write a separate
-root-owned recovery-only gate result under the trusted external evidence root,
-fsync it and its parent, and stop the current invocation without creating a
-formal soak claim. It must not stage or activate the requested commit. The
-operator must correct the cause and start a later gate. A trusted claim takes
-precedence over transaction recovery and returns claimed refusal for human
-review with zero rollback. A recovery failure atomically changes the transaction
-to `rollback_failed`, writes/fsyncs the poison marker, stops and disables worker
-then Broker, and requires the recorded QEMU snapshot; no second rollback is
-attempted.
+At gate entry, after the whole-gate lock but before any new stage, validation,
+acceptance, or claim, inspect every trusted transaction store first. Any strict
+`rollback_failed` transaction is primary poison and immediately returns
+`qemu_snapshot_recovery_required` with zero mutation and zero rollback, even when
+the redundant marker was never published. Then validate that marker and apply the
+same refusal when present; unsafe transaction or marker metadata fails closed.
+
+For each remaining transaction, verify its deterministic claim, terminal result,
+and resolution paths and classify it by the closed state machine. A `committed`
+transaction with a trusted passed result, a `rolled_back` transaction with a
+trusted failed/recovery result, and an `abandoned` transaction with a trusted
+resolution are settled and do not block a later commit. If a passed result exists
+while the transaction is still `activated`, validate its transaction/claim/report
+hashes plus live current target and manifest, atomically complete only the
+`committed` transition, fsync it, and stop this invocation; mismatches fail closed.
+If `activating` or `activated` has neither claim nor terminal result, call
+`rollback_once()` for that exact mode, verify snapshots/unit hashes/service
+state/PID cwd, atomically write a separate root-owned recovery-only gate result,
+settle as `rolled_back`, fsync it and its parent, and stop without creating a
+formal claim. It must not stage or activate the requested commit.
+
+A trusted claim without a terminal result is `unresolved_claim`. Ordinary gate
+execution always refuses it with zero mutation and zero rollback, regardless of
+the requested commit; it never infers abandonment or performs automatic recovery.
+Only `--resolve-incomplete-claim` may handle it under the same lock and the strict
+hash/live-state protocol above. A recovery or resolution rollback failure changes
+the transaction to `rollback_failed` before attempting marker publication, then
+stops/disables worker and Broker and requires the recorded QEMU snapshot; no
+second rollback is attempted.
 
 If automatic legacy rollback cannot restore unit hashes, service states, and PID
 cwd, stop and disable both services, retain `legacy.json` and unit snapshots,
@@ -1876,8 +2069,11 @@ marker, and require the operator to restore the pre-activation QEMU snapshot
 whose ID and evidence hash are recorded in `legacy.json`. Generation rollback
 failure follows the same state and poison protocol. Do not attempt a second
 activation or a formal soak after that condition. The formal gate contains no
-operation that removes the marker; only an operator who has restored the QEMU
-snapshot may run a separate cleanup/verification procedure and remove it.
+operation that removes or archives either poison. Only after independent QEMU
+snapshot restoration may an operator run a separately reviewed cleanup that
+verifies the restored system, archives the transaction and marker using new
+root-only O_EXCL evidence, and unblocks future gates. It must not delete or
+rewrite historical transaction, claim, terminal result, or resolution records.
 
 Update `install.sh` to install this script root-owned mode `0755` as
 `/usr/local/sbin/medchat-activate-runtime-generation`, retain its existing
@@ -1959,6 +2155,17 @@ def run_formal_qemu_gate(
     run_id_factory: Callable[[str], str],
 ) -> FormalGateResult:
     ...
+
+
+def resolve_incomplete_claim(
+    config: IncompleteClaimResolutionConfig,
+    *,
+    commands: CommandExecutor,
+    filesystem: FormalFilesystem,
+    activation: ActivationAdapter,
+    gate_lock: GateLockAdapter,
+) -> IncompleteClaimResolutionResult:
+    """Resolve one hash-bound post-claim crash without running a formal worker."""
 ```
 
 The implementation performs, in order, under one outer `try/finally`:
@@ -1968,29 +2175,30 @@ The implementation performs, in order, under one outer `try/finally`:
    file description through every following step, terminal-result fsync, and any
    rollback verification. Lock refusal exits immediately without rollback.
 2. While locked and before capture, staging, activation, or `run_id_factory`,
-   validate the full commit, QEMU identity/evidence, source checkout and trusted
-   output hierarchy. `lstat` the deterministic full-commit result first and claim
-   second. A trusted result returns `formal_gate_already_terminal`; absent a
-   result, a trusted claim returns `formal_soak_already_claimed`. Either condition
-   or any unsafe entry is a pre-ownership refusal: do not activate, run workers,
-   publish/replace a result, or rollback.
-3. Validate `/var/lib/medchat-runtime-generation/snapshot-required.json`. A
-   strict existing marker returns `qemu_snapshot_recovery_required` before any
-   stage or rollback with zero mutation; unsafe marker metadata fails closed.
-   The gate never deletes or repairs this marker.
-4. Inspect the trusted legacy and generation transaction records. For any
-   `activating` or `activated` record, derive and validate its full commit, then
-   `lstat` that transaction commit's deterministic claim and result paths using
-   the same trusted-path rules from step 2. A trusted claim/result refuses with
-   zero rollback for human review; only when both are absent recover it with the
-   one mode-correct `rollback_once()`,
-   verify the restored state, atomically write/fsync the separate recovery-only
-   gate result, and stop this invocation. Do not stage, validate, run acceptance,
-   allocate a run ID, or create a claim. A recovery failure marks the transaction
-   `rollback_failed`, writes/fsyncs the poison marker, stops/disables both
-   services, and never attempts a second rollback. Claim/result precedence in
-   this step means a claimed `activated` transaction is refused for human review,
-   not automatically rolled back.
+   validate the requested full commit, QEMU identity/evidence, source checkout,
+   and trusted output hierarchy. Inspect all transaction and resolution records
+   first; any strict `rollback_failed`, inherited `resolving`, or orphaned
+   authorization-without-result state is primary at-most-once poison and returns
+   `qemu_snapshot_recovery_required` with zero mutation/rollback. Then validate
+   the redundant marker with the same refusal. Neither poison is deleted or
+   repaired by the gate.
+3. Classify every other transaction together with its deterministic claim,
+   terminal result, and resolution. Strict `committed`, `rolled_back`, and
+   `abandoned` settlements do not block a different commit. When a trusted passed
+   result exists for an `activated` transaction, verify all linked hashes, current
+   target, and manifest, complete only the `committed` fsync, and stop. When an
+   `activating`/`activated` transaction has neither claim nor result, perform one
+   mode-correct recovery rollback, write/fsync the recovery result, settle as
+   `rolled_back`, and stop. Do not stage, validate, run workers, allocate a run ID,
+   or create a claim on either completion path.
+4. A trusted claim without a terminal result is `unresolved_claim`; an ordinary
+   gate returns `formal_soak_already_claimed` with zero mutation and rollback even
+   when a different commit was requested. Only the separately invoked
+   `--resolve-incomplete-claim` mode may validate the supplied old commit and four
+   hashes, independently prove stopped processes/units and zero live sandbox or
+   container state, publish the O_EXCL resolution, execute one recovery rollback,
+   and settle `abandoned`. Wrong evidence or repetition refuses before rollback;
+   rollback failure sets primary poison before the redundant marker.
 5. Invoke `--stage SOURCE_REPOSITORY FULL_COMMIT` before capture or any live
    activation transaction. Stage failure returns a stable pre-mutation code but
    writes no terminal gate result: it performs no capture, live mutation, claim,
@@ -2044,19 +2252,26 @@ The implementation performs, in order, under one outer `try/finally`:
    commit.
 15. Regardless of soak return code, recompute the manifest before rollback,
    require the soak report, hash it when present, and collect only stable codes.
-16. On any failure after a transaction has durably entered `activating`, call the
+16. On any failure after a transaction has durably entered `activating`, first
+    persist the strict stable failure envelope in that transaction, then call the
      mode-correct rollback once and verify its target PID
     cwd. On rollback failure stop and disable worker then Broker and require the
     recorded QEMU snapshot. Before stopping, atomically set the transaction to
     `rollback_failed` and atomically publish/fsync the strict poison marker.
     Failures before activation, lock contention, and
-    existing claim/result refusals never call rollback. On success retain the
-    activated generation.
-17. For an owned transaction, atomically publish one root-only strict
-    `gate-result.json` using an absent target, fsync the file and parent, and
-    return non-zero for every failed gate. Release the whole-gate lock only after
-    result fsync and rollback verification finish. Pre-ownership refusals return
-    their stable code without creating or replacing a terminal result.
+    existing claim/result refusals never call rollback. A successful rollback
+    stores its hash-linked verification receipt and leaves pre-claim failures
+    `rolled_back`; after the failed terminal result is
+    durable, post-claim failures become `abandoned`.
+17. For an owned transaction, compute its canonical pre-settlement SHA-256 and
+    atomically publish one root-only strict `gate-result.json` using an absent
+    target, including status `passed`/`failed`, claim SHA-256, transaction
+    SHA-256, report SHA-256 values, and rollback state; fsync file and parent. On
+    success, transition `activated` to `committed` only after the passed result is
+    durable. On failed rollback success, finish the `rolled_back`/`abandoned`
+    settlement only after the failed result is durable. Return non-zero for every
+    failed gate. Release the lock only after result and settlement fsync plus any
+    rollback verification. Pre-ownership refusals never create/replace a result.
 
 `build_transient_worker_command()` is the only constructor for socket probe,
 acceptance, and soak units. It includes both supplementary groups on every path,
@@ -2069,13 +2284,15 @@ requirement, and external output root. The gate never receives API credentials
 and never copies the root-managed service environment into a transient unit.
 
 `acquire_formal_gate_lock()`, activation/verification,
-`create_formal_soak_claim()`, `rollback_once()`, manifest checks, report hashing,
-and atomic gate-result publication are coordinated by
+`create_formal_soak_claim()`, incomplete-claim resolution, `rollback_once()`,
+transaction settlement, manifest checks, report hashing, and atomic gate-result
+publication are coordinated by
 `run_formal_qemu_gate()` only.
 Do not distribute rollback or exactly-once logic across shell traps, README
 snippets, acceptance, or soak. Map expected operating-system errors to stable
 codes; unexpected exceptions become `formal_gate_internal_error` without raw
-text. The outer `finally` invokes rollback only when no poison marker exists, a
+text. The outer `finally` invokes rollback only when no `rollback_failed`
+transaction or poison marker exists, a
 validated transaction is `activating` or `activated`, and rollback has not
 already been requested. It uses
 that transaction's mode and immutable rollback source, verifies the restored
@@ -2091,6 +2308,7 @@ These commands are mandatory after the Task 7 implementation; the Task 6 gate
 does not cover newly added deployment or attestation tests:
 
 ```powershell
+python -m pytest tests/sandbox_broker/test_formal_qemu_gate.py -q -p no:cacheprovider -k "transaction_settlement or committed or abandoned or unresolved_claim or resolve_incomplete_claim or resolution_hash or rollback_failed or primary_poison"
 python -m pytest tests/sandbox_broker/test_deployment_assets.py tests/sandbox_broker/test_real_opensandbox_acceptance.py tests/sandbox_broker/test_stability_soak.py tests/sandbox_broker/test_formal_qemu_gate.py -q -p no:cacheprovider
 1..10 | ForEach-Object { python -m pytest tests/sandbox_broker/test_formal_qemu_gate.py -q -p no:cacheprovider; if ($LASTEXITCODE -ne 0) { throw "formal gate repetition failed at iteration $_" } }
 python -m pytest tests/sandbox_broker -q -p no:cacheprovider
@@ -2114,8 +2332,12 @@ closed per-worker environment gates, the whole-transaction non-blocking lock,
 pre-ownership refusal without rollback, permanent O_EXCL claims, exact repeat
 30, activation/verify inside the locked state machine, single rollback state,
 strict existing-release idempotency/conflict handling, recovery-only handling of
-unclaimed/unresolved `activating` and `activated` transactions, persistent
-`rollback_failed` poison behavior, QEMU/KVM-only attestation, marker/path
+unclaimed `activating`/`activated` transactions, passed-result-before-`committed`
+crash completion, settled A-to-B generation progress, permanent unresolved-claim
+refusal, hash-bound O_EXCL manual resolution with no scientific rerun, and
+`rolled_back`/`abandoned` settlement. They must also verify that the transaction
+itself is primary poison across the marker-publication crash window, persistent
+`rollback_failed` behavior, QEMU/KVM-only attestation, marker/path
 mismatch, atomic result schema, and the
 prohibition on direct activation or formal-worker invocation. No Critical or
 Important findings may remain.
@@ -2153,9 +2375,12 @@ sudo test "$(sudo stat -c '%u:%a' "$QEMU_OPERATOR_EVIDENCE_FILE")" = "0:600"
 
 The operator may create the QEMU snapshot and its root-owned evidence file, and
 may prepare this clean source checkout. There is no supported external formal
-`--capture-legacy`, `--stage`, `--activate`, or `--verify` command. The gate
-checks the poison marker, then recovers any inherited `activating` or
-unclaimed/unresolved `activated` transaction and stops, or else stages the
+`--capture-legacy`, `--stage`, `--activate`, or `--verify` command. The gate first
+treats any `rollback_failed` transaction as primary poison, then checks the
+redundant marker, validates settled transactions, completes only a hash-verified
+passed-result-to-`committed` window, recovers any inherited `activating` or
+unclaimed `activated` transaction and stops, refuses any `unresolved_claim`, or
+else stages the
 reviewed commit before capturing/reusing the installed legacy layout, then
 activates and verifies the generation while holding its one lock. It never
 stages or activates `79860ec175f0d3235dfd0597f248d7d52788fc76`; that commit is
@@ -2183,25 +2408,30 @@ sudo env PYTHONDONTWRITEBYTECODE=1 \
 
 This is the only operator command allowed to produce formal evidence. The CLI
 acquires the root-only non-blocking lock before inspecting transaction state and
-holds it through result fsync and rollback verification. Under that lock it
-refuses an existing claim/result before mutation, checks the snapshot-required
-poison marker, recovers and stops on an inherited `activating` or
-unclaimed/unresolved `activated` transaction, stages, captures/reuses legacy
-state or
+holds it through result and transaction-settlement fsync plus rollback
+verification. Under that lock it treats `rollback_failed` transaction state as
+primary poison before checking the redundant marker, validates settled baselines,
+completes a trusted passed-result-to-`committed` crash window without rerunning,
+refuses an `unresolved_claim`, recovers and stops on an unclaimed `activating` or
+`activated` transaction, stages, captures/reuses legacy state or
 persists generation `pending_previous`, activates, verifies, performs
 release/QEMU/PID attestation,
 privileged root runtime validation, the transient socket-permission probe,
 non-root real acceptance, post-acceptance manifest/report hashing, the permanent
 full-commit claim, the non-root 30-job soak, post-soak manifest/report hashing,
-atomic `gate-result.json`, and at most one mode-correct rollback. The operator
+atomic hash-linked `gate-result.json`, `committed`/`rolled_back`/`abandoned`
+settlement, and at most one mode-correct rollback. The operator
 must not invoke the activation primitive or either lower-level runner directly.
 
 Lock contention returns `formal_gate_locked`. A trusted existing claim or
-terminal result returns `formal_soak_already_claimed` or
+terminal result for the requested full commit returns `formal_soak_already_claimed` or
 `formal_gate_already_terminal`. These pre-ownership refusals occur before source
 staging or runtime activation and always have `rollback_count == 0`. A second
 invocation after a successful gate therefore cannot interrupt or roll back the
 accepted generation.
+An older transaction that is strictly settled `committed`, `rolled_back`, or
+`abandoned` does not trigger this same-commit refusal and permits the requested
+later commit to proceed.
 
 The claim is created only after every preflight, runtime validator, release
 attestation, real acceptance, acceptance-report, and post-acceptance-manifest
@@ -2209,7 +2439,39 @@ gate passes, immediately before the one 30-job command. It is permanent across
 success, failure, process crash, rollback, and reboot. A second invocation for
 the same full commit fails with `formal_soak_already_claimed` before creating a
 random run directory. A crash after claim requires human evidence review and a
-new corrected commit; deleting or reusing the claim is forbidden.
+new corrected commit; deleting or reusing the claim is forbidden. The corrected
+commit is initially refused while the old claim remains unresolved, and may
+proceed only after the explicit resolution path below settles the old transaction.
+
+Only after a post-claim crash, and only after independent evidence collection,
+the operator may run this separate recovery command. It is not a formal run and
+does not consume or recreate any claim:
+
+```bash
+set -euo pipefail
+: "${OLD_RELEASE_COMMIT:?required}"
+: "${OLD_CLAIM_SHA256:?required}"
+: "${OLD_TRANSACTION_SHA256:?required}"
+: "${RESOLUTION_EVIDENCE_FILE:?required}"
+RESOLUTION_EVIDENCE_SHA256="$(sudo sha256sum "$RESOLUTION_EVIDENCE_FILE" | awk '{print $1}')"
+sudo env PYTHONDONTWRITEBYTECODE=1 \
+  /opt/conda/envs/medchat/bin/python -B \
+  /usr/local/src/medchat-release/scripts/run_opensandbox_formal_qemu_gate.py \
+  --resolve-incomplete-claim \
+  --old-release-commit "$OLD_RELEASE_COMMIT" \
+  --claim-sha256 "$OLD_CLAIM_SHA256" \
+  --transaction-sha256 "$OLD_TRANSACTION_SHA256" \
+  --operator-evidence-file "$RESOLUTION_EVIDENCE_FILE" \
+  --operator-evidence-sha256 "$RESOLUTION_EVIDENCE_SHA256" \
+  --output-base /var/lib/medchat-opensandbox-runs
+```
+
+The command holds the whole-gate lock, rejects wrong hashes or any still-running
+transient unit/process/sandbox/container before mutation, creates one O_EXCL
+resolution, performs one recovery rollback, retains the old claim, writes the
+resolution result, and settles the old transaction `abandoned`. Repeating it is a
+zero-rollback refusal. If rollback fails, the transaction itself becomes primary
+poison. The command never runs validator, acceptance, or soak.
 
 For a non-zero acceptance or soak return code, missing report, report-hash
 failure, or release mutation, the gate completes the applicable post-command
@@ -2217,7 +2479,8 @@ manifest check before rollback. It writes stable result codes and invokes
 `rollback_once()` no more than once. First migration uses `--rollback-legacy`;
 later generations use `--rollback`; both verify restored Broker and worker PID
 cwd. If rollback fails, the gate atomically marks the transaction
-`rollback_failed`, publishes/fsyncs the strict snapshot-required poison marker,
+`rollback_failed` as primary poison, publishes/fsyncs the redundant strict
+snapshot-required poison marker,
 stops and disables worker then Broker, and requires restoration of the recorded
 QEMU snapshot. A later gate returns `qemu_snapshot_recovery_required` before any
 stage or rollback; the gate cannot clear the marker.
@@ -2236,8 +2499,12 @@ rollback.
 
 Read the root-owned
 `/var/lib/medchat-opensandbox-runs/results/$RELEASE_COMMIT/gate-result.json` and
-cross-check its commit, strict schema, file owner/mode, claim path, report paths,
-hashes, return codes, rollback mode/state, and rollback verification. Record the
+cross-check its commit, strict schema, file owner/mode, claim path and SHA-256,
+canonical pre-settlement transaction SHA-256, report paths and SHA-256 values,
+return codes, rollback mode/state, rollback verification, and final transaction
+settlement. A passed result is recordable only with a verified `committed`
+transaction; failed results require verified `rolled_back` or `abandoned`, or an
+explicit `rollback_failed` poison condition. Record the
 release commit, absolute host report path, SHA-256, total status,
 pass/partial/fail counts, pass rate, p50/p95, phase p95 values, failure-code and
 failure-class distributions, event completeness, retry evidence, cleanup,
@@ -2251,6 +2518,13 @@ Evaluator correction does not imply runtime stability.
 Promotion is allowed only when the one formal report passed every gate.
 A failed formal report is retained and blocks promotion.
 ```
+
+If a post-claim crash produced no terminal result, do not fabricate one. Record
+the permanent claim SHA-256, canonical transaction SHA-256, preserved external
+evidence hashes, and status `unresolved_claim`; promotion and every ordinary gate
+remain blocked until the separately authorized resolution result exists. If that
+result exists, cross-check all bound hashes and record `abandoned`, never
+`passed` or `failed` on behalf of the interrupted formal run.
 
 - [ ] **Step 2: Record the gate-owned rollback result without mutating runtime**
 
@@ -2266,12 +2540,21 @@ assert result["rollback_state"] in {"succeeded", "failed"}
 assert type(result["rollback_verified"]) is bool
 ```
 
-When `rollback_state == "succeeded"`, record the gate-verified rollback mode and
-target PID cwd evidence. When it is `failed`, record that the orchestrator
+When `rollback_state == "succeeded"`, record the gate-verified rollback mode,
+target PID cwd evidence, and whether the transaction settled `rolled_back` or
+`abandoned`. If a post-claim crash was manually resolved, additionally verify and
+record the immutable resolution path, resolution-object SHA-256, old claim,
+transaction and operator-evidence SHA-256 values, preserved report/log/run
+manifest hashes, `status="abandoned"`, and confirmation that no acceptance or soak
+was rerun. When rollback state is `failed`, or when an orphaned resolution
+authorization or inherited `resolving` makes rollback execution unknowable,
+record that the transaction/resolution evidence itself is primary poison even if
+marker publication was interrupted, and that the orchestrator
 already stopped and disabled both services and that the operator must restore
 the QEMU snapshot identified by the root-owned legacy evidence. Do not attempt a
-second rollback, remove a claim, rerun the soak, or fabricate a previous
-generation. Promotion is blocked for either rollback outcome.
+second rollback, remove a claim, rerun the soak, fabricate a previous generation,
+or perform/clean up a resolution from Task 8. Promotion is blocked for every
+failed, abandoned, unresolved, or poisoned outcome.
 
 - [ ] **Step 3: Run documentation and diff-added-line safety checks**
 
@@ -2347,7 +2630,7 @@ Implementation is complete only when all statements are true:
   only `MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE=1`; soak receives only
   `MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK=1`.
 - One root-only non-blocking `flock` covers source/state checks, inherited
-  transaction recovery, stage/capture,
+  transaction settlement/recovery, manual unresolved-claim resolution, stage/capture,
   activation/verify, validation, acceptance, claim, soak, result fsync, and any
   rollback verification. Lock contention and existing claim/result refusals do
   not mutate runtime and never invoke rollback.
@@ -2356,6 +2639,17 @@ Implementation is complete only when all statements are true:
   by a permanent root-only O_EXCL claim created immediately before the command;
   its report is retained and hashed when produced even if the command exits
   non-zero, and a post-claim crash never authorizes a rerun.
+- The closed transaction states are `captured`, `activating`, `activated`,
+  `resolving`, `committed`, `rolled_back`, `abandoned`, and `rollback_failed`. A
+  passed terminal result is fsynced before `committed`; a verified crash-window completion performs
+  no scientific rerun or rollback. Settled A permits corrected generation B for
+  both legacy-first and generation-to-generation paths.
+- A claim without a terminal result is `unresolved_claim` and ordinary gates make
+  zero mutations. The explicit root-only hash-bound resolution command retains the
+  claim, proves stopped work and preserved evidence, publishes one O_EXCL
+  resolution, performs at most one recovery rollback, settles `abandoned`, and
+  never runs acceptance or soak. Wrong/repeated resolutions are zero-rollback
+  refusals; resolution failure becomes `rollback_failed`.
 - The report truthfully records latency, failures, events, cleanup, provenance, artifacts, probes, and zero-leak state.
 - Any retry, scientific timeout, invalid output, cleanup uncertainty, dependency failure, probe failure, release mismatch, virtualization mismatch, or residual container prevents promotion.
 - First migration stages before capture, safely reuses only an unchanged
@@ -2363,13 +2657,17 @@ Implementation is complete only when all statements are true:
   states, absent `current`, unit hashes, and legacy PID cwd without staging the
   old commit. Later rollback uses the active transaction's fsynced
   `pending_previous`, not long-term `previous`. Both modes persist `activating`
-  before live mutation, recover inherited `activating` or unclaimed/unresolved
-  `activated` state before a new stage and then stop, invoke at most one rollback,
+  before live mutation, recover inherited `activating` or unclaimed `activated`
+  state before a new stage and then stop, refuse unresolved claims pending the
+  explicit hash-bound resolution path, invoke at most one rollback,
   and verify restored PID cwd. Existing immutable releases are reused only after
   exact read-only attestation; any mismatch is `release_stage_conflict` with zero
   mutation.
   Stage/capture/conflict failures before live mutation do not roll back. QEMU
   snapshot restoration is required only when that gate-owned rollback fails;
-  failure persists `rollback_failed` and a root-only poison marker that all later
-  gates honor without another rollback.
+  failure persists `rollback_failed` as primary poison plus a redundant root-only
+  marker. All later gates honor either evidence without another rollback, including
+  a crash between their fsyncs. Only independent QEMU snapshot recovery and
+  separately reviewed operator cleanup may archive the poison, without deleting
+  historical claim/result/resolution/transaction evidence.
 - `docs/handoff/latest.md` distinguishes evaluator correctness from runtime stability and records either promotion evidence or rollback evidence.
