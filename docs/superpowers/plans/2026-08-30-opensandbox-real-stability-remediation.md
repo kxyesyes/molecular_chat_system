@@ -61,7 +61,8 @@ Every task must preserve these boundaries:
 | `scripts/attest_opensandbox_formal_authority_boot.py` | Read-only authority-volume/journal attestation and current-boot token creation/verification. |
 | `scripts/validate_opensandbox_deployment.py` | Static/runtime release, unit, image, socket, network, and container checks. |
 | `deployment/opensandbox/activate-runtime-generation.sh` | Future root-only generation primitive invoked by the formal orchestrator for staging, activation, verification, and one mode-specific rollback; it is not an operator formal entry. |
-| `deployment/opensandbox/medchat-formal-authority-*` | Pre-snapshot systemd generator, attestation service/target, and ExecCondition cold-boot interlock. |
+| `deployment/opensandbox/medchat-formal-authority-*` | Pre-snapshot systemd attestation service/target, root ExecCondition, diagnostics-only generator, and static fail-closed cold-boot interlock. |
+| `deployment/opensandbox/systemd/*/10-formal-authority.conf` | Static fail-closed drop-ins for Broker, Temporal worker, OpenSandbox daemon, and both automatic formal-gate service/timer units. |
 | `deployment/opensandbox/opensandbox-server-0.2.2-formal-label.patch` | Minimal reviewed daemon-side create-time mapping for the reserved formal-run label. |
 | `deployment/opensandbox/opensandbox-server-formal-label-lock.json` | Pinned server source/version, reviewed artifact/wheel hash, and protected-transport deployment identity. |
 | `deployment/opensandbox/medchat-sandbox-broker.service` | Future Broker execution from `/opt/medchat/current`. |
@@ -933,6 +934,13 @@ the only commit eligible for Task 7. Do not create an empty commit.
 - Create: `deployment/opensandbox/medchat-formal-authority-attestation.service`
 - Create: `deployment/opensandbox/medchat-formal-authority-attested.target`
 - Create: `deployment/opensandbox/medchat-formal-authority-exec-condition`
+- Create: `deployment/opensandbox/medchat-opensandbox-formal-gate.service`
+- Create: `deployment/opensandbox/medchat-opensandbox-formal-gate.timer`
+- Create: `deployment/opensandbox/systemd/medchat-sandbox-broker.service.d/10-formal-authority.conf`
+- Create: `deployment/opensandbox/systemd/medchat-temporal-worker.service.d/10-formal-authority.conf`
+- Create: `deployment/opensandbox/systemd/medchat-opensandbox.service.d/10-formal-authority.conf`
+- Create: `deployment/opensandbox/systemd/medchat-opensandbox-formal-gate.service.d/10-formal-authority.conf`
+- Create: `deployment/opensandbox/systemd/medchat-opensandbox-formal-gate.timer.d/10-formal-authority.conf`
 - Create: `deployment/opensandbox/opensandbox-server-0.2.2-formal-label.patch`
 - Create: `deployment/opensandbox/opensandbox-server-formal-label-lock.json`
 - Modify: `deployment/opensandbox/README.md`
@@ -1024,6 +1032,7 @@ authority_mount_options_sha256 # canonical required/forbidden option set
 authority_exclusion_sha256     # snapshot-exclusion policy + QEMU device graph
 pre_manifest_sha256
 post_acceptance_manifest_sha256
+acceptance_seal_sha256         # canonical root-only acceptance-tree seal receipt
 post_soak_manifest_sha256
 claim_sha256
 claim_relative_name
@@ -1073,6 +1082,12 @@ NULL. `stable_code` is from a closed allowlist; raw exception text, response
 bodies, credentials, sandbox IDs, host-user paths, and out-of-root paths are
 forbidden.
 
+`post_acceptance_manifest_sha256` and `acceptance_seal_sha256` are both NULL until
+the legal `acceptance_sealed` mutation and both non-NULL afterward. Any row with a
+non-NULL `claim_sha256`, including `CLAIMED` and every post-claim terminal/recovery
+path, requires both fields and requires the permanent claim to bind the exact seal
+hash. No separate file or process-local flag may satisfy these constraints.
+
 The five authority-volume fields are immutable after the initial `STAGED` insert
 and are bound into the QEMU snapshot evidence, first audit, claim, report seal,
 resolution authorization, and every physical attestation. The canonical
@@ -1100,13 +1115,17 @@ environment and wrapper process; it avoids PID-reuse ambiguity and lets root
 verify the exact process family before trusting `MainPID` or cgroup observations.
 The identity hash binds that invocation ID, exact executable, immutable release,
 sanitized argv, closed environment-key allowlist, run/report locators, user/group,
-timeout, mount mapping, run label, and observer baseline. `actor_mount_sha256`
+timeout, mount mapping, run label, observer baseline, and phase prerequisites. A
+soak actor additionally binds the frozen non-NULL `acceptance_seal_sha256` as a
+precondition but receives no acceptance file, directory, descriptor, or mount.
+`actor_mount_sha256`
 binds a closed canonical ordered list of every descriptor-resolved source locator,
 fixed namespace destination, read-only or read/write mode, `PrivateMounts=yes`, and
 the complete mount-namespace policy. The ordered list is actor-kind-specific:
 acceptance receives only its acceptance subtree read/write; soak receives only its
-soak subtree read/write and, when needed, the already sealed acceptance subtree at
-a separate read-only input path. `actor_run_label` is a non-secret bounded label derived
+soak subtree read/write. The soak workflow depends only on immutable release code,
+fixed scientific inputs, its closed configuration, and the journaled acceptance
+seal prerequisite; it never consumes acceptance contents. `actor_run_label` is a non-secret bounded label derived
 as lowercase SHA-256 over the domain-separated canonical full-commit and unique
 run-ID tuple. It is injected exactly as `medchat.formal_run=$ACTOR_RUN_LABEL` into
 both OpenSandbox and Docker resource metadata and accepts only `[0-9a-f]{64}`;
@@ -1118,13 +1137,21 @@ old/new row versions, stable code, actor tuple, evidence hashes, and timestamp t
 the current row through a foreign key. It contains no second writable settlement
 truth. Same-state evidence mutations are legal only for the closed mutation kinds
 `actor_bound`, `actor_stop_intent`, `actor_zero_live_attested`, `actor_cleared`,
-`report_sealed`, `poison_actor_stop_intent`, `poison_actor_zero_live_attested`,
+`acceptance_sealed`, `report_sealed`, `poison_actor_stop_intent`,
+`poison_actor_zero_live_attested`,
 `poison_actor_cleared`, and `poison_shutdown_receipt`; they use the same
 expected-state/version CAS and audit rules as state changes. The four
 `poison_*` mutations require both expected and next state `POISONED`, are strictly
 monotonic safety cleanup, and cannot change scientific, activation, rollback,
 settlement, claim, report, baseline, or resolution fields. All other same-state
-updates are forbidden.
+updates are forbidden. `acceptance_sealed` is legal only as
+`ACTIVE_PRECLAIM -> ACTIVE_PRECLAIM`, requires the acceptance actor tuple already
+cleared with a verified cgroup-plus-daemon zero-live receipt, derives the exact
+post-acceptance manifest and seal in one canonical receipt, and changes only
+`post_acceptance_manifest_sha256`, `acceptance_seal_sha256`, `updated_at_utc`, and
+`row_version`. A second different
+seal, a seal recorded in any other state, or a seal before zero-live proof is
+illegal; exact already-recorded re-entry is read-only rather than another audit.
 
 The singleton table is a real schema object, not a derived query:
 
@@ -1160,6 +1187,7 @@ claim_expected_row_version           # ACTIVE_PRECLAIM version at O_EXCL creatio
 release_target                       # exact frozen journal target
 run_relpath                          # exact frozen journal locator
 report_relpath                       # exact frozen journal locator
+acceptance_seal_sha256               # exact frozen ACTIVE_PRECLAIM seal receipt
 qemu_snapshot_id                     # exact normalized journal value
 qemu_snapshot_evidence_sha256        # exact frozen journal hash
 authority_drive_serial               # exact frozen journal value
@@ -1181,12 +1209,13 @@ verified parent fsync.
 
 For the `ACTIVE_PRECLAIM` claim-file/DB gap, recovery does not trust fields read
 from the claim. It freezes the current journal row, requires
-`claim_expected_row_version == row_version`, reconstructs the one canonical byte
-sequence above from that row, including all five frozen authority identity fields,
+`claim_expected_row_version == row_version`, requires a non-NULL
+`acceptance_seal_sha256`, reconstructs the one canonical byte sequence above from
+that row, including that seal and all five frozen authority identity fields,
 and compares both bytes and SHA-256 with the existing file. An exact match CASes
 to `RESOLUTION_REQUIRED` while recording the hash and
 expected version; it never dispatches science. A stale version, locator/target,
-snapshot/evidence mismatch, any one-field authority serial/filesystem UUID/
+snapshot/evidence or acceptance-seal mismatch, any one-field authority serial/filesystem UUID/
 `major:minor`/mount-options/exclusion mismatch, unknown field,
 partial/non-canonical file,
 or hash mismatch CASes to `POISONED` when the trusted journal is writable and then
@@ -1269,7 +1298,7 @@ illegal. “May mutate” means live runtime mutation, not the SQLite CAS itself
 |---|---|---|---|
 | `STAGED` | `ACTIVATING`, `SETTLED_FAILED`, `POISONED` | Re-attest the immutable release and captured legacy/generation snapshot. If exact, the same invocation may continue; mismatch poisons. | No |
 | `ACTIVATING` | `ACTIVE_PRECLAIM`, `ROLLING_BACK`, `POISONED` | Activation may have started. Attest `current`, both service PID cwd values, unit hashes, and the transaction-local previous/snapshot. Exact active target may finish verify; exact previous target enters deterministic failure settlement; ambiguity poisons. | Activation/verify or one attested rollback |
-| `ACTIVE_PRECLAIM` | `CLAIMED`, `ROLLING_BACK`, `RESOLUTION_REQUIRED`, `POISONED` | Re-attest active target and manifests. A matching permanent claim with no DB hash is the claim-file/DB gap and must CAS to `RESOLUTION_REQUIRED`; it must never rerun acceptance/soak. No claim may continue only through the original locked invocation; an inherited process treats it as pre-claim recovery. | Acceptance before claim only in the owning invocation; recovery may roll back once |
+| `ACTIVE_PRECLAIM` | `CLAIMED`, `ROLLING_BACK`, `RESOLUTION_REQUIRED`, `POISONED` | Re-attest active target and manifests. If root sealing completed but `acceptance_sealed` did not commit, recovery may descriptor-revalidate that exact tree and perform only the same-state seal CAS; a writable, ambiguous, or mismatched tree cannot be accepted. A matching permanent claim with no DB hash is the claim-file/DB gap and must CAS to `RESOLUTION_REQUIRED`; it must never rerun acceptance/soak. With no claim, only the original locked invocation may run acceptance; an inherited process otherwise follows pre-claim rollback/recovery and never repeats an actor whose execution is not proved absent. | Acceptance before claim only in the owning invocation; seal reconciliation or one attested rollback during recovery |
 | `CLAIMED` | `SETTLED_PASSED`, `ROLLING_BACK`, `RESOLUTION_REQUIRED`, `POISONED` | A trusted report may settle; a trusted failure envelope may enter rollback; no report/envelope is a post-claim crash and enters `RESOLUTION_REQUIRED`. | No scientific rerun; rollback only through the declared path |
 | `ROLLING_BACK` | `SETTLED_FAILED`, `POISONED` | Verify DB evidence, then attest physical runtime. If still exactly on target, dispatch the one idempotent attested rollback; if already exactly previous, write/verify the receipt and settle without dispatch; any mixed/unknown state poisons. | At most one logical rollback |
 | `RESOLUTION_REQUIRED` | `RESOLVING`, `POISONED` | Ordinary gate refuses with zero runtime mutation. Only the explicit resolution CLI may proceed after evidence and stopped-process checks. | No |
@@ -1439,9 +1468,11 @@ Parameterize a hard process-kill failpoint immediately before and after:
   cgroup zero-live verification, daemon-observer baseline/post observation,
   atomic create-time OpenSandbox/Docker label observation, actor-clear CAS,
   actor-kind-specific private-mount creation, and activation verification;
-- acceptance dispatch, acceptance-subtree validation/fsync/root sealing, exact
-  report-path publication, soak-subtree validation/fsync/root sealing, final run
-  parent sealing, and report-sealed CAS;
+- acceptance dispatch, acceptance-subtree validation/fsync/root sealing,
+  `acceptance_sealed` CAS, exact report-path publication, soak-subtree
+  validation/fsync/root sealing, final run parent sealing, and report-sealed CAS;
+- runtime-token revocation, formal-token publication, passed/rollback runtime-token
+  publication, formal-token revocation, and every token directory fsync;
 - permanent claim O_EXCL creation/fsync and the following DB CAS;
 - the single 30-job scientific soak dispatch, report hashing/sealing, and report
   settlement;
@@ -1526,16 +1557,16 @@ The RED suite must explicitly cover these named scenarios:
     distinct `acceptance/` and `soak/` actor subtrees. A real acceptance transient
     unit with `PrivateMounts=yes` receives only `acceptance/` read/write at the fixed
     output path; `soak/` is absent. After zero-live, root seals acceptance. A real
-    soak unit receives only `soak/` read/write and the sealed acceptance tree at a
-    separate read-only input path. Running both as the actual `medchat` UID proves
+    soak unit receives only `soak/` read/write; the acceptance master and every
+    acceptance input path are absent. Running both as the actual `medchat` UID proves
     they cannot cross-read/write actor-private subtrees, pre-create the soak report,
-    alter sealed acceptance, traverse host parents, inspect another commit/run,
+    see or alter sealed acceptance, traverse host parents, inspect another commit/run,
     create a sibling, or replace a parent. Wrong ordered source/destination,
     rw/ro flag, namespace policy, or mount hash refuses before dispatch.
 18. Kill between claim O_EXCL/fsync and the claim CAS. Recovery reconstructs exact
     canonical bytes from `ACTIVE_PRECLAIM` and enters `RESOLUTION_REQUIRED` once.
     Partial JSON, duplicate/unknown/missing/out-of-order keys, stale expected row
-    version, locator/target mismatch, snapshot/evidence mismatch, an independent
+    version, locator/target mismatch, snapshot/evidence or acceptance-seal mismatch, an independent
     mismatch in each of authority drive serial/filesystem UUID/`major:minor`/
     mount-options hash/exclusion hash, bad encoding, and non-canonical bytes
     poison/refuse before actor stop, rollback, or science and never rerun science.
@@ -1573,6 +1604,36 @@ The RED suite must explicitly cover these named scenarios:
     only read-only validation of the surviving settled baseline creates a token
     bound to the current kernel `boot_id`, authority identity, and journal
     state/version hash. RAM, vmstate, and device-state restore are rejected.
+25. Kill before acceptance sealing, after the root-only seal but before
+    `acceptance_sealed`, and immediately after that CAS. Recovery never trusts a
+    writable tree, but may descriptor-reopen the exact journal-bound root-only tree,
+    recompute its manifest and canonical ownership/mode/path receipt, and commit the
+    one legal `ACTIVE_PRECLAIM` same-state mutation. Wrong seal, changed content,
+    retained actor/resource, wrong manifest, or seal in another state refuses; an
+    exact committed seal is idempotent and creates no second audit. The subsequent
+    claim canonical bytes bind that exact seal hash.
+26. With generator absent, non-zero, empty, or emitting only a subset of diagnostic
+    coverage, boot an image whose Broker, worker, OpenSandbox daemon, automatic gate
+    service, and timer are enabled. Static drop-ins alone block every service
+    `ExecStart`; the timer cannot queue an unguarded service. Missing any static
+    drop-in or changing its target/condition fails installation and validation.
+27. Exercise token lifecycle failpoints for A -> B pass, B rollback -> A, and an
+    inherited in-flight recovery. Mutation begins only after the A runtime token is
+    durably removed. Recovery authorization starts only the row-selected previous
+    generation and no scientific actor. After physical attestation, a B- or
+    A-bound runtime token is atomically published before the formal token is
+    removed. A crash in any publication window leaves services blocked; read-only
+    recovery reconstructs only the token justified by the settled row/baseline and
+    never changes settlement or reruns work.
+28. Exercise `clean_initial_legacy` from a cold boot with correct authority identity,
+    empty gate/audit history, no claim/tombstone/run, NULL `live_baseline`, exact
+    reviewed legacy files/state, absent `current`, and zero Broker/worker/
+    OpenSandbox/formal PIDs and cgroups. The boot proof alone starts nothing. The
+    locked manual gate inserts the first `STAGED` row/audit before issuing one
+    invocation-bound `formal-new-run` token. Kill after proof, after `STAGED`, and
+    before/after token publication; recovery remains deterministic. Any residual
+    row/audit/claim/tombstone/run, non-NULL baseline, changed legacy state, live
+    process/cgroup, or reused proof refuses, and history can never become empty again.
 
 - [ ] **Step 4: Run the journal and gate RED tests before implementation**
 
@@ -1594,7 +1655,8 @@ PRAGMAs, integrity validation, record parsing, legal-transition validation, CAS,
 append-only transition audit, and read-only export projections.
 
 Every public mutation method, including `insert_staged_if_absent()`, actor evidence
-CASes, passed settlement plus baseline update, and ordinary state transitions:
+CASes, `acceptance_sealed`, passed settlement plus baseline update, and ordinary
+state transitions:
 
 1. verifies root identity and securely creates the missing fixed parent as
    root-owned mode `0700`, or verifies the existing trusted parent and DB path;
@@ -1690,43 +1752,134 @@ The root gate recomputes both hygiene and digest before validation, after
 acceptance regardless of return code, and after soak regardless of return code.
 
 The pre-snapshot OS baseline must also install an unavoidable cold-boot authority
-interlock. `deployment/opensandbox/medchat-formal-authority-generator` is installed
-root-owned and non-writable at
-`/usr/lib/systemd/system-generators/medchat-formal-authority-generator`. On every
-boot it emits early generator drop-ins for the Broker, Temporal worker, pinned
-OpenSandbox daemon, and every automatic formal-gate service/timer. The drop-ins
-require and order after `medchat-formal-authority-attested.target` and add the
-closed `medchat-formal-authority-exec-condition`; a unit restored as enabled in an
-old OS snapshot therefore cannot reach `ExecStart` without current-boot evidence.
-Installation/static validation fails if any relevant installed unit lacks the
-generated dependency contract.
+interlock. Protection does not depend on a generator. Root-owned, non-writable
+static drop-ins are installed for `medchat-sandbox-broker.service`,
+`medchat-temporal-worker.service`, `medchat-opensandbox.service`,
+`medchat-opensandbox-formal-gate.service`, and
+`medchat-opensandbox-formal-gate.timer`. Every service drop-in permanently has
+`Requires=medchat-formal-authority-attested.target`, orders after both the
+attestation service and target, and contains the explicit root-prefixed condition:
 
-`medchat-formal-authority-attestation.service` runs before that target. It first
+```ini
+ExecCondition=+/usr/local/sbin/medchat-formal-authority-exec-condition --unit %n
+```
+
+The timer drop-in permanently requires/orders after the same target, uses a
+fail-closed current-boot `ConditionPathExists` for the separately attested
+automatic-gate eligibility receipt, and may name only the statically guarded
+`medchat-opensandbox-formal-gate.service` as its `Unit=`. `ExecCondition=` is not a
+valid timer directive; the timer's static condition prevents queuing while the
+target service's root ExecCondition independently prevents execution. Thus both
+timer and service are guarded and no alternate service name is accepted.
+For the automatic gate service only, the root condition may admit process startup
+from the current-boot automatic-gate eligibility receipt after independently
+proving a clean settled baseline; that admission authorizes preflight and journal
+entry only. The gate must still revoke the runtime token and publish its formal
+token before any live mutation. It cannot admit an in-flight, poisoned, initial-
+legacy, or unknown state. The manual root CLI does not rely on this timer receipt.
+
+`deployment/opensandbox/medchat-formal-authority-generator` remains root-owned at
+`/usr/lib/systemd/system-generators/medchat-formal-authority-generator`, but it may
+only emit coverage diagnostics and fail-closed warnings; it never creates the sole
+dependency or condition. Installation and static/runtime validation enumerate the
+closed five-unit set and fail if any static drop-in, directive, target, condition
+binary, timer target, owner, mode, or hash is missing or different. Generator
+absence, non-zero exit, empty output, or partial output therefore cannot remove the
+static interlock and is explicitly tested with all restored units enabled.
+
+`medchat-formal-authority-attestation.service` runs before the target. It first
 mounts the excluded authority volume read-only and descriptor-verifies its drive
 serial, filesystem UUID, `major:minor`, canonical mount options, fixed binds,
 snapshot exclusion, SQLite integrity/schema, audit chain, claims, sealed evidence,
-and current journal state. `POISONED`, any in-flight/unsettled state, identity or
-exclusion mismatch, blank/substituted volume, or unreadable evidence fails without
-starting Broker, worker, daemon, or a gate. A successful settled-baseline check
-writes only `/run/medchat-formal-authority/runtime-token.json` on tmpfs, root:root
-`0400`, with a closed canonical payload binding the current kernel `boot_id`, all
-five authority fields, journal state/version hash, `live_baseline` commit/target,
-and allowed service generation. It fsyncs the file and `/run` directory. The
-ExecCondition reopens and revalidates that token and allows only Broker/worker/
-daemon binaries from the bound generation. The token disappears at reboot and no
-persistent token, restored mask state, or prior-boot file is accepted.
+and current journal state. `POISONED`, identity/exclusion mismatch,
+blank/substituted volume, or unreadable evidence fails without starting Broker,
+worker, daemon, timer, or gate. For a clean settled baseline it atomically publishes
+only `/run/medchat-formal-authority/runtime-token.json` on tmpfs, root:root `0400`,
+from an O_EXCL temporary file followed by file fsync, rename into an absent target,
+and directory fsync. Its closed payload binds the current kernel `boot_id`, all five
+authority fields, journal state/version hash, and either the `live_baseline`
+commit/target or the exact captured legacy snapshot selected by a verified
+`SETTLED_FAILED` rollback, plus the allowed immutable generation or captured-legacy
+unit/executable identity. No persistent token, restored mask state, prior-boot file,
+or token for a different target is accepted.
 
-The manual formal-gate entry uses a separate root-only attestation mode and token,
-never the runtime token as blanket authorization. `formal-new-run` is issued only
-after the same read-only authority checks prove a clean settled baseline and binds
-the requested clean source commit, snapshot evidence and invocation ID. An
-inherited in-flight row can obtain only a state/version-bound `formal-recovery`
-token that authorizes the gate's closed actor reconciliation or resolution path,
-not Broker/worker/daemon startup or new science. `POISONED` can obtain only the
-same-state safety-cleanup mode; it never authorizes activation, rollback,
-resolution, science, or service start. The root gate reattests before any controlled
-read/write remount and invalidates its `/run` token when the invocation exits.
-This controlled mode cannot bypass poison or create a replacement journal.
+Every runtime, formal, automatic-gate, and initial-legacy proof uses a distinct
+fixed filename and a closed canonical schema. Publication always uses a verified
+root-only tmpfs directory, O_EXCL temporary file, root:root `0400`, file fsync,
+rename into a verified absent destination, and directory fsync. Revocation is
+atomic unlink plus directory fsync. Partial temporary files are ignored and removed
+only after authority verification; an unexpected destination type, owner, mode, or
+payload blocks rather than being overwritten.
+
+The `+` prefix makes every service `ExecCondition` run as root even when the service
+uses `User=medchat`. On every start it descriptor-opens and independently revalidates
+the authority volume, SQLite journal/integrity/audit, current `boot_id`, target unit,
+token kind, journal row/version, `live_baseline` or settled captured-legacy receipt,
+and exact executable generation;
+the token is a bounded current-boot capability, never a substitute for journal
+truth. Failure to reopen either token or authority evidence blocks execution.
+
+The manual formal-gate entry uses a separate root-only attestation mode. Before any
+controlled live mutation, including activation, restart, acceptance preparation,
+or rollback, it atomically unlinks the old runtime token and any automatic-gate
+eligibility receipt and fsyncs their directory, then atomically publishes one
+invocation-, commit-, row-version-, state-, and
+unit-allowlist-bound formal token. `formal-new-run` is available after a clean
+settled baseline and permits only the reviewed target generation and gate phases.
+An inherited row obtains only `formal-recovery`: it may start the exact
+journal-selected previous-generation Broker, worker, and OpenSandbox daemon solely
+for rollback and PID-cwd/health verification. It cannot start the new target or any
+science, validation, acceptance, soak, design, or arbitrary service.
+
+After `SETTLED_PASSED`, root reopens the journal and performs a new read-only
+physical attestation of the new `live_baseline`, atomically publishes the new
+generation-bound runtime token, and only then unlinks/fsyncs the formal token.
+After verified rollback and `SETTLED_FAILED`, it performs the same sequence for the
+restored previous baseline (or exact captured legacy runtime). If the process dies
+before runtime-token publication or formal-token removal, services remain blocked;
+a later read-only recovery may reconstruct only the runtime token justified by the
+already settled row and current physical attestation. It does not alter settlement,
+advance a row, dispatch an actor, or rerun science. A mismatched existing token is
+removed only after journal/authority verification and is never overwritten in
+place. If a crash leaves both a valid runtime token and the just-settled formal
+token, ordinary starts fail closed on the ambiguous pair until this read-only
+recovery verifies settlement and removes/fsyncs only the stale formal token.
+
+A zero-live-mutation `STAGED -> SETTLED_FAILED` follows the same token closure: if
+the invocation had already revoked the runtime token, it read-only reattests the
+unchanged baseline, republishes the matching runtime token, and removes the formal
+token. If revocation never occurred, it verifies the existing runtime token rather
+than rotating it. This branch cannot publish a target-generation token.
+
+First migration has one separate `clean_initial_legacy` branch. It requires the
+correct authority/QEMU identity and initialized schema; completely empty gate and
+audit history; no claim, tombstone, run, or result; NULL `live_baseline`; exact
+reviewed legacy unit hashes, enabled/disabled states and PID-cwd expectations;
+absent `/opt/medchat/current`; and zero Broker, worker, OpenSandbox, automatic-gate
+PIDs and cgroups under the static interlock. Boot attestation may create only a
+root-only current-boot `initial-legacy-eligible` proof binding those observations;
+it creates no runtime token and starts no service. The manual gate acquires the
+whole-flow flock, revalidates the proof and physical state, stages/captures without
+live mutation, calls `insert_staged_if_absent()` to create the first `STAGED` row
+and initial audit, and only then atomically publishes one `formal-new-run` token
+bound to that commit, row version, invocation, and exact unit allowlist. It then
+consumes the eligibility proof by unlink plus directory fsync. Once the
+first row/audit exists, `clean_initial_legacy` can never be true again. A crash after
+the proof but before the insert may only revalidate the same empty-state branch;
+under the flock a new invocation removes the stale invocation-bound proof after
+read-only reattestation and publishes a new proof, never reuses its nonce. A
+crash after `STAGED` but before token publication uses ordinary state-bound
+`formal-recovery` and never recreates the initial row. Any residual or mismatched
+history, claim, tombstone, run, baseline, legacy state, process, cgroup, proof, or
+authority identity refuses without a token or service start. A stale eligibility
+proof found after `STAGED` is removed only after journal verification and can never
+authorize a second initial branch.
+
+`POISONED` can obtain only the same-state safety-cleanup mode; it never authorizes
+activation, rollback, resolution, science, or service start. The root gate reattests
+before any controlled read/write remount and removes any invocation token on a
+verified terminal/abort path. No token mode can bypass poison, create a replacement
+journal, or make history empty.
 
 - [ ] **Step 7: Implement the single root-owned formal QEMU gate**
 
@@ -1767,7 +1920,11 @@ The main gate order is fixed:
    snapshot, derive one unique safe commit-bound `run_relpath` and fixed descendant
    `report_relpath`, and call `insert_staged_if_absent()`. Re-entry may reuse only
    a completely identical `STAGED` row; it never allocates a replacement locator.
-6. In the `STAGED -> ACTIVATING` CAS bind the exact activation actor, dispatch its
+   The initial-legacy path must satisfy the one-time proof above before this insert;
+   every non-initial path must begin from a clean settled baseline.
+6. Before any live mutation, durably revoke the old runtime token and atomically
+   publish the row/invocation-bound `formal-new-run` or `formal-recovery` token.
+   In the `STAGED -> ACTIVATING` CAS bind the exact activation actor, dispatch its
    unique systemd transient unit, verify zero-live termination and activation, clear
    the actor, and CAS to `ACTIVE_PRECLAIM`.
 7. Descriptor-confined below the trusted output-base handle, create exactly the
@@ -1784,23 +1941,27 @@ The main gate order is fixed:
     or visible. Clear ownership only after cgroup and daemon-resource zero-live
     proof. Then descriptor-validate/fsync the acceptance evidence, recursively
     seal it root:root with files `0400` and directories `0500`, fsync its parent,
-    reopen and verify the seal, and persist the post-acceptance manifest/seal
-    evidence before claim creation. Preserve the reviewed phase allowlist, timeout
+    reopen and verify the seal, calculate its canonical receipt, and perform the
+    one `acceptance_sealed` expected-state/version CAS to persist
+    `post_acceptance_manifest_sha256` and `acceptance_seal_sha256` before claim
+    creation. A crash after physical sealing but before that CAS is recovered only
+    by descriptor-revalidating the same journal-bound tree; a writable or mismatched
+    tree is never promoted. Preserve the reviewed phase allowlist, timeout
     budgets, clean diagnostics delta, zero-container check, and artifact truth.
 8. Re-read the frozen `ACTIVE_PRECLAIM` row and construct the exact closed
    canonical claim payload, including expected row version, target, locators,
-   snapshot/evidence, and authority identity. Create
+   `acceptance_seal_sha256`, snapshot/evidence, and authority identity. Create
    `/var/lib/medchat-opensandbox-runs/claims/$FULL_COMMIT.json` with
    `O_CREAT|O_EXCL|O_NOFOLLOW`, root `0600`, file fsync, and parent fsync. It is
    permanent. Re-open and byte-verify it, hash its canonical content, then
    immediately CAS `ACTIVE_PRECLAIM -> CLAIMED` with that hash and
    `claim_expected_row_version`. An inherited O_EXCL-to-CAS gap uses only the
    reconstruction algorithm in Step 1. Never delete, replace, repair, or reuse it.
-9. Bind the exact soak actor to the existing journal locators. Give its private
-    namespace only `soak/` read/write at `/run/medchat-formal-output`; if it must
-    consume acceptance evidence, separately bind the already root-sealed
-    `acceptance/` tree read-only at `/run/medchat-formal-input/acceptance`. Include
-    the ordered RW and RO mappings and complete namespace policy in
+9. Bind the exact soak actor to the existing journal locators and frozen
+    `acceptance_seal_sha256` prerequisite. Give its private namespace exactly one
+    mapping: `soak/` read/write at `/run/medchat-formal-output`. Acceptance paths,
+    files, descriptors, and mounts are absent; the soak does not read acceptance
+    contents. Include the one ordered RW mapping and complete namespace policy in
     `actor_mount_sha256`. Then dispatch exactly one non-root 30-job soak. Never
     retry the scientific command, Vina, Meeko, upload, validation, or complete run.
     After the actor exits, prove cgroup and daemon-resource zero-live before
@@ -1821,14 +1982,19 @@ The main gate order is fixed:
 11. On success and after a fresh current physical attestation, use one
     `BEGIN IMMEDIATE` transaction to CAS `CLAIMED -> SETTLED_PASSED`, store final
     manifest/attestation hashes, update `live_baseline` to this commit, and append
-    both audits before one commit. After DB and parent fsync, atomically regenerate
-    the redacted `gate-result.json`; export failure does not change settlement and
-    is repaired from DB on next read-only entry.
+    both audits before one commit. After DB and parent fsync, read-only attest the
+    new baseline, atomically publish its runtime token, then remove/fsync the formal
+    token. Atomically regenerate the redacted `gate-result.json`; export or token-
+    publication failure does not change settlement and is repaired from DB on the
+    next read-only entry. Until a valid runtime token exists, services stay blocked.
 12. On normal failure after possible live mutation, first CAS to `ROLLING_BACK`
     while storing the stable failure-envelope hash and any trusted failed-report
     hash/status. Then perform the row-selected idempotent attested rollback. After
     exact physical verification, use one DB transaction to store the receipt hash,
-    set `rollback_verified=1`, and reach `SETTLED_FAILED`. Export afterward.
+    set `rollback_verified=1`, and reach `SETTLED_FAILED`. Read-only attest the
+    restored previous/legacy baseline, atomically publish its runtime token, remove
+    the formal token, and export afterward. A crash in token publication is repaired
+    only by the settled read-only recovery path and never repeats rollback.
 13. If rollback fails or physical state is ambiguous, CAS to `POISONED`. Through
     only the closed same-state poison mutations, reconcile/stop the journal-bound
     actor, independently prove cgroup and daemon-resource zero-live, stop and
@@ -1889,12 +2055,14 @@ For acceptance, the root systemd manager creates a private mount namespace with
 is not visible. After acceptance cgroup and daemon resources are proved zero, root
 descriptor-validates and fsyncs that subtree, changes all files to root:root `0400`
 and directories to root:root `0500`, fsyncs/reopens/verifies the seal, and only then
-may prepare soak. For soak, the manager creates a new private namespace with
-`BindPaths=$VERIFIED_SOAK_SOURCE:/run/medchat-formal-output`. If acceptance evidence
-is required, it adds only
-`BindReadOnlyPaths=$SEALED_ACCEPTANCE_SOURCE:/run/medchat-formal-input/acceptance`;
-that path is distinct from output and remains read-only. No acceptance RW bind is
-permitted, and acceptance never receives a soak bind.
+may commit the audited `acceptance_sealed` mutation and prepare soak. For soak, the
+manager creates a new private namespace with exactly
+`BindPaths=$VERIFIED_SOAK_SOURCE:/run/medchat-formal-output`. It has no second
+mapping and no acceptance source. Scientific soak is self-contained in
+the immutable release, fixed scientific inputs, closed configuration, and its own
+writable subtree; `acceptance_seal_sha256` is a journal precondition only, not an
+input artifact. Acceptance never receives a soak bind, and soak cannot resolve the
+acceptance master through its namespace.
 
 For each actor, the ordered mapping list, exact source descriptor/locator, fixed
 destination, RO/RW mode, `PrivateMounts=yes`, and all namespace properties must
@@ -1904,7 +2072,8 @@ source/destination/order, missing private namespace, extra bind, RO/RW mismatch,
 or mount-table discrepancy fails closed and leaves the actor journal-bound for
 safe recovery. Actual-UID integration tests prove acceptance cannot read or write
 soak, pre-create the soak report, inspect siblings/other runs, or replace parents;
-soak cannot modify sealed acceptance or write through its read-only input.
+soak cannot see or modify sealed acceptance and still completes its fixed-input
+workflow using only the soak subtree.
 
 Poses, copied inputs, temporary files, observer output, and reports stay below the
 phase-specific writable subtree. Artifact projection validates relative paths
@@ -2024,12 +2193,16 @@ OpenSandbox/Docker create-time label/observer test. That non-scientific prefligh
 creates one short-lived labelled sandbox, proves OpenSandbox and Docker metadata
 agreement before create returns, cleans it, and proves both observers return to
 zero; it creates no claim and cannot satisfy the formal soak. The host test also
-boots an OS snapshot whose relevant units are enabled and proves the generated
-authority interlock blocks every ExecStart without a valid current-boot token,
-under poison/in-flight/wrong-volume states, and after any RAM/vmstate/device-state
-restore attempt. Only a surviving read-only-verified settled baseline may produce
-the generation-bound runtime token. Any failure keeps Broker, worker, daemon, and
-formal gate disabled.
+boots an OS snapshot whose relevant units are enabled and proves the static
+authority drop-ins block every service `ExecStart` and prevent the timer from
+queuing an unguarded service without valid current-boot evidence, including when
+the generator is missing, exits non-zero, emits nothing, or emits only partial
+diagnostics. Poison/in-flight/wrong-volume states and any RAM/vmstate/device-state
+restore attempt remain blocked. Only a surviving read-only-verified settled
+generation baseline or a verified settled rollback to the exact captured legacy
+state may produce its corresponding runtime token; the exact empty-history
+legacy branch may produce only `initial-legacy-eligible`, never a runtime token.
+Any failure keeps Broker, worker, daemon, timer, and formal gate disabled.
 
 - [ ] **Step 10: Obtain independent review and commit Task 7 before formal execution**
 
@@ -2037,17 +2210,20 @@ Request independent specification and implementation-quality reviews over the
 complete Task 7 diff. Both reviewers must explicitly check journal filesystem
 security, schema constraints, CAS transitions, the transition/recovery table,
 atomic first-STAGED insertion, actor unit/cgroup ownership and orphan recovery,
-claim-file/DB gap, report sealing/DB gap, result-export gap, live-baseline history,
+claim-file/DB gap, acceptance-seal/DB gap, report sealing/DB gap, result-export gap,
+live-baseline history,
 rollback physical/DB gap, snapshot-ID/evidence binding, resolution crash, poison
-persistence and same-state shutdown, phase-specific RW/RO output mount/DAC
+persistence and same-state shutdown, phase-specific single-RW output mount/DAC
 isolation and sealing, OpenSandbox/Docker atomic create-time labelled-resource
-observation, authority-volume identity and rewind exclusion, cold-boot
-generator/target/token interlock, concurrent gates, immutable releases, environment isolation,
+observation, authority-volume identity and rewind exclusion, static cold-boot
+drop-ins, diagnostics-only generator failure, root ExecCondition, complete token
+revocation/publication/recovery, one-time clean-initial-legacy authorization,
+concurrent gates, immutable releases, environment isolation,
 manifest equality, external outputs, phase contracts, and old-report retention.
 No Critical or Important finding may remain.
 
 ```powershell
-git add -- src/sandbox_broker/formal_gate_state.py src/sandbox_broker/models.py src/sandbox_broker/opensandbox_client.py src/sandbox_broker/service.py scripts/attest_opensandbox_formal_authority_boot.py scripts/opensandbox_formal_runtime.py scripts/run_opensandbox_formal_qemu_gate.py scripts/run_opensandbox_docking_acceptance.py scripts/run_opensandbox_stability_soak.py scripts/validate_opensandbox_deployment.py deployment/opensandbox/activate-runtime-generation.sh deployment/opensandbox/install.sh deployment/opensandbox/medchat-formal-authority-generator deployment/opensandbox/medchat-formal-authority-attestation.service deployment/opensandbox/medchat-formal-authority-attested.target deployment/opensandbox/medchat-formal-authority-exec-condition deployment/opensandbox/opensandbox-server-0.2.2-formal-label.patch deployment/opensandbox/opensandbox-server-formal-label-lock.json deployment/opensandbox/medchat-sandbox-broker.service deployment/medchat-temporal-worker.service deployment/opensandbox/README.md tests/sandbox_broker/test_formal_gate_state.py tests/sandbox_broker/test_deployment_assets.py tests/sandbox_broker/test_formal_qemu_gate.py tests/sandbox_broker/test_opensandbox_client.py tests/sandbox_broker/test_real_opensandbox_acceptance.py tests/sandbox_broker/test_service.py tests/sandbox_broker/test_stability_soak.py
+git add -- src/sandbox_broker/formal_gate_state.py src/sandbox_broker/models.py src/sandbox_broker/opensandbox_client.py src/sandbox_broker/service.py scripts/attest_opensandbox_formal_authority_boot.py scripts/opensandbox_formal_runtime.py scripts/run_opensandbox_formal_qemu_gate.py scripts/run_opensandbox_docking_acceptance.py scripts/run_opensandbox_stability_soak.py scripts/validate_opensandbox_deployment.py deployment/opensandbox/activate-runtime-generation.sh deployment/opensandbox/install.sh deployment/opensandbox/medchat-formal-authority-generator deployment/opensandbox/medchat-formal-authority-attestation.service deployment/opensandbox/medchat-formal-authority-attested.target deployment/opensandbox/medchat-formal-authority-exec-condition deployment/opensandbox/medchat-opensandbox-formal-gate.service deployment/opensandbox/medchat-opensandbox-formal-gate.timer deployment/opensandbox/systemd/medchat-sandbox-broker.service.d/10-formal-authority.conf deployment/opensandbox/systemd/medchat-temporal-worker.service.d/10-formal-authority.conf deployment/opensandbox/systemd/medchat-opensandbox.service.d/10-formal-authority.conf deployment/opensandbox/systemd/medchat-opensandbox-formal-gate.service.d/10-formal-authority.conf deployment/opensandbox/systemd/medchat-opensandbox-formal-gate.timer.d/10-formal-authority.conf deployment/opensandbox/opensandbox-server-0.2.2-formal-label.patch deployment/opensandbox/opensandbox-server-formal-label-lock.json deployment/opensandbox/medchat-sandbox-broker.service deployment/medchat-temporal-worker.service deployment/opensandbox/README.md tests/sandbox_broker/test_formal_gate_state.py tests/sandbox_broker/test_deployment_assets.py tests/sandbox_broker/test_formal_qemu_gate.py tests/sandbox_broker/test_opensandbox_client.py tests/sandbox_broker/test_real_opensandbox_acceptance.py tests/sandbox_broker/test_service.py tests/sandbox_broker/test_stability_soak.py
 git diff --cached --check
 git commit -m "feat: add opensandbox formal gate journal"
 git rev-parse HEAD
@@ -2063,8 +2239,10 @@ canonical snapshot-evidence file plus independently recorded SHA-256. Provision
 and mount the distinct formal-authority block volume first; attest its drive
 serial, filesystem UUID, `major:minor`, hardening options, fixed bind mounts, and
 absence from the OS/runtime snapshot device set. The OS snapshot baseline must
-already contain the reviewed generator, attestation service/target, ExecCondition,
-and generated dependency coverage for every relevant enabled unit. Run the real
+already contain the reviewed static drop-ins for all five units, attestation
+service/target, root ExecCondition, timer condition, and diagnostics-only generator.
+Validation must prove the static layer remains effective with generator failure.
+Run the real
 non-scientific phase-mount/DAC, atomic-label observer, and cold-boot authority
 interlock preflights described in Step 9. Preparation may
 not stage, capture, activate, validate, claim, run workers, or roll back. Then
@@ -2110,17 +2288,22 @@ device state, a suspended guest, or any snapshot that includes the authority blo
 node is forbidden and fails the recovery checklist.
 
 The next guest start is a cold boot. Snapshot-restored enable/mask state is never
-trusted: the preinstalled systemd generator recreates the authority target and
-ExecCondition drop-ins before units are queued. The attestation service mounts the
+trusted: preinstalled static drop-ins already bind every relevant service and timer
+to authority attestation before units are queued; the generator only checks and
+reports coverage. The attestation service mounts the
 same authority volume read-only and validates serial, filesystem UUID,
 `major:minor`, options, fixed root-only binds, exclusion evidence, journal/audits,
 claims and seals before it can produce a current-`boot_id` tmpfs token. With no
 token, a prior-boot token, `POISONED`, any in-flight/unsettled row, wrong volume, or
 identity/exclusion mismatch, Broker, worker, OpenSandbox daemon and automatic gate
 units cannot reach `ExecStart` even if the restored snapshot marks them enabled.
-Only a verified settled `live_baseline` token authorizes the corresponding service
-generation; a manual gate or recovery requires its narrower state-bound token and
-cannot bypass poison. Journal rows, claims, sealed reports, POISONED state, and
+Only a verified settled `live_baseline`, or a settled failed row whose receipt
+proves exact captured-legacy restoration, authorizes the corresponding runtime
+token; a manual gate or recovery requires its narrower state-bound token and
+cannot bypass poison. An exact empty-history legacy state can create only the
+current-boot eligibility proof described above and starts nothing; inherited
+recovery may authorize only the exact previous generation selected by its row.
+Journal rows, claims, sealed reports, POISONED state, and
 permanent attempt tombstones therefore survive unchanged and the same full commit
 remains unrerunnable. An absent, blank, substituted, reformatted,
 rewind-participating, or incorrectly mounted authority volume is a terminal
@@ -2238,9 +2421,10 @@ Implementation is complete only when all statements are true:
 
 - Tasks 1-5 local tests, compileall, and static validation pass.
 - Timing-sensitive local groups pass 10 consecutive invocations.
-- Task 7's new deployment, attestation, closed worker-environment builder,
+- Task 7's new deployment, static boot interlock, attestation, closed worker-environment builder,
   whole-gate lock/concurrency, first-STAGED insertion, actor orphan recovery,
-  claim, report sealing/recovery, live-baseline history, activation/verify failure,
+  acceptance sealing/CAS recovery, claim, report sealing/recovery, token lifecycle,
+  clean-initial-legacy authorization, live-baseline history, activation/verify failure,
   manifest-ordering, gate-result, and rollback-state tests run RED before
   implementation and GREEN afterward.
 - The post-Task-7 full Broker, compileall, static, and independent-review gates pass.
@@ -2256,8 +2440,9 @@ Implementation is complete only when all statements are true:
   kind, expected cgroup, identity, private-mount mapping, run label, and observer
   baseline are journaled before dispatch as applicable. Acceptance and soak use
   separate `PrivateMounts=yes` namespaces: each receives only its own phase subtree
-  read/write at `/run/medchat-formal-output`, and soak may receive sealed acceptance
-  evidence only at a separate read-only input. The ordered mappings and RO/RW
+  read/write at `/run/medchat-formal-output`; soak has no acceptance path, mount,
+  descriptor, or content dependency and binds only the journaled seal hash as a
+  prerequisite. The ordered mappings and RO/RW
   attributes are identity-bound; host output parents remain `root:root 0700`.
   Acceptance and soak are independently zero-live-verified and root-sealed before
   the run parent is sealed. Recovery proves inactive/MainPID=0/empty cgroup
@@ -2285,7 +2470,8 @@ Implementation is complete only when all statements are true:
   its report is retained and hashed when produced even if the command exits
   non-zero, and a post-claim crash never authorizes a rerun. The claim uses the
   closed canonical payload, exact expected row version, byte/hash reconstruction,
-  all five frozen authority identity fields, and negative tests for partial/
+  exact `acceptance_seal_sha256`, all five frozen authority identity fields, and
+  negative tests for partial/
   non-canonical/stale content and each independently mismatched authority field.
 - `/var/lib/medchat-runtime-generation/formal-gate.sqlite3` is the only
   authoritative transaction, settlement, resolution, and poison store. Its
@@ -2297,8 +2483,8 @@ Implementation is complete only when all statements are true:
   `row_version=1`; identical re-entry is read-only and conflicts fail closed.
   `qemu_snapshot_id`, authority-volume identity/exclusion, actor ownership/mount/
   observer receipts, safe unique run/report locators, claim expected version,
-  poison shutdown receipt, report seal, and snapshot evidence are constrained real
-  columns. No opaque side file fills a missing schema field.
+  acceptance seal, poison shutdown receipt, report seal, and snapshot evidence are
+  constrained real columns. No opaque side file fills a missing schema field.
 - The closed states are `STAGED`, `ACTIVATING`, `ACTIVE_PRECLAIM`, `CLAIMED`,
   `ROLLING_BACK`, `RESOLUTION_REQUIRED`, `RESOLVING`,
   `SETTLED_PASSED`, `SETTLED_FAILED`, and `POISONED`. Every state/evidence
@@ -2309,6 +2495,28 @@ Implementation is complete only when all statements are true:
   frozen journal/audit/evidence truth; only the baseline row is checked against
   current symlink/PIDs. A -> B -> C retains verifiable A/B history while physically
   attesting only C as current.
+- Acceptance output becomes formal evidence only through the single audited
+  `ACTIVE_PRECLAIM` `acceptance_sealed` same-state CAS after actor/resource
+  zero-live proof and descriptor-confined manifest/hash/fsync/root sealing. The
+  claim binds that seal. Seal-before-CAS recovery revalidates the exact tree and
+  never reruns acceptance; wrong or mutable evidence fails closed.
+- Every relevant service has a pre-snapshot static authority drop-in with root
+  `ExecCondition=+...`; the automatic timer is separately static-gated and can
+  target only the guarded service. Generator absence, failure, empty output, or
+  partial output cannot remove protection. Each condition reopens the authority
+  journal and validates boot, volume, row, token, target unit, and generation.
+- The gate revokes the old runtime token before live mutation. Formal recovery may
+  start only the row-selected previous generation for rollback verification and no
+  science. Passed settlement or verified rollback publishes a freshly attested
+  baseline-bound runtime token before removing the formal token; publication
+  crashes leave services blocked and are repaired read-only without changing state
+  or rerunning work.
+- `clean_initial_legacy` is possible exactly once with correct authority/QEMU
+  identity, empty gate/audit and filesystem attempt history, NULL baseline, exact
+  reviewed legacy state, absent current link, and zero relevant PIDs/cgroups. Boot
+  creates only a current-boot eligibility proof; the locked manual gate inserts the
+  first `STAGED` row/audit before issuing `formal-new-run`. Any residue or first
+  history entry permanently disables this branch.
 - A claim without a trusted report/failure envelope reaches
   `RESOLUTION_REQUIRED`; ordinary gates make zero runtime mutations. The
   explicit root-only hash-bound resolution command retains the claim, proves
@@ -2345,11 +2553,12 @@ Implementation is complete only when all statements are true:
   on one separately attested authority block volume excluded from that rewind.
   Recovery fully shuts down, flushes and cleanly unmounts authority storage,
   optionally backs up/hash-seals evidence, and rewinds only OS/runtime disks;
-  RAM/vmstate/device-state restore is forbidden. On the mandatory cold boot, a
-  preinstalled systemd generator gates Broker, worker, OpenSandbox daemon and any
-  automatic formal gate behind read-only authority attestation and a root-only
+  RAM/vmstate/device-state restore is forbidden. On the mandatory cold boot,
+  preinstalled static drop-ins gate Broker, worker, OpenSandbox daemon and both the
+  automatic formal-gate service and timer behind read-only authority attestation;
+  the generator is diagnostics-only. Authorization requires a root-only
   current-`boot_id` tmpfs token bound to authority identity, journal state/version,
-  and service generation. Snapshot-restored enabled units cannot reach ExecStart
+  and service generation. Snapshot-restored enabled units cannot reach `ExecStart`
   before this check. POISONED/in-flight/wrong-volume states fail closed, and manual
   gate/recovery uses a narrower state-bound mode that cannot bypass poison.
   Missing/blank/substituted/included storage fails closed, and
