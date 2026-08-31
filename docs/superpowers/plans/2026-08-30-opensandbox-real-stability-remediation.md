@@ -58,8 +58,12 @@ Every task must preserve these boundaries:
 | `src/sandbox_broker/formal_gate_state.py` | Sole authoritative SQLite journal schema, trusted-path checks, legal state graph, CAS transitions, settlement, resolution, poison, and redacted export projection. |
 | `scripts/opensandbox_formal_runtime.py` | Canonical release manifest, release attestation, hygiene checks, and trusted external-output preparation shared by staging and the formal gate. |
 | `scripts/run_opensandbox_formal_qemu_gate.py` | Sole root-only formal QEMU entry; holds the process-wide gate lock while it stages, journals, activates, verifies, validates, runs non-root acceptance/soak, settles the journal, exports the result, and owns at most one rollback. |
+| `scripts/attest_opensandbox_formal_authority_boot.py` | Read-only authority-volume/journal attestation and current-boot token creation/verification. |
 | `scripts/validate_opensandbox_deployment.py` | Static/runtime release, unit, image, socket, network, and container checks. |
 | `deployment/opensandbox/activate-runtime-generation.sh` | Future root-only generation primitive invoked by the formal orchestrator for staging, activation, verification, and one mode-specific rollback; it is not an operator formal entry. |
+| `deployment/opensandbox/medchat-formal-authority-*` | Pre-snapshot systemd generator, attestation service/target, and ExecCondition cold-boot interlock. |
+| `deployment/opensandbox/opensandbox-server-0.2.2-formal-label.patch` | Minimal reviewed daemon-side create-time mapping for the reserved formal-run label. |
+| `deployment/opensandbox/opensandbox-server-formal-label-lock.json` | Pinned server source/version, reviewed artifact/wheel hash, and protected-transport deployment identity. |
 | `deployment/opensandbox/medchat-sandbox-broker.service` | Future Broker execution from `/opt/medchat/current`. |
 | `deployment/medchat-temporal-worker.service` | Future worker execution from the same `/opt/medchat/current` generation. |
 | `deployment/opensandbox/install.sh` | Future installation of units and the root-owned activation command. |
@@ -924,6 +928,13 @@ the only commit eligible for Task 7. Do not create an empty commit.
 - Modify: `deployment/opensandbox/install.sh`
 - Modify: `deployment/opensandbox/medchat-sandbox-broker.service`
 - Modify: `deployment/medchat-temporal-worker.service`
+- Create: `scripts/attest_opensandbox_formal_authority_boot.py`
+- Create: `deployment/opensandbox/medchat-formal-authority-generator`
+- Create: `deployment/opensandbox/medchat-formal-authority-attestation.service`
+- Create: `deployment/opensandbox/medchat-formal-authority-attested.target`
+- Create: `deployment/opensandbox/medchat-formal-authority-exec-condition`
+- Create: `deployment/opensandbox/opensandbox-server-0.2.2-formal-label.patch`
+- Create: `deployment/opensandbox/opensandbox-server-formal-label-lock.json`
 - Modify: `deployment/opensandbox/README.md`
 - Modify: `tests/sandbox_broker/test_deployment_assets.py`
 - Modify: `tests/sandbox_broker/test_opensandbox_client.py`
@@ -1090,11 +1101,14 @@ verify the exact process family before trusting `MainPID` or cgroup observations
 The identity hash binds that invocation ID, exact executable, immutable release,
 sanitized argv, closed environment-key allowlist, run/report locators, user/group,
 timeout, mount mapping, run label, and observer baseline. `actor_mount_sha256`
-binds a closed canonical tuple containing the descriptor-resolved source locator,
-fixed namespace destination, read/write mode, `PrivateMounts=yes`, and the complete
-mount-namespace policy. `actor_run_label` is a non-secret bounded label derived
+binds a closed canonical ordered list of every descriptor-resolved source locator,
+fixed namespace destination, read-only or read/write mode, `PrivateMounts=yes`, and
+the complete mount-namespace policy. The ordered list is actor-kind-specific:
+acceptance receives only its acceptance subtree read/write; soak receives only its
+soak subtree read/write and, when needed, the already sealed acceptance subtree at
+a separate read-only input path. `actor_run_label` is a non-secret bounded label derived
 as lowercase SHA-256 over the domain-separated canonical full-commit and unique
-run-ID tuple. It is injected exactly as `medchat.formal.run=$ACTOR_RUN_LABEL` into
+run-ID tuple. It is injected exactly as `medchat.formal_run=$ACTOR_RUN_LABEL` into
 both OpenSandbox and Docker resource metadata and accepts only `[0-9a-f]{64}`;
 raw sandbox/container IDs never enter the journal. No secret value enters any
 tuple or the journal.
@@ -1148,7 +1162,10 @@ run_relpath                          # exact frozen journal locator
 report_relpath                       # exact frozen journal locator
 qemu_snapshot_id                     # exact normalized journal value
 qemu_snapshot_evidence_sha256        # exact frozen journal hash
+authority_drive_serial               # exact frozen journal value
 authority_filesystem_uuid            # exact frozen journal value
+authority_device_major_minor         # exact frozen journal value
+authority_mount_options_sha256       # exact frozen journal hash
 authority_exclusion_sha256           # exact frozen journal hash
 ```
 
@@ -1165,10 +1182,13 @@ verified parent fsync.
 For the `ACTIVE_PRECLAIM` claim-file/DB gap, recovery does not trust fields read
 from the claim. It freezes the current journal row, requires
 `claim_expected_row_version == row_version`, reconstructs the one canonical byte
-sequence above from that row, and compares both bytes and SHA-256 with the existing
-file. An exact match CASes to `RESOLUTION_REQUIRED` while recording the hash and
+sequence above from that row, including all five frozen authority identity fields,
+and compares both bytes and SHA-256 with the existing file. An exact match CASes
+to `RESOLUTION_REQUIRED` while recording the hash and
 expected version; it never dispatches science. A stale version, locator/target,
-snapshot/evidence/authority mismatch, unknown field, partial/non-canonical file,
+snapshot/evidence mismatch, any one-field authority serial/filesystem UUID/
+`major:minor`/mount-options/exclusion mismatch, unknown field,
+partial/non-canonical file,
 or hash mismatch CASes to `POISONED` when the trusted journal is writable and then
 refuses. If even that poison CAS cannot be made safely, it returns a stable
 fail-closed refusal. It never deletes, repairs, replaces, or reruns around the
@@ -1330,6 +1350,52 @@ are part of `actor_identity_sha256`. Raw sandbox/container IDs are used only in
 ephemeral root memory for cleanup and never stored in the journal, report, unit
 description, or logs.
 
+The Broker request model has one internal-only field,
+`formal_run_label: str | None`. It accepts only the exact non-secret
+`[0-9a-f]{64}` value already bound in the journal actor tuple. Public HTTP, job,
+workflow, and user payload schemas do not expose it; if an unknown-field-tolerant
+compatibility path receives `formal_run_label` or `medchat.formal_run`, it rejects
+the request instead of stripping or forwarding it. Only the root formal gate may
+inject the field through a protected internal invocation context bound to the
+journal actor identity. The Broker passes it at create time with the pinned
+OpenSandbox 0.1.15 call:
+
+```python
+Sandbox.create(
+    ...,
+    metadata={**trusted_metadata, "medchat.formal_run": formal_run_label},
+)
+```
+
+There is no post-create metadata inspect/patch/update path. Task 7 must first prove
+that pinned `opensandbox-server==0.2.2` maps this trusted metadata key during the
+same backend `docker.containers.create(..., labels=...)` operation to the immutable
+Docker label `medchat.formal_run`, while preserving the native
+`opensandbox.io/id` label. The server accepts that reserved key only on a dedicated
+loopback mTLS listener. Its root-provisioned Broker client-certificate fingerprint,
+server certificate, listener address, and expected Broker systemd identity are
+pinned in the deployment lock; the private key is readable only by the installed
+Broker service identity and never enters a request, journal, report, unit
+description, or log. The server accepts the key only after that client identity is
+authenticated; its ordinary listener and public API return a stable rejection if
+they receive it. If the current daemon cannot prove origin or atomic propagation,
+Task 7 implements the minimal reviewed server-side
+adapter in `deployment/opensandbox/opensandbox-server-0.2.2-formal-label.patch`,
+builds and pins its wheel, records source/version/wheel SHA-256 plus deployment
+settings in `opensandbox-server-formal-label-lock.json`, and installs only that
+locked artifact. Formal mode is unavailable on an unpatched, hash-mismatched, or
+origin-unprotected daemon.
+
+`Sandbox.create()` may return only after both the OpenSandbox record metadata and
+the Docker container labels independently expose the exact same persisted label.
+Missing support, a mismatched value, partial visibility, or create-time ambiguity
+fails closed and cannot enter a formal soak. The real non-scientific observer
+preflight creates one short-lived labelled sandbox, proves both views agree before
+create returns, cleans it through the exact label, and then proves both views have
+zero matching resources and zero unexplained delta. In this contract
+“zero-resource” means resources were created, observed, and returned to zero; it
+never means the creation path was skipped.
+
 Before actor clear, the root observer queries both systems independently and
 requires: zero resources carrying the run label; zero unexplained baseline delta;
 no unknown or unassignable resource in the formal-run scope; agreement between
@@ -1371,9 +1437,11 @@ Parameterize a hard process-kill failpoint immediately before and after:
 - release staging/capture and canonical-manifest fsync;
 - every actor-binding CAS, transient-unit dispatch, stop-intent CAS, stop/wait,
   cgroup zero-live verification, daemon-observer baseline/post observation,
-  actor-clear CAS, private-mount creation, and activation verification;
-- acceptance dispatch, exact report-path publication, descriptor-confined report
-  validation, report-tree fsync, root-only sealing, and report-sealed CAS;
+  atomic create-time OpenSandbox/Docker label observation, actor-clear CAS,
+  actor-kind-specific private-mount creation, and activation verification;
+- acceptance dispatch, acceptance-subtree validation/fsync/root sealing, exact
+  report-path publication, soak-subtree validation/fsync/root sealing, final run
+  parent sealing, and report-sealed CAS;
 - permanent claim O_EXCL creation/fsync and the following DB CAS;
 - the single 30-job scientific soak dispatch, report hashing/sealing, and report
   settlement;
@@ -1383,8 +1451,10 @@ Parameterize a hard process-kill failpoint immediately before and after:
 - `SETTLED_PASSED`, `SETTLED_FAILED`, and `POISONED` commits;
 - every POISONED same-state shutdown intent, actor cleanup, worker/Broker stop, and
   shutdown-receipt CAS;
-- pre-restore authority freeze, host-side evidence hash/backup when selected,
-  OS/runtime rewind, authority remount/reattest, and gate re-enable boundary;
+- pre-restore full shutdown, authority flush/clean unmount, host-side evidence
+  hash/backup when selected, disk-only OS/runtime rewind, cold boot, authority
+  read-only remount/reattest, ephemeral boot-token publication, and gated service
+  ExecCondition boundary;
 - atomic `gate-result.json` export and parent fsync.
 
 For every failpoint, restart through the public entry point and assert:
@@ -1452,18 +1522,23 @@ The RED suite must explicitly cover these named scenarios:
     `qemu_snapshot_id`, QEMU identity, and evidence hash. Missing, malformed,
     alternate-case, wrong-ID, wrong-evidence, and evidence-for-a-different-VM
     inputs fail before resolution CAS or rollback.
-17. Root creates host base/commit parents as `root:root 0700` and the run subtree as
-    `medchat:medchat 0700`. A real transient unit with `PrivateMounts=yes` receives
-    only the exact run subtree at `/run/medchat-formal-output`. Running as the
-    actual `medchat` UID, it can read/write that mount but cannot traverse host
-    parents, inspect another commit/run, create a sibling, or replace a parent.
-    Wrong source, destination, rw/ro flag, namespace policy, or mount hash refuses
-    before dispatch.
+17. Root creates host base/commit/run parents as `root:root 0700` and pre-creates
+    distinct `acceptance/` and `soak/` actor subtrees. A real acceptance transient
+    unit with `PrivateMounts=yes` receives only `acceptance/` read/write at the fixed
+    output path; `soak/` is absent. After zero-live, root seals acceptance. A real
+    soak unit receives only `soak/` read/write and the sealed acceptance tree at a
+    separate read-only input path. Running both as the actual `medchat` UID proves
+    they cannot cross-read/write actor-private subtrees, pre-create the soak report,
+    alter sealed acceptance, traverse host parents, inspect another commit/run,
+    create a sibling, or replace a parent. Wrong ordered source/destination,
+    rw/ro flag, namespace policy, or mount hash refuses before dispatch.
 18. Kill between claim O_EXCL/fsync and the claim CAS. Recovery reconstructs exact
     canonical bytes from `ACTIVE_PRECLAIM` and enters `RESOLUTION_REQUIRED` once.
     Partial JSON, duplicate/unknown/missing/out-of-order keys, stale expected row
-    version, locator/target mismatch, snapshot/evidence/authority mismatch, bad
-    encoding, and non-canonical bytes poison/refuse and never rerun science.
+    version, locator/target mismatch, snapshot/evidence mismatch, an independent
+    mismatch in each of authority drive serial/filesystem UUID/`major:minor`/
+    mount-options hash/exclusion hash, bad encoding, and non-canonical bytes
+    poison/refuse before actor stop, rollback, or science and never rerun science.
 19. Kill immediately before and after the POISONED commit while an actor, worker,
     or Broker is still live. Recovery performs only the same-state audited shutdown
     protocol, remains POISONED, and returns snapshot-required. Stop failure,
@@ -1483,6 +1558,21 @@ The RED suite must explicitly cover these named scenarios:
 22. Historical A -> B -> C report and baseline behavior remains unchanged when all
     journal, claim, and sealed run evidence is reached through fixed root-only bind
     mounts backed by the authority volume.
+23. The real pinned server creates one short-lived non-scientific sandbox through
+    the protected Broker path. Before create returns, OpenSandbox metadata and the
+    Docker immutable labels both contain the exact `medchat.formal_run` value and
+    retain `opensandbox.io/id`; cleanup makes both observer views zero. Public API
+    injection is rejected. Kill during create, missing server support, wrong origin,
+    one-sided/mismatched labels, unknown delta, and post-create-only propagation all
+    fail closed and keep formal soak disabled.
+24. Build the snapshot baseline with Broker, Temporal worker, OpenSandbox daemon,
+    and any automatic gate unit enabled, then perform the reviewed powered-off
+    disk-only OS/runtime rewind. Before authority attestation there is no current-
+    boot token and every relevant `ExecStart` is blocked. POISONED, in-flight,
+    unsettled, wrong-volume, wrong-exclusion, and stale-token cases remain blocked;
+    only read-only validation of the surviving settled baseline creates a token
+    bound to the current kernel `boot_id`, authority identity, and journal
+    state/version hash. RAM, vmstate, and device-state restore are rejected.
 
 - [ ] **Step 4: Run the journal and gate RED tests before implementation**
 
@@ -1599,6 +1689,45 @@ every special/symlink entry, so an excluded cache can never hide a release write
 The root gate recomputes both hygiene and digest before validation, after
 acceptance regardless of return code, and after soak regardless of return code.
 
+The pre-snapshot OS baseline must also install an unavoidable cold-boot authority
+interlock. `deployment/opensandbox/medchat-formal-authority-generator` is installed
+root-owned and non-writable at
+`/usr/lib/systemd/system-generators/medchat-formal-authority-generator`. On every
+boot it emits early generator drop-ins for the Broker, Temporal worker, pinned
+OpenSandbox daemon, and every automatic formal-gate service/timer. The drop-ins
+require and order after `medchat-formal-authority-attested.target` and add the
+closed `medchat-formal-authority-exec-condition`; a unit restored as enabled in an
+old OS snapshot therefore cannot reach `ExecStart` without current-boot evidence.
+Installation/static validation fails if any relevant installed unit lacks the
+generated dependency contract.
+
+`medchat-formal-authority-attestation.service` runs before that target. It first
+mounts the excluded authority volume read-only and descriptor-verifies its drive
+serial, filesystem UUID, `major:minor`, canonical mount options, fixed binds,
+snapshot exclusion, SQLite integrity/schema, audit chain, claims, sealed evidence,
+and current journal state. `POISONED`, any in-flight/unsettled state, identity or
+exclusion mismatch, blank/substituted volume, or unreadable evidence fails without
+starting Broker, worker, daemon, or a gate. A successful settled-baseline check
+writes only `/run/medchat-formal-authority/runtime-token.json` on tmpfs, root:root
+`0400`, with a closed canonical payload binding the current kernel `boot_id`, all
+five authority fields, journal state/version hash, `live_baseline` commit/target,
+and allowed service generation. It fsyncs the file and `/run` directory. The
+ExecCondition reopens and revalidates that token and allows only Broker/worker/
+daemon binaries from the bound generation. The token disappears at reboot and no
+persistent token, restored mask state, or prior-boot file is accepted.
+
+The manual formal-gate entry uses a separate root-only attestation mode and token,
+never the runtime token as blanket authorization. `formal-new-run` is issued only
+after the same read-only authority checks prove a clean settled baseline and binds
+the requested clean source commit, snapshot evidence and invocation ID. An
+inherited in-flight row can obtain only a state/version-bound `formal-recovery`
+token that authorizes the gate's closed actor reconciliation or resolution path,
+not Broker/worker/daemon startup or new science. `POISONED` can obtain only the
+same-state safety-cleanup mode; it never authorizes activation, rollback,
+resolution, science, or service start. The root gate reattests before any controlled
+read/write remount and invalidates its `/run` token when the invocation exits.
+This controlled mode cannot bypass poison or create a replacement journal.
+
 - [ ] **Step 7: Implement the single root-owned formal QEMU gate**
 
 Create `scripts/run_opensandbox_formal_qemu_gate.py`. The operator-visible entry
@@ -1642,22 +1771,22 @@ The main gate order is fixed:
    unique systemd transient unit, verify zero-live termination and activation, clear
    the actor, and CAS to `ACTIVE_PRECLAIM`.
 7. Descriptor-confined below the trusted output-base handle, create exactly the
-   journal-bound run directory plus `acceptance/` and `soak/` subdirectories once,
-   with no symlink traversal or pre-existing target. The report file itself must
-   remain absent until the soak atomically publishes it with no-replace semantics.
-   Set the writable run subtree to the
-   selected `medchat:medchat` actor identity and mode `0700`; do not accept an
-   operator-supplied or worker-selected path. Before each acceptance/soak dispatch,
-   capture the independent OpenSandbox/Docker baseline and durable unique run
-   label, bind the exact subtree into a `PrivateMounts=yes` unit at
-   `/run/medchat-formal-output`, and persist the complete mount/observer actor
-   identity. Then run, one at a time,
-   privileged deployment/runtime validation, a transient non-root socket probe,
-   and real acceptance. Each actor tuple is durable before dispatch and cleared
-   only after independent cgroup and daemon-resource zero-live verification.
-   Preserve the already reviewed
-   phase allowlist, timeout budgets, clean diagnostics delta, zero-container check,
-   artifact truth, and post-acceptance manifest hashes.
+    journal-bound run directory plus `acceptance/` and `soak/` subdirectories once,
+    with no symlink traversal or pre-existing target. The report file itself must
+    remain absent until the soak atomically publishes it with no-replace semantics.
+    Keep the run parent root-owned mode `0700`; make only each pre-created actor
+    subtree `medchat:medchat 0700` while that phase owns it. Run privileged
+    deployment/runtime validation and a transient non-root socket probe first.
+    Before acceptance, capture the independent OpenSandbox/Docker baseline and
+    durable unique run label, persist the complete actor identity including an
+    ordered mount policy, and give its `PrivateMounts=yes` unit only
+    `acceptance/` read/write at `/run/medchat-formal-output`; `soak/` is not mounted
+    or visible. Clear ownership only after cgroup and daemon-resource zero-live
+    proof. Then descriptor-validate/fsync the acceptance evidence, recursively
+    seal it root:root with files `0400` and directories `0500`, fsync its parent,
+    reopen and verify the seal, and persist the post-acceptance manifest/seal
+    evidence before claim creation. Preserve the reviewed phase allowlist, timeout
+    budgets, clean diagnostics delta, zero-container check, and artifact truth.
 8. Re-read the frozen `ACTIVE_PRECLAIM` row and construct the exact closed
    canonical claim payload, including expected row version, target, locators,
    snapshot/evidence, and authority identity. Create
@@ -1667,19 +1796,25 @@ The main gate order is fixed:
    immediately CAS `ACTIVE_PRECLAIM -> CLAIMED` with that hash and
    `claim_expected_row_version`. An inherited O_EXCL-to-CAS gap uses only the
    reconstruction algorithm in Step 1. Never delete, replace, repair, or reuse it.
-9. Bind the exact soak actor to the existing journal locators, then dispatch
-   exactly one non-root 30-job soak. Never retry the scientific command, Vina,
-   Meeko, upload, validation, or the complete run. After the actor exits, prove
-   zero-live before trusting or sealing any output.
-10. Open the run tree and exact report through retained trusted directory
+9. Bind the exact soak actor to the existing journal locators. Give its private
+    namespace only `soak/` read/write at `/run/medchat-formal-output`; if it must
+    consume acceptance evidence, separately bind the already root-sealed
+    `acceptance/` tree read-only at `/run/medchat-formal-input/acceptance`. Include
+    the ordered RW and RO mappings and complete namespace policy in
+    `actor_mount_sha256`. Then dispatch exactly one non-root 30-job soak. Never
+    retry the scientific command, Vina, Meeko, upload, validation, or complete run.
+    After the actor exits, prove cgroup and daemon-resource zero-live before
+    trusting or sealing output.
+10. Open the soak tree and exact report through retained trusted directory
     descriptors with `O_NOFOLLOW`; reject path substitution, hard links outside
     policy, unexpected owners/types/modes, and every unbound file. Validate report
     schema, post-soak manifest, provenance, artifacts, cleanup, probes, retries,
     release identity, and zero-leak state; hash and fsync every accepted file and
-    directory. Then recursively seal the accepted evidence tree root:root with
-    regular files mode `0400` and directories mode `0500`, fsync it and its trusted
-    parent, reopen it descriptor-confined, and verify content hashes plus canonical
-    ownership/mode/path seal. Store `report_sha256`, `report_status`, and
+    directory. Recursively seal `soak/` root:root with regular files mode `0400`
+    and directories mode `0500`, fsync/reopen/verify it, then seal the run parent
+    root:root mode `0500` only after both phase trees are independently sealed.
+    Reopen the complete tree descriptor-confined and verify content hashes plus
+    canonical ownership/mode/path seal. Store `report_sha256`, `report_status`, and
     `report_seal_sha256` through the audited `report_sealed` CAS. Any retry,
     timeout, invalid output, fallback, mismatch, cleanup uncertainty, mutable
     evidence, or missing evidence prevents pass.
@@ -1740,31 +1875,43 @@ The base and full-commit parent are root-owned non-symlink directories with mode
 `0700`, not writable by group/world. `UNIQUE_RUN_ID` matches
 `[a-z0-9][a-z0-9-]{7,63}`. The privileged gate creates the final directory once
 through verified parent descriptors only after its relative locator is durable in
-the journal, then makes only the final run subtree `medchat:medchat 0700` for the
-actor lifetime. The host base and commit parent stay `root:root 0700`; they are
-never made group-traversable. Resolve and `lstat` every component; reject `..`, wrong
-commit components, untrusted owner/mode/type, symlinks, existing final targets,
-and any candidate under the source, current link, or releases root. Acceptance
-and soak never receive this host path. For each such actor, the root systemd
-manager creates a private mount namespace with `PrivateMounts=yes` and bind-mounts
-the exact descriptor-verified journal-bound source subtree read/write at the fixed
-namespace-only destination `/run/medchat-formal-output` using the closed transient
-property `BindPaths=$VERIFIED_SOURCE:/run/medchat-formal-output`; systemd's root
-manager creates/verifies the destination in that unit namespace before exec. The destination, source
-locator, rw mode, and complete namespace policy must exactly match
-`actor_mount_sha256` persisted before dispatch. The worker CLI receives only that
-fixed namespace path. It cannot traverse host parents, select a sibling, inspect
-another commit/run, or replace a host parent. A wrong source/destination, missing
-private namespace, read-only/read-write mismatch, or mount-table discrepancy fails
-closed and leaves the actor journal-bound for safe recovery.
+the journal. It creates the run parent root:root `0700` and exactly two independent
+children, `acceptance/` and `soak/`; only the child currently assigned to an actor
+is `medchat:medchat 0700`. The host base, commit parent, and run parent stay
+root:root `0700` and are never group-traversable. Resolve and `lstat` every
+component; reject `..`, wrong commit components, untrusted owner/mode/type,
+symlinks, existing final targets, and any candidate under the source, current link,
+or releases root. Neither actor receives a host path or the run parent.
 
-Acceptance and soak receive the pre-created exact namespace paths and cannot
-choose another report.
+For acceptance, the root systemd manager creates a private mount namespace with
+`PrivateMounts=yes` and exactly one writable mapping:
+`BindPaths=$VERIFIED_ACCEPTANCE_SOURCE:/run/medchat-formal-output`. The soak source
+is not visible. After acceptance cgroup and daemon resources are proved zero, root
+descriptor-validates and fsyncs that subtree, changes all files to root:root `0400`
+and directories to root:root `0500`, fsyncs/reopens/verifies the seal, and only then
+may prepare soak. For soak, the manager creates a new private namespace with
+`BindPaths=$VERIFIED_SOAK_SOURCE:/run/medchat-formal-output`. If acceptance evidence
+is required, it adds only
+`BindReadOnlyPaths=$SEALED_ACCEPTANCE_SOURCE:/run/medchat-formal-input/acceptance`;
+that path is distinct from output and remains read-only. No acceptance RW bind is
+permitted, and acceptance never receives a soak bind.
+
+For each actor, the ordered mapping list, exact source descriptor/locator, fixed
+destination, RO/RW mode, `PrivateMounts=yes`, and all namespace properties must
+exactly match `actor_mount_sha256` persisted before dispatch. The root manager
+creates and verifies destinations inside the unit namespace before exec. A wrong
+source/destination/order, missing private namespace, extra bind, RO/RW mismatch,
+or mount-table discrepancy fails closed and leaves the actor journal-bound for
+safe recovery. Actual-UID integration tests prove acceptance cannot read or write
+soak, pre-create the soak report, inspect siblings/other runs, or replace parents;
+soak cannot modify sealed acceptance or write through its read-only input.
+
 Poses, copied inputs, temporary files, observer output, and reports stay below the
-run root. Artifact projection validates relative paths against the retained root
-descriptor, and no cleanup path may cross it. After soak, the entire accepted
-evidence tree is root-owned and non-writable as described above; no `medchat`
-process may retain a writable descriptor when sealing begins.
+phase-specific writable subtree. Artifact projection validates relative paths
+against its retained phase-root descriptor, and no cleanup path may cross it. Root
+seals soak independently after zero-live proof, then seals the run parent root:root
+`0500`. No `medchat` process may retain a writable descriptor when either phase
+seal begins.
 
 If the report is root-sealed and the process dies before `report_sealed` or final
 settlement commits, recovery uses only `run_relpath`/`report_relpath` from the
@@ -1873,9 +2020,16 @@ report-locator reuse, correct A -> B -> C baseline history, persistent authority
 truth across OS/runtime rewind, and no export-driven branch. Before a formal run,
 the QEMU host integration preflight must additionally execute the real transient
 mount-namespace/DAC test as the actual `medchat` UID and the real independent
-OpenSandbox/Docker observer test. It is a non-scientific zero-resource preflight:
-it creates no claim and cannot be used to satisfy the formal soak. Failure keeps
-Broker/worker/formal gate disabled.
+OpenSandbox/Docker create-time label/observer test. That non-scientific preflight
+creates one short-lived labelled sandbox, proves OpenSandbox and Docker metadata
+agreement before create returns, cleans it, and proves both observers return to
+zero; it creates no claim and cannot satisfy the formal soak. The host test also
+boots an OS snapshot whose relevant units are enabled and proves the generated
+authority interlock blocks every ExecStart without a valid current-boot token,
+under poison/in-flight/wrong-volume states, and after any RAM/vmstate/device-state
+restore attempt. Only a surviving read-only-verified settled baseline may produce
+the generation-bound runtime token. Any failure keeps Broker, worker, daemon, and
+formal gate disabled.
 
 - [ ] **Step 10: Obtain independent review and commit Task 7 before formal execution**
 
@@ -1885,14 +2039,15 @@ security, schema constraints, CAS transitions, the transition/recovery table,
 atomic first-STAGED insertion, actor unit/cgroup ownership and orphan recovery,
 claim-file/DB gap, report sealing/DB gap, result-export gap, live-baseline history,
 rollback physical/DB gap, snapshot-ID/evidence binding, resolution crash, poison
-persistence and same-state shutdown, private output mount/DAC isolation,
-OpenSandbox/Docker labelled-resource observation, authority-volume identity and
-rewind exclusion, concurrent gates, immutable releases, environment isolation,
+persistence and same-state shutdown, phase-specific RW/RO output mount/DAC
+isolation and sealing, OpenSandbox/Docker atomic create-time labelled-resource
+observation, authority-volume identity and rewind exclusion, cold-boot
+generator/target/token interlock, concurrent gates, immutable releases, environment isolation,
 manifest equality, external outputs, phase contracts, and old-report retention.
 No Critical or Important finding may remain.
 
 ```powershell
-git add -- src/sandbox_broker/formal_gate_state.py src/sandbox_broker/models.py src/sandbox_broker/opensandbox_client.py src/sandbox_broker/service.py scripts/opensandbox_formal_runtime.py scripts/run_opensandbox_formal_qemu_gate.py scripts/run_opensandbox_docking_acceptance.py scripts/run_opensandbox_stability_soak.py scripts/validate_opensandbox_deployment.py deployment/opensandbox/activate-runtime-generation.sh deployment/opensandbox/install.sh deployment/opensandbox/medchat-sandbox-broker.service deployment/medchat-temporal-worker.service deployment/opensandbox/README.md tests/sandbox_broker/test_formal_gate_state.py tests/sandbox_broker/test_deployment_assets.py tests/sandbox_broker/test_formal_qemu_gate.py tests/sandbox_broker/test_opensandbox_client.py tests/sandbox_broker/test_real_opensandbox_acceptance.py tests/sandbox_broker/test_service.py tests/sandbox_broker/test_stability_soak.py
+git add -- src/sandbox_broker/formal_gate_state.py src/sandbox_broker/models.py src/sandbox_broker/opensandbox_client.py src/sandbox_broker/service.py scripts/attest_opensandbox_formal_authority_boot.py scripts/opensandbox_formal_runtime.py scripts/run_opensandbox_formal_qemu_gate.py scripts/run_opensandbox_docking_acceptance.py scripts/run_opensandbox_stability_soak.py scripts/validate_opensandbox_deployment.py deployment/opensandbox/activate-runtime-generation.sh deployment/opensandbox/install.sh deployment/opensandbox/medchat-formal-authority-generator deployment/opensandbox/medchat-formal-authority-attestation.service deployment/opensandbox/medchat-formal-authority-attested.target deployment/opensandbox/medchat-formal-authority-exec-condition deployment/opensandbox/opensandbox-server-0.2.2-formal-label.patch deployment/opensandbox/opensandbox-server-formal-label-lock.json deployment/opensandbox/medchat-sandbox-broker.service deployment/medchat-temporal-worker.service deployment/opensandbox/README.md tests/sandbox_broker/test_formal_gate_state.py tests/sandbox_broker/test_deployment_assets.py tests/sandbox_broker/test_formal_qemu_gate.py tests/sandbox_broker/test_opensandbox_client.py tests/sandbox_broker/test_real_opensandbox_acceptance.py tests/sandbox_broker/test_service.py tests/sandbox_broker/test_stability_soak.py
 git diff --cached --check
 git commit -m "feat: add opensandbox formal gate journal"
 git rev-parse HEAD
@@ -1907,8 +2062,11 @@ the pre-gate normalized QEMU snapshot identifier, and its root-owned mode-0600
 canonical snapshot-evidence file plus independently recorded SHA-256. Provision
 and mount the distinct formal-authority block volume first; attest its drive
 serial, filesystem UUID, `major:minor`, hardening options, fixed bind mounts, and
-absence from the OS/runtime snapshot device set. Run the real non-scientific
-mount-namespace/DAC and observer preflight described in Step 9. Preparation may
+absence from the OS/runtime snapshot device set. The OS snapshot baseline must
+already contain the reviewed generator, attestation service/target, ExecCondition,
+and generated dependency coverage for every relevant enabled unit. Run the real
+non-scientific phase-mount/DAC, atomic-label observer, and cold-boot authority
+interlock preflights described in Step 9. Preparation may
 not stage, capture, activate, validate, claim, run workers, or roll back. Then
 invoke only:
 
@@ -1940,26 +2098,34 @@ the same commit can only verify the journal/claim/export and return the stable
 already-terminal, resolution-required, or poison code; it never reruns science.
 
 QEMU recovery never restores the formal-authority volume. Before rewind, the
-independent operator stops and disables the gate, worker, Broker, and daemon-side
-formal resources; powers off or filesystem-freezes the guest as required; and
-host-side verifies the authority device identity and exclusion policy. If an
-additional immutable incident backup is required, the operator copies and hashes
-the frozen journal, claims, sealed runs/reports, audits, and filesystem metadata
-to snapshot-external host evidence **before** restore, using a reviewed offline or
-read-only quiesced-volume procedure rather than mounting a concurrently writable
-filesystem twice. Recovery then rewinds only
-the OS/runtime block nodes named by the reviewed snapshot.
+independent operator stops the gate, worker, Broker, OpenSandbox daemon and all
+formal resources, flushes every filesystem, cleanly unmounts the authority volume,
+and fully powers off the guest. `fsfreeze` is not a substitute for shutdown. The
+host verifies authority device identity and exclusion after power-off. If an
+additional immutable incident backup is required, it copies and hashes the frozen
+journal, claims, sealed runs/reports, audits, and filesystem metadata to
+snapshot-external host evidence before restore, using a reviewed offline mount.
+Recovery rewinds only the named OS/runtime block nodes. Restoring RAM, QEMU vmstate,
+device state, a suspended guest, or any snapshot that includes the authority block
+node is forbidden and fails the recovery checklist.
 
-On first boot after rewind, Broker, worker, and gate remain disabled. The operator
-mounts the same authority block volume, verifies its serial, filesystem UUID,
-`major:minor`, options, fixed root-only binds, and exclusion evidence, and opens
-the existing journal read-only before any service is enabled. Journal rows,
-claims, sealed reports, POISONED state, and permanent attempt tombstones therefore
-survive unchanged; the same full commit remains unrerunnable. An absent, blank,
-substituted, reformatted, rewind-participating, or incorrectly mounted authority
-volume is a terminal recovery refusal, never a reason to create a new DB. The gate
-has no archive, delete, truncate, replace, clear-poison, format-volume, or
-snapshot-restore command.
+The next guest start is a cold boot. Snapshot-restored enable/mask state is never
+trusted: the preinstalled systemd generator recreates the authority target and
+ExecCondition drop-ins before units are queued. The attestation service mounts the
+same authority volume read-only and validates serial, filesystem UUID,
+`major:minor`, options, fixed root-only binds, exclusion evidence, journal/audits,
+claims and seals before it can produce a current-`boot_id` tmpfs token. With no
+token, a prior-boot token, `POISONED`, any in-flight/unsettled row, wrong volume, or
+identity/exclusion mismatch, Broker, worker, OpenSandbox daemon and automatic gate
+units cannot reach `ExecStart` even if the restored snapshot marks them enabled.
+Only a verified settled `live_baseline` token authorizes the corresponding service
+generation; a manual gate or recovery requires its narrower state-bound token and
+cannot bypass poison. Journal rows, claims, sealed reports, POISONED state, and
+permanent attempt tombstones therefore survive unchanged and the same full commit
+remains unrerunnable. An absent, blank, substituted, reformatted,
+rewind-participating, or incorrectly mounted authority volume is a terminal
+recovery refusal, never a reason to create a new DB. The gate has no archive,
+delete, truncate, replace, clear-poison, format-volume, or snapshot-restore command.
 
 ### Task 8: Record authoritative evidence and promotion status
 
@@ -2088,12 +2254,23 @@ Implementation is complete only when all statements are true:
 - Activation, root validation, socket probe, acceptance, soak, and both rollback
   forms run only as uniquely named transient systemd actors whose exact unit,
   kind, expected cgroup, identity, private-mount mapping, run label, and observer
-  baseline are journaled before dispatch as applicable. Acceptance/soak use
-  `PrivateMounts=yes` and receive only `/run/medchat-formal-output`; host output
-  parents remain `root:root 0700`. Recovery proves inactive/MainPID=0/empty cgroup
+  baseline are journaled before dispatch as applicable. Acceptance and soak use
+  separate `PrivateMounts=yes` namespaces: each receives only its own phase subtree
+  read/write at `/run/medchat-formal-output`, and soak may receive sealed acceptance
+  evidence only at a separate read-only input. The ordered mappings and RO/RW
+  attributes are identity-bound; host output parents remain `root:root 0700`.
+  Acceptance and soak are independently zero-live-verified and root-sealed before
+  the run parent is sealed. Recovery proves inactive/MainPID=0/empty cgroup
   and zero labelled/unexplained OpenSandbox/Docker resource delta before clearing
   ownership; ambiguity or a surviving actor/resource poisons before rollback or a
   new gate. The actual `medchat` UID DAC/mount-namespace integration test passes.
+- `formal_run_label` is internal-only and cannot be supplied through public HTTP,
+  job, workflow, or ordinary OpenSandbox create payloads. OpenSandbox 0.1.15 passes
+  `medchat.formal_run` in create metadata, and the locked reviewed
+  `opensandbox-server==0.2.2` artifact propagates it atomically in the same Docker
+  create call. Before create returns, OpenSandbox and Docker expose the identical
+  label; ordinary-client injection, unsupported propagation, mismatches, create
+  crashes, unknown deltas, and post-create patching fail closed.
 - The socket probe receives neither scientific gate variable; acceptance receives
   only `MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE=1`; soak receives only
   `MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK=1`.
@@ -2108,7 +2285,8 @@ Implementation is complete only when all statements are true:
   its report is retained and hashed when produced even if the command exits
   non-zero, and a post-claim crash never authorizes a rerun. The claim uses the
   closed canonical payload, exact expected row version, byte/hash reconstruction,
-  and negative tests for partial/non-canonical/stale/mismatched content.
+  all five frozen authority identity fields, and negative tests for partial/
+  non-canonical/stale content and each independently mismatched authority field.
 - `/var/lib/medchat-runtime-generation/formal-gate.sqlite3` is the only
   authoritative transaction, settlement, resolution, and poison store. Its
   root-only path, DELETE journal mode, FULL synchronous mode, foreign keys,
@@ -2165,9 +2343,16 @@ Implementation is complete only when all statements are true:
   completion cannot be proven; the journal persists `POISONED` as the authority
   and a marker is optional. Journal, claims, sealed runs/reports, and audits reside
   on one separately attested authority block volume excluded from that rewind.
-  Recovery freezes and optionally backs up/hash-seals evidence before restore,
-  rewinds only OS/runtime disks, then reattests the same authority volume before
-  enabling anything. Missing/blank/substituted/included storage fails closed, and
+  Recovery fully shuts down, flushes and cleanly unmounts authority storage,
+  optionally backs up/hash-seals evidence, and rewinds only OS/runtime disks;
+  RAM/vmstate/device-state restore is forbidden. On the mandatory cold boot, a
+  preinstalled systemd generator gates Broker, worker, OpenSandbox daemon and any
+  automatic formal gate behind read-only authority attestation and a root-only
+  current-`boot_id` tmpfs token bound to authority identity, journal state/version,
+  and service generation. Snapshot-restored enabled units cannot reach ExecStart
+  before this check. POISONED/in-flight/wrong-volume states fail closed, and manual
+  gate/recovery uses a narrower state-bound mode that cannot bypass poison.
+  Missing/blank/substituted/included storage fails closed, and
   the same commit remains permanently unrerunnable. The gate never deletes,
   rewrites, clears, reformats, or replaces historical authority evidence.
 - `docs/handoff/latest.md` distinguishes evaluator correctness from runtime stability and records either promotion evidence or rollback evidence.
