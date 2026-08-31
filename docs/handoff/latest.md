@@ -1,5 +1,33 @@
 # OpenSandbox docking broker handoff
 
+## OpenSandbox runtime remediation plan finalized (2026-08-31)
+
+Branch: `codex/opensandbox-stability-hardening`
+
+Final plan commit: `2e0b9d5bac0a8d62e6e59f73ff6606dfff05f1a3`
+
+The separate runtime-remediation implementation plan is now complete at
+`docs/superpowers/plans/2026-08-30-opensandbox-real-stability-remediation.md`.
+Independent specification and implementation-quality reviewers both returned
+`APPROVED` with no remaining Critical or Important finding.
+
+The plan closes the formal-gate contracts for root-only SQLite authority,
+immutable claims and sealed evidence, actor orphan recovery, OpenSandbox/Docker
+resource observation, an authority volume that survives QEMU OS-disk rewind,
+static fail-closed systemd interlocks, phase-isolated output mounts, and
+transactional service-start capabilities. The final start boundary uses a
+root-owned guard wrapper that revalidates journal and capability state under the
+lifecycle lock and directly executes a fixed, hash-attested command after
+dropping to the configured service identity. The first-mutation lock remains
+exclusive from capability revocation through staging, `STAGED`, `ACTIVATING`,
+and durable publication of the current authorization.
+
+This planning stage did not implement those future runtime changes and did not
+run QEMU, Docker, OpenSandbox, Vina, acceptance, or a new 30-job soak. The
+preserved `79860ec` QEMU report and its failures remain unchanged. The next stage
+is to execute the reviewed remediation plan test-first; it must not be reported
+as already implemented or promoted.
+
 ## OpenSandbox soak evaluator correction (2026-08-30)
 
 Branch: `codex/opensandbox-stability-hardening`
