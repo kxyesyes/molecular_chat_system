@@ -963,10 +963,12 @@ Test all of the following before implementation:
   table/trigger/index definitions, or an unknown state returns a stable fail-closed
   code and never recreates or repairs the database automatically.
 
-The schema has one current row per full commit and an append-only transition
-audit table. Use strict tables when supported by the pinned SQLite version and
-explicit `CHECK`, `NOT NULL`, `UNIQUE`, and foreign-key constraints in all cases.
-The current row includes at least:
+The schema has one current row per full commit, one singleton live-baseline row,
+an append-only transition audit table, and an append-only live-baseline audit
+table. Use strict tables when supported by the pinned SQLite version and explicit
+`CHECK`, `NOT NULL`, `UNIQUE`, and foreign-key constraints in all cases. The
+current row includes at least these real columns (none may exist only as prose or
+inside an opaque JSON blob):
 
 ```text
 schema_version
@@ -977,16 +979,27 @@ release_target                 # canonical in-root release identifier
 previous_target                # canonical in-root target or explicit absent sentinel
 legacy_snapshot_sha256
 generation_snapshot_sha256
+qemu_snapshot_id               # normalized safe ASCII identifier, 1..128 chars
 qemu_snapshot_evidence_sha256
 pre_manifest_sha256
 post_acceptance_manifest_sha256
 post_soak_manifest_sha256
 claim_sha256
 claim_relative_name
+run_relpath                    # unique, safe, commit-bound path below output base
+report_relpath                 # unique safe descendant of run_relpath
 report_sha256
 report_status                  # passed | failed | absent
+report_seal_sha256             # canonical root ownership/mode/path seal receipt
 failure_envelope_sha256
 physical_attestation_sha256
+actor_unit                     # exact transient .service unit or NULL
+actor_kind                     # closed allowlist or NULL
+actor_cgroup                   # exact expected systemd cgroup or NULL
+actor_invocation_id            # unique 32-char lowercase hex process identity
+actor_identity_sha256          # canonical command/release/environment identity
+actor_stop_intent              # 0 | 1
+actor_stop_receipt_sha256
 rollback_receipt_sha256
 rollback_verified              # 0 | 1
 resolution_evidence_sha256
@@ -997,13 +1010,59 @@ updated_at_utc
 row_version
 ```
 
-Targets and claim names are canonical identifiers below fixed trusted roots, not
-arbitrary host paths. Hashes are lowercase SHA-256 or NULL. `stable_code` is from
-a closed allowlist; raw exception text, response bodies, credentials, sandbox
-IDs, host-user paths, and out-of-root paths are forbidden. The audit table binds
-`release_commit`, old/new states, old/new row versions, stable code, evidence
-hashes, and timestamp to the current row through a foreign key. It contains no
-second writable settlement truth.
+`qemu_snapshot_id` is normalized by rejecting Unicode, leading/trailing
+whitespace, and alternate encodings, then requiring the exact ASCII expression
+`[A-Za-z0-9][A-Za-z0-9._-]{0,127}`. It is compared byte-for-byte after
+normalization. Targets, claim names, and output locators are canonical identifiers
+below fixed trusted roots, not arbitrary host paths. `run_relpath` has the exact
+form `$FULL_COMMIT/$UNIQUE_RUN_ID`; `report_relpath` is the fixed descendant
+`$RUN_RELPATH/soak/report.json`. Acceptance output is confined to the separate
+`$RUN_RELPATH/acceptance/` subtree and cannot create or replace the soak report.
+Both locators are bound to `release_commit`, reject absolute paths,
+empty/dot/dot-dot components and symlinks, and are independently `UNIQUE` so a
+different transaction can never adopt them. Hashes are lowercase SHA-256 or
+NULL. `stable_code` is from a closed allowlist; raw exception text, response
+bodies, credentials, sandbox IDs, host-user paths, and out-of-root paths are
+forbidden.
+
+The actor tuple is all-NULL when no external actor is owned, otherwise all actor
+identity columns are non-NULL. `actor_unit` is a bounded safe systemd service name
+derived from the full commit, row version, and actor kind; `actor_kind` is exactly
+one of `activation`, `root_validator`, `socket_probe`, `acceptance`, `soak`,
+`rollback`, or `resolution_rollback`; `actor_cgroup` is the deterministic
+`/system.slice/$ACTOR_UNIT` expected before dispatch. `actor_invocation_id` is a
+preallocated non-secret `[0-9a-f]{32}` value included in the unit's closed
+environment and wrapper process; it avoids PID-reuse ambiguity and lets root
+verify the exact process family before trusting `MainPID` or cgroup observations.
+The identity hash binds that invocation ID, exact executable, immutable release,
+sanitized argv, closed environment-key allowlist, run/report locators, user/group,
+and timeout. No secret value enters that tuple or the journal.
+
+The transition audit binds `release_commit`, mutation kind, old/new states,
+old/new row versions, stable code, actor tuple, evidence hashes, and timestamp to
+the current row through a foreign key. It contains no second writable settlement
+truth. Same-state evidence mutations are legal only for the closed mutation kinds
+`actor_bound`, `actor_stop_intent`, `actor_cleared`, and `report_sealed`; they use
+the same expected-state/version CAS and audit rules as state changes. All other
+same-state updates are forbidden.
+
+The singleton table is a real schema object, not a derived query:
+
+```text
+live_baseline
+  singleton_id                 # INTEGER PRIMARY KEY CHECK(singleton_id = 1)
+  release_commit               # nullable FK until first passed generation
+  release_target               # nullable canonical generation identifier
+  physical_attestation_sha256  # nullable only when no baseline exists
+  source_gate_row_version
+  row_version
+  updated_at_utc
+```
+
+At most one row exists. Its fields are either all baseline-NULL or identify one
+`SETTLED_PASSED` generation. The append-only baseline audit records every pointer
+change and its source gate row/version. Historical settled rows are immutable
+evidence history; they do not become a second live pointer.
 
 `failure_envelope_sha256` and `resolution_record_sha256` are hashes of
 versioned canonical, sanitized tuples whose bounded fields are stored in the same
@@ -1011,8 +1070,32 @@ current row and audit entry; they are not hashes of separate state JSON files.
 `rollback_receipt_sha256`, report hashes, snapshot hashes, and operator-evidence
 hashes bind immutable external evidence, but only the journal row decides state.
 
-All transitions use one API that performs an expected-state and expected-version
-compare-and-swap:
+The first row is not a transition and must never be synthesized through an UPDATE.
+It is created only by this dedicated API:
+
+```python
+def insert_staged_if_absent(
+    conn: sqlite3.Connection,
+    *,
+    staged: NewStagedRecord,
+) -> FormalGateRecord:
+    """Atomically create STAGED row_version=1 and its first audit, or verify identity."""
+```
+
+It starts `BEGIN IMMEDIATE`, validates all immutable staged fields (including
+snapshot ID/evidence, output locators, release/previous target and snapshots), and
+uses one `INSERT ... SELECT ... WHERE NOT EXISTS` keyed by the full commit. If one
+row is inserted, it appends the initial `created -> STAGED`, `0 -> 1` audit entry
+in the same transaction and commits once. If a row already exists, the helper
+re-reads it in that transaction: a byte-for-byte identical complete staged record
+is an idempotent read that performs no UPDATE, increments neither `row_version`
+nor audit count, and returns the frozen existing row; any differing field is
+`formal_gate_stage_conflict` with no mutation. Independent-connection and
+multiprocess tests race identical and conflicting inserts and prove exactly one
+row/initial audit and stable conflict refusal.
+
+All later mutations use one API that performs an expected-state and
+expected-version compare-and-swap:
 
 ```python
 def transition(
@@ -1032,7 +1115,11 @@ release_commit=? AND state=? AND row_version=?`, require exactly one changed row
 append the audit row in the same SQLite transaction, and commit once. Unknown,
 illegal, stale, repeated, or zero/multi-row transitions fail closed. Tests must
 use two independent connections and multiprocessing to prove stale writers cannot
-both advance the same transaction.
+both advance the same transaction. The only multi-table settlement is successful
+promotion: after current physical attestation, the same `BEGIN IMMEDIATE`
+transaction performs the `CLAIMED -> SETTLED_PASSED` CAS, updates or creates
+`live_baseline(singleton_id=1)` with its own version check, and appends both audits
+before one commit. A baseline conflict rolls back the entire settlement.
 
 - [ ] **Step 2: Lock the closed state machine and recovery table in RED tests**
 
@@ -1052,7 +1139,7 @@ POISONED
 ```
 
 The journal module owns this transition table. Any transition not listed is
-illegal. 閳ユ发ay mutate閳?means live runtime mutation, not the SQLite CAS itself.
+illegal. “May mutate” means live runtime mutation, not the SQLite CAS itself.
 
 | State | Allowed next | Entry recovery | May mutate runtime? |
 |---|---|---|---|
@@ -1063,8 +1150,8 @@ illegal. 閳ユ发ay mutate閳?means live runtime mutation, not the SQLite CAS i
 | `ROLLING_BACK` | `SETTLED_FAILED`, `POISONED` | Verify DB evidence, then attest physical runtime. If still exactly on target, dispatch the one idempotent attested rollback; if already exactly previous, write/verify the receipt and settle without dispatch; any mixed/unknown state poisons. | At most one logical rollback |
 | `RESOLUTION_REQUIRED` | `RESOLVING`, `POISONED` | Ordinary gate refuses with zero runtime mutation. Only the explicit resolution CLI may proceed after evidence and stopped-process checks. | No |
 | `RESOLVING` | `SETTLED_FAILED`, `POISONED` | If physical attestation proves exact previous target and rollback completion, verify/write the receipt and settle without another rollback. If completion cannot be proved, poison and require QEMU snapshot recovery; never dispatch rollback twice. | No repeat rollback |
-| `SETTLED_PASSED` | none | Verify report, claim when present, release target, manifest, and journal hashes; then admit a different commit. | No |
-| `SETTLED_FAILED` | none | Verify the applicable pre-live, normal-failure, or manual-resolution evidence branch and its physical attestation; then admit a different commit. | No |
+| `SETTLED_PASSED` | none | Verify the historical row/audit and frozen claim, sealed report, manifest, attestation, and evidence hashes. Check current symlink/PIDs only if `live_baseline` points to this row; otherwise never compare this historical row with current physical runtime. | No |
+| `SETTLED_FAILED` | none | Verify the applicable historical row/audit and frozen pre-live, normal-failure, or manual-resolution evidence hashes. Never compare a historical failed row with current symlink/PIDs; current physical truth comes only from the active transaction or `live_baseline`. | No |
 | `POISONED` | none | Refuse every formal gate and resolution mutation with `qemu_snapshot_recovery_required`. | No |
 
 Settlement is closed and singular:
@@ -1083,6 +1170,41 @@ Settlement is closed and singular:
   operator visibility but its absence, corruption, or publication crash cannot
   weaken or override the DB state.
 
+Before applying any entry-recovery row, inspect its actor tuple. A non-NULL actor
+always takes precedence over state-specific activation, settlement, rollback, or
+new-gate logic. The recovering orchestrator must independently verify that the
+persisted unit name, actor identity, and systemd `ControlGroup` match the expected
+cgroup, and every live member matches the persisted invocation ID/identity. If the
+actor is active, it first CASes `actor_stop_intent=1`, then issues
+exactly one idempotent `systemctl stop $ACTOR_UNIT`, waits once for `inactive`, and
+independently requires `MainPID=0`, an empty/absent `ControlGroup`, and an empty or
+absent descriptor-opened `cgroup.procs`. It also verifies that no process with the
+persisted actor identity remains. Only then may a CAS clear the actor tuple and
+continue state recovery. If stop fails, times out, the cgroup is non-empty, the
+unit/cgroup/identity differs, or any observation is unavailable or contradictory,
+CAS to `POISONED`. Never roll back, settle, dispatch another actor, or admit a new
+gate while an actor may still be alive.
+
+There is no stop loop. A recovery entry dispatches stop/wait at most once. If it
+crashes after durable stop intent but before a durable zero-live receipt, the next
+entry may clear without another stop only when all independent zero-live checks
+pass; if the actor remains live or completion is ambiguous, it poisons instead of
+issuing a second stop. A cleanly exited actor is cleared only after the same
+zero-live checks and its result/evidence is reconciled from the exact journal-bound
+paths. The whole-gate flock serializes all of this, but actor safety never assumes
+that the parent process still holds the lock.
+
+`live_baseline` is validated separately from historical rows. During an in-flight
+generation, the active transaction row describes temporary physical mutation and
+the baseline continues to identify the last passed generation. Failed rollback
+must restore and attest that baseline (or the captured legacy state when no
+baseline exists) without changing the pointer. A successful gate changes the
+pointer only in the atomic passed-settlement transaction described above. A test
+sequence A -> B -> C must prove that C alone receives current symlink/PID
+attestation after C passes, while A and B remain independently verifiable from
+their frozen rows/audits/evidence hashes even though neither matches current
+runtime.
+
 The superseded multi-file state vocabulary and its transaction, resolution,
 settlement, and poison JSON authorities do not exist in the future design.
 
@@ -1096,12 +1218,16 @@ Do not monkeypatch global SQLite state or invoke real systemd/Docker in unit tes
 Parameterize a hard process-kill failpoint immediately before and after:
 
 - every authoritative SQLite commit;
+- the first `insert_staged_if_absent` INSERT and initial audit insert;
 - database creation and parent-directory fsync;
 - release staging/capture and canonical-manifest fsync;
-- activation dispatch and activation verification;
-- acceptance dispatch and report/manifest hashing;
+- every actor-binding CAS, transient-unit dispatch, stop-intent CAS, stop/wait,
+  zero-live verification, actor-clear CAS, and activation verification;
+- acceptance dispatch, exact report-path publication, descriptor-confined report
+  validation, report-tree fsync, root-only sealing, and report-sealed CAS;
 - permanent claim O_EXCL creation/fsync and the following DB CAS;
-- the single 30-job scientific soak dispatch and report hashing;
+- the single 30-job scientific soak dispatch, report hashing/sealing, and report
+  settlement;
 - failure-envelope persistence;
 - rollback dispatch and physical verification;
 - resolution authorization CAS, rollback, and receipt verification;
@@ -1116,7 +1242,10 @@ For every failpoint, restart through the public entry point and assert:
 - no crash window can turn failed/unknown evidence into passed;
 - no ordinary retry can clear `RESOLUTION_REQUIRED` or `POISONED`;
 - no JSON export, claim content, marker, or filesystem ordering can override DB;
-- every refusal happens before random run-ID allocation and before live mutation.
+- every refusal happens before live mutation; a locator already durably bound by
+  `insert_staged_if_absent` is reused exactly and never reallocated or guessed;
+- no rollback or new gate overlaps a persisted or possibly live external actor;
+- a sealed report can settle after parent death without redispatching science.
 
 The RED suite must explicitly cover these named scenarios:
 
@@ -1143,11 +1272,31 @@ The RED suite must explicitly cover these named scenarios:
 9. `POISONED` blocks even when the optional marker was never created; marker-only
    state without matching DB poison is an untrusted-export error, not authority.
 10. Two concurrent gates contend on the whole-flow flock; exactly one enters.
-    Two stale SQLite writers cannot both transition the same row.
+    Two stale SQLite writers cannot both transition the same row. Concurrent
+    identical first-stage inserts produce one row and one initial audit with
+    `row_version=1`; conflicting first-stage inserts fail without mutation.
 11. Legacy-first and generation-to-generation rollback each use only the current
     row's previous target and snapshot hashes.
 12. Existing release reuse succeeds only after exact immutable attestation;
     conflict is a stable zero-mutation failure.
+13. Kill the parent while each actor kind remains live. Recovery uses the exact
+    persisted unit/cgroup/identity, performs one stop/wait sequence, proves
+    `inactive`, `MainPID=0`, and empty `cgroup.procs`, clears the actor once, and
+    only then continues. Stop failure, non-empty cgroup, identity mismatch, or an
+    unobservable unit poisons; no rollback/new actor/new gate is dispatched.
+14. A report is fully written and root-sealed but the process dies before its DB
+    settlement. Recovery opens only `report_relpath` from the journal, validates
+    its seal/hash/schema/artifacts, and settles without globbing, guessing, or a
+    second soak. An unsealed, writable, symlinked, relocated, or hash-mismatched
+    report cannot settle.
+15. A passes, B passes, then C passes. `live_baseline` changes atomically with each
+    passed settlement and current physical checks apply only to C. Historical A
+    and B still validate from row/audit/frozen evidence without matching C's
+    current symlink or PID cwd.
+16. Manual resolution accepts only the exact normalized journal
+    `qemu_snapshot_id`, QEMU identity, and evidence hash. Missing, malformed,
+    alternate-case, wrong-ID, wrong-evidence, and evidence-for-a-different-VM
+    inputs fail before resolution CAS or rollback.
 
 - [ ] **Step 4: Run the journal and gate RED tests before implementation**
 
@@ -1168,16 +1317,21 @@ imports. It owns path verification, schema creation/migration refusal, connectio
 PRAGMAs, integrity validation, record parsing, legal-transition validation, CAS,
 append-only transition audit, and read-only export projections.
 
-Every public mutation method:
+Every public mutation method, including `insert_staged_if_absent()`, actor evidence
+CASes, passed settlement plus baseline update, and ordinary state transitions:
 
 1. verifies root identity and securely creates the missing fixed parent as
    root-owned mode `0700`, or verifies the existing trusted parent and DB path;
 2. opens the DB without following symlinks;
 3. applies the required PRAGMAs;
 4. starts `BEGIN IMMEDIATE`;
-5. re-reads and validates the complete row;
-6. checks expected state/version and evidence-field invariants;
-7. performs exactly one legal CAS plus audit insert;
+5. re-reads and validates the complete row, or verifies expected absence for the
+   first `STAGED` insert;
+6. checks expected state/version (or absence) and evidence-field invariants;
+7. performs exactly one legal CAS plus audit insert, except that first staging
+   performs the atomic conditional INSERT plus its first audit and passed
+   settlement atomically updates both the gate row and `live_baseline` plus their
+   audits;
 8. commits and fsyncs the DB; on first parent creation it fsyncs the verified
    `/var/lib` directory after `mkdir`, and on DB creation it fsyncs the DB and
    `/var/lib/medchat-runtime-generation`;
@@ -1211,6 +1365,11 @@ its transaction-local source:
 - commit `ACTIVATING` before calling the activation primitive; after current link,
   daemon-reload, service restart, health, unit hash, PID cwd, release marker, and
   canonical manifest all verify, CAS to `ACTIVE_PRECLAIM`;
+- bind every activation/verification/rollback primitive as an external actor in
+  the journal before `systemd-run` dispatch, using the same zero-live recovery
+  contract as validator, probes, acceptance, and soak; the activation actor is
+  persisted in the `STAGED -> ACTIVATING` CAS and is cleared only after unit and
+  cgroup termination plus physical verification;
 - `--activate`, `--verify`, `--rollback`, and `--rollback-legacy` remain root-only
   primitives called only by the formal orchestrator. They never update the DB,
   select transaction state, create claims, run scientific work, or choose a
@@ -1259,40 +1418,70 @@ journal or runtime mutation.
 
 The main gate order is fixed:
 
-1. Validate root, `repeat == 30`, clean full commit, QEMU/KVM evidence, trusted
-   root-managed environment, fixed DB/output roots, and exact script allowlist.
+1. Validate root, `repeat == 30`, clean full commit, the normalized
+   `qemu_snapshot_id`, exact snapshot-evidence file/hash and current QEMU/KVM VM
+   identity, trusted root-managed environment, fixed DB/output roots, and exact
+   script allowlist.
 2. Acquire the whole-flow flock. Lock contention returns `formal_gate_locked`
    before DB/runtime/output mutation.
 3. Open and validate the SQLite journal. Any `POISONED` row blocks immediately.
-   Verify all settled rows and reconcile only the explicit recovery states in the
-   transition table. Do not let `gate-result.json` or a marker select a branch.
+   Verify historical settled rows only against their rows, audits, and frozen
+   evidence hashes; verify current symlink/PIDs only against `live_baseline` or the
+   active transaction. Reconcile only the explicit recovery states in the table,
+   beginning with persisted actor ownership. Do not let `gate-result.json` or a
+   marker select a branch.
 4. For the requested commit, inspect the journal row and permanent claim together.
    A matching claim-file/DB gap enters `RESOLUTION_REQUIRED`; a mismatch poisons.
-   A trusted settled row returns its stable already-terminal code only after row,
-   claim, report/evidence, receipt, current/previous target, and physical state
-   agree. An unsettled row is recovered before any return.
+   A trusted settled row returns its stable already-terminal code only after its
+   row, audit and frozen claim/report/evidence/receipt hashes agree; it requires
+   current physical agreement only when selected by `live_baseline`. An unsettled
+   row is recovered before any return.
 5. Stage and attest the release, capture/reuse the exact legacy or generation
-   snapshot, and create/reuse the `STAGED` row by legal CAS.
-6. CAS to `ACTIVATING`, activate, verify, and CAS to `ACTIVE_PRECLAIM`.
-7. Run privileged deployment/runtime validation, then a transient non-root socket
-   probe and real acceptance. Preserve the already reviewed phase allowlist,
-   timeout budgets, clean diagnostics delta, zero-container check, artifact truth,
-   and post-acceptance manifest/report hashes.
-8. Create `/var/lib/medchat-opensandbox-runs/claims/$FULL_COMMIT.json` with
+   snapshot, derive one unique safe commit-bound `run_relpath` and fixed descendant
+   `report_relpath`, and call `insert_staged_if_absent()`. Re-entry may reuse only
+   a completely identical `STAGED` row; it never allocates a replacement locator.
+6. In the `STAGED -> ACTIVATING` CAS bind the exact activation actor, dispatch its
+   unique systemd transient unit, verify zero-live termination and activation, clear
+   the actor, and CAS to `ACTIVE_PRECLAIM`.
+7. Descriptor-confined below the trusted output-base handle, create exactly the
+   journal-bound run directory plus `acceptance/` and `soak/` subdirectories once,
+   with no symlink traversal or pre-existing target. The report file itself must
+   remain absent until the soak atomically publishes it with no-replace semantics.
+   Set the writable run subtree to the
+   selected `medchat:medchat` actor identity and mode `0700`; do not accept an
+   operator-supplied or worker-selected path. Then bind and run, one at a time,
+   privileged deployment/runtime validation, a transient non-root socket probe,
+   and real acceptance. Each actor tuple is durable before dispatch and cleared
+   only after independent zero-live verification. Preserve the already reviewed
+   phase allowlist, timeout budgets, clean diagnostics delta, zero-container check,
+   artifact truth, and post-acceptance manifest hashes.
+8. Create
+   `/var/lib/medchat-opensandbox-runs/claims/$FULL_COMMIT.json` with
    `O_CREAT|O_EXCL|O_NOFOLLOW`, root `0600`, file fsync, and parent fsync. It is
    permanent. Hash its canonical sanitized content, then immediately CAS
    `ACTIVE_PRECLAIM -> CLAIMED` with that hash. Never delete, replace, or reuse it.
-9. Allocate the formal run directory only after claim settlement, then dispatch
+9. Bind the exact soak actor to the existing journal locators, then dispatch
    exactly one non-root 30-job soak. Never retry the scientific command, Vina,
-   Meeko, upload, validation, or the complete run.
-10. Hash and validate the report, post-soak manifest, provenance, artifacts,
-    cleanup, probes, retries, release identity, and zero-leak state. Any retry,
-    timeout, invalid output, fallback, mismatch, cleanup uncertainty, or missing
-    evidence prevents pass.
-11. On success, within one `BEGIN IMMEDIATE` CAS `CLAIMED -> SETTLED_PASSED` while
-    storing report/status and final manifest hashes. After DB fsync, atomically
-    regenerate the redacted `gate-result.json`; export failure does not change
-    settlement and is repaired from DB on next read-only entry.
+   Meeko, upload, validation, or the complete run. After the actor exits, prove
+   zero-live before trusting or sealing any output.
+10. Open the run tree and exact report through retained trusted directory
+    descriptors with `O_NOFOLLOW`; reject path substitution, hard links outside
+    policy, unexpected owners/types/modes, and every unbound file. Validate report
+    schema, post-soak manifest, provenance, artifacts, cleanup, probes, retries,
+    release identity, and zero-leak state; hash and fsync every accepted file and
+    directory. Then recursively seal the accepted evidence tree root:root with
+    regular files mode `0400` and directories mode `0500`, fsync it and its trusted
+    parent, reopen it descriptor-confined, and verify content hashes plus canonical
+    ownership/mode/path seal. Store `report_sha256`, `report_status`, and
+    `report_seal_sha256` through the audited `report_sealed` CAS. Any retry,
+    timeout, invalid output, fallback, mismatch, cleanup uncertainty, mutable
+    evidence, or missing evidence prevents pass.
+11. On success and after a fresh current physical attestation, use one
+    `BEGIN IMMEDIATE` transaction to CAS `CLAIMED -> SETTLED_PASSED`, store final
+    manifest/attestation hashes, update `live_baseline` to this commit, and append
+    both audits before one commit. After DB and parent fsync, atomically regenerate
+    the redacted `gate-result.json`; export failure does not change settlement and
+    is repaired from DB on next read-only entry.
 12. On normal failure after possible live mutation, first CAS to `ROLLING_BACK`
     while storing the stable failure-envelope hash and any trusted failed-report
     hash/status. Then perform the row-selected idempotent attested rollback. After
@@ -1306,8 +1495,21 @@ The main gate order is fixed:
     must not infer rollback from a process-local boolean; it consults and CASes the
     authoritative row and can dispatch only the state-table-authorized rollback.
 
-Each transient unit is created from a closed environment builder. Socket probe
-receives neither scientific gate variable; acceptance receives only
+Every external command that can mutate runtime or outlive an orchestrator call is
+executed in a uniquely named systemd transient service: activation, privileged
+root validator, socket probe, acceptance, soak, ordinary rollback, and resolution
+rollback. Before `systemd-run`, an expected-state/version CAS stores the exact
+unit, closed actor kind, deterministic expected cgroup, invocation ID, and actor
+identity hash.
+The gate verifies the created unit/cgroup against that tuple and never identifies
+an actor by process-name search. Normal completion and inherited recovery both
+use the zero-live protocol in Step 2 before clearing ownership. The parent-held
+flock does not constitute actor ownership and its loss never authorizes rollback
+or a replacement unit.
+
+Each transient unit is created from a closed environment builder. Root validation
+receives no scientific gate variable. Socket probe receives neither scientific
+gate variable; acceptance receives only
 `MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE=1`; soak receives only
 `MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK=1`. Acceptance and soak run as
 `medchat:medchat` with `SupplementaryGroups=medchat-sandbox docker`, `python -B`,
@@ -1321,17 +1523,29 @@ The external output contract remains:
 /var/lib/medchat-opensandbox-runs/$FULL_COMMIT/$UNIQUE_RUN_ID
 ```
 
-The base is a root-owned non-symlink directory not writable by group/world. The
-full-commit parent is a non-symlink directory owned by the selected non-root run
-user with mode `0700`. `UNIQUE_RUN_ID` matches
-`[a-z0-9][a-z0-9-]{7,63}`, and the final directory must not exist before its one
-mode-`0700` creation. Resolve and `lstat` every component; reject `..`, wrong
+The base and full-commit parent are root-owned non-symlink directories with mode
+`0700`, not writable by group/world. `UNIQUE_RUN_ID` matches
+`[a-z0-9][a-z0-9-]{7,63}`. The privileged gate creates the final directory once
+through verified parent descriptors only after its relative locator is durable in
+the journal, then grants only that subtree to the selected non-root run identity
+for the actor lifetime. Resolve and `lstat` every component; reject `..`, wrong
 commit components, untrusted owner/mode/type, symlinks, existing final targets,
 and any candidate under the source, current link, or releases root. Acceptance
-and soak derive their reports below that root and pass the same root to the
-scientific runner; poses, copied inputs, temporary files, observer output, and
-reports stay below it. Artifact projection validates relative paths against this
-root, and no cleanup path may cross it.
+and soak receive the pre-created exact paths and cannot choose another report.
+Poses, copied inputs, temporary files, observer output, and reports stay below the
+run root. Artifact projection validates relative paths against the retained root
+descriptor, and no cleanup path may cross it. After soak, the entire accepted
+evidence tree is root-owned and non-writable as described above; no `medchat`
+process may retain a writable descriptor when sealing begins.
+
+If the report is root-sealed and the process dies before `report_sealed` or final
+settlement commits, recovery uses only `run_relpath`/`report_relpath` from the
+journal. It descriptor-confined revalidates the root seal, content hash, schema,
+artifact closure, actor zero-live receipt, claim and release identity, then records
+the seal or settles without redispatching soak. It never globs the output root,
+sorts candidate reports, scans random run IDs, or accepts a path discovered from
+report contents. A report left writable/unsealed at a crash is not formal evidence;
+it cannot settle passed and follows the closed failure/resolution/poison rules.
 
 Retain the existing exact phase model and attempt cardinality: non-attempt phases
 have NULL attempt; attempt phases accept only attempts 1 and 2; the 30-job soak
@@ -1352,10 +1566,14 @@ Inside the lock it must verify:
 - exact operator-evidence file hash, root ownership, mode `0600`, non-symlink
   components, and bounded location;
 - journal row version/state and release/previous/snapshot hashes;
-- stopped formal transient units/processes and zero relevant sandbox/container
-  state;
-- no formal report that can be independently settled instead;
-- QEMU identity and the recorded snapshot identifier.
+- the exact normalized CLI `qemu_snapshot_id` equals the real schema column, the
+  supplied snapshot-evidence SHA-256 equals both the file and journal field, and
+  the canonical evidence identifies the current QEMU/KVM VM identity (including
+  its stable VM UUID) plus that exact snapshot ID;
+- any persisted actor is stopped/reconciled through the one-stop zero-live protocol,
+  followed by zero relevant sandbox/container state;
+- the journal-bound report locator directly, including whether a root-sealed report
+  can be independently settled instead; globbing for a report is forbidden.
 
 After validation, CAS `RESOLUTION_REQUIRED -> RESOLVING` while storing the
 operator-evidence and canonical resolution-record hashes. Commit before rollback.
@@ -1363,7 +1581,9 @@ Perform the one row-selected attested rollback. On exact previous-state proof,
 store the verified receipt and CAS to `SETTLED_FAILED` in one transaction. Do not
 create a scientific result, recreate/delete the claim, run validator, acceptance,
 or soak. Wrong hashes, active work, repeated authorization, or a settled row
-refuse with zero rollback.
+refuse with zero rollback. Resolution rollback itself is a journal-bound
+`resolution_rollback` transient actor; its unit/cgroup/identity is persisted before
+dispatch and must be independently zero-live before receipt settlement.
 
 If the process inherits `RESOLVING`, it may settle without rollback only when
 physical attestation proves the exact previous target and the stored evidence can
@@ -1372,7 +1592,13 @@ produce a trusted receipt. If that proof is unavailable or mixed, CAS to
 poison path.
 
 The operator syntax is hash- and version-bound and contains no transaction-file
-argument:
+argument. The snapshot evidence is a root-owned mode-`0600`, non-symlink,
+descriptor-confined canonical record created outside the gate by the reviewed
+QEMU snapshot procedure. It contains only bounded snapshot ID, QEMU/KVM type,
+stable VM UUID, capture timestamp, and evidence version. Missing arguments,
+malformed/non-normalized IDs, evidence hash mismatch, snapshot-ID mismatch, VM
+identity mismatch, or an evidence file for another VM fails before actor stop,
+resolution CAS, or rollback:
 
 ```bash
 sudo env PYTHONDONTWRITEBYTECODE=1 \
@@ -1382,6 +1608,9 @@ sudo env PYTHONDONTWRITEBYTECODE=1 \
   --old-release-commit "$OLD_RELEASE_COMMIT" \
   --claim-sha256 "$OLD_CLAIM_SHA256" \
   --expected-row-version "$EXPECTED_ROW_VERSION" \
+  --qemu-snapshot-id "$QEMU_SNAPSHOT_ID" \
+  --qemu-snapshot-evidence-file "$QEMU_SNAPSHOT_EVIDENCE_FILE" \
+  --qemu-snapshot-evidence-sha256 "$QEMU_SNAPSHOT_EVIDENCE_SHA256" \
   --operator-evidence-file "$RESOLUTION_EVIDENCE_FILE" \
   --operator-evidence-sha256 "$RESOLUTION_EVIDENCE_SHA256" \
   --output-base /var/lib/medchat-opensandbox-runs
@@ -1405,16 +1634,21 @@ git diff --check
 
 Run the full failpoint matrix in both legacy-first and generation-to-generation
 modes. The test report must show scientific soak dispatch `<= 1`, logical rollback
-`<= 1`, no duplicate claim, no stale CAS success, and no export-driven branch.
+`<= 1`, actor stop/wait `<= 1` per recovery entry, no live-actor overlap, no
+duplicate claim, no stale CAS success, one initial `STAGED` audit, exact sealed
+report-locator reuse, correct A -> B -> C baseline history, and no export-driven
+branch.
 
 - [ ] **Step 10: Obtain independent review and commit Task 7 before formal execution**
 
 Request independent specification and implementation-quality reviews over the
 complete Task 7 diff. Both reviewers must explicitly check journal filesystem
 security, schema constraints, CAS transitions, the transition/recovery table,
-claim-file/DB gap, result-export gap, rollback physical/DB gap, resolution crash,
-poison persistence, concurrent gates, immutable releases, environment isolation,
-manifest equality, external outputs, phase contracts, and old-report retention.
+atomic first-STAGED insertion, actor unit/cgroup ownership and orphan recovery,
+claim-file/DB gap, report sealing/DB gap, result-export gap, live-baseline history,
+rollback physical/DB gap, snapshot-ID/evidence binding, resolution crash, poison
+persistence, concurrent gates, immutable releases, environment isolation, manifest
+equality, external outputs, phase contracts, and old-report retention.
 No Critical or Important finding may remain.
 
 ```powershell
@@ -1429,9 +1663,10 @@ The resulting immutable full commit becomes `RELEASE_COMMIT`. Do not amend it.
 - [ ] **Step 11: Prepare and invoke one reviewed QEMU formal gate**
 
 On the snapshotted Ubuntu QEMU host, prepare a root-owned clean source checkout,
-the pre-gate QEMU snapshot identifier, and a root-owned mode-0600 operator evidence
-file. Preparation may not stage, capture, activate, validate, claim, run workers,
-or roll back. Then invoke only:
+the pre-gate normalized QEMU snapshot identifier, and its root-owned mode-0600
+canonical snapshot-evidence file plus independently recorded SHA-256. Preparation
+may not stage, capture, activate, validate, claim, run workers, or roll back. Then
+invoke only:
 
 ```bash
 set -euo pipefail
@@ -1440,7 +1675,8 @@ RELEASE_COMMIT="$(git -C "$SOURCE_REPOSITORY" rev-parse HEAD)"
 test "${#RELEASE_COMMIT}" -eq 40
 test -z "$(git -C "$SOURCE_REPOSITORY" status --porcelain)"
 : "${QEMU_SNAPSHOT_ID:?required}"
-: "${QEMU_OPERATOR_EVIDENCE_FILE:?required}"
+: "${QEMU_SNAPSHOT_EVIDENCE_FILE:?required}"
+: "${QEMU_SNAPSHOT_EVIDENCE_SHA256:?required}"
 sudo env PYTHONDONTWRITEBYTECODE=1 \
   /opt/conda/envs/medchat/bin/python -B \
   "$SOURCE_REPOSITORY/scripts/run_opensandbox_formal_qemu_gate.py" \
@@ -1450,7 +1686,8 @@ sudo env PYTHONDONTWRITEBYTECODE=1 \
   --repeat 30 \
   --require-virt qemu \
   --qemu-snapshot-id "$QEMU_SNAPSHOT_ID" \
-  --qemu-operator-evidence-file "$QEMU_OPERATOR_EVIDENCE_FILE"
+  --qemu-snapshot-evidence-file "$QEMU_SNAPSHOT_EVIDENCE_FILE" \
+  --qemu-snapshot-evidence-sha256 "$QEMU_SNAPSHOT_EVIDENCE_SHA256"
 ```
 
 The operator is the only caller of the formal gate. It never calls activation
@@ -1477,10 +1714,12 @@ transition audit continuity, and the requested full-commit row. It records:
 
 - release commit, mode, authoritative state, stable code, row version, and update
   timestamp;
-- canonical release/previous target identifiers and snapshot/manifest hashes;
-- claim hash, report hash/status, rollback receipt hash/verified flag, and any
-  resolution/evidence hashes;
-- external formal report path/hash, total status, pass/partial/fail counts, pass
+- canonical release/previous target identifiers, normalized QEMU snapshot ID,
+  snapshot evidence hash, and manifest hashes;
+- claim hash, journal-bound run/report locators, report hash/status/seal hash,
+  rollback receipt hash/verified flag, and any resolution/evidence hashes;
+- `live_baseline` pointer/version/audit binding and whether this row is current;
+- external formal report locator/hash, total status, pass/partial/fail counts, pass
   rate, p50/p95 and phase p95, failure distributions, event completeness, retry
   evidence, cleanup, Vina/Meeko versions, image digest, gVisor, artifact checks,
   probes, zero-leak count, and Broker/worker PID cwd attestation.
@@ -1572,7 +1811,8 @@ Implementation is complete only when all statements are true:
 - Tasks 1-5 local tests, compileall, and static validation pass.
 - Timing-sensitive local groups pass 10 consecutive invocations.
 - Task 7's new deployment, attestation, closed worker-environment builder,
-  whole-gate lock/concurrency, claim, activation/verify failure,
+  whole-gate lock/concurrency, first-STAGED insertion, actor orphan recovery,
+  claim, report sealing/recovery, live-baseline history, activation/verify failure,
   manifest-ordering, gate-result, and rollback-state tests run RED before
   implementation and GREEN afterward.
 - The post-Task-7 full Broker, compileall, static, and independent-review gates pass.
@@ -1583,6 +1823,11 @@ Implementation is complete only when all statements are true:
   `SupplementaryGroups=medchat-sandbox docker`, `python -B`, and a trusted
   external run root. No report, pose, temporary file, cache, or bytecode enters
   the release.
+- Activation, root validation, socket probe, acceptance, soak, and both rollback
+  forms run only as uniquely named transient systemd actors whose exact unit,
+  kind, expected cgroup, and identity are journaled before dispatch. Recovery
+  proves inactive/MainPID=0/empty cgroup before clearing ownership; ambiguity or
+  a surviving actor poisons before rollback or a new gate.
 - The socket probe receives neither scientific gate variable; acceptance receives
   only `MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE=1`; soak receives only
   `MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK=1`.
@@ -1602,11 +1847,21 @@ Implementation is complete only when all statements are true:
   `BEGIN IMMEDIATE`, schema constraints, row-version CAS, and parent fsync are
   tested. Claim files are permanent audit anchors; result/poison JSON files are
   reconstructable exports and never select a recovery branch.
+- First staging uses one atomic expected-absence INSERT and initial audit at
+  `row_version=1`; identical re-entry is read-only and conflicts fail closed.
+  `qemu_snapshot_id`, actor ownership, safe unique run/report locators, report seal,
+  and snapshot evidence are constrained real columns. No opaque side file fills a
+  missing schema field.
 - The closed states are `STAGED`, `ACTIVATING`, `ACTIVE_PRECLAIM`, `CLAIMED`,
   `ROLLING_BACK`, `RESOLUTION_REQUIRED`, `RESOLVING`,
   `SETTLED_PASSED`, `SETTLED_FAILED`, and `POISONED`. Every state/evidence
   change is one legal expected-state/version CAS. Settled A permits corrected B
   in both legacy-first and generation-to-generation paths.
+- The singleton `live_baseline` points only to the current passed generation and
+  changes atomically with `SETTLED_PASSED`. Historical settled rows validate only
+  frozen journal/audit/evidence truth; only the baseline row is checked against
+  current symlink/PIDs. A -> B -> C retains verifiable A/B history while physically
+  attesting only C as current.
 - A claim without a trusted report/failure envelope reaches
   `RESOLUTION_REQUIRED`; ordinary gates make zero runtime mutations. The
   explicit root-only hash-bound resolution command retains the claim, proves
@@ -1614,7 +1869,11 @@ Implementation is complete only when all statements are true:
   and settles `SETTLED_FAILED` only with a verified receipt. An inherited
   `RESOLVING` that cannot prove physical completion becomes `POISONED`; no
   second rollback is attempted.
-- The report truthfully records latency, failures, events, cleanup, provenance, artifacts, probes, and zero-leak state.
+- The report truthfully records latency, failures, events, cleanup, provenance,
+  artifacts, probes, and zero-leak state. Its exact locator is commit-bound before
+  dispatch; successful evidence is descriptor-validated, hashed/fsynced, sealed
+  root:root and read-only, then journaled. Recovery after sealing uses that exact
+  locator and never globs or guesses.
 - Any retry, scientific timeout, invalid output, cleanup uncertainty, dependency failure, probe failure, release mismatch, virtualization mismatch, or residual container prevents promotion.
 - First migration stages before capture, safely reuses only an unchanged
   `STAGED` journal snapshot, and can atomically restore the exact legacy units, service
