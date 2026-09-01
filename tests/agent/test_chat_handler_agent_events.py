@@ -6,6 +6,7 @@ from fastapi import WebSocketDisconnect
 from src.agent.contracts import AgentContext
 from src.agent.orchestrators import WorkflowStep
 from src.agent.planning import WorkflowPlan
+from src.agent.router import SkillRouter
 from src.agent.supervisor import SupervisorAgent
 from src.web.chat_handler import ChatHandler
 
@@ -82,6 +83,21 @@ class FakeModel:
 
 class FakeRagService:
     is_initialized = False
+
+
+class ConfirmationAgentSystem:
+    llm = None
+
+    def __init__(self):
+        self.skill_router = SkillRouter()
+        self.execute_calls = []
+
+    def should_use_tools(self, message):
+        return self.skill_router.route(message) is not None
+
+    def execute(self, message, **kwargs):
+        self.execute_calls.append((message, kwargs))
+        raise AssertionError("confirmation requests must not execute tools")
 
 
 class RecordingLegacyRagService:
@@ -592,6 +608,91 @@ def test_chat_handler_tools_disabled_uses_plain_chat_without_agent_execution():
         "type": "message",
         "message": "assistant response",
     }
+
+
+def test_property_request_without_smiles_returns_clarification_without_rag_or_model():
+    model = FakeModel()
+    rag = RecordingLegacyRagService()
+    agent = ConfirmationAgentSystem()
+    handler = ChatHandler(
+        model=model,
+        rag_service=rag,
+        agent_system=agent,
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="计算阿司匹林的分子性质",
+            enable_rag=True,
+            enable_tools=True,
+        )
+    )
+
+    assert agent.execute_calls == []
+    assert rag.calls == []
+    assert model.generate_calls == 0
+    assert websocket.messages[-1]["type"] == "complete"
+    assert "SMILES" in websocket.messages[-1]["content"]
+
+
+def test_conceptual_question_skips_molecular_rag_and_uses_main_model():
+    model = FakeModel()
+    rag = RecordingLegacyRagService()
+    agent = ConfirmationAgentSystem()
+    handler = ChatHandler(
+        model=model,
+        rag_service=rag,
+        agent_system=agent,
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="什么是药物设计",
+            enable_rag=True,
+            enable_tools=True,
+        )
+    )
+
+    assert agent.execute_calls == []
+    assert rag.calls == []
+    assert model.generate_calls == 1
+    assert websocket.messages[-1] == {
+        "type": "message",
+        "message": "assistant response",
+    }
+
+
+def test_bare_smiles_preserves_legacy_molecular_rag_path():
+    model = FakeModel()
+    rag = RecordingLegacyRagService()
+    agent = ConfirmationAgentSystem()
+    handler = ChatHandler(
+        model=model,
+        rag_service=rag,
+        agent_system=agent,
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="CCO",
+            enable_rag=True,
+            enable_tools=True,
+        )
+    )
+
+    assert agent.execute_calls == []
+    assert rag.calls == [("CCO", 5)]
+    assert model.generate_calls == 1
+    assert any(item["type"] == "rag_info" for item in websocket.messages)
 
 
 def test_prompt_history_can_be_scoped_to_one_websocket_connection():

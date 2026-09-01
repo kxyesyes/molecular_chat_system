@@ -45,8 +45,7 @@ class SkillRouter:
         """
         from .metrics import metrics_system
 
-        self.hybrid_router.llm = llm
-        decision = self.hybrid_router.decide(query)
+        decision = self.decide(query, llm=llm)
         if decision.selected_skill:
             policy = self.catalog.get(decision.selected_skill)
             if policy:
@@ -64,6 +63,11 @@ class SkillRouter:
 
         logger.info("[Router] 未匹配到已注册工作流，将使用通用处理模式")
         return None
+
+    def decide(self, query: str, llm=None):
+        """Return the full explainable routing decision for boundary checks."""
+        self.hybrid_router.llm = llm
+        return self.hybrid_router.decide(query)
 
     def get_tools_for_skill(
         self,

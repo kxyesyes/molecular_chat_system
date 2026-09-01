@@ -32,6 +32,7 @@ class OpenAICompatibleModel:
         self.base_url = self._normalize_chat_url(base_url)
         self.provider_name = provider_name
         self.client = client
+        self.last_response_metadata: dict = {}
 
     @staticmethod
     def _normalize_chat_url(base_url: str) -> str:
@@ -60,15 +61,24 @@ class OpenAICompatibleModel:
         }
 
     def _payload(self, prompt: str, temperature: float, max_tokens: int, stream: bool) -> dict:
-        return {
+        payload = {
             "model": self.model_name,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": stream,
         }
+        if self.model_name.lower().startswith("deepseek-v4-"):
+            payload["thinking"] = {"type": "disabled"}
+        return payload
+
+    def _empty_response_message(self) -> str:
+        finish_reason = self.last_response_metadata.get("finish_reason")
+        suffix = f"（finish_reason={finish_reason}）" if finish_reason else ""
+        return f"模型调用失败：未收到有效正文{suffix}"
 
     async def generate(self, prompt: str, temperature: float = 0.7, max_tokens: int = 1500) -> str:
+        self.last_response_metadata = {}
         unavailable = self._unavailable_message()
         if unavailable:
             logger.warning(unavailable)
@@ -99,7 +109,18 @@ class OpenAICompatibleModel:
                 return f"模型调用失败：HTTP {response.status_code}"
 
             result = response.json()
-            return result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            choice = result.get("choices", [{}])[0]
+            message = choice.get("message", {})
+            content = message.get("content") or ""
+            reasoning = message.get("reasoning_content") or ""
+            self.last_response_metadata = {
+                "model": result.get("model") or self.model_name,
+                "finish_reason": choice.get("finish_reason"),
+                "usage": result.get("usage") or {},
+                "reasoning_chars": len(reasoning),
+                "content_chars": len(content),
+            }
+            return content if content.strip() else self._empty_response_message()
         except Exception as exc:
             logger.error("%s API call failed: %s", self.provider_name, exc, exc_info=True)
             return f"模型调用失败：{exc}"
@@ -110,6 +131,7 @@ class OpenAICompatibleModel:
         temperature: float = 0.7,
         max_tokens: int = 1500,
     ) -> AsyncIterator[str]:
+        self.last_response_metadata = {}
         unavailable = self._unavailable_message()
         if unavailable:
             logger.warning(unavailable)
@@ -151,6 +173,11 @@ class OpenAICompatibleModel:
 
             buffer = ""
             pending_content = ""
+            content_chars = 0
+            meaningful_content = False
+            reasoning_chars = 0
+            finish_reason = None
+            usage = {}
             async for chunk in response.aiter_bytes():
                 buffer += chunk.decode("utf-8", errors="ignore")
                 while "\n" in buffer:
@@ -166,11 +193,23 @@ class OpenAICompatibleModel:
                         data = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    choice = data.get("choices", [{}])[0]
+                    choices = data.get("choices") or [{}]
+                    choice = choices[0]
+                    if choice.get("finish_reason") is not None:
+                        finish_reason = choice.get("finish_reason")
+                    if isinstance(data.get("usage"), dict):
+                        usage = data["usage"]
                     content = choice.get("delta", {}).get("content")
                     if content is None:
                         content = choice.get("message", {}).get("content")
+                    reasoning = choice.get("delta", {}).get("reasoning_content")
+                    if reasoning is None:
+                        reasoning = choice.get("message", {}).get("reasoning_content")
+                    if reasoning:
+                        reasoning_chars += len(reasoning)
                     if content:
+                        content_chars += len(content)
+                        meaningful_content = meaningful_content or bool(content.strip())
                         pending_content += content
                         if (
                             len(pending_content) >= self.STREAM_CHUNK_CHARS
@@ -181,6 +220,15 @@ class OpenAICompatibleModel:
 
             if pending_content:
                 yield pending_content
+            self.last_response_metadata = {
+                "model": self.model_name,
+                "finish_reason": finish_reason,
+                "usage": usage,
+                "reasoning_chars": reasoning_chars,
+                "content_chars": content_chars,
+            }
+            if not meaningful_content:
+                yield self._empty_response_message()
 
     async def close(self) -> None:
         close = getattr(self.client, "aclose", None) if self.client is not None else None

@@ -9,6 +9,7 @@ import time
 from typing import List, Dict, Any
 from fastapi import WebSocket, WebSocketDisconnect
 
+from src.agent.routing.hybrid import SMILES_PATTERN
 from src.web.models import generate_for_chat
 
 logger = logging.getLogger(__name__)
@@ -125,13 +126,52 @@ class ChatHandler:
         
         # Agent 处理（使用temperature参数）
         matched_skill = None
-        if enable_tools and self.agent_system and self.agent_system.should_use_tools(message):
+        route_decision = None
+        skill_router = getattr(self.agent_system, "skill_router", None)
+        if enable_tools and skill_router and hasattr(skill_router, "decide"):
+            route_decision = skill_router.decide(
+                message,
+                llm=getattr(self.agent_system, "llm", None),
+            )
+            clarification = self._route_clarification(route_decision)
+            if clarification:
+                await websocket.send_text(json.dumps({
+                    "type": "complete",
+                    "content": clarification,
+                }, ensure_ascii=False))
+                history.append({
+                    "user": message,
+                    "agent_used": False,
+                    "agent_response": None,
+                    "rag_enabled": False,
+                    "molecules_retrieved": 0,
+                    "assistant": clarification,
+                })
+                if len(history) > 20:
+                    del history[:-20]
+                return
+
+        should_use_agent = bool(
+            route_decision and route_decision.selected_skill
+        ) if route_decision is not None else bool(
+            enable_tools
+            and self.agent_system
+            and self.agent_system.should_use_tools(message)
+        )
+        if enable_tools and self.agent_system and should_use_agent:
             logger.info(f"检测到需要使用 Agent 工具 (temperature={temperature})")
             
             # 预先进行技能路由，以便向前端发送状态指示器
-            if hasattr(self.agent_system, 'skill_router') and self.agent_system.skill_router:
-                # 预先进行路由，如果使用 LLM 路由，可能会有一点延迟
-                matched_skill = self.agent_system.skill_router.route(message, llm=self.agent_system.llm)
+            if skill_router:
+                if route_decision is not None:
+                    matched_skill = skill_router.catalog.get(
+                        route_decision.selected_skill
+                    )
+                else:
+                    matched_skill = skill_router.route(
+                        message,
+                        llm=self.agent_system.llm,
+                    )
                 
                 if matched_skill:
                     skill_status_map = {
@@ -257,7 +297,12 @@ class ChatHandler:
                 await self._send_status(websocket, f"⚠️ 代理执行出错: {str(e)[:100]}")
         
         # 如果没有触发 Agent 技能但启用了 RAG 开关，则执行传统 RAG（保留向后兼容性）
-        if not agent_used and enable_rag and self.rag_service.is_initialized:
+        if (
+            not agent_used
+            and enable_rag
+            and self.rag_service.is_initialized
+            and self._should_use_legacy_rag(message)
+        ):
             try:
                 await self._send_status(websocket, f"🔍 搜索相关分子数据 (top {rag_count})...")
                 retrieved_molecules = await self.rag_service.search_similar_molecules(message, rag_count)
@@ -532,6 +577,36 @@ class ChatHandler:
             "type": "status",
             "message": message
         }))
+
+    @staticmethod
+    def _route_clarification(route_decision) -> str:
+        if not route_decision or not route_decision.requires_confirmation:
+            return ""
+        if any("SMILES" in reason for reason in route_decision.reasons):
+            return (
+                "要进行真实、可追溯的分子性质计算，请提供该分子的有效 "
+                "SMILES。收到结构后，系统会调用 RDKit 计算，而不会由语言模型"
+                "猜测数值。"
+            )
+        return ""
+
+    @staticmethod
+    def _should_use_legacy_rag(message: str) -> bool:
+        lower = message.lower()
+        return bool(SMILES_PATTERN.search(message)) or any(
+            marker in lower
+            for marker in (
+                "smiles",
+                "相似分子",
+                "类似分子",
+                "知识库",
+                "检索",
+                "搜索",
+                "rag",
+                "similar molecule",
+                "knowledge base",
+            )
+        )
     
     def _is_greeting(self, message: str) -> bool:
         """检测是否为问候语"""

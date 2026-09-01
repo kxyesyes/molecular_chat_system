@@ -71,7 +71,7 @@ class HybridSkillRouter:
 
         has_target = bool(TARGET_PATTERN.search(text))
         has_smiles = bool(SMILES_PATTERN.search(text)) or "CCO" in text.upper()
-        generation = self._contains(lower, "生成", "设计", "generate", "design")
+        generation = self._has_generation_intent(lower)
 
         if self._contains(lower, "全面", "综合", "成药性", "comprehensive", "full analysis"):
             add("comprehensive_evaluation", 0.95, "comprehensive workflow phrase")
@@ -117,6 +117,10 @@ class HybridSkillRouter:
             "tpsa",
             "lipinski",
             "基础性质",
+            "分子性质",
+            "理化性质",
+            "性质计算",
+            "性质评估",
             "属性",
         ):
             add("admet_assessment", 0.88, "property or ADMET endpoint requested")
@@ -250,6 +254,33 @@ class HybridSkillRouter:
     @staticmethod
     def _contains(text: str, *needles: str) -> bool:
         return any(needle in text for needle in needles)
+
+    @staticmethod
+    def _has_generation_intent(text: str) -> bool:
+        if any(marker in text for marker in ("生成", "创建", "generate", "create")):
+            return True
+        if "设计" in text:
+            conceptual_markers = (
+                "什么是",
+                "是什么",
+                "解释",
+                "介绍",
+                "概念",
+                "原理",
+                "如何理解",
+                "怎么理解",
+                "有哪些方法",
+            )
+            if any(marker in text for marker in conceptual_markers):
+                return False
+            return bool(
+                re.search(
+                    r"(?:请|帮我|为|针对|基于|围绕|需要|想要|希望).{0,24}设计"
+                    r"|设计\s*(?:\d+|[一二三四五六七八九十]+个|候选|分子|结构)",
+                    text,
+                )
+            )
+        return bool(re.search(r"\bdesign(?:\s+|$)", text, re.I))
 
     @staticmethod
     def _is_general_chat(text: str) -> bool:

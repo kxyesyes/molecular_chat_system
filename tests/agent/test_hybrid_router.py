@@ -28,6 +28,22 @@ def test_router_abstains_for_general_chat():
     assert decision.candidates == []
 
 
+def test_router_abstains_for_conceptual_drug_design_question():
+    decision = HybridSkillRouter().decide("什么是药物设计")
+
+    assert decision.selected_skill is None
+    assert decision.source == "fallback"
+    assert decision.candidates == []
+
+
+def test_router_recognizes_molecular_property_phrase_but_requires_smiles():
+    decision = HybridSkillRouter().decide("计算阿司匹林的分子性质")
+
+    assert decision.selected_skill == "admet_assessment"
+    assert decision.requires_confirmation is True
+    assert any("SMILES" in reason for reason in decision.reasons)
+
+
 def test_router_requires_confirmation_when_required_smiles_is_missing():
     decision = HybridSkillRouter().decide(
         "请计算这个分子的 LogP、QED 和 TPSA。"

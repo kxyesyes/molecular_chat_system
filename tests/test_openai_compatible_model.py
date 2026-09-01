@@ -38,21 +38,24 @@ class _FakeStreamResponse:
 
 
 class _FakeClient:
-    def __init__(self):
+    def __init__(self, stream_chunks=None, post_payload=None):
         self.post_calls = []
         self.stream_calls = []
+        self.stream_chunks = stream_chunks
+        self.post_payload = post_payload
 
     async def post(self, url, headers=None, json=None):
         self.post_calls.append({"url": url, "headers": headers, "json": json})
         return _FakeResponse(
-            {"choices": [{"message": {"content": "API_OK"}}], "model": "demo-model"}
+            self.post_payload
+            or {"choices": [{"message": {"content": "API_OK"}}], "model": "demo-model"}
         )
 
     def stream(self, method, url, headers=None, json=None, timeout=None):
         self.stream_calls.append(
             {"method": method, "url": url, "headers": headers, "json": json}
         )
-        lines = [
+        lines = self.stream_chunks or [
             b'data: {"choices":[{"delta":{"content":"A"}}]}\n',
             b'data: {"choices":[{"delta":{"content":"PI_OK"}}]}\n',
             b"data: [DONE]\n",
@@ -116,6 +119,51 @@ class OpenAICompatibleModelTest(unittest.TestCase):
         self.assertEqual(result, ["API_OK"])
         self.assertEqual(client.stream_calls[0]["url"], "https://api.example.com/v1/chat/completions")
         self.assertTrue(client.stream_calls[0]["json"]["stream"])
+
+    def test_deepseek_v4_disables_thinking_for_chat_content_adapter(self):
+        from src.agent.openai_compatible_model import OpenAICompatibleModel
+
+        client = _FakeClient()
+        model = OpenAICompatibleModel(
+            api_key="token",
+            model_name="deepseek-v4-pro",
+            base_url="https://api.deepseek.com/chat/completions",
+            client=client,
+        )
+
+        asyncio.run(model.generate("hello"))
+
+        self.assertEqual(
+            client.post_calls[0]["json"]["thinking"],
+            {"type": "disabled"},
+        )
+
+    def test_stream_generate_reports_empty_deepseek_answer_and_finish_reason(self):
+        from src.agent.openai_compatible_model import OpenAICompatibleModel
+
+        client = _FakeClient(
+            stream_chunks=[
+                b'data: {"choices":[{"delta":{"reasoning_content":"hidden"},"finish_reason":null}]}\n',
+                b'data: {"choices":[{"delta":{"content":""},"finish_reason":"length"}],"usage":{"completion_tokens":12}}\n',
+                b"data: [DONE]\n",
+            ]
+        )
+        model = OpenAICompatibleModel(
+            api_key="token",
+            model_name="deepseek-v4-pro",
+            base_url="https://api.deepseek.com/chat/completions",
+            client=client,
+        )
+
+        async def collect():
+            return [chunk async for chunk in model.stream_generate("hello")]
+
+        result = asyncio.run(collect())
+
+        self.assertIn("未收到有效正文", "".join(result))
+        self.assertEqual(model.last_response_metadata["finish_reason"], "length")
+        self.assertEqual(model.last_response_metadata["reasoning_chars"], 6)
+        self.assertEqual(model.last_response_metadata["usage"]["completion_tokens"], 12)
 
 
 if __name__ == "__main__":
