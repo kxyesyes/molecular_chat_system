@@ -1,3 +1,4 @@
+import os
 import time
 
 from fastapi import FastAPI
@@ -228,3 +229,328 @@ def test_llm_runtime_config_routes_require_admin_token(tmp_path, monkeypatch):
         ).status_code
         == 403
     )
+
+
+def test_llm_runtime_save_route_persists_key_to_ignored_env_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEDCHAT_ADMIN_TOKEN", ADMIN_TOKEN)
+    monkeypatch.setenv("MEDCHAT_LLM_CONFIG_PATH", str(tmp_path / "llm.json"))
+    monkeypatch.setenv("MEDCHAT_ENV_FILE", str(tmp_path / ".env"))
+    monkeypatch.setenv("AGENT_STATE_DB", str(tmp_path / "agent_state.sqlite3"))
+    for name in (
+        "OPENAI_COMPATIBLE_API_KEY",
+        "OPENAI_COMPATIBLE_BASE_URL",
+        "OPENAI_COMPATIBLE_MODEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    from src.web.app import MolecularChatApp
+
+    app_instance = MolecularChatApp(config_path=str(tmp_path / "missing.yaml"))
+    client = TestClient(app_instance.app)
+    response = client.post(
+        "/api/llm/config",
+        headers=admin_headers(),
+        json={
+            "provider": "openai_compatible",
+            "base_url": "https://api.example.com/chat/completions",
+            "model_name": "example-model",
+            "api_key": "sk-route-test-secret",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    persisted = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert payload["success"] is True
+    assert payload["config"]["api_key_configured"] is True
+    assert "api_key" not in payload["config"]
+    assert "sk-route-test-secret" not in response.text
+    assert "OPENAI_COMPATIBLE_API_KEY=sk-route-test-secret" in persisted
+
+
+def test_llm_runtime_save_route_switches_provider_using_saved_target_key(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MEDCHAT_ADMIN_TOKEN", ADMIN_TOKEN)
+    monkeypatch.setenv("MEDCHAT_LLM_CONFIG_PATH", str(tmp_path / "llm.json"))
+    monkeypatch.setenv("MEDCHAT_ENV_FILE", str(tmp_path / ".env"))
+    monkeypatch.setenv("AGENT_STATE_DB", str(tmp_path / "agent_state.sqlite3"))
+    for name in (
+        "MEDCHAT_LLM_PROVIDER",
+        "MEDCHAT_LLM_STREAM",
+        "OPENAI_COMPATIBLE_API_KEY",
+        "MODELSCOPE_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / ".env").write_text(
+        "OPENAI_COMPATIBLE_API_KEY=active-openai-key\n"
+        "MODELSCOPE_API_KEY=saved-modelscope-key\n",
+        encoding="utf-8",
+    )
+
+    from src.web.app import MolecularChatApp
+
+    app_instance = MolecularChatApp(config_path=str(tmp_path / "missing.yaml"))
+    client = TestClient(app_instance.app)
+    response = client.post(
+        "/api/llm/config",
+        headers=admin_headers(),
+        json={
+            "provider": "modelscope",
+            "base_url": "https://modelscope.example.com/v1/chat/completions",
+            "model_name": "Vendor/Model",
+            "api_key": "",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["config"]["api_key_configured"] is True
+    assert app_instance.active_llm_config["api_key"] == "saved-modelscope-key"
+    assert os.environ["MEDCHAT_LLM_PROVIDER"] == "modelscope"
+    assert os.environ["MODELSCOPE_API_KEY"] == "saved-modelscope-key"
+
+
+def test_llm_runtime_save_route_clear_removes_previous_external_key(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MEDCHAT_ADMIN_TOKEN", ADMIN_TOKEN)
+    monkeypatch.setenv("MEDCHAT_LLM_CONFIG_PATH", str(tmp_path / "llm.json"))
+    monkeypatch.setenv("MEDCHAT_ENV_FILE", str(tmp_path / ".env"))
+    monkeypatch.setenv("AGENT_STATE_DB", str(tmp_path / "agent_state.sqlite3"))
+    for name in (
+        "MEDCHAT_LLM_PROVIDER",
+        "MEDCHAT_LLM_STREAM",
+        "OPENAI_COMPATIBLE_API_KEY",
+        "OPENAI_COMPATIBLE_BASE_URL",
+        "OPENAI_COMPATIBLE_MODEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / ".env").write_text(
+        "MEDCHAT_LLM_PROVIDER=openai_compatible\n"
+        "OPENAI_COMPATIBLE_API_KEY=remove-this-key\n"
+        "OPENAI_COMPATIBLE_BASE_URL=https://api.example.com/v1/chat/completions\n"
+        "OPENAI_COMPATIBLE_MODEL=example-model\n",
+        encoding="utf-8",
+    )
+
+    from src.web.app import MolecularChatApp
+
+    app_instance = MolecularChatApp(config_path=str(tmp_path / "missing.yaml"))
+    client = TestClient(app_instance.app)
+    response = client.post(
+        "/api/llm/config",
+        headers=admin_headers(),
+        json={
+            "provider": "ollama",
+            "base_url": "http://127.0.0.1:11434",
+            "model_name": "gmm-llama:latest",
+            "api_key": "",
+            "clear_api_key": True,
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    persisted = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "OPENAI_COMPATIBLE_API_KEY=" not in persisted
+    assert "MEDCHAT_LLM_PROVIDER=ollama" in persisted
+    assert "OPENAI_COMPATIBLE_API_KEY" not in os.environ
+    assert os.environ["MEDCHAT_LLM_PROVIDER"] == "ollama"
+
+
+def test_llm_runtime_save_route_keeps_env_canonical_when_cache_write_fails(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MEDCHAT_ADMIN_TOKEN", ADMIN_TOKEN)
+    monkeypatch.setenv("MEDCHAT_LLM_CONFIG_PATH", str(tmp_path / "llm.json"))
+    monkeypatch.setenv("MEDCHAT_ENV_FILE", str(tmp_path / ".env"))
+    monkeypatch.setenv("AGENT_STATE_DB", str(tmp_path / "agent_state.sqlite3"))
+
+    from src.web.app import MolecularChatApp
+
+    app_instance = MolecularChatApp(config_path=str(tmp_path / "missing.yaml"))
+    client = TestClient(app_instance.app)
+
+    def fail_cache_write(*_args, **_kwargs):
+        raise OSError("simulated runtime cache failure")
+
+    monkeypatch.setattr("src.web.app.save_runtime_config", fail_cache_write)
+    response = client.post(
+        "/api/llm/config",
+        headers=admin_headers(),
+        json={
+            "provider": "openai_compatible",
+            "base_url": "https://api.example.com/v1/chat/completions",
+            "model_name": "example-model",
+            "api_key": "fake-test-key",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert response.json()["warnings"]
+    assert app_instance.active_llm_config["provider"] == "openai_compatible"
+    persisted = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "MEDCHAT_LLM_PROVIDER=openai_compatible" in persisted
+
+
+def test_llm_runtime_test_route_uses_saved_key_for_submitted_provider(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MEDCHAT_ADMIN_TOKEN", ADMIN_TOKEN)
+    monkeypatch.setenv("MEDCHAT_LLM_CONFIG_PATH", str(tmp_path / "llm.json"))
+    monkeypatch.setenv("MEDCHAT_ENV_FILE", str(tmp_path / ".env"))
+    monkeypatch.setenv("AGENT_STATE_DB", str(tmp_path / "agent_state.sqlite3"))
+    for name in (
+        "MEDCHAT_LLM_PROVIDER",
+        "OPENAI_COMPATIBLE_API_KEY",
+        "MODELSCOPE_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / ".env").write_text(
+        "OPENAI_COMPATIBLE_API_KEY=active-openai-key\n"
+        "MODELSCOPE_API_KEY=saved-modelscope-key\n",
+        encoding="utf-8",
+    )
+
+    from src.web.app import MolecularChatApp
+
+    app_instance = MolecularChatApp(config_path=str(tmp_path / "missing.yaml"))
+    captured = {}
+
+    class FakeModel:
+        model_name = "Vendor/Model"
+
+    def capture_model(config):
+        captured.update(config)
+        return FakeModel()
+
+    async def fake_generate(*_args, **_kwargs):
+        return "CONNECTION_OK"
+
+    monkeypatch.setattr(app_instance, "_create_model_from_llm_config", capture_model)
+    monkeypatch.setattr("src.web.app.generate_for_chat", fake_generate)
+    client = TestClient(app_instance.app)
+    response = client.post(
+        "/api/llm/test",
+        headers=admin_headers(),
+        json={
+            "provider": "modelscope",
+            "base_url": "https://modelscope.example.com/v1/chat/completions",
+            "model_name": "Vendor/Model",
+            "api_key": "",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert captured["provider"] == "modelscope"
+    assert captured["api_key"] == "saved-modelscope-key"
+
+
+def test_switch_model_updates_canonical_env_without_losing_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEDCHAT_ADMIN_TOKEN", ADMIN_TOKEN)
+    monkeypatch.setenv("MEDCHAT_LLM_CONFIG_PATH", str(tmp_path / "llm.json"))
+    monkeypatch.setenv("MEDCHAT_ENV_FILE", str(tmp_path / ".env"))
+    monkeypatch.setenv("AGENT_STATE_DB", str(tmp_path / "agent_state.sqlite3"))
+    for name in (
+        "MEDCHAT_LLM_PROVIDER",
+        "OPENAI_COMPATIBLE_API_KEY",
+        "OPENAI_COMPATIBLE_BASE_URL",
+        "OPENAI_COMPATIBLE_MODEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / ".env").write_text(
+        "MEDCHAT_LLM_PROVIDER=openai_compatible\n"
+        "OPENAI_COMPATIBLE_API_KEY=keep-switch-key\n"
+        "OPENAI_COMPATIBLE_BASE_URL=https://api.example.com/v1/chat/completions\n"
+        "OPENAI_COMPATIBLE_MODEL=old-model\n",
+        encoding="utf-8",
+    )
+
+    from src.web.app import MolecularChatApp
+
+    app_instance = MolecularChatApp(config_path=str(tmp_path / "missing.yaml"))
+    client = TestClient(app_instance.app)
+    response = client.post(
+        "/api/switch_model",
+        headers=admin_headers(),
+        json={"model": "new-model"},
+    )
+
+    assert response.status_code == 200
+    persisted = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "OPENAI_COMPATIBLE_MODEL=new-model" in persisted
+    assert "OPENAI_COMPATIBLE_API_KEY=keep-switch-key" in persisted
+    assert app_instance.active_llm_config["model_name"] == "new-model"
+
+
+def test_string_false_does_not_clear_saved_api_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEDCHAT_ADMIN_TOKEN", ADMIN_TOKEN)
+    monkeypatch.setenv("MEDCHAT_LLM_CONFIG_PATH", str(tmp_path / "llm.json"))
+    monkeypatch.setenv("MEDCHAT_ENV_FILE", str(tmp_path / ".env"))
+    monkeypatch.setenv("AGENT_STATE_DB", str(tmp_path / "agent_state.sqlite3"))
+    for name in ("MEDCHAT_LLM_PROVIDER", "OPENAI_COMPATIBLE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / ".env").write_text(
+        "MEDCHAT_LLM_PROVIDER=openai_compatible\n"
+        "OPENAI_COMPATIBLE_API_KEY=keep-string-false-key\n"
+        "OPENAI_COMPATIBLE_BASE_URL=https://api.example.com/v1/chat/completions\n"
+        "OPENAI_COMPATIBLE_MODEL=example-model\n",
+        encoding="utf-8",
+    )
+
+    from src.web.app import MolecularChatApp
+
+    app_instance = MolecularChatApp(config_path=str(tmp_path / "missing.yaml"))
+    response = TestClient(app_instance.app).post(
+        "/api/llm/config",
+        headers=admin_headers(),
+        json={
+            "provider": "openai_compatible",
+            "base_url": "https://api.example.com/v1/chat/completions",
+            "model_name": "example-model",
+            "api_key": "",
+            "clear_api_key": "false",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    persisted = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "OPENAI_COMPATIBLE_API_KEY=keep-string-false-key" in persisted
+
+
+def test_llm_test_route_does_not_return_untrusted_upstream_error_body(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MEDCHAT_ADMIN_TOKEN", ADMIN_TOKEN)
+    monkeypatch.setenv("MEDCHAT_LLM_CONFIG_PATH", str(tmp_path / "llm.json"))
+    monkeypatch.setenv("MEDCHAT_ENV_FILE", str(tmp_path / ".env"))
+    monkeypatch.setenv("AGENT_STATE_DB", str(tmp_path / "agent_state.sqlite3"))
+
+    from src.web.app import MolecularChatApp
+
+    app_instance = MolecularChatApp(config_path=str(tmp_path / "missing.yaml"))
+
+    async def fake_generate(*_args, **_kwargs):
+        return "模型调用失败：上游回显 Authorization: Bearer fake-secret-value"
+
+    monkeypatch.setattr("src.web.app.generate_for_chat", fake_generate)
+    response = TestClient(app_instance.app).post(
+        "/api/llm/test",
+        headers=admin_headers(),
+        json={
+            "provider": "ollama",
+            "base_url": "http://127.0.0.1:11434",
+            "model_name": "gmm-llama:latest",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is False
+    assert "fake-secret-value" not in response.text

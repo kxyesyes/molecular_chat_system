@@ -118,10 +118,9 @@ class OpenAICompatibleModel:
                     )
             if response.status_code != 200:
                 logger.error(
-                    "%s API error: %s - %s",
+                    "%s API error: HTTP %s",
                     self.provider_name,
                     response.status_code,
-                    response.text,
                 )
                 return f"模型调用失败：HTTP {response.status_code}"
 
@@ -139,8 +138,12 @@ class OpenAICompatibleModel:
             }
             return content if content.strip() else self._empty_response_message()
         except Exception as exc:
-            logger.error("%s API call failed: %s", self.provider_name, exc, exc_info=True)
-            return f"模型调用失败：{exc}"
+            logger.error(
+                "%s API call failed (%s)",
+                self.provider_name,
+                type(exc).__name__,
+            )
+            return "模型调用失败：上游服务不可用"
 
     async def stream_generate(
         self,
@@ -164,8 +167,12 @@ class OpenAICompatibleModel:
                     async for content in self._stream_with_client(client, prompt, temperature, max_tokens):
                         yield content
         except Exception as exc:
-            logger.error("%s stream call failed: %s", self.provider_name, exc, exc_info=True)
-            yield f"模型调用失败：{exc}"
+            logger.error(
+                "%s stream call failed (%s)",
+                self.provider_name,
+                type(exc).__name__,
+            )
+            yield "模型调用失败：上游服务不可用"
 
     async def _stream_with_client(
         self,
@@ -182,9 +189,11 @@ class OpenAICompatibleModel:
             timeout=150.0,
         ) as response:
             if response.status_code != 200:
-                error_content = await response.aread()
-                detail = error_content.decode("utf-8", errors="ignore")
-                logger.error("%s stream error: %s - %s", self.provider_name, response.status_code, detail)
+                logger.error(
+                    "%s stream error: HTTP %s",
+                    self.provider_name,
+                    response.status_code,
+                )
                 yield f"模型调用失败：HTTP {response.status_code}"
                 return
 

@@ -64,6 +64,32 @@ class _FakeClient:
 
 
 class OpenAICompatibleModelTest(unittest.TestCase):
+    def test_http_error_does_not_log_untrusted_response_body(self):
+        from src.agent.openai_compatible_model import OpenAICompatibleModel
+
+        secret_marker = "fake-upstream-secret-marker"
+
+        class ErrorClient:
+            async def post(self, *_args, **_kwargs):
+                response = _FakeResponse({})
+                response.status_code = 401
+                response.text = f"Authorization: Bearer {secret_marker}"
+                return response
+
+        model = OpenAICompatibleModel(
+            api_key="fake-client-key",
+            model_name="demo-model",
+            base_url="https://api.example.com",
+            client=ErrorClient(),
+        )
+
+        with self.assertLogs("src.agent.openai_compatible_model", level="ERROR") as logs:
+            result = asyncio.run(model.generate("hello"))
+
+        rendered_logs = "\n".join(logs.output)
+        self.assertNotIn(secret_marker, rendered_logs)
+        self.assertNotIn(secret_marker, result)
+
     def test_response_metadata_is_isolated_between_concurrent_requests(self):
         from src.agent.openai_compatible_model import OpenAICompatibleModel
 

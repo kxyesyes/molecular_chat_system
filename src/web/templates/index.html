@@ -2057,6 +2057,22 @@
       color: #64748b;
     }
 
+    .llm-key-clear {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      width: fit-content;
+      cursor: pointer;
+      font-weight: 500;
+    }
+
+    .llm-settings-field .llm-key-clear input {
+      width: 16px;
+      height: 16px;
+      padding: 0;
+      accent-color: #4f46e5;
+    }
+
     .llm-settings-actions {
       display: flex;
       gap: 10px;
@@ -2186,6 +2202,10 @@
           <label for="llmApiKey">API Key</label>
           <input id="llmApiKey" type="password" autocomplete="off" placeholder="本地 Ollama 可留空；外部 API 请填写 Key" />
           <div class="llm-key-hint" id="llmApiKeyHint">未读取配置</div>
+          <label class="llm-key-clear" for="clearLlmApiKey">
+            <input id="clearLlmApiKey" type="checkbox" />
+            <span>清除已保存在本机 .env 中的 API Key</span>
+          </label>
         </div>
         <div class="llm-settings-status" id="llmSettingsStatus"></div>
         <div class="llm-settings-actions">

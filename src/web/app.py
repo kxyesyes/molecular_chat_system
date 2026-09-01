@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import os
@@ -17,10 +18,14 @@ import numpy as np
 import uvicorn
 
 from .llm_runtime_config import (
+    load_active_llm_env_config,
+    load_llm_env_config,
     load_runtime_config,
     normalize_llm_config,
     public_llm_config,
+    save_llm_env_config_snapshot,
     save_runtime_config,
+    sync_llm_process_environment,
 )
 from .admin_auth import require_admin
 from .models import OllamaModel, generate_for_chat
@@ -475,8 +480,14 @@ class MolecularChatApp:
         self.runtime_llm_config_path = Path(
             os.environ.get("MEDCHAT_LLM_CONFIG_PATH", "scratch/llm_runtime_config.json")
         )
+        self.runtime_llm_env_path = Path(
+            os.environ.get("MEDCHAT_ENV_FILE", ".env")
+        )
+        self._llm_config_lock = asyncio.Lock()
         self.active_llm_config = self._load_active_llm_config()
         self.model = self._create_model_from_llm_config(self.active_llm_config)
+        self._llm_env_signature = self._llm_env_file_signature()
+        self._llm_watch_task = None
         logger.info(
             "Active LLM provider: %s / %s",
             self.active_llm_config.get("provider"),
@@ -566,7 +577,84 @@ class MolecularChatApp:
             state_store=state_store,
         )
 
+    def _api_key_for_provider(self, provider: str) -> str:
+        normalized_provider = normalize_llm_config({"provider": provider})["provider"]
+        if normalized_provider in {"openai_compatible", "custom"}:
+            return str(
+                os.environ.get("OPENAI_COMPATIBLE_API_KEY")
+                or os.environ.get("EXTERNAL_LLM_API_KEY")
+                or ""
+            ).strip()
+        if normalized_provider == "modelscope":
+            modelscope_config = self.config.get("modelscope", {})
+            return str(
+                os.environ.get("MODELSCOPE_API_KEY")
+                or modelscope_config.get("api_key", "")
+                or ""
+            ).strip()
+        return ""
+
+    def _llm_stream_from_environment(self) -> bool:
+        default = bool(self.config.get("inference", {}).get("stream", True))
+        raw = os.environ.get("MEDCHAT_LLM_STREAM")
+        if raw is None:
+            return default
+        return raw.strip().lower() not in {"0", "false", "no", "off"}
+
     def _llm_config_from_yaml(self) -> Dict[str, Any]:
+        selected_provider = str(os.environ.get("MEDCHAT_LLM_PROVIDER") or "").strip()
+        if selected_provider:
+            provider = normalize_llm_config({"provider": selected_provider})["provider"]
+            stream = self._llm_stream_from_environment()
+            if provider in {"openai_compatible", "custom"}:
+                return normalize_llm_config(
+                    {
+                        "provider": provider,
+                        "base_url": (
+                            os.environ.get("OPENAI_COMPATIBLE_BASE_URL")
+                            or os.environ.get("EXTERNAL_LLM_BASE_URL")
+                            or ""
+                        ),
+                        "model_name": (
+                            os.environ.get("OPENAI_COMPATIBLE_MODEL")
+                            or os.environ.get("EXTERNAL_LLM_MODEL")
+                            or ""
+                        ),
+                        "api_key": self._api_key_for_provider(provider),
+                        "stream": stream,
+                    }
+                )
+            if provider == "modelscope":
+                modelscope_config = self.config.get("modelscope", {})
+                default_model = modelscope_config.get("default_model", "glm4")
+                return normalize_llm_config(
+                    {
+                        "provider": provider,
+                        "base_url": os.environ.get("MODELSCOPE_BASE_URL")
+                        or modelscope_config.get(
+                            "base_url",
+                            "https://api-inference.modelscope.cn/v1/chat/completions",
+                        ),
+                        "model_name": os.environ.get("MODELSCOPE_MODEL")
+                        or modelscope_config.get("models", {})
+                        .get(default_model, {})
+                        .get("name", "ZhipuAI/GLM-5.1"),
+                        "api_key": self._api_key_for_provider(provider),
+                        "stream": stream,
+                    }
+                )
+            ollama_config = self.config.get("ollama", {})
+            return normalize_llm_config(
+                {
+                    "provider": "ollama",
+                    "base_url": os.environ.get("OLLAMA_BASE_URL")
+                    or ollama_config.get("base_url", "http://localhost:11434"),
+                    "model_name": os.environ.get("OLLAMA_MODEL")
+                    or ollama_config.get("model", "gmm-llama:latest"),
+                    "stream": stream,
+                }
+            )
+
         external_api_key = (
             os.environ.get("OPENAI_COMPATIBLE_API_KEY")
             or os.environ.get("EXTERNAL_LLM_API_KEY")
@@ -587,25 +675,32 @@ class MolecularChatApp:
                         or ""
                     ),
                     "api_key": external_api_key,
-                    "stream": self.config.get("inference", {}).get("stream", True),
+                    "stream": self._llm_stream_from_environment(),
                 }
             )
 
         modelscope_config = self.config.get("modelscope", {})
-        modelscope_api_key = str(modelscope_config.get("api_key", "") or "").strip()
-        if modelscope_config and modelscope_api_key:
+        modelscope_api_key = str(
+            os.environ.get("MODELSCOPE_API_KEY")
+            or modelscope_config.get("api_key", "")
+            or ""
+        ).strip()
+        if modelscope_api_key:
             default_model = modelscope_config.get("default_model", "glm4")
-            model_name = modelscope_config.get("models", {}).get(default_model, {}).get("name", "ZhipuAI/GLM-5.1")
+            model_name = (
+                os.environ.get("MODELSCOPE_MODEL")
+                or modelscope_config.get("models", {}).get(default_model, {}).get("name", "ZhipuAI/GLM-5.1")
+            )
             return normalize_llm_config(
                 {
                     "provider": "modelscope",
-                    "base_url": modelscope_config.get(
+                    "base_url": os.environ.get("MODELSCOPE_BASE_URL") or modelscope_config.get(
                         "base_url",
                         "https://api-inference.modelscope.cn/v1/chat/completions",
                     ),
                     "model_name": model_name,
                     "api_key": modelscope_api_key,
-                    "stream": self.config.get("inference", {}).get("stream", True),
+                    "stream": self._llm_stream_from_environment(),
                 }
             )
 
@@ -615,19 +710,19 @@ class MolecularChatApp:
                 "provider": "ollama",
                 "base_url": ollama_config.get("base_url", "http://localhost:11434"),
                 "model_name": ollama_config.get("model", "gmm-llama:latest"),
-                "stream": self.config.get("inference", {}).get("stream", True),
+                "stream": self._llm_stream_from_environment(),
             }
         )
 
     def _load_active_llm_config(self) -> Dict[str, Any]:
         environment_config = self._llm_config_from_yaml()
         runtime_config = load_runtime_config(self.runtime_llm_config_path)
-        if runtime_config:
+        if os.environ.get("MEDCHAT_LLM_PROVIDER"):
+            config = environment_config
+        elif runtime_config:
             config = {**environment_config, **runtime_config}
-            config["api_key"] = (
-                environment_config.get("api_key", "")
-                if runtime_config.get("provider") == environment_config.get("provider")
-                else ""
+            config["api_key"] = self._api_key_for_provider(
+                runtime_config.get("provider", "")
             )
         else:
             config = environment_config
@@ -648,6 +743,60 @@ class MolecularChatApp:
                 else ("ZhipuAI/GLM-5.1" if config.get("provider") == "modelscope" else "gpt-4o-mini")
             )
         return normalize_llm_config(config)
+
+    def _llm_env_file_signature(self) -> str | None:
+        try:
+            content = self.runtime_llm_env_path.read_bytes()
+        except FileNotFoundError:
+            return None
+        return hashlib.sha256(content).hexdigest()
+
+    async def _refresh_llm_config_from_env(self) -> bool:
+        """Reload UI-managed config after another worker updates the env file."""
+        signature = self._llm_env_file_signature()
+        if signature is None or signature == self._llm_env_signature:
+            return False
+        async with self._llm_config_lock:
+            signature = self._llm_env_file_signature()
+            if signature is None or signature == self._llm_env_signature:
+                return False
+            config = load_active_llm_env_config(self.runtime_llm_env_path)
+            self._llm_env_signature = signature
+            if not config:
+                return False
+            previous_provider = self.active_llm_config.get("provider", "")
+            clear_previous = (
+                (previous_provider,)
+                if previous_provider != config.get("provider")
+                else ()
+            )
+            sync_llm_process_environment(
+                config,
+                clear_api_key=(
+                    config.get("provider") != "ollama" and not config.get("api_key")
+                ),
+                clear_api_key_providers=clear_previous,
+            )
+            self._apply_llm_config(config)
+            logger.info(
+                "Reloaded LLM configuration from local env: %s / %s",
+                config.get("provider"),
+                config.get("model_name"),
+            )
+            return True
+
+    async def _watch_llm_env_config(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(1.0)
+                await self._refresh_llm_config_from_env()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Unable to refresh LLM environment config (%s)",
+                    type(exc).__name__,
+                )
 
     def _create_model_from_llm_config(self, llm_config: Dict[str, Any]):
         config = normalize_llm_config(llm_config)
@@ -762,6 +911,7 @@ class MolecularChatApp:
         @self.app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket):
             """WebSocket endpoint for chat - 使用ChatHandler"""
+            await self._refresh_llm_config_from_env()
             if self.chat_handler:
                 # 使用新的ChatHandler（支持Agent工具）
                 await self.chat_handler.handle_websocket(websocket)
@@ -782,6 +932,7 @@ class MolecularChatApp:
         @self.app.get("/api/llm/config", dependencies=[Depends(require_admin)])
         async def get_llm_config():
             """Return public LLM connection configuration without leaking API keys."""
+            await self._refresh_llm_config_from_env()
             return {
                 "success": True,
                 "config": public_llm_config(self.active_llm_config),
@@ -791,30 +942,83 @@ class MolecularChatApp:
         async def save_llm_config(request: Request):
             """Save and activate runtime LLM connection configuration."""
             payload = await request.json()
+            await self._refresh_llm_config_from_env()
             next_config = normalize_llm_config(payload)
-            clear_api_key = bool(payload.get("clear_api_key"))
-            if (
-                not clear_api_key
-                and not next_config.get("api_key")
-                and next_config.get("provider") == self.active_llm_config.get("provider")
-            ):
-                next_config["api_key"] = self.active_llm_config.get("api_key", "")
+            clear_api_key = payload.get("clear_api_key") is True
+            warnings = []
+            async with self._llm_config_lock:
+                previous_provider = self.active_llm_config.get("provider", "")
+                if clear_api_key:
+                    next_config["api_key"] = ""
+                elif not next_config.get("api_key"):
+                    if next_config.get("provider") == previous_provider:
+                        next_config["api_key"] = self.active_llm_config.get("api_key", "")
+                    else:
+                        saved_target = load_llm_env_config(
+                            self.runtime_llm_env_path,
+                            next_config.get("provider", ""),
+                        )
+                        next_config["api_key"] = (
+                            saved_target.get("api_key", "")
+                            or self._api_key_for_provider(next_config.get("provider", ""))
+                        )
 
-            saved_config = save_runtime_config(self.runtime_llm_config_path, next_config)
-            self._apply_llm_config(saved_config)
-            return {
-                "success": True,
-                "message": "模型接入配置已保存并生效",
-                "config": public_llm_config(saved_config),
-            }
+                clear_providers = (
+                    (previous_provider,)
+                    if clear_api_key and previous_provider != next_config.get("provider")
+                    else ()
+                )
+                _env_config, env_signature = save_llm_env_config_snapshot(
+                    self.runtime_llm_env_path,
+                    next_config,
+                    clear_api_key=clear_api_key,
+                    clear_api_key_providers=clear_providers,
+                )
+                sync_llm_process_environment(
+                    next_config,
+                    clear_api_key=clear_api_key,
+                    clear_api_key_providers=clear_providers,
+                )
+                self._llm_env_signature = env_signature
+                try:
+                    saved_config = save_runtime_config(
+                        self.runtime_llm_config_path,
+                        next_config,
+                    )
+                except OSError as exc:
+                    logger.warning("Unable to update LLM runtime cache: %s", exc)
+                    warnings.append("运行时缓存写入失败；本机 .env 已保存并作为重启配置来源。")
+                    saved_config = next_config
+                self._apply_llm_config(saved_config)
+                return {
+                    "success": True,
+                    "message": "模型接入配置已保存到本机 .env 并生效",
+                    "config": public_llm_config(saved_config),
+                    "warnings": warnings,
+                }
 
         @self.app.post("/api/llm/test", dependencies=[Depends(require_admin)])
         async def test_llm_config(request: Request):
             """Test a submitted LLM connection without saving it."""
             payload = await request.json()
+            await self._refresh_llm_config_from_env()
             test_config = normalize_llm_config(payload)
-            if not test_config.get("api_key") and test_config.get("provider") != "ollama":
-                test_config["api_key"] = self.active_llm_config.get("api_key", "")
+            if (
+                payload.get("clear_api_key") is not True
+                and not test_config.get("api_key")
+                and test_config.get("provider") != "ollama"
+            ):
+                if test_config.get("provider") == self.active_llm_config.get("provider"):
+                    test_config["api_key"] = self.active_llm_config.get("api_key", "")
+                else:
+                    saved_target = load_llm_env_config(
+                        self.runtime_llm_env_path,
+                        test_config.get("provider", ""),
+                    )
+                    test_config["api_key"] = (
+                        saved_target.get("api_key", "")
+                        or self._api_key_for_provider(test_config.get("provider", ""))
+                    )
 
             try:
                 test_model = self._create_model_from_llm_config(test_config)
@@ -828,17 +1032,25 @@ class MolecularChatApp:
                 is_success = bool(response and not any(marker in response for marker in failure_markers))
                 return {
                     "success": is_success,
-                    "message": "连接测试成功" if is_success else response,
+                    "message": (
+                        "连接测试成功"
+                        if is_success
+                        else "连接测试失败；请检查服务地址、模型名称和凭据。"
+                    ),
                     "model": test_model.model_name,
                 }
             except Exception as e:
-                logger.error(f"LLM connection test failed: {e}", exc_info=True)
-                return {"success": False, "message": f"连接测试失败: {str(e)}"}
+                logger.error("LLM connection test failed (%s)", type(e).__name__)
+                return {
+                    "success": False,
+                    "message": "连接测试失败；请检查服务地址、模型名称和凭据。",
+                }
 
         @self.app.post("/api/switch_model", dependencies=[Depends(require_admin)])
         async def switch_model(request: Request):
             """Switch model name for the current provider."""
             payload = await request.json()
+            await self._refresh_llm_config_from_env()
             model_key = str(payload.get("model") or "").strip()
             model_map = {
                 "glm4": "ZhipuAI/GLM-5.1",
@@ -848,13 +1060,30 @@ class MolecularChatApp:
             }
             next_config = dict(self.active_llm_config)
             next_config["model_name"] = model_map.get(model_key, model_key or next_config.get("model_name"))
-            saved_config = save_runtime_config(self.runtime_llm_config_path, next_config)
-            self._apply_llm_config(saved_config)
-            return {
-                "success": True,
-                "message": f"已切换到 {saved_config.get('model_name')}",
-                "config": public_llm_config(saved_config),
-            }
+            warnings = []
+            async with self._llm_config_lock:
+                _env_config, env_signature = save_llm_env_config_snapshot(
+                    self.runtime_llm_env_path,
+                    next_config,
+                )
+                sync_llm_process_environment(next_config)
+                self._llm_env_signature = env_signature
+                try:
+                    saved_config = save_runtime_config(
+                        self.runtime_llm_config_path,
+                        next_config,
+                    )
+                except OSError as exc:
+                    logger.warning("Unable to update LLM runtime cache: %s", exc)
+                    warnings.append("运行时缓存写入失败；本机 .env 已保存并作为重启配置来源。")
+                    saved_config = next_config
+                self._apply_llm_config(saved_config)
+                return {
+                    "success": True,
+                    "message": f"已切换到 {saved_config.get('model_name')}",
+                    "config": public_llm_config(saved_config),
+                    "warnings": warnings,
+                }
 
         # Register additional page routes
         from .routes.main_routes import register_main_routes
@@ -1204,6 +1433,9 @@ Key guidelines:
     async def initialize(self):
         """Initialize the application"""
         logger.info("Initializing Molecular Chat System...")
+
+        if self._llm_watch_task is None or self._llm_watch_task.done():
+            self._llm_watch_task = asyncio.create_task(self._watch_llm_env_config())
         
         # Initialize RAG system
         if self.config.get("rag", {}).get("enabled", True):
@@ -1228,6 +1460,16 @@ Key guidelines:
             logger.warning(f"⚠️ 无法启动反向寻靶预加载: {e}")
         
         logger.info("Molecular Chat System initialized successfully")
+
+    async def shutdown(self):
+        """Stop application-owned background tasks."""
+        if self._llm_watch_task is not None:
+            self._llm_watch_task.cancel()
+            try:
+                await self._llm_watch_task
+            except asyncio.CancelledError:
+                pass
+            self._llm_watch_task = None
     
     def run(self, host: Optional[str] = None, port: Optional[int] = None, debug: bool = False):
         """Run the application"""
@@ -1262,6 +1504,10 @@ def create_app_sync():
         @app.on_event("startup")
         async def startup_event():
             await app_instance.initialize()
+
+        @app.on_event("shutdown")
+        async def shutdown_event():
+            await app_instance.shutdown()
 
     return app
 

@@ -44,6 +44,7 @@
     llmModelName: null,
     llmApiKey: null,
     llmApiKeyHint: null,
+    llmClearApiKey: null,
     llmSettingsStatus: null,
     testLlmConfig: null,
     saveLlmConfig: null,
@@ -80,6 +81,7 @@
     elements.llmModelName = document.getElementById("llmModelName");
     elements.llmApiKey = document.getElementById("llmApiKey");
     elements.llmApiKeyHint = document.getElementById("llmApiKeyHint");
+    elements.llmClearApiKey = document.getElementById("clearLlmApiKey");
     elements.llmSettingsStatus = document.getElementById("llmSettingsStatus");
     elements.testLlmConfig = document.getElementById("testLlmConfig");
     elements.saveLlmConfig = document.getElementById("saveLlmConfig");
@@ -551,6 +553,7 @@
       if (elements.llmBaseUrl) elements.llmBaseUrl.value = config.base_url || "";
       if (elements.llmModelName) elements.llmModelName.value = config.model_name || "";
       if (elements.llmApiKey) elements.llmApiKey.value = "";
+      if (elements.llmClearApiKey) elements.llmClearApiKey.checked = false;
       if (elements.llmApiKeyHint) {
         elements.llmApiKeyHint.textContent = config.api_key_configured
           ? `已配置：${config.api_key_hint || "******"}。留空保存会沿用原 Key。`
@@ -564,6 +567,7 @@
         base_url: elements.llmBaseUrl ? elements.llmBaseUrl.value : "",
         model_name: elements.llmModelName ? elements.llmModelName.value : "",
         api_key: elements.llmApiKey ? elements.llmApiKey.value : "",
+        clear_api_key: Boolean(elements.llmClearApiKey?.checked),
         stream: elements.llmStream ? elements.llmStream.value === "true" : true,
       };
     }

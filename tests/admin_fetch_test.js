@@ -61,7 +61,16 @@ function assertAdminHelperGuard(source) {
     "src/web/templates/molecular_docking.html",
   );
   const dockingUi = readSource("src/web/static/js/docking/ui_manager.js");
+  const homeSource = readSource("src/web/static/js/home/main.js");
+  const homeTemplate = readSource("src/web/templates/index.html");
   const failures = [];
+
+  collectCheck(failures, "LLM settings expose an explicit key-clear control", () => {
+    assert.match(homeTemplate, /id=["']clearLlmApiKey["']/);
+    assert.match(homeTemplate, /\.llm-key-clear\s*\{/);
+    assert.match(homeSource, /llmClearApiKey/);
+    assert.match(homeSource, /clear_api_key\s*:/);
+  });
 
   collectCheck(failures, "activity model manager requires the admin helper", () => {
     assertAdminHelperGuard(modelManager);
