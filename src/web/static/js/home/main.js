@@ -17,6 +17,7 @@
   let currentMessages = [];
   let reconnectAttempts = 0;
   let maxReconnectAttempts = 5;
+  let agentTaskRunActive = false;
 
   // DOM元素缓存
   const elements = {
@@ -1159,7 +1160,6 @@
 
       // 添加用户消息到界面
       addUserMessage(message);
-      resetAgentTaskPanel();
 
       // 构建发送数据 - 确保格式正确，包含高级配置
       const advancedConfig = HomeAdvancedOptions.getConfig();
@@ -1751,6 +1751,7 @@
     const panel = createAgentTaskPanel();
     if (!panel) return;
 
+    agentTaskRunActive = true;
     panel.classList.add("is-active");
     const progress = panel.querySelector(".agent-task-progress");
     const list = panel.querySelector(".agent-task-list");
@@ -1759,6 +1760,11 @@
   }
 
   function handleAgentEvent(event) {
+    const eventType = event.event || event.type || "agent_event";
+    if (!agentTaskRunActive) {
+      resetAgentTaskPanel();
+    }
+
     const panel = createAgentTaskPanel();
     if (!panel) return;
 
@@ -1767,7 +1773,6 @@
     const list = panel.querySelector(".agent-task-list");
     if (!list) return;
 
-    const eventType = event.type || "agent_event";
     const toolName = event.tool_name || event.tool || "";
     const message = event.message || getAgentEventLabel(eventType, toolName);
     const item = document.createElement("div");
@@ -1792,6 +1797,17 @@
           : percent !== null
           ? `${percent}%`
           : "执行中";
+    }
+
+    const terminalAgentEvents = new Set([
+      "task_completed",
+      "task_failed",
+      "task_partial",
+      "task_rejected",
+      "task_cancelled",
+    ]);
+    if (terminalAgentEvents.has(eventType)) {
+      agentTaskRunActive = false;
     }
 
     HomeChatRenderer.scrollToBottom();
@@ -4238,5 +4254,3 @@
     init();
   }
 })();
-
-

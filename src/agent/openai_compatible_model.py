@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextvars import ContextVar
 from typing import AsyncIterator, Optional
 
 import httpx
@@ -32,7 +33,23 @@ class OpenAICompatibleModel:
         self.base_url = self._normalize_chat_url(base_url)
         self.provider_name = provider_name
         self.client = client
-        self.last_response_metadata: dict = {}
+        self._response_metadata_var: ContextVar[dict | None] = ContextVar(
+            f"openai_response_metadata_{id(self)}",
+            default=None,
+        )
+        self._last_response_metadata: dict = {}
+
+    @property
+    def last_response_metadata(self) -> dict:
+        """Return metadata for the current async request context only."""
+        contextual = self._response_metadata_var.get()
+        return contextual if contextual is not None else self._last_response_metadata
+
+    @last_response_metadata.setter
+    def last_response_metadata(self, value: dict) -> None:
+        copied = dict(value or {})
+        self._last_response_metadata = copied
+        self._response_metadata_var.set(copied)
 
     @staticmethod
     def _normalize_chat_url(base_url: str) -> str:

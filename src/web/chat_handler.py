@@ -65,11 +65,6 @@ class ChatHandler:
                 if not message.strip():
                     continue
 
-                # 检查问候语
-                if self._is_greeting(message):
-                    await self._send_greeting(websocket)
-                    continue
-
                 # 发送确认
                 await self._send_status(websocket, "Processing your message...")
 
@@ -377,13 +372,15 @@ class ChatHandler:
         # 生成响应
         await self._send_status(websocket, "🤖 AI正在生成回答...")
         
+        model_max_tokens = self._model_max_tokens()
+
         if self.config.get("inference", {}).get("stream", True):
             try:
                 chunk_count = 0
                 async for chunk in self.model.stream_generate(
                     prompt,
                     temperature=self.config.get("inference", {}).get("temperature", 0.7),
-                    max_tokens=self.config.get("inference", {}).get("max_tokens", 1500)
+                    max_tokens=model_max_tokens,
                 ):
                     if chunk:
                         full_response += chunk
@@ -396,10 +393,24 @@ class ChatHandler:
                         if chunk_count % 5 == 0:  # 每5个chunk才sleep一次
                             await asyncio.sleep(0.001)
                 
-                await websocket.send_text(json.dumps({
+                full_response, warning_chunk, completion_meta = (
+                    self._finalize_model_response(full_response)
+                )
+                if warning_chunk:
+                    await websocket.send_text(json.dumps({
+                        "type": "stream",
+                        "content": warning_chunk,
+                    }, ensure_ascii=False))
+
+                completion_payload = {
                     "type": "complete",
-                    "content": full_response
-                }))
+                    "content": full_response,
+                    **completion_meta,
+                }
+                await websocket.send_text(json.dumps(
+                    completion_payload,
+                    ensure_ascii=False,
+                ))
                 
                 elapsed = time.time() - start_time
                 logger.info(f"消息处理完成，总耗时: {elapsed:.2f}秒，生成{len(full_response)}字符")
@@ -411,23 +422,31 @@ class ChatHandler:
                     self.model,
                     prompt,
                     temperature=self.config.get("inference", {}).get("temperature", 0.7),
-                    max_tokens=self.config.get("inference", {}).get("max_tokens", 1500)
+                    max_tokens=model_max_tokens,
+                )
+                full_response, _, completion_meta = self._finalize_model_response(
+                    full_response
                 )
                 await websocket.send_text(json.dumps({
                     "type": "message",
-                    "message": full_response
-                }))
+                    "message": full_response,
+                    **completion_meta,
+                }, ensure_ascii=False))
         else:
             full_response = await generate_for_chat(
                 self.model,
                 prompt,
                 temperature=self.config.get("inference", {}).get("temperature", 0.7),
-                max_tokens=self.config.get("inference", {}).get("max_tokens", 1500)
+                max_tokens=model_max_tokens,
+            )
+            full_response, _, completion_meta = self._finalize_model_response(
+                full_response
             )
             await websocket.send_text(json.dumps({
                 "type": "message",
-                "message": full_response
-            }))
+                "message": full_response,
+                **completion_meta,
+            }, ensure_ascii=False))
         
         # 优化5: 限制对话历史长度，避免内存泄漏
         history.append({
@@ -501,76 +520,6 @@ class ChatHandler:
             "event": event,
         }, ensure_ascii=False))
     
-    async def _send_greeting(self, websocket: WebSocket):
-        """发送问候语 - 端到端药物设计系统"""
-        greeting = (
-            "欢迎使用 MedChat - 端到端药物设计智能化系统\n\n"
-            "我是您的AI药物设计助手，集成了完整的药物发现工作流程。\n\n"
-            
-            "## 核心功能模块\n\n"
-            
-            "### 1. 分子分析与评估\n"
-            "• 基础属性计算 - 分子量、LogP、QED、利平斯基规则\n"
-            "• ADMET预测 - 吸收、分布、代谢、排泄全面评估\n"
-            "• 类药性评估 - 药物相似性、合成可及性分析\n\n"
-            
-            "### 2. 分子设计与生成\n"
-            "• AI分子生成 - 基于深度学习的新分子设计\n"
-            "• 结构优化 - 根据目标属性优化分子结构\n"
-            "• 骨架跃迁 - 探索新的化学空间\n\n"
-            
-            "### 3. 反应与合成\n"
-            "• 反应预测 - 预测化学反应产物（IBM RXN）\n"
-            "• 逆合成分析 - 自动规划合成路线\n"
-            "• 合成可行性 - 评估合成难度和成本\n\n"
-            
-            "### 4. 靶点与对接\n"
-            "• 分子对接 - 蛋白质-配体结合预测（AutoDock Vina）\n"
-            "• 反向寻靶 - 基于ChEMBL数据库的靶点预测\n"
-            "• 结合亲和力 - 定量评估分子相互作用\n"
-            "• 3D可视化 - 交互式分子结构展示\n\n"
-            
-            "### 5. 知识检索增强\n"
-            "• 分子数据库 - 5万+分子的向量检索\n"
-            "• 相似性搜索 - 快速找到结构相似的化合物\n"
-            "• 文献集成 - 关联化学文献和专利信息\n\n"
-            
-            "## 使用示例\n\n"
-            "分子分析：\n"
-            "```\n"
-            "分析阿司匹林(CC(=O)Oc1ccccc1C(=O)O)的药物性质\n"
-            "```\n\n"
-            
-            "逆合成规划：\n"
-            "```\n"
-            "设计CC(=O)OC1=CC=CC=C1C(=O)O的合成路线\n"
-            "```\n\n"
-            
-            "分子对接：\n"
-            "```\n"
-            "预测CCO与COVID-19主蛋白酶的结合\n"
-            "```\n\n"
-            
-            "AI分子生成：\n"
-            "```\n"
-            "生成QED>0.7且分子量<500的类药分子\n"
-            "```\n\n"
-            
-            "## 快速开始\n\n"
-            "1. 直接输入SMILES结构进行分析\n"
-            "2. 描述您的需求，我会自动选择合适的工具\n"
-            "3. 使用自然语言提问，支持中英文\n\n"
-            
-            "提示：开启「智能工具」可自动调用专业分析模块，开启「RAG检索」可获取相似分子参考数据。\n\n"
-            
-            "让我们开始您的药物设计之旅吧！有任何问题随时问我"
-        )
-        
-        await websocket.send_text(json.dumps({
-            "type": "message",
-            "message": greeting
-        }))
-    
     async def _send_status(self, websocket: WebSocket, message: str):
         """发送状态消息"""
         await websocket.send_text(json.dumps({
@@ -607,15 +556,6 @@ class ChatHandler:
                 "knowledge base",
             )
         )
-    
-    def _is_greeting(self, message: str) -> bool:
-        """检测是否为问候语"""
-        greeting_words = [
-            "你好", "您好", "hello", "hi", "hey", "早上好", "下午好", "晚上好",
-            "good morning", "good afternoon", "good evening", "nihao"
-        ]
-        message_lower = message.lower().strip()
-        return any(greeting in message_lower for greeting in greeting_words)
     
     def _format_rag_context(self, molecules: List[Dict[str, Any]]) -> str:
         """格式化 RAG 上下文"""
@@ -702,10 +642,46 @@ class ChatHandler:
         prompt_parts.append("3. 使用清晰的中文，包含具体数值和评估")
         prompt_parts.append("4. 提供可操作的药物化学建议")
         prompt_parts.append("5. 保持专业但易懂的表达风格")
+        prompt_parts.append(
+            "6. 对问候或概念问答直接回答当前问题，默认保持精炼；除非用户明确询问，"
+            "不要展开完整平台功能清单"
+        )
+        prompt_parts.append(
+            "7. 科学数值只能引用真实工具结果；未调用对应工具时必须明确说明不可用"
+        )
         
         prompt_parts.append("\n请开始回答：")
 
         return "\n".join(prompt_parts)
+
+    def _model_max_tokens(self) -> int:
+        """Select an output budget without leaking local GPU limits to remote APIs."""
+        inference = self.config.get("inference", {})
+        local_limit = int(inference.get("max_tokens", 1500))
+        if getattr(self.model, "provider_name", None):
+            return int(inference.get("external_max_tokens", 4096))
+        return local_limit
+
+    def _finalize_model_response(self, content: str):
+        """Expose safe completion state and make provider truncation visible."""
+        metadata = getattr(self.model, "last_response_metadata", {}) or {}
+        finish_reason = metadata.get("finish_reason")
+        completion_meta = {}
+        warning = ""
+
+        if finish_reason:
+            completion_meta["finish_reason"] = str(finish_reason)
+        if str(finish_reason).lower() == "length":
+            warning = (
+                "\n\n> ⚠️ 回答达到输出长度上限，内容可能不完整。"
+                "请回复“继续”以从中断处续写。"
+            )
+            if warning not in content:
+                content += warning
+            completion_meta["truncated"] = True
+            logger.warning("Model response reached its output length limit")
+
+        return content, warning, completion_meta
     
     def _analyze_user_intent(self, user_message_lower: str) -> Dict[str, Any]:
         """分析用户意图"""

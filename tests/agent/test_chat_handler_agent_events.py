@@ -74,11 +74,34 @@ class FakeModel:
     def __init__(self):
         self.generate_calls = 0
         self.prompts = []
+        self.max_tokens = []
 
     async def generate(self, prompt, temperature=0.7, max_tokens=1500):
         self.generate_calls += 1
         self.prompts.append(prompt)
+        self.max_tokens.append(max_tokens)
         return "assistant response"
+
+
+class ExternalFakeModel(FakeModel):
+    provider_name = "deepseek"
+
+
+class TruncatedStreamingModel:
+    provider_name = "deepseek"
+
+    def __init__(self):
+        self.max_tokens = []
+        self.last_response_metadata = {}
+
+    async def stream_generate(self, prompt, temperature=0.7, max_tokens=1500):
+        self.max_tokens.append(max_tokens)
+        yield "药物分子设计是一个多目标优化过程。"
+        self.last_response_metadata = {
+            "model": "deepseek-v4-pro",
+            "finish_reason": "length",
+            "content_chars": 18,
+        }
 
 
 class FakeRagService:
@@ -666,6 +689,119 @@ def test_conceptual_question_skips_molecular_rag_and_uses_main_model():
         "type": "message",
         "message": "assistant response",
     }
+
+
+def test_greeting_uses_main_model_without_agent_or_rag():
+    model = FakeModel()
+    rag = RecordingLegacyRagService()
+    handler = ChatHandler(
+        model=model,
+        rag_service=rag,
+        agent_system=None,
+        config={"inference": {"stream": False}},
+    )
+    websocket = ScriptedWebSocket(
+        [{"type": "chat", "message": "你好", "enable_rag": True}]
+    )
+
+    asyncio.run(handler.handle_websocket(websocket))
+
+    assert model.generate_calls == 1
+    assert rag.calls == []
+    assert not any(item["type"] == "agent_event" for item in websocket.messages)
+    assert websocket.messages[-1] == {
+        "type": "message",
+        "message": "assistant response",
+    }
+
+
+def test_external_model_uses_external_output_budget():
+    model = ExternalFakeModel()
+    handler = ChatHandler(
+        model=model,
+        rag_service=FakeRagService(),
+        agent_system=None,
+        config={
+            "inference": {
+                "stream": False,
+                "max_tokens": 600,
+                "external_max_tokens": 4096,
+            }
+        },
+    )
+
+    asyncio.run(
+        handler._process_message(
+            websocket=FakeWebSocket(),
+            message="什么是药物分子设计",
+            enable_rag=False,
+            enable_tools=False,
+        )
+    )
+
+    assert model.max_tokens == [4096]
+
+
+def test_local_model_keeps_local_output_budget():
+    model = FakeModel()
+    handler = ChatHandler(
+        model=model,
+        rag_service=FakeRagService(),
+        agent_system=None,
+        config={
+            "inference": {
+                "stream": False,
+                "max_tokens": 600,
+                "external_max_tokens": 4096,
+            }
+        },
+    )
+
+    asyncio.run(
+        handler._process_message(
+            websocket=FakeWebSocket(),
+            message="你好",
+            enable_rag=False,
+            enable_tools=False,
+        )
+    )
+
+    assert model.max_tokens == [600]
+
+
+def test_stream_length_finish_reason_is_visible_and_structured():
+    model = TruncatedStreamingModel()
+    handler = ChatHandler(
+        model=model,
+        rag_service=FakeRagService(),
+        agent_system=None,
+        config={
+            "inference": {
+                "stream": True,
+                "max_tokens": 600,
+                "external_max_tokens": 4096,
+            }
+        },
+    )
+    websocket = FakeWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="什么是药物分子设计",
+            enable_rag=False,
+            enable_tools=False,
+        )
+    )
+
+    completion = websocket.messages[-1]
+    assert model.max_tokens == [4096]
+    assert completion["type"] == "complete"
+    assert completion["finish_reason"] == "length"
+    assert completion["truncated"] is True
+    assert "达到输出长度上限" in completion["content"]
+    assert websocket.messages[-2]["type"] == "stream"
+    assert "达到输出长度上限" in websocket.messages[-2]["content"]
 
 
 def test_bare_smiles_preserves_legacy_molecular_rag_path():

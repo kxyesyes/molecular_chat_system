@@ -64,6 +64,29 @@ class _FakeClient:
 
 
 class OpenAICompatibleModelTest(unittest.TestCase):
+    def test_response_metadata_is_isolated_between_concurrent_requests(self):
+        from src.agent.openai_compatible_model import OpenAICompatibleModel
+
+        model = OpenAICompatibleModel(
+            api_key="token",
+            model_name="demo-model",
+            base_url="https://api.example.com",
+            client=_FakeClient(),
+        )
+
+        async def record(reason):
+            model.last_response_metadata = {"finish_reason": reason}
+            await asyncio.sleep(0)
+            return model.last_response_metadata["finish_reason"]
+
+        async def run_concurrently():
+            return await asyncio.gather(record("length"), record("stop"))
+
+        self.assertEqual(
+            asyncio.run(run_concurrently()),
+            ["length", "stop"],
+        )
+
     def test_generate_posts_to_chat_completions_and_parses_content(self):
         from src.agent.openai_compatible_model import OpenAICompatibleModel
 

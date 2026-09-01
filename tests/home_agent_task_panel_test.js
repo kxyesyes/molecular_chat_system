@@ -68,4 +68,42 @@ if (missingCompletionBodySnippets.length) {
   process.exit(1);
 }
 
+const sendStart = source.indexOf("function sendMessage()");
+const sendEnd = source.indexOf("// 添加用户消息 - 美化版", sendStart);
+const sendBody =
+  sendStart >= 0 && sendEnd > sendStart
+    ? source.slice(sendStart, sendEnd)
+    : "";
+
+if (sendBody.includes("resetAgentTaskPanel();")) {
+  console.error("Plain message submission must not create an Agent workflow panel");
+  process.exit(1);
+}
+
+const agentEventStart = source.indexOf("function handleAgentEvent(event)");
+const agentEventEnd = source.indexOf("function getAgentEventLabel", agentEventStart);
+const agentEventBody =
+  agentEventStart >= 0 && agentEventEnd > agentEventStart
+    ? source.slice(agentEventStart, agentEventEnd)
+    : "";
+const requiredLazyPanelSnippets = [
+  "if (!agentTaskRunActive)",
+  "resetAgentTaskPanel();",
+  "event.event || event.type",
+  "agentTaskRunActive = false;",
+  '"task_partial"',
+  '"task_rejected"',
+  '"task_cancelled"',
+];
+const missingLazyPanelSnippets = requiredLazyPanelSnippets.filter(
+  (snippet) => !agentEventBody.includes(snippet)
+);
+
+if (missingLazyPanelSnippets.length) {
+  console.error(
+    `Agent panel is not driven by real workflow lifecycle: ${missingLazyPanelSnippets.join(", ")}`
+  );
+  process.exit(1);
+}
+
 console.log("Homepage agent task panel static checks passed");
