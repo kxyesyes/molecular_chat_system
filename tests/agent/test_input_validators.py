@@ -223,12 +223,25 @@ def test_invalid_item_in_labeled_smiles_list_fails_closed(invalid):
     assert analysis.blocks_execution is True
 
 
-@pytest.mark.parametrize("term", ["ADMET", "QED", "TPSA"])
+@pytest.mark.parametrize(
+    "term",
+    ["ADMET", "QED", "TPSA", "IC50", "P450", "BBB", "CNS"],
+)
 def test_task_term_after_labeled_smiles_is_not_treated_as_list_item(term):
     analysis = InputValidator().analyze_molecular_input(f"SMILES: CCO, {term}")
 
     assert analysis.potential_smiles == ("CCO",)
     assert analysis.valid_smiles == ("CCO",)
+    assert analysis.blocks_execution is False
+
+
+@pytest.mark.parametrize("term", ["C++17", "C#12", "C/C++", "C/C++17"])
+def test_versioned_programming_notation_is_not_molecular_input(term):
+    analysis = InputValidator().analyze_molecular_input(
+        f"请检索关于 {term} 的开发说明"
+    )
+
+    assert analysis.potential_smiles == ()
     assert analysis.blocks_execution is False
 
 

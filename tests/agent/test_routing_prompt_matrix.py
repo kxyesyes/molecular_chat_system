@@ -370,6 +370,36 @@ def test_non_molecular_notation_in_scientific_prose_reaches_normal_processing(pr
     )
 
 
+@pytest.mark.parametrize("term", ["C++17", "C#12", "C/C++", "C/C++17"])
+def test_versioned_programming_notation_reaches_normal_processing(term):
+    prompt = f"请检索关于 {term} 的开发说明"
+    model = _RecordingModel()
+    rag = _RecordingRagService()
+    agent = _RecordingAgentSystem()
+    handler = ChatHandler(
+        model=model,
+        rag_service=rag,
+        agent_system=agent,
+        config={"inference": {"stream": False}},
+    )
+    websocket = _RecordingWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message=prompt,
+            enable_rag=True,
+            enable_tools=False,
+        )
+    )
+
+    assert rag.calls or model.generate_calls
+    assert not any(
+        message.get("type") == "complete" and "SMILES 无效" in message.get("content", "")
+        for message in websocket.messages
+    )
+
+
 def test_labeled_invalid_smiles_takes_priority_over_incidental_valid_smiles():
     decision = HybridSkillRouter().decide(
         "请全面分析。SMILES: CC(C)((；并与 CCO 比较"

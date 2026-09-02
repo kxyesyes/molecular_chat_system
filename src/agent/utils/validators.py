@@ -73,6 +73,7 @@ class InputValidator:
             "LOGP",
             "QED",
             "TPSA",
+            "IC50",
             "P450",
         }
     )
@@ -256,7 +257,7 @@ class InputValidator:
     @classmethod
     def _is_contextual_unlabeled_candidate(cls, token: str, text: str) -> bool:
         """Classify an unlabeled token using structure evidence and nearby cues."""
-        if token.upper() in cls._NON_MOLECULAR_NOTATIONS:
+        if cls._is_non_molecular_notation(token):
             return cls._has_explicit_molecular_cue(token, text)
         if not cls._looks_like_smiles(token):
             return False
@@ -298,6 +299,8 @@ class InputValidator:
 
     @classmethod
     def _is_labeled_list_candidate(cls, value: str) -> bool:
+        if cls._is_non_molecular_notation(value):
+            return False
         if value == "X" or re.fullmatch(r"C+X", value):
             return True
         if not cls._looks_like_smiles(value, labeled=True):
@@ -305,6 +308,13 @@ class InputValidator:
         return bool(
             cls._has_conservative_smiles_lexicon(value)
             or cls._has_strong_structural_syntax(value)
+        )
+
+    @classmethod
+    def _is_non_molecular_notation(cls, value: str) -> bool:
+        upper = value.upper()
+        return upper in cls._NON_MOLECULAR_NOTATIONS or bool(
+            re.fullmatch(r"(?:C/)?C(?:\+\+|#)\d*", upper)
         )
 
     @classmethod
