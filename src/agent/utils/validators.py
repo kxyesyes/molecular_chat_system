@@ -70,21 +70,6 @@ class InputValidator:
         r"[A-Za-z0-9@+\-\[\]\(\)=#./\\:%]+"
         r"(?![A-Za-z0-9])"
     )
-    _unlabeled_domain_terms = frozenset(
-        {
-            "admet",
-            "cns",
-            "ic50",
-            "logp",
-            "no",
-            "p450",
-            "pic50",
-            "pk",
-            "qed",
-            "smiles",
-            "tpsa",
-        }
-    )
 
     def __init__(self):
         self.calculation_keywords = {
@@ -138,6 +123,7 @@ class InputValidator:
                 validation == "invalid"
                 and source == "lexical"
                 and not self._has_strong_structural_syntax(value)
+                and not self._has_explicit_molecular_cue(value, text)
             ):
                 continue
 
@@ -172,7 +158,10 @@ class InputValidator:
 
         for match in self._token_pattern.finditer(text):
             normalized = self._normalize_candidate(match.group(0))
-            if not normalized or not self._looks_like_smiles(normalized):
+            if not normalized or not self._is_contextual_unlabeled_candidate(
+                normalized,
+                text,
+            ):
                 continue
             candidates.setdefault(normalized, "lexical")
         return list(candidates.items())
@@ -244,17 +233,73 @@ class InputValidator:
             return False
         if labeled:
             return True
-        if text.casefold() in cls._unlabeled_domain_terms:
+        return cls._has_conservative_smiles_lexicon(text)
+
+    @classmethod
+    def _is_contextual_unlabeled_candidate(cls, token: str, text: str) -> bool:
+        """Classify an unlabeled token using structure evidence and nearby cues."""
+        if not cls._looks_like_smiles(token):
             return False
-        if not cls._has_conservative_smiles_lexicon(text):
-            return False
-        if cls._has_strong_structural_syntax(text):
-            return True
-        return bool(re.fullmatch(r"(?:(?:Cl|Br|[BCNOPSFIK]))+", text))
+        if cls._is_domain_notation(token):
+            return cls._has_explicit_molecular_cue(token, text)
+        return (
+            cls._has_strong_structural_syntax(token)
+            or cls._is_common_simple_structure_token(token)
+            or cls._has_explicit_molecular_cue(token, text)
+        )
 
     @staticmethod
-    def _has_strong_structural_syntax(text: str) -> bool:
-        return any(char.isdigit() or char in "[]@+-()=#./\\:%" for char in text)
+    def _is_common_simple_structure_token(token: str) -> bool:
+        return bool(re.fullmatch(r"C{2,}(?:(?:Cl|Br|[CNOSPFIK]))*", token))
+
+    @classmethod
+    def _is_domain_notation(cls, token: str) -> bool:
+        if not re.search(r"[/\-]", token):
+            return False
+        parts = re.split(r"[/\-]", token)
+        return bool(parts) and all(
+            re.fullmatch(r"[A-Z]{1,5}\d*", part)
+            and not cls._is_common_simple_structure_token(part)
+            for part in parts
+        )
+
+    @staticmethod
+    def _has_explicit_molecular_cue(token: str, text: str) -> bool:
+        escaped = re.escape(token)
+        cue = r"(?:SMILES|molecule|structure|compound|分子|结构|化合物)"
+        wrapper = r"\s*[:：=]?\s*[\"'“”‘’(]*"
+        return bool(
+            re.search(
+                rf"{cue}{wrapper}{escaped}(?![A-Za-z0-9])",
+                text,
+                re.IGNORECASE,
+            )
+        )
+
+    @classmethod
+    def _has_strong_structural_syntax(cls, text: str) -> bool:
+        if any(char in "[]@+()=#.:/%\\" for char in text):
+            return True
+        if "-" in text and not cls._is_domain_notation(text):
+            return True
+        return cls._has_paired_ring_marker(text)
+
+    @staticmethod
+    def _has_paired_ring_marker(text: str) -> bool:
+        markers = re.findall(r"%\d{2}|\d", text)
+        for marker in set(markers):
+            positions = [
+                match.start()
+                for match in re.finditer(re.escape(marker), text)
+            ]
+            for left, right in zip(positions, positions[1:]):
+                if right - left <= len(marker):
+                    continue
+                if left == 0 or right == 0:
+                    continue
+                if text[left - 1].isalpha() and text[right - 1].isalpha():
+                    return True
+        return False
 
     @staticmethod
     def _has_conservative_smiles_lexicon(text: str) -> bool:

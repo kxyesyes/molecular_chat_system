@@ -48,7 +48,21 @@ def test_scientific_prose_is_not_a_potential_smiles_candidate(term):
 
 @pytest.mark.parametrize(
     "term",
-    ["CNS", "NO", "IC50", "P450", "PK", "ADMET", "LogP", "QED", "TPSA"],
+    [
+        "BBB",
+        "PPB",
+        "CNS",
+        "NO",
+        "PK",
+        "S9",
+        "CNS/PK",
+        "IC50/P450",
+        "IC50-P450",
+        "ADMET",
+        "LogP",
+        "QED",
+        "TPSA",
+    ],
 )
 def test_unlabeled_medicinal_chemistry_terms_are_not_molecular_input(term):
     validator = InputValidator()
@@ -60,6 +74,22 @@ def test_unlabeled_medicinal_chemistry_terms_are_not_molecular_input(term):
     assert analysis.blocks_execution is False
     assert result["has_potential_smiles"] is False
     assert result["valid"] is False
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("请分析分子 BBB", "BBB"),
+        ("Evaluate molecule PPB", "PPB"),
+        ("请分析结构 CNS", "CNS"),
+        ("Evaluate compound NO", "NO"),
+        ("请分析化合物 PK", "PK"),
+    ],
+)
+def test_ambiguous_atom_token_requires_and_honors_molecular_cue(query, expected):
+    analysis = InputValidator().analyze_molecular_input(query)
+
+    assert analysis.potential_smiles == (expected,)
 
 
 @pytest.mark.parametrize(
@@ -79,7 +109,14 @@ def test_explicitly_labeled_domain_token_is_validated_as_structure(query, expect
 
 @pytest.mark.parametrize(
     "smiles",
-    ["CCO", "CCCCCCCCCCCCCCCCCCCCC", "CC(C)O"],
+    [
+        "CCO",
+        "CCN",
+        "CCCCCCCCCCCCCCCCCCCCC",
+        "CC(C)O",
+        "CC(=O)Oc1ccccc1C(=O)O",
+        "c1ccccc1",
+    ],
 )
 def test_unlabeled_explicit_structure_tokens_remain_supported(smiles):
     analysis = InputValidator().analyze_molecular_input(f"请分析 {smiles}")

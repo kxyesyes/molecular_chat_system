@@ -221,10 +221,11 @@ def test_labeled_invalid_smiles_takes_priority_over_incidental_valid_smiles():
 @pytest.mark.parametrize(
     ("prompt", "expected_skill"),
     [
-        ("请评估 CNS 穿透和 ADMET 风险", "admet_assessment"),
-        ("请预测 IC50 和 P450 活性风险", "activity_prediction"),
-        ("请评估 PK 和 ADMET 风险", "admet_assessment"),
-        ("请分析 NO 的 ADMET 风险", "admet_assessment"),
+        ("请评估 BBB 穿透和 ADMET 风险", "admet_assessment"),
+        ("请评估 PPB 和 ADMET 风险", "admet_assessment"),
+        ("请评估 S9 稳定性和 ADMET 风险", "admet_assessment"),
+        ("请评估 CNS/PK 和 ADMET 风险", "admet_assessment"),
+        ("请预测 IC50/P450 活性和 ADMET 风险", "admet_assessment"),
     ],
 )
 def test_domain_acronyms_request_missing_smiles_instead_of_invalid_input(
@@ -240,8 +241,17 @@ def test_domain_acronyms_request_missing_smiles_instead_of_invalid_input(
     assert "invalid SMILES" not in reasons
 
 
-def test_cns_admet_prompt_returns_missing_smiles_without_downstream_calls():
-    prompt = "请评估 CNS 穿透和 ADMET 风险"
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "请评估 BBB 穿透和 ADMET 风险",
+        "请评估 PPB 和 ADMET 风险",
+        "请评估 S9 稳定性和 ADMET 风险",
+        "请评估 CNS/PK 和 ADMET 风险",
+        "请预测 IC50/P450 活性和 ADMET 风险",
+    ],
+)
+def test_domain_prose_returns_missing_smiles_without_downstream_calls(prompt):
     model = _RecordingModel()
     rag = _RecordingRagService()
     agent = _RecordingAgentSystem()
