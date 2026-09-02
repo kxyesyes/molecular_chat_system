@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
@@ -12,6 +13,7 @@ from typing import Iterable, Optional
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TARGET_DB_DIR = Path("data") / "target_db"
 DB_FILENAME = "target_database.sqlite"
+CACHE_MIGRATION_STATE_KEY = "target_remote_cache_generation_v1"
 
 
 def resolve_project_root(project_root: Optional[Path | str] = None) -> Path:
@@ -161,8 +163,12 @@ def init_db(project_root: Optional[Path | str] = None) -> None:
                 last_refresh_status TEXT,
                 schema_version INTEGER NOT NULL DEFAULT 1,
                 expires_epoch REAL NOT NULL,
+                generation_id TEXT NOT NULL,
                 cleanup_pending INTEGER NOT NULL DEFAULT 0
-                    CHECK (cleanup_pending IN (0, 1))
+                    CHECK (cleanup_pending IN (0, 1)),
+                cleanup_quarantine_path TEXT,
+                next_retry_epoch REAL NOT NULL DEFAULT 0,
+                retry_count INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS target_runtime_state (
@@ -193,14 +199,39 @@ def init_db(project_root: Optional[Path | str] = None) -> None:
             "target_remote_cache",
             {
                 "expires_epoch": "REAL NOT NULL DEFAULT 0",
+                "generation_id": "TEXT",
                 "cleanup_pending": "INTEGER NOT NULL DEFAULT 0",
+                "cleanup_quarantine_path": "TEXT",
+                "next_retry_epoch": "REAL NOT NULL DEFAULT 0",
+                "retry_count": "INTEGER NOT NULL DEFAULT 0",
             },
         )
-        _migrate_remote_cache_timestamps(conn)
+        if not _migration_completed(conn, CACHE_MIGRATION_STATE_KEY):
+            _migrate_remote_cache_rows(conn)
+            conn.execute(
+                """
+                INSERT INTO target_runtime_state (state_key, state_value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(state_key) DO UPDATE SET
+                    state_value = excluded.state_value,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    CACHE_MIGRATION_STATE_KEY,
+                    "complete",
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_target_remote_cache_expires_epoch
             ON target_remote_cache(expires_epoch)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_target_remote_cache_cleanup_due
+            ON target_remote_cache(expires_epoch, next_retry_epoch)
             """
         )
         conn.commit()
@@ -215,23 +246,46 @@ def _ensure_columns(conn: sqlite3.Connection, table_name: str, columns: dict[str
             conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {definition}")
 
 
-def _migrate_remote_cache_timestamps(conn: sqlite3.Connection) -> None:
+def _migration_completed(conn: sqlite3.Connection, state_key: str) -> bool:
+    row = conn.execute(
+        "SELECT state_value FROM target_runtime_state WHERE state_key = ?",
+        (state_key,),
+    ).fetchone()
+    return row is not None and row["state_value"] == "complete"
+
+
+def _migrate_remote_cache_rows(conn: sqlite3.Connection) -> None:
     rows = conn.execute(
-        "SELECT cache_key, retrieved_at, expires_at FROM target_remote_cache"
+        """
+        SELECT cache_key, retrieved_at, expires_at, generation_id
+        FROM target_remote_cache
+        """
     ).fetchall()
     for row in rows:
         retrieved_at = _canonical_utc_timestamp(row["retrieved_at"])
         expires_at = _canonical_utc_timestamp(row["expires_at"])
-        if retrieved_at is None or expires_at is None:
-            continue
+        generation_id = row["generation_id"]
+        if not isinstance(generation_id, str) or not generation_id:
+            generation_id = str(uuid.uuid4())
+        retrieved_text = retrieved_at.isoformat() if retrieved_at is not None else row["retrieved_at"]
+        expires_text = expires_at.isoformat() if expires_at is not None else row["expires_at"]
+        expires_epoch = expires_at.timestamp() if expires_at is not None else 0
         conn.execute(
             """
             UPDATE target_remote_cache
             SET retrieved_at = ?, expires_at = ?, expires_epoch = ?,
-                cleanup_pending = COALESCE(cleanup_pending, 0)
+                generation_id = ?, cleanup_pending = COALESCE(cleanup_pending, 0),
+                next_retry_epoch = COALESCE(next_retry_epoch, 0),
+                retry_count = COALESCE(retry_count, 0)
             WHERE cache_key = ?
             """,
-            (retrieved_at.isoformat(), expires_at.isoformat(), expires_at.timestamp(), row["cache_key"]),
+            (
+                retrieved_text,
+                expires_text,
+                expires_epoch,
+                generation_id,
+                row["cache_key"],
+            ),
         )
 
 
