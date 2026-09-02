@@ -18,6 +18,11 @@
   let reconnectAttempts = 0;
   let maxReconnectAttempts = 5;
   let agentTaskRunActive = false;
+  let pendingMoleculeCandidatePayloads = [];
+
+  function resetPendingMoleculeCandidatePayloads() {
+    pendingMoleculeCandidatePayloads = [];
+  }
 
   // DOM元素缓存
   const elements = {
@@ -152,6 +157,7 @@
 
   // WebSocket连接管理 - 修复版
   function connectWebSocket() {
+    resetPendingMoleculeCandidatePayloads();
     const wsUrl = `ws://${window.location.host}/ws`;
 
     console.log(`=== 尝试连接WebSocket ===`);
@@ -210,6 +216,7 @@
 
       ws.onerror = (error) => {
         clearTimeout(connectionTimeout);
+        resetPendingMoleculeCandidatePayloads();
         console.error("❌ WebSocket错误:", {
           error: error,
           readyState: ws ? ws.readyState : "null",
@@ -221,6 +228,7 @@
 
       ws.onclose = (event) => {
         clearTimeout(connectionTimeout);
+        resetPendingMoleculeCandidatePayloads();
         console.log("🔌 WebSocket连接关闭:", {
           code: event.code,
           reason: event.reason || "无原因说明",
@@ -369,6 +377,20 @@
           }
           break;
 
+        case "molecule_candidates": {
+          const normalized = window.HomeMoleculeCandidates?.normalize(message);
+          if (normalized) {
+            pendingMoleculeCandidatePayloads.push(normalized);
+          } else {
+            console.warn("Ignored malformed molecule candidate payload");
+            HomeChatRenderer.showNotification(
+              "收到的分子候选数据未通过验证",
+              "warning"
+            );
+          }
+          break;
+        }
+
         case "complete":
           completeLastMessage(message.content);
           clearToolStatus(); // 清除工具状态显示
@@ -401,6 +423,7 @@
           break;
 
         case "error":
+          resetPendingMoleculeCandidatePayloads();
           const errorMsg = message.message || message.error || "未知错误";
           console.error("❌ 服务器返回错误:", {
             message: errorMsg,
@@ -414,6 +437,7 @@
           console.log("❓ 未知消息类型:", message.type, message);
       }
     } catch (error) {
+      resetPendingMoleculeCandidatePayloads();
       console.error("❌ 解析WebSocket消息时出错:", {
         error: error.message,
         stack: error.stack,
@@ -1129,6 +1153,8 @@
       return;
     }
 
+    resetPendingMoleculeCandidatePayloads();
+
     // 更严格的连接状态检查
     if (!ws) {
       console.log("❌ WebSocket对象不存在，尝试重连");
@@ -1614,6 +1640,7 @@
     });
 
     if (completion.action === "ignore") {
+      resetPendingMoleculeCandidatePayloads();
       return;
     }
 
@@ -1634,6 +1661,7 @@
     }
 
     if (!lastMessage) {
+      resetPendingMoleculeCandidatePayloads();
       return;
     }
 
@@ -1655,8 +1683,11 @@
     HomeState.currentMessages = currentMessages.slice();
     updateToolbarControlStates();
 
-    // ✨ 检测并渲染SMILES分子结构
-    detectAndRenderMolecules(lastMessage, finalContent);
+    const candidatePayloads = pendingMoleculeCandidatePayloads.slice();
+    resetPendingMoleculeCandidatePayloads();
+    candidatePayloads.forEach((payload) => {
+      renderMoleculeCandidates(lastMessage, payload);
+    });
   }
 
   // 显示状态消息 - 美化版
@@ -3460,125 +3491,6 @@
     }
   }
 
-  // 获取工具生成分子的属性（使用与反向寻靶一致的样式）
-  async function fetchMoleculePropertiesForToolMolecule(smiles, container) {
-    try {
-      const response = await fetch("/api/molecule/properties", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ smiles: smiles }),
-      });
-
-      if (!response.ok) {
-        throw new Error("API请求失败");
-      }
-
-      const data = await response.json();
-
-      if (data.success && data.properties) {
-        displayToolMoleculeProperties(data.properties, container);
-      } else {
-        container.innerHTML = `
-          <div style="text-align: center; color: #f59e0b; padding: 12px;">
-            <div style="font-size: 18px; margin-bottom: 4px;">⚠️</div>
-            <div style="font-size: 11px; color: #92400e;">无法计算属性</div>
-          </div>
-        `;
-      }
-    } catch (error) {
-      console.error("获取分子属性失败:", error);
-      container.innerHTML = `
-        <div style="text-align: center; color: #94a3b8; padding: 12px;">
-          <div style="font-size: 18px; margin-bottom: 4px;">⚠️</div>
-          <div style="font-size: 11px;">无法获取属性数据</div>
-        </div>
-      `;
-    }
-  }
-
-  // 显示工具生成分子的属性（使用与反向寻靶一致的网格布局）
-  function displayToolMoleculeProperties(properties, container) {
-    const basicProps = properties.basic || {};
-
-    // 属性映射
-    const propertyLabels = {
-      molecular_weight: "分子量",
-      logp: "LogP",
-      hbd: "HBD",
-      hba: "HBA",
-      tpsa: "TPSA",
-      rotatable_bonds: "可旋转键",
-    };
-
-    const allProperties = [
-      "molecular_weight",
-      "logp",
-      "hbd",
-      "hba",
-      "tpsa",
-      "rotatable_bonds",
-    ];
-
-    let html = `<div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 10px;">`;
-    let hasProps = false;
-
-    allProperties.forEach((prop) => {
-      const value = basicProps[prop];
-
-      if (value !== undefined && value !== null) {
-        hasProps = true;
-        const propValue = parseFloat(value);
-
-        // 根据属性类型设置颜色
-        let valueColor = "#334155";
-        let bgColor = "#f8fafc";
-        let displayValue = propValue;
-
-        if (prop === "molecular_weight") {
-          valueColor = propValue <= 500 ? "#059669" : propValue <= 600 ? "#d97706" : "#dc2626";
-          bgColor = propValue <= 500 ? "#ecfdf5" : propValue <= 600 ? "#fffbeb" : "#fef2f2";
-          displayValue = propValue.toFixed(1);
-        } else if (prop === "logp") {
-          valueColor = propValue >= -0.4 && propValue <= 5.6 ? "#059669" : "#dc2626";
-          bgColor = propValue >= -0.4 && propValue <= 5.6 ? "#ecfdf5" : "#fef2f2";
-          displayValue = propValue.toFixed(2);
-        } else if (prop === "hbd") {
-          valueColor = propValue <= 5 ? "#059669" : "#dc2626";
-          displayValue = Math.round(propValue);
-        } else if (prop === "hba") {
-          valueColor = propValue <= 10 ? "#059669" : "#dc2626";
-          displayValue = Math.round(propValue);
-        } else if (prop === "tpsa") {
-          valueColor = propValue <= 140 ? "#059669" : "#d97706";
-          displayValue = propValue.toFixed(1);
-        } else if (prop === "rotatable_bonds") {
-          displayValue = Math.round(propValue);
-        }
-
-        html += `
-          <div style="display: flex; justify-content: space-between; align-items: center; background: ${bgColor}; padding: 6px 10px; border-radius: 6px; border: 1px solid rgba(0,0,0,0.03);">
-            <span style="color: #64748b; font-size: 11px; font-weight: 500;">${propertyLabels[prop] || prop}</span>
-            <span style="color: ${valueColor}; font-weight: 700; font-size: 12px; font-family: 'Inter', ui-sans-serif, system-ui;">${displayValue}</span>
-          </div>
-        `;
-      }
-    });
-
-    html += `</div>`;
-
-    if (hasProps) {
-      container.innerHTML = html;
-    } else {
-      container.innerHTML = `
-        <div style="text-align: center; color: #94a3b8; padding: 12px;">
-          <div style="font-size: 11px;">暂无属性数据</div>
-        </div>
-      `;
-    }
-  }
-
   // 显示分子属性
   function displayMoleculeProperties(properties, container) {
     const basicProps = properties.basic || {};
@@ -3734,108 +3646,11 @@
     return "#64748b";
   }
 
-  // 🧬 检测并渲染SMILES分子结构 (2D可视化)
-  function detectAndRenderMolecules(messageElement, content) {
-    console.log("🔍 开始检测SMILES分子结构...");
-    console.log("📄 消息内容长度:", content.length);
-    console.log("📝 内容预览:", content.substring(0, 300));
-
-    if (!window.SmilesDrawer) {
-      console.error("❌ SmilesDrawer库未加载，无法渲染分子结构");
-      console.log(
-        '💡 请检查 <script src="https://unpkg.com/smiles-drawer@2.0.1/dist/smiles-drawer.min.js"></script> 是否正确加载'
-      );
-      return;
-    }
-    console.log("✅ SmilesDrawer库已加载");
-
-    // SMILES检测模式：匹配典型的SMILES结构
-    // 1. 在反引号中: `CCO`, `CC(=O)O` 等
-    // 2. 在SMILES:标签后: SMILES: CCO
-    // 3. 单独一行的复杂结构
-    const smilesPatterns = [
-      /`([A-Za-z][A-Za-z0-9@+\-\[\]\(\)=#\.\\\/:]{4,})`/g, // 反引号包裹
-      /SMILES[:\s]+([A-Za-z][A-Za-z0-9@+\-\[\]\(\)=#\.\\\/:]{4,})/gi, // SMILES:标签
-      /\b([A-Z][A-Za-z0-9@+\-\[\]\(\)=#]{8,})\b/g, // 复杂结构(较长)
-    ];
-
-    const detectedSmiles = new Set();
-
-    // 提取所有SMILES
-    smilesPatterns.forEach((pattern, idx) => {
-      console.log(`🔎 使用模式 ${idx + 1} 检测...`);
-      let match;
-      while ((match = pattern.exec(content)) !== null) {
-        const smiles = match[1] || match[0];
-        console.log(`  发现候选SMILES: "${smiles}"`);
-
-        // 增强的SMILES验证逻辑
-        // 1. 基本长度检查
-        if (smiles.length < 4 || smiles.length > 200) {
-          console.log(`  ❌ 长度不符: ${smiles.length}`);
-          continue;
-        }
-
-        // 2. 必须包含化学元素符号
-        if (!/[CNOSPFClBrI]/.test(smiles)) {
-          console.log(`  ❌ 缺少化学元素`);
-          continue;
-        }
-
-        // 3. 排除常见的非SMILES字符串
-        const excludePatterns = [
-          /SMILES/i,
-          /http/i,
-          /scaffold/i,
-          /canonical/i,
-          /NumRotBonds/i,
-          /^[A-Z][a-z]+$/, // 单个单词
-          /\s{2,}/, // 多个空格
-          /^[A-Z_]+$/, // 全大写变量名
-          /\.\.\./, // 包含省略号(通常是被截断的SMILES)
-        ];
-
-        if (excludePatterns.some((pattern) => pattern.test(smiles))) {
-          console.log(`  ❌ 匹配排除模式`);
-          continue;
-        }
-
-        // 4. 检查括号匹配
-        const openParens = (smiles.match(/\(/g) || []).length;
-        const closeParens = (smiles.match(/\)/g) || []).length;
-        if (openParens !== closeParens) {
-          console.log(`  ❌ 括号不匹配: (${openParens}) vs )${closeParens})`);
-          continue;
-        }
-
-        // 5. 检查方括号匹配
-        const openBrackets = (smiles.match(/\[/g) || []).length;
-        const closeBrackets = (smiles.match(/\]/g) || []).length;
-        if (openBrackets !== closeBrackets) {
-          console.log(`  ❌ 方括号不匹配`);
-          continue;
-        }
-
-        // 6. 必须以字母或数字开头
-        if (!/^[A-Za-z0-9]/.test(smiles)) {
-          console.log(`  ❌ 开头字符无效`);
-          continue;
-        }
-
-        detectedSmiles.add(smiles.trim());
-        console.log(`  ✅ 验证通过: "${smiles}"`);
-      }
-    });
-
-    if (detectedSmiles.size === 0) {
-      console.log("📭 未检测到有效的SMILES分子结构");
-      return;
-    }
-
-    console.log(
-      `🎯 成功检测到 ${detectedSmiles.size} 个分子结构:`,
-      Array.from(detectedSmiles)
-    );
+  // 渲染后端已验证并规范化的候选分子。
+  function renderMoleculeCandidates(messageElement, payload) {
+    if (!messageElement || !payload || payload.candidates.length === 0) return;
+    const moleculesArray = payload.candidates;
+    const moleculeCount = moleculesArray.length;
 
     // 创建分子结构容器
     const moleculeContainer = document.createElement("div");
@@ -3865,18 +3680,36 @@
       padding-bottom: 16px;
       border-bottom: 1px solid #f1f5f9;
     `;
-    title.innerHTML = `
-      <div style="width: 32px; height: 32px; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: white; font-size: 18px; box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.3);">🧬</div>
-      <div style="flex: 1;">
-        <div style="line-height: 1.2;">分子结构可视化</div>
-        <div style="font-size: 12px; color: #64748b; font-weight: normal; margin-top: 2px;">检测到 ${detectedSmiles.size} 个分子结构</div>
-      </div>
-    `;
+    const titleIcon = document.createElement("div");
+    titleIcon.style.cssText =
+      "width: 32px; height: 32px; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: white; font-size: 18px; box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.3);";
+    titleIcon.textContent = "🧬";
+    const titleText = document.createElement("div");
+    titleText.style.flex = "1";
+    const titleHeading = document.createElement("div");
+    titleHeading.style.lineHeight = "1.2";
+    titleHeading.textContent = "分子结构可视化";
+    const titleCount = document.createElement("div");
+    titleCount.style.cssText =
+      "font-size: 12px; color: #64748b; font-weight: normal; margin-top: 2px;";
+    titleCount.textContent = `已验证 ${moleculeCount} 个候选分子`;
+    titleText.appendChild(titleHeading);
+    titleText.appendChild(titleCount);
+    title.appendChild(titleIcon);
+    title.appendChild(titleText);
     moleculeContainer.appendChild(title);
 
-    // 创建分子网格 - 根据分子数量动态调整（方案A+C）
-    const moleculeCount = detectedSmiles.size;
-    const moleculesArray = Array.from(detectedSmiles);
+    if (payload.warnings.length > 0) {
+      const warnings = document.createElement("div");
+      warnings.style.cssText =
+        "margin: -8px 0 18px; padding: 10px 12px; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; font-size: 12px;";
+      payload.warnings.forEach((warning) => {
+        const warningText = document.createElement("div");
+        warningText.textContent = warning;
+        warnings.appendChild(warningText);
+      });
+      moleculeContainer.appendChild(warnings);
+    }
 
     // 横向滑动布局参数（统一固定比例，避免随数量突变）
     const minCardWidth = "260px";
@@ -3908,14 +3741,14 @@
 
     // 渲染分子函数
     function renderMolecules(page) {
-      grid.innerHTML = ""; // 清空网格
+      grid.replaceChildren();
 
       const startIdx = page * itemsPerPage;
       const endIdx = Math.min(startIdx + itemsPerPage, moleculeCount);
       const pageMolecules = moleculesArray.slice(startIdx, endIdx);
 
-      pageMolecules.forEach((smiles, pageIndex) => {
-        const globalIndex = startIdx + pageIndex;
+      pageMolecules.forEach((candidate) => {
+        const smiles = candidate.canonical_smiles;
         const molCard = document.createElement("div");
         molCard.className = "molecule-card";
         molCard.style.cssText = `
@@ -3955,12 +3788,18 @@
           align-items: center;
           background: #f8fafc;
         `;
-        cardHeader.innerHTML = `
-          <div style="font-weight: 700; color: #4f46e5; font-size: 16px;">#${
-            globalIndex + 1
-          }</div>
-          <div style="background: #e0e7ff; color: #4338ca; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 20px;">工具生成</div>
-        `;
+        const candidateId = document.createElement("div");
+        candidateId.style.cssText =
+          "font-weight: 700; color: #4f46e5; font-size: 13px; overflow-wrap: anywhere;";
+        candidateId.textContent = candidate.candidate_id;
+        const provenanceLabel = document.createElement("div");
+        provenanceLabel.style.cssText =
+          "background: #e0e7ff; color: #4338ca; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 20px;";
+        provenanceLabel.textContent =
+          [payload.source.tool, payload.source.model].filter(Boolean).join(" · ") ||
+          "来源未标注";
+        cardHeader.appendChild(candidateId);
+        cardHeader.appendChild(provenanceLabel);
         molCard.appendChild(cardHeader);
 
         // 分子图片区域 - 使用后端API生成图片（动态高度）
@@ -3998,33 +3837,77 @@
         const infoSection = document.createElement("div");
         infoSection.style.cssText = `padding: 16px; flex: 1; display: flex; flex-direction: column; gap: 10px;`;
 
-        // 分子属性展示区域（占位）
+        // 仅显示候选记录中随工具结果提供的属性。
         const propertiesContainer = document.createElement("div");
         propertiesContainer.className = "molecule-properties";
         propertiesContainer.style.cssText = `
         width: 100%;
         font-size: 12px;
       `;
-        propertiesContainer.innerHTML = `
-        <div style="text-align: center; color: #94a3b8; padding: 12px;">
-          <div style="font-size: 18px; margin-bottom: 4px;">⏳</div>
-          <div style="font-size: 11px;">正在计算分子属性...</div>
-        </div>
-      `;
+        const propertyLabels = {
+          molecular_weight: "分子量",
+          mw: "分子量",
+          logp: "LogP",
+          qed: "QED",
+          tpsa: "TPSA",
+          hbd: "HBD",
+          hba: "HBA",
+        };
+        const rawProperties = candidate.metadata.properties;
+        const availableProperties = [];
+        if (rawProperties && typeof rawProperties === "object") {
+          Object.keys(propertyLabels).forEach((name) => {
+            const value = rawProperties[name];
+            if (
+              value !== null &&
+              value !== undefined &&
+              ["string", "number", "boolean"].includes(typeof value)
+            ) {
+              availableProperties.push([name, value]);
+            }
+          });
+        }
+        if (availableProperties.length === 0) {
+          const unavailable = document.createElement("div");
+          unavailable.style.cssText =
+            "text-align: center; color: #64748b; padding: 12px; font-size: 11px;";
+          unavailable.textContent = "本步骤未提供经工具验证的属性";
+          propertiesContainer.appendChild(unavailable);
+        } else {
+          const propertyGrid = document.createElement("div");
+          propertyGrid.style.cssText =
+            "display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 10px;";
+          availableProperties.forEach(([name, value]) => {
+            const propertyRow = document.createElement("div");
+            propertyRow.style.cssText =
+              "display: flex; justify-content: space-between; gap: 6px; background: #f8fafc; padding: 6px 10px; border-radius: 6px;";
+            const propertyName = document.createElement("span");
+            propertyName.style.color = "#64748b";
+            propertyName.textContent = propertyLabels[name];
+            const propertyValue = document.createElement("span");
+            propertyValue.style.cssText = "color: #334155; font-weight: 700;";
+            propertyValue.textContent = String(value);
+            propertyRow.appendChild(propertyName);
+            propertyRow.appendChild(propertyValue);
+            propertyGrid.appendChild(propertyRow);
+          });
+          propertiesContainer.appendChild(propertyGrid);
+        }
         infoSection.appendChild(propertiesContainer);
-
-        // 异步获取分子属性
-        fetchMoleculePropertiesForToolMolecule(smiles, propertiesContainer);
 
         // SMILES 折叠区域
         const smilesDetails = document.createElement("details");
         smilesDetails.style.cssText = `margin-top: 4px;`;
-        smilesDetails.innerHTML = `
-        <summary style="cursor: pointer; color: #64748b; font-size: 12px; user-select: none;">显示 SMILES</summary>
-        <div style="margin-top: 6px; padding: 8px; background: #f8fafc; border-radius: 4px; font-family: monospace; font-size: 11px; color: #475569; word-break: break-all; border: 1px solid #e2e8f0;">
-          ${smiles}
-        </div>
-      `;
+        const smilesSummary = document.createElement("summary");
+        smilesSummary.style.cssText =
+          "cursor: pointer; color: #64748b; font-size: 12px; user-select: none;";
+        smilesSummary.textContent = "显示 SMILES";
+        const smilesText = document.createElement("div");
+        smilesText.style.cssText =
+          "margin-top: 6px; padding: 8px; background: #f8fafc; border-radius: 4px; font-family: monospace; font-size: 11px; color: #475569; word-break: break-all; border: 1px solid #e2e8f0;";
+        smilesText.textContent = candidate.canonical_smiles;
+        smilesDetails.appendChild(smilesSummary);
+        smilesDetails.appendChild(smilesText);
         infoSection.appendChild(smilesDetails);
 
         molCard.appendChild(infoSection);
@@ -4056,13 +3939,13 @@
         justify-content: center;
         gap: 4px;
       `;
-        copyBtn.innerHTML = `<span style="font-size: 13px;">📋</span> 复制`;
+        copyBtn.textContent = "📋 复制";
         copyBtn.onclick = () => {
-          navigator.clipboard.writeText(smiles).then(() => {
-            copyBtn.innerHTML = `<span style="font-size: 13px;">✅</span> 已复制`;
+          navigator.clipboard.writeText(candidate.canonical_smiles).then(() => {
+            copyBtn.textContent = "✅ 已复制";
             copyBtn.style.background = "#10b981";
             setTimeout(() => {
-              copyBtn.innerHTML = `<span style="font-size: 13px;">📋</span> 复制`;
+              copyBtn.textContent = "📋 复制";
               copyBtn.style.background = "#4f46e5";
             }, 2000);
           });

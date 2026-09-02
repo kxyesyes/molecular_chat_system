@@ -71,6 +71,13 @@ assert(
   "Homepage must load safe_render.js before home formatters",
 );
 assert(
+  indexHtml.indexOf("/static/js/shared/safe_render.js") <
+    indexHtml.indexOf("/static/js/home/molecule_candidates.js") &&
+    indexHtml.indexOf("/static/js/home/molecule_candidates.js") <
+      indexHtml.indexOf("/static/js/home/main.js"),
+  "Homepage must load the structured molecule helper after shared safety and before main",
+);
+assert(
   designHtml.indexOf("/static/js/shared/safe_render.js") <
     designHtml.indexOf("/static/js/design/main.js"),
   "Molecular design must load safe_render.js before design main",
@@ -84,6 +91,9 @@ assert(
 const homeFormatters = read("src/web/static/js/home/formatters.js");
 const homeMain = read("src/web/static/js/home/main.js");
 const homeChatRenderer = read("src/web/static/js/home/chat_renderer.js");
+const homeMoleculeCandidates = read(
+  "src/web/static/js/home/molecule_candidates.js",
+);
 
 function extractFunction(source, functionName) {
   const escapedName = functionName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -122,6 +132,16 @@ assert(
 assert(
   homeFormatters.includes("MedChatSafeRender"),
   "Homepage formatters must use the shared safe rendering helper",
+);
+assert(
+  homeMoleculeCandidates.includes("HomeMoleculeCandidates") &&
+    homeMoleculeCandidates.includes("cloneJson"),
+  "Homepage molecule events must pass through a fresh structured normalizer",
+);
+assert(
+  !homeMain.includes("detectAndRenderMolecules") &&
+    !homeMain.includes("fetchMoleculePropertiesForToolMolecule"),
+  "Homepage must not scan assistant prose or fetch properties for structured candidates",
 );
 assert(
   !homeFormatters.includes('href="$2"'),
