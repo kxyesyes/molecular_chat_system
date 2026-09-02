@@ -128,6 +128,47 @@ def _migration_process_worker(project_root, start, output):
         output.put(("error", repr(exc)))
 
 
+def _auto_seed_process_worker(project_root, start, first_count_barrier, call_log, output):
+    from src.target_search import service as service_module
+    from src.target_search.seed import seed_database as real_seed_database
+
+    class RemoteMustNotRun:
+        def resolve(self, query, organism):
+            raise AssertionError("authoritative resolver must not run after seed")
+
+    def counted_seed(root):
+        with Path(call_log).open("a", encoding="utf-8") as stream:
+            stream.write(f"{os.getpid()}\n")
+        time.sleep(0.1)
+        return real_seed_database(root)
+
+    try:
+        service = service_module.TargetSearchService(
+            project_root=Path(project_root),
+            resolver=RemoteMustNotRun(),
+            auto_seed=True,
+        )
+        original_target_count = service._target_count
+        first_count = True
+
+        def synchronized_target_count():
+            nonlocal first_count
+            count = original_target_count()
+            if first_count:
+                first_count = False
+                first_count_barrier.wait(timeout=10)
+            return count
+
+        service._target_count = synchronized_target_count
+        service_module.seed_database = counted_seed
+        if not start.wait(10):
+            output.put(("error", "seed start was not signaled"))
+            return
+        output.put(("ok", service.search_targets("EGFR")["lookup_path"]))
+    except Exception as exc:
+        output.put(("error", repr(exc)))
+
+
 def _publish_coordinate(
     repository,
     project_root,
@@ -4647,6 +4688,91 @@ def test_authoritative_resolver_closes_only_clients_it_owns(monkeypatch):
     assert [client.closed for client in created] == [1, 1, 1]
 
 
+def test_service_lazy_resolver_is_created_once_under_concurrency_and_closed_once(
+    project_root, monkeypatch
+):
+    from src.target_search import service as service_module
+
+    created = []
+
+    class SlowResolver:
+        def __init__(self):
+            time.sleep(0.03)
+            self.closed = 0
+            created.append(self)
+
+        def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr(service_module, "AuthoritativeTargetResolver", SlowResolver)
+    service = service_module.TargetSearchService(
+        project_root=project_root,
+        auto_seed=False,
+    )
+    barrier = threading.Barrier(8)
+    resolved = []
+
+    def get_resolver():
+        barrier.wait()
+        resolved.append(service._get_resolver())
+
+    threads = [threading.Thread(target=get_resolver) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    service.close()
+    service.close()
+
+    assert len(created) == 1
+    assert len({id(item) for item in resolved}) == 1
+    assert created[0].closed == 1
+    with pytest.raises(RuntimeError, match="closed"):
+        service._get_resolver()
+
+
+def test_service_close_waits_for_inflight_lazy_resolver_creation(project_root, monkeypatch):
+    from src.target_search import service as service_module
+
+    construction_started = threading.Event()
+    release_construction = threading.Event()
+    created = []
+
+    class PausedResolver:
+        def __init__(self):
+            self.closed = 0
+            created.append(self)
+            construction_started.set()
+            assert release_construction.wait(timeout=5)
+
+        def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr(service_module, "AuthoritativeTargetResolver", PausedResolver)
+    service = service_module.TargetSearchService(
+        project_root=project_root,
+        auto_seed=False,
+    )
+    getter = threading.Thread(target=service._get_resolver)
+    closer = threading.Thread(target=service.close)
+
+    getter.start()
+    assert construction_started.wait(timeout=2)
+    closer.start()
+    assert closer.is_alive()
+    release_construction.set()
+    getter.join(timeout=5)
+    closer.join(timeout=5)
+
+    assert not getter.is_alive()
+    assert not closer.is_alive()
+    assert len(created) == 1
+    assert created[0].closed == 1
+    with pytest.raises(RuntimeError, match="closed"):
+        service._get_resolver()
+
+
 class _QueueResolver:
     def __init__(self, *resolutions):
         self.resolutions = list(resolutions)
@@ -4809,6 +4935,19 @@ def test_remote_resolution_caches_target_and_structures_with_separate_ttls(
     assert len(resolver.calls) == 1
     assert first["cache"] == {"target": "refreshed", "structures": "refreshed"}
     assert second["cache"] == {"target": "fresh", "structures": "fresh"}
+    record = second["results"][0]
+    assert record["target_retrieved_at"] == clock.value.isoformat()
+    assert record["target_expires_at"] == (
+        clock.value + timedelta(days=30)
+    ).isoformat()
+    assert record["structures_retrieved_at"] == clock.value.isoformat()
+    assert record["structures_expires_at"] == (
+        clock.value + timedelta(days=7)
+    ).isoformat()
+    assert record["recommended_structures"][0]["retrieved_at"] == clock.value.isoformat()
+    assert record["recommended_structures"][0]["expires_at"] == (
+        clock.value + timedelta(days=7)
+    ).isoformat()
     conn = get_connection(project_root)
     try:
         rows = conn.execute(
@@ -4827,6 +4966,77 @@ def test_remote_resolution_caches_target_and_structures_with_separate_ttls(
         "target": timedelta(days=30),
         "structures": timedelta(days=7),
     }
+
+
+@pytest.mark.parametrize(
+    ("target_changes", "structures"),
+    [
+        ({"source": "CommunityWiki"}, [_experimental_structure()]),
+        ({"source_record_id": "Q9H0H5"}, [_experimental_structure()]),
+        (
+            {"source_url": "https://evil.example/uniprot/P00533"},
+            [_experimental_structure()],
+        ),
+        ({"organism": "Mus musculus"}, [_experimental_structure()]),
+        (
+            {},
+            [
+                {
+                    **_experimental_structure(),
+                    "source_url": "https://evil.example/structure/1ABC",
+                }
+            ],
+        ),
+        (
+            {},
+            [{**_experimental_structure(), "source": "CommunityPDB"}],
+        ),
+        (
+            {},
+            [
+                {
+                    **_predicted_structure(),
+                    "structure_id": "AF-Q9H0H5-F1",
+                    "model_id": "AF-Q9H0H5-F1",
+                }
+            ],
+        ),
+    ],
+    ids=[
+        "untrusted-target-source",
+        "record-id-mismatch",
+        "evil-target-url",
+        "organism-mismatch",
+        "evil-structure-url",
+        "untrusted-structure-source",
+        "alphafold-accession-mismatch",
+    ],
+)
+def test_untrusted_authoritative_resolution_is_rejected_before_any_cache_write(
+    project_root, clock, target_changes, structures
+):
+    from src.target_search.database import get_connection
+
+    target = {**_authoritative_target(), **target_changes}
+    service = _remote_service(
+        project_root,
+        clock,
+        _QueueResolver(_resolution(target=target, structures=structures)),
+    )
+
+    payload = service.search_targets("EGFR")
+
+    assert payload["status"] == "unavailable"
+    assert payload["results"] == []
+    assert payload["warnings"] == ["authoritative_normalization_failed"]
+    conn = get_connection(project_root)
+    try:
+        cache_rows = conn.execute(
+            "SELECT COUNT(*) AS count FROM target_remote_cache"
+        ).fetchone()["count"]
+    finally:
+        conn.close()
+    assert cache_rows == 0
 
 
 def test_target_cache_identity_includes_default_organism(project_root, clock):
@@ -5018,6 +5228,13 @@ def test_fresh_target_uses_existing_stale_structures_on_retryable_outage(
     assert payload["results"][0]["stale"] is True
     assert payload["results"][0]["structure_evidence_status"] == "stale"
     assert payload["results"][0]["recommended_structures"][0]["structure_id"] == "1ABC"
+    assert payload["results"][0]["target_expires_at"] == (
+        clock.value - timedelta(days=8) + timedelta(days=30)
+    ).isoformat()
+    assert payload["results"][0]["structures_expires_at"] == (
+        clock.value - timedelta(days=1)
+    ).isoformat()
+    assert payload["results"][0]["recommended_structures"][0]["stale"] is True
     assert "stale_authoritative_cache" in payload["warnings"]
 
 
@@ -5130,3 +5347,45 @@ def test_concurrent_empty_database_calls_seed_once_idempotently(
     assert len(payloads) == 5
     assert all(payload["results"][0]["gene_symbol"] == "EGFR" for payload in payloads)
     assert resolver.calls == []
+
+
+def test_multiprocess_empty_database_calls_seed_once_under_db_path_lock(
+    project_root,
+):
+    db_dir = project_root / "data" / "target_db"
+    db_dir.mkdir(parents=True)
+    (db_dir / "common_targets.csv").write_text(
+        "gene_symbol,protein_name,uniprot_id,organism,target_type,aliases\n"
+        "EGFR,Epidermal growth factor receptor,P00533,Homo sapiens,Kinase,ERBB1\n",
+        encoding="utf-8",
+    )
+    call_log = project_root / "seed-calls.log"
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    first_count_barrier = context.Barrier(4)
+    output = context.Queue()
+    processes = [
+        context.Process(
+            target=_auto_seed_process_worker,
+            args=(
+                str(project_root),
+                start,
+                first_count_barrier,
+                str(call_log),
+                output,
+            ),
+        )
+        for _ in range(4)
+    ]
+    for process in processes:
+        process.start()
+    start.set()
+    results = [output.get(timeout=20) for _ in processes]
+    for process in processes:
+        process.join(timeout=20)
+
+    assert all(not process.is_alive() for process in processes)
+    assert all(process.exitcode == 0 for process in processes)
+    assert all(status == "ok" for status, _ in results), results
+    assert all(path[-1] == "local" for _, path in results)
+    assert len(call_log.read_text(encoding="utf-8").splitlines()) == 1

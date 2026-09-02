@@ -645,6 +645,93 @@ class TargetSearchDemoTest(unittest.TestCase):
         self.assertEqual(len(service_thread_ids), 1)
         self.assertNotEqual(route_thread_ids[0], service_thread_ids[0])
 
+    def test_search_route_keeps_event_loop_responsive_during_slow_lookup(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from src.target_search import routes
+
+        lookup_started = threading.Event()
+        release_lookup = threading.Event()
+        ping_completed = threading.Event()
+        responses = {}
+
+        class SlowTargetSearchService:
+            def search_targets(self, *args, **kwargs):
+                lookup_started.set()
+                release_lookup.wait(timeout=5)
+                return {
+                    "query": "EGFR",
+                    "results": [],
+                    "warnings": [],
+                    "lookup_path": ["local"],
+                    "status": "not_found",
+                    "cache": {"target": "miss", "structures": "miss"},
+                }
+
+            def close(self):
+                return None
+
+        with patch.object(
+            routes,
+            "TargetSearchService",
+            return_value=SlowTargetSearchService(),
+        ):
+            app = FastAPI()
+
+            @app.get("/ping")
+            async def ping():
+                return {"ok": True}
+
+            routes.setup_target_search_routes(app)
+            with TestClient(app) as client:
+                search_thread = threading.Thread(
+                    target=lambda: responses.setdefault(
+                        "search", client.get("/api/target-db/search?query=EGFR")
+                    )
+                )
+                ping_thread = threading.Thread(
+                    target=lambda: (
+                        responses.setdefault("ping", client.get("/ping")),
+                        ping_completed.set(),
+                    )
+                )
+                search_thread.start()
+                self.assertTrue(lookup_started.wait(timeout=2))
+                ping_thread.start()
+                try:
+                    self.assertTrue(
+                        ping_completed.wait(timeout=0.5),
+                        "slow target lookup blocked an unrelated async endpoint",
+                    )
+                finally:
+                    release_lookup.set()
+                    search_thread.join(timeout=5)
+                    ping_thread.join(timeout=5)
+
+        self.assertEqual(responses["ping"].status_code, 200)
+        self.assertEqual(responses["search"].status_code, 200)
+
+    def test_target_search_route_closes_owned_service_on_shutdown(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from src.target_search import routes
+
+        class ClosingService:
+            def __init__(self):
+                self.close_calls = 0
+
+            def close(self):
+                self.close_calls += 1
+
+        service = ClosingService()
+        with patch.object(routes, "TargetSearchService", return_value=service):
+            app = FastAPI()
+            routes.setup_target_search_routes(app)
+            with TestClient(app):
+                self.assertEqual(service.close_calls, 0)
+
+        self.assertEqual(service.close_calls, 1)
+
     def test_preflight_route_returns_404_for_missing_structure(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
@@ -718,8 +805,21 @@ class TargetSearchDemoTest(unittest.TestCase):
                                 {
                                     "structure_id": "1ABC",
                                     "source": "RCSB_PDB",
+                                    "source_url": "https://www.rcsb.org/structure/1ABC",
+                                    "retrieved_at": "2026-01-01T00:00:00+00:00",
+                                    "expires_at": "2026-01-08T00:00:00+00:00",
+                                    "stale": True,
                                     "recommendation_level": "recommended",
-                                }
+                                },
+                                {
+                                    "structure_id": "AF-P00533-F1",
+                                    "source": "AlphaFold",
+                                    "source_url": "https://alphafold.ebi.ac.uk/entry/P00533",
+                                    "retrieved_at": "2026-01-01T00:00:00+00:00",
+                                    "expires_at": "2026-01-08T00:00:00+00:00",
+                                    "stale": True,
+                                    "recommendation_level": "predicted",
+                                },
                             ],
                         }
                     ],
@@ -739,6 +839,7 @@ class TargetSearchDemoTest(unittest.TestCase):
             result["lookup_path"], ["local", "UniProt", "RCSB_PDB"]
         )
         self.assertIn("stale_authoritative_cache", result["warnings"])
+        self.assertEqual(result["quality"]["status"], "partial")
         self.assertEqual(
             result["evidence"],
             [
@@ -749,9 +850,45 @@ class TargetSearchDemoTest(unittest.TestCase):
                     "retrieved_at": "2026-01-01T00:00:00+00:00",
                     "expires_at": "2026-01-31T00:00:00+00:00",
                     "stale": True,
+                },
+                {
+                    "source": "RCSB_PDB",
+                    "id": "1ABC",
+                    "url": "https://www.rcsb.org/structure/1ABC",
+                    "retrieved_at": "2026-01-01T00:00:00+00:00",
+                    "expires_at": "2026-01-08T00:00:00+00:00",
+                    "stale": True,
+                },
+                {
+                    "source": "AlphaFold",
+                    "id": "AF-P00533-F1",
+                    "url": "https://alphafold.ebi.ac.uk/entry/P00533",
+                    "retrieved_at": "2026-01-01T00:00:00+00:00",
+                    "expires_at": "2026-01-08T00:00:00+00:00",
+                    "stale": True,
                 }
             ],
         )
+
+    def test_target_database_tool_closes_and_releases_long_lived_service(self):
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+        class FakeService:
+            def __init__(self):
+                self.close_calls = 0
+
+            def close(self):
+                self.close_calls += 1
+
+        tool = TargetDatabaseTool()
+        service = FakeService()
+        tool._service = service
+
+        tool.close()
+        tool.close()
+
+        self.assertEqual(service.close_calls, 1)
+        self.assertIsNone(tool._service)
 
     def test_target_database_tool_reports_zero_authoritative_matches_honestly(self):
         from src.agent.tools.target_database_tool import TargetDatabaseTool

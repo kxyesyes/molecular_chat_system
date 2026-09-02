@@ -90,5 +90,11 @@ class ToolRegistry:
     def health(self) -> list[dict]:
         return [self._tools[name].health() for name in sorted(self._tools)]
 
+    def close(self) -> None:
+        for name in sorted(self._tools):
+            close = getattr(self._tools[name], "close", None)
+            if callable(close):
+                close()
+
     def as_mapping(self) -> dict[str, ToolAdapter]:
         return dict(self._tools)

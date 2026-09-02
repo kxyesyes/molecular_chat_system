@@ -4,6 +4,7 @@
 
 from typing import Any, Dict
 import logging
+import threading
 
 from .base_tool import BaseMolecularTool
 
@@ -22,19 +23,30 @@ class TargetDatabaseTool(BaseMolecularTool):
             ),
         )
         self._service = None
+        self._service_lock = threading.RLock()
 
     def _get_service(self):
         """Lazy-load TargetSearchService."""
-        if self._service is None:
-            try:
-                from src.target_search.service import TargetSearchService
+        with self._service_lock:
+            if self._service is None:
+                try:
+                    from src.target_search.service import TargetSearchService
 
-                self._service = TargetSearchService()
-                logger.info("TargetSearchService loaded")
-            except Exception:
-                logger.error("Failed to load TargetSearchService")
-                raise
-        return self._service
+                    self._service = TargetSearchService()
+                    logger.info("TargetSearchService loaded")
+                except Exception:
+                    logger.error("Failed to load TargetSearchService")
+                    raise
+            return self._service
+
+    def close(self) -> None:
+        with self._service_lock:
+            service = self._service
+            self._service = None
+        if service is not None:
+            close = getattr(service, "close", None)
+            if callable(close):
+                close()
 
     def should_use(self, query: str) -> bool:
         query_lower = query.lower()
@@ -80,6 +92,7 @@ class TargetDatabaseTool(BaseMolecularTool):
             lookup_path: list[str] = []
             evidence: list[dict[str, Any]] = []
             service_statuses: list[str] = []
+            service_retryabilities: list[bool] = []
             result["warnings"] = []
             for search_query in search_queries:
                 search_result = service.search_targets(search_query)
@@ -89,6 +102,15 @@ class TargetDatabaseTool(BaseMolecularTool):
                 if not isinstance(service_status, str):
                     service_status = "resolved" if service_results else "not_found"
                 service_statuses.append(service_status)
+                if isinstance(search_result.get("retryable"), bool):
+                    service_retryabilities.append(search_result["retryable"])
+                for service_evidence in search_result.get("evidence", []):
+                    normalized_evidence = self._service_evidence(service_evidence)
+                    if (
+                        normalized_evidence is not None
+                        and normalized_evidence not in evidence
+                    ):
+                        evidence.append(normalized_evidence)
                 for warning in search_result.get("warnings", []):
                     if isinstance(warning, str) and warning not in result.setdefault(
                         "warnings", []
@@ -123,9 +145,9 @@ class TargetDatabaseTool(BaseMolecularTool):
                                     f"{target_id}."
                                 )
                         target["recommended_structures"] = recommended_structures
-                        provenance = self._target_evidence(target)
-                        if provenance is not None and provenance not in evidence:
-                            evidence.append(provenance)
+                        for provenance in self._target_evidence(target):
+                            if provenance not in evidence:
+                                evidence.append(provenance)
                     targets.append(target)
 
             result["lookup_path"] = lookup_path
@@ -157,6 +179,11 @@ class TargetDatabaseTool(BaseMolecularTool):
                 ):
                     result["status"] = "unavailable"
                     result["quality"]["status"] = "partial"
+                    result["quality"]["retryable"] = (
+                        any(service_retryabilities)
+                        if service_retryabilities
+                        else True
+                    )
                     result["message"] = "Target search is temporarily unavailable."
                     result["error"] = {
                         "code": "provider_error",
@@ -192,6 +219,9 @@ class TargetDatabaseTool(BaseMolecularTool):
             partial = any(
                 status in {"ambiguous", "unavailable", "partial"}
                 for status in service_statuses
+            ) or any(
+                isinstance(target, dict) and bool(target.get("stale"))
+                for target in targets
             )
             if partial:
                 result["status"] = "partial"
@@ -292,19 +322,69 @@ class TargetDatabaseTool(BaseMolecularTool):
         return result
 
     @staticmethod
-    def _target_evidence(target: dict[str, Any]) -> dict[str, Any] | None:
+    def _service_evidence(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict) or not isinstance(value.get("source"), str):
+            return None
+        allowed_fields = (
+            "source",
+            "id",
+            "source_record_id",
+            "url",
+            "retrieved_at",
+            "expires_at",
+            "stale",
+            "status",
+        )
+        return {
+            field: value[field]
+            for field in allowed_fields
+            if field in value
+            and (
+                value[field] is None
+                or isinstance(value[field], (str, bool, int, float))
+            )
+        }
+
+    @staticmethod
+    def _target_evidence(target: dict[str, Any]) -> list[dict[str, Any]]:
+        evidence: list[dict[str, Any]] = []
         source = target.get("source")
         record_id = target.get("source_record_id")
-        if not isinstance(source, str) or not isinstance(record_id, str):
-            return None
-        return {
-            "source": source,
-            "id": record_id,
-            "url": target.get("source_url"),
-            "retrieved_at": target.get("retrieved_at"),
-            "expires_at": target.get("expires_at"),
-            "stale": bool(target.get("stale")),
-        }
+        if isinstance(source, str) and isinstance(record_id, str):
+            evidence.append(
+                {
+                    "source": source,
+                    "id": record_id,
+                    "url": target.get("source_url"),
+                    "retrieved_at": target.get("target_retrieved_at", target.get("retrieved_at")),
+                    "expires_at": target.get("target_expires_at", target.get("expires_at")),
+                    "stale": bool(target.get("stale")),
+                }
+            )
+        for structure in target.get("recommended_structures") or []:
+            if not isinstance(structure, dict):
+                continue
+            structure_source = structure.get("source")
+            structure_id = structure.get("structure_id")
+            if not isinstance(structure_source, str) or not isinstance(
+                structure_id, str
+            ):
+                continue
+            evidence.append(
+                {
+                    "source": structure_source,
+                    "id": structure_id,
+                    "url": structure.get("source_url"),
+                    "retrieved_at": structure.get(
+                        "retrieved_at", target.get("structures_retrieved_at")
+                    ),
+                    "expires_at": structure.get(
+                        "expires_at", target.get("structures_expires_at")
+                    ),
+                    "stale": bool(structure.get("stale", target.get("stale"))),
+                }
+            )
+        return evidence
 
     def _search_queries(self, query: Any) -> list[str]:
         queries: list[str] = []

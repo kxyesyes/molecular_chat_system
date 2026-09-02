@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 import threading
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -37,10 +39,69 @@ _TARGET_SEED_FILENAMES = (
     "common_targets.csv",
     "pde_targets.csv",
 )
+_UNIPROT_ACCESSION_RE = re.compile(
+    r"(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})"
+)
+_RCSB_STRUCTURE_ID_RE = re.compile(r"[0-9][A-Z0-9]{3}")
+_ORGANISM_ALIASES = {
+    "homo sapiens": "Homo sapiens",
+    "human": "Homo sapiens",
+    "9606": "Homo sapiens",
+    "mus musculus": "Mus musculus",
+    "mouse": "Mus musculus",
+    "10090": "Mus musculus",
+}
 def _seed_lock(db_path: Path) -> threading.RLock:
     resolved = db_path.resolve()
     with _SEED_LOCKS_GUARD:
         return _SEED_LOCKS.setdefault(resolved, threading.RLock())
+
+
+class _InterprocessSeedLock:
+    def __init__(self, db_path: Path) -> None:
+        resolved = db_path.resolve()
+        self._lock_path = resolved.with_name(f"{resolved.name}.seed.lock")
+        self._stream = None
+
+    def __enter__(self) -> "_InterprocessSeedLock":
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._stream = self._lock_path.open("a+b", buffering=0)
+        self._stream.seek(0, os.SEEK_END)
+        if self._stream.tell() == 0:
+            self._stream.write(b"\0")
+        self._stream.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(self._stream.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._stream.fileno(), fcntl.LOCK_EX)
+        except Exception:
+            self._stream.close()
+            self._stream = None
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        if self._stream is None:
+            return False
+        try:
+            self._stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(self._stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._stream.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._stream.close()
+            self._stream = None
+        return False
 
 
 def _json_copy(value: Any) -> Any:
@@ -67,6 +128,8 @@ class TargetSearchService:
         self.downloader = StructureDownloader(self.project_root)
         self._resolver = resolver
         self._owns_resolver = resolver is None
+        self._resolver_lock = threading.RLock()
+        self._closed = False
         self.cache = cache or TargetCacheRepository(self.project_root)
         self.auto_seed = auto_seed
         self.organism = organism
@@ -193,8 +256,9 @@ class TargetSearchService:
         seed_dir = get_target_db_dir(self.project_root)
         if not any((seed_dir / filename).is_file() for filename in _TARGET_SEED_FILENAMES):
             return False
-        lock = _seed_lock(get_db_path(self.project_root))
-        with lock:
+        db_path = get_db_path(self.project_root).resolve()
+        lock = _seed_lock(db_path)
+        with lock, _InterprocessSeedLock(db_path):
             if self._target_count() != 0:
                 return False
             if not any(
@@ -274,7 +338,9 @@ class TargetSearchService:
             try:
                 normalized_target = self._normalize_target_evidence(resolution.target)
                 normalized_structures = self._normalize_structure_evidence(
-                    resolution.structures
+                    resolution.structures,
+                    accession=normalized_target["uniprot_id"],
+                    organism=normalized_target["organism"],
                 )
             except (KeyError, TypeError, ValueError):
                 return self._search_payload(
@@ -287,6 +353,7 @@ class TargetSearchService:
                         "target": target_state,
                         "structures": structures_state,
                     },
+                    retryable=False,
                 )
 
             if target_fresh and target_cached is not None:
@@ -301,6 +368,7 @@ class TargetSearchService:
                             "target": "fresh",
                             "structures": structures_state,
                         },
+                        retryable=False,
                     )
                 target_evidence = target_cached
                 target_state = "fresh"
@@ -394,6 +462,7 @@ class TargetSearchService:
             warnings=list(resolution.warnings),
             lookup_path=lookup_path,
             cache={"target": target_state, "structures": structures_state},
+            retryable=resolution.retryable,
         )
 
     def _resolve_safely(self, query: str) -> TargetResolution:
@@ -410,13 +479,24 @@ class TargetSearchService:
             )
 
     def _get_resolver(self) -> AuthoritativeTargetResolver:
-        if self._resolver is None:
-            self._resolver = AuthoritativeTargetResolver()
-        return self._resolver
+        with self._resolver_lock:
+            if self._closed:
+                raise RuntimeError("TargetSearchService is closed")
+            if self._resolver is None:
+                self._resolver = AuthoritativeTargetResolver()
+            return self._resolver
 
     def close(self) -> None:
-        if self._owns_resolver and self._resolver is not None:
-            self._resolver.close()
+        resolver = None
+        with self._resolver_lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._owns_resolver:
+                resolver = self._resolver
+            self._resolver = None
+        if resolver is not None:
+            resolver.close()
 
     def __enter__(self) -> "TargetSearchService":
         return self
@@ -459,22 +539,41 @@ class TargetSearchService:
             not isinstance(item, str) for item in aliases
         ):
             raise ValueError("target aliases are invalid")
+        accession = target["uniprot_id"].strip().upper()
+        source_record_id = target["source_record_id"].strip().upper()
+        source = target["source"].strip()
+        organism = self._optional_text(target.get("organism"))
+        expected_organism = self._canonical_organism(self.organism)
+        if (
+            source != "UniProt"
+            or _UNIPROT_ACCESSION_RE.fullmatch(accession) is None
+            or source_record_id != accession
+            or target["source_url"].strip()
+            != f"https://www.uniprot.org/uniprotkb/{accession}/entry"
+            or organism is None
+            or self._canonical_organism(organism) != expected_organism
+        ):
+            raise ValueError("target provenance is invalid")
         return {
             "gene_symbol": target["gene_symbol"].strip(),
             "protein_name": self._optional_text(target.get("protein_name")),
-            "uniprot_id": target["uniprot_id"].strip().upper(),
-            "organism": self._optional_text(target.get("organism")),
+            "uniprot_id": accession,
+            "organism": organism,
             "target_type": self._optional_text(target.get("target_type")),
             "disease_keywords": [],
             "aliases": sorted({item.strip() for item in aliases if item.strip()}),
-            "source": target["source"].strip(),
-            "source_record_id": target["source_record_id"].strip(),
-            "source_url": target["source_url"].strip(),
+            "source": source,
+            "source_record_id": source_record_id,
+            "source_url": f"https://www.uniprot.org/uniprotkb/{accession}/entry",
             "match_reason": self._optional_text(target.get("match_reason")) or "authoritative",
         }
 
     def _normalize_structure_evidence(
-        self, structures: tuple[Mapping[str, Any], ...]
+        self,
+        structures: tuple[Mapping[str, Any], ...],
+        *,
+        accession: str,
+        organism: Optional[str],
     ) -> list[dict[str, Any]]:
         normalized = []
         for index, structure in enumerate(structures):
@@ -487,28 +586,72 @@ class TargetSearchService:
                 for value in (structure_id, source, structure_type, source_url)
             ):
                 raise ValueError("structure evidence is incomplete")
+            normalized_id = structure_id.strip().upper()
+            normalized_source = source.strip()
+            normalized_type = structure_type.strip().casefold()
+            normalized_source_url = source_url.strip()
+            normalized_download_url = self._optional_text(
+                structure.get("download_url")
+            )
+            structure_organism = self._optional_text(structure.get("organism"))
+            if structure_organism is not None and (
+                organism is None
+                or self._canonical_organism(structure_organism)
+                != self._canonical_organism(organism)
+            ):
+                raise ValueError("structure organism is invalid")
+            if normalized_source == "RCSB_PDB":
+                if (
+                    normalized_type != "experimental"
+                    or _RCSB_STRUCTURE_ID_RE.fullmatch(normalized_id) is None
+                    or normalized_source_url
+                    != f"https://www.rcsb.org/structure/{normalized_id}"
+                    or normalized_download_url
+                    != f"https://files.rcsb.org/download/{normalized_id}.cif"
+                ):
+                    raise ValueError("RCSB provenance is invalid")
+            elif normalized_source == "AlphaFold":
+                expected_model_id = f"AF-{accession}-F1"
+                model_id = self._optional_text(structure.get("model_id"))
+                linked_accession = self._optional_text(structure.get("uniprot_id"))
+                official_download = re.fullmatch(
+                    rf"https://alphafold\.ebi\.ac\.uk/files/{re.escape(expected_model_id)}-model_v[1-9][0-9]*\.(?:cif|pdb)",
+                    normalized_download_url or "",
+                )
+                if (
+                    normalized_type != "predicted"
+                    or normalized_id != expected_model_id
+                    or model_id != expected_model_id
+                    or linked_accession != accession
+                    or normalized_source_url
+                    != f"https://alphafold.ebi.ac.uk/entry/{accession}"
+                    or official_download is None
+                ):
+                    raise ValueError("AlphaFold provenance is invalid")
+            else:
+                raise ValueError("structure source is invalid")
             ligand_values = structure.get("ligand_evidence", structure.get("ligand_ids", [])) or []
             if not isinstance(ligand_values, (list, tuple)) or any(
                 not isinstance(item, str) for item in ligand_values
             ):
                 raise ValueError("structure ligand evidence is invalid")
-            is_experimental = structure_type.strip().casefold() == "experimental"
+            is_experimental = normalized_type == "experimental"
             payload = {
                 "id": None,
-                "structure_id": structure_id.strip(),
-                "source": source.strip(),
-                "structure_type": structure_type.strip(),
+                "structure_id": normalized_id,
+                "source": normalized_source,
+                "structure_type": normalized_type,
                 "method": self._optional_text(structure.get("method")),
                 "resolution": structure.get("resolution"),
                 "chain_ids": [],
                 "ligand_ids": sorted(
                     {item.strip() for item in ligand_values if item.strip()}
                 ),
-                "organism": self._optional_text(structure.get("organism")),
+                "organism": structure_organism,
                 "title": self._optional_text(structure.get("title")),
                 "file_format": "cif",
-                "download_url": self._optional_text(structure.get("download_url")),
-                "source_url": source_url.strip(),
+                "download_url": normalized_download_url,
+                "source_url": normalized_source_url,
                 "is_downloaded": False,
                 "docking_recommended": is_experimental,
                 "is_preferred": index == 0,
@@ -537,6 +680,15 @@ class TargetSearchService:
         return value.strip() or None
 
     @staticmethod
+    def _canonical_organism(value: Any) -> str:
+        if isinstance(value, bool) or value is None:
+            raise ValueError("organism evidence is invalid")
+        normalized = str(value).strip().casefold()
+        if normalized not in _ORGANISM_ALIASES:
+            raise ValueError("organism evidence is invalid")
+        return _ORGANISM_ALIASES[normalized]
+
+    @staticmethod
     def _structure_cache_source(structures: list[dict[str, Any]]) -> str:
         sources = {item["source"] for item in structures}
         return next(iter(sources)) if len(sources) == 1 else "Authoritative"
@@ -548,6 +700,14 @@ class TargetSearchService:
         structure_records = [
             _json_copy(item) for item in structures.payload.get("structures", [])
         ]
+        for structure_record in structure_records:
+            structure_record.update(
+                {
+                    "retrieved_at": structures.retrieved_at.isoformat(),
+                    "expires_at": structures.expires_at.isoformat(),
+                    "stale": structures.stale,
+                }
+            )
         experimental_count = sum(
             item.get("structure_type") == "experimental" for item in structure_records
         )
@@ -566,6 +726,10 @@ class TargetSearchService:
             "recommended_structures": structure_records,
             "retrieved_at": target.retrieved_at.isoformat(),
             "expires_at": target.expires_at.isoformat(),
+            "target_retrieved_at": target.retrieved_at.isoformat(),
+            "target_expires_at": target.expires_at.isoformat(),
+            "structures_retrieved_at": structures.retrieved_at.isoformat(),
+            "structures_expires_at": structures.expires_at.isoformat(),
             "stale": target.stale or structures.stale,
             "structure_evidence_status": (
                 "stale" if structures.stale else "fresh"
@@ -586,6 +750,10 @@ class TargetSearchService:
             "recommended_structures": [],
             "retrieved_at": target.retrieved_at.isoformat(),
             "expires_at": target.expires_at.isoformat(),
+            "target_retrieved_at": target.retrieved_at.isoformat(),
+            "target_expires_at": target.expires_at.isoformat(),
+            "structures_retrieved_at": None,
+            "structures_expires_at": None,
             "stale": target.stale,
             "structure_evidence_status": "unavailable",
         }
@@ -662,8 +830,9 @@ class TargetSearchService:
         warnings: Optional[list[str]] = None,
         lookup_path: Optional[list[str]] = None,
         cache: Optional[dict[str, str]] = None,
+        retryable: Optional[bool] = None,
     ) -> dict[str, Any]:
-        return {
+        payload = {
             "query": query,
             "results": results,
             "warnings": list(dict.fromkeys(warnings or [])),
@@ -671,6 +840,9 @@ class TargetSearchService:
             "status": status,
             "cache": cache or {"target": "none", "structures": "none"},
         }
+        if retryable is not None:
+            payload["retryable"] = retryable
+        return payload
 
     def _search_sql(self, where_clause: str) -> str:
         return f"""

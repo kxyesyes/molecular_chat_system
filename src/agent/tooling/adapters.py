@@ -62,7 +62,12 @@ class ToolAdapter(ABC):
             if last_result.success:
                 return self._validate_output(last_result)
             error_code = last_result.error.code.value if last_result.error else ""
-            if attempt >= policy.max_attempts or error_code not in policy.retryable_error_codes:
+            explicitly_retryable = last_result.quality.get("retryable")
+            if (
+                attempt >= policy.max_attempts
+                or error_code not in policy.retryable_error_codes
+                or explicitly_retryable is False
+            ):
                 return last_result
             if policy.backoff_seconds:
                 time.sleep(policy.backoff_seconds * (2 ** (attempt - 1)))
@@ -174,7 +179,14 @@ class LegacyPythonToolAdapter(ToolAdapter):
         self.tool = tool
 
     def invoke(self, payload: Any) -> Any:
-        return self.tool.execute(payload)
+        from src.agent.tools.base_tool import execute_tool_compat
+
+        return execute_tool_compat(self.tool, payload)
+
+    def close(self) -> None:
+        close = getattr(self.tool, "close", None)
+        if callable(close):
+            close()
 
 
 class HTTPToolAdapter(ToolAdapter):

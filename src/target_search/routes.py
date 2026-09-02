@@ -68,7 +68,8 @@ def setup_target_search_routes(app: FastAPI) -> None:
         has_ligand: bool | None = Query(None),
     ):
         try:
-            return service.search_targets(
+            return await run_in_threadpool(
+                service.search_targets,
                 query,
                 target_type=target_type,
                 source=source,
@@ -79,6 +80,13 @@ def setup_target_search_routes(app: FastAPI) -> None:
         except Exception as exc:
             logger.error("Target search failed: %s", exc, exc_info=True)
             raise HTTPException(status_code=500, detail=str(exc))
+
+    async def close_target_search_service() -> None:
+        close = getattr(service, "close", None)
+        if callable(close):
+            await run_in_threadpool(close)
+
+    app.router.add_event_handler("shutdown", close_target_search_service)
 
     @app.get("/api/target-db/targets/{target_id}")
     async def get_target_detail(target_id: int):
