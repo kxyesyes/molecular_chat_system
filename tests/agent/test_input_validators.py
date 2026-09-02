@@ -181,6 +181,39 @@ def test_programming_and_assay_notation_without_molecular_context_is_ignored(ter
     assert analysis.blocks_execution is False
 
 
+@pytest.mark.parametrize(
+    ("query", "term"),
+    [
+        ("请解释用 C++ 处理分子结构的方法", "C++"),
+        ("请解释 C# 在分子数据处理中的用途", "C#"),
+        ("请解释 S9+ 对药物分子稳定性评估的影响", "S9+"),
+    ],
+)
+def test_non_molecular_notation_is_ignored_even_in_molecular_prose(query, term):
+    analysis = InputValidator().analyze_molecular_input(query)
+
+    assert term not in analysis.potential_smiles
+    assert analysis.blocks_execution is False
+
+
+def test_bare_structurally_explicit_invalid_smiles_fails_closed():
+    analysis = InputValidator().analyze_molecular_input("CC(C)((")
+
+    assert analysis.potential_smiles == ("CC(C)((",)
+    assert analysis.valid_smiles == ()
+    assert analysis.blocks_execution is True
+
+
+def test_bare_simple_smiles_fails_closed_when_rdkit_is_unavailable(monkeypatch):
+    monkeypatch.setattr(validators_module, "_load_rdkit_chem", lambda: None)
+
+    analysis = InputValidator().analyze_molecular_input("CCO")
+
+    assert analysis.potential_smiles == ("CCO",)
+    assert analysis.validation_available is False
+    assert analysis.blocks_execution is True
+
+
 @pytest.mark.parametrize("invalid", ["X", "CCX"])
 def test_invalid_item_in_labeled_smiles_list_fails_closed(invalid):
     analysis = InputValidator().analyze_molecular_input(f"SMILES: CCO, {invalid}")
@@ -188,6 +221,15 @@ def test_invalid_item_in_labeled_smiles_list_fails_closed(invalid):
     assert analysis.valid_smiles == ("CCO",)
     assert invalid in analysis.potential_smiles
     assert analysis.blocks_execution is True
+
+
+@pytest.mark.parametrize("term", ["ADMET", "QED", "TPSA"])
+def test_task_term_after_labeled_smiles_is_not_treated_as_list_item(term):
+    analysis = InputValidator().analyze_molecular_input(f"SMILES: CCO, {term}")
+
+    assert analysis.potential_smiles == ("CCO",)
+    assert analysis.valid_smiles == ("CCO",)
+    assert analysis.blocks_execution is False
 
 
 def test_plain_chat_without_candidates_does_not_load_rdkit(monkeypatch):

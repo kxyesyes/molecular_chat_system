@@ -335,6 +335,41 @@ def test_non_molecular_notation_is_not_rejected_by_the_entry_gate(term):
     )
 
 
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "请解释用 C++ 处理分子结构的方法",
+        "请解释 S9+ 对药物分子稳定性评估的影响",
+    ],
+)
+def test_non_molecular_notation_in_scientific_prose_reaches_normal_processing(prompt):
+    model = _RecordingModel()
+    rag = _RecordingRagService()
+    agent = _RecordingAgentSystem()
+    handler = ChatHandler(
+        model=model,
+        rag_service=rag,
+        agent_system=agent,
+        config={"inference": {"stream": False}},
+    )
+    websocket = _RecordingWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message=prompt,
+            enable_rag=True,
+            enable_tools=False,
+        )
+    )
+
+    assert rag.calls or model.generate_calls
+    assert not any(
+        message.get("type") == "complete" and "SMILES 无效" in message.get("content", "")
+        for message in websocket.messages
+    )
+
+
 def test_labeled_invalid_smiles_takes_priority_over_incidental_valid_smiles():
     decision = HybridSkillRouter().decide(
         "请全面分析。SMILES: CC(C)((；并与 CCO 比较"

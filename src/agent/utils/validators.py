@@ -59,6 +59,24 @@ class MolecularInputAnalysis:
 class InputValidator:
     """Validate calculation intent and extract plausible SMILES tokens."""
 
+    _NON_MOLECULAR_NOTATIONS = frozenset(
+        {
+            "C++",
+            "C#",
+            "S9+",
+            "BBB",
+            "PPB",
+            "CNS",
+            "PK",
+            "S9",
+            "ADMET",
+            "LOGP",
+            "QED",
+            "TPSA",
+            "P450",
+        }
+    )
+
     _label_pattern = re.compile(
         r"(?<![A-Za-z0-9_])SMILES\s*[:：]\s*",
         re.IGNORECASE,
@@ -118,14 +136,6 @@ class InputValidator:
                             validation = "valid"
                     except Exception:
                         pass
-
-            if (
-                validation != "valid"
-                and source == "lexical"
-                and not self._has_explicit_molecular_cue(value, text)
-                and not self._has_molecular_context(text)
-            ):
-                continue
 
             candidate = MolecularInputCandidate(
                 value=value,
@@ -246,6 +256,8 @@ class InputValidator:
     @classmethod
     def _is_contextual_unlabeled_candidate(cls, token: str, text: str) -> bool:
         """Classify an unlabeled token using structure evidence and nearby cues."""
+        if token.upper() in cls._NON_MOLECULAR_NOTATIONS:
+            return cls._has_explicit_molecular_cue(token, text)
         if not cls._looks_like_smiles(token):
             return False
         if cls._is_domain_notation(token):
@@ -284,25 +296,15 @@ class InputValidator:
             )
         )
 
-    @staticmethod
-    def _has_molecular_context(text: str) -> bool:
-        return bool(
-            re.search(
-                r"(?:SMILES|molecule|structure|compound|drug.?likeness|"
-                r"分子|结构|化合物|成药性)",
-                text,
-                re.IGNORECASE,
-            )
-        )
-
     @classmethod
     def _is_labeled_list_candidate(cls, value: str) -> bool:
+        if value == "X" or re.fullmatch(r"C+X", value):
+            return True
         if not cls._looks_like_smiles(value, labeled=True):
-            return len(value) == 1 and value.isupper()
+            return False
         return bool(
             cls._has_conservative_smiles_lexicon(value)
             or cls._has_strong_structural_syntax(value)
-            or re.fullmatch(r"[A-Z][A-Z0-9]{0,7}", value)
         )
 
     @classmethod
