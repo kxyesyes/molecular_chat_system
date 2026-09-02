@@ -55,6 +55,17 @@ function collectCheck(failures, description, check) {
     assert.doesNotMatch(productionSources, /MedChat 管理员令牌/);
     assert.doesNotMatch(productionSources, /admin_fetch\.js/);
   });
+  collectCheck(failures, "changed callers use the admin-removal cache version", () => {
+    const version = "v=20260902-admin-auth-removed";
+    assert.match(homeTemplate, new RegExp(`home/main\\.js\\?${version}`));
+    assert.match(dockingTemplate, new RegExp(`docking/ui_manager\\.js\\?${version}`));
+    for (const script of ["model_manager", "training_monitor", "main"]) {
+      assert.match(
+        activityTemplate,
+        new RegExp(`activity_prediction/${script}\\.js\\?${version}`),
+      );
+    }
+  });
 
   collectCheck(failures, "LLM settings expose an explicit key-clear control", () => {
     assert.match(homeTemplate, /id=["']clearLlmApiKey["']/);
