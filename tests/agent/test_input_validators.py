@@ -69,12 +69,76 @@ def test_labeled_invalid_smiles_is_not_masked_by_incidental_valid_candidate():
     assert analysis.blocks_execution is True
 
 
+def test_chinese_adjacent_smiles_label_preserves_invalid_precedence():
+    analysis = InputValidator().analyze_molecular_input(
+        "分子SMILES: CC(C)((；并与 CCO 比较"
+    )
+
+    assert analysis.valid_smiles == ("CCO",)
+    assert analysis.labeled_candidates[0].value == "CC(C)(("
+    assert analysis.labeled_candidates[0].validation == "invalid"
+    assert analysis.blocks_execution is True
+
+
 def test_validate_query_rejects_invalid_labeled_smiles():
     result = InputValidator().validate_query("请计算 SMILES: CC(C)(( 的 LogP")
 
     assert result["valid"] is False
     assert result["has_potential_smiles"] is True
     assert result["smiles_candidates"] == []
+
+
+def test_validate_query_rejects_labeled_invalid_even_with_incidental_valid_smiles():
+    result = InputValidator().validate_query(
+        "请计算。SMILES: CC(C)((；并与 CCO 比较"
+    )
+
+    assert result["valid"] is False
+    assert result["has_potential_smiles"] is True
+    assert result["smiles_candidates"] == ["CCO"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "No SMILES was provided; calculate LogP.",
+        "没有提供 SMILES，请计算 LogP。",
+    ],
+)
+def test_prose_without_molecular_input_is_classified_as_missing_smiles(query):
+    validator = InputValidator()
+    analysis = validator.analyze_molecular_input(query)
+    result = validator.validate_query(query)
+
+    assert analysis.potential_smiles == ()
+    assert analysis.blocks_execution is False
+    assert result["valid"] is False
+    assert result["has_potential_smiles"] is False
+
+
+def test_structurally_explicit_malformed_smiles_remains_blocking():
+    analysis = InputValidator().analyze_molecular_input("请分析分子 CC(C)((")
+
+    assert analysis.potential_smiles == ("CC(C)((",)
+    assert analysis.valid_smiles == ()
+    assert analysis.blocks_execution is True
+
+
+def test_labeled_square_wrapped_smiles_falls_back_to_valid_inner_structure():
+    analysis = InputValidator().analyze_molecular_input("SMILES: [CCO]")
+
+    assert analysis.valid_smiles == ("CCO",)
+    assert analysis.labeled_candidates[0].value == "CCO"
+    assert analysis.labeled_candidates[0].validation == "valid"
+    assert analysis.blocks_execution is False
+
+
+def test_genuine_bracket_atom_is_not_unwrapped_after_raw_validation():
+    analysis = InputValidator().analyze_molecular_input("SMILES: [Na+]")
+
+    assert analysis.valid_smiles == ("[Na+]",)
+    assert analysis.labeled_candidates[0].value == "[Na+]"
+    assert analysis.blocks_execution is False
 
 
 def test_rdkit_import_failure_fails_closed(monkeypatch):

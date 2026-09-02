@@ -61,7 +61,10 @@ class MolecularInputAnalysis:
 class InputValidator:
     """Validate calculation intent and extract plausible SMILES tokens."""
 
-    _label_pattern = re.compile(r"\bSMILES\s*[:：]\s*", re.IGNORECASE)
+    _label_pattern = re.compile(
+        r"(?<![A-Za-z0-9_])SMILES\s*[:：]\s*",
+        re.IGNORECASE,
+    )
     _token_pattern = re.compile(
         r"(?<![A-Za-z0-9])"
         r"[A-Za-z0-9@+\-\[\]\(\)=#./\\:%]+"
@@ -103,7 +106,7 @@ class InputValidator:
     def analyze_molecular_input(self, text: str) -> MolecularInputAnalysis:
         extracted = self._extract_candidates_with_sources(text)
         chem = _load_rdkit_chem()
-        candidates = []
+        candidates: dict[str, MolecularInputCandidate] = {}
         for value, source in extracted:
             validation: ValidationStatus
             if chem is None:
@@ -113,15 +116,34 @@ class InputValidator:
                     validation = "valid" if chem.MolFromSmiles(value) else "invalid"
                 except Exception:
                     validation = "invalid"
-            candidates.append(
-                MolecularInputCandidate(
-                    value=value,
-                    source=source,
-                    validation=validation,
-                )
+
+            if validation == "invalid" and chem is not None:
+                inner = self._square_delimited_inner(value)
+                if inner:
+                    try:
+                        if chem.MolFromSmiles(inner):
+                            value = inner
+                            validation = "valid"
+                    except Exception:
+                        pass
+
+            if (
+                validation == "invalid"
+                and source == "lexical"
+                and not self._has_strong_structural_syntax(value)
+            ):
+                continue
+
+            candidate = MolecularInputCandidate(
+                value=value,
+                source=source,
+                validation=validation,
             )
+            existing = candidates.get(value)
+            if existing is None or source == "labeled":
+                candidates[value] = candidate
         return MolecularInputAnalysis(
-            candidates=tuple(candidates),
+            candidates=tuple(candidates.values()),
             validation_available=chem is not None,
         )
 
@@ -189,6 +211,22 @@ class InputValidator:
                     return False
         return depth == 0
 
+    @staticmethod
+    def _square_delimited_inner(text: str) -> str:
+        if len(text) < 3 or text[0] != "[" or text[-1] != "]":
+            return ""
+        depth = 0
+        for index, char in enumerate(text):
+            if char == "[":
+                depth += 1
+            elif char == "]":
+                depth -= 1
+                if depth == 0 and index != len(text) - 1:
+                    return ""
+                if depth < 0:
+                    return ""
+        return text[1:-1].strip() if depth == 0 else ""
+
     @classmethod
     def _looks_like_smiles(cls, text: str, *, labeled: bool = False) -> bool:
         if not text or len(text) < 2 or any(char.isspace() for char in text):
@@ -201,7 +239,15 @@ class InputValidator:
             return True
         if text.lower() in cls._prose_terms:
             return False
-        return cls._has_conservative_smiles_lexicon(text)
+        if not cls._has_conservative_smiles_lexicon(text):
+            return False
+        if cls._has_strong_structural_syntax(text):
+            return True
+        return bool(re.fullmatch(r"(?:(?:Cl|Br|[BCNOPSFIK]))+", text))
+
+    @staticmethod
+    def _has_strong_structural_syntax(text: str) -> bool:
+        return any(char.isdigit() or char in "[]@+-()=#./\\:%" for char in text)
 
     @staticmethod
     def _has_conservative_smiles_lexicon(text: str) -> bool:
@@ -250,7 +296,12 @@ class InputValidator:
         result["smiles_candidates"] = list(analysis.valid_smiles)
         result["has_potential_smiles"] = bool(analysis.potential_smiles)
 
-        if result["has_calculation_request"] and analysis.valid_smiles:
+        if (
+            result["has_calculation_request"]
+            and analysis.validation_available
+            and analysis.valid_smiles
+            and not analysis.blocks_execution
+        ):
             result["valid"] = True
         elif result["has_calculation_request"]:
             result["issues"].append(
