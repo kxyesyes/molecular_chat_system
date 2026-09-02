@@ -145,6 +145,60 @@ def _publish_coordinate(
     )
 
 
+def _insert_corrupt_publication_intent(
+    project_root,
+    clock,
+    cache_key,
+    *,
+    staged_path=".incoming/corrupt.tmp",
+    previous=None,
+):
+    from src.target_search.database import get_connection
+
+    intent_id = str(uuid.uuid4())
+    generation_id = str(uuid.uuid4())
+    retrieved_at = clock.value
+    expires_at = retrieved_at + timedelta(days=1)
+    previous_generation_id = previous.generation_id if previous is not None else None
+    previous_path = previous.payload["path"] if previous is not None else None
+    previous_quarantine_path = (
+        f".quarantine/{previous.generation_id}-{Path(previous_path).name}"
+        if previous is not None
+        else None
+    )
+    conn = get_connection(project_root)
+    try:
+        conn.execute(
+            """
+            INSERT INTO target_coordinate_publication_intents (
+                intent_id, generation_id, cache_key, staged_path, final_path,
+                source, source_record_id, status, retrieved_at, expires_at,
+                expires_epoch, previous_generation_id, previous_path,
+                previous_quarantine_path, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, '../outside.cif', 'RCSB_PDB', 'corrupt',
+                'reserved', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                intent_id,
+                generation_id,
+                cache_key,
+                staged_path,
+                retrieved_at.isoformat(),
+                expires_at.isoformat(),
+                expires_at.timestamp(),
+                previous_generation_id,
+                previous_path,
+                previous_quarantine_path,
+                retrieved_at.isoformat(),
+                retrieved_at.isoformat(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return intent_id
+
+
 @pytest.fixture
 def project_root(tmp_path):
     return tmp_path
@@ -673,6 +727,172 @@ def test_same_key_coordinate_republish_retires_old_generation_without_orphan(
     assert not first_file.exists()
     assert quarantine.read_text(encoding="utf-8") == "first generation"
     assert intent_count == 0
+
+
+def test_same_key_republish_retires_missing_prior_file_without_stuck_intent(
+    project_root, clock
+):
+    from src.target_search.cache import TargetCacheRepository
+    from src.target_search.database import get_cache_dir, get_connection
+
+    repository = TargetCacheRepository(project_root, clock)
+    first = _publish_coordinate(
+        repository,
+        project_root,
+        "coordinate:missing-prior",
+        "first.cif",
+        source_record_id="first",
+        content="first generation",
+    )
+    first_file = get_cache_dir(project_root) / first.payload["path"]
+    first_file.unlink()
+
+    second = _publish_coordinate(
+        repository,
+        project_root,
+        "coordinate:missing-prior",
+        "second.cif",
+        source_record_id="second",
+        content="second generation",
+    )
+
+    conn = get_connection(project_root)
+    try:
+        intents = conn.execute(
+            "SELECT COUNT(*) AS count FROM target_coordinate_publication_intents"
+        ).fetchone()["count"]
+        stale_jobs = conn.execute(
+            "SELECT COUNT(*) AS count FROM target_coordinate_cleanup_jobs "
+            "WHERE generation_id = ?",
+            (first.generation_id,),
+        ).fetchone()["count"]
+        active = conn.execute(
+            "SELECT generation_id, cleanup_pending FROM target_remote_cache "
+            "WHERE cache_key = ?",
+            ("coordinate:missing-prior",),
+        ).fetchone()
+    finally:
+        conn.close()
+    second_file = get_cache_dir(project_root) / second.payload["path"]
+    assert repository.get("coordinate:missing-prior") == second
+    assert second_file.read_text(encoding="utf-8") == "second generation"
+    assert intents == 0
+    assert stale_jobs == 0
+    assert active == {"generation_id": second.generation_id, "cleanup_pending": 0}
+
+
+def test_initialization_discards_corrupt_intent_without_touching_its_paths(
+    project_root, clock
+):
+    from src.target_search.cache import TargetCacheRepository
+    from src.target_search.database import get_cache_dir, get_connection
+
+    TargetCacheRepository(project_root, clock)
+    cache_root = get_cache_dir(project_root)
+    staged = cache_root / ".incoming" / "corrupt.tmp"
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_text("untrusted staged file", encoding="utf-8")
+    outside = project_root / "outside.cif"
+    outside.write_text("outside sentinel", encoding="utf-8")
+    intent_id = _insert_corrupt_publication_intent(
+        project_root, clock, "coordinate:corrupt-init"
+    )
+
+    repository = TargetCacheRepository(project_root, clock)
+
+    conn = get_connection(project_root)
+    try:
+        intent = conn.execute(
+            "SELECT * FROM target_coordinate_publication_intents "
+            "WHERE intent_id = ?",
+            (intent_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    reused = repository.upsert(
+        "coordinate:corrupt-init",
+        "target",
+        "UniProt",
+        "P00533",
+        {"gene": "EGFR"},
+    )
+    assert intent is None
+    assert reused.record_type == "target"
+    assert staged.read_text(encoding="utf-8") == "untrusted staged file"
+    assert outside.read_text(encoding="utf-8") == "outside sentinel"
+
+
+def test_cleanup_discards_corrupt_intent_and_preserves_valid_prior_generation(
+    project_root, clock
+):
+    from src.target_search.cache import TargetCacheRepository
+    from src.target_search.database import get_cache_dir, get_connection
+
+    repository = TargetCacheRepository(project_root, clock)
+    first = _publish_coordinate(
+        repository,
+        project_root,
+        "coordinate:corrupt-cleanup",
+        "first.cif",
+        source_record_id="first",
+        content="first generation",
+    )
+    first_file = get_cache_dir(project_root) / first.payload["path"]
+    outside = project_root / "outside.cif"
+    outside.write_text("outside sentinel", encoding="utf-8")
+    intent_id = _insert_corrupt_publication_intent(
+        project_root,
+        clock,
+        "coordinate:corrupt-cleanup",
+        previous=first,
+    )
+    previous_quarantine_path = (
+        f".quarantine/{first.generation_id}-{Path(first.payload['path']).name}"
+    )
+    conn = get_connection(project_root)
+    try:
+        conn.execute(
+            """
+            UPDATE target_remote_cache
+            SET cleanup_pending = 1, cleanup_quarantine_path = ?
+            WHERE cache_key = ? AND generation_id = ?
+            """,
+            (
+                previous_quarantine_path,
+                first.cache_key,
+                first.generation_id,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    cleanup_result = repository.cleanup_expired()
+
+    conn = get_connection(project_root)
+    try:
+        intent = conn.execute(
+            "SELECT * FROM target_coordinate_publication_intents "
+            "WHERE intent_id = ?",
+            (intent_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert cleanup_result == {"records_deleted": 0, "files_deleted": 0}
+    assert intent is None
+    assert repository.get("coordinate:corrupt-cleanup") == first
+    assert first_file.read_text(encoding="utf-8") == "first generation"
+    assert outside.read_text(encoding="utf-8") == "outside sentinel"
+
+    second = _publish_coordinate(
+        repository,
+        project_root,
+        "coordinate:corrupt-cleanup",
+        "second.cif",
+        source_record_id="second",
+        content="second generation",
+    )
+    assert repository.get("coordinate:corrupt-cleanup") == second
 
 
 def test_generic_metadata_cannot_overwrite_coordinate_owned_key(project_root, clock):

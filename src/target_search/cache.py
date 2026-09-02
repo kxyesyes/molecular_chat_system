@@ -312,6 +312,9 @@ class TargetCacheRepository:
         intent = self._load_publication_intent(intent_id)
         if intent is None or not self._prepare_previous_generation_locked(intent):
             return None
+        intent = self._load_publication_intent(intent_id)
+        if intent is None:
+            return None
         cache_root = get_cache_dir(self.project_root)
         staged = cache_root.joinpath(*intent["staged_relative"].parts)
         final = cache_root.joinpath(*intent["final_relative"].parts)
@@ -473,6 +476,8 @@ class TargetCacheRepository:
         )
         if source_state == "missing" and quarantine_state == "regular":
             return True
+        if source_state == "missing" and quarantine_state == "missing":
+            return self._retire_missing_previous_generation(intent)
         if source_state != "regular" or quarantine_state != "missing":
             return False
         if _ensure_quarantine_directory(cache_root) != "ready":
@@ -483,6 +488,70 @@ class TargetCacheRepository:
             quarantine,
             intent["previous_relative"].parts,
         )
+
+    def _retire_missing_previous_generation(self, intent: dict[str, Any]) -> bool:
+        previous_generation_id = intent["previous_generation_id"]
+        if previous_generation_id is None:
+            return False
+        conn = get_connection(self.project_root)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            intent_row = conn.execute(
+                "SELECT * FROM target_coordinate_publication_intents "
+                "WHERE intent_id = ?",
+                (intent["intent_id"],),
+            ).fetchone()
+            current_intent = self._validated_publication_intent(intent_row)
+            active = conn.execute(
+                "SELECT * FROM target_remote_cache WHERE cache_key = ?",
+                (intent["cache_key"],),
+            ).fetchone()
+            active_evidence = self._validated_evidence(active)
+            if (
+                current_intent is None
+                or current_intent["previous_generation_id"]
+                != previous_generation_id
+                or active_evidence is None
+                or active_evidence.record_type != "coordinate_file"
+                or active_evidence.generation_id != previous_generation_id
+                or active_evidence.payload["path"]
+                != intent["previous_relative"].as_posix()
+                or active["cleanup_pending"] != 1
+                or active["cleanup_quarantine_path"]
+                != intent["previous_quarantine_relative"].as_posix()
+            ):
+                conn.rollback()
+                return False
+            deleted = conn.execute(
+                """
+                DELETE FROM target_remote_cache
+                WHERE cache_key = ? AND generation_id = ?
+                    AND cleanup_pending = 1
+                """,
+                (intent["cache_key"], previous_generation_id),
+            )
+            updated = conn.execute(
+                """
+                UPDATE target_coordinate_publication_intents
+                SET previous_generation_id = NULL,
+                    previous_path = NULL,
+                    previous_quarantine_path = NULL,
+                    updated_at = ?
+                WHERE intent_id = ?
+                    AND previous_generation_id = ?
+                """,
+                (self._now().isoformat(), intent["intent_id"], previous_generation_id),
+            )
+            if deleted.rowcount != 1 or updated.rowcount != 1:
+                conn.rollback()
+                return False
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _mark_publication_installed(self, intent_id: str) -> None:
         conn = get_connection(self.project_root)
@@ -631,6 +700,7 @@ class TargetCacheRepository:
         for row in rows:
             intent = self._validated_publication_intent(row)
             if intent is None:
+                self._resolve_invalid_publication_intent_locked(row)
                 continue
             staged = cache_root.joinpath(*intent["staged_relative"].parts)
             final = cache_root.joinpath(*intent["final_relative"].parts)
@@ -648,6 +718,128 @@ class TargetCacheRepository:
                 or (staged_state == "missing" and final_state == "regular")
             ):
                 self._continue_publication_intent_locked(intent["intent_id"])
+
+    def _resolve_invalid_publication_intent_locked(
+        self, intent_row: Mapping[str, Any]
+    ) -> None:
+        intent_id = intent_row.get("intent_id")
+        if not isinstance(intent_id, str):
+            return
+        try:
+            cache_key = _validate_identifier("cache_key", intent_row.get("cache_key"))
+        except (TypeError, ValueError):
+            self._delete_invalid_intent_transactionally(intent_id)
+            return
+
+        conn = get_connection(self.project_root)
+        try:
+            active = conn.execute(
+                "SELECT * FROM target_remote_cache WHERE cache_key = ?",
+                (cache_key,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if active is None or active.get("cleanup_pending") != 1:
+            self._delete_invalid_intent_transactionally(intent_id)
+            return
+
+        restore_active = False
+        active_evidence = self._validated_evidence(active)
+        if (
+            active_evidence is not None
+            and active_evidence.record_type == "coordinate_file"
+        ):
+            try:
+                source_relative = _validate_cache_relative_path(
+                    active_evidence.payload["path"]
+                )
+                quarantine_relative = _validate_quarantine_relative_path(
+                    active["cleanup_quarantine_path"],
+                    active_evidence.generation_id,
+                )
+                if quarantine_relative != _quarantine_relative_path(
+                    active_evidence.generation_id, source_relative.name
+                ):
+                    raise ValueError("active quarantine path does not match generation")
+            except (KeyError, TypeError, ValueError):
+                source_relative = None
+                quarantine_relative = None
+            if source_relative is not None and quarantine_relative is not None:
+                cache_root = get_cache_dir(self.project_root)
+                source = cache_root.joinpath(*source_relative.parts)
+                quarantine = cache_root.joinpath(*quarantine_relative.parts)
+                source_state = _prevalidate_regular_file(
+                    cache_root, source, source_relative.parts
+                )
+                quarantine_state = _prevalidate_regular_file(
+                    cache_root, quarantine, quarantine_relative.parts
+                )
+                if source_state == "regular" and quarantine_state == "missing":
+                    restore_active = True
+                elif source_state == "missing" and quarantine_state == "regular":
+                    restore_active = (
+                        _move_windows_verified(cache_root, quarantine, source)
+                        if os.name == "nt"
+                        else _replace_posix_verified(
+                            cache_root,
+                            quarantine_relative.parts,
+                            source_relative.parts,
+                            replace_existing=False,
+                        )
+                    )
+
+        self._delete_invalid_intent_transactionally(
+            intent_id,
+            active=active,
+            restore_active=restore_active,
+        )
+
+    def _delete_invalid_intent_transactionally(
+        self,
+        intent_id: str,
+        *,
+        active: Optional[Mapping[str, Any]] = None,
+        restore_active: bool = False,
+    ) -> None:
+        conn = get_connection(self.project_root)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if active is not None:
+                cache_key = active.get("cache_key")
+                generation_id = active.get("generation_id")
+                if restore_active:
+                    cursor = conn.execute(
+                        """
+                        UPDATE target_remote_cache
+                        SET cleanup_pending = 0, cleanup_quarantine_path = NULL
+                        WHERE cache_key IS ? AND generation_id IS ?
+                            AND cleanup_pending = 1
+                        """,
+                        (cache_key, generation_id),
+                    )
+                else:
+                    cursor = conn.execute(
+                        """
+                        DELETE FROM target_remote_cache
+                        WHERE cache_key IS ? AND generation_id IS ?
+                            AND cleanup_pending = 1
+                        """,
+                        (cache_key, generation_id),
+                    )
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    return
+            conn.execute(
+                "DELETE FROM target_coordinate_publication_intents "
+                "WHERE intent_id = ?",
+                (intent_id,),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _abort_publication_intent_locked(self, intent: dict[str, Any]) -> None:
         previous_generation_id = intent["previous_generation_id"]
