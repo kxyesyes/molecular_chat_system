@@ -2592,6 +2592,17 @@ class _FakeRemoteSession:
         self.close_calls += 1
 
 
+class _ManualMonotonic:
+    def __init__(self, value=0.0):
+        self.value = float(value)
+
+    def __call__(self):
+        return self.value
+
+    def advance(self, seconds):
+        self.value += seconds
+
+
 class _CapturingAdapter(requests.adapters.BaseAdapter):
     def __init__(self, payload=b"{}"):
         self.payload = payload
@@ -3717,6 +3728,91 @@ def test_borrowed_session_disables_environment_proxy_credentials_at_adapter(monk
     assert "env-user" not in repr(effective_proxies)
 
 
+def test_borrowed_session_environment_mutation_is_neutralized_before_request(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "HTTPS_PROXY", "http://late-user:late-password@proxy.invalid:8080"
+    )
+    session = requests.Session()
+    adapter = _CapturingAdapter()
+    session.mount("https://", adapter)
+    client = _bounded_remote_client(session)
+    session.trust_env = True
+
+    result = client.request_json("UniProt", "GET", _UNIPROT_TEST_URL)
+
+    assert result == {}
+    assert session.trust_env is False
+    assert adapter.send_kwargs[0]["proxies"] == {}
+    assert "late-user" not in repr(adapter.send_kwargs[0]["proxies"])
+
+
+@pytest.mark.parametrize("mutation", ["auth", "header", "proxy"])
+def test_borrowed_session_credential_mutation_is_rejected_before_request(mutation):
+    from src.target_search.remote_clients import RemoteSourceError
+
+    session = requests.Session()
+    adapter = _CapturingAdapter()
+    session.mount("https://", adapter)
+    client = _bounded_remote_client(session)
+    if mutation == "auth":
+        session.auth = ("late-user", "late-password")
+    elif mutation == "header":
+        session.headers["Cookie"] = "late-secret"
+    else:
+        session.proxies["https"] = "http://late-user:late-password@proxy.invalid"
+
+    with pytest.raises(RemoteSourceError) as raised:
+        client.request_json("UniProt", "GET", _UNIPROT_TEST_URL)
+
+    assert raised.value.code == "invalid_request"
+    assert raised.value.retryable is False
+    assert adapter.prepared_requests == []
+    assert "late" not in str(raised.value).lower()
+
+
+def test_borrowed_session_environment_is_revalidated_before_each_retry(monkeypatch):
+    monkeypatch.setenv(
+        "HTTPS_PROXY", "http://retry-user:retry-password@proxy.invalid:8080"
+    )
+
+    class RetryCapturingAdapter(requests.adapters.BaseAdapter):
+        def __init__(self):
+            self.send_kwargs = []
+
+        def send(self, request, **kwargs):
+            self.send_kwargs.append(kwargs)
+            if len(self.send_kwargs) == 1:
+                raise requests.ConnectionError("first attempt")
+            response = requests.Response()
+            response.status_code = 200
+            response._content = b"{}"
+            response._content_consumed = True
+            response.request = request
+            response.url = request.url
+            return response
+
+        def close(self):
+            pass
+
+    session = requests.Session()
+    adapter = RetryCapturingAdapter()
+    session.mount("https://", adapter)
+
+    def mutate_environment(_delay):
+        session.trust_env = True
+
+    client = _bounded_remote_client(
+        session, sleep=mutate_environment, max_attempts=2
+    )
+
+    assert client.request_json("UniProt", "GET", _UNIPROT_TEST_URL) == {}
+    assert len(adapter.send_kwargs) == 2
+    assert adapter.send_kwargs[1]["proxies"] == {}
+    assert session.trust_env is False
+
+
 @pytest.mark.parametrize(
     ("status", "retry_after", "expected_delay"),
     [
@@ -3924,6 +4020,110 @@ def test_uniprot_rejects_taxon_mismatch_in_plausible_human_record():
     assert raised.value.retryable is False
 
 
+@pytest.mark.parametrize("organism", ["Homo sapiens", "human", "9606", 9606])
+def test_uniprot_resolves_supported_human_aliases_to_taxon_query(organism):
+    from src.target_search.remote_clients import UniProtClient
+
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(
+            payload={
+                "results": [
+                    {
+                        "primaryAccession": "P00533",
+                        "genes": [{"geneName": {"value": "EGFR"}}],
+                        "organism": {
+                            "scientificName": "Homo sapiens",
+                            "taxonId": 9606,
+                        },
+                    }
+                ]
+            }
+        )
+    )
+
+    result = UniProtClient(_bounded_remote_client(session)).resolve(
+        "EGFR", organism=organism
+    )
+
+    assert result["organism"] == "Homo sapiens"
+    assert session.calls[0][2]["params"]["query"] == (
+        "(gene_exact:EGFR) AND (organism_id:9606)"
+    )
+
+
+@pytest.mark.parametrize("organism", ["Mus musculus", "mouse", "10090", 10090])
+def test_uniprot_resolves_supported_mouse_aliases_to_taxon_query(organism):
+    from src.target_search.remote_clients import UniProtClient
+
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(
+            payload={
+                "results": [
+                    {
+                        "primaryAccession": "Q01279",
+                        "genes": [{"geneName": {"value": "Egfr"}}],
+                        "organism": {
+                            "scientificName": "Mus musculus",
+                            "taxonId": 10090,
+                        },
+                    }
+                ]
+            }
+        )
+    )
+
+    result = UniProtClient(_bounded_remote_client(session)).resolve(
+        "EGFR", organism=organism
+    )
+
+    assert result["organism"] == "Mus musculus"
+    assert session.calls[0][2]["params"]["query"] == (
+        "(gene_exact:EGFR) AND (organism_id:10090)"
+    )
+
+
+@pytest.mark.parametrize(
+    "organism", ["H. sapiens", "Canis lupus", "7227", 7227, "", True]
+)
+def test_uniprot_rejects_unsupported_organisms_before_request(organism):
+    from src.target_search.remote_clients import RemoteSourceError, UniProtClient
+
+    session = _FakeRemoteSession()
+
+    with pytest.raises(RemoteSourceError) as raised:
+        UniProtClient(_bounded_remote_client(session)).resolve(
+            "EGFR", organism=organism
+        )
+
+    assert raised.value.code == "invalid_identifier"
+    assert raised.value.retryable is False
+    assert session.calls == []
+
+
+def test_uniprot_rejects_noncanonical_scientific_name_for_valid_taxon():
+    from src.target_search.remote_clients import RemoteSourceError, UniProtClient
+
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(
+            payload={
+                "results": [
+                    {
+                        "primaryAccession": "P00533",
+                        "genes": [{"geneName": {"value": "EGFR"}}],
+                        "organism": {"scientificName": "human", "taxonId": 9606},
+                    }
+                ]
+            }
+        )
+    )
+
+    with pytest.raises(RemoteSourceError) as raised:
+        UniProtClient(_bounded_remote_client(session)).resolve("EGFR", organism="human")
+
+    assert raised.value.code == "invalid_response"
+    assert raised.value.retryable is False
+
+
 def test_uniprot_preserves_ambiguity_across_secondary_gene_names():
     from src.target_search.remote_clients import RemoteSourceError, UniProtClient
 
@@ -4025,6 +4225,52 @@ def test_rcsb_uses_bounded_polymer_entity_search_and_one_graphql_batch():
     assert "reference_sequence_identifiers" in graphql_json["query"]
 
 
+def test_rcsb_max_structures_counts_unique_entries_across_bounded_pages():
+    from src.target_search.remote_clients import RcsbClient
+
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(
+            payload={
+                "total_count": 3,
+                "result_set": [
+                    {"identifier": "1ABC_1"},
+                    {"identifier": "1ABC_2"},
+                ],
+            }
+        ),
+        _FakeRemoteResponse(
+            payload={
+                "total_count": 3,
+                "result_set": [{"identifier": "2DEF_1"}],
+            }
+        ),
+        _FakeRemoteResponse(
+            payload={
+                "data": {
+                    "entries": [
+                        _rcsb_graphql_entry("2DEF"),
+                        _rcsb_graphql_entry("1ABC"),
+                    ]
+                }
+            }
+        ),
+    )
+
+    results = RcsbClient(_bounded_remote_client(session), max_structures=2).search(
+        "P00533"
+    )
+
+    assert [result["structure_id"] for result in results] == ["1ABC", "2DEF"]
+    assert len(session.calls) == 3
+    assert [call[2]["json"]["request_options"]["paginate"] for call in session.calls[:2]] == [
+        {"start": 0, "rows": 2},
+        {"start": 2, "rows": 2},
+    ]
+    assert session.calls[2][2]["json"]["variables"] == {
+        "ids": ["1ABC", "2DEF"]
+    }
+
+
 @pytest.mark.parametrize(
     "entry",
     [
@@ -4089,3 +4335,119 @@ def test_rcsb_rejects_malformed_reference_members_even_with_a_valid_match():
 
     assert raised.value.code == "invalid_response"
     assert raised.value.retryable is False
+
+
+def test_operation_timeout_rejects_trickled_json_between_stream_chunks():
+    from src.target_search.remote_clients import RemoteSourceError
+
+    clock = _ManualMonotonic()
+
+    class TrickleResponse(_FakeRemoteResponse):
+        def iter_content(self, chunk_size=8192):
+            yield b'{"ok":'
+            clock.advance(0.6)
+            yield b"true}"
+
+    response = TrickleResponse(raw=b"")
+    client = _bounded_remote_client(
+        _FakeRemoteSession(response),
+        monotonic=clock,
+        operation_timeout=0.5,
+    )
+
+    with pytest.raises(RemoteSourceError) as raised:
+        client.request_json("UniProt", "GET", _UNIPROT_TEST_URL)
+
+    assert raised.value.code == "operation_timeout"
+    assert raised.value.retryable is True
+    assert raised.value.status_code is None
+    assert response.closed is True
+
+
+def test_operation_timeout_rejects_delayed_stream_eof_after_valid_json():
+    from src.target_search.remote_clients import RemoteSourceError
+
+    clock = _ManualMonotonic()
+
+    class DelayedEofResponse(_FakeRemoteResponse):
+        def iter_content(self, chunk_size=8192):
+            yield b"{}"
+            clock.advance(0.6)
+
+    response = DelayedEofResponse(raw=b"")
+    client = _bounded_remote_client(
+        _FakeRemoteSession(response),
+        monotonic=clock,
+        operation_timeout=0.5,
+    )
+
+    with pytest.raises(RemoteSourceError) as raised:
+        client.request_json("UniProt", "GET", _UNIPROT_TEST_URL)
+
+    assert raised.value.code == "operation_timeout"
+    assert raised.value.retryable is True
+    assert response.closed is True
+
+
+def test_operation_timeout_caps_attempt_timeout_and_retry_sleep():
+    from src.target_search.remote_clients import RemoteSourceError
+
+    clock = _ManualMonotonic()
+    sleeps = []
+
+    def sleep(delay):
+        sleeps.append(delay)
+        clock.advance(delay)
+
+    session = _FakeRemoteSession(
+        requests.Timeout("provider detail must stay private"),
+        _FakeRemoteResponse(payload={"unexpected": "second attempt"}),
+    )
+    client = _bounded_remote_client(
+        session,
+        sleep=sleep,
+        monotonic=clock,
+        operation_timeout=0.4,
+        backoff_base=2.0,
+        backoff_ceiling=2.0,
+    )
+
+    with pytest.raises(RemoteSourceError) as raised:
+        client.request_json("UniProt", "GET", _UNIPROT_TEST_URL)
+
+    assert raised.value.code == "operation_timeout"
+    assert raised.value.retryable is True
+    assert sleeps == [0.4]
+    assert len(session.calls) == 1
+    assert session.calls[0][2]["timeout"] == (0.4, 0.4)
+    assert "private" not in str(raised.value).lower()
+
+
+def test_rcsb_operation_timeout_is_shared_between_search_and_graphql():
+    from src.target_search.remote_clients import RcsbClient, RemoteSourceError
+
+    clock = _ManualMonotonic()
+
+    class DeadlineAfterCloseResponse(_FakeRemoteResponse):
+        def close(self):
+            super().close()
+            clock.advance(0.6)
+
+    session = _FakeRemoteSession(
+        DeadlineAfterCloseResponse(
+            payload={"result_set": [{"identifier": "1ABC_1"}]}
+        ),
+        _FakeRemoteResponse(payload={"data": {"entries": []}}),
+    )
+    client = _bounded_remote_client(
+        session,
+        monotonic=clock,
+        operation_timeout=0.5,
+    )
+
+    with pytest.raises(RemoteSourceError) as raised:
+        RcsbClient(client, max_structures=1).search("P00533")
+
+    assert raised.value.code == "operation_timeout"
+    assert raised.value.retryable is True
+    assert len(session.calls) == 1

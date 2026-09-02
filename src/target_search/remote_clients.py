@@ -28,6 +28,7 @@ _ERROR_MESSAGES = {
     "invalid_request": "the remote request is not permitted",
     "invalid_response": "the remote source returned an invalid response shape",
     "malformed_json": "the remote source returned malformed JSON",
+    "operation_timeout": "the remote operation exceeded its time limit",
     "provider_unavailable": "the remote source is temporarily unavailable",
     "request_failure": "the remote request failed",
     "response_too_large": "the remote response exceeded the configured limit",
@@ -39,9 +40,15 @@ _UNIPROT_ACCESSION_RE = re.compile(
     r"(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})"
 )
 _GENE_SYMBOL_RE = re.compile(r"[A-Z0-9][A-Z0-9_.-]{0,63}")
-_ORGANISM_RE = re.compile(r"[A-Za-z][A-Za-z0-9 .()_-]{0,99}")
 _RCSB_POLYMER_ENTITY_ID_RE = re.compile(r"([0-9][A-Z0-9]{3})_([1-9][0-9]*)")
-_ORGANISM_TAXON_IDS = {"homo sapiens": 9606, "mus musculus": 10090}
+_SUPPORTED_ORGANISMS = {
+    "homo sapiens": ("Homo sapiens", 9606),
+    "human": ("Homo sapiens", 9606),
+    "9606": ("Homo sapiens", 9606),
+    "mus musculus": ("Mus musculus", 10090),
+    "mouse": ("Mus musculus", 10090),
+    "10090": ("Mus musculus", 10090),
+}
 _RCSB_CORE_PATH_RE = re.compile(
     r"/rest/v1/core/(?:entry/[0-9][A-Z0-9]{3}|"
     r"polymer_entity/[0-9][A-Z0-9]{3}/[1-9][0-9]*)"
@@ -225,6 +232,24 @@ def _validate_credential_free_session(session: Any) -> None:
                 raise ValueError("credential-bearing proxies are not allowed")
 
 
+def _neutralize_environment_credentials(session: Any) -> None:
+    try:
+        session.trust_env = False
+    except Exception:
+        if getattr(session, "trust_env", None) is not False:
+            raise ValueError("session must disable environment credentials") from None
+    if getattr(session, "trust_env", None) is not False:
+        raise ValueError("session must disable environment credentials")
+
+
+def _revalidate_session_for_request(session: Any, source: str) -> None:
+    try:
+        _neutralize_environment_credentials(session)
+        _validate_credential_free_session(session)
+    except (TypeError, ValueError):
+        raise RemoteSourceError(source, "invalid_request", retryable=False) from None
+
+
 class BoundedJsonClient:
     """Small JSON transport with bounded reads and narrowly scoped retries."""
 
@@ -234,6 +259,8 @@ class BoundedJsonClient:
         *,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        operation_timeout: float = 30.0,
         timeout: tuple[float, float] = (3.05, 10.0),
         max_attempts: int = 3,
         backoff_base: float = 0.25,
@@ -245,16 +272,21 @@ class BoundedJsonClient:
             session = requests.Session()
         if not callable(getattr(session, "request", None)):
             raise TypeError("session must provide request()")
-        try:
-            session.trust_env = False
-        except Exception:
-            if getattr(session, "trust_env", None) is not False:
-                raise ValueError("session must disable environment credentials") from None
+        _neutralize_environment_credentials(session)
         _validate_credential_free_session(session)
         if not callable(sleep):
             raise TypeError("sleep must be callable")
         if clock is not None and not callable(clock):
             raise TypeError("clock must be callable")
+        if not callable(monotonic):
+            raise TypeError("monotonic must be callable")
+        if (
+            isinstance(operation_timeout, bool)
+            or not isinstance(operation_timeout, (int, float))
+            or not math.isfinite(float(operation_timeout))
+            or operation_timeout <= 0
+        ):
+            raise ValueError("operation_timeout must be a positive finite number")
         if (
             not isinstance(timeout, tuple)
             or len(timeout) != 2
@@ -290,6 +322,8 @@ class BoundedJsonClient:
         self._session = session
         self._sleep = sleep
         self._clock = clock or _utc_now
+        self._monotonic = monotonic
+        self._operation_timeout = float(operation_timeout)
         self._timeout = (float(timeout[0]), float(timeout[1]))
         self._max_attempts = max_attempts
         self._backoff_base = float(backoff_base)
@@ -306,13 +340,17 @@ class BoundedJsonClient:
         *,
         params: Mapping[str, Any] | None = None,
         json: Mapping[str, Any] | None = None,
+        _deadline: float | None = None,
     ) -> Any | None:
+        deadline = self._begin_operation() if _deadline is None else _deadline
         with self._request_lock:
             if self._closed:
                 raise RuntimeError("bounded JSON client is closed")
-            return self._request_json_locked(
-                source, method, url, params=params, json=json
+            result = self._request_json_locked(
+                source, method, url, params=params, json=json, deadline=deadline
             )
+            self._remaining_time(source, deadline)
+            return result
 
     def _request_json_locked(
         self,
@@ -322,12 +360,14 @@ class BoundedJsonClient:
         *,
         params: Mapping[str, Any] | None = None,
         json: Mapping[str, Any] | None = None,
+        deadline: float,
     ) -> Any | None:
         if source not in _OFFICIAL_SOURCES:
             raise ValueError("source must be an authoritative provider")
         normalized_method = method.upper() if isinstance(method, str) else ""
         if not _is_allowlisted_request(source, normalized_method, url):
             raise RemoteSourceError(source, "invalid_request", retryable=False)
+        self._remaining_time(source, deadline)
         request_options: dict[str, Any] = {
             "headers": {
                 "Accept": "application/json",
@@ -335,7 +375,6 @@ class BoundedJsonClient:
             },
             "auth": _CREDENTIAL_FREE_AUTH,
             "allow_redirects": False,
-            "timeout": self._timeout,
             "stream": True,
         }
         if params is not None:
@@ -344,25 +383,39 @@ class BoundedJsonClient:
             request_options["json"] = dict(json)
 
         for attempt in range(1, self._max_attempts + 1):
+            _revalidate_session_for_request(self._session, source)
+            remaining = self._remaining_time(source, deadline)
+            attempt_options = dict(request_options)
+            attempt_options["timeout"] = (
+                min(self._timeout[0], remaining),
+                min(self._timeout[1], remaining),
+            )
             try:
                 response = self._session.request(
-                    normalized_method, url, **request_options
+                    normalized_method, url, **attempt_options
                 )
             except requests.Timeout:
+                self._remaining_time(source, deadline)
                 if attempt == self._max_attempts:
                     raise RemoteSourceError(
                         source, "timeout", retryable=True
                     ) from None
-                self._sleep(self._backoff_delay(attempt))
+                self._sleep_with_deadline(
+                    source, self._backoff_delay(attempt), deadline
+                )
                 continue
             except requests.ConnectionError:
+                self._remaining_time(source, deadline)
                 if attempt == self._max_attempts:
                     raise RemoteSourceError(
                         source, "connection_failure", retryable=True
                     ) from None
-                self._sleep(self._backoff_delay(attempt))
+                self._sleep_with_deadline(
+                    source, self._backoff_delay(attempt), deadline
+                )
                 continue
             except requests.RequestException:
+                self._remaining_time(source, deadline)
                 raise RemoteSourceError(
                     source, "request_failure", retryable=False
                 ) from None
@@ -370,6 +423,7 @@ class BoundedJsonClient:
             retry_delay: float | None = None
             transport_error_code: str | None = None
             try:
+                self._remaining_time(source, deadline)
                 status = getattr(response, "status_code", None)
                 if isinstance(status, bool) or not isinstance(status, int):
                     raise RemoteSourceError(
@@ -399,7 +453,9 @@ class BoundedJsonClient:
                         status_code=status,
                     )
                 else:
-                    raw = self._read_bounded(response, source, status)
+                    raw = self._read_bounded(
+                        response, source, status, deadline
+                    )
                     try:
                         return json_module.loads(raw.decode("utf-8"))
                     except (UnicodeDecodeError, json_module.JSONDecodeError):
@@ -426,14 +482,17 @@ class BoundedJsonClient:
                         pass
 
             if transport_error_code is not None:
+                self._remaining_time(source, deadline)
                 if attempt == self._max_attempts:
                     raise RemoteSourceError(
                         source, transport_error_code, retryable=True
                     ) from None
-                self._sleep(self._backoff_delay(attempt))
+                self._sleep_with_deadline(
+                    source, self._backoff_delay(attempt), deadline
+                )
                 continue
             if retry_delay is not None:
-                self._sleep(retry_delay)
+                self._sleep_with_deadline(source, retry_delay, deadline)
 
         raise AssertionError("bounded retry loop exhausted without a result")
 
@@ -455,7 +514,9 @@ class BoundedJsonClient:
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
 
-    def _read_bounded(self, response: Any, source: str, status: int) -> bytes:
+    def _read_bounded(
+        self, response: Any, source: str, status: int, deadline: float
+    ) -> bytes:
         headers = getattr(response, "headers", {})
         content_length = None
         if isinstance(headers, Mapping):
@@ -476,7 +537,17 @@ class BoundedJsonClient:
             )
         chunks: list[bytes] = []
         total = 0
-        for chunk in iter_content(chunk_size=min(8192, self._max_response_bytes + 1)):
+        iterator = iter(
+            iter_content(chunk_size=min(8192, self._max_response_bytes + 1))
+        )
+        while True:
+            self._remaining_time(source, deadline)
+            try:
+                chunk = next(iterator)
+            except StopIteration:
+                self._remaining_time(source, deadline)
+                break
+            self._remaining_time(source, deadline)
             if not chunk:
                 continue
             if not isinstance(chunk, bytes):
@@ -493,6 +564,39 @@ class BoundedJsonClient:
                 )
             chunks.append(chunk)
         return b"".join(chunks)
+
+    def _begin_operation(self) -> float:
+        return self._monotonic_now() + self._operation_timeout
+
+    def _monotonic_now(self) -> float:
+        value = self._monotonic()
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
+            raise TypeError("monotonic must return a finite number")
+        return float(value)
+
+    def _remaining_time(self, source: str, deadline: float) -> float:
+        if (
+            isinstance(deadline, bool)
+            or not isinstance(deadline, (int, float))
+            or not math.isfinite(float(deadline))
+        ):
+            raise TypeError("deadline must be a finite number")
+        remaining = float(deadline) - self._monotonic_now()
+        if remaining <= 0:
+            raise RemoteSourceError(
+                source, "operation_timeout", retryable=True
+            )
+        return remaining
+
+    def _sleep_with_deadline(
+        self, source: str, delay: float, deadline: float
+    ) -> None:
+        remaining = self._remaining_time(source, deadline)
+        self._sleep(min(delay, remaining))
 
     def _backoff_delay(self, attempt: int) -> float:
         return min(self._backoff_base * (2 ** (attempt - 1)), self._backoff_ceiling)
@@ -530,26 +634,24 @@ class UniProtClient(_SourceClientContext):
         self._http = http
 
     def resolve(
-        self, query: str, organism: str = "Homo sapiens"
+        self, query: str, organism: str | int = "Homo sapiens"
     ) -> dict[str, Any] | None:
+        deadline = self._http._begin_operation()
         normalized_query = _validate_gene_or_accession(query, "UniProt")
-        normalized_organism = _validate_organism(organism)
+        scientific_name, taxon_id = _resolve_organism(organism)
         is_accession = _is_uniprot_accession(normalized_query)
         field = "accession" if is_accession else "gene_exact"
-        if normalized_organism.casefold() == "homo sapiens":
-            organism_filter = "organism_id:9606"
-        else:
-            organism_filter = f'organism_name:"{normalized_organism}"'
         payload = self._http.request_json(
             "UniProt",
             "GET",
             self.SEARCH_URL,
             params={
-                "query": f"({field}:{normalized_query}) AND ({organism_filter})",
+                "query": f"({field}:{normalized_query}) AND (organism_id:{taxon_id})",
                 "format": "json",
                 "size": 5,
                 "fields": "accession,id,gene_names,protein_name,organism_name,organism_id",
             },
+            _deadline=deadline,
         )
         if payload is None:
             return None
@@ -569,16 +671,18 @@ class UniProtClient(_SourceClientContext):
             _, gene_names, aliases = _uniprot_genes(record)
             if is_accession:
                 if accession.upper() == normalized_query:
-                    _validate_uniprot_record_organism(record, normalized_organism)
+                    _validate_uniprot_record_organism(
+                        record, scientific_name, taxon_id
+                    )
                     ranked.append((0, record, "exact_accession"))
             elif any(
                 gene_name.casefold() == normalized_query.casefold()
                 for gene_name in gene_names
             ):
-                _validate_uniprot_record_organism(record, normalized_organism)
+                _validate_uniprot_record_organism(record, scientific_name, taxon_id)
                 ranked.append((0, record, "exact_gene"))
             elif any(alias.casefold() == normalized_query.casefold() for alias in aliases):
-                _validate_uniprot_record_organism(record, normalized_organism)
+                _validate_uniprot_record_organism(record, scientific_name, taxon_id)
                 ranked.append((1, record, "exact_alias"))
 
         if not ranked:
@@ -595,6 +699,7 @@ class UniProtClient(_SourceClientContext):
 class RcsbClient(_SourceClientContext):
     SEARCH_URL = "https://search.rcsb.org/rcsbsearch/v2/query"
     GRAPHQL_URL = "https://data.rcsb.org/graphql"
+    _SEARCH_PAGE_LIMIT = 10
     _ENTRY_QUERY = """
 query Entries($ids: [String!]!) {
   entries(entry_ids: $ids) {
@@ -632,78 +737,80 @@ query Entries($ids: [String!]!) {
         self._max_structures = max_structures
 
     def search(self, uniprot_accession: str) -> list[dict[str, Any]]:
+        deadline = self._http._begin_operation()
         accession = _validate_uniprot_accession(uniprot_accession, "RCSB_PDB")
-        payload = self._http.request_json(
-            "RCSB_PDB",
-            "POST",
-            self.SEARCH_URL,
-            json={
-                "query": {
-                    "type": "group",
-                    "logical_operator": "and",
-                    "nodes": [
-                        {
-                            "type": "terminal",
-                            "service": "text",
-                            "parameters": {
-                                "attribute": "rcsb_polymer_entity_container_identifiers.reference_sequence_identifiers.database_name",
-                                "operator": "exact_match",
-                                "value": "UniProt",
-                            },
-                        },
-                        {
-                            "type": "terminal",
-                            "service": "text",
-                            "parameters": {
-                                "attribute": "rcsb_polymer_entity_container_identifiers.reference_sequence_identifiers.database_accession",
-                                "operator": "exact_match",
-                                "value": accession,
-                            },
-                        },
-                        {
-                            "type": "terminal",
-                            "service": "text",
-                            "parameters": {
-                                "attribute": "exptl.method",
-                                "operator": "exists",
-                            },
-                        },
-                    ],
-                },
-                "return_type": "polymer_entity",
-                "request_options": {
-                    "paginate": {"start": 0, "rows": self._max_structures},
-                    "sort": [
-                        {"sort_by": "score", "direction": "desc"},
-                        {"sort_by": "rcsb_id", "direction": "asc"},
-                    ],
-                },
-            },
-        )
-        if payload is None:
-            return []
-        if not isinstance(payload, dict) or not isinstance(payload.get("result_set"), list):
-            raise RemoteSourceError("RCSB_PDB", "invalid_response", retryable=False)
+        selected_polymer_ids: dict[str, str] = {}
+        start = 0
+        scanned_hits = 0
+        search_hit_limit = self._max_structures * self._SEARCH_PAGE_LIMIT
+        while (
+            len(selected_polymer_ids) < self._max_structures
+            and scanned_hits < search_hit_limit
+        ):
+            rows = min(self._max_structures, search_hit_limit - scanned_hits)
+            payload = self._http.request_json(
+                "RCSB_PDB",
+                "POST",
+                self.SEARCH_URL,
+                json=self._search_request(accession, start=start, rows=rows),
+                _deadline=deadline,
+            )
+            self._http._remaining_time("RCSB_PDB", deadline)
+            if payload is None:
+                break
+            if not isinstance(payload, dict) or not isinstance(
+                payload.get("result_set"), list
+            ):
+                raise RemoteSourceError(
+                    "RCSB_PDB", "invalid_response", retryable=False
+                )
+            total_count = payload.get("total_count")
+            if total_count is not None and (
+                isinstance(total_count, bool)
+                or not isinstance(total_count, int)
+                or total_count < 0
+            ):
+                raise RemoteSourceError(
+                    "RCSB_PDB", "invalid_response", retryable=False
+                )
+            page = payload["result_set"]
+            if not page:
+                break
+            for item in page:
+                if not isinstance(item, dict) or not isinstance(
+                    item.get("identifier"), str
+                ):
+                    raise RemoteSourceError(
+                        "RCSB_PDB", "invalid_response", retryable=False
+                    )
+                identifier = item["identifier"].upper()
+                match = _RCSB_POLYMER_ENTITY_ID_RE.fullmatch(identifier)
+                if match is None:
+                    raise RemoteSourceError(
+                        "RCSB_PDB", "invalid_response", retryable=False
+                    )
+                selected_polymer_ids.setdefault(match.group(1), identifier)
+                if len(selected_polymer_ids) == self._max_structures:
+                    break
+            scanned_hits += len(page)
+            start += len(page)
+            if len(page) < rows or (
+                total_count is not None and start >= total_count
+            ):
+                break
 
-        polymer_ids: set[str] = set()
-        for item in payload["result_set"]:
-            if not isinstance(item, dict) or not isinstance(item.get("identifier"), str):
-                raise RemoteSourceError("RCSB_PDB", "invalid_response", retryable=False)
-            identifier = item["identifier"].upper()
-            if _RCSB_POLYMER_ENTITY_ID_RE.fullmatch(identifier) is None:
-                raise RemoteSourceError("RCSB_PDB", "invalid_response", retryable=False)
-            polymer_ids.add(identifier)
-
-        bounded_polymer_ids = sorted(polymer_ids)[: self._max_structures]
-        if not bounded_polymer_ids:
+        if not selected_polymer_ids:
             return []
-        entry_ids = sorted({identifier.split("_", 1)[0] for identifier in bounded_polymer_ids})
+        entry_ids = sorted(selected_polymer_ids)
+        self._http._remaining_time("RCSB_PDB", deadline)
         details = self._http.request_json(
             "RCSB_PDB",
             "POST",
             self.GRAPHQL_URL,
             json={"query": self._ENTRY_QUERY, "variables": {"ids": entry_ids}},
+            _deadline=deadline,
         )
+        self._http._remaining_time("RCSB_PDB", deadline)
         if details is None or not isinstance(details, dict) or "errors" in details:
             raise RemoteSourceError("RCSB_PDB", "invalid_response", retryable=False)
         data = details.get("data")
@@ -730,14 +837,57 @@ query Entries($ids: [String!]!) {
                 entries_by_id[entry_id],
                 entry_id,
                 accession,
-                {
-                    polymer_id
-                    for polymer_id in bounded_polymer_ids
-                    if polymer_id.startswith(f"{entry_id}_")
-                },
+                {selected_polymer_ids[entry_id]},
             )
             for entry_id in entry_ids
         ]
+
+    @staticmethod
+    def _search_request(
+        accession: str, *, start: int, rows: int
+    ) -> dict[str, Any]:
+        return {
+            "query": {
+                "type": "group",
+                "logical_operator": "and",
+                "nodes": [
+                    {
+                        "type": "terminal",
+                        "service": "text",
+                        "parameters": {
+                            "attribute": "rcsb_polymer_entity_container_identifiers.reference_sequence_identifiers.database_name",
+                            "operator": "exact_match",
+                            "value": "UniProt",
+                        },
+                    },
+                    {
+                        "type": "terminal",
+                        "service": "text",
+                        "parameters": {
+                            "attribute": "rcsb_polymer_entity_container_identifiers.reference_sequence_identifiers.database_accession",
+                            "operator": "exact_match",
+                            "value": accession,
+                        },
+                    },
+                    {
+                        "type": "terminal",
+                        "service": "text",
+                        "parameters": {
+                            "attribute": "exptl.method",
+                            "operator": "exists",
+                        },
+                    },
+                ],
+            },
+            "return_type": "polymer_entity",
+            "request_options": {
+                "paginate": {"start": start, "rows": rows},
+                "sort": [
+                    {"sort_by": "score", "direction": "desc"},
+                    {"sort_by": "rcsb_id", "direction": "asc"},
+                ],
+            },
+        }
 
 
 class AlphaFoldClient(_SourceClientContext):
@@ -747,11 +897,13 @@ class AlphaFoldClient(_SourceClientContext):
         self._http = http
 
     def lookup(self, accession: str) -> dict[str, Any] | None:
+        deadline = self._http._begin_operation()
         normalized_accession = _validate_uniprot_accession(accession, "AlphaFold")
         payload = self._http.request_json(
             "AlphaFold",
             "GET",
             self.PREDICTION_URL.format(accession=normalized_accession),
+            _deadline=deadline,
         )
         if payload is None:
             return None
@@ -804,13 +956,19 @@ def _validate_gene_or_accession(value: str, source: str) -> str:
     return normalized
 
 
-def _validate_organism(value: str) -> str:
-    if not isinstance(value, str):
+def _resolve_organism(value: str | int) -> tuple[str, int]:
+    if isinstance(value, bool):
         raise RemoteSourceError("UniProt", "invalid_identifier", retryable=False)
-    normalized = " ".join(value.strip().split())
-    if _ORGANISM_RE.fullmatch(normalized) is None:
+    if isinstance(value, int):
+        key = str(value)
+    elif isinstance(value, str):
+        key = " ".join(value.strip().split()).casefold()
+    else:
         raise RemoteSourceError("UniProt", "invalid_identifier", retryable=False)
-    return normalized
+    resolved = _SUPPORTED_ORGANISMS.get(key)
+    if resolved is None:
+        raise RemoteSourceError("UniProt", "invalid_identifier", retryable=False)
+    return resolved
 
 
 def _uniprot_genes(
@@ -856,7 +1014,7 @@ def _uniprot_genes(
 
 
 def _validate_uniprot_record_organism(
-    record: dict[str, Any], requested_organism: str
+    record: dict[str, Any], expected_name: str, expected_taxon_id: int
 ) -> None:
     organism = record.get("organism")
     if not isinstance(organism, dict):
@@ -870,10 +1028,7 @@ def _validate_uniprot_record_organism(
         or taxon_id <= 0
     ):
         raise RemoteSourceError("UniProt", "invalid_response", retryable=False)
-    expected_taxon = _ORGANISM_TAXON_IDS.get(requested_organism.casefold())
-    if scientific_name.casefold() != requested_organism.casefold() or (
-        expected_taxon is not None and taxon_id != expected_taxon
-    ):
+    if scientific_name != expected_name or taxon_id != expected_taxon_id:
         raise RemoteSourceError("UniProt", "invalid_response", retryable=False)
 
 
