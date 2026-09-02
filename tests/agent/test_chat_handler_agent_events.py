@@ -293,6 +293,43 @@ class InvalidAgentMapping(Mapping):
         return 1
 
 
+class ExplodingCandidateGetMapping(Mapping):
+    def __init__(self, level):
+        self.level = level
+
+    def __getitem__(self, key):
+        raise KeyError(key)
+
+    def __iter__(self):
+        return iter(())
+
+    def __len__(self):
+        return 0
+
+    def get(self, key, default=None):
+        raise RuntimeError(
+            f"token=malformed-{self.level}-token-123 "
+            "C:\\Users\\reviewer\\private\\candidate.json"
+        )
+
+
+class ExplodingCandidateItemsMapping(Mapping):
+    def __getitem__(self, key):
+        raise KeyError(key)
+
+    def __iter__(self):
+        return iter(("private-warning",))
+
+    def __len__(self):
+        return 1
+
+    def items(self):
+        raise RuntimeError(
+            "api_key=malformed-warning-key-456 "
+            "D:\\MedChat\\private\\warning.log"
+        )
+
+
 class ExplodingToolResults(dict):
     def get(self, key, default=None):
         raise RuntimeError(
@@ -969,6 +1006,54 @@ def test_candidate_event_uses_only_tool_result_sequence():
     assert not any(
         item["type"] == "molecule_candidates" for item in websocket.messages
     )
+
+
+@pytest.mark.parametrize(
+    "malformed_level",
+    ["observation", "quality", "provenance", "warnings"],
+)
+def test_malformed_candidate_mapping_is_isolated_from_successful_agent_result(
+    malformed_level,
+    caplog,
+):
+    result = _candidate_agent_result(_candidate_set().to_dict())
+    observation = result["tool_result_sequence"][0]
+    if malformed_level == "observation":
+        result["tool_result_sequence"] = [
+            ExplodingCandidateGetMapping(malformed_level)
+        ]
+    elif malformed_level in {"quality", "provenance"}:
+        observation[malformed_level] = ExplodingCandidateGetMapping(
+            malformed_level
+        )
+    else:
+        observation["warnings"] = [ExplodingCandidateItemsMapping()]
+
+    websocket, model = _run_fixed_agent_result(result)
+
+    assert not any(
+        item["type"] == "molecule_candidates" for item in websocket.messages
+    )
+    assert model.generate_calls == 0
+    assert next(
+        item for item in websocket.messages if item["type"] == "agent_result"
+    )["active_skill"] == "molecular_design"
+    assert websocket.messages[-1] == {
+        "type": "complete",
+        "content": "generated validated candidates",
+    }
+    assert "Skipped malformed molecule candidate observation" in caplog.text
+    serialized_messages = json.dumps(websocket.messages, ensure_ascii=False)
+    for forbidden in (
+        "malformed-observation-token-123",
+        "malformed-quality-token-123",
+        "malformed-provenance-token-123",
+        "malformed-warning-key-456",
+        "C:\\Users\\",
+        "D:\\MedChat\\private",
+    ):
+        assert forbidden not in caplog.text
+        assert forbidden not in serialized_messages
 
 
 def test_terminal_agent_failure_never_emits_candidate_event():

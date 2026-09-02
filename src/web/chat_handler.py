@@ -731,24 +731,18 @@ class ChatHandler:
         ):
             return None
 
-        try:
-            candidate_set = CandidateSet.from_dict(observation.get("data"))
-            if (
-                candidate_set.status
-                not in {
-                    ObservationStatus.SUCCEEDED,
-                    ObservationStatus.PARTIAL,
-                }
-                or not candidate_set.candidates
-            ):
-                return None
-            sanitized_data = cls._sanitize_agent_event(candidate_set.to_dict())
-            candidate_set = CandidateSet.from_dict(sanitized_data)
-        except Exception:
-            logger.warning(
-                "Skipped malformed molecule candidate observation"
-            )
+        candidate_set = CandidateSet.from_dict(observation.get("data"))
+        if (
+            candidate_set.status
+            not in {
+                ObservationStatus.SUCCEEDED,
+                ObservationStatus.PARTIAL,
+            }
+            or not candidate_set.candidates
+        ):
             return None
+        sanitized_data = cls._sanitize_agent_event(candidate_set.to_dict())
+        candidate_set = CandidateSet.from_dict(sanitized_data)
 
         safe_trace_id, trace_sensitive = cls._sanitize_agent_failure_text(
             trace_id,
@@ -775,6 +769,25 @@ class ChatHandler:
         if model_sensitive:
             model_name = ""
 
+        raw_warnings = observation.get("warnings")
+        warning_mappings = []
+        if isinstance(raw_warnings, Mapping):
+            warning_mappings.append(raw_warnings)
+        elif isinstance(raw_warnings, list):
+            warning_mappings.extend(
+                warning
+                for warning in raw_warnings
+                if isinstance(warning, Mapping)
+            )
+        for warning_mapping in warning_mappings:
+            sanitize_bounded(
+                warning_mapping,
+                max_depth=_AGENT_EVENT_MAX_DEPTH,
+                max_items=_AGENT_EVENT_MAX_ITEMS,
+                max_text_chars=_AGENT_FAILURE_WARNING_MAX_CHARS,
+            )
+            raise ValueError("candidate warnings must contain only text")
+
         return {
             "type": "molecule_candidates",
             "trace_id": safe_trace_id,
@@ -784,9 +797,7 @@ class ChatHandler:
                 "status": status,
             },
             "candidate_set": candidate_set.to_dict(),
-            "warnings": cls._sanitize_agent_warnings(
-                observation.get("warnings")
-            ),
+            "warnings": cls._sanitize_agent_warnings(raw_warnings),
         }
 
     @classmethod
@@ -803,12 +814,23 @@ class ChatHandler:
         for observation in sequence:
             if not isinstance(observation, Mapping):
                 continue
-            event = cls._candidate_event_from_observation(
-                observation,
-                trace_id=agent_result.get("trace_id"),
-            )
-            if event is not None:
-                await websocket.send_text(json.dumps(event, ensure_ascii=False))
+            try:
+                event = cls._candidate_event_from_observation(
+                    observation,
+                    trace_id=agent_result.get("trace_id"),
+                )
+                payload = (
+                    json.dumps(event, ensure_ascii=False)
+                    if event is not None
+                    else None
+                )
+            except Exception:
+                logger.warning(
+                    "Skipped malformed molecule candidate observation"
+                )
+                continue
+            if payload is not None:
+                await websocket.send_text(payload)
 
     async def _send_agent_events(self, websocket: WebSocket, agent_result: Dict[str, Any]):
         """Forward structured Agent workflow events to the browser."""
