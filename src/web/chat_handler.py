@@ -10,10 +10,20 @@ from collections.abc import Mapping
 from typing import List, Dict, Any
 from fastapi import WebSocket, WebSocketDisconnect
 
+from src.agent.persistence.redaction import (
+    contains_sensitive_text,
+    redact_sensitive,
+    sanitize_sensitive_text,
+)
 from src.agent.routing.hybrid import SMILES_PATTERN
 from src.web.models import generate_for_chat
 
 logger = logging.getLogger(__name__)
+
+_AGENT_FAILURE_FALLBACK = "科学计算未成功完成，请检查输入或工具状态后重试。"
+_AGENT_FAILURE_CONTENT_MAX_CHARS = 1024
+_AGENT_FAILURE_WARNING_MAX_CHARS = 256
+_AGENT_FAILURE_WARNING_LIMIT = 20
 
 
 class ChatHandler:
@@ -238,6 +248,12 @@ class ChatHandler:
                     await self._send_agent_event(websocket, event)
                     live_agent_events += 1
                 agent_result = await agent_task
+                if not isinstance(agent_result, Mapping):
+                    agent_result = self._agent_failure_envelope()
+                else:
+                    agent_result = dict(agent_result)
+                    if type(agent_result.get("success")) is not bool:
+                        agent_result = self._agent_failure_envelope()
                 while agent_event_queue and not agent_event_queue.empty():
                     event = agent_event_queue.get_nowait()
                     await self._send_agent_event(websocket, event)
@@ -287,24 +303,27 @@ class ChatHandler:
                         "active_skill": active_skill
                     }))
                 else:
-                    agent_response = await self._send_terminal_agent_failure(
+                    await self._finish_terminal_agent_failure(
                         websocket,
                         agent_result,
+                        message=message,
+                        enable_rag=enable_rag,
+                        history=history,
                     )
-                    history.append({
-                        "user": message,
-                        "agent_used": True,
-                        "agent_response": agent_response,
-                        "rag_enabled": enable_rag,
-                        "molecules_retrieved": 0,
-                        "assistant": agent_response,
-                    })
-                    if len(history) > 20:
-                        del history[:-20]
                     return
-            except Exception as e:
-                logger.error(f"Agent execution failed: {e}")
-                await self._send_status(websocket, f"⚠️ 代理执行出错: {str(e)[:100]}")
+            except Exception:
+                logger.error(
+                    "Agent result processing failed; exception details omitted"
+                )
+                agent_result = self._agent_failure_envelope()
+                await self._finish_terminal_agent_failure(
+                    websocket,
+                    agent_result,
+                    message=message,
+                    enable_rag=enable_rag,
+                    history=history,
+                )
+                return
         
         # 如果没有触发 Agent 技能但启用了 RAG 开关，则执行传统 RAG（保留向后兼容性）
         if (
@@ -515,28 +534,61 @@ class ChatHandler:
             return result
         except Exception:
             logger.error("Agent execution error; exception details omitted")
-            return {
-                "success": False,
-                "status": "failed",
-                "final_answer": "",
-                "error": None,
-                "warnings": [],
-            }
+            return self._agent_failure_envelope()
 
     @staticmethod
-    def _agent_failure_content(agent_result: Dict[str, Any]) -> str:
+    def _agent_failure_envelope() -> Dict[str, Any]:
+        return {
+            "success": False,
+            "status": "failed",
+            "final_answer": "",
+            "active_skill": "",
+            "trace_id": "",
+            "error": None,
+            "warnings": [],
+            "tool_result_sequence": [],
+        }
+
+    @staticmethod
+    def _sanitize_agent_failure_text(
+        value: Any,
+        *,
+        max_chars: int,
+    ) -> tuple[str, bool]:
+        if not isinstance(value, str):
+            return "", False
+        value = value.strip()
+        if not value:
+            return "", False
+
+        redacted = redact_sensitive(value)
+        contains_sensitive = (
+            redacted != value or contains_sensitive_text(value)
+        )
+        sanitized, _ = sanitize_sensitive_text(value, max_chars=max_chars)
+        return sanitized, contains_sensitive
+
+    @classmethod
+    def _agent_failure_content(cls, agent_result: Dict[str, Any]) -> str:
         """Select a safe, authoritative message for a failed Agent run."""
 
-        def safe_text(value: Any) -> str:
-            return value.strip() if isinstance(value, str) else ""
+        def safe_content(value: Any) -> tuple[str, bool]:
+            return cls._sanitize_agent_failure_text(
+                value,
+                max_chars=_AGENT_FAILURE_CONTENT_MAX_CHARS,
+            )
 
-        final_answer = safe_text(agent_result.get("final_answer"))
+        final_answer, sensitive = safe_content(agent_result.get("final_answer"))
+        if sensitive:
+            return _AGENT_FAILURE_FALLBACK
         if final_answer:
             return final_answer
 
         error = agent_result.get("error")
         if isinstance(error, Mapping):
-            error_message = safe_text(error.get("message"))
+            error_message, sensitive = safe_content(error.get("message"))
+            if sensitive:
+                return _AGENT_FAILURE_FALLBACK
             if error_message:
                 return error_message
 
@@ -550,11 +602,37 @@ class ChatHandler:
                 ) in {"failed", "rejected", "cancelled"}
                 if not is_failed:
                     continue
-                result_message = safe_text(result.get("message"))
+                result_message, sensitive = safe_content(result.get("message"))
+                if sensitive:
+                    return _AGENT_FAILURE_FALLBACK
                 if result_message:
                     return result_message
 
-        return "科学计算未成功完成，请检查输入或工具状态后重试。"
+        return _AGENT_FAILURE_FALLBACK
+
+    async def _finish_terminal_agent_failure(
+        self,
+        websocket: WebSocket,
+        agent_result: Dict[str, Any],
+        *,
+        message: str,
+        enable_rag: bool,
+        history: List[Dict[str, Any]],
+    ) -> None:
+        agent_response = await self._send_terminal_agent_failure(
+            websocket,
+            agent_result,
+        )
+        history.append({
+            "user": message,
+            "agent_used": True,
+            "agent_response": agent_response,
+            "rag_enabled": enable_rag,
+            "molecules_retrieved": 0,
+            "assistant": agent_response,
+        })
+        if len(history) > 20:
+            del history[:-20]
 
     async def _send_terminal_agent_failure(
         self,
@@ -568,18 +646,33 @@ class ChatHandler:
             if raw_status in {"failed", "rejected", "cancelled"}
             else "failed"
         )
-        raw_trace_id = agent_result.get("trace_id")
-        trace_id = raw_trace_id if isinstance(raw_trace_id, str) else ""
-        raw_active_skill = agent_result.get("active_skill")
-        active_skill = (
-            raw_active_skill if isinstance(raw_active_skill, str) else ""
+        trace_id, trace_sensitive = self._sanitize_agent_failure_text(
+            agent_result.get("trace_id"),
+            max_chars=128,
         )
+        if trace_sensitive:
+            trace_id = ""
+        active_skill, skill_sensitive = self._sanitize_agent_failure_text(
+            agent_result.get("active_skill"),
+            max_chars=128,
+        )
+        if skill_sensitive:
+            active_skill = ""
         raw_warnings = agent_result.get("warnings")
-        warnings = (
-            [item for item in raw_warnings if isinstance(item, str)]
-            if isinstance(raw_warnings, list)
-            else []
-        )
+        warnings = []
+        if isinstance(raw_warnings, list):
+            for warning in raw_warnings[:_AGENT_FAILURE_WARNING_LIMIT]:
+                sanitized, sensitive = self._sanitize_agent_failure_text(
+                    warning,
+                    max_chars=_AGENT_FAILURE_WARNING_MAX_CHARS,
+                )
+                if (
+                    sensitive
+                    or not sanitized
+                    or sanitized.casefold() == "[redacted]"
+                ):
+                    continue
+                warnings.append(sanitized)
 
         await self._send_status(websocket, f"⚠️ 代理执行失败: {content}")
         await websocket.send_text(json.dumps({

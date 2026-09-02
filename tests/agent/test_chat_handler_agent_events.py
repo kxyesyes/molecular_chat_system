@@ -1,5 +1,6 @@
 import asyncio
 import json
+from collections.abc import Mapping
 
 import pytest
 from fastapi import WebSocketDisconnect
@@ -135,6 +136,32 @@ class FailedScientificAgentSystem:
 class RaisingScientificAgentSystem(FailedScientificAgentSystem):
     def execute(self, message, temperature=0.7, mol_count=5, active_skill=None):
         raise RuntimeError("private-agent-token internal exception repr")
+
+
+class FixedResultAgentSystem(FailedScientificAgentSystem):
+    def __init__(self, result):
+        self.result = result
+
+    def execute(self, message, temperature=0.7, mol_count=5, active_skill=None):
+        return self.result
+
+
+class InvalidAgentMapping(Mapping):
+    def __getitem__(self, key):
+        raise RuntimeError("private-invalid-mapping-token")
+
+    def __iter__(self):
+        raise RuntimeError("private-invalid-mapping-token")
+
+    def __len__(self):
+        return 1
+
+
+class ExplodingToolResults(dict):
+    def get(self, key, default=None):
+        raise RuntimeError(
+            "private-post-processing-token at C:/Users/reviewer/private.txt"
+        )
 
 
 class FakeModel:
@@ -619,6 +646,210 @@ def test_agent_execution_exception_uses_safe_terminal_fallback_without_secret():
         websocket.messages,
         ensure_ascii=False,
     )
+
+
+@pytest.mark.parametrize(
+    "malformed_result",
+    [None, [], "not-an-agent-result", InvalidAgentMapping()],
+    ids=["none", "list", "string", "invalid-mapping"],
+)
+def test_malformed_agent_result_is_safe_terminal_without_rag_or_model(
+    malformed_result,
+):
+    model = FakeModel()
+    rag = RecordingLegacyRagService()
+    handler = ChatHandler(
+        model=model,
+        rag_service=rag,
+        agent_system=FixedResultAgentSystem(malformed_result),
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+    history = []
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="全面评估 CCO",
+            enable_rag=True,
+            enable_tools=True,
+            conversation_history=history,
+        )
+    )
+
+    assert rag.calls == []
+    assert model.generate_calls == 0
+    assert websocket.messages[-1] == {
+        "type": "complete",
+        "content": "科学计算未成功完成，请检查输入或工具状态后重试。",
+        "trace_id": "",
+        "status": "failed",
+    }
+    assert history[-1]["agent_used"] is True
+    serialized = json.dumps(
+        {"messages": websocket.messages, "history": history},
+        ensure_ascii=False,
+    )
+    assert "private-invalid-mapping-token" not in serialized
+    assert "not-an-agent-result" not in serialized
+
+
+def test_post_agent_processing_exception_is_safe_terminal_without_fallback():
+    result = {
+        "success": True,
+        "status": "completed",
+        "final_answer": "must not be used after post-processing failure",
+        "tools_used": ["rag_search"],
+        "active_skill": "rag_search",
+        "trace_id": "trace-post-processing",
+        "warnings": [],
+        "tool_results": ExplodingToolResults(),
+        "agent_events": [],
+        "workflow_plan": {"workflow_name": "rag_search"},
+    }
+    model = FakeModel()
+    rag = RecordingLegacyRagService()
+    handler = ChatHandler(
+        model=model,
+        rag_service=rag,
+        agent_system=FixedResultAgentSystem(result),
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+    history = []
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="search local knowledge base for CCO",
+            enable_rag=True,
+            enable_tools=True,
+            conversation_history=history,
+        )
+    )
+
+    assert rag.calls == []
+    assert model.generate_calls == 0
+    assert websocket.messages[-1]["type"] == "complete"
+    assert websocket.messages[-1]["status"] == "failed"
+    assert websocket.messages[-1]["content"] == (
+        "科学计算未成功完成，请检查输入或工具状态后重试。"
+    )
+    serialized = json.dumps(
+        {"messages": websocket.messages, "history": history},
+        ensure_ascii=False,
+    )
+    assert "private-post-processing-token" not in serialized
+    assert "C:/Users/" not in serialized
+
+
+@pytest.mark.parametrize("message_source", ["final_answer", "error", "tool"])
+def test_sensitive_agent_failure_content_uses_generic_terminal_message(
+    message_source,
+):
+    sensitive_message = (
+        "科学计算失败: api_key=chat-handler-test-key-123 "
+        "token=chat-handler-test-token-456 sk-testfailure123456789 "
+        "C:/Users/reviewer/private/result.json "
+        "D:\\MedChat\\private\\trace.log"
+    )
+    overrides = {
+        "final_answer": "",
+        "error": {"message": ""},
+        "tool_result_sequence": [],
+        "warnings": [
+            "safe scientific warning",
+            "api_key=warning-test-key-123",
+            "token=warning-test-token-456",
+            "sk-warningtest123456789",
+            "C:/Users/reviewer/private/warning.txt",
+            "D:\\MedChat\\private\\warning.log",
+        ],
+    }
+    if message_source == "final_answer":
+        overrides["final_answer"] = sensitive_message
+    elif message_source == "error":
+        overrides["error"] = {"message": sensitive_message}
+    else:
+        overrides["tool_result_sequence"] = [
+            {"success": False, "status": "failed", "message": sensitive_message}
+        ]
+    model = FakeModel()
+    handler = ChatHandler(
+        model=model,
+        rag_service=FakeRagService(),
+        agent_system=FailedScientificAgentSystem(**overrides),
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+    history = []
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="全面评估 CCO",
+            enable_rag=False,
+            enable_tools=True,
+            conversation_history=history,
+        )
+    )
+
+    assert model.generate_calls == 0
+    assert websocket.messages[-1]["content"] == (
+        "科学计算未成功完成，请检查输入或工具状态后重试。"
+    )
+    agent_message = next(
+        item for item in websocket.messages if item["type"] == "agent_result"
+    )
+    assert agent_message["warnings"] == ["safe scientific warning"]
+    serialized = json.dumps(
+        {"messages": websocket.messages, "history": history},
+        ensure_ascii=False,
+    )
+    for forbidden in (
+        "chat-handler-test-key-123",
+        "chat-handler-test-token-456",
+        "sk-testfailure123456789",
+        "warning-test-key-123",
+        "warning-test-token-456",
+        "sk-warningtest123456789",
+        "C:/Users/",
+        "D:\\MedChat\\private",
+    ):
+        assert forbidden not in serialized
+
+
+def test_agent_failure_content_and_warnings_are_length_bounded():
+    handler = ChatHandler(
+        model=FakeModel(),
+        rag_service=FakeRagService(),
+        agent_system=FailedScientificAgentSystem(
+            final_answer="x" * 5000,
+            warnings=["w" * 1000],
+        ),
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+    history = []
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="全面评估 CCO",
+            enable_rag=False,
+            enable_tools=True,
+            conversation_history=history,
+        )
+    )
+
+    completion = websocket.messages[-1]
+    agent_message = next(
+        item for item in websocket.messages if item["type"] == "agent_result"
+    )
+    assert len(completion["content"]) <= 1024
+    assert len(agent_message["warnings"]) == 1
+    assert len(agent_message["warnings"][0]) <= 256
+    assert history[-1]["assistant"] == completion["content"]
 
 
 def test_chat_handler_forwards_events_while_agent_is_running():
