@@ -1,6 +1,7 @@
 import asyncio
 import json
 
+import pytest
 from fastapi import WebSocketDisconnect
 
 from src.agent.contracts import AgentContext
@@ -68,6 +69,72 @@ class FakeAgentSystem:
             ],
             "workflow_plan": {"workflow_name": "comprehensive_evaluation"},
         }
+
+
+class FailedScientificAgentSystem:
+    llm = None
+    skill_router = None
+
+    def __init__(self, *, status="failed", final_answer=None, **overrides):
+        self.status = status
+        self.final_answer = (
+            "提供的 SMILES 无效，性质计算未执行。"
+            if final_answer is None
+            else final_answer
+        )
+        self.overrides = overrides
+
+    def should_use_tools(self, message):
+        return True
+
+    def execute(self, message, temperature=0.7, mol_count=5, active_skill=None):
+        result = {
+            "success": False,
+            "status": self.status,
+            "final_answer": self.final_answer,
+            "tools_used": ["property_calculator"],
+            "active_skill": "comprehensive_evaluation",
+            "trace_id": "trace-invalid-1",
+            "warnings": ["invalid_smiles"],
+            "error": {
+                "code": "invalid_input",
+                "message": "SMILES 验证失败。",
+                "details": {"field": "smiles"},
+            },
+            "tool_results": {
+                "property_calculator": {
+                    "success": False,
+                    "status": "failed",
+                    "message": "性质计算未执行。",
+                    "data": None,
+                }
+            },
+            "tool_result_sequence": [
+                {
+                    "step_id": "properties",
+                    "tool_name": "property_calculator",
+                    "success": False,
+                    "status": "failed",
+                    "message": "性质计算未执行。",
+                    "data": None,
+                }
+            ],
+            "candidate_set": {
+                "status": "failed",
+                "requested_count": 0,
+                "valid_count": 0,
+                "candidates": [],
+            },
+            "agent_events": [],
+            "workflow_plan": {"workflow_name": "comprehensive_evaluation"},
+        }
+        result.update(self.overrides)
+        return result
+
+
+class RaisingScientificAgentSystem(FailedScientificAgentSystem):
+    def execute(self, message, temperature=0.7, mol_count=5, active_skill=None):
+        raise RuntimeError("private-agent-token internal exception repr")
 
 
 class FakeModel:
@@ -342,6 +409,216 @@ def test_chat_handler_forwards_agent_events_before_agent_result():
         "content": "workflow completed",
     }
     assert model.generate_calls == 0
+
+
+def test_failed_scientific_agent_result_is_terminal_and_authoritative():
+    model = FakeModel()
+    handler = ChatHandler(
+        model=model,
+        rag_service=FakeRagService(),
+        agent_system=FailedScientificAgentSystem(),
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+    history = [
+        {"user": f"earlier-{index}", "assistant": "old response"}
+        for index in range(20)
+    ]
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="全面评估 invalid-smiles",
+            enable_rag=False,
+            enable_tools=True,
+            conversation_history=history,
+        )
+    )
+
+    assert model.generate_calls == 0
+    assert websocket.messages[-1] == {
+        "type": "complete",
+        "content": "提供的 SMILES 无效，性质计算未执行。",
+        "trace_id": "trace-invalid-1",
+        "status": "failed",
+    }
+    agent_message = next(
+        item for item in websocket.messages if item["type"] == "agent_result"
+    )
+    assert agent_message["active_skill"] == "comprehensive_evaluation"
+    assert agent_message["trace_id"] == "trace-invalid-1"
+    assert agent_message["status"] == "failed"
+    assert agent_message["warnings"] == ["invalid_smiles"]
+    assert not any(
+        item["type"] == "molecule_candidates" for item in websocket.messages
+    )
+    assert len(history) == 20
+    assert history[-1]["agent_used"] is True
+    assert history[-1]["agent_response"] == "提供的 SMILES 无效，性质计算未执行。"
+    assert history[-1]["assistant"] == "提供的 SMILES 无效，性质计算未执行。"
+
+
+@pytest.mark.parametrize(
+    ("agent_result", "expected"),
+    [
+        (
+            {
+                "final_answer": "   ",
+                "error": {"message": "结构化输入错误。"},
+                "tool_result_sequence": [
+                    {"success": False, "message": "工具失败。"}
+                ],
+            },
+            "结构化输入错误。",
+        ),
+        (
+            {
+                "final_answer": "",
+                "error": {"message": ""},
+                "tool_result_sequence": [
+                    {"success": True, "message": "成功结果不可作为失败原因。"},
+                    {"success": False, "message": "性质工具未完成。"},
+                    {"success": False, "message": "后续失败。"},
+                ],
+            },
+            "性质工具未完成。",
+        ),
+        (
+            {
+                "final_answer": "",
+                "error": {
+                    "message": ValueError("internal exception repr"),
+                    "details": {"api_key": "private-key-do-not-expose"},
+                },
+                "tool_result_sequence": [
+                    {
+                        "success": False,
+                        "message": None,
+                        "exception": RuntimeError("private-host-token"),
+                    }
+                ],
+            },
+            "科学计算未成功完成，请检查输入或工具状态后重试。",
+        ),
+    ],
+)
+def test_agent_failure_content_uses_only_safe_authoritative_messages(
+    agent_result,
+    expected,
+):
+    content = ChatHandler._agent_failure_content(agent_result)
+
+    assert content == expected
+    assert "internal exception repr" not in content
+    assert "private-key-do-not-expose" not in content
+    assert "private-host-token" not in content
+
+
+@pytest.mark.parametrize("status", ["rejected", "cancelled"])
+def test_rejected_or_cancelled_scientific_agent_status_is_terminal(status):
+    model = FakeModel()
+    rag = RecordingLegacyRagService()
+    handler = ChatHandler(
+        model=model,
+        rag_service=rag,
+        agent_system=FailedScientificAgentSystem(status=status),
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="全面评估 CCO",
+            enable_rag=False,
+            enable_tools=True,
+        )
+    )
+
+    assert model.generate_calls == 0
+    assert rag.calls == []
+    assert websocket.messages[-1]["status"] == status
+    assert next(
+        item for item in websocket.messages if item["type"] == "agent_result"
+    )["status"] == status
+
+
+def test_failed_scientific_agent_does_not_fall_through_to_initialized_legacy_rag():
+    model = FakeModel()
+    rag = RecordingLegacyRagService()
+    handler = ChatHandler(
+        model=model,
+        rag_service=rag,
+        agent_system=FailedScientificAgentSystem(),
+        config={"inference": {"stream": False}},
+    )
+
+    asyncio.run(
+        handler._process_message(
+            websocket=FakeWebSocket(),
+            message="全面评估 CCO",
+            enable_rag=True,
+            enable_tools=True,
+        )
+    )
+
+    assert rag.calls == []
+    assert model.generate_calls == 0
+
+
+def test_agent_failure_warnings_mapping_is_not_forwarded_as_a_warning_list():
+    handler = ChatHandler(
+        model=FakeModel(),
+        rag_service=FakeRagService(),
+        agent_system=FailedScientificAgentSystem(
+            warnings={"private": "do-not-forward"}
+        ),
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="全面评估 invalid-smiles",
+            enable_rag=False,
+            enable_tools=True,
+        )
+    )
+
+    agent_message = next(
+        item for item in websocket.messages if item["type"] == "agent_result"
+    )
+    assert agent_message["warnings"] == []
+
+
+def test_agent_execution_exception_uses_safe_terminal_fallback_without_secret():
+    model = FakeModel()
+    handler = ChatHandler(
+        model=model,
+        rag_service=FakeRagService(),
+        agent_system=RaisingScientificAgentSystem(),
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="全面评估 CCO",
+            enable_rag=False,
+            enable_tools=True,
+        )
+    )
+
+    assert model.generate_calls == 0
+    assert websocket.messages[-1]["content"] == (
+        "科学计算未成功完成，请检查输入或工具状态后重试。"
+    )
+    assert "private-agent-token" not in json.dumps(
+        websocket.messages,
+        ensure_ascii=False,
+    )
 
 
 def test_chat_handler_forwards_events_while_agent_is_running():

@@ -6,6 +6,7 @@ import asyncio
 import logging
 import pandas as pd
 import time
+from collections.abc import Mapping
 from typing import List, Dict, Any
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -286,7 +287,21 @@ class ChatHandler:
                         "active_skill": active_skill
                     }))
                 else:
-                    await self._send_status(websocket, f"⚠️ 代理执行失败: {agent_result.get('final_answer', '未知错误')}")
+                    agent_response = await self._send_terminal_agent_failure(
+                        websocket,
+                        agent_result,
+                    )
+                    history.append({
+                        "user": message,
+                        "agent_used": True,
+                        "agent_response": agent_response,
+                        "rag_enabled": enable_rag,
+                        "molecules_retrieved": 0,
+                        "assistant": agent_response,
+                    })
+                    if len(history) > 20:
+                        del history[:-20]
+                    return
             except Exception as e:
                 logger.error(f"Agent execution failed: {e}")
                 await self._send_status(websocket, f"⚠️ 代理执行出错: {str(e)[:100]}")
@@ -498,9 +513,90 @@ class ChatHandler:
                 lambda: self.agent_system.execute(message, **execute_kwargs)
             )
             return result
-        except Exception as e:
-            logger.error(f"Agent execution error: {e}")
-            return {"success": False, "final_answer": str(e)}
+        except Exception:
+            logger.error("Agent execution error; exception details omitted")
+            return {
+                "success": False,
+                "status": "failed",
+                "final_answer": "",
+                "error": None,
+                "warnings": [],
+            }
+
+    @staticmethod
+    def _agent_failure_content(agent_result: Dict[str, Any]) -> str:
+        """Select a safe, authoritative message for a failed Agent run."""
+
+        def safe_text(value: Any) -> str:
+            return value.strip() if isinstance(value, str) else ""
+
+        final_answer = safe_text(agent_result.get("final_answer"))
+        if final_answer:
+            return final_answer
+
+        error = agent_result.get("error")
+        if isinstance(error, Mapping):
+            error_message = safe_text(error.get("message"))
+            if error_message:
+                return error_message
+
+        sequence = agent_result.get("tool_result_sequence")
+        if isinstance(sequence, list):
+            for result in sequence:
+                if not isinstance(result, Mapping):
+                    continue
+                is_failed = result.get("success") is False or result.get(
+                    "status"
+                ) in {"failed", "rejected", "cancelled"}
+                if not is_failed:
+                    continue
+                result_message = safe_text(result.get("message"))
+                if result_message:
+                    return result_message
+
+        return "科学计算未成功完成，请检查输入或工具状态后重试。"
+
+    async def _send_terminal_agent_failure(
+        self,
+        websocket: WebSocket,
+        agent_result: Dict[str, Any],
+    ) -> str:
+        content = self._agent_failure_content(agent_result)
+        raw_status = agent_result.get("status")
+        status = (
+            raw_status
+            if raw_status in {"failed", "rejected", "cancelled"}
+            else "failed"
+        )
+        raw_trace_id = agent_result.get("trace_id")
+        trace_id = raw_trace_id if isinstance(raw_trace_id, str) else ""
+        raw_active_skill = agent_result.get("active_skill")
+        active_skill = (
+            raw_active_skill if isinstance(raw_active_skill, str) else ""
+        )
+        raw_warnings = agent_result.get("warnings")
+        warnings = (
+            [item for item in raw_warnings if isinstance(item, str)]
+            if isinstance(raw_warnings, list)
+            else []
+        )
+
+        await self._send_status(websocket, f"⚠️ 代理执行失败: {content}")
+        await websocket.send_text(json.dumps({
+            "type": "agent_result",
+            "message": content,
+            "active_skill": active_skill,
+            "trace_id": trace_id,
+            "status": status,
+            "warnings": warnings,
+        }, ensure_ascii=False))
+        await websocket.send_text(json.dumps({
+            "type": "complete",
+            "content": content,
+            "trace_id": trace_id,
+            "status": status,
+        }, ensure_ascii=False))
+        return content
 
     async def _send_agent_events(self, websocket: WebSocket, agent_result: Dict[str, Any]):
         """Forward structured Agent workflow events to the browser."""
