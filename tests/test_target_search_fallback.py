@@ -2,8 +2,10 @@ import hashlib
 import json
 import multiprocessing
 import os
+import pickle
 import sqlite3
 import threading
+import time
 import uuid
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
@@ -11,6 +13,14 @@ from pathlib import Path
 
 import pytest
 import requests
+
+
+@pytest.fixture(autouse=True)
+def _block_unexpected_http(monkeypatch):
+    def blocked_send(self, request, **kwargs):
+        raise AssertionError("unit tests must use an explicit fake adapter")
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", blocked_send)
 
 
 class MutableClock:
@@ -2567,6 +2577,7 @@ class _FakeRemoteSession:
     def __init__(self, *scripted):
         self.scripted = list(scripted)
         self.calls = []
+        self.close_calls = 0
 
     def request(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
@@ -2577,14 +2588,19 @@ class _FakeRemoteSession:
             raise result
         return result
 
+    def close(self):
+        self.close_calls += 1
+
 
 class _CapturingAdapter(requests.adapters.BaseAdapter):
     def __init__(self, payload=b"{}"):
         self.payload = payload
         self.prepared_requests = []
+        self.send_kwargs = []
 
     def send(self, request, **kwargs):
         self.prepared_requests.append(request)
+        self.send_kwargs.append(kwargs)
         response = requests.Response()
         response.status_code = 200
         response._content = self.payload
@@ -2637,6 +2653,61 @@ def _bounded_remote_client(session, sleeps=None, **overrides):
     }
     options.update(overrides)
     return BoundedJsonClient(**options)
+
+
+_UNIPROT_TEST_URL = "https://rest.uniprot.org/uniprotkb/search"
+_RCSB_SEARCH_TEST_URL = "https://search.rcsb.org/rcsbsearch/v2/query"
+_RCSB_ENTRY_TEST_URL = "https://data.rcsb.org/rest/v1/core/entry/1ABC"
+_ALPHAFOLD_TEST_URL = "https://alphafold.ebi.ac.uk/api/prediction/P00533"
+
+
+def _rcsb_graphql_entry(
+    entry_id,
+    entity_id="1",
+    *,
+    accession="P00533",
+    database_name="UniProt",
+    organism="Homo sapiens",
+    taxonomy_id=9606,
+    method="X-RAY DIFFRACTION",
+    resolution=1.8,
+    title="Experimental structure",
+    ligands=None,
+):
+    info = {}
+    if resolution is not None:
+        info["resolution_combined"] = (
+            resolution if isinstance(resolution, list) else [resolution]
+        )
+    if ligands is not None:
+        info["nonpolymer_bound_components"] = ligands
+    return {
+        "rcsb_id": entry_id,
+        "struct": {"title": title} if title is not None else None,
+        "exptl": [{"method": method}] if method is not None else [],
+        "rcsb_entry_info": info,
+        "polymer_entities": [
+            {
+                "rcsb_id": f"{entry_id}_{entity_id}",
+                "rcsb_polymer_entity_container_identifiers": {
+                    "entry_id": entry_id,
+                    "entity_id": entity_id,
+                    "reference_sequence_identifiers": [
+                        {
+                            "database_name": database_name,
+                            "database_accession": accession,
+                        }
+                    ],
+                },
+                "rcsb_entity_source_organism": [
+                    {
+                        "ncbi_scientific_name": organism,
+                        "ncbi_taxonomy_id": taxonomy_id,
+                    }
+                ],
+            }
+        ],
+    }
 
 
 def test_uniprot_resolve_constructs_exact_human_query_and_normalizes_record():
@@ -2692,7 +2763,7 @@ def test_uniprot_resolve_constructs_exact_human_query_and_normalizes_record():
                     "query": "(gene_exact:EGFR) AND (organism_id:9606)",
                     "format": "json",
                     "size": 5,
-                    "fields": "accession,id,gene_names,protein_name,organism_name",
+                    "fields": "accession,id,gene_names,protein_name,organism_name,organism_id",
                 },
                 "headers": {
                     "Accept": "application/json",
@@ -2719,12 +2790,12 @@ def test_uniprot_exact_primary_gene_match_wins_over_alias_match():
                     {
                         "primaryAccession": "Q00001",
                         "genes": [{"geneName": {"value": "OTHER"}, "synonyms": [{"value": "EGFR"}]}],
-                        "organism": {"scientificName": "Homo sapiens"},
+                        "organism": {"scientificName": "Homo sapiens", "taxonId": 9606},
                     },
                     {
                         "primaryAccession": "P00533",
                         "genes": [{"geneName": {"value": "EGFR"}}],
-                        "organism": {"scientificName": "Homo sapiens"},
+                        "organism": {"scientificName": "Homo sapiens", "taxonId": 9606},
                     },
                 ]
             }
@@ -2747,6 +2818,7 @@ def test_uniprot_accession_query_uses_exact_accession_field():
                     {
                         "primaryAccession": "P00533",
                         "genes": [{"geneName": {"value": "EGFR"}}],
+                        "organism": {"scientificName": "Homo sapiens", "taxonId": 9606},
                     }
                 ]
             }
@@ -2768,8 +2840,8 @@ def test_uniprot_multiple_equally_plausible_matches_are_explicitly_ambiguous():
         _FakeRemoteResponse(
             payload={
                 "results": [
-                    {"primaryAccession": "P00533", "genes": [{"geneName": {"value": "EGFR"}}]},
-                    {"primaryAccession": "Q9H0H5", "genes": [{"geneName": {"value": "EGFR"}}]},
+                    {"primaryAccession": "P00533", "genes": [{"geneName": {"value": "EGFR"}}], "organism": {"scientificName": "Homo sapiens", "taxonId": 9606}},
+                    {"primaryAccession": "Q9H0H5", "genes": [{"geneName": {"value": "EGFR"}}], "organism": {"scientificName": "Homo sapiens", "taxonId": 9606}},
                 ]
             }
         )
@@ -2804,7 +2876,7 @@ def test_bounded_json_client_returns_none_for_404_without_retrying():
     session = _FakeRemoteSession(_FakeRemoteResponse(status_code=404, raw=b"secret body"))
 
     result = _bounded_remote_client(session).request_json(
-        "UniProt", "GET", "https://official.example/not-found"
+        "UniProt", "GET", _UNIPROT_TEST_URL
     )
 
     assert result is None
@@ -2818,7 +2890,7 @@ def test_bounded_json_client_retries_timeout_with_capped_backoff():
     )
 
     result = _bounded_remote_client(session, sleeps, backoff_base=5.0).request_json(
-        "RCSB_PDB", "GET", "https://official.example/data"
+        "RCSB_PDB", "GET", _RCSB_ENTRY_TEST_URL
     )
 
     assert result == {"ok": True}
@@ -2832,7 +2904,7 @@ def test_bounded_json_client_retries_timeout_while_streaming_response():
     session = _FakeRemoteSession(first, _FakeRemoteResponse(payload={"ok": True}))
 
     result = _bounded_remote_client(session, sleeps).request_json(
-        "RCSB_PDB", "GET", "https://official.example/data"
+        "RCSB_PDB", "GET", _RCSB_ENTRY_TEST_URL
     )
 
     assert result == {"ok": True}
@@ -2850,7 +2922,7 @@ def test_bounded_json_client_retries_connection_failure_and_reports_exhaustion()
 
     with pytest.raises(RemoteSourceError) as raised:
         _bounded_remote_client(session, max_attempts=2).request_json(
-            "AlphaFold", "GET", "https://official.example/data?token=secret"
+            "AlphaFold", "GET", _ALPHAFOLD_TEST_URL
         )
 
     assert raised.value.code == "connection_failure"
@@ -2867,7 +2939,7 @@ def test_bounded_json_client_honors_numeric_retry_after_with_ceiling():
     )
 
     result = _bounded_remote_client(session, sleeps).request_json(
-        "UniProt", "GET", "https://official.example/data"
+        "UniProt", "GET", _UNIPROT_TEST_URL
     )
 
     assert result == {"ok": True}
@@ -2882,7 +2954,7 @@ def test_bounded_json_client_retries_provider_5xx_then_succeeds():
     )
 
     result = _bounded_remote_client(session, sleeps).request_json(
-        "RCSB_PDB", "POST", "https://official.example/query", json={"safe": True}
+        "RCSB_PDB", "POST", _RCSB_SEARCH_TEST_URL, json={"safe": True}
     )
 
     assert result == {"ok": True}
@@ -2903,7 +2975,7 @@ def test_bounded_json_client_reports_nonretryable_sanitized_errors(
 
     with pytest.raises(RemoteSourceError) as raised:
         _bounded_remote_client(_FakeRemoteSession(response)).request_json(
-            "UniProt", "GET", "https://official.example/data?token=secret"
+            "UniProt", "GET", _UNIPROT_TEST_URL
         )
 
     error = raised.value
@@ -2916,7 +2988,7 @@ def test_bounded_json_client_reports_nonretryable_sanitized_errors(
     loggable = f"{error!s} {error!r} {vars(error)}".lower()
     assert "secret" not in loggable
     assert "provider says" not in loggable
-    assert "official.example" not in loggable
+    assert "provider says" not in loggable
 
 
 def test_bounded_json_client_rejects_oversized_content_length_without_reading_body():
@@ -2929,7 +3001,7 @@ def test_bounded_json_client_rejects_oversized_content_length_without_reading_bo
     with pytest.raises(RemoteSourceError) as raised:
         _bounded_remote_client(
             _FakeRemoteSession(response), max_response_bytes=100
-        ).request_json("UniProt", "GET", "https://official.example/data")
+        ).request_json("UniProt", "GET", _UNIPROT_TEST_URL)
 
     assert raised.value.code == "response_too_large"
     assert raised.value.retryable is False
@@ -2943,7 +3015,7 @@ def test_bounded_json_client_rejects_oversized_stream_without_parsing_it():
         _bounded_remote_client(
             _FakeRemoteSession(_FakeRemoteResponse(raw=b"x" * 101)),
             max_response_bytes=100,
-        ).request_json("UniProt", "GET", "https://official.example/data")
+        ).request_json("UniProt", "GET", _UNIPROT_TEST_URL)
 
     assert raised.value.code == "response_too_large"
 
@@ -2960,7 +3032,7 @@ def test_remote_error_redacts_exception_and_provider_text_on_exhausted_5xx():
         _bounded_remote_client(
             _FakeRemoteSession(*responses), max_attempts=2
         ).request_json(
-            "RCSB_PDB", "GET", "https://official.example/data?authorization=secret"
+            "RCSB_PDB", "GET", _RCSB_ENTRY_TEST_URL
         )
 
     error = raised.value
@@ -3018,34 +3090,34 @@ def test_rcsb_search_is_bounded_deterministic_and_normalizes_evidence():
     search_response = _FakeRemoteResponse(
         payload={
             "result_set": [
-                {"identifier": "2def"},
-                {"identifier": "1ABC"},
-                {"identifier": "2DEF"},
-                {"identifier": "9ZZZ"},
+                {"identifier": "2def_2"},
+                {"identifier": "1ABC_1"},
+                {"identifier": "2DEF_2"},
+                {"identifier": "9ZZZ_1"},
             ]
         }
     )
-    first_entry = _FakeRemoteResponse(
+    entries = _FakeRemoteResponse(
         payload={
-            "rcsb_id": "1ABC",
-            "struct": {"title": "EGFR kinase with inhibitor"},
-            "exptl": [{"method": "X-RAY DIFFRACTION"}],
-            "rcsb_entry_info": {
-                "resolution_combined": [1.8],
-                "source_organism_names": ["Homo sapiens"],
-                "nonpolymer_bound_components": ["ATP", "LIG", "ATP"],
-            },
+            "data": {
+                "entries": [
+                    _rcsb_graphql_entry(
+                        "2DEF",
+                        "2",
+                        method="ELECTRON MICROSCOPY",
+                        resolution=3,
+                        title="Second structure",
+                    ),
+                    _rcsb_graphql_entry(
+                        "1ABC",
+                        title="EGFR kinase with inhibitor",
+                        ligands=["ATP", "LIG", "ATP"],
+                    ),
+                ]
+            }
         }
     )
-    second_entry = _FakeRemoteResponse(
-        payload={
-            "rcsb_id": "2DEF",
-            "struct": {"title": "Second structure"},
-            "exptl": [{"method": "ELECTRON MICROSCOPY"}],
-            "rcsb_entry_info": {"resolution_combined": [3]},
-        }
-    )
-    session = _FakeRemoteSession(search_response, first_entry, second_entry)
+    session = _FakeRemoteSession(search_response, entries)
 
     results = RcsbClient(_bounded_remote_client(session), max_structures=2).search(
         "p00533"
@@ -3070,50 +3142,35 @@ def test_rcsb_search_is_bounded_deterministic_and_normalizes_evidence():
             "structure_type": "experimental",
             "method": "ELECTRON MICROSCOPY",
             "resolution": 3.0,
-            "organism": None,
+            "organism": "Homo sapiens",
             "title": "Second structure",
             "ligand_evidence": [],
             "download_url": "https://files.rcsb.org/download/2DEF.cif",
             "source_url": "https://www.rcsb.org/structure/2DEF",
         },
     ]
-    assert session.calls[0] == (
-        "POST",
+    assert [call[1] for call in session.calls] == [
         "https://search.rcsb.org/rcsbsearch/v2/query",
-        {
-            "json": {
-                "query": {
-                    "type": "terminal",
-                    "service": "text",
-                    "parameters": {
-                        "attribute": "rcsb_polymer_entity_container_identifiers.reference_sequence_identifiers.database_accession",
-                        "operator": "exact_match",
-                        "value": "P00533",
-                    },
-                },
-                "return_type": "entry",
-                "request_options": {"paginate": {"start": 0, "rows": 2}},
-            },
-            "headers": session.calls[0][2]["headers"],
-            "auth": session.calls[0][2]["auth"],
-            "allow_redirects": False,
-            "timeout": (1.0, 2.0),
-            "stream": True,
-        },
-    )
-    assert [call[1] for call in session.calls[1:]] == [
-        "https://data.rcsb.org/rest/v1/core/entry/1ABC",
-        "https://data.rcsb.org/rest/v1/core/entry/2DEF",
+        "https://data.rcsb.org/graphql",
     ]
 
 
-def test_rcsb_missing_optional_fields_and_missing_entry_are_safe():
+def test_rcsb_missing_optional_fields_are_safe():
     from src.target_search.remote_clients import RcsbClient
 
     session = _FakeRemoteSession(
-        _FakeRemoteResponse(payload={"result_set": [{"identifier": "3XYZ"}, {"identifier": "4XYZ"}]}),
-        _FakeRemoteResponse(payload={"rcsb_id": "3XYZ"}),
-        _FakeRemoteResponse(status_code=404, raw=b"not found"),
+        _FakeRemoteResponse(payload={"result_set": [{"identifier": "3XYZ_1"}]}),
+        _FakeRemoteResponse(
+            payload={
+                "data": {
+                    "entries": [
+                        _rcsb_graphql_entry(
+                            "3XYZ", resolution=None, title=None, ligands=None
+                        )
+                    ]
+                }
+            }
+        ),
     )
 
     results = RcsbClient(_bounded_remote_client(session), max_structures=2).search(
@@ -3125,15 +3182,24 @@ def test_rcsb_missing_optional_fields_and_missing_entry_are_safe():
             "structure_id": "3XYZ",
             "source": "RCSB_PDB",
             "structure_type": "experimental",
-            "method": None,
+            "method": "X-RAY DIFFRACTION",
             "resolution": None,
-            "organism": None,
+            "organism": "Homo sapiens",
             "title": None,
             "ligand_evidence": [],
             "download_url": "https://files.rcsb.org/download/3XYZ.cif",
             "source_url": "https://www.rcsb.org/structure/3XYZ",
         }
     ]
+
+
+def test_rcsb_official_empty_search_204_returns_no_structures():
+    from src.target_search.remote_clients import RcsbClient
+
+    session = _FakeRemoteSession(_FakeRemoteResponse(status_code=204, raw=b""))
+
+    assert RcsbClient(_bounded_remote_client(session)).search("P00533") == []
+    assert len(session.calls) == 1
 
 
 def test_alphafold_lookup_constructs_official_request_and_stays_predicted():
@@ -3144,7 +3210,9 @@ def test_alphafold_lookup_constructs_official_request_and_stays_predicted():
             payload=[
                 {
                     "entryId": "AF-P00533-F1",
+                    "modelEntityId": "AF-P00533-F1",
                     "uniprotAccession": "P00533",
+                    "latestVersion": 6,
                     "uniprotDescription": "Epidermal growth factor receptor",
                     "organismScientificName": "Homo sapiens",
                     "pdbUrl": "https://alphafold.ebi.ac.uk/files/AF-P00533-F1-model_v6.pdb",
@@ -3322,7 +3390,7 @@ def test_bounded_json_client_generic_request_exception_is_nonretryable_and_redac
 
     with pytest.raises(RemoteSourceError) as raised:
         _bounded_remote_client(session).request_json(
-            "UniProt", "GET", "https://official.example/data?token=private"
+            "UniProt", "GET", _UNIPROT_TEST_URL
         )
 
     assert raised.value.code == "request_failure"
@@ -3343,7 +3411,7 @@ def test_bounded_json_client_exhausted_timeout_is_retryable_and_bounded():
 
     with pytest.raises(RemoteSourceError) as raised:
         _bounded_remote_client(session, sleeps, max_attempts=2).request_json(
-            "AlphaFold", "GET", "https://official.example/data"
+            "AlphaFold", "GET", _ALPHAFOLD_TEST_URL
         )
 
     assert (
@@ -3366,7 +3434,7 @@ def test_bounded_json_client_exhausted_429_keeps_numeric_status():
 
     with pytest.raises(RemoteSourceError) as raised:
         _bounded_remote_client(session, sleeps, max_attempts=2).request_json(
-            "UniProt", "GET", "https://official.example/data"
+            "UniProt", "GET", _UNIPROT_TEST_URL
         )
 
     assert (
@@ -3392,7 +3460,7 @@ def test_bounded_json_client_rejects_invalid_status_and_chunk_shapes(
 
     with pytest.raises(RemoteSourceError) as raised:
         _bounded_remote_client(_FakeRemoteSession(response)).request_json(
-            "RCSB_PDB", "GET", "https://official.example/data"
+            "RCSB_PDB", "GET", _RCSB_ENTRY_TEST_URL
         )
 
     assert raised.value.code == "invalid_response"
@@ -3411,8 +3479,8 @@ def test_rcsb_requires_matching_entry_identity(entry):
     from src.target_search.remote_clients import RcsbClient, RemoteSourceError
 
     session = _FakeRemoteSession(
-        _FakeRemoteResponse(payload={"result_set": [{"identifier": "1ABC"}]}),
-        _FakeRemoteResponse(payload=entry),
+        _FakeRemoteResponse(payload={"result_set": [{"identifier": "1ABC_1"}]}),
+        _FakeRemoteResponse(payload={"data": {"entries": [entry]}}),
     )
 
     with pytest.raises(RemoteSourceError) as raised:
@@ -3430,12 +3498,11 @@ def test_rcsb_rejects_every_malformed_resolution_member(resolution_values):
     from src.target_search.remote_clients import RcsbClient, RemoteSourceError
 
     session = _FakeRemoteSession(
-        _FakeRemoteResponse(payload={"result_set": [{"identifier": "1ABC"}]}),
+        _FakeRemoteResponse(payload={"result_set": [{"identifier": "1ABC_1"}]}),
         _FakeRemoteResponse(
-            payload={
-                "rcsb_id": "1ABC",
-                "rcsb_entry_info": {"resolution_combined": resolution_values},
-            }
+            payload={"data": {"entries": [
+                _rcsb_graphql_entry("1ABC", resolution=resolution_values)
+            ]}}
         ),
     )
 
@@ -3454,7 +3521,9 @@ def test_alphafold_accepts_one_model_bound_coordinate_url():
             payload=[
                 {
                     "entryId": "AF-P00533-F1",
+                    "modelEntityId": "AF-P00533-F1",
                     "uniprotAccession": "P00533",
+                    "latestVersion": 6,
                     "pdbUrl": "https://alphafold.ebi.ac.uk/files/AF-P00533-F1-model_v6.pdb",
                 }
             ]
@@ -3486,8 +3555,80 @@ def test_alphafold_rejects_absent_or_mismatched_coordinate_urls(coordinate_field
 
     record = {
         "entryId": "AF-P00533-F1",
+        "modelEntityId": "AF-P00533-F1",
         "uniprotAccession": "P00533",
+        "latestVersion": 6,
         **coordinate_fields,
+    }
+    session = _FakeRemoteSession(_FakeRemoteResponse(payload=[record]))
+
+    with pytest.raises(RemoteSourceError) as raised:
+        AlphaFoldClient(_bounded_remote_client(session)).lookup("P00533")
+
+    assert raised.value.code == "invalid_response"
+    assert raised.value.retryable is False
+
+
+def test_alphafold_filters_isoforms_and_selects_latest_canonical_model():
+    from src.target_search.remote_clients import AlphaFoldClient
+
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(
+            payload=[
+                {
+                    "entryId": "AF-P00533-2-F1",
+                    "modelEntityId": "AF-P00533-2-F1",
+                    "uniprotAccession": "P00533-2",
+                    "latestVersion": 99,
+                    "pdbUrl": "https://alphafold.ebi.ac.uk/files/AF-P00533-2-F1-model_v99.pdb",
+                },
+                {
+                    "entryId": "AF-P00533-F1",
+                    "modelEntityId": "AF-P00533-F1",
+                    "uniprotAccession": "P00533",
+                    "latestVersion": 5,
+                    "pdbUrl": "https://alphafold.ebi.ac.uk/files/AF-P00533-F1-model_v5.pdb",
+                },
+                {
+                    "entryId": "AF-P00533-F1",
+                    "modelEntityId": "AF-P00533-F1",
+                    "uniprotAccession": "P00533",
+                    "latestVersion": 6,
+                    "cifUrl": "https://alphafold.ebi.ac.uk/files/AF-P00533-F1-model_v6.cif",
+                },
+            ]
+        )
+    )
+
+    result = AlphaFoldClient(_bounded_remote_client(session)).lookup("P00533")
+
+    assert result["model_id"] == "AF-P00533-F1"
+    assert result["cif_url"].endswith("-model_v6.cif")
+    assert result["pdb_url"] is None
+
+
+@pytest.mark.parametrize(
+    "record_update",
+    [
+        {"modelEntityId": "AF-Q9H0H5-F1"},
+        {"entryId": "AF-P00533-F2", "modelEntityId": "AF-P00533-F2"},
+        {"latestVersion": 0},
+        {
+            "latestVersion": 6,
+            "pdbUrl": "https://alphafold.ebi.ac.uk/files/AF-P00533-F1-model_v5.pdb",
+        },
+    ],
+)
+def test_alphafold_canonical_identity_and_version_are_strictly_bound(record_update):
+    from src.target_search.remote_clients import AlphaFoldClient, RemoteSourceError
+
+    record = {
+        "entryId": "AF-P00533-F1",
+        "modelEntityId": "AF-P00533-F1",
+        "uniprotAccession": "P00533",
+        "latestVersion": 6,
+        "pdbUrl": "https://alphafold.ebi.ac.uk/files/AF-P00533-F1-model_v6.pdb",
+        **record_update,
     }
     session = _FakeRemoteSession(_FakeRemoteResponse(payload=[record]))
 
@@ -3523,3 +3664,428 @@ def test_bounded_client_blocks_credential_bearing_redirect_without_second_reques
     loggable = f"{error!s} {error!r} {vars(error)}".lower()
     assert "redirect-secret" not in loggable
     assert "alphafold.ebi.ac.uk/private" not in loggable
+
+
+@pytest.mark.parametrize(
+    ("source", "method", "url"),
+    [
+        ("UniProt", "GET", "http://rest.uniprot.org/uniprotkb/search"),
+        ("UniProt", "POST", _UNIPROT_TEST_URL),
+        ("UniProt", "GET", "https://user:pass@rest.uniprot.org/uniprotkb/search"),
+        ("UniProt", "GET", "https://rest.uniprot.org:443/uniprotkb/search"),
+        ("UniProt", "GET", "https://rest.uniprot.org/uniprotkb/search#fragment"),
+        ("UniProt", "GET", "https://rest.uniprot.org/uniprotkb/P00533"),
+        ("UniProt", "GET", "https://169.254.169.254/latest/meta-data/iam"),
+        ("RCSB_PDB", "POST", "https://data.rcsb.org/not-graphql"),
+        ("AlphaFold", "GET", "https://alphafold.ebi.ac.uk/api/prediction/not-valid"),
+    ],
+)
+def test_bounded_client_rejects_nonallowlisted_requests_before_session(
+    source, method, url
+):
+    from src.target_search.remote_clients import RemoteSourceError
+
+    session = _FakeRemoteSession()
+
+    with pytest.raises(RemoteSourceError) as raised:
+        _bounded_remote_client(session).request_json(source, method, url)
+
+    assert raised.value.code == "invalid_request"
+    assert raised.value.retryable is False
+    assert raised.value.status_code is None
+    assert session.calls == []
+    assert "169.254" not in str(raised.value)
+    assert "user:pass" not in str(raised.value)
+
+
+def test_borrowed_session_disables_environment_proxy_credentials_at_adapter(monkeypatch):
+    monkeypatch.setenv(
+        "HTTPS_PROXY", "http://env-user:env-password@proxy.invalid:8080"
+    )
+    session = requests.Session()
+    adapter = _CapturingAdapter()
+    session.mount("https://", adapter)
+
+    result = _bounded_remote_client(session).request_json(
+        "UniProt", "GET", _UNIPROT_TEST_URL
+    )
+
+    assert result == {}
+    assert session.trust_env is False
+    effective_proxies = adapter.send_kwargs[0]["proxies"]
+    assert not effective_proxies
+    assert "env-user" not in repr(effective_proxies)
+
+
+@pytest.mark.parametrize(
+    ("status", "retry_after", "expected_delay"),
+    [
+        (429, "-4", 0.0),
+        (503, "Thu, 01 Jan 2026 00:00:05 GMT", 2.0),
+        (500, "Thu, 01 Jan 2026 00:00:00 GMT", 0.0),
+    ],
+)
+def test_retry_after_supports_seconds_and_http_dates_with_clamping(
+    status, retry_after, expected_delay
+):
+    from src.target_search.remote_clients import BoundedJsonClient
+
+    sleeps = []
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(status_code=status, headers={"Retry-After": retry_after}),
+        _FakeRemoteResponse(payload={"ok": True}),
+    )
+    client = BoundedJsonClient(
+        session=session,
+        sleep=sleeps.append,
+        clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
+        timeout=(1.0, 2.0),
+        max_attempts=2,
+        backoff_base=0.25,
+        backoff_ceiling=2.0,
+    )
+
+    result = client.request_json("UniProt", "GET", _UNIPROT_TEST_URL)
+
+    assert result == {"ok": True}
+    assert sleeps == [expected_delay]
+
+
+def test_remote_source_error_pickle_roundtrip_preserves_only_sanitized_contract():
+    from src.target_search.remote_clients import RemoteSourceError
+
+    original = RemoteSourceError(
+        "RCSB_PDB", "provider_unavailable", retryable=True, status_code=503
+    )
+
+    restored = pickle.loads(pickle.dumps(original))
+
+    assert type(restored) is RemoteSourceError
+    assert vars(restored) == vars(original)
+    assert str(restored) == str(original)
+    with pytest.raises(AttributeError):
+        restored.extra = "provider-secret"
+
+
+def test_bounded_client_context_closes_owned_but_not_borrowed_session(monkeypatch):
+    from src.target_search.remote_clients import BoundedJsonClient
+
+    owned = _FakeRemoteSession(_FakeRemoteResponse(payload={"ok": True}))
+    monkeypatch.setattr(requests, "Session", lambda: owned)
+
+    with BoundedJsonClient() as client:
+        assert client.request_json("UniProt", "GET", _UNIPROT_TEST_URL) == {
+            "ok": True
+        }
+    assert owned.close_calls == 1
+    with pytest.raises(RuntimeError):
+        client.request_json("UniProt", "GET", _UNIPROT_TEST_URL)
+
+    borrowed = _FakeRemoteSession(_FakeRemoteResponse(payload={"ok": True}))
+    with BoundedJsonClient(session=borrowed) as borrowed_client:
+        assert borrowed_client.request_json(
+            "UniProt", "GET", _UNIPROT_TEST_URL
+        ) == {"ok": True}
+    assert borrowed.close_calls == 0
+
+
+@pytest.mark.parametrize("client_name", ["uniprot", "rcsb", "alphafold"])
+def test_source_client_context_delegates_close(client_name):
+    from src.target_search.remote_clients import AlphaFoldClient, RcsbClient, UniProtClient
+
+    class ClosingTransport:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    transport = ClosingTransport()
+    source_client = {
+        "uniprot": UniProtClient,
+        "rcsb": RcsbClient,
+        "alphafold": AlphaFoldClient,
+    }[client_name](transport)
+
+    with source_client as entered:
+        assert entered is source_client
+    assert transport.close_calls == 1
+
+
+def test_borrowed_session_request_calls_are_serialized_across_threads():
+    from src.target_search.remote_clients import BoundedJsonClient
+
+    class ConcurrentSession:
+        def __init__(self):
+            self.active = 0
+            self.max_active = 0
+            self.lock = threading.Lock()
+
+        def request(self, method, url, **kwargs):
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            try:
+                time.sleep(0.03)
+                return _FakeRemoteResponse(payload={"ok": True})
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    session = ConcurrentSession()
+    client = BoundedJsonClient(session=session, sleep=lambda delay: None)
+    barrier = threading.Barrier(5)
+    results = []
+
+    def worker():
+        barrier.wait()
+        results.append(client.request_json("UniProt", "GET", _UNIPROT_TEST_URL))
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(3)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert results == [{"ok": True}] * 4
+    assert session.max_active == 1
+
+
+def test_fallback_unit_network_guard_fails_closed_without_explicit_adapter():
+    with pytest.raises(AssertionError, match="explicit fake adapter"):
+        requests.get(_UNIPROT_TEST_URL)
+
+
+def test_uniprot_ranks_all_gene_names_and_collects_deterministic_aliases():
+    from src.target_search.remote_clients import UniProtClient
+
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(
+            payload={
+                "results": [
+                    {
+                        "primaryAccession": "P00533",
+                        "genes": [
+                            {
+                                "geneName": {"value": "ERBB_RECEPTOR"},
+                                "synonyms": [{"value": "HER1"}],
+                            },
+                            {
+                                "geneName": {"value": "EGFR"},
+                                "synonyms": [
+                                    {"value": "ERBB1"},
+                                    {"value": "HER1"},
+                                ],
+                            },
+                        ],
+                        "organism": {
+                            "scientificName": "Homo sapiens",
+                            "taxonId": 9606,
+                        },
+                    }
+                ]
+            }
+        )
+    )
+
+    result = UniProtClient(_bounded_remote_client(session)).resolve("EGFR")
+
+    assert result["gene_symbol"] == "ERBB_RECEPTOR"
+    assert result["aliases"] == ["EGFR", "ERBB1", "HER1"]
+    assert result["match_reason"] == "exact_gene"
+
+
+def test_uniprot_rejects_taxon_mismatch_in_plausible_human_record():
+    from src.target_search.remote_clients import RemoteSourceError, UniProtClient
+
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(
+            payload={
+                "results": [
+                    {
+                        "primaryAccession": "P00533",
+                        "genes": [{"geneName": {"value": "EGFR"}}],
+                        "organism": {
+                            "scientificName": "Mus musculus",
+                            "taxonId": 10090,
+                        },
+                    }
+                ]
+            }
+        )
+    )
+
+    with pytest.raises(RemoteSourceError) as raised:
+        UniProtClient(_bounded_remote_client(session)).resolve("EGFR")
+
+    assert raised.value.code == "invalid_response"
+    assert raised.value.retryable is False
+
+
+def test_uniprot_preserves_ambiguity_across_secondary_gene_names():
+    from src.target_search.remote_clients import RemoteSourceError, UniProtClient
+
+    records = []
+    for accession in ("P00533", "Q9H0H5"):
+        records.append(
+            {
+                "primaryAccession": accession,
+                "genes": [
+                    {"geneName": {"value": "PRIMARY"}},
+                    {"geneName": {"value": "EGFR"}},
+                ],
+                "organism": {
+                    "scientificName": "Homo sapiens",
+                    "taxonId": 9606,
+                },
+            }
+        )
+    session = _FakeRemoteSession(_FakeRemoteResponse(payload={"results": records}))
+
+    with pytest.raises(RemoteSourceError) as raised:
+        UniProtClient(_bounded_remote_client(session)).resolve("EGFR")
+
+    assert raised.value.code == "ambiguous_match"
+
+
+def test_rcsb_uses_bounded_polymer_entity_search_and_one_graphql_batch():
+    from src.target_search.remote_clients import RcsbClient
+
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(
+            payload={
+                "result_set": [
+                    {"identifier": "2DEF_2"},
+                    {"identifier": "1ABC_1"},
+                    {"identifier": "2DEF_2"},
+                    {"identifier": "9ZZZ_1"},
+                ]
+            }
+        ),
+        _FakeRemoteResponse(
+            payload={
+                "data": {
+                    "entries": [
+                        _rcsb_graphql_entry(
+                            "2DEF",
+                            "2",
+                            method="ELECTRON MICROSCOPY",
+                            resolution=3.0,
+                            title="Second structure",
+                        ),
+                        _rcsb_graphql_entry(
+                            "1ABC",
+                            ligands=["LIG", "ATP", "ATP"],
+                            title="EGFR kinase with inhibitor",
+                        ),
+                    ]
+                }
+            }
+        ),
+    )
+
+    results = RcsbClient(_bounded_remote_client(session), max_structures=2).search(
+        "P00533"
+    )
+
+    assert [item["structure_id"] for item in results] == ["1ABC", "2DEF"]
+    assert results[0]["organism"] == "Homo sapiens"
+    assert results[0]["ligand_evidence"] == ["ATP", "LIG"]
+    assert results[1]["method"] == "ELECTRON MICROSCOPY"
+    assert len(session.calls) == 2
+    search_json = session.calls[0][2]["json"]
+    assert search_json["return_type"] == "polymer_entity"
+    assert search_json["query"]["type"] == "group"
+    nodes = search_json["query"]["nodes"]
+    assert [node["parameters"]["attribute"] for node in nodes] == [
+        "rcsb_polymer_entity_container_identifiers.reference_sequence_identifiers.database_name",
+        "rcsb_polymer_entity_container_identifiers.reference_sequence_identifiers.database_accession",
+        "exptl.method",
+    ]
+    assert nodes[0]["parameters"]["value"] == "UniProt"
+    assert nodes[1]["parameters"]["value"] == "P00533"
+    assert nodes[2]["parameters"]["operator"] == "exists"
+    assert search_json["request_options"] == {
+        "paginate": {"start": 0, "rows": 2},
+        "sort": [
+            {"sort_by": "score", "direction": "desc"},
+            {"sort_by": "rcsb_id", "direction": "asc"},
+        ],
+    }
+    assert session.calls[1][0:2] == (
+        "POST",
+        "https://data.rcsb.org/graphql",
+    )
+    graphql_json = session.calls[1][2]["json"]
+    assert graphql_json["variables"] == {"ids": ["1ABC", "2DEF"]}
+    assert "polymer_entities" in graphql_json["query"]
+    assert "rcsb_entity_source_organism" in graphql_json["query"]
+    assert "reference_sequence_identifiers" in graphql_json["query"]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        _rcsb_graphql_entry("1ABC", database_name="PDB"),
+        _rcsb_graphql_entry("1ABC", accession="Q9H0H5"),
+        _rcsb_graphql_entry("1ABC", organism=None),
+        _rcsb_graphql_entry("1ABC", method=None),
+    ],
+)
+def test_rcsb_graphql_identity_and_experiment_validation_fail_closed(entry):
+    from src.target_search.remote_clients import RcsbClient, RemoteSourceError
+
+    if entry["polymer_entities"][0]["rcsb_entity_source_organism"][0][
+        "ncbi_scientific_name"
+    ] is None:
+        entry["polymer_entities"][0]["rcsb_entity_source_organism"] = []
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(payload={"result_set": [{"identifier": "1ABC_1"}]}),
+        _FakeRemoteResponse(payload={"data": {"entries": [entry]}}),
+    )
+
+    with pytest.raises(RemoteSourceError) as raised:
+        RcsbClient(_bounded_remote_client(session), max_structures=1).search("P00533")
+
+    assert raised.value.code == "invalid_response"
+    assert raised.value.retryable is False
+    assert len(session.calls) == 2
+
+
+def test_rcsb_organism_comes_only_from_matching_polymer_entity_source():
+    from src.target_search.remote_clients import RcsbClient
+
+    entry = _rcsb_graphql_entry("1ABC")
+    entry["rcsb_entry_info"]["source_organism_names"] = ["Fabricated species"]
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(payload={"result_set": [{"identifier": "1ABC_1"}]}),
+        _FakeRemoteResponse(payload={"data": {"entries": [entry]}}),
+    )
+
+    result = RcsbClient(_bounded_remote_client(session), max_structures=1).search(
+        "P00533"
+    )
+
+    assert result[0]["organism"] == "Homo sapiens"
+
+
+def test_rcsb_rejects_malformed_reference_members_even_with_a_valid_match():
+    from src.target_search.remote_clients import RcsbClient, RemoteSourceError
+
+    entry = _rcsb_graphql_entry("1ABC")
+    references = entry["polymer_entities"][0][
+        "rcsb_polymer_entity_container_identifiers"
+    ]["reference_sequence_identifiers"]
+    references.insert(0, None)
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(payload={"result_set": [{"identifier": "1ABC_1"}]}),
+        _FakeRemoteResponse(payload={"data": {"entries": [entry]}}),
+    )
+
+    with pytest.raises(RemoteSourceError) as raised:
+        RcsbClient(_bounded_remote_client(session), max_structures=1).search("P00533")
+
+    assert raised.value.code == "invalid_response"
+    assert raised.value.retryable is False
