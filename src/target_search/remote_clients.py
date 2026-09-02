@@ -212,6 +212,7 @@ class BoundedJsonClient:
                 "User-Agent": STABLE_USER_AGENT,
             },
             "auth": _CREDENTIAL_FREE_AUTH,
+            "allow_redirects": False,
             "timeout": self._timeout,
             "stream": True,
         }

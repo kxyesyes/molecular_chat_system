@@ -2597,6 +2597,32 @@ class _CapturingAdapter(requests.adapters.BaseAdapter):
         pass
 
 
+class _RedirectCapturingAdapter(requests.adapters.BaseAdapter):
+    def __init__(self):
+        self.prepared_requests = []
+
+    def send(self, request, **kwargs):
+        self.prepared_requests.append(request)
+        response = requests.Response()
+        response.request = request
+        response.url = request.url
+        if len(self.prepared_requests) == 1:
+            response.status_code = 302
+            response.headers["Location"] = (
+                "https://alphafold.ebi.ac.uk/private?token=redirect-secret"
+            )
+            response.headers["Set-Cookie"] = "session=redirect-secret"
+            response._content = b"provider redirect body redirect-secret"
+        else:
+            response.status_code = 200
+            response._content = b"{}"
+        response._content_consumed = True
+        return response
+
+    def close(self):
+        pass
+
+
 def _bounded_remote_client(session, sleeps=None, **overrides):
     from src.target_search.remote_clients import BoundedJsonClient
 
@@ -2673,6 +2699,7 @@ def test_uniprot_resolve_constructs_exact_human_query_and_normalizes_record():
                     "User-Agent": STABLE_USER_AGENT,
                 },
                 "auth": session.calls[0][2]["auth"],
+                "allow_redirects": False,
                 "timeout": (1.0, 2.0),
                 "stream": True,
             },
@@ -3069,6 +3096,7 @@ def test_rcsb_search_is_bounded_deterministic_and_normalizes_evidence():
             },
             "headers": session.calls[0][2]["headers"],
             "auth": session.calls[0][2]["auth"],
+            "allow_redirects": False,
             "timeout": (1.0, 2.0),
             "stream": True,
         },
@@ -3468,3 +3496,30 @@ def test_alphafold_rejects_absent_or_mismatched_coordinate_urls(coordinate_field
 
     assert raised.value.code == "invalid_response"
     assert raised.value.retryable is False
+
+
+def test_bounded_client_blocks_credential_bearing_redirect_without_second_request():
+    from src.target_search.remote_clients import RemoteSourceError
+
+    session = requests.Session()
+    adapter = _RedirectCapturingAdapter()
+    session.mount("https://", adapter)
+
+    with pytest.raises(RemoteSourceError) as raised:
+        _bounded_remote_client(session).request_json(
+            "UniProt", "GET", "https://rest.uniprot.org/uniprotkb/search"
+        )
+
+    error = raised.value
+    assert (error.code, error.retryable, error.status_code) == (
+        "unexpected_status",
+        False,
+        302,
+    )
+    assert len(adapter.prepared_requests) == 1
+    assert {
+        name.casefold() for name in adapter.prepared_requests[0].headers
+    }.isdisjoint({"authorization", "proxy-authorization", "cookie"})
+    loggable = f"{error!s} {error!r} {vars(error)}".lower()
+    assert "redirect-secret" not in loggable
+    assert "alphafold.ebi.ac.uk/private" not in loggable
