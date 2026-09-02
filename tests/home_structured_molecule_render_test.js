@@ -84,8 +84,21 @@ vm.runInContext(fs.readFileSync(helperPath, "utf8"), sandbox, {
   filename: helperPath,
 });
 
-const api = sandbox.window.HomeMoleculeCandidates;
-assert(api && typeof api.normalize === "function", "Helper must expose normalize");
+const rawApi = sandbox.window.HomeMoleculeCandidates;
+assert(rawApi && typeof rawApi.normalize === "function", "Helper must expose normalize");
+const api = {
+  normalize(payload) {
+    sandbox.__payloadJson = JSON.stringify(payload);
+    return vm.runInContext(
+      "window.HomeMoleculeCandidates.normalize(JSON.parse(__payloadJson))",
+      sandbox,
+    );
+  },
+};
+assert(
+  typeof rawApi.createLifecycle === "function",
+  "Helper must expose a pure candidate request lifecycle",
+);
 
 const helperSource = fs.readFileSync(helperPath, "utf8");
 assert(
@@ -94,8 +107,8 @@ assert(
 );
 const instrumentedSource = helperSource
   .replace(
-    "root.HomeMoleculeCandidates = { normalize };",
-    "root.HomeMoleculeCandidates = { normalize, sha256Prefix };",
+    "root.HomeMoleculeCandidates = { createLifecycle, normalize };",
+    "root.HomeMoleculeCandidates = { createLifecycle, normalize, sha256Prefix };",
   );
 assert(
   instrumentedSource.includes("normalize, sha256Prefix"),
@@ -114,6 +127,75 @@ assert(
 
 const normalized = api.normalize(validPayload());
 assert(normalized, "Valid succeeded payload must normalize");
+
+const lifecycle = rawApi.createLifecycle({
+  maxRuns: 2,
+  maxEventsPerRun: 2,
+  maxCandidates: 4,
+});
+assert(lifecycle.startRequest() === true, "First request must start");
+assert(lifecycle.startRequest() === false, "Second active request must be rejected");
+assert(lifecycle.enqueue(normalized) === true, "Active request must queue candidates");
+assert(lifecycle.enqueue(normalized) === false, "Duplicate event must be deduplicated");
+const drained = lifecycle.complete();
+assert(
+  drained.length === 1 && drained[0].candidates.length === 1,
+  "Sole active trace must drain exactly once on completion",
+);
+assert(lifecycle.complete().length === 0, "Completed runs must not drain twice");
+assert(lifecycle.enqueue(normalized) === false, "Stale events must be ignored");
+lifecycle.startRequest();
+lifecycle.enqueue(normalized);
+lifecycle.clear();
+assert(lifecycle.complete().length === 0, "Reconnect/error clear must remove stale cards");
+
+const capacityPayload = validPayload();
+capacityPayload.trace_id = "trace-capacity-2";
+capacityPayload.candidate_set.candidates[0].candidate_id = exactCandidateId(1, "CCN");
+capacityPayload.candidate_set.candidates[0].original_smiles = "CCN";
+capacityPayload.candidate_set.candidates[0].canonical_smiles = "CCN";
+capacityPayload.candidate_set.candidates[0].smiles = "CCN";
+const normalizedCapacityPayload = api.normalize(capacityPayload);
+assert(normalizedCapacityPayload, "Capacity test payload must normalize");
+
+const runCapacityLifecycle = rawApi.createLifecycle({ maxRuns: 1 });
+runCapacityLifecycle.startRequest();
+assert(runCapacityLifecycle.enqueue(normalized), "First trace must fit run cap");
+assert(
+  runCapacityLifecycle.enqueue(normalizedCapacityPayload) === false,
+  "Per-request trace maps must enforce the configured run cap",
+);
+
+const eventCapacityLifecycle = rawApi.createLifecycle({
+  maxEventsPerRun: 1,
+  maxCandidates: 4,
+});
+eventCapacityLifecycle.startRequest();
+eventCapacityLifecycle.enqueue(normalized);
+normalizedCapacityPayload.traceId = normalized.traceId;
+assert(
+  eventCapacityLifecycle.enqueue(normalizedCapacityPayload) === false,
+  "Per-trace queues must enforce the configured event cap",
+);
+
+const candidateCapacityLifecycle = rawApi.createLifecycle({ maxCandidates: 1 });
+candidateCapacityLifecycle.startRequest();
+candidateCapacityLifecycle.enqueue(normalized);
+assert(
+  candidateCapacityLifecycle.enqueue(normalizedCapacityPayload) === false,
+  "Request queues must enforce the configured candidate cap",
+);
+
+const ambiguousLifecycle = rawApi.createLifecycle({ maxRuns: 2 });
+ambiguousLifecycle.startRequest();
+ambiguousLifecycle.enqueue(normalized);
+const secondTracePayload = validPayload();
+secondTracePayload.trace_id = "trace-candidates-2";
+ambiguousLifecycle.enqueue(api.normalize(secondTracePayload));
+assert(
+  ambiguousLifecycle.complete().length === 0,
+  "Completion without a trace must not drain ambiguous runs",
+);
 assert(normalized !== validPayload(), "Normalizer must return a fresh object");
 assert(normalized.traceId === "trace-candidates-1", "Trace ID must normalize");
 assert(
@@ -265,6 +347,36 @@ rejected(
 );
 rejected(
   (payload) => {
+    payload.extra = true;
+  },
+  "Extra outer event fields must be rejected",
+);
+rejected(
+  (payload) => {
+    delete payload.warnings;
+  },
+  "Missing outer event fields must be rejected",
+);
+rejected(
+  (payload) => {
+    payload.source.extra = true;
+  },
+  "Extra source fields must be rejected",
+);
+rejected(
+  (payload) => {
+    delete payload.source.model_name;
+  },
+  "Missing source fields must be rejected",
+);
+rejected(
+  (payload) => {
+    payload.trace_id = "";
+  },
+  "Empty trace IDs must be rejected",
+);
+rejected(
+  (payload) => {
     delete payload.candidate_set.candidates[0].source_index;
   },
   "Incomplete candidate records must be rejected",
@@ -287,6 +399,14 @@ rejected(
   },
   "Impossible high counts must be rejected",
 );
+{
+  const payload = validPayload("partial");
+  payload.candidate_set.requested_count = 10000;
+  assert(
+    api.normalize(payload) === null,
+    "Implausibly large safe-integer counts must be rejected",
+  );
+}
 
 rejected(
   (payload) => {
@@ -353,6 +473,19 @@ rejected(
     `Rejected reason ${reason} must be accepted with matching counts`,
   );
 });
+accepted(
+  (payload) => {
+    payload.candidate_set.rejected[0].details = {
+      codes: ["invalid_smiles"],
+    };
+  },
+  "Backend-supported rejected details must normalize",
+);
+{
+  const payload = validPayload("partial");
+  payload.candidate_set.rejected[0].unexpected = true;
+  assert(api.normalize(payload) === null, "Unexpected rejected fields must be rejected");
+}
 rejected(
   (payload) => {
     payload.candidate_set.rejected = [
@@ -415,6 +548,95 @@ assert(
   "Prototype-trick payload values must be rejected",
 );
 
+sandbox.__basePayload = JSON.stringify(validPayload());
+sandbox.__tagReads = 0;
+const taggedResult = vm.runInContext(
+  `(() => {
+    const payload = JSON.parse(__basePayload);
+    Object.defineProperty(payload, Symbol.toStringTag, {
+      enumerable: true,
+      get() { __tagReads += 1; return "Object"; }
+    });
+    return window.HomeMoleculeCandidates.normalize(payload);
+  })()`,
+  sandbox,
+);
+assert(
+  taggedResult === null && sandbox.__tagReads === 0,
+  "Symbol.toStringTag getters must not execute during rejection",
+);
+
+const lookalikeResult = vm.runInContext(
+  `(() => {
+    const payload = JSON.parse(__basePayload);
+    const lookalike = {};
+    Object.getOwnPropertyNames(Object.prototype).forEach((key) => {
+      Object.defineProperty(lookalike, key, Object.getOwnPropertyDescriptor(Object.prototype, key));
+    });
+    Object.setPrototypeOf(payload, lookalike);
+    return window.HomeMoleculeCandidates.normalize(payload);
+  })()`,
+  sandbox,
+);
+assert(lookalikeResult === null, "Lookalike object prototypes must be rejected");
+
+sandbox.__iteratorReads = 0;
+const hostileIteratorResult = vm.runInContext(
+  `(() => {
+    const payload = JSON.parse(__basePayload);
+    const rejected = payload.candidate_set.rejected;
+    const lookalike = {};
+    Object.getOwnPropertyNames(Array.prototype).forEach((key) => {
+      Object.defineProperty(lookalike, key, Object.getOwnPropertyDescriptor(Array.prototype, key));
+    });
+    Object.defineProperty(lookalike, Symbol.iterator, {
+      value: function () {
+        __iteratorReads += 1;
+        return Array.prototype[Symbol.iterator].call(this);
+      }
+    });
+    Object.setPrototypeOf(rejected, lookalike);
+    return window.HomeMoleculeCandidates.normalize(payload);
+  })()`,
+  sandbox,
+);
+assert(
+  hostileIteratorResult === null && sandbox.__iteratorReads === 0,
+  "Hostile inherited array iterators must not execute",
+);
+
+sandbox.__getterReads = 0;
+const getterResult = vm.runInContext(
+  `(() => {
+    const payload = JSON.parse(__basePayload);
+    Object.defineProperty(payload.source, "tool_name", {
+      enumerable: true,
+      get() { __getterReads += 1; return "forged"; }
+    });
+    return window.HomeMoleculeCandidates.normalize(payload);
+  })()`,
+  sandbox,
+);
+assert(
+  getterResult === null && sandbox.__getterReads === 0,
+  "Accessor fields must be rejected without executing getters",
+);
+
+rejected(
+  (payload) => {
+    payload.candidate_set.candidates[0].metadata.large = "x".repeat(70000);
+  },
+  "Shared text budgets must reject oversized nested metadata",
+);
+assert(
+  api.normalize(
+    payloadWithCandidates(
+      Array.from({ length: 65 }, (_, index) => "C".repeat(index + 1)),
+    ),
+  ) === null,
+  "Candidate collections must be bounded before normalization work",
+);
+
 const mainSource = read("src/web/static/js/home/main.js");
 const indexHtml = read("src/web/templates/index.html");
 const rendererStart = mainSource.indexOf(
@@ -427,8 +649,28 @@ assert(
   "WebSocket handler must have a structured molecule_candidates case",
 );
 assert(
-  mainSource.includes("pendingMoleculeCandidatePayloads"),
-  "Structured candidate payloads must be queued until completion",
+  mainSource.includes("HomeMoleculeCandidates.createLifecycle"),
+  "Main must use the bounded structured-candidate lifecycle",
+);
+assert(
+  mainSource.includes("moleculeCandidateLifecycle.isRequestInFlight()"),
+  "Main must reject a second send while a request is active",
+);
+assert(
+  !mainSource.includes("pendingMoleculeCandidatePayloads"),
+  "Main must not retain the unbounded legacy candidate array",
+);
+const sendCall = mainSource.indexOf("ws.send(payloadStr)");
+const requestStart = mainSource.indexOf("moleculeCandidateLifecycle.startRequest()", sendCall);
+assert(
+  sendCall >= 0 && requestStart > sendCall,
+  "Request state must become active only after WebSocket send succeeds",
+);
+const parseCall = mainSource.indexOf("JSON.parse(data)");
+const rawLengthGuard = mainSource.lastIndexOf("data.length", parseCall);
+assert(
+  rawLengthGuard >= 0 && rawLengthGuard < parseCall,
+  "Raw WebSocket messages must be length-capped before JSON parsing",
 );
 assert(
   mainSource.includes("function renderMoleculeCandidates(messageElement, payload)"),
@@ -451,10 +693,18 @@ assert(
   "Image and copy actions must use canonical candidate SMILES",
 );
 assert(
+  rendererSource.includes("payload.candidates.slice(0, 32)"),
+  "Renderer must independently cap candidate cards",
+);
+assert(
   rendererSource.includes("candidateId.textContent") &&
     rendererSource.includes("smilesText.textContent") &&
     rendererSource.includes("provenanceLabel.textContent"),
   "Candidate IDs, SMILES, and provenance must render through textContent",
+);
+assert(
+  !rendererSource.includes(".innerHTML"),
+  "Structured candidate renderer must construct all fallback content with DOM APIs",
 );
 assert(
   !mainSource.includes("工具生成"),
@@ -470,9 +720,9 @@ assert(
 );
 
 const helperScript =
-  "/static/js/home/molecule_candidates.js?v=20260902-candidate-identity-v3";
+  "/static/js/home/molecule_candidates.js?v=20260902-candidate-lifecycle-v4";
 const safeScript = "/static/js/shared/safe_render.js";
-const mainScript = "/static/js/home/main.js?v=";
+const mainScript = "/static/js/home/main.js?v=20260902-candidate-lifecycle-v3";
 assert(indexHtml.includes(helperScript), "Template must version molecule candidate helper");
 assert(indexHtml.includes(mainScript), "Template must version homepage main");
 assert(

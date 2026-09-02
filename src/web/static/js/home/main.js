@@ -18,11 +18,13 @@
   let reconnectAttempts = 0;
   let maxReconnectAttempts = 5;
   let agentTaskRunActive = false;
-  let pendingMoleculeCandidatePayloads = [];
-
-  function resetPendingMoleculeCandidatePayloads() {
-    pendingMoleculeCandidatePayloads = [];
-  }
+  const maxWebSocketMessageLength = 256 * 1024;
+  const moleculeCandidateLifecycle =
+    window.HomeMoleculeCandidates.createLifecycle({
+      maxRuns: 2,
+      maxEventsPerRun: 8,
+      maxCandidates: 32,
+    });
 
   // DOM元素缓存
   const elements = {
@@ -157,7 +159,7 @@
 
   // WebSocket连接管理 - 修复版
   function connectWebSocket() {
-    resetPendingMoleculeCandidatePayloads();
+    moleculeCandidateLifecycle.clear();
     const wsUrl = `ws://${window.location.host}/ws`;
 
     console.log(`=== 尝试连接WebSocket ===`);
@@ -197,7 +199,6 @@
 
       ws.onmessage = (event) => {
         console.log("📨 收到WebSocket消息:", {
-          data: event.data,
           timestamp: new Date().toISOString(),
           dataLength: event.data ? event.data.length : 0,
         });
@@ -205,6 +206,7 @@
         try {
           handleWebSocketMessage(event.data);
         } catch (error) {
+          moleculeCandidateLifecycle.clear();
           console.error("❌ 处理WebSocket消息时出错:", {
             error: error.message,
             stack: error.stack,
@@ -216,7 +218,7 @@
 
       ws.onerror = (error) => {
         clearTimeout(connectionTimeout);
-        resetPendingMoleculeCandidatePayloads();
+        moleculeCandidateLifecycle.clear();
         console.error("❌ WebSocket错误:", {
           error: error,
           readyState: ws ? ws.readyState : "null",
@@ -228,7 +230,7 @@
 
       ws.onclose = (event) => {
         clearTimeout(connectionTimeout);
-        resetPendingMoleculeCandidatePayloads();
+        moleculeCandidateLifecycle.clear();
         console.log("🔌 WebSocket连接关闭:", {
           code: event.code,
           reason: event.reason || "无原因说明",
@@ -265,6 +267,7 @@
         }
       };
     } catch (error) {
+      moleculeCandidateLifecycle.clear();
       console.error("❌ 创建WebSocket连接失败:", {
         error: error.message,
         stack: error.stack,
@@ -299,6 +302,13 @@
     // 数据有效性检查
     if (!data || typeof data !== "string") {
       console.warn("⚠️ 收到无效消息数据:", data);
+      return;
+    }
+
+    if (data.length > maxWebSocketMessageLength) {
+      moleculeCandidateLifecycle.clear();
+      console.warn("Ignored oversized WebSocket message");
+      showErrorMessage("收到的消息过大，已安全忽略");
       return;
     }
 
@@ -378,15 +388,19 @@
           break;
 
         case "molecule_candidates": {
+          if (!moleculeCandidateLifecycle.isRequestInFlight()) {
+            console.warn("Ignored molecule candidate payload without active request");
+            break;
+          }
           const normalized = window.HomeMoleculeCandidates?.normalize(message);
-          if (normalized) {
-            pendingMoleculeCandidatePayloads.push(normalized);
-          } else {
+          if (!normalized) {
             console.warn("Ignored malformed molecule candidate payload");
             HomeChatRenderer.showNotification(
               "收到的分子候选数据未通过验证",
               "warning"
             );
+          } else if (!moleculeCandidateLifecycle.enqueue(normalized)) {
+            console.warn("Ignored duplicate or over-limit molecule candidate payload");
           }
           break;
         }
@@ -407,6 +421,7 @@
           break;
 
         case "message":
+          moleculeCandidateLifecycle.clear();
           if (message.message) {
             addAssistantMessage(message.message);
           } else {
@@ -423,7 +438,7 @@
           break;
 
         case "error":
-          resetPendingMoleculeCandidatePayloads();
+          moleculeCandidateLifecycle.clear();
           const errorMsg = message.message || message.error || "未知错误";
           console.error("❌ 服务器返回错误:", {
             message: errorMsg,
@@ -437,7 +452,7 @@
           console.log("❓ 未知消息类型:", message.type, message);
       }
     } catch (error) {
-      resetPendingMoleculeCandidatePayloads();
+      moleculeCandidateLifecycle.clear();
       console.error("❌ 解析WebSocket消息时出错:", {
         error: error.message,
         stack: error.stack,
@@ -1153,7 +1168,10 @@
       return;
     }
 
-    resetPendingMoleculeCandidatePayloads();
+    if (moleculeCandidateLifecycle.isRequestInFlight()) {
+      HomeChatRenderer.showNotification("请等待当前请求完成", "warning");
+      return;
+    }
 
     // 更严格的连接状态检查
     if (!ws) {
@@ -1216,6 +1234,7 @@
 
       // 发送到服务器
       ws.send(payloadStr);
+      moleculeCandidateLifecycle.startRequest();
 
       // 清空输入框
       elements.input.value = "";
@@ -1225,6 +1244,7 @@
 
       console.log("✅ 消息发送成功");
     } catch (error) {
+      moleculeCandidateLifecycle.clear();
       console.error("❌ 发送消息时出错:", {
         error: error.message,
         stack: error.stack,
@@ -1622,6 +1642,7 @@
 
   // 完成最后一条消息
   function completeLastMessage(content) {
+    const candidatePayloads = moleculeCandidateLifecycle.complete();
     const hadTypingIndicator = Boolean(
       elements.chatContainer.querySelector(".typing-indicator-wrapper")
     );
@@ -1640,7 +1661,6 @@
     });
 
     if (completion.action === "ignore") {
-      resetPendingMoleculeCandidatePayloads();
       return;
     }
 
@@ -1661,7 +1681,6 @@
     }
 
     if (!lastMessage) {
-      resetPendingMoleculeCandidatePayloads();
       return;
     }
 
@@ -1683,8 +1702,6 @@
     HomeState.currentMessages = currentMessages.slice();
     updateToolbarControlStates();
 
-    const candidatePayloads = pendingMoleculeCandidatePayloads.slice();
-    resetPendingMoleculeCandidatePayloads();
     candidatePayloads.forEach((payload) => {
       renderMoleculeCandidates(lastMessage, payload);
     });
@@ -3453,7 +3470,7 @@
   // 渲染后端已验证并规范化的候选分子。
   function renderMoleculeCandidates(messageElement, payload) {
     if (!messageElement || !payload || payload.candidates.length === 0) return;
-    const moleculesArray = payload.candidates;
+    const moleculesArray = payload.candidates.slice(0, 32);
     const moleculeCount = moleculesArray.length;
 
     // 创建分子结构容器
@@ -3627,12 +3644,18 @@
         molImage.loading = "lazy";
         molImage.onerror = function () {
           this.style.display = "none";
-          imageSection.innerHTML = `
-            <div style="color: #94a3b8; font-size: 12px; text-align: center;">
-              <div style="font-size: 24px; margin-bottom: 8px;">⚠️</div>
-              <div>无法加载分子结构</div>
-            </div>
-          `;
+          const imageError = document.createElement("div");
+          imageError.style.cssText =
+            "color: #94a3b8; font-size: 12px; text-align: center;";
+          const imageErrorIcon = document.createElement("div");
+          imageErrorIcon.style.cssText =
+            "font-size: 24px; margin-bottom: 8px;";
+          imageErrorIcon.textContent = "⚠️";
+          const imageErrorText = document.createElement("div");
+          imageErrorText.textContent = "无法加载分子结构";
+          imageError.appendChild(imageErrorIcon);
+          imageError.appendChild(imageErrorText);
+          imageSection.appendChild(imageError);
         };
         imageSection.appendChild(molImage);
         molCard.appendChild(imageSection);
@@ -3799,7 +3822,7 @@
       `;
 
       const prevBtn = document.createElement("button");
-      prevBtn.innerHTML = "← 上一页";
+      prevBtn.textContent = "← 上一页";
       prevBtn.style.cssText = `
         padding: 8px 16px;
         background: #fff;
@@ -3818,7 +3841,7 @@
       }
 
       const nextBtn = document.createElement("button");
-      nextBtn.innerHTML = "下一页 →";
+      nextBtn.textContent = "下一页 →";
       nextBtn.style.cssText = `
         padding: 8px 16px;
         background: #4f46e5;

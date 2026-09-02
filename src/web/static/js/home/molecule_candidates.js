@@ -1,17 +1,17 @@
 (function (root) {
   "use strict";
 
-  const hasOwn = (value, key) =>
-    Object.prototype.hasOwnProperty.call(value, key);
+  const ObjectPrototype = Object.prototype;
+  const ArrayPrototype = Array.prototype;
+  const getPrototypeOf = Object.getPrototypeOf;
+  const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const ownKeys = Reflect.ownKeys;
+  const arrayIsArray = Array.isArray;
   const forbiddenKeys = new Set(["__proto__", "constructor", "prototype"]);
-  const objectPrototypeKeys = Object.getOwnPropertyNames(Object.prototype)
-    .slice()
-    .sort()
-    .join("\u0000");
-  const arrayPrototypeKeys = Object.getOwnPropertyNames(Array.prototype)
-    .slice()
-    .sort()
-    .join("\u0000");
+  const eventFields = ["type", "trace_id", "source", "candidate_set", "warnings"];
+  const sourceFields = ["tool_name", "model_name", "status"];
+  const rejectedFields = ["source_index", "smiles", "reason"];
+  const rejectedFieldsWithDetails = rejectedFields.concat("details");
   const candidateSetFields = [
     "version",
     "requested_count",
@@ -39,7 +39,11 @@
     "duplicate_smiles",
     "excess_candidate",
   ]);
-  const maxCollectionItems = 4096;
+  const maxCollectionItems = 64;
+  const maxWarnings = 32;
+  const maxCloneDepth = 6;
+  const maxCloneNodes = 512;
+  const maxCloneTextChars = 65536;
   const sha256Constants = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
     0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -76,42 +80,34 @@
     if (
       value === null ||
       typeof value !== "object" ||
-      Array.isArray(value) ||
-      Object.prototype.toString.call(value) !== "[object Object]"
+      arrayIsArray(value) ||
+      getPrototypeOf(value) !== ObjectPrototype
     ) {
       return false;
     }
-    const prototype = Object.getPrototypeOf(value);
-    if (
-      prototype === null ||
-      Object.getOwnPropertyNames(prototype).slice().sort().join("\u0000") !==
-        objectPrototypeKeys
-    ) {
-      return false;
-    }
-    return Reflect.ownKeys(value).every((key) => {
+    const keys = ownKeys(value);
+    if (keys.length > maxCollectionItems) return false;
+    return keys.every((key) => {
       if (typeof key !== "string" || forbiddenKeys.has(key)) return false;
-      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      const descriptor = getOwnPropertyDescriptor(value, key);
       return Boolean(descriptor && descriptor.enumerable && "value" in descriptor);
     });
   }
 
   function isPlainArray(value) {
-    if (!Array.isArray(value)) return false;
-    const prototype = Object.getPrototypeOf(value);
-    if (
-      prototype === null ||
-      Object.getOwnPropertyNames(prototype).slice().sort().join("\u0000") !==
-        arrayPrototypeKeys
-    ) {
+    if (!arrayIsArray(value) || getPrototypeOf(value) !== ArrayPrototype) return false;
+    const lengthDescriptor = getOwnPropertyDescriptor(value, "length");
+    if (!lengthDescriptor || !("value" in lengthDescriptor)) return false;
+    const length = lengthDescriptor.value;
+    if (!Number.isSafeInteger(length) || length < 0 || length > maxCollectionItems) {
       return false;
     }
-    const keys = Reflect.ownKeys(value);
-    if (keys.length !== value.length + 1 || !keys.includes("length")) return false;
-    for (let index = 0; index < value.length; index += 1) {
+    const keys = ownKeys(value);
+    if (keys.length !== length + 1 || !keys.includes("length")) return false;
+    for (let index = 0; index < length; index += 1) {
       const key = String(index);
       if (!keys.includes(key)) return false;
-      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      const descriptor = getOwnPropertyDescriptor(value, key);
       if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
         return false;
       }
@@ -124,7 +120,7 @@
 
   function hasExactFields(value, expectedFields) {
     if (!isPlainRecord(value)) return false;
-    const actual = Reflect.ownKeys(value).slice().sort();
+    const actual = ownKeys(value).slice().sort();
     const expected = expectedFields.slice().sort();
     return (
       actual.length === expected.length &&
@@ -133,8 +129,18 @@
   }
 
   function ownValue(record, key) {
-    if (!isPlainRecord(record) || !hasOwn(record, key)) return undefined;
-    const descriptor = Object.getOwnPropertyDescriptor(record, key);
+    if (!isPlainRecord(record)) return undefined;
+    const descriptor = getOwnPropertyDescriptor(record, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  }
+
+  function arrayLength(value) {
+    if (!isPlainArray(value)) return -1;
+    return getOwnPropertyDescriptor(value, "length").value;
+  }
+
+  function arrayValue(value, index) {
+    const descriptor = getOwnPropertyDescriptor(value, String(index));
     return descriptor && "value" in descriptor ? descriptor.value : undefined;
   }
 
@@ -275,9 +281,22 @@
       .slice(0, 8);
   }
 
-  function cloneJson(value, depth) {
-    if (depth > 8) return null;
-    if (value === null || typeof value === "boolean" || typeof value === "string") {
+  function createCloneBudget() {
+    return { nodes: 0, textChars: 0 };
+  }
+
+  function cloneJson(value, depth, budget) {
+    budget.nodes += 1;
+    if (depth > maxCloneDepth || budget.nodes > maxCloneNodes) {
+      return { ok: false, value: null };
+    }
+    if (typeof value === "string") {
+      budget.textChars += value.length;
+      return budget.textChars <= maxCloneTextChars
+        ? { ok: true, value }
+        : { ok: false, value: null };
+    }
+    if (value === null || typeof value === "boolean") {
       return { ok: true, value };
     }
     if (typeof value === "number") {
@@ -286,21 +305,27 @@
         : { ok: false, value: null };
     }
     if (isPlainArray(value)) {
-      if (value.length > 100) return { ok: false, value: null };
+      const length = arrayLength(value);
+      if (length < 0 || length > maxCollectionItems) {
+        return { ok: false, value: null };
+      }
       const output = [];
-      for (const item of value) {
-        const cloned = cloneJson(item, depth + 1);
+      for (let index = 0; index < length; index += 1) {
+        const cloned = cloneJson(arrayValue(value, index), depth + 1, budget);
         if (!cloned || !cloned.ok) return { ok: false, value: null };
         output.push(cloned.value);
       }
       return { ok: true, value: output };
     }
-    if (!isPlainRecord(value) || Reflect.ownKeys(value).length > 100) {
+    if (!isPlainRecord(value)) {
       return { ok: false, value: null };
     }
+    const keys = ownKeys(value);
+    if (keys.length > maxCollectionItems) return { ok: false, value: null };
     const output = {};
-    for (const key of Reflect.ownKeys(value)) {
-      const cloned = cloneJson(ownValue(value, key), depth + 1);
+    for (let index = 0; index < keys.length; index += 1) {
+      const key = keys[index];
+      const cloned = cloneJson(ownValue(value, key), depth + 1, budget);
       if (!cloned || !cloned.ok) return { ok: false, value: null };
       output[key] = cloned.value;
     }
@@ -354,7 +379,7 @@
     return parentheses === 0;
   }
 
-  function normalizeCandidate(value, expectedOrdinal) {
+  function normalizeCandidate(value, expectedOrdinal, cloneBudget) {
     if (!hasExactFields(value, candidateFields)) return null;
     const candidateId = ownValue(value, "candidate_id");
     const sourceIndex = ownValue(value, "source_index");
@@ -383,8 +408,8 @@
     ) {
       return null;
     }
-    const clonedProvenance = cloneJson(generationProvenance, 0);
-    const clonedMetadata = cloneJson(metadata, 0);
+    const clonedProvenance = cloneJson(generationProvenance, 0, cloneBudget);
+    const clonedMetadata = cloneJson(metadata, 0, cloneBudget);
     if (
       !clonedProvenance ||
       !clonedProvenance.ok ||
@@ -405,8 +430,9 @@
     };
   }
 
-  function normalizeRejected(value) {
-    if (!isPlainRecord(value)) return null;
+  function normalizeRejected(value, cloneBudget) {
+    const hasDetails = hasExactFields(value, rejectedFieldsWithDetails);
+    if (!hasDetails && !hasExactFields(value, rejectedFields)) return null;
     const sourceIndex = ownValue(value, "source_index");
     const smiles = ownValue(value, "smiles");
     const reason = ownValue(value, "reason");
@@ -419,15 +445,22 @@
     ) {
       return null;
     }
-    const cloned = cloneJson(value, 0);
-    return cloned && cloned.ok
-      ? { source_index: sourceIndex, smiles, reason }
-      : null;
+    let details;
+    if (hasDetails) {
+      details = cloneJson(ownValue(value, "details"), 0, cloneBudget);
+      if (!details || !details.ok || !isPlainRecord(details.value)) return null;
+    }
+    const normalized = { source_index: sourceIndex, smiles, reason };
+    if (hasDetails) normalized.details = details.value;
+    return normalized;
   }
 
   function normalize(payload) {
     try {
-      if (!isPlainRecord(payload) || ownValue(payload, "type") !== "molecule_candidates") {
+      if (
+        !hasExactFields(payload, eventFields) ||
+        ownValue(payload, "type") !== "molecule_candidates"
+      ) {
         return null;
       }
       const traceId = ownValue(payload, "trace_id");
@@ -435,8 +468,8 @@
       const candidateSet = ownValue(payload, "candidate_set");
       const warnings = ownValue(payload, "warnings");
       if (
-        !isSafeString(traceId, 128, true) ||
-        !isPlainRecord(source) ||
+        !isSafeString(traceId, 128, false) ||
+        !hasExactFields(source, sourceFields) ||
         !hasExactFields(candidateSet, candidateSetFields) ||
         !isPlainArray(warnings)
       ) {
@@ -467,30 +500,38 @@
       const counts = {};
       for (const name of countNames) {
         const value = ownValue(candidateSet, name);
-        if (!isNonnegativeInteger(value)) return null;
+        if (
+          !isNonnegativeInteger(value) ||
+          value > maxCollectionItems * 2
+        ) {
+          return null;
+        }
         counts[name] = value;
       }
 
       const rawCandidates = ownValue(candidateSet, "candidates");
       const rawRejected = ownValue(candidateSet, "rejected");
+      const candidateLength = arrayLength(rawCandidates);
+      const rejectedLength = arrayLength(rawRejected);
+      const warningLength = arrayLength(warnings);
       if (
-        !isPlainArray(rawCandidates) ||
-        rawCandidates.length === 0 ||
-        rawCandidates.length > maxCollectionItems ||
-        !isPlainArray(rawRejected) ||
-        rawRejected.length > maxCollectionItems ||
-        warnings.length > maxCollectionItems
+        candidateLength <= 0 ||
+        candidateLength > maxCollectionItems ||
+        rejectedLength < 0 ||
+        rejectedLength > maxCollectionItems ||
+        warningLength < 0 ||
+        warningLength > maxWarnings
       ) {
         return null;
       }
       if (
-        counts.valid_count !== rawCandidates.length ||
-        counts.unique_count !== rawCandidates.length ||
-        counts.requested_count < rawCandidates.length ||
+        counts.valid_count !== candidateLength ||
+        counts.unique_count !== candidateLength ||
+        counts.requested_count < candidateLength ||
         (candidateStatus === "succeeded" &&
-          counts.requested_count !== rawCandidates.length) ||
+          counts.requested_count !== candidateLength) ||
         (candidateStatus === "partial" &&
-          counts.requested_count <= rawCandidates.length)
+          counts.requested_count <= candidateLength)
       ) {
         return null;
       }
@@ -499,8 +540,13 @@
       const candidateIds = new Set();
       const canonicalSmiles = new Set();
       const sourceIndexes = [];
-      for (let index = 0; index < rawCandidates.length; index += 1) {
-        const candidate = normalizeCandidate(rawCandidates[index], index + 1);
+      const cloneBudget = createCloneBudget();
+      for (let index = 0; index < candidateLength; index += 1) {
+        const candidate = normalizeCandidate(
+          arrayValue(rawCandidates, index),
+          index + 1,
+          cloneBudget
+        );
         if (
           !candidate ||
           candidateIds.has(candidate.candidate_id) ||
@@ -516,8 +562,11 @@
 
       let invalidCount = 0;
       let duplicateCount = 0;
-      for (const rawRejectedItem of rawRejected) {
-        const rejected = normalizeRejected(rawRejectedItem);
+      for (let index = 0; index < rejectedLength; index += 1) {
+        const rejected = normalizeRejected(
+          arrayValue(rawRejected, index),
+          cloneBudget
+        );
         if (!rejected) return null;
         sourceIndexes.push(rejected.source_index);
         if (
@@ -548,8 +597,11 @@
       }
 
       const normalizedWarnings = [];
-      for (const warning of warnings) {
+      for (let index = 0; index < warningLength; index += 1) {
+        const warning = arrayValue(warnings, index);
         if (!isSafeString(warning, 256, true)) return null;
+        cloneBudget.textChars += warning.length;
+        if (cloneBudget.textChars > maxCloneTextChars) return null;
         normalizedWarnings.push(warning);
       }
 
@@ -565,5 +617,111 @@
     }
   }
 
-  root.HomeMoleculeCandidates = { normalize };
+  function createLifecycle(options) {
+    const settings = options || {};
+    function boundedOption(value, fallback, upperBound) {
+      return Number.isSafeInteger(value) && value > 0
+        ? Math.min(value, upperBound)
+        : fallback;
+    }
+    const maxRuns = boundedOption(settings.maxRuns, 4, 8);
+    const maxEventsPerRun = boundedOption(settings.maxEventsPerRun, 8, 16);
+    const maxCandidates = boundedOption(settings.maxCandidates, 32, 64);
+    const runs = new Map();
+    let requestInFlight = false;
+    let queuedCandidates = 0;
+
+    function clear() {
+      runs.clear();
+      queuedCandidates = 0;
+      requestInFlight = false;
+    }
+
+    function startRequest() {
+      if (requestInFlight) return false;
+      clear();
+      requestInFlight = true;
+      return true;
+    }
+
+    function enqueue(payload) {
+      if (
+        !requestInFlight ||
+        !payload ||
+        typeof payload.traceId !== "string" ||
+        payload.traceId.length === 0 ||
+        !arrayIsArray(payload.candidates) ||
+        payload.candidates.length === 0
+      ) {
+        return false;
+      }
+      let run = runs.get(payload.traceId);
+      if (!run) {
+        if (runs.size >= maxRuns) return false;
+        run = { candidateIds: new Set(), events: [] };
+        runs.set(payload.traceId, run);
+      }
+      if (run.events.length >= maxEventsPerRun) return false;
+
+      const freshCandidates = [];
+      const freshCandidateIds = new Set();
+      for (let index = 0; index < payload.candidates.length; index += 1) {
+        const candidate = payload.candidates[index];
+        const candidateId = candidate && candidate.candidate_id;
+        if (
+          typeof candidateId !== "string" ||
+          run.candidateIds.has(candidateId) ||
+          freshCandidateIds.has(candidateId)
+        ) {
+          continue;
+        }
+        freshCandidateIds.add(candidateId);
+        freshCandidates.push(candidate);
+      }
+      if (
+        freshCandidates.length === 0 ||
+        queuedCandidates + freshCandidates.length > maxCandidates
+      ) {
+        return false;
+      }
+      for (let index = 0; index < freshCandidates.length; index += 1) {
+        run.candidateIds.add(freshCandidates[index].candidate_id);
+      }
+      queuedCandidates += freshCandidates.length;
+      run.events.push({
+        traceId: payload.traceId,
+        source: payload.source,
+        candidates: freshCandidates,
+        counts: payload.counts,
+        warnings: payload.warnings,
+      });
+      return true;
+    }
+
+    function complete() {
+      if (!requestInFlight) {
+        clear();
+        return [];
+      }
+      requestInFlight = false;
+      let drained = [];
+      if (runs.size === 1) {
+        const run = runs.values().next().value;
+        drained = run.events.slice();
+      }
+      runs.clear();
+      queuedCandidates = 0;
+      return drained;
+    }
+
+    return {
+      clear,
+      complete,
+      enqueue,
+      isRequestInFlight: () => requestInFlight,
+      startRequest,
+    };
+  }
+
+  root.HomeMoleculeCandidates = { createLifecycle, normalize };
 })(window);

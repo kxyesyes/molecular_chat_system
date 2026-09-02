@@ -139,6 +139,19 @@ assert(
   "Homepage molecule events must pass through a fresh structured normalizer",
 );
 assert(
+  homeMoleculeCandidates.includes("const ObjectPrototype = Object.prototype") &&
+    homeMoleculeCandidates.includes("const ArrayPrototype = Array.prototype") &&
+    !homeMoleculeCandidates.includes("Object.prototype.toString"),
+  "Molecule normalization must use captured intrinsic prototype identity",
+);
+assert(
+  homeMain.includes("HomeMoleculeCandidates.createLifecycle") &&
+    homeMain.includes("maxWebSocketMessageLength") &&
+    homeMain.indexOf("data.length > maxWebSocketMessageLength") <
+      homeMain.indexOf("JSON.parse(data)"),
+  "Homepage candidate handling must be request-scoped and bound raw messages before parsing",
+);
+assert(
   !homeMain.includes("detectAndRenderMolecules") &&
     !homeMain.includes("fetchMoleculePropertiesForToolMolecule") &&
     !homeMain.includes("/api/molecule/properties"),
