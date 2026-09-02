@@ -2578,6 +2578,25 @@ class _FakeRemoteSession:
         return result
 
 
+class _CapturingAdapter(requests.adapters.BaseAdapter):
+    def __init__(self, payload=b"{}"):
+        self.payload = payload
+        self.prepared_requests = []
+
+    def send(self, request, **kwargs):
+        self.prepared_requests.append(request)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = self.payload
+        response._content_consumed = True
+        response.request = request
+        response.url = request.url
+        return response
+
+    def close(self):
+        pass
+
+
 def _bounded_remote_client(session, sleeps=None, **overrides):
     from src.target_search.remote_clients import BoundedJsonClient
 
@@ -2653,6 +2672,7 @@ def test_uniprot_resolve_constructs_exact_human_query_and_normalizes_record():
                     "Accept": "application/json",
                     "User-Agent": STABLE_USER_AGENT,
                 },
+                "auth": session.calls[0][2]["auth"],
                 "timeout": (1.0, 2.0),
                 "stream": True,
             },
@@ -2734,7 +2754,7 @@ def test_uniprot_multiple_equally_plausible_matches_are_explicitly_ambiguous():
     assert raised.value.source == "UniProt"
     assert raised.value.code == "ambiguous_match"
     assert raised.value.retryable is False
-    assert raised.value.status is None
+    assert raised.value.status_code is None
 
 
 def test_uniprot_no_exact_result_returns_none():
@@ -2808,7 +2828,7 @@ def test_bounded_json_client_retries_connection_failure_and_reports_exhaustion()
 
     assert raised.value.code == "connection_failure"
     assert raised.value.retryable is True
-    assert raised.value.status is None
+    assert raised.value.status_code is None
     assert len(session.calls) == 2
 
 
@@ -2860,7 +2880,7 @@ def test_bounded_json_client_reports_nonretryable_sanitized_errors(
         )
 
     error = raised.value
-    assert (error.source, error.code, error.retryable, error.status) == (
+    assert (error.source, error.code, error.retryable, error.status_code) == (
         "UniProt",
         expected_code,
         False,
@@ -2917,7 +2937,7 @@ def test_remote_error_redacts_exception_and_provider_text_on_exhausted_5xx():
         )
 
     error = raised.value
-    assert (error.code, error.retryable, error.status) == (
+    assert (error.code, error.retryable, error.status_code) == (
         "provider_unavailable",
         True,
         500,
@@ -3048,6 +3068,7 @@ def test_rcsb_search_is_bounded_deterministic_and_normalizes_evidence():
                 "request_options": {"paginate": {"start": 0, "rows": 2}},
             },
             "headers": session.calls[0][2]["headers"],
+            "auth": session.calls[0][2]["auth"],
             "timeout": (1.0, 2.0),
             "stream": True,
         },
@@ -3145,3 +3166,305 @@ def test_alphafold_empty_result_returns_none_and_invalid_shape_is_rejected():
             )
         ).lookup("P00533")
     assert raised.value.code == "invalid_response"
+
+
+def test_remote_source_error_has_exact_immutable_sanitized_fields():
+    from src.target_search.remote_clients import RemoteSourceError
+
+    error = RemoteSourceError(
+        "UniProt", "http_client_error", retryable=False, status_code=400
+    )
+
+    assert (
+        error.source,
+        error.code,
+        error.retryable,
+        error.status_code,
+    ) == ("UniProt", "http_client_error", False, 400)
+    assert set(vars(error)) == {"source", "code", "retryable", "status_code"}
+    assert not hasattr(error, "status")
+    assert "provider body" not in str(error).lower()
+    for name, value in (
+        ("source", "AlphaFold"),
+        ("code", "timeout"),
+        ("retryable", True),
+        ("status_code", 500),
+        ("extra", "provider body"),
+        ("args", ("provider body",)),
+    ):
+        with pytest.raises(AttributeError):
+            setattr(error, name, value)
+    with pytest.raises(AttributeError):
+        del error.code
+    with pytest.raises(TypeError):
+        vars(error)["extra"] = "provider body"
+
+
+def test_bounded_client_rejects_injected_session_auth_without_leaking_it():
+    session = requests.Session()
+    session.auth = ("private-user", "private-password")
+
+    with pytest.raises(ValueError) as raised:
+        _bounded_remote_client(session)
+
+    assert "private" not in str(raised.value).lower()
+
+
+@pytest.mark.parametrize("header_name", ["Authorization", "Proxy-Authorization"])
+def test_bounded_client_rejects_default_authorization_headers(header_name):
+    session = requests.Session()
+    session.headers[header_name] = "Bearer private-token"
+
+    with pytest.raises(ValueError) as raised:
+        _bounded_remote_client(session)
+
+    assert "private-token" not in str(raised.value)
+
+
+@pytest.mark.parametrize("credential_source", ["header", "cookie_jar"])
+def test_bounded_client_rejects_session_cookies(credential_source):
+    session = requests.Session()
+    if credential_source == "header":
+        session.headers["Cookie"] = "session=private-cookie"
+    else:
+        session.cookies.set("session", "private-cookie")
+
+    with pytest.raises(ValueError) as raised:
+        _bounded_remote_client(session)
+
+    assert "private-cookie" not in str(raised.value)
+
+
+def test_bounded_client_rejects_credential_bearing_session_proxy():
+    session = requests.Session()
+    session.proxies["https"] = "https://private-user:private-password@proxy.example"
+
+    with pytest.raises(ValueError) as raised:
+        _bounded_remote_client(session)
+
+    assert "private" not in str(raised.value).lower()
+
+
+def test_bounded_client_final_prepared_request_has_no_auth_or_cookie(monkeypatch):
+    monkeypatch.setattr(
+        requests.sessions,
+        "get_netrc_auth",
+        lambda url: ("netrc-user", "netrc-password"),
+    )
+    session = requests.Session()
+    adapter = _CapturingAdapter()
+    session.mount("https://", adapter)
+
+    result = _bounded_remote_client(session).request_json(
+        "UniProt", "GET", "https://rest.uniprot.org/uniprotkb/search"
+    )
+
+    assert result == {}
+    prepared = adapter.prepared_requests[0]
+    assert {
+        name.casefold() for name in prepared.headers
+    }.isdisjoint({"authorization", "proxy-authorization", "cookie"})
+
+
+def test_internally_created_session_disables_environment_credentials(monkeypatch):
+    from src.target_search.remote_clients import BoundedJsonClient
+
+    monkeypatch.setattr(
+        requests.sessions,
+        "get_netrc_auth",
+        lambda url: ("netrc-user", "netrc-password"),
+    )
+    client = BoundedJsonClient(sleep=lambda delay: None)
+    adapter = _CapturingAdapter()
+    client._session.mount("https://", adapter)
+
+    result = client.request_json(
+        "AlphaFold", "GET", "https://alphafold.ebi.ac.uk/api/prediction/P00533"
+    )
+
+    assert result == {}
+    assert client._session.trust_env is False
+    assert "Authorization" not in adapter.prepared_requests[0].headers
+
+
+def test_bounded_json_client_generic_request_exception_is_nonretryable_and_redacted():
+    from src.target_search.remote_clients import RemoteSourceError
+
+    session = _FakeRemoteSession(requests.RequestException("token=private"))
+
+    with pytest.raises(RemoteSourceError) as raised:
+        _bounded_remote_client(session).request_json(
+            "UniProt", "GET", "https://official.example/data?token=private"
+        )
+
+    assert raised.value.code == "request_failure"
+    assert raised.value.retryable is False
+    assert raised.value.status_code is None
+    assert len(session.calls) == 1
+    assert "private" not in f"{raised.value!s} {raised.value!r}"
+
+
+def test_bounded_json_client_exhausted_timeout_is_retryable_and_bounded():
+    from src.target_search.remote_clients import RemoteSourceError
+
+    sleeps = []
+    session = _FakeRemoteSession(
+        requests.Timeout("first private body"),
+        requests.Timeout("second private body"),
+    )
+
+    with pytest.raises(RemoteSourceError) as raised:
+        _bounded_remote_client(session, sleeps, max_attempts=2).request_json(
+            "AlphaFold", "GET", "https://official.example/data"
+        )
+
+    assert (
+        raised.value.code,
+        raised.value.retryable,
+        raised.value.status_code,
+    ) == ("timeout", True, None)
+    assert sleeps == [0.25]
+    assert len(session.calls) == 2
+
+
+def test_bounded_json_client_exhausted_429_keeps_numeric_status():
+    from src.target_search.remote_clients import RemoteSourceError
+
+    sleeps = []
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(status_code=429, headers={"Retry-After": "0.75"}),
+        _FakeRemoteResponse(status_code=429, headers={"Retry-After": "0.75"}),
+    )
+
+    with pytest.raises(RemoteSourceError) as raised:
+        _bounded_remote_client(session, sleeps, max_attempts=2).request_json(
+            "UniProt", "GET", "https://official.example/data"
+        )
+
+    assert (
+        raised.value.code,
+        raised.value.retryable,
+        raised.value.status_code,
+    ) == ("provider_unavailable", True, 429)
+    assert sleeps == [0.75]
+    assert len(session.calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_status"),
+    [
+        (_FakeRemoteResponse(status_code="200"), None),
+        (_FakeRemoteResponse(raw="not-bytes"), 200),
+    ],
+)
+def test_bounded_json_client_rejects_invalid_status_and_chunk_shapes(
+    response, expected_status
+):
+    from src.target_search.remote_clients import RemoteSourceError
+
+    with pytest.raises(RemoteSourceError) as raised:
+        _bounded_remote_client(_FakeRemoteSession(response)).request_json(
+            "RCSB_PDB", "GET", "https://official.example/data"
+        )
+
+    assert raised.value.code == "invalid_response"
+    assert raised.value.retryable is False
+    assert raised.value.status_code == expected_status
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"struct": {"title": "Missing identity"}},
+        {"rcsb_id": "2DEF"},
+    ],
+)
+def test_rcsb_requires_matching_entry_identity(entry):
+    from src.target_search.remote_clients import RcsbClient, RemoteSourceError
+
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(payload={"result_set": [{"identifier": "1ABC"}]}),
+        _FakeRemoteResponse(payload=entry),
+    )
+
+    with pytest.raises(RemoteSourceError) as raised:
+        RcsbClient(_bounded_remote_client(session), max_structures=1).search("P00533")
+
+    assert raised.value.code == "invalid_response"
+    assert raised.value.retryable is False
+
+
+@pytest.mark.parametrize(
+    "resolution_values",
+    [[], [float("nan")], [float("inf")], [0], [-1], [True], [1.8, "2.0"]],
+)
+def test_rcsb_rejects_every_malformed_resolution_member(resolution_values):
+    from src.target_search.remote_clients import RcsbClient, RemoteSourceError
+
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(payload={"result_set": [{"identifier": "1ABC"}]}),
+        _FakeRemoteResponse(
+            payload={
+                "rcsb_id": "1ABC",
+                "rcsb_entry_info": {"resolution_combined": resolution_values},
+            }
+        ),
+    )
+
+    with pytest.raises(RemoteSourceError) as raised:
+        RcsbClient(_bounded_remote_client(session), max_structures=1).search("P00533")
+
+    assert raised.value.code == "invalid_response"
+    assert raised.value.retryable is False
+
+
+def test_alphafold_accepts_one_model_bound_coordinate_url():
+    from src.target_search.remote_clients import AlphaFoldClient
+
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(
+            payload=[
+                {
+                    "entryId": "AF-P00533-F1",
+                    "uniprotAccession": "P00533",
+                    "pdbUrl": "https://alphafold.ebi.ac.uk/files/AF-P00533-F1-model_v6.pdb",
+                }
+            ]
+        )
+    )
+
+    result = AlphaFoldClient(_bounded_remote_client(session)).lookup("P00533")
+
+    assert result["pdb_url"].endswith("AF-P00533-F1-model_v6.pdb")
+    assert result["cif_url"] is None
+    assert result["download_url"] == result["pdb_url"]
+
+
+@pytest.mark.parametrize(
+    "coordinate_fields",
+    [
+        {},
+        {
+            "pdbUrl": "https://alphafold.ebi.ac.uk/files/AF-Q9H0H5-F1-model_v6.pdb"
+        },
+        {
+            "cifUrl": "https://alphafold.ebi.ac.uk/files/AF-P00533-F2-model_v6.cif"
+        },
+        {"pdbUrl": "https://example.org/files/AF-P00533-F1-model_v6.pdb"},
+    ],
+)
+def test_alphafold_rejects_absent_or_mismatched_coordinate_urls(coordinate_fields):
+    from src.target_search.remote_clients import AlphaFoldClient, RemoteSourceError
+
+    record = {
+        "entryId": "AF-P00533-F1",
+        "uniprotAccession": "P00533",
+        **coordinate_fields,
+    }
+    session = _FakeRemoteSession(_FakeRemoteResponse(payload=[record]))
+
+    with pytest.raises(RemoteSourceError) as raised:
+        AlphaFoldClient(_bounded_remote_client(session)).lookup("P00533")
+
+    assert raised.value.code == "invalid_response"
+    assert raised.value.retryable is False

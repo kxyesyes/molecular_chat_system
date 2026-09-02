@@ -7,6 +7,7 @@ import math
 import re
 import time
 from collections.abc import Callable, Mapping
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -39,8 +40,20 @@ _PDB_ID_RE = re.compile(r"[0-9][A-Z0-9]{3}")
 _ALPHAFOLD_ENTRY_RE = re.compile(r"AF-([A-Z0-9]{6}|[A-Z0-9]{10})-F[0-9]+")
 
 
+class _CredentialFreeAuth(requests.auth.AuthBase):
+    def __call__(self, request: requests.PreparedRequest) -> requests.PreparedRequest:
+        for header in ("Authorization", "Proxy-Authorization", "Cookie"):
+            request.headers.pop(header, None)
+        return request
+
+
+_CREDENTIAL_FREE_AUTH = _CredentialFreeAuth()
+
+
 class RemoteSourceError(RuntimeError):
     """A sanitized, stable failure contract for authoritative source calls."""
+
+    __slots__ = ("source", "code", "retryable", "status_code")
 
     def __init__(
         self,
@@ -48,20 +61,76 @@ class RemoteSourceError(RuntimeError):
         code: str,
         *,
         retryable: bool,
-        status: int | None = None,
+        status_code: int | None = None,
     ) -> None:
         if code not in _ERROR_MESSAGES:
             raise ValueError("unknown remote source error code")
         safe_source = source if source in _OFFICIAL_SOURCES else "Remote"
-        safe_status = status if isinstance(status, int) and not isinstance(status, bool) else None
+        safe_status = (
+            status_code
+            if isinstance(status_code, int) and not isinstance(status_code, bool)
+            else None
+        )
         message = f"{safe_source}: {_ERROR_MESSAGES[code]} [{code}]"
         if safe_status is not None:
             message += f" (status {safe_status})"
         super().__init__(message)
-        self.source = safe_source
-        self.code = code
-        self.retryable = bool(retryable)
-        self.status = safe_status
+        object.__setattr__(self, "source", safe_source)
+        object.__setattr__(self, "code", code)
+        object.__setattr__(self, "retryable", bool(retryable))
+        object.__setattr__(self, "status_code", safe_status)
+
+    @property
+    def __dict__(self) -> Mapping[str, Any]:
+        return MappingProxyType(
+            {
+                "source": self.source,
+                "code": self.code,
+                "retryable": self.retryable,
+                "status_code": self.status_code,
+            }
+        )
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("RemoteSourceError is immutable")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError("RemoteSourceError is immutable")
+
+
+def _validate_credential_free_session(session: Any) -> None:
+    if getattr(session, "auth", None) is not None:
+        raise ValueError("authenticated sessions are not allowed")
+
+    headers = getattr(session, "headers", None)
+    if headers is not None:
+        if not isinstance(headers, Mapping):
+            raise TypeError("session headers must be a mapping")
+        sensitive_headers = {
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+        }
+        if any(str(name).casefold() in sensitive_headers for name in headers):
+            raise ValueError("credential-bearing session headers are not allowed")
+
+    cookies = getattr(session, "cookies", None)
+    if cookies is not None:
+        try:
+            has_cookies = len(cookies) > 0
+        except TypeError:
+            has_cookies = bool(cookies)
+        if has_cookies:
+            raise ValueError("session cookies are not allowed")
+
+    proxies = getattr(session, "proxies", None)
+    if isinstance(proxies, Mapping):
+        for proxy_url in proxies.values():
+            if not isinstance(proxy_url, str):
+                continue
+            parsed = urlsplit(proxy_url)
+            if parsed.username is not None or parsed.password is not None:
+                raise ValueError("credential-bearing proxies are not allowed")
 
 
 class BoundedJsonClient:
@@ -69,7 +138,7 @@ class BoundedJsonClient:
 
     def __init__(
         self,
-        session: requests.Session,
+        session: requests.Session | None = None,
         *,
         sleep: Callable[[float], None] = time.sleep,
         timeout: tuple[float, float] = (3.05, 10.0),
@@ -78,8 +147,12 @@ class BoundedJsonClient:
         backoff_ceiling: float = 2.0,
         max_response_bytes: int = 1_000_000,
     ) -> None:
+        if session is None:
+            session = requests.Session()
+            session.trust_env = False
         if not callable(getattr(session, "request", None)):
             raise TypeError("session must provide request()")
+        _validate_credential_free_session(session)
         if not callable(sleep):
             raise TypeError("sleep must be callable")
         if (
@@ -138,6 +211,7 @@ class BoundedJsonClient:
                 "Accept": "application/json",
                 "User-Agent": STABLE_USER_AGENT,
             },
+            "auth": _CREDENTIAL_FREE_AUTH,
             "timeout": self._timeout,
             "stream": True,
         }
@@ -182,7 +256,7 @@ class BoundedJsonClient:
                     code = "provider_unavailable"
                     if attempt == self._max_attempts:
                         raise RemoteSourceError(
-                            source, code, retryable=True, status=status
+                            source, code, retryable=True, status_code=status
                         )
                     retry_delay = self._retry_delay(response, attempt, status)
                 elif 400 <= status <= 499:
@@ -190,14 +264,14 @@ class BoundedJsonClient:
                         source,
                         "http_client_error",
                         retryable=False,
-                        status=status,
+                        status_code=status,
                     )
                 elif not 200 <= status <= 299:
                     raise RemoteSourceError(
                         source,
                         "unexpected_status",
                         retryable=False,
-                        status=status,
+                        status_code=status,
                     )
                 else:
                     raw = self._read_bounded(response, source, status)
@@ -208,7 +282,7 @@ class BoundedJsonClient:
                             source,
                             "malformed_json",
                             retryable=False,
-                            status=status,
+                            status_code=status,
                         ) from None
             except requests.Timeout:
                 transport_error_code = "timeout"
@@ -249,12 +323,14 @@ class BoundedJsonClient:
                     source,
                     "response_too_large",
                     retryable=False,
-                    status=status,
+                    status_code=status,
                 )
 
         iter_content = getattr(response, "iter_content", None)
         if not callable(iter_content):
-            raise RemoteSourceError(source, "invalid_response", retryable=False, status=status)
+            raise RemoteSourceError(
+                source, "invalid_response", retryable=False, status_code=status
+            )
         chunks: list[bytes] = []
         total = 0
         for chunk in iter_content(chunk_size=min(8192, self._max_response_bytes + 1)):
@@ -262,7 +338,7 @@ class BoundedJsonClient:
                 continue
             if not isinstance(chunk, bytes):
                 raise RemoteSourceError(
-                    source, "invalid_response", retryable=False, status=status
+                    source, "invalid_response", retryable=False, status_code=status
                 )
             total += len(chunk)
             if total > self._max_response_bytes:
@@ -270,7 +346,7 @@ class BoundedJsonClient:
                     source,
                     "response_too_large",
                     retryable=False,
-                    status=status,
+                    status_code=status,
                 )
             chunks.append(chunk)
         return b"".join(chunks)
@@ -564,9 +640,7 @@ def _normalize_rcsb_entry(entry: Any, requested_id: str) -> dict[str, Any]:
     if not isinstance(entry, dict):
         raise RemoteSourceError("RCSB_PDB", "invalid_response", retryable=False)
     returned_id = entry.get("rcsb_id")
-    if returned_id is not None and (
-        not isinstance(returned_id, str) or returned_id.upper() != requested_id
-    ):
+    if not isinstance(returned_id, str) or returned_id != requested_id:
         raise RemoteSourceError("RCSB_PDB", "invalid_response", retryable=False)
 
     title = None
@@ -622,17 +696,17 @@ def _optional_resolution(info: dict[str, Any]) -> float | None:
     values = info.get("resolution_combined")
     if values is None:
         return None
-    if not isinstance(values, list):
+    if not isinstance(values, list) or not values:
         raise RemoteSourceError("RCSB_PDB", "invalid_response", retryable=False)
-    for value in values:
-        if (
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(float(value))
-            and value > 0
-        ):
-            return float(value)
-    return None
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or value <= 0
+        for value in values
+    ):
+        raise RemoteSourceError("RCSB_PDB", "invalid_response", retryable=False)
+    return float(values[0])
 
 
 def _optional_first_string(
@@ -667,8 +741,10 @@ def _normalize_alphafold(
     record: dict[str, Any], accession: str
 ) -> dict[str, Any]:
     entry_id = record["entryId"].upper()
-    pdb_url = _optional_alphafold_url(record, "pdbUrl")
-    cif_url = _optional_alphafold_url(record, "cifUrl")
+    pdb_url = _optional_alphafold_url(record, "pdbUrl", entry_id, "pdb")
+    cif_url = _optional_alphafold_url(record, "cifUrl", entry_id, "cif")
+    if pdb_url is None and cif_url is None:
+        raise RemoteSourceError("AlphaFold", "invalid_response", retryable=False)
     title = _optional_text(record, "uniprotDescription", "AlphaFold")
     organism = _optional_text(record, "organismScientificName", "AlphaFold")
     return {
@@ -696,12 +772,23 @@ def _optional_text(mapping: dict[str, Any], key: str, source: str) -> str | None
     return value.strip() or None
 
 
-def _optional_alphafold_url(record: dict[str, Any], key: str) -> str | None:
+def _optional_alphafold_url(
+    record: dict[str, Any], key: str, entry_id: str, extension: str
+) -> str | None:
     value = _optional_text(record, key, "AlphaFold")
     if value is None:
         return None
     parsed = urlsplit(value)
-    if parsed.scheme != "https" or parsed.netloc != "alphafold.ebi.ac.uk":
+    expected_path = re.compile(
+        rf"/files/{re.escape(entry_id)}-model_v[0-9]+\.{extension}"
+    )
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "alphafold.ebi.ac.uk"
+        or parsed.query
+        or parsed.fragment
+        or expected_path.fullmatch(parsed.path) is None
+    ):
         raise RemoteSourceError("AlphaFold", "invalid_response", retryable=False)
     return value
 
