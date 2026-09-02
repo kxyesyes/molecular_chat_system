@@ -537,6 +537,11 @@ class ChatHandler:
                 "你提供的 SMILES 无效，请检查并更正结构后重试。"
                 "本次未进行科学计算，没有计算 LogP、QED、pIC50 或 binding energy（结合能）。"
             )
+        if "SMILES validation is unavailable" in reasons:
+            return (
+                "当前无法使用科学验证组件校验 SMILES，请稍后重试。"
+                "本次未进行科学计算，没有计算 LogP、QED、pIC50 或 binding energy（结合能）。"
+            )
         if "SMILES" in reasons:
             return (
                 "要进行真实、可追溯的分子性质计算，请提供该分子的有效 "

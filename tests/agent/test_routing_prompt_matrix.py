@@ -1,8 +1,61 @@
 from __future__ import annotations
 
+import asyncio
+import json
+
 import pytest
 
+from src.agent.router import SkillRouter
 from src.agent.routing import HybridSkillRouter
+from src.web.chat_handler import ChatHandler
+
+
+class _RecordingWebSocket:
+    def __init__(self):
+        self.messages = []
+
+    async def send_text(self, payload):
+        self.messages.append(json.loads(payload))
+
+
+class _RecordingModel:
+    def __init__(self):
+        self.generate_calls = 0
+
+    async def generate(self, *args, **kwargs):
+        self.generate_calls += 1
+        return "model response"
+
+
+class _RecordingRagService:
+    is_initialized = True
+
+    def __init__(self):
+        self.calls = []
+
+    async def search_similar_molecules(self, query, count):
+        self.calls.append((query, count))
+        return []
+
+
+class _RecordingAgentSystem:
+    llm = None
+
+    def __init__(self):
+        self.skill_router = SkillRouter()
+        self.execute_calls = []
+
+    def should_use_tools(self, message):
+        return True
+
+    def execute(self, message, **kwargs):
+        self.execute_calls.append((message, kwargs))
+        return {
+            "success": True,
+            "final_answer": "unexpected execution",
+            "tools_used": ["unexpected_tool"],
+            "tool_results": {},
+        }
 
 
 @pytest.mark.parametrize(
@@ -84,6 +137,85 @@ def test_valid_aspirin_smiles_does_not_require_smiles_confirmation():
 
     assert decision.selected_skill == "comprehensive_evaluation"
     assert not any("SMILES" in reason for reason in decision.reasons)
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected_skill"),
+    [
+        (
+            "请基于这个分子生成 3 个候选。SMILES: CC(C)((",
+            "molecular_design",
+        ),
+        (
+            "针对 EGFR 基于这个分子设计 3 个候选。SMILES: CC(C)((",
+            "target_driven_design",
+        ),
+        (
+            "请将配体进行 docking。SMILES: CC(C)((；"
+            "receptor.pdb，center_x=0, center_y=0, center_z=0, "
+            "size_x=20, size_y=20, size_z=20",
+            "docking_simulation",
+        ),
+    ],
+)
+def test_invalid_input_is_terminal_before_scientific_execution(prompt, expected_skill):
+    model = _RecordingModel()
+    rag = _RecordingRagService()
+    agent = _RecordingAgentSystem()
+    handler = ChatHandler(
+        model=model,
+        rag_service=rag,
+        agent_system=agent,
+        config={"inference": {"stream": False}},
+    )
+    websocket = _RecordingWebSocket()
+
+    decision = agent.skill_router.decide(prompt)
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message=prompt,
+            enable_rag=True,
+            enable_tools=True,
+        )
+    )
+
+    assert decision.selected_skill == expected_skill
+    assert decision.requires_confirmation is True
+    assert "invalid SMILES" in " ".join(decision.reasons)
+    assert agent.execute_calls == []
+    assert rag.calls == []
+    assert model.generate_calls == 0
+    assert websocket.messages[-1]["type"] == "complete"
+    assert "SMILES 无效" in websocket.messages[-1]["content"]
+
+
+def test_invalid_smiles_skips_llm_arbitration():
+    class CountingLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, *args, **kwargs):
+            self.calls += 1
+            return "{}"
+
+    llm = CountingLLM()
+    decision = HybridSkillRouter(llm=llm, llm_margin_threshold=1.0).decide(
+        "请全面分析 SMILES: CC(C)(( 的 LogP、ADMET 和 pIC50"
+    )
+
+    assert decision.requires_confirmation is True
+    assert llm.calls == 0
+
+
+def test_labeled_invalid_smiles_takes_priority_over_incidental_valid_smiles():
+    decision = HybridSkillRouter().decide(
+        "请全面分析。SMILES: CC(C)((；并与 CCO 比较"
+    )
+
+    assert decision.selected_skill == "comprehensive_evaluation"
+    assert decision.requires_confirmation is True
+    assert "invalid SMILES" in " ".join(decision.reasons)
 
 
 @pytest.mark.parametrize(

@@ -10,7 +10,7 @@ from typing import Any
 
 from src.agent.persistence.base import AgentStateStore
 from src.agent.tooling import ToolRegistry
-from src.agent.utils.validators import InputValidator
+from src.agent.utils.validators import InputValidator, MolecularInputAnalysis
 from src.agent.workflows import WorkflowCatalog
 
 from .models import RouteCandidate, RouteDecision
@@ -28,6 +28,27 @@ TARGET_PATTERN = re.compile(
 )
 SMILES_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?:[BCNOPSFIK]|Cl|Br)[A-Za-z0-9@+\-\[\]\(\)=#./\\]{2,}(?![A-Za-z])"
+)
+MOLECULAR_INPUT_SKILLS = frozenset(
+    {
+        "activity_prediction",
+        "admet_assessment",
+        "comprehensive_evaluation",
+        "docking_simulation",
+        "hit_to_lead_optimization",
+        "molecular_design",
+        "reverse_target_prediction",
+        "target_driven_design",
+    }
+)
+REQUIRED_SMILES_SKILLS = frozenset(
+    {
+        "activity_prediction",
+        "admet_assessment",
+        "comprehensive_evaluation",
+        "hit_to_lead_optimization",
+        "reverse_target_prediction",
+    }
 )
 
 
@@ -72,10 +93,8 @@ class HybridSkillRouter:
 
         has_target = bool(TARGET_PATTERN.search(text))
         input_validator = InputValidator()
-        potential_smiles = input_validator.extract_potential_smiles_candidates(text)
-        valid_smiles = input_validator.extract_smiles_candidates(text)
-        has_smiles = bool(valid_smiles)
-        has_invalid_smiles = bool(potential_smiles) and not has_smiles
+        molecular_input = input_validator.analyze_molecular_input(text)
+        has_smiles = bool(molecular_input.valid_smiles)
         generation = self._has_generation_intent(lower)
 
         if self._contains(lower, "全面", "综合", "成药性", "comprehensive", "full analysis"):
@@ -230,7 +249,12 @@ class HybridSkillRouter:
         source = "rule" if top.score >= 0.9 and margin >= 0.2 else "scoring"
         decision_reasons = list(top.reasons)
 
-        if self.llm and len(candidates) > 1 and margin < self.llm_margin_threshold:
+        if (
+            self.llm
+            and not molecular_input.blocks_execution
+            and len(candidates) > 1
+            and margin < self.llm_margin_threshold
+        ):
             arbitration = self._llm_arbitrate(text, candidates[:3])
             allowed = {candidate.skill_name for candidate in candidates[:3]}
             if arbitration and arbitration.get("selected_skill") in allowed:
@@ -243,10 +267,13 @@ class HybridSkillRouter:
                     min(1.0, float(arbitration.get("confidence", top.score))),
                 )
 
-        if has_invalid_smiles:
-            decision_reasons.append("invalid SMILES input detected")
+        if selected in MOLECULAR_INPUT_SKILLS and molecular_input.blocks_execution:
+            if molecular_input.validation_available:
+                decision_reasons.append("invalid SMILES input detected")
+            else:
+                decision_reasons.append("SMILES validation is unavailable")
         confirmation_reasons = self._confirmation_reasons(
-            selected, lower, has_smiles, has_invalid_smiles
+            selected, lower, molecular_input
         )
         return RouteDecision(
             selected_skill=selected,
@@ -378,23 +405,20 @@ class HybridSkillRouter:
     def _confirmation_reasons(
         skill: str,
         lower: str,
-        has_smiles: bool,
-        has_invalid_smiles: bool = False,
+        molecular_input: MolecularInputAnalysis,
     ) -> list[str]:
         reasons = []
-        if skill in {
-            "admet_assessment",
-            "activity_prediction",
-            "reverse_target_prediction",
-            "comprehensive_evaluation",
-            "hit_to_lead_optimization",
-        } and not has_smiles:
-            if has_invalid_smiles:
+        if skill in MOLECULAR_INPUT_SKILLS and molecular_input.blocks_execution:
+            if molecular_input.validation_available:
                 reasons.append(
                     "The provided SMILES is invalid and must be corrected before execution"
                 )
             else:
-                reasons.append("A valid SMILES input is required before execution")
+                reasons.append(
+                    "SMILES validation is unavailable; scientific execution cannot proceed"
+                )
+        elif skill in REQUIRED_SMILES_SKILLS and not molecular_input.valid_smiles:
+            reasons.append("A valid SMILES input is required before execution")
         if skill == "docking_simulation":
             has_receptor = any(
                 marker in lower
