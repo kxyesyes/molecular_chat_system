@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
+const crypto = require("crypto");
 
 const root = path.join(__dirname, "..");
 
@@ -16,6 +17,11 @@ function assert(condition, message) {
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function exactCandidateId(index, smiles) {
+  const digest = crypto.createHash("sha256").update(smiles, "utf8").digest("hex");
+  return `cand-${String(index).padStart(3, "0")}-${digest.slice(0, 8)}`;
 }
 
 function validPayload(status = "succeeded") {
@@ -81,6 +87,31 @@ vm.runInContext(fs.readFileSync(helperPath, "utf8"), sandbox, {
 const api = sandbox.window.HomeMoleculeCandidates;
 assert(api && typeof api.normalize === "function", "Helper must expose normalize");
 
+const helperSource = fs.readFileSync(helperPath, "utf8");
+assert(
+  helperSource.includes("function sha256Prefix"),
+  "Helper must provide a local synchronous SHA-256 implementation",
+);
+const instrumentedSource = helperSource
+  .replace(
+    "root.HomeMoleculeCandidates = { normalize };",
+    "root.HomeMoleculeCandidates = { normalize, sha256Prefix };",
+  );
+assert(
+  instrumentedSource.includes("normalize, sha256Prefix"),
+  "Test instrumentation must expose the local synchronous SHA-256 helper",
+);
+const hashSandbox = { window: {}, console };
+hashSandbox.globalThis = hashSandbox;
+vm.createContext(hashSandbox);
+vm.runInContext(instrumentedSource, hashSandbox, { filename: helperPath });
+const unicodeHashInput = "分子🧬";
+assert(
+  hashSandbox.window.HomeMoleculeCandidates.sha256Prefix(unicodeHashInput) ===
+    crypto.createHash("sha256").update(unicodeHashInput, "utf8").digest("hex").slice(0, 8),
+  "Local SHA-256 helper must encode Unicode input as standards-compliant UTF-8",
+);
+
 const normalized = api.normalize(validPayload());
 assert(normalized, "Valid succeeded payload must normalize");
 assert(normalized !== validPayload(), "Normalizer must return a fresh object");
@@ -123,6 +154,22 @@ failed.source.status = "failed";
 failed.candidate_set.status = "failed";
 assert(api.normalize(failed) === null, "Failed payload must be rejected");
 
+function payloadWithCandidates(smilesValues) {
+  const payload = validPayload();
+  payload.candidate_set.candidates = smilesValues.map((smiles, index) => ({
+    ...clone(payload.candidate_set.candidates[0]),
+    candidate_id: exactCandidateId(index + 1, smiles),
+    source_index: index + 1,
+    original_smiles: smiles,
+    canonical_smiles: smiles,
+    smiles,
+  }));
+  payload.candidate_set.requested_count = smilesValues.length;
+  payload.candidate_set.valid_count = smilesValues.length;
+  payload.candidate_set.unique_count = smilesValues.length;
+  return payload;
+}
+
 function rejected(mutator, message) {
   const payload = validPayload();
   mutator(payload);
@@ -134,6 +181,75 @@ function accepted(mutator, message) {
   mutator(payload);
   assert(api.normalize(payload), message);
 }
+
+assert(
+  api.normalize(payloadWithCandidates(["CCO", "CCN"])),
+  "Exact SHA-256 candidate identities in array order must normalize",
+);
+assert(
+  api.normalize(payloadWithCandidates(["C".repeat(80)])),
+  "Candidate identity hashing must remain correct across SHA-256 blocks",
+);
+accepted(
+  (payload) => {
+    payload.candidate_set.candidates[0].source_index = 2;
+    payload.candidate_set.rejected[0].source_index = 1;
+  },
+  "Candidate ordinal must be independent from a valid source index",
+);
+rejected(
+  (payload) => {
+    payload.candidate_set.candidates[0].candidate_id = "candidate-001-ab1de819";
+  },
+  "Malformed candidate ID format must be rejected",
+);
+rejected(
+  (payload) => {
+    payload.candidate_set.candidates[0].candidate_id = "cand-001-AB1DE819";
+  },
+  "Uppercase candidate hashes must be rejected",
+);
+rejected(
+  (payload) => {
+    payload.candidate_set.candidates[0].candidate_id = "cand-0001-ab1de819";
+  },
+  "Candidate ordinal formatting must match Python zero padding exactly",
+);
+rejected(
+  (payload) => {
+    payload.candidate_set.candidates[0].candidate_id = "cand-001-deadbeef";
+  },
+  "Candidate IDs with the wrong SHA-256 prefix must be rejected",
+);
+rejected(
+  (payload) => {
+    payload.candidate_set.candidates[0].candidate_id = "cand-002-ab1de819";
+  },
+  "Candidate ordinal must follow array position rather than source index",
+);
+
+const skippedOrdinal = payloadWithCandidates(["CCO", "CCN"]);
+skippedOrdinal.candidate_set.candidates[1].candidate_id =
+  `cand-003-${exactCandidateId(2, "CCN").slice(-8)}`;
+assert(
+  api.normalize(skippedOrdinal) === null,
+  "Skipped candidate ordinals must be rejected",
+);
+const reorderedOrdinal = payloadWithCandidates(["CCO", "CCN"]);
+reorderedOrdinal.candidate_set.candidates.reverse();
+assert(
+  api.normalize(reorderedOrdinal) === null,
+  "Reordered candidate ordinals must be rejected even when source indexes remain valid",
+);
+rejected(
+  (payload) => {
+    const candidate = payload.candidate_set.candidates[0];
+    candidate.canonical_smiles = "C".repeat(513);
+    candidate.original_smiles = candidate.canonical_smiles;
+    candidate.smiles = candidate.canonical_smiles;
+  },
+  "Oversized canonical SMILES must be rejected before identity hashing",
+);
 
 rejected(
   (payload) => {
@@ -353,7 +469,8 @@ assert(
   "Cards must request images only through the SMILES image endpoint",
 );
 
-const helperScript = "/static/js/home/molecule_candidates.js?v=";
+const helperScript =
+  "/static/js/home/molecule_candidates.js?v=20260902-candidate-identity-v3";
 const safeScript = "/static/js/shared/safe_render.js";
 const mainScript = "/static/js/home/main.js?v=";
 assert(indexHtml.includes(helperScript), "Template must version molecule candidate helper");
