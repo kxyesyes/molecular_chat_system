@@ -746,6 +746,7 @@ class TargetCacheRepository:
 
         restore_active = False
         retain_active = False
+        retry_active = False
         active_evidence = self._validated_evidence(active)
         if (
             active_evidence is not None
@@ -776,7 +777,12 @@ class TargetCacheRepository:
                 quarantine_state = _prevalidate_regular_file(
                     cache_root, quarantine, quarantine_relative.parts
                 )
-                if "transient_error" in {source_state, quarantine_state}:
+                if (
+                    source_state == "transient_error"
+                    and quarantine_state == "regular"
+                ):
+                    retry_active = True
+                elif "transient_error" in {source_state, quarantine_state}:
                     retain_active = True
                 elif source_state == "regular" and quarantine_state == "missing":
                     restore_active = True
@@ -797,6 +803,7 @@ class TargetCacheRepository:
             active=active,
             restore_active=restore_active,
             retain_active=retain_active,
+            retry_active=retry_active,
         )
 
     def _delete_invalid_intent_transactionally(
@@ -806,6 +813,7 @@ class TargetCacheRepository:
         active: Optional[Mapping[str, Any]] = None,
         restore_active: bool = False,
         retain_active: bool = False,
+        retry_active: bool = False,
     ) -> None:
         conn = get_connection(self.project_root)
         try:
@@ -813,7 +821,23 @@ class TargetCacheRepository:
             if active is not None:
                 cache_key = active.get("cache_key")
                 generation_id = active.get("generation_id")
-                if restore_active:
+                if retry_active:
+                    retry_count = max(0, int(active.get("retry_count", 0)))
+                    cursor = conn.execute(
+                        """
+                        UPDATE target_remote_cache
+                        SET retry_count = ?, next_retry_epoch = ?
+                        WHERE cache_key IS ? AND generation_id IS ?
+                            AND cleanup_pending = 1
+                        """,
+                        (
+                            retry_count + 1,
+                            self._now().timestamp() + _retry_delay(retry_count),
+                            cache_key,
+                            generation_id,
+                        ),
+                    )
+                elif restore_active:
                     cursor = conn.execute(
                         """
                         UPDATE target_remote_cache
@@ -1199,43 +1223,44 @@ class TargetCacheRepository:
                         cache_root, source, relative_path.parts
                     )
 
-                    if (
-                        row["cleanup_pending"] == 1
-                        and quarantine_state == "transient_error"
-                    ):
-                        _schedule_active_cleanup_retry(
-                            self.project_root,
-                            evidence.cache_key,
-                            evidence.generation_id,
-                            now_epoch,
-                        )
-                        continue
-                    if (
-                        row["cleanup_pending"] == 1
-                        and quarantine_state == "permanent_unsafe"
-                    ):
+                    if row["cleanup_pending"] == 1:
+                        if "transient_error" in {source_state, quarantine_state}:
+                            _schedule_active_cleanup_retry(
+                                self.project_root,
+                                evidence.cache_key,
+                                evidence.generation_id,
+                                now_epoch,
+                            )
+                            continue
+                        if quarantine_state == "regular":
+                            if _retire_active_to_cleanup_job(
+                                self.project_root,
+                                evidence,
+                                quarantine_relative,
+                                now_epoch,
+                            ):
+                                records_deleted += 1
+                                deleted = _attempt_job_unlink(
+                                    self.project_root,
+                                    cache_root,
+                                    evidence.generation_id,
+                                    quarantine_relative,
+                                    now_epoch,
+                                )
+                                files_deleted += int(deleted)
+                            continue
+                        if source_state == "regular":
+                            _clear_active_recovery_state(
+                                self.project_root,
+                                evidence.cache_key,
+                                evidence.generation_id,
+                            )
+                            continue
                         records_deleted += _delete_generation(
                             self.project_root,
                             evidence.cache_key,
                             evidence.generation_id,
                         )
-                        continue
-                    if row["cleanup_pending"] == 1 and quarantine_state == "regular":
-                        if _retire_active_to_cleanup_job(
-                            self.project_root,
-                            evidence,
-                            quarantine_relative,
-                            now_epoch,
-                        ):
-                            records_deleted += 1
-                            deleted = _attempt_job_unlink(
-                                self.project_root,
-                                cache_root,
-                                evidence.generation_id,
-                                quarantine_relative,
-                                now_epoch,
-                            )
-                            files_deleted += int(deleted)
                         continue
 
                     if source_state in {"missing", "permanent_unsafe"}:
@@ -1666,8 +1691,9 @@ def _due_active_rows(
             """
             SELECT *
             FROM target_remote_cache
-            WHERE expires_epoch <= ? AND next_retry_epoch <= ?
-            ORDER BY expires_epoch, cache_key
+            WHERE next_retry_epoch <= ?
+                AND (cleanup_pending = 1 OR expires_epoch <= ?)
+            ORDER BY cleanup_pending DESC, expires_epoch, cache_key
             LIMIT ?
             """,
             (now_epoch, now_epoch, limit),
@@ -1883,6 +1909,29 @@ def _schedule_active_cleanup_retry(
                     cache_key,
                     generation_id,
                 ),
+            )
+            return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def _clear_active_recovery_state(
+    project_root: Path,
+    cache_key: str,
+    generation_id: str,
+) -> bool:
+    conn = get_connection(project_root)
+    try:
+        with conn:
+            cursor = conn.execute(
+                """
+                UPDATE target_remote_cache
+                SET cleanup_pending = 0, cleanup_quarantine_path = NULL,
+                    next_retry_epoch = 0, retry_count = 0
+                WHERE cache_key = ? AND generation_id = ?
+                    AND cleanup_pending = 1
+                """,
+                (cache_key, generation_id),
             )
             return cursor.rowcount == 1
     finally:

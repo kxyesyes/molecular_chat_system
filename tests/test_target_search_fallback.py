@@ -1026,6 +1026,128 @@ def test_corrupt_intent_transient_prior_probe_retains_linked_active_generation(
     assert repository.get(first.cache_key) == second
 
 
+def test_ambiguous_quarantined_prior_retries_then_deletes_without_orphan_or_lock(
+    project_root, clock, monkeypatch
+):
+    from src.target_search import cache as cache_module
+    from src.target_search.database import get_cache_dir, get_connection
+
+    repository = cache_module.TargetCacheRepository(project_root, clock)
+    first = _publish_coordinate(
+        repository,
+        project_root,
+        "coordinate:ambiguous-prior",
+        "first.cif",
+        source_record_id="first",
+        content="first generation",
+    )
+    cache_root = get_cache_dir(project_root)
+    source = cache_root / first.payload["path"]
+    quarantine_relative = (
+        Path(".quarantine")
+        / f"{first.generation_id}-{Path(first.payload['path']).name}"
+    )
+    quarantine = cache_root / quarantine_relative
+    quarantine.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(source, quarantine)
+    _insert_corrupt_publication_intent(
+        project_root,
+        clock,
+        first.cache_key,
+        previous=first,
+    )
+    conn = get_connection(project_root)
+    try:
+        conn.execute(
+            """
+            UPDATE target_remote_cache
+            SET cleanup_pending = 1, cleanup_quarantine_path = ?
+            WHERE cache_key = ? AND generation_id = ?
+            """,
+            (
+                quarantine_relative.as_posix(),
+                first.cache_key,
+                first.generation_id,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    original_prevalidate = cache_module._prevalidate_regular_file
+
+    def transient_source_probe(cache_root_value, candidate, relative_parts):
+        if candidate == source:
+            return "transient_error"
+        return original_prevalidate(cache_root_value, candidate, relative_parts)
+
+    monkeypatch.setattr(
+        cache_module, "_prevalidate_regular_file", transient_source_probe
+    )
+
+    first_cleanup = repository.cleanup_expired()
+
+    conn = get_connection(project_root)
+    try:
+        pending = conn.execute(
+            """
+            SELECT generation_id, cleanup_pending, cleanup_quarantine_path,
+                next_retry_epoch
+            FROM target_remote_cache WHERE cache_key = ?
+            """,
+            (first.cache_key,),
+        ).fetchone()
+        intents = conn.execute(
+            "SELECT COUNT(*) AS count FROM target_coordinate_publication_intents "
+            "WHERE cache_key = ?",
+            (first.cache_key,),
+        ).fetchone()["count"]
+    finally:
+        conn.close()
+    assert first_cleanup == {"records_deleted": 0, "files_deleted": 0}
+    assert pending["generation_id"] == first.generation_id
+    assert pending["cleanup_pending"] == 1
+    assert pending["cleanup_quarantine_path"] == quarantine_relative.as_posix()
+    assert pending["next_retry_epoch"] > clock.value.timestamp()
+    assert intents == 0
+    assert not source.exists()
+    assert quarantine.read_text(encoding="utf-8") == "first generation"
+
+    monkeypatch.setattr(
+        cache_module, "_prevalidate_regular_file", original_prevalidate
+    )
+    clock.value += timedelta(minutes=2)
+    second_cleanup = repository.cleanup_expired()
+
+    conn = get_connection(project_root)
+    try:
+        active = conn.execute(
+            "SELECT * FROM target_remote_cache WHERE cache_key = ?",
+            (first.cache_key,),
+        ).fetchone()
+        jobs = conn.execute(
+            "SELECT COUNT(*) AS count FROM target_coordinate_cleanup_jobs "
+            "WHERE generation_id = ?",
+            (first.generation_id,),
+        ).fetchone()["count"]
+    finally:
+        conn.close()
+    assert second_cleanup == {"records_deleted": 1, "files_deleted": 1}
+    assert active is None
+    assert jobs == 0
+    assert not source.exists()
+    assert not quarantine.exists()
+
+    replacement = _publish_coordinate(
+        repository,
+        project_root,
+        first.cache_key,
+        "replacement.cif",
+        source_record_id="replacement",
+        content="replacement generation",
+    )
+    assert repository.get(first.cache_key) == replacement
+
+
 def test_generic_metadata_cannot_overwrite_coordinate_owned_key(project_root, clock):
     from src.target_search.cache import TargetCacheRepository
     from src.target_search.database import get_cache_dir
