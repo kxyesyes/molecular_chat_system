@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI, Request
 
 from src.agent.supervisor import SupervisorAgent
 from src.task_runtime import get_task_manager
 from src.web.api_response import api_error, api_success
-from src.web.admin_auth import require_admin
 
 
 def setup_agent_workflow_routes(
@@ -16,7 +15,7 @@ def setup_agent_workflow_routes(
 ) -> None:
     create_supervisor = supervisor_factory or SupervisorAgent
 
-    @app.post("/api/agent/workflows/plan", dependencies=[Depends(require_admin)])
+    @app.post("/api/agent/workflows/plan")
     async def plan_workflow(request: Request):
         payload: dict[str, Any] = await request.json()
         query = str(payload.get("query") or "").strip()
@@ -31,7 +30,7 @@ def setup_agent_workflow_routes(
         )
         return api_success(plan, message="工作流计划已生成")
 
-    @app.post("/api/agent/workflows/run", dependencies=[Depends(require_admin)])
+    @app.post("/api/agent/workflows/run")
     async def run_workflow(request: Request):
         payload: dict[str, Any] = await request.json()
         query = str(payload.get("query") or "").strip()

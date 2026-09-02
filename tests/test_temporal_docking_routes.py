@@ -17,7 +17,6 @@ from src.task_runtime.store import TaskStore
 from src.web.routes.api_routes import setup_api_routes
 
 
-ADMIN_TOKEN = "unit-admin-token"
 TASK_ID = "00000000-0000-4000-8000-000000000901"
 
 
@@ -99,7 +98,6 @@ class FakeDockingService:
 
 
 def _build_client(monkeypatch):
-    monkeypatch.setenv("MEDCHAT_ADMIN_TOKEN", ADMIN_TOKEN)
     runtime = FakeTaskRuntime()
     app = FastAPI()
     setup_api_routes(
@@ -112,7 +110,7 @@ def _build_client(monkeypatch):
 
 
 def _headers(**extra):
-    return {"X-MedChat-Admin-Token": ADMIN_TOKEN, **extra}
+    return extra
 
 
 def _files():
@@ -134,14 +132,9 @@ def _docking_form():
     }
 
 
-def test_async_submit_requires_admin_and_returns_202(monkeypatch):
+def test_async_submit_needs_no_admin_token_and_returns_202(monkeypatch):
     client, runtime = _build_client(monkeypatch)
 
-    unauthorized = client.post(
-        "/api/docking/tasks",
-        files=_files(),
-        data=_docking_form(),
-    )
     accepted = client.post(
         "/api/docking/tasks",
         headers=_headers(**{"Idempotency-Key": "request-1"}),
@@ -149,7 +142,6 @@ def test_async_submit_requires_admin_and_returns_202(monkeypatch):
         data=_docking_form(),
     )
 
-    assert unauthorized.status_code == 401
     assert accepted.status_code == 202
     payload = accepted.json()
     assert payload["success"] is True
@@ -360,7 +352,6 @@ class _RecordingLocalBackend:
 
 
 def test_async_submit_is_accepted_by_real_docking_stager(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("MEDCHAT_ADMIN_TOKEN", ADMIN_TOKEN)
     store = TaskStore(tmp_path / "tasks.sqlite")
     stager = DockingInputStager(tmp_path / "staging")
     backend = _RecordingLocalBackend(store)

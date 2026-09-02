@@ -3,9 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 
-from src.web.admin_auth import require_admin
 from src.web.api_response import api_error, api_success
 
 from .manager import get_task_manager
@@ -57,7 +56,7 @@ def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
             return await runtime.get(task_id)
         return await asyncio.to_thread(get_task_manager().get, task_id)
 
-    @app.get("/api/tasks", dependencies=[Depends(require_admin)])
+    @app.get("/api/tasks")
     async def list_tasks(
         limit: int = 20,
         status: str | None = None,
@@ -66,7 +65,7 @@ def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
         records = await runtime_list(limit, status, task_type)
         return api_success([record.to_public_dict() for record in records])
 
-    @app.get("/api/tasks/{task_id}", dependencies=[Depends(require_admin)])
+    @app.get("/api/tasks/{task_id}")
     async def get_task(task_id: str):
         try:
             record = await runtime_get(task_id)
@@ -74,10 +73,7 @@ def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
             return api_error("TASK_NOT_FOUND", "Task not found", status_code=404)
         return api_success(record.to_public_dict())
 
-    @app.get(
-        "/api/tasks/{task_id}/events",
-        dependencies=[Depends(require_admin)],
-    )
+    @app.get("/api/tasks/{task_id}/events")
     async def get_task_events(task_id: str):
         try:
             runtime = current_task_runtime()
@@ -104,10 +100,7 @@ def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
             ]
         )
 
-    @app.post(
-        "/api/tasks/{task_id}/cancel",
-        dependencies=[Depends(require_admin)],
-    )
+    @app.post("/api/tasks/{task_id}/cancel")
     async def cancel_task(
         task_id: str,
         payload: dict[str, Any] = Body(default_factory=dict),
@@ -141,7 +134,7 @@ def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
             message="Cancellation requested",
         )
 
-    @app.post("/api/tasks/demo", dependencies=[Depends(require_admin)])
+    @app.post("/api/tasks/demo")
     async def submit_demo_task(request: Request):
         payload: dict[str, Any] = await request.json()
 

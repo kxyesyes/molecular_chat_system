@@ -30,7 +30,6 @@ class FakeSupervisor:
 
 
 def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
-    monkeypatch.setenv("MEDCHAT_ADMIN_TOKEN", "unit-admin-token")
     monkeypatch.setenv("MEDCHAT_TASK_DB_PATH", str(tmp_path / "tasks.sqlite"))
     task_manager_module._MANAGER = None
 
@@ -39,15 +38,12 @@ def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
     setup_system_routes(app)
     setup_agent_workflow_routes(app, supervisor_factory=FakeSupervisor)
     client = TestClient(app)
-    admin_headers = {"X-MedChat-Admin-Token": "unit-admin-token"}
-
     plan_response = client.post(
         "/api/agent/workflows/plan",
         json={
             "query": "Design PDE5 drug-like molecules and evaluate docking",
             "skill_name": "target_driven_design",
         },
-        headers=admin_headers,
     )
     assert plan_response.status_code == 200
     plan_payload = plan_response.json()
@@ -61,7 +57,6 @@ def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
             "api_key": "credential-marker",
             "input_manifest_path": "C:/private/manifest.json",
         },
-        headers=admin_headers,
     )
     assert task_response.status_code == 200
     submitted_data = task_response.json()["data"]
@@ -72,7 +67,7 @@ def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
     assert submitted_data["backend"] == "local"
 
     for _ in range(50):
-        status_response = client.get(f"/api/tasks/{task_id}", headers=admin_headers)
+        status_response = client.get(f"/api/tasks/{task_id}")
         status_payload = status_response.json()["data"]
         if status_payload["status"] == "succeeded":
             break
@@ -83,7 +78,7 @@ def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
     assert "input" not in status_payload
     assert "input_manifest_path" not in status_payload
     assert "credential-marker" not in status_response.text
-    list_response = client.get("/api/tasks", headers=admin_headers)
+    list_response = client.get("/api/tasks")
     assert "credential-marker" not in list_response.text
     assert all("input" not in item for item in list_response.json()["data"])
 
@@ -93,7 +88,6 @@ def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
             "query": "credential-marker",
             "metadata": {"model_path": "C:/private/model.bin"},
         },
-        headers=admin_headers,
     )
     assert workflow_response.status_code == 200
     workflow_data = workflow_response.json()["data"]
@@ -105,9 +99,7 @@ def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
 
     workflow_task_id = workflow_data["task_id"]
     for _ in range(50):
-        workflow_status_response = client.get(
-            f"/api/tasks/{workflow_task_id}", headers=admin_headers
-        )
+        workflow_status_response = client.get(f"/api/tasks/{workflow_task_id}")
         workflow_status = workflow_status_response.json()["data"]
         if workflow_status["status"] == "succeeded":
             break
@@ -141,9 +133,7 @@ def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
                 workflow_task_id,
             ),
         )
-    legacy_response = client.get(
-        f"/api/tasks/{workflow_task_id}", headers=admin_headers
-    )
+    legacy_response = client.get(f"/api/tasks/{workflow_task_id}")
     assert legacy_response.status_code == 200
     assert legacy_response.json()["data"]["provenance"] == {
         "input_hash": "a" * 64,
@@ -152,6 +142,6 @@ def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
     assert "C:/private" not in legacy_response.text
     assert "%2e%2e" not in legacy_response.text.lower()
 
-    versions_response = client.get("/api/system/data-versions", headers=admin_headers)
+    versions_response = client.get("/api/system/data-versions")
     assert versions_response.status_code == 200
     assert "target_db" in versions_response.json()["data"]

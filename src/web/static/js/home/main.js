@@ -528,7 +528,7 @@
       elements.llmSettingsOverlay.setAttribute("aria-hidden", "false");
       setLlmSettingsStatus("正在读取当前模型配置...");
       try {
-        const response = await window.MedChatAdminAuth.fetch("/api/llm/config");
+        const response = await fetch("/api/llm/config");
         const result = await response.json();
         if (!result.success) {
           throw new Error(result.message || "读取配置失败");
@@ -582,7 +582,7 @@
       const payload = collectLlmSettingsForm();
       setLlmSettingsStatus("正在测试连接...");
       try {
-        const response = await window.MedChatAdminAuth.fetch("/api/llm/test", {
+        const response = await fetch("/api/llm/test", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -602,7 +602,7 @@
       const payload = collectLlmSettingsForm();
       setLlmSettingsStatus("正在保存并启用配置...");
       try {
-        const response = await window.MedChatAdminAuth.fetch("/api/llm/config", {
+        const response = await fetch("/api/llm/config", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -922,7 +922,7 @@
     }
 
     try {
-      const response = await window.MedChatAdminAuth.fetch("/api/switch_model", {
+      const response = await fetch("/api/switch_model", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

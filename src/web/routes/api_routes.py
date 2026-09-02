@@ -8,11 +8,10 @@ import asyncio
 import inspect
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Optional
-from fastapi import Depends, UploadFile, File, Form, Header, HTTPException, Response, Body, Query
+from fastapi import UploadFile, File, Form, Header, HTTPException, Response, Body, Query
 from starlette.concurrency import run_in_threadpool
 
 from src.agent.persistence.redaction import redact_sensitive
-from src.web.admin_auth import require_admin
 from src.web.api_response import api_success
 
 logger = logging.getLogger(__name__)
@@ -187,7 +186,6 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
     @app.post(
         "/api/docking/tasks",
         status_code=202,
-        dependencies=[Depends(require_admin)],
     )
     async def submit_durable_docking_task(
         protein_file: UploadFile = File(...),
@@ -744,7 +742,7 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
             logger.error(f"重建 pose SDF 失败: {e}")
             raise HTTPException(status_code=500, detail=f"重建 pose SDF 失败: {str(e)}")
 
-    @app.get("/api/docking/history", dependencies=[Depends(require_admin)])
+    @app.get("/api/docking/history")
     async def get_docking_history(page: int = 1, limit: int = 50):
         """获取对接历史记录列表"""
         try:
@@ -777,7 +775,7 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
             logger.error(f"获取对接历史失败: {e}")
             raise HTTPException(status_code=500, detail=f"获取历史失败: {str(e)}")
 
-    @app.delete("/api/docking/history", dependencies=[Depends(require_admin)])
+    @app.delete("/api/docking/history")
     async def clear_docking_history():
         """清除所有对接历史记录"""
         try:
@@ -803,7 +801,7 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
             logger.error(f"清除对接历史失败: {e}")
             raise HTTPException(status_code=500, detail=f"清除历史失败: {str(e)}")
 
-    @app.delete("/api/docking/history/{job_id}", dependencies=[Depends(require_admin)])
+    @app.delete("/api/docking/history/{job_id}")
     async def delete_docking_job(job_id: str):
         """删除指定的对接历史记录"""
         try:
@@ -1523,7 +1521,7 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
 
     # ==================== 活性模型训练与管理 API ====================
     
-    @app.post("/api/activity/train", dependencies=[Depends(require_admin)])
+    @app.post("/api/activity/train")
     async def start_activity_training(
         file: UploadFile           = File(...),
         target_column: str         = Form(...),
@@ -1605,7 +1603,7 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
                 except Exception:
                     pass
 
-    @app.get("/api/activity/train/status/{job_id}", dependencies=[Depends(require_admin)])
+    @app.get("/api/activity/train/status/{job_id}")
     async def get_training_status(job_id: str):
         """查询训练状态和指标"""
         from src.activity.trainer import get_job_status
@@ -1614,7 +1612,7 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
             raise HTTPException(status_code=404, detail="任务不存在")
         return {"success": True, "status": status}
         
-    @app.get("/api/activity/models", dependencies=[Depends(require_admin)])
+    @app.get("/api/activity/models")
     async def list_activity_models():
         """列出所有已训练的活性模型"""
         from src.activity.trainer import list_available_models, get_current_model_id
@@ -1626,7 +1624,7 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
             "current_model": get_current_model_id(),
         }
 
-    @app.post("/api/activity/models/switch", dependencies=[Depends(require_admin)])
+    @app.post("/api/activity/models/switch")
     async def switch_activity_model(data: Dict[str, Any] = Body(...)):
         """切换当前使用的活性预测模型权重"""
         if set(data) != {"model_id"} or not isinstance(data.get("model_id"), str):
@@ -1656,7 +1654,7 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
             logger.exception("切换活性模型失败")
             raise HTTPException(status_code=500, detail="切换活性模型失败")
 
-    @app.delete("/api/activity/models/{model_id}", dependencies=[Depends(require_admin)])
+    @app.delete("/api/activity/models/{model_id}")
     async def remove_activity_model(model_id: str):
         """物理删除一个活性预测模型"""
         try:

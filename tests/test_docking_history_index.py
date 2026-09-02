@@ -17,16 +17,9 @@ from src.docking.history_index import (
 )
 
 
-ADMIN_TOKEN = "unit-admin-token"
-
-
 class MockDockingService:
     def __init__(self, work_dir: Path):
         self.work_dir = str(work_dir)
-
-
-def admin_headers() -> dict[str, str]:
-    return {"X-MedChat-Admin-Token": ADMIN_TOKEN}
 
 
 def write_history_index(work_dir: Path, count: int = 120) -> None:
@@ -81,7 +74,6 @@ def _multiprocess_upsert_worker(
 
 
 def test_docking_history_reads_index_with_pagination(tmp_path, monkeypatch):
-    monkeypatch.setenv("MEDCHAT_ADMIN_TOKEN", ADMIN_TOKEN)
     write_history_index(tmp_path, count=120)
 
     app = FastAPI()
@@ -91,7 +83,6 @@ def test_docking_history_reads_index_with_pagination(tmp_path, monkeypatch):
     started = time.perf_counter()
     response = client.get(
         "/api/docking/history?page=2&limit=5",
-        headers=admin_headers(),
     )
     elapsed_ms = (time.perf_counter() - started) * 1000
 

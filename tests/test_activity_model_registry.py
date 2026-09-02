@@ -17,7 +17,6 @@ from fastapi.testclient import TestClient
 from src.activity.model_registry import ActivityModelRegistry
 
 
-ADMIN_TOKEN = "activity-registry-admin-token"
 REQUIRED_FIELDS = {
     "model_id",
     "weights_file",
@@ -612,13 +611,11 @@ def test_activity_model_api_uses_model_ids_and_rejects_path_payloads(
 
     dummy_predictor = SimpleNamespace(_loaded=True)
     monkeypatch.setattr(predictor_module, "_predictor", dummy_predictor)
-    monkeypatch.setenv("MEDCHAT_ADMIN_TOKEN", ADMIN_TOKEN)
     app = FastAPI()
     setup_api_routes(app)
     client = TestClient(app)
-    headers = {"X-MedChat-Admin-Token": ADMIN_TOKEN}
 
-    listed = client.get("/api/activity/models", headers=headers)
+    listed = client.get("/api/activity/models")
     assert listed.status_code == 200
     assert listed.json()["current_model"] == "first-model"
 
@@ -630,24 +627,19 @@ def test_activity_model_api_uses_model_ids_and_rejects_path_payloads(
         {"model_id": "second-model", "model_file": "second.pt"},
     ]
     for payload in invalid_payloads:
-        response = client.post(
-            "/api/activity/models/switch", headers=headers, json=payload
-        )
+        response = client.post("/api/activity/models/switch", json=payload)
         assert response.status_code in {400, 422}
         assert str(tmp_path) not in response.text
         assert ActivityModelRegistry(models_dir).get_active_model_id() == "first-model"
 
     switched = client.post(
         "/api/activity/models/switch",
-        headers=headers,
         json={"model_id": "second-model"},
     )
     assert switched.status_code == 200
     assert ActivityModelRegistry(models_dir).get_active_model_id() == "second-model"
     assert dummy_predictor._loaded is False
-    assert client.get("/api/activity/models", headers=headers).json()[
-        "current_model"
-    ] == "second-model"
+    assert client.get("/api/activity/models").json()["current_model"] == "second-model"
 
 
 def test_activity_model_delete_api_invalidates_shared_predictor(
@@ -671,15 +663,11 @@ def test_activity_model_delete_api_invalidates_shared_predictor(
 
     dummy_predictor.invalidate = Mock(side_effect=invalidate)
     monkeypatch.setattr(predictor_module, "_predictor", dummy_predictor)
-    monkeypatch.setenv("MEDCHAT_ADMIN_TOKEN", ADMIN_TOKEN)
     app = FastAPI()
     setup_api_routes(app)
     client = TestClient(app)
-    headers = {"X-MedChat-Admin-Token": ADMIN_TOKEN}
 
-    response = client.delete(
-        "/api/activity/models/delete-model", headers=headers
-    )
+    response = client.delete("/api/activity/models/delete-model")
 
     assert response.status_code == 200
     dummy_predictor.invalidate.assert_called_once_with()

@@ -14,9 +14,6 @@ from fastapi.testclient import TestClient
 from src.activity.predictor import ActivityPredictor
 
 
-ADMIN_TOKEN = "activity-contract-admin-token"
-
-
 def _model_metadata(
     *,
     task_type: str = "regression",
@@ -459,14 +456,12 @@ def test_training_api_and_frontend_forward_split_strategy(
         return "split-job"
 
     monkeypatch.setattr(trainer, "submit_training_job", fake_submit_training_job)
-    monkeypatch.setenv("MEDCHAT_ADMIN_TOKEN", ADMIN_TOKEN)
     app = FastAPI()
     api_routes.setup_api_routes(app)
     client = TestClient(app)
 
     response = client.post(
         "/api/activity/train",
-        headers={"X-MedChat-Admin-Token": ADMIN_TOKEN},
         files={"file": ("train.csv", b"smiles,label\nCCO,1\n", "text/csv")},
         data={
             "target_column": "label",

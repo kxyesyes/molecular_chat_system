@@ -9,7 +9,7 @@ import sys
 from typing import List, Dict, Any, Optional
 import httpx
 import yaml
-from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
@@ -27,7 +27,6 @@ from .llm_runtime_config import (
     save_runtime_config,
     sync_llm_process_environment,
 )
-from .admin_auth import require_admin
 from .models import OllamaModel, generate_for_chat
 from .rag_index import (
     CURRENT_SCHEMA_VERSION,
@@ -929,7 +928,7 @@ class MolecularChatApp:
                 "timestamp": __import__('time').time()
             }
 
-        @self.app.get("/api/llm/config", dependencies=[Depends(require_admin)])
+        @self.app.get("/api/llm/config")
         async def get_llm_config():
             """Return public LLM connection configuration without leaking API keys."""
             await self._refresh_llm_config_from_env()
@@ -938,7 +937,7 @@ class MolecularChatApp:
                 "config": public_llm_config(self.active_llm_config),
             }
 
-        @self.app.post("/api/llm/config", dependencies=[Depends(require_admin)])
+        @self.app.post("/api/llm/config")
         async def save_llm_config(request: Request):
             """Save and activate runtime LLM connection configuration."""
             payload = await request.json()
@@ -997,7 +996,7 @@ class MolecularChatApp:
                     "warnings": warnings,
                 }
 
-        @self.app.post("/api/llm/test", dependencies=[Depends(require_admin)])
+        @self.app.post("/api/llm/test")
         async def test_llm_config(request: Request):
             """Test a submitted LLM connection without saving it."""
             payload = await request.json()
@@ -1046,7 +1045,7 @@ class MolecularChatApp:
                     "message": "连接测试失败；请检查服务地址、模型名称和凭据。",
                 }
 
-        @self.app.post("/api/switch_model", dependencies=[Depends(require_admin)])
+        @self.app.post("/api/switch_model")
         async def switch_model(request: Request):
             """Switch model name for the current provider."""
             payload = await request.json()

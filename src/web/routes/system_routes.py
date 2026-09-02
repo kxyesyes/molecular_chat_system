@@ -3,12 +3,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 
 from src.system import collect_data_versions
 from src.task_runtime.database import get_task_db_path
 from src.web.api_response import api_success
-from src.web.admin_auth import require_admin
 
 
 def _is_task_db_writable(task_db: Path) -> bool:
@@ -18,11 +17,11 @@ def _is_task_db_writable(task_db: Path) -> bool:
 
 
 def setup_system_routes(app: FastAPI) -> None:
-    @app.get("/api/system/data-versions", dependencies=[Depends(require_admin)])
+    @app.get("/api/system/data-versions")
     async def get_data_versions():
         return api_success(collect_data_versions())
 
-    @app.get("/api/system/runtime", dependencies=[Depends(require_admin)])
+    @app.get("/api/system/runtime")
     async def get_runtime_info():
         task_db = get_task_db_path()
         return api_success(

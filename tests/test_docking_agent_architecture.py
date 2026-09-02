@@ -252,7 +252,6 @@ class DockingAgentArchitectureTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "MEDCHAT_ADMIN_TOKEN": "unit-admin-token",
                 "MEDCHAT_MAX_UPLOAD_BYTES": "4",
             },
         ), patch.object(tempfile, "NamedTemporaryFile") as named_temp_file, patch.object(
@@ -261,7 +260,6 @@ class DockingAgentArchitectureTests(unittest.TestCase):
         ) as submit_training_job:
             response = TestClient(app).post(
                 "/api/activity/train",
-                headers={"X-MedChat-Admin-Token": "unit-admin-token"},
                 files={"file": ("train.csv", b"smiles,y\nCCO,1\n", "text/csv")},
                 data={"target_column": "y"},
             )
@@ -300,7 +298,6 @@ class DockingAgentArchitectureTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "MEDCHAT_ADMIN_TOKEN": "unit-admin-token",
                     "MEDCHAT_MAX_UPLOAD_BYTES": "1024",
                 },
             ), patch.object(
@@ -314,7 +311,6 @@ class DockingAgentArchitectureTests(unittest.TestCase):
             ):
                 response = TestClient(app).post(
                     "/api/activity/train",
-                    headers={"X-MedChat-Admin-Token": "unit-admin-token"},
                     files={"file": ("train.csv", b"smiles,y\nCCO,1\n", "text/csv")},
                     data={"target_column": "y"},
                 )
