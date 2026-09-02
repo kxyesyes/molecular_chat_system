@@ -79,9 +79,16 @@ class TargetDatabaseTool(BaseMolecularTool):
             searched: list[str] = []
             lookup_path: list[str] = []
             evidence: list[dict[str, Any]] = []
+            service_statuses: list[str] = []
+            result["warnings"] = []
             for search_query in search_queries:
                 search_result = service.search_targets(search_query)
                 searched.append(search_query)
+                service_results = search_result.get("results", [])
+                service_status = search_result.get("status")
+                if not isinstance(service_status, str):
+                    service_status = "resolved" if service_results else "not_found"
+                service_statuses.append(service_status)
                 for warning in search_result.get("warnings", []):
                     if isinstance(warning, str) and warning not in result.setdefault(
                         "warnings", []
@@ -90,7 +97,7 @@ class TargetDatabaseTool(BaseMolecularTool):
                 for step in search_result.get("lookup_path", []):
                     if isinstance(step, str) and step not in lookup_path:
                         lookup_path.append(step)
-                for target in search_result.get("results", []):
+                for target in service_results:
                     if isinstance(target, dict):
                         target = {**target, "source_query": search_query}
                         target_id = target.get("target_id", target.get("id"))
@@ -123,9 +130,47 @@ class TargetDatabaseTool(BaseMolecularTool):
 
             result["lookup_path"] = lookup_path
             result["evidence"] = evidence
+            result["quality"] = {
+                "status": "complete",
+                "service_statuses": service_statuses,
+            }
 
             if not targets:
+                if any(status == "ambiguous" for status in service_statuses):
+                    result["status"] = "ambiguous"
+                    result["quality"]["status"] = "partial"
+                    result["message"] = "Target search requires clarification."
+                    result["error"] = {
+                        "code": "validation_error",
+                        "message": result["message"],
+                    }
+                    result["formatted"] = (
+                        "## Target database search results\n\n"
+                        f"Query keywords: `{', '.join(searched)}`\n\n"
+                        "The authoritative lookup was ambiguous. Please provide a "
+                        "gene symbol, UniProt accession, or organism to clarify the target."
+                    )
+                    return result
+                if any(
+                    status in {"unavailable", "partial"}
+                    for status in service_statuses
+                ):
+                    result["status"] = "unavailable"
+                    result["quality"]["status"] = "partial"
+                    result["message"] = "Target search is temporarily unavailable."
+                    result["error"] = {
+                        "code": "provider_error",
+                        "message": result["message"],
+                    }
+                    result["formatted"] = (
+                        "## Target database search results\n\n"
+                        f"Query keywords: `{', '.join(searched)}`\n\n"
+                        "The authoritative lookup could not be completed because a "
+                        "provider is unavailable. This is not a conclusive zero-match result."
+                    )
+                    return result
                 result["success"] = True
+                result["status"] = "not_found"
                 result["message"] = "No matching targets found"
                 authoritative_checked = any(
                     step in {"UniProt", "RCSB_PDB", "AlphaFold", "authoritative"}
@@ -143,6 +188,19 @@ class TargetDatabaseTool(BaseMolecularTool):
                     f"{no_match_text}"
                 )
                 return result
+
+            partial = any(
+                status in {"ambiguous", "unavailable", "partial"}
+                for status in service_statuses
+            )
+            if partial:
+                result["status"] = "partial"
+                result["quality"]["status"] = "partial"
+                warning = "partial_authoritative_results"
+                if warning not in result["warnings"]:
+                    result["warnings"].append(warning)
+            else:
+                result["status"] = "resolved"
 
             lines = [
                 "## Target database search results",
@@ -162,15 +220,35 @@ class TargetDatabaseTool(BaseMolecularTool):
                 uniprot = target.get("uniprot_id", "N/A")
                 organism = target.get("organism", "N/A")
                 struct_count = target.get("structure_count", 0)
-                has_exp = "yes" if target.get("has_experimental_structure") else "no"
-                has_af = "yes" if target.get("has_alphafold_structure") else "no"
+                structure_evidence_status = target.get("structure_evidence_status")
+                structures_unavailable = structure_evidence_status == "unavailable"
+                has_exp = (
+                    "unknown"
+                    if structures_unavailable
+                    else "yes"
+                    if target.get("has_experimental_structure")
+                    else "no"
+                )
+                has_af = (
+                    "unknown"
+                    if structures_unavailable
+                    else "yes"
+                    if target.get("has_alphafold_structure")
+                    else "no"
+                )
                 match_reason = target.get("match_reason", "")
                 recommended_structures = target.get("recommended_structures", [])
 
                 lines.append(f"### {index}. {gene} ({protein})")
                 lines.append(f"- UniProt: {uniprot}")
                 lines.append(f"- Organism: {organism}")
-                lines.append(f"- Structure count: {struct_count}")
+                lines.append(
+                    f"- Structure count: {'unknown' if structures_unavailable else struct_count}"
+                )
+                if structure_evidence_status:
+                    lines.append(
+                        f"- Structure evidence: {structure_evidence_status}"
+                    )
                 lines.append(
                     f"- Experimental structure: {has_exp} | AlphaFold: {has_af}"
                 )
@@ -186,6 +264,8 @@ class TargetDatabaseTool(BaseMolecularTool):
                         lines.append(
                             f"  - {structure_id} ({source}; {recommendation})"
                         )
+                elif structures_unavailable:
+                    lines.append("- Recommended structures: unavailable")
                 else:
                     lines.append("- Recommended structures: none recorded")
                 lines.append("")
@@ -193,11 +273,21 @@ class TargetDatabaseTool(BaseMolecularTool):
             result["success"] = True
             result["data"] = targets
             result["formatted"] = "\n".join(lines)
-            result["message"] = f"Found {len(targets)} matching targets"
+            result["message"] = (
+                f"Found {len(targets)} matching targets; results are partial."
+                if partial
+                else f"Found {len(targets)} matching targets"
+            )
 
         except Exception:
             logger.error("Target database search failed")
             result["message"] = "Target search is temporarily unavailable."
+            result["status"] = "unavailable"
+            result["quality"] = {"status": "partial", "service_statuses": []}
+            result["error"] = {
+                "code": "provider_error",
+                "message": result["message"],
+            }
 
         return result
 

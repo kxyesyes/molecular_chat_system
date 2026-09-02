@@ -119,7 +119,17 @@ class TargetSearchDemoTest(unittest.TestCase):
 
         payload = service.search_targets("   ")
 
-        self.assertEqual(payload, {"query": "", "results": []})
+        self.assertEqual(
+            payload,
+            {
+                "query": "",
+                "results": [],
+                "warnings": [],
+                "lookup_path": [],
+                "status": "not_found",
+                "cache": {"target": "none", "structures": "none"},
+            },
+        )
 
     def test_seed_is_idempotent_and_searches_aliases_and_diseases(self):
         from src.target_search.seed import seed_database
@@ -761,9 +771,139 @@ class TargetSearchDemoTest(unittest.TestCase):
         result = tool.execute("UNKNOWN")
 
         self.assertTrue(result["success"])
+        self.assertEqual(result["status"], "not_found")
+        self.assertEqual(result["quality"]["status"], "complete")
         self.assertEqual(result["lookup_path"], ["local", "UniProt"])
         self.assertIn("authoritative", result["formatted"].lower())
         self.assertNotIn("database is empty", result["formatted"].lower())
+
+    def test_target_database_tool_requires_clarification_for_ambiguous_lookup(self):
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+        class FakeService:
+            def search_targets(self, _query):
+                return {
+                    "status": "ambiguous",
+                    "warnings": ["UniProt:ambiguous_match"],
+                    "lookup_path": ["local", "UniProt"],
+                    "results": [],
+                }
+
+        tool = TargetDatabaseTool()
+        tool._service = FakeService()
+
+        result = tool.execute("ABC1")
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["status"], "ambiguous")
+        self.assertEqual(result["quality"]["status"], "partial")
+        self.assertEqual(result["error"]["code"], "validation_error")
+        self.assertIn("clarification", result["message"].lower())
+        self.assertIn("UniProt:ambiguous_match", result["warnings"])
+
+    def test_target_database_tool_reports_unavailable_without_conclusive_no_match(self):
+        from src.agent.tools.base_tool import execute_tool_compat
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+        from src.agent.contracts import AgentErrorCode
+
+        class FakeService:
+            def search_targets(self, _query):
+                return {
+                    "status": "unavailable",
+                    "warnings": ["UniProt:provider_unavailable"],
+                    "lookup_path": ["local", "UniProt"],
+                    "results": [],
+                }
+
+        tool = TargetDatabaseTool()
+        tool._service = FakeService()
+
+        raw = tool.execute("EGFR")
+        adapted = execute_tool_compat(tool, "EGFR")
+
+        self.assertFalse(raw["success"])
+        self.assertEqual(raw["status"], "unavailable")
+        self.assertEqual(raw["error"]["code"], "provider_error")
+        self.assertNotIn("No matching targets", raw["message"])
+        self.assertNotIn("conclusively", raw["formatted"].lower())
+        self.assertFalse(adapted.success)
+        self.assertEqual(adapted.error.code, AgentErrorCode.PROVIDER_ERROR)
+        self.assertIn("UniProt:provider_unavailable", adapted.warnings)
+        self.assertNotIn("provider body", str(adapted.to_legacy_dict()).lower())
+
+    def test_target_database_tool_marks_mixed_results_and_outage_partial(self):
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+        class FakeService:
+            def search_targets(self, query):
+                if query == "EGFR":
+                    return {
+                        "status": "resolved",
+                        "warnings": [],
+                        "lookup_path": ["local", "UniProt", "RCSB_PDB"],
+                        "results": [
+                            {
+                                "target_id": None,
+                                "gene_symbol": "EGFR",
+                                "uniprot_id": "P00533",
+                                "recommended_structures": [],
+                            }
+                        ],
+                    }
+                return {
+                    "status": "unavailable",
+                    "warnings": ["UniProt:provider_unavailable"],
+                    "lookup_path": ["local", "UniProt"],
+                    "results": [],
+                }
+
+        tool = TargetDatabaseTool()
+        tool._service = FakeService()
+
+        result = tool.execute(["EGFR", "OUTAGE"])
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["quality"]["status"], "partial")
+        self.assertEqual(
+            result["quality"]["service_statuses"], ["resolved", "unavailable"]
+        )
+        self.assertIn("partial_authoritative_results", result["warnings"])
+        self.assertIn("partial", result["message"].lower())
+
+    def test_target_database_tool_formats_unavailable_structure_evidence_as_unknown(self):
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+        class FakeService:
+            def search_targets(self, _query):
+                return {
+                    "status": "partial",
+                    "warnings": ["authoritative_structures_unavailable"],
+                    "lookup_path": ["local", "UniProt", "RCSB_PDB"],
+                    "results": [
+                        {
+                            "target_id": None,
+                            "gene_symbol": "EGFR",
+                            "uniprot_id": "P00533",
+                            "structure_count": None,
+                            "has_experimental_structure": None,
+                            "has_alphafold_structure": None,
+                            "structure_evidence_status": "unavailable",
+                            "recommended_structures": [],
+                        }
+                    ],
+                }
+
+        tool = TargetDatabaseTool()
+        tool._service = FakeService()
+
+        result = tool.execute("EGFR")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["status"], "partial")
+        self.assertIn("Structure evidence: unavailable", result["formatted"])
+        self.assertIn("Experimental structure: unknown", result["formatted"])
+        self.assertNotIn("Recommended structures: none recorded", result["formatted"])
 
     def test_target_database_tool_does_not_leak_provider_exception_text(self):
         from src.agent.tools.target_database_tool import TargetDatabaseTool

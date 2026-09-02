@@ -37,16 +37,6 @@ _TARGET_SEED_FILENAMES = (
     "common_targets.csv",
     "pde_targets.csv",
 )
-_RETRYABLE_REMOTE_CODES = frozenset(
-    {
-        "connection_failure",
-        "operation_timeout",
-        "provider_unavailable",
-        "timeout",
-    }
-)
-
-
 def _seed_lock(db_path: Path) -> threading.RLock:
     resolved = db_path.resolve()
     with _SEED_LOCKS_GUARD:
@@ -92,7 +82,7 @@ class TargetSearchService:
     ) -> dict:
         query = (query or "").strip()
         if not query:
-            return {"query": query, "results": []}
+            return self._search_payload(query, [], status="not_found")
 
         local_results = self._search_local(query)
         if local_results:
@@ -350,7 +340,31 @@ class TargetSearchService:
 
         if self._resolution_is_retryable(resolution) and target_cached is not None:
             if structures_cached is None:
-                structures_cached = self._empty_structures_evidence(target_cached)
+                record = self._target_only_record(target_cached)
+                warnings = [
+                    *resolution.warnings,
+                    "authoritative_structures_unavailable",
+                ]
+                if target_cached.stale:
+                    warnings.append("stale_authoritative_cache")
+                return self._authoritative_success_payload(
+                    query,
+                    record,
+                    status="partial",
+                    warnings=warnings,
+                    lookup_path=lookup_path,
+                    cache={
+                        "target": "stale" if target_cached.stale else "fresh",
+                        "structures": "unavailable",
+                    },
+                    filters={
+                        "target_type": target_type,
+                        "source": source,
+                        "has_experimental": has_experimental,
+                        "docking_recommended": docking_recommended,
+                        "has_ligand": has_ligand,
+                    },
+                )
             record = self._record_from_cache(target_cached, structures_cached)
             warnings = [*resolution.warnings, "stale_authoritative_cache"]
             return self._authoritative_success_payload(
@@ -390,6 +404,9 @@ class TargetSearchService:
                 status="unavailable",
                 warnings=("authoritative_lookup_failed",),
                 lookup_path=("authoritative",),
+                retryable=False,
+                source="Remote",
+                code="request_failure",
             )
 
     def _get_resolver(self) -> AuthoritativeTargetResolver:
@@ -409,12 +426,7 @@ class TargetSearchService:
 
     @staticmethod
     def _resolution_is_retryable(resolution: TargetResolution) -> bool:
-        if resolution.status != "unavailable":
-            return False
-        return any(
-            warning.rsplit(":", 1)[-1] in _RETRYABLE_REMOTE_CODES
-            for warning in resolution.warnings
-        )
+        return resolution.status == "unavailable" and resolution.retryable
 
     def _target_cache_key(self, query: str) -> str:
         identity = (
@@ -555,28 +567,35 @@ class TargetSearchService:
             "retrieved_at": target.retrieved_at.isoformat(),
             "expires_at": target.expires_at.isoformat(),
             "stale": target.stale or structures.stale,
+            "structure_evidence_status": (
+                "stale" if structures.stale else "fresh"
+            ),
         }
 
     @staticmethod
-    def _empty_structures_evidence(target: CachedEvidence) -> CachedEvidence:
-        return CachedEvidence(
-            cache_key="structures:unavailable",
-            record_type="structures",
-            source="Authoritative",
-            source_record_id=target.source_record_id,
-            payload={"structures": []},
-            payload_digest="",
-            generation_id=target.generation_id,
-            retrieved_at=target.retrieved_at,
-            expires_at=target.expires_at,
-            stale=target.stale,
-        )
+    def _target_only_record(target: CachedEvidence) -> dict[str, Any]:
+        return {
+            "target_id": None,
+            **_json_copy(target.payload),
+            "structure_count": None,
+            "downloaded_structure_count": None,
+            "experimental_structure_count": None,
+            "alphafold_structure_count": None,
+            "has_experimental_structure": None,
+            "has_alphafold_structure": None,
+            "recommended_structures": [],
+            "retrieved_at": target.retrieved_at.isoformat(),
+            "expires_at": target.expires_at.isoformat(),
+            "stale": target.stale,
+            "structure_evidence_status": "unavailable",
+        }
 
     def _authoritative_success_payload(
         self,
         query: str,
         record: dict[str, Any],
         *,
+        status: str = "resolved",
         lookup_path: list[str],
         cache: dict[str, str],
         filters: dict[str, Any],
@@ -586,7 +605,7 @@ class TargetSearchService:
         return self._search_payload(
             query,
             results,
-            status="resolved",
+            status=status,
             warnings=warnings,
             lookup_path=lookup_path,
             cache=cache,
@@ -603,6 +622,16 @@ class TargetSearchService:
         has_ligand: Optional[bool],
     ) -> bool:
         structures = record.get("recommended_structures") or []
+        if record.get("structure_evidence_status") == "unavailable" and any(
+            value is not None
+            for value in (
+                source,
+                has_experimental,
+                docking_recommended,
+                has_ligand,
+            )
+        ):
+            return False
         if target_type and str(record.get("target_type") or "").casefold() != target_type.casefold():
             return False
         if source and not any(

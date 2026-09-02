@@ -4595,6 +4595,9 @@ def test_authoritative_resolver_reports_not_found_ambiguity_and_sanitized_failur
     ).resolve("EGFR", "Homo sapiens")
     assert ambiguous.status == "ambiguous"
     assert ambiguous.warnings == ("UniProt:ambiguous_match",)
+    assert ambiguous.retryable is False
+    assert ambiguous.source == "UniProt"
+    assert ambiguous.code == "ambiguous_match"
 
     unavailable = AuthoritativeTargetResolver(
         _ResolverClient(
@@ -4607,6 +4610,10 @@ def test_authoritative_resolver_reports_not_found_ambiguity_and_sanitized_failur
     ).resolve("secret-provider-body", "Homo sapiens")
     assert unavailable.status == "unavailable"
     assert unavailable.warnings == ("UniProt:provider_unavailable",)
+    assert unavailable.retryable is True
+    assert unavailable.source == "UniProt"
+    assert unavailable.code == "provider_unavailable"
+    assert unavailable.to_dict()["retryable"] is True
     assert "secret-provider-body" not in str(unavailable.to_dict())
 
 
@@ -4657,7 +4664,15 @@ class _QueueResolver:
 
 
 def _resolution(
-    status="resolved", *, target=None, structures=None, warnings=(), lookup_path=None
+    status="resolved",
+    *,
+    target=None,
+    structures=None,
+    warnings=(),
+    lookup_path=None,
+    retryable=False,
+    source=None,
+    code=None,
 ):
     from src.target_search.authoritative_resolver import TargetResolution
 
@@ -4669,6 +4684,9 @@ def _resolution(
         ),
         warnings=tuple(warnings),
         lookup_path=tuple(lookup_path or ("UniProt", "RCSB_PDB")),
+        retryable=retryable,
+        source=source,
+        code=code,
     )
 
 
@@ -4888,6 +4906,9 @@ def test_retryable_outage_can_use_expired_cache_with_explicit_stale_warning(
             status="unavailable",
             warnings=("UniProt:provider_unavailable",),
             lookup_path=("UniProt",),
+            retryable=True,
+            source="UniProt",
+            code="provider_unavailable",
         ),
     )
     service = _remote_service(project_root, clock, resolver)
@@ -4901,6 +4922,103 @@ def test_retryable_outage_can_use_expired_cache_with_explicit_stale_warning(
     assert stale["cache"] == {"target": "stale", "structures": "stale"}
     assert "stale_authoritative_cache" in stale["warnings"]
     assert "UniProt:provider_unavailable" in stale["warnings"]
+
+
+def test_nonretryable_provider_unavailable_cannot_use_expired_cache(
+    project_root, clock
+):
+    resolver = _QueueResolver(
+        _resolution(),
+        _resolution(
+            status="unavailable",
+            warnings=("UniProt:provider_unavailable",),
+            lookup_path=("UniProt",),
+            retryable=False,
+            source="UniProt",
+            code="provider_unavailable",
+        ),
+    )
+    service = _remote_service(project_root, clock, resolver)
+    service.search_targets("EGFR")
+    clock.value += timedelta(days=31)
+
+    payload = service.search_targets("EGFR")
+
+    assert payload["status"] == "unavailable"
+    assert payload["results"] == []
+    assert payload["cache"] == {"target": "expired", "structures": "expired"}
+
+
+def test_fresh_target_without_structure_cache_does_not_claim_empty_fresh_evidence(
+    project_root, clock
+):
+    from src.target_search.database import get_connection
+
+    resolver = _QueueResolver(
+        _resolution(),
+        _resolution(
+            status="unavailable",
+            warnings=("RCSB_PDB:provider_unavailable",),
+            lookup_path=("UniProt", "RCSB_PDB"),
+            retryable=True,
+            source="RCSB_PDB",
+            code="provider_unavailable",
+        ),
+    )
+    service = _remote_service(project_root, clock, resolver)
+    service.search_targets("EGFR")
+    conn = get_connection(project_root)
+    try:
+        conn.execute("DELETE FROM target_remote_cache WHERE record_type = 'structures'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    payload = service.search_targets("EGFR")
+
+    assert payload["status"] == "partial"
+    assert payload["cache"] == {"target": "fresh", "structures": "unavailable"}
+    assert payload["results"][0]["structure_evidence_status"] == "unavailable"
+    assert payload["results"][0]["structure_count"] is None
+    assert payload["results"][0]["recommended_structures"] == []
+    assert "stale_authoritative_cache" not in payload["warnings"]
+    conn = get_connection(project_root)
+    try:
+        structure_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM target_remote_cache "
+            "WHERE record_type = 'structures'"
+        ).fetchone()["count"]
+    finally:
+        conn.close()
+    assert structure_count == 0
+
+
+def test_fresh_target_uses_existing_stale_structures_on_retryable_outage(
+    project_root, clock
+):
+    resolver = _QueueResolver(
+        _resolution(),
+        _resolution(
+            status="unavailable",
+            warnings=("RCSB_PDB:provider_unavailable",),
+            lookup_path=("UniProt", "RCSB_PDB"),
+            retryable=True,
+            source="RCSB_PDB",
+            code="provider_unavailable",
+        ),
+    )
+    service = _remote_service(project_root, clock, resolver)
+    service.search_targets("EGFR")
+    clock.value += timedelta(days=8)
+
+    payload = service.search_targets("EGFR")
+
+    assert payload["status"] == "resolved"
+    assert payload["cache"] == {"target": "fresh", "structures": "stale"}
+    assert payload["results"][0]["stale"] is True
+    assert payload["results"][0]["structure_evidence_status"] == "stale"
+    assert payload["results"][0]["recommended_structures"][0]["structure_id"] == "1ABC"
+    assert "stale_authoritative_cache" in payload["warnings"]
 
 
 @pytest.mark.parametrize(

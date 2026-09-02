@@ -52,6 +52,9 @@ class TargetResolution:
     structures: tuple[Mapping[str, Any], ...] = ()
     warnings: tuple[str, ...] = ()
     lookup_path: tuple[str, ...] = ()
+    retryable: bool = False
+    source: Optional[str] = None
+    code: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.status not in _RESOLUTION_STATUSES:
@@ -64,6 +67,15 @@ class TargetResolution:
             raise TypeError("warnings must contain strings")
         if any(not isinstance(item, str) for item in self.lookup_path):
             raise TypeError("lookup_path must contain strings")
+        if not isinstance(self.retryable, bool):
+            raise TypeError("retryable must be a boolean")
+        if self.retryable and self.status != "unavailable":
+            raise ValueError("only unavailable resolutions can be retryable")
+        for name, value in (("source", self.source), ("code", self.code)):
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise TypeError(f"{name} must be non-empty text or None")
         object.__setattr__(
             self,
             "target",
@@ -84,6 +96,9 @@ class TargetResolution:
             "structures": _thaw_json(self.structures),
             "warnings": list(self.warnings),
             "lookup_path": list(self.lookup_path),
+            "retryable": self.retryable,
+            "source": self.source,
+            "code": self.code,
         }
 
 
@@ -155,6 +170,9 @@ class AuthoritativeTargetResolver:
             status=status,
             warnings=(f"{error.source}:{error.code}",),
             lookup_path=tuple(lookup_path),
+            retryable=error.retryable,
+            source=error.source,
+            code=error.code,
         )
 
     def close(self) -> None:
