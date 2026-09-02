@@ -98,16 +98,21 @@ assert(
 );
 assert(
   normalized.candidates[0].canonical_smiles === "CCO" &&
+    normalized.candidates[0].source_index === 1 &&
+    normalized.candidates[0].original_smiles === "CCO" &&
+    normalized.candidates[0].generation_provenance &&
     normalized.candidates[0].metadata.properties.molecular_weight === 46.07,
-  "Validated candidate records and metadata must normalize",
+  "Complete validated candidate records and metadata must normalize",
 );
 
 const original = validPayload();
 const fresh = api.normalize(original);
 original.source.tool_name = "tampered";
+original.candidate_set.candidates[0].generation_provenance.model = "tampered";
 original.candidate_set.candidates[0].metadata.properties.molecular_weight = 999;
 assert(
   fresh.source.tool === "llm_molecular_generator" &&
+    fresh.candidates[0].generation_provenance.model === undefined &&
     fresh.candidates[0].metadata.properties.molecular_weight === 46.07,
   "Normalized output must not retain untrusted input objects",
 );
@@ -123,6 +128,49 @@ function rejected(mutator, message) {
   mutator(payload);
   assert(api.normalize(payload) === null, message);
 }
+
+function accepted(mutator, message) {
+  const payload = validPayload("partial");
+  mutator(payload);
+  assert(api.normalize(payload), message);
+}
+
+rejected(
+  (payload) => {
+    delete payload.candidate_set.rejected;
+  },
+  "Missing candidate-set fields must be rejected",
+);
+rejected(
+  (payload) => {
+    payload.candidate_set.extra = true;
+  },
+  "Extra candidate-set fields must be rejected",
+);
+rejected(
+  (payload) => {
+    delete payload.candidate_set.candidates[0].source_index;
+  },
+  "Incomplete candidate records must be rejected",
+);
+rejected(
+  (payload) => {
+    payload.candidate_set.candidates[0].extra = true;
+  },
+  "Extra candidate record fields must be rejected",
+);
+rejected(
+  (payload) => {
+    payload.candidate_set.candidates[0].source_index = 0;
+  },
+  "Candidate source indexes must be positive",
+);
+rejected(
+  (payload) => {
+    payload.candidate_set.invalid_count = Number.MAX_SAFE_INTEGER + 1;
+  },
+  "Impossible high counts must be rejected",
+);
 
 rejected(
   (payload) => {
@@ -167,6 +215,78 @@ rejected(
   },
   "Invalid CC(C)X candidate must be rejected",
 );
+rejected(
+  (payload) => {
+    payload.candidate_set.candidates[0].generation_provenance = null;
+  },
+  "Generation provenance must be an object",
+);
+
+[
+  ["invalid_smiles", 1, 0],
+  ["invalid_candidate_metadata", 1, 0],
+  ["duplicate_smiles", 0, 1],
+  ["excess_candidate", 0, 0],
+].forEach(([reason, invalidCount, duplicateCount]) => {
+  accepted(
+    (payload) => {
+      payload.candidate_set.rejected[0].reason = reason;
+      payload.candidate_set.invalid_count = invalidCount;
+      payload.candidate_set.duplicate_count = duplicateCount;
+    },
+    `Rejected reason ${reason} must be accepted with matching counts`,
+  );
+});
+rejected(
+  (payload) => {
+    payload.candidate_set.rejected = [
+      { source_index: 2, smiles: "bad", reason: "unknown_reason" },
+    ];
+    payload.candidate_set.invalid_count = 1;
+  },
+  "Unknown rejection reasons must be rejected",
+);
+rejected(
+  (payload) => {
+    payload.candidate_set.rejected = [
+      { source_index: 2, reason: "invalid_smiles" },
+    ];
+  },
+  "Incomplete rejected records must be rejected",
+);
+rejected(
+  (payload) => {
+    payload.candidate_set.invalid_count = 1;
+    payload.candidate_set.rejected = [];
+  },
+  "Invalid counts must match rejected reasons",
+);
+rejected(
+  (payload) => {
+    payload.candidate_set.duplicate_count = 1;
+    payload.candidate_set.rejected = [];
+  },
+  "Duplicate counts must match rejected reasons",
+);
+rejected(
+  (payload) => {
+    payload.candidate_set.candidates[0].source_index = 2;
+  },
+  "Source indexes must be contiguous",
+);
+rejected(
+  (payload) => {
+    payload.candidate_set.candidates[0].source_index = 2;
+    payload.candidate_set.rejected = [
+      { source_index: 2, smiles: "bad", reason: "invalid_smiles" },
+    ];
+    payload.candidate_set.requested_count = 2;
+    payload.candidate_set.status = "partial";
+    payload.source.status = "partial";
+    payload.candidate_set.invalid_count = 1;
+  },
+  "Candidate and rejected source indexes must be unique",
+);
 
 const prototypePayload = JSON.parse(
   JSON.stringify(validPayload()).replace(
@@ -207,8 +327,8 @@ assert(
   "Structured cards must not fetch unverified molecule properties",
 );
 assert(
-  !rendererSource.includes("/api/molecule/properties"),
-  "Structured molecule renderer must not call the properties endpoint",
+  !mainSource.includes("/api/molecule/properties"),
+  "Homepage must not contain the dead molecule properties endpoint path",
 );
 assert(
   rendererSource.includes("candidate.canonical_smiles"),
@@ -233,10 +353,11 @@ assert(
   "Cards must request images only through the SMILES image endpoint",
 );
 
-const helperScript = "/static/js/home/molecule_candidates.js";
+const helperScript = "/static/js/home/molecule_candidates.js?v=";
 const safeScript = "/static/js/shared/safe_render.js";
-const mainScript = "/static/js/home/main.js";
-assert(indexHtml.includes(helperScript), "Template must load molecule candidate helper");
+const mainScript = "/static/js/home/main.js?v=";
+assert(indexHtml.includes(helperScript), "Template must version molecule candidate helper");
+assert(indexHtml.includes(mainScript), "Template must version homepage main");
 assert(
   indexHtml.indexOf(safeScript) < indexHtml.indexOf(helperScript) &&
     indexHtml.indexOf(helperScript) < indexHtml.indexOf(mainScript),

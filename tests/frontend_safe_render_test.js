@@ -72,10 +72,10 @@ assert(
 );
 assert(
   indexHtml.indexOf("/static/js/shared/safe_render.js") <
-    indexHtml.indexOf("/static/js/home/molecule_candidates.js") &&
-    indexHtml.indexOf("/static/js/home/molecule_candidates.js") <
-      indexHtml.indexOf("/static/js/home/main.js"),
-  "Homepage must load the structured molecule helper after shared safety and before main",
+    indexHtml.indexOf("/static/js/home/molecule_candidates.js?v=") &&
+    indexHtml.indexOf("/static/js/home/molecule_candidates.js?v=") <
+      indexHtml.indexOf("/static/js/home/main.js?v="),
+  "Homepage must load the versioned molecule helper after shared safety and before versioned main",
 );
 assert(
   designHtml.indexOf("/static/js/shared/safe_render.js") <
@@ -140,8 +140,9 @@ assert(
 );
 assert(
   !homeMain.includes("detectAndRenderMolecules") &&
-    !homeMain.includes("fetchMoleculePropertiesForToolMolecule"),
-  "Homepage must not scan assistant prose or fetch properties for structured candidates",
+    !homeMain.includes("fetchMoleculePropertiesForToolMolecule") &&
+    !homeMain.includes("/api/molecule/properties"),
+  "Homepage must not scan assistant prose or retain the dead molecule properties path",
 );
 assert(
   !homeFormatters.includes('href="$2"'),
