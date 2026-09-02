@@ -36,6 +36,11 @@ COORDINATE_FILE_SUFFIXES = {
     ".pdbqt",
     ".sdf",
 }
+REFRESH_STATUS_PATTERN = re.compile(
+    r"^(provider_error|timeout|rate_limited|invalid_response|remote_refresh_failed)"
+    r"(?::http_(\d{3}))?$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -304,21 +309,15 @@ def _freeze_json(value: Any) -> Any:
 
 
 def _sanitize_refresh_status(reason: str) -> str:
-    status = str(reason)
-    body_match = re.search(r"(?i)\b(?:response\s+body|body)\s*[:=]", status)
-    if body_match:
-        status = status[: body_match.start()] + " [response body redacted]"
-    status = re.sub(
-        r"(?i)\bauthorization\s*:\s*(?:bearer\s+)?\S+",
-        "Authorization: [redacted]",
-        status,
-    )
-    status = re.sub(
-        r"(?i)\b(api[_ -]?key|token|password|secret)\s*[:=]\s*\S+",
-        lambda match: f"{match.group(1)}=[redacted]",
-        status,
-    )
-    status = re.sub(r"(?i)\bsk-[a-z0-9._-]+", "[redacted]", status)
-    status = re.sub(r"[\r\n\t]+", " ", status)
-    status = re.sub(r"\s+", " ", status).strip()
+    match = REFRESH_STATUS_PATTERN.fullmatch(str(reason).strip())
+    if match is None:
+        return "remote_refresh_failed"
+
+    error_code = match.group(1).lower()
+    http_status = match.group(2)
+    if http_status is None:
+        return error_code
+    if not 100 <= int(http_status) <= 599:
+        return "remote_refresh_failed"
+    status = f"{error_code}:http_{http_status}"
     return status[:MAX_REFRESH_STATUS_LENGTH]

@@ -215,11 +215,37 @@ def test_get_rejects_corrupt_json_digest_and_timestamps(
     assert repository.get("uniprot:P00533", allow_stale=True) is None
 
 
-def test_mark_refresh_failure_stores_only_bounded_redacted_single_line_status(
-    project_root, clock
+def _stored_refresh_status(project_root, repository, reason):
+    from src.target_search.database import get_connection
+
+    repository.mark_refresh_failure("uniprot:P00533", reason)
+    conn = get_connection(project_root)
+    try:
+        row = conn.execute(
+            "SELECT last_refresh_status FROM target_remote_cache WHERE cache_key = ?",
+            ("uniprot:P00533",),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row["last_refresh_status"]
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        (" provider_error ", "provider_error"),
+        ("TIMEOUT", "timeout"),
+        ("rate_limited:http_429", "rate_limited:http_429"),
+        ("invalid_response:http_502", "invalid_response:http_502"),
+        ("provider_error:http_503", "provider_error:http_503"),
+        ("timeout:http_999", "remote_refresh_failed"),
+        ("unknown provider failure", "remote_refresh_failed"),
+    ],
+)
+def test_mark_refresh_failure_persists_only_normalized_allowlisted_statuses(
+    project_root, clock, reason, expected
 ):
     from src.target_search.cache import TargetCacheRepository
-    from src.target_search.database import get_connection
 
     repository = TargetCacheRepository(project_root=project_root, clock=clock)
     repository.upsert(
@@ -229,30 +255,56 @@ def test_mark_refresh_failure_stores_only_bounded_redacted_single_line_status(
         "P00533",
         {"gene": "EGFR"},
     )
-    secret = "sk-secret-value-that-must-not-be-stored"
-    reason = (
-        f"HTTP 503\nAuthorization: Bearer {secret}\n"
-        f"response body={{\"token\":\"{secret}\",\"data\":\"{'x' * 800}\"}}"
-    )
 
-    repository.mark_refresh_failure("uniprot:P00533", reason)
+    status = _stored_refresh_status(project_root, repository, reason)
 
-    conn = get_connection(project_root)
-    try:
-        row = conn.execute(
-            "SELECT last_refresh_status FROM target_remote_cache WHERE cache_key = ?",
-            ("uniprot:P00533",),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    status = row["last_refresh_status"]
+    assert status == expected
     assert len(status) <= 500
     assert "\n" not in status and "\r" not in status
-    assert secret not in status
-    assert "Bearer" not in status
-    assert '"data"' not in status
-    assert "response body redacted" in status.lower()
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        '{"error":"upstream denied","access_token":"json-secret"}',
+        "<html><body>upstream failure client_secret=html-secret</body></html>",
+        "access_token=access-secret client_secret=client-secret",
+        "Authorization: Bearer bearer-secret sk-secret-value api_key=api-secret",
+        "HTTP 503\nopaque upstream response contents",
+    ],
+)
+def test_mark_refresh_failure_never_persists_bodies_credentials_or_free_text(
+    project_root, clock, reason
+):
+    from src.target_search.cache import TargetCacheRepository
+
+    repository = TargetCacheRepository(project_root=project_root, clock=clock)
+    repository.upsert(
+        "uniprot:P00533",
+        "target",
+        "UniProt",
+        "P00533",
+        {"gene": "EGFR"},
+    )
+
+    status = _stored_refresh_status(project_root, repository, reason)
+
+    assert status == "remote_refresh_failed"
+    assert len(status) <= 500
+    assert "\n" not in status and "\r" not in status
+    assert not any(
+        fragment in status
+        for fragment in (
+            "json-secret",
+            "html-secret",
+            "access-secret",
+            "client-secret",
+            "bearer-secret",
+            "sk-secret-value",
+            "api-secret",
+            "upstream",
+        )
+    )
 
 
 def test_cleanup_expired_is_bounded_and_returns_consistent_counts(project_root, clock):
