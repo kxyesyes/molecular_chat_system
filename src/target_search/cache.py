@@ -57,7 +57,8 @@ WINDOWS_RESERVED_NAMES = frozenset(
     | {f"COM{index}" for index in range(1, 10)}
     | {f"LPT{index}" for index in range(1, 10)}
 )
-_CACHE_MUTATION_LOCK = threading.RLock()
+_CACHE_THREAD_LOCKS: dict[Path, threading.RLock] = {}
+_CACHE_THREAD_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -107,8 +108,134 @@ class TargetCacheRepository:
         payload: Mapping[str, Any],
         ttl: Optional[timedelta] = None,
     ) -> CachedEvidence:
+        if record_type == "coordinate_file":
+            _validate_identifier("cache_key", cache_key)
+            _validate_record_type(record_type)
+            _validate_identifier("source", source)
+            _validate_identifier("source_record_id", source_record_id)
+            _validate_payload_schema(record_type, payload)
+            if ttl is not None:
+                _validate_ttl(ttl)
+            raise ValueError(
+                "coordinate_file records must be created with publish_coordinate"
+            )
+        return self._upsert_record(
+            cache_key,
+            record_type,
+            source,
+            source_record_id,
+            payload,
+            ttl=ttl,
+        )
+
+    def publish_coordinate(
+        self,
+        cache_key: str,
+        source: str,
+        source_record_id: str,
+        *,
+        temporary_path: str,
+        final_path: str,
+        ttl: Optional[timedelta] = None,
+    ) -> CachedEvidence:
+        cache_key = _validate_identifier("cache_key", cache_key)
+        source = _validate_identifier("source", source)
+        source_record_id = _validate_identifier("source_record_id", source_record_id)
+        effective_ttl = _validate_ttl(
+            ttl if ttl is not None else DEFAULT_TTLS["coordinate_file"]
+        )
+        temporary_relative = _validate_cache_relative_path(temporary_path)
+        final_relative = _validate_cache_relative_path(final_path)
+        if temporary_relative == final_relative:
+            raise ValueError("temporary and final coordinate paths must differ")
+        if final_relative.suffix.lower() not in COORDINATE_FILE_SUFFIXES:
+            raise ValueError("final coordinate path has an unsupported suffix")
+
+        cache_root = get_cache_dir(self.project_root)
+        temporary = cache_root.joinpath(*temporary_relative.parts)
+        final = cache_root.joinpath(*final_relative.parts)
+        generation_id = str(uuid.uuid4())
+        with _cache_thread_lock(cache_root), _InterprocessCacheLock(cache_root):
+            temporary_state = _prevalidate_regular_file(
+                cache_root, temporary, temporary_relative.parts
+            )
+            if temporary_state != "regular":
+                raise ValueError("temporary coordinate file is not a safe regular file")
+            destination_state = _ensure_relative_directory(
+                cache_root, final_relative.parts[:-1]
+            )
+            if destination_state != "ready":
+                raise OSError("coordinate destination directory is not safely available")
+            self._reject_active_coordinate_path(final_relative.as_posix())
+            replace_state = _atomic_publish_coordinate(
+                cache_root,
+                temporary,
+                final,
+                temporary_relative.parts,
+                final_relative.parts,
+            )
+            if replace_state != "moved":
+                raise OSError("coordinate file could not be atomically published")
+            try:
+                return self._upsert_record(
+                    cache_key,
+                    "coordinate_file",
+                    source,
+                    source_record_id,
+                    {"path": final_relative.as_posix()},
+                    ttl=effective_ttl,
+                    generation_id=generation_id,
+                    allow_coordinate=True,
+                )
+            except Exception:
+                _atomic_restore_coordinate(
+                    cache_root,
+                    final,
+                    temporary,
+                    final_relative.parts,
+                    temporary_relative.parts,
+                )
+                raise
+
+    def _reject_active_coordinate_path(self, final_path: str) -> None:
+        payload_json = json.dumps(
+            {"path": final_path}, separators=(",", ":"), sort_keys=True
+        )
+        conn = get_connection(self.project_root)
+        try:
+            row = conn.execute(
+                """
+                SELECT cache_key
+                FROM target_remote_cache
+                WHERE record_type = 'coordinate_file'
+                    AND payload_json = ? AND cleanup_pending = 0
+                LIMIT 1
+                """,
+                (payload_json,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is not None:
+            raise ValueError("active coordinate paths are immutable")
+
+    def _upsert_record(
+        self,
+        cache_key: str,
+        record_type: str,
+        source: str,
+        source_record_id: str,
+        payload: Mapping[str, Any],
+        *,
+        ttl: Optional[timedelta] = None,
+        generation_id: Optional[str] = None,
+        allow_coordinate: bool = False,
+    ) -> CachedEvidence:
         cache_key = _validate_identifier("cache_key", cache_key)
         record_type = _validate_record_type(record_type)
+        if record_type == "coordinate_file" and not allow_coordinate:
+            raise ValueError(
+                "coordinate_file records must be created with publish_coordinate"
+            )
         source = _validate_identifier("source", source)
         source_record_id = _validate_identifier("source_record_id", source_record_id)
         if not isinstance(payload, Mapping):
@@ -130,26 +257,28 @@ class TargetCacheRepository:
         except (TypeError, ValueError) as exc:
             raise ValueError("payload must contain finite JSON values") from exc
         payload_digest = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
-        generation_id = str(uuid.uuid4())
+        generation_id = (
+            _validate_generation_id(generation_id)
+            if generation_id is not None
+            else str(uuid.uuid4())
+        )
 
         evidence = None
-        cache_lock = _InterprocessCacheLock(get_cache_dir(self.project_root))
-        with _CACHE_MUTATION_LOCK, cache_lock:
-            conn = get_connection(self.project_root)
-            try:
-                with conn:
-                    pending = conn.execute(
-                        """
-                        SELECT cleanup_pending
-                        FROM target_remote_cache
-                        WHERE cache_key = ?
-                        """,
-                        (cache_key,),
-                    ).fetchone()
-                    if pending is not None and pending["cleanup_pending"] == 1:
-                        raise RuntimeError("coordinate cache entry is pending cleanup")
-                    conn.execute(
-                        """
+        conn = get_connection(self.project_root)
+        try:
+            with conn:
+                pending = conn.execute(
+                    """
+                    SELECT cleanup_pending
+                    FROM target_remote_cache
+                    WHERE cache_key = ?
+                    """,
+                    (cache_key,),
+                ).fetchone()
+                if pending is not None and pending["cleanup_pending"] == 1:
+                    raise RuntimeError("coordinate cache entry is pending cleanup")
+                conn.execute(
+                    """
                         INSERT INTO target_remote_cache (
                             cache_key, record_type, source, source_record_id,
                             payload_json, payload_digest, retrieved_at, expires_at,
@@ -173,8 +302,8 @@ class TargetCacheRepository:
                             cleanup_quarantine_path = NULL,
                             next_retry_epoch = 0,
                             retry_count = 0
-                        """,
-                        (
+                    """,
+                    (
                             cache_key,
                             record_type,
                             source,
@@ -185,15 +314,15 @@ class TargetCacheRepository:
                             expires_at.isoformat(),
                             expires_at.timestamp(),
                             generation_id,
-                        ),
-                    )
-                    row = conn.execute(
-                        "SELECT * FROM target_remote_cache WHERE cache_key = ?",
-                        (cache_key,),
-                    ).fetchone()
-                    evidence = self._validated_evidence(row)
-            finally:
-                conn.close()
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM target_remote_cache WHERE cache_key = ?",
+                    (cache_key,),
+                ).fetchone()
+                evidence = self._validated_evidence(row)
+        finally:
+            conn.close()
         if evidence is None:
             raise RuntimeError("cache upsert could not be read back")
         return evidence
@@ -210,7 +339,7 @@ class TargetCacheRepository:
             ).fetchone()
         finally:
             conn.close()
-        if row is None:
+        if row is None or row.get("cleanup_pending") == 1:
             return None
 
         evidence = self._validated_evidence(row)
@@ -266,174 +395,205 @@ class TargetCacheRepository:
         now_epoch = self._now().timestamp()
         records_deleted = 0
         files_deleted = 0
+        attempts = 0
         cache_root = get_cache_dir(self.project_root)
-        with _CACHE_MUTATION_LOCK:
+        with _cache_thread_lock(cache_root):
             try:
                 cache_lock = _InterprocessCacheLock(cache_root)
                 cache_lock.__enter__()
             except OSError:
                 return {"records_deleted": 0, "files_deleted": 0}
             try:
-                conn = get_connection(self.project_root)
-                coordinate_claims = []
-                try:
-                    conn.execute("BEGIN IMMEDIATE")
-                    rows = conn.execute(
-                        """
-                        SELECT *
-                        FROM target_remote_cache
-                        WHERE expires_epoch <= ? AND next_retry_epoch <= ?
-                        ORDER BY expires_epoch, cache_key
-                        LIMIT ?
-                        """,
-                        (now_epoch, now_epoch, limit),
-                    ).fetchall()
-                    for row in rows:
-                        evidence = self._validated_evidence(row)
-                        if evidence is None:
-                            records_deleted += _delete_raw_generation(conn, row)
-                            continue
-                        if evidence.record_type != "coordinate_file":
-                            cursor = conn.execute(
-                                """
-                                DELETE FROM target_remote_cache
-                                WHERE cache_key = ? AND generation_id = ?
-                                    AND expires_epoch <= ?
-                                """,
-                                (evidence.cache_key, evidence.generation_id, now_epoch),
-                            )
-                            records_deleted += cursor.rowcount
-                            continue
-
-                        relative_path = _validate_cache_relative_path(
-                            evidence.payload["path"]
-                        )
-                        if relative_path.suffix.lower() not in COORDINATE_FILE_SUFFIXES:
-                            records_deleted += _delete_raw_generation(conn, row)
-                            continue
-                        quarantine_path = row["cleanup_quarantine_path"]
-                        if not isinstance(quarantine_path, str) or not quarantine_path:
-                            quarantine_path = _quarantine_relative_path(
-                                evidence.generation_id, relative_path.name
-                            ).as_posix()
-                        try:
-                            quarantine_relative = _validate_quarantine_relative_path(
-                                quarantine_path, evidence.generation_id
-                            )
-                        except (TypeError, ValueError):
-                            records_deleted += _delete_raw_generation(conn, row)
-                            continue
-                        cursor = conn.execute(
-                            """
-                            UPDATE target_remote_cache
-                            SET cleanup_pending = 1, cleanup_quarantine_path = ?
-                            WHERE cache_key = ? AND generation_id = ?
-                                AND expires_epoch <= ? AND next_retry_epoch <= ?
-                            """,
-                            (
-                                quarantine_path,
-                                evidence.cache_key,
-                                evidence.generation_id,
-                                now_epoch,
-                                now_epoch,
-                            ),
-                        )
-                        if cursor.rowcount == 1:
-                            coordinate_claims.append(
-                                (evidence, relative_path, quarantine_relative)
-                            )
-                    conn.commit()
-                except Exception:
-                    conn.rollback()
-                    raise
-                finally:
-                    conn.close()
-
-                for evidence, relative_path, quarantine_relative in coordinate_claims:
-                    quarantine_path = cache_root.joinpath(*quarantine_relative.parts)
-                    source_path = cache_root.joinpath(*relative_path.parts)
-                    if not _claim_matches_generation(
-                        self.project_root,
-                        evidence.cache_key,
-                        evidence.generation_id,
-                        quarantine_relative.as_posix(),
-                    ):
+                for job in _due_cleanup_jobs(self.project_root, now_epoch, limit):
+                    attempts += 1
+                    quarantine_relative = _cleanup_job_path(job)
+                    if quarantine_relative is None:
+                        _delete_cleanup_job(self.project_root, job["generation_id"])
                         continue
-
-                    if not _ensure_quarantine_directory(cache_root):
-                        records_deleted += _delete_generation(
-                            self.project_root,
-                            evidence.cache_key,
-                            evidence.generation_id,
-                        )
-                        continue
-                    quarantine_state = _prevalidate_regular_file(
-                        cache_root,
-                        quarantine_path,
-                        quarantine_relative.parts,
+                    quarantine = cache_root.joinpath(*quarantine_relative.parts)
+                    state = _prevalidate_regular_file(
+                        cache_root, quarantine, quarantine_relative.parts
                     )
-                    if quarantine_state == "missing":
-                        source_state = _prevalidate_regular_file(
-                            cache_root,
-                            source_path,
-                            relative_path.parts,
-                        )
-                        if source_state == "missing":
-                            records_deleted += _delete_generation(
-                                self.project_root,
-                                evidence.cache_key,
-                                evidence.generation_id,
-                            )
-                            continue
-                        if source_state != "regular":
-                            records_deleted += _delete_generation(
-                                self.project_root,
-                                evidence.cache_key,
-                                evidence.generation_id,
-                            )
-                            continue
-                        if not _atomic_move_to_quarantine(
-                            cache_root,
-                            source_path,
-                            quarantine_path,
-                            relative_path.parts,
-                        ):
-                            _schedule_cleanup_retry(
-                                self.project_root,
-                                evidence.cache_key,
-                                evidence.generation_id,
-                                now_epoch,
-                            )
-                            continue
-                    elif quarantine_state != "regular":
-                        records_deleted += _delete_generation(
+                    if state in {"missing", "permanent_unsafe"}:
+                        _delete_cleanup_job(self.project_root, job["generation_id"])
+                        continue
+                    if state == "transient_error":
+                        _schedule_cleanup_job_retry(
                             self.project_root,
-                            evidence.cache_key,
-                            evidence.generation_id,
+                            job["generation_id"],
+                            now_epoch,
                         )
                         continue
-
                     try:
-                        cleanup_succeeded, file_deleted = _unlink_quarantine_file(
+                        succeeded, deleted = _unlink_quarantine_file(
                             cache_root, quarantine_relative
                         )
                     except OSError:
-                        cleanup_succeeded = False
-                        file_deleted = False
-                    if not cleanup_succeeded:
-                        _schedule_cleanup_retry(
+                        succeeded, deleted = False, False
+                    if succeeded:
+                        _delete_cleanup_job(self.project_root, job["generation_id"])
+                        files_deleted += int(deleted)
+                    else:
+                        _schedule_cleanup_job_retry(
+                            self.project_root,
+                            job["generation_id"],
+                            now_epoch,
+                        )
+
+                remaining = limit - attempts
+                if remaining <= 0:
+                    return {
+                        "records_deleted": records_deleted,
+                        "files_deleted": files_deleted,
+                    }
+                rows = _due_active_rows(self.project_root, now_epoch, remaining)
+                for row in rows:
+                    evidence = self._validated_evidence(row)
+                    if evidence is None:
+                        records_deleted += _delete_raw_row(self.project_root, row)
+                        continue
+                    if evidence.record_type != "coordinate_file":
+                        records_deleted += _delete_generation(
+                            self.project_root,
+                            evidence.cache_key,
+                            evidence.generation_id,
+                        )
+                        continue
+
+                    relative_path = _validate_cache_relative_path(
+                        evidence.payload["path"]
+                    )
+                    if relative_path.suffix.lower() not in COORDINATE_FILE_SUFFIXES:
+                        records_deleted += _delete_generation(
+                            self.project_root,
+                            evidence.cache_key,
+                            evidence.generation_id,
+                        )
+                        continue
+                    quarantine_relative = _active_quarantine_path(row, evidence)
+                    if quarantine_relative is None:
+                        records_deleted += _delete_generation(
+                            self.project_root,
+                            evidence.cache_key,
+                            evidence.generation_id,
+                        )
+                        continue
+                    source = cache_root.joinpath(*relative_path.parts)
+                    quarantine = cache_root.joinpath(*quarantine_relative.parts)
+                    quarantine_state = _prevalidate_regular_file(
+                        cache_root, quarantine, quarantine_relative.parts
+                    )
+                    source_state = _prevalidate_regular_file(
+                        cache_root, source, relative_path.parts
+                    )
+
+                    if (
+                        row["cleanup_pending"] == 1
+                        and quarantine_state == "transient_error"
+                    ):
+                        _schedule_active_cleanup_retry(
                             self.project_root,
                             evidence.cache_key,
                             evidence.generation_id,
                             now_epoch,
                         )
                         continue
-                    records_deleted += _delete_generation(
+                    if (
+                        row["cleanup_pending"] == 1
+                        and quarantine_state == "permanent_unsafe"
+                    ):
+                        records_deleted += _delete_generation(
+                            self.project_root,
+                            evidence.cache_key,
+                            evidence.generation_id,
+                        )
+                        continue
+                    if row["cleanup_pending"] == 1 and quarantine_state == "regular":
+                        if _retire_active_to_cleanup_job(
+                            self.project_root,
+                            evidence,
+                            quarantine_relative,
+                            now_epoch,
+                        ):
+                            records_deleted += 1
+                            deleted = _attempt_job_unlink(
+                                self.project_root,
+                                cache_root,
+                                evidence.generation_id,
+                                quarantine_relative,
+                                now_epoch,
+                            )
+                            files_deleted += int(deleted)
+                        continue
+
+                    if source_state in {"missing", "permanent_unsafe"}:
+                        records_deleted += _delete_generation(
+                            self.project_root,
+                            evidence.cache_key,
+                            evidence.generation_id,
+                        )
+                        continue
+                    if source_state == "transient_error":
+                        _schedule_active_cleanup_retry(
+                            self.project_root,
+                            evidence.cache_key,
+                            evidence.generation_id,
+                            now_epoch,
+                        )
+                        continue
+                    quarantine_setup = _ensure_quarantine_directory(cache_root)
+                    if quarantine_setup == "permanent_unsafe":
+                        records_deleted += _delete_generation(
+                            self.project_root,
+                            evidence.cache_key,
+                            evidence.generation_id,
+                        )
+                        continue
+                    if quarantine_setup != "ready":
+                        _schedule_active_cleanup_retry(
+                            self.project_root,
+                            evidence.cache_key,
+                            evidence.generation_id,
+                            now_epoch,
+                        )
+                        continue
+                    if not _claim_active_cleanup(
                         self.project_root,
                         evidence.cache_key,
                         evidence.generation_id,
-                    )
-                    files_deleted += int(file_deleted)
+                        quarantine_relative,
+                        now_epoch,
+                    ):
+                        continue
+                    if not _atomic_move_to_quarantine(
+                        cache_root,
+                        source,
+                        quarantine,
+                        relative_path.parts,
+                    ):
+                        _schedule_active_cleanup_retry(
+                            self.project_root,
+                            evidence.cache_key,
+                            evidence.generation_id,
+                            now_epoch,
+                            reset_claim=True,
+                        )
+                        continue
+                    if _retire_active_to_cleanup_job(
+                        self.project_root,
+                        evidence,
+                        quarantine_relative,
+                        now_epoch,
+                    ):
+                        records_deleted += 1
+                        deleted = _attempt_job_unlink(
+                            self.project_root,
+                            cache_root,
+                            evidence.generation_id,
+                            quarantine_relative,
+                            now_epoch,
+                        )
+                        files_deleted += int(deleted)
             finally:
                 cache_lock.__exit__(None, None, None)
         return {
@@ -507,6 +667,12 @@ def _parse_utc_timestamp(value: Any) -> datetime:
     if parsed.utcoffset() != timedelta(0) or value != canonical.isoformat():
         raise ValueError("timestamp must use canonical UTC encoding")
     return canonical
+
+
+def _cache_thread_lock(cache_root: Path) -> threading.RLock:
+    resolved = cache_root.resolve()
+    with _CACHE_THREAD_LOCKS_GUARD:
+        return _CACHE_THREAD_LOCKS.setdefault(resolved, threading.RLock())
 
 
 def _validate_identifier(name: str, value: Any) -> str:
@@ -720,6 +886,277 @@ def _open_windows_lock_file(lock_path: Path) -> int:
         raise
 
 
+def _due_cleanup_jobs(
+    project_root: Path, now_epoch: float, limit: int
+) -> list[dict[str, Any]]:
+    conn = get_connection(project_root)
+    try:
+        return conn.execute(
+            """
+            SELECT *
+            FROM target_coordinate_cleanup_jobs
+            WHERE next_retry_epoch <= ?
+            ORDER BY next_retry_epoch, generation_id
+            LIMIT ?
+            """,
+            (now_epoch, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def _due_active_rows(
+    project_root: Path, now_epoch: float, limit: int
+) -> list[dict[str, Any]]:
+    conn = get_connection(project_root)
+    try:
+        return conn.execute(
+            """
+            SELECT *
+            FROM target_remote_cache
+            WHERE expires_epoch <= ? AND next_retry_epoch <= ?
+            ORDER BY expires_epoch, cache_key
+            LIMIT ?
+            """,
+            (now_epoch, now_epoch, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def _delete_raw_row(project_root: Path, row: Mapping[str, Any]) -> int:
+    conn = get_connection(project_root)
+    try:
+        with conn:
+            return _delete_raw_generation(conn, row)
+    finally:
+        conn.close()
+
+
+def _cleanup_job_path(job: Mapping[str, Any]) -> Optional[Path]:
+    try:
+        generation_id = _validate_generation_id(job["generation_id"])
+        return _validate_quarantine_relative_path(
+            job["quarantine_path"], generation_id
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _active_quarantine_path(
+    row: Mapping[str, Any], evidence: CachedEvidence
+) -> Optional[Path]:
+    value = row.get("cleanup_quarantine_path")
+    if not isinstance(value, str) or not value:
+        value = _quarantine_relative_path(
+            evidence.generation_id,
+            _validate_cache_relative_path(evidence.payload["path"]).name,
+        ).as_posix()
+    try:
+        return _validate_quarantine_relative_path(value, evidence.generation_id)
+    except (TypeError, ValueError):
+        return None
+
+
+def _claim_active_cleanup(
+    project_root: Path,
+    cache_key: str,
+    generation_id: str,
+    quarantine_relative: Path,
+    now_epoch: float,
+) -> bool:
+    conn = get_connection(project_root)
+    try:
+        with conn:
+            cursor = conn.execute(
+                """
+                UPDATE target_remote_cache
+                SET cleanup_pending = 1, cleanup_quarantine_path = ?
+                WHERE cache_key = ? AND generation_id = ?
+                    AND expires_epoch <= ? AND next_retry_epoch <= ?
+                """,
+                (
+                    quarantine_relative.as_posix(),
+                    cache_key,
+                    generation_id,
+                    now_epoch,
+                    now_epoch,
+                ),
+            )
+            return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def _retire_active_to_cleanup_job(
+    project_root: Path,
+    evidence: CachedEvidence,
+    quarantine_relative: Path,
+    now_epoch: float,
+) -> bool:
+    conn = get_connection(project_root)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT cleanup_pending, cleanup_quarantine_path
+            FROM target_remote_cache
+            WHERE cache_key = ? AND generation_id = ?
+            """,
+            (evidence.cache_key, evidence.generation_id),
+        ).fetchone()
+        if (
+            row is None
+            or row["cleanup_pending"] != 1
+            or row["cleanup_quarantine_path"] != quarantine_relative.as_posix()
+        ):
+            conn.rollback()
+            return False
+        conn.execute(
+            """
+            INSERT INTO target_coordinate_cleanup_jobs (
+                generation_id, cache_key, quarantine_path,
+                next_retry_epoch, retry_count, created_at
+            ) VALUES (?, ?, ?, 0, 0, ?)
+            ON CONFLICT(generation_id) DO NOTHING
+            """,
+            (
+                evidence.generation_id,
+                evidence.cache_key,
+                quarantine_relative.as_posix(),
+                datetime.fromtimestamp(now_epoch, tz=timezone.utc).isoformat(),
+            ),
+        )
+        cursor = conn.execute(
+            """
+            DELETE FROM target_remote_cache
+            WHERE cache_key = ? AND generation_id = ? AND cleanup_pending = 1
+            """,
+            (evidence.cache_key, evidence.generation_id),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _delete_cleanup_job(project_root: Path, generation_id: str) -> bool:
+    conn = get_connection(project_root)
+    try:
+        with conn:
+            cursor = conn.execute(
+                "DELETE FROM target_coordinate_cleanup_jobs WHERE generation_id = ?",
+                (generation_id,),
+            )
+            return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def _retry_delay(retry_count: int) -> int:
+    return min(RETRY_MAX_SECONDS, RETRY_BASE_SECONDS * (2**max(0, retry_count)))
+
+
+def _schedule_cleanup_job_retry(
+    project_root: Path, generation_id: str, now_epoch: float
+) -> bool:
+    conn = get_connection(project_root)
+    try:
+        with conn:
+            row = conn.execute(
+                """
+                SELECT retry_count FROM target_coordinate_cleanup_jobs
+                WHERE generation_id = ?
+                """,
+                (generation_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            retry_count = max(0, int(row["retry_count"]))
+            cursor = conn.execute(
+                """
+                UPDATE target_coordinate_cleanup_jobs
+                SET retry_count = ?, next_retry_epoch = ?
+                WHERE generation_id = ?
+                """,
+                (
+                    retry_count + 1,
+                    now_epoch + _retry_delay(retry_count),
+                    generation_id,
+                ),
+            )
+            return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def _schedule_active_cleanup_retry(
+    project_root: Path,
+    cache_key: str,
+    generation_id: str,
+    now_epoch: float,
+    *,
+    reset_claim: bool = False,
+) -> bool:
+    conn = get_connection(project_root)
+    try:
+        with conn:
+            row = conn.execute(
+                """
+                SELECT retry_count FROM target_remote_cache
+                WHERE cache_key = ? AND generation_id = ?
+                """,
+                (cache_key, generation_id),
+            ).fetchone()
+            if row is None:
+                return False
+            retry_count = max(0, int(row["retry_count"]))
+            cursor = conn.execute(
+                """
+                UPDATE target_remote_cache
+                SET retry_count = ?, next_retry_epoch = ?,
+                    cleanup_pending = CASE WHEN ? THEN 0 ELSE cleanup_pending END,
+                    cleanup_quarantine_path = CASE WHEN ? THEN NULL
+                        ELSE cleanup_quarantine_path END
+                WHERE cache_key = ? AND generation_id = ?
+                """,
+                (
+                    retry_count + 1,
+                    now_epoch + _retry_delay(retry_count),
+                    int(reset_claim),
+                    int(reset_claim),
+                    cache_key,
+                    generation_id,
+                ),
+            )
+            return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def _attempt_job_unlink(
+    project_root: Path,
+    cache_root: Path,
+    generation_id: str,
+    quarantine_relative: Path,
+    now_epoch: float,
+) -> bool:
+    try:
+        succeeded, deleted = _unlink_quarantine_file(
+            cache_root, quarantine_relative
+        )
+    except OSError:
+        succeeded, deleted = False, False
+    if succeeded:
+        _delete_cleanup_job(project_root, generation_id)
+        return deleted
+    _schedule_cleanup_job_retry(project_root, generation_id, now_epoch)
+    return False
+
+
 def _delete_raw_generation(conn: Any, row: Mapping[str, Any]) -> int:
     generation_id = row.get("generation_id")
     cursor = conn.execute(
@@ -730,32 +1167,6 @@ def _delete_raw_generation(conn: Any, row: Mapping[str, Any]) -> int:
         (row.get("cache_key"), generation_id),
     )
     return cursor.rowcount
-
-
-def _claim_matches_generation(
-    project_root: Path,
-    cache_key: str,
-    generation_id: str,
-    quarantine_path: str,
-) -> bool:
-    conn = get_connection(project_root)
-    try:
-        row = conn.execute(
-            """
-            SELECT generation_id, cleanup_pending, cleanup_quarantine_path
-            FROM target_remote_cache
-            WHERE cache_key = ?
-            """,
-            (cache_key,),
-        ).fetchone()
-    finally:
-        conn.close()
-    return bool(
-        row is not None
-        and row["generation_id"] == generation_id
-        and row["cleanup_pending"] == 1
-        and row["cleanup_quarantine_path"] == quarantine_path
-    )
 
 
 def _delete_generation(project_root: Path, cache_key: str, generation_id: str) -> int:
@@ -774,54 +1185,81 @@ def _delete_generation(project_root: Path, cache_key: str, generation_id: str) -
         conn.close()
 
 
-def _schedule_cleanup_retry(
-    project_root: Path,
-    cache_key: str,
-    generation_id: str,
-    now_epoch: float,
-) -> bool:
-    conn = get_connection(project_root)
-    try:
-        with conn:
-            row = conn.execute(
-                """
-                SELECT retry_count
-                FROM target_remote_cache
-                WHERE cache_key = ? AND generation_id = ?
-                """,
-                (cache_key, generation_id),
-            ).fetchone()
-            if row is None:
-                return False
-            retry_count = max(0, int(row["retry_count"]))
-            delay = min(RETRY_MAX_SECONDS, RETRY_BASE_SECONDS * (2**retry_count))
-            cursor = conn.execute(
-                """
-                UPDATE target_remote_cache
-                SET retry_count = ?, next_retry_epoch = ?
-                WHERE cache_key = ? AND generation_id = ?
-                """,
-                (
-                    retry_count + 1,
-                    now_epoch + delay,
-                    cache_key,
-                    generation_id,
-                ),
-            )
-            return cursor.rowcount == 1
-    finally:
-        conn.close()
-
-
-def _ensure_quarantine_directory(cache_root: Path) -> bool:
+def _ensure_quarantine_directory(cache_root: Path) -> str:
     quarantine = cache_root / ".quarantine"
     try:
         quarantine.mkdir(exist_ok=True)
         quarantine_stat = os.lstat(quarantine)
     except OSError:
-        return False
-    return not _is_reparse_or_symlink(quarantine_stat) and stat.S_ISDIR(
+        return "transient_error"
+    if _is_reparse_or_symlink(quarantine_stat) or not stat.S_ISDIR(
         quarantine_stat.st_mode
+    ):
+        return "permanent_unsafe"
+    return "ready"
+
+
+def _ensure_relative_directory(
+    cache_root: Path, relative_parts: tuple[str, ...]
+) -> str:
+    try:
+        root_stat = os.lstat(cache_root)
+    except OSError:
+        return "transient_error"
+    if _is_reparse_or_symlink(root_stat) or not stat.S_ISDIR(root_stat.st_mode):
+        return "permanent_unsafe"
+    current = cache_root
+    for part in relative_parts:
+        current = current / part
+        try:
+            current.mkdir(exist_ok=True)
+            current_stat = os.lstat(current)
+        except OSError:
+            return "transient_error"
+        if _is_reparse_or_symlink(current_stat) or not stat.S_ISDIR(
+            current_stat.st_mode
+        ):
+            return "permanent_unsafe"
+    return "ready"
+
+
+def _atomic_publish_coordinate(
+    cache_root: Path,
+    temporary: Path,
+    final: Path,
+    temporary_parts: tuple[str, ...],
+    final_parts: tuple[str, ...],
+) -> str:
+    if _prevalidate_regular_file(cache_root, temporary, temporary_parts) != "regular":
+        return "transient_error"
+    final_state = _prevalidate_regular_file(cache_root, final, final_parts)
+    if final_state == "permanent_unsafe":
+        return "permanent_unsafe"
+    if final_state == "transient_error":
+        return "transient_error"
+    moved = (
+        _move_windows_verified(cache_root, temporary, final, replace_existing=True)
+        if os.name == "nt"
+        else _replace_posix_verified(
+            cache_root, temporary_parts, final_parts, replace_existing=True
+        )
+    )
+    return "moved" if moved else "transient_error"
+
+
+def _atomic_restore_coordinate(
+    cache_root: Path,
+    published: Path,
+    temporary: Path,
+    published_parts: tuple[str, ...],
+    temporary_parts: tuple[str, ...],
+) -> bool:
+    if os.name == "nt":
+        return _move_windows_verified(
+            cache_root, published, temporary, replace_existing=True
+        )
+    return _replace_posix_verified(
+        cache_root, published_parts, temporary_parts, replace_existing=True
     )
 
 
@@ -900,8 +1338,66 @@ def _move_posix_verified(
             os.close(descriptor)
 
 
+def _replace_posix_verified(
+    cache_root: Path,
+    source_parts: tuple[str, ...],
+    destination_parts: tuple[str, ...],
+    *,
+    replace_existing: bool,
+) -> bool:
+    open_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    descriptors = []
+    try:
+        root_descriptor = os.open(cache_root, open_flags | no_follow)
+        descriptors.append(root_descriptor)
+        source_descriptor = root_descriptor
+        for part in source_parts[:-1]:
+            source_descriptor = os.open(
+                part, open_flags | no_follow, dir_fd=source_descriptor
+            )
+            descriptors.append(source_descriptor)
+        destination_descriptor = root_descriptor
+        for part in destination_parts[:-1]:
+            destination_descriptor = os.open(
+                part, open_flags | no_follow, dir_fd=destination_descriptor
+            )
+            descriptors.append(destination_descriptor)
+        source_stat = os.stat(
+            source_parts[-1], dir_fd=source_descriptor, follow_symlinks=False
+        )
+        if not stat.S_ISREG(source_stat.st_mode):
+            return False
+        if not replace_existing:
+            try:
+                os.stat(
+                    destination_parts[-1],
+                    dir_fd=destination_descriptor,
+                    follow_symlinks=False,
+                )
+                return False
+            except FileNotFoundError:
+                pass
+        os.replace(
+            source_parts[-1],
+            destination_parts[-1],
+            src_dir_fd=source_descriptor,
+            dst_dir_fd=destination_descriptor,
+        )
+        return True
+    except OSError:
+        return False
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
 def _move_windows_verified(
-    cache_root: Path, source_path: Path, quarantine_path: Path
+    cache_root: Path,
+    source_path: Path,
+    quarantine_path: Path,
+    *,
+    replace_existing: bool = False,
 ) -> bool:
     import ctypes
     from ctypes import wintypes
@@ -1056,7 +1552,7 @@ def _move_windows_verified(
         rename_info = ctypes.cast(
             buffer, ctypes.POINTER(FileRenameInfo)
         ).contents
-        rename_info.ReplaceIfExists = 0
+        rename_info.ReplaceIfExists = int(replace_existing)
         rename_info.RootDirectory = None
         rename_info.FileNameLength = len(encoded_name)
         ctypes.memmove(
@@ -1130,30 +1626,32 @@ def _prevalidate_regular_file(
     try:
         root_stat = os.lstat(cache_root)
     except OSError:
-        return "unsafe"
+        return "transient_error"
     if _is_reparse_or_symlink(root_stat) or not stat.S_ISDIR(root_stat.st_mode):
-        return "unsafe"
+        return "permanent_unsafe"
 
     current = cache_root
     for part in relative_parts[:-1]:
         current = current / part
         try:
             component_stat = os.lstat(current)
+        except FileNotFoundError:
+            return "missing"
         except OSError:
-            return "unsafe"
+            return "transient_error"
         if _is_reparse_or_symlink(component_stat) or not stat.S_ISDIR(
             component_stat.st_mode
         ):
-            return "unsafe"
+            return "permanent_unsafe"
 
     try:
         candidate_stat = os.lstat(candidate)
     except FileNotFoundError:
         return "missing"
     except OSError:
-        return "unsafe"
+        return "transient_error"
     if _is_reparse_or_symlink(candidate_stat) or not stat.S_ISREG(candidate_stat.st_mode):
-        return "unsafe"
+        return "permanent_unsafe"
     return "regular"
 
 

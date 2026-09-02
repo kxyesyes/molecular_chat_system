@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TARGET_DB_DIR = Path("data") / "target_db"
 DB_FILENAME = "target_database.sqlite"
 CACHE_MIGRATION_STATE_KEY = "target_remote_cache_generation_v1"
+_MIGRATION_LOCKS: dict[Path, threading.RLock] = {}
+_MIGRATION_LOCKS_GUARD = threading.Lock()
 
 
 def resolve_project_root(project_root: Optional[Path | str] = None) -> Path:
@@ -91,6 +94,13 @@ def get_connection(project_root: Optional[Path | str] = None) -> sqlite3.Connect
 
 
 def init_db(project_root: Optional[Path | str] = None) -> None:
+    db_path = get_db_path(project_root)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with _migration_thread_lock(db_path), _DatabaseMigrationLock(db_path):
+        _init_db_locked(project_root)
+
+
+def _init_db_locked(project_root: Optional[Path | str] = None) -> None:
     get_cache_dir(project_root).mkdir(parents=True, exist_ok=True)
     conn = get_connection(project_root)
     try:
@@ -177,6 +187,15 @@ def init_db(project_root: Optional[Path | str] = None) -> None:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS target_coordinate_cleanup_jobs (
+                generation_id TEXT PRIMARY KEY NOT NULL,
+                cache_key TEXT NOT NULL,
+                quarantine_path TEXT NOT NULL,
+                next_retry_epoch REAL NOT NULL DEFAULT 0,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_targets_gene_symbol ON targets(gene_symbol);
             CREATE INDEX IF NOT EXISTS idx_aliases_alias ON target_aliases(alias);
             CREATE INDEX IF NOT EXISTS idx_structures_target_id ON target_structures(target_id);
@@ -184,6 +203,7 @@ def init_db(project_root: Optional[Path | str] = None) -> None:
                 ON target_remote_cache(expires_at);
             """
         )
+        conn.execute("BEGIN IMMEDIATE")
         _ensure_columns(
             conn,
             "targets",
@@ -234,7 +254,16 @@ def init_db(project_root: Optional[Path | str] = None) -> None:
             ON target_remote_cache(expires_epoch, next_retry_epoch)
             """
         )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_target_coordinate_cleanup_due
+            ON target_coordinate_cleanup_jobs(next_retry_epoch)
+            """
+        )
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -244,6 +273,58 @@ def _ensure_columns(conn: sqlite3.Connection, table_name: str, columns: dict[str
     for name, definition in columns.items():
         if name not in existing:
             conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {definition}")
+
+
+def _migration_thread_lock(db_path: Path) -> threading.RLock:
+    resolved = db_path.resolve()
+    with _MIGRATION_LOCKS_GUARD:
+        return _MIGRATION_LOCKS.setdefault(resolved, threading.RLock())
+
+
+class _DatabaseMigrationLock:
+    def __init__(self, db_path: Path) -> None:
+        self._lock_path = db_path.with_name(f"{db_path.name}.migration.lock")
+        self._stream = None
+
+    def __enter__(self) -> "_DatabaseMigrationLock":
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._stream = self._lock_path.open("a+b", buffering=0)
+        self._stream.seek(0, os.SEEK_END)
+        if self._stream.tell() == 0:
+            self._stream.write(b"\0")
+        self._stream.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(self._stream.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._stream.fileno(), fcntl.LOCK_EX)
+        except Exception:
+            self._stream.close()
+            self._stream = None
+            raise
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> bool:
+        if self._stream is None:
+            return False
+        try:
+            self._stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(self._stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._stream.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._stream.close()
+            self._stream = None
+        return False
 
 
 def _migration_completed(conn: sqlite3.Connection, state_key: str) -> bool:

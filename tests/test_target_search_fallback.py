@@ -4,7 +4,7 @@ import multiprocessing
 import os
 import sqlite3
 import threading
-from contextlib import nullcontext
+import uuid
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,46 +20,35 @@ class MutableClock:
         return self.value
 
 
-def _cleanup_process_worker(project_root, now_value, rename_ready, rename_release, output):
-    from src.target_search import cache as cache_module
-
-    original_move = getattr(cache_module, "_atomic_move_to_quarantine", None)
-
-    def paused_move(cache_root, source_path, quarantine_path, relative_parts):
-        rename_ready.set()
-        if not rename_release.wait(10):
-            raise TimeoutError("rename release was not signaled")
-        if original_move is None:
-            raise RuntimeError("atomic quarantine move is unavailable")
-        return original_move(cache_root, source_path, quarantine_path, relative_parts)
-
-    cache_module._atomic_move_to_quarantine = paused_move
-    try:
-        repository = cache_module.TargetCacheRepository(
-            project_root=Path(project_root),
-            clock=lambda: datetime.fromisoformat(now_value),
-        )
-        output.put(("ok", repository.cleanup_expired()))
-    except Exception as exc:
-        output.put(("error", repr(exc)))
-
-
-def _coordinate_upsert_process_worker(
-    project_root, now_value, started, finished, output
+def _coordinate_publish_process_worker(
+    project_root, now_value, installed, release_registration, finished, output
 ):
-    from src.target_search.cache import TargetCacheRepository
+    from src.target_search import cache as cache_module
+    from src.target_search.database import get_cache_dir
 
-    started.set()
+    original_upsert = getattr(cache_module.TargetCacheRepository, "_upsert_record")
+
+    def paused_upsert(self, *args, **kwargs):
+        installed.set()
+        if not release_registration.wait(10):
+            raise TimeoutError("registration release was not signaled")
+        return original_upsert(self, *args, **kwargs)
+
+    cache_module.TargetCacheRepository._upsert_record = paused_upsert
     try:
-        evidence = TargetCacheRepository(
+        cache_root = get_cache_dir(Path(project_root))
+        temporary = cache_root / ".incoming" / "fresh.tmp"
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text("fresh generation", encoding="utf-8")
+        evidence = cache_module.TargetCacheRepository(
             project_root=Path(project_root),
             clock=lambda: datetime.fromisoformat(now_value),
-        ).upsert(
-            "coordinate:race",
-            "coordinate_file",
+        ).publish_coordinate(
+            "coordinate:publication-race",
             "RCSB_PDB",
-            "race-new",
-            {"path": "coordinates/race.cif"},
+            "fresh",
+            temporary_path=".incoming/fresh.tmp",
+            final_path="coordinates/fresh-generation.cif",
             ttl=timedelta(days=1),
         )
         output.put(("ok", evidence.generation_id))
@@ -67,6 +56,61 @@ def _coordinate_upsert_process_worker(
         output.put(("error", repr(exc)))
     finally:
         finished.set()
+
+
+def _plain_cleanup_process_worker(project_root, now_value, finished, output):
+    from src.target_search.cache import TargetCacheRepository
+
+    try:
+        result = TargetCacheRepository(
+            project_root=Path(project_root),
+            clock=lambda: datetime.fromisoformat(now_value),
+        ).cleanup_expired()
+        output.put(("ok", result))
+    except Exception as exc:
+        output.put(("error", repr(exc)))
+    finally:
+        finished.set()
+
+
+def _migration_process_worker(project_root, start, output):
+    from src.target_search.database import init_db
+
+    if not start.wait(10):
+        output.put(("error", "migration start was not signaled"))
+        return
+    try:
+        init_db(Path(project_root))
+        output.put(("ok", None))
+    except Exception as exc:
+        output.put(("error", repr(exc)))
+
+
+def _publish_coordinate(
+    repository,
+    project_root,
+    cache_key,
+    relative_path,
+    *,
+    source_record_id=None,
+    ttl=None,
+    content="coordinate",
+):
+    from src.target_search.database import get_cache_dir
+
+    cache_root = get_cache_dir(project_root)
+    temporary_relative = Path(".incoming") / f"{uuid.uuid4()}.tmp"
+    temporary = cache_root.joinpath(*temporary_relative.parts)
+    temporary.parent.mkdir(parents=True, exist_ok=True)
+    temporary.write_text(content, encoding="utf-8")
+    return repository.publish_coordinate(
+        cache_key,
+        "RCSB_PDB",
+        source_record_id or cache_key,
+        temporary_path=temporary_relative.as_posix(),
+        final_path=relative_path,
+        ttl=ttl,
+    )
 
 
 @pytest.fixture
@@ -103,6 +147,12 @@ def test_init_db_adds_authoritative_cache_tables_idempotently(project_root):
         state_columns = {
             row["name"]: row for row in conn.execute("PRAGMA table_info(target_runtime_state)")
         }
+        cleanup_job_columns = {
+            row["name"]: row
+            for row in conn.execute(
+                "PRAGMA table_info(target_coordinate_cleanup_jobs)"
+            )
+        }
         indexes = {
             row["name"] for row in conn.execute("PRAGMA index_list(target_remote_cache)")
         }
@@ -130,6 +180,15 @@ def test_init_db_adds_authoritative_cache_tables_idempotently(project_root):
     assert cache_columns["schema_version"]["dflt_value"] == "1"
     assert {"state_key", "state_value", "updated_at"}.issubset(state_columns)
     assert state_columns["state_key"]["pk"] == 1
+    assert {
+        "generation_id",
+        "cache_key",
+        "quarantine_path",
+        "next_retry_epoch",
+        "retry_count",
+        "created_at",
+    }.issubset(cleanup_job_columns)
+    assert cleanup_job_columns["generation_id"]["pk"] == 1
     assert "idx_target_remote_cache_expires_at" in indexes
 
     conn = get_connection(project_root)
@@ -245,6 +304,68 @@ def test_second_init_does_not_rewrite_cache_rows_after_migration_marker(
     assert cache_updates == []
 
 
+def test_legacy_schema_migration_is_serialized_across_spawned_processes(project_root):
+    from src.target_search.database import get_db_path
+
+    db_path = get_db_path(project_root)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE target_remote_cache (
+                cache_key TEXT PRIMARY KEY,
+                record_type TEXT,
+                source TEXT,
+                source_record_id TEXT,
+                payload_json TEXT,
+                payload_digest TEXT,
+                retrieved_at TEXT,
+                expires_at TEXT,
+                last_refresh_status TEXT,
+                schema_version INTEGER DEFAULT 1
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    output = context.Queue()
+    processes = [
+        context.Process(
+            target=_migration_process_worker,
+            args=(str(project_root), start, output),
+        )
+        for _ in range(4)
+    ]
+    for process in processes:
+        process.start()
+    start.set()
+    try:
+        results = [output.get(timeout=15) for _ in processes]
+        for process in processes:
+            process.join(15)
+            assert process.exitcode == 0
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+
+    assert results == [("ok", None)] * len(processes)
+    conn = sqlite3.connect(db_path)
+    try:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(target_remote_cache)")
+        }
+    finally:
+        conn.close()
+    assert {"generation_id", "expires_epoch", "next_retry_epoch"}.issubset(columns)
+
+
 def test_upsert_applies_record_ttls_serializes_deterministically_and_is_immutable(
     project_root, clock
 ):
@@ -301,6 +422,108 @@ def test_upsert_applies_record_ttls_serializes_deterministically_and_is_immutabl
     assert row["payload_digest"] == hashlib.sha256(
         row["payload_json"].encode("utf-8")
     ).hexdigest()
+
+
+def test_publish_coordinate_atomically_installs_and_registers_generation(
+    project_root, clock
+):
+    from src.target_search.cache import TargetCacheRepository
+    from src.target_search.database import get_cache_dir
+
+    repository = TargetCacheRepository(project_root, clock)
+    cache_root = get_cache_dir(project_root)
+    temporary = cache_root / ".incoming" / "4wkq.download"
+    temporary.parent.mkdir(parents=True, exist_ok=True)
+    temporary.write_text("coordinates", encoding="utf-8")
+    final_file = cache_root / "coordinates" / "4wkq-generation-1.cif"
+    final_file.parent.mkdir(parents=True, exist_ok=True)
+    final_file.write_text("stale unregistered file", encoding="utf-8")
+
+    evidence = repository.publish_coordinate(
+        "coordinate:4WKQ",
+        "RCSB_PDB",
+        "4WKQ",
+        temporary_path=".incoming/4wkq.download",
+        final_path="coordinates/4wkq-generation-1.cif",
+    )
+
+    assert evidence.record_type == "coordinate_file"
+    assert evidence.payload == {"path": "coordinates/4wkq-generation-1.cif"}
+    assert final_file.read_text(encoding="utf-8") == "coordinates"
+    assert not temporary.exists()
+    assert repository.get("coordinate:4WKQ") == evidence
+
+
+def test_generic_upsert_cannot_register_an_existing_coordinate_file(
+    project_root, clock
+):
+    from src.target_search.cache import TargetCacheRepository
+    from src.target_search.database import get_cache_dir
+
+    repository = TargetCacheRepository(project_root, clock)
+    final_file = get_cache_dir(project_root) / "coordinates" / "unowned.cif"
+    final_file.parent.mkdir(parents=True, exist_ok=True)
+    final_file.write_text("unowned", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="publish_coordinate"):
+        repository.upsert(
+            "coordinate:unowned",
+            "coordinate_file",
+            "RCSB_PDB",
+            "unowned",
+            {"path": "coordinates/unowned.cif"},
+        )
+
+
+def test_publication_rejects_reusing_an_active_generation_path(project_root, clock):
+    from src.target_search.cache import TargetCacheRepository
+    from src.target_search.database import get_cache_dir
+
+    repository = TargetCacheRepository(project_root, clock)
+    original = _publish_coordinate(
+        repository,
+        project_root,
+        "coordinate:immutable",
+        "coordinates/immutable-generation.cif",
+        content="original",
+    )
+    cache_root = get_cache_dir(project_root)
+    temporary = cache_root / ".incoming" / "replacement.tmp"
+    temporary.parent.mkdir(parents=True, exist_ok=True)
+    temporary.write_text("replacement", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="immutable"):
+        repository.publish_coordinate(
+            "coordinate:immutable",
+            "RCSB_PDB",
+            "replacement",
+            temporary_path=".incoming/replacement.tmp",
+            final_path="coordinates/immutable-generation.cif",
+        )
+
+    assert repository.get("coordinate:immutable") == original
+    assert temporary.read_text(encoding="utf-8") == "replacement"
+    assert (
+        cache_root / "coordinates" / "immutable-generation.cif"
+    ).read_text(encoding="utf-8") == "original"
+
+
+def test_metadata_upserts_do_not_acquire_coordinate_filesystem_lock(
+    project_root, clock, monkeypatch
+):
+    from src.target_search import cache as cache_module
+
+    repository = cache_module.TargetCacheRepository(project_root, clock)
+
+    def forbidden_lock(_root):
+        raise AssertionError("metadata upsert acquired coordinate lock")
+
+    monkeypatch.setattr(cache_module, "_InterprocessCacheLock", forbidden_lock)
+    evidence = repository.upsert(
+        "target:metadata", "target", "UniProt", "metadata", {"gene": "EGFR"}
+    )
+
+    assert evidence.payload == {"gene": "EGFR"}
 
 
 def test_upsert_atomically_replaces_existing_cache_record(project_root, clock):
@@ -379,11 +602,6 @@ def test_upsert_materializes_its_generation_before_a_second_writer_commits(
         return connection
 
     monkeypatch.setattr(cache_module, "get_connection", coordinated_connection)
-    monkeypatch.setattr(cache_module, "_CACHE_MUTATION_LOCK", nullcontext(), raising=False)
-    monkeypatch.setattr(
-        cache_module, "_InterprocessCacheLock", lambda _root: nullcontext()
-    )
-
     def write_a():
         try:
             results["a"] = repository_a.upsert(
@@ -588,9 +806,18 @@ def test_get_strictly_rejects_non_json_constants_and_record_schema_mismatches(
     from src.target_search.database import get_connection
 
     repository = TargetCacheRepository(project_root, clock)
-    repository.upsert(
-        "strict:record", record_type, "Provider", "strict", initial_payload
-    )
+    if record_type == "coordinate_file":
+        _publish_coordinate(
+            repository,
+            project_root,
+            "strict:record",
+            initial_payload["path"],
+            source_record_id="strict",
+        )
+    else:
+        repository.upsert(
+            "strict:record", record_type, "Provider", "strict", initial_payload
+        )
     digest = hashlib.sha256(corrupt_payload_json.encode("utf-8")).hexdigest()
     conn = get_connection(project_root)
     try:
@@ -835,44 +1062,47 @@ def test_cleanup_expired_deletes_only_contained_regular_coordinate_files(
     outside_file = project_root / "outside.cif"
     safe_file.parent.mkdir(parents=True, exist_ok=True)
     directory.mkdir(parents=True, exist_ok=True)
-    safe_file.write_text("safe", encoding="utf-8")
     unrelated_file.write_text("unrelated", encoding="utf-8")
     referenced_unrelated_file.write_text("referenced unrelated", encoding="utf-8")
     outside_file.write_text("outside", encoding="utf-8")
 
-    entries = [
-        (
-            "coordinate:safe",
-            "coordinate_file",
-            {"path": "coordinates/safe.cif"},
-        ),
-        ("coordinate:outside", "coordinate_file", {"path": "placeholder.cif"}),
-        (
-            "coordinate:directory",
-            "coordinate_file",
-            {"path": "coordinate-directory"},
-        ),
-        (
-            "target:unrelated",
-            "target",
-            {"path": "unrelated.txt"},
-        ),
-        (
-            "coordinate:unrelated-extension",
-            "coordinate_file",
-            {"path": "referenced-unrelated.txt"},
-        ),
-    ]
-
-    for cache_key, record_type, payload in entries:
-        repository.upsert(
-            cache_key,
-            record_type,
-            "RCSB_PDB",
-            cache_key,
-            payload,
-            ttl=timedelta(hours=1),
-        )
+    _publish_coordinate(
+        repository,
+        project_root,
+        "coordinate:safe",
+        "coordinates/safe.cif",
+        ttl=timedelta(hours=1),
+        content="safe",
+    )
+    _publish_coordinate(
+        repository,
+        project_root,
+        "coordinate:outside",
+        "placeholder.cif",
+        ttl=timedelta(hours=1),
+    )
+    _publish_coordinate(
+        repository,
+        project_root,
+        "coordinate:directory",
+        "coordinate-directory.cif",
+        ttl=timedelta(hours=1),
+    )
+    _publish_coordinate(
+        repository,
+        project_root,
+        "coordinate:unrelated-extension",
+        "referenced-unrelated.cif",
+        ttl=timedelta(hours=1),
+    )
+    repository.upsert(
+        "target:unrelated",
+        "target",
+        "RCSB_PDB",
+        "target:unrelated",
+        {"path": "unrelated.txt"},
+        ttl=timedelta(hours=1),
+    )
     outside_payload = '{"path":"../outside.cif"}'
     conn = get_connection(project_root)
     try:
@@ -888,6 +1118,25 @@ def test_cleanup_expired_deletes_only_contained_regular_coordinate_files(
                 "coordinate:outside",
             ),
         )
+        for cache_key, payload_json in (
+            ("coordinate:directory", '{"path":"coordinate-directory"}'),
+            (
+                "coordinate:unrelated-extension",
+                '{"path":"referenced-unrelated.txt"}',
+            ),
+        ):
+            conn.execute(
+                """
+                UPDATE target_remote_cache
+                SET payload_json = ?, payload_digest = ?
+                WHERE cache_key = ?
+                """,
+                (
+                    payload_json,
+                    hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+                    cache_key,
+                ),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -906,7 +1155,7 @@ def test_cleanup_expired_deletes_only_contained_regular_coordinate_files(
     finally:
         conn.close()
 
-    assert result == {"records_deleted": len(entries), "files_deleted": 1}
+    assert result == {"records_deleted": 5, "files_deleted": 1}
     assert not safe_file.exists()
     assert outside_file.read_text(encoding="utf-8") == "outside"
     assert directory.is_dir()
@@ -927,19 +1176,19 @@ def test_cleanup_retains_symlink_and_explicitly_skips_when_creation_is_unsupport
     escape_link = cache_dir / "escape.cif"
     cache_dir.mkdir(parents=True, exist_ok=True)
     outside_file.write_text("outside", encoding="utf-8")
+    _publish_coordinate(
+        repository,
+        project_root,
+        "coordinate:escape-link",
+        "escape.cif",
+        source_record_id="escape-link",
+        ttl=timedelta(hours=1),
+    )
+    escape_link.unlink()
     try:
         os.symlink(outside_file, escape_link)
     except OSError as exc:
         pytest.skip(f"symlink creation unsupported: {exc}")
-
-    repository.upsert(
-        "coordinate:escape-link",
-        "coordinate_file",
-        "RCSB_PDB",
-        "escape-link",
-        {"path": "escape.cif"},
-        ttl=timedelta(hours=1),
-    )
     clock.value += timedelta(hours=2)
 
     result = repository.cleanup_expired()
@@ -956,6 +1205,140 @@ def test_cleanup_retains_symlink_and_explicitly_skips_when_creation_is_unsupport
     assert row is None
     assert escape_link.is_symlink()
     assert outside_file.read_text(encoding="utf-8") == "outside"
+
+
+@pytest.mark.parametrize("failure_point", ["source_prevalidation", "quarantine_setup"])
+def test_cleanup_transient_path_errors_retain_active_row_with_backoff(
+    project_root, clock, monkeypatch, failure_point
+):
+    from src.target_search import cache as cache_module
+    from src.target_search.database import get_cache_dir, get_connection
+
+    repository = cache_module.TargetCacheRepository(project_root, clock)
+    coordinate_file = get_cache_dir(project_root) / "coordinates" / "transient.cif"
+    _publish_coordinate(
+        repository,
+        project_root,
+        "coordinate:transient",
+        "coordinates/transient.cif",
+        ttl=timedelta(hours=1),
+        content="transient",
+    )
+    clock.value += timedelta(hours=2)
+
+    if failure_point == "source_prevalidation":
+        original_prevalidate = cache_module._prevalidate_regular_file
+
+        def transient_prevalidation(cache_root, candidate, relative_parts):
+            if candidate == coordinate_file:
+                return "transient_error"
+            return original_prevalidate(cache_root, candidate, relative_parts)
+
+        monkeypatch.setattr(
+            cache_module, "_prevalidate_regular_file", transient_prevalidation
+        )
+    else:
+        monkeypatch.setattr(
+            cache_module,
+            "_ensure_quarantine_directory",
+            lambda _cache_root: "transient_error",
+        )
+
+    result = repository.cleanup_expired()
+
+    conn = get_connection(project_root)
+    try:
+        active = conn.execute(
+            """
+            SELECT cleanup_pending, next_retry_epoch
+            FROM target_remote_cache
+            WHERE cache_key = ?
+            """,
+            ("coordinate:transient",),
+        ).fetchone()
+        job_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM target_coordinate_cleanup_jobs"
+        ).fetchone()["count"]
+    finally:
+        conn.close()
+    assert result == {"records_deleted": 0, "files_deleted": 0}
+    assert active["cleanup_pending"] == 0
+    assert active["next_retry_epoch"] > clock.value.timestamp()
+    assert job_count == 0
+    assert coordinate_file.read_text(encoding="utf-8") == "transient"
+
+
+def test_cleanup_transient_quarantine_probe_retains_crash_pending_generation(
+    project_root, clock, monkeypatch
+):
+    from src.target_search import cache as cache_module
+    from src.target_search.database import get_cache_dir, get_connection
+
+    repository = cache_module.TargetCacheRepository(project_root, clock)
+    evidence = _publish_coordinate(
+        repository,
+        project_root,
+        "coordinate:pending-transient",
+        "coordinates/pending-transient.cif",
+        ttl=timedelta(hours=1),
+        content="pending transient",
+    )
+    cache_root = get_cache_dir(project_root)
+    source = cache_root / "coordinates" / "pending-transient.cif"
+    quarantine_relative = (
+        Path(".quarantine")
+        / f"{evidence.generation_id}-pending-transient.cif"
+    )
+    quarantine = cache_root / quarantine_relative
+    quarantine.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(source, quarantine)
+    conn = get_connection(project_root)
+    try:
+        conn.execute(
+            """
+            UPDATE target_remote_cache
+            SET cleanup_pending = 1, cleanup_quarantine_path = ?
+            WHERE cache_key = ? AND generation_id = ?
+            """,
+            (
+                quarantine_relative.as_posix(),
+                evidence.cache_key,
+                evidence.generation_id,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    clock.value += timedelta(hours=2)
+    original_prevalidate = cache_module._prevalidate_regular_file
+
+    def transient_quarantine_probe(cache_root_value, candidate, relative_parts):
+        if candidate == quarantine:
+            return "transient_error"
+        return original_prevalidate(cache_root_value, candidate, relative_parts)
+
+    monkeypatch.setattr(
+        cache_module, "_prevalidate_regular_file", transient_quarantine_probe
+    )
+
+    result = repository.cleanup_expired()
+
+    conn = get_connection(project_root)
+    try:
+        active = conn.execute(
+            """
+            SELECT cleanup_pending, next_retry_epoch
+            FROM target_remote_cache
+            WHERE cache_key = ?
+            """,
+            (evidence.cache_key,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert result == {"records_deleted": 0, "files_deleted": 0}
+    assert active["cleanup_pending"] == 1
+    assert active["next_retry_epoch"] > clock.value.timestamp()
+    assert quarantine.read_text(encoding="utf-8") == "pending transient"
 
 
 @pytest.mark.parametrize(
@@ -979,15 +1362,15 @@ def test_cleanup_never_deletes_files_for_corrupt_cache_rows(
     original_file = coordinate_dir / "original.cif"
     tampered_file = coordinate_dir / "tampered.cif"
     coordinate_dir.mkdir(parents=True, exist_ok=True)
-    original_file.write_text("original", encoding="utf-8")
     tampered_file.write_text("tampered", encoding="utf-8")
-    repository.upsert(
+    _publish_coordinate(
+        repository,
+        project_root,
         "coordinate:corrupt",
-        "coordinate_file",
-        "RCSB_PDB",
-        "corrupt",
-        {"path": "coordinates/original.cif"},
+        "coordinates/original.cif",
+        source_record_id="corrupt",
         ttl=timedelta(hours=1),
+        content="original",
     )
     clock.value += timedelta(hours=2)
 
@@ -1027,18 +1410,18 @@ def test_cleanup_tombstone_commits_before_unlink_and_failed_delete_is_retriable(
 
     repository = TargetCacheRepository(project_root, clock)
     coordinate_file = get_cache_dir(project_root) / "coordinates" / "fault.cif"
-    coordinate_file.parent.mkdir(parents=True, exist_ok=True)
-    coordinate_file.write_text("fault", encoding="utf-8")
-    repository.upsert(
+    original = _publish_coordinate(
+        repository,
+        project_root,
         "coordinate:fault",
-        "coordinate_file",
-        "RCSB_PDB",
-        "fault",
-        {"path": "coordinates/fault.cif"},
+        "coordinates/fault.cif",
+        source_record_id="fault",
         ttl=timedelta(hours=1),
+        content="fault",
     )
     clock.value += timedelta(hours=2)
     observed = {"write_lock_released": False}
+    original_unlink = cache_module._unlink_quarantine_file
 
     def injected_failure(_cache_root, _quarantine_path):
         probe = sqlite3.connect(get_db_path(project_root), timeout=0.05)
@@ -1058,21 +1441,55 @@ def test_cleanup_tombstone_commits_before_unlink_and_failed_delete_is_retriable(
 
     conn = get_connection(project_root)
     try:
-        row = conn.execute(
-            "SELECT cleanup_pending, cleanup_quarantine_path, next_retry_epoch, generation_id "
-            "FROM target_remote_cache WHERE cache_key = ?",
+        active = conn.execute(
+            "SELECT generation_id FROM target_remote_cache WHERE cache_key = ?",
             ("coordinate:fault",),
+        ).fetchone()
+        job = conn.execute(
+            """
+            SELECT generation_id, quarantine_path, next_retry_epoch
+            FROM target_coordinate_cleanup_jobs
+            WHERE generation_id = ?
+            """,
+            (original.generation_id,),
         ).fetchone()
     finally:
         conn.close()
     assert observed["write_lock_released"] is True
-    assert result == {"records_deleted": 0, "files_deleted": 0}
-    assert row["cleanup_pending"] == 1
-    assert row["next_retry_epoch"] > clock.value.timestamp()
-    assert row["generation_id"] in row["cleanup_quarantine_path"]
+    assert result == {"records_deleted": 1, "files_deleted": 0}
+    assert active is None
+    assert repository.get("coordinate:fault", allow_stale=True) is None
+    assert job["next_retry_epoch"] > clock.value.timestamp()
+    assert job["generation_id"] in job["quarantine_path"]
     assert not coordinate_file.exists()
-    quarantine_file = get_cache_dir(project_root) / row["cleanup_quarantine_path"]
+    quarantine_file = get_cache_dir(project_root) / job["quarantine_path"]
     assert quarantine_file.read_text(encoding="utf-8") == "fault"
+
+    replacement = _publish_coordinate(
+        repository,
+        project_root,
+        "coordinate:fault",
+        "coordinates/fault-new-generation.cif",
+        source_record_id="fault-new",
+        ttl=timedelta(days=1),
+        content="fresh",
+    )
+    assert replacement.generation_id != original.generation_id
+    assert repository.get("coordinate:fault") == replacement
+
+    monkeypatch.setattr(cache_module, "_unlink_quarantine_file", original_unlink)
+    clock.value += timedelta(minutes=2)
+    retry_result = repository.cleanup_expired()
+    conn = get_connection(project_root)
+    try:
+        job_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM target_coordinate_cleanup_jobs"
+        ).fetchone()["count"]
+    finally:
+        conn.close()
+    assert retry_result == {"records_deleted": 0, "files_deleted": 1}
+    assert job_count == 0
+    assert repository.get("coordinate:fault") == replacement
 
 
 def test_cleanup_retry_backoff_prevents_limit_one_starvation(
@@ -1085,24 +1502,23 @@ def test_cleanup_retry_backoff_prevents_limit_one_starvation(
     cache_dir = get_cache_dir(project_root)
     failed_file = cache_dir / "coordinates" / "a-fail.cif"
     valid_file = cache_dir / "coordinates" / "b-valid.cif"
-    failed_file.parent.mkdir(parents=True, exist_ok=True)
-    failed_file.write_text("fail", encoding="utf-8")
-    valid_file.write_text("valid", encoding="utf-8")
-    repository.upsert(
+    _publish_coordinate(
+        repository,
+        project_root,
         "coordinate:a-fail",
-        "coordinate_file",
-        "RCSB_PDB",
-        "a-fail",
-        {"path": "coordinates/a-fail.cif"},
+        "coordinates/a-fail.cif",
+        source_record_id="a-fail",
         ttl=timedelta(hours=1),
+        content="fail",
     )
-    repository.upsert(
+    _publish_coordinate(
+        repository,
+        project_root,
         "coordinate:b-valid",
-        "coordinate_file",
-        "RCSB_PDB",
-        "b-valid",
-        {"path": "coordinates/b-valid.cif"},
+        "coordinates/b-valid.cif",
+        source_record_id="b-valid",
         ttl=timedelta(hours=1),
+        content="valid",
     )
     clock.value += timedelta(hours=2)
     original_unlink = getattr(cache_module, "_unlink_quarantine_file", None)
@@ -1122,62 +1538,48 @@ def test_cleanup_retry_backoff_prevents_limit_one_starvation(
 
     conn = get_connection(project_root)
     try:
-        remaining = {
+        remaining_jobs = {
             row["cache_key"]: row["next_retry_epoch"]
             for row in conn.execute(
-                "SELECT cache_key, next_retry_epoch FROM target_remote_cache"
+                "SELECT cache_key, next_retry_epoch "
+                "FROM target_coordinate_cleanup_jobs"
             )
         }
+        active_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM target_remote_cache"
+        ).fetchone()["count"]
     finally:
         conn.close()
-    assert first == {"records_deleted": 0, "files_deleted": 0}
+    assert first == {"records_deleted": 1, "files_deleted": 0}
     assert second == {"records_deleted": 1, "files_deleted": 1}
-    assert set(remaining) == {"coordinate:a-fail"}
-    assert remaining["coordinate:a-fail"] > clock.value.timestamp()
+    assert active_count == 0
+    assert set(remaining_jobs) == {"coordinate:a-fail"}
+    assert remaining_jobs["coordinate:a-fail"] > clock.value.timestamp()
     assert not valid_file.exists()
 
 
-def test_pending_coordinate_cleanup_rejects_cross_type_generation_overwrite(
-    project_root, clock, monkeypatch
-):
-    from src.target_search import cache as cache_module
-    from src.target_search.database import get_cache_dir
+def test_get_never_returns_a_coordinate_row_claimed_for_cleanup(project_root, clock):
+    from src.target_search.cache import TargetCacheRepository
+    from src.target_search.database import get_connection
 
-    repository = cache_module.TargetCacheRepository(project_root, clock)
-    coordinate_file = get_cache_dir(project_root) / "coordinates" / "pending.cif"
-    coordinate_file.parent.mkdir(parents=True, exist_ok=True)
-    coordinate_file.write_text("pending", encoding="utf-8")
-    original = repository.upsert(
+    repository = TargetCacheRepository(project_root, clock)
+    _publish_coordinate(
+        repository,
+        project_root,
         "coordinate:pending",
-        "coordinate_file",
-        "RCSB_PDB",
-        "pending",
-        {"path": "coordinates/pending.cif"},
-        ttl=timedelta(hours=1),
+        "coordinates/pending.cif",
     )
-    clock.value += timedelta(hours=2)
-
-    def fail_unlink(_cache_root, _quarantine_path):
-        raise OSError("transient failure")
-
-    monkeypatch.setattr(cache_module, "_unlink_quarantine_file", fail_unlink)
-    assert repository.cleanup_expired() == {
-        "records_deleted": 0,
-        "files_deleted": 0,
-    }
-
-    with pytest.raises(RuntimeError, match="pending cleanup"):
-        repository.upsert(
-            "coordinate:pending",
-            "target",
-            "UniProt",
-            "replacement",
-            {"gene": "EGFR"},
+    conn = get_connection(project_root)
+    try:
+        conn.execute(
+            "UPDATE target_remote_cache SET cleanup_pending = 1 WHERE cache_key = ?",
+            ("coordinate:pending",),
         )
+        conn.commit()
+    finally:
+        conn.close()
 
-    retained = repository.get("coordinate:pending", allow_stale=True)
-    assert retained is not None
-    assert retained.generation_id == original.generation_id
+    assert repository.get("coordinate:pending", allow_stale=True) is None
 
 
 def test_cleanup_permanent_invalid_row_cannot_starve_later_metadata_with_limit_one(
@@ -1188,15 +1590,14 @@ def test_cleanup_permanent_invalid_row_cannot_starve_later_metadata_with_limit_o
 
     repository = TargetCacheRepository(project_root, clock)
     untouched_file = get_cache_dir(project_root) / "coordinates" / "invalid.cif"
-    untouched_file.parent.mkdir(parents=True, exist_ok=True)
-    untouched_file.write_text("untouched", encoding="utf-8")
-    repository.upsert(
+    _publish_coordinate(
+        repository,
+        project_root,
         "coordinate:a-invalid",
-        "coordinate_file",
-        "RCSB_PDB",
-        "invalid",
-        {"path": "coordinates/invalid.cif"},
+        "coordinates/invalid.cif",
+        source_record_id="invalid",
         ttl=timedelta(hours=1),
+        content="untouched",
     )
     repository.upsert(
         "target:b-valid",
@@ -1243,15 +1644,14 @@ def test_cleanup_uses_cache_root_relative_paths_with_absolute_override(
     monkeypatch.setenv("TARGET_CACHE_DIR", str(external_cache.resolve()))
     repository = TargetCacheRepository(project_root, clock)
     coordinate_file = get_cache_dir(project_root) / "coordinates" / "external.cif"
-    coordinate_file.parent.mkdir(parents=True, exist_ok=True)
-    coordinate_file.write_text("external", encoding="utf-8")
-    repository.upsert(
+    _publish_coordinate(
+        repository,
+        project_root,
         "coordinate:external",
-        "coordinate_file",
-        "RCSB_PDB",
-        "external",
-        {"path": "coordinates/external.cif"},
+        "coordinates/external.cif",
+        source_record_id="external",
         ttl=timedelta(hours=1),
+        content="external",
     )
     clock.value += timedelta(hours=2)
 
@@ -1261,81 +1661,80 @@ def test_cleanup_uses_cache_root_relative_paths_with_absolute_override(
     assert not coordinate_file.exists()
 
 
-def test_coordinate_cleanup_and_upsert_are_cross_process_generation_safe(
+def test_coordinate_publication_blocks_cleanup_until_fresh_generation_is_registered(
     project_root, clock
 ):
     from src.target_search.cache import TargetCacheRepository
     from src.target_search.database import get_cache_dir
 
     repository = TargetCacheRepository(project_root, clock)
-    coordinate_file = get_cache_dir(project_root) / "coordinates" / "race.cif"
-    coordinate_file.parent.mkdir(parents=True, exist_ok=True)
-    coordinate_file.write_text("old generation", encoding="utf-8")
-    old = repository.upsert(
-        "coordinate:race",
-        "coordinate_file",
-        "RCSB_PDB",
-        "race-old",
-        {"path": "coordinates/race.cif"},
+    old = _publish_coordinate(
+        repository,
+        project_root,
+        "coordinate:publication-race",
+        "coordinates/old-generation.cif",
+        source_record_id="old",
         ttl=timedelta(hours=1),
+        content="old generation",
     )
     clock.value += timedelta(hours=2)
 
     context = multiprocessing.get_context("spawn")
-    rename_ready = context.Event()
-    rename_release = context.Event()
-    writer_started = context.Event()
-    writer_finished = context.Event()
+    installed = context.Event()
+    release_registration = context.Event()
+    publication_finished = context.Event()
+    cleanup_finished = context.Event()
+    publication_output = context.Queue()
     cleanup_output = context.Queue()
-    writer_output = context.Queue()
-    cleanup_process = context.Process(
-        target=_cleanup_process_worker,
+    publication_process = context.Process(
+        target=_coordinate_publish_process_worker,
         args=(
             str(project_root),
             clock.value.isoformat(),
-            rename_ready,
-            rename_release,
+            installed,
+            release_registration,
+            publication_finished,
+            publication_output,
+        ),
+    )
+    cleanup_process = context.Process(
+        target=_plain_cleanup_process_worker,
+        args=(
+            str(project_root),
+            clock.value.isoformat(),
+            cleanup_finished,
             cleanup_output,
         ),
     )
-    writer_process = context.Process(
-        target=_coordinate_upsert_process_worker,
-        args=(
-            str(project_root),
-            clock.value.isoformat(),
-            writer_started,
-            writer_finished,
-            writer_output,
-        ),
-    )
-    cleanup_process.start()
+    publication_process.start()
     try:
-        assert rename_ready.wait(10), "cleanup never reached quarantine rename"
-        writer_process.start()
-        assert writer_started.wait(10), "writer process did not start"
-        assert not writer_finished.wait(0.3), "writer bypassed the interprocess lock"
-        rename_release.set()
+        assert installed.wait(10), "publication never installed the fresh file"
+        cleanup_process.start()
+        assert not cleanup_finished.wait(0.3), "cleanup bypassed publication lock"
+        release_registration.set()
+        publication_process.join(10)
         cleanup_process.join(10)
-        writer_process.join(10)
+        assert publication_process.exitcode == 0
         assert cleanup_process.exitcode == 0
-        assert writer_process.exitcode == 0
+        publication_status, fresh_generation = publication_output.get(timeout=5)
         cleanup_status, cleanup_result = cleanup_output.get(timeout=5)
-        writer_status, writer_generation = writer_output.get(timeout=5)
+        assert publication_status == "ok", fresh_generation
         assert cleanup_status == "ok", cleanup_result
-        assert writer_status == "ok", writer_generation
+        assert cleanup_result == {"records_deleted": 0, "files_deleted": 0}
     finally:
-        rename_release.set()
-        for process in (cleanup_process, writer_process):
+        release_registration.set()
+        for process in (publication_process, cleanup_process):
             if process.pid is not None and process.is_alive():
                 process.terminate()
                 process.join(5)
 
-    coordinate_file.write_text("new generation", encoding="utf-8")
-    current = repository.get("coordinate:race", allow_stale=True)
+    fresh_file = get_cache_dir(project_root) / "coordinates" / "fresh-generation.cif"
+    current = repository.get("coordinate:publication-race", allow_stale=True)
     assert current is not None
-    assert current.generation_id == writer_generation
+    assert current.generation_id == fresh_generation
     assert current.generation_id != old.generation_id
-    assert coordinate_file.read_text(encoding="utf-8") == "new generation"
+    assert current.payload == {"path": "coordinates/fresh-generation.cif"}
+    assert fresh_file.read_text(encoding="utf-8") == "fresh generation"
     assert not list((get_cache_dir(project_root) / ".quarantine").glob("*"))
 
 
