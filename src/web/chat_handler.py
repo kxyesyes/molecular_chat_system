@@ -18,6 +18,7 @@ from src.agent.persistence.redaction import (
 )
 from src.agent.contracts import CandidateSet, ObservationStatus
 from src.agent.routing.hybrid import SMILES_PATTERN
+from src.agent.utils.validators import InputValidator
 from src.web.models import generate_for_chat
 
 logger = logging.getLogger(__name__)
@@ -145,29 +146,36 @@ class ChatHandler:
         # Agent 处理（使用temperature参数）
         matched_skill = None
         route_decision = None
+        molecular_input = InputValidator().analyze_molecular_input(message)
+        clarification = self._molecular_input_clarification(molecular_input)
         skill_router = getattr(self.agent_system, "skill_router", None)
-        if enable_tools and skill_router and hasattr(skill_router, "decide"):
+        if (
+            not clarification
+            and enable_tools
+            and skill_router
+            and hasattr(skill_router, "decide")
+        ):
             route_decision = skill_router.decide(
                 message,
                 llm=getattr(self.agent_system, "llm", None),
             )
             clarification = self._route_clarification(route_decision)
-            if clarification:
-                await websocket.send_text(json.dumps({
-                    "type": "complete",
-                    "content": clarification,
-                }, ensure_ascii=False))
-                history.append({
-                    "user": message,
-                    "agent_used": False,
-                    "agent_response": None,
-                    "rag_enabled": False,
-                    "molecules_retrieved": 0,
-                    "assistant": clarification,
-                })
-                if len(history) > 20:
-                    del history[:-20]
-                return
+        if clarification:
+            await websocket.send_text(json.dumps({
+                "type": "complete",
+                "content": clarification,
+            }, ensure_ascii=False))
+            history.append({
+                "user": message,
+                "agent_used": False,
+                "agent_response": None,
+                "rag_enabled": False,
+                "molecules_retrieved": 0,
+                "assistant": clarification,
+            })
+            if len(history) > 20:
+                del history[:-20]
+            return
 
         should_use_agent = bool(
             route_decision and route_decision.selected_skill
@@ -960,6 +968,20 @@ class ChatHandler:
                 "猜测数值。"
             )
         return ""
+
+    @staticmethod
+    def _molecular_input_clarification(molecular_input) -> str:
+        if not molecular_input.blocks_execution:
+            return ""
+        if molecular_input.validation_available:
+            return (
+                "你提供的 SMILES 无效，请检查并更正结构后重试。"
+                "本次未进行科学计算，没有计算 LogP、QED、pIC50 或 binding energy（结合能）。"
+            )
+        return (
+            "当前无法使用科学验证组件校验 SMILES，请稍后重试。"
+            "本次未进行科学计算，没有计算 LogP、QED、pIC50 或 binding energy（结合能）。"
+        )
 
     @staticmethod
     def _should_use_legacy_rag(message: str) -> bool:

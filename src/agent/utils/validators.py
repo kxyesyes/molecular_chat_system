@@ -51,11 +51,9 @@ class MolecularInputAnalysis:
 
     @property
     def blocks_execution(self) -> bool:
-        labeled_failure = any(
-            candidate.validation != "valid" for candidate in self.labeled_candidates
+        return any(
+            candidate.validation != "valid" for candidate in self.candidates
         )
-        no_valid_candidate = bool(self.candidates) and not self.valid_smiles
-        return labeled_failure or no_valid_candidate
 
 
 class InputValidator:
@@ -152,8 +150,8 @@ class InputValidator:
         candidates: dict[str, CandidateSource] = {}
         for match in self._label_pattern.finditer(text):
             value = self._read_labeled_candidate(text[match.end() :])
-            normalized = self._normalize_candidate(value)
-            if normalized and self._looks_like_smiles(normalized, labeled=True):
+            normalized = self._normalize_candidate(value) or value.strip()
+            if normalized:
                 candidates[normalized] = "labeled"
 
         for match in self._token_pattern.finditer(text):
@@ -178,7 +176,7 @@ class InputValidator:
             if closing_index > 0:
                 return remainder[1:closing_index]
         match = re.match(r"[^\s,，;；。!?！？]+", remainder)
-        return match.group(0) if match else ""
+        return match.group(0) if match else remainder[0]
 
     @classmethod
     def _normalize_candidate(cls, text: str) -> str:

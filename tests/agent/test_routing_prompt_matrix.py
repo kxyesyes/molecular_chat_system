@@ -208,6 +208,103 @@ def test_invalid_smiles_skips_llm_arbitration():
     assert llm.calls == 0
 
 
+def test_invalid_smiles_rag_similarity_request_requires_correction():
+    prompt = "请检索知识库中与 SMILES: CC(C)(( 相似的分子"
+
+    decision = HybridSkillRouter().decide(prompt)
+
+    assert decision.selected_skill == "rag_search"
+    assert decision.requires_confirmation is True
+    assert "invalid SMILES" in " ".join(decision.reasons)
+
+
+def test_invalid_smiles_is_terminal_when_scientific_tools_are_disabled():
+    prompt = "Analyze LogP for SMILES: CC(C)(("
+    model = _RecordingModel()
+    rag = _RecordingRagService()
+    agent = _RecordingAgentSystem()
+    handler = ChatHandler(
+        model=model,
+        rag_service=rag,
+        agent_system=agent,
+        config={"inference": {"stream": False}},
+    )
+    websocket = _RecordingWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message=prompt,
+            enable_rag=True,
+            enable_tools=False,
+        )
+    )
+
+    assert agent.execute_calls == []
+    assert rag.calls == []
+    assert model.generate_calls == 0
+    assert websocket.messages[-1]["type"] == "complete"
+    assert "SMILES 无效" in websocket.messages[-1]["content"]
+
+
+def test_nonlexical_labeled_smiles_is_terminal_when_tools_are_disabled():
+    prompt = "Analyze LogP for SMILES: ?"
+    model = _RecordingModel()
+    rag = _RecordingRagService()
+    agent = _RecordingAgentSystem()
+    handler = ChatHandler(
+        model=model,
+        rag_service=rag,
+        agent_system=agent,
+        config={"inference": {"stream": False}},
+    )
+    websocket = _RecordingWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message=prompt,
+            enable_rag=True,
+            enable_tools=False,
+        )
+    )
+
+    assert agent.execute_calls == []
+    assert rag.calls == []
+    assert model.generate_calls == 0
+    assert websocket.messages[-1]["type"] == "complete"
+    assert "SMILES 无效" in websocket.messages[-1]["content"]
+
+
+def test_invalid_smiles_rag_request_is_terminal_before_all_execution():
+    prompt = "请检索知识库中与 SMILES: CC(C)(( 相似的分子"
+    model = _RecordingModel()
+    rag = _RecordingRagService()
+    agent = _RecordingAgentSystem()
+    handler = ChatHandler(
+        model=model,
+        rag_service=rag,
+        agent_system=agent,
+        config={"inference": {"stream": False}},
+    )
+    websocket = _RecordingWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message=prompt,
+            enable_rag=True,
+            enable_tools=True,
+        )
+    )
+
+    assert agent.execute_calls == []
+    assert rag.calls == []
+    assert model.generate_calls == 0
+    assert websocket.messages[-1]["type"] == "complete"
+    assert "SMILES 无效" in websocket.messages[-1]["content"]
+
+
 def test_labeled_invalid_smiles_takes_priority_over_incidental_valid_smiles():
     decision = HybridSkillRouter().decide(
         "请全面分析。SMILES: CC(C)((；并与 CCO 比较"

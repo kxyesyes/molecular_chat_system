@@ -3715,62 +3715,19 @@
         const infoSection = document.createElement("div");
         infoSection.style.cssText = `padding: 16px; flex: 1; display: flex; flex-direction: column; gap: 10px;`;
 
-        // 仅显示候选记录中随工具结果提供的属性。
+        // CandidateSet metadata is not an independently aligned property result.
         const propertiesContainer = document.createElement("div");
         propertiesContainer.className = "molecule-properties";
         propertiesContainer.style.cssText = `
         width: 100%;
         font-size: 12px;
       `;
-        const propertyLabels = {
-          molecular_weight: "分子量",
-          mw: "分子量",
-          logp: "LogP",
-          qed: "QED",
-          tpsa: "TPSA",
-          hbd: "HBD",
-          hba: "HBA",
-        };
-        const rawProperties = candidate.metadata.properties;
-        const availableProperties = [];
-        if (rawProperties && typeof rawProperties === "object") {
-          Object.keys(propertyLabels).forEach((name) => {
-            const value = rawProperties[name];
-            if (
-              value !== null &&
-              value !== undefined &&
-              ["string", "number", "boolean"].includes(typeof value)
-            ) {
-              availableProperties.push([name, value]);
-            }
-          });
-        }
-        if (availableProperties.length === 0) {
-          const unavailable = document.createElement("div");
-          unavailable.style.cssText =
-            "text-align: center; color: #64748b; padding: 12px; font-size: 11px;";
-          unavailable.textContent = "本步骤未提供经工具验证的属性";
-          propertiesContainer.appendChild(unavailable);
-        } else {
-          const propertyGrid = document.createElement("div");
-          propertyGrid.style.cssText =
-            "display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 10px;";
-          availableProperties.forEach(([name, value]) => {
-            const propertyRow = document.createElement("div");
-            propertyRow.style.cssText =
-              "display: flex; justify-content: space-between; gap: 6px; background: #f8fafc; padding: 6px 10px; border-radius: 6px;";
-            const propertyName = document.createElement("span");
-            propertyName.style.color = "#64748b";
-            propertyName.textContent = propertyLabels[name];
-            const propertyValue = document.createElement("span");
-            propertyValue.style.cssText = "color: #334155; font-weight: 700;";
-            propertyValue.textContent = String(value);
-            propertyRow.appendChild(propertyName);
-            propertyRow.appendChild(propertyValue);
-            propertyGrid.appendChild(propertyRow);
-          });
-          propertiesContainer.appendChild(propertyGrid);
-        }
+        const unavailable = document.createElement("div");
+        unavailable.style.cssText =
+          "text-align: center; color: #64748b; padding: 12px; font-size: 11px;";
+        unavailable.textContent =
+          "当前候选事件未携带经独立性质工具验证的属性";
+        propertiesContainer.appendChild(unavailable);
         infoSection.appendChild(propertiesContainer);
 
         // SMILES 折叠区域

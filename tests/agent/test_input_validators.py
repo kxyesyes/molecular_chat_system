@@ -148,6 +148,28 @@ def test_labeled_invalid_smiles_is_not_masked_by_incidental_valid_candidate():
     assert analysis.blocks_execution is True
 
 
+def test_contextual_invalid_smiles_is_not_masked_by_valid_candidate():
+    analysis = InputValidator().analyze_molecular_input(
+        "请全面分析。CCO 与 CC(C)(( 的成药性"
+    )
+
+    assert analysis.valid_smiles == ("CCO",)
+    assert any(
+        candidate.value == "CC(C)((" and candidate.validation == "invalid"
+        for candidate in analysis.candidates
+    )
+    assert analysis.blocks_execution is True
+
+
+@pytest.mark.parametrize("value", ["?", "X"])
+def test_nonempty_labeled_non_smiles_value_fails_closed(value):
+    analysis = InputValidator().analyze_molecular_input(f"SMILES: {value}")
+
+    assert analysis.potential_smiles == (value,)
+    assert analysis.valid_smiles == ()
+    assert analysis.blocks_execution is True
+
+
 def test_chinese_adjacent_smiles_label_preserves_invalid_precedence():
     analysis = InputValidator().analyze_molecular_input(
         "分子SMILES: CC(C)((；并与 CCO 比较"

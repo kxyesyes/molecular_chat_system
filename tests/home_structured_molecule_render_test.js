@@ -741,8 +741,14 @@ assert(
   "Provenance must come from the structured source, not a hardcoded label",
 );
 assert(
-  rendererSource.includes("本步骤未提供经工具验证的属性"),
-  "Cards without allowlisted metadata properties must explain their absence",
+  !rendererSource.includes("candidate.metadata.properties") &&
+    !rendererSource.includes("availableProperties") &&
+    !rendererSource.includes("propertyLabels"),
+  "Candidate metadata properties must never be rendered as verified science",
+);
+assert(
+  rendererSource.includes("当前候选事件未携带经独立性质工具验证的属性"),
+  "Candidate cards must explicitly explain that independent property evidence is absent",
 );
 assert(
   rendererSource.includes('/api/utils/smiles_to_image?smiles=${encodeURIComponent('),
@@ -794,6 +800,8 @@ class FakeElement {
     this.scrollHeight = this.children.length;
     return child;
   }
+
+  addEventListener() {}
 
   replaceChildren(...children) {
     this.children.forEach((child) => { child.parentNode = null; });
@@ -847,6 +855,17 @@ class FakeElement {
       return this._descendants().find((element) =>
         element.classList.contains(className),
       ) || null;
+    }
+    return null;
+  }
+
+  closest(selector) {
+    if (!selector.startsWith(".")) return null;
+    const className = selector.slice(1);
+    let current = this;
+    while (current) {
+      if (current.classList.contains(className)) return current;
+      current = current.parentNode;
     }
     return null;
   }
@@ -908,6 +927,7 @@ const behaviorMainSource = mainSource
       handleWebSocketMessage,
       lifecycle: moleculeCandidateLifecycle,
       sendMessage,
+      renderMoleculeCandidatesOriginal,
       getSocket: () => ws,
       setElements: (value) => Object.assign(elements, value),
       setSocket: (value) => { ws = value; isConnected = true; },
@@ -960,6 +980,37 @@ const behaviorHooks = behaviorSandbox.window.HomeMain.__test;
 const behaviorChat = new FakeElement("div");
 const behaviorInput = { value: "second request" };
 behaviorHooks.setElements({ chatContainer: behaviorChat, input: behaviorInput });
+
+const metadataTrustPayload = api.normalize(validPayload());
+metadataTrustPayload.candidates[0].metadata.properties = {
+  logp: 99.9,
+  qed: 0.999,
+  molecular_weight: 12345,
+};
+const metadataTrustWrapper = new FakeElement("div");
+metadataTrustWrapper.classList.add("assistant-wrapper");
+const metadataTrustContainer = new FakeElement("div");
+metadataTrustContainer.classList.add("message-box");
+metadataTrustWrapper.appendChild(metadataTrustContainer);
+behaviorHooks.renderMoleculeCandidatesOriginal(
+  metadataTrustContainer,
+  metadataTrustPayload,
+);
+assert(
+  metadataTrustContainer.textContent.includes(
+    "当前候选事件未携带经独立性质工具验证的属性",
+  ),
+  "Renderer must show the independent-property-evidence notice",
+);
+assert(
+  !metadataTrustContainer.textContent.includes("99.9") &&
+    !metadataTrustContainer.textContent.includes("0.999") &&
+    !metadataTrustContainer.textContent.includes("12345") &&
+    !metadataTrustContainer.textContent.includes("LogP") &&
+    !metadataTrustContainer.textContent.includes("QED") &&
+    !metadataTrustContainer.textContent.includes("本步骤未提供经工具验证的属性"),
+  "Ordinary or malicious metadata properties must not be presented as verified values",
+);
 
 function activeSocket() {
   const socket = new FakeWebSocket("ws://example.test/ws");

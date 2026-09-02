@@ -267,7 +267,7 @@ class HybridSkillRouter:
                     min(1.0, float(arbitration.get("confidence", top.score))),
                 )
 
-        if selected in MOLECULAR_INPUT_SKILLS and molecular_input.blocks_execution:
+        if molecular_input.blocks_execution:
             if molecular_input.validation_available:
                 decision_reasons.append("invalid SMILES input detected")
             else:
@@ -408,7 +408,7 @@ class HybridSkillRouter:
         molecular_input: MolecularInputAnalysis,
     ) -> list[str]:
         reasons = []
-        if skill in MOLECULAR_INPUT_SKILLS and molecular_input.blocks_execution:
+        if molecular_input.blocks_execution:
             if molecular_input.validation_available:
                 reasons.append(
                     "The provided SMILES is invalid and must be corrected before execution"
