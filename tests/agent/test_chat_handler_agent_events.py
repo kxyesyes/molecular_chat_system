@@ -371,6 +371,118 @@ class LiveEventAgentSystem(FakeAgentSystem):
         }
 
 
+class SensitiveLiveEventAgentSystem(FakeAgentSystem):
+    def execute(
+        self,
+        message,
+        temperature=0.7,
+        mol_count=5,
+        active_skill=None,
+        event_callback=None,
+    ):
+        assert event_callback is not None
+        event_callback({
+            "type": "agent_event",
+            "event": "tool_failed",
+            "message": (
+                "Tool failed with api_key=live-event-key-123 at "
+                "C:\\Users\\reviewer\\private\\tool.log"
+            ),
+            "trace_id": "live-sensitive-trace",
+            "tool": "property_calculator",
+            "progress": 0.5,
+            "payload": {
+                "warnings": ["token=live-warning-token-456"],
+                "error": {
+                    "message": "sk-liveevent123456789",
+                    "debug_path": "D:\\MedChat\\private\\debug.json",
+                },
+            },
+        })
+        event_callback({
+            "type": "agent_event",
+            "event": "task_failed",
+            "message": "Task failed token=live-task-token-789",
+            "trace_id": "live-sensitive-trace",
+            "tool": None,
+            "progress": 0.75,
+            "payload": {"path": "C:\\Users\\reviewer\\private\\task.log"},
+        })
+        event_callback({
+            "type": "agent_event",
+            "event": "tool_completed",
+            "message": "property calculation completed normally",
+            "trace_id": "live-sensitive-trace",
+            "tool": "property_calculator",
+            "progress": 1.0,
+            "payload": {"status": "succeeded", "count": 1},
+        })
+        return {
+            "success": True,
+            "final_answer": "live event sanitization completed",
+            "tools_used": ["property_calculator"],
+            "active_skill": "comprehensive_evaluation",
+            "tool_results": {},
+            "agent_events": [],
+            "workflow_plan": {"workflow_name": "comprehensive_evaluation"},
+        }
+
+
+class SensitiveBufferedEventAgentSystem(FakeAgentSystem):
+    def execute(self, message, temperature=0.7, mol_count=5, active_skill=None):
+        return {
+            "success": True,
+            "final_answer": "buffered event sanitization completed",
+            "tools_used": ["property_calculator"],
+            "active_skill": "comprehensive_evaluation",
+            "tool_results": {},
+            "agent_events": [
+                {
+                    "type": "tool_failed",
+                    "message": (
+                        "Buffered tool failure api_key=buffered-key-123 "
+                        "D:\\MedChat\\private\\buffered.log"
+                    ),
+                    "trace_id": "buffered-sensitive-trace",
+                    "tool": "property_calculator",
+                    "progress": 0.4,
+                    "payload": {
+                        "warnings": [
+                            "token=buffered-warning-token-456",
+                            "C:\\Users\\reviewer\\private\\warning.log",
+                        ],
+                        "error": {
+                            "message": "sk-bufferedevent123456789",
+                            "details": {
+                                "output_path": "D:\\MedChat\\private\\output.json"
+                            },
+                        },
+                    },
+                },
+                {
+                    "type": "task_failed",
+                    "message": "Buffered task failed token=buffered-task-token-789",
+                    "trace_id": "buffered-sensitive-trace",
+                    "tool": None,
+                    "progress": 0.8,
+                    "error": {
+                        "message": "api_key=buffered-error-key-987",
+                        "path": "C:\\Users\\reviewer\\private\\error.log",
+                    },
+                },
+                {
+                    "type": "tool_completed",
+                    "message": "buffered property calculation completed",
+                    "trace_id": "buffered-sensitive-trace",
+                    "tool": "property_calculator",
+                    "progress": 1.0,
+                    "payload": {"status": "succeeded", "count": 2},
+                },
+            ],
+            "workflow_plan": {"workflow_name": "comprehensive_evaluation"},
+        }
+
+
 class NonWorkflowAgentSystem(FakeAgentSystem):
     def execute(self, message, temperature=0.7, mol_count=5, active_skill=None):
         return {
@@ -850,6 +962,122 @@ def test_agent_failure_content_and_warnings_are_length_bounded():
     assert len(agent_message["warnings"]) == 1
     assert len(agent_message["warnings"][0]) <= 256
     assert history[-1]["assistant"] == completion["content"]
+
+
+def test_live_failure_agent_events_are_recursively_sanitized():
+    handler = ChatHandler(
+        model=FakeModel(),
+        rag_service=FakeRagService(),
+        agent_system=SensitiveLiveEventAgentSystem(),
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="全面评估 CCO",
+            enable_rag=False,
+            enable_tools=True,
+        )
+    )
+
+    events = [
+        item["event"]
+        for item in websocket.messages
+        if item["type"] == "agent_event"
+    ]
+    assert [event["event"] for event in events] == [
+        "tool_failed",
+        "task_failed",
+        "tool_completed",
+    ]
+    assert events[0]["message"] == (
+        "科学计算未成功完成，请检查输入或工具状态后重试。"
+    )
+    assert events[0]["tool"] == "property_calculator"
+    assert events[0]["trace_id"] == "live-sensitive-trace"
+    assert events[0]["progress"] == 0.5
+    assert events[1]["message"] == (
+        "科学计算未成功完成，请检查输入或工具状态后重试。"
+    )
+    assert events[2] == {
+        "type": "agent_event",
+        "event": "tool_completed",
+        "message": "property calculation completed normally",
+        "trace_id": "live-sensitive-trace",
+        "tool": "property_calculator",
+        "progress": 1.0,
+        "payload": {"status": "succeeded", "count": 1},
+    }
+    serialized = json.dumps(websocket.messages, ensure_ascii=False)
+    for forbidden in (
+        "live-event-key-123",
+        "live-warning-token-456",
+        "sk-liveevent123456789",
+        "live-task-token-789",
+        "C:\\Users\\",
+        "D:\\MedChat\\private",
+    ):
+        assert forbidden not in serialized
+
+
+def test_buffered_failure_agent_events_are_recursively_sanitized():
+    handler = ChatHandler(
+        model=FakeModel(),
+        rag_service=FakeRagService(),
+        agent_system=SensitiveBufferedEventAgentSystem(),
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="全面评估 CCO",
+            enable_rag=False,
+            enable_tools=True,
+        )
+    )
+
+    events = [
+        item["event"]
+        for item in websocket.messages
+        if item["type"] == "agent_event"
+    ]
+    assert [event["type"] for event in events] == [
+        "tool_failed",
+        "task_failed",
+        "tool_completed",
+    ]
+    assert events[0]["message"] == (
+        "科学计算未成功完成，请检查输入或工具状态后重试。"
+    )
+    assert events[0]["tool"] == "property_calculator"
+    assert events[0]["trace_id"] == "buffered-sensitive-trace"
+    assert events[0]["progress"] == 0.4
+    assert events[1]["message"] == (
+        "科学计算未成功完成，请检查输入或工具状态后重试。"
+    )
+    assert events[2] == {
+        "type": "tool_completed",
+        "message": "buffered property calculation completed",
+        "trace_id": "buffered-sensitive-trace",
+        "tool": "property_calculator",
+        "progress": 1.0,
+        "payload": {"status": "succeeded", "count": 2},
+    }
+    serialized = json.dumps(websocket.messages, ensure_ascii=False)
+    for forbidden in (
+        "buffered-key-123",
+        "buffered-warning-token-456",
+        "sk-bufferedevent123456789",
+        "buffered-task-token-789",
+        "buffered-error-key-987",
+        "C:\\Users\\",
+        "D:\\MedChat\\private",
+    ):
+        assert forbidden not in serialized
 
 
 def test_chat_handler_forwards_events_while_agent_is_running():

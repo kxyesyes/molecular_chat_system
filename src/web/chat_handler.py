@@ -13,6 +13,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from src.agent.persistence.redaction import (
     contains_sensitive_text,
     redact_sensitive,
+    sanitize_bounded,
     sanitize_sensitive_text,
 )
 from src.agent.routing.hybrid import SMILES_PATTERN
@@ -24,6 +25,15 @@ _AGENT_FAILURE_FALLBACK = "科学计算未成功完成，请检查输入或工�
 _AGENT_FAILURE_CONTENT_MAX_CHARS = 1024
 _AGENT_FAILURE_WARNING_MAX_CHARS = 256
 _AGENT_FAILURE_WARNING_LIMIT = 20
+_AGENT_EVENT_TEXT_MAX_CHARS = 512
+_AGENT_EVENT_MAX_DEPTH = 6
+_AGENT_EVENT_MAX_ITEMS = 64
+_AGENT_FAILURE_EVENT_TYPES = frozenset({
+    "tool_failed",
+    "task_failed",
+    "task_rejected",
+    "task_cancelled",
+})
 
 
 class ChatHandler:
@@ -702,11 +712,40 @@ class ChatHandler:
                 continue
             await self._send_agent_event(websocket, event)
 
-    @staticmethod
-    async def _send_agent_event(websocket: WebSocket, event: Dict[str, Any]):
+    @classmethod
+    def _sanitize_agent_event(cls, event: Dict[str, Any]) -> Dict[str, Any]:
+        event_name = event.get("event")
+        if not isinstance(event_name, str):
+            event_name = event.get("type")
+        is_failure_event = event_name in _AGENT_FAILURE_EVENT_TYPES
+        _, message_sensitive = cls._sanitize_agent_failure_text(
+            event.get("message"),
+            max_chars=_AGENT_EVENT_TEXT_MAX_CHARS,
+        )
+
+        redacted_event = redact_sensitive(event)
+        sanitized_event, _ = sanitize_bounded(
+            redacted_event,
+            max_depth=_AGENT_EVENT_MAX_DEPTH,
+            max_items=_AGENT_EVENT_MAX_ITEMS,
+            max_text_chars=_AGENT_EVENT_TEXT_MAX_CHARS,
+        )
+        if not isinstance(sanitized_event, dict):
+            return {}
+        if is_failure_event and message_sensitive:
+            sanitized_event["message"] = _AGENT_FAILURE_FALLBACK
+        return sanitized_event
+
+    @classmethod
+    async def _send_agent_event(
+        cls,
+        websocket: WebSocket,
+        event: Dict[str, Any],
+    ):
+        sanitized_event = cls._sanitize_agent_event(event)
         await websocket.send_text(json.dumps({
             "type": "agent_event",
-            "event": event,
+            "event": sanitized_event,
         }, ensure_ascii=False))
     
     async def _send_status(self, websocket: WebSocket, message: str):
