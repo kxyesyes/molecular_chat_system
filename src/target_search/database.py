@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -148,7 +149,8 @@ def init_db(project_root: Optional[Path | str] = None) -> None:
             );
 
             CREATE TABLE IF NOT EXISTS target_remote_cache (
-                cache_key TEXT PRIMARY KEY,
+                cache_key TEXT PRIMARY KEY NOT NULL
+                    CHECK (length(trim(cache_key)) BETWEEN 1 AND 512),
                 record_type TEXT NOT NULL,
                 source TEXT NOT NULL,
                 source_record_id TEXT NOT NULL,
@@ -157,7 +159,10 @@ def init_db(project_root: Optional[Path | str] = None) -> None:
                 retrieved_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
                 last_refresh_status TEXT,
-                schema_version INTEGER NOT NULL DEFAULT 1
+                schema_version INTEGER NOT NULL DEFAULT 1,
+                expires_epoch REAL NOT NULL,
+                cleanup_pending INTEGER NOT NULL DEFAULT 0
+                    CHECK (cleanup_pending IN (0, 1))
             );
 
             CREATE TABLE IF NOT EXISTS target_runtime_state (
@@ -183,6 +188,21 @@ def init_db(project_root: Optional[Path | str] = None) -> None:
                 "external_links": "TEXT",
             },
         )
+        _ensure_columns(
+            conn,
+            "target_remote_cache",
+            {
+                "expires_epoch": "REAL NOT NULL DEFAULT 0",
+                "cleanup_pending": "INTEGER NOT NULL DEFAULT 0",
+            },
+        )
+        _migrate_remote_cache_timestamps(conn)
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_target_remote_cache_expires_epoch
+            ON target_remote_cache(expires_epoch)
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -193,3 +213,35 @@ def _ensure_columns(conn: sqlite3.Connection, table_name: str, columns: dict[str
     for name, definition in columns.items():
         if name not in existing:
             conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {definition}")
+
+
+def _migrate_remote_cache_timestamps(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        "SELECT cache_key, retrieved_at, expires_at FROM target_remote_cache"
+    ).fetchall()
+    for row in rows:
+        retrieved_at = _canonical_utc_timestamp(row["retrieved_at"])
+        expires_at = _canonical_utc_timestamp(row["expires_at"])
+        if retrieved_at is None or expires_at is None:
+            continue
+        conn.execute(
+            """
+            UPDATE target_remote_cache
+            SET retrieved_at = ?, expires_at = ?, expires_epoch = ?,
+                cleanup_pending = COALESCE(cleanup_pending, 0)
+            WHERE cache_key = ?
+            """,
+            (retrieved_at.isoformat(), expires_at.isoformat(), expires_at.timestamp(), row["cache_key"]),
+        )
+
+
+def _canonical_utc_timestamp(value: object) -> Optional[datetime]:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
