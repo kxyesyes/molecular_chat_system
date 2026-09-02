@@ -95,6 +95,8 @@ class InputValidator:
 
     def analyze_molecular_input(self, text: str) -> MolecularInputAnalysis:
         extracted = self._extract_candidates_with_sources(text)
+        if not extracted:
+            return MolecularInputAnalysis(candidates=(), validation_available=True)
         chem = _load_rdkit_chem()
         candidates: dict[str, MolecularInputCandidate] = {}
         for value, source in extracted:
@@ -118,10 +120,10 @@ class InputValidator:
                         pass
 
             if (
-                validation == "invalid"
+                validation != "valid"
                 and source == "lexical"
-                and not self._has_strong_structural_syntax(value)
                 and not self._has_explicit_molecular_cue(value, text)
+                and not self._has_molecular_context(text)
             ):
                 continue
 
@@ -149,9 +151,17 @@ class InputValidator:
     ) -> list[tuple[str, CandidateSource]]:
         candidates: dict[str, CandidateSource] = {}
         for match in self._label_pattern.finditer(text):
-            value = self._read_labeled_candidate(text[match.end() :])
+            remainder = text[match.end() :]
+            value = self._read_labeled_candidate(remainder)
             normalized = self._normalize_candidate(value) or value.strip()
             if normalized:
+                candidates[normalized] = "labeled"
+            list_scope = re.split(r"[;；。!?！？]", remainder, maxsplit=1)[0]
+            for item in re.split(r"[,，]", list_scope)[1:]:
+                value = self._read_labeled_candidate(item)
+                normalized = self._normalize_candidate(value) or value.strip()
+                if not normalized or not self._is_labeled_list_candidate(normalized):
+                    break
                 candidates[normalized] = "labeled"
 
         for match in self._token_pattern.finditer(text):
@@ -274,6 +284,27 @@ class InputValidator:
             )
         )
 
+    @staticmethod
+    def _has_molecular_context(text: str) -> bool:
+        return bool(
+            re.search(
+                r"(?:SMILES|molecule|structure|compound|drug.?likeness|"
+                r"分子|结构|化合物|成药性)",
+                text,
+                re.IGNORECASE,
+            )
+        )
+
+    @classmethod
+    def _is_labeled_list_candidate(cls, value: str) -> bool:
+        if not cls._looks_like_smiles(value, labeled=True):
+            return len(value) == 1 and value.isupper()
+        return bool(
+            cls._has_conservative_smiles_lexicon(value)
+            or cls._has_strong_structural_syntax(value)
+            or re.fullmatch(r"[A-Z][A-Z0-9]{0,7}", value)
+        )
+
     @classmethod
     def _has_strong_structural_syntax(cls, text: str) -> bool:
         if any(char in "[]@+()=#.:/%\\" for char in text):
@@ -371,7 +402,7 @@ def _load_rdkit_chem():
         from rdkit import Chem
 
         return Chem
-    except ImportError:
+    except (ImportError, OSError, RuntimeError):
         logger.warning("RDKit not available for SMILES validation")
         return None
 

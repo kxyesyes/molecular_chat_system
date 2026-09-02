@@ -4,6 +4,7 @@ import sys
 
 import pytest
 
+import src.agent.utils.validators as validators_module
 from src.agent.utils.validators import (
     InputValidator,
     sanitize_input,
@@ -166,6 +167,58 @@ def test_nonempty_labeled_non_smiles_value_fails_closed(value):
     analysis = InputValidator().analyze_molecular_input(f"SMILES: {value}")
 
     assert analysis.potential_smiles == (value,)
+    assert analysis.valid_smiles == ()
+    assert analysis.blocks_execution is True
+
+
+@pytest.mark.parametrize("term", ["C++", "C#", "S9+"])
+def test_programming_and_assay_notation_without_molecular_context_is_ignored(term):
+    analysis = InputValidator().analyze_molecular_input(
+        f"请检索关于 {term} 的普通说明"
+    )
+
+    assert analysis.potential_smiles == ()
+    assert analysis.blocks_execution is False
+
+
+@pytest.mark.parametrize("invalid", ["X", "CCX"])
+def test_invalid_item_in_labeled_smiles_list_fails_closed(invalid):
+    analysis = InputValidator().analyze_molecular_input(f"SMILES: CCO, {invalid}")
+
+    assert analysis.valid_smiles == ("CCO",)
+    assert invalid in analysis.potential_smiles
+    assert analysis.blocks_execution is True
+
+
+def test_plain_chat_without_candidates_does_not_load_rdkit(monkeypatch):
+    def fail_if_loaded():
+        raise AssertionError("RDKit must not be loaded for plain chat")
+
+    monkeypatch.setattr(validators_module, "_load_rdkit_chem", fail_if_loaded)
+
+    analysis = InputValidator().analyze_molecular_input("你好，请介绍系统能力")
+
+    assert analysis.potential_smiles == ()
+    assert analysis.blocks_execution is False
+
+
+@pytest.mark.parametrize("error_type", [OSError, RuntimeError])
+def test_rdkit_initialization_failure_is_reported_as_unavailable(
+    monkeypatch,
+    error_type,
+):
+    real_import = builtins.__import__
+
+    def reject_rdkit(name, *args, **kwargs):
+        if name == "rdkit" or name.startswith("rdkit."):
+            raise error_type("broken RDKit runtime")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_rdkit)
+
+    analysis = InputValidator().analyze_molecular_input("SMILES: CCO")
+
+    assert analysis.validation_available is False
     assert analysis.valid_smiles == ()
     assert analysis.blocks_execution is True
 
