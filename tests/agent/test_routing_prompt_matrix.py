@@ -221,6 +221,58 @@ def test_labeled_invalid_smiles_takes_priority_over_incidental_valid_smiles():
 @pytest.mark.parametrize(
     ("prompt", "expected_skill"),
     [
+        ("请评估 CNS 穿透和 ADMET 风险", "admet_assessment"),
+        ("请预测 IC50 和 P450 活性风险", "activity_prediction"),
+        ("请评估 PK 和 ADMET 风险", "admet_assessment"),
+        ("请分析 NO 的 ADMET 风险", "admet_assessment"),
+    ],
+)
+def test_domain_acronyms_request_missing_smiles_instead_of_invalid_input(
+    prompt,
+    expected_skill,
+):
+    decision = HybridSkillRouter().decide(prompt)
+    reasons = " ".join(decision.reasons)
+
+    assert decision.selected_skill == expected_skill
+    assert decision.requires_confirmation is True
+    assert "A valid SMILES input is required" in reasons
+    assert "invalid SMILES" not in reasons
+
+
+def test_cns_admet_prompt_returns_missing_smiles_without_downstream_calls():
+    prompt = "请评估 CNS 穿透和 ADMET 风险"
+    model = _RecordingModel()
+    rag = _RecordingRagService()
+    agent = _RecordingAgentSystem()
+    handler = ChatHandler(
+        model=model,
+        rag_service=rag,
+        agent_system=agent,
+        config={"inference": {"stream": False}},
+    )
+    websocket = _RecordingWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message=prompt,
+            enable_rag=True,
+            enable_tools=True,
+        )
+    )
+
+    assert agent.execute_calls == []
+    assert rag.calls == []
+    assert model.generate_calls == 0
+    assert websocket.messages[-1]["type"] == "complete"
+    assert "有效 SMILES" in websocket.messages[-1]["content"]
+    assert "SMILES 无效" not in websocket.messages[-1]["content"]
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected_skill"),
+    [
         (
             "请计算布洛芬的基础理化性质。SMILES: CC(C)Cc1ccc(cc1)[C@@H](C)C(=O)O。输出分子量、LogP、TPSA、HBD、HBA、QED 和 Lipinski 判断。",
             "admet_assessment",

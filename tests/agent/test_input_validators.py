@@ -47,6 +47,48 @@ def test_scientific_prose_is_not_a_potential_smiles_candidate(term):
 
 
 @pytest.mark.parametrize(
+    "term",
+    ["CNS", "NO", "IC50", "P450", "PK", "ADMET", "LogP", "QED", "TPSA"],
+)
+def test_unlabeled_medicinal_chemistry_terms_are_not_molecular_input(term):
+    validator = InputValidator()
+    query = f"请评估 {term} 风险"
+    analysis = validator.analyze_molecular_input(query)
+    result = validator.validate_query(query)
+
+    assert analysis.potential_smiles == ()
+    assert analysis.blocks_execution is False
+    assert result["has_potential_smiles"] is False
+    assert result["valid"] is False
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("SMILES: NO", "NO"),
+        ("分子SMILES: CNS", "CNS"),
+    ],
+)
+def test_explicitly_labeled_domain_token_is_validated_as_structure(query, expected):
+    analysis = InputValidator().analyze_molecular_input(query)
+
+    assert analysis.potential_smiles == (expected,)
+    assert analysis.labeled_candidates[0].value == expected
+    assert analysis.labeled_candidates[0].validation in {"valid", "invalid"}
+
+
+@pytest.mark.parametrize(
+    "smiles",
+    ["CCO", "CCCCCCCCCCCCCCCCCCCCC", "CC(C)O"],
+)
+def test_unlabeled_explicit_structure_tokens_remain_supported(smiles):
+    analysis = InputValidator().analyze_molecular_input(f"请分析 {smiles}")
+
+    assert analysis.valid_smiles == (smiles,)
+    assert analysis.blocks_execution is False
+
+
+@pytest.mark.parametrize(
     "text",
     ["请计算 (CCO) 的性质", '请计算 "CCO" 的性质', "请计算 'CCO' 的性质"],
 )

@@ -70,14 +70,21 @@ class InputValidator:
         r"[A-Za-z0-9@+\-\[\]\(\)=#./\\:%]+"
         r"(?![A-Za-z0-9])"
     )
-    _prose_terms = {
-        "admet",
-        "logp",
-        "pic50",
-        "qed",
-        "smiles",
-        "tpsa",
-    }
+    _unlabeled_domain_terms = frozenset(
+        {
+            "admet",
+            "cns",
+            "ic50",
+            "logp",
+            "no",
+            "p450",
+            "pic50",
+            "pk",
+            "qed",
+            "smiles",
+            "tpsa",
+        }
+    )
 
     def __init__(self):
         self.calculation_keywords = {
@@ -237,7 +244,7 @@ class InputValidator:
             return False
         if labeled:
             return True
-        if text.lower() in cls._prose_terms:
+        if text.casefold() in cls._unlabeled_domain_terms:
             return False
         if not cls._has_conservative_smiles_lexicon(text):
             return False
