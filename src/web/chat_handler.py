@@ -26,6 +26,7 @@ _AGENT_FAILURE_CONTENT_MAX_CHARS = 1024
 _AGENT_FAILURE_WARNING_MAX_CHARS = 256
 _AGENT_FAILURE_WARNING_LIMIT = 20
 _AGENT_EVENT_TEXT_MAX_CHARS = 512
+_AGENT_EVENT_KEY_MAX_CHARS = 128
 _AGENT_EVENT_MAX_DEPTH = 6
 _AGENT_EVENT_MAX_ITEMS = 64
 _AGENT_FAILURE_EVENT_TYPES = frozenset({
@@ -713,6 +714,57 @@ class ChatHandler:
             await self._send_agent_event(websocket, event)
 
     @classmethod
+    def _safe_agent_event_key(cls, key: Any) -> str:
+        if not isinstance(key, str):
+            return ""
+        sanitized_key, sensitive = cls._sanitize_agent_failure_text(
+            key,
+            max_chars=_AGENT_EVENT_KEY_MAX_CHARS,
+        )
+        if sensitive or not sanitized_key or sanitized_key != key:
+            return ""
+
+        probe_value = "agent-event-safe-key-probe"
+        redacted_probe = redact_sensitive({key: probe_value})
+        if redacted_probe.get(key) != probe_value:
+            return ""
+        return sanitized_key
+
+    @classmethod
+    def _sanitize_agent_event_keys(
+        cls,
+        value: Any,
+        *,
+        depth: int = 0,
+    ) -> Any:
+        if depth >= _AGENT_EVENT_MAX_DEPTH:
+            return value
+        if isinstance(value, Mapping):
+            sanitized_mapping = {}
+            for index, (key, child) in enumerate(value.items()):
+                if index >= _AGENT_EVENT_MAX_ITEMS:
+                    break
+                sanitized_key = cls._safe_agent_event_key(key)
+                if not sanitized_key or sanitized_key in sanitized_mapping:
+                    continue
+                sanitized_mapping[sanitized_key] = cls._sanitize_agent_event_keys(
+                    child,
+                    depth=depth + 1,
+                )
+            return sanitized_mapping
+        if isinstance(value, list):
+            return [
+                cls._sanitize_agent_event_keys(child, depth=depth + 1)
+                for child in value[:_AGENT_EVENT_MAX_ITEMS]
+            ]
+        if isinstance(value, tuple):
+            return tuple(
+                cls._sanitize_agent_event_keys(child, depth=depth + 1)
+                for child in value[:_AGENT_EVENT_MAX_ITEMS]
+            )
+        return value
+
+    @classmethod
     def _sanitize_agent_event(cls, event: Dict[str, Any]) -> Dict[str, Any]:
         event_name = event.get("event")
         if not isinstance(event_name, str):
@@ -723,7 +775,8 @@ class ChatHandler:
             max_chars=_AGENT_EVENT_TEXT_MAX_CHARS,
         )
 
-        redacted_event = redact_sensitive(event)
+        key_safe_event = cls._sanitize_agent_event_keys(event)
+        redacted_event = redact_sensitive(key_safe_event)
         sanitized_event, _ = sanitize_bounded(
             redacted_event,
             max_depth=_AGENT_EVENT_MAX_DEPTH,

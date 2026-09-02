@@ -393,6 +393,13 @@ class SensitiveLiveEventAgentSystem(FakeAgentSystem):
             "progress": 0.5,
             "payload": {
                 "warnings": ["token=live-warning-token-456"],
+                "normal_key\x00": "must-not-overwrite-live-normal-value",
+                "normal_key": "keep-live-normal-value",
+                "sk-livekey123456789": "unsafe-live-sk-key",
+                "api_key=live-nested-key-123": "unsafe-live-api-key",
+                "token=live-nested-token-456": "unsafe-live-token-key",
+                "C:\\Users\\reviewer\\private\\key.txt": "unsafe-live-user-path",
+                "D:\\MedChat\\private\\key.json": "unsafe-live-drive-path",
                 "error": {
                     "message": "sk-liveevent123456789",
                     "debug_path": "D:\\MedChat\\private\\debug.json",
@@ -451,6 +458,23 @@ class SensitiveBufferedEventAgentSystem(FakeAgentSystem):
                             "token=buffered-warning-token-456",
                             "C:\\Users\\reviewer\\private\\warning.log",
                         ],
+                        "normal_key\x00": (
+                            "must-not-overwrite-buffered-normal-value"
+                        ),
+                        "normal_key": "keep-buffered-normal-value",
+                        "sk-bufferedkey123456789": "unsafe-buffered-sk-key",
+                        "api_key=buffered-nested-key-123": (
+                            "unsafe-buffered-api-key"
+                        ),
+                        "token=buffered-nested-token-456": (
+                            "unsafe-buffered-token-key"
+                        ),
+                        "C:\\Users\\reviewer\\private\\key.txt": (
+                            "unsafe-buffered-user-path"
+                        ),
+                        "D:\\MedChat\\private\\key.json": (
+                            "unsafe-buffered-drive-path"
+                        ),
                         "error": {
                             "message": "sk-bufferedevent123456789",
                             "details": {
@@ -998,6 +1022,8 @@ def test_live_failure_agent_events_are_recursively_sanitized():
     assert events[0]["tool"] == "property_calculator"
     assert events[0]["trace_id"] == "live-sensitive-trace"
     assert events[0]["progress"] == 0.5
+    assert events[0]["payload"]["normal_key"] == "keep-live-normal-value"
+    assert "normal_key\x00" not in events[0]["payload"]
     assert events[1]["message"] == (
         "科学计算未成功完成，请检查输入或工具状态后重试。"
     )
@@ -1016,6 +1042,10 @@ def test_live_failure_agent_events_are_recursively_sanitized():
         "live-warning-token-456",
         "sk-liveevent123456789",
         "live-task-token-789",
+        "sk-livekey123456789",
+        "live-nested-key-123",
+        "live-nested-token-456",
+        "must-not-overwrite-live-normal-value",
         "C:\\Users\\",
         "D:\\MedChat\\private",
     ):
@@ -1056,6 +1086,10 @@ def test_buffered_failure_agent_events_are_recursively_sanitized():
     assert events[0]["tool"] == "property_calculator"
     assert events[0]["trace_id"] == "buffered-sensitive-trace"
     assert events[0]["progress"] == 0.4
+    assert events[0]["payload"]["normal_key"] == (
+        "keep-buffered-normal-value"
+    )
+    assert "normal_key\x00" not in events[0]["payload"]
     assert events[1]["message"] == (
         "科学计算未成功完成，请检查输入或工具状态后重试。"
     )
@@ -1074,6 +1108,10 @@ def test_buffered_failure_agent_events_are_recursively_sanitized():
         "sk-bufferedevent123456789",
         "buffered-task-token-789",
         "buffered-error-key-987",
+        "sk-bufferedkey123456789",
+        "buffered-nested-key-123",
+        "buffered-nested-token-456",
+        "must-not-overwrite-buffered-normal-value",
         "C:\\Users\\",
         "D:\\MedChat\\private",
     ):
