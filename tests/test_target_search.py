@@ -683,6 +683,121 @@ class TargetSearchDemoTest(unittest.TestCase):
         self.assertEqual(stats.json()["target_count"], 15)
         self.assertEqual(health.json()["status"], "warning")
 
+    def test_target_database_tool_preserves_remote_structures_and_aggregates_evidence(self):
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+        class FakeService:
+            def search_targets(self, _query):
+                return {
+                    "status": "resolved",
+                    "warnings": ["stale_authoritative_cache"],
+                    "lookup_path": ["local", "UniProt", "RCSB_PDB"],
+                    "results": [
+                        {
+                            "target_id": None,
+                            "gene_symbol": "EGFR",
+                            "protein_name": "Epidermal growth factor receptor",
+                            "uniprot_id": "P00533",
+                            "source": "UniProt",
+                            "source_record_id": "P00533",
+                            "source_url": "https://www.uniprot.org/uniprotkb/P00533/entry",
+                            "retrieved_at": "2026-01-01T00:00:00+00:00",
+                            "expires_at": "2026-01-31T00:00:00+00:00",
+                            "stale": True,
+                            "recommended_structures": [
+                                {
+                                    "structure_id": "1ABC",
+                                    "source": "RCSB_PDB",
+                                    "recommendation_level": "recommended",
+                                }
+                            ],
+                        }
+                    ],
+                }
+
+        tool = TargetDatabaseTool()
+        tool._service = FakeService()
+
+        result = tool.execute("EGFR")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            result["data"][0]["recommended_structures"][0]["structure_id"],
+            "1ABC",
+        )
+        self.assertEqual(
+            result["lookup_path"], ["local", "UniProt", "RCSB_PDB"]
+        )
+        self.assertIn("stale_authoritative_cache", result["warnings"])
+        self.assertEqual(
+            result["evidence"],
+            [
+                {
+                    "source": "UniProt",
+                    "id": "P00533",
+                    "url": "https://www.uniprot.org/uniprotkb/P00533/entry",
+                    "retrieved_at": "2026-01-01T00:00:00+00:00",
+                    "expires_at": "2026-01-31T00:00:00+00:00",
+                    "stale": True,
+                }
+            ],
+        )
+
+    def test_target_database_tool_reports_zero_authoritative_matches_honestly(self):
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+        class FakeService:
+            def search_targets(self, _query):
+                return {
+                    "status": "not_found",
+                    "warnings": [],
+                    "lookup_path": ["local", "UniProt"],
+                    "results": [],
+                }
+
+        tool = TargetDatabaseTool()
+        tool._service = FakeService()
+
+        result = tool.execute("UNKNOWN")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["lookup_path"], ["local", "UniProt"])
+        self.assertIn("authoritative", result["formatted"].lower())
+        self.assertNotIn("database is empty", result["formatted"].lower())
+
+    def test_target_database_tool_does_not_leak_provider_exception_text(self):
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+        class FakeService:
+            def search_targets(self, _query):
+                raise RuntimeError("provider body SECRET_TOKEN C:\\private\\targets.db")
+
+        tool = TargetDatabaseTool()
+        tool._service = FakeService()
+
+        result = tool.execute("EGFR")
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["message"], "Target search is temporarily unavailable.")
+        self.assertNotIn("SECRET_TOKEN", str(result))
+        self.assertNotIn("private", str(result).lower())
+
+    def test_target_database_tool_does_not_log_service_construction_details(self):
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+        with patch(
+            "src.target_search.service.TargetSearchService",
+            side_effect=RuntimeError("provider body SECRET_TOKEN C:\\private\\targets.db"),
+        ), self.assertLogs(
+            "src.agent.tools.target_database_tool", level="ERROR"
+        ) as captured:
+            result = TargetDatabaseTool().execute("EGFR")
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["message"], "Target search is temporarily unavailable.")
+        self.assertNotIn("SECRET_TOKEN", "\n".join(captured.output))
+        self.assertNotIn("private", "\n".join(captured.output).lower())
+
 
 if __name__ == "__main__":
     unittest.main()

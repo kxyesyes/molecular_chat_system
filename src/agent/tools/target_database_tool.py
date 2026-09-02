@@ -31,8 +31,8 @@ class TargetDatabaseTool(BaseMolecularTool):
 
                 self._service = TargetSearchService()
                 logger.info("TargetSearchService loaded")
-            except Exception as e:
-                logger.error(f"Failed to load TargetSearchService: {e}")
+            except Exception:
+                logger.error("Failed to load TargetSearchService")
                 raise
         return self._service
 
@@ -77,14 +77,28 @@ class TargetDatabaseTool(BaseMolecularTool):
             service = self._get_service()
             targets: list[Any] = []
             searched: list[str] = []
+            lookup_path: list[str] = []
+            evidence: list[dict[str, Any]] = []
             for search_query in search_queries:
                 search_result = service.search_targets(search_query)
                 searched.append(search_query)
+                for warning in search_result.get("warnings", []):
+                    if isinstance(warning, str) and warning not in result.setdefault(
+                        "warnings", []
+                    ):
+                        result["warnings"].append(warning)
+                for step in search_result.get("lookup_path", []):
+                    if isinstance(step, str) and step not in lookup_path:
+                        lookup_path.append(step)
                 for target in search_result.get("results", []):
                     if isinstance(target, dict):
                         target = {**target, "source_query": search_query}
                         target_id = target.get("target_id", target.get("id"))
-                        recommended_structures: list[dict[str, Any]] = []
+                        recommended_structures = [
+                            dict(structure)
+                            for structure in target.get("recommended_structures", [])
+                            if isinstance(structure, dict)
+                        ]
                         if target_id not in (None, ""):
                             try:
                                 structure_payload = service.get_target_structures(
@@ -96,21 +110,37 @@ class TargetDatabaseTool(BaseMolecularTool):
                                     for structure in structures[:3]
                                     if isinstance(structure, dict)
                                 ]
-                            except Exception as exc:
+                            except Exception:
                                 result.setdefault("warnings", []).append(
                                     "Could not load structures for target "
-                                    f"{target_id}: {exc}"
+                                    f"{target_id}."
                                 )
                         target["recommended_structures"] = recommended_structures
+                        provenance = self._target_evidence(target)
+                        if provenance is not None and provenance not in evidence:
+                            evidence.append(provenance)
                     targets.append(target)
+
+            result["lookup_path"] = lookup_path
+            result["evidence"] = evidence
 
             if not targets:
                 result["success"] = True
                 result["message"] = "No matching targets found"
+                authoritative_checked = any(
+                    step in {"UniProt", "RCSB_PDB", "AlphaFold", "authoritative"}
+                    for step in lookup_path
+                )
+                no_match_text = (
+                    "No matching target was found in the local database or the "
+                    "authoritative sources checked."
+                    if authoritative_checked
+                    else "No matching target records were found in the local database."
+                )
                 result["formatted"] = (
                     "## Target database search results\n\n"
                     f"Query keywords: `{', '.join(searched)}`\n\n"
-                    "No matching target records were found in the database."
+                    f"{no_match_text}"
                 )
                 return result
 
@@ -165,11 +195,26 @@ class TargetDatabaseTool(BaseMolecularTool):
             result["formatted"] = "\n".join(lines)
             result["message"] = f"Found {len(targets)} matching targets"
 
-        except Exception as e:
-            logger.error(f"Target database search failed: {e}", exc_info=True)
-            result["message"] = f"Search failed: {str(e)}"
+        except Exception:
+            logger.error("Target database search failed")
+            result["message"] = "Target search is temporarily unavailable."
 
         return result
+
+    @staticmethod
+    def _target_evidence(target: dict[str, Any]) -> dict[str, Any] | None:
+        source = target.get("source")
+        record_id = target.get("source_record_id")
+        if not isinstance(source, str) or not isinstance(record_id, str):
+            return None
+        return {
+            "source": source,
+            "id": record_id,
+            "url": target.get("source_url"),
+            "retrieved_at": target.get("retrieved_at"),
+            "expires_at": target.get("expires_at"),
+            "stale": bool(target.get("stale")),
+        }
 
     def _search_queries(self, query: Any) -> list[str]:
         queries: list[str] = []

@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import hashlib
+import threading
 from pathlib import Path
-from typing import Optional
+from typing import Any, Mapping, Optional
 
+from .authoritative_resolver import AuthoritativeTargetResolver, TargetResolution
+from .cache import CachedEvidence, TargetCacheRepository
 from .database import (
     absolute_from_project,
     get_cache_dir,
     get_connection,
     get_db_path,
+    get_target_db_dir,
     init_db,
     relative_to_project,
     resolve_project_root,
 )
 from .downloader import StructureDownloader
+from .seed import seed_database
 from .schemas import as_bool, split_list
 from .scoring import calculate_structure_score
 
@@ -24,13 +30,56 @@ PDE_CATALYTIC_TARGETS = {
     "PDE5A", "PDE6A", "PDE6B", "PDE6C", "PDE7A", "PDE7B", "PDE8A", "PDE8B", "PDE9A", "PDE10A", "PDE11A",
 }
 PDE_REGULATORY_TARGETS = {"PDE6D", "PDE6G", "PDE6H"}
+_SEED_LOCKS: dict[Path, threading.RLock] = {}
+_SEED_LOCKS_GUARD = threading.Lock()
+_TARGET_SEED_FILENAMES = (
+    "seed_targets.csv",
+    "common_targets.csv",
+    "pde_targets.csv",
+)
+_RETRYABLE_REMOTE_CODES = frozenset(
+    {
+        "connection_failure",
+        "operation_timeout",
+        "provider_unavailable",
+        "timeout",
+    }
+)
+
+
+def _seed_lock(db_path: Path) -> threading.RLock:
+    resolved = db_path.resolve()
+    with _SEED_LOCKS_GUARD:
+        return _SEED_LOCKS.setdefault(resolved, threading.RLock())
+
+
+def _json_copy(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _json_copy(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_copy(item) for item in value]
+    return value
 
 
 class TargetSearchService:
-    def __init__(self, project_root: Optional[Path | str] = None):
+    def __init__(
+        self,
+        project_root: Optional[Path | str] = None,
+        resolver: Optional[AuthoritativeTargetResolver] = None,
+        cache: Optional[TargetCacheRepository] = None,
+        auto_seed: bool = True,
+        organism: str | int = "Homo sapiens",
+    ):
+        if not isinstance(auto_seed, bool):
+            raise TypeError("auto_seed must be a boolean")
         self.project_root = resolve_project_root(project_root)
         init_db(self.project_root)
         self.downloader = StructureDownloader(self.project_root)
+        self._resolver = resolver
+        self._owns_resolver = resolver is None
+        self.cache = cache or TargetCacheRepository(self.project_root)
+        self.auto_seed = auto_seed
+        self.organism = organism
 
     def search_targets(
         self,
@@ -45,6 +94,59 @@ class TargetSearchService:
         if not query:
             return {"query": query, "results": []}
 
+        local_results = self._search_local(query)
+        if local_results:
+            results = self._search_local(
+                query,
+                target_type=target_type,
+                source=source,
+                has_experimental=has_experimental,
+                docking_recommended=docking_recommended,
+                has_ligand=has_ligand,
+            )
+            return self._search_payload(
+                query,
+                results,
+                status="resolved",
+                lookup_path=["local"],
+            )
+
+        seeded = self._maybe_auto_seed()
+        local_results = self._search_local(query)
+        if local_results:
+            results = self._search_local(
+                query,
+                target_type=target_type,
+                source=source,
+                has_experimental=has_experimental,
+                docking_recommended=docking_recommended,
+                has_ligand=has_ligand,
+            )
+            return self._search_payload(
+                query,
+                results,
+                status="resolved",
+                lookup_path=["local_seed", "local"] if seeded else ["local"],
+            )
+
+        return self._search_authoritative(
+            query,
+            target_type=target_type,
+            source=source,
+            has_experimental=has_experimental,
+            docking_recommended=docking_recommended,
+            has_ligand=has_ligand,
+        )
+
+    def _search_local(
+        self,
+        query: str,
+        target_type: Optional[str] = None,
+        source: Optional[str] = None,
+        has_experimental: Optional[bool] = None,
+        docking_recommended: Optional[bool] = None,
+        has_ligand: Optional[bool] = None,
+    ) -> list[dict[str, Any]]:
         like = f"%{query.lower()}%"
         filter_clause, filter_params = self._filter_clause(
             target_type=target_type,
@@ -71,7 +173,7 @@ class TargetSearchService:
             conn.close()
 
         if exact_rows:
-            return {"query": query, "results": [self._format_search_row(row, query) for row in exact_rows]}
+            return [self._format_search_row(row, query) for row in exact_rows]
 
         fuzzy_where = """
             (
@@ -93,7 +195,453 @@ class TargetSearchService:
             conn.close()
 
         rows = [row for row in rows if self._is_relevant_fuzzy_row(row, query)]
-        return {"query": query, "results": [self._format_search_row(row, query) for row in rows]}
+        return [self._format_search_row(row, query) for row in rows]
+
+    def _maybe_auto_seed(self) -> bool:
+        if not self.auto_seed or self._target_count() != 0:
+            return False
+        seed_dir = get_target_db_dir(self.project_root)
+        if not any((seed_dir / filename).is_file() for filename in _TARGET_SEED_FILENAMES):
+            return False
+        lock = _seed_lock(get_db_path(self.project_root))
+        with lock:
+            if self._target_count() != 0:
+                return False
+            if not any(
+                (seed_dir / filename).is_file()
+                for filename in _TARGET_SEED_FILENAMES
+            ):
+                return False
+            seed_database(self.project_root)
+            return True
+
+    def _target_count(self) -> int:
+        conn = get_connection(self.project_root)
+        try:
+            row = conn.execute("SELECT COUNT(*) AS count FROM targets").fetchone()
+            return int(row["count"])
+        finally:
+            conn.close()
+
+    def _search_authoritative(
+        self,
+        query: str,
+        *,
+        target_type: Optional[str],
+        source: Optional[str],
+        has_experimental: Optional[bool],
+        docking_recommended: Optional[bool],
+        has_ligand: Optional[bool],
+    ) -> dict[str, Any]:
+        target_key = self._target_cache_key(query)
+        target_cached = self.cache.get(target_key, allow_stale=True)
+        target_fresh = target_cached is not None and not target_cached.stale
+        target_state = (
+            "fresh" if target_fresh else "expired" if target_cached else "miss"
+        )
+        structures_cached: Optional[CachedEvidence] = None
+        structures_state = "miss"
+
+        if target_cached is not None:
+            accession = str(target_cached.payload.get("uniprot_id") or "")
+            if accession:
+                structures_cached = self.cache.get(
+                    self._structures_cache_key(accession), allow_stale=True
+                )
+                structures_state = (
+                    "fresh"
+                    if structures_cached is not None and not structures_cached.stale
+                    else "expired"
+                    if structures_cached is not None
+                    else "miss"
+                )
+
+        if target_fresh and structures_cached is not None and not structures_cached.stale:
+            record = self._record_from_cache(target_cached, structures_cached)
+            return self._authoritative_success_payload(
+                query,
+                record,
+                lookup_path=["local", "cache:target", "cache:structures"],
+                cache={"target": "fresh", "structures": "fresh"},
+                filters={
+                    "target_type": target_type,
+                    "source": source,
+                    "has_experimental": has_experimental,
+                    "docking_recommended": docking_recommended,
+                    "has_ligand": has_ligand,
+                },
+            )
+
+        resolve_query = (
+            str(target_cached.payload["uniprot_id"])
+            if target_fresh and target_cached is not None
+            else query
+        )
+        resolution = self._resolve_safely(resolve_query)
+        lookup_path = ["local", *resolution.lookup_path]
+
+        if resolution.status == "resolved":
+            try:
+                normalized_target = self._normalize_target_evidence(resolution.target)
+                normalized_structures = self._normalize_structure_evidence(
+                    resolution.structures
+                )
+            except (KeyError, TypeError, ValueError):
+                return self._search_payload(
+                    query,
+                    [],
+                    status="unavailable",
+                    warnings=["authoritative_normalization_failed"],
+                    lookup_path=lookup_path,
+                    cache={
+                        "target": target_state,
+                        "structures": structures_state,
+                    },
+                )
+
+            if target_fresh and target_cached is not None:
+                if normalized_target["uniprot_id"] != target_cached.payload["uniprot_id"]:
+                    return self._search_payload(
+                        query,
+                        [],
+                        status="unavailable",
+                        warnings=["authoritative_identity_mismatch"],
+                        lookup_path=lookup_path,
+                        cache={
+                            "target": "fresh",
+                            "structures": structures_state,
+                        },
+                    )
+                target_evidence = target_cached
+                target_state = "fresh"
+            else:
+                target_evidence = self.cache.upsert(
+                    target_key,
+                    "target",
+                    normalized_target["source"],
+                    normalized_target["source_record_id"],
+                    normalized_target,
+                )
+                target_state = "refreshed"
+
+            accession = str(target_evidence.payload["uniprot_id"])
+            structures_evidence = self.cache.upsert(
+                self._structures_cache_key(accession),
+                "structures",
+                self._structure_cache_source(normalized_structures),
+                accession,
+                {"structures": normalized_structures},
+            )
+            record = self._record_from_cache(target_evidence, structures_evidence)
+            return self._authoritative_success_payload(
+                query,
+                record,
+                warnings=list(resolution.warnings),
+                lookup_path=lookup_path,
+                cache={"target": target_state, "structures": "refreshed"},
+                filters={
+                    "target_type": target_type,
+                    "source": source,
+                    "has_experimental": has_experimental,
+                    "docking_recommended": docking_recommended,
+                    "has_ligand": has_ligand,
+                },
+            )
+
+        if self._resolution_is_retryable(resolution) and target_cached is not None:
+            if structures_cached is None:
+                structures_cached = self._empty_structures_evidence(target_cached)
+            record = self._record_from_cache(target_cached, structures_cached)
+            warnings = [*resolution.warnings, "stale_authoritative_cache"]
+            return self._authoritative_success_payload(
+                query,
+                record,
+                warnings=warnings,
+                lookup_path=lookup_path,
+                cache={
+                    "target": "stale" if target_cached.stale else "fresh",
+                    "structures": (
+                        "stale" if structures_cached.stale else "fresh"
+                    ),
+                },
+                filters={
+                    "target_type": target_type,
+                    "source": source,
+                    "has_experimental": has_experimental,
+                    "docking_recommended": docking_recommended,
+                    "has_ligand": has_ligand,
+                },
+            )
+
+        return self._search_payload(
+            query,
+            [],
+            status=resolution.status,
+            warnings=list(resolution.warnings),
+            lookup_path=lookup_path,
+            cache={"target": target_state, "structures": structures_state},
+        )
+
+    def _resolve_safely(self, query: str) -> TargetResolution:
+        try:
+            return self._get_resolver().resolve(query, self.organism)
+        except Exception:
+            return TargetResolution(
+                status="unavailable",
+                warnings=("authoritative_lookup_failed",),
+                lookup_path=("authoritative",),
+            )
+
+    def _get_resolver(self) -> AuthoritativeTargetResolver:
+        if self._resolver is None:
+            self._resolver = AuthoritativeTargetResolver()
+        return self._resolver
+
+    def close(self) -> None:
+        if self._owns_resolver and self._resolver is not None:
+            self._resolver.close()
+
+    def __enter__(self) -> "TargetSearchService":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    @staticmethod
+    def _resolution_is_retryable(resolution: TargetResolution) -> bool:
+        if resolution.status != "unavailable":
+            return False
+        return any(
+            warning.rsplit(":", 1)[-1] in _RETRYABLE_REMOTE_CODES
+            for warning in resolution.warnings
+        )
+
+    def _target_cache_key(self, query: str) -> str:
+        identity = (
+            f"{str(self.organism).strip().casefold()}\0"
+            f"{query.strip().casefold()}"
+        )
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        return f"target:{digest}"
+
+    @staticmethod
+    def _structures_cache_key(accession: str) -> str:
+        return f"structures:{accession.strip().upper()}"
+
+    def _normalize_target_evidence(
+        self, target: Optional[Mapping[str, Any]]
+    ) -> dict[str, Any]:
+        if target is None:
+            raise ValueError("resolved evidence requires a target")
+        required = (
+            "gene_symbol",
+            "uniprot_id",
+            "source",
+            "source_record_id",
+            "source_url",
+        )
+        if any(not isinstance(target.get(key), str) or not target[key].strip() for key in required):
+            raise ValueError("target evidence is incomplete")
+        aliases = target.get("aliases") or []
+        if not isinstance(aliases, (list, tuple)) or any(
+            not isinstance(item, str) for item in aliases
+        ):
+            raise ValueError("target aliases are invalid")
+        return {
+            "gene_symbol": target["gene_symbol"].strip(),
+            "protein_name": self._optional_text(target.get("protein_name")),
+            "uniprot_id": target["uniprot_id"].strip().upper(),
+            "organism": self._optional_text(target.get("organism")),
+            "target_type": self._optional_text(target.get("target_type")),
+            "disease_keywords": [],
+            "aliases": sorted({item.strip() for item in aliases if item.strip()}),
+            "source": target["source"].strip(),
+            "source_record_id": target["source_record_id"].strip(),
+            "source_url": target["source_url"].strip(),
+            "match_reason": self._optional_text(target.get("match_reason")) or "authoritative",
+        }
+
+    def _normalize_structure_evidence(
+        self, structures: tuple[Mapping[str, Any], ...]
+    ) -> list[dict[str, Any]]:
+        normalized = []
+        for index, structure in enumerate(structures):
+            structure_id = structure.get("structure_id")
+            source = structure.get("source")
+            structure_type = structure.get("structure_type")
+            source_url = structure.get("source_url")
+            if any(
+                not isinstance(value, str) or not value.strip()
+                for value in (structure_id, source, structure_type, source_url)
+            ):
+                raise ValueError("structure evidence is incomplete")
+            ligand_values = structure.get("ligand_evidence", structure.get("ligand_ids", [])) or []
+            if not isinstance(ligand_values, (list, tuple)) or any(
+                not isinstance(item, str) for item in ligand_values
+            ):
+                raise ValueError("structure ligand evidence is invalid")
+            is_experimental = structure_type.strip().casefold() == "experimental"
+            payload = {
+                "id": None,
+                "structure_id": structure_id.strip(),
+                "source": source.strip(),
+                "structure_type": structure_type.strip(),
+                "method": self._optional_text(structure.get("method")),
+                "resolution": structure.get("resolution"),
+                "chain_ids": [],
+                "ligand_ids": sorted(
+                    {item.strip() for item in ligand_values if item.strip()}
+                ),
+                "organism": self._optional_text(structure.get("organism")),
+                "title": self._optional_text(structure.get("title")),
+                "file_format": "cif",
+                "download_url": self._optional_text(structure.get("download_url")),
+                "source_url": source_url.strip(),
+                "is_downloaded": False,
+                "docking_recommended": is_experimental,
+                "is_preferred": index == 0,
+                "quality_note": None,
+            }
+            payload["score"] = calculate_structure_score(payload)
+            payload["recommendation_reasons"] = self._structure_recommendation_reasons(payload)
+            payload["warnings"] = self._structure_warnings(payload)
+            payload["recommendation_level"] = self._recommendation_level(payload)
+            payload["docking_grade"] = self._docking_grade(payload)
+            payload["docking_grade_label"] = self._docking_grade_label(
+                payload["docking_grade"]
+            )
+            normalized.append(payload)
+        return sorted(
+            normalized,
+            key=lambda item: (-item["score"], item["source"], item["structure_id"]),
+        )
+
+    @staticmethod
+    def _optional_text(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("text evidence must be a string")
+        return value.strip() or None
+
+    @staticmethod
+    def _structure_cache_source(structures: list[dict[str, Any]]) -> str:
+        sources = {item["source"] for item in structures}
+        return next(iter(sources)) if len(sources) == 1 else "Authoritative"
+
+    def _record_from_cache(
+        self, target: CachedEvidence, structures: CachedEvidence
+    ) -> dict[str, Any]:
+        target_payload = dict(target.payload)
+        structure_records = [
+            _json_copy(item) for item in structures.payload.get("structures", [])
+        ]
+        experimental_count = sum(
+            item.get("structure_type") == "experimental" for item in structure_records
+        )
+        alphafold_count = sum(
+            item.get("source") == "AlphaFold" for item in structure_records
+        )
+        return {
+            "target_id": None,
+            **_json_copy(target_payload),
+            "structure_count": len(structure_records),
+            "downloaded_structure_count": 0,
+            "experimental_structure_count": experimental_count,
+            "alphafold_structure_count": alphafold_count,
+            "has_experimental_structure": experimental_count > 0,
+            "has_alphafold_structure": alphafold_count > 0,
+            "recommended_structures": structure_records,
+            "retrieved_at": target.retrieved_at.isoformat(),
+            "expires_at": target.expires_at.isoformat(),
+            "stale": target.stale or structures.stale,
+        }
+
+    @staticmethod
+    def _empty_structures_evidence(target: CachedEvidence) -> CachedEvidence:
+        return CachedEvidence(
+            cache_key="structures:unavailable",
+            record_type="structures",
+            source="Authoritative",
+            source_record_id=target.source_record_id,
+            payload={"structures": []},
+            payload_digest="",
+            generation_id=target.generation_id,
+            retrieved_at=target.retrieved_at,
+            expires_at=target.expires_at,
+            stale=target.stale,
+        )
+
+    def _authoritative_success_payload(
+        self,
+        query: str,
+        record: dict[str, Any],
+        *,
+        lookup_path: list[str],
+        cache: dict[str, str],
+        filters: dict[str, Any],
+        warnings: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        results = [record] if self._remote_record_matches(record, **filters) else []
+        return self._search_payload(
+            query,
+            results,
+            status="resolved",
+            warnings=warnings,
+            lookup_path=lookup_path,
+            cache=cache,
+        )
+
+    @staticmethod
+    def _remote_record_matches(
+        record: Mapping[str, Any],
+        *,
+        target_type: Optional[str],
+        source: Optional[str],
+        has_experimental: Optional[bool],
+        docking_recommended: Optional[bool],
+        has_ligand: Optional[bool],
+    ) -> bool:
+        structures = record.get("recommended_structures") or []
+        if target_type and str(record.get("target_type") or "").casefold() != target_type.casefold():
+            return False
+        if source and not any(
+            str(item.get("source") or "").casefold() == source.casefold()
+            for item in structures
+        ):
+            return False
+        if has_experimental is not None and bool(
+            record.get("has_experimental_structure")
+        ) != has_experimental:
+            return False
+        if docking_recommended is not None and any(
+            bool(item.get("docking_recommended")) for item in structures
+        ) != docking_recommended:
+            return False
+        if has_ligand is not None and any(
+            bool(item.get("ligand_ids")) for item in structures
+        ) != has_ligand:
+            return False
+        return True
+
+    @staticmethod
+    def _search_payload(
+        query: str,
+        results: list[dict[str, Any]],
+        *,
+        status: str,
+        warnings: Optional[list[str]] = None,
+        lookup_path: Optional[list[str]] = None,
+        cache: Optional[dict[str, str]] = None,
+    ) -> dict[str, Any]:
+        return {
+            "query": query,
+            "results": results,
+            "warnings": list(dict.fromkeys(warnings or [])),
+            "lookup_path": list(lookup_path or []),
+            "status": status,
+            "cache": cache or {"target": "none", "structures": "none"},
+        }
 
     def _search_sql(self, where_clause: str) -> str:
         return f"""

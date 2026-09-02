@@ -4451,3 +4451,564 @@ def test_rcsb_operation_timeout_is_shared_between_search_and_graphql():
     assert raised.value.code == "operation_timeout"
     assert raised.value.retryable is True
     assert len(session.calls) == 1
+
+
+class _ResolverClient:
+    def __init__(self, *, result=None, error=None):
+        self.result = result
+        self.error = error
+        self.calls = []
+        self.closed = 0
+
+    def resolve(self, query, organism):
+        self.calls.append((query, organism))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    def search(self, accession):
+        self.calls.append(accession)
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    def lookup(self, accession):
+        self.calls.append(accession)
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    def close(self):
+        self.closed += 1
+
+
+def _authoritative_target():
+    return {
+        "gene_symbol": "EGFR",
+        "protein_name": "Epidermal growth factor receptor",
+        "uniprot_id": "P00533",
+        "organism": "Homo sapiens",
+        "aliases": ["ERBB1"],
+        "source": "UniProt",
+        "source_record_id": "P00533",
+        "source_url": "https://www.uniprot.org/uniprotkb/P00533/entry",
+        "match_reason": "exact_gene",
+    }
+
+
+def _experimental_structure(structure_id="1ABC"):
+    return {
+        "structure_id": structure_id,
+        "source": "RCSB_PDB",
+        "structure_type": "experimental",
+        "method": "X-RAY DIFFRACTION",
+        "resolution": 1.8,
+        "organism": "Homo sapiens",
+        "title": "EGFR complex",
+        "ligand_evidence": ["ATP"],
+        "download_url": f"https://files.rcsb.org/download/{structure_id}.cif",
+        "source_url": f"https://www.rcsb.org/structure/{structure_id}",
+    }
+
+
+def _predicted_structure():
+    return {
+        "structure_id": "AF-P00533-F1",
+        "model_id": "AF-P00533-F1",
+        "uniprot_id": "P00533",
+        "source": "AlphaFold",
+        "structure_type": "predicted",
+        "resolution": None,
+        "title": "Epidermal growth factor receptor",
+        "organism": "Homo sapiens",
+        "pdb_url": "https://alphafold.ebi.ac.uk/files/AF-P00533-F1-model_v6.pdb",
+        "cif_url": "https://alphafold.ebi.ac.uk/files/AF-P00533-F1-model_v6.cif",
+        "download_url": "https://alphafold.ebi.ac.uk/files/AF-P00533-F1-model_v6.cif",
+        "source_url": "https://alphafold.ebi.ac.uk/entry/P00533",
+    }
+
+
+def test_target_resolution_is_deeply_immutable_and_json_safe():
+    from src.target_search.authoritative_resolver import TargetResolution
+
+    resolution = TargetResolution(
+        status="resolved",
+        target=_authoritative_target(),
+        structures=(_experimental_structure(),),
+        warnings=("safe warning",),
+        lookup_path=("UniProt", "RCSB_PDB"),
+    )
+
+    with pytest.raises(FrozenInstanceError):
+        resolution.status = "not_found"
+    with pytest.raises(TypeError):
+        resolution.target["gene_symbol"] = "OTHER"
+    with pytest.raises(TypeError):
+        resolution.structures[0]["source"] = "OTHER"
+    assert json.loads(json.dumps(resolution.to_dict())) == resolution.to_dict()
+    assert resolution.to_dict()["structures"][0]["structure_id"] == "1ABC"
+    with pytest.raises(TypeError):
+        TargetResolution(status="resolved", target={"not_json": object()})
+
+
+def test_authoritative_resolver_uses_rcsb_before_alphafold_and_falls_back():
+    from src.target_search.authoritative_resolver import AuthoritativeTargetResolver
+
+    uniprot = _ResolverClient(result=_authoritative_target())
+    rcsb = _ResolverClient(result=[_experimental_structure()])
+    alphafold = _ResolverClient(result=_predicted_structure())
+    resolver = AuthoritativeTargetResolver(uniprot, rcsb, alphafold)
+
+    experimental = resolver.resolve("EGFR", "Homo sapiens")
+
+    assert experimental.status == "resolved"
+    assert experimental.lookup_path == ("UniProt", "RCSB_PDB")
+    assert [item["structure_id"] for item in experimental.structures] == ["1ABC"]
+    assert alphafold.calls == []
+
+    rcsb.result = []
+    predicted = resolver.resolve("P00533", "Homo sapiens")
+
+    assert predicted.lookup_path == ("UniProt", "RCSB_PDB", "AlphaFold")
+    assert predicted.structures[0]["structure_type"] == "predicted"
+
+
+def test_authoritative_resolver_reports_not_found_ambiguity_and_sanitized_failure():
+    from src.target_search.authoritative_resolver import AuthoritativeTargetResolver
+    from src.target_search.remote_clients import RemoteSourceError
+
+    not_found = AuthoritativeTargetResolver(
+        _ResolverClient(result=None), _ResolverClient(result=[]), _ResolverClient(result=None)
+    ).resolve("UNKNOWN", "Homo sapiens")
+    assert not_found.status == "not_found"
+    assert not_found.target is None
+    assert not_found.lookup_path == ("UniProt",)
+
+    ambiguous = AuthoritativeTargetResolver(
+        _ResolverClient(
+            error=RemoteSourceError(
+                "UniProt", "ambiguous_match", retryable=False
+            )
+        ),
+        _ResolverClient(result=[]),
+        _ResolverClient(result=None),
+    ).resolve("EGFR", "Homo sapiens")
+    assert ambiguous.status == "ambiguous"
+    assert ambiguous.warnings == ("UniProt:ambiguous_match",)
+
+    unavailable = AuthoritativeTargetResolver(
+        _ResolverClient(
+            error=RemoteSourceError(
+                "UniProt", "provider_unavailable", retryable=True, status_code=503
+            )
+        ),
+        _ResolverClient(result=[]),
+        _ResolverClient(result=None),
+    ).resolve("secret-provider-body", "Homo sapiens")
+    assert unavailable.status == "unavailable"
+    assert unavailable.warnings == ("UniProt:provider_unavailable",)
+    assert "secret-provider-body" not in str(unavailable.to_dict())
+
+
+def test_authoritative_resolver_closes_only_clients_it_owns(monkeypatch):
+    import src.target_search.authoritative_resolver as resolver_module
+
+    borrowed = [_ResolverClient(result=None) for _ in range(3)]
+    borrowed_resolver = resolver_module.AuthoritativeTargetResolver(*borrowed)
+    borrowed_resolver.close()
+    assert [client.closed for client in borrowed] == [0, 0, 0]
+
+    created = []
+
+    class FakeHttp:
+        def close(self):
+            pass
+
+    def factory(_http):
+        client = _ResolverClient(result=None)
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(resolver_module, "BoundedJsonClient", FakeHttp)
+    monkeypatch.setattr(resolver_module, "UniProtClient", factory)
+    monkeypatch.setattr(resolver_module, "RcsbClient", factory)
+    monkeypatch.setattr(resolver_module, "AlphaFoldClient", factory)
+
+    with resolver_module.AuthoritativeTargetResolver() as owned_resolver:
+        assert owned_resolver is not None
+
+    assert [client.closed for client in created] == [1, 1, 1]
+
+
+class _QueueResolver:
+    def __init__(self, *resolutions):
+        self.resolutions = list(resolutions)
+        self.calls = []
+        self.closed = 0
+
+    def resolve(self, query, organism):
+        self.calls.append((query, organism))
+        if len(self.resolutions) > 1:
+            return self.resolutions.pop(0)
+        return self.resolutions[0]
+
+    def close(self):
+        self.closed += 1
+
+
+def _resolution(
+    status="resolved", *, target=None, structures=None, warnings=(), lookup_path=None
+):
+    from src.target_search.authoritative_resolver import TargetResolution
+
+    return TargetResolution(
+        status=status,
+        target=_authoritative_target() if target is None and status == "resolved" else target,
+        structures=tuple(
+            [_experimental_structure()] if structures is None and status == "resolved" else structures or []
+        ),
+        warnings=tuple(warnings),
+        lookup_path=tuple(lookup_path or ("UniProt", "RCSB_PDB")),
+    )
+
+
+def _remote_service(project_root, clock, resolver, *, auto_seed=False):
+    from src.target_search.cache import TargetCacheRepository
+    from src.target_search.service import TargetSearchService
+
+    cache = TargetCacheRepository(project_root=project_root, clock=clock)
+    return TargetSearchService(
+        project_root=project_root,
+        resolver=resolver,
+        cache=cache,
+        auto_seed=auto_seed,
+    )
+
+
+def test_target_search_local_hit_returns_without_authoritative_call(project_root, clock):
+    from src.target_search.seed import seed_database
+
+    seed_database(project_root)
+    resolver = _QueueResolver(_resolution())
+    service = _remote_service(project_root, clock, resolver)
+
+    payload = service.search_targets("EGFR")
+
+    assert payload["lookup_path"] == ["local"]
+    assert payload["status"] == "resolved"
+    assert payload["cache"] == {"target": "none", "structures": "none"}
+    assert payload["results"][0]["gene_symbol"] == "EGFR"
+    assert resolver.calls == []
+
+
+def test_empty_local_database_seeds_existing_csv_once_before_remote(
+    project_root, clock, monkeypatch
+):
+    from src.target_search import service as service_module
+    from src.target_search.seed import seed_database as real_seed_database
+
+    db_dir = project_root / "data" / "target_db"
+    db_dir.mkdir(parents=True)
+    (db_dir / "common_targets.csv").write_text(
+        "gene_symbol,protein_name,uniprot_id,organism,target_type,aliases\n"
+        "EGFR,Epidermal growth factor receptor,P00533,Homo sapiens,Kinase,ERBB1\n",
+        encoding="utf-8",
+    )
+    seed_calls = []
+
+    def counted_seed(root):
+        seed_calls.append(root)
+        return real_seed_database(root)
+
+    monkeypatch.setattr(service_module, "seed_database", counted_seed)
+    resolver = _QueueResolver(_resolution())
+    service = _remote_service(project_root, clock, resolver, auto_seed=True)
+
+    first = service.search_targets("EGFR")
+    second = service.search_targets("ERBB1")
+
+    assert first["lookup_path"] == ["local_seed", "local"]
+    assert second["lookup_path"] == ["local"]
+    assert len(seed_calls) == 1
+    assert resolver.calls == []
+
+
+def test_empty_database_without_seed_csv_goes_remote_without_creating_seed_files(
+    project_root, clock
+):
+    resolver = _QueueResolver(_resolution())
+    service = _remote_service(project_root, clock, resolver, auto_seed=True)
+
+    payload = service.search_targets("EGFR")
+
+    assert payload["lookup_path"][0] == "local"
+    assert "UniProt" in payload["lookup_path"]
+    assert resolver.calls == [("EGFR", "Homo sapiens")]
+    assert not (project_root / "data" / "target_db" / "seed_targets.csv").exists()
+
+
+def test_populated_local_miss_uses_authoritative_resolver_without_reseeding(
+    project_root, clock, monkeypatch
+):
+    from src.target_search import service as service_module
+    from src.target_search.database import get_connection, init_db
+
+    init_db(project_root)
+    conn = get_connection(project_root)
+    try:
+        conn.execute(
+            "INSERT INTO targets (gene_symbol, uniprot_id) VALUES (?, ?)",
+            ("OTHER", "Q00001"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        service_module,
+        "seed_database",
+        lambda _root: pytest.fail("populated databases must never be reseeded"),
+    )
+    resolver = _QueueResolver(_resolution())
+    service = _remote_service(project_root, clock, resolver, auto_seed=True)
+
+    payload = service.search_targets("EGFR")
+
+    assert payload["results"][0]["source"] == "UniProt"
+    assert resolver.calls == [("EGFR", "Homo sapiens")]
+
+
+def test_remote_resolution_caches_target_and_structures_with_separate_ttls(
+    project_root, clock
+):
+    from src.target_search.database import get_connection
+
+    resolver = _QueueResolver(_resolution())
+    service = _remote_service(project_root, clock, resolver)
+
+    first = service.search_targets("EGFR")
+    second = service.search_targets("EGFR")
+
+    assert len(resolver.calls) == 1
+    assert first["cache"] == {"target": "refreshed", "structures": "refreshed"}
+    assert second["cache"] == {"target": "fresh", "structures": "fresh"}
+    conn = get_connection(project_root)
+    try:
+        rows = conn.execute(
+            "SELECT record_type, retrieved_at, expires_at FROM target_remote_cache "
+            "ORDER BY record_type"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert [row["record_type"] for row in rows] == ["structures", "target"]
+    ttl_by_type = {
+        row["record_type"]: datetime.fromisoformat(row["expires_at"])
+        - datetime.fromisoformat(row["retrieved_at"])
+        for row in rows
+    }
+    assert ttl_by_type == {
+        "target": timedelta(days=30),
+        "structures": timedelta(days=7),
+    }
+
+
+def test_target_cache_identity_includes_default_organism(project_root, clock):
+    from src.target_search.cache import TargetCacheRepository
+    from src.target_search.service import TargetSearchService
+
+    mouse_target = {
+        **_authoritative_target(),
+        "uniprot_id": "Q01279",
+        "organism": "Mus musculus",
+        "source_record_id": "Q01279",
+        "source_url": "https://www.uniprot.org/uniprotkb/Q01279/entry",
+    }
+    resolver = _QueueResolver(
+        _resolution(),
+        _resolution(target=mouse_target, structures=[]),
+    )
+    cache = TargetCacheRepository(project_root=project_root, clock=clock)
+    human = TargetSearchService(
+        project_root=project_root,
+        resolver=resolver,
+        cache=cache,
+        auto_seed=False,
+        organism="Homo sapiens",
+    )
+    mouse = TargetSearchService(
+        project_root=project_root,
+        resolver=resolver,
+        cache=cache,
+        auto_seed=False,
+        organism="Mus musculus",
+    )
+
+    human_result = human.search_targets("EGFR")
+    mouse_result = mouse.search_targets("EGFR")
+
+    assert human_result["results"][0]["organism"] == "Homo sapiens"
+    assert mouse_result["results"][0]["organism"] == "Mus musculus"
+    assert resolver.calls == [
+        ("EGFR", "Homo sapiens"),
+        ("EGFR", "Mus musculus"),
+    ]
+
+
+def test_expired_structure_cache_refreshes_by_accession_and_retains_fresh_identity(
+    project_root, clock
+):
+    changed_target = {**_authoritative_target(), "gene_symbol": "CHANGED"}
+    resolver = _QueueResolver(
+        _resolution(),
+        _resolution(
+            target=changed_target,
+            structures=[_experimental_structure("2DEF")],
+        ),
+    )
+    service = _remote_service(project_root, clock, resolver)
+    service.search_targets("EGFR")
+    clock.value += timedelta(days=8)
+
+    refreshed = service.search_targets("EGFR")
+
+    assert resolver.calls == [
+        ("EGFR", "Homo sapiens"),
+        ("P00533", "Homo sapiens"),
+    ]
+    assert refreshed["results"][0]["gene_symbol"] == "EGFR"
+    assert refreshed["results"][0]["recommended_structures"][0]["structure_id"] == "2DEF"
+    assert refreshed["cache"] == {"target": "fresh", "structures": "refreshed"}
+
+
+def test_retryable_outage_can_use_expired_cache_with_explicit_stale_warning(
+    project_root, clock
+):
+    resolver = _QueueResolver(
+        _resolution(),
+        _resolution(
+            status="unavailable",
+            warnings=("UniProt:provider_unavailable",),
+            lookup_path=("UniProt",),
+        ),
+    )
+    service = _remote_service(project_root, clock, resolver)
+    service.search_targets("EGFR")
+    clock.value += timedelta(days=31)
+
+    stale = service.search_targets("EGFR")
+
+    assert stale["status"] == "resolved"
+    assert stale["results"][0]["stale"] is True
+    assert stale["cache"] == {"target": "stale", "structures": "stale"}
+    assert "stale_authoritative_cache" in stale["warnings"]
+    assert "UniProt:provider_unavailable" in stale["warnings"]
+
+
+@pytest.mark.parametrize(
+    ("status", "warnings"),
+    [
+        ("not_found", ()),
+        ("ambiguous", ("UniProt:ambiguous_match",)),
+        ("unavailable", ("UniProt:invalid_identifier",)),
+    ],
+)
+def test_expired_cache_is_not_success_for_nonretryable_resolution(
+    project_root, clock, status, warnings
+):
+    resolver = _QueueResolver(
+        _resolution(),
+        _resolution(status=status, warnings=warnings, lookup_path=("UniProt",)),
+    )
+    service = _remote_service(project_root, clock, resolver)
+    service.search_targets("EGFR")
+    clock.value += timedelta(days=31)
+
+    payload = service.search_targets("EGFR")
+
+    assert payload["status"] == status
+    assert payload["results"] == []
+    assert payload["cache"] == {"target": "expired", "structures": "expired"}
+
+
+def test_remote_normalization_filters_and_provenance_are_consistent_and_json_safe(
+    project_root, clock
+):
+    target = {**_authoritative_target(), "target_type": "Kinase"}
+    service = _remote_service(
+        project_root,
+        clock,
+        _QueueResolver(_resolution(target=target)),
+    )
+
+    payload = service.search_targets(
+        "EGFR",
+        target_type="Kinase",
+        source="RCSB_PDB",
+        has_experimental=True,
+        docking_recommended=True,
+        has_ligand=True,
+    )
+    record = payload["results"][0]
+
+    assert record["target_id"] is None
+    assert record["source"] == "UniProt"
+    assert record["source_record_id"] == "P00533"
+    assert record["source_url"].startswith("https://www.uniprot.org/")
+    assert record["retrieved_at"] == clock.value.isoformat()
+    assert record["expires_at"] == (clock.value + timedelta(days=30)).isoformat()
+    assert record["stale"] is False
+    assert record["structure_count"] == 1
+    assert record["experimental_structure_count"] == 1
+    assert record["alphafold_structure_count"] == 0
+    assert record["has_experimental_structure"] is True
+    assert record["has_alphafold_structure"] is False
+    assert record["recommended_structures"][0]["ligand_ids"] == ["ATP"]
+    assert record["recommended_structures"][0]["docking_recommended"] is True
+    assert str(project_root) not in str(payload)
+    json.dumps(payload)
+
+    filtered = service.search_targets("EGFR", source="AlphaFold")
+    assert filtered["status"] == "resolved"
+    assert filtered["results"] == []
+
+
+def test_concurrent_empty_database_calls_seed_once_idempotently(
+    project_root, clock, monkeypatch
+):
+    from src.target_search import service as service_module
+    from src.target_search.seed import seed_database as real_seed_database
+
+    db_dir = project_root / "data" / "target_db"
+    db_dir.mkdir(parents=True)
+    (db_dir / "common_targets.csv").write_text(
+        "gene_symbol,protein_name,uniprot_id,organism,target_type,aliases\n"
+        "EGFR,Epidermal growth factor receptor,P00533,Homo sapiens,Kinase,ERBB1\n",
+        encoding="utf-8",
+    )
+    seed_calls = []
+
+    def slow_seed(root):
+        seed_calls.append(root)
+        time.sleep(0.05)
+        return real_seed_database(root)
+
+    monkeypatch.setattr(service_module, "seed_database", slow_seed)
+    resolver = _QueueResolver(_resolution())
+    service = _remote_service(project_root, clock, resolver, auto_seed=True)
+    barrier = threading.Barrier(5)
+    payloads = []
+
+    def search():
+        barrier.wait()
+        payloads.append(service.search_targets("EGFR"))
+
+    threads = [threading.Thread(target=search) for _ in range(5)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(seed_calls) == 1
+    assert len(payloads) == 5
+    assert all(payload["results"][0]["gene_symbol"] == "EGFR" for payload in payloads)
+    assert resolver.calls == []
