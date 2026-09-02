@@ -147,9 +147,30 @@ def init_db(project_root: Optional[Path | str] = None) -> None:
                 UNIQUE(target_id, structure_id, source, file_format)
             );
 
+            CREATE TABLE IF NOT EXISTS target_remote_cache (
+                cache_key TEXT PRIMARY KEY,
+                record_type TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_record_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                retrieved_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                last_refresh_status TEXT,
+                schema_version INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS target_runtime_state (
+                state_key TEXT PRIMARY KEY,
+                state_value TEXT,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_targets_gene_symbol ON targets(gene_symbol);
             CREATE INDEX IF NOT EXISTS idx_aliases_alias ON target_aliases(alias);
             CREATE INDEX IF NOT EXISTS idx_structures_target_id ON target_structures(target_id);
+            CREATE INDEX IF NOT EXISTS idx_target_remote_cache_expires_at
+                ON target_remote_cache(expires_at);
             """
         )
         _ensure_columns(
