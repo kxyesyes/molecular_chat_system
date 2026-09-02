@@ -18,6 +18,7 @@
   let reconnectAttempts = 0;
   let maxReconnectAttempts = 5;
   let agentTaskRunActive = false;
+  let protocolDesyncedSocket = null;
   const maxWebSocketMessageLength = 256 * 1024;
   const moleculeCandidateLifecycle =
     window.HomeMoleculeCandidates.createLifecycle({
@@ -159,6 +160,9 @@
 
   // WebSocket连接管理 - 修复版
   function connectWebSocket() {
+    const previousSocket = ws;
+    ws = null;
+    protocolDesyncedSocket = null;
     moleculeCandidateLifecycle.clear();
     const wsUrl = `ws://${window.location.host}/ws`;
 
@@ -167,26 +171,29 @@
     console.log(`重连尝试次数: ${reconnectAttempts}/${maxReconnectAttempts}`);
 
     // 如果已经存在连接，先关闭
-    if (ws && ws.readyState !== WebSocket.CLOSED) {
+    if (previousSocket && previousSocket.readyState !== WebSocket.CLOSED) {
       console.log("关闭现有WebSocket连接");
-      ws.close();
+      previousSocket.close();
     }
 
     try {
-      ws = new WebSocket(wsUrl);
+      const socket = new WebSocket(wsUrl);
+      ws = socket;
 
       // 连接超时处理
       const connectionTimeout = setTimeout(() => {
-        if (ws.readyState === WebSocket.CONNECTING) {
+        if (socket !== ws) return;
+        if (socket.readyState === WebSocket.CONNECTING) {
           console.log("WebSocket连接超时");
-          ws.close();
+          socket.close();
         }
       }, 10000); // 10秒超时
 
-      ws.onopen = () => {
+      socket.onopen = () => {
+        if (socket !== ws) return;
         clearTimeout(connectionTimeout);
         console.log("✅ WebSocket连接成功");
-        console.log(`WebSocket readyState: ${ws.readyState}`);
+        console.log(`WebSocket readyState: ${socket.readyState}`);
 
         isConnected = true;
         reconnectAttempts = 0;
@@ -194,19 +201,20 @@
         HomeChatRenderer.updateConnectionStatus("connecting");
 
         // 发送连接确认消息
-        sendTestMessage();
+        sendTestMessage(socket);
       };
 
-      ws.onmessage = (event) => {
+      socket.onmessage = (event) => {
+        if (socket !== ws) return;
         console.log("📨 收到WebSocket消息:", {
           timestamp: new Date().toISOString(),
           dataLength: event.data ? event.data.length : 0,
         });
 
         try {
-          handleWebSocketMessage(event.data);
+          handleWebSocketMessage(event.data, socket);
         } catch (error) {
-          moleculeCandidateLifecycle.clear();
+          closeProtocolSocket(socket, 1002, "message handling failed");
           console.error("❌ 处理WebSocket消息时出错:", {
             error: error.message,
             stack: error.stack,
@@ -216,21 +224,27 @@
         }
       };
 
-      ws.onerror = (error) => {
+      socket.onerror = (error) => {
+        if (socket !== ws) return;
         clearTimeout(connectionTimeout);
-        moleculeCandidateLifecycle.clear();
+        if (protocolDesyncedSocket !== socket) {
+          moleculeCandidateLifecycle.clear();
+        }
         console.error("❌ WebSocket错误:", {
           error: error,
-          readyState: ws ? ws.readyState : "null",
-          url: ws ? ws.url : "null",
+          readyState: socket.readyState,
+          url: socket.url,
         });
         HomeChatRenderer.updateConnectionStatus("error");
         HomeChatRenderer.showNotification("WebSocket连接出错", "error");
       };
 
-      ws.onclose = (event) => {
+      socket.onclose = (event) => {
+        if (socket !== ws) return;
         clearTimeout(connectionTimeout);
         moleculeCandidateLifecycle.clear();
+        protocolDesyncedSocket = null;
+        ws = null;
         console.log("🔌 WebSocket连接关闭:", {
           code: event.code,
           reason: event.reason || "无原因说明",
@@ -257,7 +271,7 @@
           );
 
           setTimeout(() => {
-            if (!isConnected && (!ws || ws.readyState === WebSocket.CLOSED)) {
+            if (!isConnected && !ws) {
               connectWebSocket();
             }
           }, delay);
@@ -281,15 +295,27 @@
     }
   }
 
+  function closeProtocolSocket(socket, code, reason) {
+    if (!socket || socket !== ws) return;
+    protocolDesyncedSocket = socket;
+    isConnected = false;
+    if (
+      socket.readyState !== WebSocket.CLOSING &&
+      socket.readyState !== WebSocket.CLOSED
+    ) {
+      socket.close(code, reason);
+    }
+  }
+
   // 发送测试消息确认连接
-  function sendTestMessage() {
-    if (ws && ws.readyState === WebSocket.OPEN) {
+  function sendTestMessage(socket = ws) {
+    if (socket && socket === ws && socket.readyState === WebSocket.OPEN) {
       try {
         const testPayload = {
           type: "ping",
           timestamp: Date.now(),
         };
-        ws.send(JSON.stringify(testPayload));
+        socket.send(JSON.stringify(testPayload));
         console.log("📤 发送连接测试消息:", testPayload);
       } catch (error) {
         console.error("❌ 发送测试消息失败:", error);
@@ -298,21 +324,24 @@
   }
 
   // 增强的消息处理函数
-  function handleWebSocketMessage(data) {
+  function handleWebSocketMessage(data, socket = ws) {
+    if (socket !== ws) return;
     // 数据有效性检查
     if (!data || typeof data !== "string") {
-      console.warn("⚠️ 收到无效消息数据:", data);
+      closeProtocolSocket(socket, 1002, "invalid message data");
+      console.warn("⚠️ 收到无效消息数据");
       return;
     }
 
     if (data.length > maxWebSocketMessageLength) {
-      moleculeCandidateLifecycle.clear();
+      closeProtocolSocket(socket, 1009, "message too large");
       console.warn("Ignored oversized WebSocket message");
       showErrorMessage("收到的消息过大，已安全忽略");
       return;
     }
 
     if (data.trim() === "") {
+      closeProtocolSocket(socket, 1002, "empty message");
       console.warn("⚠️ 收到空消息");
       return;
     }
@@ -323,11 +352,13 @@
 
       // 消息格式验证
       if (!message || typeof message !== "object") {
+        closeProtocolSocket(socket, 1002, "invalid message shape");
         console.warn("⚠️ 消息格式无效:", message);
         return;
       }
 
       if (!message.type) {
+        closeProtocolSocket(socket, 1002, "missing message type");
         console.warn("⚠️ 消息缺少type字段:", message);
         return;
       }
@@ -420,14 +451,24 @@
           }
           break;
 
-        case "message":
-          moleculeCandidateLifecycle.clear();
-          if (message.message) {
-            addAssistantMessage(message.message);
-          } else {
-            console.warn("⚠️ message消息缺少message字段");
+        case "message": {
+          const candidatePayloads = moleculeCandidateLifecycle.drain();
+          try {
+            if (message.message) {
+              const messageBox = addAssistantMessage(message.message);
+              messageBox.classList.add("complete");
+              messageBox.setAttribute("data-content", message.message);
+              candidatePayloads.forEach((payload) => {
+                renderMoleculeCandidates(messageBox, payload);
+              });
+            } else {
+              console.warn("⚠️ message消息缺少message字段");
+            }
+          } finally {
+            moleculeCandidateLifecycle.clear();
           }
           break;
+        }
 
         case "rag_info":
           if (message.molecules) {
@@ -452,7 +493,7 @@
           console.log("❓ 未知消息类型:", message.type, message);
       }
     } catch (error) {
-      moleculeCandidateLifecycle.clear();
+      closeProtocolSocket(socket, 1002, "invalid message");
       console.error("❌ 解析WebSocket消息时出错:", {
         error: error.message,
         stack: error.stack,
@@ -1168,6 +1209,11 @@
       return;
     }
 
+    if (protocolDesyncedSocket === ws) {
+      HomeChatRenderer.showNotification("连接状态异常，正在重新连接", "warning");
+      return;
+    }
+
     if (moleculeCandidateLifecycle.isRequestInFlight()) {
       HomeChatRenderer.showNotification("请等待当前请求完成", "warning");
       return;
@@ -1502,6 +1548,7 @@
     currentMessages.push({ role: "assistant", content: content });
     HomeState.currentMessages = currentMessages.slice();
     updateToolbarControlStates();
+    return messageBox;
   }
 
   // 追加到最后一条消息（用于流式输出）
@@ -1642,69 +1689,73 @@
 
   // 完成最后一条消息
   function completeLastMessage(content) {
-    const candidatePayloads = moleculeCandidateLifecycle.complete();
-    const hadTypingIndicator = Boolean(
-      elements.chatContainer.querySelector(".typing-indicator-wrapper")
-    );
-    removeTypingIndicator();
+    const candidatePayloads = moleculeCandidateLifecycle.drain();
+    try {
+      const hadTypingIndicator = Boolean(
+        elements.chatContainer.querySelector(".typing-indicator-wrapper")
+      );
+      removeTypingIndicator();
 
-    let lastMessage = elements.chatContainer.querySelector(
-      ".assistant-wrapper:last-child .message-box"
-    );
-    const lastMessageContent = lastMessage?.getAttribute("data-content") || "";
-    const completion = resolveCompletionAction({
-      hadTypingIndicator,
-      hasLastMessage: Boolean(lastMessage),
-      lastMessageComplete: Boolean(lastMessage?.classList.contains("complete")),
-      lastMessageContent,
-      finalContent: content,
-    });
-
-    if (completion.action === "ignore") {
-      return;
-    }
-
-    // Agent 工作流可能不发送 stream 帧，直接以 complete.content 返回完整结果。
-    if (completion.action === "create") {
-      appendToLastMessage(content);
-      lastMessage = elements.chatContainer.querySelector(
+      let lastMessage = elements.chatContainer.querySelector(
         ".assistant-wrapper:last-child .message-box"
       );
-    } else if (completion.action === "replace") {
-      lastMessage.setAttribute("data-content", content);
-      const messageContent =
-        lastMessage.querySelector(".message-content") ||
-        lastMessage.querySelector("div:last-child");
-      if (messageContent) {
-        messageContent.innerHTML = HomeFormatters.formatContent(content);
+      const lastMessageContent = lastMessage?.getAttribute("data-content") || "";
+      const completion = resolveCompletionAction({
+        hadTypingIndicator,
+        hasLastMessage: Boolean(lastMessage),
+        lastMessageComplete: Boolean(lastMessage?.classList.contains("complete")),
+        lastMessageContent,
+        finalContent: content,
+      });
+
+      if (completion.action === "ignore") {
+        return;
       }
+
+      // Agent 工作流可能不发送 stream 帧，直接以 complete.content 返回完整结果。
+      if (completion.action === "create") {
+        appendToLastMessage(content);
+        lastMessage = elements.chatContainer.querySelector(
+          ".assistant-wrapper:last-child .message-box"
+        );
+      } else if (completion.action === "replace") {
+        lastMessage.setAttribute("data-content", content);
+        const messageContent =
+          lastMessage.querySelector(".message-content") ||
+          lastMessage.querySelector("div:last-child");
+        if (messageContent) {
+          messageContent.innerHTML = HomeFormatters.formatContent(content);
+        }
+      }
+
+      if (!lastMessage) {
+        return;
+      }
+
+      lastMessage.classList.remove("streaming");
+      lastMessage.classList.add("complete");
+
+      // 移除光标
+      const cursor = lastMessage.querySelector(".cursor");
+      if (cursor) {
+        cursor.remove();
+      }
+
+      // 保存完整内容到历史
+      const finalContent = completion.hasFinalContent
+        ? content
+        : lastMessage.getAttribute("data-content") || lastMessage.textContent;
+      lastMessage.setAttribute("data-content", finalContent);
+      currentMessages.push({ role: "assistant", content: finalContent });
+      HomeState.currentMessages = currentMessages.slice();
+      updateToolbarControlStates();
+
+      candidatePayloads.forEach((payload) => {
+        renderMoleculeCandidates(lastMessage, payload);
+      });
+    } finally {
+      moleculeCandidateLifecycle.clear();
     }
-
-    if (!lastMessage) {
-      return;
-    }
-
-    lastMessage.classList.remove("streaming");
-    lastMessage.classList.add("complete");
-
-    // 移除光标
-    const cursor = lastMessage.querySelector(".cursor");
-    if (cursor) {
-      cursor.remove();
-    }
-
-    // 保存完整内容到历史
-    const finalContent = completion.hasFinalContent
-      ? content
-      : lastMessage.getAttribute("data-content") || lastMessage.textContent;
-    lastMessage.setAttribute("data-content", finalContent);
-    currentMessages.push({ role: "assistant", content: finalContent });
-    HomeState.currentMessages = currentMessages.slice();
-    updateToolbarControlStates();
-
-    candidatePayloads.forEach((payload) => {
-      renderMoleculeCandidates(lastMessage, payload);
-    });
   }
 
   // 显示状态消息 - 美化版

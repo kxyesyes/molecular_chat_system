@@ -658,24 +658,34 @@
       let run = runs.get(payload.traceId);
       if (!run) {
         if (runs.size >= maxRuns) return false;
-        run = { candidateIds: new Set(), events: [] };
+        run = {
+          candidateIds: new Set(),
+          canonicalSmiles: new Set(),
+          events: [],
+        };
         runs.set(payload.traceId, run);
       }
       if (run.events.length >= maxEventsPerRun) return false;
 
       const freshCandidates = [];
       const freshCandidateIds = new Set();
+      const freshCanonicalSmiles = new Set();
       for (let index = 0; index < payload.candidates.length; index += 1) {
         const candidate = payload.candidates[index];
         const candidateId = candidate && candidate.candidate_id;
+        const canonicalSmiles = candidate && candidate.canonical_smiles;
         if (
           typeof candidateId !== "string" ||
+          typeof canonicalSmiles !== "string" ||
           run.candidateIds.has(candidateId) ||
-          freshCandidateIds.has(candidateId)
+          freshCandidateIds.has(candidateId) ||
+          run.canonicalSmiles.has(canonicalSmiles) ||
+          freshCanonicalSmiles.has(canonicalSmiles)
         ) {
           continue;
         }
         freshCandidateIds.add(candidateId);
+        freshCanonicalSmiles.add(canonicalSmiles);
         freshCandidates.push(candidate);
       }
       if (
@@ -686,6 +696,7 @@
       }
       for (let index = 0; index < freshCandidates.length; index += 1) {
         run.candidateIds.add(freshCandidates[index].candidate_id);
+        run.canonicalSmiles.add(freshCandidates[index].canonical_smiles);
       }
       queuedCandidates += freshCandidates.length;
       run.events.push({
@@ -698,14 +709,9 @@
       return true;
     }
 
-    function complete() {
-      if (!requestInFlight) {
-        clear();
-        return [];
-      }
-      requestInFlight = false;
+    function drain() {
       let drained = [];
-      if (runs.size === 1) {
+      if (requestInFlight && runs.size === 1) {
         const run = runs.values().next().value;
         drained = run.events.slice();
       }
@@ -714,9 +720,16 @@
       return drained;
     }
 
+    function complete() {
+      const drained = drain();
+      requestInFlight = false;
+      return drained;
+    }
+
     return {
       clear,
       complete,
+      drain,
       enqueue,
       isRequestInFlight: () => requestInFlight,
       startRequest,

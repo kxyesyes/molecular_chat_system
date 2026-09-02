@@ -152,6 +152,12 @@ assert(
   "Homepage candidate handling must be request-scoped and bound raw messages before parsing",
 );
 assert(
+  homeMoleculeCandidates.includes("canonicalSmiles: new Set()") &&
+    homeMain.includes("const socket = new WebSocket(wsUrl)") &&
+    homeMain.includes("protocolDesyncedSocket"),
+  "Candidate rendering must dedupe canonical identities and correlate protocol state to one socket",
+);
+assert(
   !homeMain.includes("detectAndRenderMolecules") &&
     !homeMain.includes("fetchMoleculePropertiesForToolMolecule") &&
     !homeMain.includes("/api/molecule/properties"),

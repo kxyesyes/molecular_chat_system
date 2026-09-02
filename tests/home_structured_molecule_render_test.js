@@ -149,6 +149,25 @@ lifecycle.enqueue(normalized);
 lifecycle.clear();
 assert(lifecycle.complete().length === 0, "Reconnect/error clear must remove stale cards");
 
+const canonicalDedupeLifecycle = rawApi.createLifecycle({ maxEventsPerRun: 3 });
+canonicalDedupeLifecycle.startRequest();
+canonicalDedupeLifecycle.enqueue(normalized);
+const reorderedCanonicalPayload = payloadWithCandidates(["CCN", "CCO"]);
+reorderedCanonicalPayload.trace_id = normalized.traceId;
+const normalizedReorderedCanonical = api.normalize(reorderedCanonicalPayload);
+assert(normalizedReorderedCanonical, "Reordered-ordinal lifecycle payload must normalize");
+assert(
+  canonicalDedupeLifecycle.enqueue(normalizedReorderedCanonical),
+  "An event with one fresh canonical candidate must remain renderable",
+);
+const canonicalDedupeDrain = canonicalDedupeLifecycle.complete();
+assert(
+  canonicalDedupeDrain.length === 2 &&
+    canonicalDedupeDrain[1].candidates.length === 1 &&
+    canonicalDedupeDrain[1].candidates[0].canonical_smiles === "CCN",
+  "Same canonical SMILES at a different valid ordinal/ID must render only once",
+);
+
 const capacityPayload = validPayload();
 capacityPayload.trace_id = "trace-capacity-2";
 capacityPayload.candidate_set.candidates[0].candidate_id = exactCandidateId(1, "CCN");
@@ -657,6 +676,17 @@ assert(
   "Main must reject a second send while a request is active",
 );
 assert(
+  mainSource.includes("let protocolDesyncedSocket") &&
+    mainSource.includes("closeProtocolSocket(socket, 1002") &&
+    mainSource.includes("closeProtocolSocket(socket, 1009"),
+  "Malformed and oversized frames must block the exact socket as protocol desync",
+);
+assert(
+  mainSource.includes("const socket = new WebSocket(wsUrl)") &&
+    mainSource.match(/if \(socket !== ws\) return;/g)?.length >= 3,
+  "WebSocket callbacks must be correlated to their captured socket instance",
+);
+assert(
   !mainSource.includes("pendingMoleculeCandidatePayloads"),
   "Main must not retain the unbounded legacy candidate array",
 );
@@ -719,10 +749,360 @@ assert(
   "Cards must request images only through the SMILES image endpoint",
 );
 
+class FakeClassList {
+  constructor(element) {
+    this.element = element;
+  }
+
+  _tokens() {
+    return this.element.className.split(/\s+/).filter(Boolean);
+  }
+
+  contains(token) {
+    return this._tokens().includes(token);
+  }
+
+  add(...tokens) {
+    this.element.className = [...new Set([...this._tokens(), ...tokens])].join(" ");
+  }
+
+  remove(...tokens) {
+    this.element.className = this._tokens()
+      .filter((token) => !tokens.includes(token))
+      .join(" ");
+  }
+}
+
+class FakeElement {
+  constructor(tagName = "div") {
+    this.tagName = tagName.toUpperCase();
+    this.children = [];
+    this.parentNode = null;
+    this.className = "";
+    this.classList = new FakeClassList(this);
+    this.style = { cssText: "" };
+    this.attributes = new Map();
+    this.innerHTML = "";
+    this._textContent = "";
+    this.scrollTop = 0;
+    this.scrollHeight = 0;
+  }
+
+  appendChild(child) {
+    child.parentNode = this;
+    this.children.push(child);
+    this.scrollHeight = this.children.length;
+    return child;
+  }
+
+  replaceChildren(...children) {
+    this.children.forEach((child) => { child.parentNode = null; });
+    this.children = [];
+    children.forEach((child) => this.appendChild(child));
+  }
+
+  remove() {
+    if (!this.parentNode) return;
+    this.parentNode.children = this.parentNode.children.filter(
+      (child) => child !== this,
+    );
+    this.parentNode = null;
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+
+  getAttribute(name) {
+    return this.attributes.has(name) ? this.attributes.get(name) : null;
+  }
+
+  _descendants() {
+    const result = [];
+    this.children.forEach((child) => {
+      result.push(child, ...child._descendants());
+    });
+    return result;
+  }
+
+  querySelector(selector) {
+    if (selector === ".assistant-wrapper:last-child .message-box") {
+      const wrappers = this._descendants().filter((element) =>
+        element.classList.contains("assistant-wrapper"),
+      );
+      const wrapper = wrappers[wrappers.length - 1];
+      return wrapper
+        ? wrapper._descendants().find((element) =>
+            element.classList.contains("message-box"),
+          ) || null
+        : null;
+    }
+    if (selector === "div:last-child") {
+      return [...this.children]
+        .reverse()
+        .find((child) => child.tagName === "DIV") || null;
+    }
+    if (selector.startsWith(".")) {
+      const className = selector.slice(1);
+      return this._descendants().find((element) =>
+        element.classList.contains(className),
+      ) || null;
+    }
+    return null;
+  }
+
+  get textContent() {
+    return this._textContent + this.children.map((child) => child.textContent).join("");
+  }
+
+  set textContent(value) {
+    this._textContent = String(value);
+    this.children = [];
+  }
+}
+
+class FakeWebSocket {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSING = 2;
+  static CLOSED = 3;
+  static instances = [];
+
+  constructor(url) {
+    this.url = url;
+    this.readyState = FakeWebSocket.CONNECTING;
+    this.sent = [];
+    this.closeCalls = [];
+    FakeWebSocket.instances.push(this);
+  }
+
+  send(value) {
+    this.sent.push(value);
+  }
+
+  close(code, reason) {
+    this.closeCalls.push({ code, reason });
+    this.readyState = FakeWebSocket.CLOSING;
+  }
+}
+
+const behaviorMainSource = mainSource
+  .replace(
+    "function renderMoleculeCandidates(messageElement, payload) {",
+    "function renderMoleculeCandidatesOriginal(messageElement, payload) {",
+  )
+  .replace(
+    /  window\.HomeMain = \{\r?\n    init: init,\r?\n  \};/,
+    `  function renderMoleculeCandidates(messageElement, payload) {
+    window.__renderCalls.push({
+      messageElement,
+      payload,
+      requestWasInFlight: moleculeCandidateLifecycle.isRequestInFlight(),
+    });
+  }
+
+  window.HomeMain = {
+    init: init,
+    __test: {
+      connectWebSocket,
+      handleWebSocketMessage,
+      lifecycle: moleculeCandidateLifecycle,
+      sendMessage,
+      getSocket: () => ws,
+      setElements: (value) => Object.assign(elements, value),
+      setSocket: (value) => { ws = value; isConnected = true; },
+    },
+  };`,
+  );
+assert(
+  behaviorMainSource.includes("__test:"),
+  "Behavior test instrumentation must expose main lifecycle hooks",
+);
+
+const behaviorDocument = {
+  readyState: "loading",
+  body: new FakeElement("body"),
+  addEventListener() {},
+  createElement(tagName) { return new FakeElement(tagName); },
+  querySelector() { return null; },
+};
+const behaviorNotifications = [];
+const behaviorSandbox = {
+  window: {
+    location: { host: "example.test", href: "http://example.test/" },
+    __renderCalls: [],
+  },
+  document: behaviorDocument,
+  console: { log() {}, warn() {}, error() {} },
+  WebSocket: FakeWebSocket,
+  HomeState: { currentMessages: [] },
+  HomeTheme: { init() {} },
+  HomeAdvancedOptions: { getConfig: () => ({ ragCount: 3, temperature: 0.2, molCount: 2 }) },
+  HomeFormatters: { formatContent: (value) => String(value ?? "") },
+  HomeChatRenderer: {
+    getCurrentTime: () => "12:00",
+    scrollToBottom() {},
+    showNotification: (...args) => behaviorNotifications.push(args),
+    updateConnectionStatus() {},
+  },
+  clearTimeout() {},
+  setTimeout: () => 1,
+};
+behaviorSandbox.window.window = behaviorSandbox.window;
+behaviorSandbox.globalThis = behaviorSandbox;
+vm.createContext(behaviorSandbox);
+vm.runInContext(helperSource, behaviorSandbox, { filename: helperPath });
+vm.runInContext(behaviorMainSource, behaviorSandbox, {
+  filename: path.join(root, "src/web/static/js/home/main.js"),
+});
+
+const behaviorHooks = behaviorSandbox.window.HomeMain.__test;
+const behaviorChat = new FakeElement("div");
+const behaviorInput = { value: "second request" };
+behaviorHooks.setElements({ chatContainer: behaviorChat, input: behaviorInput });
+
+function activeSocket() {
+  const socket = new FakeWebSocket("ws://example.test/ws");
+  socket.readyState = FakeWebSocket.OPEN;
+  behaviorHooks.setSocket(socket);
+  return socket;
+}
+
+function beginCandidateRun(socket) {
+  behaviorHooks.lifecycle.clear();
+  assert(behaviorHooks.lifecycle.startRequest(), "Behavior run must start");
+  behaviorHooks.handleWebSocketMessage(JSON.stringify(validPayload()), socket);
+}
+
+let behaviorSocket = activeSocket();
+beginCandidateRun(behaviorSocket);
+behaviorHooks.handleWebSocketMessage(
+  JSON.stringify({ type: "complete", content: "complete result" }),
+  behaviorSocket,
+);
+assert(
+  behaviorSandbox.window.__renderCalls.length === 1 &&
+    behaviorSandbox.window.__renderCalls[0].requestWasInFlight &&
+    !behaviorHooks.lifecycle.isRequestInFlight(),
+  "molecule_candidates followed by complete must render once and finish",
+);
+behaviorHooks.handleWebSocketMessage(
+  JSON.stringify({ type: "complete", content: "complete result" }),
+  behaviorSocket,
+);
+assert(
+  behaviorSandbox.window.__renderCalls.length === 1,
+  "Duplicate complete frames must not render candidate cards twice",
+);
+
+behaviorSandbox.window.__renderCalls.length = 0;
+behaviorChat.replaceChildren();
+behaviorSocket = activeSocket();
+beginCandidateRun(behaviorSocket);
+behaviorHooks.handleWebSocketMessage(
+  JSON.stringify({ type: "message", message: "summarized result" }),
+  behaviorSocket,
+);
+assert(
+  behaviorSandbox.window.__renderCalls.length === 1 &&
+    behaviorSandbox.window.__renderCalls[0].messageElement instanceof FakeElement &&
+    behaviorSandbox.window.__renderCalls[0].messageElement.classList.contains("complete") &&
+    behaviorSandbox.window.__renderCalls[0].messageElement.getAttribute("data-content") ===
+      "summarized result" &&
+    behaviorSandbox.window.__renderCalls[0].requestWasInFlight &&
+    !behaviorHooks.lifecycle.isRequestInFlight(),
+  "molecule_candidates followed by message must render once on its assistant box",
+);
+behaviorHooks.handleWebSocketMessage(
+  JSON.stringify({ type: "message", message: "late summary" }),
+  behaviorSocket,
+);
+assert(
+  behaviorSandbox.window.__renderCalls.length === 1,
+  "Later message frames without queued candidates must not duplicate cards",
+);
+
+behaviorHooks.connectWebSocket();
+behaviorSocket = behaviorHooks.getSocket();
+behaviorSocket.readyState = FakeWebSocket.OPEN;
+behaviorHooks.lifecycle.startRequest();
+behaviorSocket.onmessage({ data: "{" });
+assert(
+  behaviorSocket.closeCalls.at(-1)?.code === 1002 &&
+    behaviorHooks.lifecycle.isRequestInFlight(),
+  "Malformed frames must close with 1002 without reopening request sending",
+);
+behaviorSocket.onerror({ type: "error" });
+assert(
+  behaviorHooks.lifecycle.isRequestInFlight(),
+  "Protocol-desync error callbacks must preserve the send block until close",
+);
+const malformedSentCount = behaviorSocket.sent.length;
+behaviorHooks.sendMessage();
+assert(
+  behaviorSocket.sent.length === malformedSentCount,
+  "A second send must remain blocked during malformed-frame desync",
+);
+behaviorSocket.onclose({ code: 1002, reason: "invalid", wasClean: true });
+assert(
+  !behaviorHooks.lifecycle.isRequestInFlight(),
+  "Closing the desynchronized socket must release its request state",
+);
+
+behaviorHooks.connectWebSocket();
+behaviorSocket = behaviorHooks.getSocket();
+behaviorSocket.readyState = FakeWebSocket.OPEN;
+behaviorHooks.lifecycle.startRequest();
+behaviorSocket.onmessage({ data: "x".repeat(256 * 1024 + 1) });
+assert(
+  behaviorSocket.closeCalls.at(-1)?.code === 1009 &&
+    behaviorHooks.lifecycle.isRequestInFlight(),
+  "Oversized frames must close with 1009 and retain the active-request block",
+);
+const oversizedSentCount = behaviorSocket.sent.length;
+behaviorHooks.sendMessage();
+assert(
+  behaviorSocket.sent.length === oversizedSentCount,
+  "A second send must remain blocked during oversized-frame desync",
+);
+behaviorSocket.onclose({ code: 1009, reason: "large", wasClean: true });
+
+FakeWebSocket.instances.length = 0;
+behaviorHooks.connectWebSocket();
+const staleSocket = behaviorHooks.getSocket();
+behaviorHooks.lifecycle.startRequest();
+behaviorHooks.connectWebSocket();
+const currentSocket = behaviorHooks.getSocket();
+assert(
+  !behaviorHooks.lifecycle.isRequestInFlight(),
+  "Reconnect must clear the prior current socket run",
+);
+behaviorHooks.lifecycle.startRequest();
+currentSocket.onmessage({ data: JSON.stringify(validPayload()) });
+staleSocket.onmessage({ data: "{" });
+staleSocket.onerror({ type: "error" });
+staleSocket.onclose({ code: 1006, reason: "stale", wasClean: false });
+assert(
+  behaviorHooks.lifecycle.isRequestInFlight() && staleSocket.closeCalls.length === 1,
+  "Stale socket callbacks must not close or clear the current run",
+);
+currentSocket.onerror({ type: "error" });
+assert(
+  !behaviorHooks.lifecycle.isRequestInFlight(),
+  "Current socket errors must clear candidate state",
+);
+behaviorHooks.lifecycle.startRequest();
+currentSocket.onclose({ code: 1000, reason: "done", wasClean: true });
+assert(
+  !behaviorHooks.lifecycle.isRequestInFlight(),
+  "Current socket close must clear candidate state safely",
+);
+
 const helperScript =
-  "/static/js/home/molecule_candidates.js?v=20260902-candidate-lifecycle-v4";
+  "/static/js/home/molecule_candidates.js?v=20260902-candidate-correlation-v5";
 const safeScript = "/static/js/shared/safe_render.js";
-const mainScript = "/static/js/home/main.js?v=20260902-candidate-lifecycle-v3";
+const mainScript =
+  "/static/js/home/main.js?v=20260902-admin-auth-removed-candidate-correlation-v4";
 assert(indexHtml.includes(helperScript), "Template must version molecule candidate helper");
 assert(indexHtml.includes(mainScript), "Template must version homepage main");
 assert(
