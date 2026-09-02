@@ -10,6 +10,7 @@ from typing import Any
 
 from src.agent.persistence.base import AgentStateStore
 from src.agent.tooling import ToolRegistry
+from src.agent.utils.validators import InputValidator
 from src.agent.workflows import WorkflowCatalog
 
 from .models import RouteCandidate, RouteDecision
@@ -70,7 +71,11 @@ class HybridSkillRouter:
             reasons[skill].append(reason)
 
         has_target = bool(TARGET_PATTERN.search(text))
-        has_smiles = bool(SMILES_PATTERN.search(text)) or "CCO" in text.upper()
+        input_validator = InputValidator()
+        potential_smiles = input_validator.extract_potential_smiles_candidates(text)
+        valid_smiles = input_validator.extract_smiles_candidates(text)
+        has_smiles = bool(valid_smiles)
+        has_invalid_smiles = bool(potential_smiles) and not has_smiles
         generation = self._has_generation_intent(lower)
 
         if self._contains(lower, "全面", "综合", "成药性", "comprehensive", "full analysis"):
@@ -238,8 +243,10 @@ class HybridSkillRouter:
                     min(1.0, float(arbitration.get("confidence", top.score))),
                 )
 
+        if has_invalid_smiles:
+            decision_reasons.append("invalid SMILES input detected")
         confirmation_reasons = self._confirmation_reasons(
-            selected, lower, has_smiles
+            selected, lower, has_smiles, has_invalid_smiles
         )
         return RouteDecision(
             selected_skill=selected,
@@ -369,7 +376,10 @@ class HybridSkillRouter:
 
     @staticmethod
     def _confirmation_reasons(
-        skill: str, lower: str, has_smiles: bool
+        skill: str,
+        lower: str,
+        has_smiles: bool,
+        has_invalid_smiles: bool = False,
     ) -> list[str]:
         reasons = []
         if skill in {
@@ -379,7 +389,12 @@ class HybridSkillRouter:
             "comprehensive_evaluation",
             "hit_to_lead_optimization",
         } and not has_smiles:
-            reasons.append("A valid SMILES input is required before execution")
+            if has_invalid_smiles:
+                reasons.append(
+                    "The provided SMILES is invalid and must be corrected before execution"
+                )
+            else:
+                reasons.append("A valid SMILES input is required before execution")
         if skill == "docking_simulation":
             has_receptor = any(
                 marker in lower

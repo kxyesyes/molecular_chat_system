@@ -44,25 +44,37 @@ class InputValidator:
             keyword in text for keyword in self.calculation_keywords["chinese"]
         )
 
-    def extract_smiles_candidates(self, text: str) -> list[str]:
+    def extract_potential_smiles_candidates(self, text: str) -> list[str]:
         candidates = list(self.smiles_pattern.findall(text))
         for token in text.split():
             clean_token = re.sub(r"[,\.!?;，。！？；：:]+$", "", token)
             if self._looks_like_smiles(clean_token):
                 candidates.append(clean_token)
-        valid = []
+        potential = []
         seen = set()
         for candidate in candidates:
-            if candidate in seen or not self._looks_like_smiles(candidate):
+            clean_candidate = re.sub(r"[,\.!?;，。！？；：:]+$", "", candidate)
+            if (
+                clean_candidate in seen
+                or not self._looks_like_smiles(clean_candidate)
+            ):
                 continue
-            if validate_smiles_with_rdkit(candidate):
-                seen.add(candidate)
-                valid.append(candidate)
-        return valid
+            seen.add(clean_candidate)
+            potential.append(clean_candidate)
+        return potential
+
+    def extract_smiles_candidates(self, text: str) -> list[str]:
+        return [
+            candidate
+            for candidate in self.extract_potential_smiles_candidates(text)
+            if validate_smiles_with_rdkit(candidate)
+        ]
 
     @staticmethod
     def _looks_like_smiles(text: str) -> bool:
         if not text or len(text) < 2 or any(char.isspace() for char in text):
+            return False
+        if text.upper() == "SMILES":
             return False
         if not re.fullmatch(r"[A-Za-z0-9@+\-\[\]\(\)=#./\\:%]+", text):
             return False

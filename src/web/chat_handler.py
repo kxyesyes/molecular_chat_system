@@ -531,7 +531,13 @@ class ChatHandler:
     def _route_clarification(route_decision) -> str:
         if not route_decision or not route_decision.requires_confirmation:
             return ""
-        if any("SMILES" in reason for reason in route_decision.reasons):
+        reasons = " ".join(route_decision.reasons)
+        if "invalid SMILES" in reasons:
+            return (
+                "你提供的 SMILES 无效，请检查并更正结构后重试。"
+                "本次未进行科学计算，没有计算 LogP、QED、pIC50 或 binding energy（结合能）。"
+            )
+        if "SMILES" in reasons:
             return (
                 "要进行真实、可追溯的分子性质计算，请提供该分子的有效 "
                 "SMILES。收到结构后，系统会调用 RDKit 计算，而不会由语言模型"

@@ -63,6 +63,30 @@ def test_top_three_contains_plausible_alternatives_for_mixed_query():
 
 
 @pytest.mark.parametrize(
+    "prompt",
+    [
+        "请分析这个 SMILES 的成药性：CC(C)((。",
+        "请全面分析这个分子的成药性：CC(C)((",
+    ],
+)
+def test_invalid_smiles_requires_correction_before_comprehensive_evaluation(prompt):
+    decision = HybridSkillRouter().decide(prompt)
+
+    assert decision.selected_skill == "comprehensive_evaluation"
+    assert decision.requires_confirmation is True
+    assert "invalid SMILES" in " ".join(decision.reasons)
+
+
+def test_valid_aspirin_smiles_does_not_require_smiles_confirmation():
+    decision = HybridSkillRouter().decide(
+        "请全面分析阿司匹林的成药性。SMILES: CC(=O)Oc1ccccc1C(=O)O。"
+    )
+
+    assert decision.selected_skill == "comprehensive_evaluation"
+    assert not any("SMILES" in reason for reason in decision.reasons)
+
+
+@pytest.mark.parametrize(
     ("prompt", "expected_skill"),
     [
         (
