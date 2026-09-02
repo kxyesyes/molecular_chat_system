@@ -196,6 +196,25 @@ def _init_db_locked(project_root: Optional[Path | str] = None) -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS target_coordinate_publication_intents (
+                intent_id TEXT PRIMARY KEY NOT NULL,
+                generation_id TEXT UNIQUE NOT NULL,
+                cache_key TEXT UNIQUE NOT NULL,
+                staged_path TEXT NOT NULL,
+                final_path TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_record_id TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('reserved', 'installed')),
+                retrieved_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                expires_epoch REAL NOT NULL,
+                previous_generation_id TEXT,
+                previous_path TEXT,
+                previous_quarantine_path TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_targets_gene_symbol ON targets(gene_symbol);
             CREATE INDEX IF NOT EXISTS idx_aliases_alias ON target_aliases(alias);
             CREATE INDEX IF NOT EXISTS idx_structures_target_id ON target_structures(target_id);
@@ -258,6 +277,12 @@ def _init_db_locked(project_root: Optional[Path | str] = None) -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_target_coordinate_cleanup_due
             ON target_coordinate_cleanup_jobs(next_retry_epoch)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_target_coordinate_publication_status
+            ON target_coordinate_publication_intents(status, created_at)
             """
         )
         conn.commit()

@@ -98,6 +98,7 @@ class TargetCacheRepository:
         self.project_root = resolve_project_root(project_root)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         init_db(self.project_root)
+        self._reconcile_publication_intents()
 
     def upsert(
         self,
@@ -134,8 +135,8 @@ class TargetCacheRepository:
         source: str,
         source_record_id: str,
         *,
-        temporary_path: str,
-        final_path: str,
+        staged_path: str,
+        coordinate_suffix: str,
         ttl: Optional[timedelta] = None,
     ) -> CachedEvidence:
         cache_key = _validate_identifier("cache_key", cache_key)
@@ -144,58 +145,51 @@ class TargetCacheRepository:
         effective_ttl = _validate_ttl(
             ttl if ttl is not None else DEFAULT_TTLS["coordinate_file"]
         )
-        temporary_relative = _validate_cache_relative_path(temporary_path)
-        final_relative = _validate_cache_relative_path(final_path)
-        if temporary_relative == final_relative:
-            raise ValueError("temporary and final coordinate paths must differ")
-        if final_relative.suffix.lower() not in COORDINATE_FILE_SUFFIXES:
-            raise ValueError("final coordinate path has an unsupported suffix")
+        staged_relative = _validate_incoming_path(staged_path)
+        coordinate_suffix = _validate_coordinate_suffix(coordinate_suffix)
+        generation_id = str(uuid.uuid4())
+        final_relative = _derive_coordinate_final_path(
+            source, source_record_id, generation_id, coordinate_suffix
+        )
+        retrieved_at = self._now()
+        expires_at = retrieved_at + effective_ttl
 
         cache_root = get_cache_dir(self.project_root)
-        temporary = cache_root.joinpath(*temporary_relative.parts)
+        staged = cache_root.joinpath(*staged_relative.parts)
         final = cache_root.joinpath(*final_relative.parts)
-        generation_id = str(uuid.uuid4())
         with _cache_thread_lock(cache_root), _InterprocessCacheLock(cache_root):
-            temporary_state = _prevalidate_regular_file(
-                cache_root, temporary, temporary_relative.parts
+            staged_state = _prevalidate_regular_file(
+                cache_root, staged, staged_relative.parts
             )
-            if temporary_state != "regular":
-                raise ValueError("temporary coordinate file is not a safe regular file")
+            if staged_state != "regular":
+                raise ValueError("staged coordinate file is not a safe regular file")
+            self._reject_active_coordinate_path(staged_relative.as_posix())
             destination_state = _ensure_relative_directory(
                 cache_root, final_relative.parts[:-1]
             )
             if destination_state != "ready":
                 raise OSError("coordinate destination directory is not safely available")
-            self._reject_active_coordinate_path(final_relative.as_posix())
-            replace_state = _atomic_publish_coordinate(
-                cache_root,
-                temporary,
-                final,
-                temporary_relative.parts,
-                final_relative.parts,
+            final_state = _prevalidate_regular_file(
+                cache_root, final, final_relative.parts
             )
-            if replace_state != "moved":
-                raise OSError("coordinate file could not be atomically published")
-            try:
-                return self._upsert_record(
-                    cache_key,
-                    "coordinate_file",
-                    source,
-                    source_record_id,
-                    {"path": final_relative.as_posix()},
-                    ttl=effective_ttl,
-                    generation_id=generation_id,
-                    allow_coordinate=True,
-                )
-            except Exception:
-                _atomic_restore_coordinate(
-                    cache_root,
-                    final,
-                    temporary,
-                    final_relative.parts,
-                    temporary_relative.parts,
-                )
-                raise
+            if final_state == "regular":
+                raise FileExistsError("coordinate destination already exists")
+            if final_state != "missing":
+                raise OSError("coordinate destination cannot be safely verified")
+            intent_id = self._reserve_publication_intent(
+                cache_key=cache_key,
+                source=source,
+                source_record_id=source_record_id,
+                staged_relative=staged_relative,
+                final_relative=final_relative,
+                generation_id=generation_id,
+                retrieved_at=retrieved_at,
+                expires_at=expires_at,
+            )
+            evidence = self._continue_publication_intent_locked(intent_id)
+            if evidence is None:
+                raise OSError("coordinate publication could not be safely completed")
+            return evidence
 
     def _reject_active_coordinate_path(self, final_path: str) -> None:
         payload_json = json.dumps(
@@ -217,6 +211,502 @@ class TargetCacheRepository:
             conn.close()
         if row is not None:
             raise ValueError("active coordinate paths are immutable")
+
+    def _reserve_publication_intent(
+        self,
+        *,
+        cache_key: str,
+        source: str,
+        source_record_id: str,
+        staged_relative: Path,
+        final_relative: Path,
+        generation_id: str,
+        retrieved_at: datetime,
+        expires_at: datetime,
+    ) -> str:
+        intent_id = str(uuid.uuid4())
+        previous_generation_id = None
+        previous_path = None
+        previous_quarantine_path = None
+        conn = get_connection(self.project_root)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                "SELECT 1 FROM target_coordinate_publication_intents "
+                "WHERE cache_key = ?",
+                (cache_key,),
+            ).fetchone() is not None:
+                raise RuntimeError("coordinate publication is already pending")
+            active = conn.execute(
+                "SELECT * FROM target_remote_cache WHERE cache_key = ?",
+                (cache_key,),
+            ).fetchone()
+            if active is not None:
+                evidence = self._validated_evidence(active)
+                if evidence is None or evidence.record_type != "coordinate_file":
+                    raise ValueError(
+                        "coordinate publication cannot replace a different record type"
+                    )
+                if active["cleanup_pending"] != 0:
+                    raise RuntimeError("coordinate cache entry is pending cleanup")
+                previous_generation_id = evidence.generation_id
+                previous_path = evidence.payload["path"]
+                previous_quarantine_path = _quarantine_relative_path(
+                    evidence.generation_id,
+                    _validate_cache_relative_path(previous_path).name,
+                ).as_posix()
+                cursor = conn.execute(
+                    """
+                    UPDATE target_remote_cache
+                    SET cleanup_pending = 1, cleanup_quarantine_path = ?
+                    WHERE cache_key = ? AND generation_id = ?
+                        AND cleanup_pending = 0
+                    """,
+                    (
+                        previous_quarantine_path,
+                        cache_key,
+                        previous_generation_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("coordinate generation changed during reservation")
+            now_text = retrieved_at.isoformat()
+            conn.execute(
+                """
+                INSERT INTO target_coordinate_publication_intents (
+                    intent_id, generation_id, cache_key, staged_path, final_path,
+                    source, source_record_id, status, retrieved_at, expires_at,
+                    expires_epoch, previous_generation_id, previous_path,
+                    previous_quarantine_path, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    intent_id,
+                    generation_id,
+                    cache_key,
+                    staged_relative.as_posix(),
+                    final_relative.as_posix(),
+                    source,
+                    source_record_id,
+                    retrieved_at.isoformat(),
+                    expires_at.isoformat(),
+                    expires_at.timestamp(),
+                    previous_generation_id,
+                    previous_path,
+                    previous_quarantine_path,
+                    now_text,
+                    now_text,
+                ),
+            )
+            conn.commit()
+            return intent_id
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _continue_publication_intent_locked(
+        self, intent_id: str
+    ) -> Optional[CachedEvidence]:
+        intent = self._load_publication_intent(intent_id)
+        if intent is None or not self._prepare_previous_generation_locked(intent):
+            return None
+        cache_root = get_cache_dir(self.project_root)
+        staged = cache_root.joinpath(*intent["staged_relative"].parts)
+        final = cache_root.joinpath(*intent["final_relative"].parts)
+        staged_state = _prevalidate_regular_file(
+            cache_root, staged, intent["staged_relative"].parts
+        )
+        final_state = _prevalidate_regular_file(
+            cache_root, final, intent["final_relative"].parts
+        )
+        if (
+            os.name != "nt"
+            and staged_state == "regular"
+            and final_state == "regular"
+            and _paths_share_file_identity(staged, final)
+            and _unlink_verified(cache_root, staged, intent["staged_relative"].parts)
+        ):
+            staged_state = "missing"
+        if final_state == "missing" and staged_state == "regular":
+            destination_state = _ensure_relative_directory(
+                cache_root, intent["final_relative"].parts[:-1]
+            )
+            if destination_state != "ready":
+                return None
+            publish_state = _atomic_publish_coordinate(
+                cache_root,
+                staged,
+                final,
+                intent["staged_relative"].parts,
+                intent["final_relative"].parts,
+            )
+            if publish_state != "moved":
+                return None
+            staged_state = "missing"
+            final_state = "regular"
+        if staged_state != "missing" or final_state != "regular":
+            return None
+        self._mark_publication_installed(intent_id)
+        return self._activate_publication_intent(intent_id)
+
+    def _load_publication_intent(self, intent_id: str) -> Optional[dict[str, Any]]:
+        conn = get_connection(self.project_root)
+        try:
+            row = conn.execute(
+                "SELECT * FROM target_coordinate_publication_intents "
+                "WHERE intent_id = ?",
+                (intent_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return self._validated_publication_intent(row)
+
+    def _validated_publication_intent(
+        self, row: Optional[dict[str, Any]]
+    ) -> Optional[dict[str, Any]]:
+        try:
+            if row is None or row["status"] not in {"reserved", "installed"}:
+                return None
+            intent_id = _validate_generation_id(row["intent_id"])
+            generation_id = _validate_generation_id(row["generation_id"])
+            cache_key = _validate_identifier("cache_key", row["cache_key"])
+            source = _validate_identifier("source", row["source"])
+            source_record_id = _validate_identifier(
+                "source_record_id", row["source_record_id"]
+            )
+            staged_relative = _validate_incoming_path(row["staged_path"])
+            final_relative = _validate_cache_relative_path(row["final_path"])
+            suffix = _validate_coordinate_suffix(final_relative.suffix)
+            if final_relative != _derive_coordinate_final_path(
+                source, source_record_id, generation_id, suffix
+            ):
+                return None
+            retrieved_at = _parse_utc_timestamp(row["retrieved_at"])
+            expires_at = _parse_utc_timestamp(row["expires_at"])
+            expires_epoch = float(row["expires_epoch"])
+            if expires_at <= retrieved_at or not math.isclose(
+                expires_epoch,
+                expires_at.timestamp(),
+                rel_tol=0.0,
+                abs_tol=0.000001,
+            ):
+                return None
+            previous_values = (
+                row.get("previous_generation_id"),
+                row.get("previous_path"),
+                row.get("previous_quarantine_path"),
+            )
+            if all(value is None for value in previous_values):
+                previous_generation_id = None
+                previous_relative = None
+                previous_quarantine_relative = None
+            elif any(value is None for value in previous_values):
+                return None
+            else:
+                previous_generation_id = _validate_generation_id(previous_values[0])
+                previous_relative = _validate_cache_relative_path(previous_values[1])
+                previous_quarantine_relative = _validate_quarantine_relative_path(
+                    previous_values[2], previous_generation_id
+                )
+                if previous_quarantine_relative != _quarantine_relative_path(
+                    previous_generation_id, previous_relative.name
+                ):
+                    return None
+            return {
+                **row,
+                "intent_id": intent_id,
+                "generation_id": generation_id,
+                "cache_key": cache_key,
+                "source": source,
+                "source_record_id": source_record_id,
+                "staged_relative": staged_relative,
+                "final_relative": final_relative,
+                "retrieved_at_value": retrieved_at,
+                "expires_at_value": expires_at,
+                "previous_generation_id": previous_generation_id,
+                "previous_relative": previous_relative,
+                "previous_quarantine_relative": previous_quarantine_relative,
+            }
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _prepare_previous_generation_locked(self, intent: dict[str, Any]) -> bool:
+        previous_generation_id = intent["previous_generation_id"]
+        conn = get_connection(self.project_root)
+        try:
+            active = conn.execute(
+                "SELECT * FROM target_remote_cache WHERE cache_key = ?",
+                (intent["cache_key"],),
+            ).fetchone()
+        finally:
+            conn.close()
+        if previous_generation_id is None:
+            return active is None
+        active_evidence = self._validated_evidence(active)
+        if (
+            active is None
+            or active_evidence is None
+            or active_evidence.record_type != "coordinate_file"
+            or active["generation_id"] != previous_generation_id
+            or active["record_type"] != "coordinate_file"
+            or active["cleanup_pending"] != 1
+            or active["cleanup_quarantine_path"]
+            != intent["previous_quarantine_relative"].as_posix()
+            or active_evidence.payload["path"]
+            != intent["previous_relative"].as_posix()
+        ):
+            return False
+        cache_root = get_cache_dir(self.project_root)
+        source = cache_root.joinpath(*intent["previous_relative"].parts)
+        quarantine = cache_root.joinpath(
+            *intent["previous_quarantine_relative"].parts
+        )
+        source_state = _prevalidate_regular_file(
+            cache_root, source, intent["previous_relative"].parts
+        )
+        quarantine_state = _prevalidate_regular_file(
+            cache_root,
+            quarantine,
+            intent["previous_quarantine_relative"].parts,
+        )
+        if source_state == "missing" and quarantine_state == "regular":
+            return True
+        if source_state != "regular" or quarantine_state != "missing":
+            return False
+        if _ensure_quarantine_directory(cache_root) != "ready":
+            return False
+        return _atomic_move_to_quarantine(
+            cache_root,
+            source,
+            quarantine,
+            intent["previous_relative"].parts,
+        )
+
+    def _mark_publication_installed(self, intent_id: str) -> None:
+        conn = get_connection(self.project_root)
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE target_coordinate_publication_intents
+                    SET status = 'installed', updated_at = ?
+                    WHERE intent_id = ?
+                    """,
+                    (self._now().isoformat(), intent_id),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("coordinate publication intent disappeared")
+        finally:
+            conn.close()
+
+    def _activate_publication_intent(self, intent_id: str) -> CachedEvidence:
+        conn = get_connection(self.project_root)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM target_coordinate_publication_intents "
+                "WHERE intent_id = ?",
+                (intent_id,),
+            ).fetchone()
+            intent = self._validated_publication_intent(row)
+            if intent is None or intent["status"] != "installed":
+                raise RuntimeError("coordinate publication intent is invalid")
+            active = conn.execute(
+                "SELECT * FROM target_remote_cache WHERE cache_key = ?",
+                (intent["cache_key"],),
+            ).fetchone()
+            previous_generation_id = intent["previous_generation_id"]
+            if previous_generation_id is None:
+                if active is not None:
+                    raise RuntimeError("coordinate cache key was claimed during publication")
+            else:
+                active_evidence = self._validated_evidence(active)
+                quarantine_path = intent[
+                    "previous_quarantine_relative"
+                ].as_posix()
+                if (
+                    active is None
+                    or active_evidence is None
+                    or active_evidence.record_type != "coordinate_file"
+                    or active["generation_id"] != previous_generation_id
+                    or active["record_type"] != "coordinate_file"
+                    or active["cleanup_pending"] != 1
+                    or active["cleanup_quarantine_path"] != quarantine_path
+                    or active_evidence.payload["path"]
+                    != intent["previous_relative"].as_posix()
+                ):
+                    raise RuntimeError("previous coordinate generation changed")
+                conn.execute(
+                    """
+                    INSERT INTO target_coordinate_cleanup_jobs (
+                        generation_id, cache_key, quarantine_path,
+                        next_retry_epoch, retry_count, created_at
+                    ) VALUES (?, ?, ?, 0, 0, ?)
+                    """,
+                    (
+                        previous_generation_id,
+                        intent["cache_key"],
+                        quarantine_path,
+                        self._now().isoformat(),
+                    ),
+                )
+                deleted = conn.execute(
+                    "DELETE FROM target_remote_cache "
+                    "WHERE cache_key = ? AND generation_id = ? "
+                    "AND cleanup_pending = 1",
+                    (intent["cache_key"], previous_generation_id),
+                )
+                if deleted.rowcount != 1:
+                    raise RuntimeError("previous coordinate generation was not retired")
+            payload_json = json.dumps(
+                {"path": intent["final_relative"].as_posix()},
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            payload_digest = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+            conn.execute(
+                """
+                INSERT INTO target_remote_cache (
+                    cache_key, record_type, source, source_record_id,
+                    payload_json, payload_digest, retrieved_at, expires_at,
+                    last_refresh_status, schema_version, expires_epoch,
+                    generation_id, cleanup_pending, cleanup_quarantine_path,
+                    next_retry_epoch, retry_count
+                ) VALUES (?, 'coordinate_file', ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?, 0,
+                    NULL, 0, 0)
+                """,
+                (
+                    intent["cache_key"],
+                    intent["source"],
+                    intent["source_record_id"],
+                    payload_json,
+                    payload_digest,
+                    intent["retrieved_at"],
+                    intent["expires_at"],
+                    intent["expires_epoch"],
+                    intent["generation_id"],
+                ),
+            )
+            conn.execute(
+                "DELETE FROM target_coordinate_publication_intents "
+                "WHERE intent_id = ?",
+                (intent_id,),
+            )
+            active_row = conn.execute(
+                "SELECT * FROM target_remote_cache WHERE cache_key = ?",
+                (intent["cache_key"],),
+            ).fetchone()
+            evidence = self._validated_evidence(active_row)
+            if evidence is None:
+                raise RuntimeError("published coordinate evidence is invalid")
+            conn.commit()
+            return evidence
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _reconcile_publication_intents(self) -> None:
+        cache_root = get_cache_dir(self.project_root)
+        with _cache_thread_lock(cache_root):
+            try:
+                with _InterprocessCacheLock(cache_root):
+                    self._reconcile_publication_intents_locked()
+            except OSError:
+                return
+
+    def _reconcile_publication_intents_locked(self) -> None:
+        conn = get_connection(self.project_root)
+        try:
+            rows = conn.execute(
+                "SELECT * FROM target_coordinate_publication_intents "
+                "ORDER BY created_at, intent_id"
+            ).fetchall()
+        finally:
+            conn.close()
+        cache_root = get_cache_dir(self.project_root)
+        for row in rows:
+            intent = self._validated_publication_intent(row)
+            if intent is None:
+                continue
+            staged = cache_root.joinpath(*intent["staged_relative"].parts)
+            final = cache_root.joinpath(*intent["final_relative"].parts)
+            staged_state = _prevalidate_regular_file(
+                cache_root, staged, intent["staged_relative"].parts
+            )
+            final_state = _prevalidate_regular_file(
+                cache_root, final, intent["final_relative"].parts
+            )
+            if staged_state == "missing" and final_state == "missing":
+                self._abort_publication_intent_locked(intent)
+                continue
+            if (
+                (staged_state == "regular" and final_state == "missing")
+                or (staged_state == "missing" and final_state == "regular")
+            ):
+                self._continue_publication_intent_locked(intent["intent_id"])
+
+    def _abort_publication_intent_locked(self, intent: dict[str, Any]) -> None:
+        previous_generation_id = intent["previous_generation_id"]
+        if previous_generation_id is not None:
+            cache_root = get_cache_dir(self.project_root)
+            source = cache_root.joinpath(*intent["previous_relative"].parts)
+            quarantine = cache_root.joinpath(
+                *intent["previous_quarantine_relative"].parts
+            )
+            source_state = _prevalidate_regular_file(
+                cache_root, source, intent["previous_relative"].parts
+            )
+            quarantine_state = _prevalidate_regular_file(
+                cache_root,
+                quarantine,
+                intent["previous_quarantine_relative"].parts,
+            )
+            if source_state == "missing" and quarantine_state == "regular":
+                restored = (
+                    _move_windows_verified(cache_root, quarantine, source)
+                    if os.name == "nt"
+                    else _replace_posix_verified(
+                        cache_root,
+                        intent["previous_quarantine_relative"].parts,
+                        intent["previous_relative"].parts,
+                        replace_existing=False,
+                    )
+                )
+                if not restored:
+                    return
+            elif not (source_state == "regular" and quarantine_state == "missing"):
+                return
+        conn = get_connection(self.project_root)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if previous_generation_id is not None:
+                cursor = conn.execute(
+                    """
+                    UPDATE target_remote_cache
+                    SET cleanup_pending = 0, cleanup_quarantine_path = NULL
+                    WHERE cache_key = ? AND generation_id = ?
+                        AND cleanup_pending = 1
+                    """,
+                    (intent["cache_key"], previous_generation_id),
+                )
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    return
+            conn.execute(
+                "DELETE FROM target_coordinate_publication_intents "
+                "WHERE intent_id = ?",
+                (intent["intent_id"],),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _upsert_record(
         self,
@@ -267,9 +757,10 @@ class TargetCacheRepository:
         conn = get_connection(self.project_root)
         try:
             with conn:
+                conn.execute("BEGIN IMMEDIATE")
                 pending = conn.execute(
                     """
-                    SELECT cleanup_pending
+                    SELECT record_type, cleanup_pending
                     FROM target_remote_cache
                     WHERE cache_key = ?
                     """,
@@ -277,6 +768,18 @@ class TargetCacheRepository:
                 ).fetchone()
                 if pending is not None and pending["cleanup_pending"] == 1:
                     raise RuntimeError("coordinate cache entry is pending cleanup")
+                if (
+                    pending is not None
+                    and pending["record_type"] == "coordinate_file"
+                    and record_type != "coordinate_file"
+                ):
+                    raise ValueError("metadata cannot overwrite a coordinate-owned key")
+                if conn.execute(
+                    "SELECT 1 FROM target_coordinate_publication_intents "
+                    "WHERE cache_key = ?",
+                    (cache_key,),
+                ).fetchone() is not None:
+                    raise RuntimeError("coordinate publication is pending for cache key")
                 conn.execute(
                     """
                         INSERT INTO target_remote_cache (
@@ -404,6 +907,7 @@ class TargetCacheRepository:
             except OSError:
                 return {"records_deleted": 0, "files_deleted": 0}
             try:
+                self._reconcile_publication_intents_locked()
                 for job in _due_cleanup_jobs(self.project_root, now_epoch, limit):
                     attempts += 1
                     quarantine_relative = _cleanup_job_path(job)
@@ -753,6 +1257,46 @@ def _validate_cache_relative_path(value: Any) -> Path:
         if part.split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES:
             raise ValueError("coordinate path uses a reserved Windows name")
     return Path(*windows_path.parts)
+
+
+def _validate_incoming_path(value: Any) -> Path:
+    relative_path = _validate_cache_relative_path(value)
+    if len(relative_path.parts) < 2 or relative_path.parts[0] != ".incoming":
+        raise ValueError("staged coordinate files must be under .incoming")
+    if any(
+        part in {".locks", ".quarantine"} for part in relative_path.parts[1:]
+    ):
+        raise ValueError("staged coordinate path uses an internal namespace")
+    return relative_path
+
+
+def _validate_coordinate_suffix(value: Any) -> str:
+    if not isinstance(value, str):
+        raise TypeError("coordinate_suffix must be a string")
+    if value not in COORDINATE_FILE_SUFFIXES:
+        raise ValueError("coordinate suffix is not supported")
+    return value
+
+
+def _derive_coordinate_final_path(
+    source: str,
+    source_record_id: str,
+    generation_id: str,
+    coordinate_suffix: str,
+) -> Path:
+    source = _validate_identifier("source", source)
+    source_record_id = _validate_identifier("source_record_id", source_record_id)
+    generation_id = _validate_generation_id(generation_id)
+    coordinate_suffix = _validate_coordinate_suffix(coordinate_suffix)
+    source_component = hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+    record_component = hashlib.sha256(
+        source_record_id.encode("utf-8")
+    ).hexdigest()[:24]
+    return (
+        Path("coordinates")
+        / source_component
+        / f"{record_component}-{generation_id}{coordinate_suffix}"
+    )
 
 
 def _quarantine_relative_path(generation_id: str, filename: str) -> Path:
@@ -1233,15 +1777,13 @@ def _atomic_publish_coordinate(
     if _prevalidate_regular_file(cache_root, temporary, temporary_parts) != "regular":
         return "transient_error"
     final_state = _prevalidate_regular_file(cache_root, final, final_parts)
-    if final_state == "permanent_unsafe":
-        return "permanent_unsafe"
-    if final_state == "transient_error":
-        return "transient_error"
+    if final_state != "missing":
+        return final_state
     moved = (
-        _move_windows_verified(cache_root, temporary, final, replace_existing=True)
+        _move_windows_verified(cache_root, temporary, final, replace_existing=False)
         if os.name == "nt"
         else _replace_posix_verified(
-            cache_root, temporary_parts, final_parts, replace_existing=True
+            cache_root, temporary_parts, final_parts, replace_existing=False
         )
     )
     return "moved" if moved else "transient_error"
@@ -1378,12 +1920,21 @@ def _replace_posix_verified(
                 return False
             except FileNotFoundError:
                 pass
-        os.replace(
-            source_parts[-1],
-            destination_parts[-1],
-            src_dir_fd=source_descriptor,
-            dst_dir_fd=destination_descriptor,
-        )
+            os.link(
+                source_parts[-1],
+                destination_parts[-1],
+                src_dir_fd=source_descriptor,
+                dst_dir_fd=destination_descriptor,
+                follow_symlinks=False,
+            )
+            os.unlink(source_parts[-1], dir_fd=source_descriptor)
+        else:
+            os.replace(
+                source_parts[-1],
+                destination_parts[-1],
+                src_dir_fd=source_descriptor,
+                dst_dir_fd=destination_descriptor,
+            )
         return True
     except OSError:
         return False
@@ -1616,6 +2167,13 @@ def _is_reparse_or_symlink(path_stat: os.stat_result) -> bool:
     return stat.S_ISLNK(path_stat.st_mode) or bool(
         attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     )
+
+
+def _paths_share_file_identity(first: Path, second: Path) -> bool:
+    try:
+        return os.path.samestat(os.lstat(first), os.lstat(second))
+    except OSError:
+        return False
 
 
 def _prevalidate_regular_file(
