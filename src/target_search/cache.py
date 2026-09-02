@@ -691,7 +691,8 @@ class TargetCacheRepository:
         conn = get_connection(self.project_root)
         try:
             rows = conn.execute(
-                "SELECT * FROM target_coordinate_publication_intents "
+                "SELECT rowid AS _intent_rowid, * "
+                "FROM target_coordinate_publication_intents "
                 "ORDER BY created_at, intent_id"
             ).fetchall()
         finally:
@@ -722,13 +723,13 @@ class TargetCacheRepository:
     def _resolve_invalid_publication_intent_locked(
         self, intent_row: Mapping[str, Any]
     ) -> None:
-        intent_id = intent_row.get("intent_id")
-        if not isinstance(intent_id, str):
+        intent_rowid = intent_row.get("_intent_rowid")
+        if isinstance(intent_rowid, bool) or not isinstance(intent_rowid, int):
             return
         try:
             cache_key = _validate_identifier("cache_key", intent_row.get("cache_key"))
         except (TypeError, ValueError):
-            self._delete_invalid_intent_transactionally(intent_id)
+            self._delete_invalid_intent_transactionally(intent_rowid)
             return
 
         conn = get_connection(self.project_root)
@@ -740,10 +741,11 @@ class TargetCacheRepository:
         finally:
             conn.close()
         if active is None or active.get("cleanup_pending") != 1:
-            self._delete_invalid_intent_transactionally(intent_id)
+            self._delete_invalid_intent_transactionally(intent_rowid)
             return
 
         restore_active = False
+        retain_active = False
         active_evidence = self._validated_evidence(active)
         if (
             active_evidence is not None
@@ -774,7 +776,9 @@ class TargetCacheRepository:
                 quarantine_state = _prevalidate_regular_file(
                     cache_root, quarantine, quarantine_relative.parts
                 )
-                if source_state == "regular" and quarantine_state == "missing":
+                if "transient_error" in {source_state, quarantine_state}:
+                    retain_active = True
+                elif source_state == "regular" and quarantine_state == "missing":
                     restore_active = True
                 elif source_state == "missing" and quarantine_state == "regular":
                     restore_active = (
@@ -789,17 +793,19 @@ class TargetCacheRepository:
                     )
 
         self._delete_invalid_intent_transactionally(
-            intent_id,
+            intent_rowid,
             active=active,
             restore_active=restore_active,
+            retain_active=retain_active,
         )
 
     def _delete_invalid_intent_transactionally(
         self,
-        intent_id: str,
+        intent_rowid: int,
         *,
         active: Optional[Mapping[str, Any]] = None,
         restore_active: bool = False,
+        retain_active: bool = False,
     ) -> None:
         conn = get_connection(self.project_root)
         try:
@@ -812,6 +818,16 @@ class TargetCacheRepository:
                         """
                         UPDATE target_remote_cache
                         SET cleanup_pending = 0, cleanup_quarantine_path = NULL
+                        WHERE cache_key IS ? AND generation_id IS ?
+                            AND cleanup_pending = 1
+                        """,
+                        (cache_key, generation_id),
+                    )
+                elif retain_active:
+                    cursor = conn.execute(
+                        """
+                        UPDATE target_remote_cache
+                        SET cleanup_pending = 0
                         WHERE cache_key IS ? AND generation_id IS ?
                             AND cleanup_pending = 1
                         """,
@@ -831,8 +847,8 @@ class TargetCacheRepository:
                     return
             conn.execute(
                 "DELETE FROM target_coordinate_publication_intents "
-                "WHERE intent_id = ?",
-                (intent_id,),
+                "WHERE rowid = ?",
+                (intent_rowid,),
             )
             conn.commit()
         except Exception:

@@ -152,10 +152,11 @@ def _insert_corrupt_publication_intent(
     *,
     staged_path=".incoming/corrupt.tmp",
     previous=None,
+    intent_id=None,
 ):
     from src.target_search.database import get_connection
 
-    intent_id = str(uuid.uuid4())
+    intent_id = str(uuid.uuid4()) if intent_id is None else intent_id
     generation_id = str(uuid.uuid4())
     retrieved_at = clock.value
     expires_at = retrieved_at + timedelta(days=1)
@@ -822,6 +823,50 @@ def test_initialization_discards_corrupt_intent_without_touching_its_paths(
     assert outside.read_text(encoding="utf-8") == "outside sentinel"
 
 
+@pytest.mark.parametrize("reconcile_mode", ["initialization", "cleanup"])
+def test_reconciliation_deletes_blob_intent_id_by_trusted_rowid_and_reuses_key(
+    project_root, clock, reconcile_mode
+):
+    from src.target_search.cache import TargetCacheRepository
+    from src.target_search.database import get_connection
+
+    repository = TargetCacheRepository(project_root, clock)
+    cache_key = f"coordinate:blob-intent:{reconcile_mode}"
+    _insert_corrupt_publication_intent(
+        project_root,
+        clock,
+        cache_key,
+        intent_id=sqlite3.Binary(f"blob-{reconcile_mode}".encode("utf-8")),
+    )
+
+    if reconcile_mode == "initialization":
+        repository = TargetCacheRepository(project_root, clock)
+    else:
+        assert repository.cleanup_expired() == {
+            "records_deleted": 0,
+            "files_deleted": 0,
+        }
+
+    conn = get_connection(project_root)
+    try:
+        remaining = conn.execute(
+            "SELECT COUNT(*) AS count FROM target_coordinate_publication_intents "
+            "WHERE cache_key = ?",
+            (cache_key,),
+        ).fetchone()["count"]
+    finally:
+        conn.close()
+    reused = repository.upsert(
+        cache_key,
+        "target",
+        "UniProt",
+        "P00533",
+        {"gene": "EGFR"},
+    )
+    assert remaining == 0
+    assert reused.cache_key == cache_key
+
+
 def test_cleanup_discards_corrupt_intent_and_preserves_valid_prior_generation(
     project_root, clock
 ):
@@ -893,6 +938,92 @@ def test_cleanup_discards_corrupt_intent_and_preserves_valid_prior_generation(
         content="second generation",
     )
     assert repository.get("coordinate:corrupt-cleanup") == second
+
+
+def test_corrupt_intent_transient_prior_probe_retains_linked_active_generation(
+    project_root, clock, monkeypatch
+):
+    from src.target_search import cache as cache_module
+    from src.target_search.database import get_cache_dir, get_connection
+
+    repository = cache_module.TargetCacheRepository(project_root, clock)
+    first = _publish_coordinate(
+        repository,
+        project_root,
+        "coordinate:corrupt-transient",
+        "first.cif",
+        source_record_id="first",
+        content="first generation",
+    )
+    cache_root = get_cache_dir(project_root)
+    first_file = cache_root / first.payload["path"]
+    quarantine_path = (
+        f".quarantine/{first.generation_id}-{Path(first.payload['path']).name}"
+    )
+    _insert_corrupt_publication_intent(
+        project_root,
+        clock,
+        first.cache_key,
+        previous=first,
+    )
+    conn = get_connection(project_root)
+    try:
+        conn.execute(
+            """
+            UPDATE target_remote_cache
+            SET cleanup_pending = 1, cleanup_quarantine_path = ?
+            WHERE cache_key = ? AND generation_id = ?
+            """,
+            (quarantine_path, first.cache_key, first.generation_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    original_prevalidate = cache_module._prevalidate_regular_file
+
+    def transient_source_probe(cache_root_value, candidate, relative_parts):
+        if candidate == first_file:
+            return "transient_error"
+        return original_prevalidate(cache_root_value, candidate, relative_parts)
+
+    monkeypatch.setattr(
+        cache_module, "_prevalidate_regular_file", transient_source_probe
+    )
+
+    result = repository.cleanup_expired()
+
+    conn = get_connection(project_root)
+    try:
+        active = conn.execute(
+            "SELECT generation_id, cleanup_pending FROM target_remote_cache "
+            "WHERE cache_key = ?",
+            (first.cache_key,),
+        ).fetchone()
+        intents = conn.execute(
+            "SELECT COUNT(*) AS count FROM target_coordinate_publication_intents "
+            "WHERE cache_key = ?",
+            (first.cache_key,),
+        ).fetchone()["count"]
+    finally:
+        conn.close()
+    assert result == {"records_deleted": 0, "files_deleted": 0}
+    assert active == {"generation_id": first.generation_id, "cleanup_pending": 0}
+    assert intents == 0
+    assert repository.get(first.cache_key) == first
+    assert first_file.read_text(encoding="utf-8") == "first generation"
+
+    monkeypatch.setattr(
+        cache_module, "_prevalidate_regular_file", original_prevalidate
+    )
+    second = _publish_coordinate(
+        repository,
+        project_root,
+        first.cache_key,
+        "second.cif",
+        source_record_id="second",
+        content="second generation",
+    )
+    assert repository.get(first.cache_key) == second
 
 
 def test_generic_metadata_cannot_overwrite_coordinate_owned_key(project_root, clock):
