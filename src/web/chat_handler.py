@@ -16,6 +16,7 @@ from src.agent.persistence.redaction import (
     sanitize_bounded,
     sanitize_sensitive_text,
 )
+from src.agent.contracts import CandidateSet, ObservationStatus
 from src.agent.routing.hybrid import SMILES_PATTERN
 from src.web.models import generate_for_chat
 
@@ -307,7 +308,11 @@ class ChatHandler:
                             }))
 
                     skill_info = f" (当前技能: {active_skill})" if active_skill else ""
-                    
+
+                    await self._send_molecule_candidate_events(
+                        websocket,
+                        agent_result,
+                    )
                     await websocket.send_text(json.dumps({
                         "type": "agent_result",
                         "message": f"✅ 智能代理完成，使用工具: {', '.join(tools_used)}{skill_info}",
@@ -580,6 +585,25 @@ class ChatHandler:
         return sanitized, contains_sensitive
 
     @classmethod
+    def _sanitize_agent_warnings(cls, raw_warnings: Any) -> list[str]:
+        warnings = []
+        if not isinstance(raw_warnings, list):
+            return warnings
+        for warning in raw_warnings[:_AGENT_FAILURE_WARNING_LIMIT]:
+            sanitized, sensitive = cls._sanitize_agent_failure_text(
+                warning,
+                max_chars=_AGENT_FAILURE_WARNING_MAX_CHARS,
+            )
+            if (
+                sensitive
+                or not sanitized
+                or sanitized.casefold() == "[redacted]"
+            ):
+                continue
+            warnings.append(sanitized)
+        return warnings
+
+    @classmethod
     def _agent_failure_content(cls, agent_result: Dict[str, Any]) -> str:
         """Select a safe, authoritative message for a failed Agent run."""
 
@@ -669,21 +693,7 @@ class ChatHandler:
         )
         if skill_sensitive:
             active_skill = ""
-        raw_warnings = agent_result.get("warnings")
-        warnings = []
-        if isinstance(raw_warnings, list):
-            for warning in raw_warnings[:_AGENT_FAILURE_WARNING_LIMIT]:
-                sanitized, sensitive = self._sanitize_agent_failure_text(
-                    warning,
-                    max_chars=_AGENT_FAILURE_WARNING_MAX_CHARS,
-                )
-                if (
-                    sensitive
-                    or not sanitized
-                    or sanitized.casefold() == "[redacted]"
-                ):
-                    continue
-                warnings.append(sanitized)
+        warnings = self._sanitize_agent_warnings(agent_result.get("warnings"))
 
         await self._send_status(websocket, f"⚠️ 代理执行失败: {content}")
         await websocket.send_text(json.dumps({
@@ -701,6 +711,104 @@ class ChatHandler:
             "status": status,
         }, ensure_ascii=False))
         return content
+
+    @classmethod
+    def _candidate_event_from_observation(
+        cls,
+        observation: Mapping[str, Any],
+        *,
+        trace_id: Any,
+    ) -> Dict[str, Any] | None:
+        if observation.get("success") is not True:
+            return None
+        status = observation.get("status")
+        if status not in {"succeeded", "partial"}:
+            return None
+        quality = observation.get("quality")
+        if (
+            not isinstance(quality, Mapping)
+            or quality.get("output_contract") != "CandidateSet@1"
+        ):
+            return None
+
+        try:
+            candidate_set = CandidateSet.from_dict(observation.get("data"))
+            if (
+                candidate_set.status
+                not in {
+                    ObservationStatus.SUCCEEDED,
+                    ObservationStatus.PARTIAL,
+                }
+                or not candidate_set.candidates
+            ):
+                return None
+            sanitized_data = cls._sanitize_agent_event(candidate_set.to_dict())
+            candidate_set = CandidateSet.from_dict(sanitized_data)
+        except Exception:
+            logger.warning(
+                "Skipped malformed molecule candidate observation"
+            )
+            return None
+
+        safe_trace_id, trace_sensitive = cls._sanitize_agent_failure_text(
+            trace_id,
+            max_chars=128,
+        )
+        if trace_sensitive:
+            safe_trace_id = ""
+        tool_name, tool_sensitive = cls._sanitize_agent_failure_text(
+            observation.get("tool_name"),
+            max_chars=128,
+        )
+        if tool_sensitive:
+            tool_name = ""
+        provenance = observation.get("provenance")
+        raw_model_name = (
+            provenance.get("model_name")
+            if isinstance(provenance, Mapping)
+            else None
+        )
+        model_name, model_sensitive = cls._sanitize_agent_failure_text(
+            raw_model_name,
+            max_chars=128,
+        )
+        if model_sensitive:
+            model_name = ""
+
+        return {
+            "type": "molecule_candidates",
+            "trace_id": safe_trace_id,
+            "source": {
+                "tool_name": tool_name,
+                "model_name": model_name,
+                "status": status,
+            },
+            "candidate_set": candidate_set.to_dict(),
+            "warnings": cls._sanitize_agent_warnings(
+                observation.get("warnings")
+            ),
+        }
+
+    @classmethod
+    async def _send_molecule_candidate_events(
+        cls,
+        websocket: WebSocket,
+        agent_result: Dict[str, Any],
+    ) -> None:
+        if agent_result.get("status") in {"failed", "rejected", "cancelled"}:
+            return
+        sequence = agent_result.get("tool_result_sequence")
+        if not isinstance(sequence, list):
+            return
+        for observation in sequence:
+            if not isinstance(observation, Mapping):
+                continue
+            event = cls._candidate_event_from_observation(
+                observation,
+                trace_id=agent_result.get("trace_id"),
+            )
+            if event is not None:
+                await websocket.send_text(json.dumps(event, ensure_ascii=False))
 
     async def _send_agent_events(self, websocket: WebSocket, agent_result: Dict[str, Any]):
         """Forward structured Agent workflow events to the browser."""

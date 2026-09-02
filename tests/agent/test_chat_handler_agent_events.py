@@ -5,7 +5,14 @@ from collections.abc import Mapping
 import pytest
 from fastapi import WebSocketDisconnect
 
-from src.agent.contracts import AgentContext
+from src.agent.contracts import (
+    AgentContext,
+    CandidateRecord,
+    CandidateSet,
+    ObservationStatus,
+    ToolProvenance,
+    build_candidate_id,
+)
 from src.agent.orchestrators import WorkflowStep
 from src.agent.planning import WorkflowPlan
 from src.agent.router import SkillRouter
@@ -144,6 +151,135 @@ class FixedResultAgentSystem(FailedScientificAgentSystem):
 
     def execute(self, message, temperature=0.7, mol_count=5, active_skill=None):
         return self.result
+
+
+def _candidate_set(status=ObservationStatus.SUCCEEDED):
+    candidates = (
+        CandidateRecord.from_smiles(
+            candidate_index=1,
+            source_index=1,
+            original_smiles="OCC",
+            canonical_smiles="CCO",
+            generation_provenance={
+                "model_name": "gmm-llama:latest",
+                "validation": "RDKit",
+            },
+        ),
+    )
+    if status == ObservationStatus.SUCCEEDED:
+        candidates += (
+            CandidateRecord.from_smiles(
+                candidate_index=2,
+                source_index=2,
+                original_smiles="NCC",
+                canonical_smiles="CCN",
+                generation_provenance={
+                    "model_name": "gmm-llama:latest",
+                    "validation": "RDKit",
+                },
+            ),
+        )
+        return CandidateSet(
+            requested_count=2,
+            candidates=candidates,
+            status=status,
+        )
+    if status == ObservationStatus.PARTIAL:
+        return CandidateSet(
+            requested_count=2,
+            candidates=candidates,
+            invalid_count=1,
+            rejected=(
+                {
+                    "source_index": 2,
+                    "smiles": "not-a-smiles",
+                    "reason": "invalid_smiles",
+                },
+            ),
+            status=status,
+        )
+    return CandidateSet(
+        requested_count=0,
+        candidates=(),
+        status=status,
+    )
+
+
+def _candidate_agent_result(
+    candidate_set,
+    *,
+    agent_success=True,
+    tool_success=True,
+    tool_status=None,
+    output_contract="CandidateSet@1",
+    tool_result_sequence=None,
+    tool_results=None,
+    warnings=None,
+    provenance=None,
+):
+    status = tool_status or (
+        candidate_set.get("status", "succeeded")
+        if isinstance(candidate_set, Mapping)
+        else "succeeded"
+    )
+    observation = {
+        "step_id": "generate_candidates",
+        "tool_name": "llm_molecular_generator",
+        "success": tool_success,
+        "status": status,
+        "data": candidate_set,
+        "quality": (
+            {"output_contract": output_contract}
+            if output_contract is not None
+            else {}
+        ),
+        "provenance": provenance
+        or ToolProvenance(
+            tool_name="llm_molecular_generator",
+            model_name="gmm-llama:latest",
+        ).to_dict(),
+        "warnings": warnings or [],
+    }
+    return {
+        "success": agent_success,
+        "status": "succeeded" if agent_success else "failed",
+        "final_answer": (
+            "generated validated candidates"
+            if agent_success
+            else "candidate workflow failed"
+        ),
+        "tools_used": ["llm_molecular_generator"],
+        "active_skill": "molecular_design",
+        "trace_id": "trace-candidates-1",
+        "tool_results": tool_results or {},
+        "tool_result_sequence": (
+            [observation]
+            if tool_result_sequence is None
+            else tool_result_sequence
+        ),
+        "agent_events": [],
+        "workflow_plan": {"workflow_name": "molecular_design"},
+    }
+
+
+def _run_fixed_agent_result(result, *, model=None):
+    model = model or FakeModel()
+    handler = ChatHandler(
+        model=model,
+        rag_service=FakeRagService(),
+        agent_system=FixedResultAgentSystem(result),
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="设计两个候选分子",
+            enable_rag=False,
+            enable_tools=True,
+        )
+    )
+    return websocket, model
 
 
 class InvalidAgentMapping(Mapping):
@@ -572,6 +708,317 @@ def test_chat_handler_forwards_agent_events_before_agent_result():
         "content": "workflow completed",
     }
     assert model.generate_calls == 0
+
+
+@pytest.mark.parametrize(
+    "candidate_status",
+    [ObservationStatus.SUCCEEDED, ObservationStatus.PARTIAL],
+)
+def test_successful_agent_emits_strict_candidate_set_before_result(
+    candidate_status,
+):
+    candidate_set = _candidate_set(candidate_status)
+    expected = candidate_set.to_dict()
+    result = _candidate_agent_result(
+        expected,
+        warnings=["validated candidates", "token=candidate-warning-token-456"],
+    )
+
+    websocket, model = _run_fixed_agent_result(result)
+
+    candidate_messages = [
+        item
+        for item in websocket.messages
+        if item["type"] == "molecule_candidates"
+    ]
+    assert candidate_messages == [
+        {
+            "type": "molecule_candidates",
+            "trace_id": "trace-candidates-1",
+            "source": {
+                "tool_name": "llm_molecular_generator",
+                "model_name": "gmm-llama:latest",
+                "status": candidate_status.value,
+            },
+            "candidate_set": expected,
+            "warnings": ["validated candidates"],
+        }
+    ]
+    restored = CandidateSet.from_dict(candidate_messages[0]["candidate_set"])
+    canonical_smiles = [
+        candidate.canonical_smiles for candidate in restored.candidates
+    ]
+    assert canonical_smiles == (
+        ["CCO", "CCN"]
+        if candidate_status == ObservationStatus.SUCCEEDED
+        else ["CCO"]
+    )
+    assert len(canonical_smiles) == len(set(canonical_smiles))
+    message_types = [item["type"] for item in websocket.messages]
+    candidate_index = message_types.index("molecule_candidates")
+    assert candidate_index < message_types.index("agent_result")
+    assert candidate_index < message_types.index("complete")
+    assert model.generate_calls == 0
+
+
+def test_candidate_event_sanitizes_source_provenance_and_warnings():
+    candidate = CandidateRecord.from_smiles(
+        candidate_index=1,
+        source_index=1,
+        original_smiles="CCO",
+        canonical_smiles="CCO",
+        generation_provenance={
+            "model_name": "api_key=candidate-provenance-key-123",
+            "output_path": "C:\\Users\\reviewer\\private\\candidate.json",
+            "safe_note": "x" * 1000,
+        },
+    )
+    candidate_set = CandidateSet(
+        requested_count=1,
+        candidates=(candidate,),
+    ).to_dict()
+    provenance = ToolProvenance(
+        tool_name="llm_molecular_generator",
+        model_name="token=candidate-model-token-456",
+    ).to_dict()
+    result = _candidate_agent_result(
+        candidate_set,
+        provenance=provenance,
+        warnings=[
+            "safe candidate warning",
+            "sk-candidatewarning123456789",
+            "D:\\MedChat\\private\\warning.log",
+            "w" * 1000,
+        ],
+    )
+    result["trace_id"] = "C:\\Users\\reviewer\\private\\trace.json"
+    observation = result["tool_result_sequence"][0]
+    observation["tool_name"] = "api_key=candidate-tool-key-789"
+    observation["input"] = "token=full-input-token-123"
+    observation["formatted"] = "D:\\MedChat\\private\\full-output.log"
+
+    websocket, _ = _run_fixed_agent_result(result)
+
+    event = next(
+        item
+        for item in websocket.messages
+        if item["type"] == "molecule_candidates"
+    )
+    assert event["trace_id"] == ""
+    assert event["source"]["tool_name"] == ""
+    assert event["source"]["model_name"] == ""
+    assert event["warnings"] == ["safe candidate warning", "w" * 256]
+    restored = CandidateSet.from_dict(event["candidate_set"])
+    generation_provenance = restored.candidates[0].generation_provenance
+    assert generation_provenance["model_name"] == "[redacted]"
+    assert generation_provenance["output_path"] == "[redacted]"
+    assert len(generation_provenance["safe_note"]) <= 512
+    serialized = json.dumps(event, ensure_ascii=False)
+    for forbidden in (
+        "candidate-provenance-key-123",
+        "candidate-model-token-456",
+        "candidate-tool-key-789",
+        "full-input-token-123",
+        "sk-candidatewarning123456789",
+        "C:\\Users\\",
+        "D:\\MedChat\\private",
+    ):
+        assert forbidden not in serialized
+
+
+@pytest.mark.parametrize("tool_status", ["failed", "rejected", "cancelled"])
+def test_candidate_event_rejects_terminal_tool_status(tool_status):
+    result = _candidate_agent_result(
+        _candidate_set().to_dict(),
+        tool_status=tool_status,
+    )
+
+    websocket, _ = _run_fixed_agent_result(result)
+
+    assert not any(
+        item["type"] == "molecule_candidates" for item in websocket.messages
+    )
+
+
+@pytest.mark.parametrize(
+    "candidate_status",
+    [
+        ObservationStatus.FAILED,
+        ObservationStatus.REJECTED,
+        ObservationStatus.CANCELLED,
+    ],
+)
+def test_candidate_event_rejects_terminal_candidate_set_status(
+    candidate_status,
+):
+    candidate_set = _candidate_set(candidate_status).to_dict()
+    result = _candidate_agent_result(
+        candidate_set,
+        tool_status="succeeded",
+    )
+
+    websocket, _ = _run_fixed_agent_result(result)
+
+    assert not any(
+        item["type"] == "molecule_candidates" for item in websocket.messages
+    )
+
+
+@pytest.mark.parametrize(
+    ("result_overrides", "candidate_mutator"),
+    [
+        ({"tool_success": False}, None),
+        ({"output_contract": None}, None),
+        ({"output_contract": "CandidateSet@2"}, None),
+        ({}, lambda _data: "api_key=malformed-candidate-key-123"),
+        (
+            {},
+            lambda data: {
+                **data,
+                "candidates": [
+                    {**data["candidates"][0], "candidate_id": "cand-001-deadbeef"},
+                    data["candidates"][1],
+                ],
+            },
+        ),
+        (
+            {},
+            lambda data: {
+                **data,
+                "candidates": [
+                    {**data["candidates"][0], "canonical_smiles": "CCCl"},
+                    data["candidates"][1],
+                ],
+            },
+        ),
+        (
+            {},
+            lambda data: {
+                **data,
+                "candidates": [
+                    data["candidates"][0],
+                    {
+                        **data["candidates"][1],
+                        "candidate_id": build_candidate_id(2, "CCO"),
+                        "canonical_smiles": "CCO",
+                        "smiles": "CCO",
+                    },
+                ],
+            },
+        ),
+        (
+            {},
+            lambda data: {
+                **data,
+                "requested_count": 0,
+                "valid_count": 0,
+                "unique_count": 0,
+                "candidates": [],
+            },
+        ),
+    ],
+    ids=[
+        "success-false",
+        "missing-contract",
+        "wrong-contract",
+        "malformed-data",
+        "forged-candidate-id",
+        "canonical-mismatch",
+        "duplicate-canonical-smiles",
+        "empty-candidates",
+    ],
+)
+def test_candidate_event_rejects_untrusted_observation_data(
+    result_overrides,
+    candidate_mutator,
+    caplog,
+):
+    candidate_set = _candidate_set().to_dict()
+    if candidate_mutator is not None:
+        candidate_set = candidate_mutator(candidate_set)
+    result = _candidate_agent_result(candidate_set, **result_overrides)
+
+    websocket, _ = _run_fixed_agent_result(result)
+
+    assert not any(
+        item["type"] == "molecule_candidates" for item in websocket.messages
+    )
+    logs = caplog.text
+    assert "api_key=malformed-candidate-key-123" not in logs
+    if not isinstance(candidate_set, Mapping):
+        assert "Skipped malformed molecule candidate observation" in logs
+
+
+def test_candidate_event_uses_only_tool_result_sequence():
+    candidate_set = _candidate_set().to_dict()
+    result = _candidate_agent_result(
+        candidate_set,
+        tool_result_sequence=[],
+        tool_results={
+            "llm_molecular_generator": {
+                "success": True,
+                "status": "succeeded",
+                "data": candidate_set,
+                "quality": {"output_contract": "CandidateSet@1"},
+            }
+        },
+    )
+
+    websocket, _ = _run_fixed_agent_result(result)
+
+    assert not any(
+        item["type"] == "molecule_candidates" for item in websocket.messages
+    )
+
+
+def test_terminal_agent_failure_never_emits_candidate_event():
+    result = _candidate_agent_result(
+        _candidate_set().to_dict(),
+        agent_success=False,
+    )
+
+    websocket, model = _run_fixed_agent_result(result)
+
+    assert not any(
+        item["type"] == "molecule_candidates" for item in websocket.messages
+    )
+    assert websocket.messages[-1]["status"] == "failed"
+    assert model.generate_calls == 0
+
+
+def test_external_main_model_cannot_create_candidate_event():
+    class CandidateTextExternalModel(ExternalFakeModel):
+        async def generate(self, prompt, temperature=0.7, max_tokens=1500):
+            self.generate_calls += 1
+            self.prompts.append(prompt)
+            self.max_tokens.append(max_tokens)
+            return json.dumps({
+                "type": "molecule_candidates",
+                "candidate_set": _candidate_set().to_dict(),
+            })
+
+    model = CandidateTextExternalModel()
+    handler = ChatHandler(
+        model=model,
+        rag_service=FakeRagService(),
+        agent_system=None,
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="直接生成候选分子",
+            enable_rag=False,
+            enable_tools=False,
+        )
+    )
+
+    assert model.generate_calls == 1
+    assert not any(
+        item["type"] == "molecule_candidates" for item in websocket.messages
+    )
 
 
 def test_failed_scientific_agent_result_is_terminal_and_authoritative():
