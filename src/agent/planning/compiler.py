@@ -60,17 +60,16 @@ class PlanCompiler:
             step_dependencies: tuple[str, ...] = ()
             if selector:
                 if selector == "$.workflow":
-                    step_dependencies = tuple(
-                        producer
-                        for output_key, producer in producers.items()
-                        if producer_capabilities[output_key]
-                        == "target.structure.search"
-                    )
-                    if not step_dependencies:
+                    if (
+                        "target" not in producers
+                        or producer_capabilities["target"]
+                        != "target.structure.search"
+                    ):
                         raise PlanCompilationError(
                             "Workflow binding requires an upstream target "
-                            "structure search output"
+                            "structure search with exact output key: target"
                         )
+                    step_dependencies = (producers["target"],)
                 else:
                     match = self.OUTPUT_SELECTOR.fullmatch(selector)
                     if not match:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from _thread import LockType
 from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from threading import Lock
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -236,6 +236,18 @@ class WorkflowExecutor:
         if plan is None:
             plan = self.planner.plan(context_snapshot)
         plan_snapshot = _copy_boundary(plan, "plan")
+        plan_request_metadata = {
+            key: plan_snapshot.metadata[key]
+            for key in ("requested_count",)
+            if key in plan_snapshot.metadata
+        }
+        context_snapshot = replace(
+            context_snapshot,
+            metadata={
+                **plan_request_metadata,
+                **context_snapshot.metadata,
+            },
+        )
         if type(self).preflight is WorkflowExecutor.preflight:
             compiled, failure = self._preflight(
                 context=context_snapshot,

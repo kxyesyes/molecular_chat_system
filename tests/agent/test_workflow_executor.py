@@ -68,6 +68,21 @@ class FakeTool:
         }
 
 
+class StaticResultTool(FakeTool):
+    def __init__(self, name, data):
+        super().__init__(name)
+        self.data = data
+
+    def execute(self, query):
+        self.calls.append(query)
+        return {
+            "success": True,
+            "message": "ok",
+            "data": self.data,
+            "formatted": self.name,
+        }
+
+
 class SingleStepPlanner:
     def plan(self, context):
         return WorkflowPlan(
@@ -259,6 +274,67 @@ def test_prepare_preserves_all_available_policy_allowed_tools():
         "property_calculator",
     ]
     assert "activity_predictor" not in prepared.tools
+
+
+def test_plan_metadata_is_carried_into_workflow_binding_during_execution():
+    policy = WorkflowPolicy(
+        name="target_driven_design",
+        description="test structured workflow binding",
+        allowed_tools=(
+            "target_database_search",
+            "llm_molecular_generator",
+        ),
+    )
+    plan = WorkflowPlan(
+        workflow_name="target_driven_design",
+        metadata={"requested_count": 7, "target_hint": "PDE5A"},
+        steps=[
+            WorkflowStep(
+                "target_search",
+                "target_database_search",
+                input_data="PDE5A",
+                output_key="target",
+                capability="target.structure.search",
+            ),
+            WorkflowStep(
+                "molecule_generation",
+                "llm_molecular_generator",
+                input_binding="$.workflow",
+                output_key="molecules",
+                capability="molecule.generate",
+                preconditions=("target_evidence",),
+            ),
+        ],
+    )
+    target = StaticResultTool(
+        "target_database_search",
+        [{"gene_symbol": "PDE5A", "source": "UniProt"}],
+    )
+    generator = StaticResultTool(
+        "llm_molecular_generator",
+        [{"smiles": "CCO"}],
+    )
+
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="generate 2 molecules for PDE5A",
+            trace_id="plan-metadata-workflow-binding",
+            active_skill="target_driven_design",
+        ),
+        policy=policy,
+        all_tools={
+            "target_database_search": target,
+            "llm_molecular_generator": generator,
+        },
+        plan=plan,
+    )
+
+    assert execution.result.success is True
+    assert generator.calls[0]["query"] == "generate 2 molecules for PDE5A"
+    assert generator.calls[0]["metadata"]["requested_count"] == 7
+    assert generator.calls[0]["outputs"]["target"] == [
+        {"gene_symbol": "PDE5A", "source": "UniProt"}
+    ]
 
 
 def test_unused_policy_allowed_tool_may_be_absent():
