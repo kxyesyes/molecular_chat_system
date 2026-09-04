@@ -27,6 +27,7 @@ class PlanCompiler:
     def compile(self, plan: WorkflowPlan, policy: WorkflowPolicy) -> CompiledPlan:
         seen_steps: set[str] = set()
         producers: dict[str, str] = {}
+        producer_capabilities: dict[str, str] = {}
         dependencies: dict[str, tuple[str, ...]] = {}
         allowed = set(policy.allowed_tools)
 
@@ -58,17 +59,30 @@ class PlanCompiler:
                 selector = f"$.outputs.{step.input_from}"
             step_dependencies: tuple[str, ...] = ()
             if selector:
-                match = self.OUTPUT_SELECTOR.fullmatch(selector)
-                if not match:
-                    raise PlanCompilationError(
-                        f"Unsupported input binding: {selector}"
+                if selector == "$.workflow":
+                    step_dependencies = tuple(
+                        producer
+                        for output_key, producer in producers.items()
+                        if producer_capabilities[output_key]
+                        == "target.structure.search"
                     )
-                output_key = match.group(1)
-                if output_key not in producers:
-                    raise PlanCompilationError(
-                        f"Binding references missing output: {output_key}"
-                    )
-                step_dependencies = (producers[output_key],)
+                    if not step_dependencies:
+                        raise PlanCompilationError(
+                            "Workflow binding requires an upstream target "
+                            "structure search output"
+                        )
+                else:
+                    match = self.OUTPUT_SELECTOR.fullmatch(selector)
+                    if not match:
+                        raise PlanCompilationError(
+                            f"Unsupported input binding: {selector}"
+                        )
+                    output_key = match.group(1)
+                    if output_key not in producers:
+                        raise PlanCompilationError(
+                            f"Binding references missing output: {output_key}"
+                        )
+                    step_dependencies = (producers[output_key],)
             dependencies[step.name] = step_dependencies
 
             if step.output_key:
@@ -77,6 +91,7 @@ class PlanCompiler:
                         f"Duplicate output key: {step.output_key}"
                     )
                 producers[step.output_key] = step.name
+                producer_capabilities[step.output_key] = requested.name
 
         step_capabilities = {
             step.name: (
@@ -123,7 +138,8 @@ class PlanCompiler:
             if (
                 generation_step is None
                 or not expected_binding
-                or generation_step.input_binding != expected_binding
+                or generation_step.input_binding
+                not in {expected_binding, "$.workflow"}
             ):
                 raise PlanCompilationError(
                     "Target-driven generation must consume target evidence"

@@ -46,9 +46,10 @@ def test_target_driven_design_plan_for_pde5_query():
     assert plan.metadata["target_hint"] == "PDE5"
     assert plan.metadata["requested_count"] == 20
     generation_step = plan.steps[1]
-    assert generation_step.input_binding == "$.outputs.target"
+    assert generation_step.input_binding == "$.workflow"
     assert generation_step.input_transform == "identity"
-    assert "Validated target evidence" in generation_step.input_template
+    assert generation_step.input_data is None
+    assert generation_step.input_template is None
     assert generation_step.preconditions == ("target_evidence",)
     assert plan.steps[2].input_from == "molecules"
     assert plan.steps[2].input_binding == "$.outputs.molecules"

@@ -49,6 +49,71 @@ def test_compiler_accepts_bound_upstream_output():
     }
 
 
+def test_compiler_workflow_binding_depends_on_target_outputs_in_plan_order():
+    plan = WorkflowPlan(
+        workflow_name="target_driven_design",
+        steps=[
+            WorkflowStep(
+                "target_search_primary",
+                "target_database_search",
+                output_key="primary_target",
+                capability="target.structure.search",
+            ),
+            WorkflowStep(
+                "target_search_secondary",
+                "target_database_search",
+                output_key="secondary_target",
+                capability="target.structure.search",
+            ),
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_binding="$.workflow",
+                output_key="molecules",
+                capability="molecule.generate",
+                preconditions=("target_evidence",),
+            ),
+        ],
+    )
+
+    compiled = PlanCompiler().compile(
+        plan,
+        WorkflowCatalog().require("target_driven_design"),
+    )
+
+    assert compiled.dependencies["generate"] == (
+        "target_search_primary",
+        "target_search_secondary",
+    )
+
+
+def test_compiler_rejects_unknown_selector_when_workflow_binding_is_supported():
+    plan = WorkflowPlan(
+        workflow_name="target_driven_design",
+        steps=[
+            WorkflowStep(
+                "target_search",
+                "target_database_search",
+                output_key="target",
+                capability="target.structure.search",
+            ),
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_binding="$.workflow.secrets",
+                capability="molecule.generate",
+                preconditions=("target_evidence",),
+            ),
+        ],
+    )
+
+    with pytest.raises(PlanCompilationError, match="Unsupported input binding"):
+        PlanCompiler().compile(
+            plan,
+            WorkflowCatalog().require("target_driven_design"),
+        )
+
+
 def test_compiler_rejects_unknown_upstream_output():
     plan = WorkflowPlan(
         workflow_name="target_driven_design",

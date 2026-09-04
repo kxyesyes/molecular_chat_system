@@ -21,6 +21,12 @@ class BindingResolver:
     ) -> Any:
         if selector == "$.request.query":
             value = request.get("query")
+        elif selector == "$.workflow":
+            value = {
+                "query": request.get("query"),
+                "metadata": dict(request.get("metadata") or {}),
+                "outputs": dict(outputs),
+            }
         else:
             match = self.OUTPUT.fullmatch(selector)
             if not match:

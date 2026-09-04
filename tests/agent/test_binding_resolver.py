@@ -30,6 +30,32 @@ def test_binding_resolver_preserves_raw_target_records():
     assert value == targets
 
 
+def test_binding_resolver_returns_isolated_structured_workflow_payload():
+    metadata = {"requested_count": 10}
+    outputs = {"target": [{"gene_symbol": "PDE5A", "source": "UniProt"}]}
+
+    value = BindingResolver().resolve(
+        "$.workflow",
+        "identity",
+        request={"query": "设计 10 个", "metadata": metadata},
+        outputs=outputs,
+    )
+
+    assert value == {
+        "query": "设计 10 个",
+        "metadata": {"requested_count": 10},
+        "outputs": {
+            "target": [{"gene_symbol": "PDE5A", "source": "UniProt"}]
+        },
+    }
+    assert value["metadata"] is not metadata
+    assert value["outputs"] is not outputs
+    value["metadata"]["requested_count"] = 3
+    value["outputs"]["extra"] = "new"
+    assert metadata == {"requested_count": 10}
+    assert "extra" not in outputs
+
+
 def test_binding_resolver_rejects_untrusted_selector_syntax():
     with pytest.raises(BindingResolutionError, match="Unsupported"):
         BindingResolver().resolve(

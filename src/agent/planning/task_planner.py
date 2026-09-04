@@ -200,13 +200,8 @@ class TaskPlanner:
                 WorkflowStep(
                     "molecule_generation",
                     "llm_molecular_generator",
-                    query,
-                    input_binding="$.outputs.target",
+                    input_binding="$.workflow",
                     input_transform="identity",
-                    input_template=(
-                        "User request: {query}\n"
-                        "Validated target evidence: {input}"
-                    ),
                     output_key="molecules",
                     capability="molecule.generate",
                     output_contract="CandidateSet@1",

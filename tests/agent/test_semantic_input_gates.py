@@ -46,7 +46,7 @@ def _target_design_plan() -> WorkflowPlan:
             WorkflowStep(
                 "molecule_generation",
                 "llm_molecular_generator",
-                input_binding="$.outputs.target",
+                input_binding="$.workflow",
                 input_transform="identity",
                 output_key="molecules",
                 capability="molecule.generate",
@@ -132,6 +132,81 @@ def test_structured_target_evidence_is_consumed_by_generator():
         "target_evidence"
     )
     assert len(execution.result.metadata["semantic_evidence"][0]["evidence_digest"]) == 64
+
+
+def test_workflow_wrapper_validates_only_outputs_target_evidence():
+    validator = SemanticInputValidator()
+    step = _target_design_plan().steps[1]
+    payload = {
+        "query": "Design PDE5A candidates",
+        "metadata": {"requested_count": 3},
+        "outputs": {
+            "target": [
+                {
+                    "gene_symbol": "PDE5A",
+                    "source": "UniProt",
+                    "recommended_structures": [{"structure_id": "1UDT"}],
+                }
+            ],
+            "unrelated": [
+                {"gene_symbol": "SHOULD_NOT_BE_USED", "source": "untrusted"}
+            ],
+        },
+    }
+
+    decision = validator.validate(step, payload)
+
+    assert decision.allowed is True
+    assert decision.evidence_digest is not None
+
+
+def test_workflow_wrapper_rejects_missing_or_untrusted_target_evidence():
+    validator = SemanticInputValidator()
+    step = _target_design_plan().steps[1]
+    invalid_payloads = (
+        {"query": "design", "metadata": {}, "outputs": {}},
+        {
+            "query": "design",
+            "metadata": {},
+            "outputs": {
+                "unrelated": [{"gene_symbol": "EGFR", "source": "UniProt"}]
+            },
+        },
+        {
+            "query": "design",
+            "metadata": {},
+            "outputs": {
+                "target": [
+                    {"gene_symbol": "PDE5A", "source": "local", "demo_mode": True}
+                ]
+            },
+        },
+        {
+            "query": "design",
+            "metadata": {},
+            "outputs": {
+                "target": [
+                    {
+                        "gene_symbol": "PDE5A",
+                        "source": "local",
+                        "fallback_used": True,
+                    }
+                ]
+            },
+        },
+        {
+            "query": "design",
+            "metadata": {},
+            "outputs": {
+                "target": [{"gene_symbol": "PDE5A", "source": "unknown"}]
+            },
+        },
+    )
+
+    for payload in invalid_payloads:
+        decision = validator.validate(step, payload)
+        assert decision.allowed is False
+        assert decision.reason == "target_evidence_missing"
 
 
 def test_demo_or_placeholder_target_evidence_is_rejected():

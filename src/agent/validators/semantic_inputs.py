@@ -58,6 +58,13 @@ class SemanticInputValidator:
             return [item for item in input_data if isinstance(item, Mapping)]
         if not isinstance(input_data, Mapping):
             return []
+        if all(
+            key in input_data for key in ("query", "metadata", "outputs")
+        ):
+            outputs = input_data.get("outputs")
+            if not isinstance(outputs, Mapping):
+                return []
+            return cls._target_records(outputs.get("target"))
         for key in ("targets", "records", "results", "data"):
             value = input_data.get(key)
             if isinstance(value, (list, tuple)):
