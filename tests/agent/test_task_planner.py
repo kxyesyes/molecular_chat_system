@@ -28,7 +28,7 @@ def test_comprehensive_evaluation_plan_for_smiles_query():
 def test_target_driven_design_plan_for_pde5_query():
     planner = TaskPlanner()
     context = AgentContext(
-        query="针对 PDE5 设计 20 个类药候选分子，并筛选适合 docking 的前 5 个",
+        query="针对 PDE5 设计 10 个类药候选分子，并筛选适合 docking 的前 5 个",
         trace_id="trace-2",
         active_skill="target_driven_design",
     )
@@ -44,7 +44,7 @@ def test_target_driven_design_plan_for_pde5_query():
         "activity_predictor",
     ]
     assert plan.metadata["target_hint"] == "PDE5"
-    assert plan.metadata["requested_count"] == 20
+    assert plan.metadata["requested_count"] == 10
     generation_step = plan.steps[1]
     assert generation_step.input_binding == "$.workflow"
     assert generation_step.input_transform == "identity"
@@ -60,6 +60,63 @@ def test_target_driven_design_plan_for_pde5_query():
     assert plan.steps[4].input_from == "molecules"
     assert plan.steps[4].input_binding == "$.outputs.molecules"
     assert plan.steps[4].metadata["candidate_source"] == "molecules"
+
+
+def test_target_driven_design_uses_generator_default_when_count_is_omitted():
+    plan = TaskPlanner().plan(
+        AgentContext(
+            query="针对 PDE5A 设计类药候选分子",
+            trace_id="trace-default-count",
+            active_skill="target_driven_design",
+        )
+    )
+
+    assert plan.steps
+    assert plan.metadata["requested_count"] == 1
+
+
+def test_target_driven_design_rejects_count_above_generator_limit():
+    plan = TaskPlanner().plan(
+        AgentContext(
+            query="针对 PDE5A 设计 11 个类药候选分子",
+            trace_id="trace-invalid-count",
+            active_skill="target_driven_design",
+        )
+    )
+
+    assert plan.steps == []
+    assert plan.metadata["requested_count"] == 11
+    assert plan.metadata["reason"] == "requested_count_out_of_range"
+    assert plan.metadata["supported_requested_count"] == {"min": 1, "max": 10}
+
+
+def test_target_driven_design_explicit_metadata_count_overrides_query_text():
+    plan = TaskPlanner().plan(
+        AgentContext(
+            query="针对 PDE5A 设计 2 个类药候选分子",
+            trace_id="trace-explicit-count",
+            active_skill="target_driven_design",
+            metadata={"requested_count": 10},
+        )
+    )
+
+    assert plan.steps
+    assert plan.metadata["requested_count"] == 10
+
+
+def test_target_driven_design_rejects_out_of_range_metadata_count():
+    plan = TaskPlanner().plan(
+        AgentContext(
+            query="针对 PDE5A 设计类药候选分子",
+            trace_id="trace-invalid-explicit-count",
+            active_skill="target_driven_design",
+            metadata={"requested_count": 11},
+        )
+    )
+
+    assert plan.steps == []
+    assert plan.metadata["requested_count"] == 11
+    assert plan.metadata["reason"] == "requested_count_out_of_range"
 
 
 def test_comprehensive_target_search_consumes_reverse_target_output():

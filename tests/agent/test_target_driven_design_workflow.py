@@ -6,8 +6,10 @@ from src.agent.workflows import WorkflowCatalog
 class FakeTool:
     def __init__(self, name):
         self.name = name
+        self.inputs = []
 
     def execute(self, query):
+        self.inputs.append(query)
         if self.name == "target_database_search":
             return {
                 "success": True,
@@ -66,7 +68,7 @@ def test_target_driven_design_workflow_runs_target_to_screening_plan_without_doc
 
     policy = WorkflowCatalog().require("target_driven_design")
     result = agent.execute(
-        "基于 PDE5 设计 20 个类药候选分子",
+        "基于 PDE5 设计 10 个类药候选分子",
         active_skill=policy,
     )
 
@@ -74,5 +76,62 @@ def test_target_driven_design_workflow_runs_target_to_screening_plan_without_doc
     assert result["active_skill"] == "target_driven_design"
     assert result["workflow_plan"]["workflow_name"] == "target_driven_design"
     assert result["workflow_plan"]["metadata"]["target_hint"] == "PDE5"
-    assert result["workflow_plan"]["metadata"]["requested_count"] == 20
+    assert result["workflow_plan"]["metadata"]["requested_count"] == 10
     assert result["tools_used"] == planned_tool_names
+    generator_input = agent.tools["llm_molecular_generator"].inputs[0]
+    assert generator_input["metadata"]["requested_count"] == 10
+
+
+def test_target_driven_design_workflow_binds_valid_default_count_when_omitted():
+    planned_tool_names = [
+        "target_database_search",
+        "llm_molecular_generator",
+        "property_calculator",
+        "admet_predictor",
+        "activity_predictor",
+    ]
+    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+    agent.llm = None
+    agent.max_iterations = 5
+    agent.skill_router = None
+    agent._active_skill = None
+    agent.tools = {name: FakeTool(name) for name in planned_tool_names}
+
+    result = agent.execute(
+        "基于 PDE5A 设计类药候选分子",
+        active_skill=WorkflowCatalog().require("target_driven_design"),
+    )
+
+    assert result["success"] is True
+    assert result["workflow_plan"]["metadata"]["requested_count"] == 1
+    generator_input = agent.tools["llm_molecular_generator"].inputs[0]
+    assert generator_input["metadata"]["requested_count"] == 1
+
+
+def test_target_driven_design_workflow_rejects_count_above_limit_before_tools():
+    planned_tool_names = [
+        "target_database_search",
+        "llm_molecular_generator",
+        "property_calculator",
+        "admet_predictor",
+        "activity_predictor",
+    ]
+    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+    agent.llm = None
+    agent.max_iterations = 5
+    agent.skill_router = None
+    agent._active_skill = None
+    agent.tools = {name: FakeTool(name) for name in planned_tool_names}
+
+    result = agent.execute(
+        "基于 PDE5A 设计 11 个类药候选分子",
+        active_skill=WorkflowCatalog().require("target_driven_design"),
+    )
+
+    assert result["success"] is False
+    assert result["tools_used"] == []
+    assert result["workflow_plan"]["metadata"]["requested_count"] == 11
+    assert result["workflow_plan"]["metadata"]["reason"] == (
+        "requested_count_out_of_range"
+    )
+    assert agent.tools["llm_molecular_generator"].inputs == []

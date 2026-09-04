@@ -18,6 +18,10 @@ class WorkflowPlan:
 class TaskPlanner:
     """Convert routed skills and user text into deterministic workflow plans."""
 
+    MIN_GENERATION_COUNT = 1
+    MAX_GENERATION_COUNT = 10
+    DEFAULT_GENERATION_COUNT = 1
+
     def plan(self, context: AgentContext) -> WorkflowPlan:
         skill = context.active_skill or ""
         query = context.query
@@ -31,7 +35,7 @@ class TaskPlanner:
         if skill == "target_driven_design" or (
             skill == "target_database_search" and self._looks_like_design(query)
         ):
-            return self._target_driven_design_plan(query)
+            return self._target_driven_design_plan(query, context.metadata)
 
         if skill == "hit_to_lead_optimization":
             return self._lead_optimization_plan(query)
@@ -189,9 +193,40 @@ class TaskPlanner:
             metadata={"input_type": "molecule"},
         )
 
-    def _target_driven_design_plan(self, query: str) -> WorkflowPlan:
+    def _target_driven_design_plan(
+        self,
+        query: str,
+        request_metadata: dict[str, Any] | None = None,
+    ) -> WorkflowPlan:
         target_hint = self._extract_target_hint(query)
-        requested_count = self._extract_requested_count(query, default=20)
+        request_metadata = request_metadata or {}
+        requested_count = (
+            request_metadata["requested_count"]
+            if "requested_count" in request_metadata
+            else self._extract_requested_count(
+                query,
+                default=self.DEFAULT_GENERATION_COUNT,
+            )
+        )
+        if (
+            isinstance(requested_count, bool)
+            or not isinstance(requested_count, int)
+        ):
+            return self._rejected_target_count_plan(
+                target_hint,
+                requested_count,
+                reason="invalid_requested_count",
+            )
+        if not (
+            self.MIN_GENERATION_COUNT
+            <= requested_count
+            <= self.MAX_GENERATION_COUNT
+        ):
+            return self._rejected_target_count_plan(
+                target_hint,
+                requested_count,
+                reason="requested_count_out_of_range",
+            )
         docking_top_n = self._extract_top_n(query, default=min(5, requested_count))
         return WorkflowPlan(
             workflow_name="target_driven_design",
@@ -249,6 +284,27 @@ class TaskPlanner:
                 "target_hint": target_hint,
                 "requested_count": requested_count,
                 "docking_top_n": docking_top_n,
+            },
+        )
+
+    def _rejected_target_count_plan(
+        self,
+        target_hint: str,
+        requested_count: Any,
+        *,
+        reason: str,
+    ) -> WorkflowPlan:
+        return WorkflowPlan(
+            workflow_name="target_driven_design",
+            steps=[],
+            metadata={
+                "target_hint": target_hint,
+                "requested_count": requested_count,
+                "reason": reason,
+                "supported_requested_count": {
+                    "min": self.MIN_GENERATION_COUNT,
+                    "max": self.MAX_GENERATION_COUNT,
+                },
             },
         )
 
@@ -325,11 +381,18 @@ class TaskPlanner:
             and any(marker in lowered for marker in ("未授权", "忽略系统限制", "unauthorized", "ignore system"))
         )
 
-    @staticmethod
-    def _extract_requested_count(query: str, default: int) -> int:
-        digit_match = re.search(r"(\d+)\s*个", query)
+    @classmethod
+    def _extract_requested_count(cls, query: str, default: int) -> int:
+        digit_match = re.search(
+            r"(-?\d+)\s*(?:个|种|份|structures?|molecules?|compounds?)",
+            query,
+            re.I,
+        )
         if digit_match:
-            return max(1, min(100, int(digit_match.group(1))))
+            try:
+                return int(digit_match.group(1))
+            except ValueError:
+                return cls.MAX_GENERATION_COUNT + 1
 
         chinese_numbers = {
             "一": 1,
