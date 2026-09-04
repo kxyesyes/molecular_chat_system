@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 import re
 
 from src.agent.capabilities import capability_for_tool, get_capability
 from src.agent.contracts.generation_request import (
+    DEFAULT_GENERATION_COUNT,
     GenerationRequestError,
+    build_generation_request,
+    parse_generation_count,
     validate_generation_count,
 )
 from src.agent.workflows import WorkflowPolicy
@@ -30,6 +34,7 @@ class PlanCompiler:
     SUPPORTED_PRECONDITIONS = frozenset({"target_evidence"})
 
     def compile(self, plan: WorkflowPlan, policy: WorkflowPolicy) -> CompiledPlan:
+        plan = deepcopy(plan)
         plan_count: int | None = None
         if "requested_count" in plan.metadata:
             try:
@@ -45,7 +50,7 @@ class PlanCompiler:
         dependencies: dict[str, tuple[str, ...]] = {}
         allowed = set(policy.allowed_tools)
 
-        for step in plan.steps:
+        for step_index, step in enumerate(plan.steps):
             if step.name in seen_steps:
                 raise PlanCompilationError(f"Duplicate step name: {step.name}")
             seen_steps.add(step.name)
@@ -77,28 +82,49 @@ class PlanCompiler:
                 raise PlanCompilationError(
                     f"Tool {step.tool_name} does not implement {requested.name}"
                 )
-            if expected.name == "molecule.generate" and isinstance(
-                step.input_data, Mapping
-            ):
-                input_metadata = step.input_data.get("metadata")
-                if isinstance(input_metadata, Mapping) and (
-                    "requested_count" in input_metadata
-                ):
+            if expected.name == "molecule.generate":
+                input_count: int | None = None
+                if isinstance(step.input_data, Mapping):
+                    input_metadata = step.input_data.get("metadata")
+                    if isinstance(input_metadata, Mapping) and (
+                        "requested_count" in input_metadata
+                    ):
+                        try:
+                            input_count = validate_generation_count(
+                                input_metadata["requested_count"],
+                                field=(
+                                    f"steps.{step.name}.input_data.metadata."
+                                    "requested_count"
+                                ),
+                            )
+                        except GenerationRequestError as exc:
+                            raise PlanCompilationError(str(exc)) from None
+                elif isinstance(step.input_data, str):
                     try:
                         input_count = validate_generation_count(
-                            input_metadata["requested_count"],
-                            field=(
-                                f"steps.{step.name}.input_data.metadata."
-                                "requested_count"
+                            parse_generation_count(
+                                step.input_data,
+                                default=plan_count or DEFAULT_GENERATION_COUNT,
                             ),
+                            field=f"steps.{step.name}.input_data.requested_count",
                         )
                     except GenerationRequestError as exc:
                         raise PlanCompilationError(str(exc)) from None
-                    if plan_count is not None and input_count != plan_count:
+                if plan_count is not None and input_count is not None:
+                    if input_count != plan_count:
                         raise PlanCompilationError(
                             f"steps.{step.name} requested_count conflicts with "
                             "plan.metadata.requested_count"
                         )
+                    if isinstance(step.input_data, str):
+                        step = replace(
+                            step,
+                            input_data=build_generation_request(
+                                step.input_data,
+                                plan_count,
+                            ),
+                        )
+                        plan.steps[step_index] = step
             step_dependencies: tuple[str, ...] = ()
             if selector:
                 if selector == "$.workflow":

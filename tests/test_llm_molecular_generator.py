@@ -242,6 +242,9 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
             "Generate zero candidates",
             "Generate -1 candidates",
             "Generate 11 candidates",
+            "Generate 1e molecules",
+            "Generate --1 molecules",
+            "Generate 7.5.2 molecules",
             "生成零个分子",
             "生成十一个候选分子",
         )
@@ -282,6 +285,17 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
         self.assertFalse(wrapped.success)
         self.assertEqual(wrapped.error.code.value, "invalid_input")
         self.assertEqual(llm.prompts, [])
+
+    def test_should_use_shares_canonical_generation_intent_grammar(self):
+        generator = LLMMolecularGenerator(llm_model=CapturingLLM())
+
+        self.assertTrue(generator.should_use("Generate 11 candidates"))
+        self.assertTrue(generator.should_use("Generate 11 for PDE5A"))
+        self.assertFalse(
+            generator.should_use(
+                'Evaluate CCO while explaining "Generate 7.5 molecules"'
+            )
+        )
 
     def test_legacy_parser_supports_multilingual_counts_without_identifiers(self):
         generator = LLMMolecularGenerator(llm_model=CapturingLLM())

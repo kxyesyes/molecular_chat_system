@@ -159,6 +159,25 @@ def test_non_generation_workflow_can_quote_malformed_generation_request():
     assert len(tools["admet_predictor"].calls) == 2
 
 
+def test_supervisor_auto_route_scopes_quoted_generation_phrase_after_routing():
+    tools = build_fake_tools()
+    tools["drug_likeness_assessment"] = FakeTool("drug_likeness_assessment")
+    policy = WorkflowCatalog().require("admet_assessment")
+    supervisor = SupervisorAgent(
+        tools=tools,
+        skill_router=FakeRouter(policy),
+    )
+
+    result = supervisor.execute(
+        'Evaluate CCO while explaining "Generate 7.5 molecules"'
+    )
+
+    assert result["success"] is True
+    assert result["active_skill"] == "admet_assessment"
+    assert (result.get("error") or {}).get("code") != "invalid_input"
+    assert tools["property_calculator"].calls
+
+
 def test_generation_workflow_rejects_malformed_count_before_tool():
     generator = FakeTool("llm_molecular_generator")
     supervisor = SupervisorAgent(tools={generator.name: generator})

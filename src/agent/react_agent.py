@@ -15,6 +15,7 @@ from .contracts.generation_request import (
     DEFAULT_GENERATION_COUNT,
     GenerationRequestError,
     build_generation_request,
+    has_generation_intent,
     parse_generation_count,
 )
 
@@ -157,10 +158,14 @@ class ReActMolecularAgent:
             'active_skill': None  # 兼容字段：记录激活的工作流策略
         }
 
-        selected_name = getattr(active_skill, "name", active_skill)
-        selected_tools = getattr(active_skill, "allowed_tools", ())
+        generation_intent = has_generation_intent(query)
+        routed_skill = active_skill
+        if routed_skill is None and not generation_intent and self.skill_router:
+            routed_skill = self.skill_router.route(query, llm=self.llm)
+        selected_name = getattr(routed_skill, "name", routed_skill)
+        selected_tools = getattr(routed_skill, "allowed_tools", ())
         validate_text_count = (
-            active_skill is None
+            generation_intent
             or "llm_molecular_generator" in selected_tools
             or selected_name
             in {
@@ -213,7 +218,7 @@ class ReActMolecularAgent:
         logger.info(f"LLM可用: {self.llm is not None}")
 
         # ── 工作流策略路由 ──────────────────────────────────────
-        self._active_skill = active_skill
+        self._active_skill = routed_skill
         if not self._active_skill and self.skill_router:
             self._active_skill = self.skill_router.route(query, llm=self.llm)
             

@@ -55,6 +55,39 @@ def test_non_generation_workflow_can_quote_malformed_generation_count(monkeypatc
     assert calls == ['Evaluate CCO while explaining "Generate 7.5 molecules"']
 
 
+def test_auto_route_scopes_quoted_generation_phrase_after_routing(monkeypatch):
+    policy = WorkflowCatalog().require("admet_assessment")
+
+    class StaticRouter:
+        def route(self, query, llm=None):
+            return policy
+
+    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+    agent.llm = None
+    agent.tools = {}
+    agent.max_iterations = 5
+    agent.skill_router = StaticRouter()
+    agent._active_skill = None
+    calls = []
+
+    def fake_execute_workflow_skill(query, result, event_callback=None):
+        calls.append(query)
+        result["success"] = True
+        result["active_skill"] = "admet_assessment"
+        result["final_answer"] = "workflow ok"
+        return result
+
+    monkeypatch.setattr(agent, "_execute_workflow_skill", fake_execute_workflow_skill)
+
+    response = agent.execute(
+        'Evaluate CCO while explaining "Generate 7.5 molecules"'
+    )
+
+    assert response["success"] is True
+    assert response["active_skill"] == "admet_assessment"
+    assert calls == ['Evaluate CCO while explaining "Generate 7.5 molecules"']
+
+
 def test_single_step_policy_blocks_forbidden_tool_execution():
     calls = []
 

@@ -209,6 +209,54 @@ def test_compiler_accepts_matching_atomic_generation_count():
     assert compiled.dependencies == {"generate": ()}
 
 
+def test_compiler_rejects_conflicting_legacy_atomic_generation_count():
+    plan = WorkflowPlan(
+        workflow_name="molecular_design",
+        metadata={"requested_count": 7, "atomic": True},
+        steps=[
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_data="Generate 3 molecules",
+                capability="molecule.generate",
+            )
+        ],
+    )
+
+    with pytest.raises(PlanCompilationError, match="requested_count conflicts"):
+        PlanCompiler().compile(
+            plan,
+            WorkflowCatalog().require("molecular_design"),
+        )
+
+
+def test_compiler_applies_plan_count_to_legacy_atomic_input_without_count():
+    plan = WorkflowPlan(
+        workflow_name="molecular_design",
+        metadata={"requested_count": 7, "atomic": True},
+        steps=[
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_data="Generate candidates",
+                capability="molecule.generate",
+            )
+        ],
+    )
+
+    compiled = PlanCompiler().compile(
+        plan,
+        WorkflowCatalog().require("molecular_design"),
+    )
+
+    assert compiled.plan.steps[0].input_data == {
+        "query": "Generate candidates",
+        "metadata": {"requested_count": 7},
+        "outputs": {},
+    }
+    assert plan.steps[0].input_data == "Generate candidates"
+
+
 def test_compiler_rejects_unknown_selector_when_workflow_binding_is_supported():
     plan = WorkflowPlan(
         workflow_name="target_driven_design",

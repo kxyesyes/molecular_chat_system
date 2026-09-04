@@ -15,6 +15,7 @@ from src.agent.contracts.generation_request import (
     DEFAULT_GENERATION_COUNT,
     GenerationRequestError,
     build_generation_request,
+    has_generation_intent,
     preserve_target_quality,
 )
 from src.agent.harness import HarnessFactory
@@ -161,13 +162,12 @@ class SupervisorAgent:
         capabilities: Mapping[str, bool] | None = None,
     ) -> dict[str, Any]:
         """Chat-compatible entry point backed by the workflow runtime."""
-        selected_policy = (
-            self._resolve_policy(query, active_skill)
-            if active_skill is not None
-            else None
-        )
+        generation_intent = has_generation_intent(query)
+        selected_policy = None
+        if active_skill is not None or not generation_intent:
+            selected_policy = self._resolve_policy(query, active_skill)
         validate_text_count = (
-            active_skill is None
+            generation_intent
             or selected_policy is not None
             and "llm_molecular_generator" in selected_policy.allowed_tools
         )

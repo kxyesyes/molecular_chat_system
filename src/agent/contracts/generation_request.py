@@ -124,27 +124,15 @@ _COUNT_PATTERNS = (
         rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
     ),
 )
-_MALFORMED_NUMERIC_COUNT = (
-    r"(?<![\w.])[-+\u2212]?"
-    r"(?:"
-    r"(?:\d+(?:\.\d*)?|\.\d+)[eE][-+\u2212]?\d+"
-    r"|\d{1,3}(?:,\d{3})+"
-    r"|\d+/\d+"
-    r"|\d+\.{2,}\d+"
-    r"|\d+\."
-    r"|\.\d+"
-    r")"
-    r"(?![\w.])"
-)
-_MALFORMED_COUNT_PATTERNS = (
+_COUNT_SLOT_PATTERNS = (
     re.compile(
-        rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?P<count>{_MALFORMED_NUMERIC_COUNT})"
+        rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?P<count>[^\s;!?\"']+)"
         rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
         rf"(?=[ \t]+(?:{_ENGLISH_NOUN}\b|for\b)|[ \t]*$)"
     ),
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
-        rf"(?P<count>{_MALFORMED_NUMERIC_COUNT})\s*(?:个|种|份)?\s*"
+        rf"(?P<count>[^\s个种份，。；、！？\"']+)\s*(?:个|种|份)?\s*"
         rf"(?:{_CHINESE_COUNT_MODIFIER}\s*){{0,2}}"
         rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
     ),
@@ -220,12 +208,32 @@ def parse_generation_count(query: str, *, default: int = DEFAULT_GENERATION_COUN
         if value is None:
             continue
         return value
-    if any(pattern.search(query) for pattern in _MALFORMED_COUNT_PATTERNS):
-        raise GenerationRequestError("generation count must be an integer")
+    for pattern in _COUNT_SLOT_PATTERNS:
+        match = pattern.search(query)
+        if match and _looks_numeric_like_count_token(match.group("count")):
+            raise GenerationRequestError("generation count must be an integer")
     for pattern, value in _FUZZY_COUNTS:
         if pattern.search(query):
             return value
     return default
+
+
+def has_generation_intent(query: str) -> bool:
+    """Recognize generation grammar without treating quoted examples as requests."""
+    normalized = unicodedata.normalize("NFKC", str(query))
+    unquoted = re.sub(
+        r'"[^"\r\n]*"|“[^”\r\n]*”|\'[^\'\r\n]*\'|‘[^’\r\n]*’',
+        " ",
+        normalized,
+    )
+    return any(pattern.search(unquoted) for pattern in _COUNT_SLOT_PATTERNS) or any(
+        pattern.search(unquoted) for pattern, _value in _FUZZY_COUNTS
+    )
+
+
+def _looks_numeric_like_count_token(token: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", token).strip()
+    return bool(re.match(r"^(?:[-+\u2212.]*)\d", normalized))
 
 
 def _parse_count_token(token: str) -> int | None:
@@ -629,6 +637,7 @@ __all__ = [
     "MIN_GENERATION_COUNT",
     "TargetEvidenceError",
     "build_generation_request",
+    "has_generation_intent",
     "parse_chinese_integer",
     "parse_generation_count",
     "preserve_target_quality",

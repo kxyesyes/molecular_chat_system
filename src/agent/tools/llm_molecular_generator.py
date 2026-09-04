@@ -27,6 +27,7 @@ from src.agent.contracts.generation_request import (
     MAX_TARGET_RECORDS,
     MAX_TARGET_STRUCTURES,
     MIN_GENERATION_COUNT,
+    has_generation_intent,
     parse_chinese_integer,
     parse_generation_count,
     serialize_target_evidence,
@@ -103,55 +104,24 @@ class LLMMolecularGenerator(BaseMolecularTool):
         return getattr(self.llm, "model_name", None) or "gmm-llama"
     
     def should_use(self, query: str) -> bool:
-        """判断是否应该使用此工具 - 优化版"""
+        """Use the canonical request grammar to recognize generation intent."""
         query_lower = query.lower()
-        
-        # 优先级1: 明确的生成请求
-        explicit_generation = any(word in query_lower for word in [
-            '随机生成', '生成一个', '生成几个', '生成若干', '生成新',
-            'generate a', 'generate some', 'create a', 'create new',
-            '设计一个', '设计新', '创建一个', '创建新'
-        ])
-        
-        # 优先级2: 检查生成相关的关键词
-        has_generation_intent = any(word in query_lower for word in [
-            'generate', 'create', 'design', 'make', 'build', 'synthesize',
-            '生成', '创建', '设计', '制作', '构建', '合成'
-        ])
-        
-        # 优先级3: 检查分子相关的关键词
-        has_molecule_keyword = any(word in query_lower for word in [
-            'molecule', 'compound', 'structure', 'smiles', 'drug', '类药',
-            '分子', '化合物', '结构', '药物'
-        ])
-        
-        # 优先级4: 检查是否明确要求使用LLM或AI生成
-        has_llm_intent = any(word in query_lower for word in [
-            'llm', 'ai', 'intelligent', 'smart', 'advanced',
-            '智能', '高级', 'gpt', 'llama'
-        ])
+        generation_intent = has_generation_intent(query)
         
         # 排除：如果是分析现有分子（包含SMILES），则不触发生成
         has_smiles = bool(self.extract_smiles(query))
-        if has_smiles and not explicit_generation:
+        if has_smiles and not generation_intent:
             # 如果查询中有SMILES且不是明确的生成请求，可能是分析任务
             if any(word in query_lower for word in ['分析', '计算', '预测', 'analyze', 'calculate', 'predict']):
                 logger.info("检测到SMILES分析任务，不触发分子生成")
                 return False
         
         # 决策逻辑
-        result = (
-            explicit_generation or  # 明确的生成请求
-            has_llm_intent or  # 明确要求LLM
-            (has_generation_intent and has_molecule_keyword)  # 生成意图+分子关键词
-        )
+        result = generation_intent
         
         if result:
             logger.info(f"✅ LLMMolecularGenerator触发: 检测到分子生成需求")
-            logger.info(f"   - 明确生成: {explicit_generation}")
-            logger.info(f"   - 生成意图: {has_generation_intent}")
-            logger.info(f"   - 分子关键词: {has_molecule_keyword}")
-            logger.info(f"   - LLM意图: {has_llm_intent}")
+            logger.info("   - 生成意图: canonical_generation_grammar")
         
         return result
     

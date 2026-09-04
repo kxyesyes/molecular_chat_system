@@ -1,4 +1,6 @@
 import src.agent.tools.llm_molecular_generator as generator_module
+import pytest
+
 from src.agent.agent_executor import MolecularAgent
 from src.agent.tools.llm_molecular_generator import LLMMolecularGenerator
 
@@ -18,6 +20,7 @@ def _build_agent(monkeypatch):
     model = CapturingLocalModel()
     generator = LLMMolecularGenerator(llm_model=model)
     monkeypatch.setattr(generator, "validate_smiles", lambda _smiles: True)
+    monkeypatch.setattr(generator, "_check_rdkit", lambda _result: True)
     monkeypatch.setattr(generator_module, "RDKIT_AVAILABLE", False)
     agent = MolecularAgent.__new__(MolecularAgent)
     agent.llm = None
@@ -35,6 +38,22 @@ def test_agent_executor_omitted_count_rejects_invalid_text_before_model(monkeypa
     assert result["error"]["code"] == "invalid_input"
     assert "between 1 and 10" in result["error"]["message"]
     assert result["tool_results"][0]["error"] == result["error"]
+    assert model.prompts == []
+
+
+@pytest.mark.parametrize(
+    "query", ["Generate 11 candidates", "Generate 11 for PDE5A"]
+)
+def test_agent_executor_canonical_generation_intent_returns_invalid_input(
+    monkeypatch, query
+):
+    agent, model = _build_agent(monkeypatch)
+
+    result = agent.execute(query)
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_input"
+    assert result["message"] != "No relevant tools found for this query"
     assert model.prompts == []
 
 
