@@ -30,15 +30,15 @@ class PlanCompiler:
     SUPPORTED_PRECONDITIONS = frozenset({"target_evidence"})
 
     def compile(self, plan: WorkflowPlan, policy: WorkflowPolicy) -> CompiledPlan:
-        if any(step.input_binding == "$.workflow" for step in plan.steps):
-            if "requested_count" in plan.metadata:
-                try:
-                    validate_generation_count(
-                        plan.metadata["requested_count"],
-                        field="plan.metadata.requested_count",
-                    )
-                except GenerationRequestError as exc:
-                    raise PlanCompilationError(str(exc)) from None
+        plan_count: int | None = None
+        if "requested_count" in plan.metadata:
+            try:
+                plan_count = validate_generation_count(
+                    plan.metadata["requested_count"],
+                    field="plan.metadata.requested_count",
+                )
+            except GenerationRequestError as exc:
+                raise PlanCompilationError(str(exc)) from None
         seen_steps: set[str] = set()
         producers: dict[str, str] = {}
         producer_capabilities: dict[str, str] = {}
@@ -77,6 +77,28 @@ class PlanCompiler:
                 raise PlanCompilationError(
                     f"Tool {step.tool_name} does not implement {requested.name}"
                 )
+            if expected.name == "molecule.generate" and isinstance(
+                step.input_data, Mapping
+            ):
+                input_metadata = step.input_data.get("metadata")
+                if isinstance(input_metadata, Mapping) and (
+                    "requested_count" in input_metadata
+                ):
+                    try:
+                        input_count = validate_generation_count(
+                            input_metadata["requested_count"],
+                            field=(
+                                f"steps.{step.name}.input_data.metadata."
+                                "requested_count"
+                            ),
+                        )
+                    except GenerationRequestError as exc:
+                        raise PlanCompilationError(str(exc)) from None
+                    if plan_count is not None and input_count != plan_count:
+                        raise PlanCompilationError(
+                            f"steps.{step.name} requested_count conflicts with "
+                            "plan.metadata.requested_count"
+                        )
             step_dependencies: tuple[str, ...] = ()
             if selector:
                 if selector == "$.workflow":

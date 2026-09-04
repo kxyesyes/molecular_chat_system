@@ -75,6 +75,66 @@ def test_binding_resolver_returns_isolated_structured_workflow_payload():
     assert outputs["target"][0]["quality"]["status"] == "official"
 
 
+def test_workflow_binding_preserves_only_recursive_output_trust_signals():
+    outputs = {
+        "target": {"gene_symbol": "PDE5A", "source": "UniProt"},
+        "quality": {
+            "provider": {"fallback_used": True, "debug": "drop-me"},
+            "request_id": "drop-me",
+        },
+        "unrelated": {"fallback_used": True},
+    }
+
+    value = BindingResolver().resolve(
+        "$.workflow",
+        "identity",
+        request={
+            "query": "Generate 2 molecules",
+            "metadata": {
+                "requested_count": 2,
+                "quality": {
+                    "provider": {"fallback_used": True, "debug": "drop-me"}
+                },
+            },
+            "quality": {
+                "provider": {"fallback_used": True, "debug": "drop-me"}
+            },
+        },
+        outputs=outputs,
+    )
+
+    assert value == {
+        "query": "Generate 2 molecules",
+        "metadata": {
+            "requested_count": 2,
+            "quality": {"provider": {"fallback_used": True}},
+        },
+        "quality": {"provider": {"fallback_used": True}},
+        "outputs": {
+            "target": {"gene_symbol": "PDE5A", "source": "UniProt"},
+            "quality": {"provider": {"fallback_used": True}},
+        },
+    }
+    with pytest.raises(TypeError, match="immutable"):
+        value["outputs"]["quality"]["provider"]["fallback_used"] = False
+
+
+def test_ordinary_target_selector_preserves_legacy_raw_shape():
+    target = {
+        "data": [{"gene_symbol": "PDE5A", "source": "UniProt"}],
+        "quality": {"provider": {"fallback_used": False}},
+    }
+
+    value = BindingResolver().resolve(
+        "$.outputs.target",
+        "identity",
+        request={"query": "design"},
+        outputs={"target": target},
+    )
+
+    assert value is target
+
+
 def test_binding_resolver_rejects_untrusted_selector_syntax():
     with pytest.raises(BindingResolutionError, match="Unsupported"):
         BindingResolver().resolve(

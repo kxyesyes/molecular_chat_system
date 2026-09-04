@@ -455,12 +455,45 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
             "Generate ＋７． molecules",
             "Generate 1e1 molecules",
             "Generate −１e１ molecules",
+            "Generate 1,000 molecules",
+            "Generate 1/2 molecules",
+            "Generate 7..5 molecules",
         ):
             with self.subTest(query=query):
                 llm = CapturingLLM()
                 wrapped = execute_tool_compat(
                     LLMMolecularGenerator(llm_model=llm),
                     query,
+                )
+
+                self.assertFalse(wrapped.success)
+                self.assertEqual(wrapped.error.code.value, "invalid_input")
+                self.assertEqual(llm.prompts, [])
+
+    def test_structured_request_rejects_trust_flags_before_target_extraction(self):
+        valid_target = {"gene_symbol": "PDE5A", "source": "UniProt"}
+        requests = (
+            {
+                "query": "Generate 2 molecules",
+                "metadata": {"requested_count": 2},
+                "outputs": {"target": valid_target},
+                "quality": {"fallback_used": True},
+            },
+            {
+                "query": "Generate 2 molecules",
+                "metadata": {"requested_count": 2},
+                "outputs": {
+                    "target": valid_target,
+                    "quality": {"provider": {"fallback_used": True}},
+                },
+            },
+        )
+
+        for request in requests:
+            with self.subTest(request=request):
+                llm = CapturingLLM()
+                wrapped = execute_tool_compat(
+                    LLMMolecularGenerator(llm_model=llm), request
                 )
 
                 self.assertFalse(wrapped.success)

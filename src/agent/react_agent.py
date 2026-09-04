@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from .prompts import PREFIX, SUFFIX, REACT_FORMAT, SIMPLE_TOOL_TEMPLATE
 from .router import SkillRouter
 from .contracts.generation_request import (
+    DEFAULT_GENERATION_COUNT,
     GenerationRequestError,
     build_generation_request,
     parse_generation_count,
@@ -156,13 +157,26 @@ class ReActMolecularAgent:
             'active_skill': None  # 兼容字段：记录激活的工作流策略
         }
 
+        selected_name = getattr(active_skill, "name", active_skill)
+        selected_tools = getattr(active_skill, "allowed_tools", ())
+        validate_text_count = (
+            active_skill is None
+            or "llm_molecular_generator" in selected_tools
+            or selected_name
+            in {
+                "molecular_design",
+                "target_driven_design",
+                "hit_to_lead_optimization",
+            }
+        )
         raw_requested_count: Any = None
         try:
-            raw_requested_count = (
-                mol_count
-                if mol_count is not _MOL_COUNT_UNSET
-                else parse_generation_count(query)
-            )
+            if mol_count is not _MOL_COUNT_UNSET:
+                raw_requested_count = mol_count
+            elif validate_text_count:
+                raw_requested_count = parse_generation_count(query)
+            else:
+                raw_requested_count = DEFAULT_GENERATION_COUNT
             generation_request = build_generation_request(
                 query, raw_requested_count
             )

@@ -266,9 +266,7 @@ class LLMMolecularGenerator(BaseMolecularTool):
                 field="metadata.requested_count",
             )
 
-        raw_outputs = value.get("outputs")
-        outputs = raw_outputs if isinstance(raw_outputs, Mapping) else {}
-        target_evidence = cls._serialize_target_evidence(outputs.get("target"))
+        target_evidence = cls._serialize_target_evidence(value)
         return query, requested_count, target_evidence
 
     @classmethod

@@ -126,7 +126,14 @@ _COUNT_PATTERNS = (
 )
 _MALFORMED_NUMERIC_COUNT = (
     r"(?<![\w.])[-+\u2212]?"
-    r"(?:(?:\d+(?:\.\d*)?|\.\d+)[eE][-+\u2212]?\d+|\d+\.|\.\d+)"
+    r"(?:"
+    r"(?:\d+(?:\.\d*)?|\.\d+)[eE][-+\u2212]?\d+"
+    r"|\d{1,3}(?:,\d{3})+"
+    r"|\d+/\d+"
+    r"|\d+\.{2,}\d+"
+    r"|\d+\."
+    r"|\.\d+"
+    r")"
     r"(?![\w.])"
 )
 _MALFORMED_COUNT_PATTERNS = (
@@ -211,9 +218,6 @@ def parse_generation_count(query: str, *, default: int = DEFAULT_GENERATION_COUN
         token = match.group("count")
         value = _parse_count_token(token)
         if value is None:
-            continue
-        # A standalone four-digit calendar year is context, not a request count.
-        if token.isdigit() and len(token) == 4 and 1900 <= value <= 2099:
             continue
         return value
     if any(pattern.search(query) for pattern in _MALFORMED_COUNT_PATTERNS):
@@ -356,20 +360,35 @@ def build_generation_request(
 
 
 def preserve_target_quality(value: Any, quality: Any) -> Any:
-    if not isinstance(quality, Mapping):
-        return value
-    trust = {
-        normalized_key: _freeze_quality_value(item)
-        for key, item in quality.items()
-        if (normalized_key := str(key).strip().lower())
-        in _TRUST_QUALITY_FIELDS
-    }
-    if not trust:
+    trust = preserve_trust_signals(quality)
+    if trust is None:
         return value
     return {
         "data": deepcopy(value),
-        "quality": _ImmutableQuality(trust),
+        "quality": trust,
     }
+
+
+def preserve_trust_signals(value: Any) -> Any | None:
+    if isinstance(value, Mapping):
+        trust: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized_key = str(key).strip().lower()
+            if normalized_key in _TRUST_QUALITY_FIELDS:
+                trust[normalized_key] = _freeze_quality_value(item)
+                continue
+            nested = preserve_trust_signals(item)
+            if nested is not None:
+                trust[str(key)] = nested
+        return _ImmutableQuality(trust) if trust else None
+    if _is_sequence(value):
+        nested_items = tuple(
+            nested
+            for item in value
+            if (nested := preserve_trust_signals(item)) is not None
+        )
+        return nested_items or None
+    return None
 
 
 def _freeze_quality_value(value: Any) -> Any:
@@ -613,6 +632,7 @@ __all__ = [
     "parse_chinese_integer",
     "parse_generation_count",
     "preserve_target_quality",
+    "preserve_trust_signals",
     "sanitize_target_evidence",
     "serialize_target_evidence",
     "validate_generation_count",

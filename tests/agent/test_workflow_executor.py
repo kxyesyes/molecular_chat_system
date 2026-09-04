@@ -68,6 +68,46 @@ class FakeTool:
         }
 
 
+def test_atomic_count_conflict_fails_preflight_before_tool():
+    tool = FakeTool("llm_molecular_generator")
+    plan = WorkflowPlan(
+        workflow_name="molecular_design",
+        metadata={"requested_count": 7, "atomic": True},
+        steps=[
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_data={
+                    "query": "Generate candidates",
+                    "metadata": {"requested_count": 3},
+                    "outputs": {},
+                },
+                capability="molecule.generate",
+            )
+        ],
+    )
+
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="Generate candidates",
+            trace_id="atomic-count-conflict",
+            active_skill="molecular_design",
+            metadata={"requested_count": 7},
+        ),
+        policy=WorkflowPolicy(
+            name="molecular_design",
+            description="test",
+            allowed_tools=("llm_molecular_generator",),
+        ),
+        all_tools={"llm_molecular_generator": tool},
+        plan=plan,
+    )
+
+    assert execution.result.success is False
+    assert execution.result.error.code == AgentErrorCode.VALIDATION_ERROR
+    assert tool.calls == []
+
+
 class StaticResultTool(FakeTool):
     def __init__(self, name, data):
         super().__init__(name)

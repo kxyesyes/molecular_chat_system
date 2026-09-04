@@ -12,6 +12,7 @@ from src.agent.contracts import (
     ToolResult,
 )
 from src.agent.contracts.generation_request import (
+    DEFAULT_GENERATION_COUNT,
     GenerationRequestError,
     build_generation_request,
     preserve_target_quality,
@@ -160,6 +161,16 @@ class SupervisorAgent:
         capabilities: Mapping[str, bool] | None = None,
     ) -> dict[str, Any]:
         """Chat-compatible entry point backed by the workflow runtime."""
+        selected_policy = (
+            self._resolve_policy(query, active_skill)
+            if active_skill is not None
+            else None
+        )
+        validate_text_count = (
+            active_skill is None
+            or selected_policy is not None
+            and "llm_molecular_generator" in selected_policy.allowed_tools
+        )
         raw_requested_count: Any = None
         try:
             raw_requested_count = (
@@ -167,14 +178,15 @@ class SupervisorAgent:
                 if mol_count is not _MOL_COUNT_UNSET
                 else None
             )
-            generation_request = (
-                build_generation_request(query, mol_count)
-                if mol_count is not _MOL_COUNT_UNSET
-                else build_generation_request(query)
-            )
-            requested_count = generation_request["metadata"]["requested_count"]
-            if mol_count is _MOL_COUNT_UNSET:
+            if mol_count is not _MOL_COUNT_UNSET:
+                generation_request = build_generation_request(query, mol_count)
+                requested_count = generation_request["metadata"]["requested_count"]
+            elif validate_text_count:
+                generation_request = build_generation_request(query)
+                requested_count = generation_request["metadata"]["requested_count"]
                 raw_requested_count = requested_count
+            else:
+                requested_count = DEFAULT_GENERATION_COUNT
         except GenerationRequestError as exc:
             active_name = getattr(active_skill, "name", active_skill)
             error = AgentExecutionError(
@@ -224,7 +236,7 @@ class SupervisorAgent:
                     },
                 },
             }
-        policy = self._resolve_policy(query, active_skill)
+        policy = selected_policy or self._resolve_policy(query, active_skill)
         if policy is None:
             return {
                 "success": False,

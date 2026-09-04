@@ -32,6 +32,9 @@ def test_agent_executor_omitted_count_rejects_invalid_text_before_model(monkeypa
     result = agent.execute("Generate 11 molecules")
 
     assert result["success"] is False
+    assert result["error"]["code"] == "invalid_input"
+    assert "between 1 and 10" in result["error"]["message"]
+    assert result["tool_results"][0]["error"] == result["error"]
     assert model.prompts == []
 
 

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from src.agent.contracts.generation_request import (
     TargetEvidenceError,
-    sanitize_target_evidence,
+    serialize_target_evidence,
 )
 
 if TYPE_CHECKING:
@@ -29,23 +28,17 @@ class SemanticInputValidator:
         for requirement in step.preconditions:
             if requirement == "target_evidence":
                 try:
-                    usable = sanitize_target_evidence(input_data)
+                    serialized = serialize_target_evidence(input_data)
                 except TargetEvidenceError:
-                    usable = []
-                if not usable:
+                    serialized = None
+                if not serialized:
                     return SemanticDecision(
                         False,
                         requirement,
                         "target_evidence_missing",
                     )
                 digest = hashlib.sha256(
-                    json.dumps(
-                        usable,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        default=str,
-                    ).encode("utf-8")
+                    serialized.encode("utf-8")
                 ).hexdigest()
                 return SemanticDecision(
                     True,

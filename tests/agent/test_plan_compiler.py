@@ -141,6 +141,74 @@ def test_compiler_rejects_invalid_workflow_requested_count(requested_count):
         )
 
 
+def test_compiler_validates_requested_count_on_every_plan():
+    plan = WorkflowPlan(
+        workflow_name="admet_assessment",
+        metadata={"requested_count": 11},
+        steps=[WorkflowStep("admet", "admet_predictor", input_data="CCO")],
+    )
+
+    with pytest.raises(PlanCompilationError, match="requested_count"):
+        PlanCompiler().compile(
+            plan,
+            WorkflowCatalog().require("admet_assessment"),
+        )
+
+
+@pytest.mark.parametrize("plan_count, input_count", [(11, 11), (7, 3)])
+def test_compiler_rejects_invalid_or_conflicting_atomic_generation_count(
+    plan_count, input_count
+):
+    plan = WorkflowPlan(
+        workflow_name="molecular_design",
+        metadata={"requested_count": plan_count, "atomic": True},
+        steps=[
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_data={
+                    "query": "Generate candidates",
+                    "metadata": {"requested_count": input_count},
+                    "outputs": {},
+                },
+                capability="molecule.generate",
+            )
+        ],
+    )
+
+    with pytest.raises(PlanCompilationError, match="requested_count"):
+        PlanCompiler().compile(
+            plan,
+            WorkflowCatalog().require("molecular_design"),
+        )
+
+
+def test_compiler_accepts_matching_atomic_generation_count():
+    plan = WorkflowPlan(
+        workflow_name="molecular_design",
+        metadata={"requested_count": 7, "atomic": True},
+        steps=[
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_data={
+                    "query": "Generate candidates",
+                    "metadata": {"requested_count": 7},
+                    "outputs": {},
+                },
+                capability="molecule.generate",
+            )
+        ],
+    )
+
+    compiled = PlanCompiler().compile(
+        plan,
+        WorkflowCatalog().require("molecular_design"),
+    )
+
+    assert compiled.dependencies == {"generate": ()}
+
+
 def test_compiler_rejects_unknown_selector_when_workflow_binding_is_supported():
     plan = WorkflowPlan(
         workflow_name="target_driven_design",

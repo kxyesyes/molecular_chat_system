@@ -3,6 +3,10 @@ from __future__ import annotations
 import pytest
 
 from src.agent.contracts import AgentContext, ToolResult
+from src.agent.contracts.generation_request import (
+    MAX_EVIDENCE_CHARS,
+    serialize_target_evidence,
+)
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.planning import WorkflowPlan
 from src.agent.runtime.event_bus import AgentEventBus
@@ -12,16 +16,17 @@ from src.agent.workflows import WorkflowCatalog
 
 
 class CountingTool:
-    def __init__(self, name: str, data):
+    def __init__(self, name: str, data, *, quality=None):
         self.name = name
         self.data = data
+        self.quality = quality
         self.calls = 0
         self.inputs = []
 
     def execute(self, query):
         self.calls += 1
         self.inputs.append(query)
-        quality = (
+        quality = self.quality if self.quality is not None else (
             {"requested_count": len(self.data), "model": "gmm-llama:latest"}
             if self.name == "llm_molecular_generator"
             else {}
@@ -133,6 +138,104 @@ def test_structured_target_evidence_is_consumed_by_generator():
         "target_evidence"
     )
     assert len(execution.result.metadata["semantic_evidence"][0]["evidence_digest"]) == 64
+
+
+def test_nested_provider_fallback_quality_survives_runtime_and_blocks_generation():
+    target = CountingTool(
+        "target_database_search",
+        data=[{"gene_symbol": "PDE5A", "source": "UniProt"}],
+        quality={"provider": {"fallback_used": True}},
+    )
+    generator = CountingTool(
+        "llm_molecular_generator", data=[{"smiles": "CCO"}]
+    )
+
+    execution, _ = _run_target_design(target, generator)
+
+    assert target.calls == 1
+    assert generator.calls == 0
+    assert execution.result.error.code.value == "validation_error"
+
+
+def _oversized_canonical_target():
+    token = "A" * 80
+    label = "A" * 120
+    nested = {
+        "source": "UniProt",
+        "database": "UniProt",
+        "id": token,
+        "source_record_id": token,
+        "structure_id": token,
+        "uniprot_id": token,
+        "status": token,
+        "artifact_type": token,
+        "label": label,
+    }
+    structure = {
+        "structure_id": token,
+        "source": "PDB",
+        "database": "PDB",
+        "source_record_id": token,
+        "structure_type": token,
+        "method": token,
+    }
+    return {
+        "gene_symbol": token,
+        "target_identifier": token,
+        "uniprot_id": token,
+        "target_name": label,
+        "target_id": token,
+        "source_record_id": token,
+        "target_type": token,
+        "structure_evidence_status": token,
+        "source": "UniProt",
+        "database": "UniProt",
+        "recommended_structures": [structure, structure],
+        "evidence": [nested, nested, nested],
+        "artifacts": [nested, nested, nested],
+    }
+
+
+def test_semantic_gate_rejects_evidence_that_cannot_fit_final_prompt_bound():
+    payload = {
+        "query": "design",
+        "metadata": {"requested_count": 2},
+        "outputs": {"target": _oversized_canonical_target()},
+    }
+
+    assert serialize_target_evidence(payload) is None
+    decision = SemanticInputValidator().validate(
+        _target_design_plan().steps[1], payload
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "target_evidence_missing"
+
+
+@pytest.mark.parametrize(
+    "name_length, expected",
+    [(120, True), (121, False), (6295, False)],
+)
+def test_semantic_gate_and_serializer_agree_at_text_boundaries(
+    name_length, expected
+):
+    payload = {
+        "query": "design",
+        "metadata": {},
+        "outputs": {
+            "target": {"target_name": "A" * name_length, "database": "UniProt"}
+        },
+    }
+
+    serialized = serialize_target_evidence(payload)
+    decision = SemanticInputValidator().validate(
+        _target_design_plan().steps[1], payload
+    )
+
+    assert (serialized is not None) is expected
+    assert decision.allowed is expected
+    if serialized is not None:
+        assert len(serialized) <= MAX_EVIDENCE_CHARS
 
 
 def test_workflow_wrapper_validates_only_outputs_target_evidence():

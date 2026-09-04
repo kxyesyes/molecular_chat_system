@@ -5,6 +5,8 @@ from copy import deepcopy
 import re
 from typing import Any
 
+from src.agent.contracts.generation_request import preserve_trust_signals
+
 
 class BindingResolutionError(ValueError):
     pass
@@ -60,17 +62,24 @@ class BindingResolver:
                 and "requested_count" in request_metadata
                 else {}
             )
-            value = deepcopy(
-                {
-                    "query": request.get("query"),
-                    "metadata": metadata,
-                    "outputs": (
-                        {"target": outputs["target"]}
-                        if "target" in outputs
-                        else {}
-                    ),
-                }
+            metadata_trust = preserve_trust_signals(request_metadata)
+            if isinstance(metadata_trust, Mapping):
+                metadata.update(metadata_trust)
+            workflow_outputs = (
+                {"target": outputs["target"]} if "target" in outputs else {}
             )
+            output_quality = preserve_trust_signals(outputs.get("quality"))
+            if output_quality is not None:
+                workflow_outputs["quality"] = output_quality
+            workflow_value = {
+                "query": request.get("query"),
+                "metadata": metadata,
+                "outputs": workflow_outputs,
+            }
+            request_quality = preserve_trust_signals(request.get("quality"))
+            if request_quality is not None:
+                workflow_value["quality"] = request_quality
+            value = deepcopy(workflow_value)
         else:
             match = self.OUTPUT.fullmatch(selector)
             if not match:

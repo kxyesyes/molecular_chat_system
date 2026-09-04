@@ -120,6 +120,59 @@ def test_supervisor_blocks_generation_when_successful_target_quality_is_fallback
     assert tools["llm_molecular_generator"].calls == []
 
 
+def test_supervisor_blocks_nested_provider_fallback_quality():
+    tools = build_fake_tools(
+        target_quality={"provider": {"fallback_used": True}}
+    )
+    supervisor = SupervisorAgent(tools=tools)
+
+    result = supervisor.execute(
+        "Design candidates for PDE5A",
+        active_skill="target_driven_design",
+    )
+
+    assert result["partial"] is True
+    assert tools["target_database_search"].calls == ["PDE5A"]
+    assert tools["llm_molecular_generator"].calls == []
+
+
+def test_non_generation_workflow_can_quote_malformed_generation_request():
+    tools = build_fake_tools()
+    tools["drug_likeness_assessment"] = FakeTool("drug_likeness_assessment")
+    supervisor = SupervisorAgent(tools=tools)
+    query = (
+        'Evaluate ADMET for CCO while explaining the phrase '
+        '"Generate 7.5 molecules"'
+    )
+
+    execute_result = supervisor.execute(
+        query,
+        active_skill="admet_assessment",
+    )
+    run_result = supervisor.run(query, skill_name="admet_assessment")
+
+    assert (execute_result.get("error") or {}).get("code") != "invalid_input"
+    assert (
+        ((run_result.get("result") or {}).get("error") or {}).get("code")
+        != "invalid_input"
+    )
+    assert len(tools["admet_predictor"].calls) == 2
+
+
+def test_generation_workflow_rejects_malformed_count_before_tool():
+    generator = FakeTool("llm_molecular_generator")
+    supervisor = SupervisorAgent(tools={generator.name: generator})
+
+    result = supervisor.run(
+        "Generate 7.5 molecules",
+        skill_name="molecular_design",
+    )
+
+    assert result["status"] == "failed"
+    assert result["result"]["error"]["code"] == "invalid_input"
+    assert generator.calls == []
+
+
 def test_supervisor_atomic_generation_receives_canonical_public_count():
     generator = FakeTool("llm_molecular_generator")
     supervisor = SupervisorAgent(tools={generator.name: generator})

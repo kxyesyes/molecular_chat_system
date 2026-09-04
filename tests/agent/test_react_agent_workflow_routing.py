@@ -27,6 +27,34 @@ def test_workflow_skill_uses_planner_and_returns_legacy_dict(monkeypatch):
     assert response["final_answer"] == "workflow ok"
 
 
+def test_non_generation_workflow_can_quote_malformed_generation_count(monkeypatch):
+    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+    agent.llm = None
+    agent.tools = {}
+    agent.max_iterations = 5
+    agent.skill_router = None
+    agent._active_skill = None
+    calls = []
+
+    def fake_execute_workflow_skill(query, result, event_callback=None):
+        calls.append(query)
+        result["success"] = True
+        result["active_skill"] = "admet_assessment"
+        result["final_answer"] = "workflow ok"
+        return result
+
+    monkeypatch.setattr(agent, "_execute_workflow_skill", fake_execute_workflow_skill)
+    policy = WorkflowCatalog().require("admet_assessment")
+
+    response = agent.execute(
+        'Evaluate CCO while explaining "Generate 7.5 molecules"',
+        active_skill=policy,
+    )
+
+    assert response["success"] is True
+    assert calls == ['Evaluate CCO while explaining "Generate 7.5 molecules"']
+
+
 def test_single_step_policy_blocks_forbidden_tool_execution():
     calls = []
 

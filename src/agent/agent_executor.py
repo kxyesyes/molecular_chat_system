@@ -7,6 +7,7 @@
 from typing import List, Dict, Any, Optional
 import logging
 from .tools import get_core_tools, get_optional_tool, OPTIONAL_TOOLS
+from .tools.base_tool import execute_tool_compat
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,7 @@ class MolecularAgent:
         """执行工具预测"""
         results = []
         used_tools = []
+        first_error = None
 
         # 执行核心工具
         for tool in self.core_tools:
@@ -97,12 +99,18 @@ class MolecularAgent:
                         generation_kwargs = {"temperature": temperature}
                         if mol_count is not None:
                             generation_kwargs["mol_count"] = mol_count
-                        result = tool.execute(query, **generation_kwargs)
+                        tool_result = execute_tool_compat(
+                            tool, query, **generation_kwargs
+                        )
+                        result = tool_result.to_legacy_dict()
                     else:
                         result = tool.execute(query)
                     if result.get('success'):
                         results.append(result)
                         used_tools.append(tool.name)
+                    elif tool.name == 'llm_molecular_generator':
+                        results.append(result)
+                        first_error = first_error or result.get("error")
             except Exception as e:
                 logger.error(f"Core tool {tool.name} execution failed: {e}")
 
@@ -123,10 +131,11 @@ class MolecularAgent:
                         logger.error(f"Optional tool {tool_name} execution failed: {e}")
 
         return {
-            'success': len(results) > 0,
+            'success': len(used_tools) > 0,
             'results': results,
             'used_tools': used_tools,
-            'message': f"Successfully executed {len(used_tools)} tools" if results else "No tools were triggered"
+            'error': first_error,
+            'message': f"Successfully executed {len(used_tools)} tools" if used_tools else "No tools were triggered"
         }
 
     def get_tool_descriptions(self) -> Dict[str, str]:
@@ -178,8 +187,17 @@ class MolecularAgent:
                 'tool_results': tool_results['results']
             }
         else:
-            return {
+            failure = {
                 'success': False,
-                'message': 'Tool execution failed',
-                'response': '工具执行失败，请检查输入格式或稍后重试。'
+                'message': (
+                    tool_results['error']['message']
+                    if tool_results.get('error')
+                    else 'Tool execution failed'
+                ),
+                'response': '工具执行失败，请检查输入格式或稍后重试。',
+                'used_tools': tool_results['used_tools'],
+                'tool_results': tool_results['results'],
             }
+            if tool_results.get('error'):
+                failure['error'] = tool_results['error']
+            return failure

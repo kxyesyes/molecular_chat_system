@@ -164,11 +164,32 @@ def test_requested_count_parser_supports_shared_multilingual_grammar():
         "Generate ＋７． molecules",
         "Generate 1e1 molecules",
         "Generate −１e１ molecules",
+        "Generate 1,000 molecules",
+        "Generate 1/2 molecules",
+        "Generate 7..5 molecules",
     ],
 )
 def test_requested_count_parser_rejects_clause_local_malformed_numbers(query):
     with pytest.raises(GenerationRequestError, match="integer"):
         TaskPlanner._extract_requested_count(query, default=1)
+
+
+def test_year_in_count_position_is_explicit_and_rejected_by_planner():
+    assert TaskPlanner._extract_requested_count(
+        "Generate 2024 molecules", default=1
+    ) == 2024
+
+    plan = TaskPlanner().plan(
+        AgentContext(
+            query="Generate 2024 molecules",
+            trace_id="year-count",
+            active_skill="molecular_design",
+        )
+    )
+
+    assert plan.steps == []
+    assert plan.metadata["requested_count"] == 2024
+    assert plan.metadata["reason"] == "requested_count_out_of_range"
 
 
 def test_target_planner_rejects_malformed_decimal_count_without_raising():
