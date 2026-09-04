@@ -174,12 +174,26 @@ def test_requested_count_parser_supports_shared_multilingual_grammar():
         "Generate ７．５．２ molecules",
         "Generate five.5 molecules",
         "Generate two-point-five molecules",
+        "Generate five point five molecules",
+        "Generate two point five molecules",
         "生成五点五个分子",
+        "生成五 点 五个分子",
     ],
 )
 def test_requested_count_parser_rejects_clause_local_malformed_numbers(query):
     with pytest.raises(GenerationRequestError, match="integer"):
         TaskPlanner._extract_requested_count(query, default=1)
+
+
+def test_spaced_word_decimal_is_not_inferred_across_clauses_or_plain_prose():
+    assert TaskPlanner._extract_requested_count(
+        "Discuss five point five assays; Generate molecules",
+        default=1,
+    ) == 1
+    assert TaskPlanner._extract_requested_count(
+        "The assay score was five point five in 2024",
+        default=1,
+    ) == 1
 
 
 def test_year_in_count_position_is_explicit_and_rejected_by_planner():

@@ -201,6 +201,7 @@ def test_nested_provider_fallback_quality_survives_runtime_and_blocks_generation
 def _oversized_canonical_target():
     token = "A" * 80
     label = "A" * 120
+    official_url = "https://www.uniprot.org/" + ("A" * 225)
     nested = {
         "source": "UniProt",
         "database": "UniProt",
@@ -211,6 +212,7 @@ def _oversized_canonical_target():
         "status": token,
         "artifact_type": token,
         "label": label,
+        "source_url": official_url,
     }
     structure = {
         "structure_id": token,
@@ -219,6 +221,8 @@ def _oversized_canonical_target():
         "source_record_id": token,
         "structure_type": token,
         "method": token,
+        "source_url": official_url,
+        "download_url": "https://files.rcsb.org/" + ("A" * 225),
     }
     return {
         "gene_symbol": token,
@@ -231,31 +235,33 @@ def _oversized_canonical_target():
         "structure_evidence_status": token,
         "source": "UniProt",
         "database": "UniProt",
+        "source_url": official_url,
         "recommended_structures": [structure, structure],
         "evidence": [nested, nested, nested],
         "artifacts": [nested, nested, nested],
     }
 
 
-def test_semantic_gate_rejects_evidence_that_cannot_fit_final_prompt_bound():
+def test_semantic_gate_bounds_oversized_original_to_complete_canonical_record():
     payload = {
         "query": "design",
         "metadata": {"requested_count": 2},
         "outputs": {"target": _oversized_canonical_target()},
     }
 
-    assert serialize_target_evidence(payload) is None
+    serialized = serialize_target_evidence(payload)
     decision = SemanticInputValidator().validate(
         _target_design_plan().steps[1], payload
     )
 
-    assert decision.allowed is False
-    assert decision.reason == "target_evidence_missing"
+    assert serialized is not None
+    assert len(serialized) <= MAX_EVIDENCE_CHARS
+    assert decision.allowed is True
 
 
 @pytest.mark.parametrize(
     "name_length, expected",
-    [(120, True), (121, False), (6295, False)],
+    [(20, True), (21, False), (6295, False)],
 )
 def test_semantic_gate_and_serializer_agree_at_text_boundaries(
     name_length, expected

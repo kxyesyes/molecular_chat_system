@@ -412,20 +412,7 @@ class ReActMolecularAgent:
             )
 
     def _is_molecular_generation_query(self, query: str) -> bool:
-        lowered = (query or "").lower()
-        generation_terms = (
-            "随机生成",
-            "生成一个",
-            "生成",
-            "设计一个",
-            "设计",
-            "generate",
-            "design",
-        )
-        molecule_terms = ("分子", "类药", "药物", "smiles", "molecule", "compound", "drug-like")
-        return any(term in lowered for term in generation_terms) and any(
-            term in lowered for term in molecule_terms
-        )
+        return has_generation_intent(query)
 
     def _extract_first_smiles(self, query: str) -> str:
         """从查询中提取第一个有效SMILES字符串"""
@@ -540,12 +527,6 @@ class ReActMolecularAgent:
         """智能回退响应：根据查询内容选择合适的工具 - 优化版"""
         query_lower = query.lower()
 
-        # 优先级0: 分子生成关键词（最高优先级）
-        generation_keywords = [
-            '随机生成', '生成一个', '生成几个', '生成新', '创建分子', '设计分子',
-            'generate', 'create molecule', 'design molecule', 'random molecule'
-        ]
-        
         # 逆合成分析关键词
         retro_keywords = [
             'retrosynthesis', 'retro', 'synthetic route', 'synthesis pathway',
@@ -575,18 +556,24 @@ class ReActMolecularAgent:
         has_smiles = self._contains_smiles(query)
 
         # 优先级0: 检查是否是分子生成请求
-        if any(word in query_lower for word in generation_keywords):
+        generation_intent = has_generation_intent(query)
+        if generation_intent:
+            try:
+                parse_generation_count(
+                    query,
+                    default=DEFAULT_GENERATION_COUNT,
+                )
+            except GenerationRequestError:
+                return (
+                    "思考: 分子生成数量无效。\n"
+                    "最终答案: Invalid molecular generation request"
+                )
             logger.info("🎯 智能回退：检测到分子生成需求，选择LLM Molecular Generator")
             return f"思考: 检测到分子生成需求，使用AI模型生成新分子。\n行动: llm_molecular_generator\n行动输入: {query}"
 
         # 如果没有SMILES且不是生成请求，提示用户
-        if not has_smiles and not any(word in query_lower for word in generation_keywords):
-            # 检查是否可能是生成意图但表达不明确
-            if any(word in query_lower for word in ['生成', 'generate', '创建', 'create', '设计', 'design']):
-                logger.info("🎯 智能回退：检测到可能的生成意图，选择LLM Molecular Generator")
-                return f"思考: 检测到可能的分子生成需求。\n行动: llm_molecular_generator\n行动输入: {query}"
-            else:
-                return "思考: 没有检测到有效的分子结构或生成请求。\n最终答案: 请提供具体的分子结构（如SMILES格式）进行分析，或明确说明要生成新分子。"
+        if not has_smiles:
+            return "思考: 没有检测到有效的分子结构或生成请求。\n最终答案: 请提供具体的分子结构（如SMILES格式）进行分析，或明确说明要生成新分子。"
 
         # 按优先级检查关键词匹配
         if any(word in query_lower for word in retro_keywords):

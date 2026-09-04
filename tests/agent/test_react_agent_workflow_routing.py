@@ -270,3 +270,69 @@ def test_no_llm_fallback_prioritizes_all_canonical_generation_verbs():
         assert response["success"] is True
         assert property_tool.calls == []
         assert generator.calls[0]["metadata"]["requested_count"] == count
+
+
+def test_llm_path_uses_canonical_generation_intent_before_model():
+    class HallucinatingLLM:
+        def __init__(self):
+            self.calls = []
+
+        def generate(self, prompt):
+            self.calls.append(prompt)
+            return "最终答案: fabricated"
+
+    class Generator:
+        name = "llm_molecular_generator"
+
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, query):
+            self.calls.append(query)
+            return {"success": True, "formatted": "generated"}
+
+    for query, count in (
+        ("Produce 5 molecules", 5),
+        ("Make 3 compounds", 3),
+        ("Build 4 structures", 4),
+    ):
+        llm = HallucinatingLLM()
+        generator = Generator()
+        agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+        agent.llm = llm
+        agent.tools = {generator.name: generator}
+        agent.max_iterations = 2
+        agent.skill_router = None
+        agent._active_skill = None
+
+        response = agent.execute(query)
+
+        assert response["success"] is True
+        assert llm.calls == []
+        assert generator.calls[0]["metadata"]["requested_count"] == count
+
+
+def test_react_generation_helpers_share_quoted_canonical_grammar():
+    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+    agent.tools = {}
+
+    for query in (
+        "Produce 5 molecules",
+        "Make 3 compounds",
+        "Build 4 structures",
+    ):
+        assert agent._is_molecular_generation_query(query) is True
+        fallback = agent._intelligent_fallback_response(query)
+        assert "行动: llm_molecular_generator" in fallback
+
+    quoted = 'Explain the phrase "Produce 5 molecules"'
+    assert agent._is_molecular_generation_query(quoted) is False
+    assert "行动: llm_molecular_generator" not in agent._intelligent_fallback_response(
+        quoted
+    )
+
+    malformed = "Produce five point five molecules"
+    assert agent._is_molecular_generation_query(malformed) is True
+    fallback = agent._intelligent_fallback_response(malformed)
+    assert "Invalid molecular generation request" in fallback
+    assert "行动: llm_molecular_generator" not in fallback

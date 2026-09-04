@@ -227,7 +227,15 @@ def test_supervisor_atomic_invalid_count_is_invalid_input_before_tool():
     assert generator.calls == []
 
 
-@pytest.mark.parametrize("query, mol_count", [("Generate candidates", 11), ("Generate 7.5 molecules", None)])
+@pytest.mark.parametrize(
+    "query, mol_count",
+    [
+        ("Generate candidates", 11),
+        ("Generate 7.5 molecules", None),
+        ("Generate five point five molecules", None),
+        ("生成五 点 五个分子", None),
+    ],
+)
 def test_supervisor_rejects_invalid_generation_count_before_router_model(
     query, mol_count
 ):

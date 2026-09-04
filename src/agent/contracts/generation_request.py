@@ -6,6 +6,7 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import Any
+from urllib.parse import urlsplit
 
 from src.agent.persistence.redaction import looks_like_credential
 
@@ -54,18 +55,17 @@ _TARGET_TEXT_FIELDS = (
     "target_name",
     "target_id",
     "source_record_id",
-    "target_type",
-    "structure_evidence_status",
     "source",
     "database",
+    "source_url",
 )
 _STRUCTURE_TEXT_FIELDS = (
     "structure_id",
     "source",
     "database",
     "source_record_id",
-    "structure_type",
-    "method",
+    "source_url",
+    "download_url",
 )
 _EVIDENCE_TEXT_FIELDS = (
     "source",
@@ -74,9 +74,7 @@ _EVIDENCE_TEXT_FIELDS = (
     "source_record_id",
     "structure_id",
     "uniprot_id",
-    "status",
-    "artifact_type",
-    "label",
+    "source_url",
 )
 _IDENTIFIER_FIELDS = frozenset(
     {"gene_symbol", "target_identifier", "uniprot_id", "target_name", "target_id"}
@@ -85,6 +83,7 @@ _PROVENANCE_FIELDS = frozenset(
     {
         "source",
         "database",
+        "source_url",
         "uniprot_id",
         "recommended_structures",
         "evidence",
@@ -96,16 +95,25 @@ _CREDENTIAL_PATTERN = re.compile(
     r"secret|password)\b(?:\s*[:=]|\Z)|(?:^|[_ -])(?:token|secret|password)"
     r"(?:$|[_ -]))"
 )
-_SAFE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/+\-]{0,79}\Z")
-_SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.,():/+\-]{0,119}\Z")
+_SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9.:-]{0,79}\Z")
+_SAFE_GENE_SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,19}\Z")
+_OFFICIAL_EVIDENCE_HOSTS = frozenset(
+    {
+        "alphafold.ebi.ac.uk",
+        "files.rcsb.org",
+        "www.rcsb.org",
+        "www.uniprot.org",
+    }
+)
 
 _ARABIC_COUNT = r"(?<![\w.])[-+\u2212]?\d+(?:\.\d+)?(?![\w.])"
 _CHINESE_COUNT = r"[零〇一二两三四五六七八九十百]+"
-_ENGLISH_COUNT = (
-    r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+_ENGLISH_COUNT_WORD = (
+    r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
     r"twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
-    r"twenty)\b"
+    r"twenty)"
 )
+_ENGLISH_COUNT = rf"\b{_ENGLISH_COUNT_WORD}\b"
 _COUNT_TOKEN = rf"(?:{_ARABIC_COUNT}|{_CHINESE_COUNT}|{_ENGLISH_COUNT})"
 _ENGLISH_NOUN = r"(?:candidates?|molecules?|compounds?|structures?)"
 _GENERATION_VERB = r"(?:generate|design|create|produce|make|build)"
@@ -133,6 +141,20 @@ _COUNT_SLOT_PATTERNS = (
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
         rf"(?P<count>[^\s个种份，。；、！？\"']+)\s*(?:个|种|份)?\s*"
+        rf"(?:{_CHINESE_COUNT_MODIFIER}\s*){{0,2}}"
+        rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
+    ),
+)
+_MALFORMED_WORD_COUNT_PATTERNS = (
+    re.compile(
+        rf"(?i)\b{_GENERATION_VERB}\b[ \t]*{_ENGLISH_COUNT_WORD}"
+        rf"[ \t]+point[ \t]+{_ENGLISH_COUNT_WORD}"
+        rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
+        rf"(?=[ \t]+(?:{_ENGLISH_NOUN}\b|for\b)|[ \t]*$)"
+    ),
+    re.compile(
+        rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
+        rf"{_CHINESE_COUNT}\s*点\s*{_CHINESE_COUNT}\s*(?:个|种|份)?\s*"
         rf"(?:{_CHINESE_COUNT_MODIFIER}\s*){{0,2}}"
         rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
     ),
@@ -199,6 +221,8 @@ def validate_generation_count(value: Any, *, field: str = "requested_count") -> 
 
 def parse_generation_count(query: str, *, default: int = DEFAULT_GENERATION_COUNT) -> int:
     query = unicodedata.normalize("NFKC", str(query))
+    if any(pattern.search(query) for pattern in _MALFORMED_WORD_COUNT_PATTERNS):
+        raise GenerationRequestError("generation count must be an integer")
     for pattern in _COUNT_PATTERNS:
         match = pattern.search(query)
         if not match:
@@ -226,8 +250,13 @@ def has_generation_intent(query: str) -> bool:
         " ",
         normalized,
     )
-    return any(pattern.search(unquoted) for pattern in _COUNT_SLOT_PATTERNS) or any(
-        pattern.search(unquoted) for pattern, _value in _FUZZY_COUNTS
+    return (
+        any(pattern.search(unquoted) for pattern in _COUNT_SLOT_PATTERNS)
+        or any(
+            pattern.search(unquoted)
+            for pattern in _MALFORMED_WORD_COUNT_PATTERNS
+        )
+        or any(pattern.search(unquoted) for pattern, _value in _FUZZY_COUNTS)
     )
 
 
@@ -526,7 +555,6 @@ def _sanitize_target_record(
         safe = _safe_text(
             value.get(field),
             field=field,
-            allow_spaces=field == "target_name",
         )
         if safe is not None:
             record[field] = safe
@@ -582,7 +610,6 @@ def _sanitize_evidence_record(value: Mapping[str, Any]) -> dict[str, Any]:
     record = _sanitize_text_fields(
         value,
         _EVIDENCE_TEXT_FIELDS,
-        spaced_fields={"label"},
     )
     if isinstance(value.get("stale"), bool):
         record["stale"] = value["stale"]
@@ -608,16 +635,12 @@ def _sanitize_nested_records(value: Any, sanitizer, *, limit: int) -> list[dict[
 def _sanitize_text_fields(
     value: Mapping[str, Any],
     fields: Sequence[str],
-    *,
-    spaced_fields: set[str] | None = None,
 ) -> dict[str, Any]:
-    spaced_fields = spaced_fields or set()
     record: dict[str, Any] = {}
     for field in fields:
         safe = _safe_text(
             value.get(field),
             field=field,
-            allow_spaces=field in spaced_fields,
         )
         if safe is not None:
             record[field] = safe
@@ -628,7 +651,6 @@ def _safe_text(
     value: Any,
     *,
     field: str,
-    allow_spaces: bool = False,
 ) -> str | None:
     if not isinstance(value, str):
         return None
@@ -638,49 +660,73 @@ def _safe_text(
     if (
         looks_like_credential(normalized)
         or _CREDENTIAL_PATTERN.search(normalized)
-        or _contains_instruction_text(normalized)
     ):
         raise TargetEvidenceError("target evidence contains unsafe text")
-    if field in {"source", "database"} and (
-        normalized.casefold() not in _TRUSTED_EVIDENCE_SOURCES
-    ):
-        return None
-    pattern = _SAFE_NAME if allow_spaces else _SAFE_TOKEN
+    if field in {"source", "database"}:
+        if normalized.casefold() not in _TRUSTED_EVIDENCE_SOURCES:
+            return None
+        return normalized
+    if field in {"source_url", "download_url"}:
+        return normalized if _is_official_evidence_url(normalized) else None
+    pattern = (
+        _SAFE_GENE_SYMBOL
+        if field in {"gene_symbol", "target_name"}
+        else _SAFE_IDENTIFIER
+    )
     return normalized if pattern.fullmatch(normalized) else None
 
 
-def _contains_instruction_text(value: str) -> bool:
-    normalized = unicodedata.normalize("NFKC", value).casefold()
-    compact = re.sub(r"[^a-z0-9]+", "", normalized)
-    if any(
-        marker in compact
-        for marker in (
-            "ignoreallpreviousinstructions",
-            "ignorepreviousinstructions",
-            "disregardallpreviousinstructions",
-            "disregardpreviousinstructions",
-            "followtheseinstructions",
-            "followthefollowinginstructions",
-            "systemprompt",
-            "donotfollow",
-            "overridethetask",
-            "overridetheinstructions",
-            "overridetheprompt",
+def _is_official_evidence_url(value: str) -> bool:
+    if len(value) > 256:
+        return False
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in _OFFICIAL_EVIDENCE_HOSTS
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port is not None
+            or parsed.fragment
+        ):
+            return False
+    except ValueError:
+        return False
+    identifier = r"[A-Za-z0-9][A-Za-z0-9.:-]{0,79}"
+    if parsed.hostname == "www.uniprot.org":
+        return bool(
+            not parsed.query
+            and re.fullmatch(rf"/uniprotkb/{identifier}/entry", parsed.path)
         )
-    ):
-        return True
-    words = re.sub(r"[^a-z0-9]+", " ", normalized).strip()
-    if re.search(
-        r"\b(?:override|replace|change)\b.{0,32}"
-        r"\b(?:task|instructions?|prompt|request)\b",
-        words,
-    ):
-        return True
+    if parsed.hostname == "www.rcsb.org":
+        return bool(
+            (
+                not parsed.query
+                and re.fullmatch(rf"/structure/{identifier}", parsed.path)
+            )
+            or (
+                parsed.path == "/search"
+                and re.fullmatch(rf"request={identifier}", parsed.query)
+            )
+        )
+    if parsed.hostname == "files.rcsb.org":
+        return bool(
+            not parsed.query
+            and re.fullmatch(
+                rf"/download/{identifier}\.(?:cif|pdb)",
+                parsed.path,
+                re.IGNORECASE,
+            )
+        )
     return bool(
-        re.search(
-            r"\b(?:output|return|emit|print|write)\b\s+"
-            r"(?:a\s+|the\s+)?[a-z0-9@+\-=#./\\\[\]()]{3,}\b",
-            words,
+        not parsed.query
+        and (
+            re.fullmatch(rf"/entry/{identifier}", parsed.path)
+            or re.fullmatch(
+                rf"/files/AF-{identifier}-F1-model_v[1-9][0-9]*\.(?:cif|pdb)",
+                parsed.path,
+                re.IGNORECASE,
+            )
         )
     )
 
