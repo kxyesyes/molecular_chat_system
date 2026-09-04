@@ -5,7 +5,9 @@ from copy import deepcopy
 import re
 from typing import Any
 
-from src.agent.contracts.generation_request import preserve_trust_signals
+from src.agent.contracts.generation_request import (
+    preserve_generation_trust_envelope,
+)
 
 
 class BindingResolutionError(ValueError):
@@ -62,23 +64,29 @@ class BindingResolver:
                 and "requested_count" in request_metadata
                 else {}
             )
-            metadata_trust = preserve_trust_signals(request_metadata)
+            trust_envelope = preserve_generation_trust_envelope(
+                {
+                    "metadata": request_metadata,
+                    "quality": request.get("quality"),
+                    "outputs": {"quality": outputs.get("quality")},
+                }
+            )
+            metadata_trust = trust_envelope.get("metadata")
             if isinstance(metadata_trust, Mapping):
                 metadata.update(metadata_trust)
             workflow_outputs = (
                 {"target": outputs["target"]} if "target" in outputs else {}
             )
-            output_quality = preserve_trust_signals(outputs.get("quality"))
-            if output_quality is not None:
-                workflow_outputs["quality"] = output_quality
+            outputs_trust = trust_envelope.get("outputs")
+            if isinstance(outputs_trust, Mapping):
+                workflow_outputs.update(outputs_trust)
             workflow_value = {
                 "query": request.get("query"),
                 "metadata": metadata,
                 "outputs": workflow_outputs,
             }
-            request_quality = preserve_trust_signals(request.get("quality"))
-            if request_quality is not None:
-                workflow_value["quality"] = request_quality
+            if "quality" in trust_envelope:
+                workflow_value["quality"] = trust_envelope["quality"]
             value = deepcopy(workflow_value)
         else:
             match = self.OUTPUT.fullmatch(selector)

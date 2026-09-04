@@ -152,6 +152,7 @@ class PlanCompiler:
                                 str(step.input_data.get("query") or ""),
                                 plan_count,
                                 outputs=step.input_data.get("outputs"),
+                                trust_envelope=step.input_data,
                             ),
                         )
                         plan.steps[step_index] = step

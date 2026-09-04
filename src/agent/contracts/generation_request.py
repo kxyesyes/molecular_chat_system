@@ -349,6 +349,7 @@ def build_generation_request(
     requested_count: Any = _COUNT_UNSET,
     *,
     outputs: Mapping[str, Any] | None = None,
+    trust_envelope: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     count = validate_generation_count(
         parse_generation_count(query)
@@ -360,11 +361,44 @@ def build_generation_request(
         if isinstance(outputs, Mapping) and "target" in outputs
         else {}
     )
-    return {
+    request = {
         "query": str(query),
         "metadata": {"requested_count": count},
         "outputs": target_outputs,
     }
+    preserved_trust = preserve_generation_trust_envelope(trust_envelope)
+    metadata_trust = preserved_trust.get("metadata")
+    if isinstance(metadata_trust, Mapping):
+        request["metadata"].update(metadata_trust)
+    outputs_trust = preserved_trust.get("outputs")
+    if isinstance(outputs_trust, Mapping):
+        request["outputs"].update(outputs_trust)
+    if "quality" in preserved_trust:
+        request["quality"] = preserved_trust["quality"]
+    return request
+
+
+def preserve_generation_trust_envelope(
+    value: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep only canonical recursive trust signals from request wrappers."""
+    if not isinstance(value, Mapping):
+        return {}
+    envelope: dict[str, Any] = {}
+    metadata_trust = preserve_trust_signals(value.get("metadata"))
+    if metadata_trust is not None:
+        envelope["metadata"] = metadata_trust
+    outputs = value.get("outputs")
+    if isinstance(outputs, Mapping):
+        outputs_quality = preserve_trust_signals(outputs.get("quality"))
+        if outputs_quality is not None:
+            envelope["outputs"] = _ImmutableQuality(
+                {"quality": outputs_quality}
+            )
+    request_quality = preserve_trust_signals(value.get("quality"))
+    if request_quality is not None:
+        envelope["quality"] = request_quality
+    return envelope
 
 
 def preserve_target_quality(value: Any, quality: Any) -> Any:
@@ -640,6 +674,7 @@ __all__ = [
     "has_generation_intent",
     "parse_chinese_integer",
     "parse_generation_count",
+    "preserve_generation_trust_envelope",
     "preserve_target_quality",
     "preserve_trust_signals",
     "sanitize_target_evidence",

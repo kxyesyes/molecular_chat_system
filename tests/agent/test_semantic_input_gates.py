@@ -8,11 +8,43 @@ from src.agent.contracts.generation_request import (
     serialize_target_evidence,
 )
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
-from src.agent.planning import WorkflowPlan
+from src.agent.planning import PlanCompiler, WorkflowPlan
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.workflow_executor import WorkflowExecutor
 from src.agent.validators.semantic_inputs import SemanticInputValidator
 from src.agent.workflows import WorkflowCatalog
+
+
+def _compiled_atomic_request_with_trust(location: str):
+    request = {
+        "query": "Generate candidates",
+        "metadata": {},
+        "outputs": {
+            "target": {"gene_symbol": "PDE5A", "source": "UniProt"}
+        },
+    }
+    if location == "quality":
+        request["quality"] = {"fallback_used": True}
+    elif location == "metadata.quality":
+        request["metadata"]["quality"] = {"demo_mode": True}
+    else:
+        request["outputs"]["quality"] = {"untrusted": True}
+    plan = WorkflowPlan(
+        workflow_name="molecular_design",
+        metadata={"requested_count": 7, "atomic": True},
+        steps=[
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_data=request,
+                capability="molecule.generate",
+            )
+        ],
+    )
+    return PlanCompiler().compile(
+        plan,
+        WorkflowCatalog().require("molecular_design"),
+    ).plan.steps[0].input_data
 
 
 class CountingTool:
@@ -361,6 +393,23 @@ def test_target_evidence_rejects_untrusted_workflow_and_outputs_wrappers():
         )
         assert decision.allowed is False
         assert decision.reason == "target_evidence_missing"
+
+
+@pytest.mark.parametrize(
+    "location", ["quality", "metadata.quality", "outputs.quality"]
+)
+def test_compiler_canonical_trust_envelope_blocks_semantic_generation(location):
+    canonical = _compiled_atomic_request_with_trust(location)
+    step = WorkflowStep(
+        "generate",
+        "llm_molecular_generator",
+        preconditions=("target_evidence",),
+    )
+
+    decision = SemanticInputValidator().validate(step, canonical)
+
+    assert decision.allowed is False
+    assert decision.reason == "target_evidence_missing"
 
 
 @pytest.mark.parametrize(

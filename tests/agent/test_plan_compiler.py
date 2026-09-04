@@ -287,6 +287,68 @@ def test_compiler_validates_structured_query_when_count_metadata_is_absent(
         )
 
 
+@pytest.mark.parametrize(
+    "location, flag",
+    [
+        ("quality", "fallback_used"),
+        ("metadata.quality", "demo_mode"),
+        ("outputs.quality", "untrusted"),
+    ],
+)
+def test_compiler_preserves_only_immutable_recursive_trust_envelope(
+    location, flag
+):
+    request = {
+        "query": "Generate candidates",
+        "metadata": {"audit_note": "drop-me"},
+        "outputs": {
+            "target": {"gene_symbol": "PDE5A", "source": "UniProt"},
+            "unrelated": {"secret": "drop-me"},
+        },
+        "private": "drop-me",
+    }
+    quality = {"provider": {flag: True, "debug": "drop-me"}}
+    if location == "quality":
+        request["quality"] = quality
+    elif location == "metadata.quality":
+        request["metadata"]["quality"] = quality
+    else:
+        request["outputs"]["quality"] = quality
+    plan = WorkflowPlan(
+        workflow_name="molecular_design",
+        metadata={"requested_count": 7, "atomic": True},
+        steps=[
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_data=request,
+                capability="molecule.generate",
+            )
+        ],
+    )
+
+    compiled = PlanCompiler().compile(
+        plan,
+        WorkflowCatalog().require("molecular_design"),
+    )
+    canonical = compiled.plan.steps[0].input_data
+
+    assert canonical["metadata"]["requested_count"] == 7
+    assert canonical["outputs"]["target"] == request["outputs"]["target"]
+    assert "private" not in canonical
+    assert "audit_note" not in canonical["metadata"]
+    assert "unrelated" not in canonical["outputs"]
+    if location == "quality":
+        preserved = canonical["quality"]
+    elif location == "metadata.quality":
+        preserved = canonical["metadata"]["quality"]
+    else:
+        preserved = canonical["outputs"]["quality"]
+    assert preserved == {"provider": {flag: True}}
+    with pytest.raises(TypeError, match="immutable"):
+        preserved["provider"][flag] = False
+
+
 def test_compiler_rejects_unknown_selector_when_workflow_binding_is_supported():
     plan = WorkflowPlan(
         workflow_name="target_driven_design",

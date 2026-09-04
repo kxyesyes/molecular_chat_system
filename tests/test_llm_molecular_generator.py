@@ -8,8 +8,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import src.agent.tools.llm_molecular_generator as generator_module
+from src.agent.orchestrators import WorkflowStep
+from src.agent.planning import PlanCompiler, WorkflowPlan
 from src.agent.tools.llm_molecular_generator import LLMMolecularGenerator
 from src.agent.tools.base_tool import execute_tool_compat
+from src.agent.workflows import WorkflowCatalog
 
 
 class FakeLLM:
@@ -508,6 +511,52 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
                 llm = CapturingLLM()
                 wrapped = execute_tool_compat(
                     LLMMolecularGenerator(llm_model=llm), request
+                )
+
+                self.assertFalse(wrapped.success)
+                self.assertEqual(wrapped.error.code.value, "invalid_input")
+                self.assertEqual(llm.prompts, [])
+
+    def test_compiler_canonical_trust_envelopes_block_before_model(self):
+        locations = ("quality", "metadata.quality", "outputs.quality")
+        for location in locations:
+            with self.subTest(location=location):
+                request = {
+                    "query": "Generate candidates",
+                    "metadata": {},
+                    "outputs": {
+                        "target": {
+                            "gene_symbol": "PDE5A",
+                            "source": "UniProt",
+                        }
+                    },
+                }
+                if location == "quality":
+                    request["quality"] = {"fallback_used": True}
+                elif location == "metadata.quality":
+                    request["metadata"]["quality"] = {"demo_mode": True}
+                else:
+                    request["outputs"]["quality"] = {"untrusted": True}
+                plan = WorkflowPlan(
+                    workflow_name="molecular_design",
+                    metadata={"requested_count": 7, "atomic": True},
+                    steps=[
+                        WorkflowStep(
+                            "generate",
+                            "llm_molecular_generator",
+                            input_data=request,
+                            capability="molecule.generate",
+                        )
+                    ],
+                )
+                canonical = PlanCompiler().compile(
+                    plan,
+                    WorkflowCatalog().require("molecular_design"),
+                ).plan.steps[0].input_data
+                llm = CapturingLLM()
+
+                wrapped = execute_tool_compat(
+                    LLMMolecularGenerator(llm_model=llm), canonical
                 )
 
                 self.assertFalse(wrapped.success)
