@@ -1,3 +1,5 @@
+import pytest
+
 from src.agent.orchestrators.base import WorkflowStep
 from src.agent.planning import WorkflowPlan
 from src.agent.router import SkillRouter
@@ -6,14 +8,15 @@ from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
 
 
 class FakeTool:
-    def __init__(self, name):
+    def __init__(self, name, *, quality=None):
         self.name = name
         self.calls = []
+        self.quality = quality
 
     def execute(self, query):
         self.calls.append(query)
         if self.name == "target_database_search":
-            return {
+            result = {
                 "success": True,
                 "message": f"{self.name} ok",
                 "data": [
@@ -21,6 +24,9 @@ class FakeTool:
                 ],
                 "formatted": "validated PDE5A target evidence",
             }
+            if self.quality is not None:
+                result["quality"] = self.quality
+            return result
         if self.name == "llm_molecular_generator":
             return {
                 "success": True,
@@ -44,8 +50,8 @@ class FakeTool:
         }
 
 
-def build_fake_tools():
-    return {
+def build_fake_tools(*, target_quality=None):
+    tools = {
         name: FakeTool(name)
         for name in [
             "target_database_search",
@@ -56,6 +62,11 @@ def build_fake_tools():
             "molecular_docking",
         ]
     }
+    if target_quality is not None:
+        tools["target_database_search"] = FakeTool(
+            "target_database_search", quality=target_quality
+        )
+    return tools
 
 
 def test_supervisor_generates_target_driven_plan():
@@ -92,6 +103,80 @@ def test_supervisor_runs_multi_tool_workflow():
     assert tools["target_database_search"].calls
     assert tools["llm_molecular_generator"].calls
     assert tools["molecular_docking"].calls == []
+
+
+def test_supervisor_blocks_generation_when_successful_target_quality_is_fallback():
+    tools = build_fake_tools(target_quality={"fallback_used": True})
+    supervisor = SupervisorAgent(tools=tools)
+
+    result = supervisor.execute(
+        "Design candidates for PDE5A",
+        active_skill="target_driven_design",
+    )
+
+    assert result["success"] is True
+    assert result["partial"] is True
+    assert tools["target_database_search"].calls == ["PDE5A"]
+    assert tools["llm_molecular_generator"].calls == []
+
+
+def test_supervisor_atomic_generation_receives_canonical_public_count():
+    generator = FakeTool("llm_molecular_generator")
+    supervisor = SupervisorAgent(tools={generator.name: generator})
+
+    result = supervisor.execute(
+        "Generate candidates",
+        mol_count=7,
+        active_skill="molecular_design",
+    )
+
+    assert result["success"] is True
+    assert generator.calls == [
+        {
+            "query": "Generate candidates",
+            "metadata": {"requested_count": 7},
+            "outputs": {},
+        }
+    ]
+
+
+def test_supervisor_atomic_invalid_count_is_invalid_input_before_tool():
+    generator = FakeTool("llm_molecular_generator")
+    supervisor = SupervisorAgent(tools={generator.name: generator})
+
+    result = supervisor.execute(
+        "Generate candidates",
+        mol_count=11,
+        active_skill="molecular_design",
+    )
+
+    assert result["success"] is False
+    assert result["agent_result"].error.code.value == "invalid_input"
+    assert generator.calls == []
+
+
+@pytest.mark.parametrize("query, mol_count", [("Generate candidates", 11), ("Generate 7.5 molecules", None)])
+def test_supervisor_rejects_invalid_generation_count_before_router_model(
+    query, mol_count
+):
+    class RouterThatMustNotRun:
+        catalog = WorkflowCatalog()
+
+        def route(self, query, llm=None):
+            raise AssertionError("router model ran before count validation")
+
+    generator = FakeTool("llm_molecular_generator")
+    supervisor = SupervisorAgent(
+        tools={generator.name: generator},
+        skill_router=RouterThatMustNotRun(),
+    )
+    kwargs = {} if mol_count is None else {"mol_count": mol_count}
+
+    result = supervisor.execute(query, **kwargs)
+
+    assert result["success"] is False
+    assert result["agent_result"].error.code.value == "invalid_input"
+    assert generator.calls == []
 
 
 def test_supervisor_public_mol_count_is_authoritative_for_target_workflow():

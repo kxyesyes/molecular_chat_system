@@ -14,6 +14,7 @@ from src.agent.contracts import (
     RunOutcome,
     ToolResult,
 )
+from src.agent.contracts.generation_request import preserve_target_quality
 from src.agent.evidence import EvidenceLedger
 from src.agent.persistence.redaction import redact_sensitive
 from src.agent.planning.bindings import BindingResolutionError
@@ -321,7 +322,10 @@ class WorkflowRunSession:
             self._persist_step_result(step, journal, result)
         if not journal.output_applied:
             if result.success and step.output_key:
-                self.outputs[step.output_key] = result.data
+                output = result.data
+                if step.output_key == "target":
+                    output = preserve_target_quality(output, result.quality)
+                self.outputs[step.output_key] = output
             journal.output_applied = True
         if not journal.warnings_applied:
             self.state.warnings.extend(result.warnings)

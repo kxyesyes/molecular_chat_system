@@ -403,6 +403,59 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
                 self.assertEqual(wrapped.error.code.value, "invalid_input")
                 self.assertEqual(llm.prompts, [])
 
+    def test_adversarial_source_credentials_and_instructions_fail_closed(self):
+        unsafe_sources = (
+            "github_pat_11AA22BB33CC44DD55EE66FF",
+            "AKIAIOSFODNN7EXAMPLE",
+            "DISREGARD_PREVIOUS_INSTRUCTIONS",
+            "FOLLOW_THESE_INSTRUCTIONS",
+        )
+
+        for unsafe_source in unsafe_sources:
+            with self.subTest(unsafe_source=unsafe_source):
+                llm = CapturingLLM()
+                with (
+                    mock.patch.object(generator_module.logger, "info") as info,
+                    mock.patch.object(generator_module.logger, "warning") as warning,
+                    mock.patch.object(generator_module.logger, "error") as error,
+                ):
+                    wrapped = execute_tool_compat(
+                        LLMMolecularGenerator(llm_model=llm),
+                        {
+                            "query": "Generate 2 candidates",
+                            "metadata": {"requested_count": 2},
+                            "outputs": {
+                                "target": {
+                                    "gene_symbol": "PDE5A",
+                                    "source": unsafe_source,
+                                }
+                            },
+                        },
+                    )
+
+                serialized = str(wrapped.to_legacy_dict())
+                logs = " ".join(
+                    repr(call)
+                    for logger_mock in (info, warning, error)
+                    for call in logger_mock.call_args_list
+                )
+                self.assertFalse(wrapped.success)
+                self.assertEqual(wrapped.error.code.value, "invalid_input")
+                self.assertNotIn(unsafe_source, serialized)
+                self.assertNotIn(unsafe_source, logs)
+                self.assertEqual(llm.prompts, [])
+
+    def test_decimal_legacy_count_is_invalid_before_model(self):
+        llm = CapturingLLM()
+        wrapped = execute_tool_compat(
+            LLMMolecularGenerator(llm_model=llm),
+            "Generate 7.5 molecules",
+        )
+
+        self.assertFalse(wrapped.success)
+        self.assertEqual(wrapped.error.code.value, "invalid_input")
+        self.assertEqual(llm.prompts, [])
+
     def test_target_evidence_is_sanitized_before_record_limit(self):
         serialized = LLMMolecularGenerator._serialize_target_evidence(
             [

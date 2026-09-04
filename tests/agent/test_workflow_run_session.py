@@ -403,6 +403,65 @@ def test_blocked_generation_emits_partial_terminal_message():
     assert terminal.progress == 1.0
 
 
+def test_target_quality_fallback_envelope_blocks_generation_and_is_immutable():
+    target_data = [{"gene_symbol": "PDE5A", "source": "UniProt"}]
+
+    class FallbackTargetTool:
+        name = "target_database_search"
+
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, query):
+            self.calls.append(query)
+            return {
+                "success": True,
+                "message": "fallback target data",
+                "data": target_data,
+                "quality": {"fallback_used": True, "secret": "drop-me"},
+            }
+
+    target = FallbackTargetTool()
+    generator = CountingTool("llm_molecular_generator")
+    steps = [
+        WorkflowStep(
+            "target_search",
+            target.name,
+            input_data="PDE5A",
+            output_key="target",
+            capability="target.structure.search",
+        ),
+        WorkflowStep(
+            "generate",
+            generator.name,
+            input_binding="$.workflow",
+            output_key="molecules",
+            capability="molecule.generate",
+            preconditions=("target_evidence",),
+        ),
+    ]
+    session, _ = _make_session(steps=steps, tools={target.name: target, generator.name: generator})
+    session.context.metadata["requested_count"] = 1
+
+    session.start()
+    first = session.execute_step(0)
+
+    assert first.outcome == "succeeded"
+    assert session.outputs["target"]["data"] == target_data
+    assert dict(session.outputs["target"]["quality"]) == {
+        "fallback_used": True
+    }
+    with pytest.raises(TypeError):
+        session.outputs["target"]["quality"]["fallback_used"] = False
+
+    second = session.execute_step(1)
+    result = session.finish()
+
+    assert second.outcome == "skipped_precondition"
+    assert generator.calls == []
+    assert result.error.code == AgentErrorCode.VALIDATION_ERROR
+
+
 def test_fail_runtime_finishes_with_internal_error_and_one_failed_event():
     session, event_bus = _make_session(steps=[], tools={})
     session.start()

@@ -11,6 +11,7 @@ from src.agent.contracts.generation_request import (
 )
 from src.agent.workflows import WorkflowPolicy
 
+from .bindings import BindingResolutionError, BindingResolver
 from .task_planner import WorkflowPlan
 
 
@@ -61,15 +62,21 @@ class PlanCompiler:
                     f"Tool {step.tool_name} is not allowed by {policy.name}"
                 )
 
+            try:
+                BindingResolver.validate_transform(step.input_transform)
+                selector = BindingResolver.derive_selector(
+                    step.input_binding,
+                    step.input_from,
+                )
+            except BindingResolutionError as exc:
+                raise PlanCompilationError(str(exc)) from None
+
             expected = capability_for_tool(step.tool_name)
             requested = get_capability(step.capability) if step.capability else expected
             if step.tool_name not in requested.tool_names:
                 raise PlanCompilationError(
                     f"Tool {step.tool_name} does not implement {requested.name}"
                 )
-            selector = step.input_binding
-            if selector is None and step.input_from:
-                selector = f"$.outputs.{step.input_from}"
             step_dependencies: tuple[str, ...] = ()
             if selector:
                 if selector == "$.workflow":

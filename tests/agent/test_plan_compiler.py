@@ -188,6 +188,72 @@ def test_compiler_rejects_unknown_upstream_output():
         )
 
 
+def test_compiler_empty_binding_falls_back_to_input_from_dependency():
+    plan = WorkflowPlan(
+        workflow_name="admet_assessment",
+        steps=[
+            WorkflowStep(
+                "properties",
+                "property_calculator",
+                output_key="properties",
+            ),
+            WorkflowStep(
+                "properties_again",
+                "property_calculator",
+                input_from="properties",
+                input_binding="",
+            ),
+        ],
+    )
+
+    compiled = PlanCompiler().compile(
+        plan,
+        WorkflowCatalog().require("admet_assessment"),
+    )
+
+    assert compiled.dependencies["properties_again"] == ("properties",)
+
+
+@pytest.mark.parametrize("selector", ["", 0, False, []])
+def test_compiler_rejects_invalid_explicit_binding_selector(selector):
+    plan = WorkflowPlan(
+        workflow_name="admet_assessment",
+        steps=[
+            WorkflowStep(
+                "properties",
+                "property_calculator",
+                input_binding=selector,
+            )
+        ],
+    )
+
+    with pytest.raises(PlanCompilationError, match="input binding"):
+        PlanCompiler().compile(
+            plan,
+            WorkflowCatalog().require("admet_assessment"),
+        )
+
+
+@pytest.mark.parametrize("transform", ["", "raw", 1, None])
+def test_compiler_rejects_unsupported_input_transform(transform):
+    plan = WorkflowPlan(
+        workflow_name="admet_assessment",
+        steps=[
+            WorkflowStep(
+                "properties",
+                "property_calculator",
+                input_transform=transform,
+            )
+        ],
+    )
+
+    with pytest.raises(PlanCompilationError, match="input transform"):
+        PlanCompiler().compile(
+            plan,
+            WorkflowCatalog().require("admet_assessment"),
+        )
+
+
 def test_compiler_rejects_capability_tool_mismatch():
     plan = WorkflowPlan(
         workflow_name="admet_assessment",

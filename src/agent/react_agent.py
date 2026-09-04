@@ -11,6 +11,11 @@ from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 from .prompts import PREFIX, SUFFIX, REACT_FORMAT, SIMPLE_TOOL_TEMPLATE
 from .router import SkillRouter
+from .contracts.generation_request import (
+    GenerationRequestError,
+    build_generation_request,
+    parse_generation_count,
+)
 
 logger = logging.getLogger(__name__)
 _MOL_COUNT_UNSET = object()
@@ -141,10 +146,6 @@ class ReActMolecularAgent:
         start_time = time.time()
         
         self.current_temperature = temperature
-        self.current_mol_count = (
-            5 if mol_count is _MOL_COUNT_UNSET else mol_count
-        )
-        self._current_mol_count_is_explicit = mol_count is not _MOL_COUNT_UNSET
         result = {
             'query': query,
             'success': True,
@@ -154,6 +155,44 @@ class ReActMolecularAgent:
             'tools_used': [],
             'active_skill': None  # 兼容字段：记录激活的工作流策略
         }
+
+        raw_requested_count: Any = None
+        try:
+            raw_requested_count = (
+                mol_count
+                if mol_count is not _MOL_COUNT_UNSET
+                else parse_generation_count(query)
+            )
+            generation_request = build_generation_request(
+                query, raw_requested_count
+            )
+            requested_count = generation_request["metadata"]["requested_count"]
+        except GenerationRequestError as exc:
+            result["success"] = False
+            result["final_answer"] = "Invalid molecular generation request"
+            result["error"] = {
+                "code": "invalid_input",
+                "message": str(exc),
+                "details": {},
+            }
+            workflow_name = getattr(active_skill, "name", active_skill)
+            result["workflow_plan"] = {
+                "workflow_name": workflow_name or "molecular_design",
+                "steps": [],
+                "metadata": {
+                    "requested_count": raw_requested_count,
+                    "reason": (
+                        "invalid_requested_count"
+                        if raw_requested_count is None
+                        or isinstance(raw_requested_count, bool)
+                        or not isinstance(raw_requested_count, int)
+                        else "requested_count_out_of_range"
+                    ),
+                },
+            }
+            return result
+        self.current_mol_count = requested_count
+        self._current_generation_request = generation_request
 
         logger.info(f"=== ReAct Agent 开始执行 ===")
         logger.info(f"查询: {query}")
@@ -716,7 +755,10 @@ class ReActMolecularAgent:
             
             # 特殊处理：如果是分子生成工具，传入用户在UI设置的数量
             if matched_tool_name == "llm_molecular_generator":
-                exec_params["mol_count"] = getattr(self, "current_mol_count", 5)
+                exec_params["query"] = build_generation_request(
+                    tool_input,
+                    getattr(self, "current_mol_count", 1),
+                )
                 exec_params["temperature"] = getattr(self, "current_temperature", 0.7)
             elif matched_tool_name in ["rxn_chemistry_agent", "property_calculator"]:
                 # 其他可能支持temperature的工具
@@ -807,11 +849,9 @@ class ReActMolecularAgent:
             active_skill=self._active_skill.name if self._active_skill else None,
             temperature=getattr(self, "current_temperature", 0.7),
             mol_count=getattr(self, "current_mol_count", 5),
-            metadata=(
-                {"requested_count": getattr(self, "current_mol_count", 5)}
-                if getattr(self, "_current_mol_count_is_explicit", False)
-                else {}
-            ),
+            metadata={
+                "requested_count": getattr(self, "current_mol_count", 1)
+            },
         )
         execution = WorkflowExecutor().execute(
             context=context,
@@ -956,7 +996,16 @@ class ReActMolecularAgent:
 
             # 执行工具
             tool_start = time.time()
-            tool_result = tool.execute(query)
+            tool_input = (
+                build_generation_request(
+                    query,
+                    getattr(self, "current_mol_count", 1),
+                )
+                if self._canonical_tool_name(tool_name)
+                == "llm_molecular_generator"
+                else query
+            )
+            tool_result = tool.execute(tool_input)
             tool_elapsed = time.time() - tool_start
             
             result['tools_used'].append(tool_name)

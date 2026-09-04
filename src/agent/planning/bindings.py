@@ -12,6 +12,31 @@ class BindingResolutionError(ValueError):
 
 class BindingResolver:
     OUTPUT = re.compile(r"^\$\.outputs\.([A-Za-z0-9_-]+)$")
+    SUPPORTED_TRANSFORMS = frozenset({"identity", "smiles_text"})
+
+    @classmethod
+    def derive_selector(cls, input_binding: Any, input_from: Any) -> str | None:
+        if input_binding is not None and not isinstance(input_binding, str):
+            raise BindingResolutionError("Invalid input binding selector")
+        if input_from is not None and not isinstance(input_from, str):
+            raise BindingResolutionError("Invalid input_from selector")
+        if input_binding:
+            return input_binding
+        if input_from:
+            return f"$.outputs.{input_from}"
+        if input_binding == "":
+            raise BindingResolutionError("Invalid empty input binding selector")
+        if input_from == "":
+            raise BindingResolutionError("Invalid empty input_from selector")
+        return None
+
+    @classmethod
+    def validate_transform(cls, transform: Any) -> str:
+        if not isinstance(transform, str) or transform not in cls.SUPPORTED_TRANSFORMS:
+            raise BindingResolutionError(
+                f"Unsupported input transform: {transform!r}"
+            )
+        return transform
 
     def resolve(
         self,
@@ -20,6 +45,9 @@ class BindingResolver:
         request: Mapping[str, Any],
         outputs: Mapping[str, Any],
     ) -> Any:
+        self.validate_transform(transform)
+        if not isinstance(selector, str) or not selector:
+            raise BindingResolutionError("Invalid input binding selector")
         if selector == "$.request.query":
             value = request.get("query")
         elif selector == "$.workflow":
@@ -58,9 +86,7 @@ class BindingResolver:
             return value
         if transform == "smiles_text":
             return self._smiles_text(value)
-        raise BindingResolutionError(
-            f"Unsupported binding transform: {transform}"
-        )
+        raise BindingResolutionError(f"Unsupported input transform: {transform}")
 
     @classmethod
     def _smiles_text(cls, value: Any) -> str:

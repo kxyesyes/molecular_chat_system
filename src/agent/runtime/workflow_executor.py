@@ -329,6 +329,34 @@ class WorkflowExecutor:
         all_tools: Mapping[str, Any],
         plan: WorkflowPlan,
     ) -> tuple[CompiledPlan | None, WorkflowExecution | None]:
+        if plan.metadata.get("reason") in {
+            "invalid_requested_count",
+            "requested_count_out_of_range",
+        }:
+            details = {
+                "skill": policy.name,
+                "reason": plan.metadata["reason"],
+                "supported_requested_count": plan.metadata.get(
+                    "supported_requested_count"
+                ),
+            }
+            error = AgentExecutionError(
+                code=AgentErrorCode.INVALID_INPUT,
+                message="Invalid molecular generation request",
+                details=details,
+            )
+            return None, WorkflowExecution(
+                plan=plan,
+                result=AgentResult(
+                    trace_id=context.trace_id,
+                    success=False,
+                    message=error.message,
+                    skill_name=policy.name,
+                    error=error,
+                    metadata={"preflight": details},
+                ),
+                events=[],
+            )
         allowed = set(policy.allowed_tools)
         planned = [step.tool_name for step in plan.steps]
         unauthorized = [name for name in planned if name not in allowed]

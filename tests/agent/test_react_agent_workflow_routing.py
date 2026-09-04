@@ -109,3 +109,66 @@ def test_no_llm_fallback_blocks_forbidden_policy_tool_end_to_end():
     assert response["active_skill"] == "activity_prediction"
     assert response["tools_used"] == []
     assert "没有允许且匹配的可用工具" in response["final_answer"]
+
+
+def test_no_llm_generation_fallback_receives_canonical_public_count():
+    class MatchingGenerator:
+        name = "llm_molecular_generator"
+
+        def __init__(self):
+            self.calls = []
+
+        def should_use(self, query):
+            return True
+
+        def execute(self, query):
+            self.calls.append(query)
+            return {"success": True, "formatted": "generated"}
+
+    tool = MatchingGenerator()
+    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+    agent.llm = None
+    agent.tools = {tool.name: tool}
+    agent.max_iterations = 5
+    agent.skill_router = None
+    agent._active_skill = None
+
+    response = agent.execute("Generate candidates", mol_count=7)
+
+    assert response["success"] is True
+    assert tool.calls == [
+        {
+            "query": "Generate candidates",
+            "metadata": {"requested_count": 7},
+            "outputs": {},
+        }
+    ]
+
+
+def test_no_llm_generation_fallback_rejects_invalid_count_before_tool():
+    class MatchingGenerator:
+        name = "llm_molecular_generator"
+
+        def __init__(self):
+            self.calls = []
+
+        def should_use(self, query):
+            return True
+
+        def execute(self, query):
+            self.calls.append(query)
+            return {"success": True, "formatted": "generated"}
+
+    tool = MatchingGenerator()
+    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+    agent.llm = None
+    agent.tools = {tool.name: tool}
+    agent.max_iterations = 5
+    agent.skill_router = None
+    agent._active_skill = None
+
+    response = agent.execute("Generate candidates", mol_count=11)
+
+    assert response["success"] is False
+    assert response["error"]["code"] == "invalid_input"
+    assert tool.calls == []

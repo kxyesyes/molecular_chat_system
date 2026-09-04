@@ -1347,6 +1347,44 @@ def test_executor_rejects_uncompilable_binding_before_tool_runs():
     assert execution.events == []
 
 
+@pytest.mark.parametrize(
+    "step",
+    [
+        WorkflowStep(
+            "invalid_selector",
+            "property_calculator",
+            input_binding="",
+        ),
+        WorkflowStep(
+            "invalid_transform",
+            "property_calculator",
+            input_transform="raw",
+        ),
+    ],
+)
+def test_executor_rejects_invalid_binding_contract_before_any_tool(step):
+    tool = FakeTool("property_calculator")
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="CCO",
+            trace_id=f"preflight-{step.name}",
+            active_skill="comprehensive_evaluation",
+        ),
+        policy=FAKE_POLICY,
+        all_tools={tool.name: tool},
+        plan=WorkflowPlan(
+            workflow_name="comprehensive_evaluation",
+            steps=[step],
+        ),
+    )
+
+    assert execution.result.success is False
+    assert execution.result.error.code == AgentErrorCode.VALIDATION_ERROR
+    assert execution.tool_attempt_count == 0
+    assert tool.calls == []
+    assert execution.events == []
+
+
 def test_execution_preserves_exact_compilation_and_tool_attempt_count():
     compiler = CountingCompiler()
     tool = FakeTool("property_calculator")

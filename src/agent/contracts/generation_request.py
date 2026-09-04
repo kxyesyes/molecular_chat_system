@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from typing import Any
+
+from src.agent.persistence.redaction import looks_like_credential
 
 
 MIN_GENERATION_COUNT = 1
@@ -13,6 +17,7 @@ MAX_TARGET_RECORDS = 3
 MAX_TARGET_STRUCTURES = 2
 MAX_EVIDENCE_ITEMS = 3
 MAX_EVIDENCE_CHARS = 4096
+_COUNT_UNSET = object()
 
 
 class GenerationRequestError(ValueError):
@@ -28,6 +33,20 @@ _UNTRUSTED_TRUE_FLAGS = frozenset(
     {"demo_mode", "fallback_used", "is_demo", "fallback", "untrusted"}
 )
 _UNTRUSTED_FALSE_FLAGS = frozenset({"trusted", "authoritative"})
+_TRUST_QUALITY_FIELDS = _UNTRUSTED_TRUE_FLAGS | _UNTRUSTED_FALSE_FLAGS
+_TRUSTED_EVIDENCE_SOURCES = frozenset(
+    {
+        "alphafold",
+        "local",
+        "local_target_db",
+        "official",
+        "pdb",
+        "rcsb",
+        "rcsb_pdb",
+        "target_database",
+        "uniprot",
+    }
+)
 _TARGET_TEXT_FIELDS = (
     "gene_symbol",
     "target_identifier",
@@ -72,10 +91,6 @@ _PROVENANCE_FIELDS = frozenset(
         "artifacts",
     }
 )
-_INSTRUCTION_PATTERN = re.compile(
-    r"(?i)(ignore(?:_all)?(?:\s|_)*(?:all(?:\s|_)*)?(?:previous(?:\s|_)*)?"
-    r"instructions?|system(?:\s|_)*prompt|do(?:\s|_)*not(?:\s|_)*follow)"
-)
 _CREDENTIAL_PATTERN = re.compile(
     r"(?i)(?:\bsk-[A-Za-z0-9_-]+|\b(?:api[_ -]?key|access[_ -]?token|"
     r"secret|password)\b(?:\s*[:=]|\Z)|(?:^|[_ -])(?:token|secret|password)"
@@ -84,7 +99,7 @@ _CREDENTIAL_PATTERN = re.compile(
 _SAFE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/+\-]{0,79}\Z")
 _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.,():/+\-]{0,119}\Z")
 
-_ARABIC_COUNT = r"(?<![\w.])[-+]?\d+(?![\w.])"
+_ARABIC_COUNT = r"(?<![\w.])[-+\u2212]?\d+(?:\.\d+)?(?![\w.])"
 _CHINESE_COUNT = r"[零〇一二两三四五六七八九十百]+"
 _ENGLISH_COUNT = (
     r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
@@ -95,6 +110,7 @@ _COUNT_TOKEN = rf"(?:{_ARABIC_COUNT}|{_CHINESE_COUNT}|{_ENGLISH_COUNT})"
 _ENGLISH_NOUN = r"(?:candidates?|molecules?|compounds?|structures?)"
 _GENERATION_VERB = r"(?:generate|design|create|produce|make|build)"
 _ENGLISH_COUNT_MODIFIER = r"(?:new|novel|candidate|drug-like)"
+_CHINESE_COUNT_MODIFIER = r"(?:新(?:的)?|全新(?:的)?|新颖(?:的)?)"
 _COUNT_PATTERNS = (
     re.compile(
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?P<count>{_COUNT_TOKEN})"
@@ -104,6 +120,7 @@ _COUNT_PATTERNS = (
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
         rf"(?P<count>{_COUNT_TOKEN})\s*(?:个|种|份)?\s*"
+        rf"(?:{_CHINESE_COUNT_MODIFIER}\s*){{0,2}}"
         rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
     ),
 )
@@ -168,6 +185,7 @@ def validate_generation_count(value: Any, *, field: str = "requested_count") -> 
 
 
 def parse_generation_count(query: str, *, default: int = DEFAULT_GENERATION_COUNT) -> int:
+    query = unicodedata.normalize("NFKC", str(query))
     for pattern in _COUNT_PATTERNS:
         match = pattern.search(query)
         if not match:
@@ -187,9 +205,12 @@ def parse_generation_count(query: str, *, default: int = DEFAULT_GENERATION_COUN
 
 
 def _parse_count_token(token: str) -> int | None:
-    normalized = token.strip().lower()
+    normalized = unicodedata.normalize("NFKC", token).strip().lower()
+    normalized = normalized.replace("\u2212", "-")
     if re.fullmatch(r"[-+]?\d+", normalized):
         return int(normalized)
+    if re.fullmatch(r"[-+]?\d+\.\d+", normalized):
+        raise GenerationRequestError("generation count must be an integer")
     english = {
         "zero": 0,
         "one": 1,
@@ -274,6 +295,73 @@ def sanitize_target_evidence(
     return sanitized[:max_records]
 
 
+class _ImmutableQuality(dict[str, Any]):
+    def _readonly(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("target quality envelope is immutable")
+
+    __setitem__ = _readonly
+    __delitem__ = _readonly
+    clear = _readonly
+    pop = _readonly
+    popitem = _readonly
+    setdefault = _readonly
+    update = _readonly
+    __ior__ = _readonly
+
+    def __deepcopy__(self, _memo: dict[int, Any]) -> "_ImmutableQuality":
+        return self
+
+
+def build_generation_request(
+    query: str,
+    requested_count: Any = _COUNT_UNSET,
+    *,
+    outputs: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    count = validate_generation_count(
+        parse_generation_count(query)
+        if requested_count is _COUNT_UNSET
+        else requested_count
+    )
+    target_outputs = (
+        {"target": deepcopy(outputs["target"])}
+        if isinstance(outputs, Mapping) and "target" in outputs
+        else {}
+    )
+    return {
+        "query": str(query),
+        "metadata": {"requested_count": count},
+        "outputs": target_outputs,
+    }
+
+
+def preserve_target_quality(value: Any, quality: Any) -> Any:
+    if not isinstance(quality, Mapping):
+        return value
+    trust = {
+        normalized_key: _freeze_quality_value(item)
+        for key, item in quality.items()
+        if (normalized_key := str(key).strip().lower())
+        in _TRUST_QUALITY_FIELDS
+    }
+    if not trust:
+        return value
+    return {
+        "data": deepcopy(value),
+        "quality": _ImmutableQuality(trust),
+    }
+
+
+def _freeze_quality_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return _ImmutableQuality(
+            {str(key): _freeze_quality_value(item) for key, item in value.items()}
+        )
+    if _is_sequence(value):
+        return tuple(_freeze_quality_value(item) for item in value)
+    return deepcopy(value)
+
+
 def serialize_target_evidence(value: Any) -> str | None:
     sanitized = sanitize_target_evidence(value)
     if not sanitized:
@@ -304,7 +392,11 @@ def _sanitize_target_record(
 ) -> dict[str, Any]:
     record: dict[str, Any] = {}
     for field in _TARGET_TEXT_FIELDS:
-        safe = _safe_text(value.get(field), allow_spaces=field == "target_name")
+        safe = _safe_text(
+            value.get(field),
+            field=field,
+            allow_spaces=field == "target_name",
+        )
         if safe is not None:
             record[field] = safe
     for field in ("has_experimental_structure", "has_alphafold_structure"):
@@ -391,22 +483,57 @@ def _sanitize_text_fields(
     spaced_fields = spaced_fields or set()
     record: dict[str, Any] = {}
     for field in fields:
-        safe = _safe_text(value.get(field), allow_spaces=field in spaced_fields)
+        safe = _safe_text(
+            value.get(field),
+            field=field,
+            allow_spaces=field in spaced_fields,
+        )
         if safe is not None:
             record[field] = safe
     return record
 
 
-def _safe_text(value: Any, *, allow_spaces: bool = False) -> str | None:
+def _safe_text(
+    value: Any,
+    *,
+    field: str,
+    allow_spaces: bool = False,
+) -> str | None:
     if not isinstance(value, str):
         return None
     normalized = value.strip()
     if normalized.lower() in _PLACEHOLDERS:
         return None
-    if _CREDENTIAL_PATTERN.search(normalized) or _INSTRUCTION_PATTERN.search(normalized):
+    if (
+        looks_like_credential(normalized)
+        or _CREDENTIAL_PATTERN.search(normalized)
+        or _contains_instruction_text(normalized)
+    ):
         raise TargetEvidenceError("target evidence contains unsafe text")
+    if field in {"source", "database"} and (
+        normalized.casefold() not in _TRUSTED_EVIDENCE_SOURCES
+    ):
+        return None
     pattern = _SAFE_NAME if allow_spaces else _SAFE_TOKEN
     return normalized if pattern.fullmatch(normalized) else None
+
+
+def _contains_instruction_text(value: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    compact = re.sub(r"[^a-z0-9]+", "", normalized)
+    return any(
+        marker in compact
+        for marker in (
+            "ignoreallpreviousinstructions",
+            "ignorepreviousinstructions",
+            "disregardallpreviousinstructions",
+            "disregardpreviousinstructions",
+            "followtheseinstructions",
+            "followthefollowinginstructions",
+            "systemprompt",
+            "donotfollow",
+        )
+    )
 
 
 def _contains_untrusted_mode(value: Any) -> bool:
@@ -462,8 +589,10 @@ __all__ = [
     "MAX_GENERATION_COUNT",
     "MIN_GENERATION_COUNT",
     "TargetEvidenceError",
+    "build_generation_request",
     "parse_chinese_integer",
     "parse_generation_count",
+    "preserve_target_quality",
     "sanitize_target_evidence",
     "serialize_target_evidence",
     "validate_generation_count",

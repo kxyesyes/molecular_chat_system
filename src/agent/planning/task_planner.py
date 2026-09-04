@@ -10,6 +10,7 @@ from src.agent.contracts.generation_request import (
     GenerationRequestError,
     MAX_GENERATION_COUNT,
     MIN_GENERATION_COUNT,
+    build_generation_request,
     parse_generation_count,
     validate_generation_count,
 )
@@ -47,6 +48,9 @@ class TaskPlanner:
 
         if skill == "hit_to_lead_optimization":
             return self._lead_optimization_plan(query)
+
+        if skill == "molecular_design":
+            return self._molecular_design_plan(query, context.metadata)
 
         if skill == "target_database_search":
             return WorkflowPlan(
@@ -89,7 +93,6 @@ class TaskPlanner:
             )
 
         atomic_tools = {
-            "molecular_design": "llm_molecular_generator",
             "activity_prediction": "activity_predictor",
             "reverse_target_prediction": "reverse_target_predictor",
             "docking_simulation": "molecular_docking",
@@ -208,20 +211,21 @@ class TaskPlanner:
     ) -> WorkflowPlan:
         target_hint = self._extract_target_hint(query)
         request_metadata = request_metadata or {}
-        requested_count = (
-            request_metadata["requested_count"]
-            if "requested_count" in request_metadata
-            else self._extract_requested_count(
-                query,
-                default=self.DEFAULT_GENERATION_COUNT,
-            )
-        )
+        requested_count: Any = None
         try:
+            requested_count = (
+                request_metadata["requested_count"]
+                if "requested_count" in request_metadata
+                else self._extract_requested_count(
+                    query,
+                    default=self.DEFAULT_GENERATION_COUNT,
+                )
+            )
             requested_count = validate_generation_count(requested_count)
         except GenerationRequestError:
-            invalid_type = isinstance(requested_count, bool) or not isinstance(
-                requested_count, int
-            )
+            invalid_type = requested_count is None or isinstance(
+                requested_count, bool
+            ) or not isinstance(requested_count, int)
             return self._rejected_target_count_plan(
                 target_hint,
                 requested_count,
@@ -288,6 +292,65 @@ class TaskPlanner:
                 "target_hint": target_hint,
                 "requested_count": requested_count,
                 "docking_top_n": docking_top_n,
+            },
+        )
+
+    def _molecular_design_plan(
+        self,
+        query: str,
+        request_metadata: dict[str, Any] | None = None,
+    ) -> WorkflowPlan:
+        request_metadata = request_metadata or {}
+        requested_count: Any = None
+        try:
+            requested_count = (
+                request_metadata["requested_count"]
+                if "requested_count" in request_metadata
+                else self._extract_requested_count(
+                    query,
+                    default=self.DEFAULT_GENERATION_COUNT,
+                )
+            )
+            requested_count = validate_generation_count(requested_count)
+        except GenerationRequestError:
+            invalid_type = requested_count is None or isinstance(
+                requested_count, bool
+            ) or not isinstance(requested_count, int)
+            return WorkflowPlan(
+                workflow_name="molecular_design",
+                steps=[],
+                metadata={
+                    "input_type": "rejected_generation_request",
+                    "atomic": True,
+                    "requested_count": requested_count,
+                    "reason": (
+                        "invalid_requested_count"
+                        if invalid_type
+                        else "requested_count_out_of_range"
+                    ),
+                    "supported_requested_count": {
+                        "min": self.MIN_GENERATION_COUNT,
+                        "max": self.MAX_GENERATION_COUNT,
+                    },
+                },
+            )
+        return WorkflowPlan(
+            workflow_name="molecular_design",
+            steps=[
+                WorkflowStep(
+                    name="molecular_design",
+                    tool_name="llm_molecular_generator",
+                    input_data=build_generation_request(
+                        query,
+                        requested_count,
+                    ),
+                    output_key="result",
+                )
+            ],
+            metadata={
+                "input_type": "structured_generation_request",
+                "atomic": True,
+                "requested_count": requested_count,
             },
         )
 

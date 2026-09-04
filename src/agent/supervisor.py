@@ -11,6 +11,11 @@ from src.agent.contracts import (
     AgentResult,
     ToolResult,
 )
+from src.agent.contracts.generation_request import (
+    GenerationRequestError,
+    build_generation_request,
+    preserve_target_quality,
+)
 from src.agent.harness import HarnessFactory
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.planning import PlanCompiler, WorkflowPlan
@@ -155,6 +160,70 @@ class SupervisorAgent:
         capabilities: Mapping[str, bool] | None = None,
     ) -> dict[str, Any]:
         """Chat-compatible entry point backed by the workflow runtime."""
+        raw_requested_count: Any = None
+        try:
+            raw_requested_count = (
+                mol_count
+                if mol_count is not _MOL_COUNT_UNSET
+                else None
+            )
+            generation_request = (
+                build_generation_request(query, mol_count)
+                if mol_count is not _MOL_COUNT_UNSET
+                else build_generation_request(query)
+            )
+            requested_count = generation_request["metadata"]["requested_count"]
+            if mol_count is _MOL_COUNT_UNSET:
+                raw_requested_count = requested_count
+        except GenerationRequestError as exc:
+            active_name = getattr(active_skill, "name", active_skill)
+            error = AgentExecutionError(
+                code=AgentErrorCode.INVALID_INPUT,
+                message="Invalid molecular generation request",
+                details={"reason": str(exc)},
+            )
+            trace_id = f"agent-{uuid4().hex[:12]}"
+            agent_result = AgentResult(
+                trace_id=trace_id,
+                success=False,
+                message=error.message,
+                skill_name=active_name if isinstance(active_name, str) else None,
+                error=error,
+            )
+            legacy = agent_result.to_legacy_dict()
+            return {
+                "success": False,
+                "final_answer": error.message,
+                "tools_used": [],
+                "active_skill": agent_result.skill_name,
+                "tool_results": legacy["tool_results"],
+                "tool_result_sequence": legacy["tool_result_sequence"],
+                "tool_results_by_step": legacy["tool_results_by_step"],
+                "partial": False,
+                "trace_id": trace_id,
+                "agent_result": agent_result,
+                "agent_events": [],
+                "error": legacy["error"],
+                "workflow_plan": {
+                    "workflow_name": agent_result.skill_name
+                    or "molecular_design",
+                    "steps": [],
+                    "metadata": {
+                        "requested_count": (
+                            raw_requested_count
+                            if isinstance(raw_requested_count, int)
+                            and not isinstance(raw_requested_count, bool)
+                            else None
+                        ),
+                        "reason": (
+                            "requested_count_out_of_range"
+                            if isinstance(raw_requested_count, int)
+                            and not isinstance(raw_requested_count, bool)
+                            else "invalid_requested_count"
+                        ),
+                    },
+                },
+            }
         policy = self._resolve_policy(query, active_skill)
         if policy is None:
             return {
@@ -175,12 +244,14 @@ class SupervisorAgent:
         )
         if mol_count is not _MOL_COUNT_UNSET:
             request_metadata["requested_count"] = mol_count
+        elif "llm_molecular_generator" in policy.allowed_tools:
+            request_metadata["requested_count"] = requested_count
         context = AgentContext(
             query=query,
             trace_id=f"agent-{uuid4().hex[:12]}",
             active_skill=policy.name,
             temperature=temperature,
-            mol_count=5 if mol_count is _MOL_COUNT_UNSET else mol_count,
+            mol_count=requested_count,
             metadata=request_metadata,
         )
         request_tools = self._request_tools(context)
@@ -325,6 +396,30 @@ class SupervisorAgent:
             )
 
         if not steps:
+            if policy is not None and workflow_plan.metadata.get("reason") in {
+                "invalid_requested_count",
+                "requested_count_out_of_range",
+            }:
+                execution = WorkflowExecutor(
+                    planner=self.planner,
+                    orchestrator=self.orchestrator,
+                ).execute(
+                    context=context,
+                    policy=policy,
+                    all_tools=(
+                        self.tool_registry.as_mapping()
+                        if self.tool_registry is not None
+                        else request_tools
+                    ),
+                    idempotency_key=idempotency_key,
+                    plan=workflow_plan,
+                )
+                return self._format_run_result(
+                    workflow_plan.workflow_name,
+                    workflow_plan.metadata,
+                    steps,
+                    execution.result,
+                )
             return {
                 "trace_id": context.trace_id,
                 "status": "failed",
@@ -613,7 +708,22 @@ class SupervisorAgent:
                         adapter_version=adapter.adapter_version,
                     )
             if task_result.status == "succeeded" and step.output_key:
-                outputs[step.output_key] = task_result.outputs.get(step.tool_name)
+                output = task_result.outputs.get(step.tool_name)
+                if step.output_key == "target":
+                    source_result = next(
+                        (
+                            item
+                            for item in task_result.tool_results
+                            if item.tool_name == step.tool_name
+                        ),
+                        None,
+                    )
+                    if source_result is not None:
+                        output = preserve_target_quality(
+                            output,
+                            source_result.quality,
+                        )
+                outputs[step.output_key] = output
             delegations.append(
                 {
                     "task_id": task.task_id,

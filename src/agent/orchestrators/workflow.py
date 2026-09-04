@@ -343,14 +343,18 @@ class WorkflowOrchestrator:
         step: WorkflowStep,
         outputs: Mapping[str, Any],
     ) -> Any:
+        selector = BindingResolver.derive_selector(
+            step.input_binding,
+            step.input_from,
+        )
         if step.input_binding:
             input_data = BindingResolver().resolve(
-                step.input_binding,
+                selector,
                 step.input_transform,
                 request={"query": context.query, "metadata": context.metadata},
                 outputs=outputs,
             )
-        elif step.input_from:
+        elif selector is not None:
             raw_input = outputs.get(step.input_from)
             input_data = (
                 raw_input

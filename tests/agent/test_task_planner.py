@@ -1,6 +1,7 @@
 import pytest
 
 from src.agent.contracts import AgentContext
+from src.agent.contracts.generation_request import GenerationRequestError
 from src.agent.planning.task_planner import TaskPlanner
 from src.agent.tooling import build_tool_registry
 from src.agent.tools.rag_search_tool import RAGSearchTool
@@ -146,6 +147,63 @@ def test_requested_count_parser_supports_shared_multilingual_grammar():
     assert parser("生成十一个候选结构", default=1) == 11
     assert parser("Generate 5 new molecules", default=1) == 5
     assert parser("Design 7 novel candidate compounds", default=1) == 7
+    assert parser("生成五个新的候选分子", default=1) == 5
+    assert parser("Generate +7 molecules", default=1) == 7
+    assert parser("Generate ７ molecules", default=1) == 7
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Generate 7.5 molecules",
+        "Generate ７．５ molecules",
+    ],
+)
+def test_requested_count_parser_rejects_clause_local_malformed_numbers(query):
+    with pytest.raises(GenerationRequestError, match="integer"):
+        TaskPlanner._extract_requested_count(query, default=1)
+
+
+def test_target_planner_rejects_malformed_decimal_count_without_raising():
+    plan = TaskPlanner().plan(
+        AgentContext(
+            query="Generate 7.5 molecules for PDE5A",
+            trace_id="malformed-decimal",
+            active_skill="target_driven_design",
+        )
+    )
+
+    assert plan.steps == []
+    assert plan.metadata["requested_count"] is None
+    assert plan.metadata["reason"] == "invalid_requested_count"
+
+
+def test_atomic_molecular_design_uses_canonical_count_request_or_rejects():
+    valid = TaskPlanner().plan(
+        AgentContext(
+            query="Generate candidates",
+            trace_id="atomic-valid",
+            active_skill="molecular_design",
+            metadata={"requested_count": 7},
+        )
+    )
+    invalid = TaskPlanner().plan(
+        AgentContext(
+            query="Generate candidates",
+            trace_id="atomic-invalid",
+            active_skill="molecular_design",
+            metadata={"requested_count": 11},
+        )
+    )
+
+    assert valid.steps[0].input_data == {
+        "query": "Generate candidates",
+        "metadata": {"requested_count": 7},
+        "outputs": {},
+    }
+    assert valid.metadata["requested_count"] == 7
+    assert invalid.steps == []
+    assert invalid.metadata["reason"] == "requested_count_out_of_range"
 
 
 @pytest.mark.parametrize(

@@ -24,17 +24,21 @@ class QueryInput(BaseModel):
 
 
 class FakeTool:
-    def __init__(self, name, output=None):
+    def __init__(self, name, output=None, quality=None):
         self.name = name
         self.calls = []
         self.output = output
+        self.quality = quality
 
     def execute(self, query):
         self.calls.append(query)
         data = self.output
         if data is None:
             data = {"query": query, "tool": self.name}
-        return {"success": True, "message": "ok", "data": data}
+        result = {"success": True, "message": "ok", "data": data}
+        if self.quality is not None:
+            result["quality"] = self.quality
+        return result
 
 
 class RecordingPropertySpecialist(SpecialistAgent):
@@ -65,7 +69,7 @@ OWNERS = {
 }
 
 
-def build_registry(excluded=(), target_output=None):
+def build_registry(excluded=(), target_output=None, target_quality=None):
     registry = ToolRegistry()
     tools = {}
     for name, owner in OWNERS.items():
@@ -83,7 +87,11 @@ def build_registry(excluded=(), target_output=None):
             output = [{"gene_symbol": "EGFR", "final_similarity": 0.91}]
         else:
             output = None
-        tool = FakeTool(name, output=output)
+        tool = FakeTool(
+            name,
+            output=output,
+            quality=target_quality if name == "target_database_search" else None,
+        )
         tools[name] = tool
         registry.register(
             LegacyPythonToolAdapter(
@@ -125,6 +133,61 @@ def test_delegated_supervisor_does_not_bypass_target_evidence_gate():
     assert result["result"]["metadata"]["skipped_steps"][0]["step_id"] == (
         "molecule_generation"
     )
+
+
+def test_delegated_successful_fallback_target_quality_blocks_generation():
+    registry, tools = build_registry(target_quality={"fallback_used": True})
+    supervisor = SupervisorAgent(
+        tool_registry=registry,
+        specialists=build_default_specialists(),
+    )
+
+    result = supervisor.run(
+        "Design PDE5A candidates",
+        skill_name="target_driven_design",
+    )
+
+    assert result["status"] == "partial"
+    assert tools["target_database_search"].calls == ["PDE5A"]
+    assert tools["llm_molecular_generator"].calls == []
+
+
+def test_delegated_atomic_generation_receives_canonical_count_and_rejects_invalid():
+    registry, tools = build_registry()
+    supervisor = SupervisorAgent(
+        tool_registry=registry,
+        specialists=build_default_specialists(),
+    )
+
+    valid = supervisor.run(
+        "Generate candidates",
+        skill_name="molecular_design",
+        mol_count=7,
+    )
+
+    assert valid["status"] == "succeeded"
+    assert tools["llm_molecular_generator"].calls == [
+        {
+            "query": "Generate candidates",
+            "metadata": {"requested_count": 7},
+            "outputs": {},
+        }
+    ]
+
+    registry, tools = build_registry()
+    invalid_supervisor = SupervisorAgent(
+        tool_registry=registry,
+        specialists=build_default_specialists(),
+    )
+    invalid = invalid_supervisor.run(
+        "Generate candidates",
+        skill_name="molecular_design",
+        mol_count=11,
+    )
+
+    assert invalid["status"] == "failed"
+    assert invalid["result"]["error"]["code"] == "invalid_input"
+    assert tools["llm_molecular_generator"].calls == []
 
 
 def test_supervisor_delegates_each_step_to_declared_specialist():
