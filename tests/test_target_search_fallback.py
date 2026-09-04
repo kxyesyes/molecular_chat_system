@@ -5018,6 +5018,36 @@ def test_remote_resolution_caches_target_and_structures_with_separate_ttls(
     }
 
 
+def test_multiple_structures_normalize_idempotently_and_reuse_fresh_cache(
+    project_root, clock
+):
+    lower_ranked = {
+        **_experimental_structure("1LOW"),
+        "resolution": 3.4,
+        "ligand_evidence": [],
+    }
+    higher_ranked = _experimental_structure("2HIH")
+    resolver = _QueueResolver(
+        _resolution(structures=[lower_ranked, higher_ranked])
+    )
+    service = _remote_service(project_root, clock, resolver)
+
+    first = service.search_targets("EGFR")
+    second = service.search_targets("EGFR")
+
+    assert resolver.calls == [("EGFR", "Homo sapiens")]
+    assert first["cache"] == {"target": "refreshed", "structures": "refreshed"}
+    assert second["cache"] == {"target": "fresh", "structures": "fresh"}
+    for payload in (first, second):
+        structures = payload["results"][0]["recommended_structures"]
+        assert [item["structure_id"] for item in structures] == ["2HIH", "1LOW"]
+        assert [item["is_preferred"] for item in structures] == [True, False]
+    assert (
+        first["results"][0]["recommended_structures"]
+        == second["results"][0]["recommended_structures"]
+    )
+
+
 @pytest.mark.parametrize(
     ("target_changes", "structures"),
     [
@@ -5214,6 +5244,86 @@ def test_invalid_cached_structures_are_removed_before_authoritative_fallback(
     assert payload["status"] == "resolved"
     assert payload["results"][0]["recommended_structures"][0]["structure_id"] == "2DEF"
     assert payload["cache"] == {"target": "fresh", "structures": "refreshed"}
+
+
+def test_cache_miss_cleanup_does_not_delete_generation_published_after_read(
+    project_root, clock, monkeypatch
+):
+    from src.target_search.cache import TargetCacheRepository
+
+    cache = TargetCacheRepository(project_root=project_root, clock=clock)
+    service = _remote_service(project_root, clock, _QueueResolver(_resolution()))
+    service.cache = cache
+    target_key = service._target_cache_key("EGFR")
+    real_get = cache.get
+    published = {}
+
+    def get_then_publish(cache_key, allow_stale=False):
+        evidence = real_get(cache_key, allow_stale=allow_stale)
+        if cache_key == target_key and "evidence" not in published:
+            assert evidence is None
+            published["evidence"] = cache.upsert(
+                target_key,
+                "target",
+                "UniProt",
+                "P00533",
+                _authoritative_target(),
+            )
+        return evidence
+
+    monkeypatch.setattr(cache, "get", get_then_publish)
+
+    assert service._read_target_cache(target_key) is None
+    surviving = real_get(target_key, allow_stale=True)
+
+    assert surviving is not None
+    assert surviving.generation_id == published["evidence"].generation_id
+
+
+def test_invalid_target_companion_cleanup_preserves_new_structure_generation(
+    project_root, clock, monkeypatch
+):
+    from src.target_search.cache import TargetCacheRepository
+
+    cache = TargetCacheRepository(project_root=project_root, clock=clock)
+    service = _remote_service(project_root, clock, _QueueResolver(_resolution()))
+    service.cache = cache
+    service.search_targets("EGFR")
+    target_key = service._target_cache_key("EGFR")
+    structures_key = service._structures_cache_key("P00533")
+    _tamper_cache_row(
+        project_root,
+        target_key,
+        payload_changes=lambda payload: payload.update(
+            source_url="https://evil.example/uniprot/P00533"
+        ),
+    )
+    original_structures = cache.get(structures_key, allow_stale=True)
+    assert original_structures is not None
+    real_discard = cache.discard
+    published = {}
+
+    def publish_before_discard(cache_key, *, expected_generation_id):
+        if cache_key == structures_key and "evidence" not in published:
+            published["evidence"] = cache.upsert(
+                structures_key,
+                "structures",
+                original_structures.source,
+                original_structures.source_record_id,
+                original_structures.to_dict()["payload"],
+            )
+        return real_discard(
+            cache_key,
+            expected_generation_id=expected_generation_id,
+        )
+
+    monkeypatch.setattr(cache, "discard", publish_before_discard)
+
+    assert service._read_target_cache(target_key) is None
+    surviving = cache.get(structures_key, allow_stale=True)
+
+    assert surviving is not None
+    assert surviving.generation_id == published["evidence"].generation_id
 
 
 def test_target_cache_identity_includes_default_organism(project_root, clock):

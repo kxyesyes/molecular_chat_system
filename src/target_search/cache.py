@@ -1102,25 +1102,18 @@ class TargetCacheRepository:
         self,
         cache_key: str,
         *,
-        expected_generation_id: Optional[str] = None,
+        expected_generation_id: str,
     ) -> bool:
         cache_key = _validate_identifier("cache_key", cache_key)
-        if expected_generation_id is not None:
-            expected_generation_id = _validate_generation_id(expected_generation_id)
+        expected_generation_id = _validate_generation_id(expected_generation_id)
         conn = get_connection(self.project_root)
         try:
             with conn:
-                if expected_generation_id is None:
-                    cursor = conn.execute(
-                        "DELETE FROM target_remote_cache WHERE cache_key = ?",
-                        (cache_key,),
-                    )
-                else:
-                    cursor = conn.execute(
-                        "DELETE FROM target_remote_cache "
-                        "WHERE cache_key = ? AND generation_id = ?",
-                        (cache_key, expected_generation_id),
-                    )
+                cursor = conn.execute(
+                    "DELETE FROM target_remote_cache "
+                    "WHERE cache_key = ? AND generation_id = ?",
+                    (cache_key, expected_generation_id),
+                )
                 return cursor.rowcount == 1
         finally:
             conn.close()

@@ -524,7 +524,6 @@ class TargetSearchService:
     def _read_target_cache(self, cache_key: str) -> Optional[CachedEvidence]:
         evidence = self.cache.get(cache_key, allow_stale=True)
         if evidence is None:
-            self.cache.discard(cache_key)
             return None
         try:
             normalized = self._normalize_target_evidence(evidence.payload)
@@ -548,7 +547,13 @@ class TargetSearchService:
             )
             for accession in accessions:
                 if _UNIPROT_ACCESSION_RE.fullmatch(accession):
-                    self.cache.discard(self._structures_cache_key(accession))
+                    structures_key = self._structures_cache_key(accession)
+                    structures = self.cache.get(structures_key, allow_stale=True)
+                    if structures is not None:
+                        self.cache.discard(
+                            structures_key,
+                            expected_generation_id=structures.generation_id,
+                        )
             return None
         return evidence
 
@@ -561,7 +566,6 @@ class TargetSearchService:
         cache_key = self._structures_cache_key(accession)
         evidence = self.cache.get(cache_key, allow_stale=True)
         if evidence is None:
-            self.cache.discard(cache_key)
             return None
         try:
             payload = _json_copy(evidence.payload)
@@ -645,7 +649,7 @@ class TargetSearchService:
         organism: Optional[str],
     ) -> list[dict[str, Any]]:
         normalized = []
-        for index, structure in enumerate(structures):
+        for structure in structures:
             structure_id = structure.get("structure_id")
             source = structure.get("source")
             structure_type = structure.get("structure_type")
@@ -723,9 +727,16 @@ class TargetSearchService:
                 "source_url": normalized_source_url,
                 "is_downloaded": False,
                 "docking_recommended": is_experimental,
-                "is_preferred": index == 0,
+                "is_preferred": False,
                 "quality_note": None,
             }
+            payload["score"] = calculate_structure_score(payload)
+            normalized.append(payload)
+        normalized.sort(
+            key=lambda item: (-item["score"], item["source"], item["structure_id"])
+        )
+        for index, payload in enumerate(normalized):
+            payload["is_preferred"] = index == 0
             payload["score"] = calculate_structure_score(payload)
             payload["recommendation_reasons"] = self._structure_recommendation_reasons(payload)
             payload["warnings"] = self._structure_warnings(payload)
@@ -734,11 +745,7 @@ class TargetSearchService:
             payload["docking_grade_label"] = self._docking_grade_label(
                 payload["docking_grade"]
             )
-            normalized.append(payload)
-        return sorted(
-            normalized,
-            key=lambda item: (-item["score"], item["source"], item["structure_id"]),
-        )
+        return normalized
 
     @staticmethod
     def _optional_text(value: Any) -> Optional[str]:
