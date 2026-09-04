@@ -172,6 +172,8 @@ def test_requested_count_parser_supports_shared_multilingual_grammar():
         "Generate 1e1 molecules",
         "Generate −１e１ molecules",
         "Generate 1,000 molecules",
+        "Generate 1 1 molecules",
+        "Generate 1\u202f000 molecules",
         "Generate 1/2 molecules",
         "Generate 7..5 molecules",
         "Generate 1e molecules",
@@ -181,6 +183,7 @@ def test_requested_count_parser_supports_shared_multilingual_grammar():
         "Generate ７．５．２ molecules",
         "Generate five.5 molecules",
         "Generate two-point-five molecules",
+        "Generate two point-five molecules",
         "Generate five point five molecules",
         "Generate two point five molecules",
         "Generate five point 5 molecules",
@@ -269,6 +272,24 @@ def test_masked_non_actionable_count_defaults_without_rejecting(query):
 )
 def test_count_parser_masks_only_the_negated_generation_occurrence(query):
     assert parse_generation_count(query) == 3
+
+
+def test_affirmative_generation_before_later_negation_keeps_its_count():
+    assert parse_generation_count(
+        "Generate 3 molecules and do not generate 11 molecules"
+    ) == 3
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "I do not want you to generate 3 molecules",
+        "Do not ever generate 3 molecules",
+        "不要为 PDE5A 生成三个分子",
+    ],
+)
+def test_bounded_intervening_negation_remains_non_actionable(query):
+    assert parse_generation_count(query) == 1
 
 
 def test_year_in_count_position_is_explicit_and_rejected_by_planner():

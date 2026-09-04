@@ -195,7 +195,13 @@ _COUNT_SLOT_PATTERNS = (
 _MALFORMED_WORD_COUNT_PATTERNS = (
     re.compile(
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*{_ENGLISH_DECIMAL_PART}"
-        rf"[ \t]+point[ \t]+{_ENGLISH_DECIMAL_PART}"
+        rf"(?:[ \t]+|-)point(?:[ \t]+|-){_ENGLISH_DECIMAL_PART}"
+        rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
+        rf"(?=[ \t]+(?:{_ENGLISH_NOUN}\b|for\b)|[ \t]*$)"
+    ),
+    re.compile(
+        rf"(?i)\b{_GENERATION_VERB}\b[ \t]*{_ENGLISH_DECIMAL_PART}"
+        rf"[ \t]+{_ENGLISH_DECIMAL_PART}"
         rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
         rf"(?=[ \t]+(?:{_ENGLISH_NOUN}\b|for\b)|[ \t]*$)"
     ),
@@ -373,7 +379,7 @@ def _split_generation_clauses(value: str) -> list[str]:
         separated.append(character)
 
     return re.split(
-        r"(?i)\n+|\b(?:but|instead)\b|(?:但是|而是|但|只)",
+        r"(?i)\n+|\b(?:but|instead|and)\b|(?:但是|而是|但|只)",
         "".join(separated),
     )
 
@@ -389,7 +395,9 @@ def _is_non_actionable_generation_clause(clause: str) -> bool:
     )
     english_suffix = r"(?:as\s+an?\s+example|for\s+example)"
     if re.search(
-        rf"(?i)\b{english_negation}\b[ \t]{{0,12}}\b{_GENERATION_VERB}\b",
+        rf"(?i)\b{english_negation}\b"
+        rf"(?:[ \t]+[A-Za-z0-9][A-Za-z0-9'’_-]*){{0,5}}"
+        rf"[ \t]+\b{_GENERATION_VERB}\b",
         clause,
     ):
         return True
@@ -404,9 +412,13 @@ def _is_non_actionable_generation_clause(clause: str) -> bool:
     ):
         return True
     chinese_verb = r"(?:生成|创建|设计|制作|构建|合成|给我|提供)"
+    chinese_target_scope = (
+        rf"(?:(?:为|针对|给)\s*{_CHINESE_REFERENCE}\s*)"
+    )
     if re.search(
         rf"(?:请勿|勿|不要|无需|不需要|禁止|别|不可|不能|不"
-        rf")\s*(?:再|要)?\s*{chinese_verb}",
+        rf")\s*(?:(?:再|要)\s*|{chinese_target_scope}){{0,2}}"
+        rf"{chinese_verb}",
         clause,
     ):
         return True

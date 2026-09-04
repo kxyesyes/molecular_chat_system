@@ -15,6 +15,7 @@ from src.agent.contracts import (
     AgentResult,
 )
 from src.agent.contracts.generation_request import (
+    DEFAULT_GENERATION_COUNT,
     GenerationRequestError,
     parse_generation_count,
     validate_generation_count,
@@ -249,11 +250,15 @@ class WorkflowExecutor:
             plan = self.planner.plan(context_snapshot)
         plan_snapshot = _copy_boundary(plan, "plan")
         effective_plan = _copy_boundary(plan_snapshot, "effective plan")
-        has_generation_step = any(
-            step.tool_name == "llm_molecular_generator"
-            or step.capability == "molecule.generate"
+        generation_steps = [
+            step
             for step in effective_plan.steps
-        )
+            if (
+                step.tool_name == "llm_molecular_generator"
+                or step.capability == "molecule.generate"
+            )
+        ]
+        has_generation_step = bool(generation_steps)
         if has_generation_step and "requested_count" not in effective_plan.metadata:
             if "requested_count" in context_snapshot.metadata:
                 effective_plan.metadata["requested_count"] = deepcopy(
@@ -276,14 +281,50 @@ class WorkflowExecutor:
                         step_counts[0]
                     )
                 else:
-                    try:
-                        effective_plan.metadata["requested_count"] = (
-                            parse_generation_count(context_snapshot.query)
+                    step_query_counts: list[int] = []
+                    invalid_step_count = False
+                    for step in generation_steps:
+                        step_query = (
+                            step.input_data
+                            if isinstance(step.input_data, str)
+                            else (
+                                step.input_data.get("query")
+                                if isinstance(step.input_data, Mapping)
+                                else None
+                            )
                         )
-                    except GenerationRequestError:
+                        if not isinstance(step_query, str):
+                            continue
+                        try:
+                            parsed = parse_generation_count(
+                                step_query,
+                                default=None,
+                            )
+                            if parsed is not None:
+                                step_query_counts.append(
+                                    validate_generation_count(parsed)
+                                )
+                        except GenerationRequestError:
+                            invalid_step_count = True
+                    if invalid_step_count:
                         # Materialize an invalid sentinel so the common preflight
                         # validator rejects before any upstream workflow tool runs.
                         effective_plan.metadata["requested_count"] = None
+                    elif step_query_counts:
+                        effective_plan.metadata["requested_count"] = (
+                            step_query_counts[0]
+                        )
+                    else:
+                        try:
+                            context_count = parse_generation_count(
+                                context_snapshot.query,
+                                default=DEFAULT_GENERATION_COUNT,
+                            )
+                            effective_plan.metadata["requested_count"] = (
+                                validate_generation_count(context_count)
+                            )
+                        except GenerationRequestError:
+                            effective_plan.metadata["requested_count"] = None
         plan_request_metadata = {
             key: effective_plan.metadata[key]
             for key in ("requested_count",)

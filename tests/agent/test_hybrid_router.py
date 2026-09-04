@@ -150,6 +150,42 @@ def test_pure_negated_generation_does_not_route(query):
     }
 
 
+def test_affirmative_generation_before_later_negation_still_routes():
+    decision = HybridSkillRouter().decide(
+        "Generate 3 molecules and do not generate 11 molecules"
+    )
+    assert decision.selected_skill == "molecular_design"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "I do not want you to generate 3 molecules",
+        "Do not ever generate 3 molecules",
+        "不要为 PDE5A 生成三个分子",
+    ],
+)
+def test_router_rejects_generation_with_bounded_negation_scope(query):
+    decision = HybridSkillRouter().decide(query)
+    assert decision.selected_skill not in {
+        "molecular_design",
+        "target_driven_design",
+    }
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Generate 1 1 molecules",
+        "Generate 1\u202f000 molecules",
+        "Generate two point-five molecules",
+    ],
+)
+def test_router_recognizes_malformed_grouped_generation_count(query):
+    decision = HybridSkillRouter().decide(query)
+    assert decision.selected_skill == "molecular_design"
+
+
 def test_accepted_routing_feedback_adjusts_future_decision(tmp_path):
     store = SQLiteAgentStateStore(tmp_path / "state.sqlite3")
     query = "评估 CCO"

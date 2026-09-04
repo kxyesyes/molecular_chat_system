@@ -258,9 +258,33 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
         llm = CapturingLLM()
         generator = LLMMolecularGenerator(llm_model=llm)
 
-        self.assertFalse(generator.should_use("Don't generate 11 molecules"))
-        self.assertFalse(generator.should_use("请勿生成三个分子"))
+        for query in (
+            "Don't generate 11 molecules",
+            "I do not want you to generate 3 molecules",
+            "Do not ever generate 3 molecules",
+            "请勿生成三个分子",
+            "不要为 PDE5A 生成三个分子",
+        ):
+            with self.subTest(query=query):
+                self.assertFalse(generator.should_use(query))
         self.assertEqual(llm.prompts, [])
+
+    def test_grouped_and_hybrid_counts_reject_without_model_call(self):
+        for query in (
+            "Generate 1 1 molecules",
+            "Generate 1\u202f000 molecules",
+            "Generate two point-five molecules",
+        ):
+            with self.subTest(query=query):
+                llm = CapturingLLM()
+                generator = LLMMolecularGenerator(llm_model=llm)
+                result = generator.execute(
+                    {"query": query, "metadata": {}, "outputs": {}}
+                )
+
+                self.assertFalse(result["success"])
+                self.assertEqual(result["error"]["code"], "invalid_input")
+                self.assertEqual(llm.prompts, [])
 
     def test_invalid_structured_requested_counts_fail_without_calling_model(self):
         invalid_counts = ("10", True, False, None, 0, -1, 11, 1.5)
