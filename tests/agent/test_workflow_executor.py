@@ -523,6 +523,115 @@ def test_invalid_step_query_count_rejects_before_any_tool(input_data):
     assert generator.calls == []
 
 
+@pytest.mark.parametrize(
+    "later_input",
+    [
+        {
+            "query": "Generate candidates",
+            "metadata": {"requested_count": 11},
+            "outputs": {},
+        },
+        "Generate 7.5 molecules",
+        {
+            "query": "Generate 3 molecules and generate 4 molecules",
+            "metadata": {},
+        },
+    ],
+)
+def test_every_generation_step_count_is_preflighted_atomically(later_input):
+    generator = FakeTool("llm_molecular_generator")
+    plan = WorkflowPlan(
+        workflow_name="molecular_design",
+        steps=[
+            WorkflowStep(
+                "generate_valid",
+                "llm_molecular_generator",
+                input_data={
+                    "query": "Generate candidates",
+                    "metadata": {"requested_count": 3},
+                    "outputs": {},
+                },
+                capability="molecule.generate",
+            ),
+            WorkflowStep(
+                "generate_invalid",
+                "llm_molecular_generator",
+                input_data=later_input,
+                capability="molecule.generate",
+            ),
+        ],
+    )
+
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="Design candidates",
+            trace_id="later-step-invalid-count",
+            active_skill="molecular_design",
+        ),
+        policy=WorkflowPolicy(
+            name="molecular_design",
+            description="test",
+            allowed_tools=("llm_molecular_generator",),
+        ),
+        all_tools={generator.name: generator},
+        plan=plan,
+    )
+
+    assert execution.result.success is False
+    assert execution.result.error.code == AgentErrorCode.INVALID_INPUT
+    assert execution.tool_attempt_count == 0
+    assert generator.calls == []
+
+
+def test_valid_multi_step_count_conflict_remains_validation_error():
+    generator = FakeTool("llm_molecular_generator")
+    plan = WorkflowPlan(
+        workflow_name="molecular_design",
+        steps=[
+            WorkflowStep(
+                "generate_three",
+                "llm_molecular_generator",
+                input_data={
+                    "query": "Generate candidates",
+                    "metadata": {"requested_count": 3},
+                    "outputs": {},
+                },
+                capability="molecule.generate",
+            ),
+            WorkflowStep(
+                "generate_four",
+                "llm_molecular_generator",
+                input_data={
+                    "query": "Generate candidates",
+                    "metadata": {"requested_count": 4},
+                    "outputs": {},
+                },
+                capability="molecule.generate",
+            ),
+        ],
+    )
+
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="Design candidates",
+            trace_id="multi-step-count-conflict",
+            active_skill="molecular_design",
+        ),
+        policy=WorkflowPolicy(
+            name="molecular_design",
+            description="test",
+            allowed_tools=("llm_molecular_generator",),
+        ),
+        all_tools={generator.name: generator},
+        plan=plan,
+    )
+
+    assert execution.result.success is False
+    assert execution.result.error.code == AgentErrorCode.VALIDATION_ERROR
+    assert execution.tool_attempt_count == 0
+    assert generator.calls == []
+
+
 class SingleStepPlanner:
     def plan(self, context):
         return WorkflowPlan(

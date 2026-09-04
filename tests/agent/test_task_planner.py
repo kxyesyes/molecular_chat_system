@@ -299,11 +299,66 @@ def test_count_parser_masks_only_the_explained_generation_occurrence(query):
     assert parse_generation_count(query) == 3
 
 
+@pytest.mark.parametrize(
+    "query, message",
+    [
+        ("Generate 3 molecules and generate 11 molecules", "conflicting"),
+        ("Generate 3 molecules and generate 4 molecules", "conflicting"),
+        ("Generate 3 molecules and generate 7.5 molecules", "integer"),
+        ("Generate 3 and generate 11", "conflicting"),
+        ("Generate 3 and generate 4", "conflicting"),
+        ("Generate 3 and generate 7.5", "integer"),
+    ],
+)
+def test_count_parser_validates_every_actionable_generation_occurrence(
+    query, message
+):
+    with pytest.raises(GenerationRequestError, match=message):
+        parse_generation_count(query)
+
+
+def test_count_parser_accepts_repeated_identical_actionable_counts():
+    assert parse_generation_count(
+        "Generate 3 molecules and generate 3 molecules"
+    ) == 3
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Don't generate 11 molecules and then generate 3 molecules",
+        "Generate 3 molecules and as an example generate 11 molecules",
+    ],
+)
+def test_occurrence_scope_does_not_leak_to_adjacent_generation(query):
+    assert has_generation_intent(query) is True
+    assert parse_generation_count(query) == 3
+
+
 def test_pure_generation_explanation_remains_non_actionable():
     query = "Explain how to generate 11 molecules"
 
     assert has_generation_intent(query) is False
     assert parse_generation_count(query) == 1
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Explain this example:\n```\nGenerate 3 molecules",
+        "Explain this example:\n~~~text\nGenerate 11 molecules",
+    ],
+)
+def test_unclosed_fenced_generation_is_masked_to_end(query):
+    assert has_generation_intent(query) is False
+    assert parse_generation_count(query) == 1
+
+
+def test_actionable_generation_before_unclosed_fence_is_retained():
+    query = "Generate 3 molecules\n```\nGenerate 11 molecules"
+
+    assert has_generation_intent(query) is True
+    assert parse_generation_count(query) == 3
 
 
 @pytest.mark.parametrize(

@@ -109,6 +109,8 @@ def test_router_ignores_quoted_generation_examples():
         "For example, analyze CCO and generate 3 molecules",
         "As an example, analyze CCO and generate 3 molecules",
         "Explain how to analyze CCO and generate 3 molecules",
+        "Explain this example:\n```\nGenerate 3 molecules",
+        "Explain this example:\n~~~text\nGenerate 3 molecules",
     ],
 )
 def test_router_masks_code_and_non_actionable_generation_clauses(query):
@@ -125,6 +127,19 @@ def test_router_masks_code_and_non_actionable_generation_clauses(query):
     ],
 )
 def test_router_retains_actionable_generation_beside_explanation(query):
+    decision = HybridSkillRouter().decide(query)
+
+    assert decision.selected_skill == "molecular_design"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Don't generate 11 molecules and then generate 3 molecules",
+        "Generate 3 molecules and as an example generate 11 molecules",
+    ],
+)
+def test_router_uses_independently_scoped_actionable_occurrence(query):
     decision = HybridSkillRouter().decide(query)
 
     assert decision.selected_skill == "molecular_design"

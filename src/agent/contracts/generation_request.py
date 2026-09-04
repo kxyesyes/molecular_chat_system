@@ -102,6 +102,13 @@ _CREDENTIAL_PATTERN = re.compile(
 )
 _SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
 _SAFE_GENE_SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,19}\Z")
+_INSTRUCTION_IDENTIFIER_PREFIXES = frozenset(
+    {
+        ("output", "only"),
+        ("respond", "with"),
+        ("system", "prompt"),
+    }
+)
 _UNIPROT_ACCESSION = re.compile(
     r"(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})\Z",
     re.IGNORECASE,
@@ -137,6 +144,10 @@ _CHINESE_DECIMAL_PART = rf"(?:{_CHINESE_COUNT}|\d+)"
 _COUNT_TOKEN = rf"(?:{_ARABIC_COUNT}|{_CHINESE_COUNT}|{_ENGLISH_COUNT})"
 _ENGLISH_NOUN = r"(?:candidates?|molecules?|compounds?|structures?)"
 _GENERATION_VERB = r"(?:generate|design|create|produce|make|build)"
+_ENGLISH_COUNT_FOLLOW = (
+    rf"(?:{_ENGLISH_NOUN}\b|for\b|"
+    rf"and[ \t]+(?:then[ \t]+)?{_GENERATION_VERB}\b)"
+)
 _ENGLISH_COUNT_MODIFIER = r"(?:new|novel|candidate|drug-like)"
 _CHINESE_COUNT_MODIFIER = r"(?:新(?:的)?|全新(?:的)?|新颖(?:的)?)"
 _CHINESE_REFERENCE = r"[A-Za-z0-9\u3400-\u9fff-]{1,24}"
@@ -164,7 +175,7 @@ _COUNT_PATTERNS = (
     re.compile(
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?P<count>{_COUNT_TOKEN})"
         rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
-        rf"(?=[ \t]+(?:{_ENGLISH_NOUN}\b|for\b)|[ \t]*$)"
+        rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW}|[ \t]*$)"
     ),
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
@@ -183,7 +194,7 @@ _COUNT_SLOT_PATTERNS = (
     re.compile(
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?P<count>[^\s;!?\"']+)"
         rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
-        rf"(?=[ \t]+(?:{_ENGLISH_NOUN}\b|for\b)|[ \t]*$)"
+        rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW}|[ \t]*$)"
     ),
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
@@ -201,7 +212,7 @@ _MALFORMED_GROUPED_COUNT_PATTERNS = (
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*"
         rf"(?P<count>{_GROUPED_ARABIC_COUNT})"
         rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
-        rf"(?=[ \t]+(?:{_ENGLISH_NOUN}\b|for\b)|[ \t]*$)"
+        rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW}|[ \t]*$)"
     ),
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
@@ -234,13 +245,13 @@ _MALFORMED_WORD_COUNT_PATTERNS = (
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*{_ENGLISH_DECIMAL_PART}"
         rf"(?:[ \t]+|-)point(?:[ \t]+|-){_ENGLISH_DECIMAL_PART}"
         rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
-        rf"(?=[ \t]+(?:{_ENGLISH_NOUN}\b|for\b)|[ \t]*$)"
+        rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW}|[ \t]*$)"
     ),
     re.compile(
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*{_ENGLISH_DECIMAL_PART}"
         rf"[ \t]+{_ENGLISH_DECIMAL_PART}"
         rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
-        rf"(?=[ \t]+(?:{_ENGLISH_NOUN}\b|for\b)|[ \t]*$)"
+        rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW}|[ \t]*$)"
     ),
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
@@ -255,7 +266,7 @@ _FUZZY_COUNTS = (
         re.compile(
             rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?:several|some|a[ \t]+few)"
             rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
-            rf"(?=[ \t]+{_ENGLISH_NOUN}\b)"
+            rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW})"
         ),
         3,
     ),
@@ -263,7 +274,7 @@ _FUZZY_COUNTS = (
         re.compile(
             rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?:multiple|many)"
             rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
-            rf"(?=[ \t]+{_ENGLISH_NOUN}\b)"
+            rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW})"
         ),
         5,
     ),
@@ -271,7 +282,7 @@ _FUZZY_COUNTS = (
         re.compile(
             rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?:one|a)"
             rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
-            rf"(?=[ \t]+{_ENGLISH_NOUN}\b)"
+            rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW})"
         ),
         1,
     ),
@@ -322,25 +333,56 @@ def parse_generation_count(query: str, *, default: int = DEFAULT_GENERATION_COUN
         for pattern in _MALFORMED_PREMASK_COUNT_PATTERNS
     ):
         raise GenerationRequestError("generation count must be an integer")
-    if any(pattern.search(query) for pattern in _MALFORMED_WORD_COUNT_PATTERNS):
+    counts: list[int] = []
+    for start, end in _generation_occurrence_spans(query):
+        count = _parse_generation_occurrence_count(query, start, end)
+        if count is not None:
+            counts.append(count)
+    if len(set(counts)) > 1:
+        raise GenerationRequestError("conflicting generation counts")
+    return counts[0] if counts else default
+
+
+def _parse_generation_occurrence_count(
+    query: str,
+    occurrence_start: int,
+    occurrence_end: int,
+) -> int | None:
+    def occurrence_matches(pattern: re.Pattern[str]) -> list[re.Match[str]]:
+        return [
+            match
+            for match in pattern.finditer(query)
+            if (
+                match.start() < occurrence_end
+                and match.end() > occurrence_start
+            )
+        ]
+
+    if any(
+        occurrence_matches(pattern)
+        for pattern in (
+            *_MALFORMED_PREMASK_COUNT_PATTERNS,
+            *_MALFORMED_WORD_COUNT_PATTERNS,
+        )
+    ):
         raise GenerationRequestError("generation count must be an integer")
     for pattern in _COUNT_PATTERNS:
-        match = pattern.search(query)
-        if not match:
+        matches = occurrence_matches(pattern)
+        if not matches:
             continue
-        token = match.group("count")
-        value = _parse_count_token(token)
-        if value is None:
-            continue
-        return value
+        count = _parse_count_token(matches[0].group("count"))
+        if count is not None:
+            return count
     for pattern in _COUNT_SLOT_PATTERNS:
-        match = pattern.search(query)
-        if match and _looks_numeric_like_count_token(match.group("count")):
+        matches = occurrence_matches(pattern)
+        if matches and _looks_numeric_like_count_token(
+            matches[0].group("count")
+        ):
             raise GenerationRequestError("generation count must be an integer")
-    for pattern, value in _FUZZY_COUNTS:
-        if pattern.search(query):
-            return value
-    return default
+    for pattern, count in _FUZZY_COUNTS:
+        if occurrence_matches(pattern):
+            return count
+    return None
 
 
 def has_generation_intent(query: str) -> bool:
@@ -382,7 +424,7 @@ def _strip_generation_literals(query: str) -> str:
     normalized = unicodedata.normalize("NFKC", str(query))
     normalized = re.sub(r"(?i)\be\.g\.", "for example", normalized)
     without_code = re.sub(
-        r"```[\s\S]*?```|~~~[\s\S]*?~~~",
+        r"```[\s\S]*?(?:```|\Z)|~~~[\s\S]*?(?:~~~|\Z)",
         " ",
         normalized,
     )
@@ -475,20 +517,38 @@ def _mask_non_actionable_generation_occurrences(clause: str) -> str:
 
     masked = list(clause)
     previous_end = 0
-    negation_active = False
     for index, (start, end) in enumerate(spans):
         next_start = (
             spans[index + 1][0]
             if index + 1 < len(spans)
             else len(clause)
         )
-        prefix_window = clause[previous_end:end]
-        suffix_window = clause[start:next_start]
-        negation_active = negation_active or _has_generation_negation(
-            prefix_window
+        bridge = clause[previous_end:start]
+        boundaries = (
+            list(
+                re.finditer(
+                    r"(?i)\b(?:and|then)\b|(?:然后|并且|并|再|且)",
+                    bridge,
+                )
+            )
+            if index
+            else []
         )
+        prefix_start = (
+            previous_end + boundaries[-1].end()
+            if boundaries
+            else previous_end
+        )
+        prefix_window = clause[prefix_start:end]
+        suffix_window = clause[start:next_start]
+        suffix_boundary = re.search(
+            r"(?i)\b(?:and|then)\b|(?:然后|并且|并|再|且)",
+            suffix_window,
+        )
+        if suffix_boundary:
+            suffix_window = suffix_window[: suffix_boundary.start()]
         if (
-            negation_active
+            _has_generation_negation(prefix_window)
             or _has_generation_example_prefix(prefix_window)
             or _has_generation_example_suffix(suffix_window)
         ):
@@ -1009,6 +1069,8 @@ def _safe_text(
         or _CREDENTIAL_PATTERN.search(normalized)
     ):
         raise TargetEvidenceError("target evidence contains unsafe text")
+    if _looks_instruction_shaped_identifier(normalized):
+        return None
     if field in {"source", "database"}:
         if normalized.casefold() not in _TRUSTED_EVIDENCE_SOURCES:
             return None
@@ -1021,6 +1083,32 @@ def _safe_text(
         else _SAFE_IDENTIFIER
     )
     return normalized if pattern.fullmatch(normalized) else None
+
+
+def _looks_instruction_shaped_identifier(value: str) -> bool:
+    tokens = tuple(
+        token
+        for token in re.split(r"[._-]+", value.casefold())
+        if token
+    )
+    if tokens[:2] in _INSTRUCTION_IDENTIFIER_PREFIXES:
+        return True
+    return bool(
+        tokens
+        and (
+            (
+                tokens[0] == "ignore"
+                and any(token.startswith("instruction") for token in tokens[1:])
+            )
+            or (
+                tokens[0] == "override"
+                and any(
+                    token in {"prompt", "system", "task"}
+                    for token in tokens[1:]
+                )
+            )
+        )
+    )
 
 
 def _filter_source_specific_identifiers(

@@ -166,6 +166,49 @@ def test_agent_executor_uses_only_actionable_generation_occurrence(
 @pytest.mark.parametrize(
     "query",
     [
+        "Don't generate 11 molecules and then generate 3 molecules",
+        "Generate 3 molecules and as an example generate 11 molecules",
+    ],
+)
+def test_agent_executor_occurrence_scope_is_bounded(monkeypatch, query):
+    agent, model = _build_agent(monkeypatch)
+
+    result = agent.execute(query)
+
+    assert result["success"] is True
+    assert "Task: provide 3 valid" in model.prompts[0]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Generate 3 molecules and generate 11 molecules",
+        "Generate 3 molecules and generate 4 molecules",
+        "Generate 3 molecules and generate 7.5 molecules",
+        "Generate 3 and generate 11",
+        "Generate 3 and generate 4",
+        "Generate 3 and generate 7.5",
+    ],
+)
+def test_agent_executor_validates_all_generation_occurrences_before_tools(
+    monkeypatch, query
+):
+    agent, model = _build_agent(monkeypatch)
+    other_tool = RecordingMixedTool()
+    agent.core_tools.insert(0, other_tool)
+
+    result = agent.execute(query)
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_input"
+    assert other_tool.should_use_calls == []
+    assert other_tool.calls == []
+    assert model.prompts == []
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
         "Generate 1, 000 molecules",
         "生成1 1个分子",
         "生成1\u202f000个分子",
@@ -197,6 +240,8 @@ def test_agent_executor_rejects_grouped_counts_before_all_tools(monkeypatch, que
         "Explain `Generate 11 molecules` as an example",
         "Explain ```Generate 3 molecules``` as an example",
         "Explain this example:\n```\nGenerate 3 molecules\n```",
+        "Explain this example:\n```\nGenerate 3 molecules",
+        "Explain this example:\n~~~text\nGenerate 3 molecules",
         "Do not generate 3 molecules; explain the syntax",
         "Don’t generate 3 molecules; explain the syntax",
         "Can't generate 3 molecules; explain the syntax",
