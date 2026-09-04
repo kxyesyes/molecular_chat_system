@@ -144,6 +144,8 @@ def test_requested_count_parser_supports_shared_multilingual_grammar():
     assert parser("为 PDE5A 生成五个候选分子", default=1) == 5
     assert parser("设计十种化合物", default=1) == 10
     assert parser("生成十一个候选结构", default=1) == 11
+    assert parser("Generate 5 new molecules", default=1) == 5
+    assert parser("Design 7 novel candidate compounds", default=1) == 7
 
 
 @pytest.mark.parametrize(
@@ -157,6 +159,18 @@ def test_requested_count_parser_supports_shared_multilingual_grammar():
     ],
 )
 def test_requested_count_parser_never_uses_identifiers_years_or_decimals(query):
+    assert TaskPlanner._extract_requested_count(query, default=1) == 1
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Design candidates for PDE5A; many structures are known",
+        "Design candidates for HSP90; 7 structures are known",
+        "Generate candidates for PDE10A in 2024; 8 structures are known",
+    ],
+)
+def test_requested_count_parser_does_not_cross_generation_clause(query):
     assert TaskPlanner._extract_requested_count(query, default=1) == 1
 
 

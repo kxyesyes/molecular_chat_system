@@ -13,6 +13,7 @@ from .prompts import PREFIX, SUFFIX, REACT_FORMAT, SIMPLE_TOOL_TEMPLATE
 from .router import SkillRouter
 
 logger = logging.getLogger(__name__)
+_MOL_COUNT_UNSET = object()
 
 _TOOL_NAME_MAPPING = {
     'property_calculator': 'property_calculator',
@@ -130,7 +131,7 @@ class ReActMolecularAgent:
         self,
         query: str,
         temperature: float = 0.7,
-        mol_count: int = 5,
+        mol_count: Any = _MOL_COUNT_UNSET,
         active_skill=None,
         event_callback=None,
     ) -> Dict[str, Any]:
@@ -140,7 +141,10 @@ class ReActMolecularAgent:
         start_time = time.time()
         
         self.current_temperature = temperature
-        self.current_mol_count = mol_count
+        self.current_mol_count = (
+            5 if mol_count is _MOL_COUNT_UNSET else mol_count
+        )
+        self._current_mol_count_is_explicit = mol_count is not _MOL_COUNT_UNSET
         result = {
             'query': query,
             'success': True,
@@ -803,6 +807,11 @@ class ReActMolecularAgent:
             active_skill=self._active_skill.name if self._active_skill else None,
             temperature=getattr(self, "current_temperature", 0.7),
             mol_count=getattr(self, "current_mol_count", 5),
+            metadata=(
+                {"requested_count": getattr(self, "current_mol_count", 5)}
+                if getattr(self, "_current_mol_count_is_explicit", False)
+                else {}
+            ),
         )
         execution = WorkflowExecutor().execute(
             context=context,

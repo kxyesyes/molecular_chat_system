@@ -260,6 +260,70 @@ def test_target_evidence_rejects_untrusted_workflow_and_outputs_wrappers():
         assert decision.reason == "target_evidence_missing"
 
 
+@pytest.mark.parametrize(
+    "trust_field, trust_value",
+    [
+        ("untrusted", 1),
+        ("trusted", 0),
+        ("fallback_used", "maybe"),
+        ("demo_mode", None),
+        ("authoritative", {"value": True}),
+    ],
+)
+def test_target_evidence_rejects_non_boolean_or_unsafe_trust_flags(
+    trust_field, trust_value
+):
+    payload = {
+        "query": "design",
+        "metadata": {},
+        "outputs": {
+            "target": {
+                "target_identifier": "O76074",
+                "evidence": [
+                    {
+                        "source": "UniProt",
+                        "id": "O76074",
+                        "quality": {trust_field: trust_value},
+                    }
+                ],
+            }
+        },
+    }
+
+    decision = SemanticInputValidator().validate(
+        _target_design_plan().steps[1], payload
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "target_evidence_missing"
+
+
+def test_target_evidence_accepts_explicit_safe_trust_booleans():
+    payload = {
+        "query": "design",
+        "metadata": {},
+        "outputs": {
+            "target": {
+                "gene_symbol": "PDE5A",
+                "source": "UniProt",
+                "quality": {
+                    "demo_mode": False,
+                    "fallback_used": "false",
+                    "untrusted": "no",
+                    "trusted": True,
+                    "authoritative": "true",
+                },
+            }
+        },
+    }
+
+    decision = SemanticInputValidator().validate(
+        _target_design_plan().steps[1], payload
+    )
+
+    assert decision.allowed is True
+
+
 def test_workflow_wrapper_rejects_missing_or_untrusted_target_evidence():
     validator = SemanticInputValidator()
     step = _target_design_plan().steps[1]

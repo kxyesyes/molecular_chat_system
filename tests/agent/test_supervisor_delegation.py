@@ -187,6 +187,45 @@ def test_delegated_supervisor_uses_prepared_authoritative_count_metadata():
     }
 
 
+def test_delegated_public_mol_count_is_authoritative():
+    registry, tools = build_registry()
+    supervisor = SupervisorAgent(
+        tool_registry=registry,
+        specialists=build_default_specialists(),
+    )
+
+    result = supervisor.run(
+        "Design candidates for PDE5A",
+        skill_name="target_driven_design",
+        metadata={"requested_count": 2},
+        mol_count=7,
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["plan"]["metadata"]["requested_count"] == 7
+    assert tools["llm_molecular_generator"].calls[0]["metadata"] == {
+        "requested_count": 7
+    }
+
+
+def test_delegated_public_invalid_mol_count_fails_before_tools():
+    registry, tools = build_registry()
+    supervisor = SupervisorAgent(
+        tool_registry=registry,
+        specialists=build_default_specialists(),
+    )
+
+    result = supervisor.run(
+        "Design candidates for PDE5A",
+        skill_name="target_driven_design",
+        mol_count=11,
+    )
+
+    assert result["status"] == "failed"
+    assert result["plan"]["metadata"]["requested_count"] == 11
+    assert all(not tool.calls for tool in tools.values())
+
+
 def test_delegated_plan_count_overrides_conflicting_context_metadata():
     authoritative_plan = TaskPlanner().plan(
         AgentContext(

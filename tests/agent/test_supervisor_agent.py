@@ -94,6 +94,38 @@ def test_supervisor_runs_multi_tool_workflow():
     assert tools["molecular_docking"].calls == []
 
 
+def test_supervisor_public_mol_count_is_authoritative_for_target_workflow():
+    tools = build_fake_tools()
+    supervisor = SupervisorAgent(tools=tools)
+
+    result = supervisor.execute(
+        "Design candidates for PDE5A",
+        mol_count=7,
+        active_skill="target_driven_design",
+    )
+
+    assert result["success"] is True
+    assert result["workflow_plan"]["metadata"]["requested_count"] == 7
+    assert tools["llm_molecular_generator"].calls[0]["metadata"] == {
+        "requested_count": 7
+    }
+
+
+def test_supervisor_public_invalid_mol_count_fails_before_tools():
+    tools = build_fake_tools()
+    supervisor = SupervisorAgent(tools=tools)
+
+    result = supervisor.execute(
+        "Design candidates for PDE5A",
+        mol_count=11,
+        active_skill="target_driven_design",
+    )
+
+    assert result["success"] is False
+    assert result["workflow_plan"]["metadata"]["requested_count"] == 11
+    assert all(not tool.calls for tool in tools.values())
+
+
 class FakeRouter:
     def __init__(self, skill):
         self.skill = skill

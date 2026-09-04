@@ -108,6 +108,60 @@ def test_target_driven_design_workflow_binds_valid_default_count_when_omitted():
     assert generator_input["metadata"]["requested_count"] == 1
 
 
+def test_react_public_mol_count_is_authoritative_for_target_workflow():
+    planned_tool_names = [
+        "target_database_search",
+        "llm_molecular_generator",
+        "property_calculator",
+        "admet_predictor",
+        "activity_predictor",
+    ]
+    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+    agent.llm = None
+    agent.max_iterations = 5
+    agent.skill_router = None
+    agent._active_skill = None
+    agent.tools = {name: FakeTool(name) for name in planned_tool_names}
+
+    result = agent.execute(
+        "Design candidates for PDE5A",
+        mol_count=7,
+        active_skill=WorkflowCatalog().require("target_driven_design"),
+    )
+
+    assert result["success"] is True
+    assert result["workflow_plan"]["metadata"]["requested_count"] == 7
+    assert agent.tools["llm_molecular_generator"].inputs[0]["metadata"] == {
+        "requested_count": 7
+    }
+
+
+def test_react_public_invalid_mol_count_fails_before_tools():
+    planned_tool_names = [
+        "target_database_search",
+        "llm_molecular_generator",
+        "property_calculator",
+        "admet_predictor",
+        "activity_predictor",
+    ]
+    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+    agent.llm = None
+    agent.max_iterations = 5
+    agent.skill_router = None
+    agent._active_skill = None
+    agent.tools = {name: FakeTool(name) for name in planned_tool_names}
+
+    result = agent.execute(
+        "Design candidates for PDE5A",
+        mol_count=11,
+        active_skill=WorkflowCatalog().require("target_driven_design"),
+    )
+
+    assert result["success"] is False
+    assert result["workflow_plan"]["metadata"]["requested_count"] == 11
+    assert all(not tool.inputs for tool in agent.tools.values())
+
+
 def test_target_driven_design_workflow_rejects_count_above_limit_before_tools():
     planned_tool_names = [
         "target_database_search",

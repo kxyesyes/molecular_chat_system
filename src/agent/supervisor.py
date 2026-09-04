@@ -32,6 +32,7 @@ from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
 RAG_TOOL_NAMES = frozenset(
     {"rag_search", "rag_database_search", "database_search"}
 )
+_MOL_COUNT_UNSET = object()
 
 
 class _DelegatedWorkflowExecutor:
@@ -148,7 +149,7 @@ class SupervisorAgent:
         self,
         query: str,
         temperature: float = 0.7,
-        mol_count: int = 5,
+        mol_count: Any = _MOL_COUNT_UNSET,
         active_skill=None,
         event_callback=None,
         capabilities: Mapping[str, bool] | None = None,
@@ -167,17 +168,20 @@ class SupervisorAgent:
                 "agent_events": [],
             }
 
+        request_metadata: dict[str, Any] = (
+            {"capabilities": dict(capabilities)}
+            if capabilities is not None
+            else {}
+        )
+        if mol_count is not _MOL_COUNT_UNSET:
+            request_metadata["requested_count"] = mol_count
         context = AgentContext(
             query=query,
             trace_id=f"agent-{uuid4().hex[:12]}",
             active_skill=policy.name,
             temperature=temperature,
-            mol_count=mol_count,
-            metadata=(
-                {"capabilities": dict(capabilities)}
-                if capabilities is not None
-                else {}
-            ),
+            mol_count=5 if mol_count is _MOL_COUNT_UNSET else mol_count,
+            metadata=request_metadata,
         )
         request_tools = self._request_tools(context)
         execution = self._execute_with_harness(
@@ -247,8 +251,11 @@ class SupervisorAgent:
         skill_name: str | None = None,
         trace_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        mol_count: Any = _MOL_COUNT_UNSET,
     ) -> dict[str, Any]:
-        context = self._build_context(query, skill_name, trace_id, metadata)
+        context = self._build_context(
+            query, skill_name, trace_id, metadata, mol_count
+        )
         workflow_plan = self.planner.plan(context)
 
         steps = workflow_plan.steps
@@ -276,6 +283,7 @@ class SupervisorAgent:
         skill_name: str | None = None,
         trace_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        mol_count: Any = _MOL_COUNT_UNSET,
     ) -> dict[str, Any]:
         metadata = metadata or {}
         idempotency_key = metadata.get("idempotency_key")
@@ -283,7 +291,9 @@ class SupervisorAgent:
             existing = self.state_store.get_run_by_idempotency_key(idempotency_key)
             if existing:
                 trace_id = existing["trace_id"]
-        context = self._build_context(query, skill_name, trace_id, metadata)
+        context = self._build_context(
+            query, skill_name, trace_id, metadata, mol_count
+        )
         workflow_plan = self.planner.plan(context)
         steps = workflow_plan.steps
         request_tools = self._request_tools(context)
@@ -817,15 +827,20 @@ class SupervisorAgent:
         skill_name: str | None,
         trace_id: str | None,
         metadata: dict[str, Any] | None,
+        mol_count: Any = _MOL_COUNT_UNSET,
     ) -> AgentContext:
         policy = self._resolve_policy(query, skill_name)
         active_skill = policy.name if policy is not None else skill_name
+        request_metadata = dict(metadata or {})
+        if mol_count is not _MOL_COUNT_UNSET:
+            request_metadata["requested_count"] = mol_count
         return AgentContext(
             query=query,
             trace_id=trace_id or str(uuid4()),
             active_skill=active_skill,
             workflow_name=active_skill,
-            metadata=metadata or {},
+            mol_count=5 if mol_count is _MOL_COUNT_UNSET else mol_count,
+            metadata=request_metadata,
         )
 
     def _request_tools(self, context: AgentContext) -> dict[str, Any]:

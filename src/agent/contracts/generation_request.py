@@ -94,26 +94,65 @@ _ENGLISH_COUNT = (
 _COUNT_TOKEN = rf"(?:{_ARABIC_COUNT}|{_CHINESE_COUNT}|{_ENGLISH_COUNT})"
 _ENGLISH_NOUN = r"(?:candidates?|molecules?|compounds?|structures?)"
 _GENERATION_VERB = r"(?:generate|design|create|produce|make|build)"
+_ENGLISH_COUNT_MODIFIER = r"(?:new|novel|candidate|drug-like)"
 _COUNT_PATTERNS = (
     re.compile(
-        rf"(?i)\b{_GENERATION_VERB}\b\s*(?P<count>{_COUNT_TOKEN})"
-        rf"(?=\s*(?:{_ENGLISH_NOUN}\b|for\b|$))"
+        rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?P<count>{_COUNT_TOKEN})"
+        rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
+        rf"(?=[ \t]+(?:{_ENGLISH_NOUN}\b|for\b)|[ \t]*$)"
     ),
-    re.compile(rf"(?i)(?P<count>{_COUNT_TOKEN})\s*{_ENGLISH_NOUN}\b"),
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
         rf"(?P<count>{_COUNT_TOKEN})\s*(?:个|种|份)?\s*"
         rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
     ),
-    re.compile(
-        rf"(?P<count>{_COUNT_TOKEN})\s*(?:个|种|份)\s*"
-        rf"(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)"
-    ),
 )
 _FUZZY_COUNTS = (
-    (re.compile(r"(?i)(?:\bseveral\b|\bsome\b|\ba few\b|几个|若干)"), 3),
-    (re.compile(r"(?i)(?:\bmultiple\b|\bmany\b|多个|很多)"), 5),
-    (re.compile(r"(?i)(?:\bone\b|\ba\s+(?:molecule|compound)\b|一个|单个)"), 1),
+    (
+        re.compile(
+            rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?:several|some|a[ \t]+few)"
+            rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
+            rf"(?=[ \t]+{_ENGLISH_NOUN}\b)"
+        ),
+        3,
+    ),
+    (
+        re.compile(
+            rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?:multiple|many)"
+            rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
+            rf"(?=[ \t]+{_ENGLISH_NOUN}\b)"
+        ),
+        5,
+    ),
+    (
+        re.compile(
+            rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?:one|a)"
+            rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
+            rf"(?=[ \t]+{_ENGLISH_NOUN}\b)"
+        ),
+        1,
+    ),
+    (
+        re.compile(
+            r"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*(?:几个|若干)"
+            r"\s*(?:个|种|份)?\s*(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选))"
+        ),
+        3,
+    ),
+    (
+        re.compile(
+            r"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*(?:多个|很多)"
+            r"\s*(?:个|种|份)?\s*(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选))"
+        ),
+        5,
+    ),
+    (
+        re.compile(
+            r"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*(?:一个|单个)"
+            r"\s*(?:个|种|份)?\s*(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选))"
+        ),
+        1,
+    ),
 )
 
 
@@ -374,10 +413,16 @@ def _contains_untrusted_mode(value: Any) -> bool:
     if isinstance(value, Mapping):
         for key, item in value.items():
             normalized_key = str(key).strip().lower()
-            if normalized_key in _UNTRUSTED_TRUE_FLAGS and _enabled_flag(item):
-                return True
-            if normalized_key in _UNTRUSTED_FALSE_FLAGS and _disabled_flag(item):
-                return True
+            if normalized_key in _UNTRUSTED_TRUE_FLAGS:
+                parsed = _parse_trust_flag(item)
+                if parsed is None or parsed:
+                    return True
+                continue
+            if normalized_key in _UNTRUSTED_FALSE_FLAGS:
+                parsed = _parse_trust_flag(item)
+                if parsed is None or not parsed:
+                    return True
+                continue
             if _contains_untrusted_mode(item):
                 return True
     elif _is_sequence(value):
@@ -385,18 +430,17 @@ def _contains_untrusted_mode(value: Any) -> bool:
     return False
 
 
-def _enabled_flag(value: Any) -> bool:
-    return value is True or (
-        isinstance(value, str)
-        and value.strip().lower() in {"1", "true", "yes", "on"}
-    )
-
-
-def _disabled_flag(value: Any) -> bool:
-    return value is False or (
-        isinstance(value, str)
-        and value.strip().lower() in {"0", "false", "no", "off"}
-    )
+def _parse_trust_flag(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
 
 
 def _is_sequence(value: Any) -> bool:

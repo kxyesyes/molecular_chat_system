@@ -306,6 +306,19 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
                     generator._analyze_generation_intent(query)["count"], 1
                 )
 
+        self.assertEqual(
+            generator._analyze_generation_intent(
+                "Design candidates for PDE5A; many structures are known"
+            )["count"],
+            1,
+        )
+        self.assertEqual(
+            generator._analyze_generation_intent("Generate 5 new molecules")[
+                "count"
+            ],
+            5,
+        )
+
     def test_structured_metadata_count_precedes_query_and_mol_count(self):
         llm = CapturingLLM()
         generator = LLMMolecularGenerator(llm_model=llm)
@@ -353,6 +366,26 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
             {
                 "fallback_used": True,
                 "targets": [{"gene_symbol": "PDE5A", "source": "UniProt"}],
+            },
+            {
+                "target_identifier": "O76074",
+                "evidence": [
+                    {
+                        "source": "UniProt",
+                        "id": "O76074",
+                        "quality": {"untrusted": 1},
+                    }
+                ],
+            },
+            {
+                "gene_symbol": "PDE5A",
+                "source": "UniProt",
+                "quality": {"trusted": 0},
+            },
+            {
+                "gene_symbol": "PDE5A",
+                "source": "UniProt",
+                "quality": {"fallback_used": "unknown-state"},
             },
         )
         for target in unsafe_targets:
