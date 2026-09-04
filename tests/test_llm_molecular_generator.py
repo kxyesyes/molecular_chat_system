@@ -445,16 +445,27 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
                 self.assertNotIn(unsafe_source, logs)
                 self.assertEqual(llm.prompts, [])
 
-    def test_decimal_legacy_count_is_invalid_before_model(self):
-        llm = CapturingLLM()
-        wrapped = execute_tool_compat(
-            LLMMolecularGenerator(llm_model=llm),
+    def test_malformed_numeric_legacy_counts_are_invalid_before_model(self):
+        for query in (
             "Generate 7.5 molecules",
-        )
+            "Generate .5 molecules",
+            "Generate +.5 molecules",
+            "Generate −.5 molecules",
+            "Generate 7. molecules",
+            "Generate ＋７． molecules",
+            "Generate 1e1 molecules",
+            "Generate −１e１ molecules",
+        ):
+            with self.subTest(query=query):
+                llm = CapturingLLM()
+                wrapped = execute_tool_compat(
+                    LLMMolecularGenerator(llm_model=llm),
+                    query,
+                )
 
-        self.assertFalse(wrapped.success)
-        self.assertEqual(wrapped.error.code.value, "invalid_input")
-        self.assertEqual(llm.prompts, [])
+                self.assertFalse(wrapped.success)
+                self.assertEqual(wrapped.error.code.value, "invalid_input")
+                self.assertEqual(llm.prompts, [])
 
     def test_target_evidence_is_sanitized_before_record_limit(self):
         serialized = LLMMolecularGenerator._serialize_target_evidence(

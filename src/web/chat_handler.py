@@ -84,7 +84,7 @@ class ChatHandler:
                 enable_tools = message_data.get("enable_tools", True)
                 rag_count = message_data.get("rag_count", 5)  # 获取RAG检索数量
                 temperature = message_data.get("temperature", 0.7)  # 获取生成温度
-                mol_count = message_data.get("mol_count", 5)  # 获取分子生成数量
+                mol_count = message_data.get("mol_count")  # 未提供时由生成请求解析器决定
 
                 if not message.strip():
                     continue
@@ -123,7 +123,7 @@ class ChatHandler:
     async def _process_message(self, websocket: WebSocket, message: str, 
                               enable_rag: bool, enable_tools: bool, 
                               rag_count: int = 5, temperature: float = 0.7,
-                              mol_count: int = 5,
+                              mol_count: int | None = None,
                               conversation_history: List[Dict[str, Any]] | None = None):
         """处理用户消息 - 性能优化版"""
         history = (
@@ -524,7 +524,7 @@ class ChatHandler:
         self,
         message: str,
         temperature: float = 0.7,
-        mol_count: int = 5,
+        mol_count: int | None = None,
         active_skill=None,
         event_callback=None,
         enable_rag: bool = True,
@@ -539,9 +539,10 @@ class ChatHandler:
             ).parameters
             execute_kwargs = {
                 "temperature": temperature,
-                "mol_count": mol_count,
                 "active_skill": active_skill,
             }
+            if mol_count is not None:
+                execute_kwargs["mol_count"] = mol_count
             if "event_callback" in execute_parameters:
                 execute_kwargs["event_callback"] = event_callback
             if "capabilities" in execute_parameters:

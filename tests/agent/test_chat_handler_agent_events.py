@@ -1939,6 +1939,77 @@ def test_chat_handler_tools_disabled_uses_plain_chat_without_agent_execution():
     }
 
 
+@pytest.mark.parametrize("query", ["Generate 11 molecules", "Generate 7.5 molecules"])
+def test_chat_handler_omitted_count_rejects_invalid_text_before_tool(query):
+    tool = RecordingTool("llm_molecular_generator")
+    supervisor = SupervisorAgent(
+        tools={"llm_molecular_generator": tool},
+        skill_router=FixedRouter(MolecularDesignSkill()),
+    )
+    handler = ChatHandler(
+        model=FakeModel(),
+        rag_service=FakeRagService(),
+        agent_system=supervisor,
+        config={"inference": {"stream": False}},
+    )
+
+    result = asyncio.run(
+        handler._execute_agent(query, active_skill=MolecularDesignSkill())
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_input"
+    assert tool.calls == []
+
+
+def test_chat_handler_omitted_count_preserves_valid_text_count():
+    tool = RecordingTool("llm_molecular_generator")
+    supervisor = SupervisorAgent(
+        tools={"llm_molecular_generator": tool},
+        skill_router=FixedRouter(MolecularDesignSkill()),
+    )
+    handler = ChatHandler(
+        model=FakeModel(),
+        rag_service=FakeRagService(),
+        agent_system=supervisor,
+        config={"inference": {"stream": False}},
+    )
+
+    result = asyncio.run(
+        handler._execute_agent(
+            "Generate 7 molecules", active_skill=MolecularDesignSkill()
+        )
+    )
+
+    assert tool.calls
+    assert tool.calls[0]["metadata"]["requested_count"] == 7
+
+
+def test_chat_handler_explicit_count_remains_authoritative():
+    tool = RecordingTool("llm_molecular_generator")
+    supervisor = SupervisorAgent(
+        tools={"llm_molecular_generator": tool},
+        skill_router=FixedRouter(MolecularDesignSkill()),
+    )
+    handler = ChatHandler(
+        model=FakeModel(),
+        rag_service=FakeRagService(),
+        agent_system=supervisor,
+        config={"inference": {"stream": False}},
+    )
+
+    result = asyncio.run(
+        handler._execute_agent(
+            "Generate 7 molecules",
+            mol_count=3,
+            active_skill=MolecularDesignSkill(),
+        )
+    )
+
+    assert tool.calls
+    assert tool.calls[0]["metadata"]["requested_count"] == 3
+
+
 def test_property_request_without_smiles_returns_clarification_without_rag_or_model():
     model = FakeModel()
     rag = RecordingLegacyRagService()

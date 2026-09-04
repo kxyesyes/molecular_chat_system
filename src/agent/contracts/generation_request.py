@@ -124,6 +124,24 @@ _COUNT_PATTERNS = (
         rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
     ),
 )
+_MALFORMED_NUMERIC_COUNT = (
+    r"(?<![\w.])[-+\u2212]?"
+    r"(?:(?:\d+(?:\.\d*)?|\.\d+)[eE][-+\u2212]?\d+|\d+\.|\.\d+)"
+    r"(?![\w.])"
+)
+_MALFORMED_COUNT_PATTERNS = (
+    re.compile(
+        rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?P<count>{_MALFORMED_NUMERIC_COUNT})"
+        rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
+        rf"(?=[ \t]+(?:{_ENGLISH_NOUN}\b|for\b)|[ \t]*$)"
+    ),
+    re.compile(
+        rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
+        rf"(?P<count>{_MALFORMED_NUMERIC_COUNT})\s*(?:个|种|份)?\s*"
+        rf"(?:{_CHINESE_COUNT_MODIFIER}\s*){{0,2}}"
+        rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
+    ),
+)
 _FUZZY_COUNTS = (
     (
         re.compile(
@@ -198,6 +216,8 @@ def parse_generation_count(query: str, *, default: int = DEFAULT_GENERATION_COUN
         if token.isdigit() and len(token) == 4 and 1900 <= value <= 2099:
             continue
         return value
+    if any(pattern.search(query) for pattern in _MALFORMED_COUNT_PATTERNS):
+        raise GenerationRequestError("generation count must be an integer")
     for pattern, value in _FUZZY_COUNTS:
         if pattern.search(query):
             return value

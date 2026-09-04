@@ -77,7 +77,12 @@ class MolecularAgent:
             ])
         return False
 
-    def execute_tools(self, query: str, temperature: float = 0.7, mol_count: int = 5) -> Dict[str, Any]:
+    def execute_tools(
+        self,
+        query: str,
+        temperature: float = 0.7,
+        mol_count: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """执行工具预测"""
         results = []
         used_tools = []
@@ -89,7 +94,10 @@ class MolecularAgent:
                     logger.info(f"Executing core tool: {tool.name}")
                     # 如果是分子生成工具，传递temperature和mol_count参数
                     if tool.name == 'llm_molecular_generator':
-                        result = tool.execute(query, temperature=temperature, mol_count=mol_count)
+                        generation_kwargs = {"temperature": temperature}
+                        if mol_count is not None:
+                            generation_kwargs["mol_count"] = mol_count
+                        result = tool.execute(query, **generation_kwargs)
                     else:
                         result = tool.execute(query)
                     if result.get('success'):
@@ -135,7 +143,12 @@ class MolecularAgent:
 
         return descriptions
 
-    def execute(self, query: str, temperature: float = 0.7, mol_count: int = 5) -> Dict[str, Any]:
+    def execute(
+        self,
+        query: str,
+        temperature: float = 0.7,
+        mol_count: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """执行agent任务 - 简化版本，直接使用工具"""
         logger.info(f"Executing query: {query[:100]}... (temperature={temperature})")
 
