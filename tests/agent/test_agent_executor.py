@@ -126,6 +126,51 @@ def test_agent_executor_valid_mixed_generation_behavior_is_unchanged(monkeypatch
 @pytest.mark.parametrize(
     "query",
     [
+        "For example, analyze CCO and generate 3 molecules",
+        "As an example, analyze CCO and generate 3 molecules",
+        "Explain how to analyze CCO and generate 3 molecules",
+    ],
+)
+def test_agent_executor_does_not_generate_within_explanation_scope(
+    monkeypatch, query
+):
+    agent, model = _build_agent(monkeypatch)
+    other_tool = RecordingMixedTool()
+    agent.core_tools.insert(0, other_tool)
+
+    result = agent.execute(query)
+
+    assert result["success"] is True
+    assert other_tool.calls == [query]
+    assert model.prompts == []
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Generate 1, 000 molecules",
+        "生成1 1个分子",
+        "生成1\u202f000个分子",
+        "生成1， 000个分子",
+    ],
+)
+def test_agent_executor_rejects_grouped_counts_before_all_tools(monkeypatch, query):
+    agent, model = _build_agent(monkeypatch)
+    other_tool = RecordingMixedTool()
+    agent.core_tools.insert(0, other_tool)
+
+    result = agent.execute(query)
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_input"
+    assert other_tool.should_use_calls == []
+    assert other_tool.calls == []
+    assert model.prompts == []
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
         "Explain `Generate 3 molecules` as an example",
         "Explain `Generate 11 molecules` as an example",
         "Explain ```Generate 3 molecules``` as an example",

@@ -192,6 +192,24 @@ _COUNT_SLOT_PATTERNS = (
         rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
     ),
 )
+_GROUPED_COUNT_SEPARATOR = r"(?:[ \t]*[,，][ \t]*|[ \t]+)"
+_GROUPED_ARABIC_COUNT = (
+    rf"[-+\u2212]?\d+(?:{_GROUPED_COUNT_SEPARATOR}\d+)+"
+)
+_MALFORMED_GROUPED_COUNT_PATTERNS = (
+    re.compile(
+        rf"(?i)\b{_GENERATION_VERB}\b[ \t]*"
+        rf"(?P<count>{_GROUPED_ARABIC_COUNT})"
+        rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
+        rf"(?=[ \t]+(?:{_ENGLISH_NOUN}\b|for\b)|[ \t]*$)"
+    ),
+    re.compile(
+        rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
+        rf"(?P<count>{_GROUPED_ARABIC_COUNT})\s*(?:个|种|份)?\s*"
+        rf"(?:{_CHINESE_PRE_NOUN_MODIFIER}\s*){{0,2}}"
+        rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
+    ),
+)
 _MALFORMED_WORD_COUNT_PATTERNS = (
     re.compile(
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*{_ENGLISH_DECIMAL_PART}"
@@ -274,7 +292,17 @@ def validate_generation_count(value: Any, *, field: str = "requested_count") -> 
 
 
 def parse_generation_count(query: str, *, default: int = DEFAULT_GENERATION_COUNT) -> int:
+    unquoted = _strip_generation_literals(query)
+    grouped_count_present = any(
+        pattern.search(unquoted)
+        for pattern in _MALFORMED_GROUPED_COUNT_PATTERNS
+    )
     query = _mask_non_actionable_generation_text(query)
+    if grouped_count_present and any(
+        pattern.search(query)
+        for pattern in _MALFORMED_GROUPED_COUNT_PATTERNS
+    ):
+        raise GenerationRequestError("generation count must be an integer")
     if any(pattern.search(query) for pattern in _MALFORMED_WORD_COUNT_PATTERNS):
         raise GenerationRequestError("generation count must be an integer")
     for pattern in _COUNT_PATTERNS:
@@ -307,6 +335,10 @@ def _matches_generation_grammar(value: str) -> bool:
         any(pattern.search(value) for pattern in _COUNT_SLOT_PATTERNS)
         or any(
             pattern.search(value)
+            for pattern in _MALFORMED_GROUPED_COUNT_PATTERNS
+        )
+        or any(
+            pattern.search(value)
             for pattern in _MALFORMED_WORD_COUNT_PATTERNS
         )
         or any(pattern.search(value) for pattern, _value in _FUZZY_COUNTS)
@@ -314,6 +346,20 @@ def _matches_generation_grammar(value: str) -> bool:
 
 
 def _mask_non_actionable_generation_text(query: str) -> str:
+    unquoted = _strip_generation_literals(query)
+    actionable_clauses: list[str] = []
+    for clause in _split_generation_clauses(unquoted):
+        if not _matches_generation_grammar(clause):
+            actionable_clauses.append(clause)
+            continue
+        if _is_non_actionable_generation_clause(clause):
+            actionable_clauses.append(" ")
+            continue
+        actionable_clauses.append(clause)
+    return ";".join(actionable_clauses)
+
+
+def _strip_generation_literals(query: str) -> str:
     normalized = unicodedata.normalize("NFKC", str(query))
     normalized = re.sub(r"(?i)\be\.g\.", "for example", normalized)
     without_code = re.sub(
@@ -327,16 +373,7 @@ def _mask_non_actionable_generation_text(query: str) -> str:
         " ",
         without_code,
     )
-    actionable_clauses: list[str] = []
-    for clause in _split_generation_clauses(unquoted):
-        if not _matches_generation_grammar(clause):
-            actionable_clauses.append(clause)
-            continue
-        if _is_non_actionable_generation_clause(clause):
-            actionable_clauses.append(" ")
-            continue
-        actionable_clauses.append(clause)
-    return ";".join(actionable_clauses)
+    return unquoted
 
 
 def _split_generation_clauses(value: str) -> list[str]:
@@ -344,6 +381,7 @@ def _split_generation_clauses(value: str) -> list[str]:
     for pattern in (
         *_COUNT_SLOT_PATTERNS,
         *_COUNT_PATTERNS,
+        *_MALFORMED_GROUPED_COUNT_PATTERNS,
         *_MALFORMED_WORD_COUNT_PATTERNS,
     ):
         for match in pattern.finditer(value):
@@ -363,7 +401,10 @@ def _split_generation_clauses(value: str) -> list[str]:
             after = value[index + 1] if index + 1 < len(value) else ""
             prefix = value[:index].rstrip().casefold()
             introduces_example = bool(
-                re.search(r"(?:for example|such as|例如|比如)$", prefix)
+                re.search(
+                    r"(?:for example|as an? example|such as|例如|比如)$",
+                    prefix,
+                )
             )
             separated.append(
                 character
@@ -379,7 +420,7 @@ def _split_generation_clauses(value: str) -> list[str]:
         separated.append(character)
 
     return re.split(
-        r"(?i)\n+|\b(?:but|instead|and)\b|(?:但是|而是|但|只)",
+        r"(?i)\n+|\b(?:but|instead)\b|(?:但是|而是|但|只)",
         "".join(separated),
     )
 
@@ -394,11 +435,15 @@ def _is_non_actionable_generation_clause(clause: str) -> bool:
         r"explain(?:ing)?|illustrat(?:e|ing)|example|phrase|instruction|command)"
     )
     english_suffix = r"(?:as\s+an?\s+example|for\s+example)"
-    if re.search(
+    negated_generation = re.search(
         rf"(?i)\b{english_negation}\b"
         rf"(?:[ \t]+[A-Za-z0-9][A-Za-z0-9'’_-]*){{0,5}}"
         rf"[ \t]+\b{_GENERATION_VERB}\b",
         clause,
+    )
+    if negated_generation and not re.search(
+        rf"(?i)\b{_GENERATION_VERB}\b",
+        clause[: negated_generation.start()],
     ):
         return True
     if re.search(

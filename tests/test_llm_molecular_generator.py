@@ -271,8 +271,12 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
 
     def test_grouped_and_hybrid_counts_reject_without_model_call(self):
         for query in (
+            "Generate 1, 000 molecules",
             "Generate 1 1 molecules",
             "Generate 1\u202f000 molecules",
+            "生成1 1个分子",
+            "生成1\u202f000个分子",
+            "生成1， 000个分子",
             "Generate two point-five molecules",
         ):
             with self.subTest(query=query):

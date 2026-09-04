@@ -106,6 +106,9 @@ def test_router_ignores_quoted_generation_examples():
         "请勿生成三个分子；解释 CCO 的 ADMET",
         "不生成三个分子；解释 CCO 的 ADMET",
         "For example, generate 3 molecules when teaching prompt syntax",
+        "For example, analyze CCO and generate 3 molecules",
+        "As an example, analyze CCO and generate 3 molecules",
+        "Explain how to analyze CCO and generate 3 molecules",
     ],
 )
 def test_router_masks_code_and_non_actionable_generation_clauses(query):
@@ -177,7 +180,11 @@ def test_router_rejects_generation_with_bounded_negation_scope(query):
     "query",
     [
         "Generate 1 1 molecules",
+        "Generate 1, 000 molecules",
         "Generate 1\u202f000 molecules",
+        "生成1 1个分子",
+        "生成1\u202f000个分子",
+        "生成1， 000个分子",
         "Generate two point-five molecules",
     ],
 )

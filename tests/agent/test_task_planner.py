@@ -3,6 +3,7 @@ import pytest
 from src.agent.contracts import AgentContext
 from src.agent.contracts.generation_request import (
     GenerationRequestError,
+    has_generation_intent,
     parse_generation_count,
 )
 from src.agent.planning.task_planner import TaskPlanner
@@ -172,8 +173,19 @@ def test_requested_count_parser_supports_shared_multilingual_grammar():
         "Generate 1e1 molecules",
         "Generate −１e１ molecules",
         "Generate 1,000 molecules",
+        "Generate 1, 000 molecules",
         "Generate 1 1 molecules",
+        "Generate 1\u00a0000 molecules",
         "Generate 1\u202f000 molecules",
+        "Generate 1\u2009000 molecules",
+        "生成1 1个分子",
+        "生成1\u00a0000个分子",
+        "生成1\u202f000个分子",
+        "生成1\u2009000个分子",
+        "生成1,000个分子",
+        "生成1, 000个分子",
+        "生成1，000个分子",
+        "生成1， 000个分子",
         "Generate 1/2 molecules",
         "Generate 7..5 molecules",
         "Generate 1e molecules",
@@ -256,6 +268,36 @@ def test_count_parser_uses_only_masked_actionable_generation_clauses(query):
 )
 def test_masked_non_actionable_count_defaults_without_rejecting(query):
     assert parse_generation_count(query) == 1
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "For example, analyze CCO and generate 3 molecules",
+        "As an example, analyze CCO and generate 3 molecules",
+        "Explain how to analyze CCO and generate 3 molecules",
+    ],
+)
+def test_explanation_scope_covers_coordinated_generation_clause(query):
+    assert has_generation_intent(query) is False
+    assert parse_generation_count(query) == 1
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "For example, analyze CCO and generate 11 molecules. Generate 3 molecules",
+        "As an example, analyze CCO and generate 11 molecules; but generate 3 molecules",
+        "Explain how to analyze CCO and generate 11 molecules. Instead, generate 3 molecules",
+    ],
+)
+def test_independent_generation_after_scope_reset_remains_actionable(query):
+    assert has_generation_intent(query) is True
+    assert parse_generation_count(query) == 3
+
+
+def test_normal_comma_clause_separator_keeps_generation_count_actionable():
+    assert parse_generation_count("Analyze CCO, generate 3 molecules") == 3
 
 
 @pytest.mark.parametrize(
