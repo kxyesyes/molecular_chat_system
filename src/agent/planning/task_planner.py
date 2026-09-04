@@ -383,16 +383,17 @@ class TaskPlanner:
 
     @classmethod
     def _extract_requested_count(cls, query: str, default: int) -> int:
-        digit_match = re.search(
-            r"(-?\d+)\s*(?:个|种|份|structures?|molecules?|compounds?)",
-            query,
-            re.I,
+        digit_patterns = (
+            r"(-?\d+)\s*(?:个|种|份|structures?\b|molecules?\b|compounds?\b|candidates?\b)",
+            r"\b(?:generate|design|create|produce|make)\s+(-?\d+)\s+for\b",
         )
-        if digit_match:
-            try:
-                return int(digit_match.group(1))
-            except ValueError:
-                return cls.MAX_GENERATION_COUNT + 1
+        for pattern in digit_patterns:
+            digit_match = re.search(pattern, query, re.I)
+            if digit_match:
+                try:
+                    return int(digit_match.group(1))
+                except ValueError:
+                    return cls.MAX_GENERATION_COUNT + 1
 
         chinese_numbers = {
             "一": 1,

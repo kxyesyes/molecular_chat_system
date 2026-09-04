@@ -119,6 +119,56 @@ def test_target_driven_design_rejects_out_of_range_metadata_count():
     assert plan.metadata["reason"] == "requested_count_out_of_range"
 
 
+def test_requested_count_parser_handles_english_candidate_intent_forms():
+    parser = TaskPlanner._extract_requested_count
+
+    assert parser("Design 5 candidates for PDE5A", default=1) == 5
+    assert parser("Generate 10 candidates for PDE5A", default=1) == 10
+    assert parser("Generate 11 for PDE5A", default=1) == 11
+
+
+def test_requested_count_parser_ignores_target_identifiers_and_years():
+    parser = TaskPlanner._extract_requested_count
+
+    assert parser("Design candidates for PDE5A", default=1) == 1
+    assert parser("Design candidates for PDE10A", default=1) == 1
+    assert parser("Design candidates for PDE5A using a 2024 study", default=1) == 1
+
+
+def test_target_driven_design_plans_english_candidate_counts_with_bounds():
+    planner = TaskPlanner()
+
+    five = planner.plan(
+        AgentContext(
+            query="Design 5 candidates for PDE5A",
+            trace_id="trace-english-five",
+            active_skill="target_driven_design",
+        )
+    )
+    ten = planner.plan(
+        AgentContext(
+            query="Generate 10 candidates for PDE5A",
+            trace_id="trace-english-ten",
+            active_skill="target_driven_design",
+        )
+    )
+    eleven = planner.plan(
+        AgentContext(
+            query="Generate 11 for PDE5A",
+            trace_id="trace-english-eleven",
+            active_skill="target_driven_design",
+        )
+    )
+
+    assert five.metadata["requested_count"] == 5
+    assert five.steps
+    assert ten.metadata["requested_count"] == 10
+    assert ten.steps
+    assert eleven.metadata["requested_count"] == 11
+    assert eleven.steps == []
+    assert eleven.metadata["reason"] == "requested_count_out_of_range"
+
+
 def test_comprehensive_target_search_consumes_reverse_target_output():
     planner = TaskPlanner()
 

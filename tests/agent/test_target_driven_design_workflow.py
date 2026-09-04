@@ -135,3 +135,65 @@ def test_target_driven_design_workflow_rejects_count_above_limit_before_tools():
         "requested_count_out_of_range"
     )
     assert agent.tools["llm_molecular_generator"].inputs == []
+
+
+def test_english_candidate_counts_are_propagated_to_generation_binding():
+    planned_tool_names = [
+        "target_database_search",
+        "llm_molecular_generator",
+        "property_calculator",
+        "admet_predictor",
+        "activity_predictor",
+    ]
+
+    for query, expected_count in (
+        ("Design 5 candidates for PDE5A", 5),
+        ("Generate 10 candidates for PDE5A", 10),
+    ):
+        agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+        agent.llm = None
+        agent.max_iterations = 5
+        agent.skill_router = None
+        agent._active_skill = None
+        agent.tools = {name: FakeTool(name) for name in planned_tool_names}
+
+        result = agent.execute(
+            query,
+            active_skill=WorkflowCatalog().require("target_driven_design"),
+        )
+
+        assert result["success"] is True
+        assert result["workflow_plan"]["metadata"]["requested_count"] == (
+            expected_count
+        )
+        generator_input = agent.tools["llm_molecular_generator"].inputs[0]
+        assert generator_input["metadata"]["requested_count"] == expected_count
+
+
+def test_english_count_above_limit_is_rejected_before_tools():
+    planned_tool_names = [
+        "target_database_search",
+        "llm_molecular_generator",
+        "property_calculator",
+        "admet_predictor",
+        "activity_predictor",
+    ]
+    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+    agent.llm = None
+    agent.max_iterations = 5
+    agent.skill_router = None
+    agent._active_skill = None
+    agent.tools = {name: FakeTool(name) for name in planned_tool_names}
+
+    result = agent.execute(
+        "Generate 11 for PDE5A",
+        active_skill=WorkflowCatalog().require("target_driven_design"),
+    )
+
+    assert result["success"] is False
+    assert result["tools_used"] == []
+    assert result["workflow_plan"]["metadata"]["requested_count"] == 11
+    assert result["workflow_plan"]["metadata"]["reason"] == (
+        "requested_count_out_of_range"
+    )
+    assert all(not tool.inputs for tool in agent.tools.values())
