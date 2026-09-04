@@ -186,6 +186,10 @@ def test_requested_count_parser_supports_shared_multilingual_grammar():
         "生成1, 000个分子",
         "生成1，000个分子",
         "生成1， 000个分子",
+        "生成一 1个分子",
+        "生成1 一个分子",
+        "生成一1个分子",
+        "生成1一个分子",
         "Generate 1/2 molecules",
         "Generate 7..5 molecules",
         "Generate 1e molecules",
@@ -279,6 +283,25 @@ def test_masked_non_actionable_count_defaults_without_rejecting(query):
     ],
 )
 def test_explanation_scope_covers_coordinated_generation_clause(query):
+    assert has_generation_intent(query) is False
+    assert parse_generation_count(query) == 1
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Generate 3 molecules and explain how to generate 11 molecules",
+        "Explain how to generate 11 molecules and generate 3 molecules",
+    ],
+)
+def test_count_parser_masks_only_the_explained_generation_occurrence(query):
+    assert has_generation_intent(query) is True
+    assert parse_generation_count(query) == 3
+
+
+def test_pure_generation_explanation_remains_non_actionable():
+    query = "Explain how to generate 11 molecules"
+
     assert has_generation_intent(query) is False
     assert parse_generation_count(query) == 1
 

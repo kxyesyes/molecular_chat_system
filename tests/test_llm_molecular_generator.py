@@ -277,6 +277,10 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
             "生成1 1个分子",
             "生成1\u202f000个分子",
             "生成1， 000个分子",
+            "生成一 1个分子",
+            "生成1 一个分子",
+            "生成一1个分子",
+            "生成1一个分子",
             "Generate two point-five molecules",
         ):
             with self.subTest(query=query):

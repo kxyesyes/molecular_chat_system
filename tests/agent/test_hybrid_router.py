@@ -117,6 +117,19 @@ def test_router_masks_code_and_non_actionable_generation_clauses(query):
     assert decision.selected_skill != "target_driven_design"
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Generate 3 molecules and explain how to generate 11 molecules",
+        "Explain how to generate 11 molecules and generate 3 molecules",
+    ],
+)
+def test_router_retains_actionable_generation_beside_explanation(query):
+    decision = HybridSkillRouter().decide(query)
+
+    assert decision.selected_skill == "molecular_design"
+
+
 def test_admet_prompt_with_negated_generation_clause_stays_admet():
     decision = HybridSkillRouter().decide(
         "Evaluate ADMET for CCO; do not Generate 3 molecules"
@@ -185,6 +198,10 @@ def test_router_rejects_generation_with_bounded_negation_scope(query):
         "生成1 1个分子",
         "生成1\u202f000个分子",
         "生成1， 000个分子",
+        "生成一 1个分子",
+        "生成1 一个分子",
+        "生成一1个分子",
+        "生成1一个分子",
         "Generate two point-five molecules",
     ],
 )

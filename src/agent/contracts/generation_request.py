@@ -210,6 +210,25 @@ _MALFORMED_GROUPED_COUNT_PATTERNS = (
         rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
     ),
 )
+_CHINESE_ARABIC_SEPARATOR = r"[ \t]*(?:[,，][ \t]*)?"
+_CHINESE_ARABIC_HYBRID_COUNT = (
+    rf"(?:{_CHINESE_COUNT}{_CHINESE_ARABIC_SEPARATOR}\d+|"
+    rf"\d+{_CHINESE_ARABIC_SEPARATOR}{_CHINESE_COUNT})"
+    rf"(?:{_CHINESE_ARABIC_SEPARATOR}(?:{_CHINESE_COUNT}|\d+))*"
+)
+_MALFORMED_HYBRID_COUNT_PATTERNS = (
+    re.compile(
+        rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
+        rf"(?P<count>{_CHINESE_ARABIC_HYBRID_COUNT})"
+        rf"\s*(?:个|种|份)?\s*"
+        rf"(?:{_CHINESE_PRE_NOUN_MODIFIER}\s*){{0,2}}"
+        rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
+    ),
+)
+_MALFORMED_PREMASK_COUNT_PATTERNS = (
+    *_MALFORMED_GROUPED_COUNT_PATTERNS,
+    *_MALFORMED_HYBRID_COUNT_PATTERNS,
+)
 _MALFORMED_WORD_COUNT_PATTERNS = (
     re.compile(
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*{_ENGLISH_DECIMAL_PART}"
@@ -293,14 +312,14 @@ def validate_generation_count(value: Any, *, field: str = "requested_count") -> 
 
 def parse_generation_count(query: str, *, default: int = DEFAULT_GENERATION_COUNT) -> int:
     unquoted = _strip_generation_literals(query)
-    grouped_count_present = any(
+    malformed_premask_count_present = any(
         pattern.search(unquoted)
-        for pattern in _MALFORMED_GROUPED_COUNT_PATTERNS
+        for pattern in _MALFORMED_PREMASK_COUNT_PATTERNS
     )
     query = _mask_non_actionable_generation_text(query)
-    if grouped_count_present and any(
+    if malformed_premask_count_present and any(
         pattern.search(query)
-        for pattern in _MALFORMED_GROUPED_COUNT_PATTERNS
+        for pattern in _MALFORMED_PREMASK_COUNT_PATTERNS
     ):
         raise GenerationRequestError("generation count must be an integer")
     if any(pattern.search(query) for pattern in _MALFORMED_WORD_COUNT_PATTERNS):
@@ -339,6 +358,10 @@ def _matches_generation_grammar(value: str) -> bool:
         )
         or any(
             pattern.search(value)
+            for pattern in _MALFORMED_HYBRID_COUNT_PATTERNS
+        )
+        or any(
+            pattern.search(value)
             for pattern in _MALFORMED_WORD_COUNT_PATTERNS
         )
         or any(pattern.search(value) for pattern, _value in _FUZZY_COUNTS)
@@ -349,13 +372,9 @@ def _mask_non_actionable_generation_text(query: str) -> str:
     unquoted = _strip_generation_literals(query)
     actionable_clauses: list[str] = []
     for clause in _split_generation_clauses(unquoted):
-        if not _matches_generation_grammar(clause):
-            actionable_clauses.append(clause)
-            continue
-        if _is_non_actionable_generation_clause(clause):
-            actionable_clauses.append(" ")
-            continue
-        actionable_clauses.append(clause)
+        actionable_clauses.append(
+            _mask_non_actionable_generation_occurrences(clause)
+        )
     return ";".join(actionable_clauses)
 
 
@@ -382,6 +401,7 @@ def _split_generation_clauses(value: str) -> list[str]:
         *_COUNT_SLOT_PATTERNS,
         *_COUNT_PATTERNS,
         *_MALFORMED_GROUPED_COUNT_PATTERNS,
+        *_MALFORMED_HYBRID_COUNT_PATTERNS,
         *_MALFORMED_WORD_COUNT_PATTERNS,
     ):
         for match in pattern.finditer(value):
@@ -425,58 +445,116 @@ def _split_generation_clauses(value: str) -> list[str]:
     )
 
 
-def _is_non_actionable_generation_clause(clause: str) -> bool:
+def _generation_occurrence_spans(value: str) -> list[tuple[int, int]]:
+    matches: list[tuple[int, int]] = []
+    for pattern in (
+        *_COUNT_SLOT_PATTERNS,
+        *_MALFORMED_GROUPED_COUNT_PATTERNS,
+        *_MALFORMED_HYBRID_COUNT_PATTERNS,
+        *_MALFORMED_WORD_COUNT_PATTERNS,
+        *(pattern for pattern, _value in _FUZZY_COUNTS),
+    ):
+        matches.extend(match.span() for match in pattern.finditer(value))
+    if not matches:
+        return []
+
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(matches):
+        if merged and start < merged[-1][1]:
+            previous_start, previous_end = merged[-1]
+            merged[-1] = (previous_start, max(previous_end, end))
+            continue
+        merged.append((start, end))
+    return merged
+
+
+def _mask_non_actionable_generation_occurrences(clause: str) -> str:
+    spans = _generation_occurrence_spans(clause)
+    if not spans:
+        return clause
+
+    masked = list(clause)
+    previous_end = 0
+    negation_active = False
+    for index, (start, end) in enumerate(spans):
+        next_start = (
+            spans[index + 1][0]
+            if index + 1 < len(spans)
+            else len(clause)
+        )
+        prefix_window = clause[previous_end:end]
+        suffix_window = clause[start:next_start]
+        negation_active = negation_active or _has_generation_negation(
+            prefix_window
+        )
+        if (
+            negation_active
+            or _has_generation_example_prefix(prefix_window)
+            or _has_generation_example_suffix(suffix_window)
+        ):
+            masked[start:end] = " " * (end - start)
+        previous_end = end
+    return "".join(masked)
+
+
+def _has_generation_negation(value: str) -> bool:
     english_negation = (
         r"(?:do\s+not|don['’]t|dont|can(?:not|['’]t)|never|"
         r"not(?:\s+to)?|without)"
     )
-    english_example = (
-        r"(?:for\s+example|as\s+an?\s+example|such\s+as|"
-        r"explain(?:ing)?|illustrat(?:e|ing)|example|phrase|instruction|command)"
-    )
-    english_suffix = r"(?:as\s+an?\s+example|for\s+example)"
-    negated_generation = re.search(
+    if re.search(
         rf"(?i)\b{english_negation}\b"
         rf"(?:[ \t]+[A-Za-z0-9][A-Za-z0-9'’_-]*){{0,5}}"
         rf"[ \t]+\b{_GENERATION_VERB}\b",
-        clause,
-    )
-    if negated_generation and not re.search(
-        rf"(?i)\b{_GENERATION_VERB}\b",
-        clause[: negated_generation.start()],
-    ):
-        return True
-    if re.search(
-        rf"(?i)\b{english_example}\b[^;.!?]{{0,80}}\b{_GENERATION_VERB}\b",
-        clause,
-    ):
-        return True
-    if re.search(
-        rf"(?i)\b{_GENERATION_VERB}\b[^;.!?]{{0,80}}\b{english_suffix}\b",
-        clause,
+        value,
     ):
         return True
     chinese_verb = r"(?:生成|创建|设计|制作|构建|合成|给我|提供)"
     chinese_target_scope = (
         rf"(?:(?:为|针对|给)\s*{_CHINESE_REFERENCE}\s*)"
     )
+    return bool(
+        re.search(
+            rf"(?:请勿|勿|不要|无需|不需要|禁止|别|不可|不能|不"
+            rf")\s*(?:(?:再|要)\s*|{chinese_target_scope}){{0,2}}"
+            rf"{chinese_verb}",
+            value,
+        )
+    )
+
+
+def _has_generation_example_prefix(value: str) -> bool:
+    english_example = (
+        r"(?:for\s+example|as\s+an?\s+example|such\s+as|"
+        r"explain(?:ing)?|illustrat(?:e|ing)|example|phrase|instruction|command)"
+    )
     if re.search(
-        rf"(?:请勿|勿|不要|无需|不需要|禁止|别|不可|不能|不"
-        rf")\s*(?:(?:再|要)\s*|{chinese_target_scope}){{0,2}}"
-        rf"{chinese_verb}",
-        clause,
+        rf"(?i)\b{english_example}\b[^;.!?]{{0,80}}\b{_GENERATION_VERB}\b",
+        value,
     ):
         return True
+    chinese_verb = r"(?:生成|创建|设计|制作|构建|合成|给我|提供)"
+    return bool(
+        re.search(
+            rf"(?:例如|比如|示例|例子|解释|说明)"
+            rf"[^；。！？]{{0,48}}{chinese_verb}",
+            value,
+        )
+    )
+
+
+def _has_generation_example_suffix(value: str) -> bool:
+    english_suffix = r"(?:as\s+an?\s+example|for\s+example)"
     if re.search(
-        rf"(?:例如|比如|示例|例子|解释|说明)"
-        rf"[^；。！？]{{0,48}}{chinese_verb}",
-        clause,
+        rf"(?i)\b{_GENERATION_VERB}\b[^;.!?]{{0,80}}\b{english_suffix}\b",
+        value,
     ):
         return True
+    chinese_verb = r"(?:生成|创建|设计|制作|构建|合成|给我|提供)"
     return bool(
         re.search(
             rf"{chinese_verb}[^；。！？]{{0,48}}(?:作为|当作)(?:一个)?示例",
-            clause,
+            value,
         )
     )
 

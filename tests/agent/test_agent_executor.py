@@ -148,10 +148,32 @@ def test_agent_executor_does_not_generate_within_explanation_scope(
 @pytest.mark.parametrize(
     "query",
     [
+        "Generate 3 molecules and explain how to generate 11 molecules",
+        "Explain how to generate 11 molecules and generate 3 molecules",
+    ],
+)
+def test_agent_executor_uses_only_actionable_generation_occurrence(
+    monkeypatch, query
+):
+    agent, model = _build_agent(monkeypatch)
+
+    result = agent.execute(query)
+
+    assert result["success"] is True
+    assert "Task: provide 3 valid" in model.prompts[0]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
         "Generate 1, 000 molecules",
         "生成1 1个分子",
         "生成1\u202f000个分子",
         "生成1， 000个分子",
+        "生成一 1个分子",
+        "生成1 一个分子",
+        "生成一1个分子",
+        "生成1一个分子",
     ],
 )
 def test_agent_executor_rejects_grouped_counts_before_all_tools(monkeypatch, query):
