@@ -100,6 +100,11 @@ def test_router_ignores_quoted_generation_examples():
         "Explain ```Generate 3 molecules``` as an example",
         "Explain this example:\n```text\nGenerate 3 molecules\n```",
         "Do not generate 3 molecules; explain ADMET for CCO",
+        "Don’t generate 3 molecules; explain ADMET for CCO",
+        "Can't generate 3 molecules; explain ADMET for CCO",
+        "Cannot generate 3 molecules; explain ADMET for CCO",
+        "请勿生成三个分子；解释 CCO 的 ADMET",
+        "不生成三个分子；解释 CCO 的 ADMET",
         "For example, generate 3 molecules when teaching prompt syntax",
     ],
 )
@@ -114,6 +119,13 @@ def test_admet_prompt_with_negated_generation_clause_stays_admet():
         "Evaluate ADMET for CCO; do not Generate 3 molecules"
     )
     assert decision.selected_skill == "admet_assessment"
+
+
+def test_later_affirmative_generation_clause_remains_actionable():
+    decision = HybridSkillRouter().decide(
+        "Don’t generate 11 molecules; Generate 3 molecules"
+    )
+    assert decision.selected_skill == "molecular_design"
 
 
 def test_accepted_routing_feedback_adjusts_future_decision(tmp_path):

@@ -1,7 +1,10 @@
 import pytest
 
 from src.agent.contracts import AgentContext
-from src.agent.contracts.generation_request import GenerationRequestError
+from src.agent.contracts.generation_request import (
+    GenerationRequestError,
+    parse_generation_count,
+)
 from src.agent.planning.task_planner import TaskPlanner
 from src.agent.tooling import build_tool_registry
 from src.agent.tools.rag_search_tool import RAGSearchTool
@@ -219,6 +222,37 @@ def test_spaced_word_decimal_is_not_inferred_across_clauses_or_plain_prose():
         "阿司匹林有 5 个已知作用；生成候选分子",
         default=1,
     ) == 1
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Explain `Generate 11 molecules`; Generate 3 molecules",
+        "Explain this example:\n```text\nGenerate 11 molecules\n```\nGenerate 3 molecules",
+        "Do not generate 11 molecules; Generate 3 molecules",
+        "Don’t generate 11 molecules; Generate 3 molecules",
+        "Can't generate 11 molecules; Generate 3 molecules",
+        "Cannot generate 11 molecules; Generate 3 molecules",
+        "请勿生成十一个分子；生成三个分子",
+        "不生成十一个分子；生成三个分子",
+    ],
+)
+def test_count_parser_uses_only_masked_actionable_generation_clauses(query):
+    assert parse_generation_count(query) == 3
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Explain `Generate 11 molecules` as an example",
+        "Don't generate 11 molecules",
+        "Can’t generate 11 molecules",
+        "请勿生成十一个分子",
+        "不生成十一个分子",
+    ],
+)
+def test_masked_non_actionable_count_defaults_without_rejecting(query):
+    assert parse_generation_count(query) == 1
 
 
 def test_year_in_count_position_is_explicit_and_rejected_by_planner():

@@ -220,6 +220,23 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
         self.assertEqual(result["quality"]["requested_count"], 2)
         self.assertEqual(len(result["data"]), 2)
 
+    def test_legacy_request_uses_only_actionable_generation_clause_count(self):
+        llm = CapturingLLM()
+        generator = LLMMolecularGenerator(llm_model=llm)
+
+        with (
+            mock.patch.object(generator, "_check_rdkit", return_value=True),
+            mock.patch.object(generator, "validate_smiles", return_value=True),
+            mock.patch.object(generator_module, "RDKIT_AVAILABLE", False),
+        ):
+            result = generator.execute(
+                "Explain `Generate 11 molecules`; Generate 3 molecules"
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["quality"]["requested_count"], 3)
+        self.assertIn("provide 3 valid", llm.prompts[0])
+
     def test_invalid_structured_requested_counts_fail_without_calling_model(self):
         invalid_counts = ("10", True, False, None, 0, -1, 11, 1.5)
 

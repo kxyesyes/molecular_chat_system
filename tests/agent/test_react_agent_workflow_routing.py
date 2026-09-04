@@ -346,6 +346,10 @@ def test_react_generation_helpers_share_quoted_canonical_grammar():
         "Explain `Generate 3 molecules` as an example",
         "Explain ```Generate 3 molecules``` as an example",
         "Do not generate 3 molecules; explain the syntax",
+        "Don’t generate 3 molecules; explain the syntax",
+        "Cannot generate 3 molecules; explain the syntax",
+        "请勿生成三个分子；解释语法",
+        "不生成三个分子；解释语法",
     ],
 )
 def test_react_masks_non_actionable_generation_before_tool_selection(query):

@@ -127,9 +127,15 @@ def test_agent_executor_valid_mixed_generation_behavior_is_unchanged(monkeypatch
     "query",
     [
         "Explain `Generate 3 molecules` as an example",
+        "Explain `Generate 11 molecules` as an example",
         "Explain ```Generate 3 molecules``` as an example",
         "Explain this example:\n```\nGenerate 3 molecules\n```",
         "Do not generate 3 molecules; explain the syntax",
+        "Don’t generate 3 molecules; explain the syntax",
+        "Can't generate 3 molecules; explain the syntax",
+        "Cannot generate 3 molecules; explain the syntax",
+        "请勿生成三个分子；解释语法",
+        "不生成三个分子；解释语法",
     ],
 )
 def test_agent_executor_masks_non_actionable_generation_examples(monkeypatch, query):

@@ -312,6 +312,124 @@ def test_query_count_is_materialized_into_supplied_workflow_request():
     assert generator.calls[0]["metadata"]["requested_count"] == 7
 
 
+def test_structured_step_count_precedes_omitted_context_query_count():
+    generator = FakeTool("llm_molecular_generator")
+    plan = WorkflowPlan(
+        workflow_name="molecular_design",
+        steps=[
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_data={
+                    "query": "Generate candidates",
+                    "metadata": {"requested_count": 7},
+                    "outputs": {},
+                },
+                capability="molecule.generate",
+            )
+        ],
+    )
+
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="Design candidates",
+            trace_id="step-count-authoritative",
+            active_skill="molecular_design",
+        ),
+        policy=WorkflowPolicy(
+            name="molecular_design",
+            description="test",
+            allowed_tools=("llm_molecular_generator",),
+        ),
+        all_tools={generator.name: generator},
+        plan=plan,
+    )
+
+    assert execution.tool_attempt_count == 1
+    assert execution.plan.metadata["requested_count"] == 7
+    assert generator.calls[0]["metadata"]["requested_count"] == 7
+
+
+@pytest.mark.parametrize("requested_count", ["7", True, 0, 11])
+def test_malformed_structured_step_count_rejects_before_tool(requested_count):
+    generator = FakeTool("llm_molecular_generator")
+    plan = WorkflowPlan(
+        workflow_name="molecular_design",
+        steps=[
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_data={
+                    "query": "Generate candidates",
+                    "metadata": {"requested_count": requested_count},
+                    "outputs": {},
+                },
+                capability="molecule.generate",
+            )
+        ],
+    )
+
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="Design candidates",
+            trace_id="step-count-invalid",
+            active_skill="molecular_design",
+        ),
+        policy=WorkflowPolicy(
+            name="molecular_design",
+            description="test",
+            allowed_tools=("llm_molecular_generator",),
+        ),
+        all_tools={generator.name: generator},
+        plan=plan,
+    )
+
+    assert execution.result.success is False
+    assert execution.result.error.code == AgentErrorCode.INVALID_INPUT
+    assert execution.tool_attempt_count == 0
+    assert generator.calls == []
+
+
+def test_context_and_structured_step_count_conflict_rejects_before_tool():
+    generator = FakeTool("llm_molecular_generator")
+    plan = WorkflowPlan(
+        workflow_name="molecular_design",
+        steps=[
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_data={
+                    "query": "Generate candidates",
+                    "metadata": {"requested_count": 7},
+                    "outputs": {},
+                },
+                capability="molecule.generate",
+            )
+        ],
+    )
+
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="Design candidates",
+            trace_id="context-step-count-conflict",
+            active_skill="molecular_design",
+            metadata={"requested_count": 5},
+        ),
+        policy=WorkflowPolicy(
+            name="molecular_design",
+            description="test",
+            allowed_tools=("llm_molecular_generator",),
+        ),
+        all_tools={generator.name: generator},
+        plan=plan,
+    )
+
+    assert execution.result.success is False
+    assert execution.result.error.code == AgentErrorCode.VALIDATION_ERROR
+    assert execution.tool_attempt_count == 0
+    assert generator.calls == []
+
+
 class SingleStepPlanner:
     def plan(self, context):
         return WorkflowPlan(

@@ -268,7 +268,7 @@ def validate_generation_count(value: Any, *, field: str = "requested_count") -> 
 
 
 def parse_generation_count(query: str, *, default: int = DEFAULT_GENERATION_COUNT) -> int:
-    query = unicodedata.normalize("NFKC", str(query))
+    query = _mask_non_actionable_generation_text(query)
     if any(pattern.search(query) for pattern in _MALFORMED_WORD_COUNT_PATTERNS):
         raise GenerationRequestError("generation count must be an integer")
     for pattern in _COUNT_PATTERNS:
@@ -334,7 +334,8 @@ def _mask_non_actionable_generation_text(query: str) -> str:
 
 def _is_non_actionable_generation_clause(clause: str) -> bool:
     english_prefix = (
-        r"(?:do\s+not|don't|dont|never|not(?:\s+to)?|without|"
+        r"(?:do\s+not|don['’]t|dont|can(?:not|['’]t)|never|"
+        r"not(?:\s+to)?|without|"
         r"for\s+example|as\s+an?\s+example|e\.g\.|such\s+as|"
         r"explain(?:ing)?|illustrat(?:e|ing)|example|phrase|instruction|command)"
     )
@@ -351,7 +352,8 @@ def _is_non_actionable_generation_clause(clause: str) -> bool:
         return True
     chinese_verb = r"(?:生成|创建|设计|制作|构建|合成|给我|提供)"
     if re.search(
-        rf"(?:不要|无需|不需要|禁止|别|例如|比如|示例|例子|解释|说明)"
+        rf"(?:请勿|勿|不要|无需|不需要|禁止|别|不可|不能|不|"
+        rf"例如|比如|示例|例子|解释|说明)"
         rf"[^；。！？]{{0,48}}{chinese_verb}",
         clause,
     ):

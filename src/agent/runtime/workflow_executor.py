@@ -260,14 +260,30 @@ class WorkflowExecutor:
                     context_snapshot.metadata["requested_count"]
                 )
             else:
-                try:
-                    effective_plan.metadata["requested_count"] = (
-                        parse_generation_count(context_snapshot.query)
+                step_counts = [
+                    step.input_data["metadata"]["requested_count"]
+                    for step in effective_plan.steps
+                    if (
+                        step.tool_name == "llm_molecular_generator"
+                        or step.capability == "molecule.generate"
                     )
-                except GenerationRequestError:
-                    # Materialize an invalid sentinel so the common preflight
-                    # validator rejects before any upstream workflow tool runs.
-                    effective_plan.metadata["requested_count"] = None
+                    and isinstance(step.input_data, Mapping)
+                    and isinstance(step.input_data.get("metadata"), Mapping)
+                    and "requested_count" in step.input_data["metadata"]
+                ]
+                if step_counts:
+                    effective_plan.metadata["requested_count"] = deepcopy(
+                        step_counts[0]
+                    )
+                else:
+                    try:
+                        effective_plan.metadata["requested_count"] = (
+                            parse_generation_count(context_snapshot.query)
+                        )
+                    except GenerationRequestError:
+                        # Materialize an invalid sentinel so the common preflight
+                        # validator rejects before any upstream workflow tool runs.
+                        effective_plan.metadata["requested_count"] = None
         plan_request_metadata = {
             key: effective_plan.metadata[key]
             for key in ("requested_count",)
