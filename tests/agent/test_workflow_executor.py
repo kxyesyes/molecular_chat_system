@@ -206,6 +206,51 @@ def test_context_count_is_preflighted_when_generation_plan_omits_count():
     assert generator.calls == []
 
 
+def test_query_count_is_preflighted_when_supplied_generation_plan_omits_count():
+    target = FakeTool("target_database_search")
+    generator = FakeTool("llm_molecular_generator")
+    plan = WorkflowPlan(
+        workflow_name="target_driven_design",
+        steps=[
+            WorkflowStep(
+                "target_search",
+                "target_database_search",
+                input_data="PDE5A",
+                output_key="target",
+                capability="target.structure.search",
+            ),
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_binding="$.workflow",
+                capability="molecule.generate",
+                preconditions=("target_evidence",),
+            ),
+        ],
+    )
+
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="Generate 11 molecules for PDE5A",
+            trace_id="query-invalid-count",
+            active_skill="target_driven_design",
+        ),
+        policy=WorkflowPolicy(
+            name="target_driven_design",
+            description="test",
+            allowed_tools=("target_database_search", "llm_molecular_generator"),
+        ),
+        all_tools={target.name: target, generator.name: generator},
+        plan=plan,
+    )
+
+    assert execution.result.success is False
+    assert execution.result.error.code == AgentErrorCode.INVALID_INPUT
+    assert execution.tool_attempt_count == 0
+    assert target.calls == []
+    assert generator.calls == []
+
+
 class StaticResultTool(FakeTool):
     def __init__(self, name, data):
         super().__init__(name)
@@ -219,6 +264,52 @@ class StaticResultTool(FakeTool):
             "data": self.data,
             "formatted": self.name,
         }
+
+
+def test_query_count_is_materialized_into_supplied_workflow_request():
+    target = StaticResultTool(
+        "target_database_search",
+        [{"gene_symbol": "PDE5A", "source": "UniProt"}],
+    )
+    generator = FakeTool("llm_molecular_generator")
+    plan = WorkflowPlan(
+        workflow_name="target_driven_design",
+        steps=[
+            WorkflowStep(
+                "target_search",
+                "target_database_search",
+                input_data="PDE5A",
+                output_key="target",
+                capability="target.structure.search",
+            ),
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_binding="$.workflow",
+                capability="molecule.generate",
+                preconditions=("target_evidence",),
+            ),
+        ],
+    )
+
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="Generate 7 molecules for PDE5A",
+            trace_id="query-valid-count",
+            active_skill="target_driven_design",
+        ),
+        policy=WorkflowPolicy(
+            name="target_driven_design",
+            description="test",
+            allowed_tools=("target_database_search", "llm_molecular_generator"),
+        ),
+        all_tools={target.name: target, generator.name: generator},
+        plan=plan,
+    )
+
+    assert execution.tool_attempt_count == 2
+    assert execution.plan.metadata["requested_count"] == 7
+    assert generator.calls[0]["metadata"]["requested_count"] == 7
 
 
 class SingleStepPlanner:

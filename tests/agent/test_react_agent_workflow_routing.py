@@ -1,3 +1,5 @@
+import pytest
+
 from src.agent.react_agent import ReActMolecularAgent
 from src.agent.workflows import WorkflowCatalog
 
@@ -336,3 +338,42 @@ def test_react_generation_helpers_share_quoted_canonical_grammar():
     fallback = agent._intelligent_fallback_response(malformed)
     assert "Invalid molecular generation request" in fallback
     assert "行动: llm_molecular_generator" not in fallback
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Explain `Generate 3 molecules` as an example",
+        "Explain ```Generate 3 molecules``` as an example",
+        "Do not generate 3 molecules; explain the syntax",
+    ],
+)
+def test_react_masks_non_actionable_generation_before_tool_selection(query):
+    class CanonicalGenerator:
+        name = "llm_molecular_generator"
+
+        def __init__(self):
+            self.calls = []
+
+        def should_use(self, query):
+            from src.agent.contracts.generation_request import has_generation_intent
+
+            return has_generation_intent(query)
+
+        def execute(self, query):
+            self.calls.append(query)
+            return {"success": True, "formatted": "generated"}
+
+    generator = CanonicalGenerator()
+    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+    agent.llm = None
+    agent.tools = {generator.name: generator}
+    agent.max_iterations = 2
+    agent.skill_router = None
+    agent._active_skill = None
+
+    response = agent.execute(query)
+
+    assert response["success"] is True
+    assert response["tools_used"] == []
+    assert generator.calls == []

@@ -121,3 +121,22 @@ def test_agent_executor_valid_mixed_generation_behavior_is_unchanged(monkeypatch
     assert result["success"] is True
     assert other_tool.calls == ["Analyze CCO and Generate 3 molecules"]
     assert "Task: provide 3 valid" in model.prompts[0]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Explain `Generate 3 molecules` as an example",
+        "Explain ```Generate 3 molecules``` as an example",
+        "Explain this example:\n```\nGenerate 3 molecules\n```",
+        "Do not generate 3 molecules; explain the syntax",
+    ],
+)
+def test_agent_executor_masks_non_actionable_generation_examples(monkeypatch, query):
+    agent, model = _build_agent(monkeypatch)
+
+    result = agent.execute(query)
+
+    assert result["success"] is False
+    assert result["message"] == "No relevant tools found for this query"
+    assert model.prompts == []

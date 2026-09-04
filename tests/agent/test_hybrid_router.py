@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.router import SkillRouter
 from src.agent.routing import HybridSkillRouter
@@ -89,6 +91,29 @@ def test_router_ignores_quoted_generation_examples():
     )
 
     assert decision.selected_skill != "molecular_design"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Explain `Generate 3 molecules` as an example",
+        "Explain ```Generate 3 molecules``` as an example",
+        "Explain this example:\n```text\nGenerate 3 molecules\n```",
+        "Do not generate 3 molecules; explain ADMET for CCO",
+        "For example, generate 3 molecules when teaching prompt syntax",
+    ],
+)
+def test_router_masks_code_and_non_actionable_generation_clauses(query):
+    decision = HybridSkillRouter().decide(query)
+    assert decision.selected_skill != "molecular_design"
+    assert decision.selected_skill != "target_driven_design"
+
+
+def test_admet_prompt_with_negated_generation_clause_stays_admet():
+    decision = HybridSkillRouter().decide(
+        "Evaluate ADMET for CCO; do not Generate 3 molecules"
+    )
+    assert decision.selected_skill == "admet_assessment"
 
 
 def test_accepted_routing_feedback_adjusts_future_decision(tmp_path):

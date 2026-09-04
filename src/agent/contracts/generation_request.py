@@ -100,8 +100,21 @@ _CREDENTIAL_PATTERN = re.compile(
     r"secret|password)\b(?:\s*[:=]|\Z)|(?:^|[_ -])(?:token|secret|password)"
     r"(?:$|[_ -]))"
 )
-_SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9.:-]{0,79}\Z")
+_SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
 _SAFE_GENE_SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,19}\Z")
+_UNIPROT_ACCESSION = re.compile(
+    r"(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})\Z",
+    re.IGNORECASE,
+)
+_RCSB_STRUCTURE_ID = re.compile(r"[0-9][A-Z0-9]{3}\Z", re.IGNORECASE)
+_ALPHAFOLD_STRUCTURE_ID = re.compile(
+    rf"AF-(?:{_UNIPROT_ACCESSION.pattern[:-2]})-F[0-9]+\Z",
+    re.IGNORECASE,
+)
+_LOCAL_RECORD_ID = re.compile(
+    r"(?:LOCAL|TARGETDB|TARGET_DATABASE)[._-][A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z",
+    re.IGNORECASE,
+)
 _OFFICIAL_EVIDENCE_HOSTS = frozenset(
     {
         "alphafold.ebi.ac.uk",
@@ -126,7 +139,28 @@ _ENGLISH_NOUN = r"(?:candidates?|molecules?|compounds?|structures?)"
 _GENERATION_VERB = r"(?:generate|design|create|produce|make|build)"
 _ENGLISH_COUNT_MODIFIER = r"(?:new|novel|candidate|drug-like)"
 _CHINESE_COUNT_MODIFIER = r"(?:新(?:的)?|全新(?:的)?|新颖(?:的)?)"
+_CHINESE_REFERENCE = r"[A-Za-z0-9\u3400-\u9fff-]{1,24}"
+_CHINESE_REFERENCE_MODIFIER = (
+    rf"(?:类似\s*{_CHINESE_REFERENCE}\s*的|"
+    rf"与\s*{_CHINESE_REFERENCE}\s*类似的|"
+    rf"基于\s*{_CHINESE_REFERENCE}\s*的|"
+    rf"针对\s*{_CHINESE_REFERENCE}\s*的|"
+    rf"以\s*{_CHINESE_REFERENCE}\s*为基础的)"
+)
+_CHINESE_PRE_NOUN_MODIFIER = (
+    rf"(?:{_CHINESE_COUNT_MODIFIER}|{_CHINESE_REFERENCE_MODIFIER})"
+)
+_CHINESE_TARGET_PREFIX = r"(?:[A-Za-z][A-Za-z0-9-]{0,19}\s*)?"
+_CHINESE_REPEAT_PREFIX = (
+    rf"(?:生成|创建|设计|制作|构建|合成)\s*{_COUNT_TOKEN}\s*次"
+    rf"\s*[、,，]?\s*每次\s*"
+)
 _COUNT_PATTERNS = (
+    re.compile(
+        rf"{_CHINESE_REPEAT_PREFIX}(?P<count>{_COUNT_TOKEN})"
+        rf"\s*(?:个|种|份)?\s*{_CHINESE_TARGET_PREFIX}"
+        rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选))"
+    ),
     re.compile(
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?P<count>{_COUNT_TOKEN})"
         rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
@@ -135,11 +169,17 @@ _COUNT_PATTERNS = (
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
         rf"(?P<count>{_COUNT_TOKEN})\s*(?:个|种|份)?\s*"
-        rf"(?:{_CHINESE_COUNT_MODIFIER}\s*){{0,2}}"
+        rf"(?:{_CHINESE_PRE_NOUN_MODIFIER}\s*){{0,2}}"
         rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
     ),
 )
 _COUNT_SLOT_PATTERNS = (
+    re.compile(
+        rf"{_CHINESE_REPEAT_PREFIX}"
+        rf"(?P<count>[^\s个种份，。；、！？\"']+)\s*(?:个|种|份)?\s*"
+        rf"{_CHINESE_TARGET_PREFIX}"
+        rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选))"
+    ),
     re.compile(
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?P<count>[^\s;!?\"']+)"
         rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
@@ -148,7 +188,7 @@ _COUNT_SLOT_PATTERNS = (
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
         rf"(?P<count>[^\s个种份，。；、！？\"']+)\s*(?:个|种|份)?\s*"
-        rf"(?:{_CHINESE_COUNT_MODIFIER}\s*){{0,2}}"
+        rf"(?:{_CHINESE_PRE_NOUN_MODIFIER}\s*){{0,2}}"
         rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
     ),
 )
@@ -163,7 +203,7 @@ _MALFORMED_WORD_COUNT_PATTERNS = (
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
         rf"{_CHINESE_DECIMAL_PART}\s*点\s*{_CHINESE_DECIMAL_PART}"
         rf"\s*(?:个|种|份)?\s*"
-        rf"(?:{_CHINESE_COUNT_MODIFIER}\s*){{0,2}}"
+        rf"(?:{_CHINESE_PRE_NOUN_MODIFIER}\s*){{0,2}}"
         rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
     ),
 )
@@ -251,25 +291,88 @@ def parse_generation_count(query: str, *, default: int = DEFAULT_GENERATION_COUN
 
 
 def has_generation_intent(query: str) -> bool:
-    """Recognize generation grammar without treating quoted examples as requests."""
+    """Recognize actionable generation grammar, excluding examples and code."""
+    actionable = _mask_non_actionable_generation_text(query)
+    return _matches_generation_grammar(actionable)
+
+
+def _matches_generation_grammar(value: str) -> bool:
+    return (
+        any(pattern.search(value) for pattern in _COUNT_SLOT_PATTERNS)
+        or any(
+            pattern.search(value)
+            for pattern in _MALFORMED_WORD_COUNT_PATTERNS
+        )
+        or any(pattern.search(value) for pattern, _value in _FUZZY_COUNTS)
+    )
+
+
+def _mask_non_actionable_generation_text(query: str) -> str:
     normalized = unicodedata.normalize("NFKC", str(query))
-    unquoted = re.sub(
-        r'"[^"\r\n]*"|“[^”\r\n]*”|\'[^\'\r\n]*\'|‘[^’\r\n]*’',
+    without_code = re.sub(
+        r"```[\s\S]*?```|~~~[\s\S]*?~~~",
         " ",
         normalized,
     )
-    return (
-        any(pattern.search(unquoted) for pattern in _COUNT_SLOT_PATTERNS)
-        or any(
-            pattern.search(unquoted)
-            for pattern in _MALFORMED_WORD_COUNT_PATTERNS
+    without_code = re.sub(r"(?<!`)`[^`\r\n]+`(?!`)", " ", without_code)
+    unquoted = re.sub(
+        r'"[^"\r\n]*"|“[^”\r\n]*”|\'[^\'\r\n]*\'|‘[^’\r\n]*’',
+        " ",
+        without_code,
+    )
+    actionable_clauses: list[str] = []
+    for clause in re.split(r"[;；!?。！？\r\n]+", unquoted):
+        if not _matches_generation_grammar(clause):
+            actionable_clauses.append(clause)
+            continue
+        if _is_non_actionable_generation_clause(clause):
+            actionable_clauses.append(" ")
+            continue
+        actionable_clauses.append(clause)
+    return ";".join(actionable_clauses)
+
+
+def _is_non_actionable_generation_clause(clause: str) -> bool:
+    english_prefix = (
+        r"(?:do\s+not|don't|dont|never|not(?:\s+to)?|without|"
+        r"for\s+example|as\s+an?\s+example|e\.g\.|such\s+as|"
+        r"explain(?:ing)?|illustrat(?:e|ing)|example|phrase|instruction|command)"
+    )
+    english_suffix = r"(?:as\s+an?\s+example|for\s+example)"
+    if re.search(
+        rf"(?i)\b{english_prefix}\b[^;.!?]{{0,80}}\b{_GENERATION_VERB}\b",
+        clause,
+    ):
+        return True
+    if re.search(
+        rf"(?i)\b{_GENERATION_VERB}\b[^;.!?]{{0,80}}\b{english_suffix}\b",
+        clause,
+    ):
+        return True
+    chinese_verb = r"(?:生成|创建|设计|制作|构建|合成|给我|提供)"
+    if re.search(
+        rf"(?:不要|无需|不需要|禁止|别|例如|比如|示例|例子|解释|说明)"
+        rf"[^；。！？]{{0,48}}{chinese_verb}",
+        clause,
+    ):
+        return True
+    return bool(
+        re.search(
+            rf"{chinese_verb}[^；。！？]{{0,48}}(?:作为|当作)(?:一个)?示例",
+            clause,
         )
-        or any(pattern.search(unquoted) for pattern, _value in _FUZZY_COUNTS)
     )
 
 
 def _looks_numeric_like_count_token(token: str) -> bool:
-    normalized = unicodedata.normalize("NFKC", token).strip().casefold()
+    normalized = (
+        unicodedata.normalize("NFKC", token)
+        .strip()
+        .casefold()
+        .replace("\u2212", "-")
+    )
+    if re.fullmatch(r"[-+]?(?:nan|inf(?:inity)?|∞)", normalized):
+        return True
     if re.match(r"^(?:[-+\u2212.]*)\d", normalized):
         return True
     english_number = (
@@ -279,7 +382,12 @@ def _looks_numeric_like_count_token(token: str) -> bool:
     )
     if re.match(rf"^{english_number}(?:\.|-|_?point(?:-|_)?)", normalized):
         return True
-    return bool(re.match(rf"^{_CHINESE_COUNT}点", normalized))
+    return bool(
+        re.match(
+            rf"^(?:{_CHINESE_COUNT}|\d+)(?:点|\.)(?:{_CHINESE_COUNT}|\d+)",
+            normalized,
+        )
+    )
 
 
 def _parse_count_token(token: str) -> int | None:
@@ -592,6 +700,18 @@ def _sanitize_target_record(
     if safe_artifacts:
         record["artifacts"] = safe_artifacts
 
+    if not _filter_source_specific_identifiers(
+        record,
+        fields=(
+            "target_identifier",
+            "uniprot_id",
+            "target_id",
+            "source_record_id",
+        ),
+        allow_nested_source=True,
+    ):
+        return {}
+
     has_identifier = any(field in record for field in _IDENTIFIER_FIELDS) or any(
         record.get(field)
         for field in ("recommended_structures", "evidence", "artifacts")
@@ -604,6 +724,11 @@ def _sanitize_target_record(
 
 def _sanitize_structure_record(value: Mapping[str, Any]) -> dict[str, Any]:
     record = _sanitize_text_fields(value, _STRUCTURE_TEXT_FIELDS)
+    if not _filter_source_specific_identifiers(
+        record,
+        fields=("structure_id", "source_record_id"),
+    ):
+        return {}
     resolution = value.get("resolution")
     if (
         isinstance(resolution, (int, float))
@@ -631,6 +756,11 @@ def _sanitize_evidence_record(value: Mapping[str, Any]) -> dict[str, Any]:
     )
     if isinstance(value.get("stale"), bool):
         record["stale"] = value["stale"]
+    if not _filter_source_specific_identifiers(
+        record,
+        fields=("id", "source_record_id", "structure_id", "uniprot_id"),
+    ):
+        return {}
     has_identifier = any(
         key in record
         for key in ("id", "source_record_id", "structure_id", "uniprot_id")
@@ -698,6 +828,175 @@ def _safe_text(
     return normalized if pattern.fullmatch(normalized) else None
 
 
+def _filter_source_specific_identifiers(
+    record: dict[str, Any],
+    *,
+    fields: Sequence[str],
+    allow_nested_source: bool = False,
+) -> bool:
+    source_kind, conflict = _record_source_kind(record)
+    if conflict:
+        return False
+    if source_kind is None and allow_nested_source:
+        nested_kinds = _nested_source_kinds(record)
+        if len(nested_kinds) == 1:
+            source_kind = next(iter(nested_kinds))
+
+    for field in fields:
+        identifier = record.get(field)
+        if not isinstance(identifier, str):
+            continue
+        if not _identifier_matches_source(field, identifier, source_kind):
+            record.pop(field, None)
+    if not _record_identifiers_match_urls(record, fields, source_kind):
+        return False
+    return True
+
+
+def _record_source_kind(record: Mapping[str, Any]) -> tuple[str | None, bool]:
+    kinds: set[str] = set()
+    for field in ("source", "database"):
+        value = record.get(field)
+        if not isinstance(value, str):
+            continue
+        normalized = value.casefold()
+        if normalized in {"uniprot"}:
+            kinds.add("uniprot")
+        elif normalized in {"pdb", "rcsb", "rcsb_pdb"}:
+            kinds.add("rcsb")
+        elif normalized == "alphafold":
+            kinds.add("alphafold")
+        elif normalized in {"local", "local_target_db", "target_database"}:
+            kinds.add("local")
+        elif normalized == "official":
+            kinds.add("official")
+    for field in ("source_url", "download_url"):
+        value = record.get(field)
+        if not isinstance(value, str):
+            continue
+        host = urlsplit(value).hostname
+        if host == "www.uniprot.org":
+            kinds.add("uniprot")
+        elif host in {"www.rcsb.org", "files.rcsb.org"}:
+            kinds.add("rcsb")
+        elif host == "alphafold.ebi.ac.uk":
+            kinds.add("alphafold")
+    if "official" in kinds and len(kinds) > 1:
+        kinds.remove("official")
+    return (next(iter(kinds)), False) if len(kinds) == 1 else (None, len(kinds) > 1)
+
+
+def _nested_source_kinds(record: Mapping[str, Any]) -> set[str]:
+    kinds: set[str] = set()
+    for field in ("recommended_structures", "evidence", "artifacts"):
+        value = record.get(field)
+        if not _is_sequence(value):
+            continue
+        for item in value:
+            if not isinstance(item, Mapping):
+                continue
+            kind, conflict = _record_source_kind(item)
+            if not conflict and kind not in {None, "official"}:
+                kinds.add(kind)
+    return kinds
+
+
+def _identifier_matches_source(
+    field: str,
+    identifier: str,
+    source_kind: str | None,
+) -> bool:
+    if field == "uniprot_id":
+        return source_kind in {None, "official", "uniprot", "alphafold"} and bool(
+            _UNIPROT_ACCESSION.fullmatch(identifier)
+        )
+    if source_kind == "uniprot":
+        return bool(_UNIPROT_ACCESSION.fullmatch(identifier))
+    if source_kind == "rcsb":
+        return bool(_RCSB_STRUCTURE_ID.fullmatch(identifier))
+    if source_kind == "alphafold":
+        return bool(_ALPHAFOLD_STRUCTURE_ID.fullmatch(identifier))
+    if source_kind == "local":
+        return bool(_LOCAL_RECORD_ID.fullmatch(identifier))
+    if source_kind in {None, "official"}:
+        return any(
+            pattern.fullmatch(identifier)
+            for pattern in (
+                _UNIPROT_ACCESSION,
+                _RCSB_STRUCTURE_ID,
+                _ALPHAFOLD_STRUCTURE_ID,
+            )
+        )
+    return False
+
+
+def _record_identifiers_match_urls(
+    record: Mapping[str, Any],
+    fields: Sequence[str],
+    source_kind: str | None,
+) -> bool:
+    if source_kind not in {"uniprot", "rcsb", "alphafold"}:
+        return True
+    identifiers = {
+        canonical
+        for field in fields
+        if isinstance(record.get(field), str)
+        and (
+            canonical := _canonical_source_identifier(
+                str(record[field]), source_kind
+            )
+        )
+    }
+    url_identifiers = {
+        canonical
+        for field in ("source_url", "download_url")
+        if isinstance(record.get(field), str)
+        and (
+            canonical := _canonical_url_identifier(
+                str(record[field]), source_kind
+            )
+        )
+    }
+    return (
+        len(identifiers) <= 1
+        and len(url_identifiers) <= 1
+        and (not identifiers or not url_identifiers or identifiers == url_identifiers)
+    )
+
+
+def _canonical_source_identifier(identifier: str, source_kind: str) -> str | None:
+    normalized = identifier.upper()
+    if source_kind == "alphafold":
+        match = re.fullmatch(r"AF-(.+)-F[0-9]+", normalized)
+        return match.group(1) if match else None
+    return normalized
+
+
+def _canonical_url_identifier(value: str, source_kind: str) -> str | None:
+    parsed = urlsplit(value)
+    if source_kind == "uniprot":
+        match = re.fullmatch(r"/uniprotkb/([^/]+)/entry", parsed.path)
+        return match.group(1).upper() if match else None
+    if source_kind == "rcsb":
+        match = re.fullmatch(r"/structure/([^/]+)", parsed.path)
+        if match:
+            return match.group(1).upper()
+        match = re.fullmatch(r"/download/([^/]+)\.(?:cif|pdb)", parsed.path, re.I)
+        if match:
+            return match.group(1).upper()
+        match = re.fullmatch(r"request=([^&]+)", parsed.query)
+        return match.group(1).upper() if match else None
+    match = re.fullmatch(r"/entry/([^/]+)", parsed.path)
+    if match:
+        return match.group(1).upper()
+    match = re.fullmatch(
+        r"/files/AF-(.+)-F[0-9]+-model_v[1-9][0-9]*\.(?:cif|pdb)",
+        parsed.path,
+        re.I,
+    )
+    return match.group(1).upper() if match else None
+
+
 def _is_official_evidence_url(value: str) -> bool:
     if len(value) > 256:
         return False
@@ -714,28 +1013,39 @@ def _is_official_evidence_url(value: str) -> bool:
             return False
     except ValueError:
         return False
-    identifier = r"[A-Za-z0-9][A-Za-z0-9.:-]{0,79}"
     if parsed.hostname == "www.uniprot.org":
         return bool(
             not parsed.query
-            and re.fullmatch(rf"/uniprotkb/{identifier}/entry", parsed.path)
+            and re.fullmatch(
+                rf"/uniprotkb/{_UNIPROT_ACCESSION.pattern[:-2]}/entry",
+                parsed.path,
+                re.IGNORECASE,
+            )
         )
     if parsed.hostname == "www.rcsb.org":
         return bool(
             (
                 not parsed.query
-                and re.fullmatch(rf"/structure/{identifier}", parsed.path)
+                and re.fullmatch(
+                    rf"/structure/{_RCSB_STRUCTURE_ID.pattern[:-2]}",
+                    parsed.path,
+                    re.IGNORECASE,
+                )
             )
             or (
                 parsed.path == "/search"
-                and re.fullmatch(rf"request={identifier}", parsed.query)
+                and re.fullmatch(
+                    rf"request={_RCSB_STRUCTURE_ID.pattern[:-2]}",
+                    parsed.query,
+                    re.IGNORECASE,
+                )
             )
         )
     if parsed.hostname == "files.rcsb.org":
         return bool(
             not parsed.query
             and re.fullmatch(
-                rf"/download/{identifier}\.(?:cif|pdb)",
+                rf"/download/{_RCSB_STRUCTURE_ID.pattern[:-2]}\.(?:cif|pdb)",
                 parsed.path,
                 re.IGNORECASE,
             )
@@ -743,9 +1053,13 @@ def _is_official_evidence_url(value: str) -> bool:
     return bool(
         not parsed.query
         and (
-            re.fullmatch(rf"/entry/{identifier}", parsed.path)
+            re.fullmatch(
+                rf"/entry/{_UNIPROT_ACCESSION.pattern[:-2]}",
+                parsed.path,
+                re.IGNORECASE,
+            )
             or re.fullmatch(
-                rf"/files/AF-{identifier}-F1-model_v[1-9][0-9]*\.(?:cif|pdb)",
+                rf"/files/AF-{_UNIPROT_ACCESSION.pattern[:-2]}-F1-model_v[1-9][0-9]*\.(?:cif|pdb)",
                 parsed.path,
                 re.IGNORECASE,
             )

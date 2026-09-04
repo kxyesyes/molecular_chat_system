@@ -235,6 +235,9 @@ def test_supervisor_atomic_invalid_count_is_invalid_input_before_tool():
         ("Generate five point five molecules", None),
         ("Generate five point 5 molecules", None),
         ("Generate 5 point five molecules", None),
+        ("Generate NaN molecules", None),
+        ("Generate Infinity molecules", None),
+        ("生成五.五个分子", None),
         ("生成五 点 五个分子", None),
         ("生成五 点 5 个分子", None),
     ],
@@ -523,5 +526,11 @@ def test_supervisor_run_executes_the_single_prechecked_plan():
     assert result["plan"]["steps"][0]["tool_name"] == (
         "llm_molecular_generator"
     )
-    assert generator.calls == ["generate one molecule"]
+    assert generator.calls == [
+        {
+            "query": "generate one molecule",
+            "metadata": {"requested_count": 1},
+            "outputs": {},
+        }
+    ]
     assert property_tool.calls == []

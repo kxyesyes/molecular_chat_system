@@ -148,6 +148,10 @@ def test_requested_count_parser_supports_shared_multilingual_grammar():
     assert parser("Generate 5 new molecules", default=1) == 5
     assert parser("Design 7 novel candidate compounds", default=1) == 7
     assert parser("生成五个新的候选分子", default=1) == 5
+    assert parser("生成 5 个类似阿司匹林的候选分子 SMILES", default=1) == 5
+    assert parser("生成五个与阿司匹林类似的候选分子", default=1) == 5
+    assert parser("生成 4 个基于PDE5A的候选结构", default=1) == 4
+    assert parser("请连续生成 3 次、每次 5 个 PDE5 候选分子", default=1) == 5
     assert parser("Generate +7 molecules", default=1) == 7
     assert parser("Generate ７ molecules", default=1) == 7
 
@@ -185,6 +189,16 @@ def test_requested_count_parser_supports_shared_multilingual_grammar():
         "生成5点五个分子",
         "生成五 点 5 个分子",
         "生成5 点 五个分子",
+        "生成五.五个分子",
+        "Generate NaN molecules",
+        "Generate Infinity molecules",
+        "Generate -Infinity molecules",
+        "Generate −Infinity molecules",
+        "Generate +NaN molecules",
+        "Generate ＮａＮ molecules",
+        "生成 NaN 个分子",
+        "生成 ∞ 个分子",
+        "生成 −∞ 个分子",
     ],
 )
 def test_requested_count_parser_rejects_clause_local_malformed_numbers(query):
@@ -199,6 +213,10 @@ def test_spaced_word_decimal_is_not_inferred_across_clauses_or_plain_prose():
     ) == 1
     assert TaskPlanner._extract_requested_count(
         "The assay score was five point five in 2024",
+        default=1,
+    ) == 1
+    assert TaskPlanner._extract_requested_count(
+        "阿司匹林有 5 个已知作用；生成候选分子",
         default=1,
     ) == 1
 

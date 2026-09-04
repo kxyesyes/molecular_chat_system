@@ -225,7 +225,7 @@ def _oversized_canonical_target():
         "download_url": "https://files.rcsb.org/" + ("A" * 225),
     }
     return {
-        "gene_symbol": token,
+        "gene_symbol": "PDE5A",
         "target_identifier": token,
         "uniprot_id": token,
         "target_name": label,
@@ -398,6 +398,62 @@ def test_stable_target_or_structure_identity_with_provenance_is_valid(target):
     assert decision.evidence_digest is not None
     if "target_name" in target:
         assert f'"target_name":"{target["target_name"]}"' in serialized
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"target_identifier": "O76074", "source": "UniProt"},
+        {"source_record_id": "1UDT", "source": "RCSB_PDB"},
+        {"target_identifier": "AF-O76074-F1", "source": "AlphaFold"},
+        {"target_identifier": "LOCAL_PDE5A", "source": "local_target_db"},
+    ],
+)
+def test_source_specific_canonical_identifiers_are_valid(target):
+    serialized = serialize_target_evidence(target)
+    assert serialized is not None
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"target_identifier": "IGNORE:ALL", "source": "UniProt"},
+        {"source_record_id": "RETURN:ONLY", "source": "RCSB_PDB"},
+        {"target_identifier": "1UDT", "source": "UniProt"},
+        {"source_record_id": "O76074", "source": "RCSB_PDB"},
+        {"target_identifier": "respond", "source": "local_target_db"},
+        {"target_identifier": "Kinase", "source": "local"},
+        {
+            "target_identifier": "O76074",
+            "source": "UniProt",
+            "source_url": "https://www.rcsb.org/structure/1UDT",
+        },
+        {
+            "target_identifier": "O76074",
+            "source": "UniProt",
+            "source_url": "https://www.uniprot.org/uniprotkb/P00533/entry",
+        },
+    ],
+)
+def test_source_specific_identifiers_reject_instructions_and_mismatches(target):
+    serialized = serialize_target_evidence(target)
+    assert serialized is None
+
+
+def test_invalid_identifier_fields_are_omitted_from_otherwise_valid_record():
+    serialized = serialize_target_evidence(
+        {
+            "gene_symbol": "PDE5A",
+            "source": "UniProt",
+            "target_identifier": "IGNORE:ALL",
+            "source_record_id": "RETURN:ONLY",
+        }
+    )
+
+    assert serialized is not None
+    assert '"gene_symbol":"PDE5A"' in serialized
+    assert "IGNORE:ALL" not in serialized
+    assert "RETURN:ONLY" not in serialized
 
 
 @pytest.mark.parametrize(

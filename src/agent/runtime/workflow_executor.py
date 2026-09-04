@@ -16,6 +16,7 @@ from src.agent.contracts import (
 )
 from src.agent.contracts.generation_request import (
     GenerationRequestError,
+    parse_generation_count,
     validate_generation_count,
 )
 from src.agent.planning import (
@@ -250,16 +251,23 @@ class WorkflowExecutor:
         effective_plan = _copy_boundary(plan_snapshot, "effective plan")
         has_generation_step = any(
             step.tool_name == "llm_molecular_generator"
+            or step.capability == "molecule.generate"
             for step in effective_plan.steps
         )
-        if (
-            has_generation_step
-            and "requested_count" not in effective_plan.metadata
-            and "requested_count" in context_snapshot.metadata
-        ):
-            effective_plan.metadata["requested_count"] = deepcopy(
-                context_snapshot.metadata["requested_count"]
-            )
+        if has_generation_step and "requested_count" not in effective_plan.metadata:
+            if "requested_count" in context_snapshot.metadata:
+                effective_plan.metadata["requested_count"] = deepcopy(
+                    context_snapshot.metadata["requested_count"]
+                )
+            else:
+                try:
+                    effective_plan.metadata["requested_count"] = (
+                        parse_generation_count(context_snapshot.query)
+                    )
+                except GenerationRequestError:
+                    # Materialize an invalid sentinel so the common preflight
+                    # validator rejects before any upstream workflow tool runs.
+                    effective_plan.metadata["requested_count"] = None
         plan_request_metadata = {
             key: effective_plan.metadata[key]
             for key in ("requested_count",)
