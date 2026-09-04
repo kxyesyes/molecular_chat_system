@@ -320,6 +320,7 @@ def test_plan_metadata_is_carried_into_workflow_binding_during_execution():
             query="generate 2 molecules for PDE5A",
             trace_id="plan-metadata-workflow-binding",
             active_skill="target_driven_design",
+            metadata={"requested_count": 2, "secret": "must-not-bind"},
         ),
         policy=policy,
         all_tools={
@@ -329,9 +330,13 @@ def test_plan_metadata_is_carried_into_workflow_binding_during_execution():
         plan=plan,
     )
 
-    assert execution.result.success is True
+    assert execution.tool_attempt_count == 2
     assert generator.calls[0]["query"] == "generate 2 molecules for PDE5A"
     assert generator.calls[0]["metadata"]["requested_count"] == 7
+    assert "secret" not in generator.calls[0]["metadata"]
+    assert execution.result.metadata["workflow_state"]["inputs"][
+        "requested_count"
+    ] == 7
     assert generator.calls[0]["outputs"]["target"] == [
         {"gene_symbol": "PDE5A", "source": "UniProt"}
     ]

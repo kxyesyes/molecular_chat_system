@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 import re
 from typing import Any
 
@@ -22,11 +23,26 @@ class BindingResolver:
         if selector == "$.request.query":
             value = request.get("query")
         elif selector == "$.workflow":
-            value = {
-                "query": request.get("query"),
-                "metadata": dict(request.get("metadata") or {}),
-                "outputs": dict(outputs),
-            }
+            request_metadata = request.get("metadata")
+            metadata = (
+                {
+                    "requested_count": request_metadata["requested_count"]
+                }
+                if isinstance(request_metadata, Mapping)
+                and "requested_count" in request_metadata
+                else {}
+            )
+            value = deepcopy(
+                {
+                    "query": request.get("query"),
+                    "metadata": metadata,
+                    "outputs": (
+                        {"target": outputs["target"]}
+                        if "target" in outputs
+                        else {}
+                    ),
+                }
+            )
         else:
             match = self.OUTPUT.fullmatch(selector)
             if not match:

@@ -31,8 +31,21 @@ def test_binding_resolver_preserves_raw_target_records():
 
 
 def test_binding_resolver_returns_isolated_structured_workflow_payload():
-    metadata = {"requested_count": 10}
-    outputs = {"target": [{"gene_symbol": "PDE5A", "source": "UniProt"}]}
+    metadata = {
+        "requested_count": 10,
+        "capabilities": {"scientific_tools": True},
+        "secret": "must-not-bind",
+    }
+    outputs = {
+        "target": [
+            {
+                "gene_symbol": "PDE5A",
+                "source": "UniProt",
+                "quality": {"status": "official"},
+            }
+        ],
+        "unrelated": {"secret": "must-not-bind"},
+    }
 
     value = BindingResolver().resolve(
         "$.workflow",
@@ -45,15 +58,21 @@ def test_binding_resolver_returns_isolated_structured_workflow_payload():
         "query": "设计 10 个",
         "metadata": {"requested_count": 10},
         "outputs": {
-            "target": [{"gene_symbol": "PDE5A", "source": "UniProt"}]
+            "target": [
+                {
+                    "gene_symbol": "PDE5A",
+                    "source": "UniProt",
+                    "quality": {"status": "official"},
+                }
+            ]
         },
     }
     assert value["metadata"] is not metadata
     assert value["outputs"] is not outputs
     value["metadata"]["requested_count"] = 3
-    value["outputs"]["extra"] = "new"
-    assert metadata == {"requested_count": 10}
-    assert "extra" not in outputs
+    value["outputs"]["target"][0]["quality"]["status"] = "mutated"
+    assert metadata["requested_count"] == 10
+    assert outputs["target"][0]["quality"]["status"] == "official"
 
 
 def test_binding_resolver_rejects_untrusted_selector_syntax():

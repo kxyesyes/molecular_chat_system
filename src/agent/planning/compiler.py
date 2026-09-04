@@ -5,6 +5,10 @@ from dataclasses import dataclass
 import re
 
 from src.agent.capabilities import capability_for_tool, get_capability
+from src.agent.contracts.generation_request import (
+    GenerationRequestError,
+    validate_generation_count,
+)
 from src.agent.workflows import WorkflowPolicy
 
 from .task_planner import WorkflowPlan
@@ -25,6 +29,15 @@ class PlanCompiler:
     SUPPORTED_PRECONDITIONS = frozenset({"target_evidence"})
 
     def compile(self, plan: WorkflowPlan, policy: WorkflowPolicy) -> CompiledPlan:
+        if any(step.input_binding == "$.workflow" for step in plan.steps):
+            if "requested_count" in plan.metadata:
+                try:
+                    validate_generation_count(
+                        plan.metadata["requested_count"],
+                        field="plan.metadata.requested_count",
+                    )
+                except GenerationRequestError as exc:
+                    raise PlanCompilationError(str(exc)) from None
         seen_steps: set[str] = set()
         producers: dict[str, str] = {}
         producer_capabilities: dict[str, str] = {}

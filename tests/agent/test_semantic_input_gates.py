@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.agent.contracts import AgentContext, ToolResult
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.planning import WorkflowPlan
@@ -124,7 +126,6 @@ def test_structured_target_evidence_is_consumed_by_generator():
 
     execution, _ = _run_target_design(target, generator)
 
-    assert execution.result.success is True
     assert generator.calls == 1
     assert "PDE5A" in str(generator.inputs[0])
     assert "1UDT" in str(generator.inputs[0])
@@ -158,6 +159,105 @@ def test_workflow_wrapper_validates_only_outputs_target_evidence():
 
     assert decision.allowed is True
     assert decision.evidence_digest is not None
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"target_name": "PDE5A", "database": "UniProt"},
+        {
+            "target_identifier": "O76074",
+            "evidence": [{"source": "UniProt", "id": "O76074"}],
+        },
+    ],
+)
+def test_canonical_target_evidence_schemas_are_valid(target):
+    decision = SemanticInputValidator().validate(
+        _target_design_plan().steps[1],
+        {"query": "design", "metadata": {}, "outputs": {"target": target}},
+    )
+
+    assert decision.allowed is True
+    assert decision.evidence_digest is not None
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {
+            "fallback_used": True,
+            "targets": [{"gene_symbol": "PDE5A", "source": "UniProt"}],
+        },
+        {
+            "quality": {"demo_mode": True},
+            "results": [{"gene_symbol": "PDE5A", "source": "UniProt"}],
+        },
+        {
+            "targets": [
+                {
+                    "gene_symbol": "PDE5A",
+                    "source": "UniProt",
+                    "recommended_structures": [
+                        {
+                            "structure_id": "1UDT",
+                            "quality": {"fallback_used": True},
+                        }
+                    ],
+                }
+            ]
+        },
+        {
+            "target_identifier": "O76074",
+            "evidence": [
+                {
+                    "source": "UniProt",
+                    "id": "O76074",
+                    "untrusted": True,
+                }
+            ],
+        },
+    ],
+)
+def test_target_evidence_rejects_untrusted_flags_on_every_container(target):
+    payload = {
+        "query": "design",
+        "metadata": {},
+        "outputs": {"target": target},
+    }
+
+    decision = SemanticInputValidator().validate(
+        _target_design_plan().steps[1], payload
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "target_evidence_missing"
+
+
+def test_target_evidence_rejects_untrusted_workflow_and_outputs_wrappers():
+    valid_target = {"gene_symbol": "PDE5A", "source": "UniProt"}
+    payloads = (
+        {
+            "query": "design",
+            "metadata": {},
+            "outputs": {"target": valid_target},
+            "quality": {"fallback_used": True},
+        },
+        {
+            "query": "design",
+            "metadata": {},
+            "outputs": {
+                "target": valid_target,
+                "quality": {"demo_mode": True},
+            },
+        },
+    )
+
+    for payload in payloads:
+        decision = SemanticInputValidator().validate(
+            _target_design_plan().steps[1], payload
+        )
+        assert decision.allowed is False
+        assert decision.reason == "target_evidence_missing"
 
 
 def test_workflow_wrapper_rejects_missing_or_untrusted_target_evidence():

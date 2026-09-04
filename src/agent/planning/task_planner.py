@@ -5,6 +5,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.agent.contracts import AgentContext
+from src.agent.contracts.generation_request import (
+    DEFAULT_GENERATION_COUNT,
+    GenerationRequestError,
+    MAX_GENERATION_COUNT,
+    MIN_GENERATION_COUNT,
+    parse_generation_count,
+    validate_generation_count,
+)
 from src.agent.orchestrators.base import WorkflowStep
 
 
@@ -18,9 +26,9 @@ class WorkflowPlan:
 class TaskPlanner:
     """Convert routed skills and user text into deterministic workflow plans."""
 
-    MIN_GENERATION_COUNT = 1
-    MAX_GENERATION_COUNT = 10
-    DEFAULT_GENERATION_COUNT = 1
+    MIN_GENERATION_COUNT = MIN_GENERATION_COUNT
+    MAX_GENERATION_COUNT = MAX_GENERATION_COUNT
+    DEFAULT_GENERATION_COUNT = DEFAULT_GENERATION_COUNT
 
     def plan(self, context: AgentContext) -> WorkflowPlan:
         skill = context.active_skill or ""
@@ -208,24 +216,20 @@ class TaskPlanner:
                 default=self.DEFAULT_GENERATION_COUNT,
             )
         )
-        if (
-            isinstance(requested_count, bool)
-            or not isinstance(requested_count, int)
-        ):
-            return self._rejected_target_count_plan(
-                target_hint,
-                requested_count,
-                reason="invalid_requested_count",
+        try:
+            requested_count = validate_generation_count(requested_count)
+        except GenerationRequestError:
+            invalid_type = isinstance(requested_count, bool) or not isinstance(
+                requested_count, int
             )
-        if not (
-            self.MIN_GENERATION_COUNT
-            <= requested_count
-            <= self.MAX_GENERATION_COUNT
-        ):
             return self._rejected_target_count_plan(
                 target_hint,
                 requested_count,
-                reason="requested_count_out_of_range",
+                reason=(
+                    "invalid_requested_count"
+                    if invalid_type
+                    else "requested_count_out_of_range"
+                ),
             )
         docking_top_n = self._extract_top_n(query, default=min(5, requested_count))
         return WorkflowPlan(
@@ -383,35 +387,7 @@ class TaskPlanner:
 
     @classmethod
     def _extract_requested_count(cls, query: str, default: int) -> int:
-        digit_patterns = (
-            r"(-?\d+)\s*(?:个|种|份|structures?\b|molecules?\b|compounds?\b|candidates?\b)",
-            r"\b(?:generate|design|create|produce|make)\s+(-?\d+)\s+for\b",
-        )
-        for pattern in digit_patterns:
-            digit_match = re.search(pattern, query, re.I)
-            if digit_match:
-                try:
-                    return int(digit_match.group(1))
-                except ValueError:
-                    return cls.MAX_GENERATION_COUNT + 1
-
-        chinese_numbers = {
-            "一": 1,
-            "二": 2,
-            "三": 3,
-            "四": 4,
-            "五": 5,
-            "六": 6,
-            "七": 7,
-            "八": 8,
-            "九": 9,
-            "十": 10,
-            "二十": 20,
-        }
-        for text, value in sorted(chinese_numbers.items(), key=lambda item: len(item[0]), reverse=True):
-            if f"{text}个" in query:
-                return value
-        return default
+        return parse_generation_count(query, default=default)
 
     @staticmethod
     def _extract_top_n(query: str, default: int) -> int:

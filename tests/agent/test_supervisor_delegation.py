@@ -4,6 +4,10 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from src.agent.contracts import AgentContext
+from src.agent.orchestrators import WorkflowStep
+from src.agent.planning import WorkflowPlan
+from src.agent.planning.task_planner import TaskPlanner
 from src.agent.specialists import SpecialistAgent, build_default_specialists
 from src.agent.supervisor import SupervisorAgent
 from src.agent.tooling import (
@@ -159,6 +163,111 @@ def test_supervisor_delegates_each_step_to_declared_specialist():
     assert result["result"]["tool_results_by_step"][property_step]["tool_name"] == (
         "property_calculator"
     )
+
+
+def test_delegated_supervisor_uses_prepared_authoritative_count_metadata():
+    registry, tools = build_registry()
+    supervisor = SupervisorAgent(
+        tool_registry=registry,
+        specialists=build_default_specialists(),
+    )
+
+    result = supervisor.run(
+        "Produce 5 for PDE5A",
+        skill_name="target_driven_design",
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["plan"]["metadata"]["requested_count"] == 5
+    assert result["result"]["metadata"]["request_metadata"] == {
+        "requested_count": 5
+    }
+    assert tools["llm_molecular_generator"].calls[0]["metadata"] == {
+        "requested_count": 5
+    }
+
+
+def test_delegated_plan_count_overrides_conflicting_context_metadata():
+    authoritative_plan = TaskPlanner().plan(
+        AgentContext(
+            query="Design candidates for PDE5A",
+            trace_id="build-authoritative-plan",
+            active_skill="target_driven_design",
+            metadata={"requested_count": 5},
+        )
+    )
+
+    class FixedPlanner:
+        @staticmethod
+        def plan(_context):
+            return authoritative_plan
+
+    registry, tools = build_registry()
+    supervisor = SupervisorAgent(
+        planner=FixedPlanner(),
+        tool_registry=registry,
+        specialists=build_default_specialists(),
+    )
+
+    result = supervisor.run(
+        "Design candidates for PDE5A",
+        skill_name="target_driven_design",
+        metadata={"requested_count": 2, "secret": "must-not-bind"},
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["plan"]["metadata"]["requested_count"] == 5
+    assert result["result"]["metadata"]["request_metadata"] == {
+        "requested_count": 5
+    }
+    assert tools["llm_molecular_generator"].calls[0]["metadata"] == {
+        "requested_count": 5
+    }
+
+
+def test_delegated_invalid_compiled_count_fails_before_target_invocation():
+    invalid_plan = WorkflowPlan(
+        workflow_name="target_driven_design",
+        metadata={"requested_count": 11},
+        steps=[
+            WorkflowStep(
+                "target_search",
+                "target_database_search",
+                input_data="PDE5A",
+                output_key="target",
+                capability="target.structure.search",
+            ),
+            WorkflowStep(
+                "molecule_generation",
+                "llm_molecular_generator",
+                input_binding="$.workflow",
+                capability="molecule.generate",
+                preconditions=("target_evidence",),
+            ),
+        ],
+    )
+
+    class InvalidPlanner:
+        @staticmethod
+        def plan(_context):
+            return invalid_plan
+
+    registry, tools = build_registry()
+    supervisor = SupervisorAgent(
+        planner=InvalidPlanner(),
+        tool_registry=registry,
+        specialists=build_default_specialists(),
+    )
+
+    result = supervisor.run(
+        "Design candidates for PDE5A",
+        skill_name="target_driven_design",
+    )
+
+    assert result["status"] == "failed"
+    assert result["result"]["error"]["code"] == "validation_error"
+    assert "requested_count" in result["result"]["metadata"]["preflight"]["reason"]
+    assert all(tool.calls == [] for tool in tools.values())
 
 
 def test_supervisor_delegates_reverse_target_output_to_target_search():

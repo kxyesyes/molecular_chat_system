@@ -169,8 +169,7 @@ class PreparedWorkflow:
             _PREPARED_INPUTS_ARE_SNAPSHOTS.reset(token)
 
     def create_session(self):
-        self._consume()
-        context, plan = self._execution_payload.rebuild()
+        context, plan = self.consume_execution_inputs()
         return self.orchestrator.create_session(
             context=context,
             steps=plan.steps,
@@ -180,8 +179,7 @@ class PreparedWorkflow:
         )
 
     def _run(self) -> AgentResult:
-        self._consume()
-        context, plan = self._execution_payload.rebuild()
+        context, plan = self.consume_execution_inputs()
         return self.orchestrator.run(
             context=context,
             steps=plan.steps,
@@ -189,6 +187,11 @@ class PreparedWorkflow:
             continue_on_error=False,
             idempotency_key=self.idempotency_key,
         )
+
+    def consume_execution_inputs(self) -> tuple[AgentContext, WorkflowPlan]:
+        """Consume this preflight result and return isolated authoritative inputs."""
+        self._consume()
+        return self._execution_payload.rebuild()
 
     def _consume(self) -> None:
         with self._consume_lock:
@@ -244,8 +247,8 @@ class WorkflowExecutor:
         context_snapshot = replace(
             context_snapshot,
             metadata={
-                **plan_request_metadata,
                 **context_snapshot.metadata,
+                **plan_request_metadata,
             },
         )
         if type(self).preflight is WorkflowExecutor.preflight:

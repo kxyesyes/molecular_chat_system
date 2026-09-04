@@ -112,6 +112,35 @@ def test_compiler_rejects_workflow_binding_without_exact_target_output():
         )
 
 
+@pytest.mark.parametrize("requested_count", [True, "5", 0, -1, 11])
+def test_compiler_rejects_invalid_workflow_requested_count(requested_count):
+    plan = WorkflowPlan(
+        workflow_name="target_driven_design",
+        metadata={"requested_count": requested_count},
+        steps=[
+            WorkflowStep(
+                "target_search",
+                "target_database_search",
+                output_key="target",
+                capability="target.structure.search",
+            ),
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_binding="$.workflow",
+                capability="molecule.generate",
+                preconditions=("target_evidence",),
+            ),
+        ],
+    )
+
+    with pytest.raises(PlanCompilationError, match="requested_count"):
+        PlanCompiler().compile(
+            plan,
+            WorkflowCatalog().require("target_driven_design"),
+        )
+
+
 def test_compiler_rejects_unknown_selector_when_workflow_binding_is_supported():
     plan = WorkflowPlan(
         workflow_name="target_driven_design",

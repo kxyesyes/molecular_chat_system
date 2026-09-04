@@ -66,7 +66,11 @@ class _DelegatedWorkflowExecutor:
         if isinstance(prepared, WorkflowExecution):
             return prepared
         assert isinstance(prepared, PreparedWorkflow)
-        execution = self.supervisor._run_delegated(context, prepared.plan)
+        execution_context, execution_plan = prepared.consume_execution_inputs()
+        execution = self.supervisor._run_delegated(
+            execution_context,
+            execution_plan,
+        )
         execution.compiled_dependencies = prepared.compiled.dependencies
         return execution
 
@@ -671,6 +675,11 @@ class SupervisorAgent:
             metadata={
                 "skipped_steps": skipped_steps,
                 "semantic_evidence": semantic_evidence,
+                "request_metadata": {
+                    "requested_count": context.metadata["requested_count"]
+                }
+                if "requested_count" in context.metadata
+                else {},
                 "_harness_delegations": delegations,
             },
             error=(

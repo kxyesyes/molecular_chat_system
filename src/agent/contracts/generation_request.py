@@ -1,0 +1,426 @@
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+
+MIN_GENERATION_COUNT = 1
+MAX_GENERATION_COUNT = 10
+DEFAULT_GENERATION_COUNT = 1
+MAX_TARGET_RECORDS = 3
+MAX_TARGET_STRUCTURES = 2
+MAX_EVIDENCE_ITEMS = 3
+MAX_EVIDENCE_CHARS = 4096
+
+
+class GenerationRequestError(ValueError):
+    """A caller-supplied generation request violates the public contract."""
+
+
+class TargetEvidenceError(GenerationRequestError):
+    """Target evidence is unsafe or cannot satisfy the canonical schema."""
+
+
+_PLACEHOLDERS = frozenset({"", "none", "null", "n/a", "unknown"})
+_UNTRUSTED_TRUE_FLAGS = frozenset(
+    {"demo_mode", "fallback_used", "is_demo", "fallback", "untrusted"}
+)
+_UNTRUSTED_FALSE_FLAGS = frozenset({"trusted", "authoritative"})
+_TARGET_TEXT_FIELDS = (
+    "gene_symbol",
+    "target_identifier",
+    "uniprot_id",
+    "target_name",
+    "target_id",
+    "source_record_id",
+    "target_type",
+    "structure_evidence_status",
+    "source",
+    "database",
+)
+_STRUCTURE_TEXT_FIELDS = (
+    "structure_id",
+    "source",
+    "database",
+    "source_record_id",
+    "structure_type",
+    "method",
+)
+_EVIDENCE_TEXT_FIELDS = (
+    "source",
+    "database",
+    "id",
+    "source_record_id",
+    "structure_id",
+    "uniprot_id",
+    "status",
+    "artifact_type",
+    "label",
+)
+_IDENTIFIER_FIELDS = frozenset(
+    {"gene_symbol", "target_identifier", "uniprot_id", "target_name", "target_id"}
+)
+_PROVENANCE_FIELDS = frozenset(
+    {
+        "source",
+        "database",
+        "uniprot_id",
+        "recommended_structures",
+        "evidence",
+        "artifacts",
+    }
+)
+_INSTRUCTION_PATTERN = re.compile(
+    r"(?i)(ignore(?:_all)?(?:\s|_)*(?:all(?:\s|_)*)?(?:previous(?:\s|_)*)?"
+    r"instructions?|system(?:\s|_)*prompt|do(?:\s|_)*not(?:\s|_)*follow)"
+)
+_CREDENTIAL_PATTERN = re.compile(
+    r"(?i)(?:\bsk-[A-Za-z0-9_-]+|\b(?:api[_ -]?key|access[_ -]?token|"
+    r"secret|password)\b(?:\s*[:=]|\Z)|(?:^|[_ -])(?:token|secret|password)"
+    r"(?:$|[_ -]))"
+)
+_SAFE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/+\-]{0,79}\Z")
+_SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.,():/+\-]{0,119}\Z")
+
+_ARABIC_COUNT = r"(?<![\w.])[-+]?\d+(?![\w.])"
+_CHINESE_COUNT = r"[零〇一二两三四五六七八九十百]+"
+_ENGLISH_COUNT = (
+    r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+    r"twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
+    r"twenty)\b"
+)
+_COUNT_TOKEN = rf"(?:{_ARABIC_COUNT}|{_CHINESE_COUNT}|{_ENGLISH_COUNT})"
+_ENGLISH_NOUN = r"(?:candidates?|molecules?|compounds?|structures?)"
+_GENERATION_VERB = r"(?:generate|design|create|produce|make|build)"
+_COUNT_PATTERNS = (
+    re.compile(
+        rf"(?i)\b{_GENERATION_VERB}\b\s*(?P<count>{_COUNT_TOKEN})"
+        rf"(?=\s*(?:{_ENGLISH_NOUN}\b|for\b|$))"
+    ),
+    re.compile(rf"(?i)(?P<count>{_COUNT_TOKEN})\s*{_ENGLISH_NOUN}\b"),
+    re.compile(
+        rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
+        rf"(?P<count>{_COUNT_TOKEN})\s*(?:个|种|份)?\s*"
+        rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
+    ),
+    re.compile(
+        rf"(?P<count>{_COUNT_TOKEN})\s*(?:个|种|份)\s*"
+        rf"(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)"
+    ),
+)
+_FUZZY_COUNTS = (
+    (re.compile(r"(?i)(?:\bseveral\b|\bsome\b|\ba few\b|几个|若干)"), 3),
+    (re.compile(r"(?i)(?:\bmultiple\b|\bmany\b|多个|很多)"), 5),
+    (re.compile(r"(?i)(?:\bone\b|\ba\s+(?:molecule|compound)\b|一个|单个)"), 1),
+)
+
+
+def validate_generation_count(value: Any, *, field: str = "requested_count") -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise GenerationRequestError(f"{field} must be an integer")
+    if not MIN_GENERATION_COUNT <= value <= MAX_GENERATION_COUNT:
+        raise GenerationRequestError(
+            f"{field} must be between {MIN_GENERATION_COUNT} and "
+            f"{MAX_GENERATION_COUNT}"
+        )
+    return value
+
+
+def parse_generation_count(query: str, *, default: int = DEFAULT_GENERATION_COUNT) -> int:
+    for pattern in _COUNT_PATTERNS:
+        match = pattern.search(query)
+        if not match:
+            continue
+        token = match.group("count")
+        value = _parse_count_token(token)
+        if value is None:
+            continue
+        # A standalone four-digit calendar year is context, not a request count.
+        if token.isdigit() and len(token) == 4 and 1900 <= value <= 2099:
+            continue
+        return value
+    for pattern, value in _FUZZY_COUNTS:
+        if pattern.search(query):
+            return value
+    return default
+
+
+def _parse_count_token(token: str) -> int | None:
+    normalized = token.strip().lower()
+    if re.fullmatch(r"[-+]?\d+", normalized):
+        return int(normalized)
+    english = {
+        "zero": 0,
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+        "eleven": 11,
+        "twelve": 12,
+        "thirteen": 13,
+        "fourteen": 14,
+        "fifteen": 15,
+        "sixteen": 16,
+        "seventeen": 17,
+        "eighteen": 18,
+        "nineteen": 19,
+        "twenty": 20,
+    }
+    if normalized in english:
+        return english[normalized]
+    return parse_chinese_integer(normalized)
+
+
+def parse_chinese_integer(text: str) -> int | None:
+    digits = {
+        "零": 0,
+        "〇": 0,
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+    }
+    if text in digits:
+        return digits[text]
+    if text == "十":
+        return 10
+    if "百" in text:
+        left, right = text.split("百", 1)
+        hundreds = digits.get(left, 1 if not left else None)
+        rest = parse_chinese_integer(right) if right else 0
+        return None if hundreds is None or rest is None else hundreds * 100 + rest
+    if "十" in text:
+        left, right = text.split("十", 1)
+        tens = digits.get(left, 1 if not left else None)
+        ones = digits.get(right, 0 if not right else None)
+        return None if tens is None or ones is None else tens * 10 + ones
+    return None
+
+
+def sanitize_target_evidence(
+    value: Any,
+    *,
+    max_records: int = MAX_TARGET_RECORDS,
+    max_structures: int = MAX_TARGET_STRUCTURES,
+) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if _contains_untrusted_mode(value):
+        raise TargetEvidenceError("target evidence is demo, fallback, or untrusted")
+    if isinstance(value, Mapping) and all(
+        key in value for key in ("query", "metadata", "outputs")
+    ):
+        outputs = value.get("outputs")
+        value = outputs.get("target") if isinstance(outputs, Mapping) else None
+
+    sanitized: list[dict[str, Any]] = []
+    for raw_record in _target_records(value):
+        record = _sanitize_target_record(raw_record, max_structures=max_structures)
+        if record:
+            sanitized.append(record)
+    return sanitized[:max_records]
+
+
+def serialize_target_evidence(value: Any) -> str | None:
+    sanitized = sanitize_target_evidence(value)
+    if not sanitized:
+        return None
+    serialized = _compact_json(sanitized)
+    while len(serialized) > MAX_EVIDENCE_CHARS and sanitized:
+        sanitized.pop()
+        serialized = _compact_json(sanitized)
+    return serialized if sanitized else None
+
+
+def _target_records(value: Any) -> list[Mapping[str, Any]]:
+    if isinstance(value, Mapping):
+        for key in ("targets", "records", "results", "data"):
+            nested = value.get(key)
+            if isinstance(nested, Mapping):
+                return _target_records(nested)
+            if _is_sequence(nested):
+                return [item for item in nested if isinstance(item, Mapping)]
+        return [value]
+    if _is_sequence(value):
+        return [item for item in value if isinstance(item, Mapping)]
+    return []
+
+
+def _sanitize_target_record(
+    value: Mapping[str, Any], *, max_structures: int
+) -> dict[str, Any]:
+    record: dict[str, Any] = {}
+    for field in _TARGET_TEXT_FIELDS:
+        safe = _safe_text(value.get(field), allow_spaces=field == "target_name")
+        if safe is not None:
+            record[field] = safe
+    for field in ("has_experimental_structure", "has_alphafold_structure"):
+        if isinstance(value.get(field), bool):
+            record[field] = value[field]
+    count = value.get("structure_count")
+    if isinstance(count, int) and not isinstance(count, bool) and 0 <= count <= 10000:
+        record["structure_count"] = count
+
+    structures = value.get("recommended_structures", value.get("structures"))
+    safe_structures = _sanitize_nested_records(
+        structures,
+        _sanitize_structure_record,
+        limit=max_structures,
+    )
+    if safe_structures:
+        record["recommended_structures"] = safe_structures
+    safe_evidence = _sanitize_nested_records(
+        value.get("evidence"), _sanitize_evidence_record, limit=MAX_EVIDENCE_ITEMS
+    )
+    if safe_evidence:
+        record["evidence"] = safe_evidence
+    safe_artifacts = _sanitize_nested_records(
+        value.get("artifacts"), _sanitize_evidence_record, limit=MAX_EVIDENCE_ITEMS
+    )
+    if safe_artifacts:
+        record["artifacts"] = safe_artifacts
+
+    has_identifier = any(field in record for field in _IDENTIFIER_FIELDS)
+    has_provenance = any(field in record for field in _PROVENANCE_FIELDS)
+    return record if has_identifier and has_provenance else {}
+
+
+def _sanitize_structure_record(value: Mapping[str, Any]) -> dict[str, Any]:
+    record = _sanitize_text_fields(value, _STRUCTURE_TEXT_FIELDS)
+    resolution = value.get("resolution")
+    if (
+        isinstance(resolution, (int, float))
+        and not isinstance(resolution, bool)
+        and 0 <= float(resolution) <= 100
+    ):
+        record["resolution"] = float(resolution)
+    for field in ("docking_recommended", "is_preferred", "stale"):
+        if isinstance(value.get(field), bool):
+            record[field] = value[field]
+    return record if any(
+        key in record for key in ("structure_id", "source_record_id")
+    ) else {}
+
+
+def _sanitize_evidence_record(value: Mapping[str, Any]) -> dict[str, Any]:
+    record = _sanitize_text_fields(
+        value,
+        _EVIDENCE_TEXT_FIELDS,
+        spaced_fields={"label"},
+    )
+    if isinstance(value.get("stale"), bool):
+        record["stale"] = value["stale"]
+    return record if any(
+        key in record
+        for key in ("source", "database", "id", "source_record_id", "structure_id")
+    ) else {}
+
+
+def _sanitize_nested_records(value: Any, sanitizer, *, limit: int) -> list[dict[str, Any]]:
+    if not _is_sequence(value):
+        return []
+    sanitized = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        record = sanitizer(item)
+        if record:
+            sanitized.append(record)
+    return sanitized[:limit]
+
+
+def _sanitize_text_fields(
+    value: Mapping[str, Any],
+    fields: Sequence[str],
+    *,
+    spaced_fields: set[str] | None = None,
+) -> dict[str, Any]:
+    spaced_fields = spaced_fields or set()
+    record: dict[str, Any] = {}
+    for field in fields:
+        safe = _safe_text(value.get(field), allow_spaces=field in spaced_fields)
+        if safe is not None:
+            record[field] = safe
+    return record
+
+
+def _safe_text(value: Any, *, allow_spaces: bool = False) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if normalized.lower() in _PLACEHOLDERS:
+        return None
+    if _CREDENTIAL_PATTERN.search(normalized) or _INSTRUCTION_PATTERN.search(normalized):
+        raise TargetEvidenceError("target evidence contains unsafe text")
+    pattern = _SAFE_NAME if allow_spaces else _SAFE_TOKEN
+    return normalized if pattern.fullmatch(normalized) else None
+
+
+def _contains_untrusted_mode(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            normalized_key = str(key).strip().lower()
+            if normalized_key in _UNTRUSTED_TRUE_FLAGS and _enabled_flag(item):
+                return True
+            if normalized_key in _UNTRUSTED_FALSE_FLAGS and _disabled_flag(item):
+                return True
+            if _contains_untrusted_mode(item):
+                return True
+    elif _is_sequence(value):
+        return any(_contains_untrusted_mode(item) for item in value)
+    return False
+
+
+def _enabled_flag(value: Any) -> bool:
+    return value is True or (
+        isinstance(value, str)
+        and value.strip().lower() in {"1", "true", "yes", "on"}
+    )
+
+
+def _disabled_flag(value: Any) -> bool:
+    return value is False or (
+        isinstance(value, str)
+        and value.strip().lower() in {"0", "false", "no", "off"}
+    )
+
+
+def _is_sequence(value: Any) -> bool:
+    return isinstance(value, (list, tuple))
+
+
+def _compact_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+__all__ = [
+    "DEFAULT_GENERATION_COUNT",
+    "GenerationRequestError",
+    "MAX_GENERATION_COUNT",
+    "MIN_GENERATION_COUNT",
+    "TargetEvidenceError",
+    "parse_chinese_integer",
+    "parse_generation_count",
+    "sanitize_target_evidence",
+    "serialize_target_evidence",
+    "validate_generation_count",
+]

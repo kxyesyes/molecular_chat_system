@@ -1,3 +1,5 @@
+import pytest
+
 from src.agent.contracts import AgentContext
 from src.agent.planning.task_planner import TaskPlanner
 from src.agent.tooling import build_tool_registry
@@ -133,6 +135,52 @@ def test_requested_count_parser_ignores_target_identifiers_and_years():
     assert parser("Design candidates for PDE5A", default=1) == 1
     assert parser("Design candidates for PDE10A", default=1) == 1
     assert parser("Design candidates for PDE5A using a 2024 study", default=1) == 1
+
+
+def test_requested_count_parser_supports_shared_multilingual_grammar():
+    parser = TaskPlanner._extract_requested_count
+
+    assert parser("Produce 5 for PDE5A", default=1) == 5
+    assert parser("为 PDE5A 生成五个候选分子", default=1) == 5
+    assert parser("设计十种化合物", default=1) == 10
+    assert parser("生成十一个候选结构", default=1) == 11
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Analyze p53 candidates",
+        "Review HSP90 molecules",
+        "Design for PDE10A",
+        "Review the 2024 candidate campaign",
+        "Generate candidates with pIC50 7.5",
+    ],
+)
+def test_requested_count_parser_never_uses_identifiers_years_or_decimals(query):
+    assert TaskPlanner._extract_requested_count(query, default=1) == 1
+
+
+@pytest.mark.parametrize(
+    "query, requested_count",
+    [
+        ("Generate zero candidates for PDE5A", 0),
+        ("Generate -2 candidates for PDE5A", -2),
+        ("Generate 11 for PDE5A", 11),
+        ("生成十一个候选结构用于 PDE5A", 11),
+    ],
+)
+def test_target_plan_rejects_explicit_invalid_shared_count(query, requested_count):
+    plan = TaskPlanner().plan(
+        AgentContext(
+            query=query,
+            trace_id="invalid-shared-count",
+            active_skill="target_driven_design",
+        )
+    )
+
+    assert plan.steps == []
+    assert plan.metadata["requested_count"] == requested_count
+    assert plan.metadata["reason"] == "requested_count_out_of_range"
 
 
 def test_target_driven_design_plans_english_candidate_counts_with_bounds():

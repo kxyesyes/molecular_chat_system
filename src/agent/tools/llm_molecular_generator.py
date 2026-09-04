@@ -8,7 +8,6 @@
 from collections.abc import Mapping
 from typing import Dict, List, Optional, Any
 import asyncio
-import json
 import logging
 import re
 
@@ -20,6 +19,19 @@ except ImportError:
     RDKIT_AVAILABLE = False
 
 from .base_tool import BaseMolecularTool
+from src.agent.contracts.generation_request import (
+    DEFAULT_GENERATION_COUNT,
+    GenerationRequestError,
+    MAX_EVIDENCE_CHARS,
+    MAX_GENERATION_COUNT,
+    MAX_TARGET_RECORDS,
+    MAX_TARGET_STRUCTURES,
+    MIN_GENERATION_COUNT,
+    parse_chinese_integer,
+    parse_generation_count,
+    serialize_target_evidence,
+    validate_generation_count,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,26 +43,11 @@ class LLMMolecularGenerator(BaseMolecularTool):
     使用gmm-llama:latest模型通过自然语言生成分子结构
     """
 
-    MIN_GENERATION_COUNT = 1
-    MAX_GENERATION_COUNT = 10
-    MAX_TARGET_RECORDS = 3
-    MAX_TARGET_STRUCTURES = 2
-    MAX_EVIDENCE_CHARS = 4096
-    _TARGET_IDENTIFIER_FIELDS = (
-        "gene_symbol",
-        "uniprot_id",
-        "source",
-        "source_record_id",
-        "target_type",
-        "structure_evidence_status",
-    )
-    _STRUCTURE_IDENTIFIER_FIELDS = (
-        "structure_id",
-        "source",
-        "structure_type",
-        "method",
-    )
-    
+    MIN_GENERATION_COUNT = MIN_GENERATION_COUNT
+    MAX_GENERATION_COUNT = MAX_GENERATION_COUNT
+    MAX_TARGET_RECORDS = MAX_TARGET_RECORDS
+    MAX_TARGET_STRUCTURES = MAX_TARGET_STRUCTURES
+    MAX_EVIDENCE_CHARS = MAX_EVIDENCE_CHARS
     def __init__(self, llm_model=None):
         """
         初始化LLM分子生成工具
@@ -160,14 +157,30 @@ class LLMMolecularGenerator(BaseMolecularTool):
     
     def execute(self, query: Any, temperature: float = 0.7, mol_count: int = None) -> Dict[str, Any]:
         """执行LLM驱动的分子生成 - 带重试机制"""
+        query_text = str(query.get("query") or "") if isinstance(query, Mapping) else str(query)
         try:
             query_text, explicit_count, target_evidence = self._normalize_request(
                 query
             )
-        except (TypeError, ValueError) as exc:
-            result = self._create_base_result("")
-            result["message"] = f"Invalid molecular generation request: {exc}"
-            return result
+            validated_mol_count = (
+                validate_generation_count(mol_count, field="mol_count")
+                if mol_count is not None
+                else None
+            )
+            if explicit_count is not None:
+                requested_count = explicit_count
+            elif validated_mol_count is not None:
+                requested_count = validated_mol_count
+            else:
+                requested_count = validate_generation_count(
+                    parse_generation_count(
+                        query_text,
+                        default=DEFAULT_GENERATION_COUNT,
+                    ),
+                    field="requested_count",
+                )
+        except (GenerationRequestError, TypeError, ValueError) as exc:
+            return self._invalid_input_result(query_text, str(exc))
 
         result = self._create_base_result(query_text)
         
@@ -186,10 +199,7 @@ class LLMMolecularGenerator(BaseMolecularTool):
             intent = self._analyze_generation_intent(query_text)
             intent['temperature'] = temperature  # 注入温度参数
             intent['target_evidence'] = target_evidence
-            if explicit_count is not None:
-                intent['count'] = explicit_count
-            elif mol_count is not None:
-                intent['count'] = mol_count  # 注入显式指定的数量
+            intent['count'] = requested_count
             logger.info(f"生成意图: {intent}")
             
             # 使用重试机制生成足够数量的有效分子
@@ -223,6 +233,16 @@ class LLMMolecularGenerator(BaseMolecularTool):
         
         return result
 
+    def _invalid_input_result(self, query: str, message: str) -> Dict[str, Any]:
+        result = self._create_base_result(query)
+        result["message"] = f"Invalid molecular generation request: {message}"
+        result["error"] = {
+            "code": "invalid_input",
+            "message": result["message"],
+            "details": {},
+        }
+        return result
+
     @classmethod
     def _normalize_request(
         cls, value: Any
@@ -241,8 +261,9 @@ class LLMMolecularGenerator(BaseMolecularTool):
 
         requested_count = None
         if "requested_count" in metadata:
-            requested_count = cls._validate_requested_count(
-                metadata["requested_count"]
+            requested_count = validate_generation_count(
+                metadata["requested_count"],
+                field="metadata.requested_count",
             )
 
         raw_outputs = value.get("outputs")
@@ -252,117 +273,14 @@ class LLMMolecularGenerator(BaseMolecularTool):
 
     @classmethod
     def _validate_requested_count(cls, value: Any) -> int:
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise ValueError("metadata.requested_count must be an integer")
-        if not cls.MIN_GENERATION_COUNT <= value <= cls.MAX_GENERATION_COUNT:
-            raise ValueError(
-                "metadata.requested_count must be between "
-                f"{cls.MIN_GENERATION_COUNT} and {cls.MAX_GENERATION_COUNT}"
-            )
-        return value
+        return validate_generation_count(
+            value,
+            field="metadata.requested_count",
+        )
 
     @classmethod
     def _serialize_target_evidence(cls, value: Any) -> Optional[str]:
-        records = cls._target_records(value)
-        sanitized = [
-            record
-            for item in records[: cls.MAX_TARGET_RECORDS]
-            if (record := cls._sanitize_target_record(item))
-        ]
-        if not sanitized:
-            return None
-
-        serialized = json.dumps(
-            sanitized,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        while len(serialized) > cls.MAX_EVIDENCE_CHARS and sanitized:
-            sanitized.pop()
-            serialized = json.dumps(
-                sanitized,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        return serialized if sanitized else None
-
-    @classmethod
-    def _target_records(cls, value: Any) -> list[Mapping[str, Any]]:
-        if isinstance(value, Mapping):
-            for key in ("targets", "results", "data"):
-                nested = value.get(key)
-                if isinstance(nested, (list, tuple)):
-                    return [item for item in nested if isinstance(item, Mapping)]
-            return [value]
-        if isinstance(value, (list, tuple)):
-            return [item for item in value if isinstance(item, Mapping)]
-        return []
-
-    @classmethod
-    def _sanitize_target_record(
-        cls, value: Mapping[str, Any]
-    ) -> dict[str, Any]:
-        record: dict[str, Any] = {}
-        for field in cls._TARGET_IDENTIFIER_FIELDS:
-            safe_value = cls._safe_evidence_identifier(value.get(field))
-            if safe_value is not None:
-                record[field] = safe_value
-
-        for field in (
-            "has_experimental_structure",
-            "has_alphafold_structure",
-        ):
-            if isinstance(value.get(field), bool):
-                record[field] = value[field]
-        if isinstance(value.get("structure_count"), int) and not isinstance(
-            value.get("structure_count"), bool
-        ):
-            record["structure_count"] = max(
-                0, min(10000, value["structure_count"])
-            )
-
-        structures = value.get("recommended_structures")
-        if isinstance(structures, (list, tuple)):
-            safe_structures = [
-                structure
-                for item in structures[: cls.MAX_TARGET_STRUCTURES]
-                if isinstance(item, Mapping)
-                and (structure := cls._sanitize_structure_record(item))
-            ]
-            if safe_structures:
-                record["recommended_structures"] = safe_structures
-        return record
-
-    @classmethod
-    def _sanitize_structure_record(
-        cls, value: Mapping[str, Any]
-    ) -> dict[str, Any]:
-        record: dict[str, Any] = {}
-        for field in cls._STRUCTURE_IDENTIFIER_FIELDS:
-            safe_value = cls._safe_evidence_identifier(value.get(field))
-            if safe_value is not None:
-                record[field] = safe_value
-        if isinstance(value.get("resolution"), (int, float)) and not isinstance(
-            value.get("resolution"), bool
-        ):
-            record["resolution"] = max(
-                0.0, min(100.0, float(value["resolution"]))
-            )
-        for field in ("docking_recommended", "is_preferred"):
-            if isinstance(value.get(field), bool):
-                record[field] = value[field]
-        return record
-
-    @staticmethod
-    def _safe_evidence_identifier(value: Any) -> Optional[str]:
-        if not isinstance(value, str):
-            return None
-        normalized = value.strip()
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/+\-]{0,79}", normalized):
-            return None
-        return normalized
+        return serialize_target_evidence(value)
     
     def _generate_with_retry(self, intent: Dict[str, Any], max_attempts: int = 5) -> List[Dict[str, Any]]:
         """分子生成 - 简化版，直接信任模型输出"""
@@ -531,53 +449,10 @@ class LLMMolecularGenerator(BaseMolecularTool):
             if smiles_list:
                 intent['base_smiles'] = smiles_list[0]
         
-        # 提取数量要求 - 改进的正则表达式
-        # 匹配模式：
-        # - "生成3个分子" -> 3
-        # - "generate 5 molecules" -> 5
-        # - "一个分子" -> 1
-        # - "几个分子" -> 3 (默认)
-        # - "若干分子" -> 3 (默认)
-        
-        # 首先检查明确的阿拉伯数字
-        count_patterns = [
-            r'(\d+)\s*(?:个|种|份|个|structures?|molecules?|compounds?)',  # 数字+量词
-            r'(?:生成|创建|设计|generate|create|design)\s*(\d+)',  # 动词+数字
-        ]
-        
-        count_found = False
-        for pattern in count_patterns:
-            count_match = re.search(pattern, query_lower)
-            if count_match:
-                intent['count'] = min(int(count_match.group(1)), 10)  # 最多10个
-                count_found = True
-                break
-
-        # 再检查中文数字，例如“五个类药分子”“生成十种候选结构”“设计两个化合物”
-        if not count_found:
-            chinese_count_patterns = [
-                r'([零〇一二两三四五六七八九十百]+)\s*(?:个|种|份|条)?\s*(?:类药)?(?:分子|化合物|结构|候选)',
-                r'(?:生成|创建|设计|给我|提供|produce|make)\s*([零〇一二两三四五六七八九十百]+)\s*(?:个|种|份|条)?',
-            ]
-            for pattern in chinese_count_patterns:
-                count_match = re.search(pattern, query_lower)
-                if not count_match:
-                    continue
-                count_value = self._parse_chinese_count(count_match.group(1))
-                if count_value is not None:
-                    intent['count'] = min(count_value, 10)  # 最多10个
-                    count_found = True
-                    break
-        
-        # 如果没有找到明确数字，检查模糊数量词
-        if not count_found:
-            if any(word in query_lower for word in ['一个', 'one', 'a molecule', 'a compound', '单个']):
-                intent['count'] = 1
-            elif any(word in query_lower for word in ['几个', 'some', 'several', '若干', 'a few']):
-                intent['count'] = 3
-            elif any(word in query_lower for word in ['多个', 'multiple', 'many', '很多']):
-                intent['count'] = 5
-            # 如果都没有匹配，保持默认值1
+        intent['count'] = parse_generation_count(
+            query,
+            default=DEFAULT_GENERATION_COUNT,
+        )
         
         # 提取优化目标
         if 'drug' in query_lower or '药' in query_lower or '类药' in query_lower:
@@ -592,45 +467,7 @@ class LLMMolecularGenerator(BaseMolecularTool):
     @staticmethod
     def _parse_chinese_count(text: str) -> Optional[int]:
         """Parse common Chinese integer words used in generation requests."""
-        if not text:
-            return None
-
-        digits = {
-            "零": 0,
-            "〇": 0,
-            "一": 1,
-            "二": 2,
-            "两": 2,
-            "三": 3,
-            "四": 4,
-            "五": 5,
-            "六": 6,
-            "七": 7,
-            "八": 8,
-            "九": 9,
-        }
-        text = text.strip()
-        if text in digits:
-            return digits[text]
-        if text == "十":
-            return 10
-        if "百" in text:
-            parts = text.split("百", 1)
-            hundreds = digits.get(parts[0], 1 if parts[0] == "" else None)
-            if hundreds is None:
-                return None
-            rest = LLMMolecularGenerator._parse_chinese_count(parts[1]) if parts[1] else 0
-            if rest is None:
-                return None
-            return hundreds * 100 + rest
-        if "十" in text:
-            parts = text.split("十", 1)
-            tens = digits.get(parts[0], 1 if parts[0] == "" else None)
-            ones = digits.get(parts[1], 0 if parts[1] == "" else None)
-            if tens is None or ones is None:
-                return None
-            return tens * 10 + ones
-        return None
+        return parse_chinese_integer(text)
     
     def _generate_with_llm(self, intent: Dict[str, Any]) -> List[str]:
         """使用LLM从描述生成分子"""
