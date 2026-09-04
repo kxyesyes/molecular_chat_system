@@ -779,7 +779,7 @@ class WorkflowRunSession:
             agent_result.message = message
             agent_result.final_answer = ""
             agent_result.error = self._runtime_error
-        return agent_result, message
+        return agent_result, agent_result.message
 
     def _consume_step(self, index: int) -> None:
         self._executed_indices.add(index)

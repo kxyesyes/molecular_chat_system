@@ -364,6 +364,45 @@ def test_semantic_precondition_skip_does_not_call_tool():
     assert result.error.code == AgentErrorCode.VALIDATION_ERROR
 
 
+def test_blocked_generation_emits_partial_terminal_message():
+    target_search = CountingTool("target_database_search")
+    generator = CountingTool("llm_molecular_generator")
+    steps = [
+        WorkflowStep(
+            "search_targets",
+            target_search.name,
+            input_data={"records": []},
+            output_key="targets",
+        ),
+        WorkflowStep(
+            "generate",
+            generator.name,
+            input_binding="$.outputs.targets",
+            preconditions=("target_evidence",),
+        ),
+    ]
+    session, event_bus = _make_session(
+        steps=steps,
+        tools={target_search.name: target_search, generator.name: generator},
+    )
+
+    session.start()
+    first = session.execute_step(0)
+    second = session.execute_step(1)
+    result = session.finish()
+    terminal = event_bus.events[-1]
+
+    assert first.outcome == "succeeded"
+    assert second.outcome == "skipped_precondition"
+    assert target_search.calls == [{"records": []}]
+    assert generator.calls == []
+    assert result.outcome == RunOutcome.PARTIAL
+    assert terminal.event == TaskEventType.TASK_PARTIAL
+    assert "partial" in terminal.message.lower()
+    assert terminal.message != "Workflow completed"
+    assert terminal.progress == 1.0
+
+
 def test_fail_runtime_finishes_with_internal_error_and_one_failed_event():
     session, event_bus = _make_session(steps=[], tools={})
     session.start()

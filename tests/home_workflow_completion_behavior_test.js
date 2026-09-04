@@ -26,9 +26,9 @@ const templateSource = fs.readFileSync(templatePath, "utf8");
 
 assert.ok(
   templateSource.includes(
-    '/static/js/home/main.js?v=20260713-workflow-complete-v2'
+    '/static/js/home/main.js?v=20260904-partial-terminal-v1'
   ),
-  "homepage must cache-bust the workflow completion fix"
+  "homepage must cache-bust the partial terminal styling fix"
 );
 
 function extractFunction(functionName) {
@@ -48,6 +48,8 @@ function extractFunction(functionName) {
 
 const resolverSource = extractFunction("resolveCompletionAction");
 const resolveCompletionAction = vm.runInNewContext(`(${resolverSource})`);
+const eventClassSource = extractFunction("getAgentEventClass");
+const getAgentEventClass = vm.runInNewContext(`(${eventClassSource})`);
 
 function resolve(overrides = {}) {
   return resolveCompletionAction({
@@ -136,6 +138,23 @@ assert.strictEqual(
 assert.ok(
   source.includes("resolveCompletionAction({"),
   "completeLastMessage() must consume the tested state resolver"
+);
+
+const partialTerminalEvent = { event: "task_partial", progress: 1.0 };
+assert.strictEqual(
+  Math.round(partialTerminalEvent.progress * 100),
+  100,
+  "partial terminal events must remain at 100% progress"
+);
+assert.strictEqual(
+  getAgentEventClass(partialTerminalEvent.event),
+  "is-warning",
+  "task_partial at 100% must use partial warning state instead of success"
+);
+assert.notStrictEqual(
+  getAgentEventClass(partialTerminalEvent.event),
+  "is-complete",
+  "task_partial at 100% must not receive success styling"
 );
 
 console.log("Homepage workflow completion behavior checks passed");
