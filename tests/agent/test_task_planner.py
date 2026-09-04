@@ -255,6 +255,22 @@ def test_masked_non_actionable_count_defaults_without_rejecting(query):
     assert parse_generation_count(query) == 1
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Don't generate 11 molecules, but generate 3 molecules",
+        "Don't generate 11 molecules. Instead generate 3 molecules",
+        "This compound is not stable, generate 3 molecules",
+        "这个分子不稳定，请生成三个分子",
+        "请勿生成十一个分子，但生成三个分子",
+        "不要生成十一个分子，而是生成三个分子",
+        "不要生成十一个分子、只生成三个分子",
+    ],
+)
+def test_count_parser_masks_only_the_negated_generation_occurrence(query):
+    assert parse_generation_count(query) == 3
+
+
 def test_year_in_count_position_is_explicit_and_rejected_by_planner():
     assert TaskPlanner._extract_requested_count(
         "Generate 2024 molecules", default=1

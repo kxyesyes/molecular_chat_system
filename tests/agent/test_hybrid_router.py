@@ -122,10 +122,32 @@ def test_admet_prompt_with_negated_generation_clause_stays_admet():
 
 
 def test_later_affirmative_generation_clause_remains_actionable():
-    decision = HybridSkillRouter().decide(
-        "Don’t generate 11 molecules; Generate 3 molecules"
-    )
-    assert decision.selected_skill == "molecular_design"
+    for query in (
+        "Don’t generate 11 molecules; Generate 3 molecules",
+        "Don't generate 11 molecules, but generate 3 molecules",
+        "This compound is not stable, generate 3 molecules",
+        "这个分子不稳定，请生成三个分子",
+        "请勿生成十一个分子，但生成三个分子",
+    ):
+        decision = HybridSkillRouter().decide(query)
+        assert decision.selected_skill == "molecular_design", query
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Don't generate 11 molecules",
+        "Cannot generate 3 molecules",
+        "请勿生成三个分子",
+        "不生成三个分子",
+    ],
+)
+def test_pure_negated_generation_does_not_route(query):
+    decision = HybridSkillRouter().decide(query)
+    assert decision.selected_skill not in {
+        "molecular_design",
+        "target_driven_design",
+    }
 
 
 def test_accepted_routing_feedback_adjusts_future_decision(tmp_path):

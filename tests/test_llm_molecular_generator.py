@@ -237,6 +237,31 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
         self.assertEqual(result["quality"]["requested_count"], 3)
         self.assertIn("provide 3 valid", llm.prompts[0])
 
+    def test_adversative_generation_uses_affirmative_count(self):
+        llm = CapturingLLM()
+        generator = LLMMolecularGenerator(llm_model=llm)
+
+        with (
+            mock.patch.object(generator, "_check_rdkit", return_value=True),
+            mock.patch.object(generator, "validate_smiles", return_value=True),
+            mock.patch.object(generator_module, "RDKIT_AVAILABLE", False),
+        ):
+            result = generator.execute(
+                "Don't generate 11 molecules, but generate 3 molecules"
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["quality"]["requested_count"], 3)
+        self.assertIn("provide 3 valid", llm.prompts[0])
+
+    def test_pure_negated_generation_does_not_select_or_call_model(self):
+        llm = CapturingLLM()
+        generator = LLMMolecularGenerator(llm_model=llm)
+
+        self.assertFalse(generator.should_use("Don't generate 11 molecules"))
+        self.assertFalse(generator.should_use("请勿生成三个分子"))
+        self.assertEqual(llm.prompts, [])
+
     def test_invalid_structured_requested_counts_fail_without_calling_model(self):
         invalid_counts = ("10", True, False, None, 0, -1, 11, 1.5)
 

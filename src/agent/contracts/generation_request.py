@@ -309,6 +309,7 @@ def _matches_generation_grammar(value: str) -> bool:
 
 def _mask_non_actionable_generation_text(query: str) -> str:
     normalized = unicodedata.normalize("NFKC", str(query))
+    normalized = re.sub(r"(?i)\be\.g\.", "for example", normalized)
     without_code = re.sub(
         r"```[\s\S]*?```|~~~[\s\S]*?~~~",
         " ",
@@ -321,7 +322,7 @@ def _mask_non_actionable_generation_text(query: str) -> str:
         without_code,
     )
     actionable_clauses: list[str] = []
-    for clause in re.split(r"[;；!?。！？\r\n]+", unquoted):
+    for clause in _split_generation_clauses(unquoted):
         if not _matches_generation_grammar(clause):
             actionable_clauses.append(clause)
             continue
@@ -332,16 +333,68 @@ def _mask_non_actionable_generation_text(query: str) -> str:
     return ";".join(actionable_clauses)
 
 
+def _split_generation_clauses(value: str) -> list[str]:
+    protected_punctuation: set[int] = set()
+    for pattern in (
+        *_COUNT_SLOT_PATTERNS,
+        *_COUNT_PATTERNS,
+        *_MALFORMED_WORD_COUNT_PATTERNS,
+    ):
+        for match in pattern.finditer(value):
+            start, end = match.span()
+            protected_punctuation.update(range(start, end))
+
+    separated: list[str] = []
+    for index, character in enumerate(value):
+        if index in protected_punctuation:
+            separated.append(character)
+            continue
+        if character in ";；!?。！？\r\n、":
+            separated.append("\n")
+            continue
+        if character in ",，":
+            before = value[index - 1] if index else ""
+            after = value[index + 1] if index + 1 < len(value) else ""
+            prefix = value[:index].rstrip().casefold()
+            introduces_example = bool(
+                re.search(r"(?:for example|such as|例如|比如)$", prefix)
+            )
+            separated.append(
+                character
+                if (
+                    before.isdigit() and after.isdigit()
+                ) or introduces_example
+                else "\n"
+            )
+            continue
+        if character == "." and index not in protected_punctuation:
+            separated.append("\n")
+            continue
+        separated.append(character)
+
+    return re.split(
+        r"(?i)\n+|\b(?:but|instead)\b|(?:但是|而是|但|只)",
+        "".join(separated),
+    )
+
+
 def _is_non_actionable_generation_clause(clause: str) -> bool:
-    english_prefix = (
+    english_negation = (
         r"(?:do\s+not|don['’]t|dont|can(?:not|['’]t)|never|"
-        r"not(?:\s+to)?|without|"
-        r"for\s+example|as\s+an?\s+example|e\.g\.|such\s+as|"
+        r"not(?:\s+to)?|without)"
+    )
+    english_example = (
+        r"(?:for\s+example|as\s+an?\s+example|such\s+as|"
         r"explain(?:ing)?|illustrat(?:e|ing)|example|phrase|instruction|command)"
     )
     english_suffix = r"(?:as\s+an?\s+example|for\s+example)"
     if re.search(
-        rf"(?i)\b{english_prefix}\b[^;.!?]{{0,80}}\b{_GENERATION_VERB}\b",
+        rf"(?i)\b{english_negation}\b[ \t]{{0,12}}\b{_GENERATION_VERB}\b",
+        clause,
+    ):
+        return True
+    if re.search(
+        rf"(?i)\b{english_example}\b[^;.!?]{{0,80}}\b{_GENERATION_VERB}\b",
         clause,
     ):
         return True
@@ -352,8 +405,13 @@ def _is_non_actionable_generation_clause(clause: str) -> bool:
         return True
     chinese_verb = r"(?:生成|创建|设计|制作|构建|合成|给我|提供)"
     if re.search(
-        rf"(?:请勿|勿|不要|无需|不需要|禁止|别|不可|不能|不|"
-        rf"例如|比如|示例|例子|解释|说明)"
+        rf"(?:请勿|勿|不要|无需|不需要|禁止|别|不可|不能|不"
+        rf")\s*(?:再|要)?\s*{chinese_verb}",
+        clause,
+    ):
+        return True
+    if re.search(
+        rf"(?:例如|比如|示例|例子|解释|说明)"
         rf"[^；。！？]{{0,48}}{chinese_verb}",
         clause,
     ):
