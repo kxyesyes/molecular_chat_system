@@ -77,14 +77,19 @@ _EVIDENCE_TEXT_FIELDS = (
     "source_url",
 )
 _IDENTIFIER_FIELDS = frozenset(
-    {"gene_symbol", "target_identifier", "uniprot_id", "target_name", "target_id"}
+    {
+        "gene_symbol",
+        "target_identifier",
+        "uniprot_id",
+        "target_id",
+        "source_record_id",
+    }
 )
 _PROVENANCE_FIELDS = frozenset(
     {
         "source",
         "database",
         "source_url",
-        "uniprot_id",
         "recommended_structures",
         "evidence",
         "artifacts",
@@ -114,6 +119,8 @@ _ENGLISH_COUNT_WORD = (
     r"twenty)"
 )
 _ENGLISH_COUNT = rf"\b{_ENGLISH_COUNT_WORD}\b"
+_ENGLISH_DECIMAL_PART = rf"(?:{_ENGLISH_COUNT_WORD}|\d+)"
+_CHINESE_DECIMAL_PART = rf"(?:{_CHINESE_COUNT}|\d+)"
 _COUNT_TOKEN = rf"(?:{_ARABIC_COUNT}|{_CHINESE_COUNT}|{_ENGLISH_COUNT})"
 _ENGLISH_NOUN = r"(?:candidates?|molecules?|compounds?|structures?)"
 _GENERATION_VERB = r"(?:generate|design|create|produce|make|build)"
@@ -147,14 +154,15 @@ _COUNT_SLOT_PATTERNS = (
 )
 _MALFORMED_WORD_COUNT_PATTERNS = (
     re.compile(
-        rf"(?i)\b{_GENERATION_VERB}\b[ \t]*{_ENGLISH_COUNT_WORD}"
-        rf"[ \t]+point[ \t]+{_ENGLISH_COUNT_WORD}"
+        rf"(?i)\b{_GENERATION_VERB}\b[ \t]*{_ENGLISH_DECIMAL_PART}"
+        rf"[ \t]+point[ \t]+{_ENGLISH_DECIMAL_PART}"
         rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
         rf"(?=[ \t]+(?:{_ENGLISH_NOUN}\b|for\b)|[ \t]*$)"
     ),
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
-        rf"{_CHINESE_COUNT}\s*点\s*{_CHINESE_COUNT}\s*(?:个|种|份)?\s*"
+        rf"{_CHINESE_DECIMAL_PART}\s*点\s*{_CHINESE_DECIMAL_PART}"
+        rf"\s*(?:个|种|份)?\s*"
         rf"(?:{_CHINESE_COUNT_MODIFIER}\s*){{0,2}}"
         rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
     ),
@@ -584,7 +592,12 @@ def _sanitize_target_record(
     if safe_artifacts:
         record["artifacts"] = safe_artifacts
 
-    has_identifier = any(field in record for field in _IDENTIFIER_FIELDS)
+    has_identifier = any(field in record for field in _IDENTIFIER_FIELDS) or any(
+        record.get(field)
+        for field in ("recommended_structures", "evidence", "artifacts")
+    )
+    if not has_identifier:
+        record.pop("target_name", None)
     has_provenance = any(field in record for field in _PROVENANCE_FIELDS)
     return record if has_identifier and has_provenance else {}
 
@@ -601,9 +614,14 @@ def _sanitize_structure_record(value: Mapping[str, Any]) -> dict[str, Any]:
     for field in ("docking_recommended", "is_preferred", "stale"):
         if isinstance(value.get(field), bool):
             record[field] = value[field]
-    return record if any(
+    has_identifier = any(
         key in record for key in ("structure_id", "source_record_id")
-    ) else {}
+    )
+    has_provenance = any(
+        key in record
+        for key in ("source", "database", "source_url", "download_url")
+    )
+    return record if has_identifier and has_provenance else {}
 
 
 def _sanitize_evidence_record(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -613,10 +631,14 @@ def _sanitize_evidence_record(value: Mapping[str, Any]) -> dict[str, Any]:
     )
     if isinstance(value.get("stale"), bool):
         record["stale"] = value["stale"]
-    return record if any(
+    has_identifier = any(
         key in record
-        for key in ("source", "database", "id", "source_record_id", "structure_id")
-    ) else {}
+        for key in ("id", "source_record_id", "structure_id", "uniprot_id")
+    )
+    has_provenance = any(
+        key in record for key in ("source", "database", "source_url")
+    )
+    return record if has_identifier and has_provenance else {}
 
 
 def _sanitize_nested_records(value: Any, sanitizer, *, limit: int) -> list[dict[str, Any]]:

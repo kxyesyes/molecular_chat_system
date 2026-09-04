@@ -176,8 +176,15 @@ def test_requested_count_parser_supports_shared_multilingual_grammar():
         "Generate two-point-five molecules",
         "Generate five point five molecules",
         "Generate two point five molecules",
+        "Generate five point 5 molecules",
+        "Generate 5 point five molecules",
+        "Generate 5 point 5 new molecules",
         "生成五点五个分子",
         "生成五 点 五个分子",
+        "生成五点5个分子",
+        "生成5点五个分子",
+        "生成五 点 5 个分子",
+        "生成5 点 五个分子",
     ],
 )
 def test_requested_count_parser_rejects_clause_local_malformed_numbers(query):

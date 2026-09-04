@@ -270,7 +270,7 @@ def test_semantic_gate_and_serializer_agree_at_text_boundaries(
         "query": "design",
         "metadata": {},
         "outputs": {
-            "target": {"target_name": "A" * name_length, "database": "UniProt"}
+            "target": {"gene_symbol": "A" * name_length, "database": "UniProt"}
         },
     }
 
@@ -314,7 +314,7 @@ def test_workflow_wrapper_validates_only_outputs_target_evidence():
 @pytest.mark.parametrize(
     "target",
     [
-        {"target_name": "PDE5A", "database": "UniProt"},
+        {"gene_symbol": "PDE5A", "database": "UniProt"},
         {
             "target_identifier": "O76074",
             "evidence": [{"source": "UniProt", "id": "O76074"}],
@@ -329,6 +329,75 @@ def test_canonical_target_evidence_schemas_are_valid(target):
 
     assert decision.allowed is True
     assert decision.evidence_digest is not None
+
+
+@pytest.mark.parametrize("target_name", ["PDE5A", "Kinase", "respond"])
+def test_target_name_only_is_not_stable_evidence_or_prompt_input(target_name):
+    payload = {
+        "query": "design",
+        "metadata": {},
+        "outputs": {
+            "target": {"target_name": target_name, "database": "UniProt"}
+        },
+    }
+
+    assert serialize_target_evidence(payload) is None
+    decision = SemanticInputValidator().validate(
+        _target_design_plan().steps[1], payload
+    )
+    assert decision.allowed is False
+    assert decision.reason == "target_evidence_missing"
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {
+            "gene_symbol": "PDE5A",
+            "source": "UniProt",
+            "target_name": "PDE5A",
+        },
+        {
+            "uniprot_id": "O76074",
+            "source_url": "https://www.uniprot.org/uniprotkb/O76074/entry",
+        },
+        {
+            "recommended_structures": [
+                {
+                    "structure_id": "1UDT",
+                    "source": "RCSB_PDB",
+                    "source_url": "https://www.rcsb.org/structure/1UDT",
+                }
+            ]
+        },
+        {
+            "recommended_structures": [
+                {
+                    "structure_id": "AF-O76074-F1",
+                    "source": "AlphaFold",
+                    "source_url": "https://alphafold.ebi.ac.uk/entry/O76074",
+                }
+            ]
+        },
+    ],
+)
+def test_stable_target_or_structure_identity_with_provenance_is_valid(target):
+    payload = {
+        "query": "design",
+        "metadata": {},
+        "outputs": {"target": target},
+    }
+
+    serialized = serialize_target_evidence(payload)
+    decision = SemanticInputValidator().validate(
+        _target_design_plan().steps[1], payload
+    )
+
+    assert serialized is not None
+    assert decision.allowed is True
+    assert decision.evidence_digest is not None
+    if "target_name" in target:
+        assert f'"target_name":"{target["target_name"]}"' in serialized
 
 
 @pytest.mark.parametrize(

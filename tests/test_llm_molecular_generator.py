@@ -252,8 +252,15 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
             "Generate two-point-five molecules",
             "Generate five point five molecules",
             "Generate two point five molecules",
+            "Generate five point 5 molecules",
+            "Generate 5 point five molecules",
+            "Generate 5 point 5 new molecules",
             "生成五点五个分子",
             "生成五 点 五个分子",
+            "生成五点5个分子",
+            "生成5点五个分子",
+            "生成五 点 5 个分子",
+            "生成5 点 五个分子",
             "生成零个分子",
             "生成十一个候选分子",
         )
@@ -355,7 +362,7 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
                     "query": "generate 2 candidates",
                     "metadata": {"requested_count": 5},
                     "outputs": {
-                        "target": {"target_name": "PDE5A", "database": "UniProt"}
+                        "target": {"gene_symbol": "PDE5A", "database": "UniProt"}
                     },
                 },
                 mol_count=3,
@@ -363,7 +370,7 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
 
         self.assertTrue(result["success"])
         self.assertEqual(result["quality"]["requested_count"], 5)
-        self.assertIn('"target_name":"PDE5A"', llm.prompts[0])
+        self.assertIn('"gene_symbol":"PDE5A"', llm.prompts[0])
         self.assertIn('"database":"UniProt"', llm.prompts[0])
 
     def test_canonical_nested_evidence_is_serialized_and_untrusted_data_is_blocked(self):
