@@ -324,6 +324,25 @@ def test_count_parser_accepts_repeated_identical_actionable_counts():
 
 
 @pytest.mark.parametrize(
+    "separator",
+    [" then ", ". ", "; ", ", ", " but ", " instead "],
+)
+def test_nounless_counts_are_aggregated_across_clause_boundaries(separator):
+    query = f"Generate 11{separator}Generate 3"
+
+    with pytest.raises(GenerationRequestError, match="conflicting"):
+        parse_generation_count(query)
+
+
+@pytest.mark.parametrize(
+    "separator",
+    [" then ", ". ", "; ", ", ", " but ", " instead "],
+)
+def test_repeated_nounless_counts_across_clause_boundaries_are_valid(separator):
+    assert parse_generation_count(f"Generate 3{separator}Generate 3") == 3
+
+
+@pytest.mark.parametrize(
     "query",
     [
         "Don't generate 11 molecules and then generate 3 molecules",

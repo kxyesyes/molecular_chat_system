@@ -311,6 +311,18 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
                 self.assertEqual(result["error"]["code"], "invalid_input")
                 self.assertEqual(llm.prompts, [])
 
+    def test_nounless_counts_across_boundaries_are_validated_before_model(self):
+        for separator in (" then ", ". ", "; ", ", ", " but ", " instead "):
+            with self.subTest(separator=separator):
+                llm = CapturingLLM()
+                result = LLMMolecularGenerator(llm_model=llm).execute(
+                    f"Generate 11{separator}Generate 3"
+                )
+
+                self.assertFalse(result["success"])
+                self.assertEqual(result["error"]["code"], "invalid_input")
+                self.assertEqual(llm.prompts, [])
+
     def test_invalid_structured_requested_counts_fail_without_calling_model(self):
         invalid_counts = ("10", True, False, None, 0, -1, 11, 1.5)
 

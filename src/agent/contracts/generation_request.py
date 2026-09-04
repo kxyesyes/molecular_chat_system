@@ -105,6 +105,7 @@ _SAFE_GENE_SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,19}\Z")
 _INSTRUCTION_IDENTIFIER_PREFIXES = frozenset(
     {
         ("output", "only"),
+        ("return", "only"),
         ("respond", "with"),
         ("system", "prompt"),
     }
@@ -119,7 +120,7 @@ _ALPHAFOLD_STRUCTURE_ID = re.compile(
     re.IGNORECASE,
 )
 _LOCAL_RECORD_ID = re.compile(
-    r"(?:LOCAL|TARGETDB|TARGET_DATABASE)[._-][A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z",
+    r"(?:LOCAL|TARGETDB|TARGET_DATABASE)[._-][A-Za-z0-9]{1,64}\Z",
     re.IGNORECASE,
 )
 _OFFICIAL_EVIDENCE_HOSTS = frozenset(
@@ -146,7 +147,7 @@ _ENGLISH_NOUN = r"(?:candidates?|molecules?|compounds?|structures?)"
 _GENERATION_VERB = r"(?:generate|design|create|produce|make|build)"
 _ENGLISH_COUNT_FOLLOW = (
     rf"(?:{_ENGLISH_NOUN}\b|for\b|"
-    rf"and[ \t]+(?:then[ \t]+)?{_GENERATION_VERB}\b)"
+    rf"(?:and[ \t]+(?:then[ \t]+)?|then[ \t]+){_GENERATION_VERB}\b)"
 )
 _ENGLISH_COUNT_MODIFIER = r"(?:new|novel|candidate|drug-like)"
 _CHINESE_COUNT_MODIFIER = r"(?:新(?:的)?|全新(?:的)?|新颖(?:的)?)"
@@ -327,17 +328,19 @@ def parse_generation_count(query: str, *, default: int = DEFAULT_GENERATION_COUN
         pattern.search(unquoted)
         for pattern in _MALFORMED_PREMASK_COUNT_PATTERNS
     )
-    query = _mask_non_actionable_generation_text(query)
+    actionable_clauses = _actionable_generation_clauses(query)
     if malformed_premask_count_present and any(
-        pattern.search(query)
+        pattern.search(clause)
+        for clause in actionable_clauses
         for pattern in _MALFORMED_PREMASK_COUNT_PATTERNS
     ):
         raise GenerationRequestError("generation count must be an integer")
     counts: list[int] = []
-    for start, end in _generation_occurrence_spans(query):
-        count = _parse_generation_occurrence_count(query, start, end)
-        if count is not None:
-            counts.append(count)
+    for clause in actionable_clauses:
+        for start, end in _generation_occurrence_spans(clause):
+            count = _parse_generation_occurrence_count(clause, start, end)
+            if count is not None:
+                counts.append(count)
     if len(set(counts)) > 1:
         raise GenerationRequestError("conflicting generation counts")
     return counts[0] if counts else default
@@ -387,8 +390,10 @@ def _parse_generation_occurrence_count(
 
 def has_generation_intent(query: str) -> bool:
     """Recognize actionable generation grammar, excluding examples and code."""
-    actionable = _mask_non_actionable_generation_text(query)
-    return _matches_generation_grammar(actionable)
+    return any(
+        _matches_generation_grammar(clause)
+        for clause in _actionable_generation_clauses(query)
+    )
 
 
 def _matches_generation_grammar(value: str) -> bool:
@@ -410,14 +415,12 @@ def _matches_generation_grammar(value: str) -> bool:
     )
 
 
-def _mask_non_actionable_generation_text(query: str) -> str:
+def _actionable_generation_clauses(query: str) -> list[str]:
     unquoted = _strip_generation_literals(query)
-    actionable_clauses: list[str] = []
-    for clause in _split_generation_clauses(unquoted):
-        actionable_clauses.append(
-            _mask_non_actionable_generation_occurrences(clause)
-        )
-    return ";".join(actionable_clauses)
+    return [
+        _mask_non_actionable_generation_occurrences(clause)
+        for clause in _split_generation_clauses(unquoted)
+    ]
 
 
 def _strip_generation_literals(query: str) -> str:
@@ -1091,20 +1094,23 @@ def _looks_instruction_shaped_identifier(value: str) -> bool:
         for token in re.split(r"[._-]+", value.casefold())
         if token
     )
-    if tokens[:2] in _INSTRUCTION_IDENTIFIER_PREFIXES:
+    if any(
+        tokens[index : index + 2] in _INSTRUCTION_IDENTIFIER_PREFIXES
+        for index in range(len(tokens) - 1)
+    ):
         return True
     return bool(
         tokens
         and (
             (
-                tokens[0] == "ignore"
-                and any(token.startswith("instruction") for token in tokens[1:])
+                "ignore" in tokens
+                and any(token.startswith("instruction") for token in tokens)
             )
             or (
-                tokens[0] == "override"
+                "override" in tokens
                 and any(
                     token in {"prompt", "system", "task"}
-                    for token in tokens[1:]
+                    for token in tokens
                 )
             )
         )

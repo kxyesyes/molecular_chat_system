@@ -207,6 +207,26 @@ def test_agent_executor_validates_all_generation_occurrences_before_tools(
 
 
 @pytest.mark.parametrize(
+    "separator",
+    [" then ", ". ", "; ", ", ", " but ", " instead "],
+)
+def test_agent_executor_aggregates_nounless_counts_before_model(
+    monkeypatch, separator
+):
+    agent, model = _build_agent(monkeypatch)
+    other_tool = RecordingMixedTool()
+    agent.core_tools.insert(0, other_tool)
+
+    result = agent.execute(f"Generate 11{separator}Generate 3")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_input"
+    assert other_tool.should_use_calls == []
+    assert other_tool.calls == []
+    assert model.prompts == []
+
+
+@pytest.mark.parametrize(
     "query",
     [
         "Generate 1, 000 molecules",

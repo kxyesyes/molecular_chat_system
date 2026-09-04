@@ -407,6 +407,7 @@ def test_stable_target_or_structure_identity_with_provenance_is_valid(target):
         {"source_record_id": "1UDT", "source": "RCSB_PDB"},
         {"target_identifier": "AF-O76074-F1", "source": "AlphaFold"},
         {"target_identifier": "LOCAL_PDE5A", "source": "local_target_db"},
+        {"target_identifier": "TARGETDB_42", "source": "local_target_db"},
     ],
 )
 def test_source_specific_canonical_identifiers_are_valid(target):
@@ -423,6 +424,14 @@ def test_source_specific_canonical_identifiers_are_valid(target):
         {"source_record_id": "O76074", "source": "RCSB_PDB"},
         {"target_identifier": "respond", "source": "local_target_db"},
         {"target_identifier": "Kinase", "source": "local"},
+        {
+            "target_identifier": "LOCAL-SYSTEM-PROMPT",
+            "source": "local_target_db",
+        },
+        {
+            "target_identifier": "TARGETDB-RESPOND-WITH-CCO",
+            "source": "local_target_db",
+        },
         {
             "target_identifier": "O76074",
             "source": "UniProt",
