@@ -110,10 +110,14 @@ class PreparedWorkflow:
     def __post_init__(self) -> None:
         if _PREPARED_INPUTS_ARE_SNAPSHOTS.get():
             context = self.context
-            plan = self.plan
+            audit_plan = self.plan
         else:
             context = _copy_boundary(self.context, "context")
-            plan = _copy_boundary(self.plan, "plan")
+            audit_plan = _copy_boundary(self.plan, "plan")
+        executable_plan = _copy_boundary(
+            self.compiled.plan,
+            "compiled execution plan",
+        )
         dependencies = MappingProxyType(
             {
                 step_name: tuple(_copy_boundary(values, "compiled dependencies"))
@@ -122,11 +126,11 @@ class PreparedWorkflow:
         )
 
         object.__setattr__(self, "context", context)
-        object.__setattr__(self, "plan", plan)
+        object.__setattr__(self, "plan", audit_plan)
         object.__setattr__(
             self,
             "compiled",
-            CompiledPlan(plan=plan, dependencies=dependencies),
+            CompiledPlan(plan=executable_plan, dependencies=dependencies),
         )
         # The registry is a request-scoped shallow copy by design. Tool objects
         # are stateful runtime extensions and must preserve their identity.
@@ -136,7 +140,7 @@ class PreparedWorkflow:
             "_execution_payload",
             _PreparedExecutionPayload(
                 context=_copy_boundary(context, "execution context"),
-                plan=_copy_boundary(plan, "execution plan"),
+                plan=_copy_boundary(executable_plan, "execution plan"),
             ),
         )
 

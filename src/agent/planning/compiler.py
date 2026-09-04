@@ -99,6 +99,23 @@ class PlanCompiler:
                             )
                         except GenerationRequestError as exc:
                             raise PlanCompilationError(str(exc)) from None
+                    else:
+                        query = str(step.input_data.get("query") or "")
+                        try:
+                            input_count = validate_generation_count(
+                                parse_generation_count(
+                                    query,
+                                    default=(
+                                        plan_count or DEFAULT_GENERATION_COUNT
+                                    ),
+                                ),
+                                field=(
+                                    f"steps.{step.name}.input_data."
+                                    "requested_count"
+                                ),
+                            )
+                        except GenerationRequestError as exc:
+                            raise PlanCompilationError(str(exc)) from None
                 elif isinstance(step.input_data, str):
                     try:
                         input_count = validate_generation_count(
@@ -122,6 +139,19 @@ class PlanCompiler:
                             input_data=build_generation_request(
                                 step.input_data,
                                 plan_count,
+                            ),
+                        )
+                        plan.steps[step_index] = step
+                    elif isinstance(step.input_data, Mapping) and not (
+                        isinstance(step.input_data.get("metadata"), Mapping)
+                        and "requested_count" in step.input_data["metadata"]
+                    ):
+                        step = replace(
+                            step,
+                            input_data=build_generation_request(
+                                str(step.input_data.get("query") or ""),
+                                plan_count,
+                                outputs=step.input_data.get("outputs"),
                             ),
                         )
                         plan.steps[step_index] = step

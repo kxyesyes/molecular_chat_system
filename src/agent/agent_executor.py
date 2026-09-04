@@ -6,8 +6,14 @@
 
 from typing import List, Dict, Any, Optional
 import logging
+from .contracts import AgentErrorCode, ToolResult
 from .tools import get_core_tools, get_optional_tool, OPTIONAL_TOOLS
 from .tools.base_tool import execute_tool_compat
+from .contracts.generation_request import (
+    GenerationRequestError,
+    build_generation_request,
+    has_generation_intent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +166,29 @@ class MolecularAgent:
     ) -> Dict[str, Any]:
         """执行agent任务 - 简化版本，直接使用工具"""
         logger.info(f"Executing query: {query[:100]}... (temperature={temperature})")
+
+        if has_generation_intent(query):
+            try:
+                if mol_count is None:
+                    build_generation_request(query)
+                else:
+                    build_generation_request(query, mol_count)
+            except GenerationRequestError as exc:
+                message = f"Invalid molecular generation request: {exc}"
+                tool_result = ToolResult.error_result(
+                    tool_name="llm_molecular_generator",
+                    code=AgentErrorCode.INVALID_INPUT,
+                    message=message,
+                ).to_legacy_dict()
+                error = tool_result["error"]
+                return {
+                    "success": False,
+                    "message": message,
+                    "response": "工具执行失败，请检查输入格式或稍后重试。",
+                    "used_tools": [],
+                    "tool_results": [tool_result],
+                    "error": error,
+                }
 
         # 快速判断是否需要工具
         if not self.should_use_tools(query):

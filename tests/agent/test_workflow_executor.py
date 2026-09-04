@@ -108,6 +108,52 @@ def test_atomic_count_conflict_fails_preflight_before_tool():
     assert tool.calls == []
 
 
+def test_atomic_legacy_input_executes_compiler_canonical_plan_count():
+    tool = FakeTool("llm_molecular_generator")
+    plan = WorkflowPlan(
+        workflow_name="molecular_design",
+        metadata={"requested_count": 7, "atomic": True},
+        steps=[
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_data="Generate candidates",
+                capability="molecule.generate",
+            )
+        ],
+    )
+    prepared = WorkflowExecutor(
+        orchestrator=CanonicalPlanRecordingOrchestrator()
+    ).prepare(
+        context=AgentContext(
+            query="Generate candidates",
+            trace_id="atomic-legacy-canonical",
+            active_skill="molecular_design",
+        ),
+        policy=WorkflowPolicy(
+            name="molecular_design",
+            description="test",
+            allowed_tools=("llm_molecular_generator",),
+        ),
+        all_tools={"llm_molecular_generator": tool},
+        plan=plan,
+    )
+
+    assert prepared.plan.steps[0].input_data == "Generate candidates"
+    assert prepared.compiled.plan.steps[0].input_data["metadata"] == {
+        "requested_count": 7
+    }
+
+    result = prepared._run()
+    execution = prepared.to_execution(result)
+
+    assert result.success is True
+    assert tool.calls[0]["metadata"] == {"requested_count": 7}
+    assert execution.plan.steps[0].input_data["metadata"] == {
+        "requested_count": 7
+    }
+
+
 class StaticResultTool(FakeTool):
     def __init__(self, name, data):
         super().__init__(name)
@@ -165,6 +211,26 @@ class InputRecordingOrchestrator(WorkflowOrchestrator):
     def create_session(self, **kwargs):
         self.create_session_calls.append(kwargs)
         return super().create_session(**kwargs)
+
+
+class CanonicalPlanRecordingOrchestrator:
+    state_store = None
+
+    def __init__(self):
+        self.calls = []
+
+    def for_request(self, _event_bus):
+        return self
+
+    def run(self, *, context, steps, tools, **_kwargs):
+        value = steps[0].input_data
+        self.calls.append(value)
+        raw = tools[steps[0].tool_name].execute(value)
+        return AgentResult(
+            trace_id=context.trace_id,
+            success=raw["success"],
+            message=raw["message"],
+        )
 
 
 class CountingPlanner(SingleStepPlanner):
@@ -510,7 +576,8 @@ def test_prepare_freezes_context_plan_and_compilation_for_execution():
     }
     assert prepared.plan.steps[0].metadata == {"labels": ["original"]}
     assert prepared.plan.steps[0].preconditions == ()
-    assert prepared.compiled.plan is prepared.plan
+    assert prepared.compiled.plan is not prepared.plan
+    assert prepared.compiled.plan == prepared.plan
     assert prepared.compiled.dependencies == {"snapshot-step": ()}
     with pytest.raises(TypeError):
         prepared.compiled.dependencies["snapshot-step"] = ("changed",)
@@ -558,7 +625,8 @@ def test_direct_prepared_workflow_construction_takes_a_defensive_snapshot():
     assert prepared.plan is not plan
     assert prepared.plan.metadata == {"nested": {"value": 1}}
     assert prepared.plan.steps[0].input_data == {"nested": {"value": 1}}
-    assert prepared.compiled.plan is prepared.plan
+    assert prepared.compiled.plan is not prepared.plan
+    assert prepared.compiled.plan == prepared.plan
     assert prepared.compiled.dependencies == {"direct-step": ()}
     with pytest.raises(TypeError):
         prepared.compiled.dependencies["direct-step"] = ()
@@ -670,7 +738,12 @@ def test_prepared_public_mutation_cannot_change_actual_execution_inputs():
         "molecule": {"smiles": "CCO"}
     }
     assert session_call["steps"][0].metadata == {"labels": ["stable"]}
-    assert prepared.compiled.plan is prepared.plan
+    assert prepared.compiled.plan is not prepared.plan
+    assert prepared.compiled.plan != prepared.plan
+    assert prepared.compiled.plan.workflow_name == "stable-plan"
+    assert prepared.compiled.plan.metadata == {
+        "planning": {"source": "stable"}
+    }
     assert execution.result.trace_id == "stable-trace"
     assert execution.plan is not prepared.plan
     assert execution.plan.workflow_name == "stable-plan"
@@ -1047,7 +1120,8 @@ def test_prepare_capture_ignores_reentrant_preflight_from_other_executor():
         plan=outer_plan,
     )
 
-    assert prepared.compiled.plan is prepared.plan
+    assert prepared.compiled.plan is not prepared.plan
+    assert prepared.compiled.plan == prepared.plan
     assert prepared.compiled.dependencies == {"outer-only": ()}
     assert outer_executor.preflight_calls == 1
     assert outer_compiler.calls == 1

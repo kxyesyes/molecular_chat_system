@@ -16,6 +16,26 @@ class CapturingLocalModel:
         return "\n".join("C" * length for length in range(1, 11))
 
 
+class RecordingMixedTool:
+    name = "property_calculator"
+
+    def __init__(self):
+        self.should_use_calls = []
+        self.calls = []
+
+    def should_use(self, query):
+        self.should_use_calls.append(query)
+        return True
+
+    def execute(self, query):
+        self.calls.append(query)
+        return {
+            "success": True,
+            "formatted": "properties",
+            "data": {"query": query},
+        }
+
+
 def _build_agent(monkeypatch):
     model = CapturingLocalModel()
     generator = LLMMolecularGenerator(llm_model=model)
@@ -72,4 +92,32 @@ def test_agent_executor_explicit_count_remains_authoritative(monkeypatch):
     result = agent.execute("Generate 7 molecules", mol_count=3)
 
     assert result["success"] is True
+    assert "Task: provide 3 valid" in model.prompts[0]
+
+
+def test_agent_executor_prevalidates_invalid_mixed_generation_before_all_tools(
+    monkeypatch,
+):
+    agent, model = _build_agent(monkeypatch)
+    other_tool = RecordingMixedTool()
+    agent.core_tools.insert(0, other_tool)
+
+    result = agent.execute("Analyze CCO and Generate 11 molecules")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_input"
+    assert other_tool.should_use_calls == []
+    assert other_tool.calls == []
+    assert model.prompts == []
+
+
+def test_agent_executor_valid_mixed_generation_behavior_is_unchanged(monkeypatch):
+    agent, model = _build_agent(monkeypatch)
+    other_tool = RecordingMixedTool()
+    agent.core_tools.insert(0, other_tool)
+
+    result = agent.execute("Analyze CCO and Generate 3 molecules")
+
+    assert result["success"] is True
+    assert other_tool.calls == ["Analyze CCO and Generate 3 molecules"]
     assert "Task: provide 3 valid" in model.prompts[0]
