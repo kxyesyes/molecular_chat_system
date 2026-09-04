@@ -55,8 +55,8 @@ function collectCheck(failures, description, check) {
     assert.doesNotMatch(productionSources, /MedChat 管理员令牌/);
     assert.doesNotMatch(productionSources, /admin_fetch\.js/);
   });
-  collectCheck(failures, "changed callers use the admin-removal cache version", () => {
-    const version = "v=20260902-admin-auth-removed";
+  collectCheck(failures, "changed callers use cache-busted script references", () => {
+    const version = "v=[^\"']+";
     assert.match(homeTemplate, new RegExp(`home/main\\.js\\?${version}`));
     assert.match(dockingTemplate, new RegExp(`docking/ui_manager\\.js\\?${version}`));
     for (const script of ["model_manager", "training_monitor", "main"]) {

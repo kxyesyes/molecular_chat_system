@@ -26,7 +26,7 @@ const templateSource = fs.readFileSync(templatePath, "utf8");
 
 assert.ok(
   templateSource.includes(
-    '/static/js/home/main.js?v=20260904-partial-terminal-v1'
+    '/static/js/home/main.js?v=20260904-partial-terminal-v2'
   ),
   "homepage must cache-bust the partial terminal styling fix"
 );
@@ -50,6 +50,12 @@ const resolverSource = extractFunction("resolveCompletionAction");
 const resolveCompletionAction = vm.runInNewContext(`(${resolverSource})`);
 const eventClassSource = extractFunction("getAgentEventClass");
 const getAgentEventClass = vm.runInNewContext(`(${eventClassSource})`);
+const eventPresentationSource = extractFunction("resolveAgentEventPresentation");
+const resolveAgentEventPresentation = vm.runInNewContext(
+  `(${eventPresentationSource})`,
+  { getAgentEventClass }
+);
+const agentEventHandlerSource = extractFunction("handleAgentEvent");
 
 function resolve(overrides = {}) {
   return resolveCompletionAction({
@@ -140,21 +146,34 @@ assert.ok(
   "completeLastMessage() must consume the tested state resolver"
 );
 
-const partialTerminalEvent = { event: "task_partial", progress: 1.0 };
+const partialTerminalPresentation = resolveAgentEventPresentation({
+  event: "task_partial",
+  progress: 1.0,
+});
 assert.strictEqual(
-  Math.round(partialTerminalEvent.progress * 100),
-  100,
-  "partial terminal events must remain at 100% progress"
+  partialTerminalPresentation.progressText,
+  "100%",
+  "partial terminal events must display 100% progress"
 );
 assert.strictEqual(
-  getAgentEventClass(partialTerminalEvent.event),
+  partialTerminalPresentation.itemClass,
   "is-warning",
   "task_partial at 100% must use partial warning state instead of success"
 );
-assert.notStrictEqual(
-  getAgentEventClass(partialTerminalEvent.event),
-  "is-complete",
+assert.strictEqual(
+  partialTerminalPresentation.terminal,
+  true,
+  "task_partial at 100% must end the active workflow state"
+);
+assert.ok(
+  !["is-complete", "is-success"].includes(
+    partialTerminalPresentation.itemClass
+  ),
   "task_partial at 100% must not receive success styling"
+);
+assert.ok(
+  agentEventHandlerSource.includes("resolveAgentEventPresentation(event)"),
+  "handleAgentEvent() must consume the tested presentation resolver"
 );
 
 console.log("Homepage workflow completion behavior checks passed");

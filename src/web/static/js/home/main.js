@@ -1862,8 +1862,36 @@
     if (list) list.innerHTML = "";
   }
 
-  function handleAgentEvent(event) {
+  function resolveAgentEventPresentation(event) {
     const eventType = event.event || event.type || "agent_event";
+    const percent =
+      typeof event.progress === "number"
+        ? Math.round(Math.max(0, Math.min(1, event.progress)) * 100)
+        : null;
+    const progressText =
+      eventType.includes("completed") || eventType === "task_completed"
+        ? "已完成"
+        : percent !== null
+        ? `${percent}%`
+        : "执行中";
+    const terminalAgentEvents = new Set([
+      "task_completed",
+      "task_failed",
+      "task_partial",
+      "task_rejected",
+      "task_cancelled",
+    ]);
+    return {
+      eventType,
+      itemClass: getAgentEventClass(eventType),
+      progressText,
+      terminal: terminalAgentEvents.has(eventType),
+    };
+  }
+
+  function handleAgentEvent(event) {
+    const presentation = resolveAgentEventPresentation(event);
+    const eventType = presentation.eventType;
     if (!agentTaskRunActive) {
       resetAgentTaskPanel();
     }
@@ -1879,7 +1907,7 @@
     const toolName = event.tool_name || event.tool || "";
     const message = event.message || getAgentEventLabel(eventType, toolName);
     const item = document.createElement("div");
-    item.className = `agent-task-item ${getAgentEventClass(eventType)}`;
+    item.className = `agent-task-item ${presentation.itemClass}`;
     item.innerHTML = `
       <span class="agent-task-dot"></span>
       <div class="agent-task-copy">
@@ -1889,27 +1917,9 @@
     `;
     list.appendChild(item);
 
-    if (progress) {
-      const percent =
-        typeof event.progress === "number"
-          ? Math.round(Math.max(0, Math.min(1, event.progress)) * 100)
-          : null;
-      progress.textContent =
-        eventType.includes("completed") || eventType === "task_completed"
-          ? "已完成"
-          : percent !== null
-          ? `${percent}%`
-          : "执行中";
-    }
+    if (progress) progress.textContent = presentation.progressText;
 
-    const terminalAgentEvents = new Set([
-      "task_completed",
-      "task_failed",
-      "task_partial",
-      "task_rejected",
-      "task_cancelled",
-    ]);
-    if (terminalAgentEvents.has(eventType)) {
+    if (presentation.terminal) {
       agentTaskRunActive = false;
     }
 

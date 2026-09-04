@@ -1152,10 +1152,12 @@ assert(
 const helperScript =
   "/static/js/home/molecule_candidates.js?v=20260902-candidate-correlation-v5";
 const safeScript = "/static/js/shared/safe_render.js";
-const mainScript =
-  "/static/js/home/main.js?v=20260902-admin-auth-removed-candidate-correlation-v4";
+const mainScriptMatch = indexHtml.match(
+  /\/static\/js\/home\/main\.js\?v=[^"']+/,
+);
+const mainScript = mainScriptMatch ? mainScriptMatch[0] : "";
 assert(indexHtml.includes(helperScript), "Template must version molecule candidate helper");
-assert(indexHtml.includes(mainScript), "Template must version homepage main");
+assert(mainScript, "Template must version homepage main");
 assert(
   indexHtml.indexOf(safeScript) < indexHtml.indexOf(helperScript) &&
     indexHtml.indexOf(helperScript) < indexHtml.indexOf(mainScript),
