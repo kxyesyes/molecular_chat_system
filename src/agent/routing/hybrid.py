@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import Any
 
 from src.agent.persistence.base import AgentStateStore
+from src.agent.contracts.generation_request import has_generation_intent
 from src.agent.tooling import ToolRegistry
 from src.agent.utils.validators import InputValidator, MolecularInputAnalysis
 from src.agent.workflows import WorkflowCatalog
@@ -291,30 +292,7 @@ class HybridSkillRouter:
 
     @staticmethod
     def _has_generation_intent(text: str) -> bool:
-        if any(marker in text for marker in ("生成", "创建", "generate", "create")):
-            return True
-        if "设计" in text:
-            conceptual_markers = (
-                "什么是",
-                "是什么",
-                "解释",
-                "介绍",
-                "概念",
-                "原理",
-                "如何理解",
-                "怎么理解",
-                "有哪些方法",
-            )
-            if any(marker in text for marker in conceptual_markers):
-                return False
-            return bool(
-                re.search(
-                    r"(?:请|帮我|为|针对|基于|围绕|需要|想要|希望).{0,24}设计"
-                    r"|设计\s*(?:\d+|[一二三四五六七八九十]+个|候选|分子|结构)",
-                    text,
-                )
-            )
-        return bool(re.search(r"\bdesign(?:\s+|$)", text, re.I))
+        return has_generation_intent(text)
 
     @staticmethod
     def _is_general_chat(text: str) -> bool:

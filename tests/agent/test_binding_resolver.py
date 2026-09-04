@@ -114,9 +114,12 @@ def test_workflow_binding_preserves_only_recursive_output_trust_signals():
             "target": {"gene_symbol": "PDE5A", "source": "UniProt"},
             "quality": {"provider": {"fallback_used": True}},
         },
+        "trust_envelope": {"signals": ({"fallback_used": True},)},
     }
     with pytest.raises(TypeError, match="immutable"):
         value["outputs"]["quality"]["provider"]["fallback_used"] = False
+    with pytest.raises(TypeError, match="immutable"):
+        value["trust_envelope"]["signals"][0]["fallback_used"] = False
 
 
 def test_ordinary_target_selector_preserves_legacy_raw_shape():

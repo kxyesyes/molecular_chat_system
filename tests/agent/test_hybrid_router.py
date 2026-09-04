@@ -73,6 +73,24 @@ def test_target_plus_design_routes_to_target_driven_workflow_without_screening_w
     assert "llm_molecular_generator" in decision.allowed_tools
 
 
+def test_router_uses_canonical_generation_grammar_for_supported_verbs():
+    for query in (
+        "Produce 5 molecules",
+        "Make 3 compounds",
+        "Build 4 structures",
+    ):
+        decision = HybridSkillRouter().decide(query)
+        assert decision.selected_skill == "molecular_design", query
+
+
+def test_router_ignores_quoted_generation_examples():
+    decision = HybridSkillRouter().decide(
+        'Explain the phrase "Produce 5 molecules"'
+    )
+
+    assert decision.selected_skill != "molecular_design"
+
+
 def test_accepted_routing_feedback_adjusts_future_decision(tmp_path):
     store = SQLiteAgentStateStore(tmp_path / "state.sqlite3")
     query = "评估 CCO"

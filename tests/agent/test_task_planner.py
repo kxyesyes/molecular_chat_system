@@ -172,6 +172,9 @@ def test_requested_count_parser_supports_shared_multilingual_grammar():
         "Generate −−1 molecules",
         "Generate 7.5.2 molecules",
         "Generate ７．５．２ molecules",
+        "Generate five.5 molecules",
+        "Generate two-point-five molecules",
+        "生成五点五个分子",
     ],
 )
 def test_requested_count_parser_rejects_clause_local_malformed_numbers(query):

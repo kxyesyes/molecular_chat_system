@@ -293,6 +293,9 @@ def test_compiler_validates_structured_query_when_count_metadata_is_absent(
         ("quality", "fallback_used"),
         ("metadata.quality", "demo_mode"),
         ("outputs.quality", "untrusted"),
+        ("provider", "fallback_used"),
+        ("outputs.provider", "untrusted"),
+        ("private.provider", "fallback_used"),
     ],
 )
 def test_compiler_preserves_only_immutable_recursive_trust_envelope(
@@ -312,8 +315,17 @@ def test_compiler_preserves_only_immutable_recursive_trust_envelope(
         request["quality"] = quality
     elif location == "metadata.quality":
         request["metadata"]["quality"] = quality
-    else:
+    elif location == "outputs.quality":
         request["outputs"]["quality"] = quality
+    elif location == "provider":
+        request["provider"] = quality["provider"]
+    elif location == "outputs.provider":
+        request["outputs"]["provider"] = quality["provider"]
+    else:
+        request["private"] = {
+            "provider": quality["provider"],
+            "note": "drop-me",
+        }
     plan = WorkflowPlan(
         workflow_name="molecular_design",
         metadata={"requested_count": 7, "atomic": True},
@@ -342,8 +354,16 @@ def test_compiler_preserves_only_immutable_recursive_trust_envelope(
         preserved = canonical["quality"]
     elif location == "metadata.quality":
         preserved = canonical["metadata"]["quality"]
-    else:
+    elif location == "outputs.quality":
         preserved = canonical["outputs"]["quality"]
+    else:
+        assert "provider" not in canonical
+        assert "provider" not in canonical["outputs"]
+        preserved = canonical["trust_envelope"]["signals"][0]
+        assert preserved == {flag: True}
+        with pytest.raises(TypeError, match="immutable"):
+            preserved[flag] = False
+        return
     assert preserved == {"provider": {flag: True}}
     with pytest.raises(TypeError, match="immutable"):
         preserved["provider"][flag] = False

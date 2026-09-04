@@ -958,14 +958,9 @@ class ReActMolecularAgent:
             # 工具优先级调整 - 优化版
             def get_tool_priority(tool_name: str, query_str: str) -> int:
                 """动态计算工具优先级，考虑查询内容"""
-                query_lower = query_str.lower()
-
                 # 分子生成请求（最高优先级）
-                generation_keywords = [
-                    '随机生成', '生成一个', '生成几个', '生成新', '创建分子', '设计分子',
-                    'generate', 'create molecule', 'design molecule', 'random'
-                ]
-                is_generation = any(kw in query_lower for kw in generation_keywords)
+                query_lower = query_str.lower()
+                is_generation = has_generation_intent(query_str)
 
                 # 逆合成分析请求
                 retro_keywords = [

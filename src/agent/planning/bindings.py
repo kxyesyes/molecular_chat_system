@@ -64,13 +64,9 @@ class BindingResolver:
                 and "requested_count" in request_metadata
                 else {}
             )
-            trust_envelope = preserve_generation_trust_envelope(
-                {
-                    "metadata": request_metadata,
-                    "quality": request.get("quality"),
-                    "outputs": {"quality": outputs.get("quality")},
-                }
-            )
+            trust_source = dict(request)
+            trust_source["outputs"] = outputs
+            trust_envelope = preserve_generation_trust_envelope(trust_source)
             metadata_trust = trust_envelope.get("metadata")
             if isinstance(metadata_trust, Mapping):
                 metadata.update(metadata_trust)
@@ -87,6 +83,10 @@ class BindingResolver:
             }
             if "quality" in trust_envelope:
                 workflow_value["quality"] = trust_envelope["quality"]
+            if "trust_envelope" in trust_envelope:
+                workflow_value["trust_envelope"] = trust_envelope[
+                    "trust_envelope"
+                ]
             value = deepcopy(workflow_value)
         else:
             match = self.OUTPUT.fullmatch(selector)

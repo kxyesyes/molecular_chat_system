@@ -166,7 +166,10 @@ class LLMMolecularGenerator(BaseMolecularTool):
             logger.info(f"使用LLM生成分子: {query_text[:100]}")
             
             # 分析查询意图
-            intent = self._analyze_generation_intent(query_text)
+            intent = self._analyze_generation_intent(
+                query_text,
+                requested_count=requested_count,
+            )
             intent['temperature'] = temperature  # 注入温度参数
             intent['target_evidence'] = target_evidence
             intent['count'] = requested_count
@@ -397,7 +400,11 @@ class LLMMolecularGenerator(BaseMolecularTool):
                 filtered.append(candidate)
         return filtered
     
-    def _analyze_generation_intent(self, query: str) -> Dict[str, Any]:
+    def _analyze_generation_intent(
+        self,
+        query: str,
+        requested_count: int | None = None,
+    ) -> Dict[str, Any]:
         """分析生成意图 - 改进版，更准确识别数量"""
         intent = {
             'type': 'description',
@@ -417,9 +424,16 @@ class LLMMolecularGenerator(BaseMolecularTool):
             if smiles_list:
                 intent['base_smiles'] = smiles_list[0]
         
-        intent['count'] = parse_generation_count(
-            query,
-            default=DEFAULT_GENERATION_COUNT,
+        intent['count'] = (
+            validate_generation_count(
+                requested_count,
+                field="requested_count",
+            )
+            if requested_count is not None
+            else parse_generation_count(
+                query,
+                default=DEFAULT_GENERATION_COUNT,
+            )
         )
         
         # 提取优化目标

@@ -154,6 +154,58 @@ def test_atomic_legacy_input_executes_compiler_canonical_plan_count():
     }
 
 
+def test_context_count_is_preflighted_when_generation_plan_omits_count():
+    target = FakeTool("target_database_search")
+    generator = FakeTool("llm_molecular_generator")
+    plan = WorkflowPlan(
+        workflow_name="target_driven_design",
+        steps=[
+            WorkflowStep(
+                "target_search",
+                "target_database_search",
+                input_data="PDE5A",
+                output_key="target",
+                capability="target.structure.search",
+            ),
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_binding="$.workflow",
+                capability="molecule.generate",
+                preconditions=("target_evidence",),
+            ),
+        ],
+    )
+
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="Design candidates for PDE5A",
+            trace_id="context-invalid-count",
+            active_skill="target_driven_design",
+            metadata={"requested_count": 11},
+        ),
+        policy=WorkflowPolicy(
+            name="target_driven_design",
+            description="test",
+            allowed_tools=(
+                "target_database_search",
+                "llm_molecular_generator",
+            ),
+        ),
+        all_tools={
+            target.name: target,
+            generator.name: generator,
+        },
+        plan=plan,
+    )
+
+    assert execution.result.success is False
+    assert execution.result.error.code == AgentErrorCode.INVALID_INPUT
+    assert execution.tool_attempt_count == 0
+    assert target.calls == []
+    assert generator.calls == []
+
+
 class StaticResultTool(FakeTool):
     def __init__(self, name, data):
         super().__init__(name)

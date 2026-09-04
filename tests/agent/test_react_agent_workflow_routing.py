@@ -233,3 +233,40 @@ def test_no_llm_generation_fallback_rejects_invalid_count_before_tool():
     assert response["success"] is False
     assert response["error"]["code"] == "invalid_input"
     assert tool.calls == []
+
+
+def test_no_llm_fallback_prioritizes_all_canonical_generation_verbs():
+    class MatchingTool:
+        def __init__(self, name):
+            self.name = name
+            self.calls = []
+
+        def should_use(self, _query):
+            return True
+
+        def execute(self, query):
+            self.calls.append(query)
+            return {"success": True, "formatted": self.name}
+
+    for query, count in (
+        ("Produce 5 molecules", 5),
+        ("Make 3 compounds", 3),
+        ("Build 4 structures", 4),
+    ):
+        property_tool = MatchingTool("property_calculator")
+        generator = MatchingTool("llm_molecular_generator")
+        agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+        agent.llm = None
+        agent.tools = {
+            property_tool.name: property_tool,
+            generator.name: generator,
+        }
+        agent.max_iterations = 5
+        agent.skill_router = None
+        agent._active_skill = None
+
+        response = agent.execute(query)
+
+        assert response["success"] is True
+        assert property_tool.calls == []
+        assert generator.calls[0]["metadata"]["requested_count"] == count

@@ -232,8 +232,17 @@ def has_generation_intent(query: str) -> bool:
 
 
 def _looks_numeric_like_count_token(token: str) -> bool:
-    normalized = unicodedata.normalize("NFKC", token).strip()
-    return bool(re.match(r"^(?:[-+\u2212.]*)\d", normalized))
+    normalized = unicodedata.normalize("NFKC", token).strip().casefold()
+    if re.match(r"^(?:[-+\u2212.]*)\d", normalized):
+        return True
+    english_number = (
+        r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|"
+        r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+        r"eighteen|nineteen|twenty)"
+    )
+    if re.match(rf"^{english_number}(?:\.|-|_?point(?:-|_)?)", normalized):
+        return True
+    return bool(re.match(rf"^{_CHINESE_COUNT}点", normalized))
 
 
 def _parse_count_token(token: str) -> int | None:
@@ -375,6 +384,8 @@ def build_generation_request(
         request["outputs"].update(outputs_trust)
     if "quality" in preserved_trust:
         request["quality"] = preserved_trust["quality"]
+    if "trust_envelope" in preserved_trust:
+        request["trust_envelope"] = preserved_trust["trust_envelope"]
     return request
 
 
@@ -398,7 +409,46 @@ def preserve_generation_trust_envelope(
     request_quality = preserve_trust_signals(value.get("quality"))
     if request_quality is not None:
         envelope["quality"] = request_quality
+    extra_signals = _collect_discarded_trust_signals(value)
+    if extra_signals:
+        envelope["trust_envelope"] = _ImmutableQuality(
+            {"signals": tuple(extra_signals)}
+        )
     return envelope
+
+
+def _collect_discarded_trust_signals(value: Mapping[str, Any]) -> list[Any]:
+    """Retain trust flags that canonical allowlisting would otherwise discard."""
+    signals: list[Any] = []
+
+    def retained_path(path: tuple[str, ...]) -> bool:
+        if path and path[0] in {"metadata", "quality"}:
+            return True
+        return len(path) >= 2 and path[:2] in {
+            ("outputs", "quality"),
+            ("outputs", "target"),
+        }
+
+    def collect(item: Any, path: tuple[str, ...]) -> None:
+        if isinstance(item, Mapping):
+            for key, nested in item.items():
+                normalized_key = str(key).strip().lower()
+                if (
+                    normalized_key in _TRUST_QUALITY_FIELDS
+                    and not retained_path(path)
+                ):
+                    signals.append(
+                        _ImmutableQuality(
+                            {normalized_key: _freeze_quality_value(nested)}
+                        )
+                    )
+                collect(nested, (*path, normalized_key))
+        elif _is_sequence(item):
+            for nested in item:
+                collect(nested, path)
+
+    collect(value, ())
+    return signals
 
 
 def preserve_target_quality(value: Any, quality: Any) -> Any:
@@ -602,7 +652,7 @@ def _safe_text(
 def _contains_instruction_text(value: str) -> bool:
     normalized = unicodedata.normalize("NFKC", value).casefold()
     compact = re.sub(r"[^a-z0-9]+", "", normalized)
-    return any(
+    if any(
         marker in compact
         for marker in (
             "ignoreallpreviousinstructions",
@@ -613,6 +663,24 @@ def _contains_instruction_text(value: str) -> bool:
             "followthefollowinginstructions",
             "systemprompt",
             "donotfollow",
+            "overridethetask",
+            "overridetheinstructions",
+            "overridetheprompt",
+        )
+    ):
+        return True
+    words = re.sub(r"[^a-z0-9]+", " ", normalized).strip()
+    if re.search(
+        r"\b(?:override|replace|change)\b.{0,32}"
+        r"\b(?:task|instructions?|prompt|request)\b",
+        words,
+    ):
+        return True
+    return bool(
+        re.search(
+            r"\b(?:output|return|emit|print|write)\b\s+"
+            r"(?:a\s+|the\s+)?[a-z0-9@+\-=#./\\\[\]()]{3,}\b",
+            words,
         )
     )
 

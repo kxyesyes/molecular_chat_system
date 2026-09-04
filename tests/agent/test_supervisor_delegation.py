@@ -367,7 +367,7 @@ def test_delegated_invalid_compiled_count_fails_before_target_invocation():
     )
 
     assert result["status"] == "failed"
-    assert result["result"]["error"]["code"] == "validation_error"
+    assert result["result"]["error"]["code"] == "invalid_input"
     assert "requested_count" in result["result"]["metadata"]["preflight"]["reason"]
     assert all(tool.calls == [] for tool in tools.values())
 

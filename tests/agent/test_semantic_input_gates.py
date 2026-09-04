@@ -27,8 +27,17 @@ def _compiled_atomic_request_with_trust(location: str):
         request["quality"] = {"fallback_used": True}
     elif location == "metadata.quality":
         request["metadata"]["quality"] = {"demo_mode": True}
-    else:
+    elif location == "outputs.quality":
         request["outputs"]["quality"] = {"untrusted": True}
+    elif location == "provider":
+        request["provider"] = {"fallback_used": True}
+    elif location == "outputs.provider":
+        request["outputs"]["provider"] = {"untrusted": True}
+    else:
+        request["private"] = {
+            "provider": {"fallback_used": True},
+            "note": "drop-me",
+        }
     plan = WorkflowPlan(
         workflow_name="molecular_design",
         metadata={"requested_count": 7, "atomic": True},
@@ -396,7 +405,15 @@ def test_target_evidence_rejects_untrusted_workflow_and_outputs_wrappers():
 
 
 @pytest.mark.parametrize(
-    "location", ["quality", "metadata.quality", "outputs.quality"]
+    "location",
+    [
+        "quality",
+        "metadata.quality",
+        "outputs.quality",
+        "provider",
+        "outputs.provider",
+        "private.provider",
+    ],
 )
 def test_compiler_canonical_trust_envelope_blocks_semantic_generation(location):
     canonical = _compiled_atomic_request_with_trust(location)

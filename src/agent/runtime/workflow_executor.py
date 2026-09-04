@@ -14,6 +14,10 @@ from src.agent.contracts import (
     AgentExecutionError,
     AgentResult,
 )
+from src.agent.contracts.generation_request import (
+    GenerationRequestError,
+    validate_generation_count,
+)
 from src.agent.planning import (
     CompiledPlan,
     PlanCompilationError,
@@ -243,10 +247,23 @@ class WorkflowExecutor:
         if plan is None:
             plan = self.planner.plan(context_snapshot)
         plan_snapshot = _copy_boundary(plan, "plan")
+        effective_plan = _copy_boundary(plan_snapshot, "effective plan")
+        has_generation_step = any(
+            step.tool_name == "llm_molecular_generator"
+            for step in effective_plan.steps
+        )
+        if (
+            has_generation_step
+            and "requested_count" not in effective_plan.metadata
+            and "requested_count" in context_snapshot.metadata
+        ):
+            effective_plan.metadata["requested_count"] = deepcopy(
+                context_snapshot.metadata["requested_count"]
+            )
         plan_request_metadata = {
-            key: plan_snapshot.metadata[key]
+            key: effective_plan.metadata[key]
             for key in ("requested_count",)
-            if key in plan_snapshot.metadata
+            if key in effective_plan.metadata
         }
         context_snapshot = replace(
             context_snapshot,
@@ -260,7 +277,7 @@ class WorkflowExecutor:
                 context=context_snapshot,
                 policy=policy,
                 all_tools=all_tools_snapshot,
-                plan=plan_snapshot,
+                plan=effective_plan,
             )
         else:
             capture = _PreflightCapture(owner=self)
@@ -270,7 +287,7 @@ class WorkflowExecutor:
                     context=context_snapshot,
                     policy=policy,
                     all_tools=all_tools_snapshot,
-                    plan=plan_snapshot,
+                    plan=effective_plan,
                 )
             finally:
                 _ACTIVE_PREFLIGHT_CAPTURE.reset(token)
@@ -283,7 +300,7 @@ class WorkflowExecutor:
                     context=context_snapshot,
                     policy=policy,
                     all_tools=all_tools_snapshot,
-                    plan=plan_snapshot,
+                    plan=effective_plan,
                 )
         if failure is not None:
             return failure
@@ -333,6 +350,32 @@ class WorkflowExecutor:
         all_tools: Mapping[str, Any],
         plan: WorkflowPlan,
     ) -> tuple[CompiledPlan | None, WorkflowExecution | None]:
+        if "requested_count" in plan.metadata:
+            try:
+                validate_generation_count(plan.metadata["requested_count"])
+            except GenerationRequestError as exc:
+                details = {
+                    "skill": policy.name,
+                    "reason": "invalid_requested_count",
+                    "validation": str(exc),
+                }
+                error = AgentExecutionError(
+                    code=AgentErrorCode.INVALID_INPUT,
+                    message="Invalid molecular generation request",
+                    details=details,
+                )
+                return None, WorkflowExecution(
+                    plan=plan,
+                    result=AgentResult(
+                        trace_id=context.trace_id,
+                        success=False,
+                        message=error.message,
+                        skill_name=policy.name,
+                        error=error,
+                        metadata={"preflight": details},
+                    ),
+                    events=[],
+                )
         if plan.metadata.get("reason") in {
             "invalid_requested_count",
             "requested_count_out_of_range",
