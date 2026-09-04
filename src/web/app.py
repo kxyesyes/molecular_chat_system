@@ -1469,6 +1469,28 @@ Key guidelines:
             except asyncio.CancelledError:
                 pass
             self._llm_watch_task = None
+
+        registry = getattr(self, "agent_tool_registry", None)
+        self.agent_tool_registry = None
+        agent_system = getattr(self, "agent_system", None)
+        agent_tools = list(getattr(agent_system, "tools", {}).values())
+        if agent_system is not None:
+            agent_system.tools = {}
+
+        registry_tool_ids = set()
+        if registry is not None:
+            registry_tool_ids = {
+                id(tool)
+                for adapter in registry.as_mapping().values()
+                if (tool := getattr(adapter, "tool", None)) is not None
+            }
+            registry.close()
+        for tool in agent_tools:
+            if id(tool) in registry_tool_ids:
+                continue
+            close = getattr(tool, "close", None)
+            if callable(close):
+                close()
     
     def run(self, host: Optional[str] = None, port: Optional[int] = None, debug: bool = False):
         """Run the application"""

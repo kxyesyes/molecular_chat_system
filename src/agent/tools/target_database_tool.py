@@ -358,7 +358,7 @@ class TargetDatabaseTool(BaseMolecularTool):
                     "url": target.get("source_url"),
                     "retrieved_at": target.get("target_retrieved_at", target.get("retrieved_at")),
                     "expires_at": target.get("target_expires_at", target.get("expires_at")),
-                    "stale": bool(target.get("stale")),
+                    "stale": bool(target.get("target_stale", target.get("stale"))),
                 }
             )
         for structure in target.get("recommended_structures") or []:
@@ -381,7 +381,12 @@ class TargetDatabaseTool(BaseMolecularTool):
                     "expires_at": structure.get(
                         "expires_at", target.get("structures_expires_at")
                     ),
-                    "stale": bool(structure.get("stale", target.get("stale"))),
+                    "stale": bool(
+                        structure.get(
+                            "stale",
+                            target.get("structures_stale", target.get("stale")),
+                        )
+                    ),
                 }
             )
         return evidence

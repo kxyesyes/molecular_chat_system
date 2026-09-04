@@ -4829,6 +4829,56 @@ def _remote_service(project_root, clock, resolver, *, auto_seed=False):
     )
 
 
+def _tamper_cache_row(project_root, cache_key, *, row_changes=None, payload_changes=None):
+    from src.target_search.database import get_connection
+
+    conn = get_connection(project_root)
+    try:
+        row = conn.execute(
+            "SELECT payload_json FROM target_remote_cache WHERE cache_key = ?",
+            (cache_key,),
+        ).fetchone()
+        assert row is not None
+        assignments = []
+        values = []
+        if payload_changes:
+            payload = json.loads(row["payload_json"])
+            payload_changes(payload)
+            payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+            assignments.extend(["payload_json = ?", "payload_digest = ?"])
+            values.extend(
+                [
+                    payload_json,
+                    hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+                ]
+            )
+        for column, value in (row_changes or {}).items():
+            assignments.append(f"{column} = ?")
+            values.append(value)
+        values.append(cache_key)
+        conn.execute(
+            f"UPDATE target_remote_cache SET {', '.join(assignments)} "
+            "WHERE cache_key = ?",
+            values,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _cache_rows(project_root):
+    from src.target_search.database import get_connection
+
+    conn = get_connection(project_root)
+    try:
+        return conn.execute(
+            "SELECT cache_key, record_type, source, source_record_id, payload_json "
+            "FROM target_remote_cache ORDER BY record_type"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
 def test_target_search_local_hit_returns_without_authoritative_call(project_root, clock):
     from src.target_search.seed import seed_database
 
@@ -5039,6 +5089,133 @@ def test_untrusted_authoritative_resolution_is_rejected_before_any_cache_write(
     assert cache_rows == 0
 
 
+@pytest.mark.parametrize(
+    ("row_changes", "payload_changes"),
+    [
+        ({"source": "CommunityWiki"}, None),
+        ({"source_record_id": "Q9H0H5"}, None),
+        (None, lambda payload: payload.update(organism="Mus musculus")),
+        (None, lambda payload: payload.update(uniprot_id="Q9H0H5")),
+        (None, lambda payload: payload.update(source_record_id="Q9H0H5")),
+        (
+            None,
+            lambda payload: payload.update(
+                source_url="https://evil.example/uniprot/P00533"
+            ),
+        ),
+    ],
+    ids=[
+        "unofficial-row-source",
+        "row-record-id-mismatch",
+        "payload-organism-mismatch",
+        "payload-accession-mismatch",
+        "payload-record-id-mismatch",
+        "payload-evil-url",
+    ],
+)
+def test_invalid_cached_target_is_fully_removed_before_authoritative_fallback(
+    project_root, clock, row_changes, payload_changes
+):
+    class InspectingResolver(_QueueResolver):
+        def resolve(self, query, organism):
+            if self.calls:
+                assert _cache_rows(project_root) == []
+            return super().resolve(query, organism)
+
+    resolver = InspectingResolver(
+        _resolution(),
+        _resolution(structures=[_experimental_structure("2DEF")]),
+    )
+    service = _remote_service(project_root, clock, resolver)
+    service.search_targets("EGFR")
+    target_key = service._target_cache_key("EGFR")
+    _tamper_cache_row(
+        project_root,
+        target_key,
+        row_changes=row_changes,
+        payload_changes=payload_changes,
+    )
+
+    payload = service.search_targets("EGFR")
+
+    assert resolver.calls == [
+        ("EGFR", "Homo sapiens"),
+        ("EGFR", "Homo sapiens"),
+    ]
+    assert payload["status"] == "resolved"
+    assert payload["results"][0]["source"] == "UniProt"
+    assert payload["results"][0]["recommended_structures"][0]["structure_id"] == "2DEF"
+    assert payload["cache"] == {"target": "refreshed", "structures": "refreshed"}
+
+
+@pytest.mark.parametrize(
+    ("row_changes", "payload_changes"),
+    [
+        ({"source": "CommunityPDB"}, None),
+        ({"source_record_id": "Q9H0H5"}, None),
+        (
+            None,
+            lambda payload: payload["structures"][0].update(
+                organism="Mus musculus"
+            ),
+        ),
+        (
+            None,
+            lambda payload: payload["structures"][0].update(
+                source_url="https://evil.example/structure/1ABC"
+            ),
+        ),
+        (
+            None,
+            lambda payload: payload["structures"][0].update(
+                structure_id="9ZZZ"
+            ),
+        ),
+    ],
+    ids=[
+        "unofficial-row-source",
+        "row-accession-mismatch",
+        "payload-organism-mismatch",
+        "payload-evil-url",
+        "payload-record-id-url-mismatch",
+    ],
+)
+def test_invalid_cached_structures_are_removed_before_authoritative_fallback(
+    project_root, clock, row_changes, payload_changes
+):
+    class InspectingResolver(_QueueResolver):
+        def resolve(self, query, organism):
+            if self.calls:
+                rows = _cache_rows(project_root)
+                assert len(rows) == 1
+                assert rows[0]["record_type"] == "target"
+            return super().resolve(query, organism)
+
+    resolver = InspectingResolver(
+        _resolution(),
+        _resolution(structures=[_experimental_structure("2DEF")]),
+    )
+    service = _remote_service(project_root, clock, resolver)
+    service.search_targets("EGFR")
+    structures_key = service._structures_cache_key("P00533")
+    _tamper_cache_row(
+        project_root,
+        structures_key,
+        row_changes=row_changes,
+        payload_changes=payload_changes,
+    )
+
+    payload = service.search_targets("EGFR")
+
+    assert resolver.calls == [
+        ("EGFR", "Homo sapiens"),
+        ("P00533", "Homo sapiens"),
+    ]
+    assert payload["status"] == "resolved"
+    assert payload["results"][0]["recommended_structures"][0]["structure_id"] == "2DEF"
+    assert payload["cache"] == {"target": "fresh", "structures": "refreshed"}
+
+
 def test_target_cache_identity_includes_default_organism(project_root, clock):
     from src.target_search.cache import TargetCacheRepository
     from src.target_search.service import TargetSearchService
@@ -5226,6 +5403,8 @@ def test_fresh_target_uses_existing_stale_structures_on_retryable_outage(
     assert payload["status"] == "resolved"
     assert payload["cache"] == {"target": "fresh", "structures": "stale"}
     assert payload["results"][0]["stale"] is True
+    assert payload["results"][0]["target_stale"] is False
+    assert payload["results"][0]["structures_stale"] is True
     assert payload["results"][0]["structure_evidence_status"] == "stale"
     assert payload["results"][0]["recommended_structures"][0]["structure_id"] == "1ABC"
     assert payload["results"][0]["target_expires_at"] == (
@@ -5236,6 +5415,13 @@ def test_fresh_target_uses_existing_stale_structures_on_retryable_outage(
     ).isoformat()
     assert payload["results"][0]["recommended_structures"][0]["stale"] is True
     assert "stale_authoritative_cache" in payload["warnings"]
+    from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+    evidence = TargetDatabaseTool._target_evidence(payload["results"][0])
+    assert evidence[0]["source"] == "UniProt"
+    assert evidence[0]["stale"] is False
+    assert evidence[1]["source"] == "RCSB_PDB"
+    assert evidence[1]["stale"] is True
 
 
 @pytest.mark.parametrize(

@@ -288,7 +288,7 @@ class TargetSearchService:
         has_ligand: Optional[bool],
     ) -> dict[str, Any]:
         target_key = self._target_cache_key(query)
-        target_cached = self.cache.get(target_key, allow_stale=True)
+        target_cached = self._read_target_cache(target_key)
         target_fresh = target_cached is not None and not target_cached.stale
         target_state = (
             "fresh" if target_fresh else "expired" if target_cached else "miss"
@@ -299,8 +299,9 @@ class TargetSearchService:
         if target_cached is not None:
             accession = str(target_cached.payload.get("uniprot_id") or "")
             if accession:
-                structures_cached = self.cache.get(
-                    self._structures_cache_key(accession), allow_stale=True
+                structures_cached = self._read_structures_cache(
+                    accession,
+                    organism=str(target_cached.payload["organism"]),
                 )
                 structures_state = (
                     "fresh"
@@ -520,6 +521,74 @@ class TargetSearchService:
     def _structures_cache_key(accession: str) -> str:
         return f"structures:{accession.strip().upper()}"
 
+    def _read_target_cache(self, cache_key: str) -> Optional[CachedEvidence]:
+        evidence = self.cache.get(cache_key, allow_stale=True)
+        if evidence is None:
+            self.cache.discard(cache_key)
+            return None
+        try:
+            normalized = self._normalize_target_evidence(evidence.payload)
+            if (
+                evidence.cache_key != cache_key
+                or evidence.record_type != "target"
+                or evidence.source != normalized["source"]
+                or evidence.source_record_id != normalized["source_record_id"]
+                or _json_copy(evidence.payload) != normalized
+            ):
+                raise ValueError("cached target provenance is invalid")
+        except (KeyError, TypeError, ValueError):
+            accessions = {
+                str(evidence.source_record_id).strip().upper(),
+                str(evidence.payload.get("uniprot_id") or "").strip().upper(),
+                str(evidence.payload.get("source_record_id") or "").strip().upper(),
+            }
+            self.cache.discard(
+                cache_key,
+                expected_generation_id=evidence.generation_id,
+            )
+            for accession in accessions:
+                if _UNIPROT_ACCESSION_RE.fullmatch(accession):
+                    self.cache.discard(self._structures_cache_key(accession))
+            return None
+        return evidence
+
+    def _read_structures_cache(
+        self,
+        accession: str,
+        *,
+        organism: str,
+    ) -> Optional[CachedEvidence]:
+        cache_key = self._structures_cache_key(accession)
+        evidence = self.cache.get(cache_key, allow_stale=True)
+        if evidence is None:
+            self.cache.discard(cache_key)
+            return None
+        try:
+            payload = _json_copy(evidence.payload)
+            if set(payload) != {"structures"}:
+                raise ValueError("cached structures payload is invalid")
+            normalized = self._normalize_structure_evidence(
+                tuple(payload["structures"]),
+                accession=accession,
+                organism=organism,
+            )
+            expected_source = self._structure_cache_source(normalized)
+            if (
+                evidence.cache_key != cache_key
+                or evidence.record_type != "structures"
+                or evidence.source != expected_source
+                or evidence.source_record_id != accession
+                or payload != {"structures": normalized}
+            ):
+                raise ValueError("cached structure provenance is invalid")
+        except (KeyError, TypeError, ValueError):
+            self.cache.discard(
+                cache_key,
+                expected_generation_id=evidence.generation_id,
+            )
+            return None
+        return evidence
+
     def _normalize_target_evidence(
         self, target: Optional[Mapping[str, Any]]
     ) -> dict[str, Any]:
@@ -730,6 +799,8 @@ class TargetSearchService:
             "target_expires_at": target.expires_at.isoformat(),
             "structures_retrieved_at": structures.retrieved_at.isoformat(),
             "structures_expires_at": structures.expires_at.isoformat(),
+            "target_stale": target.stale,
+            "structures_stale": structures.stale,
             "stale": target.stale or structures.stale,
             "structure_evidence_status": (
                 "stale" if structures.stale else "fresh"
@@ -754,6 +825,8 @@ class TargetSearchService:
             "target_expires_at": target.expires_at.isoformat(),
             "structures_retrieved_at": None,
             "structures_expires_at": None,
+            "target_stale": target.stale,
+            "structures_stale": None,
             "stale": target.stale,
             "structure_evidence_status": "unavailable",
         }
