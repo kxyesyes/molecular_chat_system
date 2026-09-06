@@ -9,7 +9,12 @@ import time
 from pathlib import Path
 from tqdm import tqdm
 
-from src.reverse_target.config import get_reverse_target_data_dir
+if __package__ in {None, ""}:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from src.reverse_target.config import configure_console_output, get_reverse_target_data_dir
 
 
 class ChEMBLAPIFetcher:
@@ -188,6 +193,7 @@ class ChEMBLAPIFetcher:
 
 def main():
     """主函数"""
+    configure_console_output()
     import argparse
     print("=" * 60)
     print("ChEMBL Web API 数据获取工具")

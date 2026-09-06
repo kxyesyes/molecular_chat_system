@@ -13,7 +13,11 @@ sys.path.insert(0, str(project_root))
 from src.reverse_target.download_chembl import ChEMBLDownloader
 from src.reverse_target.extract_clean_data import ChEMBLDataExtractor
 from src.reverse_target.generate_fingerprints import FingerprintGenerator
-from src.reverse_target.config import get_chembl_db_path, get_reverse_target_data_dir
+from src.reverse_target.config import (
+    configure_console_output,
+    get_chembl_db_path,
+    get_reverse_target_data_dir,
+)
 
 
 class DatabaseBuilder:
@@ -190,6 +194,7 @@ class DatabaseBuilder:
 
 def main():
     """主函数"""
+    configure_console_output()
     import argparse
     
     parser = argparse.ArgumentParser(description='反向寻靶数据库构建工具')

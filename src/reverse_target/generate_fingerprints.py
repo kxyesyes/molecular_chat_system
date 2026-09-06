@@ -8,11 +8,16 @@ import numpy as np
 from pathlib import Path
 from rdkit import Chem
 from rdkit import DataStructs
-from rdkit.Chem import AllChem, MACCSkeys
+from rdkit.Chem import MACCSkeys, rdFingerprintGenerator
 from tqdm import tqdm
 import pickle
 
-from src.reverse_target.config import get_reverse_target_data_dir
+if __package__ in {None, ""}:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from src.reverse_target.config import configure_console_output, get_reverse_target_data_dir
 
 
 def _bitvect_to_numpy_array(bitvect):
@@ -33,7 +38,7 @@ def _process_single_fp(smiles):
     """用于多进程提取指纹的包装函数 (Top-level)"""
     try:
         from rdkit import Chem
-        from rdkit.Chem import AllChem, MACCSkeys
+        from rdkit.Chem import MACCSkeys, rdFingerprintGenerator
         from rdkit import DataStructs
         import numpy as np
         
@@ -41,7 +46,10 @@ def _process_single_fp(smiles):
         if mol is None: return None, None
         
         # Morgan (Radius 2, 2048 bits)
-        fp_morgan = AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=2048)
+        fp_morgan = rdFingerprintGenerator.GetMorganGenerator(
+            radius=2,
+            fpSize=2048,
+        ).GetFingerprint(mol)
         arr_morgan = np.zeros((fp_morgan.GetNumBits(),), dtype=np.uint8)
         try:
             DataStructs.ConvertToNumpyArray(fp_morgan, arr_morgan)
@@ -106,11 +114,10 @@ class FingerprintGenerator:
             return None
         
         try:
-            fp = AllChem.GetMorganFingerprintAsBitVect(
-                mol, 
-                radius=self.morgan_radius, 
-                nBits=self.morgan_bits
-            )
+            fp = rdFingerprintGenerator.GetMorganGenerator(
+                radius=self.morgan_radius,
+                fpSize=self.morgan_bits,
+            ).GetFingerprint(mol)
             # 转换为 numpy 数组
             return _bitvect_to_numpy_array(fp)
         except:
@@ -237,6 +244,7 @@ class FingerprintGenerator:
 
 def main():
     """主函数"""
+    configure_console_output()
     print("=" * 60)
     print("分子指纹生成工具")
     print("=" * 60)

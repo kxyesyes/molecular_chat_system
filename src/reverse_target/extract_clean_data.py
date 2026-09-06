@@ -8,7 +8,16 @@ import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 
-from src.reverse_target.config import get_chembl_db_path, get_reverse_target_data_dir
+if __package__ in {None, ""}:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from src.reverse_target.config import (
+    configure_console_output,
+    get_chembl_db_path,
+    get_reverse_target_data_dir,
+)
 
 
 class ChEMBLDataExtractor:
@@ -188,6 +197,7 @@ class ChEMBLDataExtractor:
 
 def main():
     """主函数"""
+    configure_console_output()
     print("=" * 60)
     print("ChEMBL 数据提取和清洗工具")
     print("=" * 60)
