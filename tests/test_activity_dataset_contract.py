@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+import hashlib
 import json
 import math
 import os
@@ -66,6 +67,67 @@ def _validation_manifest(**overrides: object) -> DatasetManifest:
         payload.setdefault("output_endpoint", "active")
         payload.setdefault("output_units", "probability")
     return DatasetManifest(**payload)
+
+
+def _prepared_frame() -> pd.DataFrame:
+    rows = [
+        ("C", 1.0, "scaffold-a"),
+        ("CC", 2.0, "scaffold-a"),
+        ("CCC", 3.0, "scaffold-b"),
+        ("CCCC", 4.0, "scaffold-b"),
+        ("CCCCC", 5.0, "scaffold-b"),
+        ("N", 6.0, "scaffold-c"),
+        ("NN", 7.0, "scaffold-d"),
+        ("NNN", 8.0, "scaffold-d"),
+        ("O", 9.0, "scaffold-e"),
+        ("OO", 10.0, "scaffold-f"),
+    ]
+    return pd.DataFrame(
+        [
+            {
+                "canonical_smiles": smiles,
+                "normalized_value": value,
+                "scaffold_smiles": scaffold,
+                "normalized_units": "pIC50",
+            }
+            for smiles, value, scaffold in rows
+        ]
+    )
+
+
+def _prepared_validation_result(
+    accepted: pd.DataFrame,
+    *,
+    ready_for_training: bool = True,
+) -> contract.DatasetValidationResult:
+    rejected = pd.DataFrame(
+        [
+            {
+                "original_smiles": "PRIVATE_REJECTED_SMILES",
+                "original_value": "PRIVATE_REJECTED_VALUE",
+                "original_units": "pIC50",
+                "relation": "=",
+                "canonical_smiles": None,
+                "rejection_reason": "invalid_smiles",
+            }
+        ]
+    )
+    return contract.DatasetValidationResult(
+        accepted=accepted,
+        rejected=rejected,
+        warnings=["one synthetic warning"],
+        statistics={
+            "input_rows": len(accepted) + len(rejected),
+            "accepted_rows": len(accepted),
+            "rejected_rows": len(rejected),
+            "unique_molecules": len(accepted),
+            "unique_scaffolds": accepted["scaffold_smiles"].nunique(),
+            "rejected_by_reason": {"invalid_smiles": 1},
+            "duplicate_rows_collapsed": 0,
+        },
+        input_sha256="1" * 64,
+        ready_for_training=ready_for_training,
+    )
 
 
 def test_loads_pde5a_manifest_with_defaults_and_exact_endpoint_key(
@@ -1681,3 +1743,329 @@ def test_readiness_counts_unique_molecules_and_shared_empty_scaffold() -> None:
     assert ready.statistics["rejected_rows"] == 1
     assert ready.accepted["scaffold_smiles"].tolist() == ["", ""]
     assert not_ready.ready_for_training is False
+
+
+def test_scaffold_split_is_deterministic_across_input_order_without_mutation() -> None:
+    prepared = _prepared_frame()
+    reordered = prepared.sample(frac=1, random_state=17).reset_index(drop=True)
+    original = prepared.copy(deep=True)
+    reordered_original = reordered.copy(deep=True)
+
+    first = contract.split_prepared_dataset(prepared, seed=23)
+    second = contract.split_prepared_dataset(reordered, seed=23)
+
+    assert isinstance(first, contract.DatasetSplitResult)
+    assert tuple(first.frames) == ("train", "validation", "test")
+    assert first.assignments == second.assignments
+    assert first.provenance == second.provenance
+    for split_name in first.frames:
+        assert_frame_equal(first.frames[split_name], second.frames[split_name])
+    assert_frame_equal(prepared, original)
+    assert_frame_equal(reordered, reordered_original)
+
+
+def test_scaffold_split_is_nonempty_leakage_free_exact_and_stably_ordered() -> None:
+    prepared = _prepared_frame().sample(frac=1, random_state=8)
+
+    result = contract.split_prepared_dataset(prepared, seed=42)
+
+    canonical_sets = {
+        name: set(frame["canonical_smiles"]) for name, frame in result.frames.items()
+    }
+    scaffold_sets = {
+        name: set(frame["scaffold_smiles"]) for name, frame in result.frames.items()
+    }
+    assert all(not frame.empty for frame in result.frames.values())
+    assert canonical_sets["train"].isdisjoint(canonical_sets["validation"])
+    assert canonical_sets["train"].isdisjoint(canonical_sets["test"])
+    assert canonical_sets["validation"].isdisjoint(canonical_sets["test"])
+    assert scaffold_sets["train"].isdisjoint(scaffold_sets["validation"])
+    assert scaffold_sets["train"].isdisjoint(scaffold_sets["test"])
+    assert scaffold_sets["validation"].isdisjoint(scaffold_sets["test"])
+    emitted = pd.concat(result.frames.values(), ignore_index=True)
+    assert set(emitted["canonical_smiles"]) == set(prepared["canonical_smiles"])
+    assert len(emitted) == len(prepared)
+    for frame in result.frames.values():
+        assert frame["canonical_smiles"].tolist() == sorted(
+            frame["canonical_smiles"].tolist()
+        )
+    assert result.provenance["algorithm"] == "deterministic_scaffold_greedy_v1"
+    assert result.provenance["seed"] == 42
+    assert sum(result.provenance["counts"].values()) == len(prepared)
+
+
+def test_scaffold_split_does_not_depend_on_caller_index_labels() -> None:
+    prepared = _prepared_frame()
+    prepared.index = [0] * len(prepared)
+
+    result = contract.split_prepared_dataset(prepared)
+
+    emitted = pd.concat(result.frames.values(), ignore_index=True)
+    assert len(emitted) == len(prepared)
+    assert set(emitted["canonical_smiles"]) == set(prepared["canonical_smiles"])
+
+
+def test_scaffold_split_requires_at_least_three_distinct_scaffolds() -> None:
+    prepared = _prepared_frame()
+    prepared["scaffold_smiles"] = ["a"] * 5 + ["b"] * 5
+
+    with pytest.raises(ValueError, match="three distinct scaffold"):
+        contract.split_prepared_dataset(prepared)
+
+
+@pytest.mark.parametrize(
+    "ratios",
+    [
+        (0.7, 0.3),
+        (0.7, 0.2, 0.2),
+        (0.7, 0.3, 0.0),
+        (0.7, -0.1, 0.4),
+        (0.7, float("nan"), 0.3),
+        (0.7, True, 0.3),
+        "0.70,0.15,0.15",
+    ],
+)
+def test_scaffold_split_rejects_invalid_ratios(ratios: object) -> None:
+    with pytest.raises(ValueError, match="ratios"):
+        contract.split_prepared_dataset(_prepared_frame(), ratios=ratios)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("seed", [True, False, 4.2, "42", None])
+def test_scaffold_split_rejects_boolean_and_non_integer_seed(seed: object) -> None:
+    with pytest.raises(ValueError, match="seed"):
+        contract.split_prepared_dataset(_prepared_frame(), seed=seed)  # type: ignore[arg-type]
+
+
+def test_scaffold_split_rejects_empty_missing_duplicate_and_nonfinite_data() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        contract.split_prepared_dataset(_prepared_frame().iloc[0:0])
+
+    for missing in ("canonical_smiles", "normalized_value", "scaffold_smiles"):
+        with pytest.raises(ValueError, match=missing):
+            contract.split_prepared_dataset(_prepared_frame().drop(columns=missing))
+
+    duplicate_columns = pd.concat(
+        [_prepared_frame(), _prepared_frame()[["canonical_smiles"]]], axis=1
+    )
+    with pytest.raises(ValueError, match="Duplicate dataframe column"):
+        contract.split_prepared_dataset(duplicate_columns)
+
+    duplicate_smiles = _prepared_frame()
+    duplicate_smiles.loc[1, "canonical_smiles"] = duplicate_smiles.loc[
+        0, "canonical_smiles"
+    ]
+    with pytest.raises(ValueError, match="Duplicate canonical SMILES"):
+        contract.split_prepared_dataset(duplicate_smiles)
+
+    nonfinite = _prepared_frame()
+    nonfinite.loc[0, "normalized_value"] = float("inf")
+    with pytest.raises(ValueError, match="finite normalized_value"):
+        contract.split_prepared_dataset(nonfinite)
+
+
+def test_write_prepared_dataset_emits_atomic_relative_verified_artifacts(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepared_frame()
+    validation = _prepared_validation_result(prepared)
+    split = contract.split_prepared_dataset(prepared, seed=9, ratios=(0.6, 0.2, 0.2))
+    manifest = _validation_manifest(dataset_id="safe-dataset.v1")
+
+    manifest_path = contract.write_prepared_dataset(
+        validation,
+        split,
+        manifest,
+        tmp_path,
+    )
+
+    dataset_dir = tmp_path / manifest.dataset_id
+    assert manifest_path == dataset_dir / "dataset_manifest.json"
+    assert manifest_path.exists()
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 1
+    assert payload["dataset_id"] == manifest.dataset_id
+    assert payload["source"] == manifest.source
+    assert payload["source_endpoint"] == manifest.endpoint
+    assert payload["source_units"] == manifest.units
+    assert payload["output_endpoint"] == (manifest.output_endpoint or manifest.endpoint)
+    assert payload["output_units"] == (manifest.output_units or manifest.units)
+    assert payload["endpoint_key"] == manifest.endpoint_key
+    assert payload["model_contract_key"] == manifest.model_contract_key
+    assert payload["input_sha256"] == validation.input_sha256
+    assert len(payload["prepared_dataset_sha256"]) == 64
+    assert payload["split"]["seed"] == 9
+    assert payload["split"]["ratios"] == {
+        "train": 0.6,
+        "validation": 0.2,
+        "test": 0.2,
+    }
+    assert payload["split"]["counts"] == split.provenance["counts"]
+    assert payload["split"]["scaffold_counts"] == split.provenance[
+        "scaffold_counts"
+    ]
+    assert set(payload["artifacts"]) == {
+        "train",
+        "validation",
+        "test",
+        "quality_report",
+    }
+    for artifact in payload["artifacts"].values():
+        relative_path = Path(artifact["path"])
+        assert relative_path.name == artifact["path"]
+        assert not relative_path.is_absolute()
+        artifact_path = dataset_dir / relative_path
+        assert artifact_path.exists()
+        assert hashlib.sha256(artifact_path.read_bytes()).hexdigest() == artifact[
+            "sha256"
+        ]
+    quality = json.loads((dataset_dir / "quality_report.json").read_text("utf-8"))
+    assert quality["counts"]["accepted_rows"] == len(prepared)
+    assert quality["rejection_reason_counts"] == {"invalid_smiles": 1}
+    assert quality["warnings"] == ["one synthetic warning"]
+    assert quality["split_summary"]["counts"] == split.provenance["counts"]
+    assert "PRIVATE_REJECTED_SMILES" not in json.dumps(quality)
+    assert "PRIVATE_REJECTED_VALUE" not in json.dumps(quality)
+    assert not (dataset_dir / "rejected.csv").exists()
+    assert not list(dataset_dir.glob("*.tmp"))
+
+
+def test_prepared_dataset_digest_is_independent_of_output_path_and_input_order(
+    tmp_path: Path,
+) -> None:
+    first_frame = _prepared_frame()
+    second_frame = first_frame.sample(frac=1, random_state=33).reset_index(drop=True)
+    first_manifest = _validation_manifest(dataset_id="first")
+    second_manifest = _validation_manifest(dataset_id="second")
+
+    first_path = contract.write_prepared_dataset(
+        _prepared_validation_result(first_frame),
+        contract.split_prepared_dataset(first_frame, seed=7),
+        first_manifest,
+        tmp_path / "one",
+    )
+    second_path = contract.write_prepared_dataset(
+        _prepared_validation_result(second_frame),
+        contract.split_prepared_dataset(second_frame, seed=7),
+        second_manifest,
+        tmp_path / "two",
+    )
+
+    first_payload = json.loads(first_path.read_text("utf-8"))
+    second_payload = json.loads(second_path.read_text("utf-8"))
+    assert first_payload["prepared_dataset_sha256"] == second_payload[
+        "prepared_dataset_sha256"
+    ]
+
+
+def test_rejected_rows_are_written_only_to_explicit_destination(tmp_path: Path) -> None:
+    prepared = _prepared_frame()
+    validation = _prepared_validation_result(prepared)
+    split = contract.split_prepared_dataset(prepared)
+    rejected_path = tmp_path / "private" / "explicit-rejections.csv"
+
+    manifest_path = contract.write_prepared_dataset(
+        validation,
+        split,
+        _validation_manifest(dataset_id="with-rejections"),
+        tmp_path / "published",
+        rejected_output_path=rejected_path,
+    )
+
+    assert rejected_path.exists()
+    rejected = pd.read_csv(rejected_path)
+    assert rejected["original_smiles"].tolist() == ["PRIVATE_REJECTED_SMILES"]
+    manifest_payload = json.loads(manifest_path.read_text("utf-8"))
+    assert "rejected" not in manifest_payload["artifacts"]
+    assert str(rejected_path) not in manifest_path.read_text("utf-8")
+
+
+def test_write_prepared_dataset_refuses_not_ready_or_mismatched_splits(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepared_frame()
+    split = contract.split_prepared_dataset(prepared)
+
+    with pytest.raises(ValueError, match="ready for training"):
+        contract.write_prepared_dataset(
+            _prepared_validation_result(prepared, ready_for_training=False),
+            split,
+            _validation_manifest(dataset_id="not-ready"),
+            tmp_path,
+        )
+
+    split.frames["train"].loc[0, "normalized_value"] += 1
+    with pytest.raises(ValueError, match="exactly"):
+        contract.write_prepared_dataset(
+            _prepared_validation_result(prepared),
+            split,
+            _validation_manifest(dataset_id="mismatched"),
+            tmp_path,
+        )
+
+
+@pytest.mark.parametrize(
+    "dataset_id",
+    ["../escape", "nested/dataset", r"nested\dataset", ".", "..", "C:escape"],
+)
+def test_write_prepared_dataset_rejects_unsafe_dataset_artifact_paths(
+    tmp_path: Path,
+    dataset_id: str,
+) -> None:
+    prepared = _prepared_frame()
+
+    with pytest.raises(ValueError, match="dataset_id"):
+        contract.write_prepared_dataset(
+            _prepared_validation_result(prepared),
+            contract.split_prepared_dataset(prepared),
+            _validation_manifest(dataset_id=dataset_id),
+            tmp_path,
+        )
+    assert not (tmp_path.parent / "escape" / "dataset_manifest.json").exists()
+
+
+def test_write_prepared_dataset_refuses_existing_destination(tmp_path: Path) -> None:
+    prepared = _prepared_frame()
+    manifest = _validation_manifest(dataset_id="already-there")
+    destination = tmp_path / manifest.dataset_id
+    destination.mkdir()
+    sentinel = destination / "dataset_manifest.json"
+    sentinel.write_text("existing", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        contract.write_prepared_dataset(
+            _prepared_validation_result(prepared),
+            contract.split_prepared_dataset(prepared),
+            manifest,
+            tmp_path,
+        )
+
+    assert sentinel.read_text("utf-8") == "existing"
+
+
+def test_atomic_replace_failure_leaves_no_publishable_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = _prepared_frame()
+    manifest = _validation_manifest(dataset_id="atomic-failure")
+    real_replace = os.replace
+    calls = 0
+
+    def fail_during_publish(source: object, destination: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated atomic failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(contract.os, "replace", fail_during_publish)
+
+    with pytest.raises(OSError, match="simulated atomic failure"):
+        contract.write_prepared_dataset(
+            _prepared_validation_result(prepared),
+            contract.split_prepared_dataset(prepared),
+            manifest,
+            tmp_path,
+        )
+
+    assert not (tmp_path / manifest.dataset_id / "dataset_manifest.json").exists()

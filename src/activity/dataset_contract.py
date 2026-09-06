@@ -7,10 +7,15 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field, fields
+import hashlib
 import json
 import math
+import numbers
+import os
 from pathlib import Path
 import re
+import shutil
+import tempfile
 import unicodedata
 from typing import Any
 
@@ -103,6 +108,13 @@ _REJECTED_COLUMNS = [
     "canonical_smiles",
     "rejection_reason",
 ]
+_SPLIT_NAMES = ("train", "validation", "test")
+_SPLIT_REQUIRED_COLUMNS = (
+    "canonical_smiles",
+    "normalized_value",
+    "scaffold_smiles",
+)
+_SAFE_DATASET_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
 def _normalized_text(value: str) -> str:
@@ -414,6 +426,15 @@ class DatasetValidationResult:
     statistics: dict[str, Any]
     input_sha256: str | None
     ready_for_training: bool
+
+
+@dataclass(frozen=True)
+class DatasetSplitResult:
+    """Leakage-safe dataset partitions and reproducible assignment evidence."""
+
+    frames: dict[str, pd.DataFrame] = field(repr=False)
+    assignments: dict[str, str]
+    provenance: dict[str, Any]
 
 
 def _normalized_unit(value: Any) -> str | None:
@@ -804,6 +825,461 @@ def validate_activity_dataset(
         input_sha256=input_sha256,
         ready_for_training=ready_for_training,
     )
+
+
+def _validate_split_input(prepared: pd.DataFrame) -> None:
+    duplicate_columns = prepared.columns[prepared.columns.duplicated()].tolist()
+    if duplicate_columns:
+        names = ", ".join(str(name) for name in duplicate_columns)
+        raise ValueError(f"Duplicate dataframe column(s): {names}")
+    if prepared.empty:
+        raise ValueError("Prepared dataframe must not be empty")
+
+    missing_columns = [
+        name for name in _SPLIT_REQUIRED_COLUMNS if name not in prepared.columns
+    ]
+    if missing_columns:
+        names = ", ".join(missing_columns)
+        raise ValueError(f"Missing required prepared dataframe column(s): {names}")
+
+    canonical_values = prepared["canonical_smiles"].tolist()
+    if any(not isinstance(value, str) or not value for value in canonical_values):
+        raise ValueError("Invalid canonical_smiles: expected nonblank strings")
+    if prepared["canonical_smiles"].duplicated().any():
+        raise ValueError("Duplicate canonical SMILES are not allowed")
+
+    scaffold_values = prepared["scaffold_smiles"].tolist()
+    if any(not isinstance(value, str) for value in scaffold_values):
+        raise ValueError("Invalid scaffold_smiles: expected strings")
+
+    for value in prepared["normalized_value"].tolist():
+        if isinstance(value, bool) or not isinstance(value, numbers.Real):
+            raise ValueError("Expected finite normalized_value values")
+        try:
+            finite = math.isfinite(float(value))
+        except (OverflowError, TypeError, ValueError):
+            finite = False
+        if not finite:
+            raise ValueError("Expected finite normalized_value values")
+
+
+def _validated_split_parameters(
+    seed: int,
+    ratios: tuple[float, float, float],
+) -> tuple[int, tuple[float, float, float]]:
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("Invalid seed: expected an integer")
+    if isinstance(ratios, (str, bytes)):
+        raise ValueError("Invalid split ratios: expected three positive numbers")
+    try:
+        ratio_values = tuple(ratios)
+    except TypeError:
+        raise ValueError(
+            "Invalid split ratios: expected three positive numbers"
+        ) from None
+    if len(ratio_values) != len(_SPLIT_NAMES):
+        raise ValueError("Invalid split ratios: expected exactly three values")
+
+    normalized: list[float] = []
+    for value in ratio_values:
+        if isinstance(value, bool) or not isinstance(value, numbers.Real):
+            raise ValueError("Invalid split ratios: expected finite numbers")
+        numeric = float(value)
+        if not math.isfinite(numeric) or numeric <= 0:
+            raise ValueError("Invalid split ratios: values must be positive and finite")
+        normalized.append(numeric)
+    if not math.isclose(sum(normalized), 1.0, rel_tol=0.0, abs_tol=1e-12):
+        raise ValueError("Invalid split ratios: values must sum to 1")
+    return seed, (normalized[0], normalized[1], normalized[2])
+
+
+def _stable_split_token(seed: int, *components: str) -> str:
+    payload = "\0".join((str(seed), *components)).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _sorted_prepared_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    return frame.sort_values(
+        by="canonical_smiles",
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+
+def _verify_split_invariants(
+    prepared: pd.DataFrame,
+    frames: dict[str, pd.DataFrame],
+) -> None:
+    canonical_sets = {
+        name: set(frame["canonical_smiles"].tolist())
+        for name, frame in frames.items()
+    }
+    scaffold_sets = {
+        name: set(frame["scaffold_smiles"].tolist())
+        for name, frame in frames.items()
+    }
+    for left_index, left_name in enumerate(_SPLIT_NAMES):
+        for right_name in _SPLIT_NAMES[left_index + 1 :]:
+            if canonical_sets[left_name] & canonical_sets[right_name]:
+                raise ValueError("Canonical SMILES overlap across dataset splits")
+            if scaffold_sets[left_name] & scaffold_sets[right_name]:
+                raise ValueError("Scaffold overlap across dataset splits")
+
+    emitted = pd.concat(
+        [frames[name] for name in _SPLIT_NAMES],
+        ignore_index=True,
+    )
+    if len(emitted) != len(prepared):
+        raise ValueError("Dataset split row loss or duplication detected")
+    if emitted["canonical_smiles"].duplicated().any():
+        raise ValueError("Dataset split duplicated canonical SMILES")
+    if set(emitted["canonical_smiles"]) != set(prepared["canonical_smiles"]):
+        raise ValueError("Dataset split union does not equal its input")
+    if not _sorted_prepared_frame(emitted).equals(
+        _sorted_prepared_frame(prepared)
+    ):
+        raise ValueError("Dataset split rows do not exactly equal their input")
+
+
+def split_prepared_dataset(
+    prepared: pd.DataFrame,
+    *,
+    seed: int = 42,
+    ratios: tuple[float, float, float] = (0.70, 0.15, 0.15),
+) -> DatasetSplitResult:
+    """Partition canonical rows by complete scaffold groups without leakage."""
+
+    _validate_split_input(prepared)
+    seed, normalized_ratios = _validated_split_parameters(seed, ratios)
+
+    positional = prepared.reset_index(drop=True)
+    scaffold_groups = {
+        scaffold: tuple(group.index.tolist())
+        for scaffold, group in positional.groupby("scaffold_smiles", sort=False)
+    }
+    if len(scaffold_groups) < len(_SPLIT_NAMES):
+        raise ValueError("Prepared dataset requires at least three distinct scaffold identities")
+
+    ordered_groups = sorted(
+        scaffold_groups.items(),
+        key=lambda item: (
+            -len(item[1]),
+            _stable_split_token(seed, item[0]),
+            item[0],
+        ),
+    )
+    target_counts = {
+        name: len(prepared) * ratio
+        for name, ratio in zip(_SPLIT_NAMES, normalized_ratios)
+    }
+    counts = {name: 0 for name in _SPLIT_NAMES}
+    assigned_indices: dict[str, list[Any]] = {name: [] for name in _SPLIT_NAMES}
+    assignments: dict[str, str] = {}
+
+    for group_index, (scaffold, indices) in enumerate(ordered_groups):
+        empty_splits = [name for name in _SPLIT_NAMES if counts[name] == 0]
+        groups_remaining = len(ordered_groups) - group_index
+        candidates = (
+            empty_splits if groups_remaining == len(empty_splits) else list(_SPLIT_NAMES)
+        )
+
+        def candidate_score(split_name: str) -> tuple[float, str, int]:
+            projected = dict(counts)
+            projected[split_name] += len(indices)
+            deviation = sum(
+                abs(projected[name] - target_counts[name]) for name in _SPLIT_NAMES
+            )
+            return (
+                deviation,
+                _stable_split_token(seed, scaffold, split_name),
+                _SPLIT_NAMES.index(split_name),
+            )
+
+        chosen = min(candidates, key=candidate_score)
+        assignments[scaffold] = chosen
+        assigned_indices[chosen].extend(indices)
+        counts[chosen] += len(indices)
+
+    frames = {
+        name: _sorted_prepared_frame(
+            positional.iloc[assigned_indices[name]].copy(deep=True)
+        )
+        for name in _SPLIT_NAMES
+    }
+    if any(frame.empty for frame in frames.values()):
+        raise ValueError("Scaffold split could not preserve nonempty partitions")
+    _verify_split_invariants(prepared, frames)
+
+    scaffold_counts = {
+        name: int(frames[name]["scaffold_smiles"].nunique(dropna=False))
+        for name in _SPLIT_NAMES
+    }
+    ordered_assignments = dict(sorted(assignments.items()))
+    assignment_bytes = json.dumps(
+        ordered_assignments,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    ratio_mapping = dict(zip(_SPLIT_NAMES, normalized_ratios))
+    provenance = {
+        "algorithm": "deterministic_scaffold_greedy_v1",
+        "seed": seed,
+        "ratios": ratio_mapping,
+        "counts": counts,
+        "scaffold_counts": scaffold_counts,
+        "assignments_sha256": hashlib.sha256(assignment_bytes).hexdigest(),
+    }
+    return DatasetSplitResult(
+        frames=frames,
+        assignments=ordered_assignments,
+        provenance=provenance,
+    )
+
+
+def _json_bytes(payload: Any) -> bytes:
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _csv_bytes(frame: pd.DataFrame) -> bytes:
+    return frame.to_csv(index=False, lineterminator="\n").encode("utf-8")
+
+
+def _sha256_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _atomic_write(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_path = Path(temporary.name)
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _write_verified(path: Path, content: bytes) -> str:
+    expected_digest = _sha256_bytes(content)
+    _atomic_write(path, content)
+    actual_digest = _sha256_bytes(path.read_bytes())
+    if actual_digest != expected_digest:
+        raise OSError(f"SHA-256 verification failed for {path.name}")
+    return actual_digest
+
+
+def _safe_dataset_directory(output_dir: str | Path, dataset_id: str) -> Path:
+    if not _SAFE_DATASET_ID.fullmatch(dataset_id) or dataset_id in {".", ".."}:
+        raise ValueError("Invalid dataset_id for artifact path")
+    output_root = Path(output_dir).resolve()
+    dataset_directory = (output_root / dataset_id).resolve()
+    if dataset_directory.parent != output_root:
+        raise ValueError("Invalid dataset_id: artifact path escapes output_dir")
+    return dataset_directory
+
+
+def _validate_result_matches_split(
+    validation_result: DatasetValidationResult,
+    split_result: DatasetSplitResult,
+) -> None:
+    if not validation_result.ready_for_training:
+        raise ValueError("Activity dataset is not ready for training")
+    if set(split_result.frames) != set(_SPLIT_NAMES):
+        raise ValueError("Split frames must contain train, validation, and test")
+    for name in _SPLIT_NAMES:
+        _validate_split_input(split_result.frames[name])
+        if split_result.frames[name].empty:
+            raise ValueError("Split frames must all be nonempty")
+    _validate_split_input(validation_result.accepted)
+    _verify_split_invariants(validation_result.accepted, split_result.frames)
+
+    actual_assignments: dict[str, str] = {}
+    for name in _SPLIT_NAMES:
+        for scaffold in split_result.frames[name]["scaffold_smiles"].unique():
+            actual_assignments[scaffold] = name
+    if actual_assignments != split_result.assignments:
+        raise ValueError("Split assignments do not correspond exactly to split frames")
+
+
+def _explicit_rejected_path(
+    output_dir: str | Path,
+    rejected_output_path: str | Path,
+) -> Path:
+    requested = Path(rejected_output_path)
+    if requested.is_absolute():
+        return requested.resolve()
+    output_root = Path(output_dir).resolve()
+    resolved = (output_root / requested).resolve()
+    if output_root != resolved and output_root not in resolved.parents:
+        raise ValueError("Relative rejected_output_path escapes output_dir")
+    return resolved
+
+
+def write_prepared_dataset(
+    validation_result: DatasetValidationResult,
+    split_result: DatasetSplitResult,
+    manifest: DatasetManifest,
+    output_dir: str | Path,
+    *,
+    rejected_output_path: str | Path | None = None,
+) -> Path:
+    """Atomically publish validated split artifacts and their integrity manifest."""
+
+    _validate_result_matches_split(validation_result, split_result)
+    dataset_directory = _safe_dataset_directory(output_dir, manifest.dataset_id)
+    output_root = Path(output_dir).resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    try:
+        dataset_directory.mkdir()
+    except FileExistsError:
+        raise FileExistsError(
+            f"Prepared dataset destination already exists: {manifest.dataset_id}"
+        ) from None
+
+    try:
+        artifact_payloads = {
+            name: _csv_bytes(split_result.frames[name]) for name in _SPLIT_NAMES
+        }
+        counts = {
+            name: len(split_result.frames[name]) for name in _SPLIT_NAMES
+        }
+        scaffold_counts = {
+            name: int(
+                split_result.frames[name]["scaffold_smiles"].nunique(dropna=False)
+            )
+            for name in _SPLIT_NAMES
+        }
+        quality_report = {
+            "counts": {
+                "input_rows": validation_result.statistics.get("input_rows"),
+                "accepted_rows": len(validation_result.accepted),
+                "rejected_rows": len(validation_result.rejected),
+                "duplicate_rows_collapsed": validation_result.statistics.get(
+                    "duplicate_rows_collapsed", 0
+                ),
+                "unique_molecules": validation_result.statistics.get(
+                    "unique_molecules", len(validation_result.accepted)
+                ),
+                "unique_scaffolds": validation_result.statistics.get(
+                    "unique_scaffolds",
+                    validation_result.accepted["scaffold_smiles"].nunique(
+                        dropna=False
+                    ),
+                ),
+            },
+            "warnings": list(validation_result.warnings),
+            "rejection_reason_counts": dict(
+                validation_result.statistics.get("rejected_by_reason", {})
+            ),
+            "split_summary": {
+                "counts": counts,
+                "scaffold_counts": scaffold_counts,
+            },
+        }
+        quality_payload = _json_bytes(quality_report)
+        artifact_payloads["quality_report"] = quality_payload
+
+        artifact_filenames = {
+            "train": "train.csv",
+            "validation": "validation.csv",
+            "test": "test.csv",
+            "quality_report": "quality_report.json",
+        }
+        artifacts: dict[str, dict[str, Any]] = {}
+        for name, filename in artifact_filenames.items():
+            content = artifact_payloads[name]
+            digest = _write_verified(dataset_directory / filename, content)
+            artifacts[name] = {
+                "path": filename,
+                "sha256": digest,
+                "row_count": counts.get(name, len(validation_result.accepted)),
+            }
+
+        canonical_content = _csv_bytes(
+            _sorted_prepared_frame(validation_result.accepted)[
+                list(_SPLIT_REQUIRED_COLUMNS)
+            ]
+        )
+        prepared_digest_payload = _json_bytes(
+            {
+                "canonical_scientific_content_sha256": _sha256_bytes(
+                    canonical_content
+                ),
+                "artifact_sha256": {
+                    name: artifacts[name]["sha256"] for name in artifact_filenames
+                },
+            }
+        )
+        prepared_dataset_sha256 = _sha256_bytes(prepared_digest_payload)
+
+        if rejected_output_path is not None:
+            rejected_path = _explicit_rejected_path(
+                output_dir,
+                rejected_output_path,
+            )
+            reserved_paths = {
+                (dataset_directory / filename).resolve()
+                for filename in (*artifact_filenames.values(), "dataset_manifest.json")
+            }
+            if rejected_path in reserved_paths:
+                raise ValueError("rejected_output_path conflicts with dataset artifact")
+            _write_verified(rejected_path, _csv_bytes(validation_result.rejected))
+
+        ratios = split_result.provenance.get("ratios")
+        seed = split_result.provenance.get("seed")
+        dataset_manifest = {
+            "schema_version": 1,
+            "dataset_id": manifest.dataset_id,
+            "target_id": _normalized_text(manifest.target_id),
+            "target_name": _normalized_text(manifest.target_name),
+            "task_type": manifest.task_type,
+            "source": _normalized_text(manifest.source),
+            "license": _normalized_text(manifest.license),
+            "source_endpoint": manifest.endpoint,
+            "source_units": manifest.units,
+            "output_endpoint": manifest.output_endpoint or manifest.endpoint,
+            "output_units": manifest.output_units or manifest.units,
+            "label_transform": manifest.label_transform,
+            "endpoint_key": manifest.endpoint_key,
+            "model_contract_key": manifest.model_contract_key,
+            "input_sha256": validation_result.input_sha256,
+            "prepared_dataset_sha256": prepared_dataset_sha256,
+            "split": {
+                "algorithm": split_result.provenance.get("algorithm"),
+                "ratios": ratios,
+                "seed": seed,
+                "counts": counts,
+                "scaffold_counts": scaffold_counts,
+            },
+            "artifacts": artifacts,
+        }
+        manifest_path = dataset_directory / "dataset_manifest.json"
+        _write_verified(manifest_path, _json_bytes(dataset_manifest))
+        return manifest_path
+    except Exception:
+        shutil.rmtree(dataset_directory, ignore_errors=True)
+        raise
 
 
 def load_dataset_manifest(path: str | Path) -> DatasetManifest:
