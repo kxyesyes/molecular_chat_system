@@ -132,6 +132,7 @@ verify_container_ownership() {
             '{{index .Config.Labels "opensandbox.io/id"}}' \
             "$container" 2>/dev/null) || fail
         valid_sandbox_id "$sandbox_id" || fail
+        container_network_is_exact "$container" || fail
     done
 
     labeled=$(docker ps -aq --no-trunc --filter "label=$SANDBOX_LABEL" \

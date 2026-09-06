@@ -94,9 +94,10 @@ docking:
         self.assertTrue(workflow_path.is_file())
         source = workflow_path.read_text(encoding="utf-8")
         required_commands = [
-            "python -m pytest ${{ matrix.pytest_target }} -q -p no:cacheprovider",
+            "python -m pytest ${{ matrix.pytest_target }} -q -p no:cacheprovider ${{ matrix.pytest_args }}",
             'pytest_target: "tests/agent"',
-            'pytest_target: "tests/sandbox_broker"',
+            'pytest_target: "tests/sandbox_broker/test_api.py"',
+            'pytest_target: "tests/sandbox_broker --ignore=tests/sandbox_broker/test_api.py"',
             'pytest_target: "tests/task_runtime"',
             'pytest_target: "tests --ignore=tests/agent --ignore=tests/sandbox_broker --ignore=tests/task_runtime"',
             "python -m compileall -q src scripts",
@@ -107,6 +108,7 @@ docking:
         for command in required_commands:
             self.assertIn(command, source)
         self.assertIn('python-version: "3.10"', source)
+        self.assertGreaterEqual(source.count('pytest_args: "--timeout=60"'), 2)
         self.assertIn("git grep -IlE", source)
         self.assertNotIn("git grep -nE", source)
         self.assertNotIn("secrets.", source)

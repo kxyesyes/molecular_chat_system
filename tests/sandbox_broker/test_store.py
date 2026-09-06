@@ -404,7 +404,10 @@ def test_constructor_rejects_symlinked_parent(tmp_path: Path) -> None:
 
         assert str(tmp_path) not in str(raised.value)
     finally:
-        alias_parent.rmdir()
+        if alias_parent.is_symlink():
+            alias_parent.unlink()
+        else:
+            alias_parent.rmdir()
 
 
 def test_constructor_rejects_existing_hardlinked_database_target(tmp_path: Path) -> None:

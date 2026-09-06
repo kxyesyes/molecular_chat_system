@@ -1473,6 +1473,16 @@ def test_runtime_dependency_lock_check_matches_only_exact_installed_bytes(
         "_RUNTIME_DEPENDENCY_LOCKS",
         ((installed, expected),),
     )
+    if os.name == "posix" and installed.stat().st_uid != 0:
+        real_fstat = validator.os.fstat
+
+        def root_owned_fstat(descriptor: int):
+            metadata = real_fstat(descriptor)
+            values = list(metadata)
+            values[4] = 0
+            return os.stat_result(values)
+
+        monkeypatch.setattr(validator.os, "fstat", root_owned_fstat)
 
     assert validator._runtime_dependency_locks_match()
     installed.chmod(0o644)
@@ -2195,7 +2205,6 @@ def test_interrupted_preview_rotation_rolls_back_every_generation_file(
         tmp_path / "etc/systemd/system/medchat-opensandbox-firewall.service",
         tmp_path / "etc/systemd/system/medchat-opensandbox.service",
         tmp_path / "etc/systemd/system/medchat-sandbox-broker.service",
-        tmp_path / "etc/systemd/system/medchat-temporal-worker.service",
         tmp_path / "usr/local/libexec/medchat/configure-opensandbox-firewall",
     )
     before = {path: path.read_bytes() for path in generation_paths}

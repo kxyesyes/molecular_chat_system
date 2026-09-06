@@ -181,20 +181,27 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _safe_unlink_created(path: Path, created_identity: tuple[int, ...] | None) -> None:
+def _safe_unlink_created(
+    path: Path,
+    created_identity: tuple[int, ...] | None,
+    created_version: tuple[int, ...] | None = None,
+) -> bool:
     if created_identity is None:
-        return
+        return False
     try:
         metadata = path.lstat()
         if (
             _identity(metadata) == created_identity
+            and (created_version is None or _stat_version(metadata) == created_version)
             and stat.S_ISREG(metadata.st_mode)
             and not stat.S_ISLNK(metadata.st_mode)
             and not _is_reparse(metadata)
         ):
             path.unlink()
+            return True
     except (FileNotFoundError, OSError, RuntimeError):
         pass
+    return False
 
 
 def _validate_stage_arguments(
@@ -237,7 +244,9 @@ def stage_input(
     part: Path | None = None
     final: Path | None = None
     part_identity: tuple[int, ...] | None = None
+    part_version: tuple[int, ...] | None = None
     published_identity: tuple[int, ...] | None = None
+    published_version: tuple[int, ...] | None = None
     descriptor: int | None = None
     published = False
     try:
@@ -287,6 +296,7 @@ def stage_input(
             raise ValueError
         os.fsync(descriptor)
         after = os.fstat(descriptor)
+        part_version = _stat_version(after)
         named = part.lstat()
         if (
             after.st_nlink != 1
@@ -314,17 +324,37 @@ def stage_input(
             snapshot = read_file_snapshot(final, limit)
             if snapshot.sha256 != digest.hexdigest() or len(snapshot.content) != total:
                 raise ValueError
-            _safe_unlink_created(part, part_identity)
+            if not _safe_unlink_created(part, part_identity, part_version):
+                raise ValueError
             part_identity = None
+            part_version = None
         else:
             if _identity(input_root.lstat()) != parent_identity:
                 raise ValueError
             os.link(part, final, follow_symlinks=False)
             published = True
-            published_identity = _identity(after)
-            part.unlink()
+            linked_part = part.lstat()
+            linked_final = final.lstat()
+            if (
+                _identity(linked_part) != part_identity
+                or not stat.S_ISREG(linked_part.st_mode)
+                or linked_part.st_nlink != 2
+                or _is_reparse(linked_part)
+                or _file_identity(linked_part) != _file_identity(linked_final)
+            ):
+                raise ValueError
+            published_identity = _identity(linked_final)
+            published_version = _stat_version(linked_final)
+            if not _safe_unlink_created(
+                part,
+                _identity(linked_part),
+                _stat_version(linked_part),
+            ):
+                raise ValueError
             part_identity = None
+            part_version = None
             final_metadata = final.lstat()
+            published_version = _stat_version(final_metadata)
             if (
                 _identity(final_metadata) != _identity(after)
                 or not stat.S_ISREG(final_metadata.st_mode)
@@ -338,7 +368,7 @@ def stage_input(
         return StagedInput(str(relative), total, digest.hexdigest())
     except Exception:
         if published and final is not None:
-            _safe_unlink_created(final, published_identity)
+            _safe_unlink_created(final, published_identity, published_version)
         raise InputStagingError("input staging failed") from None
     finally:
         if descriptor is not None:
@@ -347,7 +377,7 @@ def stage_input(
             except OSError:
                 pass
         if part is not None:
-            _safe_unlink_created(part, part_identity)
+            _safe_unlink_created(part, part_identity, part_version)
 
 
 def _reject_json_constant(_: str) -> None:

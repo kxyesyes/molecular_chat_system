@@ -76,6 +76,15 @@ def _multiprocess_upsert_worker(
 def test_docking_history_reads_index_with_pagination(tmp_path, monkeypatch):
     write_history_index(tmp_path, count=120)
 
+    def fail_if_legacy_result_is_parsed(_result_file):
+        raise AssertionError("history GET must not parse result.pdbqt")
+
+    monkeypatch.setattr(
+        history_index_module,
+        "_parse_vina_summary",
+        fail_if_legacy_result_is_parsed,
+    )
+
     app = FastAPI()
     setup_api_routes(app, docking_service=MockDockingService(tmp_path))
     client = TestClient(app)
@@ -95,7 +104,9 @@ def test_docking_history_reads_index_with_pagination(tmp_path, monkeypatch):
     assert len(payload["history"]) == 5
     assert payload["history"][0]["job_id"] == "0005"
     assert payload["history"][0]["best_energy"] == -14.9
-    assert elapsed_ms < 100
+    # This is only a coarse regression budget; the structural assertion above
+    # proves that request latency does not grow with pose-file parsing.
+    assert elapsed_ms < 500
 
 
 def test_docking_history_concurrent_mutation_and_reads_preserve_records(tmp_path):

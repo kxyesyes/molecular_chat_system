@@ -803,6 +803,7 @@ class SandboxDockingRunner:
         try:
             if type(job_id) is not str or _JOB_ID_PATTERN.fullmatch(job_id) is None:
                 raise ValueError("invalid docking job")
+            self._preflight_output_job_path(job_id)
             if not isinstance(payload, Mapping):
                 raise ValueError("invalid docking payload")
             if "smiles" in payload:
@@ -1655,6 +1656,37 @@ class SandboxDockingRunner:
         if _stat_identity(after) != _stat_identity(metadata):
             raise ValueError("unsafe artifact output")
         return root, job_root, None, None, root_identity, _stat_identity(after)
+
+    def _preflight_output_job_path(self, job_id: str) -> None:
+        """Reject an already-unsafe output path before contacting the broker."""
+
+        root = self._allowed_output_root
+        try:
+            root_metadata = root.lstat()
+        except FileNotFoundError:
+            return
+        if (
+            not stat.S_ISDIR(root_metadata.st_mode)
+            or stat.S_ISLNK(root_metadata.st_mode)
+            or bool(getattr(root_metadata, "st_file_attributes", 0) & 0x400)
+            or root.resolve(strict=True) != root
+        ):
+            raise ValueError("unsafe artifact output")
+
+        job_root = root / f"docking_{job_id}"
+        if job_root.parent != root:
+            raise ValueError("unsafe artifact output")
+        try:
+            metadata = job_root.lstat()
+        except FileNotFoundError:
+            return
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or bool(getattr(metadata, "st_file_attributes", 0) & 0x400)
+            or job_root.resolve(strict=True).parent != root
+        ):
+            raise ValueError("unsafe artifact output")
 
     @staticmethod
     def _verify_output_parent(
