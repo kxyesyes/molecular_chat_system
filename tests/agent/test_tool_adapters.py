@@ -174,6 +174,41 @@ def test_adapter_timeout_returns_without_waiting_for_running_tool() -> None:
         release.set()
 
 
+def test_adapter_never_retries_while_timed_out_invocation_is_still_running() -> None:
+    release = threading.Event()
+    calls = 0
+
+    class BlockingTool:
+        name = "legacy_value"
+
+        def execute(self, query):
+            nonlocal calls
+            calls += 1
+            release.wait(1.0)
+            return {"success": True, "data": {"value": 1}}
+
+    adapter = LegacyPythonToolAdapter(
+        make_spec(
+            timeout_seconds=0.03,
+            retry_policy=RetryPolicy(
+                max_attempts=2,
+                retryable_error_codes={AgentErrorCode.TOOL_TIMEOUT.value},
+            ),
+        ),
+        BlockingTool(),
+    )
+    try:
+        first = adapter.execute({"query": "CCO"})
+        second = adapter.execute({"query": "CCO"})
+
+        assert first.error.code is AgentErrorCode.TOOL_TIMEOUT
+        assert first.quality["retryable"] is False
+        assert second.error.code is AgentErrorCode.TOOL_TIMEOUT
+        assert calls == 1
+    finally:
+        release.set()
+
+
 def test_adapter_redacts_declared_sensitive_fields():
     class EchoTool:
         name = "legacy_value"

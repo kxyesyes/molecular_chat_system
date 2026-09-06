@@ -4,7 +4,8 @@ import asyncio
 import inspect
 import time
 from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from threading import Lock
 from typing import Any, Callable
 
 import httpx
@@ -23,6 +24,8 @@ class ToolAdapter(ABC):
         self.spec = spec
         self._available = True
         self._health_message = "available"
+        self._orphaned_lock = Lock()
+        self._orphaned_invocations: set[Future[Any]] = set()
 
     def set_available(self, available: bool, message: str = "") -> None:
         self._available = available
@@ -90,6 +93,10 @@ class ToolAdapter(ABC):
         return data
 
     def _execute_once(self, payload: Any) -> ToolResult:
+        if self._has_running_timed_out_invocation():
+            return self._timeout_result(
+                "Previous timed-out tool invocation is still running"
+            )
         start = time.perf_counter()
         executor = ThreadPoolExecutor(max_workers=1)
         future = executor.submit(self.invoke, payload)
@@ -99,10 +106,9 @@ class ToolAdapter(ABC):
             return self._normalize(raw, elapsed_ms)
         except FutureTimeoutError:
             future.cancel()
-            return ToolResult.error_result(
-                self.spec.name,
-                AgentErrorCode.TOOL_TIMEOUT,
-                f"Tool timed out after {self.spec.timeout_seconds} seconds",
+            self._track_timed_out_invocation(future)
+            return self._timeout_result(
+                f"Tool timed out after {self.spec.timeout_seconds} seconds"
             )
         except (ConnectionError, httpx.HTTPError) as exc:
             return ToolResult.error_result(
@@ -118,6 +124,36 @@ class ToolAdapter(ABC):
             )
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
+
+    def _has_running_timed_out_invocation(self) -> bool:
+        with self._orphaned_lock:
+            completed = {
+                future for future in self._orphaned_invocations if future.done()
+            }
+            self._orphaned_invocations.difference_update(completed)
+            return bool(self._orphaned_invocations)
+
+    def _track_timed_out_invocation(self, future: Future[Any]) -> None:
+        with self._orphaned_lock:
+            self._orphaned_invocations.add(future)
+
+        def completed(done: Future[Any]) -> None:
+            with self._orphaned_lock:
+                self._orphaned_invocations.discard(done)
+
+        future.add_done_callback(completed)
+
+    def _timeout_result(self, message: str) -> ToolResult:
+        return ToolResult.error_result(
+            self.spec.name,
+            AgentErrorCode.TOOL_TIMEOUT,
+            message,
+            quality={
+                "retryable": False,
+                "deadline_exceeded": True,
+                "invocation_may_still_be_running": True,
+            },
+        )
 
     def _normalize(self, raw: Any, elapsed_ms: int) -> ToolResult:
         if isinstance(raw, ToolResult):

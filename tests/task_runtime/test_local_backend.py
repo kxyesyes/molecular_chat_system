@@ -1878,6 +1878,60 @@ async def test_local_runtime_fails_closed_when_temporal_control_is_unavailable(
         await runtime.close()
 
 
+@pytest.mark.anyio
+async def test_lazy_temporal_control_cannot_publish_after_runtime_close(
+    tmp_path: Path,
+) -> None:
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("temporal-owned", "docking", {}, backend="temporal")
+    factory_started = asyncio.Event()
+    release_factory = asyncio.Event()
+
+    class TrackingTemporal(_FakeBackend):
+        def __init__(self) -> None:
+            super().__init__(
+                store,
+                "temporal",
+                StartOutcome.REJECTED,
+                create=False,
+            )
+            self.close_calls = 0
+
+        async def close(self):
+            self.close_calls += 1
+            await super().close()
+
+    temporal = TrackingTemporal()
+
+    async def temporal_factory():
+        factory_started.set()
+        await release_factory.wait()
+        return temporal
+
+    runtime = TaskRuntime(
+        config=_runtime_config(tmp_path, canary_percent=0),
+        store=store,
+        stager=object(),
+        local_backend=_FakeBackend(
+            store,
+            "local",
+            StartOutcome.REJECTED,
+            create=False,
+        ),
+        temporal_backend_factory=temporal_factory,
+    )
+
+    control = asyncio.create_task(runtime.get("temporal-owned"))
+    await factory_started.wait()
+    await runtime.close()
+    release_factory.set()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        await control
+    assert temporal.close_calls == 1
+    assert runtime.temporal_backend is None
+
+
 def _stage_file_for_runtime(
     stager: DockingInputStager,
     task_id: str,

@@ -113,6 +113,7 @@ class TaskRuntime:
             assert_async_backend_contract(local_backend)
         self.local_backend = local_backend
         self._closed = False
+        self._closing = False
         self._close_lock = threading.Lock()
         self._close_future: Future[None] | None = None
         self._close_runner: asyncio.Task[None] | None = None
@@ -589,9 +590,13 @@ class TaskRuntime:
         )
 
     async def _temporal_control_backend(self) -> TaskRuntimeBackend:
+        if self._closing or self._closed:
+            raise RuntimeError("task runtime is closed")
         if self.temporal_backend is not None:
             return self.temporal_backend
         async with self._temporal_backend_lock:
+            if self._closing or self._closed:
+                raise RuntimeError("task runtime is closed")
             if self.temporal_backend is not None:
                 return self.temporal_backend
             try:
@@ -603,6 +608,9 @@ class TaskRuntime:
                 raise TaskBackendStartError(
                     "Temporal control backend is unavailable"
                 ) from exc
+            if self._closing or self._closed:
+                await self._close_backend(backend)
+                raise RuntimeError("task runtime is closed")
             self.temporal_backend = backend
             return backend
 
@@ -620,6 +628,7 @@ class TaskRuntime:
             if shared is None:
                 shared = Future()
                 self._close_future = shared
+                self._closing = True
                 self._close_runner = asyncio.create_task(
                     self._close_once(shared),
                     name="medchat-task-runtime-close",
@@ -634,6 +643,7 @@ class TaskRuntime:
                 if self._close_future is shared:
                     self._close_future = None
                     self._close_runner = None
+                    self._closing = False
             if not shared.done():
                 shared.set_exception(exc)
             return
@@ -650,14 +660,18 @@ class TaskRuntime:
             if backend is None or id(backend) in seen:
                 continue
             seen.add(id(backend))
-            closer = getattr(backend, "close", None)
-            if closer is None:
-                closer = getattr(backend, "shutdown", None)
-            if closer is None:
-                continue
-            result = closer()
-            if inspect.isawaitable(result):
-                await result
+            await self._close_backend(backend)
+
+    @staticmethod
+    async def _close_backend(backend: TaskRuntimeBackend) -> None:
+        closer = getattr(backend, "close", None)
+        if closer is None:
+            closer = getattr(backend, "shutdown", None)
+        if closer is None:
+            return
+        result = closer()
+        if inspect.isawaitable(result):
+            await result
 
     async def _temporal_health(self) -> BackendHealth:
         if self.temporal_backend is None:
