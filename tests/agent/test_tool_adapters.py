@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from pydantic import BaseModel
 
@@ -203,8 +204,49 @@ def test_adapter_never_retries_while_timed_out_invocation_is_still_running() -> 
 
         assert first.error.code is AgentErrorCode.TOOL_TIMEOUT
         assert first.quality["retryable"] is False
-        assert second.error.code is AgentErrorCode.TOOL_TIMEOUT
+        assert second.error.code is AgentErrorCode.TOOL_UNAVAILABLE
         assert calls == 1
+    finally:
+        release.set()
+
+
+def test_adapter_bounds_concurrent_invocations_before_any_timeout_is_observed() -> None:
+    release = threading.Event()
+    barrier = threading.Barrier(6)
+    calls = 0
+    calls_lock = threading.Lock()
+
+    class BlockingTool:
+        name = "legacy_value"
+
+        def execute(self, query):
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            release.wait(1.0)
+            return {"success": True, "data": {"value": 1}}
+
+    adapter = LegacyPythonToolAdapter(
+        make_spec(timeout_seconds=0.03, max_concurrency=1),
+        BlockingTool(),
+    )
+
+    def invoke():
+        barrier.wait()
+        return adapter.execute({"query": "CCO"})
+
+    try:
+        with ThreadPoolExecutor(max_workers=6) as callers:
+            results = list(callers.map(lambda _: invoke(), range(6)))
+
+        assert calls == 1
+        assert all(result.success is False for result in results)
+        assert sum(
+            result.error.code is AgentErrorCode.TOOL_TIMEOUT for result in results
+        ) == 1
+        assert sum(
+            result.error.code is AgentErrorCode.TOOL_UNAVAILABLE for result in results
+        ) == 5
     finally:
         release.set()
 

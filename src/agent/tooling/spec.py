@@ -35,9 +35,15 @@ class ToolSpec:
     aliases: set[str] = field(default_factory=set)
     latency_class: str = "standard"
     cost_class: str = "local"
+    max_concurrency: int = 1
 
     def __post_init__(self) -> None:
         if not self.name.strip():
             raise ValueError("Tool name cannot be empty")
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if (
+            type(self.max_concurrency) is not int
+            or not 1 <= self.max_concurrency <= 64
+        ):
+            raise ValueError("max_concurrency must be between 1 and 64")

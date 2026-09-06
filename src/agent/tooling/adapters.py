@@ -4,8 +4,8 @@ import asyncio
 import inspect
 import time
 from abc import ABC, abstractmethod
-from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from threading import Lock
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from threading import BoundedSemaphore
 from typing import Any, Callable
 
 import httpx
@@ -24,8 +24,7 @@ class ToolAdapter(ABC):
         self.spec = spec
         self._available = True
         self._health_message = "available"
-        self._orphaned_lock = Lock()
-        self._orphaned_invocations: set[Future[Any]] = set()
+        self._invocation_slots = BoundedSemaphore(spec.max_concurrency)
 
     def set_available(self, available: bool, message: str = "") -> None:
         self._available = available
@@ -93,20 +92,28 @@ class ToolAdapter(ABC):
         return data
 
     def _execute_once(self, payload: Any) -> ToolResult:
-        if self._has_running_timed_out_invocation():
-            return self._timeout_result(
-                "Previous timed-out tool invocation is still running"
+        if not self._invocation_slots.acquire(blocking=False):
+            return ToolResult.error_result(
+                self.spec.name,
+                AgentErrorCode.TOOL_UNAVAILABLE,
+                "Tool concurrency limit reached",
+                quality={"retryable": False, "capacity_exhausted": True},
             )
         start = time.perf_counter()
         executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(self.invoke, payload)
+        try:
+            future = executor.submit(self.invoke, payload)
+        except BaseException:
+            self._invocation_slots.release()
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        future.add_done_callback(lambda _: self._invocation_slots.release())
         try:
             raw = future.result(timeout=self.spec.timeout_seconds)
             elapsed_ms = int((time.perf_counter() - start) * 1000)
             return self._normalize(raw, elapsed_ms)
         except FutureTimeoutError:
             future.cancel()
-            self._track_timed_out_invocation(future)
             return self._timeout_result(
                 f"Tool timed out after {self.spec.timeout_seconds} seconds"
             )
@@ -124,24 +131,6 @@ class ToolAdapter(ABC):
             )
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
-
-    def _has_running_timed_out_invocation(self) -> bool:
-        with self._orphaned_lock:
-            completed = {
-                future for future in self._orphaned_invocations if future.done()
-            }
-            self._orphaned_invocations.difference_update(completed)
-            return bool(self._orphaned_invocations)
-
-    def _track_timed_out_invocation(self, future: Future[Any]) -> None:
-        with self._orphaned_lock:
-            self._orphaned_invocations.add(future)
-
-        def completed(done: Future[Any]) -> None:
-            with self._orphaned_lock:
-                self._orphaned_invocations.discard(done)
-
-        future.add_done_callback(completed)
 
     def _timeout_result(self, message: str) -> ToolResult:
         return ToolResult.error_result(
