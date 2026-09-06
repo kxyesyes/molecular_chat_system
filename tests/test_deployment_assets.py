@@ -96,12 +96,8 @@ docking:
         required_commands = [
             "python -m pytest tests -q -p no:cacheprovider",
             "python -m compileall -q src scripts",
-            "node tests/admin_fetch_test.js",
-            "node tests/frontend_safe_render_test.js",
-            "node tests/activity_prediction_safe_render_test.js",
-            "node tests/home_agent_task_panel_test.js",
-            "node tests/reverse_target_broad_recall_test.js",
-            "node tests/reverse_target_pagination_test.js",
+            "find tests -maxdepth 1 -type f -name '*_test.js'",
+            'node "$test_file"',
             "BEGIN (RSA|OPENSSH) PRIVATE KEY",
         ]
         for command in required_commands:
