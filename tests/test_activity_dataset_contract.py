@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -739,12 +740,43 @@ def test_only_exact_equals_relation_is_accepted(relation: str) -> None:
     assert result.rejected["rejection_reason"].tolist() == ["unsupported_relation"]
 
 
+def test_relation_normalizes_only_surrounding_ascii_whitespace() -> None:
+    frame = pd.DataFrame(
+        [
+            {"smiles": "CCO", "value": 7.0, "relation": "= ", "units": "pIC50"},
+            {
+                "smiles": "CCN",
+                "value": 7.0,
+                "relation": " = extra",
+                "units": "pIC50",
+            },
+            {
+                "smiles": "CCC",
+                "value": 7.0,
+                "relation": "\N{NO-BREAK SPACE}=\N{NO-BREAK SPACE}",
+                "units": "pIC50",
+            },
+        ]
+    )
+
+    result = contract.validate_activity_dataset(frame, _validation_manifest())
+
+    assert result.accepted["canonical_smiles"].tolist() == ["CCO"]
+    assert result.accepted["relation"].tolist() == ["= "]
+    assert result.rejected["rejection_reason"].tolist() == [
+        "unsupported_relation",
+        "unsupported_relation",
+    ]
+
+
 @pytest.mark.parametrize(
     ("units", "value"),
     [
         ("M", 1e-7),
         ("mM", 1e-4),
         ("uM", 0.1),
+        ("µM", 0.1),
+        ("μM", 0.1),
         ("micro-M", 0.1),
         ("nM", 100.0),
         ("pM", 100_000.0),
@@ -769,6 +801,66 @@ def test_molar_to_pactivity_normalizes_supported_units_to_exact_pactivity(
     assert row["original_units"] == units
 
 
+@pytest.mark.parametrize("units", ["m-m", "n m", "nmol", "nM!", "nanomolar"])
+def test_molar_to_pactivity_rejects_unit_near_matches(units: str) -> None:
+    frame = pd.DataFrame(
+        [{"smiles": "CCO", "value": 100.0, "relation": "=", "units": units}]
+    )
+
+    result = contract.validate_activity_dataset(
+        frame,
+        _validation_manifest(label_transform="molar_to_pactivity"),
+    )
+
+    assert result.accepted.empty
+    assert result.rejected["rejection_reason"].tolist() == ["unknown_units"]
+
+
+@pytest.mark.parametrize(
+    ("units", "value"),
+    [
+        ("pM", float.fromhex("0x0.0000000000001p-1022")),
+        ("M", 1e308),
+    ],
+)
+def test_molar_to_pactivity_handles_extreme_positive_finite_values(
+    units: str,
+    value: float,
+) -> None:
+    frame = pd.DataFrame(
+        [{"smiles": "CCO", "value": value, "relation": "=", "units": units}]
+    )
+
+    result = contract.validate_activity_dataset(
+        frame,
+        _validation_manifest(label_transform="molar_to_pactivity"),
+    )
+
+    normalized_value = result.accepted.iloc[0]["normalized_value"]
+    unit_exponent = {"M": 0, "pM": -12}[units]
+    assert normalized_value == pytest.approx(-math.log10(value) - unit_exponent)
+    assert math.isfinite(normalized_value)
+
+
+def test_non_finite_transformed_pactivity_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        [{"smiles": "CCO", "value": 1.0, "relation": "=", "units": "M"}]
+    )
+    monkeypatch.setattr(contract.math, "log10", lambda _: float("-inf"))
+
+    result = contract.validate_activity_dataset(
+        frame,
+        _validation_manifest(label_transform="molar_to_pactivity"),
+    )
+
+    assert result.accepted.empty
+    assert result.rejected["rejection_reason"].tolist() == [
+        "non_finite_normalized_value"
+    ]
+
+
 def test_molar_to_pactivity_rejects_non_positive_concentrations() -> None:
     frame = pd.DataFrame(
         [
@@ -788,18 +880,26 @@ def test_molar_to_pactivity_rejects_non_positive_concentrations() -> None:
     ]
 
 
-def test_identity_regression_accepts_normalized_unit_aliases() -> None:
+def test_identity_regression_normalizes_case_and_unicode_only() -> None:
     frame = pd.DataFrame(
-        [{"smiles": "CCO", "value": 100, "relation": "=", "units": "nanomolar"}]
+        [
+            {"smiles": "CCO", "value": 7, "relation": "=", "units": "ＰＩＣ５０"},
+            {"smiles": "CCN", "value": 8, "relation": "=", "units": "p-IC50"},
+            {"smiles": "CCC", "value": 9, "relation": "=", "units": "p IC50"},
+        ]
     )
 
     result = contract.validate_activity_dataset(
         frame,
-        _validation_manifest(endpoint="IC50", units="nM"),
+        _validation_manifest(),
     )
 
-    assert result.accepted["normalized_value"].tolist() == [100.0]
-    assert result.accepted["normalized_units"].tolist() == ["nM"]
+    assert result.accepted["normalized_value"].tolist() == [7.0]
+    assert result.accepted["normalized_units"].tolist() == ["pIC50"]
+    assert result.rejected["rejection_reason"].tolist() == [
+        "unknown_units",
+        "unknown_units",
+    ]
 
 
 def test_regression_duplicates_use_median_range_and_first_occurrence_order() -> None:
@@ -827,6 +927,41 @@ def test_regression_duplicates_use_median_range_and_first_occurrence_order() -> 
     assert ethanol["replicate_count"] == 2
     assert ethanol["replicate_range"] == 2.0
     assert result.statistics["duplicate_rows_collapsed"] == 1
+
+
+def test_regression_even_median_is_finite_for_duplicate_large_values() -> None:
+    frame = pd.DataFrame(
+        [
+            {"smiles": "CCO", "value": 1e308, "relation": "=", "units": "pIC50"},
+            {"smiles": "C(C)O", "value": 1e308, "relation": "=", "units": "pIC50"},
+        ]
+    )
+
+    result = contract.validate_activity_dataset(frame, _validation_manifest())
+
+    assert result.rejected.empty
+    assert result.accepted["normalized_value"].tolist() == [1e308]
+    assert result.accepted["replicate_range"].tolist() == [0.0]
+    assert math.isfinite(result.accepted.iloc[0]["normalized_value"])
+
+
+def test_regression_rejects_group_when_aggregate_range_is_non_finite() -> None:
+    frame = pd.DataFrame(
+        [
+            {"smiles": "CCO", "value": -1e308, "relation": "=", "units": "pIC50"},
+            {"smiles": "C(C)O", "value": 1e308, "relation": "=", "units": "pIC50"},
+        ]
+    )
+
+    result = contract.validate_activity_dataset(frame, _validation_manifest())
+
+    assert result.accepted.empty
+    assert result.rejected["rejection_reason"].tolist() == [
+        "non_finite_aggregate",
+        "non_finite_aggregate",
+    ]
+    assert result.statistics["rejected_by_reason"] == {"non_finite_aggregate": 2}
+    assert result.statistics["duplicate_rows_collapsed"] == 0
 
 
 def test_identity_classification_collapses_equal_labels_and_rejects_conflicts() -> None:

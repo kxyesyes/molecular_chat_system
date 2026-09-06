@@ -11,7 +11,6 @@ import json
 import math
 from pathlib import Path
 import re
-from statistics import median
 import unicodedata
 from typing import Any
 
@@ -47,20 +46,15 @@ _REQUIRED_STRING_FIELDS = (
 _COLUMN_FIELDS = ("relation_column", "smiles_column", "value_column")
 _UNITS_COLUMN = "units"
 _WHITESPACE = re.compile(r"\s+")
-_UNIT_SEPARATORS = re.compile(r"[\s_-]+")
+_ASCII_WHITESPACE = " \t\n\r\f\v"
 _CONCENTRATION_UNITS = {
-    "m": ("M", 1.0),
-    "molar": ("M", 1.0),
-    "mm": ("mM", 1e-3),
-    "millimolar": ("mM", 1e-3),
-    "um": ("uM", 1e-6),
-    "μm": ("uM", 1e-6),
-    "microm": ("uM", 1e-6),
-    "micromolar": ("uM", 1e-6),
-    "nm": ("nM", 1e-9),
-    "nanomolar": ("nM", 1e-9),
-    "pm": ("pM", 1e-12),
-    "picomolar": ("pM", 1e-12),
+    "m": ("M", 0),
+    "mm": ("mM", -3),
+    "um": ("uM", -6),
+    "μm": ("uM", -6),
+    "micro-m": ("uM", -6),
+    "nm": ("nM", -9),
+    "pm": ("pM", -12),
 }
 _ACCEPTED_COLUMNS = [
     "original_smiles",
@@ -294,23 +288,24 @@ class DatasetValidationResult:
     ready_for_training: bool
 
 
-def _unit_key(value: Any) -> str | None:
+def _normalized_unit(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
-    normalized = unicodedata.normalize("NFKC", value).strip().lower()
+    normalized = unicodedata.normalize("NFKC", value)
+    normalized = normalized.strip(_ASCII_WHITESPACE).casefold()
     if not normalized:
         return None
-    return _UNIT_SEPARATORS.sub("", normalized)
+    return normalized
 
 
 def _unit_identity(value: Any) -> str | None:
-    key = _unit_key(value)
-    if key is None:
+    normalized = _normalized_unit(value)
+    if normalized is None:
         return None
-    concentration = _CONCENTRATION_UNITS.get(key)
+    concentration = _CONCENTRATION_UNITS.get(normalized)
     if concentration is not None:
         return concentration[0]
-    return key
+    return normalized
 
 
 def _is_missing_value(value: Any) -> bool:
@@ -400,15 +395,20 @@ def _normalize_row_value(
 
     row_units = row[_UNITS_COLUMN]
     if manifest.label_transform == "molar_to_pactivity":
-        unit_key = _unit_key(row_units)
+        normalized_unit = _normalized_unit(row_units)
         concentration_unit = (
-            _CONCENTRATION_UNITS.get(unit_key) if unit_key is not None else None
+            _CONCENTRATION_UNITS.get(normalized_unit)
+            if normalized_unit is not None
+            else None
         )
         if concentration_unit is None:
             return None, "unknown_units"
         if numeric <= 0:
             return None, "non_positive_concentration"
-        return -math.log10(numeric * concentration_unit[1]), None
+        normalized_value = -math.log10(numeric) - concentration_unit[1]
+        if not math.isfinite(normalized_value):
+            return None, "non_finite_normalized_value"
+        return normalized_value, None
 
     if _unit_identity(row_units) != _unit_identity(manifest.units):
         return None, "unknown_units"
@@ -428,6 +428,48 @@ def _normalize_row_value(
     if direction == "greater_or_equal":
         return float(numeric >= threshold), None
     return float(numeric <= threshold), None
+
+
+def _safe_regression_aggregate(
+    values: list[float],
+) -> tuple[float, float] | None:
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        aggregate_median = ordered[midpoint]
+    else:
+        lower = ordered[midpoint - 1]
+        upper = ordered[midpoint]
+        if (lower >= 0 and upper >= 0) or (lower <= 0 and upper <= 0):
+            aggregate_median = lower + (upper - lower) / 2.0
+        else:
+            aggregate_median = lower / 2.0 + upper / 2.0
+
+    aggregate_range = ordered[-1] - ordered[0]
+    if not math.isfinite(aggregate_median) or not math.isfinite(aggregate_range):
+        return None
+    return float(aggregate_median), float(aggregate_range)
+
+
+def _reject_valid_group(
+    group: list[dict[str, Any]],
+    reason: str,
+    rejected_records: list[dict[str, Any]],
+) -> None:
+    for record in group:
+        rejected = {
+            key: record[key]
+            for key in (
+                "original_smiles",
+                "original_value",
+                "original_units",
+                "relation",
+                "canonical_smiles",
+                "_input_order",
+            )
+        }
+        rejected["rejection_reason"] = reason
+        rejected_records.append(rejected)
 
 
 def validate_activity_dataset(
@@ -474,7 +516,10 @@ def validate_activity_dataset(
             continue
 
         relation = row[manifest.relation_column]
-        if not isinstance(relation, str) or relation.strip() != "=":
+        if (
+            not isinstance(relation, str)
+            or relation.strip(_ASCII_WHITESPACE) != "="
+        ):
             rejected_records.append(
                 _rejected_record(
                     row,
@@ -509,33 +554,23 @@ def validate_activity_dataset(
     for canonical_smiles, group in valid_groups.items():
         values = [record["normalized_value"] for record in group]
         if manifest.task_type == "classification" and len(set(values)) > 1:
-            for record in group:
-                rejected = {
-                    key: record[key]
-                    for key in (
-                        "original_smiles",
-                        "original_value",
-                        "original_units",
-                        "relation",
-                        "canonical_smiles",
-                        "_input_order",
-                    )
-                }
-                rejected["rejection_reason"] = "conflicting_duplicate_labels"
-                rejected_records.append(rejected)
+            _reject_valid_group(
+                group,
+                "conflicting_duplicate_labels",
+                rejected_records,
+            )
             continue
 
         first = group[0]
-        normalized_value = (
-            float(median(values))
-            if manifest.task_type == "regression"
-            else float(values[0])
-        )
-        replicate_range = (
-            float(max(values) - min(values))
-            if manifest.task_type == "regression"
-            else 0.0
-        )
+        if manifest.task_type == "regression":
+            aggregate = _safe_regression_aggregate(values)
+            if aggregate is None:
+                _reject_valid_group(group, "non_finite_aggregate", rejected_records)
+                continue
+            normalized_value, replicate_range = aggregate
+        else:
+            normalized_value = float(values[0])
+            replicate_range = 0.0
         molecule = Chem.MolFromSmiles(canonical_smiles)
         if molecule is None:  # Defensive guard; canonical SMILES came from RDKit.
             raise ValueError("RDKit could not parse its canonical SMILES output")
