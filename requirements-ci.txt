@@ -1,0 +1,6 @@
+-r requirements.txt
+-r requirements-agent-temporal.txt
+
+# CPU graph imports exercised by tests/test_rg_mpnn_legacy_modules.py.
+torch==2.4.0
+torch-geometric==2.6.1

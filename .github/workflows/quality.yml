@@ -39,7 +39,7 @@ jobs:
       - name: Install CPU development dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-ci.txt
 
       - name: Run Python tests
         run: python -m pytest tests -q -p no:cacheprovider
@@ -48,13 +48,11 @@ jobs:
         run: python -m compileall -q src scripts
 
       - name: Run Node contract tests
+        shell: bash
         run: |
-          node tests/admin_fetch_test.js
-          node tests/frontend_safe_render_test.js
-          node tests/activity_prediction_safe_render_test.js
-          node tests/home_agent_task_panel_test.js
-          node tests/reverse_target_broad_recall_test.js
-          node tests/reverse_target_pagination_test.js
+          while IFS= read -r test_file; do
+            node "$test_file"
+          done < <(find tests -maxdepth 1 -type f -name '*_test.js' -print | sort)
 
       - name: Scan tracked non-document files for credential material
         shell: bash
