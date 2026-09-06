@@ -192,6 +192,10 @@ _ENGLISH_COUNT_FOLLOW = (
     rf"(?:{_ENGLISH_NOUN}\b|for\b|"
     rf"{_GENERATION_CONNECTOR}{_GENERATION_VERB}\b)"
 )
+_ENGLISH_COUNT_BOUNDARY = (
+    rf"(?:[ \t]+{_ENGLISH_COUNT_FOLLOW}|"
+    rf"[ \t]*(?:[+;,!?]|\b(?:but|instead)\b)|[ \t]*$)"
+)
 _MAX_ENGLISH_COUNT_MODIFIER_TOKENS = 6
 _ENGLISH_COUNT_MODIFIER_TOKEN = (
     rf"(?!(?:{_ENGLISH_NOUN}|{_GENERATION_VERB}|but|instead|for)\b)"
@@ -201,7 +205,7 @@ _ENGLISH_COUNT_MODIFIER_TOKEN = (
 _ENGLISH_COUNT_TAIL = (
     rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER_TOKEN})"
     rf"{{0,{_MAX_ENGLISH_COUNT_MODIFIER_TOKENS}}}"
-    rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW}|[ \t]*$)"
+    rf"(?={_ENGLISH_COUNT_BOUNDARY})"
 )
 _CHINESE_COUNT_MODIFIER = r"(?:新(?:的)?|全新(?:的)?|新颖(?:的)?)"
 _CHINESE_REFERENCE = r"[A-Za-z0-9\u3400-\u9fff-]{1,24}"
@@ -235,6 +239,13 @@ _COUNT_PATTERNS = (
         rf"(?P<count>{_COUNT_TOKEN})\s*(?:个|种|份)?\s*"
         rf"(?:{_CHINESE_PRE_NOUN_MODIFIER}\s*){{0,2}}"
         rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
+    ),
+)
+_CLAUSE_TERMINATED_COUNT_PATTERNS = (
+    re.compile(
+        rf"(?i)\b{_GENERATION_VERB}\b[ \t]*"
+        rf"(?P<count>(?<![\w.])[-+\u2212]?\d+(?:\.\d+)?)"
+        rf"(?=[ \t]*\.[ \t]+{_GENERATION_VERB}\b)"
     ),
 )
 _COUNT_SLOT_PATTERNS = (
@@ -400,25 +411,39 @@ def preflight_generation_request(
     """Validate one generation boundary without reparsing authoritative counts."""
     if count_supplied:
         return validate_generation_count(authoritative_count, field=field)
-    if active_molecular_skill or has_generation_intent(query):
-        return validate_generation_count(parse_generation_count(query), field=field)
+    analysis = _build_generation_analysis(query)
+    if _analysis_has_generation_intent(
+        analysis,
+        active_molecular_skill=active_molecular_skill,
+    ):
+        return validate_generation_count(
+            _parse_generation_analysis(analysis, DEFAULT_GENERATION_COUNT),
+            field=field,
+        )
     return None
 
 
 def parse_generation_count(query: str, *, default: int = DEFAULT_GENERATION_COUNT) -> int:
-    query = str(query)
-    if len(query) > MAX_GENERATION_REQUEST_CHARS:
+    return _parse_generation_analysis(
+        _build_generation_analysis(query),
+        default,
+    )
+
+
+def _parse_generation_analysis(
+    analysis: _GenerationAnalysis,
+    default: int,
+) -> int:
+    if analysis.overlength:
         raise GenerationRequestError(
             "generation request is too long",
-            value={"length": len(query)},
+            value={"length": len(analysis.query)},
         )
-    actionable_clauses = _actionable_generation_clauses(query)
     counts: list[int] = []
-    for clause in actionable_clauses:
-        for occurrence in _collect_generation_occurrences(clause):
-            count = _parse_generation_occurrence_count(occurrence)
-            if count is not None:
-                counts.append(count)
+    for occurrence in analysis.occurrences:
+        count = _parse_generation_occurrence_count(occurrence)
+        if count is not None:
+            counts.append(count)
     if len(set(counts)) > 1:
         raise GenerationRequestError(
             "conflicting generation counts",
@@ -442,12 +467,76 @@ class _GenerationOccurrence:
     matches: tuple[_GenerationPatternMatch, ...]
 
 
+@dataclass(frozen=True)
+class _GenerationAnalysis:
+    query: str
+    text: str
+    occurrences: tuple[_GenerationOccurrence, ...]
+    overlength: bool = False
+    overlength_generation_shape: bool = False
+
+
+def _build_generation_analysis(query: str) -> _GenerationAnalysis:
+    query = str(query)
+    if len(query) > MAX_GENERATION_REQUEST_CHARS:
+        return _GenerationAnalysis(
+            query=query,
+            text="",
+            occurrences=(),
+            overlength=True,
+            overlength_generation_shape=_looks_like_overlength_generation_shape(
+                query
+            ),
+        )
+    text = _strip_generation_literals(query)
+    occurrences = _collect_generation_occurrences(text)
+    masked = _mask_non_actionable_generation_occurrences(
+        text,
+        occurrences=occurrences,
+    )
+    actionable = tuple(
+        occurrence
+        for occurrence in occurrences
+        if masked[occurrence.start : occurrence.end].strip()
+    )
+    return _GenerationAnalysis(
+        query=query,
+        text=text,
+        occurrences=actionable,
+    )
+
+
+def _looks_like_overlength_generation_shape(value: str) -> bool:
+    """Recognize bounded generation evidence without scanning the full request."""
+    edge_chars = 512
+    prefix = unicodedata.normalize("NFKC", value[:edge_chars])
+    suffix = unicodedata.normalize("NFKC", value[-edge_chars:])
+    molecular_object = (
+        r"(?:molecules?|compounds?|structures?|candidates?|ligands?|"
+        r"scaffolds?|analog(?:ue)?s?|inhibitors?|agonists?|antagonists?|"
+        r"drugs?|chemotypes?|smiles)"
+    )
+    if re.search(
+        rf"(?is)\b{_GENERATION_VERB}\b.{{0,384}}\b{molecular_object}\b",
+        prefix,
+    ) or re.search(
+        rf"(?is)\b{_GENERATION_VERB}\b.{{0,384}}\b{molecular_object}\b",
+        suffix,
+    ):
+        return True
+    return bool(
+        re.search(rf"(?i)\b{_GENERATION_VERB}\b\s*[-+\u2212]?\d{{32,}}$", prefix)
+        and re.search(rf"(?i)^\d{{32,}}\s*\b{molecular_object}\b", suffix)
+    )
+
+
 def _collect_generation_occurrences(value: str) -> list[_GenerationOccurrence]:
     """Scan each grammar pattern once, then group overlapping matches."""
     found: list[_GenerationPatternMatch] = []
     pattern_groups = (
         ("malformed", _MALFORMED_PREMASK_COUNT_PATTERNS),
         ("malformed", _MALFORMED_WORD_COUNT_PATTERNS),
+        ("count", _CLAUSE_TERMINATED_COUNT_PATTERNS),
         ("count", _COUNT_PATTERNS),
         ("slot", _COUNT_SLOT_PATTERNS),
     )
@@ -538,16 +627,32 @@ def has_generation_intent(
     active_molecular_skill: bool = False,
 ) -> bool:
     """Recognize actionable generation grammar, excluding examples and code."""
-    query = str(query)
-    if len(query) > MAX_GENERATION_REQUEST_CHARS:
-        return False
-    return any(
-        _matches_generation_grammar(
-            clause,
-            active_molecular_skill=active_molecular_skill,
-        )
-        for clause in _actionable_generation_clauses(query)
+    return _analysis_has_generation_intent(
+        _build_generation_analysis(query),
+        active_molecular_skill=active_molecular_skill,
     )
+
+
+def _analysis_has_generation_intent(
+    analysis: _GenerationAnalysis,
+    *,
+    active_molecular_skill: bool = False,
+) -> bool:
+    if analysis.overlength:
+        return analysis.overlength_generation_shape or (
+            active_molecular_skill
+            and _bounded_generation_verb_present(analysis.query)
+        )
+    return any(
+        active_molecular_skill
+        or _occurrence_has_molecular_scope(analysis.text, occurrence)
+        for occurrence in analysis.occurrences
+    )
+
+
+def _bounded_generation_verb_present(value: str) -> bool:
+    edges = f"{value[:512]}\n{value[-512:]}"
+    return bool(re.search(rf"(?i)\b{_GENERATION_VERB}\b", edges))
 
 
 def _matches_generation_grammar(
@@ -564,17 +669,18 @@ def _matches_generation_grammar(
 
 
 _GENERIC_CREATION_VERB = re.compile(
-    r"(?i)\b(?:create|generate|make|build)\b"
+    rf"(?i)\b{_GENERATION_VERB}\b"
 )
 _MOLECULAR_ENTITY = re.compile(
     r"(?i)\b(?:molecules?|compounds?|structures?|candidates?|ligands?|"
     r"scaffolds?|analog(?:ue)?s?|inhibitors?|agonists?|antagonists?|drugs?|"
-    r"chemotypes?|smiles|chemical|drug[- ]?like|potent|selective|"
-    r"similar[- ]to|targets?|proteins?|enzymes?)\b"
+    r"chemotypes?|smiles|chemicals?)\b"
 )
-_TARGET_ENTITY = re.compile(
-    r"\b(?:PDE\d+[A-Z]?|EGFR|BACE1|KRAS|BRAF|JAK2|ALK|MET|CDK2|KDR)\b",
-    re.IGNORECASE,
+_CHINESE_GENERATION_VERB_PATTERN = re.compile(
+    r"(?:生成|创建|设计|制作|构建|合成|给我|提供)"
+)
+_CHINESE_MOLECULAR_ENTITY = re.compile(
+    r"(?:分子|化合物|结构|候选|配体|骨架|类似物|抑制剂|激动剂|拮抗剂|药物)"
 )
 
 
@@ -584,8 +690,21 @@ def _occurrence_has_molecular_scope(
 ) -> bool:
     occurrence_text = value[occurrence.start : occurrence.end]
     verb = re.search(rf"(?i)\b{_GENERATION_VERB}\b", occurrence_text)
-    if verb is None or not _GENERIC_CREATION_VERB.fullmatch(verb.group(0)):
-        return True
+    if verb is None:
+        chinese_verb = _CHINESE_GENERATION_VERB_PATTERN.search(occurrence_text)
+        if chinese_verb is None:
+            return False
+        object_phrase = value[
+            occurrence.start + chinese_verb.end() : min(
+                len(value), occurrence.end + 200
+            )
+        ]
+        object_phrase = re.split(
+            r"(?:关于|有关|描述|涉及)", object_phrase, maxsplit=1
+        )[0]
+        return bool(_CHINESE_MOLECULAR_ENTITY.search(object_phrase))
+    if not _GENERIC_CREATION_VERB.fullmatch(verb.group(0)):
+        return False
     window = value[
         occurrence.start : min(len(value), occurrence.end + 200)
     ]
@@ -595,12 +714,23 @@ def _occurrence_has_molecular_scope(
     )
     if connector:
         window = window[: connector.start() + 1]
+    object_phrase = window[verb.end() :].strip()
+    object_phrase = re.sub(
+        rf"(?i)^(?:{_COUNT_TOKEN}|several|some|a\s+few|multiple|many|one|a)\b\s*",
+        "",
+        object_phrase,
+        count=1,
+    )
+    object_phrase = re.split(
+        r"(?i)\b(?:about|of|on|regarding|concerning|describing|covering)\b",
+        object_phrase,
+        maxsplit=1,
+    )[0]
     return bool(
-        _MOLECULAR_ENTITY.search(window)
-        or _TARGET_ENTITY.search(window)
+        _MOLECULAR_ENTITY.search(object_phrase)
         or re.search(
             r"\b[BCNOFPSI][BCNOFPSIcnops0-9@+\-\[\]()=#\\/.]{1,}\b",
-            window,
+            object_phrase,
         )
     )
 
@@ -697,10 +827,22 @@ def _generation_occurrence_spans(value: str) -> list[tuple[int, int]]:
     ]
 
 
-def _mask_non_actionable_generation_occurrences(clause: str) -> str:
-    spans = _generation_occurrence_spans(clause)
-    if not spans:
+def _mask_non_actionable_generation_occurrences(
+    clause: str,
+    *,
+    occurrences: Sequence[_GenerationOccurrence] | None = None,
+) -> str:
+    resolved_occurrences = (
+        list(occurrences)
+        if occurrences is not None
+        else _collect_generation_occurrences(clause)
+    )
+    if not resolved_occurrences:
         return clause
+    spans = [
+        (occurrence.start, occurrence.end)
+        for occurrence in resolved_occurrences
+    ]
 
     masked = list(clause)
     previous_end = 0
@@ -726,6 +868,9 @@ def _mask_non_actionable_generation_occurrences(clause: str) -> str:
             if boundaries
             else previous_end
         )
+        blank_lines = list(re.finditer(r"\r?\n[ \t]*\r?\n", bridge))
+        if blank_lines:
+            prefix_start = previous_end + blank_lines[-1].end()
         prefix_window = clause[prefix_start:end]
         suffix_window = clause[start:next_start]
         suffix_boundary = re.search(

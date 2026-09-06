@@ -690,6 +690,10 @@ def test_hit_to_lead_generation_consumes_computed_baseline():
         "Generate report",
         "Make table",
         "Build dashboard",
+        "Design slides",
+        "Produce reports",
+        "Synthesize summaries",
+        "Generate charts about compounds",
     ),
 )
 def test_generic_creation_verbs_require_a_molecular_entity(query):
@@ -702,6 +706,44 @@ def test_explicit_molecular_skill_can_activate_generic_generation_grammar():
         "Create 7",
         active_molecular_skill=True,
     ) == 7
+
+    assert preflight_generation_request(
+        "Design 7 slides",
+        active_molecular_skill=True,
+    ) == 7
+
+
+def test_preflight_reuses_one_generation_occurrence_collection(monkeypatch):
+    import src.agent.contracts.generation_request as generation_request
+
+    original = generation_request._collect_generation_occurrences
+    calls = []
+
+    def recording_collector(value):
+        calls.append(value)
+        return original(value)
+
+    monkeypatch.setattr(
+        generation_request,
+        "_collect_generation_occurrences",
+        recording_collector,
+    )
+
+    assert generation_request.preflight_generation_request(
+        "Generate 3 potent molecules"
+    ) == 3
+    assert len(calls) == 1
+
+
+def test_overlength_generation_shape_fails_closed_without_full_parse():
+    query = f"Generate {'9' * 17000} molecules"
+
+    assert has_generation_intent(query) is True
+    with pytest.raises(GenerationRequestError) as captured:
+        preflight_generation_request(query)
+
+    assert captured.value.reason == "malformed_requested_count"
+    assert captured.value.value == {"length": len(query)}
 
 
 def test_oversized_numeric_count_is_rejected_without_integer_conversion_error():

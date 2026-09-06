@@ -453,7 +453,7 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
         generator = LLMMolecularGenerator(llm_model=CapturingLLM())
 
         self.assertTrue(generator.should_use("Generate 11 candidates"))
-        self.assertTrue(generator.should_use("Generate 11 for PDE5A"))
+        self.assertFalse(generator.should_use("Generate 11 for PDE5A"))
         self.assertFalse(
             generator.should_use(
                 'Evaluate CCO while explaining "Generate 7.5 molecules"'

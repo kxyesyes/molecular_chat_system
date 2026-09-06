@@ -261,8 +261,12 @@ def test_supervisor_plan_and_run_reject_malformed_count_before_router(entrypoint
     if entrypoint == "run":
         assert result["status"] == "failed"
         assert result["result"]["error"]["code"] == "invalid_input"
+        metadata = result["plan"]["metadata"]
     else:
-        assert result["metadata"]["reason"] == "invalid_requested_count"
+        metadata = result["metadata"]
+    assert metadata["reason"] == "malformed_requested_count"
+    assert metadata["requested_count"] == "- 1"
+    assert metadata["rejected_value"] == "- 1"
     assert generator.calls == []
 
 
@@ -287,6 +291,7 @@ def test_supervisor_atomic_invalid_count_is_invalid_input_before_tool():
         ("Generate molecules", 11, "requested_count_out_of_range", 11),
         ("Generate molecules", "7", "invalid_requested_count_type", "7"),
         ("Generate 7.5 molecules", None, "malformed_requested_count", "7.5"),
+        ("Generate - 1 molecules", None, "malformed_requested_count", "- 1"),
     ),
 )
 def test_supervisor_execute_plan_and_run_share_generation_error_metadata(
@@ -324,6 +329,7 @@ def test_supervisor_execute_plan_and_run_share_generation_error_metadata(
         )
 
         assert plan_metadata["reason"] == reason
+        assert plan_metadata["requested_count"] == rejected_value
         assert plan_metadata["rejected_value"] == rejected_value
         assert error["details"]["reason"] == reason
         assert error["details"]["rejected_value"] == rejected_value
@@ -343,6 +349,27 @@ def test_supervisor_oversized_numeric_token_is_canonical_invalid_input():
         "malformed_requested_count"
     )
     assert generator.calls == []
+
+
+def test_supervisor_overlength_generation_shape_fails_before_router():
+    class RouterThatMustNotRun:
+        catalog = WorkflowCatalog()
+
+        def route(self, query, llm=None):
+            raise AssertionError("router ran before overlength preflight")
+
+    query = f"Generate {'9' * 17000} molecules"
+    result = SupervisorAgent(
+        tools={},
+        skill_router=RouterThatMustNotRun(),
+    ).execute(query)
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_input"
+    assert result["error"]["details"] == {
+        "reason": "malformed_requested_count",
+        "rejected_value": {"length": len(query)},
+    }
 
 
 @pytest.mark.parametrize(

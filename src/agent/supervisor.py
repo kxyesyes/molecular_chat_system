@@ -568,7 +568,11 @@ class SupervisorAgent:
         raw_count = (
             mol_count
             if mol_count is not _MOL_COUNT_UNSET
-            else metadata.get("requested_count")
+            else (
+                metadata["requested_count"]
+                if "requested_count" in metadata
+                else exc.value
+            )
         )
         classification = generation_request_error_details(exc)
         return {

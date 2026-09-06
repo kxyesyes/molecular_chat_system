@@ -81,7 +81,6 @@ def test_router_uses_canonical_generation_grammar_for_supported_verbs():
         "Make 3 compounds",
         "Build 4 structures",
         "Synthesize 6 molecules",
-        "Generate 3 potent",
         "Generate 3 similar-to aspirin molecules",
     ):
         decision = HybridSkillRouter().decide(query)
@@ -95,6 +94,11 @@ def test_router_uses_canonical_generation_grammar_for_supported_verbs():
         "Generate report",
         "Make table",
         "Build dashboard",
+        "Design slides",
+        "Produce reports",
+        "Synthesize summaries",
+        "Generate charts about compounds",
+        "Generate 3 potent",
     ),
 )
 def test_router_does_not_treat_generic_creation_as_molecular_generation(query):
