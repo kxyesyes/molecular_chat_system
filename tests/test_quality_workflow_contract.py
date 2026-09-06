@@ -56,7 +56,7 @@ def test_quality_workflow_shards_python_suite_and_preserves_final_gate() -> None
         assert f'pytest_target: "{target}"' in workflow
 
     assert workflow.count("--timeout=60") == 2
-    assert 'pytest_args: "--timeout=60 -vv"' in workflow
+    assert workflow.count('pytest_args: "--timeout=60"') == 2
 
     assert "run: python -m pytest tests -q -p no:cacheprovider" not in workflow
     assert "fetch-depth: 0" not in workflow

@@ -28,7 +28,7 @@ jobs:
             command_timeout: 600
           - name: sandbox-api
             pytest_target: "tests/sandbox_broker/test_api.py"
-            pytest_args: "--timeout=60 -vv"
+            pytest_args: "--timeout=60"
             command_timeout: 180
           - name: sandbox-core
             pytest_target: "tests/sandbox_broker --ignore=tests/sandbox_broker/test_api.py"
