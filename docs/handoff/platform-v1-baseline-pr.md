@@ -31,7 +31,7 @@ The archive branch and tag are intentionally not pushed until the historical cre
 
 - Python compilation: passed with `python -m compileall -q src scripts`.
 - Agent suite: 1515 passed, 1 opt-in external test skipped.
-- Full deterministic Python suite: 6185 passed, 233 skipped, 171 subtests passed, 8 dependency/deprecation warnings.
+- Full deterministic Python suite: 6188 passed, 233 skipped, 171 subtests passed, 8 dependency/deprecation warnings.
 - Node suite: 8 tracked JavaScript tests passed.
 - Contract acceptance: 34/34 passed, pass rate 1.0.
 - Credential scan: exact CI pattern returned no match (`git grep` exit 1).
@@ -44,17 +44,19 @@ The first full-suite run exposed two test-environment defects: a concurrent capa
 
 ## Merge-blocker fixes
 
-Reviewed production-code head: `07ecf35e07831d0707e5801bdd99119582513178`.
+Reviewed production-code head: `ad7635f`.
 
-- CI now installs the complete platform test profile, pins the CPU PyTorch wheel, and discovers every tracked `tests/*_test.js` script dynamically.
+- CI now installs the complete platform test profile (including LangGraph and Temporal), pins the CPU PyTorch wheel, discovers every tracked `tests/*_test.js` script dynamically, and runs four complete Python shards behind the stable `offline-quality` aggregate gate.
 - Tool adapter deadlines return promptly without waiting for orphaned worker threads. Per-tool concurrency is bounded, timed-out work cannot create unbounded thread growth, and capacity is released if worker construction or submission fails.
 - LLM route arbitration is request-local and awaited without blocking the WebSocket event loop.
 - Replay evaluation no longer promotes original scientific failures; it rechecks route, tools, forbidden output and provenance while reporting strict pass/partial/fail rates.
 - Persisted Temporal-owned tasks can be controlled after process restart; durable control intent survives transient Temporal RPC failure, and lazy backend shutdown is race-safe.
 - Sandbox recovery explicitly reconciles jobs that failed between sandbox creation and sandbox-ID persistence, using the broker's job identity and reporting cleanup status.
+- Staging now enforces the portable Windows path ceiling on every host and quarantines a task if POSIX publication succeeds but the directory durability barrier fails.
+- CI uses full Git history for predecessor-contract tests, while production-worker tests isolate the fixed runtime-socket trust probe from host filesystem state.
 - Independent code review found no remaining P0/P1 issue in the final tool-capacity fix.
 
-The GitHub `offline-quality` job for code head `07ecf35` was observed in progress after push. The final documentation commit triggers a new run, so merge readiness must be based on the final PR-head check rather than that earlier run.
+The original single-job GitHub run for `e84207a` timed out in its monolithic Python step after 30 minutes. The first sharded run then exposed missing LangGraph dependencies, shallow Git history, Linux test isolation, and two cross-platform staging defects; `ad7635f` addresses all four from the actual CI logs. Merge readiness must be based on the final PR-head run, not either superseded run.
 
 ## Golden real acceptance
 
