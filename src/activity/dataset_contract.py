@@ -48,13 +48,13 @@ _UNITS_COLUMN = "units"
 _WHITESPACE = re.compile(r"\s+")
 _ASCII_WHITESPACE = " \t\n\r\f\v"
 _CONCENTRATION_UNITS = {
-    "m": ("M", 0),
-    "mm": ("mM", -3),
-    "um": ("uM", -6),
-    "μm": ("uM", -6),
-    "micro-m": ("uM", -6),
-    "nm": ("nM", -9),
-    "pm": ("pM", -12),
+    "M": ("M", 0),
+    "mM": ("mM", -3),
+    "uM": ("uM", -6),
+    "μM": ("uM", -6),
+    "micro-M": ("uM", -6),
+    "nM": ("nM", -9),
+    "pM": ("pM", -12),
 }
 _ACCEPTED_COLUMNS = [
     "original_smiles",
@@ -291,8 +291,7 @@ class DatasetValidationResult:
 def _normalized_unit(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
-    normalized = unicodedata.normalize("NFKC", value)
-    normalized = normalized.strip(_ASCII_WHITESPACE).casefold()
+    normalized = unicodedata.normalize("NFKC", value).strip()
     if not normalized:
         return None
     return normalized

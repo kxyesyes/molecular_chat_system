@@ -779,6 +779,7 @@ def test_relation_normalizes_only_surrounding_ascii_whitespace() -> None:
         ("μM", 0.1),
         ("micro-M", 0.1),
         ("nM", 100.0),
+        (" \uff4e\uff2d ", 100.0),
         ("pM", 100_000.0),
     ],
 )
@@ -801,7 +802,22 @@ def test_molar_to_pactivity_normalizes_supported_units_to_exact_pactivity(
     assert row["original_units"] == units
 
 
-@pytest.mark.parametrize("units", ["m-m", "n m", "nmol", "nM!", "nanomolar"])
+@pytest.mark.parametrize(
+    "units",
+    [
+        "m",
+        "MM",
+        "UM",
+        "NM",
+        "PM",
+        "Micro-M",
+        "m-m",
+        "n m",
+        "nmol",
+        "nM!",
+        "nanomolar",
+    ],
+)
 def test_molar_to_pactivity_rejects_unit_near_matches(units: str) -> None:
     frame = pd.DataFrame(
         [{"smiles": "CCO", "value": 100.0, "relation": "=", "units": units}]
@@ -880,12 +896,13 @@ def test_molar_to_pactivity_rejects_non_positive_concentrations() -> None:
     ]
 
 
-def test_identity_regression_normalizes_case_and_unicode_only() -> None:
+def test_identity_regression_normalizes_unicode_but_preserves_case() -> None:
     frame = pd.DataFrame(
         [
-            {"smiles": "CCO", "value": 7, "relation": "=", "units": "ＰＩＣ５０"},
-            {"smiles": "CCN", "value": 8, "relation": "=", "units": "p-IC50"},
-            {"smiles": "CCC", "value": 9, "relation": "=", "units": "p IC50"},
+            {"smiles": "CCO", "value": 7, "relation": "=", "units": "ｐＩＣ５０"},
+            {"smiles": "CCN", "value": 8, "relation": "=", "units": "ＰＩＣ５０"},
+            {"smiles": "CCC", "value": 9, "relation": "=", "units": "p-IC50"},
+            {"smiles": "CCCl", "value": 10, "relation": "=", "units": "p IC50"},
         ]
     )
 
@@ -899,7 +916,27 @@ def test_identity_regression_normalizes_case_and_unicode_only() -> None:
     assert result.rejected["rejection_reason"].tolist() == [
         "unknown_units",
         "unknown_units",
+        "unknown_units",
     ]
+
+
+def test_identity_units_normalize_micro_symbols_without_casefolding() -> None:
+    frame = pd.DataFrame(
+        [
+            {"smiles": "CCO", "value": 1, "relation": "=", "units": "uM"},
+            {"smiles": "CCN", "value": 2, "relation": "=", "units": "µM"},
+            {"smiles": "CCC", "value": 3, "relation": "=", "units": "μM"},
+            {"smiles": "CCCl", "value": 4, "relation": "=", "units": "UM"},
+        ]
+    )
+
+    result = contract.validate_activity_dataset(
+        frame,
+        _validation_manifest(endpoint="IC50", units="uM"),
+    )
+
+    assert result.accepted["normalized_value"].tolist() == [1.0, 2.0, 3.0]
+    assert result.rejected["rejection_reason"].tolist() == ["unknown_units"]
 
 
 def test_regression_duplicates_use_median_range_and_first_occurrence_order() -> None:
