@@ -704,8 +704,16 @@ def test_hit_to_lead_generation_consumes_computed_baseline():
         "Create charts that show compounds",
         "Generate reports which list candidate molecules",
         "Create analysts who screen molecules",
+        "Generate presentations summarizing molecules",
+        "Create reports analyzing compounds",
+        "Build dashboards cataloging ligands",
+        "Produce charts showing compounds",
+        "Make tables listing candidate molecules",
+        "Synthesize summaries mentioning molecules",
         "创建展示化合物的图表",
         "生成列出候选分子的报告",
+        "生成报告列出化合物",
+        "创建图表展示分子",
     ),
 )
 def test_generic_creation_verbs_require_a_molecular_entity(query):
@@ -736,11 +744,33 @@ def test_explicit_molecular_skill_can_activate_generic_generation_grammar():
         "Produce long-acting ligands",
         "生成有前景的化合物",
         "生成长效配体",
+        "生成化合物",
     ),
 )
 def test_direct_molecular_creation_objects_remain_generation_intent(query):
     assert has_generation_intent(query) is True
     assert preflight_generation_request(query) == 1
+
+
+def test_screening_is_a_safe_modifier_before_a_molecular_head():
+    query = "Generate 3 screening compounds"
+
+    assert has_generation_intent(query) is True
+    assert preflight_generation_request(query) == 3
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "生成3个化合物",
+        "生成3个有前景的化合物",
+        "生成3个长效配体",
+    ),
+)
+def test_no_space_chinese_arabic_generation_counts(query):
+    assert has_generation_intent(query) is True
+    assert parse_generation_count(query) == 3
+    assert preflight_generation_request(query) == 3
 
 
 def test_preflight_reuses_one_generation_occurrence_collection(monkeypatch):

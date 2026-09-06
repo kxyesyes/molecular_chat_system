@@ -173,7 +173,12 @@ _OFFICIAL_EVIDENCE_HOSTS = frozenset(
 )
 
 _ARABIC_COUNT = r"(?<![\w.])[-+\u2212]?\d+(?:\.\d+)?(?![\w.])"
+_CHINESE_ARABIC_COUNT = r"[-+\u2212]?\d+(?:\.\d+)?"
 _CHINESE_COUNT = r"[零〇一二两三四五六七八九十百]+"
+_CHINESE_REQUEST_COUNT = (
+    rf"(?:{_CHINESE_ARABIC_COUNT}|{_CHINESE_COUNT})"
+    rf"(?![.\d零〇一二两三四五六七八九十百])"
+)
 _ENGLISH_COUNT_WORD = (
     r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
     r"twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
@@ -207,28 +212,23 @@ _ENGLISH_COUNT_TAIL = (
     rf"{{0,{_MAX_ENGLISH_COUNT_MODIFIER_TOKENS}}}"
     rf"(?={_ENGLISH_COUNT_BOUNDARY})"
 )
-_CHINESE_COUNT_MODIFIER = r"(?:新(?:的)?|全新(?:的)?|新颖(?:的)?)"
 _CHINESE_REFERENCE = r"[A-Za-z0-9\u3400-\u9fff-]{1,24}"
-_CHINESE_REFERENCE_MODIFIER = (
-    rf"(?:类似\s*{_CHINESE_REFERENCE}\s*的|"
-    rf"与\s*{_CHINESE_REFERENCE}\s*类似的|"
-    rf"基于\s*{_CHINESE_REFERENCE}\s*的|"
-    rf"针对\s*{_CHINESE_REFERENCE}\s*的|"
-    rf"以\s*{_CHINESE_REFERENCE}\s*为基础的)"
+_CHINESE_MOLECULAR_NOUN = (
+    r"(?:分子|化合物|结构|候选|配体|骨架|类似物|抑制剂|激动剂|拮抗剂|药物)"
 )
-_CHINESE_PRE_NOUN_MODIFIER = (
-    rf"(?:{_CHINESE_COUNT_MODIFIER}|{_CHINESE_REFERENCE_MODIFIER})"
+_CHINESE_COUNT_OBJECT_FOLLOW = (
+    rf"(?=[^,，。；;、!?！？\r\n]{{0,24}}{_CHINESE_MOLECULAR_NOUN}|用于|给|$)"
 )
 _CHINESE_TARGET_PREFIX = r"(?:[A-Za-z][A-Za-z0-9-]{0,19}\s*)?"
 _CHINESE_REPEAT_PREFIX = (
-    rf"(?:生成|创建|设计|制作|构建|合成)\s*{_COUNT_TOKEN}\s*次"
+    rf"(?:生成|创建|设计|制作|构建|合成)\s*{_CHINESE_REQUEST_COUNT}\s*次"
     rf"\s*[、,，]?\s*每次\s*"
 )
 _COUNT_PATTERNS = (
     re.compile(
-        rf"{_CHINESE_REPEAT_PREFIX}(?P<count>{_COUNT_TOKEN})"
+        rf"{_CHINESE_REPEAT_PREFIX}(?P<count>{_CHINESE_REQUEST_COUNT})"
         rf"\s*(?:个|种|份)?\s*{_CHINESE_TARGET_PREFIX}"
-        rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选))"
+        rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
     ),
     re.compile(
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?P<count>{_COUNT_TOKEN})"
@@ -236,9 +236,8 @@ _COUNT_PATTERNS = (
     ),
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
-        rf"(?P<count>{_COUNT_TOKEN})\s*(?:个|种|份)?\s*"
-        rf"(?:{_CHINESE_PRE_NOUN_MODIFIER}\s*){{0,2}}"
-        rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
+        rf"(?P<count>{_CHINESE_REQUEST_COUNT})\s*(?:个|种|份)?\s*"
+        rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
     ),
 )
 _CLAUSE_TERMINATED_COUNT_PATTERNS = (
@@ -253,7 +252,7 @@ _COUNT_SLOT_PATTERNS = (
         rf"{_CHINESE_REPEAT_PREFIX}"
         rf"(?P<count>[^\s个种份，。；、！？\"']+)\s*(?:个|种|份)?\s*"
         rf"{_CHINESE_TARGET_PREFIX}"
-        rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选))"
+        rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
     ),
     re.compile(
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?P<count>[^\s;!?\"']+)"
@@ -262,8 +261,7 @@ _COUNT_SLOT_PATTERNS = (
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
         rf"(?P<count>[^\s个种份，。；、！？\"']+)\s*(?:个|种|份)?\s*"
-        rf"(?:{_CHINESE_PRE_NOUN_MODIFIER}\s*){{0,2}}"
-        rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
+        rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
     ),
 )
 _GROUPED_COUNT_SEPARATOR = r"(?:[ \t]*[,，][ \t]*|[ \t]+)"
@@ -279,8 +277,7 @@ _MALFORMED_GROUPED_COUNT_PATTERNS = (
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
         rf"(?P<count>{_GROUPED_ARABIC_COUNT})\s*(?:个|种|份)?\s*"
-        rf"(?:{_CHINESE_PRE_NOUN_MODIFIER}\s*){{0,2}}"
-        rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
+        rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
     ),
 )
 _CHINESE_ARABIC_SEPARATOR = r"[ \t]*(?:[,，][ \t]*)?"
@@ -294,8 +291,7 @@ _MALFORMED_HYBRID_COUNT_PATTERNS = (
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
         rf"(?P<count>{_CHINESE_ARABIC_HYBRID_COUNT})"
         rf"\s*(?:个|种|份)?\s*"
-        rf"(?:{_CHINESE_PRE_NOUN_MODIFIER}\s*){{0,2}}"
-        rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
+        rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
     ),
 )
 _SPACED_SIGNED_ARABIC_COUNT = r"[-+\u2212][ \t]+\d+(?:\.\d+)?"
@@ -309,8 +305,7 @@ _MALFORMED_SPACED_SIGN_COUNT_PATTERNS = (
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
         rf"(?P<count>{_SPACED_SIGNED_ARABIC_COUNT})"
         rf"\s*(?:个|种|份)?\s*"
-        rf"(?:{_CHINESE_PRE_NOUN_MODIFIER}\s*){{0,2}}"
-        rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
+        rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
     ),
 )
 _MALFORMED_PREMASK_COUNT_PATTERNS = (
@@ -333,8 +328,7 @@ _MALFORMED_WORD_COUNT_PATTERNS = (
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
         rf"{_CHINESE_DECIMAL_PART}\s*点\s*{_CHINESE_DECIMAL_PART}"
         rf"\s*(?:个|种|份)?\s*"
-        rf"(?:{_CHINESE_PRE_NOUN_MODIFIER}\s*){{0,2}}"
-        rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
+        rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
     ),
 )
 _FUZZY_COUNTS = (
@@ -660,18 +654,18 @@ _MAX_OBJECT_MODIFIERS = 6
 _RELATIVE_CLAUSE_MARKERS = frozenset(
     {"that", "which", "who", "whom", "whose"}
 )
-_RELATIONAL_OBJECT_VERB = re.compile(
-    r"(?i)(?:show(?:s|ed|ing)?|list(?:s|ed|ing)?|display(?:s|ed|ing)?|"
-    r"mention(?:s|ed|ing)?|contain(?:s|ed|ing)?|includ(?:e|es|ed|ing)|"
-    r"featur(?:e|es|ed|ing)|describ(?:e|es|ed|ing)|cover(?:s|ed|ing)?|"
-    r"concern(?:s|ed|ing)?|involv(?:e|es|ed|ing)|depict(?:s|ed|ing)?|"
-    r"present(?:s|ed|ing)?|screen(?:s|ed|ing)?)\Z"
+_NON_MOLECULAR_OUTPUT_HEAD = re.compile(
+    r"(?i)(?:presentations?|reports?|dashboards?|charts?|tables?|summaries?|"
+    r"slides?)\Z"
 )
 _CHINESE_GENERATION_VERB_PATTERN = re.compile(
     r"(?:生成|创建|设计|制作|构建|合成|给我|提供)"
 )
 _CHINESE_MOLECULAR_ENTITY = re.compile(
-    r"(?:分子|化合物|结构|候选|配体|骨架|类似物|抑制剂|激动剂|拮抗剂|药物)"
+    _CHINESE_MOLECULAR_NOUN
+)
+_CHINESE_NON_MOLECULAR_OUTPUT_HEAD = re.compile(
+    r"(?:报告|报表|图表|仪表盘|表格|摘要|演示文稿|幻灯片)"
 )
 _OBJECT_BOUNDARY = re.compile(
     r"(?i)(?:[.;!?]|\b(?:about|based\s+on|concerning|containing|contains?|"
@@ -700,10 +694,9 @@ def _has_immediate_molecular_head(object_phrase: str) -> bool:
         normalized = token.casefold()
         if _MOLECULAR_ENTITY.fullmatch(token):
             return True
-        if (
-            normalized in _RELATIVE_CLAUSE_MARKERS
-            or _RELATIONAL_OBJECT_VERB.fullmatch(token)
-        ):
+        if _NON_MOLECULAR_OUTPUT_HEAD.fullmatch(token):
+            return False
+        if normalized in _RELATIVE_CLAUSE_MARKERS:
             return False
         modifiers += 1
         if modifiers > _MAX_OBJECT_MODIFIERS:
@@ -713,11 +706,13 @@ def _has_immediate_molecular_head(object_phrase: str) -> bool:
 
 
 def _has_chinese_molecular_head(object_phrase: str) -> bool:
-    """Require the final ``的``-headed Chinese noun phrase to be molecular."""
-    matches = tuple(_CHINESE_MOLECULAR_ENTITY.finditer(object_phrase))
-    if not matches:
+    """Classify the first direct head in the final Chinese noun phrase."""
+    head_phrase = object_phrase.rsplit("的", maxsplit=1)[-1]
+    molecular = _CHINESE_MOLECULAR_ENTITY.search(head_phrase)
+    non_molecular = _CHINESE_NON_MOLECULAR_OUTPUT_HEAD.search(head_phrase)
+    if molecular is None:
         return False
-    return matches[-1].start() > object_phrase.rfind("的")
+    return non_molecular is None or molecular.start() < non_molecular.start()
 
 
 def _occurrence_has_molecular_scope(

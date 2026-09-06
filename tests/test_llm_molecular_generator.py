@@ -914,6 +914,23 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
                 self.assertEqual(wrapped.error.code.value, "invalid_input")
                 self.assertEqual(llm.prompts, [])
 
+    def test_no_space_chinese_arabic_counts_reach_model_as_three(self):
+        for query in (
+            "生成3个化合物",
+            "生成3个有前景的化合物",
+            "生成3个长效配体",
+        ):
+            with self.subTest(query=query):
+                llm = CapturingLLM()
+                wrapped = execute_tool_compat(
+                    LLMMolecularGenerator(llm_model=llm),
+                    query,
+                )
+
+                self.assertTrue(wrapped.success)
+                self.assertEqual(len(wrapped.data), 3)
+                self.assertEqual(len(llm.prompts), 1)
+
     def test_malformed_numeric_legacy_counts_are_invalid_before_model(self):
         for query in (
             "Generate 7.5 molecules",

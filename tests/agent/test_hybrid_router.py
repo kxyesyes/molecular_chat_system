@@ -249,6 +249,20 @@ def test_router_recognizes_malformed_grouped_generation_count(query):
     assert decision.selected_skill == "molecular_design"
 
 
+@pytest.mark.parametrize(
+    "query",
+    (
+        "生成3个化合物",
+        "生成3个有前景的化合物",
+        "生成3个长效配体",
+    ),
+)
+def test_router_recognizes_no_space_chinese_arabic_counts(query):
+    decision = HybridSkillRouter().decide(query)
+
+    assert decision.selected_skill == "molecular_design"
+
+
 def test_accepted_routing_feedback_adjusts_future_decision(tmp_path):
     store = SQLiteAgentStateStore(tmp_path / "state.sqlite3")
     query = "评估 CCO"
