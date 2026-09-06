@@ -4,17 +4,19 @@ ChEMBL 数据提取和清洗脚本
 """
 
 import sqlite3
-import os
 import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 
+from src.reverse_target.config import get_chembl_db_path, get_reverse_target_data_dir
+
 
 class ChEMBLDataExtractor:
     def __init__(self, db_path=None):
-        default_path = db_path or Path(os.environ.get("CHEMBL_DB_PATH", "data/reverse_target/chembl.db"))
+        default_path = db_path or get_chembl_db_path()
         self.db_path = Path(default_path)
-        self.output_dir = self.db_path.parent.parent
+        self.output_dir = get_reverse_target_data_dir()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         
         if not self.db_path.exists():
             raise FileNotFoundError(f"数据库文件不存在: {self.db_path}")

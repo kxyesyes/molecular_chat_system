@@ -8,10 +8,12 @@ import requests
 from pathlib import Path
 from tqdm import tqdm
 
+from src.reverse_target.config import get_reverse_target_data_dir
+
 
 class ChEMBLDownloader:
-    def __init__(self, output_dir="data/reverse_target"):
-        self.output_dir = Path(output_dir)
+    def __init__(self, output_dir=None):
+        self.output_dir = Path(output_dir) if output_dir else get_reverse_target_data_dir()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # ChEMBL v33 下载链接

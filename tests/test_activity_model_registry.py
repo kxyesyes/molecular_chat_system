@@ -97,6 +97,43 @@ def _process_hold_registry_lock(models_dir: str, ready, release) -> None:
         release.wait(10)
 
 
+def test_configured_activity_model_dir_is_shared_by_runtime_and_health(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import health_check
+    from src.activity import trainer
+
+    configured_dir = tmp_path / "configured-models"
+    monkeypatch.setenv("ACTIVITY_MODEL_DIR", str(configured_dir))
+
+    registry = trainer.get_model_registry()
+    ok, detail = health_check.check_activity_models()
+
+    assert registry.models_dir == configured_dir.resolve()
+    assert ok is False
+    assert "no registered activity models" in detail
+
+
+def test_activity_model_health_accepts_only_a_valid_registered_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import health_check
+
+    models_dir = tmp_path / "models"
+    weights = _write_weights(models_dir, "health.pt")
+    ActivityModelRegistry(models_dir).register(
+        _metadata("health-model", weights.name)
+    )
+    monkeypatch.setenv("ACTIVITY_MODEL_DIR", str(models_dir))
+
+    ok, detail = health_check.check_activity_models()
+
+    assert ok is True
+    assert "1 registered models" in detail
+
+
 @pytest.mark.parametrize(
     "unsafe_name",
     [

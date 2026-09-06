@@ -12,6 +12,8 @@ from rdkit.Chem import AllChem, MACCSkeys
 from tqdm import tqdm
 import pickle
 
+from src.reverse_target.config import get_reverse_target_data_dir
+
 
 def _bitvect_to_numpy_array(bitvect):
     num_bits = bitvect.GetNumBits()
@@ -69,8 +71,10 @@ def _process_single_fp(smiles):
 
 
 class FingerprintGenerator:
-    def __init__(self, input_file="data/reverse_target/chembl_training_data.tsv"):
-        self.input_file = Path(input_file)
+    def __init__(self, input_file=None):
+        self.input_file = Path(input_file) if input_file else (
+            get_reverse_target_data_dir() / "chembl_training_data.tsv"
+        )
         self.output_dir = self.input_file.parent
         
         if not self.input_file.exists():

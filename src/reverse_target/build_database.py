@@ -13,13 +13,14 @@ sys.path.insert(0, str(project_root))
 from src.reverse_target.download_chembl import ChEMBLDownloader
 from src.reverse_target.extract_clean_data import ChEMBLDataExtractor
 from src.reverse_target.generate_fingerprints import FingerprintGenerator
+from src.reverse_target.config import get_chembl_db_path, get_reverse_target_data_dir
 
 
 class DatabaseBuilder:
     """反向寻靶数据库构建器"""
     
     def __init__(self):
-        self.output_dir = Path("data/reverse_target")
+        self.output_dir = get_reverse_target_data_dir()
         self.output_dir.mkdir(parents=True, exist_ok=True)
     
     def step1_download(self):
@@ -28,7 +29,7 @@ class DatabaseBuilder:
         print("步骤 1/4: 下载 ChEMBL v36 数据库")
         print("=" * 80)
         
-        downloader = ChEMBLDownloader()
+        downloader = ChEMBLDownloader(output_dir=self.output_dir)
         
         # 下载数据库
         print("\n> 下载数据库文件...")
@@ -52,7 +53,7 @@ class DatabaseBuilder:
         print("=" * 80)
         
         try:
-            extractor = ChEMBLDataExtractor()
+            extractor = ChEMBLDataExtractor(db_path=get_chembl_db_path())
             
             # 提取原始数据
             print("\n> 提取原始数据...")
@@ -82,7 +83,9 @@ class DatabaseBuilder:
         print("=" * 80)
         
         try:
-            generator = FingerprintGenerator()
+            generator = FingerprintGenerator(
+                input_file=self.output_dir / "chembl_training_data.tsv"
+            )
             
             # 加载数据
             print("\n> 加载训练数据...")
