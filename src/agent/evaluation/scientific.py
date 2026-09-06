@@ -20,6 +20,7 @@ from src.agent.routing import HybridSkillRouter
 from src.agent.runtime.workflow_executor import WorkflowExecutor
 from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
 from src.agent.tools.admet_predictor import ADMETPredictor
+from src.agent.tools.candidate_ranker import CandidateRanker
 from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
 from src.agent.tools.llm_molecular_generator import LLMMolecularGenerator
 from src.agent.tools.molecular_docking import MolecularDocking
@@ -659,6 +660,7 @@ class ScientificAcceptanceRunner:
             "drug_likeness_assessment": DrugLikenessAssessment(),
             "admet_predictor": ADMETPredictor(),
             "activity_predictor": ActivityPredictorTool(),
+            "candidate_ranker": CandidateRanker(),
             "reverse_target_predictor": ReverseTargetTool(),
             "target_database_search": TargetDatabaseTool(),
             "molecular_docking": MolecularDocking(),
@@ -2044,6 +2046,8 @@ def _case_status(
     forbidden_called = set(actual_tools) & set(case.forbidden_tools)
     if forbidden_called:
         return "failed", "forbidden_tools_called:" + ",".join(sorted(forbidden_called))
+    if execution_error:
+        return "failed", execution_error
     failed_truth = [
         name
         for name, check in truth_checks.items()
@@ -2063,8 +2067,6 @@ def _case_status(
     ]
     if expected_missing:
         return "partial", "expected_tools_missing:" + ",".join(expected_missing)
-    if execution_error:
-        return "partial", execution_error
     if not execution_success and case.expected_tools:
         return "partial", "workflow_not_successful"
     return "passed", None

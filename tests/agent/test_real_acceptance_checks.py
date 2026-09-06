@@ -49,6 +49,45 @@ def test_generation_truth_check_rejects_invalid_or_duplicate_candidates():
     assert check["reason"] == "generated_candidates_not_unique"
 
 
+def test_real_acceptance_tool_registry_includes_candidate_ranker(tmp_path):
+    runner = scientific.ScientificAcceptanceRunner(
+        dataset_dir=tmp_path,
+        project_root=tmp_path,
+    )
+
+    assert "candidate_ranker" in runner.tools
+    assert runner.tools["candidate_ranker"].name == "candidate_ranker"
+
+
+def test_execution_exception_takes_precedence_over_dependent_truth_failures():
+    case = EvaluationCase(
+        case_id="EXECUTION-ERROR-001",
+        version="1",
+        category="target_design",
+        prompt="Design candidates",
+        expected_skill="target_driven_design",
+        expected_tools=["target_database_search"],
+    )
+
+    status, error = scientific._case_status(
+        case=case,
+        actual_skill="target_driven_design",
+        actual_tools=[],
+        anti_hallucination={"status": "passed", "forbidden_found": []},
+        truth_checks={
+            "target_database_evidence": {
+                "status": "failed",
+                "reason": "tool_not_run:target_database_search",
+            }
+        },
+        execution_success=False,
+        execution_error="execution_exception:KeyError",
+    )
+
+    assert status == "failed"
+    assert error == "execution_exception:KeyError"
+
+
 def test_contract_harness_probe_records_shadow_without_double_execution():
     class Factory:
         last_warning = None
