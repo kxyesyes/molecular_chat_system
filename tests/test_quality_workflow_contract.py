@@ -40,9 +40,12 @@ def test_quality_workflow_shards_python_suite_and_preserves_final_gate() -> None
     assert "offline-quality:" in workflow
     assert "needs: [python-tests, static-quality]" in workflow
     assert (
-        "python -m pytest ${{ matrix.pytest_target }} -q -p no:cacheprovider "
+        "timeout ${{ matrix.command_timeout }}s python -m pytest "
+        "${{ matrix.pytest_target }} -q -p no:cacheprovider "
         "${{ matrix.pytest_args }}"
     ) in workflow
+    assert workflow.count("command_timeout:") == 5
+    assert "command_timeout: 180" in workflow
     for target in (
         "tests/agent",
         "tests/sandbox_broker/test_api.py",
