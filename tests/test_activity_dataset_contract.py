@@ -99,6 +99,28 @@ def test_unknown_manifest_key_is_rejected(tmp_path: Path) -> None:
         )
 
 
+def test_duplicate_json_object_member_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "duplicate-endpoint.json"
+    path.write_text(
+        """{
+            "dataset_id": "synthetic-duplicate",
+            "target_id": "P54750",
+            "target_name": "Synthetic PDE5A",
+            "task_type": "regression",
+            "endpoint": "pIC50",
+            "endpoint": "pKi",
+            "units": "pIC50",
+            "label_transform": "identity",
+            "source": "synthetic-test-source",
+            "license": "synthetic-test-license"
+        }""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"[Dd]uplicate.*endpoint"):
+        load_dataset_manifest(path)
+
+
 @pytest.mark.parametrize(
     ("field", "invalid_value"),
     [
@@ -149,6 +171,108 @@ def test_binary_threshold_accepts_a_finite_numeric_threshold(tmp_path: Path) -> 
     )
 
     assert manifest.classification_threshold == 6.5
+
+
+@pytest.mark.parametrize(
+    ("task_type", "label_transform", "classification_threshold"),
+    [
+        ("regression", "identity", None),
+        ("regression", "molar_to_pactivity", None),
+        ("classification", "identity", None),
+        ("classification", "binary_threshold", 6.5),
+    ],
+)
+def test_supported_task_transform_combinations_are_accepted(
+    tmp_path: Path,
+    task_type: str,
+    label_transform: str,
+    classification_threshold: float | None,
+) -> None:
+    overrides: dict[str, object] = {
+        "task_type": task_type,
+        "label_transform": label_transform,
+    }
+    if classification_threshold is not None:
+        overrides["classification_threshold"] = classification_threshold
+    manifest = load_dataset_manifest(
+        _write_manifest(
+            tmp_path,
+            _manifest_payload(**overrides),
+        )
+    )
+
+    assert manifest.task_type == task_type
+    assert manifest.label_transform == label_transform
+
+
+@pytest.mark.parametrize(
+    ("task_type", "label_transform", "classification_threshold"),
+    [
+        ("regression", "binary_threshold", 6.5),
+        ("classification", "molar_to_pactivity", None),
+    ],
+)
+def test_incompatible_task_transform_combinations_are_rejected(
+    tmp_path: Path,
+    task_type: str,
+    label_transform: str,
+    classification_threshold: float | None,
+) -> None:
+    with pytest.raises(ValueError, match="label_transform"):
+        load_dataset_manifest(
+            _write_manifest(
+                tmp_path,
+                _manifest_payload(
+                    task_type=task_type,
+                    label_transform=label_transform,
+                    classification_threshold=classification_threshold,
+                ),
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("task_type", "label_transform"),
+    [
+        ("regression", "identity"),
+        ("regression", "molar_to_pactivity"),
+        ("classification", "identity"),
+    ],
+)
+@pytest.mark.parametrize("classification_threshold", [None, 6.5])
+def test_threshold_is_rejected_outside_classification_binary_transform(
+    tmp_path: Path,
+    task_type: str,
+    label_transform: str,
+    classification_threshold: float | None,
+) -> None:
+    with pytest.raises(ValueError, match="classification_threshold"):
+        load_dataset_manifest(
+            _write_manifest(
+                tmp_path,
+                _manifest_payload(
+                    task_type=task_type,
+                    label_transform=label_transform,
+                    classification_threshold=classification_threshold,
+                ),
+            )
+        )
+
+
+def test_overflowing_integer_threshold_uses_value_error_contract(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="classification_threshold"):
+        load_dataset_manifest(
+            _write_manifest(
+                tmp_path,
+                _manifest_payload(
+                    task_type="classification",
+                    label_transform="binary_threshold",
+                    classification_threshold=10**400,
+                ),
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -208,6 +332,80 @@ def test_endpoint_key_is_stable_across_case_and_extra_whitespace(
     )
 
 
+def test_model_contract_key_distinguishes_label_transforms(tmp_path: Path) -> None:
+    identity = load_dataset_manifest(
+        _write_manifest(tmp_path, _manifest_payload(label_transform="identity"))
+    )
+    converted = load_dataset_manifest(
+        _write_manifest(
+            tmp_path,
+            _manifest_payload(label_transform="  MOLAR_TO_PACTIVITY  "),
+        )
+    )
+
+    assert identity.endpoint_key == converted.endpoint_key
+    assert identity.model_contract_key != converted.model_contract_key
+    assert converted.endpoint_key in converted.model_contract_key
+    assert "molar_to_pactivity" in converted.model_contract_key
+
+
+def test_model_contract_key_distinguishes_binary_thresholds(tmp_path: Path) -> None:
+    first = load_dataset_manifest(
+        _write_manifest(
+            tmp_path,
+            _manifest_payload(
+                task_type="classification",
+                label_transform="binary_threshold",
+                classification_threshold=6.0,
+            ),
+        )
+    )
+    second_path = tmp_path / "second.json"
+    second_path.write_text(
+        json.dumps(
+            _manifest_payload(
+                task_type="classification",
+                label_transform="binary_threshold",
+                classification_threshold=7.0,
+            )
+        ),
+        encoding="utf-8",
+    )
+    second = load_dataset_manifest(second_path)
+
+    assert first.endpoint_key == second.endpoint_key
+    assert first.model_contract_key != second.model_contract_key
+    assert first.endpoint_key in first.model_contract_key
+    assert "binary_threshold" in first.model_contract_key
+
+
+def test_model_contract_key_canonicalizes_equivalent_numeric_thresholds(
+    tmp_path: Path,
+) -> None:
+    integer_threshold = load_dataset_manifest(
+        _write_manifest(
+            tmp_path,
+            _manifest_payload(
+                task_type="classification",
+                label_transform="binary_threshold",
+                classification_threshold=6,
+            ),
+        )
+    )
+    float_threshold = load_dataset_manifest(
+        _write_manifest(
+            tmp_path,
+            _manifest_payload(
+                task_type="classification",
+                label_transform="binary_threshold",
+                classification_threshold=6.0,
+            ),
+        )
+    )
+
+    assert integer_threshold.model_contract_key == float_threshold.model_contract_key
+
+
 @pytest.mark.parametrize("field", ["target_id", "endpoint", "units", "task_type"])
 def test_endpoint_key_components_reject_ambiguous_delimiters(
     tmp_path: Path,
@@ -217,6 +415,51 @@ def test_endpoint_key_components_reject_ambiguous_delimiters(
         load_dataset_manifest(
             _write_manifest(tmp_path, _manifest_payload(**{field: "unsafe:value"}))
         )
+
+
+@pytest.mark.parametrize("field", REQUIRED_FIELDS)
+@pytest.mark.parametrize("disallowed", ["\x00", "\u200b"])
+def test_required_metadata_rejects_unicode_control_and_format_characters(
+    tmp_path: Path,
+    field: str,
+    disallowed: str,
+) -> None:
+    payload = _manifest_payload()
+    payload[field] = f"{payload[field]}{disallowed}"
+
+    with pytest.raises(ValueError, match=field):
+        load_dataset_manifest(_write_manifest(tmp_path, payload))
+
+
+@pytest.mark.parametrize(
+    "disallowed",
+    [
+        "\x00",  # control
+        "\u200b",  # format
+        "\ud800",  # surrogate
+        "\ue000",  # private use
+        "\u0378",  # unassigned
+    ],
+)
+def test_required_metadata_rejects_all_unicode_category_c_groups(
+    tmp_path: Path,
+    disallowed: str,
+) -> None:
+    with pytest.raises(ValueError, match="target_name"):
+        load_dataset_manifest(
+            _write_manifest(
+                tmp_path,
+                _manifest_payload(target_name=f"Synthetic target{disallowed}"),
+            )
+        )
+
+
+def test_required_metadata_allows_ordinary_non_ascii_text(tmp_path: Path) -> None:
+    manifest = load_dataset_manifest(
+        _write_manifest(tmp_path, _manifest_payload(target_name="磷酸二酯酶5A"))
+    )
+
+    assert manifest.target_name == "磷酸二酯酶5A"
 
 
 @pytest.mark.parametrize("content", ["{", "[1, 2", "not json"])
