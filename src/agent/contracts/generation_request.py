@@ -5,6 +5,7 @@ import re
 import unicodedata
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -18,15 +19,36 @@ MAX_TARGET_RECORDS = 3
 MAX_TARGET_STRUCTURES = 2
 MAX_EVIDENCE_ITEMS = 3
 MAX_EVIDENCE_CHARS = 4096
+MAX_GENERATION_REQUEST_CHARS = 16384
+MAX_GENERATION_OCCURRENCES = 64
+MAX_GENERATION_COUNT_TOKEN_DIGITS = 32
 _COUNT_UNSET = object()
 
 
 class GenerationRequestError(ValueError):
     """A caller-supplied generation request violates the public contract."""
 
-    def __init__(self, message: str, *, value: Any = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        value: Any = None,
+        reason: str = "malformed_requested_count",
+    ):
         super().__init__(message)
         self.value = value
+        self.reason = reason
+
+
+def generation_request_error_details(
+    exc: GenerationRequestError,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Return one stable public classification for every generation boundary."""
+    details = {"reason": exc.reason, **extra}
+    if exc.value is not None:
+        details["rejected_value"] = deepcopy(exc.value)
+    return details
 
 
 class TargetEvidenceError(GenerationRequestError):
@@ -353,13 +375,16 @@ _FUZZY_COUNTS = (
 def validate_generation_count(value: Any, *, field: str = "requested_count") -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise GenerationRequestError(
-            f"{field} must be an integer", value=value
+            f"{field} must be an integer",
+            value=value,
+            reason="invalid_requested_count_type",
         )
     if not MIN_GENERATION_COUNT <= value <= MAX_GENERATION_COUNT:
         raise GenerationRequestError(
             f"{field} must be between {MIN_GENERATION_COUNT} and "
             f"{MAX_GENERATION_COUNT}",
             value=value,
+            reason="requested_count_out_of_range",
         )
     return value
 
@@ -370,98 +395,213 @@ def preflight_generation_request(
     *,
     count_supplied: bool = False,
     field: str = "requested_count",
+    active_molecular_skill: bool = False,
 ) -> int | None:
     """Validate one generation boundary without reparsing authoritative counts."""
     if count_supplied:
         return validate_generation_count(authoritative_count, field=field)
-    if has_generation_intent(query):
+    if active_molecular_skill or has_generation_intent(query):
         return validate_generation_count(parse_generation_count(query), field=field)
     return None
 
 
 def parse_generation_count(query: str, *, default: int = DEFAULT_GENERATION_COUNT) -> int:
-    unquoted = _strip_generation_literals(query)
-    malformed_premask_count_present = any(
-        pattern.search(unquoted)
-        for pattern in _MALFORMED_PREMASK_COUNT_PATTERNS
-    )
+    query = str(query)
+    if len(query) > MAX_GENERATION_REQUEST_CHARS:
+        raise GenerationRequestError(
+            "generation request is too long",
+            value={"length": len(query)},
+        )
     actionable_clauses = _actionable_generation_clauses(query)
-    if malformed_premask_count_present and any(
-        pattern.search(clause)
-        for clause in actionable_clauses
-        for pattern in _MALFORMED_PREMASK_COUNT_PATTERNS
-    ):
-        raise GenerationRequestError("generation count must be an integer")
     counts: list[int] = []
     for clause in actionable_clauses:
-        for start, end in _generation_occurrence_spans(clause):
-            count = _parse_generation_occurrence_count(clause, start, end)
+        for occurrence in _collect_generation_occurrences(clause):
+            count = _parse_generation_occurrence_count(occurrence)
             if count is not None:
                 counts.append(count)
     if len(set(counts)) > 1:
-        raise GenerationRequestError("conflicting generation counts")
+        raise GenerationRequestError(
+            "conflicting generation counts",
+            value=tuple(dict.fromkeys(counts)),
+        )
     return counts[0] if counts else default
 
 
-def _parse_generation_occurrence_count(
-    query: str,
-    occurrence_start: int,
-    occurrence_end: int,
-) -> int | None:
-    def occurrence_matches(pattern: re.Pattern[str]) -> list[re.Match[str]]:
-        return [
-            match
-            for match in pattern.finditer(query)
-            if (
-                match.start() < occurrence_end
-                and match.end() > occurrence_start
-            )
-        ]
+@dataclass(frozen=True)
+class _GenerationPatternMatch:
+    category: str
+    order: int
+    match: re.Match[str]
+    fuzzy_count: int | None = None
 
-    if any(
-        occurrence_matches(pattern)
-        for pattern in (
-            *_MALFORMED_PREMASK_COUNT_PATTERNS,
-            *_MALFORMED_WORD_COUNT_PATTERNS,
+
+@dataclass(frozen=True)
+class _GenerationOccurrence:
+    start: int
+    end: int
+    matches: tuple[_GenerationPatternMatch, ...]
+
+
+def _collect_generation_occurrences(value: str) -> list[_GenerationOccurrence]:
+    """Scan each grammar pattern once, then group overlapping matches."""
+    found: list[_GenerationPatternMatch] = []
+    pattern_groups = (
+        ("malformed", _MALFORMED_PREMASK_COUNT_PATTERNS),
+        ("malformed", _MALFORMED_WORD_COUNT_PATTERNS),
+        ("count", _COUNT_PATTERNS),
+        ("slot", _COUNT_SLOT_PATTERNS),
+    )
+    order = 0
+    for category, patterns in pattern_groups:
+        for pattern in patterns:
+            found.extend(
+                _GenerationPatternMatch(category, order, match)
+                for match in pattern.finditer(value)
+            )
+            order += 1
+    for pattern, fuzzy_count in _FUZZY_COUNTS:
+        found.extend(
+            _GenerationPatternMatch("fuzzy", order, match, fuzzy_count)
+            for match in pattern.finditer(value)
         )
+        order += 1
+    if not found:
+        return []
+
+    occurrences: list[_GenerationOccurrence] = []
+    for item in sorted(
+        found,
+        key=lambda candidate: (
+            candidate.match.start(),
+            candidate.match.end(),
+            candidate.order,
+        ),
     ):
-        raise GenerationRequestError("generation count must be an integer")
-    for pattern in _COUNT_PATTERNS:
-        matches = occurrence_matches(pattern)
-        if not matches:
+        start, end = item.match.span()
+        if occurrences and start < occurrences[-1].end:
+            previous = occurrences[-1]
+            occurrences[-1] = _GenerationOccurrence(
+                previous.start,
+                max(previous.end, end),
+                (*previous.matches, item),
+            )
+        else:
+            occurrences.append(_GenerationOccurrence(start, end, (item,)))
+        if len(occurrences) > MAX_GENERATION_OCCURRENCES:
+            raise GenerationRequestError(
+                "too many generation occurrences",
+                value={"limit": MAX_GENERATION_OCCURRENCES},
+            )
+    return occurrences
+
+
+def _parse_generation_occurrence_count(
+    occurrence: _GenerationOccurrence,
+) -> int | None:
+    ordered = sorted(occurrence.matches, key=lambda item: item.order)
+    malformed = next(
+        (item for item in ordered if item.category == "malformed"),
+        None,
+    )
+    if malformed is not None:
+        raise GenerationRequestError(
+            "generation count must be an integer",
+            value=_safe_count_error_value(malformed.match.groupdict().get("count")),
+        )
+    for item in ordered:
+        if item.category != "count":
             continue
-        count = _parse_count_token(matches[0].group("count"))
+        count = _parse_count_token(item.match.group("count"))
         if count is not None:
             return count
-    for pattern in _COUNT_SLOT_PATTERNS:
-        matches = occurrence_matches(pattern)
-        if matches and _looks_numeric_like_count_token(
-            matches[0].group("count")
+    for item in ordered:
+        if item.category == "slot" and _looks_numeric_like_count_token(
+            item.match.group("count")
         ):
-            raise GenerationRequestError("generation count must be an integer")
-    for pattern, count in _FUZZY_COUNTS:
-        if occurrence_matches(pattern):
-            return count
+            token = item.match.group("count")
+            raise GenerationRequestError(
+                "generation count must be an integer",
+                value=_safe_count_error_value(token),
+            )
+    fuzzy = next(
+        (item for item in ordered if item.category == "fuzzy"),
+        None,
+    )
+    if fuzzy is not None:
+        return fuzzy.fuzzy_count
     return None
 
 
-def has_generation_intent(query: str) -> bool:
+def has_generation_intent(
+    query: str,
+    *,
+    active_molecular_skill: bool = False,
+) -> bool:
     """Recognize actionable generation grammar, excluding examples and code."""
+    query = str(query)
+    if len(query) > MAX_GENERATION_REQUEST_CHARS:
+        return False
     return any(
-        _matches_generation_grammar(clause)
+        _matches_generation_grammar(
+            clause,
+            active_molecular_skill=active_molecular_skill,
+        )
         for clause in _actionable_generation_clauses(query)
     )
 
 
-def _matches_generation_grammar(value: str) -> bool:
-    return (
-        any(pattern.search(value) for pattern in _COUNT_SLOT_PATTERNS)
-        or any(pattern.search(value) for pattern in _MALFORMED_PREMASK_COUNT_PATTERNS)
-        or any(
-            pattern.search(value)
-            for pattern in _MALFORMED_WORD_COUNT_PATTERNS
+def _matches_generation_grammar(
+    value: str,
+    *,
+    active_molecular_skill: bool = False,
+) -> bool:
+    occurrences = _collect_generation_occurrences(value)
+    return any(
+        active_molecular_skill
+        or _occurrence_has_molecular_scope(value, occurrence)
+        for occurrence in occurrences
+    )
+
+
+_GENERIC_CREATION_VERB = re.compile(
+    r"(?i)\b(?:create|generate|make|build)\b"
+)
+_MOLECULAR_ENTITY = re.compile(
+    r"(?i)\b(?:molecules?|compounds?|structures?|candidates?|ligands?|"
+    r"scaffolds?|analog(?:ue)?s?|inhibitors?|agonists?|antagonists?|drugs?|"
+    r"chemotypes?|smiles|chemical|drug[- ]?like|potent|selective|"
+    r"similar[- ]to|targets?|proteins?|enzymes?)\b"
+)
+_TARGET_ENTITY = re.compile(
+    r"\b(?:PDE\d+[A-Z]?|EGFR|BACE1|KRAS|BRAF|JAK2|ALK|MET|CDK2|KDR)\b",
+    re.IGNORECASE,
+)
+
+
+def _occurrence_has_molecular_scope(
+    value: str,
+    occurrence: _GenerationOccurrence,
+) -> bool:
+    occurrence_text = value[occurrence.start : occurrence.end]
+    verb = re.search(rf"(?i)\b{_GENERATION_VERB}\b", occurrence_text)
+    if verb is None or not _GENERIC_CREATION_VERB.fullmatch(verb.group(0)):
+        return True
+    window = value[
+        occurrence.start : min(len(value), occurrence.end + 200)
+    ]
+    connector = re.search(
+        rf"(?i)\b(?:and(?:\s+(?:then|also))?|then|plus)\s+{_GENERATION_VERB}\b",
+        window[1:],
+    )
+    if connector:
+        window = window[: connector.start() + 1]
+    return bool(
+        _MOLECULAR_ENTITY.search(window)
+        or _TARGET_ENTITY.search(window)
+        or re.search(
+            r"\b[BCNOFPSI][BCNOFPSIcnops0-9@+\-\[\]()=#\\/.]{1,}\b",
+            window,
         )
-        or any(pattern.search(value) for pattern, _value in _FUZZY_COUNTS)
     )
 
 
@@ -491,20 +631,26 @@ def _strip_generation_literals(query: str) -> str:
 
 
 def _split_generation_clauses(value: str) -> list[str]:
-    protected_punctuation: set[int] = set()
-    for pattern in (
-        *_COUNT_SLOT_PATTERNS,
-        *_COUNT_PATTERNS,
-        *_MALFORMED_PREMASK_COUNT_PATTERNS,
-        *_MALFORMED_WORD_COUNT_PATTERNS,
-    ):
-        for match in pattern.finditer(value):
-            start, end = match.span()
-            protected_punctuation.update(range(start, end))
+    protected_spans = [
+        (occurrence.start, occurrence.end)
+        for occurrence in _collect_generation_occurrences(value)
+    ]
+    protected_index = 0
 
     separated: list[str] = []
     for index, character in enumerate(value):
-        if index in protected_punctuation:
+        while (
+            protected_index < len(protected_spans)
+            and index >= protected_spans[protected_index][1]
+        ):
+            protected_index += 1
+        protected = (
+            protected_index < len(protected_spans)
+            and protected_spans[protected_index][0]
+            <= index
+            < protected_spans[protected_index][1]
+        )
+        if protected:
             separated.append(character)
             continue
         if character == "+":
@@ -533,7 +679,7 @@ def _split_generation_clauses(value: str) -> list[str]:
                 else "\n"
             )
             continue
-        if character == "." and index not in protected_punctuation:
+        if character == ".":
             separated.append("\n")
             continue
         separated.append(character)
@@ -545,25 +691,10 @@ def _split_generation_clauses(value: str) -> list[str]:
 
 
 def _generation_occurrence_spans(value: str) -> list[tuple[int, int]]:
-    matches: list[tuple[int, int]] = []
-    for pattern in (
-        *_COUNT_SLOT_PATTERNS,
-        *_MALFORMED_PREMASK_COUNT_PATTERNS,
-        *_MALFORMED_WORD_COUNT_PATTERNS,
-        *(pattern for pattern, _value in _FUZZY_COUNTS),
-    ):
-        matches.extend(match.span() for match in pattern.finditer(value))
-    if not matches:
-        return []
-
-    merged: list[tuple[int, int]] = []
-    for start, end in sorted(matches):
-        if merged and start < merged[-1][1]:
-            previous_start, previous_end = merged[-1]
-            merged[-1] = (previous_start, max(previous_end, end))
-            continue
-        merged.append((start, end))
-    return merged
+    return [
+        (occurrence.start, occurrence.end)
+        for occurrence in _collect_generation_occurrences(value)
+    ]
 
 
 def _mask_non_actionable_generation_occurrences(clause: str) -> str:
@@ -701,13 +832,32 @@ def _looks_numeric_like_count_token(token: str) -> bool:
     )
 
 
+def _safe_count_error_value(token: Any) -> Any:
+    if not isinstance(token, str):
+        return token
+    normalized = unicodedata.normalize("NFKC", token).strip()
+    digit_count = sum(character.isdigit() for character in normalized)
+    if digit_count > MAX_GENERATION_COUNT_TOKEN_DIGITS:
+        return {"numeric_digits": digit_count}
+    return normalized
+
+
 def _parse_count_token(token: str) -> int | None:
     normalized = unicodedata.normalize("NFKC", token).strip().lower()
     normalized = normalized.replace("\u2212", "-")
     if re.fullmatch(r"[-+]?\d+", normalized):
+        digit_count = len(normalized.lstrip("-+"))
+        if digit_count > MAX_GENERATION_COUNT_TOKEN_DIGITS:
+            raise GenerationRequestError(
+                "generation count numeric token is too long",
+                value={"numeric_digits": digit_count},
+            )
         return int(normalized)
     if re.fullmatch(r"[-+]?\d+\.\d+", normalized):
-        raise GenerationRequestError("generation count must be an integer")
+        raise GenerationRequestError(
+            "generation count must be an integer",
+            value=_safe_count_error_value(token),
+        )
     english = {
         "zero": 0,
         "one": 1,
@@ -1529,6 +1679,7 @@ __all__ = [
     "MIN_GENERATION_COUNT",
     "TargetEvidenceError",
     "build_generation_request",
+    "generation_request_error_details",
     "has_generation_intent",
     "parse_chinese_integer",
     "parse_generation_count",

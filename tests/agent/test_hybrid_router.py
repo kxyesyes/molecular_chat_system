@@ -88,6 +88,21 @@ def test_router_uses_canonical_generation_grammar_for_supported_verbs():
         assert decision.selected_skill == "molecular_design", query
 
 
+@pytest.mark.parametrize(
+    "query",
+    (
+        "Create 12 slides",
+        "Generate report",
+        "Make table",
+        "Build dashboard",
+    ),
+)
+def test_router_does_not_treat_generic_creation_as_molecular_generation(query):
+    decision = HybridSkillRouter().decide(query)
+
+    assert decision.selected_skill != "molecular_design"
+
+
 def test_router_ignores_quoted_generation_examples():
     decision = HybridSkillRouter().decide(
         'Explain the phrase "Produce 5 molecules"'

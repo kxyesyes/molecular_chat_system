@@ -19,6 +19,8 @@ from src.agent.persistence.redaction import (
 from src.agent.contracts import CandidateSet, ObservationStatus
 from src.agent.contracts.generation_request import (
     GenerationRequestError,
+    generation_request_error_details,
+    has_generation_intent,
     preflight_generation_request,
 )
 from src.agent.routing.hybrid import SMILES_PATTERN
@@ -608,7 +610,7 @@ class ChatHandler:
                 "error": {
                     "code": "invalid_input",
                     "message": str(exc),
-                    "details": {},
+                    "details": generation_request_error_details(exc),
                 },
             }
         except Exception:
@@ -1192,7 +1194,7 @@ class ChatHandler:
         }
         
         # 生成类任务
-        if any(kw in user_message_lower for kw in ['生成', '随机生成', '创建', '设计新', 'generate', 'create']):
+        if has_generation_intent(user_message_lower):
             intent['intent_type'] = '分子生成'
             intent['task_description'] = '使用AI生成符合要求的新分子结构'
             intent['rag_usage'] = '作为设计灵感和参考'

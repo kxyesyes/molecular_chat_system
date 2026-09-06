@@ -17,6 +17,10 @@ from src.agent.contracts import (
     ToolProvenance,
     ToolResult,
 )
+from src.agent.contracts.generation_request import (
+    build_generation_request,
+    validate_generation_count,
+)
 from src.agent.persistence.base import AgentStateStore
 from src.agent.planning.bindings import BindingResolver
 from src.agent.runtime.event_bus import AgentEventBus
@@ -332,9 +336,72 @@ class WorkflowOrchestrator:
         outputs: Mapping[str, Any],
     ) -> Any:
         input_data = cls._resolve_semantic_input(context, step, outputs)
+        if cls._is_generation_step(step):
+            return cls._canonical_generation_input(
+                context,
+                step,
+                outputs,
+                input_data,
+            )
         if step.input_template:
             return step.input_template.format(input=input_data, query=context.query)
         return input_data
+
+    @staticmethod
+    def _is_generation_step(step: WorkflowStep) -> bool:
+        return (
+            step.tool_name == "llm_molecular_generator"
+            or step.capability == "molecule.generate"
+        )
+
+    @classmethod
+    def _canonical_generation_input(
+        cls,
+        context: AgentContext,
+        step: WorkflowStep,
+        outputs: Mapping[str, Any],
+        bound_value: Any,
+    ) -> dict[str, Any]:
+        template = step.input_data if isinstance(step.input_data, Mapping) else {}
+        template_metadata = template.get("metadata")
+        if (
+            isinstance(template_metadata, Mapping)
+            and "requested_count" in template_metadata
+        ):
+            requested_count = validate_generation_count(
+                template_metadata["requested_count"]
+            )
+        elif "requested_count" in context.metadata:
+            requested_count = validate_generation_count(
+                context.metadata["requested_count"]
+            )
+        else:
+            requested_count = validate_generation_count(context.mol_count)
+        query = str(template.get("query") or context.query)
+        canonical = build_generation_request(
+            query,
+            requested_count,
+            outputs=(
+                template.get("outputs")
+                if isinstance(template.get("outputs"), Mapping)
+                else None
+            ),
+            trust_envelope=template,
+        )
+        selector = BindingResolver.derive_selector(
+            step.input_binding,
+            step.input_from,
+        )
+        if selector == BindingResolver.WORKFLOW and isinstance(
+            bound_value, Mapping
+        ):
+            bound_outputs = bound_value.get("outputs")
+            if isinstance(bound_outputs, Mapping):
+                canonical["outputs"].update(deepcopy(dict(bound_outputs)))
+        elif selector is not None:
+            key = BindingResolver.output_key(selector)
+            canonical["outputs"][key] = deepcopy(outputs[key])
+        return canonical
 
     @classmethod
     def _resolve_semantic_input(
@@ -348,11 +415,15 @@ class WorkflowOrchestrator:
             step.input_from,
         )
         if selector is not None:
-            transform = BindingResolver.normalize_transform(
-                step.input_binding,
-                step.input_from,
-                step.input_transform,
-                step.metadata,
+            transform = (
+                "identity"
+                if cls._is_generation_step(step)
+                else BindingResolver.normalize_transform(
+                    step.input_binding,
+                    step.input_from,
+                    step.input_transform,
+                    step.metadata,
+                )
             )
             input_data = BindingResolver().resolve(
                 selector,

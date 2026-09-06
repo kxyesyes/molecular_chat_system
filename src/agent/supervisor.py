@@ -14,6 +14,7 @@ from src.agent.contracts import (
 from src.agent.contracts.generation_request import (
     DEFAULT_GENERATION_COUNT,
     GenerationRequestError,
+    generation_request_error_details,
     has_generation_intent,
     preflight_generation_request,
     preserve_target_quality,
@@ -139,6 +140,17 @@ class SupervisorAgent:
         preflight_generation_request(query)
         return self._resolve_policy(query) is not None
 
+    @staticmethod
+    def _is_molecular_generation_skill(skill: Any) -> bool:
+        if isinstance(skill, WorkflowPolicy):
+            return "llm_molecular_generator" in skill.allowed_tools
+        name = getattr(skill, "name", skill)
+        return name in {
+            "molecular_design",
+            "target_driven_design",
+            "hit_to_lead_optimization",
+        }
+
     def _resolve_policy(
         self,
         query: str,
@@ -172,6 +184,9 @@ class SupervisorAgent:
                 mol_count if mol_count is not _MOL_COUNT_UNSET else None,
                 count_supplied=mol_count is not _MOL_COUNT_UNSET,
                 field="mol_count",
+                active_molecular_skill=self._is_molecular_generation_skill(
+                    active_skill
+                ),
             )
             if preflight_count is not None:
                 requested_count = preflight_count
@@ -179,13 +194,14 @@ class SupervisorAgent:
             else:
                 requested_count = DEFAULT_GENERATION_COUNT
         except GenerationRequestError as exc:
-            if raw_requested_count is None and isinstance(exc.value, int):
+            if raw_requested_count is None and exc.value is not None:
                 raw_requested_count = exc.value
             active_name = getattr(active_skill, "name", active_skill)
+            classification = generation_request_error_details(exc)
             error = AgentExecutionError(
                 code=AgentErrorCode.INVALID_INPUT,
                 message="Invalid molecular generation request",
-                details={"reason": str(exc)},
+                details=classification,
             )
             trace_id = f"agent-{uuid4().hex[:12]}"
             agent_result = AgentResult(
@@ -216,16 +232,10 @@ class SupervisorAgent:
                     "metadata": {
                         "requested_count": (
                             raw_requested_count
-                            if isinstance(raw_requested_count, int)
-                            and not isinstance(raw_requested_count, bool)
+                            if raw_requested_count is not None
                             else None
                         ),
-                        "reason": (
-                            "requested_count_out_of_range"
-                            if isinstance(raw_requested_count, int)
-                            and not isinstance(raw_requested_count, bool)
-                            else "invalid_requested_count"
-                        ),
+                        **classification,
                     },
                 },
             }
@@ -335,7 +345,9 @@ class SupervisorAgent:
     ) -> dict[str, Any]:
         metadata = dict(metadata or {})
         try:
-            self._preflight_context_count(query, metadata, mol_count)
+            self._preflight_context_count(
+                query, metadata, mol_count, skill_name
+            )
         except GenerationRequestError as exc:
             return self._invalid_plan_response(
                 query, skill_name, trace_id, metadata, mol_count, exc
@@ -374,7 +386,9 @@ class SupervisorAgent:
     ) -> dict[str, Any]:
         metadata = dict(metadata or {})
         try:
-            self._preflight_context_count(query, metadata, mol_count)
+            self._preflight_context_count(
+                query, metadata, mol_count, skill_name
+            )
         except GenerationRequestError as exc:
             return self._invalid_run_response(
                 skill_name, trace_id, metadata, mol_count, exc
@@ -420,6 +434,8 @@ class SupervisorAgent:
         if not steps:
             if policy is not None and workflow_plan.metadata.get("reason") in {
                 "invalid_requested_count",
+                "invalid_requested_count_type",
+                "malformed_requested_count",
                 "requested_count_out_of_range",
             }:
                 execution = WorkflowExecutor(
@@ -510,6 +526,7 @@ class SupervisorAgent:
         query: str,
         metadata: dict[str, Any],
         mol_count: Any,
+        skill_name: str | None = None,
     ) -> int | None:
         if mol_count is not _MOL_COUNT_UNSET:
             count = preflight_generation_request(
@@ -529,7 +546,12 @@ class SupervisorAgent:
             )
             metadata["requested_count"] = count
             return count
-        count = preflight_generation_request(query)
+        count = preflight_generation_request(
+            query,
+            active_molecular_skill=(
+                SupervisorAgent._is_molecular_generation_skill(skill_name)
+            ),
+        )
         if count is not None:
             metadata["requested_count"] = count
         return count
@@ -548,19 +570,20 @@ class SupervisorAgent:
             if mol_count is not _MOL_COUNT_UNSET
             else metadata.get("requested_count")
         )
+        classification = generation_request_error_details(exc)
         return {
             "trace_id": trace_id or str(uuid4()),
             "skill_name": skill_name,
             "workflow_name": skill_name or "molecular_design",
             "metadata": {
                 "requested_count": raw_count,
-                "reason": "invalid_requested_count",
+                **classification,
             },
             "steps": [],
             "error": {
                 "code": AgentErrorCode.INVALID_INPUT.value,
                 "message": str(exc),
-                "details": {},
+                "details": classification,
             },
         }
 
@@ -578,7 +601,7 @@ class SupervisorAgent:
         error = AgentExecutionError(
             code=AgentErrorCode.INVALID_INPUT,
             message="Invalid molecular generation request",
-            details={"reason": str(exc)},
+            details=generation_request_error_details(exc),
         )
         result = AgentResult(
             trace_id=plan["trace_id"],

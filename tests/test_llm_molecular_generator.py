@@ -87,6 +87,20 @@ class CountingChem:
 
 
 class LLMMolecularGeneratorTest(unittest.TestCase):
+    def test_oversized_numeric_token_is_rejected_before_model(self):
+        llm = CapturingLLM()
+        generator = LLMMolecularGenerator(llm_model=llm)
+
+        result = generator.execute(f"Generate {'9' * 5000} molecules")
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"]["code"], "invalid_input")
+        self.assertEqual(
+            result["error"]["details"]["reason"],
+            "malformed_requested_count",
+        )
+        self.assertEqual(llm.prompts, [])
+
     def test_generation_intent_parses_chinese_number_words(self):
         generator = LLMMolecularGenerator(llm_model=FakeLLM())
 

@@ -17,6 +17,7 @@ from src.agent.contracts import (
 from src.agent.contracts.generation_request import (
     DEFAULT_GENERATION_COUNT,
     GenerationRequestError,
+    generation_request_error_details,
     parse_generation_count,
     validate_generation_count,
 )
@@ -268,7 +269,7 @@ class WorkflowExecutor:
         has_generation_step = bool(generation_steps)
         step_counts: list[int] = []
         step_query_counts: list[int] = []
-        invalid_step_count = False
+        invalid_step_error: GenerationRequestError | None = None
         higher_precedence_count = (
             "requested_count" in effective_plan.metadata
             or "requested_count" in context_snapshot.metadata
@@ -289,8 +290,8 @@ class WorkflowExecutor:
                             input_metadata["requested_count"]
                         )
                     )
-                except GenerationRequestError:
-                    invalid_step_count = True
+                except GenerationRequestError as exc:
+                    invalid_step_error = invalid_step_error or exc
                 continue
 
             if higher_precedence_count:
@@ -313,13 +314,20 @@ class WorkflowExecutor:
                     step_query_counts.append(
                         validate_generation_count(parsed)
                     )
-            except GenerationRequestError:
-                invalid_step_count = True
+            except GenerationRequestError as exc:
+                invalid_step_error = invalid_step_error or exc
 
-        if has_generation_step and invalid_step_count:
-            # Use the common preflight validator so malformed generation data
-            # fails atomically before compilation or any tool invocation.
-            effective_plan.metadata["requested_count"] = None
+        if has_generation_step and invalid_step_error is not None:
+            effective_plan.metadata.update(
+                generation_request_error_details(invalid_step_error)
+            )
+            return self._invalid_count_execution(
+                context_snapshot,
+                policy,
+                effective_plan,
+                invalid_step_error,
+                field="step.requested_count",
+            )
         elif has_generation_step and "requested_count" not in effective_plan.metadata:
             if "requested_count" in context_snapshot.metadata:
                 effective_plan.metadata["requested_count"] = deepcopy(
@@ -342,8 +350,17 @@ class WorkflowExecutor:
                     effective_plan.metadata["requested_count"] = (
                         validate_generation_count(context_count)
                     )
-                except GenerationRequestError:
-                    effective_plan.metadata["requested_count"] = None
+                except GenerationRequestError as exc:
+                    effective_plan.metadata.update(
+                        generation_request_error_details(exc)
+                    )
+                    return self._invalid_count_execution(
+                        context_snapshot,
+                        policy,
+                        effective_plan,
+                        exc,
+                        field="context.query",
+                    )
         plan_request_metadata = {
             key: effective_plan.metadata[key]
             for key in ("requested_count",)
@@ -493,12 +510,13 @@ class WorkflowExecutor:
         *,
         field: str,
     ) -> WorkflowExecution:
-        details = {
-            "skill": policy.name,
-            "reason": "invalid_requested_count",
-            "field": field,
-            "validation": str(exc),
-        }
+        details = generation_request_error_details(
+            exc,
+            skill=policy.name,
+            field=field,
+            validation=str(exc),
+        )
+        plan.metadata.update(generation_request_error_details(exc))
         error = AgentExecutionError(
             code=AgentErrorCode.INVALID_INPUT,
             message="Invalid molecular generation request",
@@ -537,6 +555,8 @@ class WorkflowExecutor:
                 )
         if plan.metadata.get("reason") in {
             "invalid_requested_count",
+            "invalid_requested_count_type",
+            "malformed_requested_count",
             "requested_count_out_of_range",
         }:
             details = {

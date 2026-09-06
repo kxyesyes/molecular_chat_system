@@ -58,6 +58,25 @@ def test_agent_executor_omitted_count_rejects_invalid_text_before_model(monkeypa
     assert result["error"]["code"] == "invalid_input"
     assert "between 1 and 10" in result["error"]["message"]
     assert result["tool_results"][0]["error"] == result["error"]
+    assert result["error"]["details"] == {
+        "reason": "requested_count_out_of_range",
+        "rejected_value": 11,
+    }
+    assert model.prompts == []
+
+
+def test_agent_executor_oversized_numeric_token_is_canonical_invalid_input(
+    monkeypatch,
+):
+    agent, model = _build_agent(monkeypatch)
+
+    result = agent.execute(f"Generate {'9' * 5000} molecules")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_input"
+    assert result["error"]["details"]["reason"] == (
+        "malformed_requested_count"
+    )
     assert model.prompts == []
 
 

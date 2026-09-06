@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 from threading import Barrier, Lock
 from typing import get_type_hints
 
@@ -15,10 +16,12 @@ from src.agent.orchestrators.base import WorkflowStep
 from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.planning import CompiledPlan, PlanCompiler, WorkflowPlan
 from src.agent import runtime as runtime_module
+import src.agent.tools.llm_molecular_generator as generator_module
 from src.agent.runtime import workflow_executor as workflow_executor_module
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.task_state import TaskEventType
 from src.agent.runtime.workflow_executor import WorkflowExecutor
+from src.agent.tools.llm_molecular_generator import LLMMolecularGenerator
 from src.agent.workflows import WorkflowPolicy
 
 
@@ -66,6 +69,96 @@ class FakeTool:
             "data": {"query": query},
             "formatted": self.name,
         }
+
+
+class CapturingGeneratorModel:
+    model_name = "gmm-llama:latest"
+
+    def __init__(self):
+        self.prompts = []
+
+    def generate(self, prompt, temperature=0.7, max_tokens=1000):
+        self.prompts.append(prompt)
+        return "\n".join("C" * length for length in range(1, 11))
+
+
+def test_legacy_target_binding_reaches_real_generator_with_canonical_count(
+    monkeypatch,
+):
+    target = FakeTool("target_database_search")
+    model = CapturingGeneratorModel()
+    generator = LLMMolecularGenerator(llm_model=model)
+    monkeypatch.setattr(generator, "_check_rdkit", lambda _result: True)
+    monkeypatch.setattr(generator, "validate_smiles", lambda _smiles: True)
+    monkeypatch.setattr(generator_module, "RDKIT_AVAILABLE", False)
+
+    class AcceptingChem:
+        @staticmethod
+        def MolFromSmiles(smiles):
+            return smiles
+
+        @staticmethod
+        def MolToSmiles(molecule):
+            return molecule
+
+    monkeypatch.setitem(
+        sys.modules,
+        "rdkit",
+        SimpleNamespace(Chem=AcceptingChem),
+    )
+    plan = WorkflowPlan(
+        workflow_name="legacy_bound_generation",
+        steps=[
+            WorkflowStep(
+                "target",
+                "target_database_search",
+                input_data="PDE5A",
+                output_key="target",
+                capability="target.structure.search",
+            ),
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_from="target",
+                input_template="{query}: {input}",
+                output_key="molecules",
+                capability="molecule.generate",
+            ),
+        ],
+        metadata={"requested_count": 7},
+    )
+
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="Design candidates for PDE5A",
+            trace_id="legacy-real-generator",
+            active_skill="legacy_bound_generation",
+            mol_count=7,
+            metadata={"requested_count": 7},
+        ),
+        policy=WorkflowPolicy(
+            name="legacy_bound_generation",
+            description="test",
+            allowed_tools=(
+                "target_database_search",
+                "llm_molecular_generator",
+            ),
+        ),
+        all_tools={
+            "target_database_search": target,
+            "llm_molecular_generator": generator,
+        },
+        plan=plan,
+    )
+
+    assert execution.result.success is True
+    generation_result = next(
+        item
+        for item in execution.result.tool_results
+        if item.tool_name == "llm_molecular_generator"
+    )
+    assert generation_result.quality["requested_count"] == 7
+    assert len(model.prompts) == 1
 
 
 @pytest.mark.parametrize(

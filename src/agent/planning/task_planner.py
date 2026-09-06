@@ -11,6 +11,7 @@ from src.agent.contracts.generation_request import (
     MAX_GENERATION_COUNT,
     MIN_GENERATION_COUNT,
     build_generation_request,
+    generation_request_error_details,
     parse_generation_count,
     validate_generation_count,
 )
@@ -47,7 +48,7 @@ class TaskPlanner:
             return self._target_driven_design_plan(query, context.metadata)
 
         if skill == "hit_to_lead_optimization":
-            return self._lead_optimization_plan(query)
+            return self._lead_optimization_plan(query, context.metadata)
 
         if skill == "molecular_design":
             return self._molecular_design_plan(query, context.metadata)
@@ -222,18 +223,14 @@ class TaskPlanner:
                 )
             )
             requested_count = validate_generation_count(requested_count)
-        except GenerationRequestError:
-            invalid_type = requested_count is None or isinstance(
-                requested_count, bool
-            ) or not isinstance(requested_count, int)
+        except GenerationRequestError as exc:
+            rejected_value = (
+                exc.value if exc.value is not None else requested_count
+            )
             return self._rejected_target_count_plan(
                 target_hint,
-                requested_count,
-                reason=(
-                    "invalid_requested_count"
-                    if invalid_type
-                    else "requested_count_out_of_range"
-                ),
+                rejected_value,
+                classification=generation_request_error_details(exc),
             )
         docking_top_n = self._extract_top_n(query, default=min(5, requested_count))
         return WorkflowPlan(
@@ -243,6 +240,10 @@ class TaskPlanner:
                 WorkflowStep(
                     "molecule_generation",
                     "llm_molecular_generator",
+                    input_data=build_generation_request(
+                        query,
+                        requested_count,
+                    ),
                     input_binding="$.workflow",
                     input_transform="identity",
                     output_key="molecules",
@@ -312,22 +313,18 @@ class TaskPlanner:
                 )
             )
             requested_count = validate_generation_count(requested_count)
-        except GenerationRequestError:
-            invalid_type = requested_count is None or isinstance(
-                requested_count, bool
-            ) or not isinstance(requested_count, int)
+        except GenerationRequestError as exc:
+            rejected_value = (
+                exc.value if exc.value is not None else requested_count
+            )
             return WorkflowPlan(
                 workflow_name="molecular_design",
                 steps=[],
                 metadata={
                     "input_type": "rejected_generation_request",
                     "atomic": True,
-                    "requested_count": requested_count,
-                    "reason": (
-                        "invalid_requested_count"
-                        if invalid_type
-                        else "requested_count_out_of_range"
-                    ),
+                    "requested_count": rejected_value,
+                    **generation_request_error_details(exc),
                     "supported_requested_count": {
                         "min": self.MIN_GENERATION_COUNT,
                         "max": self.MAX_GENERATION_COUNT,
@@ -359,7 +356,7 @@ class TaskPlanner:
         target_hint: str,
         requested_count: Any,
         *,
-        reason: str,
+        classification: dict[str, Any],
     ) -> WorkflowPlan:
         return WorkflowPlan(
             workflow_name="target_driven_design",
@@ -367,7 +364,7 @@ class TaskPlanner:
             metadata={
                 "target_hint": target_hint,
                 "requested_count": requested_count,
-                "reason": reason,
+                **classification,
                 "supported_requested_count": {
                     "min": self.MIN_GENERATION_COUNT,
                     "max": self.MAX_GENERATION_COUNT,
@@ -375,7 +372,21 @@ class TaskPlanner:
             },
         )
 
-    def _lead_optimization_plan(self, query: str) -> WorkflowPlan:
+    def _lead_optimization_plan(
+        self,
+        query: str,
+        request_metadata: dict[str, Any] | None = None,
+    ) -> WorkflowPlan:
+        request_metadata = request_metadata or {}
+        requested_count = validate_generation_count(
+            request_metadata.get(
+                "requested_count",
+                self._extract_requested_count(
+                    query,
+                    default=self.DEFAULT_GENERATION_COUNT,
+                ),
+            )
+        )
         return WorkflowPlan(
             workflow_name="hit_to_lead_optimization",
             steps=[
@@ -404,7 +415,7 @@ class TaskPlanner:
                 WorkflowStep(
                     "molecule_generation",
                     "llm_molecular_generator",
-                    query,
+                    build_generation_request(query, requested_count),
                     input_binding="$.outputs.baseline",
                     input_transform="identity",
                     input_template=(
@@ -427,7 +438,10 @@ class TaskPlanner:
                     output_contract="PropertyAssessmentSet@1",
                 ),
             ],
-            metadata={"input_type": "lead_molecule"},
+            metadata={
+                "input_type": "lead_molecule",
+                "requested_count": requested_count,
+            },
         )
 
     @staticmethod

@@ -27,6 +27,7 @@ from src.agent.contracts.generation_request import (
     MAX_TARGET_RECORDS,
     MAX_TARGET_STRUCTURES,
     MIN_GENERATION_COUNT,
+    generation_request_error_details,
     has_generation_intent,
     parse_chinese_integer,
     parse_generation_count,
@@ -139,8 +140,18 @@ class LLMMolecularGenerator(BaseMolecularTool):
                     ),
                     field="requested_count",
                 )
-        except (GenerationRequestError, TypeError, ValueError) as exc:
-            return self._invalid_input_result(query_text, str(exc))
+        except GenerationRequestError as exc:
+            return self._invalid_input_result(
+                query_text,
+                str(exc),
+                details=generation_request_error_details(exc),
+            )
+        except (TypeError, ValueError) as exc:
+            return self._invalid_input_result(
+                query_text,
+                str(exc),
+                details={"reason": "malformed_requested_count"},
+            )
 
         result = self._create_base_result(query_text)
         
@@ -196,13 +207,19 @@ class LLMMolecularGenerator(BaseMolecularTool):
         
         return result
 
-    def _invalid_input_result(self, query: str, message: str) -> Dict[str, Any]:
+    def _invalid_input_result(
+        self,
+        query: str,
+        message: str,
+        *,
+        details: Mapping[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         result = self._create_base_result(query)
         result["message"] = f"Invalid molecular generation request: {message}"
         result["error"] = {
             "code": "invalid_input",
             "message": result["message"],
-            "details": {},
+            "details": dict(details or {}),
         }
         return result
 

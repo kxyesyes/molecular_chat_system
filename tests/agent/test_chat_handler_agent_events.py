@@ -2015,6 +2015,40 @@ def test_chat_handler_rejects_malformed_generation_before_should_use_or_router()
     assert "Invalid molecular generation request" in websocket.messages[-1]["content"]
 
 
+def test_chat_handler_rejects_oversized_numeric_token_before_router_or_model():
+    class AgentThatMustNotRun:
+        llm = None
+        skill_router = None
+
+        def should_use_tools(self, _message):
+            raise AssertionError("router ran")
+
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("agent ran")
+
+    model = FakeModel()
+    handler = ChatHandler(
+        model=model,
+        rag_service=FakeRagService(),
+        agent_system=AgentThatMustNotRun(),
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message=f"Generate {'9' * 5000} molecules",
+            enable_rag=False,
+            enable_tools=True,
+        )
+    )
+
+    assert model.generate_calls == 0
+    assert websocket.messages[-1]["type"] == "complete"
+    assert "Invalid molecular generation request" in websocket.messages[-1]["content"]
+
+
 def test_chat_handler_authoritative_count_bypasses_malformed_generation_prose():
     class CapturingAgent:
         llm = None

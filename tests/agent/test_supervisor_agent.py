@@ -1,9 +1,14 @@
+import sys
+from types import SimpleNamespace
+
 import pytest
 
+import src.agent.tools.llm_molecular_generator as generator_module
 from src.agent.orchestrators.base import WorkflowStep
 from src.agent.planning import WorkflowPlan
 from src.agent.router import SkillRouter
 from src.agent.supervisor import SupervisorAgent
+from src.agent.tools.llm_molecular_generator import LLMMolecularGenerator
 from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
 
 
@@ -277,6 +282,70 @@ def test_supervisor_atomic_invalid_count_is_invalid_input_before_tool():
 
 
 @pytest.mark.parametrize(
+    "query,mol_count,reason,rejected_value",
+    (
+        ("Generate molecules", 11, "requested_count_out_of_range", 11),
+        ("Generate molecules", "7", "invalid_requested_count_type", "7"),
+        ("Generate 7.5 molecules", None, "malformed_requested_count", "7.5"),
+    ),
+)
+def test_supervisor_execute_plan_and_run_share_generation_error_metadata(
+    query,
+    mol_count,
+    reason,
+    rejected_value,
+):
+    kwargs = {} if mol_count is None else {"mol_count": mol_count}
+
+    for entrypoint in ("execute", "plan", "run"):
+        supervisor = SupervisorAgent(
+            tools={"llm_molecular_generator": FakeTool("llm_molecular_generator")}
+        )
+        result = getattr(supervisor, entrypoint)(
+            query,
+            **kwargs,
+            **(
+                {"active_skill": "molecular_design"}
+                if entrypoint == "execute"
+                else {"skill_name": "molecular_design"}
+            ),
+        )
+        plan_metadata = (
+            result["workflow_plan"]["metadata"]
+            if entrypoint == "execute"
+            else result["metadata"]
+            if entrypoint == "plan"
+            else result["plan"]["metadata"]
+        )
+        error = (
+            result["error"]
+            if entrypoint in {"execute", "plan"}
+            else result["result"]["error"]
+        )
+
+        assert plan_metadata["reason"] == reason
+        assert plan_metadata["rejected_value"] == rejected_value
+        assert error["details"]["reason"] == reason
+        assert error["details"]["rejected_value"] == rejected_value
+
+
+def test_supervisor_oversized_numeric_token_is_canonical_invalid_input():
+    query = f"Generate {'9' * 5000} molecules"
+    generator = FakeTool("llm_molecular_generator")
+
+    result = SupervisorAgent(
+        tools={"llm_molecular_generator": generator}
+    ).execute(query, active_skill="molecular_design")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_input"
+    assert result["error"]["details"]["reason"] == (
+        "malformed_requested_count"
+    )
+    assert generator.calls == []
+
+
+@pytest.mark.parametrize(
     "query, mol_count",
     [
         ("Generate candidates", 11),
@@ -339,6 +408,50 @@ def test_supervisor_public_mol_count_is_authoritative_for_target_workflow():
     }
 
 
+def test_supervisor_hit_to_lead_real_generator_reports_public_count(
+    monkeypatch,
+):
+    model = FakeGeneratingLLM()
+    generator = LLMMolecularGenerator(llm_model=model)
+    monkeypatch.setattr(generator, "_check_rdkit", lambda _result: True)
+    monkeypatch.setattr(generator, "validate_smiles", lambda _smiles: True)
+    monkeypatch.setattr(generator, "extract_smiles", lambda _query: [])
+    monkeypatch.setattr(generator_module, "RDKIT_AVAILABLE", False)
+
+    class AcceptingChem:
+        @staticmethod
+        def MolFromSmiles(smiles):
+            return smiles
+
+        @staticmethod
+        def MolToSmiles(molecule):
+            return molecule
+
+    monkeypatch.setitem(
+        sys.modules,
+        "rdkit",
+        SimpleNamespace(Chem=AcceptingChem),
+    )
+    tools = build_fake_tools()
+    tools["llm_molecular_generator"] = generator
+    supervisor = SupervisorAgent(tools=tools)
+
+    result = supervisor.execute(
+        "Optimize CCO to reduce LogP and improve QED",
+        mol_count=7,
+        active_skill="hit_to_lead_optimization",
+    )
+
+    assert result["success"] is True
+    generation_result = next(
+        item
+        for item in result["tool_result_sequence"]
+        if item["tool_name"] == "llm_molecular_generator"
+    )
+    assert generation_result["quality"]["requested_count"] == 7
+    assert len(model.prompts) == 1
+
+
 def test_supervisor_public_invalid_mol_count_fails_before_tools():
     tools = build_fake_tools()
     supervisor = SupervisorAgent(tools=tools)
@@ -364,6 +477,17 @@ class FakeRouter:
 
 class FakeLLM:
     model_name = "external-main"
+
+
+class FakeGeneratingLLM:
+    model_name = "gmm-llama:latest"
+
+    def __init__(self):
+        self.prompts = []
+
+    def generate(self, prompt, temperature=0.7, max_tokens=1000):
+        self.prompts.append(prompt)
+        return "\n".join("C" * length for length in range(1, 11))
 
 
 class FakeLocalGenerator:

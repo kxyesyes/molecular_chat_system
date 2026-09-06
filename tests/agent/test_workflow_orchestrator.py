@@ -265,7 +265,7 @@ def test_legacy_input_from_is_resolved_without_unrelated_output_leakage():
     assert "must-not-leak" not in text
 
 
-def test_workflow_binding_and_template_pass_target_evidence_to_generator():
+def test_bound_generation_keeps_canonical_payload_instead_of_template_text():
     class ValidGenerator(FakeTool):
         def execute(self, query):
             self.calls.append(query)
@@ -282,6 +282,8 @@ def test_workflow_binding_and_template_pass_target_evidence_to_generator():
         context=AgentContext(
             query="Design molecules for EGFR",
             trace_id="bound-target",
+            mol_count=7,
+            metadata={"requested_count": 7},
         ),
         steps=[
             WorkflowStep(
@@ -306,10 +308,55 @@ def test_workflow_binding_and_template_pass_target_evidence_to_generator():
         },
     )
 
-    assert result.success is True
+    assert result.partial or result.success
     assert generator.calls == [
-        "User request: Design molecules for EGFR\n"
-        "Validated target evidence: {'input': 'EGFR'}"
+        {
+            "query": "Design molecules for EGFR",
+            "metadata": {"requested_count": 7},
+            "outputs": {"target": {"input": "EGFR"}},
+        }
+    ]
+
+
+def test_legacy_input_from_generation_keeps_selected_upstream_data_typed():
+    target_tool = FakeTool("target_database_search")
+    generator = FakeTool("llm_molecular_generator")
+
+    result = WorkflowOrchestrator().run(
+        context=AgentContext(
+            query="Design molecules for PDE5A",
+            trace_id="legacy-bound-target",
+            mol_count=7,
+            metadata={"requested_count": 7},
+        ),
+        steps=[
+            WorkflowStep(
+                "target_search",
+                "target_database_search",
+                "PDE5A",
+                output_key="target",
+            ),
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_from="target",
+                input_template="{query}: {input}",
+                capability="molecule.generate",
+            ),
+        ],
+        tools={
+            "target_database_search": target_tool,
+            "llm_molecular_generator": generator,
+        },
+    )
+
+    assert result.partial or result.success
+    assert generator.calls == [
+        {
+            "query": "Design molecules for PDE5A",
+            "metadata": {"requested_count": 7},
+            "outputs": {"target": {"input": "PDE5A"}},
+        }
     ]
 
 

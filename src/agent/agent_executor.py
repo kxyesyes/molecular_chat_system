@@ -12,6 +12,7 @@ from .tools.base_tool import execute_tool_compat
 from .contracts.generation_request import (
     GenerationRequestError,
     build_generation_request,
+    generation_request_error_details,
     has_generation_intent,
     preflight_generation_request,
 )
@@ -100,6 +101,7 @@ class MolecularAgent:
                 mol_count,
                 count_supplied=mol_count is not None,
                 field="mol_count",
+                active_molecular_skill=True,
             )
         except GenerationRequestError as exc:
             tool_result = self._invalid_generation_tool_result(exc)
@@ -191,6 +193,7 @@ class MolecularAgent:
                 mol_count,
                 count_supplied=mol_count is not None,
                 field="mol_count",
+                active_molecular_skill=True,
             )
         except GenerationRequestError as exc:
             return self._invalid_generation_response(exc)
@@ -251,6 +254,7 @@ class MolecularAgent:
             tool_name="llm_molecular_generator",
             code=AgentErrorCode.INVALID_INPUT,
             message=message,
+            details=generation_request_error_details(exc),
         ).to_legacy_dict()
 
     @classmethod

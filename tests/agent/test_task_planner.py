@@ -5,6 +5,7 @@ from src.agent.contracts.generation_request import (
     GenerationRequestError,
     has_generation_intent,
     parse_generation_count,
+    preflight_generation_request,
 )
 from src.agent.planning.task_planner import TaskPlanner
 from src.agent.tooling import build_tool_registry
@@ -55,7 +56,11 @@ def test_target_driven_design_plan_for_pde5_query():
     generation_step = plan.steps[1]
     assert generation_step.input_binding == "$.workflow"
     assert generation_step.input_transform == "identity"
-    assert generation_step.input_data is None
+    assert generation_step.input_data == {
+        "query": context.query,
+        "metadata": {"requested_count": 10},
+        "outputs": {},
+    }
     assert generation_step.input_template is None
     assert generation_step.preconditions == ("target_evidence",)
     assert plan.steps[2].input_from == "molecules"
@@ -525,8 +530,9 @@ def test_target_planner_rejects_malformed_decimal_count_without_raising():
     )
 
     assert plan.steps == []
-    assert plan.metadata["requested_count"] is None
-    assert plan.metadata["reason"] == "invalid_requested_count"
+    assert plan.metadata["requested_count"] == "7.5"
+    assert plan.metadata["reason"] == "malformed_requested_count"
+    assert plan.metadata["rejected_value"] == "7.5"
 
 
 def test_atomic_molecular_design_uses_canonical_count_request_or_rejects():
@@ -675,6 +681,63 @@ def test_hit_to_lead_generation_consumes_computed_baseline():
     )
     assert candidate_step.input_binding == "$.outputs.candidates"
     assert candidate_step.metadata["candidate_source"] == "candidates"
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "Create 12 slides",
+        "Generate report",
+        "Make table",
+        "Build dashboard",
+    ),
+)
+def test_generic_creation_verbs_require_a_molecular_entity(query):
+    assert has_generation_intent(query) is False
+    assert preflight_generation_request(query) is None
+
+
+def test_explicit_molecular_skill_can_activate_generic_generation_grammar():
+    assert preflight_generation_request(
+        "Create 7",
+        active_molecular_skill=True,
+    ) == 7
+
+
+def test_oversized_numeric_count_is_rejected_without_integer_conversion_error():
+    token = "9" * 5000
+
+    with pytest.raises(GenerationRequestError) as captured:
+        parse_generation_count(f"Generate {token} molecules")
+
+    assert captured.value.reason == "malformed_requested_count"
+    assert captured.value.value != token
+
+
+def test_oversized_request_takes_the_bounded_parser_exit(monkeypatch):
+    import src.agent.contracts.generation_request as generation_request
+
+    monkeypatch.setattr(
+        generation_request,
+        "_strip_generation_literals",
+        lambda _query: (_ for _ in ()).throw(
+            AssertionError("oversized request reached regex parsing")
+        ),
+    )
+
+    with pytest.raises(GenerationRequestError) as captured:
+        generation_request.parse_generation_count("x" * 20000)
+
+    assert captured.value.reason == "malformed_requested_count"
+
+
+def test_generation_occurrence_limit_rejects_pathological_requests():
+    query = "; ".join("Generate 1 molecule" for _ in range(65))
+
+    with pytest.raises(GenerationRequestError) as captured:
+        parse_generation_count(query)
+
+    assert captured.value.reason == "malformed_requested_count"
 
 
 def test_atomic_skills_receive_single_step_declarative_plans():
