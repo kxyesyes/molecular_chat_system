@@ -1590,8 +1590,10 @@ async def test_stopped_owner_loop_with_live_worker_fails_closed_without_pending_
 
 
 @pytest.mark.anyio
-async def test_shutdown_cancels_task_that_has_not_started_running(tmp_path: Path) -> None:
+async def test_shutdown_cancels_newly_submitted_task(tmp_path: Path) -> None:
     async def handler(submission, cancel_event, progress):
+        while not cancel_event.is_set():
+            await asyncio.sleep(0)
         return {"success": True}
 
     store = TaskStore(tmp_path / "tasks.sqlite")

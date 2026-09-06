@@ -4232,6 +4232,7 @@ def test_queue_full_rejection_persistence_failure_remains_owned_until_retry(
         assert list(service._pending_rejections) == [submitted.job_id]
 
         allow_persistence[0] = True
+        await service._drain_pending_rejections()
         terminal = await service.wait_terminal(submitted.job_id, timeout=3.0)
         assert submitted.job_id not in service._pending_rejections
         assert submitted.job_id not in service._rejected_work
