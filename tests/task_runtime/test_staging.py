@@ -1014,7 +1014,10 @@ def test_impractical_final_input_path_is_rejected_before_sensitive_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stager = DockingInputStager(tmp_path)
+    # Keep this contract deterministic across short Linux /tmp roots and
+    # longer Windows workspaces: the staging root itself is valid, while the
+    # final task input path must exceed the cross-platform safety ceiling.
+    stager = DockingInputStager(tmp_path / ("r" * 80))
     real_atomic_write = staging_module._atomic_write
     sensitive_writes: list[str] = []
 

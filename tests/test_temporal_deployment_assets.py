@@ -71,6 +71,7 @@ WORKER_HELPER = (
 WORKER_DIRECTORY_HELPER = (
     ROOT / "deployment" / "libexec" / "prepare-temporal-worker-directories.py"
 )
+LEGACY_WORKER_FIXTURES = ROOT / "tests" / "fixtures" / "temporal-worker-legacy"
 
 LONG_RUNNING = {
     "postgres", "postgres-exporter", "temporal", "temporal-ui", "prometheus", "grafana"
@@ -1442,31 +1443,25 @@ def test_temporal_worker_legacy_allowlist_matches_flat_predecessor() -> None:
     installer = _load_bundle_installer()
     predecessor = {
         "etc/systemd/system/medchat-temporal-worker.service": (
-            "deployment/medchat-temporal-worker.service",
+            "medchat-temporal-worker.service",
             0o644,
         ),
         "etc/systemd/system/medchat-temporal-worker-prepare.service": (
-            "deployment/medchat-temporal-worker-prepare.service",
+            "medchat-temporal-worker-prepare.service",
             0o644,
         ),
         "usr/libexec/medchat/validate-temporal-worker-env": (
-            "deployment/libexec/validate-temporal-worker-env.py",
+            "validate-temporal-worker-env.py",
             0o755,
         ),
         "usr/lib/tmpfiles.d/medchat-temporal-worker.conf": (
-            "deployment/tmpfiles/medchat-temporal-worker.conf",
+            "medchat-temporal-worker.conf",
             0o644,
         ),
     }
     expected = {}
-    for installed, (repository_path, mode) in predecessor.items():
-        payload = subprocess.run(
-            ["git", "show", f"0c54b2f:{repository_path}"],
-            cwd=ROOT,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True,
-        ).stdout
+    for installed, (fixture_name, mode) in predecessor.items():
+        payload = (LEGACY_WORKER_FIXTURES / fixture_name).read_bytes()
         expected[installed] = (mode, hashlib.sha256(payload).hexdigest())
     assert installer.LEGACY_ASSETS == expected
     assert installer.LEGACY_TMPFILES_RELATIVE == (
@@ -2061,19 +2056,13 @@ def test_temporal_legacy_migration_quarantines_dangerous_policy(
     legacy = tmp_path / "legacy"
     legacy.mkdir()
     predecessor = {
-        "worker": "deployment/medchat-temporal-worker.service",
-        "prepare": "deployment/medchat-temporal-worker-prepare.service",
-        "env-helper": "deployment/libexec/validate-temporal-worker-env.py",
-        "tmpfiles": "deployment/tmpfiles/medchat-temporal-worker.conf",
+        "worker": "medchat-temporal-worker.service",
+        "prepare": "medchat-temporal-worker-prepare.service",
+        "env-helper": "validate-temporal-worker-env.py",
+        "tmpfiles": "medchat-temporal-worker.conf",
     }
-    for name, repository_path in predecessor.items():
-        payload = subprocess.run(
-            ["git", "show", f"0c54b2f:{repository_path}"],
-            cwd=ROOT,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True,
-        ).stdout
+    for name, fixture_name in predecessor.items():
+        payload = (LEGACY_WORKER_FIXTURES / fixture_name).read_bytes()
         (legacy / name).write_bytes(payload)
     repository = ROOT.resolve().as_posix()
     legacy_wsl = legacy.resolve().as_posix()

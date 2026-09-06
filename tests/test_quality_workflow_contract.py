@@ -48,4 +48,4 @@ def test_quality_workflow_shards_python_suite_and_preserves_final_gate() -> None
         assert f'pytest_target: "{target}"' in workflow
 
     assert "run: python -m pytest tests -q -p no:cacheprovider" not in workflow
-    assert workflow.count("fetch-depth: 0") == 2
+    assert "fetch-depth: 0" not in workflow
