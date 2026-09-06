@@ -657,6 +657,16 @@ _MOLECULAR_ENTITY = re.compile(
 )
 _OBJECT_WORD = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*")
 _MAX_OBJECT_MODIFIERS = 6
+_RELATIVE_CLAUSE_MARKERS = frozenset(
+    {"that", "which", "who", "whom", "whose"}
+)
+_RELATIONAL_OBJECT_VERB = re.compile(
+    r"(?i)(?:show(?:s|ed|ing)?|list(?:s|ed|ing)?|display(?:s|ed|ing)?|"
+    r"mention(?:s|ed|ing)?|contain(?:s|ed|ing)?|includ(?:e|es|ed|ing)|"
+    r"featur(?:e|es|ed|ing)|describ(?:e|es|ed|ing)|cover(?:s|ed|ing)?|"
+    r"concern(?:s|ed|ing)?|involv(?:e|es|ed|ing)|depict(?:s|ed|ing)?|"
+    r"present(?:s|ed|ing)?|screen(?:s|ed|ing)?)\Z"
+)
 _CHINESE_GENERATION_VERB_PATTERN = re.compile(
     r"(?:生成|创建|设计|制作|构建|合成|给我|提供)"
 )
@@ -678,9 +688,8 @@ _OBJECT_BOUNDARY = re.compile(
 def _has_immediate_molecular_head(object_phrase: str) -> bool:
     """Recognize a molecular head after only a bounded modifier sequence.
 
-    A relational participle starts a subordinate description, so molecular
-    terms after ``showing``, ``listing``, and similar verbs cannot retroactively
-    make the generated object molecular.
+    Relative clauses and relational predicates start subordinate descriptions,
+    so their molecular terms cannot retroactively change the generated head.
     """
     modifiers = 0
     position = 0
@@ -691,13 +700,24 @@ def _has_immediate_molecular_head(object_phrase: str) -> bool:
         normalized = token.casefold()
         if _MOLECULAR_ENTITY.fullmatch(token):
             return True
-        if normalized.endswith("ing"):
+        if (
+            normalized in _RELATIVE_CLAUSE_MARKERS
+            or _RELATIONAL_OBJECT_VERB.fullmatch(token)
+        ):
             return False
         modifiers += 1
         if modifiers > _MAX_OBJECT_MODIFIERS:
             return False
         position = match.end()
     return False
+
+
+def _has_chinese_molecular_head(object_phrase: str) -> bool:
+    """Require the final ``的``-headed Chinese noun phrase to be molecular."""
+    matches = tuple(_CHINESE_MOLECULAR_ENTITY.finditer(object_phrase))
+    if not matches:
+        return False
+    return matches[-1].start() > object_phrase.rfind("的")
 
 
 def _occurrence_has_molecular_scope(
@@ -716,11 +736,12 @@ def _occurrence_has_molecular_scope(
             )
         ]
         object_phrase = re.split(
-            r"(?:关于|有关|描述|涉及|包含|含有|带有|并且|然后|同时)",
+            r"(?:[,，](?!\s*[0-9])|[。；;!?！？]|关于|有关|描述|涉及|包含|含有|带有|"
+            r"并且|然后|同时)",
             object_phrase,
             maxsplit=1,
         )[0]
-        return bool(_CHINESE_MOLECULAR_ENTITY.search(object_phrase))
+        return _has_chinese_molecular_head(object_phrase)
     if not _GENERIC_CREATION_VERB.fullmatch(verb.group(0)):
         return False
     window = value[

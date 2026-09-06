@@ -701,6 +701,11 @@ def test_hit_to_lead_generation_consumes_computed_baseline():
         "Create reports listing candidate molecules",
         "Produce tables displaying ligands",
         "Synthesize summaries mentioning molecules",
+        "Create charts that show compounds",
+        "Generate reports which list candidate molecules",
+        "Create analysts who screen molecules",
+        "创建展示化合物的图表",
+        "生成列出候选分子的报告",
     ),
 )
 def test_generic_creation_verbs_require_a_molecular_entity(query):
@@ -726,6 +731,11 @@ def test_explicit_molecular_skill_can_activate_generic_generation_grammar():
         "Generate molecular structures",
         "Generate candidate molecules",
         "Generate ligands",
+        "Generate promising compounds",
+        "Create interesting molecules",
+        "Produce long-acting ligands",
+        "生成有前景的化合物",
+        "生成长效配体",
     ),
 )
 def test_direct_molecular_creation_objects_remain_generation_intent(query):
