@@ -109,7 +109,8 @@ _INSTRUCTION_IDENTIFIER_LEXICAL_COMBINATIONS = (
     ("system", "prompt"),
 )
 _CREDENTIAL_TEXT_PATTERN = re.compile(
-    r"(?:accesstoken|apikey|authtoken|credential|password|"
+    r"(?:bearer[a-z0-9._~+/=-]{8,}|accesstoken|apikey|authtoken|"
+    r"credential|password|"
     r"secret(?:key|token|[0-9]|$))"
 )
 _UNIPROT_ACCESSION = re.compile(
@@ -123,6 +124,10 @@ _ALPHAFOLD_STRUCTURE_ID = re.compile(
 )
 _LOCAL_RECORD_ID = re.compile(
     r"(?:LOCAL|TARGETDB|TARGET_DATABASE)[._-](?P<suffix>[A-Za-z0-9]{1,64})\Z",
+    re.IGNORECASE,
+)
+_LOCAL_RECORD_PREFIX = re.compile(
+    r"(?:LOCAL|TARGETDB|TARGET_DATABASE)[._-]+(?P<suffix>.*)\Z",
     re.IGNORECASE,
 )
 _OFFICIAL_EVIDENCE_HOSTS = frozenset(
@@ -151,7 +156,17 @@ _ENGLISH_COUNT_FOLLOW = (
     rf"(?:{_ENGLISH_NOUN}\b|for\b|"
     rf"(?:and[ \t]+(?:then[ \t]+)?|then[ \t]+){_GENERATION_VERB}\b)"
 )
-_ENGLISH_COUNT_MODIFIER = r"(?:new|novel|candidate|drug-like)"
+_MAX_ENGLISH_COUNT_MODIFIER_TOKENS = 6
+_ENGLISH_COUNT_MODIFIER_TOKEN = (
+    rf"(?!(?:{_ENGLISH_NOUN}|{_GENERATION_VERB}|but|instead|for)\b)"
+    rf"(?!(?:and[ \t]+(?:then[ \t]+)?|then[ \t]+){_GENERATION_VERB}\b)"
+    r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*"
+)
+_ENGLISH_COUNT_TAIL = (
+    rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER_TOKEN})"
+    rf"{{0,{_MAX_ENGLISH_COUNT_MODIFIER_TOKENS}}}"
+    rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW}|[ \t]*$)"
+)
 _CHINESE_COUNT_MODIFIER = r"(?:新(?:的)?|全新(?:的)?|新颖(?:的)?)"
 _CHINESE_REFERENCE = r"[A-Za-z0-9\u3400-\u9fff-]{1,24}"
 _CHINESE_REFERENCE_MODIFIER = (
@@ -177,8 +192,7 @@ _COUNT_PATTERNS = (
     ),
     re.compile(
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?P<count>{_COUNT_TOKEN})"
-        rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
-        rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW}|[ \t]*$)"
+        rf"{_ENGLISH_COUNT_TAIL}"
     ),
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
@@ -196,8 +210,7 @@ _COUNT_SLOT_PATTERNS = (
     ),
     re.compile(
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?P<count>[^\s;!?\"']+)"
-        rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
-        rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW}|[ \t]*$)"
+        rf"{_ENGLISH_COUNT_TAIL}"
     ),
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
@@ -214,8 +227,7 @@ _MALFORMED_GROUPED_COUNT_PATTERNS = (
     re.compile(
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*"
         rf"(?P<count>{_GROUPED_ARABIC_COUNT})"
-        rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
-        rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW}|[ \t]*$)"
+        rf"{_ENGLISH_COUNT_TAIL}"
     ),
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
@@ -244,8 +256,7 @@ _MALFORMED_SPACED_SIGN_COUNT_PATTERNS = (
     re.compile(
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*"
         rf"(?P<count>{_SPACED_SIGNED_ARABIC_COUNT})"
-        rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
-        rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW}|[ \t]*$)"
+        rf"{_ENGLISH_COUNT_TAIL}"
     ),
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
@@ -264,14 +275,12 @@ _MALFORMED_WORD_COUNT_PATTERNS = (
     re.compile(
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*{_ENGLISH_DECIMAL_PART}"
         rf"(?:[ \t]+|-)point(?:[ \t]+|-){_ENGLISH_DECIMAL_PART}"
-        rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
-        rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW}|[ \t]*$)"
+        rf"{_ENGLISH_COUNT_TAIL}"
     ),
     re.compile(
         rf"(?i)\b{_GENERATION_VERB}\b[ \t]*{_ENGLISH_DECIMAL_PART}"
         rf"[ \t]+{_ENGLISH_DECIMAL_PART}"
-        rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
-        rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW}|[ \t]*$)"
+        rf"{_ENGLISH_COUNT_TAIL}"
     ),
     re.compile(
         rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
@@ -285,24 +294,21 @@ _FUZZY_COUNTS = (
     (
         re.compile(
             rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?:several|some|a[ \t]+few)"
-            rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
-            rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW})"
+            rf"{_ENGLISH_COUNT_TAIL}"
         ),
         3,
     ),
     (
         re.compile(
             rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?:multiple|many)"
-            rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
-            rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW})"
+            rf"{_ENGLISH_COUNT_TAIL}"
         ),
         5,
     ),
     (
         re.compile(
             rf"(?i)\b{_GENERATION_VERB}\b[ \t]*(?:one|a)"
-            rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
-            rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW})"
+            rf"{_ENGLISH_COUNT_TAIL}"
         ),
         1,
     ),
@@ -486,6 +492,11 @@ def _split_generation_clauses(value: str) -> list[str]:
     for index, character in enumerate(value):
         if index in protected_punctuation:
             separated.append(character)
+            continue
+        if character == "+":
+            suffix = value[index + 1 :].lstrip()
+            is_numeric_sign = bool(re.match(r"(?:\d|\.)", suffix))
+            separated.append(character if is_numeric_sign else "\n")
             continue
         if character in ";；!?。！？\r\n、":
             separated.append("\n")
@@ -1118,7 +1129,13 @@ def _safe_text(
 
 def _looks_instruction_shaped_identifier(value: str) -> bool:
     normalized = unicodedata.normalize("NFKC", value).casefold()
-    lexical_text = re.sub(r"[^a-z0-9]+", "", normalized)
+    prefix_match = _LOCAL_RECORD_PREFIX.fullmatch(normalized)
+    identifier_text = (
+        prefix_match.group("suffix") if prefix_match else normalized
+    )
+    lexical_text = re.sub(r"[^a-z0-9]+", "", identifier_text)
+    if "instruction" in lexical_text or "systemprompt" in lexical_text:
+        return True
     return any(
         all(lexeme in lexical_text for lexeme in combination)
         for combination in _INSTRUCTION_IDENTIFIER_LEXICAL_COMBINATIONS
@@ -1126,13 +1143,21 @@ def _looks_instruction_shaped_identifier(value: str) -> bool:
 
 
 def _looks_credential_shaped_text(value: str) -> bool:
-    normalized = unicodedata.normalize("NFKC", value).casefold()
-    lexical_text = re.sub(r"[^a-z0-9]+", "", normalized)
-    return bool(
-        looks_like_credential(value)
-        or _CREDENTIAL_PATTERN.search(normalized)
-        or _CREDENTIAL_TEXT_PATTERN.search(lexical_text)
-    )
+    normalized = unicodedata.normalize("NFKC", value)
+    prefix_match = _LOCAL_RECORD_PREFIX.fullmatch(normalized)
+    candidates = [normalized]
+    if prefix_match:
+        candidates.append(prefix_match.group("suffix"))
+    for candidate in candidates:
+        folded = candidate.casefold()
+        lexical_text = re.sub(r"[^a-z0-9]+", "", folded)
+        if (
+            looks_like_credential(candidate)
+            or _CREDENTIAL_PATTERN.search(folded)
+            or _CREDENTIAL_TEXT_PATTERN.search(lexical_text)
+        ):
+            return True
+    return False
 
 
 def _filter_source_specific_identifiers(

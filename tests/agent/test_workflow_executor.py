@@ -68,6 +68,68 @@ class FakeTool:
         }
 
 
+def test_non_generation_plan_rejects_invalid_context_count_before_tool():
+    tool = FakeTool("property_calculator")
+    plan = WorkflowPlan(
+        workflow_name="comprehensive_evaluation",
+        steps=[
+            WorkflowStep(
+                "properties",
+                "property_calculator",
+                input_data="CCO",
+            )
+        ],
+    )
+
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="Analyze CCO",
+            trace_id="non-generation-invalid-context-count",
+            active_skill="comprehensive_evaluation",
+            metadata={"requested_count": 11},
+        ),
+        policy=FAKE_POLICY,
+        all_tools={tool.name: tool},
+        plan=plan,
+    )
+
+    assert execution.result.success is False
+    assert execution.result.error.code == AgentErrorCode.INVALID_INPUT
+    assert execution.tool_attempt_count == 0
+    assert execution.events == []
+    assert tool.calls == []
+
+
+def test_non_generation_plan_accepts_harmless_valid_context_count():
+    tool = FakeTool("property_calculator")
+    plan = WorkflowPlan(
+        workflow_name="comprehensive_evaluation",
+        steps=[
+            WorkflowStep(
+                "properties",
+                "property_calculator",
+                input_data="CCO",
+            )
+        ],
+    )
+
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="Analyze CCO",
+            trace_id="non-generation-valid-context-count",
+            active_skill="comprehensive_evaluation",
+            metadata={"requested_count": 5},
+        ),
+        policy=FAKE_POLICY,
+        all_tools={tool.name: tool},
+        plan=plan,
+    )
+
+    assert execution.result.success is True
+    assert execution.tool_attempt_count == 1
+    assert tool.calls == ["CCO"]
+
+
 def test_atomic_count_conflict_fails_preflight_before_tool():
     tool = FakeTool("llm_molecular_generator")
     plan = WorkflowPlan(

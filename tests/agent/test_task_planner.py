@@ -328,6 +328,49 @@ def test_count_parser_accepts_repeated_identical_actionable_counts():
 
 
 @pytest.mark.parametrize(
+    "query",
+    [
+        "Generate 3 potent",
+        "Generate 3 highly selective molecules",
+        "Generate 3 potent and selective molecules",
+        "Generate 3 similar-to aspirin molecules",
+        "Synthesize 3 structurally distinct reference guided candidates",
+    ],
+)
+def test_count_parser_accepts_bounded_arbitrary_modifiers_before_molecule_nouns(
+    query,
+):
+    assert parse_generation_count(query) == 3
+
+
+def test_arbitrary_modifier_window_has_a_six_token_bound():
+    assert parse_generation_count(
+        "Generate 3 highly potent selective novel scaffold guided molecules"
+    ) == 3
+    assert parse_generation_count(
+        "Generate 3 highly potent selective novel scaffold guided reference molecules"
+    ) == 1
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Generate 7.5 potent",
+        "Generate 7.5 highly selective molecules",
+        "Synthesize - 1 similar-to aspirin candidates",
+    ],
+)
+def test_count_parser_rejects_malformed_counts_with_arbitrary_modifiers(query):
+    with pytest.raises(GenerationRequestError, match="integer"):
+        parse_generation_count(query)
+
+
+def test_modifier_window_does_not_hide_conflicting_generation_clause():
+    with pytest.raises(GenerationRequestError, match="conflicting"):
+        parse_generation_count("Generate 3 potent + synthesize 4 potent")
+
+
+@pytest.mark.parametrize(
     "separator",
     [" then ", ". ", "; ", ", ", " but ", " instead "],
 )

@@ -246,6 +246,41 @@ class WorkflowExecutor:
     ) -> PreparedWorkflow | WorkflowExecution:
         context_snapshot = _copy_boundary(context, "context")
         all_tools_snapshot = dict(all_tools)
+        if "requested_count" in context_snapshot.metadata:
+            try:
+                validated_context_count = validate_generation_count(
+                    context_snapshot.metadata["requested_count"]
+                )
+            except GenerationRequestError:
+                validation_plan = (
+                    _copy_boundary(plan, "plan")
+                    if plan is not None
+                    else WorkflowPlan(
+                        workflow_name=(
+                            context_snapshot.active_skill or policy.name
+                        ),
+                        steps=[],
+                    )
+                )
+                validation_plan.metadata["requested_count"] = deepcopy(
+                    context_snapshot.metadata["requested_count"]
+                )
+                _, failure = self._preflight(
+                    context=context_snapshot,
+                    policy=policy,
+                    all_tools=all_tools_snapshot,
+                    plan=validation_plan,
+                )
+                if failure is None:  # pragma: no cover - contract invariant
+                    raise RuntimeError("invalid requested_count passed preflight")
+                return failure
+            context_snapshot = replace(
+                context_snapshot,
+                metadata={
+                    **context_snapshot.metadata,
+                    "requested_count": validated_context_count,
+                },
+            )
         if plan is None:
             plan = self.planner.plan(context_snapshot)
         plan_snapshot = _copy_boundary(plan, "plan")

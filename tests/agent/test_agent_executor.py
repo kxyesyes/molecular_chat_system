@@ -263,6 +263,8 @@ def test_agent_executor_occurrence_scope_is_bounded(monkeypatch, query):
         "Generate 3 and generate 7.5",
         "Generate 3 molecules and generate - 1 molecule",
         "Synthesize 3 compounds; Synthesize + 2 compounds",
+        "Generate 7.5 potent",
+        "Generate 3 potent + synthesize 4 potent",
     ],
 )
 def test_agent_executor_validates_all_generation_occurrences_before_tools(

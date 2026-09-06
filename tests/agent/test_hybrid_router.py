@@ -81,6 +81,8 @@ def test_router_uses_canonical_generation_grammar_for_supported_verbs():
         "Make 3 compounds",
         "Build 4 structures",
         "Synthesize 6 molecules",
+        "Generate 3 potent",
+        "Generate 3 similar-to aspirin molecules",
     ):
         decision = HybridSkillRouter().decide(query)
         assert decision.selected_skill == "molecular_design", query
