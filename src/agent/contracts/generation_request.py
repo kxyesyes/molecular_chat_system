@@ -409,9 +409,14 @@ def preflight_generation_request(
     active_molecular_skill: bool = False,
 ) -> int | None:
     """Validate one generation boundary without reparsing authoritative counts."""
+    query = str(query)
+    if len(query) > MAX_GENERATION_REQUEST_CHARS:
+        _raise_request_too_long(query)
     if count_supplied:
         return validate_generation_count(authoritative_count, field=field)
     analysis = _build_generation_analysis(query)
+    if analysis.overlength:
+        _raise_request_too_long(analysis.query)
     if _analysis_has_generation_intent(
         analysis,
         active_molecular_skill=active_molecular_skill,
@@ -435,10 +440,7 @@ def _parse_generation_analysis(
     default: int,
 ) -> int:
     if analysis.overlength:
-        raise GenerationRequestError(
-            "generation request is too long",
-            value={"length": len(analysis.query)},
-        )
+        _raise_request_too_long(analysis.query)
     counts: list[int] = []
     for occurrence in analysis.occurrences:
         count = _parse_generation_occurrence_count(occurrence)
@@ -473,7 +475,14 @@ class _GenerationAnalysis:
     text: str
     occurrences: tuple[_GenerationOccurrence, ...]
     overlength: bool = False
-    overlength_generation_shape: bool = False
+
+
+def _raise_request_too_long(query: str) -> None:
+    raise GenerationRequestError(
+        "generation request is too long",
+        value={"length": len(query)},
+        reason="request_too_long",
+    )
 
 
 def _build_generation_analysis(query: str) -> _GenerationAnalysis:
@@ -484,9 +493,6 @@ def _build_generation_analysis(query: str) -> _GenerationAnalysis:
             text="",
             occurrences=(),
             overlength=True,
-            overlength_generation_shape=_looks_like_overlength_generation_shape(
-                query
-            ),
         )
     text = _strip_generation_literals(query)
     occurrences = _collect_generation_occurrences(text)
@@ -503,30 +509,6 @@ def _build_generation_analysis(query: str) -> _GenerationAnalysis:
         query=query,
         text=text,
         occurrences=actionable,
-    )
-
-
-def _looks_like_overlength_generation_shape(value: str) -> bool:
-    """Recognize bounded generation evidence without scanning the full request."""
-    edge_chars = 512
-    prefix = unicodedata.normalize("NFKC", value[:edge_chars])
-    suffix = unicodedata.normalize("NFKC", value[-edge_chars:])
-    molecular_object = (
-        r"(?:molecules?|compounds?|structures?|candidates?|ligands?|"
-        r"scaffolds?|analog(?:ue)?s?|inhibitors?|agonists?|antagonists?|"
-        r"drugs?|chemotypes?|smiles)"
-    )
-    if re.search(
-        rf"(?is)\b{_GENERATION_VERB}\b.{{0,384}}\b{molecular_object}\b",
-        prefix,
-    ) or re.search(
-        rf"(?is)\b{_GENERATION_VERB}\b.{{0,384}}\b{molecular_object}\b",
-        suffix,
-    ):
-        return True
-    return bool(
-        re.search(rf"(?i)\b{_GENERATION_VERB}\b\s*[-+\u2212]?\d{{32,}}$", prefix)
-        and re.search(rf"(?i)^\d{{32,}}\s*\b{molecular_object}\b", suffix)
     )
 
 
@@ -639,21 +621,12 @@ def _analysis_has_generation_intent(
     active_molecular_skill: bool = False,
 ) -> bool:
     if analysis.overlength:
-        return analysis.overlength_generation_shape or (
-            active_molecular_skill
-            and _bounded_generation_verb_present(analysis.query)
-        )
+        return False
     return any(
         active_molecular_skill
         or _occurrence_has_molecular_scope(analysis.text, occurrence)
         for occurrence in analysis.occurrences
     )
-
-
-def _bounded_generation_verb_present(value: str) -> bool:
-    edges = f"{value[:512]}\n{value[-512:]}"
-    return bool(re.search(rf"(?i)\b{_GENERATION_VERB}\b", edges))
-
 
 def _matches_generation_grammar(
     value: str,
@@ -682,6 +655,16 @@ _CHINESE_GENERATION_VERB_PATTERN = re.compile(
 _CHINESE_MOLECULAR_ENTITY = re.compile(
     r"(?:分子|化合物|结构|候选|配体|骨架|类似物|抑制剂|激动剂|拮抗剂|药物)"
 )
+_OBJECT_BOUNDARY = re.compile(
+    r"(?i)(?:[.;!?]|\b(?:about|based\s+on|concerning|containing|contains?|"
+    r"covering|describing|featuring|for|from|including|includes?|of|on|"
+    r"regarding|that\s+(?:contain|contains|include|includes)|with|without)\b|"
+    r"\b(?:and|but|or)\s+(?:(?:also|then)\s+)?(?:analy(?:s|z)(?:e|es|ed|ing)|"
+    r"assess(?:es|ed|ing)?|calculat(?:e|es|ed|ing)|compar(?:e|es|ed|ing)|"
+    r"comput(?:e|es|ed|ing)|discuss(?:es|ed|ing)?|evaluat(?:e|es|ed|ing)|"
+    r"explain(?:s|ed|ing)?|predict(?:s|ed|ing)?|review(?:s|ed|ing)?|"
+    r"screen(?:s|ed|ing)?|search(?:es|ed|ing)?|summari(?:ze|zes|zed|zing))\b)"
+)
 
 
 def _occurrence_has_molecular_scope(
@@ -700,7 +683,9 @@ def _occurrence_has_molecular_scope(
             )
         ]
         object_phrase = re.split(
-            r"(?:关于|有关|描述|涉及)", object_phrase, maxsplit=1
+            r"(?:关于|有关|描述|涉及|包含|含有|带有|并且|然后|同时)",
+            object_phrase,
+            maxsplit=1,
         )[0]
         return bool(_CHINESE_MOLECULAR_ENTITY.search(object_phrase))
     if not _GENERIC_CREATION_VERB.fullmatch(verb.group(0)):
@@ -721,11 +706,7 @@ def _occurrence_has_molecular_scope(
         object_phrase,
         count=1,
     )
-    object_phrase = re.split(
-        r"(?i)\b(?:about|of|on|regarding|concerning|describing|covering)\b",
-        object_phrase,
-        maxsplit=1,
-    )[0]
+    object_phrase = _OBJECT_BOUNDARY.split(object_phrase, maxsplit=1)[0]
     return bool(
         _MOLECULAR_ENTITY.search(object_phrase)
         or re.search(

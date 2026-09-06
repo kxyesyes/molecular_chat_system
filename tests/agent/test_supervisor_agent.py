@@ -351,14 +351,21 @@ def test_supervisor_oversized_numeric_token_is_canonical_invalid_input():
     assert generator.calls == []
 
 
-def test_supervisor_overlength_generation_shape_fails_before_router():
+@pytest.mark.parametrize(
+    "query",
+    (
+        f"{'x' * 9000} Generate 3 molecules {'x' * 9000}",
+        f"{'x' * 17000} Generate 3 molecules",
+        "x" * 17000,
+    ),
+)
+def test_supervisor_rejects_every_overlength_request_before_router(query):
     class RouterThatMustNotRun:
         catalog = WorkflowCatalog()
 
         def route(self, query, llm=None):
             raise AssertionError("router ran before overlength preflight")
 
-    query = f"Generate {'9' * 17000} molecules"
     result = SupervisorAgent(
         tools={},
         skill_router=RouterThatMustNotRun(),
@@ -367,7 +374,7 @@ def test_supervisor_overlength_generation_shape_fails_before_router():
     assert result["success"] is False
     assert result["error"]["code"] == "invalid_input"
     assert result["error"]["details"] == {
-        "reason": "malformed_requested_count",
+        "reason": "request_too_long",
         "rejected_value": {"length": len(query)},
     }
 

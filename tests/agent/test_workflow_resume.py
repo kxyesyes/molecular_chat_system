@@ -204,7 +204,11 @@ def test_tool_execution_and_terminal_run_status_are_persisted(tmp_path):
 def test_generator_candidate_set_survives_checkpoint_reuse(tmp_path):
     store = SQLiteAgentStateStore(tmp_path / "candidate-state.sqlite3")
     generator = CountingCandidateGenerator()
-    context = AgentContext(query="generate", trace_id="candidate-resume")
+    context = AgentContext(
+        query="generate",
+        trace_id="candidate-resume",
+        mol_count=3,
+    )
     steps = [
         WorkflowStep(
             "generate",
@@ -226,7 +230,13 @@ def test_generator_candidate_set_survives_checkpoint_reuse(tmp_path):
 
     first_result = first.tool_results[0]
     resumed_result = resumed.tool_results[0]
-    assert generator.calls == ["generate"]
+    assert generator.calls == [
+        {
+            "query": "generate",
+            "metadata": {"requested_count": 3},
+            "outputs": {},
+        }
+    ]
     assert resumed.metadata["reused_steps"] == ["generate"]
     assert resumed_result.data == first_result.data
     assert resumed_result.quality == first_result.quality
@@ -296,7 +306,11 @@ def test_validated_checkpoint_trusts_invalid_candidate_metadata_rejection(
 ):
     store = SQLiteAgentStateStore(tmp_path / "trusted-candidate.sqlite3")
     generator = MetadataRejectingCandidateGenerator()
-    context = AgentContext(query="generate", trace_id="trusted-candidate")
+    context = AgentContext(
+        query="generate",
+        trace_id="trusted-candidate",
+        mol_count=1,
+    )
     steps = [
         WorkflowStep(
             "generate",
@@ -318,7 +332,13 @@ def test_validated_checkpoint_trusts_invalid_candidate_metadata_rejection(
 
     assert first.success is True
     assert resumed.success is True
-    assert generator.calls == ["generate"]
+    assert generator.calls == [
+        {
+            "query": "generate",
+            "metadata": {"requested_count": 1},
+            "outputs": {},
+        }
+    ]
     assert resumed.metadata["reused_steps"] == ["generate"]
     assert resumed.tool_results[0].data["rejected"] == [
         {
@@ -377,20 +397,29 @@ def test_corrupted_checkpoint_is_cache_miss_and_reexecutes_tool(tmp_path):
 def test_corrupted_candidate_set_checkpoint_reexecutes_generator(tmp_path):
     store = SQLiteAgentStateStore(tmp_path / "corrupted-candidates.sqlite3")
     generator = CountingCandidateGenerator()
-    context = AgentContext(query="generate", trace_id="corrupted-candidates")
+    context = AgentContext(
+        query="generate",
+        trace_id="corrupted-candidates",
+        mol_count=3,
+    )
     step = WorkflowStep(
         "generate",
         generator.name,
         output_key="molecules",
     )
     orchestrator = WorkflowOrchestrator(state_store=store)
+    canonical_request = {
+        "query": "generate",
+        "metadata": {"requested_count": 3},
+        "outputs": {},
+    }
     store.save_checkpoint(
         {
             "trace_id": context.trace_id,
             "step_id": step.name,
             "workflow_version": orchestrator.workflow_version,
             "status": "succeeded",
-            "input_hash": orchestrator._input_hash("generate"),
+            "input_hash": orchestrator._input_hash(canonical_request),
             "tool_name": step.tool_name,
             "tool_version": "1",
             "adapter_version": orchestrator.adapter_version,
@@ -417,7 +446,7 @@ def test_corrupted_candidate_set_checkpoint_reexecutes_generator(tmp_path):
     )
 
     assert result.partial is True
-    assert generator.calls == ["generate"]
+    assert generator.calls == [canonical_request]
     assert result.metadata["reused_steps"] == []
     assert result.metadata["checkpoint_warnings"] == [
         {

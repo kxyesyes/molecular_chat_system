@@ -694,6 +694,9 @@ def test_hit_to_lead_generation_consumes_computed_baseline():
         "Produce reports",
         "Synthesize summaries",
         "Generate charts about compounds",
+        "Generate charts with molecular structures",
+        "Create reports containing candidate molecules",
+        "Build dashboards and analyze compounds",
     ),
 )
 def test_generic_creation_verbs_require_a_molecular_entity(query):
@@ -711,6 +714,18 @@ def test_explicit_molecular_skill_can_activate_generic_generation_grammar():
         "Design 7 slides",
         active_molecular_skill=True,
     ) == 7
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "Generate molecular structures",
+        "Generate candidate molecules",
+    ),
+)
+def test_direct_molecular_creation_objects_remain_generation_intent(query):
+    assert has_generation_intent(query) is True
+    assert preflight_generation_request(query) == 1
 
 
 def test_preflight_reuses_one_generation_occurrence_collection(monkeypatch):
@@ -735,14 +750,33 @@ def test_preflight_reuses_one_generation_occurrence_collection(monkeypatch):
     assert len(calls) == 1
 
 
-def test_overlength_generation_shape_fails_closed_without_full_parse():
-    query = f"Generate {'9' * 17000} molecules"
-
-    assert has_generation_intent(query) is True
+@pytest.mark.parametrize(
+    "query",
+    (
+        f"{'x' * 9000} Generate 3 molecules {'x' * 9000}",
+        f"{'x' * 17000} Generate 3 molecules",
+        "x" * 17000,
+    ),
+)
+def test_every_overlength_public_request_fails_closed(query):
     with pytest.raises(GenerationRequestError) as captured:
         preflight_generation_request(query)
 
-    assert captured.value.reason == "malformed_requested_count"
+    assert captured.value.reason == "request_too_long"
+    assert captured.value.value == {"length": len(query)}
+
+
+def test_overlength_request_precedes_authoritative_count_bypass():
+    query = "x" * 17000
+
+    with pytest.raises(GenerationRequestError) as captured:
+        preflight_generation_request(
+            query,
+            5,
+            count_supplied=True,
+        )
+
+    assert captured.value.reason == "request_too_long"
     assert captured.value.value == {"length": len(query)}
 
 
@@ -770,7 +804,7 @@ def test_oversized_request_takes_the_bounded_parser_exit(monkeypatch):
     with pytest.raises(GenerationRequestError) as captured:
         generation_request.parse_generation_count("x" * 20000)
 
-    assert captured.value.reason == "malformed_requested_count"
+    assert captured.value.reason == "request_too_long"
 
 
 def test_generation_occurrence_limit_rejects_pathological_requests():

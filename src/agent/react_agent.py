@@ -15,6 +15,7 @@ from .contracts.generation_request import (
     DEFAULT_GENERATION_COUNT,
     GenerationRequestError,
     build_generation_request,
+    generation_request_error_details,
     has_generation_intent,
     parse_generation_count,
     preflight_generation_request,
@@ -98,6 +99,18 @@ class ReActMolecularAgent:
             if hasattr(tool, "llm"):
                 tool.llm = llm
 
+    @staticmethod
+    def _is_molecular_generation_skill(skill: Any) -> bool:
+        allowed_tools = getattr(skill, "allowed_tools", ())
+        if "llm_molecular_generator" in allowed_tools:
+            return True
+        name = getattr(skill, "name", skill)
+        return name in {
+            "molecular_design",
+            "target_driven_design",
+            "hit_to_lead_optimization",
+        }
+
     def should_use_tools(self, query: str) -> bool:
         """判断是否需要使用工具处理查询"""
         preflight_generation_request(query)
@@ -165,7 +178,12 @@ class ReActMolecularAgent:
             if mol_count is not _MOL_COUNT_UNSET:
                 raw_requested_count = mol_count
             else:
-                raw_requested_count = preflight_generation_request(query)
+                raw_requested_count = preflight_generation_request(
+                    query,
+                    active_molecular_skill=(
+                        self._is_molecular_generation_skill(active_skill)
+                    ),
+                )
             if raw_requested_count is None:
                 raw_requested_count = DEFAULT_GENERATION_COUNT
             generation_request = build_generation_request(
@@ -173,14 +191,15 @@ class ReActMolecularAgent:
             )
             requested_count = generation_request["metadata"]["requested_count"]
         except GenerationRequestError as exc:
-            if raw_requested_count is None and isinstance(exc.value, int):
+            if raw_requested_count is None and exc.value is not None:
                 raw_requested_count = exc.value
+            classification = generation_request_error_details(exc)
             result["success"] = False
             result["final_answer"] = "Invalid molecular generation request"
             result["error"] = {
                 "code": "invalid_input",
                 "message": str(exc),
-                "details": {},
+                "details": classification,
             }
             workflow_name = getattr(active_skill, "name", active_skill)
             result["workflow_plan"] = {
@@ -188,13 +207,7 @@ class ReActMolecularAgent:
                 "steps": [],
                 "metadata": {
                     "requested_count": raw_requested_count,
-                    "reason": (
-                        "invalid_requested_count"
-                        if raw_requested_count is None
-                        or isinstance(raw_requested_count, bool)
-                        or not isinstance(raw_requested_count, int)
-                        else "requested_count_out_of_range"
-                    ),
+                    **classification,
                 },
             }
             return result

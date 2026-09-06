@@ -236,6 +236,41 @@ def test_no_llm_generation_fallback_rejects_invalid_count_before_tool():
     assert response["error"]["code"] == "invalid_input"
 
 
+def test_target_driven_policy_rejects_nounless_invalid_count_before_tools(
+    monkeypatch,
+):
+    class RouterThatMustNotRun:
+        def route(self, query, llm=None):
+            raise AssertionError("router ran before generation preflight")
+
+    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+    agent.llm = None
+    agent.tools = {}
+    agent.max_iterations = 5
+    agent.skill_router = RouterThatMustNotRun()
+    agent._active_skill = None
+    monkeypatch.setattr(
+        agent,
+        "_execute_workflow_skill",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("workflow tools ran before generation preflight")
+        ),
+    )
+
+    response = agent.execute(
+        "Generate 11 for PDE5A",
+        active_skill=WorkflowCatalog().require("target_driven_design"),
+    )
+
+    assert response["success"] is False
+    assert response["error"]["code"] == "invalid_input"
+    assert response["error"]["details"] == {
+        "reason": "requested_count_out_of_range",
+        "rejected_value": 11,
+    }
+    assert response["tools_used"] == []
+
+
 def test_react_explicit_count_bypasses_malformed_generation_prose():
     class MatchingGenerator:
         name = "llm_molecular_generator"
