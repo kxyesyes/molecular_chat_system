@@ -1779,6 +1779,105 @@ async def _submit_runtime_input(
     )
 
 
+@pytest.mark.anyio
+async def test_local_runtime_lazily_controls_existing_temporal_task(tmp_path: Path) -> None:
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("temporal-owned", "docking", {}, backend="temporal")
+
+    class TrackingBackend(_FakeBackend):
+        def __init__(self, backend: str) -> None:
+            super().__init__(
+                store,
+                backend,
+                StartOutcome.REJECTED,
+                create=False,
+            )
+            self.get_calls: list[str] = []
+            self.cancel_calls: list[tuple[str, str | None]] = []
+
+        async def get(self, task_id: str):
+            self.get_calls.append(task_id)
+            return self.store.get(task_id)
+
+        async def cancel(self, task_id: str, reason: str | None = None):
+            self.cancel_calls.append((task_id, reason))
+            return self.store.request_cancel(task_id, reason=reason)
+
+    local = TrackingBackend("local")
+    temporal = TrackingBackend("temporal")
+    factory_calls = 0
+
+    def temporal_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        return temporal
+
+    runtime = TaskRuntime(
+        config=_runtime_config(tmp_path, canary_percent=0),
+        store=store,
+        stager=object(),
+        local_backend=local,
+        temporal_backend_factory=temporal_factory,
+    )
+    try:
+        record = await runtime.get("temporal-owned")
+        canceled = await runtime.cancel("temporal-owned", "operator request")
+
+        assert record.backend == "temporal"
+        assert canceled.status is TaskStatus.CANCEL_REQUESTED
+        assert factory_calls == 1
+        assert temporal.get_calls == ["temporal-owned"]
+        assert temporal.cancel_calls == [("temporal-owned", "operator request")]
+        assert local.get_calls == []
+        assert local.cancel_calls == []
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.anyio
+async def test_local_runtime_fails_closed_when_temporal_control_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("temporal-owned", "docking", {}, backend="temporal")
+
+    class TrackingLocal(_FakeBackend):
+        def __init__(self) -> None:
+            super().__init__(
+                store,
+                "local",
+                StartOutcome.REJECTED,
+                create=False,
+            )
+            self.cancel_calls: list[str] = []
+
+        async def cancel(self, task_id: str, reason: str | None = None):
+            self.cancel_calls.append(task_id)
+            return await super().cancel(task_id, reason)
+
+    local = TrackingLocal()
+
+    def unavailable_factory():
+        raise RuntimeError("temporal service unavailable")
+
+    runtime = TaskRuntime(
+        config=_runtime_config(tmp_path, canary_percent=0),
+        store=store,
+        stager=object(),
+        local_backend=local,
+        temporal_backend_factory=unavailable_factory,
+    )
+    try:
+        with pytest.raises(TaskBackendStartError, match="Temporal control"):
+            await runtime.get("temporal-owned")
+        with pytest.raises(TaskBackendStartError, match="Temporal control"):
+            await runtime.cancel("temporal-owned", "operator request")
+        assert local.cancel_calls == []
+        assert store.get("temporal-owned").status is TaskStatus.QUEUED
+    finally:
+        await runtime.close()
+
+
 def _stage_file_for_runtime(
     stager: DockingInputStager,
     task_id: str,

@@ -62,6 +62,7 @@ class TaskRuntime:
         selector: TemporalDockingSelector | Any | None = None,
         local_backend: TaskRuntimeBackend | None = None,
         temporal_backend: TaskRuntimeBackend | None = None,
+        temporal_backend_factory: Callable[[], Any] | None = None,
         uuid_factory: Callable[[], Any] | None = None,
         docking_execution: DockingExecution | Any | None = None,
     ) -> None:
@@ -70,18 +71,19 @@ class TaskRuntime:
         self.stager = stager or DockingInputStager(self.config.staging_root)
         self.selector = selector or TemporalDockingSelector(self.config.canary_percent)
         self._uuid_factory = uuid_factory or uuid4
+        self._temporal_backend_lock = asyncio.Lock()
+        self._temporal_backend_factory = (
+            temporal_backend_factory or self._build_temporal_backend
+        )
         if (
             temporal_backend is None
             and self.config.backend == "temporal_canary"
         ):
-            from .backends.temporal import TemporalTaskBackend
-
-            temporal_backend = TemporalTaskBackend(
-                self.store,
-                address=self.config.temporal_address,
-                namespace=self.config.temporal_namespace,
-                task_queue=self.config.docking_queue,
-            )
+            temporal_backend = self._temporal_backend_factory()
+            if inspect.isawaitable(temporal_backend):
+                raise TypeError(
+                    "async temporal backend factory cannot initialize canary runtime"
+                )
         self.temporal_backend = temporal_backend
         if temporal_backend is not None:
             assert_async_backend_contract(temporal_backend)
@@ -352,8 +354,9 @@ class TaskRuntime:
 
     async def get(self, task_id: str) -> TaskRecord:
         record = await asyncio.to_thread(self.store.get, task_id)
-        if record.backend == "temporal" and self.temporal_backend is not None:
-            return await self.temporal_backend.get(task_id)
+        if record.backend == "temporal":
+            temporal_backend = await self._temporal_control_backend()
+            return await temporal_backend.get(task_id)
         return record
 
     async def events(self, task_id: str):
@@ -570,9 +573,38 @@ class TaskRuntime:
 
     async def cancel(self, task_id: str, reason: str | None = None) -> TaskRecord:
         record = await asyncio.to_thread(self.store.get, task_id)
-        if record.backend == "temporal" and self.temporal_backend is not None:
-            return await self.temporal_backend.cancel(task_id, reason)
+        if record.backend == "temporal":
+            temporal_backend = await self._temporal_control_backend()
+            return await temporal_backend.cancel(task_id, reason)
         return await self.local_backend.cancel(task_id, reason)
+
+    def _build_temporal_backend(self) -> TaskRuntimeBackend:
+        from .backends.temporal import TemporalTaskBackend
+
+        return TemporalTaskBackend(
+            self.store,
+            address=self.config.temporal_address,
+            namespace=self.config.temporal_namespace,
+            task_queue=self.config.docking_queue,
+        )
+
+    async def _temporal_control_backend(self) -> TaskRuntimeBackend:
+        if self.temporal_backend is not None:
+            return self.temporal_backend
+        async with self._temporal_backend_lock:
+            if self.temporal_backend is not None:
+                return self.temporal_backend
+            try:
+                backend = self._temporal_backend_factory()
+                if inspect.isawaitable(backend):
+                    backend = await backend
+                assert_async_backend_contract(backend)
+            except Exception as exc:
+                raise TaskBackendStartError(
+                    "Temporal control backend is unavailable"
+                ) from exc
+            self.temporal_backend = backend
+            return backend
 
     async def health(self) -> dict[str, BackendHealth]:
         return {
