@@ -94,7 +94,11 @@ docking:
         self.assertTrue(workflow_path.is_file())
         source = workflow_path.read_text(encoding="utf-8")
         required_commands = [
-            "python -m pytest tests -q -p no:cacheprovider",
+            "python -m pytest ${{ matrix.pytest_target }} -q -p no:cacheprovider",
+            'pytest_target: "tests/agent"',
+            'pytest_target: "tests/sandbox_broker"',
+            'pytest_target: "tests/task_runtime"',
+            'pytest_target: "tests --ignore=tests/agent --ignore=tests/sandbox_broker --ignore=tests/task_runtime"',
             "python -m compileall -q src scripts",
             "find tests -maxdepth 1 -type f -name '*_test.js'",
             'node "$test_file"',

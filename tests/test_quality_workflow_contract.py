@@ -28,3 +28,22 @@ def test_quality_workflow_runs_every_tracked_node_contract() -> None:
 
     assert "find tests -maxdepth 1 -type f -name '*_test.js'" in workflow
     assert 'node "$test_file"' in workflow
+
+
+def test_quality_workflow_shards_python_suite_and_preserves_final_gate() -> None:
+    workflow = (ROOT / ".github/workflows/quality.yml").read_text("utf-8")
+
+    assert "python-tests:" in workflow
+    assert "static-quality:" in workflow
+    assert "offline-quality:" in workflow
+    assert "needs: [python-tests, static-quality]" in workflow
+    assert "python -m pytest ${{ matrix.pytest_target }} -q -p no:cacheprovider" in workflow
+    for target in (
+        "tests/agent",
+        "tests/sandbox_broker",
+        "tests/task_runtime",
+        "tests --ignore=tests/agent --ignore=tests/sandbox_broker --ignore=tests/task_runtime",
+    ):
+        assert f'pytest_target: "{target}"' in workflow
+
+    assert "run: python -m pytest tests -q -p no:cacheprovider" not in workflow
