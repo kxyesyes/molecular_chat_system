@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pydantic import BaseModel
 
 from src.agent.contracts import AgentErrorCode
+from src.agent.tooling import adapters as adapter_module
 from src.agent.tooling import (
     LegacyPythonToolAdapter,
     MCPToolAdapter,
@@ -249,6 +250,24 @@ def test_adapter_bounds_concurrent_invocations_before_any_timeout_is_observed() 
         ) == 5
     finally:
         release.set()
+
+
+def test_adapter_releases_capacity_when_executor_construction_fails(
+    monkeypatch,
+) -> None:
+    class BrokenExecutor:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("worker unavailable")
+
+    adapter = LegacyPythonToolAdapter(make_spec(max_concurrency=1), LegacyValueTool())
+    monkeypatch.setattr(adapter_module, "ThreadPoolExecutor", BrokenExecutor)
+
+    first = adapter.execute({"query": "CCO"})
+    second = adapter.execute({"query": "CCO"})
+
+    assert first.error.code is AgentErrorCode.INTERNAL_ERROR
+    assert second.error.code is AgentErrorCode.INTERNAL_ERROR
+    assert first.message == second.message == "Tool worker unavailable"
 
 
 def test_adapter_redacts_declared_sensitive_fields():

@@ -100,7 +100,18 @@ class ToolAdapter(ABC):
                 quality={"retryable": False, "capacity_exhausted": True},
             )
         start = time.perf_counter()
-        executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            executor = ThreadPoolExecutor(max_workers=1)
+        except BaseException as exc:
+            self._invocation_slots.release()
+            if not isinstance(exc, Exception):
+                raise
+            return ToolResult.error_result(
+                self.spec.name,
+                AgentErrorCode.INTERNAL_ERROR,
+                "Tool worker unavailable",
+                quality={"retryable": False},
+            )
         try:
             future = executor.submit(self.invoke, payload)
         except BaseException:
