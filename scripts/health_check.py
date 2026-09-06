@@ -236,6 +236,7 @@ def check_agent_tool_registry() -> tuple[bool, str]:
 def check_agent_components() -> tuple[bool, str]:
     try:
         from src.agent.contracts import AgentContext
+        from src.agent.contracts.generation_request import MAX_GENERATION_COUNT
         from src.agent.orchestrators import WorkflowOrchestrator
         from src.agent.planning import TaskPlanner
         from src.agent.runtime.event_bus import AgentEventBus
@@ -247,7 +248,7 @@ def check_agent_components() -> tuple[bool, str]:
             return False, "target_driven_design workflow policy is not registered"
 
         context = AgentContext(
-            query="基于 PDE5 设计 20 个类药候选分子",
+            query=f"基于 PDE5 设计 {MAX_GENERATION_COUNT} 个类药候选分子",
             trace_id="health-agent",
             active_skill="target_driven_design",
         )
