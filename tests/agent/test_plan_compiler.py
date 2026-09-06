@@ -49,6 +49,79 @@ def test_compiler_accepts_bound_upstream_output():
     }
 
 
+def test_compiler_request_query_binding_has_no_producer_dependency():
+    plan = WorkflowPlan(
+        workflow_name="admet_assessment",
+        steps=[
+            WorkflowStep(
+                "properties",
+                "property_calculator",
+                input_binding="$.request.query",
+                input_transform="identity",
+            )
+        ],
+    )
+
+    compiled = PlanCompiler().compile(
+        plan,
+        WorkflowCatalog().require("admet_assessment"),
+    )
+
+    assert compiled.dependencies == {"properties": ()}
+
+
+def test_compiler_plan_count_bypasses_malformed_generation_prose():
+    plan = WorkflowPlan(
+        workflow_name="molecular_design",
+        metadata={"requested_count": 5},
+        steps=[
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_data="Generate 7.5 molecules",
+                capability="molecule.generate",
+            )
+        ],
+    )
+
+    compiled = PlanCompiler().compile(
+        plan,
+        WorkflowCatalog().require("molecular_design"),
+    )
+
+    assert compiled.plan.steps[0].input_data == {
+        "query": "Generate 7.5 molecules",
+        "metadata": {"requested_count": 5},
+        "outputs": {},
+    }
+
+
+def test_compiler_structured_step_count_bypasses_malformed_generation_prose():
+    step_request = {
+        "query": "Generate 7.5 molecules",
+        "metadata": {"requested_count": 5},
+        "outputs": {},
+    }
+    plan = WorkflowPlan(
+        workflow_name="molecular_design",
+        steps=[
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_data=step_request,
+                capability="molecule.generate",
+            )
+        ],
+    )
+
+    compiled = PlanCompiler().compile(
+        plan,
+        WorkflowCatalog().require("molecular_design"),
+    )
+
+    assert compiled.plan.steps[0].input_data == step_request
+
+
 def test_compiler_workflow_binding_depends_only_on_exact_target_output():
     plan = WorkflowPlan(
         workflow_name="target_driven_design",
@@ -209,7 +282,7 @@ def test_compiler_accepts_matching_atomic_generation_count():
     assert compiled.dependencies == {"generate": ()}
 
 
-def test_compiler_rejects_conflicting_legacy_atomic_generation_count():
+def test_compiler_plan_count_overrides_legacy_atomic_generation_prose_count():
     plan = WorkflowPlan(
         workflow_name="molecular_design",
         metadata={"requested_count": 7, "atomic": True},
@@ -223,11 +296,14 @@ def test_compiler_rejects_conflicting_legacy_atomic_generation_count():
         ],
     )
 
-    with pytest.raises(PlanCompilationError, match="requested_count conflicts"):
-        PlanCompiler().compile(
-            plan,
-            WorkflowCatalog().require("molecular_design"),
-        )
+    compiled = PlanCompiler().compile(
+        plan,
+        WorkflowCatalog().require("molecular_design"),
+    )
+
+    assert compiled.plan.steps[0].input_data["metadata"] == {
+        "requested_count": 7
+    }
 
 
 def test_compiler_applies_plan_count_to_legacy_atomic_input_without_count():
@@ -257,16 +333,8 @@ def test_compiler_applies_plan_count_to_legacy_atomic_input_without_count():
     assert plan.steps[0].input_data == "Generate candidates"
 
 
-@pytest.mark.parametrize(
-    "query, message",
-    [
-        ("Generate 3 molecules", "requested_count conflicts"),
-        ("Generate 7.5 molecules", "must be an integer"),
-    ],
-)
-def test_compiler_validates_structured_query_when_count_metadata_is_absent(
-    query, message
-):
+@pytest.mark.parametrize("query", ["Generate 3 molecules", "Generate 7.5 molecules"])
+def test_compiler_plan_count_overrides_structured_query_without_step_count(query):
     plan = WorkflowPlan(
         workflow_name="molecular_design",
         metadata={"requested_count": 7, "atomic": True},
@@ -280,11 +348,14 @@ def test_compiler_validates_structured_query_when_count_metadata_is_absent(
         ],
     )
 
-    with pytest.raises(PlanCompilationError, match=message):
-        PlanCompiler().compile(
-            plan,
-            WorkflowCatalog().require("molecular_design"),
-        )
+    compiled = PlanCompiler().compile(
+        plan,
+        WorkflowCatalog().require("molecular_design"),
+    )
+
+    assert compiled.plan.steps[0].input_data["metadata"] == {
+        "requested_count": 7
+    }
 
 
 @pytest.mark.parametrize(

@@ -15,7 +15,11 @@ class FakeTool:
                 "success": True,
                 "message": f"{self.name} completed",
                 "data": [
-                    {"gene_symbol": "PDE5A", "source": "local_target_db"}
+                    {
+                        "gene_symbol": "PDE5A",
+                        "source_record_id": "LOCAL_PDE5A",
+                        "source": "local_target_db",
+                    }
                 ],
                 "formatted": "validated PDE5A target evidence",
             }

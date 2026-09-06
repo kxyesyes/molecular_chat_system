@@ -13,6 +13,7 @@ from .contracts.generation_request import (
     GenerationRequestError,
     build_generation_request,
     has_generation_intent,
+    preflight_generation_request,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,8 +56,10 @@ class MolecularAgent:
         all_tools.extend(self.optional_tools.values())
         return all_tools
 
-    def should_use_tools(self, query: str) -> bool:
+    def should_use_tools(self, query: str, *, preflight: bool = True) -> bool:
         """快速判断是否需要使用工具"""
+        if preflight:
+            preflight_generation_request(query)
         # 首先检查核心工具
         for tool in self.core_tools:
             if hasattr(tool, 'should_use') and tool.should_use(query):
@@ -91,6 +94,23 @@ class MolecularAgent:
         mol_count: Optional[int] = None,
     ) -> Dict[str, Any]:
         """执行工具预测"""
+        try:
+            preflight_generation_request(
+                query,
+                mol_count,
+                count_supplied=mol_count is not None,
+                field="mol_count",
+            )
+        except GenerationRequestError as exc:
+            tool_result = self._invalid_generation_tool_result(exc)
+            return {
+                'success': False,
+                'results': [tool_result],
+                'used_tools': [],
+                'error': tool_result['error'],
+                'message': tool_result['error']['message'],
+            }
+
         results = []
         used_tools = []
         first_error = None
@@ -165,33 +185,26 @@ class MolecularAgent:
         mol_count: Optional[int] = None,
     ) -> Dict[str, Any]:
         """执行agent任务 - 简化版本，直接使用工具"""
+        try:
+            requested_count = preflight_generation_request(
+                query,
+                mol_count,
+                count_supplied=mol_count is not None,
+                field="mol_count",
+            )
+        except GenerationRequestError as exc:
+            return self._invalid_generation_response(exc)
+
         logger.info(f"Executing query: {query[:100]}... (temperature={temperature})")
 
         if has_generation_intent(query):
             try:
-                if mol_count is None:
-                    build_generation_request(query)
-                else:
-                    build_generation_request(query, mol_count)
+                build_generation_request(query, requested_count)
             except GenerationRequestError as exc:
-                message = f"Invalid molecular generation request: {exc}"
-                tool_result = ToolResult.error_result(
-                    tool_name="llm_molecular_generator",
-                    code=AgentErrorCode.INVALID_INPUT,
-                    message=message,
-                ).to_legacy_dict()
-                error = tool_result["error"]
-                return {
-                    "success": False,
-                    "message": message,
-                    "response": "工具执行失败，请检查输入格式或稍后重试。",
-                    "used_tools": [],
-                    "tool_results": [tool_result],
-                    "error": error,
-                }
+                return self._invalid_generation_response(exc)
 
         # 快速判断是否需要工具
-        if not self.should_use_tools(query):
+        if not self.should_use_tools(query, preflight=False):
             return {
                 'success': False,
                 'message': 'No relevant tools found for this query',
@@ -230,3 +243,26 @@ class MolecularAgent:
             if tool_results.get('error'):
                 failure['error'] = tool_results['error']
             return failure
+
+    @staticmethod
+    def _invalid_generation_tool_result(exc: GenerationRequestError) -> Dict[str, Any]:
+        message = f"Invalid molecular generation request: {exc}"
+        return ToolResult.error_result(
+            tool_name="llm_molecular_generator",
+            code=AgentErrorCode.INVALID_INPUT,
+            message=message,
+        ).to_legacy_dict()
+
+    @classmethod
+    def _invalid_generation_response(
+        cls, exc: GenerationRequestError
+    ) -> Dict[str, Any]:
+        tool_result = cls._invalid_generation_tool_result(exc)
+        return {
+            "success": False,
+            "message": tool_result["error"]["message"],
+            "response": "工具执行失败，请检查输入格式或稍后重试。",
+            "used_tools": [],
+            "tool_results": [tool_result],
+            "error": tool_result["error"],
+        }

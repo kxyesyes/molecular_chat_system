@@ -68,16 +68,6 @@ class LLMMolecularGenerator(BaseMolecularTool):
         
         self.llm = llm_model
         
-        # 触发关键词
-        self.trigger_words = [
-            'generate', 'create', 'design', 'make', 'build', 'synthesize',
-            '生成', '创建', '设计', '制作', '构建', '合成',
-            'molecule', 'compound', 'drug', 'structure', 'smiles',
-            '分子', '化合物', '药物', '结构',
-            'new', 'novel', 'innovative',
-            '新', '新型', '创新'
-        ]
-        
         # LLM生成提示词模板
         self.generation_prompt_template = (
             "You are an experienced medicinal chemist working with an 8B llama model that knows SMILES.\n"

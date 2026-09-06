@@ -146,6 +146,7 @@ def test_requested_count_parser_supports_shared_multilingual_grammar():
     parser = TaskPlanner._extract_requested_count
 
     assert parser("Produce 5 for PDE5A", default=1) == 5
+    assert parser("Synthesize 6 molecules", default=1) == 6
     assert parser("为 PDE5A 生成五个候选分子", default=1) == 5
     assert parser("设计十种化合物", default=1) == 10
     assert parser("生成十一个候选结构", default=1) == 11
@@ -195,6 +196,9 @@ def test_requested_count_parser_supports_shared_multilingual_grammar():
         "Generate 1e molecules",
         "Generate --1 molecules",
         "Generate −−1 molecules",
+        "Generate - 1 molecules",
+        "Synthesize + 2 compounds",
+        "Generate 3 molecules; Synthesize − 1 molecule",
         "Generate 7.5.2 molecules",
         "Generate ７．５．２ molecules",
         "Generate five.5 molecules",

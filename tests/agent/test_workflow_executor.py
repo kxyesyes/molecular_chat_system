@@ -269,7 +269,13 @@ class StaticResultTool(FakeTool):
 def test_query_count_is_materialized_into_supplied_workflow_request():
     target = StaticResultTool(
         "target_database_search",
-        [{"gene_symbol": "PDE5A", "source": "UniProt"}],
+        [
+            {
+                "gene_symbol": "PDE5A",
+                "source_record_id": "O76074",
+                "source": "UniProt",
+            }
+        ],
     )
     generator = FakeTool("llm_molecular_generator")
     plan = WorkflowPlan(
@@ -321,7 +327,7 @@ def test_structured_step_count_precedes_omitted_context_query_count():
                 "generate",
                 "llm_molecular_generator",
                 input_data={
-                    "query": "Generate candidates",
+                    "query": "Generate 7.5 molecules",
                     "metadata": {"requested_count": 7},
                     "outputs": {},
                 },
@@ -877,7 +883,13 @@ def test_plan_metadata_is_carried_into_workflow_binding_during_execution():
     )
     target = StaticResultTool(
         "target_database_search",
-        [{"gene_symbol": "PDE5A", "source": "UniProt"}],
+        [
+            {
+                "gene_symbol": "PDE5A",
+                "source_record_id": "O76074",
+                "source": "UniProt",
+            }
+        ],
     )
     generator = StaticResultTool(
         "llm_molecular_generator",
@@ -907,7 +919,11 @@ def test_plan_metadata_is_carried_into_workflow_binding_during_execution():
         "requested_count"
     ] == 7
     assert generator.calls[0]["outputs"]["target"] == [
-        {"gene_symbol": "PDE5A", "source": "UniProt"}
+        {
+            "gene_symbol": "PDE5A",
+            "source_record_id": "O76074",
+            "source": "UniProt",
+        }
     ]
 
 
@@ -1922,6 +1938,38 @@ def test_executor_rejects_uncompilable_binding_before_tool_runs():
     assert "missing" in execution.result.error.details["reason"]
     assert tool.calls == []
     assert execution.events == []
+
+
+def test_executor_resolves_request_query_without_producer_or_metadata_leakage():
+    tool = FakeTool("property_calculator")
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="CCO",
+            trace_id="request-query-binding",
+            active_skill="admet_assessment",
+            metadata={"password": "must-not-bind"},
+        ),
+        policy=WorkflowPolicy(
+            name="admet_assessment",
+            description="test",
+            allowed_tools=("property_calculator",),
+        ),
+        all_tools={tool.name: tool},
+        plan=WorkflowPlan(
+            workflow_name="admet_assessment",
+            steps=[
+                WorkflowStep(
+                    "properties",
+                    "property_calculator",
+                    input_binding="$.request.query",
+                    input_transform="identity",
+                )
+            ],
+        ),
+    )
+
+    assert execution.result.success is True
+    assert tool.calls == ["CCO"]
 
 
 @pytest.mark.parametrize(

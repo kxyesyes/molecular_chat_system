@@ -17,6 +17,7 @@ from .contracts.generation_request import (
     build_generation_request,
     has_generation_intent,
     parse_generation_count,
+    preflight_generation_request,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,7 @@ class ReActMolecularAgent:
 
     def should_use_tools(self, query: str) -> bool:
         """判断是否需要使用工具处理查询"""
+        preflight_generation_request(query)
         # 检查是否包含SMILES分子结构
         if self._contains_smiles(query):
             return True
@@ -158,35 +160,21 @@ class ReActMolecularAgent:
             'active_skill': None  # 兼容字段：记录激活的工作流策略
         }
 
-        generation_intent = has_generation_intent(query)
-        routed_skill = active_skill
-        if routed_skill is None and not generation_intent and self.skill_router:
-            routed_skill = self.skill_router.route(query, llm=self.llm)
-        selected_name = getattr(routed_skill, "name", routed_skill)
-        selected_tools = getattr(routed_skill, "allowed_tools", ())
-        validate_text_count = (
-            generation_intent
-            or "llm_molecular_generator" in selected_tools
-            or selected_name
-            in {
-                "molecular_design",
-                "target_driven_design",
-                "hit_to_lead_optimization",
-            }
-        )
         raw_requested_count: Any = None
         try:
             if mol_count is not _MOL_COUNT_UNSET:
                 raw_requested_count = mol_count
-            elif validate_text_count:
-                raw_requested_count = parse_generation_count(query)
             else:
+                raw_requested_count = preflight_generation_request(query)
+            if raw_requested_count is None:
                 raw_requested_count = DEFAULT_GENERATION_COUNT
             generation_request = build_generation_request(
                 query, raw_requested_count
             )
             requested_count = generation_request["metadata"]["requested_count"]
         except GenerationRequestError as exc:
+            if raw_requested_count is None and isinstance(exc.value, int):
+                raw_requested_count = exc.value
             result["success"] = False
             result["final_answer"] = "Invalid molecular generation request"
             result["error"] = {
@@ -210,6 +198,10 @@ class ReActMolecularAgent:
                 },
             }
             return result
+        generation_intent = has_generation_intent(query)
+        routed_skill = active_skill
+        if routed_skill is None and not generation_intent and self.skill_router:
+            routed_skill = self.skill_router.route(query, llm=self.llm)
         self.current_mol_count = requested_count
         self._current_generation_request = generation_request
 

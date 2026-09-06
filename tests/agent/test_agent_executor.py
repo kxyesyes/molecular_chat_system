@@ -61,6 +61,26 @@ def test_agent_executor_omitted_count_rejects_invalid_text_before_model(monkeypa
     assert model.prompts == []
 
 
+def test_execute_tools_rejects_malformed_count_before_any_tool_boundary(monkeypatch):
+    agent, model = _build_agent(monkeypatch)
+    generator = agent.core_tools[0]
+    should_use_calls = []
+    original_should_use = generator.should_use
+
+    def recording_should_use(query):
+        should_use_calls.append(query)
+        return original_should_use(query)
+
+    monkeypatch.setattr(generator, "should_use", recording_should_use)
+
+    result = agent.execute_tools("Generate - 1 molecules")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_input"
+    assert should_use_calls == []
+    assert model.prompts == []
+
+
 @pytest.mark.parametrize(
     "query", ["Generate 11 candidates", "Generate 11 for PDE5A"]
 )
@@ -89,10 +109,63 @@ def test_agent_executor_omitted_count_preserves_valid_text_count(monkeypatch):
 def test_agent_executor_explicit_count_remains_authoritative(monkeypatch):
     agent, model = _build_agent(monkeypatch)
 
-    result = agent.execute("Generate 7 molecules", mol_count=3)
+    result = agent.execute("Generate 7.5 molecules", mol_count=3)
 
     assert result["success"] is True
     assert "Task: provide 3 valid" in model.prompts[0]
+
+
+def test_agent_executor_supports_synthesize_through_shared_grammar(monkeypatch):
+    agent, model = _build_agent(monkeypatch)
+
+    result = agent.execute("Synthesize 3 molecules")
+
+    assert result["success"] is True
+    assert "Task: provide 3 valid" in model.prompts[0]
+
+
+def test_agent_execute_rejects_invalid_mol_count_before_non_generation_tools(
+    monkeypatch,
+):
+    agent, model = _build_agent(monkeypatch)
+    other_tool = RecordingMixedTool()
+    agent.core_tools.insert(0, other_tool)
+
+    result = agent.execute("Analyze CCO", mol_count=11)
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_input"
+    assert other_tool.should_use_calls == []
+    assert other_tool.calls == []
+    assert model.prompts == []
+
+
+def test_execute_tools_rejects_invalid_mol_count_before_any_tool(monkeypatch):
+    agent, model = _build_agent(monkeypatch)
+    other_tool = RecordingMixedTool()
+    agent.core_tools.insert(0, other_tool)
+
+    result = agent.execute_tools("Analyze CCO", mol_count=11)
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_input"
+    assert other_tool.should_use_calls == []
+    assert other_tool.calls == []
+    assert model.prompts == []
+
+
+def test_valid_mol_count_does_not_force_generation_for_non_generation_query(
+    monkeypatch,
+):
+    agent, model = _build_agent(monkeypatch)
+    other_tool = RecordingMixedTool()
+    agent.core_tools.insert(0, other_tool)
+
+    result = agent.execute("Analyze CCO", mol_count=3)
+
+    assert result["success"] is True
+    assert other_tool.calls == ["Analyze CCO"]
+    assert model.prompts == []
 
 
 def test_agent_executor_prevalidates_invalid_mixed_generation_before_all_tools(
@@ -188,6 +261,8 @@ def test_agent_executor_occurrence_scope_is_bounded(monkeypatch, query):
         "Generate 3 and generate 11",
         "Generate 3 and generate 4",
         "Generate 3 and generate 7.5",
+        "Generate 3 molecules and generate - 1 molecule",
+        "Synthesize 3 compounds; Synthesize + 2 compounds",
     ],
 )
 def test_agent_executor_validates_all_generation_occurrences_before_tools(

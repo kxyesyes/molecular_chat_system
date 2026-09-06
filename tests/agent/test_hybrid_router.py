@@ -80,6 +80,7 @@ def test_router_uses_canonical_generation_grammar_for_supported_verbs():
         "Produce 5 molecules",
         "Make 3 compounds",
         "Build 4 structures",
+        "Synthesize 6 molecules",
     ):
         decision = HybridSkillRouter().decide(query)
         assert decision.selected_skill == "molecular_design", query
@@ -218,6 +219,8 @@ def test_router_rejects_generation_with_bounded_negation_scope(query):
         "生成一1个分子",
         "生成1一个分子",
         "Generate two point-five molecules",
+        "Generate - 1 molecules",
+        "Synthesize + 2 compounds",
     ],
 )
 def test_router_recognizes_malformed_grouped_generation_count(query):

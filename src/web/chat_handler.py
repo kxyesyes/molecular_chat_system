@@ -17,6 +17,10 @@ from src.agent.persistence.redaction import (
     sanitize_sensitive_text,
 )
 from src.agent.contracts import CandidateSet, ObservationStatus
+from src.agent.contracts.generation_request import (
+    GenerationRequestError,
+    preflight_generation_request,
+)
 from src.agent.routing.hybrid import SMILES_PATTERN
 from src.agent.utils.validators import InputValidator
 from src.web.models import generate_for_chat
@@ -142,6 +146,35 @@ class ChatHandler:
         agent_event_queue = None
         live_agent_events = 0
         rag_task = None
+
+        try:
+            validated_mol_count = preflight_generation_request(
+                message,
+                mol_count,
+                count_supplied=mol_count is not None,
+                field="mol_count",
+            )
+        except GenerationRequestError as exc:
+            content = "Invalid molecular generation request"
+            await websocket.send_text(
+                json.dumps({"type": "complete", "content": content})
+            )
+            history.append(
+                {
+                    "user": message,
+                    "agent_used": False,
+                    "agent_response": None,
+                    "rag_enabled": False,
+                    "molecules_retrieved": 0,
+                    "assistant": content,
+                    "error": {"code": "invalid_input", "message": str(exc)},
+                }
+            )
+            if len(history) > 20:
+                del history[:-20]
+            return
+        if validated_mol_count is not None:
+            mol_count = validated_mol_count
         
         # Agent 处理（使用temperature参数）
         matched_skill = None
@@ -534,6 +567,15 @@ class ChatHandler:
         try:
             import inspect
 
+            validated_mol_count = preflight_generation_request(
+                message,
+                mol_count,
+                count_supplied=mol_count is not None,
+                field="mol_count",
+            )
+            if validated_mol_count is not None:
+                mol_count = validated_mol_count
+
             execute_parameters = inspect.signature(
                 self.agent_system.execute
             ).parameters
@@ -557,6 +599,18 @@ class ChatHandler:
                 lambda: self.agent_system.execute(message, **execute_kwargs)
             )
             return result
+        except GenerationRequestError as exc:
+            return {
+                "success": False,
+                "final_answer": "Invalid molecular generation request",
+                "tools_used": [],
+                "tool_results": {},
+                "error": {
+                    "code": "invalid_input",
+                    "message": str(exc),
+                    "details": {},
+                },
+            }
         except Exception:
             logger.error("Agent execution error; exception details omitted")
             return self._agent_failure_envelope()

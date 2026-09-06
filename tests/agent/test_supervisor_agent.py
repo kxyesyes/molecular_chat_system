@@ -20,7 +20,11 @@ class FakeTool:
                 "success": True,
                 "message": f"{self.name} ok",
                 "data": [
-                    {"gene_symbol": "PDE5A", "source": "local_target_db"}
+                    {
+                        "gene_symbol": "PDE5A",
+                        "source_record_id": "LOCAL_PDE5A",
+                        "source": "local_target_db",
+                    }
                 ],
                 "formatted": "validated PDE5A target evidence",
             }
@@ -210,6 +214,51 @@ def test_supervisor_atomic_generation_receives_canonical_public_count():
             "outputs": {},
         }
     ]
+
+
+def test_supervisor_explicit_count_bypasses_malformed_prose_for_execute_plan_and_run():
+    generator = FakeTool("llm_molecular_generator")
+    supervisor = SupervisorAgent(tools={generator.name: generator})
+    query = "Generate 7.5 molecules"
+
+    execute_result = supervisor.execute(
+        query, mol_count=5, active_skill="molecular_design"
+    )
+    plan_result = supervisor.plan(
+        query, mol_count=5, skill_name="molecular_design"
+    )
+    run_result = supervisor.run(
+        query, mol_count=5, skill_name="molecular_design"
+    )
+
+    assert execute_result["success"] is True
+    assert plan_result["metadata"]["requested_count"] == 5
+    assert run_result["status"] == "succeeded"
+    assert all(call["metadata"]["requested_count"] == 5 for call in generator.calls)
+
+
+@pytest.mark.parametrize("entrypoint", ["plan", "run"])
+def test_supervisor_plan_and_run_reject_malformed_count_before_router(entrypoint):
+    class RouterThatMustNotRun:
+        catalog = WorkflowCatalog()
+
+        def route(self, query, llm=None):
+            raise AssertionError("router ran before generation preflight")
+
+    generator = FakeTool("llm_molecular_generator")
+    supervisor = SupervisorAgent(
+        tools={generator.name: generator},
+        skill_router=RouterThatMustNotRun(),
+    )
+
+    result = getattr(supervisor, entrypoint)("Generate - 1 molecules")
+
+    if entrypoint == "run":
+        assert result["status"] == "failed"
+        assert result["result"]["error"]["code"] == "invalid_input"
+    else:
+        assert result["metadata"]["reason"] == "invalid_requested_count"
+    assert generator.calls == []
 
 
 def test_supervisor_atomic_invalid_count_is_invalid_input_before_tool():

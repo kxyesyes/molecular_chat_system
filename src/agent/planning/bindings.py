@@ -16,6 +16,8 @@ class BindingResolutionError(ValueError):
 
 class BindingResolver:
     OUTPUT = re.compile(r"^\$\.outputs\.([A-Za-z0-9_-]+)$")
+    REQUEST_QUERY = "$.request.query"
+    WORKFLOW = "$.workflow"
     SUPPORTED_TRANSFORMS = frozenset({"identity", "smiles_text"})
 
     @classmethod
@@ -42,6 +44,28 @@ class BindingResolver:
             )
         return transform
 
+    @classmethod
+    def normalize_transform(
+        cls,
+        input_binding: Any,
+        input_from: Any,
+        transform: Any,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Normalize the historical input_from shape contract explicitly."""
+        normalized = cls.validate_transform(transform)
+        if input_binding is None and input_from and normalized == "identity":
+            if not isinstance(metadata, Mapping) or metadata.get("input_mode") != "raw":
+                return "smiles_text"
+        return normalized
+
+    @classmethod
+    def output_key(cls, selector: str) -> str:
+        match = cls.OUTPUT.fullmatch(selector)
+        if not match:
+            raise BindingResolutionError(f"Unsupported binding selector: {selector}")
+        return match.group(1)
+
     def resolve(
         self,
         selector: str,
@@ -52,9 +76,9 @@ class BindingResolver:
         self.validate_transform(transform)
         if not isinstance(selector, str) or not selector:
             raise BindingResolutionError("Invalid input binding selector")
-        if selector == "$.request.query":
+        if selector == self.REQUEST_QUERY:
             value = request.get("query")
-        elif selector == "$.workflow":
+        elif selector == self.WORKFLOW:
             request_metadata = request.get("metadata")
             metadata = (
                 {
@@ -89,12 +113,7 @@ class BindingResolver:
                 ]
             value = deepcopy(workflow_value)
         else:
-            match = self.OUTPUT.fullmatch(selector)
-            if not match:
-                raise BindingResolutionError(
-                    f"Unsupported binding selector: {selector}"
-                )
-            key = match.group(1)
+            key = self.output_key(selector)
             if key not in outputs:
                 raise BindingResolutionError(f"Missing bound output: {key}")
             value = outputs[key]

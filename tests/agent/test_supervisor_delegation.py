@@ -79,7 +79,13 @@ def build_registry(excluded=(), target_output=None, target_quality=None):
             output = (
                 target_output
                 if target_output is not None
-                else [{"gene_symbol": "PDE5A", "source": "local_target_db"}]
+                else [
+                    {
+                        "gene_symbol": "PDE5A",
+                        "source_record_id": "LOCAL_PDE5A",
+                        "source": "local_target_db",
+                    }
+                ]
             )
         elif name == "llm_molecular_generator":
             output = [{"smiles": "CCO"}]
@@ -160,16 +166,16 @@ def test_delegated_atomic_generation_receives_canonical_count_and_rejects_invali
     )
 
     valid = supervisor.run(
-        "Generate candidates",
+        "Generate 7.5 molecules",
         skill_name="molecular_design",
-        mol_count=7,
+        mol_count=5,
     )
 
     assert valid["status"] == "succeeded"
     assert tools["llm_molecular_generator"].calls == [
         {
-            "query": "Generate candidates",
-            "metadata": {"requested_count": 7},
+            "query": "Generate 7.5 molecules",
+            "metadata": {"requested_count": 5},
             "outputs": {},
         }
     ]

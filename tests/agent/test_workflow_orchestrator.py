@@ -226,6 +226,45 @@ def test_workflow_can_pass_raw_upstream_output_to_downstream_tool():
     assert target_tool.calls == [[{"gene_symbol": "EGFR", "final_similarity": 0.91}]]
 
 
+def test_legacy_input_from_is_resolved_without_unrelated_output_leakage():
+    selected = {
+        "data": [{"smiles": "CCO"}],
+        "source_record_id": "LOCAL_MOLECULES_1",
+    }
+    outputs = {
+        "molecules": selected,
+        "unrelated": {"password": "must-not-leak"},
+    }
+    context = AgentContext(query="analyze", trace_id="legacy-binding")
+
+    raw = WorkflowOrchestrator._resolve_semantic_input(
+        context,
+        WorkflowStep(
+            "raw",
+            "property_calculator",
+            input_from="molecules",
+            input_transform="identity",
+            metadata={"input_mode": "raw"},
+        ),
+        outputs,
+    )
+    text = WorkflowOrchestrator._resolve_semantic_input(
+        context,
+        WorkflowStep(
+            "text",
+            "property_calculator",
+            input_from="molecules",
+            input_transform="identity",
+        ),
+        outputs,
+    )
+
+    assert raw is selected
+    assert text == "CCO"
+    assert "must-not-leak" not in repr(raw)
+    assert "must-not-leak" not in text
+
+
 def test_workflow_binding_and_template_pass_target_evidence_to_generator():
     class ValidGenerator(FakeTool):
         def execute(self, query):

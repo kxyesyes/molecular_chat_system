@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
-import re
 
 from src.agent.capabilities import capability_for_tool, get_capability
 from src.agent.contracts.generation_request import (
@@ -30,7 +29,6 @@ class CompiledPlan:
 
 
 class PlanCompiler:
-    OUTPUT_SELECTOR = re.compile(r"^\$\.outputs\.([A-Za-z0-9_-]+)$")
     SUPPORTED_PRECONDITIONS = frozenset({"target_evidence"})
 
     def compile(self, plan: WorkflowPlan, policy: WorkflowPolicy) -> CompiledPlan:
@@ -68,7 +66,12 @@ class PlanCompiler:
                 )
 
             try:
-                BindingResolver.validate_transform(step.input_transform)
+                BindingResolver.normalize_transform(
+                    step.input_binding,
+                    step.input_from,
+                    step.input_transform,
+                    step.metadata,
+                )
                 selector = BindingResolver.derive_selector(
                     step.input_binding,
                     step.input_from,
@@ -99,6 +102,8 @@ class PlanCompiler:
                             )
                         except GenerationRequestError as exc:
                             raise PlanCompilationError(str(exc)) from None
+                    elif plan_count is not None:
+                        input_count = plan_count
                     else:
                         query = str(step.input_data.get("query") or "")
                         try:
@@ -117,16 +122,21 @@ class PlanCompiler:
                         except GenerationRequestError as exc:
                             raise PlanCompilationError(str(exc)) from None
                 elif isinstance(step.input_data, str):
-                    try:
-                        input_count = validate_generation_count(
-                            parse_generation_count(
-                                step.input_data,
-                                default=plan_count or DEFAULT_GENERATION_COUNT,
-                            ),
-                            field=f"steps.{step.name}.input_data.requested_count",
-                        )
-                    except GenerationRequestError as exc:
-                        raise PlanCompilationError(str(exc)) from None
+                    if plan_count is not None:
+                        input_count = plan_count
+                    else:
+                        try:
+                            input_count = validate_generation_count(
+                                parse_generation_count(
+                                    step.input_data,
+                                    default=DEFAULT_GENERATION_COUNT,
+                                ),
+                                field=(
+                                    f"steps.{step.name}.input_data.requested_count"
+                                ),
+                            )
+                        except GenerationRequestError as exc:
+                            raise PlanCompilationError(str(exc)) from None
                 if plan_count is not None and input_count is not None:
                     if input_count != plan_count:
                         raise PlanCompilationError(
@@ -158,7 +168,9 @@ class PlanCompiler:
                         plan.steps[step_index] = step
             step_dependencies: tuple[str, ...] = ()
             if selector:
-                if selector == "$.workflow":
+                if selector == BindingResolver.REQUEST_QUERY:
+                    step_dependencies = ()
+                elif selector == BindingResolver.WORKFLOW:
                     if (
                         "target" not in producers
                         or producer_capabilities["target"]
@@ -170,12 +182,12 @@ class PlanCompiler:
                         )
                     step_dependencies = (producers["target"],)
                 else:
-                    match = self.OUTPUT_SELECTOR.fullmatch(selector)
-                    if not match:
+                    try:
+                        output_key = BindingResolver.output_key(selector)
+                    except BindingResolutionError as exc:
                         raise PlanCompilationError(
                             f"Unsupported input binding: {selector}"
-                        )
-                    output_key = match.group(1)
+                        ) from None
                     if output_key not in producers:
                         raise PlanCompilationError(
                             f"Binding references missing output: {output_key}"

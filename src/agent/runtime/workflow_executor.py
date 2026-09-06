@@ -262,6 +262,10 @@ class WorkflowExecutor:
         step_counts: list[int] = []
         step_query_counts: list[int] = []
         invalid_step_count = False
+        higher_precedence_count = (
+            "requested_count" in effective_plan.metadata
+            or "requested_count" in context_snapshot.metadata
+        )
         for step in generation_steps:
             input_metadata = (
                 step.input_data.get("metadata")
@@ -280,6 +284,10 @@ class WorkflowExecutor:
                     )
                 except GenerationRequestError:
                     invalid_step_count = True
+                continue
+
+            if higher_precedence_count:
+                continue
 
             step_query = (
                 step.input_data

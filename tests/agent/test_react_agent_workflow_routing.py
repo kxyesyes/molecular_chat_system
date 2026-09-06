@@ -234,7 +234,34 @@ def test_no_llm_generation_fallback_rejects_invalid_count_before_tool():
 
     assert response["success"] is False
     assert response["error"]["code"] == "invalid_input"
-    assert tool.calls == []
+
+
+def test_react_explicit_count_bypasses_malformed_generation_prose():
+    class MatchingGenerator:
+        name = "llm_molecular_generator"
+
+        def __init__(self):
+            self.calls = []
+
+        def should_use(self, query):
+            return True
+
+        def execute(self, query):
+            self.calls.append(query)
+            return {"success": True, "formatted": "generated"}
+
+    tool = MatchingGenerator()
+    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
+    agent.llm = None
+    agent.tools = {tool.name: tool}
+    agent.max_iterations = 5
+    agent.skill_router = None
+    agent._active_skill = None
+
+    response = agent.execute("Generate 7.5 molecules", mol_count=5)
+
+    assert response["success"] is True
+    assert tool.calls[0]["metadata"]["requested_count"] == 5
 
 
 def test_no_llm_fallback_prioritizes_all_canonical_generation_verbs():

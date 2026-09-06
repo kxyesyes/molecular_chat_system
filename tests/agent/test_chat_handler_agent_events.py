@@ -1962,6 +1962,90 @@ def test_chat_handler_omitted_count_rejects_invalid_text_before_tool(query):
     assert tool.calls == []
 
 
+def test_chat_handler_rejects_malformed_generation_before_should_use_or_router():
+    class AgentThatMustNotRoute:
+        llm = None
+        skill_router = None
+
+        def __init__(self):
+            self.should_use_calls = []
+            self.execute_calls = []
+
+        def should_use_tools(self, message):
+            self.should_use_calls.append(message)
+            raise AssertionError("should_use_tools ran before generation preflight")
+
+        def execute(self, *args, **kwargs):
+            self.execute_calls.append((args, kwargs))
+            raise AssertionError("agent ran before generation preflight")
+
+    agent = AgentThatMustNotRoute()
+    model = FakeModel()
+    handler = ChatHandler(
+        model=model,
+        rag_service=FakeRagService(),
+        agent_system=agent,
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="Generate - 1 molecules",
+            enable_rag=False,
+            enable_tools=True,
+        )
+    )
+
+    assert agent.should_use_calls == []
+    assert agent.execute_calls == []
+    assert model.generate_calls == 0
+    assert websocket.messages[-1]["type"] == "complete"
+    assert "Invalid molecular generation request" in websocket.messages[-1]["content"]
+
+
+def test_chat_handler_authoritative_count_bypasses_malformed_generation_prose():
+    class CapturingAgent:
+        llm = None
+        skill_router = None
+
+        def __init__(self):
+            self.calls = []
+
+        def should_use_tools(self, message):
+            return True
+
+        def execute(self, message, **kwargs):
+            self.calls.append((message, kwargs))
+            return {
+                "success": True,
+                "final_answer": "generated",
+                "tools_used": ["llm_molecular_generator"],
+                "tool_results": {},
+            }
+
+    agent = CapturingAgent()
+    handler = ChatHandler(
+        model=FakeModel(),
+        rag_service=FakeRagService(),
+        agent_system=agent,
+        config={"inference": {"stream": False}},
+    )
+
+    asyncio.run(
+        handler._process_message(
+            websocket=FakeWebSocket(),
+            message="Generate 7.5 molecules",
+            enable_rag=False,
+            enable_tools=True,
+            mol_count=5,
+        )
+    )
+
+    assert agent.calls[0][1]["mol_count"] == 5
+
+
 def test_chat_handler_omitted_count_preserves_valid_text_count():
     tool = RecordingTool("llm_molecular_generator")
     supervisor = SupervisorAgent(

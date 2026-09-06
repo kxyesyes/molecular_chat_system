@@ -347,19 +347,18 @@ class WorkflowOrchestrator:
             step.input_binding,
             step.input_from,
         )
-        if step.input_binding:
+        if selector is not None:
+            transform = BindingResolver.normalize_transform(
+                step.input_binding,
+                step.input_from,
+                step.input_transform,
+                step.metadata,
+            )
             input_data = BindingResolver().resolve(
                 selector,
-                step.input_transform,
+                transform,
                 request={"query": context.query, "metadata": context.metadata},
                 outputs=outputs,
-            )
-        elif selector is not None:
-            raw_input = outputs.get(step.input_from)
-            input_data = (
-                raw_input
-                if step.metadata.get("input_mode") == "raw"
-                else cls._smiles_text(raw_input)
             )
         else:
             input_data = context.query if step.input_data is None else step.input_data

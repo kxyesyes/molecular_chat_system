@@ -24,6 +24,10 @@ _COUNT_UNSET = object()
 class GenerationRequestError(ValueError):
     """A caller-supplied generation request violates the public contract."""
 
+    def __init__(self, message: str, *, value: Any = None):
+        super().__init__(message)
+        self.value = value
+
 
 class TargetEvidenceError(GenerationRequestError):
     """Target evidence is unsafe or cannot satisfy the canonical schema."""
@@ -76,15 +80,6 @@ _EVIDENCE_TEXT_FIELDS = (
     "uniprot_id",
     "source_url",
 )
-_IDENTIFIER_FIELDS = frozenset(
-    {
-        "gene_symbol",
-        "target_identifier",
-        "uniprot_id",
-        "target_id",
-        "source_record_id",
-    }
-)
 _PROVENANCE_FIELDS = frozenset(
     {
         "source",
@@ -102,23 +97,20 @@ _CREDENTIAL_PATTERN = re.compile(
 )
 _SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
 _SAFE_GENE_SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,19}\Z")
-_INSTRUCTION_IDENTIFIER_PREFIXES = frozenset(
-    {
-        ("output", "only"),
-        ("return", "only"),
-        ("respond", "with"),
-        ("system", "prompt"),
-    }
+_INSTRUCTION_IDENTIFIER_LEXICAL_COMBINATIONS = (
+    ("follow", "instruction"),
+    ("ignore", "instruction"),
+    ("output", "only"),
+    ("override", "prompt"),
+    ("override", "system"),
+    ("override", "task"),
+    ("respond", "with"),
+    ("return", "only"),
+    ("system", "prompt"),
 )
-_CONCATENATED_LOCAL_INSTRUCTION_PATTERNS = frozenset(
-    {
-        "followinstruction",
-        "ignoreinstruction",
-        "outputonly",
-        "respondwith",
-        "returnonly",
-        "systemprompt",
-    }
+_CREDENTIAL_TEXT_PATTERN = re.compile(
+    r"(?:accesstoken|apikey|authtoken|credential|password|"
+    r"secret(?:key|token|[0-9]|$))"
 )
 _UNIPROT_ACCESSION = re.compile(
     r"(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})\Z",
@@ -154,7 +146,7 @@ _ENGLISH_DECIMAL_PART = rf"(?:{_ENGLISH_COUNT_WORD}|\d+)"
 _CHINESE_DECIMAL_PART = rf"(?:{_CHINESE_COUNT}|\d+)"
 _COUNT_TOKEN = rf"(?:{_ARABIC_COUNT}|{_CHINESE_COUNT}|{_ENGLISH_COUNT})"
 _ENGLISH_NOUN = r"(?:candidates?|molecules?|compounds?|structures?)"
-_GENERATION_VERB = r"(?:generate|design|create|produce|make|build)"
+_GENERATION_VERB = r"(?:generate|design|create|produce|make|build|synthesize)"
 _ENGLISH_COUNT_FOLLOW = (
     rf"(?:{_ENGLISH_NOUN}\b|for\b|"
     rf"(?:and[ \t]+(?:then[ \t]+)?|then[ \t]+){_GENERATION_VERB}\b)"
@@ -247,9 +239,26 @@ _MALFORMED_HYBRID_COUNT_PATTERNS = (
         rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
     ),
 )
+_SPACED_SIGNED_ARABIC_COUNT = r"[-+\u2212][ \t]+\d+(?:\.\d+)?"
+_MALFORMED_SPACED_SIGN_COUNT_PATTERNS = (
+    re.compile(
+        rf"(?i)\b{_GENERATION_VERB}\b[ \t]*"
+        rf"(?P<count>{_SPACED_SIGNED_ARABIC_COUNT})"
+        rf"(?:[ \t]+{_ENGLISH_COUNT_MODIFIER}){{0,3}}"
+        rf"(?=[ \t]+{_ENGLISH_COUNT_FOLLOW}|[ \t]*$)"
+    ),
+    re.compile(
+        rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
+        rf"(?P<count>{_SPACED_SIGNED_ARABIC_COUNT})"
+        rf"\s*(?:个|种|份)?\s*"
+        rf"(?:{_CHINESE_PRE_NOUN_MODIFIER}\s*){{0,2}}"
+        rf"(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选)|用于|给|$)"
+    ),
+)
 _MALFORMED_PREMASK_COUNT_PATTERNS = (
     *_MALFORMED_GROUPED_COUNT_PATTERNS,
     *_MALFORMED_HYBRID_COUNT_PATTERNS,
+    *_MALFORMED_SPACED_SIGN_COUNT_PATTERNS,
 )
 _MALFORMED_WORD_COUNT_PATTERNS = (
     re.compile(
@@ -323,13 +332,31 @@ _FUZZY_COUNTS = (
 
 def validate_generation_count(value: Any, *, field: str = "requested_count") -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise GenerationRequestError(f"{field} must be an integer")
+        raise GenerationRequestError(
+            f"{field} must be an integer", value=value
+        )
     if not MIN_GENERATION_COUNT <= value <= MAX_GENERATION_COUNT:
         raise GenerationRequestError(
             f"{field} must be between {MIN_GENERATION_COUNT} and "
-            f"{MAX_GENERATION_COUNT}"
+            f"{MAX_GENERATION_COUNT}",
+            value=value,
         )
     return value
+
+
+def preflight_generation_request(
+    query: str,
+    authoritative_count: Any = None,
+    *,
+    count_supplied: bool = False,
+    field: str = "requested_count",
+) -> int | None:
+    """Validate one generation boundary without reparsing authoritative counts."""
+    if count_supplied:
+        return validate_generation_count(authoritative_count, field=field)
+    if has_generation_intent(query):
+        return validate_generation_count(parse_generation_count(query), field=field)
+    return None
 
 
 def parse_generation_count(query: str, *, default: int = DEFAULT_GENERATION_COUNT) -> int:
@@ -409,14 +436,7 @@ def has_generation_intent(query: str) -> bool:
 def _matches_generation_grammar(value: str) -> bool:
     return (
         any(pattern.search(value) for pattern in _COUNT_SLOT_PATTERNS)
-        or any(
-            pattern.search(value)
-            for pattern in _MALFORMED_GROUPED_COUNT_PATTERNS
-        )
-        or any(
-            pattern.search(value)
-            for pattern in _MALFORMED_HYBRID_COUNT_PATTERNS
-        )
+        or any(pattern.search(value) for pattern in _MALFORMED_PREMASK_COUNT_PATTERNS)
         or any(
             pattern.search(value)
             for pattern in _MALFORMED_WORD_COUNT_PATTERNS
@@ -455,8 +475,7 @@ def _split_generation_clauses(value: str) -> list[str]:
     for pattern in (
         *_COUNT_SLOT_PATTERNS,
         *_COUNT_PATTERNS,
-        *_MALFORMED_GROUPED_COUNT_PATTERNS,
-        *_MALFORMED_HYBRID_COUNT_PATTERNS,
+        *_MALFORMED_PREMASK_COUNT_PATTERNS,
         *_MALFORMED_WORD_COUNT_PATTERNS,
     ):
         for match in pattern.finditer(value):
@@ -504,8 +523,7 @@ def _generation_occurrence_spans(value: str) -> list[tuple[int, int]]:
     matches: list[tuple[int, int]] = []
     for pattern in (
         *_COUNT_SLOT_PATTERNS,
-        *_MALFORMED_GROUPED_COUNT_PATTERNS,
-        *_MALFORMED_HYBRID_COUNT_PATTERNS,
+        *_MALFORMED_PREMASK_COUNT_PATTERNS,
         *_MALFORMED_WORD_COUNT_PATTERNS,
         *(pattern for pattern, _value in _FUZZY_COUNTS),
     ):
@@ -977,10 +995,20 @@ def _sanitize_target_record(
             "source_record_id",
         ),
         allow_nested_source=True,
+        require_identity=False,
     ):
         return {}
 
-    has_identifier = any(field in record for field in _IDENTIFIER_FIELDS) or any(
+    has_identifier = _has_source_specific_identity(
+        record,
+        fields=(
+            "target_identifier",
+            "uniprot_id",
+            "target_id",
+            "source_record_id",
+        ),
+        allow_nested_source=True,
+    ) or any(
         record.get(field)
         for field in ("recommended_structures", "evidence", "artifacts")
     )
@@ -1007,14 +1035,11 @@ def _sanitize_structure_record(value: Mapping[str, Any]) -> dict[str, Any]:
     for field in ("docking_recommended", "is_preferred", "stale"):
         if isinstance(value.get(field), bool):
             record[field] = value[field]
-    has_identifier = any(
-        key in record for key in ("structure_id", "source_record_id")
-    )
     has_provenance = any(
         key in record
         for key in ("source", "database", "source_url", "download_url")
     )
-    return record if has_identifier and has_provenance else {}
+    return record if has_provenance else {}
 
 
 def _sanitize_evidence_record(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -1029,14 +1054,10 @@ def _sanitize_evidence_record(value: Mapping[str, Any]) -> dict[str, Any]:
         fields=("id", "source_record_id", "structure_id", "uniprot_id"),
     ):
         return {}
-    has_identifier = any(
-        key in record
-        for key in ("id", "source_record_id", "structure_id", "uniprot_id")
-    )
     has_provenance = any(
         key in record for key in ("source", "database", "source_url")
     )
-    return record if has_identifier and has_provenance else {}
+    return record if has_provenance else {}
 
 
 def _sanitize_nested_records(value: Any, sanitizer, *, limit: int) -> list[dict[str, Any]]:
@@ -1077,10 +1098,7 @@ def _safe_text(
     normalized = value.strip()
     if normalized.lower() in _PLACEHOLDERS:
         return None
-    if (
-        looks_like_credential(normalized)
-        or _CREDENTIAL_PATTERN.search(normalized)
-    ):
+    if _looks_credential_shaped_text(normalized):
         raise TargetEvidenceError("target evidence contains unsafe text")
     if _looks_instruction_shaped_identifier(normalized):
         return None
@@ -1099,39 +1117,21 @@ def _safe_text(
 
 
 def _looks_instruction_shaped_identifier(value: str) -> bool:
-    normalized_local = unicodedata.normalize("NFKC", value).casefold()
-    local_match = _LOCAL_RECORD_ID.fullmatch(normalized_local)
-    if local_match and any(
-        pattern in local_match.group("suffix")
-        for pattern in _CONCATENATED_LOCAL_INSTRUCTION_PATTERNS
-    ):
-        return True
-
-    tokens = tuple(
-        token
-        for token in re.split(r"[._-]+", value.casefold())
-        if token
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    lexical_text = re.sub(r"[^a-z0-9]+", "", normalized)
+    return any(
+        all(lexeme in lexical_text for lexeme in combination)
+        for combination in _INSTRUCTION_IDENTIFIER_LEXICAL_COMBINATIONS
     )
-    if any(
-        tokens[index : index + 2] in _INSTRUCTION_IDENTIFIER_PREFIXES
-        for index in range(len(tokens) - 1)
-    ):
-        return True
+
+
+def _looks_credential_shaped_text(value: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    lexical_text = re.sub(r"[^a-z0-9]+", "", normalized)
     return bool(
-        tokens
-        and (
-            (
-                "ignore" in tokens
-                and any(token.startswith("instruction") for token in tokens)
-            )
-            or (
-                "override" in tokens
-                and any(
-                    token in {"prompt", "system", "task"}
-                    for token in tokens
-                )
-            )
-        )
+        looks_like_credential(value)
+        or _CREDENTIAL_PATTERN.search(normalized)
+        or _CREDENTIAL_TEXT_PATTERN.search(lexical_text)
     )
 
 
@@ -1140,6 +1140,7 @@ def _filter_source_specific_identifiers(
     *,
     fields: Sequence[str],
     allow_nested_source: bool = False,
+    require_identity: bool = True,
 ) -> bool:
     source_kind, conflict = _record_source_kind(record)
     if conflict:
@@ -1157,7 +1158,44 @@ def _filter_source_specific_identifiers(
             record.pop(field, None)
     if not _record_identifiers_match_urls(record, fields, source_kind):
         return False
-    return True
+    return not require_identity or _has_source_specific_identity(
+        record,
+        fields=fields,
+        allow_nested_source=allow_nested_source,
+    )
+
+
+def _has_source_specific_identity(
+    record: Mapping[str, Any],
+    *,
+    fields: Sequence[str],
+    allow_nested_source: bool = False,
+) -> bool:
+    source_kind, conflict = _record_source_kind(record)
+    if conflict:
+        return False
+    if source_kind is None and allow_nested_source:
+        nested_kinds = _nested_source_kinds(record)
+        if len(nested_kinds) == 1:
+            source_kind = next(iter(nested_kinds))
+    if source_kind not in {"uniprot", "rcsb", "alphafold", "local"}:
+        return False
+    identifiers, url_identifiers = _source_identity_values(
+        record, fields, source_kind
+    )
+    if source_kind == "alphafold":
+        identifiers = {
+            canonical
+            for field in fields
+            if field != "uniprot_id"
+            and isinstance(record.get(field), str)
+            and (
+                canonical := _canonical_source_identifier(
+                    str(record[field]), source_kind, field=field
+                )
+            )
+        }
+    return bool(identifiers or url_identifiers)
 
 
 def _record_source_kind(record: Mapping[str, Any]) -> tuple[str | None, bool]:
@@ -1244,13 +1282,28 @@ def _record_identifiers_match_urls(
 ) -> bool:
     if source_kind not in {"uniprot", "rcsb", "alphafold"}:
         return True
+    identifiers, url_identifiers = _source_identity_values(
+        record, fields, source_kind
+    )
+    return (
+        len(identifiers) <= 1
+        and len(url_identifiers) <= 1
+        and (not identifiers or not url_identifiers or identifiers == url_identifiers)
+    )
+
+
+def _source_identity_values(
+    record: Mapping[str, Any],
+    fields: Sequence[str],
+    source_kind: str,
+) -> tuple[set[str], set[str]]:
     identifiers = {
         canonical
         for field in fields
         if isinstance(record.get(field), str)
         and (
             canonical := _canonical_source_identifier(
-                str(record[field]), source_kind
+                str(record[field]), source_kind, field=field
             )
         )
     }
@@ -1264,16 +1317,19 @@ def _record_identifiers_match_urls(
             )
         )
     }
-    return (
-        len(identifiers) <= 1
-        and len(url_identifiers) <= 1
-        and (not identifiers or not url_identifiers or identifiers == url_identifiers)
-    )
+    return identifiers, url_identifiers
 
 
-def _canonical_source_identifier(identifier: str, source_kind: str) -> str | None:
+def _canonical_source_identifier(
+    identifier: str,
+    source_kind: str,
+    *,
+    field: str,
+) -> str | None:
     normalized = identifier.upper()
     if source_kind == "alphafold":
+        if field == "uniprot_id" and _UNIPROT_ACCESSION.fullmatch(normalized):
+            return normalized
         match = re.fullmatch(r"AF-(.+)-F[0-9]+", normalized)
         return match.group(1) if match else None
     return normalized
@@ -1431,6 +1487,7 @@ __all__ = [
     "has_generation_intent",
     "parse_chinese_integer",
     "parse_generation_count",
+    "preflight_generation_request",
     "preserve_generation_trust_envelope",
     "preserve_target_quality",
     "preserve_trust_signals",

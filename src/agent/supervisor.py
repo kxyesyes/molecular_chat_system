@@ -14,8 +14,8 @@ from src.agent.contracts import (
 from src.agent.contracts.generation_request import (
     DEFAULT_GENERATION_COUNT,
     GenerationRequestError,
-    build_generation_request,
     has_generation_intent,
+    preflight_generation_request,
     preserve_target_quality,
 )
 from src.agent.harness import HarnessFactory
@@ -136,6 +136,7 @@ class SupervisorAgent:
 
     def should_use_tools(self, query: str) -> bool:
         """Return whether the query maps to a supported scientific skill."""
+        preflight_generation_request(query)
         return self._resolve_policy(query) is not None
 
     def _resolve_policy(
@@ -162,32 +163,24 @@ class SupervisorAgent:
         capabilities: Mapping[str, bool] | None = None,
     ) -> dict[str, Any]:
         """Chat-compatible entry point backed by the workflow runtime."""
-        generation_intent = has_generation_intent(query)
-        selected_policy = None
-        if active_skill is not None or not generation_intent:
-            selected_policy = self._resolve_policy(query, active_skill)
-        validate_text_count = (
-            generation_intent
-            or selected_policy is not None
-            and "llm_molecular_generator" in selected_policy.allowed_tools
+        raw_requested_count: Any = (
+            mol_count if mol_count is not _MOL_COUNT_UNSET else None
         )
-        raw_requested_count: Any = None
         try:
-            raw_requested_count = (
-                mol_count
-                if mol_count is not _MOL_COUNT_UNSET
-                else None
+            preflight_count = preflight_generation_request(
+                query,
+                mol_count if mol_count is not _MOL_COUNT_UNSET else None,
+                count_supplied=mol_count is not _MOL_COUNT_UNSET,
+                field="mol_count",
             )
-            if mol_count is not _MOL_COUNT_UNSET:
-                generation_request = build_generation_request(query, mol_count)
-                requested_count = generation_request["metadata"]["requested_count"]
-            elif validate_text_count:
-                generation_request = build_generation_request(query)
-                requested_count = generation_request["metadata"]["requested_count"]
+            if preflight_count is not None:
+                requested_count = preflight_count
                 raw_requested_count = requested_count
             else:
                 requested_count = DEFAULT_GENERATION_COUNT
         except GenerationRequestError as exc:
+            if raw_requested_count is None and isinstance(exc.value, int):
+                raw_requested_count = exc.value
             active_name = getattr(active_skill, "name", active_skill)
             error = AgentExecutionError(
                 code=AgentErrorCode.INVALID_INPUT,
@@ -236,6 +229,10 @@ class SupervisorAgent:
                     },
                 },
             }
+        generation_intent = has_generation_intent(query)
+        selected_policy = None
+        if active_skill is not None or not generation_intent:
+            selected_policy = self._resolve_policy(query, active_skill)
         policy = selected_policy or self._resolve_policy(query, active_skill)
         if policy is None:
             return {
@@ -336,6 +333,13 @@ class SupervisorAgent:
         metadata: dict[str, Any] | None = None,
         mol_count: Any = _MOL_COUNT_UNSET,
     ) -> dict[str, Any]:
+        metadata = dict(metadata or {})
+        try:
+            self._preflight_context_count(query, metadata, mol_count)
+        except GenerationRequestError as exc:
+            return self._invalid_plan_response(
+                query, skill_name, trace_id, metadata, mol_count, exc
+            )
         context = self._build_context(
             query, skill_name, trace_id, metadata, mol_count
         )
@@ -368,7 +372,13 @@ class SupervisorAgent:
         metadata: dict[str, Any] | None = None,
         mol_count: Any = _MOL_COUNT_UNSET,
     ) -> dict[str, Any]:
-        metadata = metadata or {}
+        metadata = dict(metadata or {})
+        try:
+            self._preflight_context_count(query, metadata, mol_count)
+        except GenerationRequestError as exc:
+            return self._invalid_run_response(
+                skill_name, trace_id, metadata, mol_count, exc
+            )
         idempotency_key = metadata.get("idempotency_key")
         if self.state_store and idempotency_key:
             existing = self.state_store.get_run_by_idempotency_key(idempotency_key)
@@ -494,6 +504,100 @@ class SupervisorAgent:
             execution.plan.steps,
             execution.result,
         )
+
+    @staticmethod
+    def _preflight_context_count(
+        query: str,
+        metadata: dict[str, Any],
+        mol_count: Any,
+    ) -> int | None:
+        if mol_count is not _MOL_COUNT_UNSET:
+            count = preflight_generation_request(
+                query,
+                mol_count,
+                count_supplied=True,
+                field="mol_count",
+            )
+            metadata["requested_count"] = count
+            return count
+        if "requested_count" in metadata:
+            count = preflight_generation_request(
+                query,
+                metadata["requested_count"],
+                count_supplied=True,
+                field="metadata.requested_count",
+            )
+            metadata["requested_count"] = count
+            return count
+        count = preflight_generation_request(query)
+        if count is not None:
+            metadata["requested_count"] = count
+        return count
+
+    @staticmethod
+    def _invalid_plan_response(
+        query: str,
+        skill_name: str | None,
+        trace_id: str | None,
+        metadata: Mapping[str, Any],
+        mol_count: Any,
+        exc: GenerationRequestError,
+    ) -> dict[str, Any]:
+        raw_count = (
+            mol_count
+            if mol_count is not _MOL_COUNT_UNSET
+            else metadata.get("requested_count")
+        )
+        return {
+            "trace_id": trace_id or str(uuid4()),
+            "skill_name": skill_name,
+            "workflow_name": skill_name or "molecular_design",
+            "metadata": {
+                "requested_count": raw_count,
+                "reason": "invalid_requested_count",
+            },
+            "steps": [],
+            "error": {
+                "code": AgentErrorCode.INVALID_INPUT.value,
+                "message": str(exc),
+                "details": {},
+            },
+        }
+
+    @staticmethod
+    def _invalid_run_response(
+        skill_name: str | None,
+        trace_id: str | None,
+        metadata: Mapping[str, Any],
+        mol_count: Any,
+        exc: GenerationRequestError,
+    ) -> dict[str, Any]:
+        plan = SupervisorAgent._invalid_plan_response(
+            "", skill_name, trace_id, metadata, mol_count, exc
+        )
+        error = AgentExecutionError(
+            code=AgentErrorCode.INVALID_INPUT,
+            message="Invalid molecular generation request",
+            details={"reason": str(exc)},
+        )
+        result = AgentResult(
+            trace_id=plan["trace_id"],
+            success=False,
+            message=error.message,
+            skill_name=skill_name,
+            error=error,
+        ).to_legacy_dict()
+        return {
+            "trace_id": plan["trace_id"],
+            "status": "failed",
+            "message": error.message,
+            "plan": {
+                "workflow_name": plan["workflow_name"],
+                "steps": [],
+                "metadata": plan["metadata"],
+            },
+            "result": result,
+        }
 
     def _execute_with_harness(
         self,
