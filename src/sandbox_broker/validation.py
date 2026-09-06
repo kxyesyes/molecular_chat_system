@@ -306,9 +306,9 @@ def stage_input(
             or _identity(input_root.lstat()) != parent_identity
         ):
             raise ValueError
-        os.close(descriptor)
-        descriptor = None
-
+        if os.name != "posix":
+            os.close(descriptor)
+            descriptor = None
         try:
             existing = final.lstat()
         except FileNotFoundError:
@@ -331,7 +331,37 @@ def stage_input(
         else:
             if _identity(input_root.lstat()) != parent_identity:
                 raise ValueError
-            os.link(part, final, follow_symlinks=False)
+            try:
+                os.link(part, final, follow_symlinks=False)
+            except BaseException:
+                opened_after_link = (
+                    os.fstat(descriptor) if descriptor is not None else part.lstat()
+                )
+                if _identity(opened_after_link) == part_identity:
+                    part_version = _stat_version(opened_after_link)
+                    try:
+                        interrupted_final = final.lstat()
+                    except FileNotFoundError:
+                        interrupted_final = None
+                    if (
+                        interrupted_final is not None
+                        and stat.S_ISREG(interrupted_final.st_mode)
+                        and not stat.S_ISLNK(interrupted_final.st_mode)
+                        and not _is_reparse(interrupted_final)
+                        and _identity(interrupted_final) == part_identity
+                    ):
+                        published = True
+                        published_identity = _identity(interrupted_final)
+                        published_version = _stat_version(interrupted_final)
+                        if _safe_unlink_created(
+                            part,
+                            part_identity,
+                            _stat_version(opened_after_link),
+                        ):
+                            part_identity = None
+                            part_version = None
+                            published_version = _stat_version(final.lstat())
+                raise
             published = True
             linked_part = part.lstat()
             linked_final = final.lstat()
@@ -365,19 +395,35 @@ def stage_input(
             _fsync_directory(input_root)
 
         relative = PurePosixPath("jobs", validated_job_id, "input", server_name)
+        published = False
         return StagedInput(str(relative), total, digest.hexdigest())
     except Exception:
-        if published and final is not None:
-            _safe_unlink_created(final, published_identity, published_version)
         raise InputStagingError("input staging failed") from None
     finally:
+        if descriptor is not None and os.name != "posix":
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            descriptor = None
+        descriptor_open = descriptor is not None
+        if published and final is not None:
+            _safe_unlink_created(
+                final,
+                published_identity,
+                None if descriptor_open else published_version,
+            )
+        if part is not None:
+            _safe_unlink_created(
+                part,
+                part_identity,
+                None if descriptor_open else part_version,
+            )
         if descriptor is not None:
             try:
                 os.close(descriptor)
             except OSError:
                 pass
-        if part is not None:
-            _safe_unlink_created(part, part_identity, part_version)
 
 
 def _reject_json_constant(_: str) -> None:
