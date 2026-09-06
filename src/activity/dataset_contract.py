@@ -6,7 +6,7 @@ This module deliberately contains no training imports or filesystem setup.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 import json
 import math
 from pathlib import Path
@@ -16,7 +16,7 @@ from typing import Any
 
 import pandas as pd
 from rdkit import Chem, rdBase
-from rdkit.Chem.MolStandardize import rdMolStandardize
+from rdkit.Chem import SaltRemover
 from rdkit.Chem.Scaffolds import MurckoScaffold
 
 
@@ -47,15 +47,28 @@ _COLUMN_FIELDS = ("relation_column", "smiles_column", "value_column")
 _UNITS_COLUMN = "units"
 _WHITESPACE = re.compile(r"\s+")
 _ASCII_WHITESPACE = " \t\n\r\f\v"
-_CONCENTRATION_UNITS = {
-    "M": ("M", 0),
-    "mM": ("mM", -3),
-    "uM": ("uM", -6),
-    "μM": ("uM", -6),
-    "micro-M": ("uM", -6),
-    "nM": ("nM", -9),
-    "pM": ("pM", -12),
+_UNIT_REGISTRY = {
+    "M": "M",
+    "mM": "mM",
+    "uM": "uM",
+    "μM": "uM",
+    "micro-M": "uM",
+    "nM": "nM",
+    "pM": "pM",
+    "pIC50": "pIC50",
+    "pKi": "pKi",
+    "pEC50": "pEC50",
+    "probability": "probability",
 }
+_CONCENTRATION_EXPONENTS = {
+    "M": 0,
+    "mM": -3,
+    "uM": -6,
+    "nM": -9,
+    "pM": -12,
+}
+_PACTIVITY_UNITS = {"pIC50", "pKi", "pEC50"}
+_SALT_REMOVER = SaltRemover.SaltRemover()
 _ACCEPTED_COLUMNS = [
     "original_smiles",
     "original_value",
@@ -148,6 +161,8 @@ class DatasetManifest:
     label_transform: str
     source: str
     license: str
+    output_endpoint: str | None = None
+    output_units: str | None = None
     relation_column: str = "relation"
     smiles_column: str = "smiles"
     value_column: str = "value"
@@ -173,6 +188,14 @@ class DatasetManifest:
         if normalized_transform not in _SUPPORTED_LABEL_TRANSFORMS:
             raise ValueError(f"Invalid label_transform: {self.label_transform!r}")
         object.__setattr__(self, "label_transform", normalized_transform)
+
+        normalized_endpoint = _validate_metadata_string(self.endpoint, "endpoint")
+        object.__setattr__(self, "endpoint", normalized_endpoint)
+        object.__setattr__(
+            self,
+            "units",
+            _canonical_manifest_unit(self.units, "units"),
+        )
 
         if not isinstance(self.duplicate_strategy, str):
             raise ValueError("Invalid duplicate_strategy")
@@ -246,23 +269,83 @@ class DatasetManifest:
                 "is classification and label_transform is binary_threshold"
             )
 
+        output_endpoint = self.output_endpoint
+        output_units = self.output_units
+        if normalized_transform == "identity":
+            if output_endpoint is not None:
+                raise ValueError(
+                    "Invalid output_endpoint: must be absent for identity transform"
+                )
+            if output_units is not None:
+                raise ValueError(
+                    "Invalid output_units: must be absent for identity transform"
+                )
+        else:
+            normalized_output_endpoint = _validate_metadata_string(
+                output_endpoint,
+                "output_endpoint",
+            )
+            canonical_output_units = _canonical_manifest_unit(
+                output_units,
+                "output_units",
+            )
+            object.__setattr__(
+                self,
+                "output_endpoint",
+                normalized_output_endpoint,
+            )
+            object.__setattr__(self, "output_units", canonical_output_units)
+
+            if normalized_transform == "molar_to_pactivity":
+                if self.units not in _CONCENTRATION_EXPONENTS:
+                    raise ValueError(
+                        "Invalid units: molar_to_pactivity requires concentration units"
+                    )
+                if normalized_output_endpoint not in _PACTIVITY_UNITS:
+                    raise ValueError(
+                        "Invalid output_endpoint: expected supported pActivity endpoint"
+                    )
+                if canonical_output_units != normalized_output_endpoint:
+                    raise ValueError(
+                        "Invalid output_units: must match output_endpoint for pActivity"
+                    )
+            elif canonical_output_units != "probability":
+                raise ValueError(
+                    "Invalid output_units: binary_threshold requires probability"
+                )
+
         for field_name in ("target_id", "endpoint", "units", "task_type"):
             _identity_component(getattr(self, field_name), field_name)
+        if self.output_endpoint is not None:
+            _identity_component(self.output_endpoint, "output_endpoint")
+        if self.output_units is not None:
+            _identity_component(self.output_units, "output_units")
 
     @property
     def endpoint_key(self) -> str:
         """Return the canonical target/endpoint identity used by model assets."""
 
+        endpoint = self.output_endpoint or self.endpoint
+        units = self.output_units or self.units
         return ":".join(
-            _identity_component(getattr(self, field_name), field_name)
-            for field_name in ("target_id", "endpoint", "units", "task_type")
+            (
+                _identity_component(self.target_id, "target_id"),
+                _identity_component(endpoint, "endpoint"),
+                _identity_component(units, "units"),
+                _identity_component(self.task_type, "task_type"),
+            )
         )
 
     @property
     def model_contract_key(self) -> str:
         """Return the endpoint identity extended with training-label semantics."""
 
-        key = f"{self.endpoint_key}|label_transform={self.label_transform}"
+        source_endpoint = _identity_component(self.endpoint, "endpoint")
+        source_units = _identity_component(self.units, "units")
+        key = (
+            f"{self.endpoint_key}|source_endpoint={source_endpoint}"
+            f"|source_units={source_units}|label_transform={self.label_transform}"
+        )
         if self.label_transform == "binary_threshold":
             threshold = self.classification_threshold
             if threshold is None:  # Defensive guard for deserialization bypasses.
@@ -280,8 +363,8 @@ class DatasetManifest:
 class DatasetValidationResult:
     """Accepted training rows and fail-closed validation diagnostics."""
 
-    accepted: pd.DataFrame
-    rejected: pd.DataFrame
+    accepted: pd.DataFrame = field(repr=False)
+    rejected: pd.DataFrame = field(repr=False)
     warnings: list[str]
     statistics: dict[str, Any]
     input_sha256: str | None
@@ -297,14 +380,31 @@ def _normalized_unit(value: Any) -> str | None:
     return normalized
 
 
+def _canonical_known_unit(value: Any) -> str | None:
+    normalized = _normalized_unit(value)
+    if normalized is None:
+        return None
+    return _UNIT_REGISTRY.get(normalized)
+
+
+def _canonical_manifest_unit(value: Any, field_name: str) -> str:
+    normalized = _validate_metadata_string(value, field_name)
+    normalized = unicodedata.normalize("NFKC", normalized)
+    canonical = _UNIT_REGISTRY.get(normalized)
+    if canonical is not None:
+        return canonical
+    if any(
+        normalized.casefold() == alias.casefold() for alias in _UNIT_REGISTRY
+    ):
+        raise ValueError(f"Invalid {field_name}: wrong-case known unit")
+    return normalized
+
+
 def _unit_identity(value: Any) -> str | None:
     normalized = _normalized_unit(value)
     if normalized is None:
         return None
-    concentration = _CONCENTRATION_UNITS.get(normalized)
-    if concentration is not None:
-        return concentration[0]
-    return normalized
+    return _UNIT_REGISTRY.get(normalized, normalized)
 
 
 def _is_missing_value(value: Any) -> bool:
@@ -330,27 +430,33 @@ def _numeric_value(value: Any) -> tuple[float | None, str | None]:
     return numeric, None
 
 
-def _canonical_parent(smiles: Any) -> tuple[str | None, Any | None]:
+def _canonical_parent(
+    smiles: Any,
+) -> tuple[str | None, Any | None, str | None]:
     if not isinstance(smiles, str) or not smiles.strip():
-        return None, None
+        return None, None, "invalid_smiles"
     try:
         with rdBase.BlockLogs():
             molecule = Chem.MolFromSmiles(smiles.strip())
             if molecule is None or molecule.GetNumAtoms() == 0:
-                return None, None
-            parent = rdMolStandardize.FragmentParent(molecule)
+                return None, None, "invalid_smiles"
+            parent = _SALT_REMOVER.StripMol(molecule, dontRemoveEverything=True)
             if parent is None or parent.GetNumAtoms() == 0:
-                return None, None
+                return None, None, "invalid_smiles"
+            if len(Chem.GetMolFrags(parent)) != 1:
+                return None, None, "ambiguous_multifragment"
             canonical_smiles = Chem.MolToSmiles(
                 parent,
                 canonical=True,
                 isomericSmiles=True,
             )
+    except (RuntimeError, ValueError):
+        return None, None, "invalid_smiles"
     except Exception:
-        return None, None
+        raise ValueError("RDKit structure processing failed") from None
     if not canonical_smiles:
-        return None, None
-    return canonical_smiles, parent
+        return None, None, "invalid_smiles"
+    return canonical_smiles, parent, None
 
 
 def _source_record(
@@ -394,17 +500,14 @@ def _normalize_row_value(
 
     row_units = row[_UNITS_COLUMN]
     if manifest.label_transform == "molar_to_pactivity":
-        normalized_unit = _normalized_unit(row_units)
-        concentration_unit = (
-            _CONCENTRATION_UNITS.get(normalized_unit)
-            if normalized_unit is not None
-            else None
-        )
-        if concentration_unit is None:
+        concentration_unit = _canonical_known_unit(row_units)
+        if concentration_unit not in _CONCENTRATION_EXPONENTS:
             return None, "unknown_units"
         if numeric <= 0:
             return None, "non_positive_concentration"
-        normalized_value = -math.log10(numeric) - concentration_unit[1]
+        normalized_value = (
+            -math.log10(numeric) - _CONCENTRATION_EXPONENTS[concentration_unit]
+        )
         if not math.isfinite(normalized_value):
             return None, "non_finite_normalized_value"
         return normalized_value, None
@@ -420,13 +523,7 @@ def _normalize_row_value(
             return None, "invalid_binary_label"
         return numeric, None
 
-    threshold = manifest.classification_threshold
-    direction = manifest.classification_direction
-    if threshold is None or direction is None:
-        raise ValueError("Invalid binary threshold manifest")
-    if direction == "greater_or_equal":
-        return float(numeric >= threshold), None
-    return float(numeric <= threshold), None
+    return numeric, None
 
 
 def _safe_regression_aggregate(
@@ -448,6 +545,18 @@ def _safe_regression_aggregate(
     if not math.isfinite(aggregate_median) or not math.isfinite(aggregate_range):
         return None
     return float(aggregate_median), float(aggregate_range)
+
+
+def _scaffold_identity(molecule: Any) -> str:
+    try:
+        scaffold = MurckoScaffold.GetScaffoldForMol(molecule)
+        return Chem.MolToSmiles(
+            scaffold,
+            canonical=True,
+            isomericSmiles=True,
+        )
+    except Exception:
+        raise ValueError("RDKit scaffold processing failed") from None
 
 
 def _reject_valid_group(
@@ -499,16 +608,19 @@ def validate_activity_dataset(
 
     valid_groups: dict[str, list[dict[str, Any]]] = {}
     rejected_records: list[dict[str, Any]] = []
+    scaffold_cache: dict[str, str] = {}
 
     for input_order in range(len(frame)):
         row = frame.iloc[input_order]
-        canonical_smiles, molecule = _canonical_parent(row[manifest.smiles_column])
+        canonical_smiles, molecule, structure_reason = _canonical_parent(
+            row[manifest.smiles_column]
+        )
         if canonical_smiles is None or molecule is None:
             rejected_records.append(
                 _rejected_record(
                     row,
                     manifest,
-                    "invalid_smiles",
+                    structure_reason or "invalid_smiles",
                     input_order,
                 )
             )
@@ -545,6 +657,9 @@ def validate_activity_dataset(
 
         record = _source_record(row, manifest, canonical_smiles)
         record["normalized_value"] = normalized_value
+        if canonical_smiles not in scaffold_cache:
+            scaffold_cache[canonical_smiles] = _scaffold_identity(molecule)
+        record["scaffold_smiles"] = scaffold_cache[canonical_smiles]
         record["_input_order"] = input_order
         valid_groups.setdefault(canonical_smiles, []).append(record)
 
@@ -552,7 +667,11 @@ def validate_activity_dataset(
     duplicate_rows_collapsed = 0
     for canonical_smiles, group in valid_groups.items():
         values = [record["normalized_value"] for record in group]
-        if manifest.task_type == "classification" and len(set(values)) > 1:
+        is_identity_classification = (
+            manifest.task_type == "classification"
+            and manifest.label_transform == "identity"
+        )
+        if is_identity_classification and len(set(values)) > 1:
             _reject_valid_group(
                 group,
                 "conflicting_duplicate_labels",
@@ -561,24 +680,30 @@ def validate_activity_dataset(
             continue
 
         first = group[0]
-        if manifest.task_type == "regression":
+        if (
+            manifest.task_type == "regression"
+            or manifest.label_transform == "binary_threshold"
+        ):
             aggregate = _safe_regression_aggregate(values)
             if aggregate is None:
                 _reject_valid_group(group, "non_finite_aggregate", rejected_records)
                 continue
             normalized_value, replicate_range = aggregate
+            if manifest.label_transform == "binary_threshold":
+                threshold = manifest.classification_threshold
+                direction = manifest.classification_direction
+                if threshold is None or direction is None:
+                    raise ValueError("Invalid binary threshold manifest")
+                if direction == "greater_or_equal":
+                    normalized_value = float(normalized_value >= threshold)
+                else:
+                    normalized_value = float(normalized_value <= threshold)
         else:
             normalized_value = float(values[0])
             replicate_range = 0.0
-        molecule = Chem.MolFromSmiles(canonical_smiles)
-        if molecule is None:  # Defensive guard; canonical SMILES came from RDKit.
-            raise ValueError("RDKit could not parse its canonical SMILES output")
-        scaffold = MurckoScaffold.GetScaffoldForMol(molecule)
-        scaffold_smiles = Chem.MolToSmiles(
-            scaffold,
-            canonical=True,
-            isomericSmiles=True,
-        )
+        if not math.isfinite(normalized_value) or not math.isfinite(replicate_range):
+            _reject_valid_group(group, "non_finite_aggregate", rejected_records)
+            continue
         accepted_records.append(
             {
                 "original_smiles": first["original_smiles"],
@@ -587,10 +712,10 @@ def validate_activity_dataset(
                 "relation": first["relation"],
                 "canonical_smiles": canonical_smiles,
                 "normalized_value": normalized_value,
-                "normalized_units": manifest.units,
+                "normalized_units": manifest.output_units or manifest.units,
                 "replicate_count": len(group),
                 "replicate_range": replicate_range,
-                "scaffold_smiles": scaffold_smiles,
+                "scaffold_smiles": first["scaffold_smiles"],
             }
         )
         duplicate_rows_collapsed += len(group) - 1
@@ -604,6 +729,9 @@ def validate_activity_dataset(
     unique_molecules = len(accepted)
     unique_scaffolds = accepted["scaffold_smiles"].nunique(dropna=False)
     rejected_by_reason = dict(Counter(rejected["rejection_reason"].tolist()))
+    accounted_rows = len(accepted) + len(rejected) + duplicate_rows_collapsed
+    if len(frame) != accounted_rows:
+        raise ValueError("Activity dataset row accounting invariant violated")
     ready_for_training = (
         unique_molecules >= manifest.minimum_unique_molecules
         and unique_scaffolds >= manifest.minimum_scaffolds
@@ -658,6 +786,12 @@ def load_dataset_manifest(path: str | Path) -> DatasetManifest:
         raise ValueError(f"Missing required dataset manifest field(s): {names}")
 
     manifest = DatasetManifest(**payload)
+    if manifest.label_transform == "identity":
+        for field_name in ("output_endpoint", "output_units"):
+            if field_name in payload:
+                raise ValueError(
+                    f"Invalid {field_name}: must be absent for identity transform"
+                )
     if (
         "classification_threshold" in payload
         and manifest.classification_threshold is None

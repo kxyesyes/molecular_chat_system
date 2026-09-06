@@ -55,6 +55,16 @@ def _validation_manifest(**overrides: object) -> DatasetManifest:
     payload = _manifest_payload()
     payload.update(minimum_unique_molecules=1, minimum_scaffolds=1)
     payload.update(overrides)
+    if payload["label_transform"] == "molar_to_pactivity":
+        if "endpoint" not in overrides:
+            payload["endpoint"] = "IC50"
+        if "units" not in overrides:
+            payload["units"] = "nM"
+        payload.setdefault("output_endpoint", "pIC50")
+        payload.setdefault("output_units", "pIC50")
+    elif payload["label_transform"] == "binary_threshold":
+        payload.setdefault("output_endpoint", "active")
+        payload.setdefault("output_units", "probability")
     return DatasetManifest(**payload)
 
 
@@ -72,6 +82,8 @@ def test_loads_pde5a_manifest_with_defaults_and_exact_endpoint_key(
     assert manifest.minimum_scaffolds == 10
     assert manifest.classification_threshold is None
     assert manifest.classification_direction is None
+    assert manifest.output_endpoint is None
+    assert manifest.output_units is None
     with pytest.raises(FrozenInstanceError):
         manifest.endpoint = "Ki"  # type: ignore[misc]
 
@@ -165,6 +177,8 @@ def test_binary_threshold_requires_a_finite_numeric_threshold(
                     task_type="classification",
                     label_transform="binary_threshold",
                     classification_threshold=threshold,
+                    output_endpoint="active",
+                    output_units="probability",
                 ),
             )
         )
@@ -179,6 +193,8 @@ def test_binary_threshold_accepts_a_finite_numeric_threshold(tmp_path: Path) -> 
                 label_transform="binary_threshold",
                 classification_threshold=6.5,
                 classification_direction="greater_or_equal",
+                output_endpoint="active",
+                output_units="probability",
             ),
         )
     )
@@ -201,6 +217,8 @@ def test_binary_threshold_requires_a_supported_direction(
                     label_transform="binary_threshold",
                     classification_threshold=6.5,
                     classification_direction=direction,
+                    output_endpoint="active",
+                    output_units="probability",
                 ),
             )
         )
@@ -219,6 +237,8 @@ def test_binary_threshold_accepts_both_supported_directions(
                 label_transform="binary_threshold",
                 classification_threshold=6.5,
                 classification_direction=direction,
+                output_endpoint="active",
+                output_units="probability",
             ),
         )
     )
@@ -236,6 +256,177 @@ def test_classification_direction_is_rejected_for_other_transforms(
                 _manifest_payload(classification_direction="greater_or_equal"),
             )
         )
+
+
+def test_molar_manifest_separates_source_and_output_identity(tmp_path: Path) -> None:
+    manifest = load_dataset_manifest(
+        _write_manifest(
+            tmp_path,
+            _manifest_payload(
+                endpoint="IC50",
+                units="nM",
+                label_transform="molar_to_pactivity",
+                output_endpoint="pIC50",
+                output_units="pIC50",
+            ),
+        )
+    )
+
+    assert manifest.endpoint == "IC50"
+    assert manifest.units == "nM"
+    assert manifest.output_endpoint == "pIC50"
+    assert manifest.output_units == "pIC50"
+    assert manifest.endpoint_key == "p54750:pic50:pic50:regression"
+    assert "source_endpoint=ic50" in manifest.model_contract_key
+    assert "source_units=nm" in manifest.model_contract_key
+
+
+def test_manifest_canonicalizes_known_micro_unit_aliases() -> None:
+    micro_sign = DatasetManifest(**_manifest_payload(endpoint="IC50", units="µM"))
+    greek_mu = DatasetManifest(**_manifest_payload(endpoint="IC50", units="μM"))
+
+    assert micro_sign.units == "uM"
+    assert greek_mu.units == "uM"
+    assert micro_sign.model_contract_key == greek_mu.model_contract_key
+
+
+@pytest.mark.parametrize("units", ["m", "MM", "UM", "NM", "PM", "bananas"])
+def test_molar_manifest_rejects_invalid_source_units(units: str) -> None:
+    with pytest.raises(ValueError, match="units"):
+        DatasetManifest(
+            **_manifest_payload(
+                endpoint="IC50",
+                units=units,
+                label_transform="molar_to_pactivity",
+                output_endpoint="pIC50",
+                output_units="pIC50",
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "field"),
+    [
+        ({"output_endpoint": "pIC50"}, "output_units"),
+        ({"output_units": "pIC50"}, "output_endpoint"),
+        (
+            {
+                "output_endpoint": "pIC50",
+                "output_units": "bananas",
+            },
+            "output_units",
+        ),
+        (
+            {
+                "output_endpoint": "pKi",
+                "output_units": "pIC50",
+            },
+            "output_units",
+        ),
+        (
+            {
+                "output_endpoint": "bananas",
+                "output_units": "bananas",
+            },
+            "output_endpoint",
+        ),
+    ],
+)
+def test_molar_manifest_requires_compatible_explicit_output_identity(
+    overrides: dict[str, str],
+    field: str,
+) -> None:
+    payload = _manifest_payload(
+        endpoint="IC50",
+        units="nM",
+        label_transform="molar_to_pactivity",
+    )
+    payload.update(overrides)
+
+    with pytest.raises(ValueError, match=field):
+        DatasetManifest(**payload)
+
+
+@pytest.mark.parametrize(
+    "output_endpoint, output_units",
+    [("pIC50", "pIC50"), ("pKi", "pKi"), ("pEC50", "pEC50")],
+)
+def test_molar_manifest_accepts_supported_pactivity_outputs(
+    output_endpoint: str,
+    output_units: str,
+) -> None:
+    manifest = DatasetManifest(
+        **_manifest_payload(
+            endpoint="potency",
+            units="nM",
+            label_transform="molar_to_pactivity",
+            output_endpoint=output_endpoint,
+            output_units=output_units,
+        )
+    )
+
+    assert manifest.output_endpoint == output_endpoint
+    assert manifest.output_units == output_units
+
+
+@pytest.mark.parametrize("field", ["output_endpoint", "output_units"])
+def test_identity_forbids_output_identity_fields(field: str) -> None:
+    with pytest.raises(ValueError, match=field):
+        DatasetManifest(**_manifest_payload(**{field: "pIC50"}))
+
+
+@pytest.mark.parametrize("field", ["output_endpoint", "output_units"])
+def test_identity_manifest_json_requires_output_fields_to_be_absent(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    with pytest.raises(ValueError, match=field):
+        load_dataset_manifest(
+            _write_manifest(tmp_path, _manifest_payload(**{field: None}))
+        )
+
+
+def test_binary_manifest_requires_probability_output() -> None:
+    common = {
+        "task_type": "classification",
+        "label_transform": "binary_threshold",
+        "classification_threshold": 6.5,
+        "classification_direction": "greater_or_equal",
+    }
+    with pytest.raises(ValueError, match="output_endpoint"):
+        DatasetManifest(**_manifest_payload(**common))
+    with pytest.raises(ValueError, match="output_units"):
+        DatasetManifest(
+            **_manifest_payload(
+                **common,
+                output_endpoint="active",
+                output_units="bananas",
+            )
+        )
+
+
+def test_model_contract_key_cannot_collide_across_source_units() -> None:
+    nanomolar = DatasetManifest(
+        **_manifest_payload(
+            endpoint="IC50",
+            units="nM",
+            label_transform="molar_to_pactivity",
+            output_endpoint="pIC50",
+            output_units="pIC50",
+        )
+    )
+    micromolar = DatasetManifest(
+        **_manifest_payload(
+            endpoint="IC50",
+            units="uM",
+            label_transform="molar_to_pactivity",
+            output_endpoint="pIC50",
+            output_units="pIC50",
+        )
+    )
+
+    assert nanomolar.endpoint_key == micromolar.endpoint_key
+    assert nanomolar.model_contract_key != micromolar.model_contract_key
 
 
 @pytest.mark.parametrize(
@@ -260,6 +451,15 @@ def test_supported_task_transform_combinations_are_accepted(
     if classification_threshold is not None:
         overrides["classification_threshold"] = classification_threshold
         overrides["classification_direction"] = "greater_or_equal"
+        overrides["output_endpoint"] = "active"
+        overrides["output_units"] = "probability"
+    elif label_transform == "molar_to_pactivity":
+        overrides.update(
+            endpoint="IC50",
+            units="nM",
+            output_endpoint="pIC50",
+            output_units="pIC50",
+        )
     manifest = load_dataset_manifest(
         _write_manifest(
             tmp_path,
@@ -312,15 +512,23 @@ def test_threshold_is_rejected_outside_classification_binary_transform(
     label_transform: str,
     classification_threshold: float | None,
 ) -> None:
+    overrides: dict[str, object] = {
+        "task_type": task_type,
+        "label_transform": label_transform,
+        "classification_threshold": classification_threshold,
+    }
+    if label_transform == "molar_to_pactivity":
+        overrides.update(
+            endpoint="IC50",
+            units="nM",
+            output_endpoint="pIC50",
+            output_units="pIC50",
+        )
     with pytest.raises(ValueError, match="classification_threshold"):
         load_dataset_manifest(
             _write_manifest(
                 tmp_path,
-                _manifest_payload(
-                    task_type=task_type,
-                    label_transform=label_transform,
-                    classification_threshold=classification_threshold,
-                ),
+                _manifest_payload(**overrides),
             )
         )
 
@@ -336,6 +544,8 @@ def test_overflowing_integer_threshold_uses_value_error_contract(
                     task_type="classification",
                     label_transform="binary_threshold",
                     classification_threshold=10**400,
+                    output_endpoint="active",
+                    output_units="probability",
                 ),
             )
         )
@@ -405,7 +615,13 @@ def test_model_contract_key_distinguishes_label_transforms(tmp_path: Path) -> No
     converted = load_dataset_manifest(
         _write_manifest(
             tmp_path,
-            _manifest_payload(label_transform="  MOLAR_TO_PACTIVITY  "),
+            _manifest_payload(
+                endpoint="IC50",
+                units="nM",
+                label_transform="  MOLAR_TO_PACTIVITY  ",
+                output_endpoint="pIC50",
+                output_units="pIC50",
+            ),
         )
     )
 
@@ -424,6 +640,8 @@ def test_model_contract_key_distinguishes_binary_thresholds(tmp_path: Path) -> N
                 label_transform="binary_threshold",
                 classification_threshold=6.0,
                 classification_direction="greater_or_equal",
+                output_endpoint="active",
+                output_units="probability",
             ),
         )
     )
@@ -435,6 +653,8 @@ def test_model_contract_key_distinguishes_binary_thresholds(tmp_path: Path) -> N
                 label_transform="binary_threshold",
                 classification_threshold=7.0,
                 classification_direction="greater_or_equal",
+                output_endpoint="active",
+                output_units="probability",
             )
         ),
         encoding="utf-8",
@@ -458,6 +678,8 @@ def test_model_contract_key_distinguishes_binary_threshold_directions(
                 label_transform="binary_threshold",
                 classification_threshold=6.0,
                 classification_direction="greater_or_equal",
+                output_endpoint="active",
+                output_units="probability",
             ),
         )
     )
@@ -469,6 +691,8 @@ def test_model_contract_key_distinguishes_binary_threshold_directions(
                 label_transform="binary_threshold",
                 classification_threshold=6.0,
                 classification_direction="less_or_equal",
+                output_endpoint="active",
+                output_units="probability",
             )
         ),
         encoding="utf-8",
@@ -492,6 +716,8 @@ def test_model_contract_key_canonicalizes_equivalent_numeric_thresholds(
                 label_transform="binary_threshold",
                 classification_threshold=6,
                 classification_direction="greater_or_equal",
+                output_endpoint="active",
+                output_units="probability",
             ),
         )
     )
@@ -503,6 +729,8 @@ def test_model_contract_key_canonicalizes_equivalent_numeric_thresholds(
                 label_transform="binary_threshold",
                 classification_threshold=6.0,
                 classification_direction="greater_or_equal",
+                output_endpoint="active",
+                output_units="probability",
             ),
         )
     )
@@ -689,6 +917,40 @@ def test_rdkit_strips_salts_deterministically_and_preserves_stereochemistry() ->
     assert canonical[0] != canonical[1]
 
 
+def test_multiple_non_salt_fragments_reject_without_selecting_a_parent() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "smiles": "CCO.CCN",
+                "value": 6.0,
+                "relation": "=",
+                "units": "pIC50",
+            },
+            {
+                "smiles": "CCN.CCO",
+                "value": 8.0,
+                "relation": "=",
+                "units": "pIC50",
+            },
+            {
+                "smiles": "CCO.[Na+]",
+                "value": 7.0,
+                "relation": "=",
+                "units": "pIC50",
+            },
+        ]
+    )
+
+    result = contract.validate_activity_dataset(frame, _validation_manifest())
+
+    assert result.accepted["canonical_smiles"].tolist() == ["CCO"]
+    assert result.rejected["canonical_smiles"].isna().all()
+    assert result.rejected["rejection_reason"].tolist() == [
+        "ambiguous_multifragment",
+        "ambiguous_multifragment",
+    ]
+
+
 def test_invalid_rows_are_rejected_with_specific_reasons_and_no_raw_summaries() -> None:
     frame = pd.DataFrame(
         [
@@ -726,6 +988,88 @@ def test_invalid_rows_are_rejected_with_specific_reasons_and_no_raw_summaries() 
     }
     assert "PRIVATE_SECRET" not in repr(result.statistics)
     assert "PRIVATE_SECRET" not in repr(result.warnings)
+
+
+def test_validation_result_repr_hides_source_dataframes() -> None:
+    secret = "SECRET_SENTINEL_DO_NOT_RENDER"
+    frame = pd.DataFrame(
+        [{"smiles": secret, "value": 7, "relation": "=", "units": "pIC50"}]
+    )
+
+    result = contract.validate_activity_dataset(frame, _validation_manifest())
+
+    assert secret in result.rejected.iloc[0]["original_smiles"]
+    assert secret not in repr(result)
+
+
+def test_unexpected_rdkit_failure_is_fatal_without_raw_source_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "SECRET_STRUCTURE_SENTINEL"
+
+    def unexpected_failure(_: str) -> None:
+        raise KeyError(secret)
+
+    monkeypatch.setattr(contract.Chem, "MolFromSmiles", unexpected_failure)
+    frame = pd.DataFrame(
+        [{"smiles": secret, "value": 7, "relation": "=", "units": "pIC50"}]
+    )
+
+    with pytest.raises(ValueError, match="RDKit structure processing failed") as exc:
+        contract.validate_activity_dataset(frame, _validation_manifest())
+
+    assert secret not in str(exc.value)
+
+
+def test_structure_parsing_and_scaffold_calculation_are_cached_by_canonical_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_parse = contract.Chem.MolFromSmiles
+    original_scaffold = contract.MurckoScaffold.GetScaffoldForMol
+    parse_calls = 0
+    scaffold_calls = 0
+
+    def counted_parse(*args: object, **kwargs: object) -> object:
+        nonlocal parse_calls
+        parse_calls += 1
+        return original_parse(*args, **kwargs)
+
+    def counted_scaffold(*args: object, **kwargs: object) -> object:
+        nonlocal scaffold_calls
+        scaffold_calls += 1
+        return original_scaffold(*args, **kwargs)
+
+    monkeypatch.setattr(contract.Chem, "MolFromSmiles", counted_parse)
+    monkeypatch.setattr(
+        contract.MurckoScaffold,
+        "GetScaffoldForMol",
+        counted_scaffold,
+    )
+    rows = [
+        {
+            "smiles": "CCO" if index % 2 else "C(C)O",
+            "value": float(index + 1),
+            "relation": "=",
+            "units": "pIC50",
+        }
+        for index in range(20)
+    ]
+    rows.append(
+        {"smiles": "not-smiles", "value": 21.0, "relation": "=", "units": "pIC50"}
+    )
+    frame = pd.DataFrame(rows)
+
+    result = contract.validate_activity_dataset(frame, _validation_manifest())
+
+    assert parse_calls == len(frame)
+    assert scaffold_calls == 1
+    assert result.accepted["normalized_value"].map(math.isfinite).all()
+    statistics = result.statistics
+    assert statistics["input_rows"] == (
+        statistics["accepted_rows"]
+        + statistics["rejected_rows"]
+        + statistics["duplicate_rows_collapsed"]
+    )
 
 
 @pytest.mark.parametrize("relation", ["<", ">", "<=", ">=", "less", "greater", "~"])
@@ -1062,6 +1406,49 @@ def test_binary_threshold_applies_explicit_direction(
     )
 
     assert result.accepted["normalized_value"].tolist() == expected
+
+
+@pytest.mark.parametrize(
+    ("values", "direction"),
+    [
+        ([5.0, 7.0, 9.0], "greater_or_equal"),
+        ([6.0, 8.0], "less_or_equal"),
+    ],
+)
+def test_binary_threshold_aggregates_replicates_before_thresholding(
+    values: list[float],
+    direction: str,
+) -> None:
+    equivalent_smiles = ["CCO", "C(C)O", "[CH3][CH2]O"]
+    frame = pd.DataFrame(
+        [
+            {
+                "smiles": equivalent_smiles[index],
+                "value": value,
+                "relation": "=",
+                "units": "pIC50",
+            }
+            for index, value in enumerate(values)
+        ]
+    )
+
+    result = contract.validate_activity_dataset(
+        frame,
+        _validation_manifest(
+            task_type="classification",
+            label_transform="binary_threshold",
+            classification_threshold=7.0,
+            classification_direction=direction,
+        ),
+    )
+
+    assert result.rejected.empty
+    assert result.accepted["normalized_value"].tolist() == [1.0]
+    assert result.accepted["normalized_units"].tolist() == ["probability"]
+    assert result.accepted["replicate_count"].tolist() == [len(values)]
+    expected_range = 4.0 if len(values) == 3 else 2.0
+    assert result.accepted["replicate_range"].tolist() == [expected_range]
+    assert result.statistics["duplicate_rows_collapsed"] == len(values) - 1
 
 
 def test_readiness_counts_unique_molecules_and_shared_empty_scaffold() -> None:
