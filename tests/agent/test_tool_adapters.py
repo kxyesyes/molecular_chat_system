@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+
 from pydantic import BaseModel
 
 from src.agent.contracts import AgentErrorCode
@@ -142,6 +145,33 @@ def test_adapter_does_not_retry_connection_error_when_policy_excludes_it():
     assert result.success is False
     assert result.error.code == AgentErrorCode.PROVIDER_ERROR
     assert tool.calls == 1
+
+
+def test_adapter_timeout_returns_without_waiting_for_running_tool() -> None:
+    release = threading.Event()
+    calls = 0
+
+    class BlockingTool:
+        name = "legacy_value"
+
+        def execute(self, query):
+            nonlocal calls
+            calls += 1
+            release.wait(1.0)
+            return {"success": True, "data": {"value": 1}}
+
+    started = time.monotonic()
+    try:
+        result = LegacyPythonToolAdapter(
+            make_spec(timeout_seconds=0.03), BlockingTool()
+        ).execute({"query": "CCO"})
+
+        assert time.monotonic() - started < 0.20
+        assert result.success is False
+        assert result.error.code == AgentErrorCode.TOOL_TIMEOUT
+        assert calls == 1
+    finally:
+        release.set()
 
 
 def test_adapter_redacts_declared_sensitive_fields():

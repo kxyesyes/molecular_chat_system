@@ -91,13 +91,14 @@ class ToolAdapter(ABC):
 
     def _execute_once(self, payload: Any) -> ToolResult:
         start = time.perf_counter()
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self.invoke, payload)
         try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(self.invoke, payload)
-                raw = future.result(timeout=self.spec.timeout_seconds)
+            raw = future.result(timeout=self.spec.timeout_seconds)
             elapsed_ms = int((time.perf_counter() - start) * 1000)
             return self._normalize(raw, elapsed_ms)
         except FutureTimeoutError:
+            future.cancel()
             return ToolResult.error_result(
                 self.spec.name,
                 AgentErrorCode.TOOL_TIMEOUT,
@@ -115,6 +116,8 @@ class ToolAdapter(ABC):
                 AgentErrorCode.INTERNAL_ERROR,
                 str(exc),
             )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _normalize(self, raw: Any, elapsed_ms: int) -> ToolResult:
         if isinstance(raw, ToolResult):
