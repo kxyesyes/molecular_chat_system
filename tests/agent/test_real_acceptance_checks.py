@@ -494,6 +494,48 @@ def test_target_database_truth_check_rejects_structure_counts_without_records() 
     }
 
 
+def test_target_database_truth_check_rejects_source_label_without_identity_evidence() -> None:
+    result = ToolResult.success_result(
+        "target_database_search",
+        data=[{"source": "UniProt"}],
+    )
+
+    check = scientific._check_target_database_evidence([result])
+
+    assert check == {
+        "status": "failed",
+        "reason": "target_records_without_evidence",
+    }
+
+
+def test_target_database_truth_check_accepts_source_backed_pde5a_structure() -> None:
+    result = ToolResult.success_result(
+        "target_database_search",
+        data=[
+            {
+                "gene_symbol": "PDE5A",
+                "uniprot_id": "O76074",
+                "source": "UniProt",
+                "source_url": "https://www.uniprot.org/uniprotkb/O76074/entry",
+                "target_stale": False,
+                "recommended_structures": [
+                    {
+                        "structure_id": "1T9S",
+                        "source": "RCSB_PDB",
+                        "source_url": "https://www.rcsb.org/structure/1T9S",
+                    }
+                ],
+            }
+        ],
+    )
+
+    check = scientific._check_target_database_evidence([result])
+
+    assert check["status"] == "passed"
+    assert check["evidence_count"] == 1
+    assert check["recommended_structure_count"] == 1
+
+
 def test_target_design_truth_check_rejects_generation_after_empty_target_evidence():
     check = scientific._check_target_driven_generation_gate(
         tool_results=[

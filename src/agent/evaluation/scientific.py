@@ -1263,16 +1263,27 @@ def _candidate_records(value: Any) -> list[Mapping[str, Any]]:
 def _target_record_has_evidence(record: Any) -> bool:
     if not isinstance(record, Mapping):
         return False
-    evidence_keys = {
+    identity_keys = {
+        "target_id",
+        "gene_symbol",
         "uniprot_id",
+        "chembl_target_id",
         "pdb_id",
         "pdb_ids",
-        "structures",
-        "recommended_structures",
-        "match_reason",
-        "source",
     }
-    return any(record.get(key) for key in evidence_keys)
+    if not any(record.get(key) for key in identity_keys):
+        return False
+    if record.get("source_url") or record.get("match_reason"):
+        return True
+    structures = record.get("recommended_structures") or record.get("structures")
+    if not isinstance(structures, list):
+        return False
+    return any(
+        isinstance(structure, Mapping)
+        and bool(structure.get("structure_id") or structure.get("pdb_id"))
+        and bool(structure.get("source") or structure.get("source_url"))
+        for structure in structures
+    )
 
 
 def _check_reverse_target_evidence(tool_results: list[ToolResult]) -> dict[str, Any]:

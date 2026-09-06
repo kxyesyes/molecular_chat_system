@@ -649,7 +649,7 @@ class UniProtClient(_SourceClientContext):
                 "query": f"({field}:{normalized_query}) AND (organism_id:{taxon_id})",
                 "format": "json",
                 "size": 5,
-                "fields": "accession,id,gene_names,protein_name,organism_name,organism_id",
+                "fields": "accession,id,gene_names,protein_name,organism_name,organism_id,reviewed",
             },
             _deadline=deadline,
         )
@@ -680,10 +680,24 @@ class UniProtClient(_SourceClientContext):
                 for gene_name in gene_names
             ):
                 _validate_uniprot_record_organism(record, scientific_name, taxon_id)
-                ranked.append((0, record, "exact_gene"))
+                reviewed = _is_reviewed_uniprot_record(record)
+                ranked.append(
+                    (
+                        0 if reviewed else 1,
+                        record,
+                        "exact_gene_reviewed" if reviewed else "exact_gene",
+                    )
+                )
             elif any(alias.casefold() == normalized_query.casefold() for alias in aliases):
                 _validate_uniprot_record_organism(record, scientific_name, taxon_id)
-                ranked.append((1, record, "exact_alias"))
+                reviewed = _is_reviewed_uniprot_record(record)
+                ranked.append(
+                    (
+                        2 if reviewed else 3,
+                        record,
+                        "exact_alias_reviewed" if reviewed else "exact_alias",
+                    )
+                )
 
         if not ranked:
             return None
@@ -1011,6 +1025,15 @@ def _uniprot_genes(
     ordered_names = sorted(gene_names, key=lambda item: (item.casefold(), item))
     ordered_aliases = sorted(aliases, key=lambda item: (item.casefold(), item))
     return primary, ordered_names, ordered_aliases
+
+
+def _is_reviewed_uniprot_record(record: dict[str, Any]) -> bool:
+    entry_type = record.get("entryType")
+    if entry_type is None:
+        return False
+    if not isinstance(entry_type, str):
+        raise RemoteSourceError("UniProt", "invalid_response", retryable=False)
+    return entry_type == "UniProtKB reviewed (Swiss-Prot)"
 
 
 def _validate_uniprot_record_organism(

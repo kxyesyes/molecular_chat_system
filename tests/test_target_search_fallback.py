@@ -17,11 +17,38 @@ import requests
 
 
 @pytest.fixture(autouse=True)
-def _block_unexpected_http(monkeypatch):
+def _block_unexpected_http(monkeypatch, request):
+    if request.node.get_closest_marker("real_external") is not None:
+        return
+
     def blocked_send(self, request, **kwargs):
         raise AssertionError("unit tests must use an explicit fake adapter")
 
     monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", blocked_send)
+
+
+@pytest.mark.real_external
+def test_real_pde5a_authoritative_lookup(tmp_path, monkeypatch):
+    if os.getenv("RUN_REAL_TARGET_SEARCH") != "1":
+        pytest.skip("real authoritative target lookup not enabled")
+
+    from src.target_search.service import TargetSearchService
+
+    monkeypatch.setenv("TARGET_DB_PATH", str(tmp_path / "runtime" / "targets.sqlite"))
+    monkeypatch.setenv("TARGET_CACHE_DIR", str(tmp_path / "runtime" / "cache"))
+    with TargetSearchService(tmp_path, auto_seed=False) as service:
+        result = service.search_targets("PDE5A")
+
+    assert result["status"] == "resolved", result
+    assert result["results"], result
+    target = result["results"][0]
+    assert target["uniprot_id"] == "O76074"
+    assert target["source"] == "UniProt"
+    assert target["recommended_structures"]
+    assert target["recommended_structures"][0]["source"] in {
+        "RCSB_PDB",
+        "AlphaFold",
+    }
 
 
 class MutableClock:
@@ -3030,7 +3057,7 @@ def test_uniprot_resolve_constructs_exact_human_query_and_normalizes_record():
                     "query": "(gene_exact:EGFR) AND (organism_id:9606)",
                     "format": "json",
                     "size": 5,
-                    "fields": "accession,id,gene_names,protein_name,organism_name,organism_id",
+                    "fields": "accession,id,gene_names,protein_name,organism_name,organism_id,reviewed",
                 },
                 "headers": {
                     "Accept": "application/json",
@@ -3121,6 +3148,42 @@ def test_uniprot_multiple_equally_plausible_matches_are_explicitly_ambiguous():
     assert raised.value.code == "ambiguous_match"
     assert raised.value.retryable is False
     assert raised.value.status_code is None
+
+
+def test_uniprot_prefers_reviewed_exact_gene_over_unreviewed_exact_matches():
+    from src.target_search.remote_clients import UniProtClient
+
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(
+            payload={
+                "results": [
+                    {
+                        "primaryAccession": "G5E9C5",
+                        "entryType": "UniProtKB unreviewed (TrEMBL)",
+                        "genes": [{"geneName": {"value": "PDE5A"}}],
+                        "organism": {
+                            "scientificName": "Homo sapiens",
+                            "taxonId": 9606,
+                        },
+                    },
+                    {
+                        "primaryAccession": "O76074",
+                        "entryType": "UniProtKB reviewed (Swiss-Prot)",
+                        "genes": [{"geneName": {"value": "PDE5A"}}],
+                        "organism": {
+                            "scientificName": "Homo sapiens",
+                            "taxonId": 9606,
+                        },
+                    },
+                ]
+            }
+        )
+    )
+
+    result = UniProtClient(_bounded_remote_client(session)).resolve("PDE5A")
+
+    assert result["uniprot_id"] == "O76074"
+    assert result["match_reason"] == "exact_gene_reviewed"
 
 
 def test_uniprot_no_exact_result_returns_none():
