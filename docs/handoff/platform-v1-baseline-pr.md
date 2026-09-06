@@ -30,17 +30,31 @@ The archive branch and tag are intentionally not pushed until the historical cre
 ## Verification
 
 - Python compilation: passed with `python -m compileall -q src scripts`.
-- Agent suite: 1505 passed, 1 opt-in external test skipped.
-- Full deterministic Python suite: 6167 passed, 233 skipped, 171 subtests passed, 8 dependency/deprecation warnings.
+- Agent suite: 1515 passed, 1 opt-in external test skipped.
+- Full deterministic Python suite: 6185 passed, 233 skipped, 171 subtests passed, 8 dependency/deprecation warnings.
 - Node suite: 8 tracked JavaScript tests passed.
 - Contract acceptance: 34/34 passed, pass rate 1.0.
 - Credential scan: exact CI pattern returned no match (`git grep` exit 1).
 - New large files: 0 baseline-added files exceed 10 MiB.
 - Forbidden tracked runtime paths: 0; no real `.env`, SQLite runtime database, model weight, output, scratch report or FAISS manifest is tracked.
-- Original-worktree state: 13 status entries before and after; SHA-256 remained `adb459051c62b3f3e2e17df4f7b81186aae4ba63400a5a7bbee0f5c854d8f465`.
+- Original-worktree state: 12 existing status entries at final read-only inspection on branch `codex/industrial-agent-platform-design`; this task made no writes there.
 - Diff whitespace check: passed.
 
-The first full-suite run exposed two test-environment defects: a concurrent capacity test assumed deterministic coroutine winner indices, and an LLM configuration test inherited the host provider marker. Both test contracts were corrected without changing production behavior. The focused fixes passed, the concurrency test passed 20 consecutive runs, and the full suite then passed.
+The first full-suite run exposed two test-environment defects: a concurrent capacity test assumed deterministic coroutine winner indices, and an LLM configuration test inherited the host provider marker. Both test contracts were corrected without changing production behavior. A later sandbox security-contract run produced one non-reproducible failure; the isolated test passed 10 consecutive runs, its full module passed, and the final full suite passed cleanly.
+
+## Merge-blocker fixes
+
+Reviewed production-code head: `07ecf35e07831d0707e5801bdd99119582513178`.
+
+- CI now installs the complete platform test profile, pins the CPU PyTorch wheel, and discovers every tracked `tests/*_test.js` script dynamically.
+- Tool adapter deadlines return promptly without waiting for orphaned worker threads. Per-tool concurrency is bounded, timed-out work cannot create unbounded thread growth, and capacity is released if worker construction or submission fails.
+- LLM route arbitration is request-local and awaited without blocking the WebSocket event loop.
+- Replay evaluation no longer promotes original scientific failures; it rechecks route, tools, forbidden output and provenance while reporting strict pass/partial/fail rates.
+- Persisted Temporal-owned tasks can be controlled after process restart; durable control intent survives transient Temporal RPC failure, and lazy backend shutdown is race-safe.
+- Sandbox recovery explicitly reconciles jobs that failed between sandbox creation and sandbox-ID persistence, using the broker's job identity and reporting cleanup status.
+- Independent code review found no remaining P0/P1 issue in the final tool-capacity fix.
+
+The GitHub `offline-quality` job for code head `07ecf35` was observed in progress after push. The final documentation commit triggers a new run, so merge readiness must be based on the final PR-head check rather than that earlier run.
 
 ## Golden real acceptance
 
@@ -87,6 +101,11 @@ No case fabricated pIC50, binding energy, docking score, literature or experimen
 - Frontend structured result rendering
 - Target-source cache lifetime and remote evidence semantics
 - The known `partial` plus score-100 acceptance inconsistency
+- Final PR-head `offline-quality` result and the two-PR integration order
+
+## Integration order
+
+Both PRs remain drafts. Review and merge the documentation/base PR #3 first. Then retarget PR #2 from `codex/main-local-docs-2026-09-06` to `main`, resolve only genuine integration conflicts, and require a green quality run on the retargeted final head. Do not merge either PR automatically.
 
 ## Rollback
 
