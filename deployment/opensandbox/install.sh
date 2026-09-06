@@ -785,10 +785,11 @@ def snapshot_target(path: Path, mode: int, uid: int) -> tuple[bytes, int, int, i
         path.lstat()
     except FileNotFoundError:
         return None
-    require_locked_regular(path, mode, expected_uid=uid)
+    expected_uid = uid if root == Path("/") else None
+    require_locked_regular(path, mode, expected_uid=expected_uid)
     metadata = path.lstat()
     return (
-        read_source(path, expected_uid=uid),
+        read_source(path, expected_uid=expected_uid),
         stat.S_IMODE(metadata.st_mode),
         metadata.st_uid,
         metadata.st_gid,

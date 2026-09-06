@@ -926,7 +926,7 @@ def _stop_process_tree(
     baseline: frozenset[int],
     cleanup_deadline: float,
 ) -> bool:
-    if os.name == "posix":
+    if os.name == "posix" and _SUBREAPER_ENABLED:
         return _terminate_and_reap_invocation(process, baseline, cleanup_deadline)
     try:
         if process.poll() is not None:

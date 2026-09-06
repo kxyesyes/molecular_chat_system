@@ -884,7 +884,8 @@ class SandboxDockingRunner:
                     if _cancelled(cancel_event):
                         raise _Cancelled
                     self._check_deadline(deadline)
-                    time.sleep(min(_POLL_SECONDS, deadline - time.monotonic()))
+                    poll_remaining = deadline - time.monotonic()
+                    time.sleep(min(_POLL_SECONDS, poll_remaining / 2))
                     self._check_deadline(deadline)
                     with client.stream(
                         "GET",

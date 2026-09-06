@@ -1518,7 +1518,8 @@ def test_installer_rejects_untrusted_source_ancestors_and_rechecks_opened_uid() 
     read_end = installer.index("\n\ndef fsync_parent", read_start)
     read_source = installer[read_start:read_end]
     assert "expected_uid is not None and opened.st_uid != expected_uid" in read_source
-    assert "read_source(path, expected_uid=uid)" in installer
+    assert 'expected_uid = uid if root == Path("/") else None' in installer
+    assert "read_source(path, expected_uid=expected_uid)" in installer
     assert "source_expected_uid = 0 if root == Path(\"/\") else None" in installer
     assert installer.count("expected_uid=source_expected_uid") == 5
 

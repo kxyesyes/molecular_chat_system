@@ -93,13 +93,13 @@ _PINNED_ASSET_SHA256 = {
         "d08a8ed8795d2c505099fd9ddf8660831fc9780d251d46c3f8132d99ce86a3e1"
     ),
     "deployment/opensandbox/configure-firewall.sh": (
-        "1a637566231a36928dd0c025b42e4c81d871420f79c897c71e06afe1436b3fc9"
+        "a9d595858cb52a4d9a4a14211d8403965a0a06b8021db4e1f9bfc8fcc8f7b5bd"
     ),
     "deployment/opensandbox/opensandbox.env.example": (
         "cfa46013ec18a8ddacbe35ac11057246bf40842886a3686b9e893617e67c63ce"
     ),
     "deployment/opensandbox/install.sh": (
-        "13ff0284fec2da14216f197e4cb667aabe3af78cf0faec1b38917da04edbeaec"
+        "eecc72d1036880e7ca4a639191885d113bf931120c52c07570eaa8a4fb7f0fc8"
     ),
     "deployment/medchat-temporal-worker.service": (
         "15fb8b7faa079b9a33328081c751a75c72a2d68e1b92b676b55150438064f982"
@@ -916,7 +916,8 @@ def _validate_installer(text: str) -> bool:
         "require_empty=True",
         "def read_source(",
         "expected_uid is not None and opened.st_uid != expected_uid",
-        "read_source(path, expected_uid=uid)",
+        'expected_uid = uid if root == Path("/") else None',
+        "read_source(path, expected_uid=expected_uid)",
         'source_expected_uid = 0 if root == Path("/") else None',
         "expected_uid=source_expected_uid",
         '"OPEN_SANDBOX_API_KEY=" + secret + "\\n"',
