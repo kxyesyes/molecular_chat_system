@@ -273,4 +273,3 @@ Expected: 34/34 passed.
 - [ ] **Step 5: Inspect scope**
 
 Run `git diff --check`, credential scan, and `git status --short`. Confirm only plan and implementation commits are present and the original dirty worktree digest remains unchanged.
-

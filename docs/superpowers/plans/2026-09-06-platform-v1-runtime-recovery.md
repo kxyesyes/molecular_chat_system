@@ -128,4 +128,3 @@ Fetch workflow runs for the pushed head. If CI fails, inspect the failed job log
 - [ ] **Step 7: Update PR #2 description**
 
 Replace stale validation totals with the observed totals and list any remaining partial/skipped dependencies. Do not mark the PR ready or merge it.
-
