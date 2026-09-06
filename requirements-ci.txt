@@ -1,4 +1,5 @@
 -r requirements.txt
+-r requirements-agent-harness.txt
 -r requirements-agent-temporal.txt
 
 # CPU graph imports exercised by tests/test_rg_mpnn_legacy_modules.py.

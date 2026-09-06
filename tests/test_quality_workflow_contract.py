@@ -15,6 +15,7 @@ def test_cpu_ci_profile_contains_collection_dependencies() -> None:
 
     for expected in (
         "-r requirements.txt",
+        "-r requirements-agent-harness.txt",
         "-r requirements-agent-temporal.txt",
         "--extra-index-url https://download.pytorch.org/whl/cpu",
         "torch==2.4.0+cpu",
@@ -47,3 +48,4 @@ def test_quality_workflow_shards_python_suite_and_preserves_final_gate() -> None
         assert f'pytest_target: "{target}"' in workflow
 
     assert "run: python -m pytest tests -q -p no:cacheprovider" not in workflow
+    assert workflow.count("fetch-depth: 0") == 2

@@ -55,6 +55,11 @@ def clear_runtime_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "MEDCHAT_SANDBOX_BROKER_SOCKET",
         "/run/medchat-sandbox/broker.sock",
     )
+    monkeypatch.setattr(
+        production_worker,
+        "_sandbox_socket_parent_is_trusted",
+        lambda path: True,
+    )
 
 
 def apply_production_env(

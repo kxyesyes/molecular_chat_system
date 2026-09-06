@@ -593,12 +593,20 @@ class DockingInputStager:
                     if not _publish_directory(temporary_root, task_root):
                         raise ManifestError("manifest_io_error")
                 except ManifestError:
-                    if task_root.exists() or task_root.is_symlink():
+                    if (
+                        (temporary_root.exists() or temporary_root.is_symlink())
+                        and (task_root.exists() or task_root.is_symlink())
+                    ):
                         return self._reuse_or_reject(
                             task_id,
                             manifest_path,
                             expected,
                         )
+                    published = (
+                        not temporary_root.exists()
+                        and not temporary_root.is_symlink()
+                        and (task_root.exists() or task_root.is_symlink())
+                    )
                     raise
                 published = True
                 self._assert_task_root(task_id, task_root)
@@ -2396,10 +2404,8 @@ def _portable_name_key(name: str) -> str:
 
 def _assert_practical_path(path: Path, reason_code: str) -> None:
     text = str(path)
-    if _IS_WINDOWS:
-        if len(text) > _MAX_WINDOWS_PATH_CHARS:
-            raise ManifestError(reason_code)
-        return
+    if len(text) > _MAX_WINDOWS_PATH_CHARS:
+        raise ManifestError(reason_code)
     try:
         if len(os.fsencode(text)) > _MAX_POSIX_PATH_BYTES:
             raise ManifestError(reason_code)

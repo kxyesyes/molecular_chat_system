@@ -1039,6 +1039,20 @@ def test_impractical_final_input_path_is_rejected_before_sensitive_write(
     assert sensitive_writes == []
 
 
+def test_practical_path_check_enforces_windows_portability_on_posix_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(staging_module, "_IS_WINDOWS", False)
+
+    with pytest.raises(ManifestError) as caught:
+        staging_module._assert_practical_path(
+            Path("x" * (staging_module._MAX_WINDOWS_PATH_CHARS + 1)),
+            "manifest_path_invalid",
+        )
+
+    assert caught.value.reason_code == "manifest_path_invalid"
+
+
 def test_receptor_and_ligand_names_cannot_collide_portably(tmp_path: Path) -> None:
     stager = DockingInputStager(tmp_path)
 
@@ -2104,6 +2118,25 @@ def test_post_publish_root_barrier_failure_quarantines_active_task(
         real_barrier(path)
 
     monkeypatch.setattr(staging_module, "_fsync_directory", fail_root_after_publish)
+
+    with pytest.raises(ManifestError) as caught:
+        _stage_file(stager)
+
+    assert caught.value.reason_code == "manifest_io_error"
+    assert not (tmp_path / "task-1").exists()
+
+
+def test_post_publish_failure_is_not_mistaken_for_concurrent_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stager = DockingInputStager(tmp_path)
+
+    def publish_then_fail(source: Path, destination: Path) -> bool:
+        source.rename(destination)
+        raise ManifestError("manifest_io_error")
+
+    monkeypatch.setattr(staging_module, "_publish_directory", publish_then_fail)
 
     with pytest.raises(ManifestError) as caught:
         _stage_file(stager)
