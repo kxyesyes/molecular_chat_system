@@ -341,7 +341,7 @@ class LLMRuntimeConfigTest(unittest.TestCase):
                     "OPENAI_COMPATIBLE_BASE_URL": "https://env.example.com",
                     "OPENAI_COMPATIBLE_MODEL": "env-model",
                 },
-                clear=False,
+                clear=True,
             ):
                 loaded = app._load_active_llm_config()
 

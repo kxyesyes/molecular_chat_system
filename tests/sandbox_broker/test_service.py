@@ -4343,28 +4343,36 @@ def test_pending_rejection_capacity_is_reserved_before_durable_create(
             ),
             return_exceptions=True,
         )
-        accepted = [item for item in outcomes if not isinstance(item, BaseException)]
-        rejected = [item for item in outcomes if isinstance(item, BrokerFailure)]
+        accepted = [
+            (index, item)
+            for index, item in enumerate(outcomes)
+            if not isinstance(item, BaseException)
+        ]
+        rejected = [
+            (index, item)
+            for index, item in enumerate(outcomes)
+            if isinstance(item, BrokerFailure)
+        ]
 
         assert len(accepted) == 2
         assert len(rejected) == 3
         assert {
-            item.code for item in rejected
+            item.code for _, item in rejected
         } == {BrokerErrorCode.OPENSANDBOX_UNAVAILABLE}
         assert len(service._pending_rejections) <= config.queue_capacity
         assert service._pending_rejection_reservations == 0
         assert len(store.active_jobs()) == 3 + config.queue_capacity
-        for index in range(config.queue_capacity, 5):
+        for index, _ in rejected:
             assert store.get_by_idempotency(
                 f"idem-capacity-rejected-{index}"
             ) is None
 
-        first = accepted[0]
+        first_index, first = accepted[0]
         reused = await service.submit_uploads(
             DockingParameters(center=[1, 2, 3], size=[20, 20, 20]),
             upload("receptor.pdb", b"ATOM\n"),
             upload("ligand.sdf", VALID_SDF),
-            "idem-capacity-rejected-0",
+            f"idem-capacity-rejected-{first_index}",
         )
         assert reused.job_id == first.job_id
         with pytest.raises(BrokerFailure) as conflict:
@@ -4372,18 +4380,18 @@ def test_pending_rejection_capacity_is_reserved_before_durable_create(
                 DockingParameters(center=[1, 2, 3], size=[20, 20, 20]),
                 upload("receptor.pdb", b"ATOM\n"),
                 upload("ligand.sdf", VALID_SDF + b"\n"),
-                "idem-capacity-rejected-0",
+                f"idem-capacity-rejected-{first_index}",
             )
         assert conflict.value.code is BrokerErrorCode.IDEMPOTENCY_CONFLICT
         assert len(service._pending_rejections) <= config.queue_capacity
-        for item in accepted:
+        for _, item in accepted:
             assert not (config.state_root / "jobs" / item.job_id).exists()
 
         allow_persistence[0] = True
         await service._drain_pending_rejections()
         terminals = [
             await service.wait_terminal(item.job_id, timeout=2.0)
-            for item in accepted
+            for _, item in accepted
         ]
         assert all(
             item.error_code == BrokerErrorCode.QUEUE_SATURATED.value
