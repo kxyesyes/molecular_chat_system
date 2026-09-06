@@ -2388,6 +2388,27 @@ class SandboxBrokerService:
                                 warnings=("cleanup_failed",),
                                 cleanup_status="failed",
                             )
+                    elif current.status is BrokerJobStatus.PROVISIONING:
+                        self.store.record_cleanup(current.job_id, "in_progress")
+                        try:
+                            await self._recover_destroy_by_job_id(current.job_id)
+                        except asyncio.CancelledError:
+                            raise
+                        except BaseException:
+                            self.store.record_cleanup(current.job_id, "failed")
+                            self.store.fail(
+                                current.job_id,
+                                BrokerErrorCode.CLEANUP_FAILED,
+                                warnings=("cleanup_failed",),
+                                cleanup_status="failed",
+                            )
+                        else:
+                            self.store.record_cleanup(current.job_id, "succeeded")
+                            self.store.fail(
+                                current.job_id,
+                                BrokerErrorCode.OPENSANDBOX_UNAVAILABLE,
+                                cleanup_status="succeeded",
+                            )
                     else:
                         self.store.record_cleanup(current.job_id, "succeeded")
                         self.store.fail(
@@ -2431,6 +2452,60 @@ class SandboxBrokerService:
                 cleanup_status="failed",
             )
             raise
+        self._finish_phase(
+            cleanup,
+            outcome="passed",
+            cleanup_status="succeeded",
+        )
+
+    async def _recover_destroy_by_job_id(self, job_id: str) -> None:
+        cleanup = self._start_phase(job_id, "cleanup", 1)
+        reconcile = getattr(self.client, "destroy_by_job_id", None)
+        if not callable(reconcile):
+            self._finish_phase(
+                cleanup,
+                outcome="failed",
+                failure_class=FailureClass.DESTROY_FAILED,
+                cleanup_status="failed",
+            )
+            self._record_control_plane_failure(
+                "destroy", FailureClass.DESTROY_FAILED
+            )
+            raise BrokerFailure(BrokerErrorCode.CLEANUP_FAILED)
+
+        task = asyncio.create_task(
+            reconcile(job_id),
+            name=f"sandbox-broker-recovery-reconcile-{job_id}",
+        )
+        try:
+            destroyed = await asyncio.wait_for(
+                asyncio.shield(task), timeout=self._destroy_hard_timeout_seconds
+            )
+            if type(destroyed) is not int or destroyed < 0:
+                raise BrokerFailure(BrokerErrorCode.CLEANUP_FAILED)
+        except asyncio.CancelledError:
+            self._finish_phase(
+                cleanup,
+                outcome="cancelled",
+                cleanup_status="failed",
+            )
+            await self._cancel_and_isolate_reconciliation(task)
+            raise
+        except BaseException as destroy_failure:
+            await self._cancel_and_isolate_reconciliation(task)
+            classified = (
+                FailureClass.DESTROY_FAILED
+                if isinstance(destroy_failure, asyncio.TimeoutError)
+                else self._classified_failure("destroy", destroy_failure)
+            )
+            self._record_control_plane_failure("destroy", classified)
+            self._finish_phase(
+                cleanup,
+                outcome="failed",
+                failure_class=classified,
+                cleanup_status="failed",
+            )
+            raise BrokerFailure(BrokerErrorCode.CLEANUP_FAILED) from None
         self._finish_phase(
             cleanup,
             outcome="passed",

@@ -3413,11 +3413,20 @@ def test_submit_maps_different_hash_idempotency_conflict_without_second_run(
     assert sdk.create_count == sdk.run_count == 1
 
 
-def test_recovery_without_sandbox_fails_unavailable_without_sdk_cleanup(
+def test_recovery_provisioning_without_sandbox_reconciles_by_job_id(
     tmp_path: Path,
 ) -> None:
-    async def scenario() -> tuple[object, RecoverySandboxClient]:
-        sdk = RecoverySandboxClient()
+    class ReconcileByJobClient(RecoverySandboxClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reconciled_jobs: list[str] = []
+
+        async def destroy_by_job_id(self, job_id: str) -> int:
+            self.reconciled_jobs.append(job_id)
+            return 1
+
+    async def scenario() -> tuple[object, ReconcileByJobClient]:
+        sdk = ReconcileByJobClient()
         service, store, _ = _service(tmp_path, sdk)
         job, _ = store.create_or_get("idem-no-sandbox", "9" * 64, "trace-no-sandbox")
         store.transition(job.job_id, BrokerJobStatus.PROVISIONING)
@@ -3431,6 +3440,59 @@ def test_recovery_without_sandbox_fails_unavailable_without_sdk_cleanup(
     assert terminal.error_code == BrokerErrorCode.OPENSANDBOX_UNAVAILABLE.value
     assert terminal.cleanup_status == "succeeded"
     assert sdk.recovery_calls == 0
+    assert sdk.reconciled_jobs == [terminal.job_id]
+
+
+def test_recovery_provisioning_without_identity_fails_when_reconciliation_missing(
+    tmp_path: Path,
+) -> None:
+    class NoReconciliationClient(RecoverySandboxClient):
+        destroy_by_job_id = None
+
+    async def scenario() -> object:
+        sdk = NoReconciliationClient()
+        service, store, _ = _service(tmp_path, sdk)
+        job, _ = store.create_or_get(
+            "idem-no-identity", "8" * 64, "trace-no-identity"
+        )
+        store.transition(job.job_id, BrokerJobStatus.PROVISIONING)
+        await service.recover()
+        terminal = store.get(job.job_id)
+        assert terminal is not None
+        return terminal
+
+    terminal = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.error_code == BrokerErrorCode.CLEANUP_FAILED.value
+    assert terminal.cleanup_status == "failed"
+    assert "cleanup_failed" in terminal.warnings
+
+
+def test_recovery_queued_without_sandbox_needs_no_remote_reconciliation(
+    tmp_path: Path,
+) -> None:
+    class TrackingReconciliationClient(RecoverySandboxClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reconciled_jobs: list[str] = []
+
+        async def destroy_by_job_id(self, job_id: str) -> int:
+            self.reconciled_jobs.append(job_id)
+            return 0
+
+    async def scenario() -> tuple[object, TrackingReconciliationClient]:
+        sdk = TrackingReconciliationClient()
+        service, store, _ = _service(tmp_path, sdk)
+        job, _ = store.create_or_get("idem-queued", "7" * 64, "trace-queued")
+        await service.recover()
+        terminal = store.get(job.job_id)
+        assert terminal is not None
+        return terminal, sdk
+
+    terminal, sdk = asyncio.run(scenario())
+    assert terminal.status is BrokerJobStatus.FAILED
+    assert terminal.cleanup_status == "succeeded"
+    assert sdk.reconciled_jobs == []
 
 
 def test_cancel_completion_race_has_exactly_one_legal_terminal_transition(
