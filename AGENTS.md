@@ -228,7 +228,7 @@ Get-ChildItem src/web/static/js -Recurse -Filter *.js -File |
 10. 完成时报告准确文件、命令、测试结果、分支、commit 和 PR。
 
 ## 8. Git 分支与 PR 规则
-
+- 默认不自动合并；维护者明确指定 PR、合并方式并授权，且所有质量门禁满足后，Codex 可以执行合并。
 - 禁止直接修改或提交到 `main`。
 - 分支命名建议：
 
@@ -251,7 +251,6 @@ test: cover checkpoint recovery
 - 每个 PR 只解决一个主题；不要混入格式化、依赖升级或无关重构。
 - PR 描述必须包含：修改目标、文件范围、验证命令、待确认事项、风险和审查重点。
 - 默认创建 draft PR；由维护者确认后再转为 ready。
-- 禁止 Agent/Codex 自动合并 PR，尤其禁止直接合并到 `main`。
 
 分支保护、必需审查人数和 CI 必需检查当前未在仓库文件中定义，属于“待确认”。
 
