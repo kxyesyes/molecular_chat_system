@@ -48,6 +48,13 @@ def test_agent_platform_health_check_exercises_persistence_and_evaluation():
     assert "evaluation" in detail
 
 
+def test_agent_components_health_check_uses_supported_generation_count():
+    ok, detail = health_check.check_agent_components()
+
+    assert ok is True, detail
+    assert "planner" in detail
+
+
 def test_temporal_health_local_default_is_safe_and_non_blocking(monkeypatch):
     monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "local")
     monkeypatch.setenv("MEDCHAT_TEMPORAL_ADDRESS", "temporal.internal:7233")
