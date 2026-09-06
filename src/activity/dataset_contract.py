@@ -58,7 +58,9 @@ _UNIT_REGISTRY = {
     "pIC50": "pIC50",
     "pKi": "pKi",
     "pEC50": "pEC50",
+    "pKd": "pKd",
     "probability": "probability",
+    "binary": "binary",
 }
 _CONCENTRATION_EXPONENTS = {
     "M": 0,
@@ -67,7 +69,19 @@ _CONCENTRATION_EXPONENTS = {
     "nM": -9,
     "pM": -12,
 }
-_PACTIVITY_UNITS = {"pIC50", "pKi", "pEC50"}
+_PACTIVITY_UNITS = {"pIC50", "pKi", "pEC50", "pKd"}
+_CONTINUOUS_ACTIVITY_UNITS = set(_CONCENTRATION_EXPONENTS) | _PACTIVITY_UNITS
+_PACTIVITY_ENDPOINT_BY_SOURCE = {
+    "IC50": "pIC50",
+    "Ki": "pKi",
+    "EC50": "pEC50",
+    "Kd": "pKd",
+}
+_CANONICAL_ENDPOINTS = {
+    endpoint.casefold(): endpoint
+    for pair in _PACTIVITY_ENDPOINT_BY_SOURCE.items()
+    for endpoint in pair
+}
 _SALT_REMOVER = SaltRemover.SaltRemover()
 _ACCEPTED_COLUMNS = [
     "original_smiles",
@@ -108,6 +122,11 @@ def _validate_metadata_string(value: Any, field_name: str) -> str:
     ):
         raise ValueError(f"Invalid {field_name}: required safe nonblank string")
     return normalized
+
+
+def _canonical_endpoint(value: Any, field_name: str) -> str:
+    normalized = _validate_metadata_string(value, field_name)
+    return _CANONICAL_ENDPOINTS.get(normalized.casefold(), normalized)
 
 
 def _identity_component(value: str, field_name: str) -> str:
@@ -189,7 +208,7 @@ class DatasetManifest:
             raise ValueError(f"Invalid label_transform: {self.label_transform!r}")
         object.__setattr__(self, "label_transform", normalized_transform)
 
-        normalized_endpoint = _validate_metadata_string(self.endpoint, "endpoint")
+        normalized_endpoint = _canonical_endpoint(self.endpoint, "endpoint")
         object.__setattr__(self, "endpoint", normalized_endpoint)
         object.__setattr__(
             self,
@@ -280,8 +299,22 @@ class DatasetManifest:
                 raise ValueError(
                     "Invalid output_units: must be absent for identity transform"
                 )
+            if (
+                normalized_task_type == "regression"
+                and self.units not in _CONTINUOUS_ACTIVITY_UNITS
+            ):
+                raise ValueError(
+                    "Invalid units: regression identity requires activity units"
+                )
+            if (
+                normalized_task_type == "classification"
+                and self.units != "binary"
+            ):
+                raise ValueError(
+                    "Invalid units: classification identity requires binary"
+                )
         else:
-            normalized_output_endpoint = _validate_metadata_string(
+            normalized_output_endpoint = _canonical_endpoint(
                 output_endpoint,
                 "output_endpoint",
             )
@@ -301,18 +334,30 @@ class DatasetManifest:
                     raise ValueError(
                         "Invalid units: molar_to_pactivity requires concentration units"
                     )
-                if normalized_output_endpoint not in _PACTIVITY_UNITS:
+                expected_output_endpoint = _PACTIVITY_ENDPOINT_BY_SOURCE.get(
+                    self.endpoint
+                )
+                if expected_output_endpoint is None:
                     raise ValueError(
-                        "Invalid output_endpoint: expected supported pActivity endpoint"
+                        "Invalid endpoint: unsupported molar_to_pactivity source"
                     )
-                if canonical_output_units != normalized_output_endpoint:
+                if normalized_output_endpoint != expected_output_endpoint:
+                    raise ValueError(
+                        "Invalid output_endpoint: incompatible with source endpoint"
+                    )
+                if canonical_output_units != expected_output_endpoint:
                     raise ValueError(
                         "Invalid output_units: must match output_endpoint for pActivity"
                     )
-            elif canonical_output_units != "probability":
-                raise ValueError(
-                    "Invalid output_units: binary_threshold requires probability"
-                )
+            else:
+                if self.units not in _CONTINUOUS_ACTIVITY_UNITS:
+                    raise ValueError(
+                        "Invalid units: binary_threshold requires activity units"
+                    )
+                if canonical_output_units != "probability":
+                    raise ValueError(
+                        "Invalid output_units: binary_threshold requires probability"
+                    )
 
         for field_name in ("target_id", "endpoint", "units", "task_type"):
             _identity_component(getattr(self, field_name), field_name)
@@ -397,7 +442,7 @@ def _canonical_manifest_unit(value: Any, field_name: str) -> str:
         normalized.casefold() == alias.casefold() for alias in _UNIT_REGISTRY
     ):
         raise ValueError(f"Invalid {field_name}: wrong-case known unit")
-    return normalized
+    raise ValueError(f"Invalid {field_name}: unsupported unit")
 
 
 def _unit_identity(value: Any) -> str | None:
@@ -440,18 +485,20 @@ def _canonical_parent(
             molecule = Chem.MolFromSmiles(smiles.strip())
             if molecule is None or molecule.GetNumAtoms() == 0:
                 return None, None, "invalid_smiles"
-            parent = _SALT_REMOVER.StripMol(molecule, dontRemoveEverything=True)
+            parent = _SALT_REMOVER.StripMol(molecule, dontRemoveEverything=False)
             if parent is None or parent.GetNumAtoms() == 0:
-                return None, None, "invalid_smiles"
+                return None, None, "salt_only"
             if len(Chem.GetMolFrags(parent)) != 1:
                 return None, None, "ambiguous_multifragment"
+            if any(atom.GetAtomicNum() == 0 for atom in parent.GetAtoms()):
+                return None, None, "unsupported_structure"
+            if parent.GetNumHeavyAtoms() < 2 or parent.GetNumBonds() < 1:
+                return None, None, "unsupported_structure"
             canonical_smiles = Chem.MolToSmiles(
                 parent,
                 canonical=True,
                 isomericSmiles=True,
             )
-    except (RuntimeError, ValueError):
-        return None, None, "invalid_smiles"
     except Exception:
         raise ValueError("RDKit structure processing failed") from None
     if not canonical_smiles:

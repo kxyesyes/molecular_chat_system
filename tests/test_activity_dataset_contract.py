@@ -290,6 +290,37 @@ def test_manifest_canonicalizes_known_micro_unit_aliases() -> None:
     assert micro_sign.model_contract_key == greek_mu.model_contract_key
 
 
+@pytest.mark.parametrize(
+    "units",
+    ["class", "CLASS", "bananas", "Nano Molar", "PIC50"],
+)
+def test_identity_manifest_rejects_units_outside_controlled_registry(
+    units: str,
+) -> None:
+    with pytest.raises(ValueError, match="units"):
+        DatasetManifest(**_manifest_payload(units=units))
+
+
+def test_identity_manifest_enforces_task_specific_source_units() -> None:
+    with pytest.raises(ValueError, match="units"):
+        DatasetManifest(**_manifest_payload(units="binary"))
+    with pytest.raises(ValueError, match="units"):
+        DatasetManifest(
+            **_manifest_payload(task_type="classification", units="pIC50")
+        )
+
+    manifest = DatasetManifest(
+        **_manifest_payload(
+            task_type="classification",
+            endpoint="active",
+            units="binary",
+        )
+    )
+
+    assert manifest.units == "binary"
+    assert manifest.endpoint_key == "p54750:active:binary:classification"
+
+
 @pytest.mark.parametrize("units", ["m", "MM", "UM", "NM", "PM", "bananas"])
 def test_molar_manifest_rejects_invalid_source_units(units: str) -> None:
     with pytest.raises(ValueError, match="units"):
@@ -318,17 +349,10 @@ def test_molar_manifest_rejects_invalid_source_units(units: str) -> None:
         ),
         (
             {
-                "output_endpoint": "pKi",
-                "output_units": "pIC50",
+                "output_endpoint": "pIC50",
+                "output_units": "pKi",
             },
             "output_units",
-        ),
-        (
-            {
-                "output_endpoint": "bananas",
-                "output_units": "bananas",
-            },
-            "output_endpoint",
         ),
     ],
 )
@@ -348,25 +372,60 @@ def test_molar_manifest_requires_compatible_explicit_output_identity(
 
 
 @pytest.mark.parametrize(
-    "output_endpoint, output_units",
-    [("pIC50", "pIC50"), ("pKi", "pKi"), ("pEC50", "pEC50")],
+    ("source_input", "source_endpoint", "output_input", "output_endpoint"),
+    [
+        (" ic50 ", "IC50", " PIC50 ", "pIC50"),
+        ("KI", "Ki", "PKI", "pKi"),
+        ("ec50", "EC50", "pec50", "pEC50"),
+        ("KD", "Kd", "PKD", "pKd"),
+    ],
 )
-def test_molar_manifest_accepts_supported_pactivity_outputs(
+def test_molar_manifest_accepts_only_compatible_endpoint_transforms(
+    source_input: str,
+    source_endpoint: str,
+    output_input: str,
     output_endpoint: str,
-    output_units: str,
 ) -> None:
     manifest = DatasetManifest(
         **_manifest_payload(
-            endpoint="potency",
+            endpoint=source_input,
             units="nM",
             label_transform="molar_to_pactivity",
-            output_endpoint=output_endpoint,
-            output_units=output_units,
+            output_endpoint=output_input,
+            output_units=output_endpoint,
         )
     )
 
+    assert manifest.endpoint == source_endpoint
     assert manifest.output_endpoint == output_endpoint
-    assert manifest.output_units == output_units
+    assert manifest.output_units == output_endpoint
+
+
+@pytest.mark.parametrize(
+    ("source_endpoint", "output_endpoint"),
+    [
+        ("IC50", "pKi"),
+        ("Ki", "pEC50"),
+        ("EC50", "pKd"),
+        ("Kd", "pIC50"),
+        ("potency", "pIC50"),
+        ("IC50", "bananas"),
+    ],
+)
+def test_molar_manifest_rejects_incompatible_or_unknown_endpoint_transforms(
+    source_endpoint: str,
+    output_endpoint: str,
+) -> None:
+    with pytest.raises(ValueError, match="endpoint"):
+        DatasetManifest(
+            **_manifest_payload(
+                endpoint=source_endpoint,
+                units="nM",
+                label_transform="molar_to_pactivity",
+                output_endpoint=output_endpoint,
+                output_units="pIC50",
+            )
+        )
 
 
 @pytest.mark.parametrize("field", ["output_endpoint", "output_units"])
@@ -401,6 +460,15 @@ def test_binary_manifest_requires_probability_output() -> None:
                 **common,
                 output_endpoint="active",
                 output_units="bananas",
+            )
+        )
+    with pytest.raises(ValueError, match="units"):
+        DatasetManifest(
+            **_manifest_payload(
+                **common,
+                units="binary",
+                output_endpoint="active",
+                output_units="probability",
             )
         )
 
@@ -460,6 +528,8 @@ def test_supported_task_transform_combinations_are_accepted(
             output_endpoint="pIC50",
             output_units="pIC50",
         )
+    elif task_type == "classification":
+        overrides.update(endpoint="active", units="binary")
     manifest = load_dataset_manifest(
         _write_manifest(
             tmp_path,
@@ -524,6 +594,8 @@ def test_threshold_is_rejected_outside_classification_binary_transform(
             output_endpoint="pIC50",
             output_units="pIC50",
         )
+    elif task_type == "classification":
+        overrides.update(endpoint="active", units="binary")
     with pytest.raises(ValueError, match="classification_threshold"):
         load_dataset_manifest(
             _write_manifest(
@@ -584,7 +656,7 @@ def test_endpoint_key_is_stable_across_case_and_extra_whitespace(
             _manifest_payload(
                 target_id="P 54750",
                 endpoint="Binding Affinity",
-                units="Nano Molar",
+                units="µM",
             ),
         )
     )
@@ -594,7 +666,7 @@ def test_endpoint_key_is_stable_across_case_and_extra_whitespace(
             _manifest_payload(
                 target_id="  p   54750  ",
                 endpoint=" BINDING\t AFFINITY ",
-                units=" nano\n\nMOLAR ",
+                units=" μM ",
                 task_type=" REGRESSION ",
             )
         ),
@@ -604,7 +676,7 @@ def test_endpoint_key_is_stable_across_case_and_extra_whitespace(
 
     assert compact.endpoint_key == expanded.endpoint_key
     assert compact.endpoint_key == (
-        "p 54750:binding affinity:nano molar:regression"
+        "p 54750:binding affinity:um:regression"
     )
 
 
@@ -917,6 +989,69 @@ def test_rdkit_strips_salts_deterministically_and_preserves_stereochemistry() ->
     assert canonical[0] != canonical[1]
 
 
+@pytest.mark.parametrize("smiles", ["[Na+]", "[Cl-]"])
+def test_salt_only_counterions_are_rejected(smiles: str) -> None:
+    frame = pd.DataFrame(
+        [{"smiles": smiles, "value": 7, "relation": "=", "units": "pIC50"}]
+    )
+
+    result = contract.validate_activity_dataset(frame, _validation_manifest())
+
+    assert result.accepted.empty
+    assert result.rejected["rejection_reason"].tolist() == ["salt_only"]
+    assert result.statistics["rejected_by_reason"] == {"salt_only": 1}
+    assert result.ready_for_training is False
+    assert result.statistics["input_rows"] == 1
+    assert result.statistics["accepted_rows"] == 0
+    assert result.statistics["rejected_rows"] == 1
+    assert result.statistics["duplicate_rows_collapsed"] == 0
+
+
+@pytest.mark.parametrize("smiles", ["*CC", "C"])
+def test_rg_mpnn_unsupported_structures_are_rejected(smiles: str) -> None:
+    frame = pd.DataFrame(
+        [{"smiles": smiles, "value": 7, "relation": "=", "units": "pIC50"}]
+    )
+
+    result = contract.validate_activity_dataset(frame, _validation_manifest())
+
+    assert result.accepted.empty
+    assert result.rejected["rejection_reason"].tolist() == [
+        "unsupported_structure"
+    ]
+    assert result.statistics["rejected_by_reason"] == {
+        "unsupported_structure": 1
+    }
+    assert result.ready_for_training is False
+    assert result.statistics["input_rows"] == 1
+    assert result.statistics["accepted_rows"] == 0
+    assert result.statistics["rejected_rows"] == 1
+    assert result.statistics["duplicate_rows_collapsed"] == 0
+
+
+def test_controlled_salt_parent_is_trainable_with_exact_row_accounting() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "smiles": "CCO.[Na+]",
+                "value": 7,
+                "relation": "=",
+                "units": "pIC50",
+            }
+        ]
+    )
+
+    result = contract.validate_activity_dataset(frame, _validation_manifest())
+
+    assert result.accepted["canonical_smiles"].tolist() == ["CCO"]
+    assert result.rejected.empty
+    assert result.ready_for_training is True
+    assert result.statistics["input_rows"] == 1
+    assert result.statistics["accepted_rows"] == 1
+    assert result.statistics["rejected_rows"] == 0
+    assert result.statistics["duplicate_rows_collapsed"] == 0
+
+
 def test_multiple_non_salt_fragments_reject_without_selecting_a_parent() -> None:
     frame = pd.DataFrame(
         [
@@ -1002,26 +1137,61 @@ def test_validation_result_repr_hides_source_dataframes() -> None:
     assert secret not in repr(result)
 
 
-def test_unexpected_rdkit_failure_is_fatal_without_raw_source_value(
+def test_rdkit_parse_none_is_rejected_as_invalid_smiles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    secret = "SECRET_STRUCTURE_SENTINEL"
-
-    def unexpected_failure(_: str) -> None:
-        raise KeyError(secret)
-
-    monkeypatch.setattr(contract.Chem, "MolFromSmiles", unexpected_failure)
+    monkeypatch.setattr(contract.Chem, "MolFromSmiles", lambda _: None)
     frame = pd.DataFrame(
-        [{"smiles": secret, "value": 7, "relation": "=", "units": "pIC50"}]
+        [{"smiles": "invalid", "value": 7, "relation": "=", "units": "pIC50"}]
     )
 
-    with pytest.raises(ValueError, match="RDKit structure processing failed") as exc:
+    result = contract.validate_activity_dataset(frame, _validation_manifest())
+
+    assert result.accepted.empty
+    assert result.rejected["rejection_reason"].tolist() == ["invalid_smiles"]
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, ValueError, KeyError])
+@pytest.mark.parametrize(
+    "operation",
+    ["parsing", "standardization", "canonicalization", "scaffold"],
+)
+def test_unexpected_rdkit_failures_are_fatal_without_raw_source_value(
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+    operation: str,
+) -> None:
+    raw_smiles = "C[C@H](O)CO"
+
+    def unexpected_failure(*_: object, **__: object) -> None:
+        raise error_type(raw_smiles)
+
+    if operation == "parsing":
+        monkeypatch.setattr(contract.Chem, "MolFromSmiles", unexpected_failure)
+    elif operation == "standardization":
+        class FailingSaltRemover:
+            StripMol = staticmethod(unexpected_failure)
+
+        monkeypatch.setattr(contract, "_SALT_REMOVER", FailingSaltRemover())
+    elif operation == "canonicalization":
+        monkeypatch.setattr(contract.Chem, "MolToSmiles", unexpected_failure)
+    else:
+        monkeypatch.setattr(
+            contract.MurckoScaffold,
+            "GetScaffoldForMol",
+            unexpected_failure,
+        )
+    frame = pd.DataFrame(
+        [{"smiles": raw_smiles, "value": 7, "relation": "=", "units": "pIC50"}]
+    )
+
+    with pytest.raises(ValueError, match=r"RDKit .* processing failed") as exc:
         contract.validate_activity_dataset(frame, _validation_manifest())
 
-    assert secret not in str(exc.value)
+    assert raw_smiles not in str(exc.value)
 
 
-def test_structure_parsing_and_scaffold_calculation_are_cached_by_canonical_key(
+def test_scaffold_is_reused_by_canonical_key_without_canonical_reparse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     original_parse = contract.Chem.MolFromSmiles
@@ -1384,11 +1554,11 @@ def test_regression_rejects_group_when_aggregate_range_is_non_finite() -> None:
 def test_identity_classification_collapses_equal_labels_and_rejects_conflicts() -> None:
     frame = pd.DataFrame(
         [
-            {"smiles": "CCO", "value": 1, "relation": "=", "units": "class"},
-            {"smiles": "C(C)O", "value": 1.0, "relation": "=", "units": "class"},
-            {"smiles": "CCN", "value": 0, "relation": "=", "units": "class"},
-            {"smiles": "C(C)N", "value": 1, "relation": "=", "units": "class"},
-            {"smiles": "CCC", "value": 2, "relation": "=", "units": "class"},
+            {"smiles": "CCO", "value": 1, "relation": "=", "units": "binary"},
+            {"smiles": "C(C)O", "value": 1.0, "relation": "=", "units": "binary"},
+            {"smiles": "CCN", "value": 0, "relation": "=", "units": "binary"},
+            {"smiles": "C(C)N", "value": 1, "relation": "=", "units": "binary"},
+            {"smiles": "CCC", "value": 2, "relation": "=", "units": "binary"},
         ]
     )
 
@@ -1397,7 +1567,7 @@ def test_identity_classification_collapses_equal_labels_and_rejects_conflicts() 
         _validation_manifest(
             task_type="classification",
             endpoint="active",
-            units="class",
+            units="binary",
         ),
     )
 
