@@ -430,10 +430,12 @@ class TargetSearchDemoTest(unittest.TestCase):
                 self.root
             ).prepare_structure_file(structure)
 
-        self.assertEqual(Path(prepared["file_path"]), final_path)
-        self.assertTrue(final_path.is_file())
-        self.assertIn(b"_atom_site.id", final_path.read_bytes())
-        self.assertFalse(list(final_path.parent.glob("*.tmp")))
+        managed_path = Path(prepared["file_path"])
+        self.assertTrue(managed_path.is_relative_to(self.root / "runtime-cache"))
+        self.assertTrue(managed_path.is_file())
+        self.assertIn(b"_atom_site.id", managed_path.read_bytes())
+        self.assertFalse(list((self.root / "runtime-cache").rglob("*.tmp")))
+        self.assertFalse(final_path.exists())
         mark_downloaded.assert_called_once()
 
     def test_invalid_or_oversized_download_never_publishes_cache_file(self):

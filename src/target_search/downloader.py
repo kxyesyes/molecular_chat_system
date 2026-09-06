@@ -6,8 +6,9 @@ import gzip
 import logging
 import os
 import re
+from datetime import timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from uuid import uuid4
 
 import requests
@@ -18,6 +19,9 @@ from .database import (
     get_connection,
     relative_to_project,
 )
+
+if TYPE_CHECKING:
+    from .cache import TargetCacheRepository
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +47,18 @@ class StructureDownloadError(RuntimeError):
 
 
 class StructureDownloader:
-    def __init__(self, project_root: Optional[Path | str] = None):
+    def __init__(
+        self,
+        project_root: Optional[Path | str] = None,
+        *,
+        cache: Optional["TargetCacheRepository"] = None,
+    ):
         self.project_root = Path(project_root).resolve() if project_root else Path(__file__).resolve().parents[2]
+        if cache is None:
+            from .cache import TargetCacheRepository
+
+            cache = TargetCacheRepository(self.project_root)
+        self.cache = cache
 
     def prepare_structure_file(self, structure: dict, requested_format: Optional[str] = None) -> dict:
         file_format = (requested_format or structure.get("file_format") or "cif").lower()
@@ -100,8 +114,15 @@ class StructureDownloader:
         try:
             response = requests.get(url, timeout=30, stream=True)
             response.raise_for_status()
-            self._publish_response(response, absolute_path, file_format)
-            self._mark_downloaded(structure["id"], local_path, download_url=url, file_format=file_format)
+            absolute_path, local_path = self._publish_managed_response(
+                response, structure, file_format
+            )
+            self._mark_downloaded(
+                structure["id"],
+                absolute_path,
+                download_url=url,
+                file_format=file_format,
+            )
             return {
                 "success": True,
                 "file_path": str(absolute_path),
@@ -133,8 +154,15 @@ class StructureDownloader:
             try:
                 response = requests.get(url, timeout=45, stream=True)
                 response.raise_for_status()
-                self._publish_response(response, absolute_path, file_format)
-                self._mark_downloaded(structure["id"], local_path, download_url=url, file_format=file_format)
+                absolute_path, local_path = self._publish_managed_response(
+                    response, structure, file_format
+                )
+                self._mark_downloaded(
+                    structure["id"],
+                    absolute_path,
+                    download_url=url,
+                    file_format=file_format,
+                )
                 return {
                     "success": True,
                     "file_path": str(absolute_path),
@@ -239,6 +267,39 @@ class StructureDownloader:
         except Exception:
             temporary_path.unlink(missing_ok=True)
             raise
+
+    def _publish_managed_response(
+        self,
+        response,
+        structure: dict,
+        file_format: str,
+    ) -> tuple[Path, str]:
+        normalized_format = file_format.lower()
+        coordinate_suffix = f".{normalized_format}"
+        cache_root = get_cache_dir(self.project_root)
+        staged_relative = Path(".incoming") / f"{uuid4().hex}.download"
+        staged_path = cache_root.joinpath(*staged_relative.parts)
+        try:
+            self._publish_response(response, staged_path, normalized_format)
+            source = str(structure.get("source") or "")
+            structure_id = str(structure.get("structure_id") or "")
+            evidence = self.cache.publish_coordinate(
+                self._coordinate_cache_key(source, structure_id, normalized_format),
+                source,
+                f"{structure_id}:{normalized_format}",
+                staged_path=staged_relative.as_posix(),
+                coordinate_suffix=coordinate_suffix,
+                ttl=timedelta(days=90),
+            )
+        finally:
+            staged_path.unlink(missing_ok=True)
+        cache_relative_path = str(evidence.payload["path"])
+        absolute_path = cache_root.joinpath(*Path(cache_relative_path).parts)
+        return absolute_path, relative_to_project(absolute_path, self.project_root)
+
+    @staticmethod
+    def _coordinate_cache_key(source: str, structure_id: str, file_format: str) -> str:
+        return f"coordinate:{source}:{structure_id}:{file_format}"
 
     @staticmethod
     def _content_length(response) -> Optional[int]:

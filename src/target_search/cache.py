@@ -29,7 +29,7 @@ from .database import (
 DEFAULT_TTLS = {
     "target": timedelta(days=30),
     "structures": timedelta(days=7),
-    "coordinate_file": timedelta(days=7),
+    "coordinate_file": timedelta(days=90),
 }
 MAX_REFRESH_STATUS_LENGTH = 500
 MAX_IDENTIFIER_LENGTH = 512
@@ -39,10 +39,12 @@ RETRY_MAX_SECONDS = 3600
 ALLOWED_RECORD_TYPES = frozenset({"target", "structures", "coordinate_file"})
 COORDINATE_FILE_SUFFIXES = {
     ".cif",
+    ".cif.gz",
     ".ent",
     ".mmcif",
     ".mol2",
     ".pdb",
+    ".pdb.gz",
     ".pdbqt",
     ".sdf",
 }
@@ -381,7 +383,7 @@ class TargetCacheRepository:
             )
             staged_relative = _validate_incoming_path(row["staged_path"])
             final_relative = _validate_cache_relative_path(row["final_path"])
-            suffix = _validate_coordinate_suffix(final_relative.suffix)
+            suffix = _coordinate_suffix_from_path(final_relative)
             if final_relative != _derive_coordinate_final_path(
                 source, source_record_id, generation_id, suffix
             ):
@@ -1219,7 +1221,9 @@ class TargetCacheRepository:
                     relative_path = _validate_cache_relative_path(
                         evidence.payload["path"]
                     )
-                    if relative_path.suffix.lower() not in COORDINATE_FILE_SUFFIXES:
+                    try:
+                        _coordinate_suffix_from_path(relative_path)
+                    except ValueError:
                         records_deleted += _delete_generation(
                             self.project_root,
                             evidence.cache_key,
@@ -1356,6 +1360,41 @@ class TargetCacheRepository:
         return {
             "records_deleted": records_deleted,
             "files_deleted": files_deleted,
+        }
+
+    def get_health_summary(self) -> dict[str, Any]:
+        """Return aggregate cache health without identifiers, payloads, or paths."""
+        now_epoch = self._now().timestamp()
+        conn = get_connection(self.project_root)
+        try:
+            counts = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS cache_entry_count,
+                    SUM(CASE WHEN expires_epoch <= ? THEN 1 ELSE 0 END)
+                        AS stale_entry_count
+                FROM target_remote_cache
+                """,
+                (now_epoch,),
+            ).fetchone()
+            refresh_rows = conn.execute(
+                """
+                SELECT last_refresh_status, COUNT(*) AS count
+                FROM target_remote_cache
+                WHERE last_refresh_status IS NOT NULL
+                GROUP BY last_refresh_status
+                ORDER BY last_refresh_status
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+        return {
+            "cache_entry_count": int(counts["cache_entry_count"] or 0),
+            "stale_entry_count": int(counts["stale_entry_count"] or 0),
+            "last_refresh_errors": {
+                str(row["last_refresh_status"]): int(row["count"])
+                for row in refresh_rows
+            },
         }
 
     def _now(self) -> datetime:
@@ -1529,6 +1568,14 @@ def _validate_coordinate_suffix(value: Any) -> str:
     if value not in COORDINATE_FILE_SUFFIXES:
         raise ValueError("coordinate suffix is not supported")
     return value
+
+
+def _coordinate_suffix_from_path(path: Path) -> str:
+    filename = path.name.lower()
+    for suffix in sorted(COORDINATE_FILE_SUFFIXES, key=len, reverse=True):
+        if filename.endswith(suffix):
+            return suffix
+    raise ValueError("coordinate path does not use a supported suffix")
 
 
 def _derive_coordinate_final_path(

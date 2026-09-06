@@ -1,3 +1,4 @@
+import gzip
 import hashlib
 import json
 import multiprocessing
@@ -2584,6 +2585,220 @@ def test_cleanup_rejects_non_positive_or_non_integer_limits(project_root, clock)
     for limit in (0, -1, 1.5, True):
         with pytest.raises(ValueError):
             repository.cleanup_expired(limit=limit)
+
+
+def test_fallback_health_is_bounded_and_does_not_expose_paths(project_root, clock):
+    from src.target_search.cache import TargetCacheRepository
+    from src.target_search.service import TargetSearchService
+
+    cache = TargetCacheRepository(project_root=project_root, clock=clock)
+    fresh = cache.upsert(
+        "target:fresh",
+        "target",
+        "UniProt",
+        "P00533",
+        {"gene_symbol": "EGFR"},
+    )
+    cache.upsert(
+        "target:stale",
+        "target",
+        "UniProt",
+        "O76074",
+        {"gene_symbol": "PDE5A"},
+        ttl=timedelta(seconds=1),
+    )
+    assert cache.mark_refresh_failure(
+        fresh.cache_key,
+        "timeout",
+        expected_generation_id=fresh.generation_id,
+    )
+    clock.value += timedelta(seconds=2)
+
+    service = TargetSearchService(
+        project_root=project_root,
+        resolver=_QueueResolver(),
+        cache=cache,
+        auto_seed=False,
+    )
+    health = service.get_fallback_health()
+
+    assert set(health) == {
+        "local_target_count",
+        "local_structure_count",
+        "seed_available",
+        "cache_entry_count",
+        "stale_entry_count",
+        "last_refresh_errors",
+    }
+    assert health == {
+        "local_target_count": 0,
+        "local_structure_count": 0,
+        "seed_available": False,
+        "cache_entry_count": 2,
+        "stale_entry_count": 1,
+        "last_refresh_errors": {"timeout": 1},
+    }
+    assert "db_path" not in repr(health).lower()
+    assert str(project_root) not in repr(health)
+
+
+def test_cleanup_target_cache_cli_deletes_at_most_requested_limit(
+    project_root, clock, monkeypatch, capsys
+):
+    from scripts.cleanup_target_cache import main
+    from src.target_search.cache import TargetCacheRepository
+    from src.target_search.database import get_connection
+
+    monkeypatch.setenv("TARGET_DB_PATH", str(project_root / "runtime" / "targets.sqlite"))
+    monkeypatch.setenv("TARGET_CACHE_DIR", str(project_root / "runtime" / "cache"))
+    repository = TargetCacheRepository(project_root=project_root, clock=clock)
+    for index in range(12):
+        repository.upsert(
+            f"target:cli:{index}",
+            "target",
+            "UniProt",
+            str(index),
+            {"index": index},
+            ttl=timedelta(seconds=1),
+        )
+    clock.value += timedelta(seconds=2)
+
+    assert main(["--limit", "10"], project_root=project_root, clock=clock) == 0
+    output = json.loads(capsys.readouterr().out)
+
+    conn = get_connection(project_root)
+    try:
+        remaining = conn.execute(
+            "SELECT COUNT(*) AS count FROM target_remote_cache"
+        ).fetchone()["count"]
+    finally:
+        conn.close()
+    assert output == {"files_deleted": 0, "records_deleted": 10}
+    assert remaining == 2
+    assert str(project_root) not in json.dumps(output)
+
+
+def test_successful_structure_download_registers_managed_coordinate_for_90_days(
+    project_root, clock, monkeypatch
+):
+    from src.target_search.cache import TargetCacheRepository
+    from src.target_search.database import get_cache_dir
+    from src.target_search.downloader import StructureDownloader
+
+    class Response:
+        headers = {}
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size):
+            yield b"data_test\n_atom_site.id\n1\n"
+
+    cache = TargetCacheRepository(project_root=project_root, clock=clock)
+    downloader = StructureDownloader(project_root=project_root, cache=cache)
+    monkeypatch.setattr(
+        "src.target_search.downloader.requests.get", lambda *a, **k: Response()
+    )
+    monkeypatch.setattr(downloader, "_mark_downloaded", lambda *a, **k: None)
+    structure = {
+        "id": 17,
+        "structure_id": "1ABC",
+        "source": "RCSB_PDB",
+        "file_format": "cif",
+        "local_file_path": "data/target_db/cache/rcsb/PDE5A/1ABC.cif",
+        "download_url": "https://files.rcsb.org/download/1ABC.cif",
+    }
+
+    result = downloader.prepare_structure_file(structure)
+    evidence = cache.get("coordinate:RCSB_PDB:1ABC:cif")
+
+    assert result["success"] is True
+    assert evidence is not None
+    assert evidence.record_type == "coordinate_file"
+    assert evidence.expires_at == clock.value + timedelta(days=90)
+    assert Path(result["file_path"]).is_file()
+    assert Path(result["file_path"]).is_relative_to(get_cache_dir(project_root))
+    assert (
+        Path(result["file_path"])
+        .relative_to(get_cache_dir(project_root))
+        .as_posix()
+        == evidence.payload["path"]
+    )
+
+
+def test_failed_structure_download_does_not_register_coordinate(
+    project_root, clock, monkeypatch
+):
+    from src.target_search.cache import TargetCacheRepository
+    from src.target_search.downloader import StructureDownloadError, StructureDownloader
+
+    class Response:
+        headers = {}
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size):
+            yield b"not-a-coordinate"
+
+    cache = TargetCacheRepository(project_root=project_root, clock=clock)
+    downloader = StructureDownloader(project_root=project_root, cache=cache)
+    monkeypatch.setattr(
+        "src.target_search.downloader.requests.get", lambda *a, **k: Response()
+    )
+    structure = {
+        "id": 18,
+        "structure_id": "2BAD",
+        "source": "RCSB_PDB",
+        "file_format": "cif",
+        "local_file_path": "data/target_db/cache/rcsb/BAD/2BAD.cif",
+        "download_url": "https://files.rcsb.org/download/2BAD.cif",
+    }
+
+    with pytest.raises(StructureDownloadError, match="validation"):
+        downloader.prepare_structure_file(structure)
+
+    assert cache.get("coordinate:RCSB_PDB:2BAD:cif", allow_stale=True) is None
+
+
+def test_compressed_structure_download_is_registered_and_remains_readable(
+    project_root, clock, monkeypatch
+):
+    from src.target_search.cache import TargetCacheRepository
+    from src.target_search.downloader import StructureDownloader
+
+    compressed = gzip.compress(b"data_test\n_atom_site.id\n1\n")
+
+    class Response:
+        headers = {}
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size):
+            yield compressed
+
+    cache = TargetCacheRepository(project_root=project_root, clock=clock)
+    downloader = StructureDownloader(project_root=project_root, cache=cache)
+    monkeypatch.setattr(
+        "src.target_search.downloader.requests.get", lambda *a, **k: Response()
+    )
+    monkeypatch.setattr(downloader, "_mark_downloaded", lambda *a, **k: None)
+    structure = {
+        "id": 19,
+        "structure_id": "3GZP",
+        "source": "RCSB_PDB",
+        "file_format": "cif.gz",
+        "local_file_path": "data/target_db/cache/rcsb/PDE5A/3GZP.cif.gz",
+        "download_url": "https://files.rcsb.org/download/3GZP.cif.gz",
+    }
+
+    result = downloader.prepare_structure_file(structure)
+
+    assert gzip.decompress(Path(result["file_path"]).read_bytes()).startswith(
+        b"data_test"
+    )
+    assert cache.get("coordinate:RCSB_PDB:3GZP:cif.gz") is not None
 
 
 class _FakeRemoteResponse:

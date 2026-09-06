@@ -125,12 +125,12 @@ class TargetSearchService:
             raise TypeError("auto_seed must be a boolean")
         self.project_root = resolve_project_root(project_root)
         init_db(self.project_root)
-        self.downloader = StructureDownloader(self.project_root)
         self._resolver = resolver
         self._owns_resolver = resolver is None
         self._resolver_lock = threading.RLock()
         self._closed = False
         self.cache = cache or TargetCacheRepository(self.project_root)
+        self.downloader = StructureDownloader(self.project_root, cache=self.cache)
         self.auto_seed = auto_seed
         self.organism = organism
 
@@ -1160,6 +1160,34 @@ class TargetSearchService:
     def prepare_structure_file(self, structure_db_id: int, requested_format: Optional[str] = None) -> dict:
         structure = self._get_structure(structure_db_id)
         return self.downloader.prepare_structure_file(structure, requested_format)
+
+    def get_fallback_health(self) -> dict[str, Any]:
+        """Expose bounded operational counts without machine paths or cache payloads."""
+        conn = get_connection(self.project_root)
+        try:
+            local_target_count = int(
+                conn.execute("SELECT COUNT(*) AS count FROM targets").fetchone()["count"]
+            )
+            local_structure_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS count FROM target_structures"
+                ).fetchone()["count"]
+            )
+        finally:
+            conn.close()
+        cache_health = self.cache.get_health_summary()
+        seed_dir = get_target_db_dir(self.project_root)
+        return {
+            "local_target_count": local_target_count,
+            "local_structure_count": local_structure_count,
+            "seed_available": any(
+                (seed_dir / filename).is_file()
+                for filename in _TARGET_SEED_FILENAMES
+            ),
+            "cache_entry_count": cache_health["cache_entry_count"],
+            "stale_entry_count": cache_health["stale_entry_count"],
+            "last_refresh_errors": cache_health["last_refresh_errors"],
+        }
 
     def preflight_structure(self, structure_db_id: int, requested_format: Optional[str] = None) -> dict:
         """Check structure cache and docking suitability without downloading files."""
