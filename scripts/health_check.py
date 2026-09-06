@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import importlib
+import json
 import os
 import sqlite3
 import subprocess
@@ -56,6 +58,9 @@ def check_vina() -> tuple[bool, str]:
     if vina_in_path:
         candidates.append(vina_in_path)
     if not candidates:
+        diagnostics = _docking_diagnostics()
+        if diagnostics.get("vina", {}).get("exists"):
+            return True, str(diagnostics["vina"]["path"])
         return False, "No Vina path found (set MOLECULAR_DOCKING_VINA)"
 
     vina_path = Path(candidates[0]).expanduser()
@@ -86,6 +91,10 @@ def check_adfrsuite() -> tuple[bool, str]:
 
     adfr_bin = os.environ.get("MOLECULAR_DOCKING_ADFR_BIN", "").strip()
     if not adfr_bin:
+        diagnostics = _docking_diagnostics()
+        receptor = diagnostics.get("adfr_prepare_receptor", {})
+        if receptor.get("exists"):
+            return True, str(receptor.get("path"))
         return False, "MOLECULAR_DOCKING_ADFR_BIN is empty (or set MOLECULAR_DOCKING_PREPARE_RECEPTOR)"
     adfr_dir = Path(adfr_bin).expanduser()
     if not adfr_dir.exists():
@@ -110,6 +119,10 @@ def check_ligand_preparation() -> tuple[bool, str]:
         if found:
             candidates.append(found)
     if not candidates:
+        diagnostics = _docking_diagnostics()
+        ligand = diagnostics.get("mk_prepare_ligand", {})
+        if ligand.get("exists"):
+            return True, str(ligand.get("path"))
         return False, "mk_prepare_ligand not found (set MOLECULAR_DOCKING_PREPARE_LIGAND)"
 
     command_path = Path(candidates[0]).expanduser()
@@ -155,7 +168,18 @@ def check_ollama() -> tuple[bool, str]:
         with urllib.request.urlopen(url, timeout=3) as response:
             if response.status != 200:
                 return False, f"{url} returned HTTP {response.status}"
-            return True, f"{url}"
+            payload = json.loads(response.read().decode("utf-8"))
+            names = {
+                str(item.get("name"))
+                for item in payload.get("models", [])
+                if item.get("name")
+            }
+            required_model = os.environ.get(
+                "MOLECULAR_GENERATOR_MODEL", "gmm-llama:latest"
+            )
+            if required_model not in names:
+                return False, f"{url} reachable but {required_model} is not installed"
+            return True, f"{url} ({required_model})"
     except urllib.error.URLError as exc:
         return False, f"Ollama not reachable at {url}: {exc}"
     except Exception as exc:
@@ -215,12 +239,12 @@ def check_agent_components() -> tuple[bool, str]:
         from src.agent.orchestrators import WorkflowOrchestrator
         from src.agent.planning import TaskPlanner
         from src.agent.runtime.event_bus import AgentEventBus
-        from src.agent.skills.skill_registry import SkillRegistry
+        from src.agent.workflows import WorkflowCatalog
 
-        registry = SkillRegistry()
-        target_skill = registry.get_skill_by_name("target_driven_design")
-        if target_skill is None:
-            return False, "target_driven_design skill is not registered"
+        catalog = WorkflowCatalog()
+        target_policy = catalog.get("target_driven_design")
+        if target_policy is None:
+            return False, "target_driven_design workflow policy is not registered"
 
         context = AgentContext(
             query="基于 PDE5 设计 20 个类药候选分子",
@@ -232,9 +256,59 @@ def check_agent_components() -> tuple[bool, str]:
             return False, "TaskPlanner did not produce the target-driven workflow"
 
         WorkflowOrchestrator(event_bus=AgentEventBus())
-        return True, f"planner, orchestrator and {len(registry.skills)} skills are available"
+        policy_names = ", ".join(policy.name for policy in catalog.policies)
+        return (
+            True,
+            f"planner, orchestrator and {len(catalog.policies)} workflow policies "
+            f"are available: {policy_names}",
+        )
     except Exception as exc:
         return False, f"Agent component check failed: {exc}"
+
+
+def check_agent_platform() -> tuple[bool, str]:
+    try:
+        from src.agent.evaluation import EvaluationCase, EvaluationRunner
+        from src.agent.persistence import SQLiteAgentStateStore
+        from src.agent.routing import HybridSkillRouter
+
+        with tempfile.TemporaryDirectory(prefix="medchat_agent_platform_") as tmp:
+            store = SQLiteAgentStateStore(Path(tmp) / "agent.sqlite3")
+            store.start_run(
+                {
+                    "trace_id": "health-platform",
+                    "status": "running",
+                    "query": "health",
+                }
+            )
+            store.save_checkpoint(
+                {
+                    "trace_id": "health-platform",
+                    "step_id": "health",
+                    "status": "succeeded",
+                    "output": {"ok": True},
+                }
+            )
+            checkpoint = store.latest_checkpoint("health-platform", "health")
+            if not checkpoint or checkpoint.get("output") != {"ok": True}:
+                return False, "Agent persistence checkpoint round trip failed"
+
+        report = EvaluationRunner(HybridSkillRouter()).evaluate_routing(
+            [
+                EvaluationCase(
+                    case_id="health-route",
+                    version="1",
+                    category="routing",
+                    prompt="分析 CCO 的 ADMET",
+                    expected_skill="admet_assessment",
+                )
+            ]
+        )
+        if report.metrics.get("top1_accuracy") != 1.0:
+            return False, "Agent routing evaluation health case failed"
+        return True, "persistence, hybrid routing and evaluation are available"
+    except Exception as exc:
+        return False, f"Agent platform check failed: {exc}"
 
 
 def check_task_runtime() -> tuple[bool, str]:
@@ -262,6 +336,63 @@ def check_task_runtime() -> tuple[bool, str]:
         return True, "SQLite task runtime is available"
     except Exception as exc:
         return False, f"Task runtime check failed: {exc}"
+
+
+def check_temporal_runtime(
+    *,
+    config_factory=None,
+    backend_factory=None,
+) -> tuple[bool, str]:
+    """Check strict Temporal config, service reachability, and worker freshness."""
+
+    try:
+        from src.task_runtime.config import TaskRuntimeConfig
+
+        config = (config_factory or TaskRuntimeConfig.from_env)()
+        safe = config.to_safe_dict()
+    except Exception:
+        return False, "Temporal configuration is invalid"
+    warnings = tuple(safe.get("warnings") or ())
+    configured = safe.get("temporal_address_configured") is True
+    if warnings:
+        return False, f"Temporal configuration warnings={','.join(warnings)}; configured={str(configured).lower()}"
+    if config.backend == "local":
+        return True, f"local default; Temporal configured={str(configured).lower()}"
+
+    if backend_factory is None:
+        try:
+            import temporalio  # noqa: F401
+            from src.task_runtime.backends.temporal import TemporalTaskBackend
+            from src.task_runtime.store import TaskStore
+        except Exception:
+            return False, "Temporal SDK unavailable; configured=true"
+
+        backend = TemporalTaskBackend(
+            TaskStore(),
+            address=config.temporal_address,
+            namespace=config.temporal_namespace,
+            task_queue=config.docking_queue,
+        )
+    else:
+        backend = backend_factory(config)
+
+    async def probe():
+        try:
+            return await backend.health()
+        finally:
+            await backend.close()
+
+    try:
+        health = asyncio.run(probe())
+    except Exception:
+        return False, (
+            "Temporal health unavailable; configured=true; "
+            f"namespace={config.temporal_namespace}; queue={config.docking_queue}"
+        )
+    return health.available, (
+        f"{health.message}; configured=true; namespace={config.temporal_namespace}; "
+        f"queue={config.docking_queue}"
+    )
 
 
 def check_supervisor_agent() -> tuple[bool, str]:
@@ -406,6 +537,15 @@ def shutil_which(cmd: str) -> str | None:
     return shutil.which(cmd)
 
 
+def _docking_diagnostics() -> dict:
+    try:
+        from src.docking import docking_service
+
+        return docking_service.env_diagnostics()
+    except Exception:
+        return {}
+
+
 def run_checks(strict: bool) -> int:
     checks: list[tuple[str, Callable[[], tuple[bool, str]]]] = [
         ("RDKit", check_rdkit),
@@ -419,7 +559,9 @@ def run_checks(strict: bool) -> int:
         ("Agent Contracts", check_agent_contracts),
         ("Agent Tool Registry", check_agent_tool_registry),
         ("Agent Components", check_agent_components),
+        ("Agent Platform", check_agent_platform),
         ("Task Runtime", check_task_runtime),
+        ("Temporal Runtime", check_temporal_runtime),
         ("Supervisor Agent", check_supervisor_agent),
         ("Reverse Target Data", check_reverse_target_data),
         ("Activity Models", check_activity_models),

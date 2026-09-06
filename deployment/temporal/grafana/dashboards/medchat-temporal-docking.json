@@ -1,0 +1,162 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "medchat-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 4, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "values": false}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "medchat_temporal_canary_percent", "refId": "A"}],
+      "title": "Canary level",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "medchat-prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 5, "w": 4, "x": 4, "y": 0},
+      "id": 2,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "values": false}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "medchat_temporal_worker_ready", "refId": "A"}],
+      "title": "Worker readiness",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "medchat-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 4, "x": 8, "y": 0},
+      "id": 3,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "values": false}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "time() - medchat_temporal_worker_last_heartbeat_timestamp_seconds", "refId": "A"}],
+      "title": "Worker heartbeat",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "medchat-prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
+      "id": 4,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "sum(approximate_backlog_count{namespace=\"default\",taskqueue=\"medchat-docking\"})", "refId": "A"}],
+      "title": "Queue backlog",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "medchat-prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0},
+      "id": 5,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "sum(increase(service_requests{service_name=\"frontend\",namespace=\"default\",operation=\"StartWorkflowExecution\"}[5m]))", "refId": "A"}],
+      "title": "Workflow start requests",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "medchat-prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 5},
+      "id": 6,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "sum by (status) (increase(medchat_temporal_task_terminal_total[15m]))", "legendFormat": "{{status}}", "refId": "A"}],
+      "title": "Terminal distribution",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "medchat-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 5},
+      "id": 7,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "targets": [
+        {"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "histogram_quantile(0.50, sum by (le) (rate(medchat_temporal_task_duration_seconds_bucket[15m])))", "legendFormat": "p50", "refId": "A"},
+        {"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "histogram_quantile(0.95, sum by (le) (rate(medchat_temporal_task_duration_seconds_bucket[15m])))", "legendFormat": "p95", "refId": "B"}
+      ],
+      "title": "p50 / p95 latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "medchat-prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 5},
+      "id": 8,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "sum(increase(medchat_temporal_docking_process_attempts_total[15m]))", "refId": "A"}],
+      "title": "Vina attempts",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "medchat-prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 5, "w": 4, "x": 0, "y": 12},
+      "id": 9,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "values": false}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "sum(increase(medchat_temporal_duplicate_vina_execution_total[15m]))", "refId": "A"}],
+      "title": "Duplicate prevention",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "medchat-prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 5, "w": 4, "x": 4, "y": 12},
+      "id": 10,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "values": false}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "sum(increase(medchat_temporal_terminal_invariant_violation_total[15m]))", "refId": "A"}],
+      "title": "Terminal invariants",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "medchat-prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 5, "w": 4, "x": 8, "y": 12},
+      "id": 11,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "values": false}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "sum(increase(medchat_temporal_artifact_validation_failure_total[15m]))", "refId": "A"}],
+      "title": "Artifact validation",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "medchat-prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 5, "w": 4, "x": 12, "y": 12},
+      "id": 12,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "values": false}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "sum(increase(medchat_temporal_provenance_validation_failure_total[15m]))", "refId": "A"}],
+      "title": "Provenance gate",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "medchat-prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 5, "w": 4, "x": 16, "y": 12},
+      "id": 13,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "values": false}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "sum(increase(medchat_temporal_duplicate_vina_execution_total[15m])) + sum(increase(medchat_temporal_terminal_invariant_violation_total[15m])) + sum(increase(medchat_temporal_artifact_validation_failure_total[15m])) + sum(increase(medchat_temporal_provenance_validation_failure_total[15m]))", "refId": "A"}],
+      "title": "Scientific gates",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "medchat-prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 5, "w": 4, "x": 20, "y": 12},
+      "id": 14,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "values": false}},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "medchat-prometheus"}, "expr": "count(ALERTS{alertstate=\"firing\",release_blocker=\"true\"}) or vector(0)", "refId": "A"}],
+      "title": "Firing release blockers",
+      "type": "stat"
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 41,
+  "tags": ["medchat", "temporal", "docking"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "MedChat Temporal Docking Canary",
+  "uid": "medchat-temporal-docking",
+  "version": 1
+}

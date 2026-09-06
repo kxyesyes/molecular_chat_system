@@ -24,6 +24,7 @@ inference:
   stream: true
   temperature: 0.9
   max_tokens: 600  # 降低生成长度以节省显存
+  external_max_tokens: 4096  # 外部主模型不复用本地 GPU 输出限制
   timeout: 120 # 增加超时时间
 
 web:

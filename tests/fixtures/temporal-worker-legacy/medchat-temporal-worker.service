@@ -1,0 +1,32 @@
+[Unit]
+Description=MedChat Temporal Docking Worker
+After=network-online.target docker.service medchat-temporal-worker-prepare.service
+Wants=network-online.target
+Requires=medchat-temporal-worker-prepare.service
+
+[Service]
+Type=simple
+User=medchat
+Group=medchat
+WorkingDirectory=/opt/medchat/molecular_chat_system
+EnvironmentFile=/etc/medchat/temporal-worker.env
+Environment=PATH=/opt/conda/envs/medchat/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=/opt/conda/envs/medchat/bin/python scripts/validate_temporal_worker_production.py --check-config
+ExecStart=/opt/conda/envs/medchat/bin/python scripts/run_temporal_docking_worker.py
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=90
+KillMode=mixed
+KillSignal=SIGTERM
+SendSIGKILL=yes
+UMask=0077
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/medchat/molecular_chat_system/scratch /opt/medchat/molecular_chat_system/temp_docking
+ReadOnlyPaths=/opt/medchat/molecular_chat_system /opt/conda/envs/medchat
+
+[Install]
+WantedBy=multi-user.target

@@ -1,4 +1,6 @@
 // ==================== UI状态管理 ====================
+const Safe = window.MedChatSafeRender;
+
 const UIManager = {
   // 更新按钮状态
   updateButtonStates() {
@@ -340,8 +342,8 @@ function handleFileUpload(inputId, displayId, fileType) {
       const fileItem = document.createElement("div");
       fileItem.className = "file-item";
       fileItem.innerHTML = `
-        <span class="file-name">${file.name} (${(file.size / 1024).toFixed(1)} KB)</span>
-        <button class="file-remove" onclick="removeFile(${index}, '${inputId}', '${displayId}')">删除</button>
+        <span class="file-name">${Safe.escapeHtml(file.name)} (${(file.size / 1024).toFixed(1)} KB)</span>
+        <button class="file-remove" onclick="removeFile(${index}, '${Safe.escapeInlineJsString(inputId)}', '${Safe.escapeInlineJsString(displayId)}')">删除</button>
       `;
       display.appendChild(fileItem);
 
@@ -523,8 +525,8 @@ function removeFile(index, inputId, displayId) {
     const fileItem = document.createElement("div");
     fileItem.className = "file-item";
     fileItem.innerHTML = `
-      <span class="file-name">${file.name} (${(file.size / 1024).toFixed(1)} KB)</span>
-      <button class="file-remove" onclick="removeFile(${i}, '${inputId}', '${displayId}')">删除</button>
+      <span class="file-name">${Safe.escapeHtml(file.name)} (${(file.size / 1024).toFixed(1)} KB)</span>
+      <button class="file-remove" onclick="removeFile(${i}, '${Safe.escapeInlineJsString(inputId)}', '${Safe.escapeInlineJsString(displayId)}')">删除</button>
     `;
     display.appendChild(fileItem);
   });
@@ -628,7 +630,7 @@ function startBatchDocking() {
       resultsContent.innerHTML = `
         <div style="padding: 20px; border-radius: 12px; background: #fef2f2; color: #991b1b;">
           <div style="font-weight: 700; margin-bottom: 8px;">批量对接失败</div>
-          <div>${error.message}</div>
+          <div>${Safe.escapeHtml(error.message)}</div>
         </div>
       `;
       statusIndicators.forEach((indicator) => {
@@ -876,11 +878,12 @@ function startDocking() {
       progressContainer.style.display = "none";
 
       const resultsContent = document.getElementById("results-content");
+      const safeErrorMessage = Safe.escapeHtml(error.message || "对接计算失败");
       resultsContent.innerHTML = `
         <div style="text-align: center; color: #ef4444; padding: 40px;">
           <div style="font-size: 48px; margin-bottom: 16px;">❌</div>
           <div style="font-size: 18px; font-weight: bold; margin-bottom: 8px;">对接计算失败</div>
-          <div style="font-size: 14px;">${error.message}</div>
+          <div style="font-size: 14px;">${safeErrorMessage}</div>
         </div>
       `;
 
@@ -897,6 +900,7 @@ function startDocking() {
 // 显示真实的对接结果
 function showRealResults(data) {
   const resultsContent = document.getElementById("results-content");
+  const safeJobIdJs = Safe.escapeInlineJsString(data.job_id || "");
 
   if (!data.results || data.results.length === 0) {
     resultsContent.innerHTML = `
@@ -958,8 +962,8 @@ function showRealResults(data) {
       </tbody>
     </table>
     <div class="action-buttons">
-      <button class="action-btn btn-primary" onclick="downloadResults('${data.job_id}')">导出结果</button>
-      <button class="action-btn btn-secondary" onclick="generateReport('${data.job_id}')">生成报告</button>
+      <button class="action-btn btn-primary" onclick="downloadResults('${safeJobIdJs}')">导出结果</button>
+      <button class="action-btn btn-secondary" onclick="generateReport('${safeJobIdJs}')">生成报告</button>
       <button class="action-btn btn-secondary" onclick="resetDocking()">重新对接</button>
     </div>
   `;
@@ -1006,6 +1010,11 @@ function showBatchResults(data) {
   const resultsContent = document.getElementById("results-content");
   const rows = AppState.currentBatchResults
     .map((item) => {
+      const safeBatchJobIdJs = Safe.escapeInlineJsString(item.job_id || "");
+      const safeLigandNameText = Safe.escapeHtml(item.ligand_name || "--");
+      const safeLigandNameAttr = Safe.escapeAttr(item.ligand_name || "");
+      const safeIndex = Safe.escapeHtml(item.index);
+      const safeError = Safe.escapeHtml(item.error || "");
       const status = item.success
         ? '<span class="status-indicator status-completed">成功</span>'
         : '<span class="status-indicator status-error">失败</span>';
@@ -1014,22 +1023,22 @@ function showBatchResults(data) {
       const poseCount = item.total_poses || 0;
       const viewBtn =
         item.success && item.job_id
-          ? `<button class="action-btn btn-primary" style="padding: 5px 10px; font-size: 12px;" onclick="viewBatchLigand('${item.job_id}')">查看</button>`
+          ? `<button class="action-btn btn-primary" style="padding: 5px 10px; font-size: 12px;" onclick="viewBatchLigand('${safeBatchJobIdJs}')">查看</button>`
           : `<span style="color:#94a3b8;font-size:12px;">不可用</span>`;
       const downloadBtn =
         item.success && item.job_id
-          ? `<button class="action-btn btn-secondary" style="padding: 5px 10px; font-size: 12px;" onclick="downloadResults('${item.job_id}')">下载</button>`
+          ? `<button class="action-btn btn-secondary" style="padding: 5px 10px; font-size: 12px;" onclick="downloadResults('${safeBatchJobIdJs}')">下载</button>`
           : "";
       return `
         <tr>
-          <td>${item.index}</td>
-          <td title="${item.ligand_name || ""}">${item.ligand_name || "--"}</td>
+          <td>${safeIndex}</td>
+          <td title="${safeLigandNameAttr}">${safeLigandNameText}</td>
           <td>${item.input_type === "smiles" ? "SMILES" : "文件"}</td>
           <td>${status}</td>
           <td><strong>${energy}</strong></td>
           <td>${poseCount}</td>
           <td>${viewBtn} ${downloadBtn}</td>
-          <td style="max-width: 220px; color:#ef4444; font-size:12px;">${item.error || ""}</td>
+          <td style="max-width: 220px; color:#ef4444; font-size:12px;">${safeError}</td>
         </tr>
       `;
     })
@@ -1516,7 +1525,6 @@ function loadDockingHistory() {
   const listEl = document.getElementById("history-list");
   if (!listEl) return;
   listEl.innerHTML = '<div class="history-empty">加载中...</div>';
-
   fetch("/api/docking/history")
     .then((r) => r.json())
     .then((data) => {
@@ -1543,22 +1551,26 @@ function loadDockingHistory() {
         const energy =
           item.best_energy !== null ? item.best_energy.toFixed(1) : "--";
         const sizeKB = (item.size_bytes / 1024).toFixed(0);
+        const safeJobIdText = Safe.escapeHtml(item.job_id);
+        const safeJobIdAttr = Safe.escapeAttr(item.job_id);
+        const safeJobIdJs = Safe.escapeInlineJsString(item.job_id);
+        const safeHistoryTime = Safe.escapeHtml(item.time);
 
         html += `
-          <div class="history-card" data-jobid="${item.job_id}">
+          <div class="history-card" data-jobid="${safeJobIdAttr}">
             <div class="history-card-top">
-              <span class="history-job-id" title="${item.job_id}">🔬 ${item.job_id}</span>
+              <span class="history-job-id" title="${safeJobIdAttr}">🔬 ${safeJobIdText}</span>
               <span class="${statusClass}">${statusText}</span>
             </div>
             <div class="history-card-info">
-              <span class="history-meta history-time">🕐 ${item.time}</span>
+              <span class="history-meta history-time">🕐 ${safeHistoryTime}</span>
               <span class="history-energy">${energy} kcal/mol</span>
               <span class="history-meta">📊 ${item.pose_count} 个构象</span>
               <span class="history-meta">💾 ${sizeKB} KB</span>
             </div>
             <div class="history-card-actions">
-              ${item.has_result ? `<button class="history-action-btn history-load-btn" onclick="loadHistoryJob('${item.job_id}')">📂 加载结果</button>` : ""}
-              <button class="history-action-btn history-delete-btn" onclick="deleteHistoryJob('${item.job_id}')">🗑️ 删除</button>
+              ${item.has_result ? `<button class="history-action-btn history-load-btn" onclick="loadHistoryJob('${safeJobIdJs}')">📂 加载结果</button>` : ""}
+              <button class="history-action-btn history-delete-btn" onclick="deleteHistoryJob('${safeJobIdJs}')">🗑️ 删除</button>
             </div>
           </div>
         `;
@@ -1574,7 +1586,6 @@ function loadDockingHistory() {
 
 function clearAllHistory() {
   if (!confirm("确定要清除所有对接历史记录？\n此操作不可撤销！")) return;
-
   fetch("/api/docking/history", { method: "DELETE" })
     .then((r) => r.json())
     .then((data) => {
@@ -1590,14 +1601,14 @@ function clearAllHistory() {
 
 function deleteHistoryJob(jobId) {
   if (!confirm(`确定删除任务 ${jobId} ？`)) return;
-
   fetch(`/api/docking/history/${jobId}`, { method: "DELETE" })
     .then((r) => r.json())
     .then((data) => {
       if (data.success) {
         // 从列表移除卡片（带动画）
+        const safeJobIdSelector = Safe.escapeCssIdent(jobId);
         const card = document.querySelector(
-          `.history-card[data-jobid="${jobId}"]`,
+          `.history-card[data-jobid="${safeJobIdSelector}"]`,
         );
         if (card) {
           card.style.transition = "all 0.3s ease";

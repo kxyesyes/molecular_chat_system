@@ -1,0 +1,140 @@
+rule_files:
+  - ../rules/medchat-temporal.yml
+
+evaluation_interval: 15s
+
+tests:
+  - name: missing baseline blocks release
+    interval: 1m
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: TemporalDockingP95BaselineMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              release_blocker: "true"
+            exp_annotations:
+              summary: Temporal docking p95 baseline is unavailable
+              description: A positive measured docking latency baseline is required before release.
+
+  - name: labeled baseline p95 fires
+    interval: 1m
+    input_series:
+      - series: 'medchat_temporal_task_duration_seconds_bucket{job="worker",instance="relay:9466",task_type="docking",le="60"}'
+        values: '0+10x30'
+      - series: 'medchat_temporal_task_duration_seconds_bucket{job="worker",instance="relay:9466",task_type="docking",le="+Inf"}'
+        values: '0+10x30'
+      - series: 'medchat_temporal_baseline_p95_seconds{job="worker",instance="relay:9466"}'
+        values: '10+0x30'
+    alert_rule_test:
+      - eval_time: 26m
+        alertname: TemporalDockingP95TooHigh
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              release_blocker: "true"
+            exp_annotations:
+              summary: Temporal docking p95 latency is too high
+              description: Docking p95 exceeds the release baseline or the absolute latency ceiling.
+
+  - name: scoped docking queue grows
+    interval: 1m
+    input_series:
+      - series: 'approximate_backlog_count{namespace="default",taskqueue="medchat-docking"}'
+        values: '0+1x30'
+      - series: 'approximate_backlog_count{namespace="default",taskqueue="unrelated"}'
+        values: '0+2x30'
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: TemporalQueueBacklogGrowing
+        exp_alerts:
+          - exp_labels:
+              namespace: default
+              taskqueue: medchat-docking
+              severity: critical
+              release_blocker: "true"
+            exp_annotations:
+              summary: Temporal queue backlog is growing
+              description: The official Temporal queue backlog gauge has increased over ten minutes.
+
+  - name: unrelated queue does not fire
+    interval: 1m
+    input_series:
+      - series: 'approximate_backlog_count{namespace="default",taskqueue="unrelated"}'
+        values: '0+2x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: TemporalQueueBacklogGrowing
+        exp_alerts: []
+
+  - name: low frequency start error persists
+    interval: 1m
+    input_series:
+      - series: 'service_errors{service_name="frontend",namespace="default",operation="StartWorkflowExecution"}'
+        values: '0+0x4 1+0x30'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: TemporalWorkflowStartUnexpectedErrors
+        exp_alerts:
+          - exp_labels:
+              service_name: frontend
+              namespace: default
+              operation: StartWorkflowExecution
+              severity: critical
+              release_blocker: "true"
+            exp_annotations:
+              summary: Temporal workflow starts have unexpected errors
+              description: The Temporal frontend reported unexpected workflow start request errors.
+
+  - name: low frequency runtime failure persists
+    interval: 1m
+    input_series:
+      - series: 'medchat_temporal_task_terminal_total{task_type="docking",status="failed"}'
+        values: '0+0x4 1+0x35'
+      - series: 'medchat_temporal_task_terminal_total{task_type="docking",status="succeeded"}'
+        values: '0+0x4 9+0x35'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: TemporalRuntimeFailureRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              release_blocker: "true"
+            exp_annotations:
+              summary: Temporal docking failure rate is high
+              description: Non-successful terminal outcomes exceed five percent of terminal outcomes.
+
+  - name: one scrape gap is tolerated
+    interval: 15s
+    input_series:
+      - series: 'up{job="temporal-server"}'
+        values: '1 1 0 1+0x8'
+      - series: 'up{job="temporal-postgres"}'
+        values: '1+0x11'
+      - series: 'pg_up{job="temporal-postgres"}'
+        values: '1+0x11'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: TemporalPostgresUnavailable
+        exp_alerts: []
+
+  - name: sustained unavailability fires
+    interval: 15s
+    input_series:
+      - series: 'up{job="temporal-server"}'
+        values: '1 0+0x10'
+      - series: 'up{job="temporal-postgres"}'
+        values: '1+0x11'
+      - series: 'pg_up{job="temporal-postgres"}'
+        values: '1+0x11'
+    alert_rule_test:
+      - eval_time: 90s
+        alertname: TemporalPostgresUnavailable
+        exp_alerts:
+          - exp_labels:
+              job: temporal-server
+              severity: critical
+              release_blocker: "true"
+            exp_annotations:
+              summary: Temporal or PostgreSQL metrics are unavailable
+              description: The Temporal server scrape, PostgreSQL exporter scrape, or database connection is missing or unhealthy.

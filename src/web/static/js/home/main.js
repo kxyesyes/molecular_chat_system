@@ -17,6 +17,15 @@
   let currentMessages = [];
   let reconnectAttempts = 0;
   let maxReconnectAttempts = 5;
+  let agentTaskRunActive = false;
+  let protocolDesyncedSocket = null;
+  const maxWebSocketMessageLength = 256 * 1024;
+  const moleculeCandidateLifecycle =
+    window.HomeMoleculeCandidates.createLifecycle({
+      maxRuns: 2,
+      maxEventsPerRun: 8,
+      maxCandidates: 32,
+    });
 
   // DOM元素缓存
   const elements = {
@@ -43,6 +52,7 @@
     llmModelName: null,
     llmApiKey: null,
     llmApiKeyHint: null,
+    llmClearApiKey: null,
     llmSettingsStatus: null,
     testLlmConfig: null,
     saveLlmConfig: null,
@@ -79,6 +89,7 @@
     elements.llmModelName = document.getElementById("llmModelName");
     elements.llmApiKey = document.getElementById("llmApiKey");
     elements.llmApiKeyHint = document.getElementById("llmApiKeyHint");
+    elements.llmClearApiKey = document.getElementById("clearLlmApiKey");
     elements.llmSettingsStatus = document.getElementById("llmSettingsStatus");
     elements.testLlmConfig = document.getElementById("testLlmConfig");
     elements.saveLlmConfig = document.getElementById("saveLlmConfig");
@@ -149,6 +160,10 @@
 
   // WebSocket连接管理 - 修复版
   function connectWebSocket() {
+    const previousSocket = ws;
+    ws = null;
+    protocolDesyncedSocket = null;
+    moleculeCandidateLifecycle.clear();
     const wsUrl = `ws://${window.location.host}/ws`;
 
     console.log(`=== 尝试连接WebSocket ===`);
@@ -156,26 +171,29 @@
     console.log(`重连尝试次数: ${reconnectAttempts}/${maxReconnectAttempts}`);
 
     // 如果已经存在连接，先关闭
-    if (ws && ws.readyState !== WebSocket.CLOSED) {
+    if (previousSocket && previousSocket.readyState !== WebSocket.CLOSED) {
       console.log("关闭现有WebSocket连接");
-      ws.close();
+      previousSocket.close();
     }
 
     try {
-      ws = new WebSocket(wsUrl);
+      const socket = new WebSocket(wsUrl);
+      ws = socket;
 
       // 连接超时处理
       const connectionTimeout = setTimeout(() => {
-        if (ws.readyState === WebSocket.CONNECTING) {
+        if (socket !== ws) return;
+        if (socket.readyState === WebSocket.CONNECTING) {
           console.log("WebSocket连接超时");
-          ws.close();
+          socket.close();
         }
       }, 10000); // 10秒超时
 
-      ws.onopen = () => {
+      socket.onopen = () => {
+        if (socket !== ws) return;
         clearTimeout(connectionTimeout);
         console.log("✅ WebSocket连接成功");
-        console.log(`WebSocket readyState: ${ws.readyState}`);
+        console.log(`WebSocket readyState: ${socket.readyState}`);
 
         isConnected = true;
         reconnectAttempts = 0;
@@ -183,19 +201,20 @@
         HomeChatRenderer.updateConnectionStatus("connecting");
 
         // 发送连接确认消息
-        sendTestMessage();
+        sendTestMessage(socket);
       };
 
-      ws.onmessage = (event) => {
+      socket.onmessage = (event) => {
+        if (socket !== ws) return;
         console.log("📨 收到WebSocket消息:", {
-          data: event.data,
           timestamp: new Date().toISOString(),
           dataLength: event.data ? event.data.length : 0,
         });
 
         try {
-          handleWebSocketMessage(event.data);
+          handleWebSocketMessage(event.data, socket);
         } catch (error) {
+          closeProtocolSocket(socket, 1002, "message handling failed");
           console.error("❌ 处理WebSocket消息时出错:", {
             error: error.message,
             stack: error.stack,
@@ -205,19 +224,27 @@
         }
       };
 
-      ws.onerror = (error) => {
+      socket.onerror = (error) => {
+        if (socket !== ws) return;
         clearTimeout(connectionTimeout);
+        if (protocolDesyncedSocket !== socket) {
+          moleculeCandidateLifecycle.clear();
+        }
         console.error("❌ WebSocket错误:", {
           error: error,
-          readyState: ws ? ws.readyState : "null",
-          url: ws ? ws.url : "null",
+          readyState: socket.readyState,
+          url: socket.url,
         });
         HomeChatRenderer.updateConnectionStatus("error");
         HomeChatRenderer.showNotification("WebSocket连接出错", "error");
       };
 
-      ws.onclose = (event) => {
+      socket.onclose = (event) => {
+        if (socket !== ws) return;
         clearTimeout(connectionTimeout);
+        moleculeCandidateLifecycle.clear();
+        protocolDesyncedSocket = null;
+        ws = null;
         console.log("🔌 WebSocket连接关闭:", {
           code: event.code,
           reason: event.reason || "无原因说明",
@@ -244,7 +271,7 @@
           );
 
           setTimeout(() => {
-            if (!isConnected && (!ws || ws.readyState === WebSocket.CLOSED)) {
+            if (!isConnected && !ws) {
               connectWebSocket();
             }
           }, delay);
@@ -254,6 +281,7 @@
         }
       };
     } catch (error) {
+      moleculeCandidateLifecycle.clear();
       console.error("❌ 创建WebSocket连接失败:", {
         error: error.message,
         stack: error.stack,
@@ -267,15 +295,27 @@
     }
   }
 
+  function closeProtocolSocket(socket, code, reason) {
+    if (!socket || socket !== ws) return;
+    protocolDesyncedSocket = socket;
+    isConnected = false;
+    if (
+      socket.readyState !== WebSocket.CLOSING &&
+      socket.readyState !== WebSocket.CLOSED
+    ) {
+      socket.close(code, reason);
+    }
+  }
+
   // 发送测试消息确认连接
-  function sendTestMessage() {
-    if (ws && ws.readyState === WebSocket.OPEN) {
+  function sendTestMessage(socket = ws) {
+    if (socket && socket === ws && socket.readyState === WebSocket.OPEN) {
       try {
         const testPayload = {
           type: "ping",
           timestamp: Date.now(),
         };
-        ws.send(JSON.stringify(testPayload));
+        socket.send(JSON.stringify(testPayload));
         console.log("📤 发送连接测试消息:", testPayload);
       } catch (error) {
         console.error("❌ 发送测试消息失败:", error);
@@ -284,14 +324,24 @@
   }
 
   // 增强的消息处理函数
-  function handleWebSocketMessage(data) {
+  function handleWebSocketMessage(data, socket = ws) {
+    if (socket !== ws) return;
     // 数据有效性检查
     if (!data || typeof data !== "string") {
-      console.warn("⚠️ 收到无效消息数据:", data);
+      closeProtocolSocket(socket, 1002, "invalid message data");
+      console.warn("⚠️ 收到无效消息数据");
+      return;
+    }
+
+    if (data.length > maxWebSocketMessageLength) {
+      closeProtocolSocket(socket, 1009, "message too large");
+      console.warn("Ignored oversized WebSocket message");
+      showErrorMessage("收到的消息过大，已安全忽略");
       return;
     }
 
     if (data.trim() === "") {
+      closeProtocolSocket(socket, 1002, "empty message");
       console.warn("⚠️ 收到空消息");
       return;
     }
@@ -302,11 +352,13 @@
 
       // 消息格式验证
       if (!message || typeof message !== "object") {
+        closeProtocolSocket(socket, 1002, "invalid message shape");
         console.warn("⚠️ 消息格式无效:", message);
         return;
       }
 
       if (!message.type) {
+        closeProtocolSocket(socket, 1002, "missing message type");
         console.warn("⚠️ 消息缺少type字段:", message);
         return;
       }
@@ -366,8 +418,26 @@
           }
           break;
 
+        case "molecule_candidates": {
+          if (!moleculeCandidateLifecycle.isRequestInFlight()) {
+            console.warn("Ignored molecule candidate payload without active request");
+            break;
+          }
+          const normalized = window.HomeMoleculeCandidates?.normalize(message);
+          if (!normalized) {
+            console.warn("Ignored malformed molecule candidate payload");
+            HomeChatRenderer.showNotification(
+              "收到的分子候选数据未通过验证",
+              "warning"
+            );
+          } else if (!moleculeCandidateLifecycle.enqueue(normalized)) {
+            console.warn("Ignored duplicate or over-limit molecule candidate payload");
+          }
+          break;
+        }
+
         case "complete":
-          completeLastMessage();
+          completeLastMessage(message.content);
           clearToolStatus(); // 清除工具状态显示
           break;
 
@@ -381,13 +451,24 @@
           }
           break;
 
-        case "message":
-          if (message.message) {
-            addAssistantMessage(message.message);
-          } else {
-            console.warn("⚠️ message消息缺少message字段");
+        case "message": {
+          const candidatePayloads = moleculeCandidateLifecycle.drain();
+          try {
+            if (message.message) {
+              const messageBox = addAssistantMessage(message.message);
+              messageBox.classList.add("complete");
+              messageBox.setAttribute("data-content", message.message);
+              candidatePayloads.forEach((payload) => {
+                renderMoleculeCandidates(messageBox, payload);
+              });
+            } else {
+              console.warn("⚠️ message消息缺少message字段");
+            }
+          } finally {
+            moleculeCandidateLifecycle.clear();
           }
           break;
+        }
 
         case "rag_info":
           if (message.molecules) {
@@ -398,6 +479,7 @@
           break;
 
         case "error":
+          moleculeCandidateLifecycle.clear();
           const errorMsg = message.message || message.error || "未知错误";
           console.error("❌ 服务器返回错误:", {
             message: errorMsg,
@@ -411,6 +493,7 @@
           console.log("❓ 未知消息类型:", message.type, message);
       }
     } catch (error) {
+      closeProtocolSocket(socket, 1002, "invalid message");
       console.error("❌ 解析WebSocket消息时出错:", {
         error: error.message,
         stack: error.stack,
@@ -550,6 +633,7 @@
       if (elements.llmBaseUrl) elements.llmBaseUrl.value = config.base_url || "";
       if (elements.llmModelName) elements.llmModelName.value = config.model_name || "";
       if (elements.llmApiKey) elements.llmApiKey.value = "";
+      if (elements.llmClearApiKey) elements.llmClearApiKey.checked = false;
       if (elements.llmApiKeyHint) {
         elements.llmApiKeyHint.textContent = config.api_key_configured
           ? `已配置：${config.api_key_hint || "******"}。留空保存会沿用原 Key。`
@@ -563,6 +647,7 @@
         base_url: elements.llmBaseUrl ? elements.llmBaseUrl.value : "",
         model_name: elements.llmModelName ? elements.llmModelName.value : "",
         api_key: elements.llmApiKey ? elements.llmApiKey.value : "",
+        clear_api_key: Boolean(elements.llmClearApiKey?.checked),
         stream: elements.llmStream ? elements.llmStream.value === "true" : true,
       };
     }
@@ -859,45 +944,50 @@
       return;
     }
 
+    elements.managedFileList.replaceChildren();
+
     if (!HomeState.managedFiles.length) {
-      elements.managedFileList.innerHTML =
-        '<li class="file-manager-list__empty">暂无文件，请先添加文档。</li>';
+      const emptyItem = document.createElement("li");
+      emptyItem.className = "file-manager-list__empty";
+      emptyItem.textContent = "暂无文件，请先添加文档。";
+      elements.managedFileList.appendChild(emptyItem);
       return;
     }
 
-    elements.managedFileList.innerHTML = HomeState.managedFiles
-      .map(function (file) {
-        return `
-          <li class="file-manager-list__item">
-            <div class="file-manager-list__meta">
-              <strong>${file.name}</strong>
-              <span>${Math.max(1, Math.round(file.size / 1024))} KB</span>
-            </div>
-            <button
-              class="file-manager-list__remove"
-              type="button"
-              data-file-id="${file.id}"
-              aria-label="移除 ${file.name}"
-            >
-              移除
-            </button>
-          </li>
-        `;
-      })
-      .join("");
+    HomeState.managedFiles.forEach(function (file) {
+      const item = document.createElement("li");
+      item.className = "file-manager-list__item";
 
-    elements.managedFileList
-      .querySelectorAll(".file-manager-list__remove")
-      .forEach(function (button) {
-        button.addEventListener("click", function () {
-          const fileId = button.getAttribute("data-file-id");
-          HomeState.managedFiles = HomeState.managedFiles.filter(function (file) {
-            return file.id !== fileId;
-          });
-          persistManagedFiles();
-          renderManagedFiles();
+      const meta = document.createElement("div");
+      meta.className = "file-manager-list__meta";
+
+      const fileName = document.createElement("strong");
+      fileName.textContent = file.name;
+
+      const fileSize = document.createElement("span");
+      const sizeKb = Math.max(1, Math.round((Number(file.size) || 0) / 1024));
+      fileSize.textContent = `${sizeKb} KB`;
+
+      meta.append(fileName, fileSize);
+
+      const removeButton = document.createElement("button");
+      removeButton.className = "file-manager-list__remove";
+      removeButton.type = "button";
+      removeButton.dataset.fileId = file.id;
+      removeButton.setAttribute("aria-label", `移除 ${file.name}`);
+      removeButton.textContent = "移除";
+      removeButton.addEventListener("click", function () {
+        const fileId = String(file.id);
+        HomeState.managedFiles = HomeState.managedFiles.filter(function (item) {
+          return item.id !== fileId;
         });
+        persistManagedFiles();
+        renderManagedFiles();
       });
+
+      item.append(meta, removeButton);
+      elements.managedFileList.appendChild(item);
+    });
   }
 
   async function handleModelChange(e) {
@@ -1028,10 +1118,12 @@
       gap: 10px;
     `;
 
-    toast.innerHTML = `
-      <span style="font-size: 20px;">${icon}</span>
-      <span>${message}</span>
-    `;
+    const iconSpan = document.createElement("span");
+    iconSpan.style.fontSize = "20px";
+    iconSpan.textContent = icon;
+    const messageSpan = document.createElement("span");
+    messageSpan.textContent = message;
+    toast.append(iconSpan, messageSpan);
 
     // 添加动画样式
     if (!document.getElementById("toast-animation-style")) {
@@ -1117,6 +1209,16 @@
       return;
     }
 
+    if (protocolDesyncedSocket === ws) {
+      HomeChatRenderer.showNotification("连接状态异常，正在重新连接", "warning");
+      return;
+    }
+
+    if (moleculeCandidateLifecycle.isRequestInFlight()) {
+      HomeChatRenderer.showNotification("请等待当前请求完成", "warning");
+      return;
+    }
+
     // 更严格的连接状态检查
     if (!ws) {
       console.log("❌ WebSocket对象不存在，尝试重连");
@@ -1152,7 +1254,6 @@
 
       // 添加用户消息到界面
       addUserMessage(message);
-      resetAgentTaskPanel();
 
       // 构建发送数据 - 确保格式正确，包含高级配置
       const advancedConfig = HomeAdvancedOptions.getConfig();
@@ -1179,6 +1280,7 @@
 
       // 发送到服务器
       ws.send(payloadStr);
+      moleculeCandidateLifecycle.startRequest();
 
       // 清空输入框
       elements.input.value = "";
@@ -1188,6 +1290,7 @@
 
       console.log("✅ 消息发送成功");
     } catch (error) {
+      moleculeCandidateLifecycle.clear();
       console.error("❌ 发送消息时出错:", {
         error: error.message,
         stack: error.stack,
@@ -1445,6 +1548,7 @@
     currentMessages.push({ role: "assistant", content: content });
     HomeState.currentMessages = currentMessages.slice();
     updateToolbarControlStates();
+    return messageBox;
   }
 
   // 追加到最后一条消息（用于流式输出）
@@ -1554,12 +1658,80 @@
     HomeChatRenderer.scrollToBottom();
   }
 
+  function resolveCompletionAction(state) {
+    const hasFinalContent =
+      typeof state.finalContent === "string" && state.finalContent.length > 0;
+
+    if (state.lastMessageComplete) {
+      return {
+        action:
+          state.hadTypingIndicator && hasFinalContent ? "create" : "ignore",
+        hasFinalContent,
+      };
+    }
+
+    if (!state.hasLastMessage) {
+      return {
+        action: hasFinalContent ? "create" : "ignore",
+        hasFinalContent,
+      };
+    }
+
+    if (
+      hasFinalContent &&
+      state.lastMessageContent !== state.finalContent
+    ) {
+      return { action: "replace", hasFinalContent };
+    }
+
+    return { action: "finalize", hasFinalContent };
+  }
+
   // 完成最后一条消息
-  function completeLastMessage() {
-    const lastMessage = elements.chatContainer.querySelector(
-      ".assistant-wrapper:last-child .message-box"
-    );
-    if (lastMessage) {
+  function completeLastMessage(content) {
+    const candidatePayloads = moleculeCandidateLifecycle.drain();
+    try {
+      const hadTypingIndicator = Boolean(
+        elements.chatContainer.querySelector(".typing-indicator-wrapper")
+      );
+      removeTypingIndicator();
+
+      let lastMessage = elements.chatContainer.querySelector(
+        ".assistant-wrapper:last-child .message-box"
+      );
+      const lastMessageContent = lastMessage?.getAttribute("data-content") || "";
+      const completion = resolveCompletionAction({
+        hadTypingIndicator,
+        hasLastMessage: Boolean(lastMessage),
+        lastMessageComplete: Boolean(lastMessage?.classList.contains("complete")),
+        lastMessageContent,
+        finalContent: content,
+      });
+
+      if (completion.action === "ignore") {
+        return;
+      }
+
+      // Agent 工作流可能不发送 stream 帧，直接以 complete.content 返回完整结果。
+      if (completion.action === "create") {
+        appendToLastMessage(content);
+        lastMessage = elements.chatContainer.querySelector(
+          ".assistant-wrapper:last-child .message-box"
+        );
+      } else if (completion.action === "replace") {
+        lastMessage.setAttribute("data-content", content);
+        const messageContent =
+          lastMessage.querySelector(".message-content") ||
+          lastMessage.querySelector("div:last-child");
+        if (messageContent) {
+          messageContent.innerHTML = HomeFormatters.formatContent(content);
+        }
+      }
+
+      if (!lastMessage) {
+        return;
+      }
+
       lastMessage.classList.remove("streaming");
       lastMessage.classList.add("complete");
 
@@ -1570,14 +1742,19 @@
       }
 
       // 保存完整内容到历史
-      const content =
-        lastMessage.getAttribute("data-content") || lastMessage.textContent;
-    currentMessages.push({ role: "assistant", content: content });
-    HomeState.currentMessages = currentMessages.slice();
-    updateToolbarControlStates();
+      const finalContent = completion.hasFinalContent
+        ? content
+        : lastMessage.getAttribute("data-content") || lastMessage.textContent;
+      lastMessage.setAttribute("data-content", finalContent);
+      currentMessages.push({ role: "assistant", content: finalContent });
+      HomeState.currentMessages = currentMessages.slice();
+      updateToolbarControlStates();
 
-      // ✨ 检测并渲染SMILES分子结构
-      detectAndRenderMolecules(lastMessage, content);
+      candidatePayloads.forEach((payload) => {
+        renderMoleculeCandidates(lastMessage, payload);
+      });
+    } finally {
+      moleculeCandidateLifecycle.clear();
     }
   }
 
@@ -1599,7 +1776,13 @@
             backdrop-filter: blur(10px);
         `;
 
-    statusDiv.innerHTML = `<span style="margin-right: 8px;">✨</span>${message}`;
+    const iconSpan = document.createElement("span");
+    iconSpan.style.marginRight = "8px";
+    iconSpan.textContent = "✨";
+    const messageSpan = document.createElement("span");
+    messageSpan.textContent = message;
+    statusDiv.appendChild(iconSpan);
+    statusDiv.appendChild(messageSpan);
     elements.chatContainer.appendChild(statusDiv);
 
     // 3秒后自动移除
@@ -1629,7 +1812,13 @@
             backdrop-filter: blur(10px);
         `;
 
-    toolDiv.innerHTML = `🔧 ${message}`;
+    const iconSpan = document.createElement("span");
+    iconSpan.style.marginRight = "8px";
+    iconSpan.textContent = "🔧";
+    const messageSpan = document.createElement("span");
+    messageSpan.textContent = message;
+    toolDiv.appendChild(iconSpan);
+    toolDiv.appendChild(messageSpan);
     elements.chatContainer.appendChild(toolDiv);
 
     HomeChatRenderer.scrollToBottom();
@@ -1665,6 +1854,7 @@
     const panel = createAgentTaskPanel();
     if (!panel) return;
 
+    agentTaskRunActive = true;
     panel.classList.add("is-active");
     const progress = panel.querySelector(".agent-task-progress");
     const list = panel.querySelector(".agent-task-list");
@@ -1672,7 +1862,40 @@
     if (list) list.innerHTML = "";
   }
 
+  function resolveAgentEventPresentation(event) {
+    const eventType = event.event || event.type || "agent_event";
+    const percent =
+      typeof event.progress === "number"
+        ? Math.round(Math.max(0, Math.min(1, event.progress)) * 100)
+        : null;
+    const progressText =
+      eventType.includes("completed") || eventType === "task_completed"
+        ? "已完成"
+        : percent !== null
+        ? `${percent}%`
+        : "执行中";
+    const terminalAgentEvents = new Set([
+      "task_completed",
+      "task_failed",
+      "task_partial",
+      "task_rejected",
+      "task_cancelled",
+    ]);
+    return {
+      eventType,
+      itemClass: getAgentEventClass(eventType),
+      progressText,
+      terminal: terminalAgentEvents.has(eventType),
+    };
+  }
+
   function handleAgentEvent(event) {
+    const presentation = resolveAgentEventPresentation(event);
+    const eventType = presentation.eventType;
+    if (!agentTaskRunActive) {
+      resetAgentTaskPanel();
+    }
+
     const panel = createAgentTaskPanel();
     if (!panel) return;
 
@@ -1681,11 +1904,10 @@
     const list = panel.querySelector(".agent-task-list");
     if (!list) return;
 
-    const eventType = event.type || "agent_event";
     const toolName = event.tool_name || event.tool || "";
     const message = event.message || getAgentEventLabel(eventType, toolName);
     const item = document.createElement("div");
-    item.className = `agent-task-item ${getAgentEventClass(eventType)}`;
+    item.className = `agent-task-item ${presentation.itemClass}`;
     item.innerHTML = `
       <span class="agent-task-dot"></span>
       <div class="agent-task-copy">
@@ -1695,17 +1917,10 @@
     `;
     list.appendChild(item);
 
-    if (progress) {
-      const percent =
-        typeof event.progress === "number"
-          ? Math.round(Math.max(0, Math.min(1, event.progress)) * 100)
-          : null;
-      progress.textContent =
-        eventType.includes("completed") || eventType === "task_completed"
-          ? "已完成"
-          : percent !== null
-          ? `${percent}%`
-          : "执行中";
+    if (progress) progress.textContent = presentation.progressText;
+
+    if (presentation.terminal) {
+      agentTaskRunActive = false;
     }
 
     HomeChatRenderer.scrollToBottom();
@@ -1729,7 +1944,9 @@
 
   function getAgentEventClass(type) {
     if (type && type.includes("failed")) return "is-error";
-    if (type === "validation_warning") return "is-warning";
+    if (type === "validation_warning" || type === "task_partial") {
+      return "is-warning";
+    }
     if (type && type.includes("completed")) return "is-complete";
     return "is-running";
   }
@@ -2605,7 +2822,11 @@
       error: "❌",
     };
 
-    notification.innerHTML = `<span>${icons[type]}</span><span>${message}</span>`;
+    const iconSpan = document.createElement("span");
+    iconSpan.textContent = icons[type] || icons.info;
+    const messageSpan = document.createElement("span");
+    messageSpan.textContent = message;
+    notification.append(iconSpan, messageSpan);
     document.body.appendChild(notification);
 
     // 3秒后自动移除
@@ -2992,6 +3213,7 @@
 
   // 格式化反应预测结果
   function formatReactionPrediction(content) {
+    const safeContent = escapeHtml(content);
     if (content.includes("预测的可能产物")) {
       let visualContent = `
         <div style="background: linear-gradient(135deg, #fbb6ce20 0%, #f687b320 100%); border-radius: 16px; padding: 24px; margin: 16px 0;">
@@ -3011,7 +3233,7 @@
           <div style="background: white; border-radius: 12px; padding: 20px; margin: 16px 0; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
             <h4 style="margin: 0 0 12px 0; color: #2d3748;">⚗️ 反应物</h4>
             <div style="background: #f0f9ff; padding: 12px; border-radius: 8px; font-family: monospace; font-size: 16px; color: #0c4a6e; border: 2px solid #7dd3fc;">
-              ${reactantMatch[1]}
+              ${escapeHtml(reactantMatch[1])}
             </div>
           </div>
         `;
@@ -3031,9 +3253,9 @@
           const productMatch = product.match(
             /\d+\.\s*`([^`]+)`\s*\(置信度:\s*(\d+\.?\d*)%\)/
           );
-          if (productMatch) {
-            const productSMILES = productMatch[1];
-            const confidence = productMatch[2];
+            if (productMatch) {
+              const productSMILES = productMatch[1];
+              const confidence = productMatch[2];
             const confidenceNum = parseFloat(confidence);
 
             let confidenceColor = "#ef4444";
@@ -3047,11 +3269,11 @@
                 </div>
                 <div style="flex: 1; margin-right: 16px;">
                   <div style="background: #e0f2fe; padding: 10px; border-radius: 6px; font-family: monospace; font-size: 14px; color: #0c4a6e;">
-                    ${productSMILES}
+                    ${escapeHtml(productSMILES)}
                   </div>
                 </div>
                 <div style="background: ${confidenceColor}; color: white; padding: 8px 16px; border-radius: 20px; font-size: 14px; font-weight: bold; min-width: 80px; text-align: center;">
-                  ${confidence}%
+                  ${escapeHtml(confidence)}%
                 </div>
               </div>
             `;
@@ -3073,11 +3295,12 @@
       return visualContent;
     }
 
-    return content.replace(/\n/g, "<br>");
+    return safeContent.replace(/\n/g, "<br>");
   }
 
   // 格式化文献搜索结果
   function formatLiteratureResults(content) {
+    const safeContent = escapeHtml(content);
     if (content.includes("相关文献") || content.includes("相关专利")) {
       let visualContent = `
         <div style="background: linear-gradient(135deg, #a7f3d020 0%, #6ee7b720 100%); border-radius: 16px; padding: 24px; margin: 16px 0;">
@@ -3091,7 +3314,7 @@
       `;
 
       // 简单地格式化内容，保持原有的结构但增加样式
-      const formattedContent = content
+      const formattedContent = safeContent
         .replace(
           /\*\*(.*?)\*\*/g,
           '<strong style="color: #2d3748;">$1</strong>'
@@ -3113,11 +3336,12 @@
       return visualContent;
     }
 
-    return content.replace(/\n/g, "<br>");
+    return safeContent.replace(/\n/g, "<br>");
   }
 
   // 格式化ADMET预测结果
   function formatADMETResults(content) {
+    const safeContent = escapeHtml(content);
     if (
       content.includes("增强ADMET属性预测结果") ||
       content.includes("**理化性质:**")
@@ -3134,7 +3358,7 @@
       `;
 
       // 格式化内容并添加样式
-      let formattedContent = content
+      let formattedContent = safeContent
         .replace(/💊 增强ADMET属性预测结果/g, "")
         .replace(
           /\*\*(.*?)\*\*/g,
@@ -3162,11 +3386,12 @@
       visualContent += `</div>`;
       return visualContent;
     }
-    return content.replace(/\n/g, "<br>");
+    return safeContent.replace(/\n/g, "<br>");
   }
 
   // 格式化类药评估结果
   function formatDrugLikenessResults(content) {
+    const safeContent = escapeHtml(content);
     if (
       content.includes("类药性评估结果") ||
       content.includes("**综合评估:**")
@@ -3182,7 +3407,7 @@
           </div>
       `;
 
-      let formattedContent = content
+      let formattedContent = safeContent
         .replace(/💊 类药性评估结果/g, "")
         .replace(
           /\*\*(.*?)\*\*/g,
@@ -3215,11 +3440,12 @@
       visualContent += `</div>`;
       return visualContent;
     }
-    return content.replace(/\n/g, "<br>");
+    return safeContent.replace(/\n/g, "<br>");
   }
 
   // 格式化基础分子属性结果
   function formatMolecularProperties(content) {
+    const safeContent = escapeHtml(content);
     if (content.includes("基础分子属性计算结果")) {
       let visualContent = `
         <div style="background: linear-gradient(135deg, #ecfdf520 0%, #d1fae520 100%); border-radius: 16px; padding: 24px; margin: 16px 0;">
@@ -3232,7 +3458,7 @@
           </div>
       `;
 
-      let formattedContent = content
+      let formattedContent = safeContent
         .replace(/🧬 基础分子属性计算结果/g, "")
         .replace(
           /📊 关键属性:/g,
@@ -3256,11 +3482,12 @@
       visualContent += `</div>`;
       return visualContent;
     }
-    return content.replace(/\n/g, "<br>");
+    return safeContent.replace(/\n/g, "<br>");
   }
 
   // 格式化ReAct推理结果
   function formatReActResults(content) {
+    const safeContent = escapeHtml(content);
     if (
       content.includes("**推理过程:**") ||
       content.includes("**使用工具:**")
@@ -3276,7 +3503,7 @@
           </div>
       `;
 
-      let formattedContent = content
+      let formattedContent = safeContent
         .replace(
           /\*\*(推理过程|使用工具|分析结果):\*\*/g,
           '<div style="background: #fffbeb; margin: 16px 0; padding: 12px; border-radius: 8px; border-left: 4px solid #f59e0b;"><strong style="color: #92400e; font-size: 16px;">🔧 $1</strong></div>'
@@ -3300,426 +3527,14 @@
       visualContent += `</div>`;
       return visualContent;
     }
-    return content.replace(/\n/g, "<br>");
+    return safeContent.replace(/\n/g, "<br>");
   }
 
-  // 获取分子属性（用于旧版本的分子卡片）
-  async function fetchMoleculeProperties(smiles, container) {
-    try {
-      // 调用后端API获取分子属性
-      const response = await fetch("/api/molecule/properties", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ smiles: smiles }),
-      });
-
-      if (!response.ok) {
-        throw new Error("API请求失败");
-      }
-
-      const data = await response.json();
-
-      if (data.success && data.properties) {
-        displayMoleculeProperties(data.properties, container);
-      } else {
-        const errorMsg = data.error || "未知错误";
-        container.innerHTML = `
-          <div style="text-align: center; color: #f59e0b; padding: 12px;">
-            <div style="font-size: 18px; margin-bottom: 4px;">⚠️</div>
-            <div style="font-size: 11px; color: #92400e;">该分子结构无法计算属性</div>
-            <div style="font-size: 10px; color: #b45309; margin-top: 4px;">可能是无效的SMILES结构</div>
-          </div>
-        `;
-      }
-    } catch (error) {
-      console.error("获取分子属性失败:", error);
-      container.innerHTML = `
-        <div style="text-align: center; color: #94a3b8; padding: 12px;">
-          <div style="font-size: 18px; margin-bottom: 4px;">⚠️</div>
-          <div style="font-size: 11px;">无法获取属性数据</div>
-        </div>
-      `;
-    }
-  }
-
-  // 获取工具生成分子的属性（使用与反向寻靶一致的样式）
-  async function fetchMoleculePropertiesForToolMolecule(smiles, container) {
-    try {
-      const response = await fetch("/api/molecule/properties", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ smiles: smiles }),
-      });
-
-      if (!response.ok) {
-        throw new Error("API请求失败");
-      }
-
-      const data = await response.json();
-
-      if (data.success && data.properties) {
-        displayToolMoleculeProperties(data.properties, container);
-      } else {
-        container.innerHTML = `
-          <div style="text-align: center; color: #f59e0b; padding: 12px;">
-            <div style="font-size: 18px; margin-bottom: 4px;">⚠️</div>
-            <div style="font-size: 11px; color: #92400e;">无法计算属性</div>
-          </div>
-        `;
-      }
-    } catch (error) {
-      console.error("获取分子属性失败:", error);
-      container.innerHTML = `
-        <div style="text-align: center; color: #94a3b8; padding: 12px;">
-          <div style="font-size: 18px; margin-bottom: 4px;">⚠️</div>
-          <div style="font-size: 11px;">无法获取属性数据</div>
-        </div>
-      `;
-    }
-  }
-
-  // 显示工具生成分子的属性（使用与反向寻靶一致的网格布局）
-  function displayToolMoleculeProperties(properties, container) {
-    const basicProps = properties.basic || {};
-
-    // 属性映射
-    const propertyLabels = {
-      molecular_weight: "分子量",
-      logp: "LogP",
-      hbd: "HBD",
-      hba: "HBA",
-      tpsa: "TPSA",
-      rotatable_bonds: "可旋转键",
-    };
-
-    const allProperties = [
-      "molecular_weight",
-      "logp",
-      "hbd",
-      "hba",
-      "tpsa",
-      "rotatable_bonds",
-    ];
-
-    let html = `<div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 10px;">`;
-    let hasProps = false;
-
-    allProperties.forEach((prop) => {
-      const value = basicProps[prop];
-
-      if (value !== undefined && value !== null) {
-        hasProps = true;
-        const propValue = parseFloat(value);
-
-        // 根据属性类型设置颜色
-        let valueColor = "#334155";
-        let bgColor = "#f8fafc";
-        let displayValue = propValue;
-
-        if (prop === "molecular_weight") {
-          valueColor = propValue <= 500 ? "#059669" : propValue <= 600 ? "#d97706" : "#dc2626";
-          bgColor = propValue <= 500 ? "#ecfdf5" : propValue <= 600 ? "#fffbeb" : "#fef2f2";
-          displayValue = propValue.toFixed(1);
-        } else if (prop === "logp") {
-          valueColor = propValue >= -0.4 && propValue <= 5.6 ? "#059669" : "#dc2626";
-          bgColor = propValue >= -0.4 && propValue <= 5.6 ? "#ecfdf5" : "#fef2f2";
-          displayValue = propValue.toFixed(2);
-        } else if (prop === "hbd") {
-          valueColor = propValue <= 5 ? "#059669" : "#dc2626";
-          displayValue = Math.round(propValue);
-        } else if (prop === "hba") {
-          valueColor = propValue <= 10 ? "#059669" : "#dc2626";
-          displayValue = Math.round(propValue);
-        } else if (prop === "tpsa") {
-          valueColor = propValue <= 140 ? "#059669" : "#d97706";
-          displayValue = propValue.toFixed(1);
-        } else if (prop === "rotatable_bonds") {
-          displayValue = Math.round(propValue);
-        }
-
-        html += `
-          <div style="display: flex; justify-content: space-between; align-items: center; background: ${bgColor}; padding: 6px 10px; border-radius: 6px; border: 1px solid rgba(0,0,0,0.03);">
-            <span style="color: #64748b; font-size: 11px; font-weight: 500;">${propertyLabels[prop] || prop}</span>
-            <span style="color: ${valueColor}; font-weight: 700; font-size: 12px; font-family: 'Inter', ui-sans-serif, system-ui;">${displayValue}</span>
-          </div>
-        `;
-      }
-    });
-
-    html += `</div>`;
-
-    if (hasProps) {
-      container.innerHTML = html;
-    } else {
-      container.innerHTML = `
-        <div style="text-align: center; color: #94a3b8; padding: 12px;">
-          <div style="font-size: 11px;">暂无属性数据</div>
-        </div>
-      `;
-    }
-  }
-
-  // 显示分子属性
-  function displayMoleculeProperties(properties, container) {
-    const basicProps = properties.basic || {};
-    const admetProps = properties.admet || {};
-
-    let html = `
-      <div style="margin-bottom: 12px;">
-        <div style="font-weight: 600; color: #1e293b; margin-bottom: 8px; font-size: 13px; display: flex; align-items: center; gap: 6px;">
-          <span>📊</span> 基础属性
-        </div>
-        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
-    `;
-
-    // 基础属性
-    const basicItems = [
-      {
-        label: "分子量",
-        value: basicProps.molecular_weight,
-        unit: "g/mol",
-        key: "mw",
-      },
-      { label: "LogP", value: basicProps.logp, unit: "", key: "logp" },
-      { label: "HBD", value: basicProps.hbd, unit: "", key: "hbd" },
-      { label: "HBA", value: basicProps.hba, unit: "", key: "hba" },
-      { label: "TPSA", value: basicProps.tpsa, unit: "Ų", key: "tpsa" },
-      {
-        label: "Rotatable",
-        value: basicProps.rotatable_bonds,
-        unit: "",
-        key: "rot",
-      },
-    ];
-
-    basicItems.forEach((item) => {
-      if (item.value !== undefined && item.value !== null) {
-        const displayValue =
-          typeof item.value === "number" ? item.value.toFixed(2) : item.value;
-        const color = getPropertyColor(item.key, item.value);
-        html += `
-          <div style="background: #f8fafc; padding: 6px 8px; border-radius: 6px; border: 1px solid #e2e8f0;">
-            <div style="font-size: 10px; color: #64748b; margin-bottom: 2px;">${item.label}</div>
-            <div style="font-weight: 600; color: ${color}; font-size: 12px;">${displayValue}${item.unit}</div>
-          </div>
-        `;
-      }
-    });
-
-    html += `
-        </div>
-      </div>
-    `;
-
-    // ADMET属性
-    if (admetProps && Object.keys(admetProps).length > 0) {
-      html += `
-        <div>
-          <div style="font-weight: 600; color: #1e293b; margin-bottom: 8px; font-size: 13px; display: flex; align-items: center; gap: 6px;">
-            <span>💊</span> ADMET属性
-          </div>
-          <div style="display: grid; grid-template-columns: 1fr; gap: 6px;">
-      `;
-
-      const admetItems = [
-        { label: "BBB渗透", value: admetProps.bbb_penetration, key: "bbb" },
-        { label: "CYP抑制", value: admetProps.cyp_inhibition, key: "cyp" },
-        { label: "肝毒性", value: admetProps.hepatotoxicity, key: "hepato" },
-        { label: "溶解度", value: admetProps.solubility, key: "sol" },
-      ];
-
-      admetItems.forEach((item) => {
-        if (item.value !== undefined && item.value !== null) {
-          const icon = getADMETIcon(item.value);
-          const color = getADMETColor(item.value);
-          html += `
-            <div style="background: #f8fafc; padding: 6px 8px; border-radius: 6px; border: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: center;">
-              <span style="font-size: 11px; color: #475569;">${item.label}</span>
-              <span style="font-size: 11px; font-weight: 600; color: ${color};">${icon} ${item.value}</span>
-            </div>
-          `;
-        }
-      });
-
-      html += `
-          </div>
-        </div>
-      `;
-    }
-
-    container.innerHTML = html;
-  }
-
-  // 获取属性值的颜色
-  function getPropertyColor(key, value) {
-    if (typeof value !== "number") return "#374151";
-
-    switch (key) {
-      case "mw":
-        return value <= 500 ? "#059669" : value <= 600 ? "#d97706" : "#dc2626";
-      case "logp":
-        return value >= -0.4 && value <= 5.6 ? "#059669" : "#dc2626";
-      case "hbd":
-        return value <= 5 ? "#059669" : "#dc2626";
-      case "hba":
-        return value <= 10 ? "#059669" : "#dc2626";
-      case "tpsa":
-        return value <= 140 ? "#059669" : "#d97706";
-      default:
-        return "#374151";
-    }
-  }
-
-  // 获取ADMET属性的图标
-  function getADMETIcon(value) {
-    if (typeof value === "string") {
-      const lower = value.toLowerCase();
-      if (
-        lower.includes("high") ||
-        lower.includes("good") ||
-        lower.includes("yes") ||
-        lower.includes("高")
-      )
-        return "✓";
-      if (
-        lower.includes("low") ||
-        lower.includes("poor") ||
-        lower.includes("no") ||
-        lower.includes("低")
-      )
-        return "✗";
-    }
-    return "•";
-  }
-
-  // 获取ADMET属性的颜色
-  function getADMETColor(value) {
-    if (typeof value === "string") {
-      const lower = value.toLowerCase();
-      if (
-        lower.includes("high") ||
-        lower.includes("good") ||
-        lower.includes("yes")
-      )
-        return "#059669";
-      if (
-        lower.includes("low") ||
-        lower.includes("poor") ||
-        lower.includes("no")
-      )
-        return "#dc2626";
-      if (lower.includes("moderate") || lower.includes("medium"))
-        return "#d97706";
-    }
-    return "#64748b";
-  }
-
-  // 🧬 检测并渲染SMILES分子结构 (2D可视化)
-  function detectAndRenderMolecules(messageElement, content) {
-    console.log("🔍 开始检测SMILES分子结构...");
-    console.log("📄 消息内容长度:", content.length);
-    console.log("📝 内容预览:", content.substring(0, 300));
-
-    if (!window.SmilesDrawer) {
-      console.error("❌ SmilesDrawer库未加载，无法渲染分子结构");
-      console.log(
-        '💡 请检查 <script src="https://unpkg.com/smiles-drawer@2.0.1/dist/smiles-drawer.min.js"></script> 是否正确加载'
-      );
-      return;
-    }
-    console.log("✅ SmilesDrawer库已加载");
-
-    // SMILES检测模式：匹配典型的SMILES结构
-    // 1. 在反引号中: `CCO`, `CC(=O)O` 等
-    // 2. 在SMILES:标签后: SMILES: CCO
-    // 3. 单独一行的复杂结构
-    const smilesPatterns = [
-      /`([A-Za-z][A-Za-z0-9@+\-\[\]\(\)=#\.\\\/:]{4,})`/g, // 反引号包裹
-      /SMILES[:\s]+([A-Za-z][A-Za-z0-9@+\-\[\]\(\)=#\.\\\/:]{4,})/gi, // SMILES:标签
-      /\b([A-Z][A-Za-z0-9@+\-\[\]\(\)=#]{8,})\b/g, // 复杂结构(较长)
-    ];
-
-    const detectedSmiles = new Set();
-
-    // 提取所有SMILES
-    smilesPatterns.forEach((pattern, idx) => {
-      console.log(`🔎 使用模式 ${idx + 1} 检测...`);
-      let match;
-      while ((match = pattern.exec(content)) !== null) {
-        const smiles = match[1] || match[0];
-        console.log(`  发现候选SMILES: "${smiles}"`);
-
-        // 增强的SMILES验证逻辑
-        // 1. 基本长度检查
-        if (smiles.length < 4 || smiles.length > 200) {
-          console.log(`  ❌ 长度不符: ${smiles.length}`);
-          continue;
-        }
-
-        // 2. 必须包含化学元素符号
-        if (!/[CNOSPFClBrI]/.test(smiles)) {
-          console.log(`  ❌ 缺少化学元素`);
-          continue;
-        }
-
-        // 3. 排除常见的非SMILES字符串
-        const excludePatterns = [
-          /SMILES/i,
-          /http/i,
-          /scaffold/i,
-          /canonical/i,
-          /NumRotBonds/i,
-          /^[A-Z][a-z]+$/, // 单个单词
-          /\s{2,}/, // 多个空格
-          /^[A-Z_]+$/, // 全大写变量名
-          /\.\.\./, // 包含省略号(通常是被截断的SMILES)
-        ];
-
-        if (excludePatterns.some((pattern) => pattern.test(smiles))) {
-          console.log(`  ❌ 匹配排除模式`);
-          continue;
-        }
-
-        // 4. 检查括号匹配
-        const openParens = (smiles.match(/\(/g) || []).length;
-        const closeParens = (smiles.match(/\)/g) || []).length;
-        if (openParens !== closeParens) {
-          console.log(`  ❌ 括号不匹配: (${openParens}) vs )${closeParens})`);
-          continue;
-        }
-
-        // 5. 检查方括号匹配
-        const openBrackets = (smiles.match(/\[/g) || []).length;
-        const closeBrackets = (smiles.match(/\]/g) || []).length;
-        if (openBrackets !== closeBrackets) {
-          console.log(`  ❌ 方括号不匹配`);
-          continue;
-        }
-
-        // 6. 必须以字母或数字开头
-        if (!/^[A-Za-z0-9]/.test(smiles)) {
-          console.log(`  ❌ 开头字符无效`);
-          continue;
-        }
-
-        detectedSmiles.add(smiles.trim());
-        console.log(`  ✅ 验证通过: "${smiles}"`);
-      }
-    });
-
-    if (detectedSmiles.size === 0) {
-      console.log("📭 未检测到有效的SMILES分子结构");
-      return;
-    }
-
-    console.log(
-      `🎯 成功检测到 ${detectedSmiles.size} 个分子结构:`,
-      Array.from(detectedSmiles)
-    );
+  // 渲染后端已验证并规范化的候选分子。
+  function renderMoleculeCandidates(messageElement, payload) {
+    if (!messageElement || !payload || payload.candidates.length === 0) return;
+    const moleculesArray = payload.candidates.slice(0, 32);
+    const moleculeCount = moleculesArray.length;
 
     // 创建分子结构容器
     const moleculeContainer = document.createElement("div");
@@ -3749,18 +3564,36 @@
       padding-bottom: 16px;
       border-bottom: 1px solid #f1f5f9;
     `;
-    title.innerHTML = `
-      <div style="width: 32px; height: 32px; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: white; font-size: 18px; box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.3);">🧬</div>
-      <div style="flex: 1;">
-        <div style="line-height: 1.2;">分子结构可视化</div>
-        <div style="font-size: 12px; color: #64748b; font-weight: normal; margin-top: 2px;">检测到 ${detectedSmiles.size} 个分子结构</div>
-      </div>
-    `;
+    const titleIcon = document.createElement("div");
+    titleIcon.style.cssText =
+      "width: 32px; height: 32px; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: white; font-size: 18px; box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.3);";
+    titleIcon.textContent = "🧬";
+    const titleText = document.createElement("div");
+    titleText.style.flex = "1";
+    const titleHeading = document.createElement("div");
+    titleHeading.style.lineHeight = "1.2";
+    titleHeading.textContent = "分子结构可视化";
+    const titleCount = document.createElement("div");
+    titleCount.style.cssText =
+      "font-size: 12px; color: #64748b; font-weight: normal; margin-top: 2px;";
+    titleCount.textContent = `已验证 ${moleculeCount} 个候选分子`;
+    titleText.appendChild(titleHeading);
+    titleText.appendChild(titleCount);
+    title.appendChild(titleIcon);
+    title.appendChild(titleText);
     moleculeContainer.appendChild(title);
 
-    // 创建分子网格 - 根据分子数量动态调整（方案A+C）
-    const moleculeCount = detectedSmiles.size;
-    const moleculesArray = Array.from(detectedSmiles);
+    if (payload.warnings.length > 0) {
+      const warnings = document.createElement("div");
+      warnings.style.cssText =
+        "margin: -8px 0 18px; padding: 10px 12px; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; font-size: 12px;";
+      payload.warnings.forEach((warning) => {
+        const warningText = document.createElement("div");
+        warningText.textContent = warning;
+        warnings.appendChild(warningText);
+      });
+      moleculeContainer.appendChild(warnings);
+    }
 
     // 横向滑动布局参数（统一固定比例，避免随数量突变）
     const minCardWidth = "260px";
@@ -3792,14 +3625,14 @@
 
     // 渲染分子函数
     function renderMolecules(page) {
-      grid.innerHTML = ""; // 清空网格
+      grid.replaceChildren();
 
       const startIdx = page * itemsPerPage;
       const endIdx = Math.min(startIdx + itemsPerPage, moleculeCount);
       const pageMolecules = moleculesArray.slice(startIdx, endIdx);
 
-      pageMolecules.forEach((smiles, pageIndex) => {
-        const globalIndex = startIdx + pageIndex;
+      pageMolecules.forEach((candidate) => {
+        const smiles = candidate.canonical_smiles;
         const molCard = document.createElement("div");
         molCard.className = "molecule-card";
         molCard.style.cssText = `
@@ -3839,12 +3672,18 @@
           align-items: center;
           background: #f8fafc;
         `;
-        cardHeader.innerHTML = `
-          <div style="font-weight: 700; color: #4f46e5; font-size: 16px;">#${
-            globalIndex + 1
-          }</div>
-          <div style="background: #e0e7ff; color: #4338ca; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 20px;">工具生成</div>
-        `;
+        const candidateId = document.createElement("div");
+        candidateId.style.cssText =
+          "font-weight: 700; color: #4f46e5; font-size: 13px; overflow-wrap: anywhere;";
+        candidateId.textContent = candidate.candidate_id;
+        const provenanceLabel = document.createElement("div");
+        provenanceLabel.style.cssText =
+          "background: #e0e7ff; color: #4338ca; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 20px;";
+        provenanceLabel.textContent =
+          [payload.source.tool, payload.source.model].filter(Boolean).join(" · ") ||
+          "来源未标注";
+        cardHeader.appendChild(candidateId);
+        cardHeader.appendChild(provenanceLabel);
         molCard.appendChild(cardHeader);
 
         // 分子图片区域 - 使用后端API生成图片（动态高度）
@@ -3868,12 +3707,18 @@
         molImage.loading = "lazy";
         molImage.onerror = function () {
           this.style.display = "none";
-          imageSection.innerHTML = `
-            <div style="color: #94a3b8; font-size: 12px; text-align: center;">
-              <div style="font-size: 24px; margin-bottom: 8px;">⚠️</div>
-              <div>无法加载分子结构</div>
-            </div>
-          `;
+          const imageError = document.createElement("div");
+          imageError.style.cssText =
+            "color: #94a3b8; font-size: 12px; text-align: center;";
+          const imageErrorIcon = document.createElement("div");
+          imageErrorIcon.style.cssText =
+            "font-size: 24px; margin-bottom: 8px;";
+          imageErrorIcon.textContent = "⚠️";
+          const imageErrorText = document.createElement("div");
+          imageErrorText.textContent = "无法加载分子结构";
+          imageError.appendChild(imageErrorIcon);
+          imageError.appendChild(imageErrorText);
+          imageSection.appendChild(imageError);
         };
         imageSection.appendChild(molImage);
         molCard.appendChild(imageSection);
@@ -3882,33 +3727,34 @@
         const infoSection = document.createElement("div");
         infoSection.style.cssText = `padding: 16px; flex: 1; display: flex; flex-direction: column; gap: 10px;`;
 
-        // 分子属性展示区域（占位）
+        // CandidateSet metadata is not an independently aligned property result.
         const propertiesContainer = document.createElement("div");
         propertiesContainer.className = "molecule-properties";
         propertiesContainer.style.cssText = `
         width: 100%;
         font-size: 12px;
       `;
-        propertiesContainer.innerHTML = `
-        <div style="text-align: center; color: #94a3b8; padding: 12px;">
-          <div style="font-size: 18px; margin-bottom: 4px;">⏳</div>
-          <div style="font-size: 11px;">正在计算分子属性...</div>
-        </div>
-      `;
+        const unavailable = document.createElement("div");
+        unavailable.style.cssText =
+          "text-align: center; color: #64748b; padding: 12px; font-size: 11px;";
+        unavailable.textContent =
+          "当前候选事件未携带经独立性质工具验证的属性";
+        propertiesContainer.appendChild(unavailable);
         infoSection.appendChild(propertiesContainer);
-
-        // 异步获取分子属性
-        fetchMoleculePropertiesForToolMolecule(smiles, propertiesContainer);
 
         // SMILES 折叠区域
         const smilesDetails = document.createElement("details");
         smilesDetails.style.cssText = `margin-top: 4px;`;
-        smilesDetails.innerHTML = `
-        <summary style="cursor: pointer; color: #64748b; font-size: 12px; user-select: none;">显示 SMILES</summary>
-        <div style="margin-top: 6px; padding: 8px; background: #f8fafc; border-radius: 4px; font-family: monospace; font-size: 11px; color: #475569; word-break: break-all; border: 1px solid #e2e8f0;">
-          ${smiles}
-        </div>
-      `;
+        const smilesSummary = document.createElement("summary");
+        smilesSummary.style.cssText =
+          "cursor: pointer; color: #64748b; font-size: 12px; user-select: none;";
+        smilesSummary.textContent = "显示 SMILES";
+        const smilesText = document.createElement("div");
+        smilesText.style.cssText =
+          "margin-top: 6px; padding: 8px; background: #f8fafc; border-radius: 4px; font-family: monospace; font-size: 11px; color: #475569; word-break: break-all; border: 1px solid #e2e8f0;";
+        smilesText.textContent = candidate.canonical_smiles;
+        smilesDetails.appendChild(smilesSummary);
+        smilesDetails.appendChild(smilesText);
         infoSection.appendChild(smilesDetails);
 
         molCard.appendChild(infoSection);
@@ -3940,13 +3786,13 @@
         justify-content: center;
         gap: 4px;
       `;
-        copyBtn.innerHTML = `<span style="font-size: 13px;">📋</span> 复制`;
+        copyBtn.textContent = "📋 复制";
         copyBtn.onclick = () => {
-          navigator.clipboard.writeText(smiles).then(() => {
-            copyBtn.innerHTML = `<span style="font-size: 13px;">✅</span> 已复制`;
+          navigator.clipboard.writeText(candidate.canonical_smiles).then(() => {
+            copyBtn.textContent = "✅ 已复制";
             copyBtn.style.background = "#10b981";
             setTimeout(() => {
-              copyBtn.innerHTML = `<span style="font-size: 13px;">📋</span> 复制`;
+              copyBtn.textContent = "📋 复制";
               copyBtn.style.background = "#4f46e5";
             }, 2000);
           });
@@ -3996,7 +3842,7 @@
       `;
 
       const prevBtn = document.createElement("button");
-      prevBtn.innerHTML = "← 上一页";
+      prevBtn.textContent = "← 上一页";
       prevBtn.style.cssText = `
         padding: 8px 16px;
         background: #fff;
@@ -4015,7 +3861,7 @@
       }
 
       const nextBtn = document.createElement("button");
-      nextBtn.innerHTML = "下一页 →";
+      nextBtn.textContent = "下一页 →";
       nextBtn.style.cssText = `
         padding: 8px 16px;
         background: #4f46e5;
@@ -4142,5 +3988,3 @@
     init();
   }
 })();
-
-

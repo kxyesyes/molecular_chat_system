@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from .optimizer import evaluate_goals, parse_optimization_goals
+
 
 def _mol_from_smiles(smiles: str, label: str = "SMILES"):
     from rdkit import Chem
@@ -116,7 +118,13 @@ def _do_substitution(parent_mol, fragment_mol):
     for dummy_idx in sorted([parent_dummy, fragment_dummy_in_combo], reverse=True):
         rw.RemoveAtom(dummy_idx)
 
-    Chem.SanitizeMol(rw)
+    try:
+        Chem.SanitizeMol(rw)
+    except Exception as exc:
+        raise ValueError(
+            "化学取代失败：生成产物未通过 RDKit 结构校验，"
+            "可能存在价态、芳香性或连接点不兼容。请尝试更换片段或手动标记 [*] 位点。"
+        ) from exc
     return rw.GetMol()
 
 
@@ -145,12 +153,43 @@ def substitute_fragment(parent_smiles: str, fragment_smiles: str) -> Dict[str, A
     }
 
 
-def calculate_properties(smiles: str) -> Dict[str, Any]:
+def calculate_scaffold_similarity(reference_smiles: str, candidate_smiles: str) -> Optional[float]:
+    if not reference_smiles or not candidate_smiles:
+        return None
+    try:
+        from rdkit import Chem, DataStructs
+
+        ref = Chem.MolFromSmiles(reference_smiles)
+        cand = Chem.MolFromSmiles(candidate_smiles)
+        if ref is None or cand is None:
+            return None
+        try:
+            from rdkit.Chem import rdFingerprintGenerator
+
+            generator = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+            ref_fp = generator.GetFingerprint(ref)
+            cand_fp = generator.GetFingerprint(cand)
+        except Exception:
+            from rdkit.Chem import AllChem
+
+            ref_fp = AllChem.GetMorganFingerprintAsBitVect(ref, 2, nBits=2048)
+            cand_fp = AllChem.GetMorganFingerprintAsBitVect(cand, 2, nBits=2048)
+        return round(float(DataStructs.TanimotoSimilarity(ref_fp, cand_fp)), 4)
+    except Exception:
+        return None
+
+
+def calculate_properties(
+    smiles: str,
+    command: str = "",
+    reference_smiles: str = "",
+) -> Dict[str, Any]:
     from rdkit.Chem import Descriptors, rdMolDescriptors
     from rdkit.Chem.Lipinski import NumHAcceptors, NumHDonors
     from rdkit.Chem.QED import qed
 
     mol = _mol_from_smiles(smiles)
+    property_status = {}
     props = {
         "logp": round(float(Descriptors.MolLogP(mol)), 3),
         "mw": round(float(Descriptors.MolWt(mol)), 3),
@@ -173,7 +212,20 @@ def calculate_properties(smiles: str) -> Dict[str, Any]:
         import sascorer
 
         props["sa_score"] = round(float(sascorer.calculateScore(mol)), 3)
+        property_status["sa_score"] = "ok"
     except Exception:
-        pass
+        props["sa_score"] = None
+        property_status["sa_score"] = "unavailable"
 
-    return {"success": True, "properties": props}
+    scaffold_similarity = calculate_scaffold_similarity(reference_smiles, smiles)
+    if scaffold_similarity is not None:
+        props["scaffold_similarity"] = scaffold_similarity
+
+    goals = parse_optimization_goals(command)
+
+    return {
+        "success": True,
+        "properties": props,
+        "goals": evaluate_goals(props, goals),
+        "property_status": property_status,
+    }

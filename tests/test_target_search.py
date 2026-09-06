@@ -1,7 +1,10 @@
 import unittest
 from pathlib import Path
+import os
 import sys
 import tempfile
+import threading
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -23,12 +26,110 @@ class TargetSearchDemoTest(unittest.TestCase):
         seed_database(project_root=self.root)
         return TargetSearchService(project_root=self.root)
 
+    def test_connection_uses_concurrent_durable_sqlite_pragmas(self):
+        from src.target_search.database import get_connection
+
+        conn = get_connection(project_root=self.root)
+        try:
+            pragma = lambda name: next(iter(conn.execute(f"PRAGMA {name}").fetchone().values()))
+            self.assertEqual(str(pragma("journal_mode")).lower(), "wal")
+            self.assertEqual(int(pragma("synchronous")), 1)
+            self.assertEqual(int(pragma("busy_timeout")), 30000)
+            self.assertEqual(int(pragma("foreign_keys")), 1)
+            self.assertNotEqual(str(pragma("locking_mode")).lower(), "exclusive")
+        finally:
+            conn.close()
+
+    def test_target_runtime_paths_honor_environment_overrides(self):
+        from src.target_search.database import (
+            absolute_from_project,
+            get_cache_dir,
+            get_db_path,
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "TARGET_DB_PATH": "runtime/targets.sqlite",
+                "TARGET_CACHE_DIR": "runtime/target-cache",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                get_db_path(self.root),
+                (self.root / "runtime" / "targets.sqlite").resolve(),
+            )
+            self.assertEqual(
+                get_cache_dir(self.root),
+                (self.root / "runtime" / "target-cache").resolve(),
+            )
+            self.assertEqual(
+                absolute_from_project(
+                    "data/target_db/cache/rcsb/EGFR/4WKQ.cif",
+                    self.root,
+                ),
+                (
+                    self.root
+                    / "runtime"
+                    / "target-cache"
+                    / "rcsb"
+                    / "EGFR"
+                    / "4WKQ.cif"
+                ).resolve(),
+            )
+
+    def test_rebuild_deletes_the_configured_database_not_the_default(self):
+        from src.target_search.database import get_connection
+        from src.target_search.seed import rebuild_database, seed_database
+
+        configured = self.root / "runtime" / "targets.sqlite"
+        default = self.root / "data" / "target_db" / "target_database.sqlite"
+        with patch.dict(
+            os.environ,
+            {"TARGET_DB_PATH": str(configured)},
+            clear=False,
+        ):
+            seed_database(self.root)
+            conn = get_connection(self.root)
+            try:
+                conn.execute(
+                    "INSERT INTO targets (gene_symbol, uniprot_id) VALUES (?, ?)",
+                    ("ONLY_BEFORE_REBUILD", "TEST-ONLY-BEFORE"),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            rebuild_database(self.root)
+            conn = get_connection(self.root)
+            try:
+                row = conn.execute(
+                    "SELECT id FROM targets WHERE gene_symbol = ?",
+                    ("ONLY_BEFORE_REBUILD",),
+                ).fetchone()
+            finally:
+                conn.close()
+
+        self.assertIsNone(row)
+        self.assertTrue(configured.is_file())
+        self.assertFalse(default.exists())
+
     def test_empty_search_returns_no_results(self):
         service = self._seeded_service()
 
         payload = service.search_targets("   ")
 
-        self.assertEqual(payload, {"query": "", "results": []})
+        self.assertEqual(
+            payload,
+            {
+                "query": "",
+                "results": [],
+                "warnings": [],
+                "lookup_path": [],
+                "status": "not_found",
+                "cache": {"target": "none", "structures": "none"},
+            },
+        )
 
     def test_seed_is_idempotent_and_searches_aliases_and_diseases(self):
         from src.target_search.seed import seed_database
@@ -282,6 +383,119 @@ class TargetSearchDemoTest(unittest.TestCase):
         finally:
             downloader.requests.get = original_get
 
+    def test_structure_download_streams_validates_and_atomically_replaces(self):
+        from src.target_search import downloader as downloader_module
+
+        final_path = self.root / "runtime-cache" / "rcsb" / "EGFR" / "4WKQ.cif"
+
+        class FakeResponse:
+            headers = {"Content-Length": "35"}
+
+            def raise_for_status(self):
+                return None
+
+            def iter_content(self, chunk_size):
+                self_outer.assertFalse(final_path.exists())
+                yield b"data_4WKQ\n"
+                yield b"_atom_site.id\nATOM\n"
+
+        self_outer = self
+
+        def fake_get(_url, *, timeout, stream):
+            self.assertEqual(timeout, 30)
+            self.assertTrue(stream)
+            return FakeResponse()
+
+        structure = {
+            "id": 7,
+            "structure_id": "4WKQ",
+            "source": "RCSB_PDB",
+            "file_format": "cif",
+            "local_file_path": "data/target_db/cache/rcsb/EGFR/4WKQ.cif",
+            "download_url": "https://files.rcsb.org/download/4WKQ.cif",
+        }
+        with patch.dict(
+            os.environ,
+            {"TARGET_CACHE_DIR": "runtime-cache"},
+            clear=False,
+        ), patch.object(
+            downloader_module.requests,
+            "get",
+            side_effect=fake_get,
+        ), patch.object(
+            downloader_module.StructureDownloader,
+            "_mark_downloaded",
+        ) as mark_downloaded:
+            prepared = downloader_module.StructureDownloader(
+                self.root
+            ).prepare_structure_file(structure)
+
+        managed_path = Path(prepared["file_path"])
+        self.assertTrue(managed_path.is_relative_to(self.root / "runtime-cache"))
+        self.assertTrue(managed_path.is_file())
+        self.assertIn(b"_atom_site.id", managed_path.read_bytes())
+        self.assertFalse(list((self.root / "runtime-cache").rglob("*.tmp")))
+        self.assertFalse(final_path.exists())
+        mark_downloaded.assert_called_once()
+
+    def test_invalid_or_oversized_download_never_publishes_cache_file(self):
+        from src.target_search import downloader as downloader_module
+
+        structure = {
+            "id": 8,
+            "structure_id": "BAD1",
+            "source": "RCSB_PDB",
+            "file_format": "cif",
+            "local_file_path": "data/target_db/cache/rcsb/BAD/BAD1.cif",
+            "download_url": "https://example.invalid/BAD1.cif",
+        }
+        final_path = self.root / structure["local_file_path"]
+
+        class InvalidResponse:
+            headers = {}
+
+            def raise_for_status(self):
+                return None
+
+            def iter_content(self, chunk_size):
+                yield b"<html>not a structure</html>"
+
+        instance = downloader_module.StructureDownloader(self.root)
+        with patch.object(
+            downloader_module.requests,
+            "get",
+            return_value=InvalidResponse(),
+        ), patch.object(instance, "_mark_downloaded") as mark_downloaded:
+            with self.assertRaisesRegex(
+                downloader_module.StructureDownloadError,
+                "validation",
+            ):
+                instance.prepare_structure_file(structure)
+
+        self.assertFalse(final_path.exists())
+        self.assertFalse(list(final_path.parent.glob("*.tmp")))
+        mark_downloaded.assert_not_called()
+
+        class OversizedResponse(InvalidResponse):
+            headers = {"Content-Length": "100"}
+
+        with patch.object(
+            downloader_module,
+            "MAX_STRUCTURE_DOWNLOAD_BYTES",
+            10,
+        ), patch.object(
+            downloader_module.requests,
+            "get",
+            return_value=OversizedResponse(),
+        ):
+            with self.assertRaisesRegex(
+                downloader_module.StructureDownloadError,
+                "maximum",
+            ):
+                instance.prepare_structure_file(structure)
+
+        self.assertFalse(final_path.exists())
+
     def test_structure_preflight_reports_cache_and_docking_readiness(self):
         service = self._seeded_service()
         target = service.search_targets("WDR5")["results"][0]
@@ -386,6 +600,140 @@ class TargetSearchDemoTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
 
+    def test_structure_download_preparation_runs_in_worker_thread(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from starlette.concurrency import run_in_threadpool as starlette_run_in_threadpool
+        from src.target_search import routes
+
+        route_thread_ids = []
+        service_thread_ids = []
+        structure_file = self.root / "prepared.cif"
+        structure_file.write_bytes(b"data_demo\n")
+
+        async def recording_run_in_threadpool(func, *args, **kwargs):
+            route_thread_ids.append(threading.get_ident())
+            return await starlette_run_in_threadpool(func, *args, **kwargs)
+
+        class FakeTargetSearchService:
+            def prepare_structure_file(self, structure_db_id, requested_format):
+                service_thread_ids.append(threading.get_ident())
+                return {
+                    "success": True,
+                    "file_path": str(structure_file),
+                    "file_format": requested_format,
+                }
+
+        with patch.object(
+            routes,
+            "TargetSearchService",
+            return_value=FakeTargetSearchService(),
+        ), patch.object(
+            routes,
+            "run_in_threadpool",
+            new=recording_run_in_threadpool,
+            create=True,
+        ):
+            app = FastAPI()
+            routes.setup_target_search_routes(app)
+            with TestClient(app) as client:
+                response = client.get(
+                    "/api/target-db/structures/1/download?format=cif"
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.content, b"data_demo\n")
+        self.assertEqual(len(route_thread_ids), 1)
+        self.assertEqual(len(service_thread_ids), 1)
+        self.assertNotEqual(route_thread_ids[0], service_thread_ids[0])
+
+    def test_search_route_keeps_event_loop_responsive_during_slow_lookup(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from src.target_search import routes
+
+        lookup_started = threading.Event()
+        release_lookup = threading.Event()
+        ping_completed = threading.Event()
+        responses = {}
+
+        class SlowTargetSearchService:
+            def search_targets(self, *args, **kwargs):
+                lookup_started.set()
+                release_lookup.wait(timeout=5)
+                return {
+                    "query": "EGFR",
+                    "results": [],
+                    "warnings": [],
+                    "lookup_path": ["local"],
+                    "status": "not_found",
+                    "cache": {"target": "miss", "structures": "miss"},
+                }
+
+            def close(self):
+                return None
+
+        with patch.object(
+            routes,
+            "TargetSearchService",
+            return_value=SlowTargetSearchService(),
+        ):
+            app = FastAPI()
+
+            @app.get("/ping")
+            async def ping():
+                return {"ok": True}
+
+            routes.setup_target_search_routes(app)
+            with TestClient(app) as client:
+                search_thread = threading.Thread(
+                    target=lambda: responses.setdefault(
+                        "search", client.get("/api/target-db/search?query=EGFR")
+                    )
+                )
+                ping_thread = threading.Thread(
+                    target=lambda: (
+                        responses.setdefault("ping", client.get("/ping")),
+                        ping_completed.set(),
+                    )
+                )
+                search_thread.start()
+                self.assertTrue(lookup_started.wait(timeout=2))
+                ping_thread.start()
+                try:
+                    self.assertTrue(
+                        ping_completed.wait(timeout=0.5),
+                        "slow target lookup blocked an unrelated async endpoint",
+                    )
+                finally:
+                    release_lookup.set()
+                    search_thread.join(timeout=5)
+                    ping_thread.join(timeout=5)
+
+        self.assertEqual(responses["ping"].status_code, 200)
+        self.assertEqual(responses["search"].status_code, 200)
+
+    def test_target_search_route_closes_owned_service_on_shutdown(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from src.target_search import routes
+
+        class ClosingService:
+            def __init__(self):
+                self.close_calls = 0
+
+            def close(self):
+                self.close_calls += 1
+
+        service = ClosingService()
+        with patch.object(routes, "TargetSearchService", return_value=service):
+            app = FastAPI()
+            routes.setup_target_search_routes(app)
+            with TestClient(app):
+                self.assertEqual(service.close_calls, 0)
+
+        self.assertEqual(service.close_calls, 1)
+
     def test_preflight_route_returns_404_for_missing_structure(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
@@ -433,6 +781,301 @@ class TargetSearchDemoTest(unittest.TestCase):
         self.assertEqual(pde.status_code, 200)
         self.assertEqual(stats.json()["target_count"], 15)
         self.assertEqual(health.json()["status"], "warning")
+
+    def test_target_database_tool_preserves_remote_structures_and_aggregates_evidence(self):
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+        class FakeService:
+            def search_targets(self, _query):
+                return {
+                    "status": "resolved",
+                    "warnings": ["stale_authoritative_cache"],
+                    "lookup_path": ["local", "UniProt", "RCSB_PDB"],
+                    "results": [
+                        {
+                            "target_id": None,
+                            "gene_symbol": "EGFR",
+                            "protein_name": "Epidermal growth factor receptor",
+                            "uniprot_id": "P00533",
+                            "source": "UniProt",
+                            "source_record_id": "P00533",
+                            "source_url": "https://www.uniprot.org/uniprotkb/P00533/entry",
+                            "retrieved_at": "2026-01-01T00:00:00+00:00",
+                            "expires_at": "2026-01-31T00:00:00+00:00",
+                            "stale": True,
+                            "recommended_structures": [
+                                {
+                                    "structure_id": "1ABC",
+                                    "source": "RCSB_PDB",
+                                    "source_url": "https://www.rcsb.org/structure/1ABC",
+                                    "retrieved_at": "2026-01-01T00:00:00+00:00",
+                                    "expires_at": "2026-01-08T00:00:00+00:00",
+                                    "stale": True,
+                                    "recommendation_level": "recommended",
+                                },
+                                {
+                                    "structure_id": "AF-P00533-F1",
+                                    "source": "AlphaFold",
+                                    "source_url": "https://alphafold.ebi.ac.uk/entry/P00533",
+                                    "retrieved_at": "2026-01-01T00:00:00+00:00",
+                                    "expires_at": "2026-01-08T00:00:00+00:00",
+                                    "stale": True,
+                                    "recommendation_level": "predicted",
+                                },
+                            ],
+                        }
+                    ],
+                }
+
+        tool = TargetDatabaseTool()
+        tool._service = FakeService()
+
+        result = tool.execute("EGFR")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            result["data"][0]["recommended_structures"][0]["structure_id"],
+            "1ABC",
+        )
+        self.assertEqual(
+            result["lookup_path"], ["local", "UniProt", "RCSB_PDB"]
+        )
+        self.assertIn("stale_authoritative_cache", result["warnings"])
+        self.assertEqual(result["quality"]["status"], "partial")
+        self.assertEqual(
+            result["evidence"],
+            [
+                {
+                    "source": "UniProt",
+                    "id": "P00533",
+                    "url": "https://www.uniprot.org/uniprotkb/P00533/entry",
+                    "retrieved_at": "2026-01-01T00:00:00+00:00",
+                    "expires_at": "2026-01-31T00:00:00+00:00",
+                    "stale": True,
+                },
+                {
+                    "source": "RCSB_PDB",
+                    "id": "1ABC",
+                    "url": "https://www.rcsb.org/structure/1ABC",
+                    "retrieved_at": "2026-01-01T00:00:00+00:00",
+                    "expires_at": "2026-01-08T00:00:00+00:00",
+                    "stale": True,
+                },
+                {
+                    "source": "AlphaFold",
+                    "id": "AF-P00533-F1",
+                    "url": "https://alphafold.ebi.ac.uk/entry/P00533",
+                    "retrieved_at": "2026-01-01T00:00:00+00:00",
+                    "expires_at": "2026-01-08T00:00:00+00:00",
+                    "stale": True,
+                }
+            ],
+        )
+
+    def test_target_database_tool_closes_and_releases_long_lived_service(self):
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+        class FakeService:
+            def __init__(self):
+                self.close_calls = 0
+
+            def close(self):
+                self.close_calls += 1
+
+        tool = TargetDatabaseTool()
+        service = FakeService()
+        tool._service = service
+
+        tool.close()
+        tool.close()
+
+        self.assertEqual(service.close_calls, 1)
+        self.assertIsNone(tool._service)
+
+    def test_target_database_tool_reports_zero_authoritative_matches_honestly(self):
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+        class FakeService:
+            def search_targets(self, _query):
+                return {
+                    "status": "not_found",
+                    "warnings": [],
+                    "lookup_path": ["local", "UniProt"],
+                    "results": [],
+                }
+
+        tool = TargetDatabaseTool()
+        tool._service = FakeService()
+
+        result = tool.execute("UNKNOWN")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["status"], "not_found")
+        self.assertEqual(result["quality"]["status"], "complete")
+        self.assertEqual(result["lookup_path"], ["local", "UniProt"])
+        self.assertIn("authoritative", result["formatted"].lower())
+        self.assertNotIn("database is empty", result["formatted"].lower())
+
+    def test_target_database_tool_requires_clarification_for_ambiguous_lookup(self):
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+        class FakeService:
+            def search_targets(self, _query):
+                return {
+                    "status": "ambiguous",
+                    "warnings": ["UniProt:ambiguous_match"],
+                    "lookup_path": ["local", "UniProt"],
+                    "results": [],
+                }
+
+        tool = TargetDatabaseTool()
+        tool._service = FakeService()
+
+        result = tool.execute("ABC1")
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["status"], "ambiguous")
+        self.assertEqual(result["quality"]["status"], "partial")
+        self.assertEqual(result["error"]["code"], "validation_error")
+        self.assertIn("clarification", result["message"].lower())
+        self.assertIn("UniProt:ambiguous_match", result["warnings"])
+
+    def test_target_database_tool_reports_unavailable_without_conclusive_no_match(self):
+        from src.agent.tools.base_tool import execute_tool_compat
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+        from src.agent.contracts import AgentErrorCode
+
+        class FakeService:
+            def search_targets(self, _query):
+                return {
+                    "status": "unavailable",
+                    "warnings": ["UniProt:provider_unavailable"],
+                    "lookup_path": ["local", "UniProt"],
+                    "results": [],
+                }
+
+        tool = TargetDatabaseTool()
+        tool._service = FakeService()
+
+        raw = tool.execute("EGFR")
+        adapted = execute_tool_compat(tool, "EGFR")
+
+        self.assertFalse(raw["success"])
+        self.assertEqual(raw["status"], "unavailable")
+        self.assertEqual(raw["error"]["code"], "provider_error")
+        self.assertNotIn("No matching targets", raw["message"])
+        self.assertNotIn("conclusively", raw["formatted"].lower())
+        self.assertFalse(adapted.success)
+        self.assertEqual(adapted.error.code, AgentErrorCode.PROVIDER_ERROR)
+        self.assertIn("UniProt:provider_unavailable", adapted.warnings)
+        self.assertNotIn("provider body", str(adapted.to_legacy_dict()).lower())
+
+    def test_target_database_tool_marks_mixed_results_and_outage_partial(self):
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+        class FakeService:
+            def search_targets(self, query):
+                if query == "EGFR":
+                    return {
+                        "status": "resolved",
+                        "warnings": [],
+                        "lookup_path": ["local", "UniProt", "RCSB_PDB"],
+                        "results": [
+                            {
+                                "target_id": None,
+                                "gene_symbol": "EGFR",
+                                "uniprot_id": "P00533",
+                                "recommended_structures": [],
+                            }
+                        ],
+                    }
+                return {
+                    "status": "unavailable",
+                    "warnings": ["UniProt:provider_unavailable"],
+                    "lookup_path": ["local", "UniProt"],
+                    "results": [],
+                }
+
+        tool = TargetDatabaseTool()
+        tool._service = FakeService()
+
+        result = tool.execute(["EGFR", "OUTAGE"])
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["quality"]["status"], "partial")
+        self.assertEqual(
+            result["quality"]["service_statuses"], ["resolved", "unavailable"]
+        )
+        self.assertIn("partial_authoritative_results", result["warnings"])
+        self.assertIn("partial", result["message"].lower())
+
+    def test_target_database_tool_formats_unavailable_structure_evidence_as_unknown(self):
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+        class FakeService:
+            def search_targets(self, _query):
+                return {
+                    "status": "partial",
+                    "warnings": ["authoritative_structures_unavailable"],
+                    "lookup_path": ["local", "UniProt", "RCSB_PDB"],
+                    "results": [
+                        {
+                            "target_id": None,
+                            "gene_symbol": "EGFR",
+                            "uniprot_id": "P00533",
+                            "structure_count": None,
+                            "has_experimental_structure": None,
+                            "has_alphafold_structure": None,
+                            "structure_evidence_status": "unavailable",
+                            "recommended_structures": [],
+                        }
+                    ],
+                }
+
+        tool = TargetDatabaseTool()
+        tool._service = FakeService()
+
+        result = tool.execute("EGFR")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["status"], "partial")
+        self.assertIn("Structure evidence: unavailable", result["formatted"])
+        self.assertIn("Experimental structure: unknown", result["formatted"])
+        self.assertNotIn("Recommended structures: none recorded", result["formatted"])
+
+    def test_target_database_tool_does_not_leak_provider_exception_text(self):
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+        class FakeService:
+            def search_targets(self, _query):
+                raise RuntimeError("provider body SECRET_TOKEN C:\\private\\targets.db")
+
+        tool = TargetDatabaseTool()
+        tool._service = FakeService()
+
+        result = tool.execute("EGFR")
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["message"], "Target search is temporarily unavailable.")
+        self.assertNotIn("SECRET_TOKEN", str(result))
+        self.assertNotIn("private", str(result).lower())
+
+    def test_target_database_tool_does_not_log_service_construction_details(self):
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+
+        with patch(
+            "src.target_search.service.TargetSearchService",
+            side_effect=RuntimeError("provider body SECRET_TOKEN C:\\private\\targets.db"),
+        ), self.assertLogs(
+            "src.agent.tools.target_database_tool", level="ERROR"
+        ) as captured:
+            result = TargetDatabaseTool().execute("EGFR")
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["message"], "Target search is temporarily unavailable.")
+        self.assertNotIn("SECRET_TOKEN", "\n".join(captured.output))
+        self.assertNotIn("private", "\n".join(captured.output).lower())
 
 
 if __name__ == "__main__":

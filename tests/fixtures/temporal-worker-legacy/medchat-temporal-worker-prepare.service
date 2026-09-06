@@ -1,0 +1,10 @@
+[Unit]
+Description=Prepare MedChat Temporal Docking Worker Trust Boundary
+Before=medchat-temporal-worker.service
+PartOf=medchat-temporal-worker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/medchat/validate-temporal-worker-env
+ExecStart=/usr/bin/systemd-tmpfiles --create /usr/lib/tmpfiles.d/medchat-temporal-worker.conf
+RemainAfterExit=yes

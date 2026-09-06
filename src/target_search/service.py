@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
+import re
+import threading
 from pathlib import Path
-from typing import Optional
+from typing import Any, Mapping, Optional
 
+from .authoritative_resolver import AuthoritativeTargetResolver, TargetResolution
+from .cache import CachedEvidence, TargetCacheRepository
 from .database import (
     absolute_from_project,
     get_cache_dir,
     get_connection,
     get_db_path,
+    get_target_db_dir,
     init_db,
     relative_to_project,
     resolve_project_root,
 )
 from .downloader import StructureDownloader
+from .seed import seed_database
 from .schemas import as_bool, split_list
 from .scoring import calculate_structure_score
 
@@ -24,13 +32,107 @@ PDE_CATALYTIC_TARGETS = {
     "PDE5A", "PDE6A", "PDE6B", "PDE6C", "PDE7A", "PDE7B", "PDE8A", "PDE8B", "PDE9A", "PDE10A", "PDE11A",
 }
 PDE_REGULATORY_TARGETS = {"PDE6D", "PDE6G", "PDE6H"}
+_SEED_LOCKS: dict[Path, threading.RLock] = {}
+_SEED_LOCKS_GUARD = threading.Lock()
+_TARGET_SEED_FILENAMES = (
+    "seed_targets.csv",
+    "common_targets.csv",
+    "pde_targets.csv",
+)
+_UNIPROT_ACCESSION_RE = re.compile(
+    r"(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})"
+)
+_RCSB_STRUCTURE_ID_RE = re.compile(r"[0-9][A-Z0-9]{3}")
+_ORGANISM_ALIASES = {
+    "homo sapiens": "Homo sapiens",
+    "human": "Homo sapiens",
+    "9606": "Homo sapiens",
+    "mus musculus": "Mus musculus",
+    "mouse": "Mus musculus",
+    "10090": "Mus musculus",
+}
+def _seed_lock(db_path: Path) -> threading.RLock:
+    resolved = db_path.resolve()
+    with _SEED_LOCKS_GUARD:
+        return _SEED_LOCKS.setdefault(resolved, threading.RLock())
+
+
+class _InterprocessSeedLock:
+    def __init__(self, db_path: Path) -> None:
+        resolved = db_path.resolve()
+        self._lock_path = resolved.with_name(f"{resolved.name}.seed.lock")
+        self._stream = None
+
+    def __enter__(self) -> "_InterprocessSeedLock":
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._stream = self._lock_path.open("a+b", buffering=0)
+        self._stream.seek(0, os.SEEK_END)
+        if self._stream.tell() == 0:
+            self._stream.write(b"\0")
+        self._stream.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(self._stream.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._stream.fileno(), fcntl.LOCK_EX)
+        except Exception:
+            self._stream.close()
+            self._stream = None
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        if self._stream is None:
+            return False
+        try:
+            self._stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(self._stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._stream.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._stream.close()
+            self._stream = None
+        return False
+
+
+def _json_copy(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _json_copy(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_copy(item) for item in value]
+    return value
 
 
 class TargetSearchService:
-    def __init__(self, project_root: Optional[Path | str] = None):
+    def __init__(
+        self,
+        project_root: Optional[Path | str] = None,
+        resolver: Optional[AuthoritativeTargetResolver] = None,
+        cache: Optional[TargetCacheRepository] = None,
+        auto_seed: bool = True,
+        organism: str | int = "Homo sapiens",
+    ):
+        if not isinstance(auto_seed, bool):
+            raise TypeError("auto_seed must be a boolean")
         self.project_root = resolve_project_root(project_root)
         init_db(self.project_root)
-        self.downloader = StructureDownloader(self.project_root)
+        self._resolver = resolver
+        self._owns_resolver = resolver is None
+        self._resolver_lock = threading.RLock()
+        self._closed = False
+        self.cache = cache or TargetCacheRepository(self.project_root)
+        self.downloader = StructureDownloader(self.project_root, cache=self.cache)
+        self.auto_seed = auto_seed
+        self.organism = organism
 
     def search_targets(
         self,
@@ -43,8 +145,61 @@ class TargetSearchService:
     ) -> dict:
         query = (query or "").strip()
         if not query:
-            return {"query": query, "results": []}
+            return self._search_payload(query, [], status="not_found")
 
+        local_results = self._search_local(query)
+        if local_results:
+            results = self._search_local(
+                query,
+                target_type=target_type,
+                source=source,
+                has_experimental=has_experimental,
+                docking_recommended=docking_recommended,
+                has_ligand=has_ligand,
+            )
+            return self._search_payload(
+                query,
+                results,
+                status="resolved",
+                lookup_path=["local"],
+            )
+
+        seeded = self._maybe_auto_seed()
+        local_results = self._search_local(query)
+        if local_results:
+            results = self._search_local(
+                query,
+                target_type=target_type,
+                source=source,
+                has_experimental=has_experimental,
+                docking_recommended=docking_recommended,
+                has_ligand=has_ligand,
+            )
+            return self._search_payload(
+                query,
+                results,
+                status="resolved",
+                lookup_path=["local_seed", "local"] if seeded else ["local"],
+            )
+
+        return self._search_authoritative(
+            query,
+            target_type=target_type,
+            source=source,
+            has_experimental=has_experimental,
+            docking_recommended=docking_recommended,
+            has_ligand=has_ligand,
+        )
+
+    def _search_local(
+        self,
+        query: str,
+        target_type: Optional[str] = None,
+        source: Optional[str] = None,
+        has_experimental: Optional[bool] = None,
+        docking_recommended: Optional[bool] = None,
+        has_ligand: Optional[bool] = None,
+    ) -> list[dict[str, Any]]:
         like = f"%{query.lower()}%"
         filter_clause, filter_params = self._filter_clause(
             target_type=target_type,
@@ -71,7 +226,7 @@ class TargetSearchService:
             conn.close()
 
         if exact_rows:
-            return {"query": query, "results": [self._format_search_row(row, query) for row in exact_rows]}
+            return [self._format_search_row(row, query) for row in exact_rows]
 
         fuzzy_where = """
             (
@@ -93,7 +248,681 @@ class TargetSearchService:
             conn.close()
 
         rows = [row for row in rows if self._is_relevant_fuzzy_row(row, query)]
-        return {"query": query, "results": [self._format_search_row(row, query) for row in rows]}
+        return [self._format_search_row(row, query) for row in rows]
+
+    def _maybe_auto_seed(self) -> bool:
+        if not self.auto_seed or self._target_count() != 0:
+            return False
+        seed_dir = get_target_db_dir(self.project_root)
+        if not any((seed_dir / filename).is_file() for filename in _TARGET_SEED_FILENAMES):
+            return False
+        db_path = get_db_path(self.project_root).resolve()
+        lock = _seed_lock(db_path)
+        with lock, _InterprocessSeedLock(db_path):
+            if self._target_count() != 0:
+                return False
+            if not any(
+                (seed_dir / filename).is_file()
+                for filename in _TARGET_SEED_FILENAMES
+            ):
+                return False
+            seed_database(self.project_root)
+            return True
+
+    def _target_count(self) -> int:
+        conn = get_connection(self.project_root)
+        try:
+            row = conn.execute("SELECT COUNT(*) AS count FROM targets").fetchone()
+            return int(row["count"])
+        finally:
+            conn.close()
+
+    def _search_authoritative(
+        self,
+        query: str,
+        *,
+        target_type: Optional[str],
+        source: Optional[str],
+        has_experimental: Optional[bool],
+        docking_recommended: Optional[bool],
+        has_ligand: Optional[bool],
+    ) -> dict[str, Any]:
+        target_key = self._target_cache_key(query)
+        target_cached = self._read_target_cache(target_key)
+        target_fresh = target_cached is not None and not target_cached.stale
+        target_state = (
+            "fresh" if target_fresh else "expired" if target_cached else "miss"
+        )
+        structures_cached: Optional[CachedEvidence] = None
+        structures_state = "miss"
+
+        if target_cached is not None:
+            accession = str(target_cached.payload.get("uniprot_id") or "")
+            if accession:
+                structures_cached = self._read_structures_cache(
+                    accession,
+                    organism=str(target_cached.payload["organism"]),
+                )
+                structures_state = (
+                    "fresh"
+                    if structures_cached is not None and not structures_cached.stale
+                    else "expired"
+                    if structures_cached is not None
+                    else "miss"
+                )
+
+        if target_fresh and structures_cached is not None and not structures_cached.stale:
+            record = self._record_from_cache(target_cached, structures_cached)
+            return self._authoritative_success_payload(
+                query,
+                record,
+                lookup_path=["local", "cache:target", "cache:structures"],
+                cache={"target": "fresh", "structures": "fresh"},
+                filters={
+                    "target_type": target_type,
+                    "source": source,
+                    "has_experimental": has_experimental,
+                    "docking_recommended": docking_recommended,
+                    "has_ligand": has_ligand,
+                },
+            )
+
+        resolve_query = (
+            str(target_cached.payload["uniprot_id"])
+            if target_fresh and target_cached is not None
+            else query
+        )
+        resolution = self._resolve_safely(resolve_query)
+        lookup_path = ["local", *resolution.lookup_path]
+
+        if resolution.status == "resolved":
+            try:
+                normalized_target = self._normalize_target_evidence(resolution.target)
+                normalized_structures = self._normalize_structure_evidence(
+                    resolution.structures,
+                    accession=normalized_target["uniprot_id"],
+                    organism=normalized_target["organism"],
+                )
+            except (KeyError, TypeError, ValueError):
+                return self._search_payload(
+                    query,
+                    [],
+                    status="unavailable",
+                    warnings=["authoritative_normalization_failed"],
+                    lookup_path=lookup_path,
+                    cache={
+                        "target": target_state,
+                        "structures": structures_state,
+                    },
+                    retryable=False,
+                )
+
+            if target_fresh and target_cached is not None:
+                if normalized_target["uniprot_id"] != target_cached.payload["uniprot_id"]:
+                    return self._search_payload(
+                        query,
+                        [],
+                        status="unavailable",
+                        warnings=["authoritative_identity_mismatch"],
+                        lookup_path=lookup_path,
+                        cache={
+                            "target": "fresh",
+                            "structures": structures_state,
+                        },
+                        retryable=False,
+                    )
+                target_evidence = target_cached
+                target_state = "fresh"
+            else:
+                target_evidence = self.cache.upsert(
+                    target_key,
+                    "target",
+                    normalized_target["source"],
+                    normalized_target["source_record_id"],
+                    normalized_target,
+                )
+                target_state = "refreshed"
+
+            accession = str(target_evidence.payload["uniprot_id"])
+            structures_evidence = self.cache.upsert(
+                self._structures_cache_key(accession),
+                "structures",
+                self._structure_cache_source(normalized_structures),
+                accession,
+                {"structures": normalized_structures},
+            )
+            record = self._record_from_cache(target_evidence, structures_evidence)
+            return self._authoritative_success_payload(
+                query,
+                record,
+                warnings=list(resolution.warnings),
+                lookup_path=lookup_path,
+                cache={"target": target_state, "structures": "refreshed"},
+                filters={
+                    "target_type": target_type,
+                    "source": source,
+                    "has_experimental": has_experimental,
+                    "docking_recommended": docking_recommended,
+                    "has_ligand": has_ligand,
+                },
+            )
+
+        if self._resolution_is_retryable(resolution) and target_cached is not None:
+            if structures_cached is None:
+                record = self._target_only_record(target_cached)
+                warnings = [
+                    *resolution.warnings,
+                    "authoritative_structures_unavailable",
+                ]
+                if target_cached.stale:
+                    warnings.append("stale_authoritative_cache")
+                return self._authoritative_success_payload(
+                    query,
+                    record,
+                    status="partial",
+                    warnings=warnings,
+                    lookup_path=lookup_path,
+                    cache={
+                        "target": "stale" if target_cached.stale else "fresh",
+                        "structures": "unavailable",
+                    },
+                    filters={
+                        "target_type": target_type,
+                        "source": source,
+                        "has_experimental": has_experimental,
+                        "docking_recommended": docking_recommended,
+                        "has_ligand": has_ligand,
+                    },
+                )
+            record = self._record_from_cache(target_cached, structures_cached)
+            warnings = [*resolution.warnings, "stale_authoritative_cache"]
+            return self._authoritative_success_payload(
+                query,
+                record,
+                warnings=warnings,
+                lookup_path=lookup_path,
+                cache={
+                    "target": "stale" if target_cached.stale else "fresh",
+                    "structures": (
+                        "stale" if structures_cached.stale else "fresh"
+                    ),
+                },
+                filters={
+                    "target_type": target_type,
+                    "source": source,
+                    "has_experimental": has_experimental,
+                    "docking_recommended": docking_recommended,
+                    "has_ligand": has_ligand,
+                },
+            )
+
+        return self._search_payload(
+            query,
+            [],
+            status=resolution.status,
+            warnings=list(resolution.warnings),
+            lookup_path=lookup_path,
+            cache={"target": target_state, "structures": structures_state},
+            retryable=resolution.retryable,
+        )
+
+    def _resolve_safely(self, query: str) -> TargetResolution:
+        try:
+            return self._get_resolver().resolve(query, self.organism)
+        except Exception:
+            return TargetResolution(
+                status="unavailable",
+                warnings=("authoritative_lookup_failed",),
+                lookup_path=("authoritative",),
+                retryable=False,
+                source="Remote",
+                code="request_failure",
+            )
+
+    def _get_resolver(self) -> AuthoritativeTargetResolver:
+        with self._resolver_lock:
+            if self._closed:
+                raise RuntimeError("TargetSearchService is closed")
+            if self._resolver is None:
+                self._resolver = AuthoritativeTargetResolver()
+            return self._resolver
+
+    def close(self) -> None:
+        resolver = None
+        with self._resolver_lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._owns_resolver:
+                resolver = self._resolver
+            self._resolver = None
+        if resolver is not None:
+            resolver.close()
+
+    def __enter__(self) -> "TargetSearchService":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    @staticmethod
+    def _resolution_is_retryable(resolution: TargetResolution) -> bool:
+        return resolution.status == "unavailable" and resolution.retryable
+
+    def _target_cache_key(self, query: str) -> str:
+        identity = (
+            f"{str(self.organism).strip().casefold()}\0"
+            f"{query.strip().casefold()}"
+        )
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        return f"target:{digest}"
+
+    @staticmethod
+    def _structures_cache_key(accession: str) -> str:
+        return f"structures:{accession.strip().upper()}"
+
+    def _read_target_cache(self, cache_key: str) -> Optional[CachedEvidence]:
+        evidence = self.cache.get(cache_key, allow_stale=True)
+        if evidence is None:
+            return None
+        try:
+            normalized = self._normalize_target_evidence(evidence.payload)
+            if (
+                evidence.cache_key != cache_key
+                or evidence.record_type != "target"
+                or evidence.source != normalized["source"]
+                or evidence.source_record_id != normalized["source_record_id"]
+                or _json_copy(evidence.payload) != normalized
+            ):
+                raise ValueError("cached target provenance is invalid")
+        except (KeyError, TypeError, ValueError):
+            accessions = {
+                str(evidence.source_record_id).strip().upper(),
+                str(evidence.payload.get("uniprot_id") or "").strip().upper(),
+                str(evidence.payload.get("source_record_id") or "").strip().upper(),
+            }
+            self.cache.discard(
+                cache_key,
+                expected_generation_id=evidence.generation_id,
+            )
+            for accession in accessions:
+                if _UNIPROT_ACCESSION_RE.fullmatch(accession):
+                    structures_key = self._structures_cache_key(accession)
+                    structures = self.cache.get(structures_key, allow_stale=True)
+                    if structures is not None:
+                        self.cache.discard(
+                            structures_key,
+                            expected_generation_id=structures.generation_id,
+                        )
+            return None
+        return evidence
+
+    def _read_structures_cache(
+        self,
+        accession: str,
+        *,
+        organism: str,
+    ) -> Optional[CachedEvidence]:
+        cache_key = self._structures_cache_key(accession)
+        evidence = self.cache.get(cache_key, allow_stale=True)
+        if evidence is None:
+            return None
+        try:
+            payload = _json_copy(evidence.payload)
+            if set(payload) != {"structures"}:
+                raise ValueError("cached structures payload is invalid")
+            normalized = self._normalize_structure_evidence(
+                tuple(payload["structures"]),
+                accession=accession,
+                organism=organism,
+            )
+            expected_source = self._structure_cache_source(normalized)
+            if (
+                evidence.cache_key != cache_key
+                or evidence.record_type != "structures"
+                or evidence.source != expected_source
+                or evidence.source_record_id != accession
+                or payload != {"structures": normalized}
+            ):
+                raise ValueError("cached structure provenance is invalid")
+        except (KeyError, TypeError, ValueError):
+            self.cache.discard(
+                cache_key,
+                expected_generation_id=evidence.generation_id,
+            )
+            return None
+        return evidence
+
+    def _normalize_target_evidence(
+        self, target: Optional[Mapping[str, Any]]
+    ) -> dict[str, Any]:
+        if target is None:
+            raise ValueError("resolved evidence requires a target")
+        required = (
+            "gene_symbol",
+            "uniprot_id",
+            "source",
+            "source_record_id",
+            "source_url",
+        )
+        if any(not isinstance(target.get(key), str) or not target[key].strip() for key in required):
+            raise ValueError("target evidence is incomplete")
+        aliases = target.get("aliases") or []
+        if not isinstance(aliases, (list, tuple)) or any(
+            not isinstance(item, str) for item in aliases
+        ):
+            raise ValueError("target aliases are invalid")
+        accession = target["uniprot_id"].strip().upper()
+        source_record_id = target["source_record_id"].strip().upper()
+        source = target["source"].strip()
+        organism = self._optional_text(target.get("organism"))
+        expected_organism = self._canonical_organism(self.organism)
+        if (
+            source != "UniProt"
+            or _UNIPROT_ACCESSION_RE.fullmatch(accession) is None
+            or source_record_id != accession
+            or target["source_url"].strip()
+            != f"https://www.uniprot.org/uniprotkb/{accession}/entry"
+            or organism is None
+            or self._canonical_organism(organism) != expected_organism
+        ):
+            raise ValueError("target provenance is invalid")
+        return {
+            "gene_symbol": target["gene_symbol"].strip(),
+            "protein_name": self._optional_text(target.get("protein_name")),
+            "uniprot_id": accession,
+            "organism": organism,
+            "target_type": self._optional_text(target.get("target_type")),
+            "disease_keywords": [],
+            "aliases": sorted({item.strip() for item in aliases if item.strip()}),
+            "source": source,
+            "source_record_id": source_record_id,
+            "source_url": f"https://www.uniprot.org/uniprotkb/{accession}/entry",
+            "match_reason": self._optional_text(target.get("match_reason")) or "authoritative",
+        }
+
+    def _normalize_structure_evidence(
+        self,
+        structures: tuple[Mapping[str, Any], ...],
+        *,
+        accession: str,
+        organism: Optional[str],
+    ) -> list[dict[str, Any]]:
+        normalized = []
+        for structure in structures:
+            structure_id = structure.get("structure_id")
+            source = structure.get("source")
+            structure_type = structure.get("structure_type")
+            source_url = structure.get("source_url")
+            if any(
+                not isinstance(value, str) or not value.strip()
+                for value in (structure_id, source, structure_type, source_url)
+            ):
+                raise ValueError("structure evidence is incomplete")
+            normalized_id = structure_id.strip().upper()
+            normalized_source = source.strip()
+            normalized_type = structure_type.strip().casefold()
+            normalized_source_url = source_url.strip()
+            normalized_download_url = self._optional_text(
+                structure.get("download_url")
+            )
+            structure_organism = self._optional_text(structure.get("organism"))
+            if structure_organism is not None and (
+                organism is None
+                or self._canonical_organism(structure_organism)
+                != self._canonical_organism(organism)
+            ):
+                raise ValueError("structure organism is invalid")
+            if normalized_source == "RCSB_PDB":
+                if (
+                    normalized_type != "experimental"
+                    or _RCSB_STRUCTURE_ID_RE.fullmatch(normalized_id) is None
+                    or normalized_source_url
+                    != f"https://www.rcsb.org/structure/{normalized_id}"
+                    or normalized_download_url
+                    != f"https://files.rcsb.org/download/{normalized_id}.cif"
+                ):
+                    raise ValueError("RCSB provenance is invalid")
+            elif normalized_source == "AlphaFold":
+                expected_model_id = f"AF-{accession}-F1"
+                model_id = self._optional_text(structure.get("model_id"))
+                linked_accession = self._optional_text(structure.get("uniprot_id"))
+                official_download = re.fullmatch(
+                    rf"https://alphafold\.ebi\.ac\.uk/files/{re.escape(expected_model_id)}-model_v[1-9][0-9]*\.(?:cif|pdb)",
+                    normalized_download_url or "",
+                )
+                if (
+                    normalized_type != "predicted"
+                    or normalized_id != expected_model_id
+                    or model_id != expected_model_id
+                    or linked_accession != accession
+                    or normalized_source_url
+                    != f"https://alphafold.ebi.ac.uk/entry/{accession}"
+                    or official_download is None
+                ):
+                    raise ValueError("AlphaFold provenance is invalid")
+            else:
+                raise ValueError("structure source is invalid")
+            ligand_values = structure.get("ligand_evidence", structure.get("ligand_ids", [])) or []
+            if not isinstance(ligand_values, (list, tuple)) or any(
+                not isinstance(item, str) for item in ligand_values
+            ):
+                raise ValueError("structure ligand evidence is invalid")
+            is_experimental = normalized_type == "experimental"
+            payload = {
+                "id": None,
+                "structure_id": normalized_id,
+                "source": normalized_source,
+                "structure_type": normalized_type,
+                "method": self._optional_text(structure.get("method")),
+                "resolution": structure.get("resolution"),
+                "chain_ids": [],
+                "ligand_ids": sorted(
+                    {item.strip() for item in ligand_values if item.strip()}
+                ),
+                "organism": structure_organism,
+                "title": self._optional_text(structure.get("title")),
+                "file_format": "cif",
+                "download_url": normalized_download_url,
+                "source_url": normalized_source_url,
+                "is_downloaded": False,
+                "docking_recommended": is_experimental,
+                "is_preferred": False,
+                "quality_note": None,
+            }
+            payload["score"] = calculate_structure_score(payload)
+            normalized.append(payload)
+        normalized.sort(
+            key=lambda item: (-item["score"], item["source"], item["structure_id"])
+        )
+        for index, payload in enumerate(normalized):
+            payload["is_preferred"] = index == 0
+            payload["score"] = calculate_structure_score(payload)
+            payload["recommendation_reasons"] = self._structure_recommendation_reasons(payload)
+            payload["warnings"] = self._structure_warnings(payload)
+            payload["recommendation_level"] = self._recommendation_level(payload)
+            payload["docking_grade"] = self._docking_grade(payload)
+            payload["docking_grade_label"] = self._docking_grade_label(
+                payload["docking_grade"]
+            )
+        return normalized
+
+    @staticmethod
+    def _optional_text(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("text evidence must be a string")
+        return value.strip() or None
+
+    @staticmethod
+    def _canonical_organism(value: Any) -> str:
+        if isinstance(value, bool) or value is None:
+            raise ValueError("organism evidence is invalid")
+        normalized = str(value).strip().casefold()
+        if normalized not in _ORGANISM_ALIASES:
+            raise ValueError("organism evidence is invalid")
+        return _ORGANISM_ALIASES[normalized]
+
+    @staticmethod
+    def _structure_cache_source(structures: list[dict[str, Any]]) -> str:
+        sources = {item["source"] for item in structures}
+        return next(iter(sources)) if len(sources) == 1 else "Authoritative"
+
+    def _record_from_cache(
+        self, target: CachedEvidence, structures: CachedEvidence
+    ) -> dict[str, Any]:
+        target_payload = dict(target.payload)
+        structure_records = [
+            _json_copy(item) for item in structures.payload.get("structures", [])
+        ]
+        for structure_record in structure_records:
+            structure_record.update(
+                {
+                    "retrieved_at": structures.retrieved_at.isoformat(),
+                    "expires_at": structures.expires_at.isoformat(),
+                    "stale": structures.stale,
+                }
+            )
+        experimental_count = sum(
+            item.get("structure_type") == "experimental" for item in structure_records
+        )
+        alphafold_count = sum(
+            item.get("source") == "AlphaFold" for item in structure_records
+        )
+        return {
+            "target_id": None,
+            **_json_copy(target_payload),
+            "structure_count": len(structure_records),
+            "downloaded_structure_count": 0,
+            "experimental_structure_count": experimental_count,
+            "alphafold_structure_count": alphafold_count,
+            "has_experimental_structure": experimental_count > 0,
+            "has_alphafold_structure": alphafold_count > 0,
+            "recommended_structures": structure_records,
+            "retrieved_at": target.retrieved_at.isoformat(),
+            "expires_at": target.expires_at.isoformat(),
+            "target_retrieved_at": target.retrieved_at.isoformat(),
+            "target_expires_at": target.expires_at.isoformat(),
+            "structures_retrieved_at": structures.retrieved_at.isoformat(),
+            "structures_expires_at": structures.expires_at.isoformat(),
+            "target_stale": target.stale,
+            "structures_stale": structures.stale,
+            "stale": target.stale or structures.stale,
+            "structure_evidence_status": (
+                "stale" if structures.stale else "fresh"
+            ),
+        }
+
+    @staticmethod
+    def _target_only_record(target: CachedEvidence) -> dict[str, Any]:
+        return {
+            "target_id": None,
+            **_json_copy(target.payload),
+            "structure_count": None,
+            "downloaded_structure_count": None,
+            "experimental_structure_count": None,
+            "alphafold_structure_count": None,
+            "has_experimental_structure": None,
+            "has_alphafold_structure": None,
+            "recommended_structures": [],
+            "retrieved_at": target.retrieved_at.isoformat(),
+            "expires_at": target.expires_at.isoformat(),
+            "target_retrieved_at": target.retrieved_at.isoformat(),
+            "target_expires_at": target.expires_at.isoformat(),
+            "structures_retrieved_at": None,
+            "structures_expires_at": None,
+            "target_stale": target.stale,
+            "structures_stale": None,
+            "stale": target.stale,
+            "structure_evidence_status": "unavailable",
+        }
+
+    def _authoritative_success_payload(
+        self,
+        query: str,
+        record: dict[str, Any],
+        *,
+        status: str = "resolved",
+        lookup_path: list[str],
+        cache: dict[str, str],
+        filters: dict[str, Any],
+        warnings: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        results = [record] if self._remote_record_matches(record, **filters) else []
+        return self._search_payload(
+            query,
+            results,
+            status=status,
+            warnings=warnings,
+            lookup_path=lookup_path,
+            cache=cache,
+        )
+
+    @staticmethod
+    def _remote_record_matches(
+        record: Mapping[str, Any],
+        *,
+        target_type: Optional[str],
+        source: Optional[str],
+        has_experimental: Optional[bool],
+        docking_recommended: Optional[bool],
+        has_ligand: Optional[bool],
+    ) -> bool:
+        structures = record.get("recommended_structures") or []
+        if record.get("structure_evidence_status") == "unavailable" and any(
+            value is not None
+            for value in (
+                source,
+                has_experimental,
+                docking_recommended,
+                has_ligand,
+            )
+        ):
+            return False
+        if target_type and str(record.get("target_type") or "").casefold() != target_type.casefold():
+            return False
+        if source and not any(
+            str(item.get("source") or "").casefold() == source.casefold()
+            for item in structures
+        ):
+            return False
+        if has_experimental is not None and bool(
+            record.get("has_experimental_structure")
+        ) != has_experimental:
+            return False
+        if docking_recommended is not None and any(
+            bool(item.get("docking_recommended")) for item in structures
+        ) != docking_recommended:
+            return False
+        if has_ligand is not None and any(
+            bool(item.get("ligand_ids")) for item in structures
+        ) != has_ligand:
+            return False
+        return True
+
+    @staticmethod
+    def _search_payload(
+        query: str,
+        results: list[dict[str, Any]],
+        *,
+        status: str,
+        warnings: Optional[list[str]] = None,
+        lookup_path: Optional[list[str]] = None,
+        cache: Optional[dict[str, str]] = None,
+        retryable: Optional[bool] = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "query": query,
+            "results": results,
+            "warnings": list(dict.fromkeys(warnings or [])),
+            "lookup_path": list(lookup_path or []),
+            "status": status,
+            "cache": cache or {"target": "none", "structures": "none"},
+        }
+        if retryable is not None:
+            payload["retryable"] = retryable
+        return payload
 
     def _search_sql(self, where_clause: str) -> str:
         return f"""
@@ -331,6 +1160,34 @@ class TargetSearchService:
     def prepare_structure_file(self, structure_db_id: int, requested_format: Optional[str] = None) -> dict:
         structure = self._get_structure(structure_db_id)
         return self.downloader.prepare_structure_file(structure, requested_format)
+
+    def get_fallback_health(self) -> dict[str, Any]:
+        """Expose bounded operational counts without machine paths or cache payloads."""
+        conn = get_connection(self.project_root)
+        try:
+            local_target_count = int(
+                conn.execute("SELECT COUNT(*) AS count FROM targets").fetchone()["count"]
+            )
+            local_structure_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS count FROM target_structures"
+                ).fetchone()["count"]
+            )
+        finally:
+            conn.close()
+        cache_health = self.cache.get_health_summary()
+        seed_dir = get_target_db_dir(self.project_root)
+        return {
+            "local_target_count": local_target_count,
+            "local_structure_count": local_structure_count,
+            "seed_available": any(
+                (seed_dir / filename).is_file()
+                for filename in _TARGET_SEED_FILENAMES
+            ),
+            "cache_entry_count": cache_health["cache_entry_count"],
+            "stale_entry_count": cache_health["stale_entry_count"],
+            "last_refresh_errors": cache_health["last_refresh_errors"],
+        }
 
     def preflight_structure(self, structure_db_id: int, requested_format: Optional[str] = None) -> dict:
         """Check structure cache and docking suitability without downloading files."""

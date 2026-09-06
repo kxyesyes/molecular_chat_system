@@ -1,5 +1,5 @@
 from src.agent.react_agent import ReActMolecularAgent
-from src.agent.skills.comprehensive_evaluation_skill import ComprehensiveEvaluationSkill
+from src.agent.workflows import WorkflowCatalog
 
 
 class FakeTool:
@@ -18,6 +18,7 @@ class FakeTool:
 def test_comprehensive_workflow_runs_standard_planned_chain():
     planned_tool_names = [
         "property_calculator",
+        "drug_likeness_assessment",
         "admet_predictor",
         "activity_predictor",
         "reverse_target_predictor",
@@ -32,11 +33,11 @@ def test_comprehensive_workflow_runs_standard_planned_chain():
 
     result = agent.execute(
         "请全面评估 CCO 的成药性",
-        active_skill=ComprehensiveEvaluationSkill(),
+        active_skill=WorkflowCatalog().require("comprehensive_evaluation"),
     )
 
     assert result["success"] is True
     assert result["workflow_plan"]["workflow_name"] == "comprehensive_evaluation"
     assert result["tools_used"] == planned_tool_names
-    assert [item["event"] for item in result["agent_events"]].count("tool_completed") == 5
+    assert [item["event"] for item in result["agent_events"]].count("tool_completed") == 6
     assert "target_database_search" in result["tool_results"]

@@ -1,0 +1,12 @@
+FROM mambaorg/micromamba:2.3.2
+COPY --chown=$MAMBA_USER:$MAMBA_USER deployment/opensandbox/environment-lock.yml /tmp/environment-exact.yml
+RUN micromamba config set channel_priority strict
+RUN micromamba install -y -n base -f /tmp/environment-exact.yml && micromamba clean --all --yes
+RUN /opt/conda/bin/python -c "import pkg_resources, prody"
+USER root
+RUN install -d -o 65532 -g 65532 -m 0700 /workspace/input /workspace/output && install -d -o root -g root -m 0555 /opt/medchat
+COPY deployment/opensandbox/run_docking.py /opt/medchat/run_docking.py
+RUN chown root:root /opt/medchat/run_docking.py && chmod 0555 /opt/medchat/run_docking.py
+USER 65532:65532
+WORKDIR /workspace
+ENTRYPOINT ["sleep", "infinity"]

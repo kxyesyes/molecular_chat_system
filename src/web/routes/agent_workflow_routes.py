@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, Request
 
@@ -9,7 +9,12 @@ from src.task_runtime import get_task_manager
 from src.web.api_response import api_error, api_success
 
 
-def setup_agent_workflow_routes(app: FastAPI) -> None:
+def setup_agent_workflow_routes(
+    app: FastAPI,
+    supervisor_factory: Callable[[], SupervisorAgent] | None = None,
+) -> None:
+    create_supervisor = supervisor_factory or SupervisorAgent
+
     @app.post("/api/agent/workflows/plan")
     async def plan_workflow(request: Request):
         payload: dict[str, Any] = await request.json()
@@ -17,7 +22,7 @@ def setup_agent_workflow_routes(app: FastAPI) -> None:
         if not query:
             return api_error("QUERY_REQUIRED", "请输入任务目标", status_code=422)
 
-        supervisor = SupervisorAgent()
+        supervisor = create_supervisor()
         plan = supervisor.plan(
             query=query,
             skill_name=payload.get("skill_name"),
@@ -33,7 +38,7 @@ def setup_agent_workflow_routes(app: FastAPI) -> None:
             return api_error("QUERY_REQUIRED", "请输入任务目标", status_code=422)
 
         def handler(task_payload: dict[str, Any]) -> dict[str, Any]:
-            supervisor = SupervisorAgent()
+            supervisor = create_supervisor()
             return supervisor.run(
                 query=str(task_payload.get("query") or ""),
                 skill_name=task_payload.get("skill_name"),
@@ -49,4 +54,4 @@ def setup_agent_workflow_routes(app: FastAPI) -> None:
             },
             handler=handler,
         )
-        return api_success(record.to_dict(), message="Agent 工作流任务已提交")
+        return api_success(record.to_public_dict(), message="Agent 工作流任务已提交")

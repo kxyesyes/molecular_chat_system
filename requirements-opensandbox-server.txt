@@ -1,0 +1,3 @@
+# Deployment-isolated from the broker profile. opensandbox-server 0.2.2 needs
+# a newer FastAPI/Starlette/python-multipart stack and must resolve separately.
+opensandbox-server==0.2.2

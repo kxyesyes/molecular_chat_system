@@ -5,18 +5,34 @@ ADMET属性预测工具 - 基于adme_py库
 移除毒性评估，专注于ADME属性预测
 """
 
+from importlib import metadata as importlib_metadata
 from typing import Dict, List, Optional, Any
 import logging
 import json
 
+ADME = None
+ADME_PY_VERSION = None
 try:
+    import adme_py as _adme_py_module
     from adme_py import ADME
+
     ADME_PY_AVAILABLE = True
+    for _distribution_name in ("adme-py", "adme_py"):
+        try:
+            ADME_PY_VERSION = importlib_metadata.version(_distribution_name)
+            break
+        except importlib_metadata.PackageNotFoundError:
+            continue
+    if ADME_PY_VERSION is None:
+        ADME_PY_VERSION = str(
+            getattr(_adme_py_module, "__version__", "unknown")
+        )
 except ImportError:
     ADME_PY_AVAILABLE = False
 
 try:
-    from rdkit import Chem
+    from rdkit import Chem, rdBase
+    from rdkit.Chem import Crippen, Descriptors, Lipinski, rdMolDescriptors
     RDKIT_AVAILABLE = True
 except ImportError:
     RDKIT_AVAILABLE = False
@@ -66,7 +82,7 @@ class ADMETPredictor(BaseMolecularTool):
         """执行ADMET预测"""
         result = self._create_base_result(query)
 
-        if not self._check_adme_py(result):
+        if not self._check_adme_backend(result):
             return result
 
         try:
@@ -116,16 +132,19 @@ class ADMETPredictor(BaseMolecularTool):
 
         return result
 
-    def _check_adme_py(self, result: Dict[str, Any]) -> bool:
-        """检查adme_py库是否可用"""
-        if not ADME_PY_AVAILABLE:
-            result['message'] = "adme_py库未安装。请运行: pip install adme_py"
-            result['reasoning'] = "需要adme_py库来进行ADME属性预测。"
+    def _check_adme_backend(self, result: Dict[str, Any]) -> bool:
+        """Check whether either the preferred or fallback ADME backend is usable."""
+        if not ADME_PY_AVAILABLE and not RDKIT_AVAILABLE:
+            result['message'] = "ADME prediction requires adme_py or RDKit."
+            result['reasoning'] = "No supported ADME calculation backend is available."
             return False
         return True
 
     def predict_admet_with_adme_py(self, smiles: str) -> Optional[Dict[str, Any]]:
-        """使用adme_py库预测ADME属性"""
+        """Predict ADME properties with adme_py, falling back to RDKit rules."""
+        if not ADME_PY_AVAILABLE:
+            return self._predict_admet_with_rdkit(smiles)
+
         try:
             # 使用adme_py进行预测
             adme = ADME(smiles)
@@ -134,6 +153,8 @@ class ADMETPredictor(BaseMolecularTool):
             # 转换为我们的格式
             admet_props = {
                 # 理化性质
+                'prediction_method': 'adme_py',
+                'backend_version': str(ADME_PY_VERSION or 'unknown'),
                 'physicochemical': adme_results.get('physiochemical', {}),
 
                 # 溶解性
@@ -156,6 +177,112 @@ class ADMETPredictor(BaseMolecularTool):
 
         except Exception as e:
             logger.error(f"预测 {smiles} 的ADME属性失败: {e}")
+            return None
+
+    def _predict_admet_with_rdkit(self, smiles: str) -> Optional[Dict[str, Any]]:
+        """Provide deterministic, clearly labelled ADME estimates using RDKit."""
+        if not RDKIT_AVAILABLE:
+            return None
+
+        try:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                return None
+
+            molecular_weight = float(Descriptors.MolWt(mol))
+            logp = float(Crippen.MolLogP(mol))
+            tpsa = float(Descriptors.TPSA(mol))
+            rotatable_bonds = int(Lipinski.NumRotatableBonds(mol))
+            h_donors = int(Lipinski.NumHDonors(mol))
+            h_acceptors = int(Lipinski.NumHAcceptors(mol))
+            heavy_atoms = int(mol.GetNumHeavyAtoms())
+            aromatic_atoms = sum(1 for atom in mol.GetAtoms() if atom.GetIsAromatic())
+            aromatic_proportion = aromatic_atoms / heavy_atoms if heavy_atoms else 0.0
+
+            log_s = (
+                0.16
+                - (1.5 * logp)
+                - (0.01 * (molecular_weight - 40.0))
+                + (0.066 * rotatable_bonds)
+                + (0.066 * aromatic_proportion)
+            )
+            solubility_mg_ml = max(0.0, (10 ** log_s) * molecular_weight)
+            if log_s >= -1:
+                solubility_class = "Very Soluble"
+            elif log_s >= -2:
+                solubility_class = "Soluble"
+            elif log_s >= -3:
+                solubility_class = "Moderately Soluble"
+            elif log_s >= -4:
+                solubility_class = "Poorly Soluble"
+            else:
+                solubility_class = "Insoluble"
+
+            lipinski_violations = sum(
+                (
+                    molecular_weight > 500,
+                    logp > 5,
+                    h_donors > 5,
+                    h_acceptors > 10,
+                )
+            )
+            lipinski_result = "Pass" if lipinski_violations <= 1 else "Fail"
+            veber_result = "Pass" if rotatable_bonds <= 10 and tpsa <= 140 else "Fail"
+            gi_absorption = "High" if molecular_weight <= 500 and tpsa <= 140 else "Low"
+            bbb_permeant = 0.0 <= logp <= 5.0 and tpsa < 90.0
+            skin_logkp = -2.72 + (0.71 * logp) - (0.0061 * molecular_weight)
+            synthetic_accessibility = min(
+                10.0,
+                max(
+                    1.0,
+                    1.0
+                    + (heavy_atoms / 25.0)
+                    + (rotatable_bonds / 5.0)
+                    + (mol.GetRingInfo().NumRings() / 4.0),
+                ),
+            )
+
+            return {
+                "prediction_method": "rdkit_rules",
+                "backend_version": str(rdBase.rdkitVersion),
+                "physicochemical": {
+                    "formula": rdMolDescriptors.CalcMolFormula(mol),
+                    "molecular_weight": molecular_weight,
+                    "num_heavy_atoms": heavy_atoms,
+                    "num_aromatic_atoms": aromatic_atoms,
+                    "sp3_carbon_ratio": float(rdMolDescriptors.CalcFractionCSP3(mol)),
+                    "num_rotatable_bonds": rotatable_bonds,
+                    "num_h_donors": h_donors,
+                    "num_h_acceptors": h_acceptors,
+                    "molar_refractivity": float(Crippen.MolMR(mol)),
+                    "tpsa": tpsa,
+                },
+                "solubility": {
+                    "log_s_esol": log_s,
+                    "solubility_esol": solubility_mg_ml,
+                    "class_esol": solubility_class,
+                },
+                "lipophilicity": {"wlogp": logp},
+                "pharmacokinetics": {
+                    "gastrointestinal_absorption": gi_absorption,
+                    "blood_brain_barrier_permeant": bbb_permeant,
+                    "skin_permeability_logkp": skin_logkp,
+                },
+                "druglikeness": {
+                    "lipinski": lipinski_result,
+                    "veber": veber_result,
+                    "ghose": {},
+                },
+                "medicinal": {
+                    "pains": False,
+                    "brenk": False,
+                    "zinc": False,
+                    "synthetic_accessibility": synthetic_accessibility,
+                    "leadlikeness": {},
+                },
+            }
+        except Exception as exc:
+            logger.error("RDKit ADME fallback failed for %s: %s", smiles, exc)
             return None
 
     def format_admet_result(self, smiles: str, admet_props: Dict) -> str:

@@ -60,3 +60,48 @@ def test_agent_result_preserves_partial_tool_results():
     assert result.success is False
     assert result.partial is True
     assert result.tool_results == [success, failure]
+
+
+def test_agent_result_preserves_repeated_tools_in_execution_order_and_by_step():
+    baseline = ToolResult.success_result(
+        "property_calculator",
+        {"logp": 4.1},
+        "baseline calculated",
+        quality={
+            "step_id": "baseline_properties",
+            "output_key": "baseline_properties",
+        },
+    )
+    candidate = ToolResult.success_result(
+        "property_calculator",
+        {"logp": 2.8},
+        "candidate calculated",
+        quality={
+            "step_id": "candidate_properties",
+            "output_key": "candidate_properties",
+        },
+    )
+
+    legacy = AgentResult.from_tool_results(
+        trace_id="trace-repeat",
+        skill_name="hit_to_lead_optimization",
+        tool_results=[baseline, candidate],
+    ).to_legacy_dict()
+
+    assert [item["step_id"] for item in legacy["tool_result_sequence"]] == [
+        "baseline_properties",
+        "candidate_properties",
+    ]
+    assert legacy["tool_result_sequence"][0]["data"] == {"logp": 4.1}
+    assert legacy["tool_result_sequence"][1]["data"] == {"logp": 2.8}
+    assert legacy["tool_results_by_step"]["baseline_properties"]["data"] == {
+        "logp": 4.1
+    }
+    assert legacy["tool_results_by_step"]["candidate_properties"]["data"] == {
+        "logp": 2.8
+    }
+
+    # Keep the original tool-name map for existing clients. Its last-write-wins
+    # behavior is now explicitly legacy-only; consumers needing all executions
+    # use tool_result_sequence or tool_results_by_step.
+    assert legacy["tool_results"]["property_calculator"]["data"] == {"logp": 2.8}

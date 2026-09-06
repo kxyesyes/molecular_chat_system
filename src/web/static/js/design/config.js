@@ -16,8 +16,10 @@ var DesignState = {
   history: [],
   candidates: [],
   iter: 0,
+  optimizationCommand: "",
   prevProps: null,
   curProps: null,
+  curGoals: null,
   propsTimer: null,
   ketcherReady: false,
 };

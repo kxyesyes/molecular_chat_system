@@ -18,7 +18,10 @@ class Complete_Virtual_Self(object):
 
         edge_attr = None
         if data.edge_attr is not None:
-            real_full_edge_idx = torch.arange(data.num_nodes * data.num_nodes, dtype=torch.long
+            real_full_edge_idx = torch.arange(
+                data.num_nodes * data.num_nodes,
+                dtype=torch.long,
+            )
             
             real_edge_idx = data.edge_index[0] * data.num_nodes + data.edge_index[1]
 

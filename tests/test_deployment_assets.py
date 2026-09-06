@@ -82,6 +82,52 @@ docking:
 
         self.assertIn("MedChat deployment health check", result.stdout)
 
+    def test_main_uses_append_rotating_file_logging(self):
+        source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
+
+        self.assertIn("RotatingFileHandler", source)
+        self.assertNotIn('FileHandler("logs/app.log", encoding=\'utf-8\', mode=\'w\')', source)
+
+    def test_quality_workflow_covers_reproducible_offline_gates(self):
+        workflow_path = PROJECT_ROOT / ".github" / "workflows" / "quality.yml"
+
+        self.assertTrue(workflow_path.is_file())
+        source = workflow_path.read_text(encoding="utf-8")
+        required_commands = [
+            "timeout ${{ matrix.command_timeout }}s python -m pytest ${{ matrix.pytest_target }} -q -p no:cacheprovider ${{ matrix.pytest_args }}",
+            'pytest_target: "tests/agent"',
+            'pytest_target: "tests/sandbox_broker/test_api.py"',
+            'pytest_target: "tests/sandbox_broker --ignore=tests/sandbox_broker/test_api.py"',
+            'pytest_target: "tests/task_runtime"',
+            'pytest_target: "tests --ignore=tests/agent --ignore=tests/sandbox_broker --ignore=tests/task_runtime"',
+            "python -m compileall -q src scripts",
+            "find tests -maxdepth 1 -type f -name '*_test.js'",
+            'node "$test_file"',
+            "BEGIN (RSA|OPENSSH) PRIVATE KEY",
+        ]
+        for command in required_commands:
+            self.assertIn(command, source)
+        self.assertIn('python-version: "3.10"', source)
+        self.assertEqual(source.count("--timeout=60"), 2)
+        self.assertEqual(source.count('pytest_args: "--timeout=60"'), 2)
+        self.assertEqual(source.count("command_timeout:"), 5)
+        self.assertIn("command_timeout: 180", source)
+        self.assertIn("git grep -IlE", source)
+        self.assertNotIn("git grep -nE", source)
+        self.assertNotIn("secrets.", source)
+        self.assertNotIn("OPENAI_COMPATIBLE_API_KEY", source)
+
+    def test_dependency_files_declare_distinct_supported_profiles(self):
+        development = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8")
+        deployment = (PROJECT_ROOT / "deployment" / "requirements.txt").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("CI / CPU development profile", development)
+        self.assertIn("not interchangeable", development)
+        self.assertIn("CUDA 12.1 deployment profile", deployment)
+        self.assertIn("not interchangeable", deployment)
+
     def test_health_check_reports_extended_deployment_categories(self):
         spec = importlib.util.spec_from_file_location(
             "health_check", PROJECT_ROOT / "scripts" / "health_check.py"

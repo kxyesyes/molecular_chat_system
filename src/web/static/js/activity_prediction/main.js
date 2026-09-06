@@ -28,6 +28,23 @@ window.ActivityMain = (function () {
     if (el) el.textContent = text;
   }
 
+  function normalizeSplitStrategy(value) {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (normalized.includes("scaffold")) return "scaffold";
+    if (normalized.includes("random")) return "random";
+    return normalized;
+  }
+
+  function selectSplitStrategy(value) {
+    const select = document.getElementById("splitStrategy");
+    if (!select) return;
+    const expected = normalizeSplitStrategy(value);
+    const option = Array.from(select.options).find(function (item) {
+      return normalizeSplitStrategy(item.value) === expected;
+    });
+    if (option) select.value = option.value;
+  }
+
   function bindFileDisplay(inputId, infoId, prefix) {
     const input = document.getElementById(inputId);
     const info = document.getElementById(infoId);
@@ -87,7 +104,9 @@ window.ActivityMain = (function () {
       dropout: document.getElementById("dropout").value,
       target_column: document.getElementById("targetColumn").value,
       smiles_column: document.getElementById("smilesColumn").value,
-      split_strategy: document.getElementById("splitStrategy").value,
+      split_strategy: normalizeSplitStrategy(
+        document.getElementById("splitStrategy").value,
+      ),
       exported_at: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(cfg, null, 2)], {
@@ -128,6 +147,9 @@ window.ActivityMain = (function () {
           if (cfg.smiles_column) {
             document.getElementById("smilesColumn").value = cfg.smiles_column;
           }
+          if (cfg.split_strategy) {
+            selectSplitStrategy(cfg.split_strategy);
+          }
           ActivityPreflight.setTrainHint("✅ 配置已导入", "ok");
         } catch (err) {
           alert("JSON 格式错误，无法解析。");
@@ -148,6 +170,9 @@ window.ActivityMain = (function () {
       parseInt(document.getElementById("epochs").value || "50", 10),
     );
     const taskType = document.getElementById("trainTaskType").value;
+    const splitStrategy = normalizeSplitStrategy(
+      document.getElementById("splitStrategy").value,
+    );
 
     if (!trainFile || !targetColumn) {
       alert("请先上传训练数据并填写目标列名。");
@@ -181,6 +206,7 @@ window.ActivityMain = (function () {
     formData.append("file", trainFile);
     formData.append("target_column", targetColumn);
     formData.append("task_type", taskType);
+    formData.append("split_strategy", splitStrategy);
     formData.append("epochs", totalEpochs);
     formData.append("learning_rate", document.getElementById("learningRate").value);
     formData.append("batch_size", document.getElementById("batchSize").value);

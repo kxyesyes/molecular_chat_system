@@ -2057,6 +2057,22 @@
       color: #64748b;
     }
 
+    .llm-key-clear {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      width: fit-content;
+      cursor: pointer;
+      font-weight: 500;
+    }
+
+    .llm-settings-field .llm-key-clear input {
+      width: 16px;
+      height: 16px;
+      padding: 0;
+      accent-color: #4f46e5;
+    }
+
     .llm-settings-actions {
       display: flex;
       gap: 10px;
@@ -2186,6 +2202,10 @@
           <label for="llmApiKey">API Key</label>
           <input id="llmApiKey" type="password" autocomplete="off" placeholder="本地 Ollama 可留空；外部 API 请填写 Key" />
           <div class="llm-key-hint" id="llmApiKeyHint">未读取配置</div>
+          <label class="llm-key-clear" for="clearLlmApiKey">
+            <input id="clearLlmApiKey" type="checkbox" />
+            <span>清除已保存在本机 .env 中的 API Key</span>
+          </label>
         </div>
         <div class="llm-settings-status" id="llmSettingsStatus"></div>
         <div class="llm-settings-actions">
@@ -2522,12 +2542,15 @@
   <script src="/static/js/home/config.js?v=20260422-toolbar-fix"></script>
   <script src="/static/js/home/state.js?v=20260422-toolbar-fix"></script>
   <script src="/static/js/home/theme.js"></script>
+  <script src="/static/js/shared/safe_render.js"></script>
+  <script src="/static/js/home/molecule_candidates.js?v=20260902-candidate-correlation-v5"></script>
   <script src="/static/js/home/formatters.js"></script>
   <script src="/static/js/home/molecule_renderer.js"></script>
   <script src="/static/js/home/chat_renderer.js"></script>
   <script src="/static/js/home/advanced_options.js"></script>
   <script src="/static/js/home/ws_client.js"></script>
-  <script src="/static/js/home/main.js?v=20260422-toolbar-fix"></script>
+  <!-- Cache lineage: /static/js/home/main.js?v=20260713-workflow-complete-v2 -->
+  <script src="/static/js/home/main.js?v=20260904-partial-terminal-v2"></script>
 </body>
 
 </html>

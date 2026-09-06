@@ -1,0 +1,124 @@
+name: quality
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-tests:
+    name: python-tests (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: agent
+            pytest_target: "tests/agent"
+            pytest_args: ""
+            command_timeout: 600
+          - name: sandbox-api
+            pytest_target: "tests/sandbox_broker/test_api.py"
+            pytest_args: "--timeout=60"
+            command_timeout: 180
+          - name: sandbox-core
+            pytest_target: "tests/sandbox_broker --ignore=tests/sandbox_broker/test_api.py"
+            pytest_args: "--timeout=60"
+            command_timeout: 600
+          - name: task-runtime
+            pytest_target: "tests/task_runtime"
+            pytest_args: ""
+            command_timeout: 600
+          - name: root
+            pytest_target: "tests --ignore=tests/agent --ignore=tests/sandbox_broker --ignore=tests/task_runtime"
+            pytest_args: ""
+            command_timeout: 600
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install CPU development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-ci.txt
+
+      - name: Run Python tests
+        run: timeout ${{ matrix.command_timeout }}s python -m pytest ${{ matrix.pytest_target }} -q -p no:cacheprovider ${{ matrix.pytest_args }}
+
+  static-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Compile Python sources
+        run: python -m compileall -q src scripts
+
+      - name: Run Node contract tests
+        shell: bash
+        run: |
+          while IFS= read -r test_file; do
+            node "$test_file"
+          done < <(find tests -maxdepth 1 -type f -name '*_test.js' -print | sort)
+
+      - name: Scan tracked non-document files for credential material
+        shell: bash
+        run: |
+          set +e
+          matches=$(git grep -IlE 'sk-[A-Za-z0-9]{20,}|BEGIN (RSA|OPENSSH) PRIVATE KEY' -- . ':(exclude,glob)**/*.md')
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "Credential-like material found in tracked non-document files:"
+            printf '%s\n' "$matches"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            exit "$status"
+          fi
+
+  offline-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ always() }}
+    needs: [python-tests, static-quality]
+
+    steps:
+      - name: Enforce all quality gates
+        env:
+          PYTHON_TESTS_RESULT: ${{ needs.python-tests.result }}
+          STATIC_QUALITY_RESULT: ${{ needs.static-quality.result }}
+        run: |
+          test "$PYTHON_TESTS_RESULT" = "success"
+          test "$STATIC_QUALITY_RESULT" = "success"

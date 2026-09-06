@@ -1,13 +1,16 @@
 import os
 import time
-import json
+import hashlib
 import uuid
 import threading
 import logging
+import random
 from pathlib import Path
 from typing import Dict, Any, List
 import pandas as pd
 import numpy as np
+
+from src.activity.model_registry import ActivityModelRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -15,65 +18,201 @@ logger = logging.getLogger(__name__)
 training_jobs: Dict[str, Dict[str, Any]] = {}
 MODELS_DIR = Path("data/activity/models")
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
-ACTIVE_MODEL_OVERRIDE = None
+
+
+def get_model_registry() -> ActivityModelRegistry:
+    return ActivityModelRegistry(MODELS_DIR)
 
 def save_model_info(model_id: str, info: dict):
-    info_path = MODELS_DIR / f"{model_id}_info.json"
-    with open(info_path, "w", encoding="utf-8") as f:
-        json.dump(info, f, ensure_ascii=False, indent=2)
+    if info.get("model_id") != model_id:
+        raise ValueError("model_id does not match metadata")
+    return get_model_registry().register(info)
 
 def list_available_models():
-    models = []
-    if not MODELS_DIR.exists():
-        return models
-    for fp in MODELS_DIR.glob("*_info.json"):
-        try:
-            with open(fp, "r", encoding="utf-8") as f:
-                info = json.load(f)
-            models.append(info)
-        except Exception as e:
-            logger.warning(f"Failed to read model info {fp}: {e}")
-    # Sort by creation time descending
-    models.sort(key=lambda x: x.get("created_at", 0), reverse=True)
-    return models
+    return get_model_registry().list()
 
-def set_active_model(model_filename: str):
-    global ACTIVE_MODEL_OVERRIDE
-    ACTIVE_MODEL_OVERRIDE = model_filename
+def set_active_model(model_id: str):
+    return get_model_registry().select(model_id)
 
 def delete_model(model_id: str):
-    """删除模型权重及其描述信息"""
-    models = list_available_models()
-    target_info = next((m for m in models if m['model_id'] == model_id), None)
-    if not target_info:
-        raise ValueError("模型不存在")
-    
-    # 获取文件名
-    weights_file = target_info.get("weights_file")
-    info_file = f"{model_id}_info.json"
-    
-    # 物理删除
-    if weights_file:
-        weights_path = MODELS_DIR / weights_file
-        if weights_path.exists():
-            os.remove(weights_path)
-            
-    info_path = MODELS_DIR / info_file
-    if info_path.exists():
-        os.remove(info_path)
-    
-    return True
+    """删除已注册的模型权重及其 metadata。"""
+    return get_model_registry().delete(model_id)
+
+
+def get_best_model():
+    registry = get_model_registry()
+    active = registry.get_active()
+    if active is not None:
+        return active
+
+    models = registry.list()
+    return models[0] if models else None
 
 def get_best_model_path():
-    global ACTIVE_MODEL_OVERRIDE
-    if ACTIVE_MODEL_OVERRIDE:
-        return str(MODELS_DIR / ACTIVE_MODEL_OVERRIDE)
-    
-    models = list_available_models()
-    if not models:
+    model = get_best_model()
+    if model is None:
         return None
-    # Pick the most recent one as default "current" model for now
-    return str(MODELS_DIR / models[0]["weights_file"])
+    return str(get_model_registry().resolve_weights(model["model_id"]))
+
+
+def get_current_model_id():
+    model = get_best_model()
+    return model["model_id"] if model is not None else None
+
+
+def _sha256_file(file_path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(file_path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _split_indices(
+    smiles_list: List[str],
+    *,
+    split_strategy: str = "scaffold",
+    random_seed: int = 42,
+    validation_fraction: float = 0.2,
+) -> Dict[str, Any]:
+    if isinstance(random_seed, bool) or not isinstance(random_seed, int):
+        raise ValueError("random_seed must be an integer")
+    if not 0 < validation_fraction < 1:
+        raise ValueError("validation_fraction must be between 0 and 1")
+    if len(smiles_list) < 2:
+        raise ValueError("At least two samples are required for a train/validation split")
+
+    requested_strategy = str(split_strategy).strip().lower()
+    if requested_strategy not in {"scaffold", "random"}:
+        raise ValueError("split_strategy must be 'scaffold' or 'random'")
+
+    indices = list(range(len(smiles_list)))
+    if requested_strategy == "random":
+        from sklearn.model_selection import train_test_split
+
+        train_indices, val_indices = train_test_split(
+            indices,
+            test_size=validation_fraction,
+            random_state=random_seed,
+        )
+        return {
+            "train_indices": list(train_indices),
+            "val_indices": list(val_indices),
+            "requested_strategy": requested_strategy,
+            "actual_strategy": "random",
+            "random_seed": random_seed,
+            "warnings": [],
+        }
+
+    from rdkit import Chem
+    from rdkit.Chem.Scaffolds import MurckoScaffold
+
+    scaffold_groups: Dict[str, List[int]] = {}
+    for index, smiles in enumerate(smiles_list):
+        molecule = Chem.MolFromSmiles(str(smiles))
+        if molecule is None:
+            raise ValueError(
+                f"Invalid SMILES at index {index}; scaffold split cannot be calculated"
+            )
+        scaffold = MurckoScaffold.MurckoScaffoldSmiles(
+            mol=molecule,
+            includeChirality=False,
+        )
+        scaffold_groups.setdefault(scaffold, []).append(index)
+
+    if len(scaffold_groups) < 2:
+        raise ValueError(
+            "Scaffold split requires at least two distinct Bemis-Murcko scaffolds"
+        )
+
+    grouped_indices = list(scaffold_groups.values())
+    random.Random(random_seed).shuffle(grouped_indices)
+    grouped_indices.sort(key=len, reverse=True)
+    target_val_size = max(
+        1,
+        min(len(smiles_list) - 1, round(len(smiles_list) * validation_fraction)),
+    )
+
+    val_groups: List[List[int]] = []
+    val_size = 0
+    for group in grouped_indices:
+        proposed_size = val_size + len(group)
+        if proposed_size >= len(smiles_list):
+            continue
+        if abs(proposed_size - target_val_size) < abs(val_size - target_val_size):
+            val_groups.append(group)
+            val_size = proposed_size
+
+    if not val_groups:
+        val_groups = [min(grouped_indices, key=len)]
+
+    selected_group_ids = {id(group) for group in val_groups}
+    val_indices = sorted(index for group in val_groups for index in group)
+    train_indices = sorted(
+        index
+        for group in grouped_indices
+        if id(group) not in selected_group_ids
+        for index in group
+    )
+    if not train_indices or not val_indices:
+        raise ValueError(
+            "Scaffold split could not produce non-empty train and validation sets"
+        )
+
+    return {
+        "train_indices": train_indices,
+        "val_indices": val_indices,
+        "requested_strategy": requested_strategy,
+        "actual_strategy": "scaffold",
+        "random_seed": random_seed,
+        "warnings": [],
+    }
+
+
+def _build_model_metadata(
+    *,
+    model_id: str,
+    weights_file: str,
+    task_type: str,
+    target_column: str,
+    file_path: str,
+    samples: int,
+    best_metrics: dict,
+    model_config: dict,
+    endpoint: str | None = None,
+    units: str = "unspecified",
+    requested_split_strategy: str = "random",
+    actual_split_strategy: str | None = None,
+    random_seed: int = 42,
+    split_warnings: List[str] | None = None,
+    created_at: float | None = None,
+) -> dict:
+    created_at = time.time() if created_at is None else created_at
+    metrics = dict(best_metrics or {})
+    endpoint = target_column if endpoint is None else endpoint
+    actual_split_strategy = actual_split_strategy or requested_split_strategy
+    return {
+        "model_id": model_id,
+        "created_at": created_at,
+        "task_type": task_type,
+        "endpoint": endpoint,
+        "units": units,
+        "dataset_sha256": _sha256_file(file_path),
+        "requested_split_strategy": requested_split_strategy,
+        "split_strategy": actual_split_strategy,
+        "random_seed": random_seed,
+        "split_warnings": list(split_warnings or []),
+        "model_config": dict(model_config),
+        "model_format": "pytorch_state_dict",
+        "weights_sha256": _sha256_file(MODELS_DIR / weights_file),
+        "metrics": metrics,
+        "target": target_column,
+        "dataset": Path(file_path).name,
+        "samples": samples,
+        "best_metrics": metrics,
+        "weights_file": weights_file,
+        "name": f"{target_column} ({task_type}) - {time.strftime('%Y%m%d%H%M', time.localtime(created_at))}",
+    }
 
 class ActivityTrainer:
     def __init__(self, job_id: str):
@@ -132,21 +271,25 @@ class ActivityTrainer:
                        weight_decay: float = 1e-4,
                        patience: int = 12,
                        loss_metric: str = "MSE",
-                       lr_scheduler: str = "Cosine"):
+                       lr_scheduler: str = "Cosine",
+                       split_strategy: str = "scaffold",
+                       random_seed: int = 42):
         
         thread = threading.Thread(
             target=self._train_loop, 
             args=(file_path, target_column, task_type, epochs, lr, batch_size, dropout, 
-                  num_layers, hidden_size, weight_decay, patience, loss_metric, lr_scheduler)
+                  num_layers, hidden_size, weight_decay, patience, loss_metric, lr_scheduler,
+                  split_strategy, random_seed)
         )
         thread.start()
         
     def _train_loop(self, file_path, target_column, task_type, total_epochs, lr, batch_size, dropout,
-                    num_layers, hidden_size, weight_decay, patience, loss_metric, lr_scheduler):
+                    num_layers, hidden_size, weight_decay, patience, loss_metric, lr_scheduler,
+                    split_strategy, random_seed):
         start_time = time.time()
         self.status["state"] = "running"
         self._log(f"Starting training job {self.job_id}")
-        self._log(f"Config: layers={num_layers}, hidden={hidden_size}, decay={weight_decay}, patience={patience}, loss={loss_metric}, scheduler={lr_scheduler}")
+        self._log(f"Config: layers={num_layers}, hidden={hidden_size}, decay={weight_decay}, patience={patience}, loss={loss_metric}, scheduler={lr_scheduler}, split={split_strategy}, seed={random_seed}")
         
         if not self.has_torch:
             self.status["state"] = "failed"
@@ -156,7 +299,6 @@ class ActivityTrainer:
         import torch
         import torch.nn.functional as F
         from torch_geometric.data import Batch
-        from sklearn.model_selection import train_test_split
         from src.activity.predictor import get_predictor
         from src.activity.rg_mpnn.Nets.ReduceGNN import RGNN
         
@@ -219,6 +361,7 @@ class ActivityTrainer:
             valid_atom_data = []
             valid_rg_data = []
             valid_y = []
+            valid_smiles = []
             
             for smi, y in zip(smiles_list, targets):
                 processed = predictor.process_smiles(smi)
@@ -229,22 +372,40 @@ class ActivityTrainer:
                     valid_atom_data.append(atom_data)
                     valid_rg_data.append(rg_data)
                     valid_y.append(y)
+                    valid_smiles.append(str(smi))
                     
             if len(valid_atom_data) < 10:
                 raise ValueError(f"Not enough valid molecules to train. Processed: {len(valid_atom_data)}")
                 
             self._log(f"Successfully featurized {len(valid_atom_data)} molecules.")
             
-            # 3. Random Split
-            indices = list(range(len(valid_atom_data)))
-            train_idx, val_idx = train_test_split(indices, test_size=0.2, random_state=42)
+            # 3. Task-configured split
+            split_info = _split_indices(
+                valid_smiles,
+                split_strategy=split_strategy,
+                random_seed=random_seed,
+                validation_fraction=0.2,
+            )
+            train_idx = split_info["train_indices"]
+            val_idx = split_info["val_indices"]
+            self.status["requested_split_strategy"] = split_info[
+                "requested_strategy"
+            ]
+            self.status["split_strategy"] = split_info["actual_strategy"]
+            self.status["random_seed"] = split_info["random_seed"]
+            self.status.setdefault("warnings", []).extend(split_info["warnings"])
+            for warning in split_info["warnings"]:
+                self._log(f"Split warning: {warning}")
             
             train_atom = [valid_atom_data[i] for i in train_idx]
             train_rg = [valid_rg_data[i] for i in train_idx]
             val_atom = [valid_atom_data[i] for i in val_idx]
             val_rg = [valid_rg_data[i] for i in val_idx]
             
-            self._log(f"Split: {len(train_idx)} train, {len(val_idx)} validation.")
+            self._log(
+                f"Split ({split_info['actual_strategy']}): "
+                f"{len(train_idx)} train, {len(val_idx)} validation."
+            )
             
             # 4. Model Setup (Dynamic dimension detection)
             atom_dim = valid_atom_data[0].x.shape[1]
@@ -417,31 +578,39 @@ class ActivityTrainer:
                 model_filename = f"model_rgmpnn_{self.job_id}.pt"
                 model_path = MODELS_DIR / model_filename
                 torch.save({'state_dict': best_weights}, model_path)
-                
-                # Save info
-                info = {
-                    "model_id": self.job_id,
-                    "created_at": time.time(),
-                    "task_type": task_type,
-                    "target": target_column,
-                    "dataset": Path(file_path).name,
-                    "samples": len(valid_atom_data),
-                    "best_metrics": best_metrics,
-                    "weights_file": model_filename,
-                    "model_config": {
-                        "in_channels": atom_dim,
-                        "edge_dim": bond_dim,
-                        "channels": hidden_size,
-                        "out_channels": out_channels,
-                        "num_passing_atom": num_layers,
-                        "num_passing_pool": 1,
-                        "num_passing_rg": 1,
-                        "num_passing_mol": 1,
-                        "dropout": dropout,
-                    },
-                    "name": f"{target_column} ({task_type}) - {time.strftime('%Y%m%d%H%M')}"
+
+                model_config = {
+                    "in_channels": atom_dim,
+                    "edge_dim": bond_dim,
+                    "channels": hidden_size,
+                    "out_channels": out_channels,
+                    "num_passing_atom": num_layers,
+                    "num_passing_pool": 1,
+                    "num_passing_rg": 1,
+                    "num_passing_mol": 1,
+                    "dropout": dropout,
                 }
-                save_model_info(self.job_id, info)
+                info = _build_model_metadata(
+                    model_id=self.job_id,
+                    weights_file=model_filename,
+                    task_type=task_type,
+                    target_column=target_column,
+                    endpoint=target_column,
+                    units=("probability" if task_type == "classification" else "unspecified"),
+                    file_path=file_path,
+                    samples=len(valid_atom_data),
+                    best_metrics=best_metrics,
+                    model_config=model_config,
+                    requested_split_strategy=split_info["requested_strategy"],
+                    actual_split_strategy=split_info["actual_strategy"],
+                    random_seed=split_info["random_seed"],
+                    split_warnings=split_info["warnings"],
+                )
+                try:
+                    save_model_info(self.job_id, info)
+                except Exception:
+                    model_path.unlink(missing_ok=True)
+                    raise
                 
                 self._log(f"Training completed successfully! Model saved as {model_filename}")
                 self.status["state"] = "completed"
@@ -482,6 +651,7 @@ def submit_training_job(**kwargs):
         "val_loss": None,
         "learning_rate": None,
         "logs": [],
+        "warnings": [],
         "elapsed": 0
     }
     trainer = ActivityTrainer(job_id)

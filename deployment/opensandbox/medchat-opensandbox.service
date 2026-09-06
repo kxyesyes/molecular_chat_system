@@ -1,0 +1,48 @@
+[Unit]
+Description=MedChat OpenSandbox Server
+After=network-online.target docker.service medchat-opensandbox-firewall.service
+Wants=network-online.target
+Requires=docker.service medchat-opensandbox-firewall.service
+
+[Service]
+Type=simple
+User=medchat-opensandbox
+Group=medchat-opensandbox
+SupplementaryGroups=docker
+WorkingDirectory=/var/lib/opensandbox
+RuntimeDirectory=opensandbox
+RuntimeDirectoryMode=0700
+EnvironmentFile=/etc/medchat/opensandbox.env
+Environment=PATH=/opt/conda/envs/medchat/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=/usr/bin/runsc --version
+ExecStart=/opt/conda/envs/medchat/bin/opensandbox-server --config /etc/medchat/opensandbox.toml
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=90
+KillMode=mixed
+UMask=0077
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+RemoveIPC=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/opensandbox /run/opensandbox /var/run/docker.sock
+ReadOnlyPaths=/etc/medchat/opensandbox.env /etc/medchat/opensandbox.toml
+InaccessiblePaths=/var/lib/opensandbox/approved-empty
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,5 @@
 from src.agent.react_agent import ReActMolecularAgent
-from src.agent.skills.comprehensive_evaluation_skill import ComprehensiveEvaluationSkill
-from src.agent.skills.hit_to_lead_skill import HitToLeadSkill
+from src.agent.workflows import WorkflowCatalog
 
 
 class FakeTool:
@@ -26,34 +25,40 @@ def build_agent_with_tools(tool_names):
     return agent
 
 
-def test_comprehensive_skill_declares_workflow_steps():
-    skill = ComprehensiveEvaluationSkill()
+def test_comprehensive_policy_declares_permissions_not_plan_steps():
+    policy = WorkflowCatalog().require("comprehensive_evaluation")
 
-    assert [step.tool_name for step in skill.workflow_steps] == [
+    assert policy.is_multi_step is True
+    assert policy.allowed_tools == (
         "property_calculator",
         "drug_likeness_assessment",
         "admet_predictor",
         "activity_predictor",
         "reverse_target_predictor",
-    ]
+        "target_database_search",
+    )
+    assert not hasattr(policy, "workflow_steps")
 
 
-def test_hit_to_lead_skill_declares_workflow_steps():
-    skill = HitToLeadSkill()
+def test_hit_to_lead_policy_declares_permissions_not_plan_steps():
+    policy = WorkflowCatalog().require("hit_to_lead_optimization")
 
-    assert [step.tool_name for step in skill.workflow_steps] == [
+    assert policy.is_multi_step is True
+    assert policy.allowed_tools == (
         "property_calculator",
+        "drug_likeness_assessment",
         "admet_predictor",
         "activity_predictor",
         "llm_molecular_generator",
-        "property_calculator",
-    ]
+    )
+    assert not hasattr(policy, "workflow_steps")
 
 
-def test_react_agent_executes_workflow_skill_without_llm():
-    skill = ComprehensiveEvaluationSkill()
+def test_react_agent_executes_workflow_policy_without_llm():
+    policy = WorkflowCatalog().require("comprehensive_evaluation")
     planned_tool_names = [
         "property_calculator",
+        "drug_likeness_assessment",
         "admet_predictor",
         "activity_predictor",
         "reverse_target_predictor",
@@ -61,7 +66,7 @@ def test_react_agent_executes_workflow_skill_without_llm():
     ]
     agent = build_agent_with_tools(planned_tool_names)
 
-    result = agent.execute("全面评估 CCO", active_skill=skill)
+    result = agent.execute("全面评估 CCO", active_skill=policy)
 
     assert result["success"] is True
     assert result["active_skill"] == "comprehensive_evaluation"

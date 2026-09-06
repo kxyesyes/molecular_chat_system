@@ -203,6 +203,8 @@ scratch/llm_runtime_config.json
 # Runtime outputs and scratch spaces
 outputs/
 scratch/
+# Durable task input staging
+scratch/task_inputs/
 temp_docking/
 last_run.log
 
@@ -219,6 +221,10 @@ last_run.log
 *.joblib
 *.sqlite
 *.sqlite-journal
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-shm
+*.sqlite3-wal
 *.db
 *.index
 *.faiss

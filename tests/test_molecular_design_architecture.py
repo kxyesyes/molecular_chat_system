@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import importlib.util
 from pathlib import Path
 import sys
 from unittest import mock
@@ -10,11 +11,22 @@ from fastapi.testclient import TestClient
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
+HAS_RDKIT = importlib.util.find_spec("rdkit") is not None
 
 
 class DummyDesignModel:
     def generate(self, prompt, temperature=0.3, max_tokens=800):
         return "<script>alert('x')</script>\nUse [*]C as a simple fragment."
+
+
+class JsonDesignModel:
+    def generate(self, prompt, temperature=0.3, max_tokens=800):
+        return (
+            '{"fragments": ['
+            '{"fragment_smiles": "[*]O", "name": "hydroxy", "reason": "increase polarity"},'
+            '{"fragment_smiles": "invalid", "name": "bad", "reason": "should be filtered"}'
+            ']}'
+        )
 
 
 class MolecularDesignArchitectureTest(unittest.TestCase):
@@ -56,6 +68,7 @@ class MolecularDesignArchitectureTest(unittest.TestCase):
         self.assertEqual(result["total"], 3)
         self.assertEqual(len(result["fragments"]), 3)
 
+    @unittest.skipUnless(HAS_RDKIT, "RDKit is required for real SMILES property validation")
     def test_invalid_smiles_properties_returns_400(self):
         response = self._client().post("/api/design/properties", json={"smiles": "not-a-smiles"})
 
@@ -63,6 +76,7 @@ class MolecularDesignArchitectureTest(unittest.TestCase):
         self.assertEqual(response.json()["success"], False)
         self.assertIn("SMILES", response.json()["error"])
 
+    @unittest.skipUnless(HAS_RDKIT, "RDKit is required for real fragment substitution")
     def test_unmarked_aromatic_parent_can_be_auto_marked_for_substitution(self):
         response = self._client().post(
             "/api/design/substitute",
@@ -95,6 +109,41 @@ class MolecularDesignArchitectureTest(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(response.json()["success"])
 
+    def test_optimizer_parses_dynamic_numeric_goals(self):
+        from src.molecular_design.optimizer import evaluate_goals, parse_optimization_goals
+
+        goals = parse_optimization_goals("提高 QED，并且 MW < 300，LogP <= 3")
+        result = evaluate_goals({"qed": 0.72, "mw": 320, "logp": 2.5}, goals)
+
+        self.assertEqual(goals["mw"]["threshold"], 300)
+        self.assertEqual(goals["logp"]["threshold"], 3)
+        self.assertTrue(result["items"][0]["passed"])
+        self.assertFalse(result["summary"]["all_passed"])
+
+    def test_ai_recommendation_parses_valid_json_fragments_and_filters_invalid_ones(self):
+        import src.web.routes.design_routes as design_routes
+
+        design_routes._FRAG_DB_PATH = str(self.fragment_csv)
+        design_routes._SAVE_DIR = str(self.data_dir / "saved")
+
+        app = FastAPI()
+        design_routes.setup_design_routes(app, model=JsonDesignModel())
+        with mock.patch("src.molecular_design.ai.validate_fragment_smiles") as validate:
+            validate.side_effect = lambda smiles: smiles if smiles == "[*]O" else None
+            response = TestClient(app).post(
+                "/api/design/ai_recommend",
+                json={"command": "增加水溶性", "current_smiles": "CCO", "current_props": {}},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        self.assertFalse(payload["fallback_used"])
+        self.assertEqual(payload["structured_fragments"][0]["fragment_smiles"], "[*]O")
+        self.assertEqual(payload["structured_fragments"][0]["source"], "llm")
+        self.assertTrue(payload["recommended_fragments"][0]["source"] == "llm")
+
+    @unittest.skipUnless(HAS_RDKIT, "RDKit is required for real molecule persistence validation")
     def test_save_molecule_rejects_invalid_smiles(self):
         response = self._client().post(
             "/api/design/save_molecule",
@@ -104,6 +153,7 @@ class MolecularDesignArchitectureTest(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(response.json()["success"])
 
+    @unittest.skipUnless(HAS_RDKIT, "RDKit is required for real property calculation")
     def test_properties_route_runs_calculation_in_threadpool(self):
         import src.web.routes.design_routes as design_routes
 
@@ -148,9 +198,36 @@ class MolecularDesignArchitectureTest(unittest.TestCase):
         self.assertIn(".optimization-console", css)
         self.assertIn("grid-template-columns: minmax(260px, 1fr) minmax(320px, 1.2fr) minmax(240px, 0.9fr)", css)
         self.assertIn("margin-top: var(--design-workspace-offset)", css)
-        self.assertIn("min-height: var(--design-workspace-min-height)", css)
+        self.assertIn("min-height: min(var(--design-workspace-min-height), calc(100vh - 84px))", css)
         self.assertIn("height: var(--design-console-height)", css)
         self.assertIn("--design-workspace-offset: 0px", css)
+
+    def test_design_frontend_uses_backend_goals_and_deduped_candidate_ranking(self):
+        properties_js = (PROJECT_ROOT / "src/web/static/js/design/properties_panel.js").read_text(encoding="utf-8")
+        editor_js = (PROJECT_ROOT / "src/web/static/js/design/molecule_editor.js").read_text(encoding="utf-8")
+        api_js = (PROJECT_ROOT / "src/web/static/js/design/api_client.js").read_text(encoding="utf-8")
+
+        self.assertIn("d.goals", properties_js)
+        self.assertIn("renderGoals(d.goals", properties_js)
+        self.assertIn("reference_smiles", api_js)
+        self.assertIn("candidateScore", editor_js)
+        self.assertIn("findIndex", editor_js)
+        self.assertIn("sort(function (a, b)", editor_js)
+
+    def test_design_smiles_polling_is_debounced_visibility_aware_and_non_reentrant(self):
+        main_js = (PROJECT_ROOT / "src/web/static/js/design/main.js").read_text(encoding="utf-8")
+
+        self.assertNotIn("setInterval(async function ()", main_js)
+        self.assertIn("syncSmilesFromEditor", main_js)
+        self.assertIn("schedulePropsCalculation", main_js)
+        self.assertIn("S.propsPollInFlight", main_js)
+        self.assertIn("S.propsCalcInFlight", main_js)
+        self.assertIn("S.propsDebounceTimer", main_js)
+        self.assertIn("clearTimeout(S.propsDebounceTimer)", main_js)
+        self.assertIn("setTimeout(runLatestPropsCalculation", main_js)
+        self.assertIn("document.hidden", main_js)
+        self.assertIn("visibilitychange", main_js)
+        self.assertIn("S.pendingPropsSmiles !== undefined", main_js)
 
 if __name__ == "__main__":
     unittest.main()
