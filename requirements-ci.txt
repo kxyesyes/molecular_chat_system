@@ -6,3 +6,4 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.4.0+cpu
 torch-geometric==2.6.1
+pytest-timeout==2.3.1

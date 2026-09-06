@@ -20,6 +20,7 @@ def test_cpu_ci_profile_contains_collection_dependencies() -> None:
         "--extra-index-url https://download.pytorch.org/whl/cpu",
         "torch==2.4.0+cpu",
         "torch-geometric==2.6.1",
+        "pytest-timeout==2.3.1",
     ):
         assert expected in requirements
 
@@ -38,14 +39,20 @@ def test_quality_workflow_shards_python_suite_and_preserves_final_gate() -> None
     assert "static-quality:" in workflow
     assert "offline-quality:" in workflow
     assert "needs: [python-tests, static-quality]" in workflow
-    assert "python -m pytest ${{ matrix.pytest_target }} -q -p no:cacheprovider" in workflow
+    assert (
+        "python -m pytest ${{ matrix.pytest_target }} -q -p no:cacheprovider "
+        "${{ matrix.pytest_args }}"
+    ) in workflow
     for target in (
         "tests/agent",
-        "tests/sandbox_broker",
+        "tests/sandbox_broker/test_api.py",
+        "tests/sandbox_broker --ignore=tests/sandbox_broker/test_api.py",
         "tests/task_runtime",
         "tests --ignore=tests/agent --ignore=tests/sandbox_broker --ignore=tests/task_runtime",
     ):
         assert f'pytest_target: "{target}"' in workflow
+
+    assert workflow.count('pytest_args: "--timeout=60"') == 2
 
     assert "run: python -m pytest tests -q -p no:cacheprovider" not in workflow
     assert "fetch-depth: 0" not in workflow

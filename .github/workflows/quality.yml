@@ -24,12 +24,19 @@ jobs:
         include:
           - name: agent
             pytest_target: "tests/agent"
-          - name: sandbox-broker
-            pytest_target: "tests/sandbox_broker"
+            pytest_args: ""
+          - name: sandbox-api
+            pytest_target: "tests/sandbox_broker/test_api.py"
+            pytest_args: "--timeout=60"
+          - name: sandbox-core
+            pytest_target: "tests/sandbox_broker --ignore=tests/sandbox_broker/test_api.py"
+            pytest_args: "--timeout=60"
           - name: task-runtime
             pytest_target: "tests/task_runtime"
+            pytest_args: ""
           - name: root
             pytest_target: "tests --ignore=tests/agent --ignore=tests/sandbox_broker --ignore=tests/task_runtime"
+            pytest_args: ""
     env:
       PYTHONDONTWRITEBYTECODE: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
@@ -50,7 +57,7 @@ jobs:
           python -m pip install -r requirements-ci.txt
 
       - name: Run Python tests
-        run: python -m pytest ${{ matrix.pytest_target }} -q -p no:cacheprovider
+        run: python -m pytest ${{ matrix.pytest_target }} -q -p no:cacheprovider ${{ matrix.pytest_args }}
 
   static-quality:
     runs-on: ubuntu-latest
