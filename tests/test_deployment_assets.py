@@ -108,7 +108,8 @@ docking:
         for command in required_commands:
             self.assertIn(command, source)
         self.assertIn('python-version: "3.10"', source)
-        self.assertGreaterEqual(source.count('pytest_args: "--timeout=60"'), 2)
+        self.assertEqual(source.count("--timeout=60"), 2)
+        self.assertIn('pytest_args: "--timeout=60 -vv"', source)
         self.assertIn("git grep -IlE", source)
         self.assertNotIn("git grep -nE", source)
         self.assertNotIn("secrets.", source)
