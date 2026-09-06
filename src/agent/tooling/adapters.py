@@ -181,7 +181,19 @@ class LegacyPythonToolAdapter(ToolAdapter):
     def invoke(self, payload: Any) -> Any:
         from src.agent.tools.base_tool import execute_tool_compat
 
-        return execute_tool_compat(self.tool, payload)
+        raw = self.tool.execute(payload)
+        if isinstance(raw, ToolResult):
+            return raw
+
+        class CompletedInvocation:
+            name = self.spec.name
+
+            def execute(self, _payload: Any) -> Any:
+                return raw
+
+        result = execute_tool_compat(CompletedInvocation(), payload)
+        result.elapsed_ms = None
+        return result
 
     def close(self) -> None:
         close = getattr(self.tool, "close", None)

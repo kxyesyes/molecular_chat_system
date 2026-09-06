@@ -118,6 +118,32 @@ def test_adapter_retries_declared_retryable_errors():
     assert tool.calls == 2
 
 
+def test_adapter_does_not_retry_connection_error_when_policy_excludes_it():
+    class OfflineTool:
+        name = "legacy_value"
+
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, query):
+            self.calls += 1
+            raise ConnectionError("offline")
+
+    tool = OfflineTool()
+    spec = make_spec(
+        retry_policy=RetryPolicy(
+            max_attempts=2,
+            retryable_error_codes={AgentErrorCode.TOOL_TIMEOUT.value},
+        )
+    )
+
+    result = LegacyPythonToolAdapter(spec, tool).execute({"query": "CCO"})
+
+    assert result.success is False
+    assert result.error.code == AgentErrorCode.PROVIDER_ERROR
+    assert tool.calls == 1
+
+
 def test_adapter_redacts_declared_sensitive_fields():
     class EchoTool:
         name = "legacy_value"

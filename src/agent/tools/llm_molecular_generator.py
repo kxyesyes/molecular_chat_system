@@ -33,6 +33,7 @@ from src.agent.contracts.generation_request import (
     parse_generation_count,
     serialize_target_evidence,
     validate_generation_count,
+    validate_generation_request_length,
 )
 
 logger = logging.getLogger(__name__)
@@ -228,9 +229,9 @@ class LLMMolecularGenerator(BaseMolecularTool):
         cls, value: Any
     ) -> tuple[str, Optional[int], Optional[str]]:
         if not isinstance(value, Mapping):
-            return str(value), None, None
+            return validate_generation_request_length(value), None, None
 
-        query = str(value.get("query") or "")
+        query = validate_generation_request_length(value.get("query") or "")
         raw_metadata = value.get("metadata")
         if raw_metadata is None:
             metadata: dict[str, Any] = {}

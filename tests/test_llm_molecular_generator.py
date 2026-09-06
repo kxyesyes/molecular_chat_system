@@ -87,6 +87,30 @@ class CountingChem:
 
 
 class LLMMolecularGeneratorTest(unittest.TestCase):
+    def test_typed_request_validates_query_length_before_authoritative_count(self):
+        llm = CapturingLLM()
+        generator = LLMMolecularGenerator(llm_model=llm)
+        query = "x" * 17000
+
+        result = generator.execute(
+            {
+                "query": query,
+                "metadata": {"requested_count": 3},
+                "outputs": {},
+            }
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"]["code"], "invalid_input")
+        self.assertEqual(
+            result["error"]["details"],
+            {
+                "reason": "request_too_long",
+                "rejected_value": {"length": len(query)},
+            },
+        )
+        self.assertEqual(llm.prompts, [])
+
     def test_oversized_numeric_token_is_rejected_before_model(self):
         llm = CapturingLLM()
         generator = LLMMolecularGenerator(llm_model=llm)

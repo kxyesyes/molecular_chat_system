@@ -697,6 +697,10 @@ def test_hit_to_lead_generation_consumes_computed_baseline():
         "Generate charts with molecular structures",
         "Create reports containing candidate molecules",
         "Build dashboards and analyze compounds",
+        "Generate charts showing compounds",
+        "Create reports listing candidate molecules",
+        "Produce tables displaying ligands",
+        "Synthesize summaries mentioning molecules",
     ),
 )
 def test_generic_creation_verbs_require_a_molecular_entity(query):
@@ -721,6 +725,7 @@ def test_explicit_molecular_skill_can_activate_generic_generation_grammar():
     (
         "Generate molecular structures",
         "Generate candidate molecules",
+        "Generate ligands",
     ),
 )
 def test_direct_molecular_creation_objects_remain_generation_intent(query):

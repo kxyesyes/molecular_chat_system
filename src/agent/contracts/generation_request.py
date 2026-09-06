@@ -400,6 +400,14 @@ def validate_generation_count(value: Any, *, field: str = "requested_count") -> 
     return value
 
 
+def validate_generation_request_length(query: Any) -> str:
+    """Normalize and bound a public generation query before other validation."""
+    normalized = str(query)
+    if len(normalized) > MAX_GENERATION_REQUEST_CHARS:
+        _raise_request_too_long(normalized)
+    return normalized
+
+
 def preflight_generation_request(
     query: str,
     authoritative_count: Any = None,
@@ -409,9 +417,7 @@ def preflight_generation_request(
     active_molecular_skill: bool = False,
 ) -> int | None:
     """Validate one generation boundary without reparsing authoritative counts."""
-    query = str(query)
-    if len(query) > MAX_GENERATION_REQUEST_CHARS:
-        _raise_request_too_long(query)
+    query = validate_generation_request_length(query)
     if count_supplied:
         return validate_generation_count(authoritative_count, field=field)
     analysis = _build_generation_analysis(query)
@@ -645,10 +651,12 @@ _GENERIC_CREATION_VERB = re.compile(
     rf"(?i)\b{_GENERATION_VERB}\b"
 )
 _MOLECULAR_ENTITY = re.compile(
-    r"(?i)\b(?:molecules?|compounds?|structures?|candidates?|ligands?|"
+    r"(?i)(?:molecules?|compounds?|structures?|candidates?|ligands?|"
     r"scaffolds?|analog(?:ue)?s?|inhibitors?|agonists?|antagonists?|drugs?|"
-    r"chemotypes?|smiles|chemicals?)\b"
+    r"chemotypes?|smiles|chemicals?)\Z"
 )
+_OBJECT_WORD = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*")
+_MAX_OBJECT_MODIFIERS = 6
 _CHINESE_GENERATION_VERB_PATTERN = re.compile(
     r"(?:生成|创建|设计|制作|构建|合成|给我|提供)"
 )
@@ -665,6 +673,31 @@ _OBJECT_BOUNDARY = re.compile(
     r"explain(?:s|ed|ing)?|predict(?:s|ed|ing)?|review(?:s|ed|ing)?|"
     r"screen(?:s|ed|ing)?|search(?:es|ed|ing)?|summari(?:ze|zes|zed|zing))\b)"
 )
+
+
+def _has_immediate_molecular_head(object_phrase: str) -> bool:
+    """Recognize a molecular head after only a bounded modifier sequence.
+
+    A relational participle starts a subordinate description, so molecular
+    terms after ``showing``, ``listing``, and similar verbs cannot retroactively
+    make the generated object molecular.
+    """
+    modifiers = 0
+    position = 0
+    for match in _OBJECT_WORD.finditer(object_phrase):
+        if object_phrase[position : match.start()].strip():
+            return False
+        token = match.group(0)
+        normalized = token.casefold()
+        if _MOLECULAR_ENTITY.fullmatch(token):
+            return True
+        if normalized.endswith("ing"):
+            return False
+        modifiers += 1
+        if modifiers > _MAX_OBJECT_MODIFIERS:
+            return False
+        position = match.end()
+    return False
 
 
 def _occurrence_has_molecular_scope(
@@ -699,18 +732,29 @@ def _occurrence_has_molecular_scope(
     )
     if connector:
         window = window[: connector.start() + 1]
-    object_phrase = window[verb.end() :].strip()
-    object_phrase = re.sub(
-        rf"(?i)^(?:{_COUNT_TOKEN}|several|some|a\s+few|multiple|many|one|a)\b\s*",
-        "",
-        object_phrase,
-        count=1,
+    malformed_end = max(
+        (
+            item.match.end() - occurrence.start
+            for item in occurrence.matches
+            if item.category == "malformed"
+        ),
+        default=None,
     )
+    if malformed_end is not None:
+        object_phrase = window[malformed_end:].strip()
+    else:
+        object_phrase = window[verb.end() :].strip()
+        object_phrase = re.sub(
+            rf"(?i)^(?:{_COUNT_TOKEN}|several|some|a\s+few|multiple|many|one|a)\b\s*",
+            "",
+            object_phrase,
+            count=1,
+        )
     object_phrase = _OBJECT_BOUNDARY.split(object_phrase, maxsplit=1)[0]
     return bool(
-        _MOLECULAR_ENTITY.search(object_phrase)
-        or re.search(
-            r"\b[BCNOFPSI][BCNOFPSIcnops0-9@+\-\[\]()=#\\/.]{1,}\b",
+        _has_immediate_molecular_head(object_phrase)
+        or re.match(
+            r"[BCNOFPSI][BCNOFPSIcnops0-9@+\-\[\]()=#\\/.]{1,}\b",
             object_phrase,
         )
     )
@@ -1816,4 +1860,5 @@ __all__ = [
     "sanitize_target_evidence",
     "serialize_target_evidence",
     "validate_generation_count",
+    "validate_generation_request_length",
 ]
