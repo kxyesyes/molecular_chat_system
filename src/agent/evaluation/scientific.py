@@ -107,9 +107,8 @@ def summarize_scientific_stability(iterations: list[dict[str, Any]]) -> dict[str
         for result in results
         if isinstance(result.get("latency_ms", 0), (int, float))
     ]
-    successful = sum(
-        1 for result in results if result.get("status") in {"passed", "partial"}
-    )
+    counts = _status_counts(results)
+    rates = _status_rates(counts, len(results))
     failure_types = Counter(
         str(result.get("error"))
         for result in results
@@ -118,7 +117,7 @@ def summarize_scientific_stability(iterations: list[dict[str, Any]]) -> dict[str
     return {
         "run_count": len(iterations),
         "case_count": len(results),
-        "pass_rate": successful / len(results) if results else 0.0,
+        **rates,
         "latency": latency_metrics(latencies),
         "failure_types": dict(failure_types),
     }
@@ -146,11 +145,7 @@ def replay_scientific_report(report: Mapping[str, Any]) -> dict[str, Any]:
             "partial_count": counts["partial"],
             "failed_count": counts["failed"],
             "skipped_count": counts["skipped"],
-            "pass_rate": (
-                (counts["passed"] + counts["partial"]) / len(replayed)
-                if replayed
-                else 0.0
-            ),
+            **_status_rates(counts, len(replayed)),
         },
         "results": redact_sensitive(replayed),
     }
@@ -491,6 +486,7 @@ class ScientificAcceptanceRunner:
                 "actual_skill": actual_skill,
                 "expected_tools": case.expected_tools,
                 "actual_tools": actual_tools,
+                "forbidden_tools": case.forbidden_tools,
                 "events": events,
                 "event_sequence": [
                     item.get("event") for item in events if isinstance(item, dict)
@@ -694,6 +690,29 @@ def _status_counts(results: Iterable[Mapping[str, Any]]) -> dict[str, int]:
     }
 
 
+def _status_rates(counts: Mapping[str, int], total: int) -> dict[str, float]:
+    if total <= 0:
+        return {
+            "pass_rate": 0.0,
+            "completion_rate": 0.0,
+            "passed_rate": 0.0,
+            "partial_rate": 0.0,
+            "failed_rate": 0.0,
+            "skipped_rate": 0.0,
+        }
+    completion_rate = (counts["passed"] + counts["partial"]) / total
+    return {
+        # Compatibility alias: historical reports used pass_rate for
+        # non-catastrophic completion (passed + partial).
+        "pass_rate": completion_rate,
+        "completion_rate": completion_rate,
+        "passed_rate": counts["passed"] / total,
+        "partial_rate": counts["partial"] / total,
+        "failed_rate": counts["failed"] / total,
+        "skipped_rate": counts["skipped"] / total,
+    }
+
+
 def _overall_status(results: Iterable[Mapping[str, Any]]) -> str:
     result_list = list(results)
     if not result_list:
@@ -708,17 +727,61 @@ def _overall_status(results: Iterable[Mapping[str, Any]]) -> str:
 
 def _replay_case_status(case_result: Mapping[str, Any]) -> tuple[str, list[str]]:
     reasons: list[str] = []
+    original_status = str(case_result.get("status") or "")
+    if original_status == "failed":
+        reasons.append("original_status_failed")
+    elif original_status not in {"passed", "partial", "skipped"}:
+        reasons.append("missing_or_invalid_original_status")
+
+    required_contract_fields = {
+        "expected_skill",
+        "actual_skill",
+        "expected_tools",
+        "actual_tools",
+        "forbidden_tools",
+    }
+    missing_fields = sorted(required_contract_fields - set(case_result))
+    if missing_fields:
+        reasons.append("missing_replay_contract_fields:" + ",".join(missing_fields))
+
+    expected_skill = case_result.get("expected_skill")
+    actual_skill = case_result.get("actual_skill")
+    if expected_skill != actual_skill:
+        reasons.append("skill_mismatch")
+
+    expected_tools = list(case_result.get("expected_tools") or [])
+    actual_tools = list(case_result.get("actual_tools") or [])
+    forbidden_tools = list(case_result.get("forbidden_tools") or [])
+    if not _is_ordered_subsequence(expected_tools, actual_tools):
+        missing_expected = [
+            name for name in expected_tools if name not in actual_tools
+        ]
+        suffix = missing_expected or expected_tools
+        reasons.append(
+            "expected_tools_missing_or_out_of_order:" + ",".join(suffix)
+        )
+    forbidden_called = sorted(set(forbidden_tools) & set(actual_tools))
+    if forbidden_called:
+        reasons.append("forbidden_tools_called:" + ",".join(forbidden_called))
+
     anti = case_result.get("anti_hallucination") or {}
     if anti.get("forbidden_found"):
         reasons.append("forbidden_patterns_found")
     if anti.get("status") == "failed":
         reasons.append("anti_hallucination_failed")
-    if not case_result.get("tool_provenance") and case_result.get("expected_tools"):
-        reasons.append("missing_tool_provenance")
+    provenance = list(case_result.get("tool_provenance") or [])
+    for tool_name in dict.fromkeys(expected_tools):
+        matching_records = [
+            item
+            for item in provenance
+            if isinstance(item, Mapping) and item.get("tool_name") == tool_name
+        ]
+        if not matching_records:
+            reasons.append(f"missing_tool_provenance:{tool_name}")
+        elif not all(_provenance_record_complete(item) for item in matching_records):
+            reasons.append(f"incomplete_tool_provenance:{tool_name}")
     truth_checks = case_result.get("truth_checks") or {}
-    requires_truth_checks = bool(case_result.get("expected_tools")) or (
-        case_result.get("expected_skill") is not None
-    )
+    requires_truth_checks = bool(expected_tools) or expected_skill is not None
     if not truth_checks and requires_truth_checks:
         reasons.append("missing_truth_checks")
     failed_truth = [
@@ -735,7 +798,9 @@ def _replay_case_status(case_result: Mapping[str, Any]) -> tuple[str, list[str]]
         reasons.append("truth_failed:" + ",".join(sorted(failed_truth)))
     if reasons:
         return "failed", reasons
-    if partial_truth or case_result.get("status") in {"partial", "skipped"}:
+    if original_status == "skipped":
+        return "skipped", []
+    if partial_truth or original_status == "partial":
         return "partial", ["truth_partial:" + ",".join(sorted(partial_truth))]
     return "passed", []
 

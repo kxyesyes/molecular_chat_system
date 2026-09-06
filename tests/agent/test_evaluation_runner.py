@@ -733,6 +733,11 @@ def test_replay_scientific_report_checks_truth_provenance_and_forbidden_patterns
                 {
                     "case_id": "GOLD-001",
                     "status": "passed",
+                    "expected_skill": "admet_assessment",
+                    "actual_skill": "admet_assessment",
+                    "expected_tools": ["property_calculator"],
+                    "actual_tools": ["property_calculator"],
+                    "forbidden_tools": [],
                     "anti_hallucination": {
                         "status": "passed",
                         "forbidden_found": [],
@@ -743,6 +748,8 @@ def test_replay_scientific_report_checks_truth_provenance_and_forbidden_patterns
                     "tool_provenance": [
                         {
                             "tool_name": "property_calculator",
+                            "trace_id": "gold-001-trace",
+                            "input_hash": "a" * 64,
                             "input_summary": "aspirin",
                             "output_summary": "mw/logp/qed",
                         }
@@ -780,6 +787,7 @@ def test_replay_allows_no_tool_general_chat_case_without_truth_checks():
                     "actual_skill": None,
                     "expected_tools": [],
                     "actual_tools": [],
+                    "forbidden_tools": [],
                     "anti_hallucination": {
                         "status": "passed",
                         "forbidden_found": [],
@@ -818,8 +826,91 @@ def test_scientific_stability_summary_reports_latency_and_failure_types():
     assert stability["run_count"] == 2
     assert stability["case_count"] == 4
     assert stability["pass_rate"] == 0.75
+    assert stability["completion_rate"] == 0.75
+    assert stability["passed_rate"] == 0.5
+    assert stability["partial_rate"] == 0.25
+    assert stability["failed_rate"] == 0.25
+    assert stability["skipped_rate"] == 0.0
     assert stability["latency"]["p50_ms"] == 250
     assert stability["failure_types"] == {"rg_mpnn_demo": 1, "vina_missing": 1}
+
+
+def test_replay_never_promotes_original_failure_to_passed():
+    result = _complete_replay_case(status="failed")
+
+    replayed = replay_scientific_report(
+        {"real_cases": {"results": [result]}}
+    )
+
+    assert replayed["results"][0]["status"] == "failed"
+    assert "original_status_failed" in replayed["results"][0]["replay_reasons"]
+
+
+def test_replay_fails_skill_tool_and_forbidden_tool_contract_violations():
+    skill_mismatch = _complete_replay_case(actual_skill="activity_prediction")
+    missing_expected = _complete_replay_case(actual_tools=[])
+    forbidden_called = _complete_replay_case(
+        actual_tools=["property_calculator", "molecular_docking"],
+        forbidden_tools=["molecular_docking"],
+    )
+
+    replayed = replay_scientific_report(
+        {
+            "real_cases": {
+                "results": [skill_mismatch, missing_expected, forbidden_called]
+            }
+        }
+    )
+
+    reasons = [item["replay_reasons"] for item in replayed["results"]]
+    assert "skill_mismatch" in reasons[0]
+    assert "expected_tools_missing_or_out_of_order:property_calculator" in reasons[1]
+    assert "forbidden_tools_called:molecular_docking" in reasons[2]
+    assert replayed["metrics"]["failed_count"] == 3
+
+
+def test_replay_reports_strict_status_rates_separately_from_completion_rate():
+    results = [
+        _complete_replay_case(case_id="R-1", status="passed"),
+        _complete_replay_case(case_id="R-2", status="partial"),
+        _complete_replay_case(case_id="R-3", status="failed"),
+        _complete_replay_case(case_id="R-4", status="skipped"),
+    ]
+
+    replayed = replay_scientific_report({"real_cases": {"results": results}})
+
+    assert replayed["metrics"]["pass_rate"] == 0.5
+    assert replayed["metrics"]["completion_rate"] == 0.5
+    assert replayed["metrics"]["passed_rate"] == 0.25
+    assert replayed["metrics"]["partial_rate"] == 0.25
+    assert replayed["metrics"]["failed_rate"] == 0.25
+    assert replayed["metrics"]["skipped_rate"] == 0.25
+
+
+def _complete_replay_case(**overrides):
+    case_id = overrides.pop("case_id", "GOLD-001")
+    result = {
+        "case_id": case_id,
+        "status": "passed",
+        "expected_skill": "admet_assessment",
+        "actual_skill": "admet_assessment",
+        "expected_tools": ["property_calculator"],
+        "actual_tools": ["property_calculator"],
+        "forbidden_tools": [],
+        "anti_hallucination": {"status": "passed", "forbidden_found": []},
+        "truth_checks": {"rdkit": {"status": "passed"}},
+        "tool_provenance": [
+            {
+                "tool_name": "property_calculator",
+                "trace_id": f"{case_id}-trace",
+                "input_hash": "b" * 64,
+                "input_summary": "input",
+                "output_summary": "output",
+            }
+        ],
+    }
+    result.update(overrides)
+    return result
 
 
 def test_scientific_vina_energy_parser_reads_best_pose_and_results():

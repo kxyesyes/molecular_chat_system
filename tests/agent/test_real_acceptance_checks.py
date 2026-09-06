@@ -945,10 +945,21 @@ def test_replay_mode_reads_existing_structured_report_without_running_tools(tmp_
           {
             "case_id": "GOLD-001",
             "status": "passed",
+            "expected_skill": "admet_assessment",
+            "actual_skill": "admet_assessment",
+            "expected_tools": ["property_calculator"],
+            "actual_tools": ["property_calculator"],
+            "forbidden_tools": [],
             "anti_hallucination": {"status": "passed", "forbidden_found": []},
             "truth_checks": {"rdkit": {"status": "passed"}},
             "tool_provenance": [
-              {"tool_name": "property_calculator", "input_summary": "aspirin", "output_summary": "props"}
+              {
+                "tool_name": "property_calculator",
+                "trace_id": "gold-001-trace",
+                "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "input_summary": "aspirin",
+                "output_summary": "props"
+              }
             ]
           }
         ]
