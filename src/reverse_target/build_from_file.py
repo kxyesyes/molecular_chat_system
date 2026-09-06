@@ -14,7 +14,7 @@ sys.path.insert(0, str(project_root))
 
 from src.reverse_target.extract_clean_data import ChEMBLDataExtractor
 from src.reverse_target.generate_fingerprints import FingerprintGenerator
-from src.reverse_target.config import get_reverse_target_data_dir
+from src.reverse_target.config import configure_console_output, get_reverse_target_data_dir
 
 
 def extract_tar_file(tar_path, output_dir):
@@ -52,6 +52,7 @@ def find_db_file(search_dir):
 
 def main():
     """主函数"""
+    configure_console_output()
     import argparse
     
     parser = argparse.ArgumentParser(description='从本地文件构建反向寻靶数据库')

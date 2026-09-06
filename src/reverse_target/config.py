@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def configure_console_output() -> None:
+    """Keep CLI diagnostics printable on strict legacy Windows consoles."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(errors="replace")
+            except (OSError, ValueError):
+                pass
 
 
 def get_reverse_target_data_dir() -> Path:

@@ -1,6 +1,7 @@
 import pickle
 import os
 import json
+import subprocess
 import tempfile
 import threading
 import time
@@ -255,6 +256,52 @@ class ReverseTargetHealthTest(unittest.TestCase):
             resolved = get_chembl_db_path()
 
         self.assertEqual(resolved, database_path)
+
+    def test_documented_fetch_cli_runs_directly_from_project_root(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "src/reverse_target/fetch_chembl_api.py",
+                "--help",
+            ],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("ModuleNotFoundError", result.stderr)
+
+    @unittest.skipUnless(HAS_RDKIT, "RDKit is not installed in this Python environment")
+    def test_fingerprint_cli_completes_under_windows_gbk_console(self):
+        training_data = self.data_dir / "chembl_training_data.tsv"
+        training_data.write_text(
+            "molecule_chembl_id\tcanonical_smiles\ttarget_name\tstandard_type\tstandard_value\torganism\n"
+            "CHEMBL25\tCCO\tDemo target\tIC50\t100\tHuman\n",
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env["REVERSE_TARGET_DATA_DIR"] = str(self.data_dir)
+        env["PYTHONIOENCODING"] = "gbk:strict"
+
+        result = subprocess.run(
+            [sys.executable, "src/reverse_target/generate_fingerprints.py"],
+            cwd=PROJECT_ROOT,
+            env=env,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr.decode("gbk", errors="replace"))
+        self.assertNotIn(b"DEPRECATION WARNING", result.stderr)
+        for filename in (
+            "chembl_data_with_fps.tsv",
+            "morgan_fingerprints.npy",
+            "maccs_fingerprints.npy",
+            "fingerprint_metadata.pkl",
+        ):
+            self.assertTrue((self.data_dir / filename).exists(), filename)
 
     def test_health_prefers_aligned_training_data_and_metadata_record_count(self):
         from src.reverse_target.health import inspect_reverse_target_database
