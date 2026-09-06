@@ -437,13 +437,18 @@ def check_activity_models() -> tuple[bool, str]:
     models_dir = resolve_project_path(os.environ.get("ACTIVITY_MODEL_DIR", "data/activity/models"))
     if not models_dir.exists():
         return False, f"activity model dir not found: {models_dir}"
-    patterns = ("*.pt", "*.pkl", "*.joblib", "*.json")
-    model_files = []
-    for pattern in patterns:
-        model_files.extend(models_dir.glob(pattern))
-    if not model_files:
-        return False, f"no activity model files found in {models_dir}"
-    return True, f"{models_dir} ({len(model_files)} files)"
+    registry_state = models_dir / "registry_state.json"
+    if not registry_state.exists():
+        return False, f"no registered activity models in {models_dir}"
+    try:
+        from src.activity.model_registry import ActivityModelRegistry
+
+        models = ActivityModelRegistry(models_dir).list()
+    except (OSError, RuntimeError, ValueError) as exc:
+        return False, f"activity model registry is invalid: {exc}"
+    if not models:
+        return False, f"no registered activity models in {models_dir}"
+    return True, f"{models_dir} ({len(models)} registered models)"
 
 
 def check_rag_index() -> tuple[bool, str]:

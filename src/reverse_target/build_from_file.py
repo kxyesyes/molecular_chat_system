@@ -14,6 +14,7 @@ sys.path.insert(0, str(project_root))
 
 from src.reverse_target.extract_clean_data import ChEMBLDataExtractor
 from src.reverse_target.generate_fingerprints import FingerprintGenerator
+from src.reverse_target.config import get_reverse_target_data_dir
 
 
 def extract_tar_file(tar_path, output_dir):
@@ -61,7 +62,7 @@ def main():
     
     args = parser.parse_args()
     
-    output_dir = Path("data/reverse_target")
+    output_dir = get_reverse_target_data_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("=" * 80)
@@ -147,7 +148,9 @@ def main():
         print("-" * 80)
         
         try:
-            generator = FingerprintGenerator()
+            generator = FingerprintGenerator(
+                input_file=output_dir / "chembl_training_data.tsv"
+            )
             
             # 加载数据
             print("\n> 加载训练数据...")

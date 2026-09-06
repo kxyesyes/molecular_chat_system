@@ -17,11 +17,20 @@ logger = logging.getLogger(__name__)
 # Global dictionary to track training jobs
 training_jobs: Dict[str, Dict[str, Any]] = {}
 MODELS_DIR = Path("data/activity/models")
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_activity_models_dir() -> Path:
+    """Resolve the model registry directory used by training and inference."""
+    configured = os.environ.get("ACTIVITY_MODEL_DIR", "").strip()
+    directory = Path(configured).expanduser() if configured else Path(MODELS_DIR)
+    if not directory.is_absolute():
+        directory = Path(__file__).resolve().parents[2] / directory
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
 
 
 def get_model_registry() -> ActivityModelRegistry:
-    return ActivityModelRegistry(MODELS_DIR)
+    return ActivityModelRegistry(get_activity_models_dir())
 
 def save_model_info(model_id: str, info: dict):
     if info.get("model_id") != model_id:
@@ -204,7 +213,7 @@ def _build_model_metadata(
         "split_warnings": list(split_warnings or []),
         "model_config": dict(model_config),
         "model_format": "pytorch_state_dict",
-        "weights_sha256": _sha256_file(MODELS_DIR / weights_file),
+        "weights_sha256": _sha256_file(get_activity_models_dir() / weights_file),
         "metrics": metrics,
         "target": target_column,
         "dataset": Path(file_path).name,
@@ -576,7 +585,7 @@ class ActivityTrainer:
             # 6. Save Best Model
             if best_weights:
                 model_filename = f"model_rgmpnn_{self.job_id}.pt"
-                model_path = MODELS_DIR / model_filename
+                model_path = get_activity_models_dir() / model_filename
                 torch.save({'state_dict': best_weights}, model_path)
 
                 model_config = {

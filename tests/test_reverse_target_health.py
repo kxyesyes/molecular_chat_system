@@ -202,6 +202,60 @@ class ReverseTargetHealthTest(unittest.TestCase):
 
         self.assertEqual(predictor.data_dir, self.data_dir)
 
+    @unittest.skipUnless(HAS_RDKIT, "RDKit is not installed in this Python environment")
+    def test_build_components_share_configured_data_dir(self):
+        from src.reverse_target.build_database import DatabaseBuilder
+        from src.reverse_target.download_chembl import ChEMBLDownloader
+        from src.reverse_target.fetch_chembl_api import ChEMBLAPIFetcher
+        from src.reverse_target.generate_fingerprints import FingerprintGenerator
+
+        training_data = self.data_dir / "chembl_training_data.tsv"
+        training_data.write_text(
+            "molecule_chembl_id\tcanonical_smiles\ttarget_name\tstandard_type\tstandard_value\torganism\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(
+            os.environ,
+            {"REVERSE_TARGET_DATA_DIR": str(self.data_dir)},
+        ):
+            self.assertEqual(DatabaseBuilder().output_dir, self.data_dir)
+            self.assertEqual(ChEMBLDownloader().output_dir, self.data_dir)
+            self.assertEqual(ChEMBLAPIFetcher().output_dir, self.data_dir)
+            self.assertEqual(FingerprintGenerator().input_file, training_data)
+
+    def test_extractor_writes_outputs_to_configured_data_dir(self):
+        from src.reverse_target.extract_clean_data import ChEMBLDataExtractor
+
+        database_path = (
+            self.data_dir / "vendor" / "chembl_36" / "chembl_36_sqlite" / "chembl_36.db"
+        )
+        database_path.parent.mkdir(parents=True)
+        database_path.touch()
+
+        with patch.dict(
+            os.environ,
+            {"REVERSE_TARGET_DATA_DIR": str(self.data_dir)},
+        ):
+            extractor = ChEMBLDataExtractor(db_path=database_path)
+
+        self.assertEqual(extractor.output_dir, self.data_dir)
+
+    def test_config_discovers_extracted_chembl_database(self):
+        from src.reverse_target.config import get_chembl_db_path
+
+        database_path = self.data_dir / "chembl_36" / "chembl_36_sqlite" / "chembl_36.db"
+        database_path.parent.mkdir(parents=True)
+        database_path.touch()
+
+        with patch.dict(
+            os.environ,
+            {"REVERSE_TARGET_DATA_DIR": str(self.data_dir)},
+        ):
+            resolved = get_chembl_db_path()
+
+        self.assertEqual(resolved, database_path)
+
     def test_health_prefers_aligned_training_data_and_metadata_record_count(self):
         from src.reverse_target.health import inspect_reverse_target_database
 
