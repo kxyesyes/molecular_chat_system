@@ -110,6 +110,16 @@ _INSTRUCTION_IDENTIFIER_PREFIXES = frozenset(
         ("system", "prompt"),
     }
 )
+_CONCATENATED_LOCAL_INSTRUCTION_PATTERNS = frozenset(
+    {
+        "followinstruction",
+        "ignoreinstruction",
+        "outputonly",
+        "respondwith",
+        "returnonly",
+        "systemprompt",
+    }
+)
 _UNIPROT_ACCESSION = re.compile(
     r"(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})\Z",
     re.IGNORECASE,
@@ -120,7 +130,7 @@ _ALPHAFOLD_STRUCTURE_ID = re.compile(
     re.IGNORECASE,
 )
 _LOCAL_RECORD_ID = re.compile(
-    r"(?:LOCAL|TARGETDB|TARGET_DATABASE)[._-][A-Za-z0-9]{1,64}\Z",
+    r"(?:LOCAL|TARGETDB|TARGET_DATABASE)[._-](?P<suffix>[A-Za-z0-9]{1,64})\Z",
     re.IGNORECASE,
 )
 _OFFICIAL_EVIDENCE_HOSTS = frozenset(
@@ -1089,6 +1099,14 @@ def _safe_text(
 
 
 def _looks_instruction_shaped_identifier(value: str) -> bool:
+    normalized_local = unicodedata.normalize("NFKC", value).casefold()
+    local_match = _LOCAL_RECORD_ID.fullmatch(normalized_local)
+    if local_match and any(
+        pattern in local_match.group("suffix")
+        for pattern in _CONCATENATED_LOCAL_INSTRUCTION_PATTERNS
+    ):
+        return True
+
     tokens = tuple(
         token
         for token in re.split(r"[._-]+", value.casefold())
