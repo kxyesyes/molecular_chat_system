@@ -16,7 +16,8 @@ def test_cpu_ci_profile_contains_collection_dependencies() -> None:
     for expected in (
         "-r requirements.txt",
         "-r requirements-agent-temporal.txt",
-        "torch==2.4.0",
+        "--extra-index-url https://download.pytorch.org/whl/cpu",
+        "torch==2.4.0+cpu",
         "torch-geometric==2.6.1",
     ):
         assert expected in requirements

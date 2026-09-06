@@ -2,5 +2,6 @@
 -r requirements-agent-temporal.txt
 
 # CPU graph imports exercised by tests/test_rg_mpnn_legacy_modules.py.
-torch==2.4.0
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.4.0+cpu
 torch-geometric==2.6.1
