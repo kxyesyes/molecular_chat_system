@@ -109,7 +109,7 @@ docking:
             self.assertIn(command, source)
         self.assertIn('python-version: "3.10"', source)
         self.assertEqual(source.count("--timeout=60"), 2)
-        self.assertIn('pytest_args: "--timeout=60 -vv"', source)
+        self.assertEqual(source.count('pytest_args: "--timeout=60"'), 2)
         self.assertEqual(source.count("command_timeout:"), 5)
         self.assertIn("command_timeout: 180", source)
         self.assertIn("git grep -IlE", source)
