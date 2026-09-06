@@ -68,6 +68,88 @@ class FakeTool:
         }
 
 
+@pytest.mark.parametrize(
+    "context_kwargs, field",
+    [
+        ({"mol_count": 11}, "mol_count"),
+        (
+            {"mol_count": 11, "metadata": {"requested_count": 5}},
+            "mol_count",
+        ),
+        ({"metadata": {"requested_count": 11}}, "requested_count"),
+    ],
+)
+def test_public_preflight_validates_context_counts_before_compilation(
+    context_kwargs,
+    field,
+):
+    class CompilerMustNotRun:
+        def compile(self, _plan, _policy):
+            raise AssertionError("compiler ran before context count validation")
+
+    tool = FakeTool("property_calculator")
+    plan = WorkflowPlan(
+        workflow_name="comprehensive_evaluation",
+        steps=[
+            WorkflowStep(
+                "properties",
+                "property_calculator",
+                input_data="CCO",
+            )
+        ],
+    )
+    failure = WorkflowExecutor(compiler=CompilerMustNotRun()).preflight(
+        context=AgentContext(
+            query="Analyze CCO",
+            trace_id=f"public-preflight-invalid-{field}",
+            active_skill="comprehensive_evaluation",
+            **context_kwargs,
+        ),
+        policy=FAKE_POLICY,
+        all_tools={tool.name: tool},
+        plan=plan,
+    )
+
+    assert failure is not None
+    assert failure.result.success is False
+    assert failure.result.error.code == AgentErrorCode.INVALID_INPUT
+    assert failure.result.error.details["field"] == field
+    assert failure.tool_attempt_count == 0
+    assert failure.events == []
+    assert tool.calls == []
+
+
+@pytest.mark.parametrize(
+    "context_kwargs, field",
+    [
+        ({"mol_count": 11}, "mol_count"),
+        ({"metadata": {"requested_count": 11}}, "requested_count"),
+    ],
+)
+def test_public_preflight_validates_context_before_planning(
+    context_kwargs,
+    field,
+):
+    class PlannerMustNotRun:
+        def plan(self, _context):
+            raise AssertionError("planner ran before context count validation")
+
+    failure = WorkflowExecutor(planner=PlannerMustNotRun()).preflight(
+        context=AgentContext(
+            query="Analyze CCO",
+            trace_id=f"public-preflight-before-planning-{field}",
+            active_skill="comprehensive_evaluation",
+            **context_kwargs,
+        ),
+        policy=FAKE_POLICY,
+        all_tools={"property_calculator": FakeTool("property_calculator")},
+    )
+
+    assert failure is not None
+    assert failure.result.error.code == AgentErrorCode.INVALID_INPUT
+    assert failure.result.error.details["field"] == field
+
+
 def test_non_generation_plan_rejects_invalid_context_count_before_tool():
     tool = FakeTool("property_calculator")
     plan = WorkflowPlan(

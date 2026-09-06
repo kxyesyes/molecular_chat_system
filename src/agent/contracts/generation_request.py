@@ -108,30 +108,16 @@ _INSTRUCTION_IDENTIFIER_LEXICAL_COMBINATIONS = (
     ("return", "only"),
     ("system", "prompt"),
 )
-_INSTRUCTION_ACTION_LEXEMES = frozenset(
-    {
-        "bypass",
-        "circumvent",
-        "disable",
-        "disregard",
-        "evade",
-        "follow",
-        "ignore",
-        "obey",
-        "override",
-        "remove",
-    }
+_INSTRUCTION_ACTION_PATTERN = re.compile(
+    r"(?:bypass(?:ed|es|ing)?|circumvent(?:ed|s|ing)?|"
+    r"disabl(?:e|ed|es|ing)|disregard(?:ed|s|ing)?|"
+    r"evad(?:e|ed|es|ing)|follow(?:ed|s|ing)?|"
+    r"ignor(?:e|ed|es|ing)|obey(?:ed|s|ing)?|"
+    r"overrid(?:e|den|es|ing)|remov(?:e|ed|es|ing))"
 )
-_INSTRUCTION_OBJECT_LEXEMES = frozenset(
-    {
-        "guardrail",
-        "instruction",
-        "policy",
-        "prompt",
-        "rule",
-        "safety",
-        "task",
-    }
+_INSTRUCTION_OBJECT_PATTERN = re.compile(
+    r"(?:guardrails?|instructions?|polic(?:y|ies)|prompts?|rules?|"
+    r"safeguards?|safet(?:y|ies)|tasks?)"
 )
 _CREDENTIAL_TEXT_PATTERN = re.compile(
     r"(?:bearer[a-z0-9._~+/=-]{8,}|accesstoken|apikey|authtoken|"
@@ -1162,11 +1148,11 @@ def _looks_instruction_shaped_identifier(value: str) -> bool:
         prefix_match.group("suffix") if prefix_match else normalized
     )
     lexical_text = re.sub(r"[^a-z0-9]+", "", identifier_text)
-    has_instruction_action = any(
-        lexeme in lexical_text for lexeme in _INSTRUCTION_ACTION_LEXEMES
+    has_instruction_action = bool(
+        _INSTRUCTION_ACTION_PATTERN.search(lexical_text)
     )
-    has_instruction_object = any(
-        lexeme in lexical_text for lexeme in _INSTRUCTION_OBJECT_LEXEMES
+    has_instruction_object = bool(
+        _INSTRUCTION_OBJECT_PATTERN.search(lexical_text)
     )
     if has_instruction_action and has_instruction_object:
         return True

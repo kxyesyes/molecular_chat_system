@@ -246,52 +246,13 @@ class WorkflowExecutor:
     ) -> PreparedWorkflow | WorkflowExecution:
         context_snapshot = _copy_boundary(context, "context")
         all_tools_snapshot = dict(all_tools)
-        try:
-            validate_generation_count(
-                context_snapshot.mol_count,
-                field="mol_count",
-            )
-        except GenerationRequestError as exc:
-            validation_plan = self._count_validation_plan(
-                context_snapshot,
-                policy,
-                plan,
-            )
-            return self._invalid_count_execution(
-                context_snapshot,
-                policy,
-                validation_plan,
-                exc,
-                field="mol_count",
-            )
-        if "requested_count" in context_snapshot.metadata:
-            try:
-                validated_context_count = validate_generation_count(
-                    context_snapshot.metadata["requested_count"]
-                )
-            except GenerationRequestError as exc:
-                validation_plan = self._count_validation_plan(
-                    context_snapshot,
-                    policy,
-                    plan,
-                )
-                validation_plan.metadata["requested_count"] = deepcopy(
-                    context_snapshot.metadata["requested_count"]
-                )
-                return self._invalid_count_execution(
-                    context_snapshot,
-                    policy,
-                    validation_plan,
-                    exc,
-                    field="requested_count",
-                )
-            context_snapshot = replace(
-                context_snapshot,
-                metadata={
-                    **context_snapshot.metadata,
-                    "requested_count": validated_context_count,
-                },
-            )
+        context_snapshot, count_failure = self._validate_context_counts(
+            context_snapshot,
+            policy,
+            plan,
+        )
+        if count_failure is not None:
+            return count_failure
         if plan is None:
             plan = self.planner.plan(context_snapshot)
         plan_snapshot = _copy_boundary(plan, "plan")
@@ -479,6 +440,50 @@ class WorkflowExecutor:
             steps=[],
         )
 
+    def _validate_context_counts(
+        self,
+        context: AgentContext,
+        policy: WorkflowPolicy,
+        plan: WorkflowPlan | None,
+    ) -> tuple[AgentContext, WorkflowExecution | None]:
+        supplied_counts = [("mol_count", context.mol_count)]
+        if "requested_count" in context.metadata:
+            supplied_counts.append(
+                ("requested_count", context.metadata["requested_count"])
+            )
+
+        validated_metadata_count: int | None = None
+        for field, value in supplied_counts:
+            try:
+                validated = validate_generation_count(value, field=field)
+            except GenerationRequestError as exc:
+                validation_plan = self._count_validation_plan(
+                    context,
+                    policy,
+                    plan,
+                )
+                if field == "requested_count":
+                    validation_plan.metadata[field] = deepcopy(value)
+                return context, self._invalid_count_execution(
+                    context,
+                    policy,
+                    validation_plan,
+                    exc,
+                    field=field,
+                )
+            if field == "requested_count":
+                validated_metadata_count = validated
+
+        if validated_metadata_count is not None:
+            context = replace(
+                context,
+                metadata={
+                    **context.metadata,
+                    "requested_count": validated_metadata_count,
+                },
+            )
+        return context, None
+
     @staticmethod
     def _invalid_count_execution(
         context: AgentContext,
@@ -644,6 +649,14 @@ class WorkflowExecutor:
         all_tools: Mapping[str, Any],
         plan: WorkflowPlan | None = None,
     ) -> WorkflowExecution | None:
+        context, count_failure = self._validate_context_counts(
+            context,
+            policy,
+            plan,
+        )
+        if count_failure is not None:
+            self._capture_preflight_result(None, count_failure)
+            return count_failure
         if plan is None:
             plan = self.planner.plan(context)
         compiled, failure = self._preflight(
@@ -652,12 +665,19 @@ class WorkflowExecutor:
             all_tools=all_tools,
             plan=plan,
         )
+        self._capture_preflight_result(compiled, failure)
+        return failure
+
+    def _capture_preflight_result(
+        self,
+        compiled: CompiledPlan | None,
+        failure: WorkflowExecution | None,
+    ) -> None:
         capture = _ACTIVE_PREFLIGHT_CAPTURE.get()
         if capture is not None and capture.owner is self:
             capture.used = True
             capture.compiled = compiled
             capture.failure = failure
-        return failure
 
 
 def _copy_boundary(value: Any, label: str) -> Any:

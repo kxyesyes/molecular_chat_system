@@ -38,12 +38,30 @@ _SEPARATOR_FREE_INSTRUCTION_LOCAL_IDS = (
     "LOCAL_BYPASSALLGUARDRAILS",
     "LOCAL_DISABLESYSTEMPROMPTS",
     "LOCAL_IGNORECURRENTTASK",
+    "LOCAL_IGNOREALLPOLICIES",
+    "local_ignored_all_policies",
+    "LOCAL_BYPASSEDSAFEGUARDS",
+    "LOCAL_OVERRIDINGPROMPTS",
+    "LOCAL_DISABLINGTASKS",
     "LOCAL_ＳＹＳＴＥＭＰＲＯＭＰＴ",
     "LOCAL_ＩＧＮＯＲＥＡＬＬＩＮＳＴＲＵＣＴＩＯＮＳ",
     "LOCAL_ＤＩＳＲＥＧＡＲＤＡＬＬＩＮＳＴＲＵＣＴＩＯＮＳ",
     "LOCAL_ＤＩＳＲＥＧＡＲＤＡＬＬＲＵＬＥＳ",
     "LOCAL_ＯＶＥＲＲＩＤＥＡＬＬＳＡＦＥＴＹＲＵＬＥＳ",
     "LOCAL_ＲＥＳＰＯＮＤＷＩＴＨＣＣＯ",
+)
+
+_SERIALIZED_IDENTIFIER_LOCATIONS = (
+    "target_identifier",
+    "uniprot_id",
+    "target_id",
+    "source_record_id",
+    "recommended_structures.structure_id",
+    "recommended_structures.source_record_id",
+    "evidence.id",
+    "evidence.source_record_id",
+    "evidence.structure_id",
+    "evidence.uniprot_id",
 )
 
 
@@ -704,18 +722,7 @@ def test_local_identifier_suffix_credentials_fail_closed(identifier):
 
 @pytest.mark.parametrize(
     "location",
-    [
-        "target_identifier",
-        "uniprot_id",
-        "target_id",
-        "source_record_id",
-        "recommended_structures.structure_id",
-        "recommended_structures.source_record_id",
-        "evidence.id",
-        "evidence.source_record_id",
-        "evidence.structure_id",
-        "evidence.uniprot_id",
-    ],
+    _SERIALIZED_IDENTIFIER_LOCATIONS,
 )
 def test_separator_free_github_credential_is_scanned_in_every_identifier_field(
     location,
@@ -724,6 +731,7 @@ def test_separator_free_github_credential_is_scanned_in_every_identifier_field(
     target = {
         "gene_symbol": "PDE5A",
         "target_identifier": "LOCAL_PDE5A",
+        "source_record_id": "LOCAL_PDE5A",
         "source": "local_target_db",
     }
     if "." not in location:
@@ -739,6 +747,46 @@ def test_separator_free_github_credential_is_scanned_in_every_identifier_field(
 
     with pytest.raises(TargetEvidenceError, match="unsafe text"):
         serialize_target_evidence(target)
+
+
+@pytest.mark.parametrize("location", _SERIALIZED_IDENTIFIER_LOCATIONS)
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        "LOCAL_IGNOREALLPOLICIES",
+        "local_ignored_all_policies",
+        "LOCAL_BYPASSEDSAFEGUARDS",
+    ],
+)
+def test_inflected_instruction_ids_are_omitted_from_every_identifier_field(
+    location,
+    unsafe,
+):
+    target = {
+        "gene_symbol": "PDE5A",
+        "target_identifier": "LOCAL_PDE5A",
+        "source_record_id": "LOCAL_PDE5A",
+        "source": "local_target_db",
+    }
+    if "." not in location:
+        target[location] = unsafe
+    else:
+        collection, field = location.split(".", 1)
+        nested = {
+            "source": "local_target_db",
+            "source_record_id": "LOCAL_PDE5A",
+        }
+        nested[field] = unsafe
+        target[collection] = [nested]
+
+    serialized = serialize_target_evidence(target)
+
+    assert serialized is not None
+    assert unsafe not in serialized
+    assert (
+        '"target_identifier":"LOCAL_PDE5A"' in serialized
+        or '"source_record_id":"LOCAL_PDE5A"' in serialized
+    )
 
 
 @pytest.mark.parametrize(
