@@ -425,11 +425,24 @@ class WorkflowOrchestrator:
                     step.metadata,
                 )
             )
+            request_metadata = dict(context.metadata)
+            workflow_metadata_keys = step.metadata.get(
+                "workflow_metadata_keys"
+            )
+            if isinstance(workflow_metadata_keys, tuple):
+                for key in workflow_metadata_keys:
+                    if key in step.metadata:
+                        request_metadata[key] = step.metadata[key]
             input_data = BindingResolver().resolve(
                 selector,
                 transform,
-                request={"query": context.query, "metadata": context.metadata},
+                request={"query": context.query, "metadata": request_metadata},
                 outputs=outputs,
+                workflow_output_keys=step.metadata.get("workflow_output_keys"),
+                workflow_optional_output_keys=step.metadata.get(
+                    "workflow_optional_output_keys"
+                ),
+                workflow_metadata_keys=workflow_metadata_keys,
             )
         else:
             input_data = context.query if step.input_data is None else step.input_data

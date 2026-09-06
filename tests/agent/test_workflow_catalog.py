@@ -38,6 +38,7 @@ def test_target_design_policy_preserves_tool_allowlist():
         "property_calculator",
         "admet_predictor",
         "activity_predictor",
+        "candidate_ranker",
         "molecular_docking",
     )
     assert policy.is_multi_step is True

@@ -28,6 +28,7 @@ CAPABILITY_CATALOG = (
         "medium",
         False,
     ),
+    CapabilitySpec("candidate.rank", ("candidate_ranker",), "low", False),
     CapabilitySpec(
         "target.reverse_predict",
         ("reverse_target_predictor",),

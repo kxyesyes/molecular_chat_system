@@ -70,6 +70,80 @@ def test_compiler_request_query_binding_has_no_producer_dependency():
     assert compiled.dependencies == {"properties": ()}
 
 
+def test_compiler_rejects_workflow_output_allowlist_for_generation_step():
+    plan = WorkflowPlan(
+        workflow_name="target_driven_design",
+        metadata={"requested_count": 1},
+        steps=[
+            WorkflowStep(
+                "target_search",
+                "target_database_search",
+                output_key="target",
+                capability="target.structure.search",
+            ),
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_binding="$.workflow",
+                metadata={"workflow_output_keys": ("target",)},
+                capability="molecule.generate",
+                preconditions=("target_evidence",),
+            ),
+        ],
+    )
+
+    with pytest.raises(PlanCompilationError, match="candidate ranking"):
+        PlanCompiler().compile(
+            plan,
+            WorkflowCatalog().require("target_driven_design"),
+        )
+
+
+def test_compiler_rejects_optional_workflow_outputs_outside_allowlist():
+    plan = WorkflowPlan(
+        workflow_name="target_driven_design",
+        metadata={"requested_count": 1},
+        steps=[
+            WorkflowStep(
+                "target_search",
+                "target_database_search",
+                output_key="target",
+                capability="target.structure.search",
+            ),
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_binding="$.workflow",
+                capability="molecule.generate",
+                output_key="molecules",
+                preconditions=("target_evidence",),
+            ),
+            WorkflowStep(
+                "properties",
+                "property_calculator",
+                input_binding="$.outputs.molecules",
+                output_key="properties",
+            ),
+            WorkflowStep(
+                "rank",
+                "candidate_ranker",
+                input_binding="$.workflow",
+                capability="candidate.rank",
+                metadata={
+                    "workflow_output_keys": ("molecules", "properties"),
+                    "workflow_optional_output_keys": ("activity",),
+                },
+            ),
+        ],
+    )
+
+    with pytest.raises(PlanCompilationError, match="optional"):
+        PlanCompiler().compile(
+            plan,
+            WorkflowCatalog().require("target_driven_design"),
+        )
+
+
 def test_compiler_plan_count_bypasses_malformed_generation_prose():
     plan = WorkflowPlan(
         workflow_name="molecular_design",

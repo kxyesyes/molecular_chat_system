@@ -109,15 +109,18 @@ class ActivityPredictorTool(BaseMolecularTool):
                 else "RG-MPNN 未返回任何真实活性预测结果"
             )
             metadata = getattr(predictor, "current_model_metadata", None) or {}
+            model_provenance = {
+                "model_id": metadata.get("model_id"),
+                "weights_sha256": metadata.get("weights_sha256"),
+                "endpoint": metadata.get("endpoint"),
+                "units": metadata.get("units"),
+                "task_type": metadata.get("task_type"),
+                "demo_mode": bool(getattr(predictor, "demo_mode", True)),
+            }
+            for prediction in successful_predictions:
+                prediction["model_provenance"] = dict(model_provenance)
             result['quality'] = {
-                "model_provenance": {
-                    "model_id": metadata.get("model_id"),
-                    "weights_sha256": metadata.get("weights_sha256"),
-                    "endpoint": metadata.get("endpoint"),
-                    "units": metadata.get("units"),
-                    "task_type": metadata.get("task_type"),
-                    "demo_mode": bool(getattr(predictor, "demo_mode", True)),
-                }
+                "model_provenance": model_provenance
             }
 
         except Exception as e:

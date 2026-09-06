@@ -61,6 +61,7 @@ OWNERS = {
     "target_database_search": "target",
     "reverse_target_predictor": "reverse_target",
     "llm_molecular_generator": "molecular_design",
+    "candidate_ranker": "molecular_design",
     "property_calculator": "property_admet",
     "drug_likeness_assessment": "property_admet",
     "admet_predictor": "property_admet",
@@ -91,6 +92,8 @@ def build_registry(excluded=(), target_output=None, target_quality=None):
             output = [{"smiles": "CCO"}]
         elif name == "reverse_target_predictor":
             output = [{"gene_symbol": "EGFR", "final_similarity": 0.91}]
+        elif name == "candidate_ranker":
+            output = {"top_candidates": [{"canonical_smiles": "CCO", "score": 0.5}]}
         else:
             output = None
         tool = FakeTool(
@@ -215,6 +218,7 @@ def test_supervisor_delegates_each_step_to_declared_specialist():
         "property_admet",
         "property_admet",
         "activity",
+        "molecular_design",
     ]
     assert tools["llm_molecular_generator"].calls
     assert tools["property_calculator"].calls == ["CCO"]

@@ -288,6 +288,26 @@ class TaskPlanner:
                     capability="molecule.activity",
                     output_contract="ActivityPredictionSet@1",
                 ),
+                WorkflowStep(
+                    "candidate_ranking",
+                    "candidate_ranker",
+                    input_binding="$.workflow",
+                    input_transform="identity",
+                    output_key="ranking",
+                    metadata={
+                        "docking_top_n": docking_top_n,
+                        "workflow_output_keys": (
+                            "molecules",
+                            "properties",
+                            "admet",
+                            "activity",
+                        ),
+                        "workflow_optional_output_keys": ("admet", "activity"),
+                        "workflow_metadata_keys": ("docking_top_n",),
+                    },
+                    capability="candidate.rank",
+                    output_contract="CandidateRanking@1",
+                ),
             ],
             metadata={
                 "target_hint": target_hint,

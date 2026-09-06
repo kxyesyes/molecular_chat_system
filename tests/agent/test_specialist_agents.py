@@ -81,7 +81,10 @@ def make_task(agent_name, tool_name):
 
 def test_specialist_agent_tool_ownership_is_explicit():
     assert TargetAgent.allowed_tools == {"target_database_search"}
-    assert MolecularDesignAgent.allowed_tools == {"llm_molecular_generator"}
+    assert MolecularDesignAgent.allowed_tools == {
+        "llm_molecular_generator",
+        "candidate_ranker",
+    }
     assert {"property_calculator", "admet_predictor"} <= PropertyAdmetAgent.allowed_tools
     assert ActivityAgent.allowed_tools == {"activity_predictor"}
     assert {

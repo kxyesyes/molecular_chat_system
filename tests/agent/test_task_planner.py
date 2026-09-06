@@ -8,6 +8,8 @@ from src.agent.contracts.generation_request import (
     preflight_generation_request,
 )
 from src.agent.planning.task_planner import TaskPlanner
+from src.agent.planning import PlanCompiler
+from src.agent.workflows import WorkflowCatalog
 from src.agent.tooling import build_tool_registry
 from src.agent.tools.rag_search_tool import RAGSearchTool
 
@@ -50,6 +52,7 @@ def test_target_driven_design_plan_for_pde5_query():
         "property_calculator",
         "admet_predictor",
         "activity_predictor",
+        "candidate_ranker",
     ]
     assert plan.metadata["target_hint"] == "PDE5"
     assert plan.metadata["requested_count"] == 10
@@ -72,6 +75,30 @@ def test_target_driven_design_plan_for_pde5_query():
     assert plan.steps[4].input_from == "molecules"
     assert plan.steps[4].input_binding == "$.outputs.molecules"
     assert plan.steps[4].metadata["candidate_source"] == "molecules"
+    ranking_step = plan.steps[5]
+    assert ranking_step.name == "candidate_ranking"
+    assert ranking_step.input_binding == "$.workflow"
+    assert ranking_step.input_transform == "identity"
+    assert ranking_step.output_key == "ranking"
+    assert ranking_step.capability == "candidate.rank"
+    assert ranking_step.output_contract == "CandidateRanking@1"
+    assert ranking_step.metadata["workflow_output_keys"] == (
+        "molecules",
+        "properties",
+        "admet",
+        "activity",
+    )
+
+    compiled = PlanCompiler().compile(
+        plan,
+        WorkflowCatalog().require("target_driven_design"),
+    )
+    assert compiled.dependencies["candidate_ranking"] == (
+        "molecule_generation",
+        "properties",
+        "admet",
+        "activity",
+    )
 
 
 def test_target_driven_design_uses_generator_default_when_count_is_omitted():

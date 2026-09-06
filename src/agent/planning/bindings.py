@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 import re
 from typing import Any
@@ -72,6 +72,9 @@ class BindingResolver:
         transform: str,
         request: Mapping[str, Any],
         outputs: Mapping[str, Any],
+        workflow_output_keys: Sequence[str] | None = None,
+        workflow_optional_output_keys: Sequence[str] | None = None,
+        workflow_metadata_keys: Sequence[str] | None = None,
     ) -> Any:
         self.validate_transform(transform)
         if not isinstance(selector, str) or not selector:
@@ -80,14 +83,33 @@ class BindingResolver:
             value = request.get("query")
         elif selector == self.WORKFLOW:
             request_metadata = request.get("metadata")
-            metadata = (
-                {
-                    "requested_count": request_metadata["requested_count"]
+            if workflow_metadata_keys is not None:
+                metadata = self._select_mapping_keys(
+                    request_metadata,
+                    workflow_metadata_keys,
+                    "workflow metadata",
+                )
+            else:
+                metadata = (
+                    {
+                        "requested_count": request_metadata["requested_count"]
+                    }
+                    if isinstance(request_metadata, Mapping)
+                    and "requested_count" in request_metadata
+                    else {}
+                )
+            if workflow_output_keys is not None:
+                workflow_outputs = self._select_mapping_keys(
+                    outputs,
+                    workflow_output_keys,
+                    "workflow outputs",
+                    optional_keys=workflow_optional_output_keys,
+                )
+                return {
+                    "query": request.get("query"),
+                    "metadata": deepcopy(metadata),
+                    "outputs": deepcopy(workflow_outputs),
                 }
-                if isinstance(request_metadata, Mapping)
-                and "requested_count" in request_metadata
-                else {}
-            )
             trust_source = dict(request)
             trust_source["outputs"] = outputs
             trust_envelope = preserve_generation_trust_envelope(trust_source)
@@ -123,6 +145,46 @@ class BindingResolver:
         if transform == "smiles_text":
             return self._smiles_text(value)
         raise BindingResolutionError(f"Unsupported input transform: {transform}")
+
+    @staticmethod
+    def _select_mapping_keys(
+        value: Any,
+        keys: Sequence[str],
+        label: str,
+        optional_keys: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            value = {}
+        if isinstance(keys, (str, bytes)) or not isinstance(keys, Sequence):
+            raise BindingResolutionError(f"Invalid {label} key allowlist")
+        seen: set[str] = set()
+        for key in keys:
+            if not isinstance(key, str) or not key or key in seen:
+                raise BindingResolutionError(f"Invalid {label} key allowlist")
+            seen.add(key)
+        if isinstance(optional_keys, (str, bytes)) or (
+            optional_keys is not None
+            and not isinstance(optional_keys, Sequence)
+        ):
+            raise BindingResolutionError(f"Invalid {label} optional key allowlist")
+        optional_values = tuple(optional_keys or ())
+        if any(
+            not isinstance(key, str) or not key
+            for key in optional_values
+        ):
+            raise BindingResolutionError(f"Invalid {label} optional key allowlist")
+        optional = set(optional_values)
+        if len(optional) != len(optional_values) or not optional.issubset(seen):
+            raise BindingResolutionError(f"Invalid {label} optional key allowlist")
+        selected: dict[str, Any] = {}
+        for key in keys:
+            if key not in value:
+                if key in optional:
+                    selected[key] = []
+                    continue
+                raise BindingResolutionError(f"Missing bound output: {key}")
+            selected[key] = value[key]
+        return selected
 
     @classmethod
     def _smiles_text(cls, value: Any) -> str:

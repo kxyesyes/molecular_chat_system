@@ -171,16 +171,72 @@ class PlanCompiler:
                 if selector == BindingResolver.REQUEST_QUERY:
                     step_dependencies = ()
                 elif selector == BindingResolver.WORKFLOW:
-                    if (
-                        "target" not in producers
-                        or producer_capabilities["target"]
-                        != "target.structure.search"
-                    ):
-                        raise PlanCompilationError(
-                            "Workflow binding requires an upstream target "
-                            "structure search with exact output key: target"
+                    workflow_output_keys = step.metadata.get(
+                        "workflow_output_keys"
+                    )
+                    if workflow_output_keys is not None:
+                        if requested.name != "candidate.rank":
+                            raise PlanCompilationError(
+                                "Workflow output allowlists are reserved for "
+                                "candidate ranking steps"
+                            )
+                        if (
+                            not isinstance(workflow_output_keys, tuple)
+                            or not workflow_output_keys
+                            or any(
+                                not isinstance(key, str) or not key
+                                for key in workflow_output_keys
+                            )
+                            or len(set(workflow_output_keys))
+                            != len(workflow_output_keys)
+                        ):
+                            raise PlanCompilationError(
+                                "Workflow output allowlist must be a non-empty "
+                                "tuple of unique output keys"
+                            )
+                        optional_output_keys = step.metadata.get(
+                            "workflow_optional_output_keys", ()
                         )
-                    step_dependencies = (producers["target"],)
+                        if (
+                            not isinstance(optional_output_keys, tuple)
+                            or any(
+                                not isinstance(key, str) or not key
+                                for key in optional_output_keys
+                            )
+                            or len(set(optional_output_keys))
+                            != len(optional_output_keys)
+                            or not set(optional_output_keys).issubset(
+                                set(workflow_output_keys)
+                            )
+                        ):
+                            raise PlanCompilationError(
+                                "Workflow optional output allowlist must be a "
+                                "tuple subset of workflow outputs"
+                            )
+                        missing_outputs = [
+                            key
+                            for key in workflow_output_keys
+                            if key not in producers
+                        ]
+                        if missing_outputs:
+                            raise PlanCompilationError(
+                                "Workflow binding references missing outputs: "
+                                f"{missing_outputs}"
+                            )
+                        step_dependencies = tuple(
+                            producers[key] for key in workflow_output_keys
+                        )
+                    else:
+                        if (
+                            "target" not in producers
+                            or producer_capabilities["target"]
+                            != "target.structure.search"
+                        ):
+                            raise PlanCompilationError(
+                                "Workflow binding requires an upstream target "
+                                "structure search with exact output key: target"
+                            )
+                        step_dependencies = (producers["target"],)
                 else:
                     try:
                         output_key = BindingResolver.output_key(selector)

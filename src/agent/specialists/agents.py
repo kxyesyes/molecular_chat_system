@@ -18,7 +18,7 @@ class ReverseTargetAgent(SpecialistAgent):
 
 class MolecularDesignAgent(SpecialistAgent):
     name = "molecular_design"
-    allowed_tools = {"llm_molecular_generator"}
+    allowed_tools = {"llm_molecular_generator", "candidate_ranker"}
 
 
 class PropertyAdmetAgent(SpecialistAgent):

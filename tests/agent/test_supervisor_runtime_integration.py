@@ -38,6 +38,7 @@ def build_tools():
         FakeTool("property_calculator"),
         FakeTool("admet_predictor"),
         FakeTool("activity_predictor"),
+        FakeTool("candidate_ranker"),
         FakeTool("molecular_docking"),
     ]
 
@@ -73,7 +74,7 @@ def test_delegated_supervisor_persists_run_events_and_tool_results(tmp_path):
 
     assert result["status"] == "succeeded"
     assert store.get_run("runtime-trace")["status"] == "succeeded"
-    assert len(store.get_tool_executions("runtime-trace")) == 5
+    assert len(store.get_tool_executions("runtime-trace")) == 6
     event_names = [item["event"] for item in store.get_events("runtime-trace")]
     assert event_names[:3] == [
         "task_started",

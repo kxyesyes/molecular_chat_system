@@ -385,6 +385,9 @@ def test_agent_tool_formats_task_schema_and_exposes_complete_provenance(
         "task_type": prediction["task_type"],
         "demo_mode": False,
     }
+    assert result["data"][0]["model_provenance"] == result["quality"][
+        "model_provenance"
+    ]
 
 
 def test_activity_api_uses_task8_threadpool_for_cold_start_and_prediction(

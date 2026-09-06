@@ -49,6 +49,8 @@ class FakeTool:
             data = [{"smiles": "CCO", "admet": {"prediction_method": "test"}}]
         elif self.name == "activity_predictor":
             data = [{"smiles": "CCO", "success": True, "value": 0.5}]
+        elif self.name == "candidate_ranker":
+            data = {"top_candidates": [{"canonical_smiles": "CCO", "score": 0.5}]}
         else:
             data = {"query": query}
         return {
@@ -68,6 +70,7 @@ def build_fake_tools(*, target_quality=None):
             "property_calculator",
             "admet_predictor",
             "activity_predictor",
+            "candidate_ranker",
             "molecular_docking",
         ]
     }

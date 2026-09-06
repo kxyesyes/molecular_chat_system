@@ -47,6 +47,7 @@ WORKFLOW_POLICIES = (
             "property_calculator",
             "admet_predictor",
             "activity_predictor",
+            "candidate_ranker",
             "molecular_docking",
         ),
         True,

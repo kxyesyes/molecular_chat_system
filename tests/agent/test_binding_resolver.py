@@ -75,6 +75,58 @@ def test_binding_resolver_returns_isolated_structured_workflow_payload():
     assert outputs["target"][0]["quality"]["status"] == "official"
 
 
+def test_workflow_binding_can_expose_only_explicit_scientific_output_keys():
+    outputs = {
+        "target": {"gene_symbol": "PDE5A"},
+        "molecules": [{"smiles": "CCO"}],
+        "properties": [{"smiles": "CCO", "properties": {"qed": 0.7}}],
+        "admet": [],
+        "activity": [],
+        "secret": {"token": "must-not-bind"},
+    }
+
+    value = BindingResolver().resolve(
+        "$.workflow",
+        "identity",
+        request={"query": "rank", "metadata": {"docking_top_n": 3}},
+        outputs=outputs,
+        workflow_output_keys=("molecules", "properties", "admet", "activity"),
+        workflow_metadata_keys=("docking_top_n",),
+    )
+
+    assert value == {
+        "query": "rank",
+        "metadata": {"docking_top_n": 3},
+        "outputs": {
+            "molecules": [{"smiles": "CCO"}],
+            "properties": [
+                {"smiles": "CCO", "properties": {"qed": 0.7}}
+            ],
+            "admet": [],
+            "activity": [],
+        },
+    }
+    assert "secret" not in value["outputs"]
+
+
+def test_workflow_binding_materializes_missing_optional_outputs_as_empty_lists():
+    value = BindingResolver().resolve(
+        "$.workflow",
+        "identity",
+        request={"query": "rank", "metadata": {"docking_top_n": 2}},
+        outputs={
+            "molecules": [{"smiles": "CCO"}],
+            "properties": [{"smiles": "CCO", "properties": {"qed": 0.7}}],
+        },
+        workflow_output_keys=("molecules", "properties", "admet", "activity"),
+        workflow_optional_output_keys=("admet", "activity"),
+        workflow_metadata_keys=("docking_top_n",),
+    )
+
+    assert value["outputs"]["admet"] == []
+    assert value["outputs"]["activity"] == []
+
+
 def test_workflow_binding_preserves_only_recursive_output_trust_signals():
     outputs = {
         "target": {"gene_symbol": "PDE5A", "source": "UniProt"},

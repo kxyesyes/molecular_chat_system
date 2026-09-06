@@ -60,6 +60,7 @@ def test_wf002_target_design_plan_matches_docx_order():
         "property_calculator",
         "admet_predictor",
         "activity_predictor",
+        "candidate_ranker",
     ]
     assert plan.metadata["requested_count"] == 10
     assert plan.metadata["docking_top_n"] == 3

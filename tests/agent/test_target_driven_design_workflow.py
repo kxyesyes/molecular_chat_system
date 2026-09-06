@@ -36,6 +36,16 @@ class FakeTool:
             data = [{"smiles": "CCO", "admet": {"prediction_method": "test"}}]
         elif self.name == "activity_predictor":
             data = [{"smiles": "CCO", "success": True, "value": 0.5}]
+        elif self.name == "candidate_ranker":
+            data = {
+                "top_candidates": [
+                    {
+                        "canonical_smiles": "CCO",
+                        "score": 0.5,
+                        "ranking_evidence": {},
+                    }
+                ]
+            }
         else:
             data = {"query": query}
         return {
@@ -62,6 +72,7 @@ def test_target_driven_design_workflow_runs_target_to_screening_plan_without_doc
         "property_calculator",
         "admet_predictor",
         "activity_predictor",
+        "candidate_ranker",
     ]
     agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
     agent.llm = None
@@ -84,6 +95,14 @@ def test_target_driven_design_workflow_runs_target_to_screening_plan_without_doc
     assert result["tools_used"] == planned_tool_names
     generator_input = agent.tools["llm_molecular_generator"].inputs[0]
     assert generator_input["metadata"]["requested_count"] == 10
+    ranking_input = agent.tools["candidate_ranker"].inputs[0]
+    assert ranking_input["metadata"]["docking_top_n"] == 5
+    assert set(ranking_input["outputs"]) == {
+        "molecules",
+        "properties",
+        "admet",
+        "activity",
+    }
 
 
 def test_target_driven_design_workflow_binds_valid_default_count_when_omitted():
@@ -93,6 +112,7 @@ def test_target_driven_design_workflow_binds_valid_default_count_when_omitted():
         "property_calculator",
         "admet_predictor",
         "activity_predictor",
+        "candidate_ranker",
     ]
     agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
     agent.llm = None
@@ -119,6 +139,7 @@ def test_react_public_mol_count_is_authoritative_for_target_workflow():
         "property_calculator",
         "admet_predictor",
         "activity_predictor",
+        "candidate_ranker",
     ]
     agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
     agent.llm = None
@@ -147,6 +168,7 @@ def test_react_public_invalid_mol_count_fails_before_tools():
         "property_calculator",
         "admet_predictor",
         "activity_predictor",
+        "candidate_ranker",
     ]
     agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
     agent.llm = None
@@ -173,6 +195,7 @@ def test_target_driven_design_workflow_rejects_count_above_limit_before_tools():
         "property_calculator",
         "admet_predictor",
         "activity_predictor",
+        "candidate_ranker",
     ]
     agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
     agent.llm = None
@@ -202,6 +225,7 @@ def test_english_candidate_counts_are_propagated_to_generation_binding():
         "property_calculator",
         "admet_predictor",
         "activity_predictor",
+        "candidate_ranker",
     ]
 
     for query, expected_count in (
@@ -235,6 +259,7 @@ def test_english_count_above_limit_is_rejected_before_tools():
         "property_calculator",
         "admet_predictor",
         "activity_predictor",
+        "candidate_ranker",
     ]
     agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
     agent.llm = None
