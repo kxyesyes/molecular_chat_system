@@ -468,12 +468,41 @@ def _remove_owned_bound_socket(
         raise RuntimeError("sandbox broker socket cleanup failed") from None
 
 
+def _verify_owned_bound_socket(
+    socket_path: Path,
+    bound_identity: tuple[int, int],
+) -> None:
+    """Revalidate the pre-bound socket immediately before handing it to Uvicorn."""
+
+    try:
+        target, parent_identity = _trusted_socket_parent(socket_path)
+        metadata = os.lstat(target)
+        parent = os.lstat(target.parent)
+        if (
+            not _verified_socket(metadata)
+            or _node_identity(metadata) != bound_identity
+            or stat.S_IMODE(metadata.st_mode) != _BROKER_SOCKET_MODE
+            or _identity(parent) != parent_identity
+            or (
+                os.name == "posix"
+                and (
+                    metadata.st_uid != os.geteuid()
+                    or metadata.st_gid != os.getegid()
+                )
+            )
+        ):
+            raise ValueError
+    except Exception:
+        raise RuntimeError("sandbox broker socket verification failed") from None
+
+
 def serve_application(application: object, socket_path: Path) -> None:
     """Serve from a pre-bound mode-0660 UDS and notify only when ready."""
 
     listener, bound_identity = bind_runtime_socket(socket_path)
     server_failure: BaseException | None = None
     try:
+        _verify_owned_bound_socket(socket_path, bound_identity)
         configuration = uvicorn.Config(
             application,
             workers=1,

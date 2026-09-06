@@ -1526,7 +1526,8 @@ def test_app_registers_exact_private_http_paths_without_docs_or_redirects(
         "/metrics",
         "/healthz",
     ]
-    with TestClient(app, follow_redirects=False) as client:
+    with TestClient(app) as client:
+        client.follow_redirects = False
         for path in (
             "/docs",
             "/openapi.json",
@@ -2957,6 +2958,8 @@ def test_runtime_lock_uses_secure_open_identity_checks_and_nonblocking_flock(
         st_mode=stat.S_IFDIR | 0o750,
         st_dev=9,
         st_ino=2,
+        st_uid=os.geteuid() if os.name == "posix" else 0,
+        st_gid=os.getegid() if os.name == "posix" else 0,
         st_file_attributes=0,
     )
     lock_stat = SimpleNamespace(
