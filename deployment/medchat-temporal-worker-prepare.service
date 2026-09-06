@@ -1,0 +1,10 @@
+[Unit]
+Description=Prepare MedChat Temporal Docking Worker Trust Boundary
+Before=medchat-temporal-worker.service
+PartOf=medchat-temporal-worker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/medchat/temporal-worker/current/libexec/validate-temporal-worker-env
+ExecStart=/usr/lib/medchat/temporal-worker/current/libexec/prepare-temporal-worker-directories
+RemainAfterExit=yes

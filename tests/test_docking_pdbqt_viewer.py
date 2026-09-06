@@ -66,6 +66,8 @@ class DockingPdbqtViewerTest(unittest.TestCase):
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=True,
         )
         payload = json.loads(result.stdout.strip().splitlines()[-1])

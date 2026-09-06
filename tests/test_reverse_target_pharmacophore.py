@@ -70,6 +70,57 @@ class PharmacophoreAlignmentTest(unittest.TestCase):
         self.assertLessEqual(result["alignment_rmsd"], 0.1)
         self.assertEqual(result["matched_pair_count"], 4)
 
+    def test_transformed_alignment_uses_global_best_matching_not_greedy_order(self):
+        from src.reverse_target.pharmacophore_refiner import _score_transformed_alignment
+        import numpy as np
+
+        query_features = [
+            {"index": 0, "family": "Hydrophobe", "pos": np.array([0.0, 0.0, 0.0])},
+            {"index": 1, "family": "Hydrophobe", "pos": np.array([1.0, 0.0, 0.0])},
+            {"index": 2, "family": "Donor", "pos": np.array([0.0, 1.0, 0.0])},
+        ]
+        hit_features = [
+            {"index": 0, "family": "Hydrophobe", "pos": np.array([0.9, 0.0, 0.0])},
+            {"index": 1, "family": "Hydrophobe", "pos": np.array([0.0, 0.0, 0.0])},
+            {"index": 2, "family": "Donor", "pos": np.array([0.0, 1.0, 0.0])},
+        ]
+
+        result = _score_transformed_alignment(
+            query_features,
+            hit_features,
+            rotation=np.eye(3),
+            hit_center=np.zeros(3),
+            query_center=np.zeros(3),
+            distance_cutoff=0.25,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["matched_pair_count"], 3)
+        self.assertLess(result["alignment_rmsd"], 0.1)
+
+    def test_hydrophobe_alignment_allows_wider_cutoff_than_polar_features(self):
+        from src.reverse_target.pharmacophore_refiner import _score_transformed_alignment
+        import numpy as np
+
+        query_features = [
+            {"index": 0, "family": "Hydrophobe", "pos": np.array([0.0, 0.0, 0.0])},
+        ]
+        hit_features = [
+            {"index": 0, "family": "Hydrophobe", "pos": np.array([2.25, 0.0, 0.0])},
+        ]
+
+        result = _score_transformed_alignment(
+            query_features,
+            hit_features,
+            rotation=np.eye(3),
+            hit_center=np.zeros(3),
+            query_center=np.zeros(3),
+            distance_cutoff=1.8,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["matched_pair_count"], 1)
+
     def test_alignment_score_is_invariant_to_rotation_and_translation(self):
         from src.reverse_target.pharmacophore_refiner import aligned_pharmacophore_score
 

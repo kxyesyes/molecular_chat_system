@@ -28,3 +28,11 @@
 - 生产环境优先通过 `.env` 配置 `TARGET_DB_PATH`、`TARGET_CACHE_DIR`、`REVERSE_TARGET_DATA_DIR`、`ACTIVITY_MODEL_DIR`、`RAG_INDEX_PATH`。
 - 数据库、模型、缓存和索引建议放在服务器持久化目录；Git 仓库只保存代码、轻量样例和构建/校验脚本。
 - 更新任何数据资产时，应记录来源、版本、生成命令和日期；后续可扩展为带 SHA256 校验的 `scripts/fetch_data.py`。
+
+## 靶点数据库运行时安全约定
+
+- `TARGET_DB_PATH` 可配置为绝对路径或相对项目根目录的路径；未配置时使用 `data/target_db/target_database.sqlite`。
+- `TARGET_CACHE_DIR` 可配置为绝对路径或相对项目根目录的路径；数据库中已有的 `data/target_db/cache/...` 逻辑路径会映射到该目录。
+- 靶点 SQLite 连接统一启用 WAL、`synchronous=NORMAL`、30 秒 busy timeout 和外键约束，支持 Web 请求与后台同步并发访问。
+- 在线结构下载先流式写入同目录临时文件，限制为 50 MiB，并校验 PDB/mmCIF 标记；只有校验通过后才原子替换正式缓存文件。
+- 数据库、WAL 文件、结构缓存与下载临时文件均属于运行时资产，禁止提交到 Git。

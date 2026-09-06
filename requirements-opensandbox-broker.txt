@@ -1,0 +1,13 @@
+# Resolver-verified on Python 3.10. The plan's httpx==0.25.2 was changed to
+# the minimum version accepted by the official opensandbox 0.1.15 wheel.
+# OpenSandbox 0.1.15 generated clients use attrs.field(alias=...), which is
+# unavailable in attrs 21.3.0 despite the wheel's declared lower bound.
+attrs==26.1.0
+fastapi==0.104.1
+starlette==0.27.0
+httpx==0.27.0
+opensandbox==0.1.15
+pydantic==2.5.0
+python-dateutil==2.8.2
+python-multipart==0.0.6
+uvicorn[standard]==0.24.0

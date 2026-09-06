@@ -41,10 +41,16 @@ class BaseMolecularTool:
         complex_matches = re.findall(complex_smiles_pattern, text)
 
         for match in complex_matches:
+            candidate = match.strip().strip("`'\".,;")
             # 过滤掉纯英文单词
-            if not re.match(r'^[a-zA-Z]+$', match) and len(match) >= 6:
-                candidates.append(match)
-                logger.info(f"检测到复杂分子结构: {match}")
+            if (
+                not re.match(r'^[a-zA-Z]+$', candidate)
+                and len(candidate) >= 6
+                and self._is_plausible_smiles_lexeme(candidate)
+                and self.validate_smiles(candidate)
+            ):
+                candidates.append(candidate)
+                logger.info(f"检测到复杂分子结构: {candidate}")
 
         # 方法2: 检查预定义的简单分子（仅在没有复杂分子时）
         if not candidates:
@@ -69,9 +75,10 @@ class BaseMolecularTool:
         for pattern in special_patterns:
             matches = re.findall(pattern, text)
             for match in matches:
-                if len(match) >= 10:  # 确保是复杂分子
-                    candidates.append(match)
-                    logger.info(f"检测到特殊分子模式: {match}")
+                candidate = match.strip().strip("`'\".,;")
+                if len(candidate) >= 10 and self.validate_smiles(candidate):  # 确保是复杂分子
+                    candidates.append(candidate)
+                    logger.info(f"检测到特殊分子模式: {candidate}")
 
         # 验证并去重
         valid_smiles = []
@@ -89,7 +96,7 @@ class BaseMolecularTool:
             if len(candidate) <= 2 and candidate not in ['CCO']:
                 continue
 
-            if self.validate_smiles(candidate):
+            if self._is_plausible_smiles_lexeme(candidate) and self.validate_smiles(candidate):
                 valid_smiles.append(candidate)
                 seen.add(candidate)
                 logger.info(f"验证成功的SMILES: {candidate}")
@@ -102,10 +109,26 @@ class BaseMolecularTool:
             return self._basic_smiles_validation(smiles)
 
         try:
-            mol = Chem.MolFromSmiles(smiles)
+            try:
+                from rdkit import rdBase
+
+                with rdBase.BlockLogs():
+                    mol = Chem.MolFromSmiles(smiles)
+            except (AttributeError, ImportError):
+                mol = Chem.MolFromSmiles(smiles)
             return mol is not None
         except:
             return False
+
+    @staticmethod
+    def _is_plausible_smiles_lexeme(candidate: str) -> bool:
+        value = str(candidate or "").strip()
+        if not value or value.startswith(":") or value.endswith(":"):
+            return False
+        unbracketed = re.sub(r"\[[^\]]*\]", "", value)
+        letters = "".join(character for character in unbracketed if character.isalpha())
+        letters = letters.replace("Cl", "").replace("Br", "")
+        return all(character in "BCNOPSFIbcnops" for character in letters)
 
     def _basic_smiles_validation(self, smiles: str) -> bool:
         """基本SMILES验证（无RDKit时）"""
@@ -156,7 +179,46 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
     """Run legacy tools and normalize their output into ToolResult."""
     import time
 
-    from src.agent.contracts import AgentErrorCode, ToolResult
+    from src.agent.contracts import (
+        AgentErrorCode,
+        ToolProvenance,
+        ToolResult,
+        WorkflowArtifact,
+    )
+
+    def normalize_artifacts(values: Any) -> list[WorkflowArtifact]:
+        artifacts: list[WorkflowArtifact] = []
+        for value in values or []:
+            if isinstance(value, WorkflowArtifact):
+                artifacts.append(value)
+            elif isinstance(value, dict):
+                artifacts.append(
+                    WorkflowArtifact(
+                        artifact_type=str(value.get("artifact_type", "file")),
+                        path=str(value.get("path", "")),
+                        label=str(value.get("label", value.get("path", "artifact"))),
+                        mime_type=value.get("mime_type"),
+                        metadata=dict(value.get("metadata") or {}),
+                    )
+                )
+        return artifacts
+
+    def normalize_error_code(value: Any) -> AgentErrorCode:
+        try:
+            return AgentErrorCode(str(value))
+        except ValueError:
+            return AgentErrorCode.INTERNAL_ERROR
+
+    def normalize_provenance(raw_result: dict[str, Any]) -> ToolProvenance | None:
+        if "provenance" not in raw_result or raw_result["provenance"] is None:
+            return None
+        try:
+            provenance = ToolProvenance.from_dict(raw_result["provenance"])
+        except (TypeError, ValueError):
+            raise ValueError("Tool provenance failed strict validation") from None
+        if provenance.tool_name != tool_name:
+            raise ValueError("Tool provenance failed strict validation")
+        return provenance
 
     tool_name = getattr(tool, "name", tool.__class__.__name__)
     start = time.perf_counter()
@@ -174,6 +236,15 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
             return raw_result
 
         if isinstance(raw_result, dict):
+            try:
+                provenance = normalize_provenance(raw_result)
+            except ValueError:
+                return ToolResult.error_result(
+                    tool_name=tool_name,
+                    code=AgentErrorCode.INVALID_OUTPUT,
+                    message="Tool provenance failed strict validation",
+                    elapsed_ms=elapsed_ms,
+                )
             if raw_result.get("success", False):
                 return ToolResult.success_result(
                     tool_name=tool_name,
@@ -181,13 +252,36 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
                     message=raw_result.get("message", ""),
                     formatted=raw_result.get("formatted", ""),
                     elapsed_ms=elapsed_ms,
+                    warnings=list(raw_result.get("warnings") or []),
+                    evidence=list(raw_result.get("evidence") or []),
+                    artifacts=normalize_artifacts(raw_result.get("artifacts")),
+                    quality=dict(raw_result.get("quality") or {}),
+                    provenance=provenance,
                 )
+            raw_error = raw_result.get("error") or {}
+            if isinstance(raw_error, dict):
+                error_message = raw_error.get("message") or raw_result.get(
+                    "message", "Tool execution failed"
+                )
+                error_code = raw_error.get("code")
+                error_details = raw_error.get("details") or {"raw_result": raw_result}
+            else:
+                error_message = str(raw_error) or raw_result.get(
+                    "message", "Tool execution failed"
+                )
+                error_code = raw_result.get("error_code")
+                error_details = {"raw_result": raw_result}
             return ToolResult.error_result(
                 tool_name=tool_name,
-                code=AgentErrorCode.INTERNAL_ERROR,
-                message=raw_result.get("message", "Tool execution failed"),
-                details={"raw_result": raw_result},
+                code=normalize_error_code(error_code),
+                message=error_message,
+                details=error_details,
                 elapsed_ms=elapsed_ms,
+                warnings=list(raw_result.get("warnings") or []),
+                evidence=list(raw_result.get("evidence") or []),
+                artifacts=normalize_artifacts(raw_result.get("artifacts")),
+                quality=dict(raw_result.get("quality") or {}),
+                provenance=provenance,
             )
 
         return ToolResult.success_result(

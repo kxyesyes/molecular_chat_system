@@ -1,0 +1,2 @@
+{"case_id":"CQ-001","version":"1.0","category":"chemistry_quality","prompt":"生成 5 个类似阿司匹林的候选分子 SMILES。","expected_skill":"molecular_design","expected_tools":["llm_molecular_generator"],"metadata":{"requested_count":5,"requires_valid_smiles":true,"requires_uniqueness":true}}
+{"case_id":"CQ-002","version":"1.0","category":"chemistry_quality","prompt":"针对 PDE5 设计 10 个类药候选分子。","expected_skill":"target_driven_design","expected_tools":["target_database_search","llm_molecular_generator"],"metadata":{"requested_count":10,"requires_valid_smiles":true,"requires_uniqueness":true}}

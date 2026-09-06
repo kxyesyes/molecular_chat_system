@@ -8,6 +8,9 @@
   var Editor = MoleculeEditor;
   var Props = PropertiesPanel;
   var Hist = HistoryManager;
+  var Safe = window.MedChatSafeRender;
+  var SMILES_POLL_INTERVAL_MS = 2000;
+  var PROPS_DEBOUNCE_MS = 350;
 
   function setFeedback(msg, type) {
     UI.setFeedback(msg, type);
@@ -27,19 +30,73 @@
     }, 900);
   });
 
-  function startTimer() {
-    if (S.propsTimer) clearInterval(S.propsTimer);
-    S.propsTimer = setInterval(async function () {
+  function updateCurrentSmilesText(smi) {
+    document.getElementById("curSmiles").textContent =
+      smi || "等待绘制分子...";
+  }
+
+  function schedulePropsCalculation(smi) {
+    S.pendingPropsSmiles = smi;
+    if (S.propsDebounceTimer) clearTimeout(S.propsDebounceTimer);
+    S.propsDebounceTimer = setTimeout(runLatestPropsCalculation, PROPS_DEBOUNCE_MS);
+  }
+
+  async function runLatestPropsCalculation() {
+    S.propsDebounceTimer = null;
+    if (S.propsCalcInFlight) return;
+
+    var requestedSmiles = S.pendingPropsSmiles || "";
+    if (!requestedSmiles) {
+      Props.clearPropsUI();
+      return;
+    }
+
+    S.propsCalcInFlight = true;
+    try {
+      await Props.calcProps(requestedSmiles);
+    } finally {
+      S.propsCalcInFlight = false;
+      if (S.pendingPropsSmiles !== requestedSmiles) {
+        schedulePropsCalculation(S.pendingPropsSmiles);
+      }
+    }
+  }
+
+  async function syncSmilesFromEditor() {
+    if (document.hidden || S.propsPollInFlight) return;
+
+    S.propsPollInFlight = true;
+    try {
       var smi = await Editor.getSMILES();
       if (smi !== S.smiles) {
         S.smiles = smi;
-        document.getElementById("curSmiles").textContent =
-          smi || "等待绘制分子...";
-        if (smi) await Props.calcProps(smi);
-        else Props.clearPropsUI();
+        updateCurrentSmilesText(smi);
+        schedulePropsCalculation(smi);
       }
-    }, 2000);
+    } catch (err) {
+      console.warn("同步 Ketcher SMILES 失败:", err);
+    } finally {
+      S.propsPollInFlight = false;
+    }
   }
+
+  function startTimer() {
+    if (S.propsTimer) clearInterval(S.propsTimer);
+    syncSmilesFromEditor();
+    S.propsTimer = setInterval(syncSmilesFromEditor, SMILES_POLL_INTERVAL_MS);
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) {
+      if (S.propsDebounceTimer) clearTimeout(S.propsDebounceTimer);
+      S.propsDebounceTimer = null;
+      return;
+    }
+    if (S.pendingPropsSmiles !== undefined && !S.propsDebounceTimer) {
+      schedulePropsCalculation(S.pendingPropsSmiles);
+    }
+    if (S.ketcherReady) syncSmilesFromEditor();
+  });
 
   async function sendAI() {
     var cmd = document.getElementById("aiInput").value.trim();
@@ -48,6 +105,7 @@
       return;
     }
 
+    S.optimizationCommand = cmd;
     var replyEl = document.getElementById("aiReply");
     replyEl.style.display = "block";
     replyEl.textContent = "思考中...";
@@ -59,7 +117,7 @@
         var modeBadge = d.fallback_used
           ? '<span class="ai-status fallback">规则推荐</span>'
           : '<span class="ai-status">AI 推荐</span>';
-        replyEl.innerHTML = modeBadge + "<br>" + d.reply;
+        replyEl.innerHTML = modeBadge + "<br>" + Safe.escapeHtml(d.reply || "");
         if (d.fallback_used) {
           setFeedback("AI 模型暂不可用，已切换为本地规则推荐。", "warn");
         } else {
@@ -72,13 +130,14 @@
       } else {
         replyEl.innerHTML =
           "<strong>AI建议:</strong><br>" +
-          (d.error || "AI 推荐暂时不可用，请稍后重试。");
+          Safe.escapeHtml(d.error || "AI 推荐暂时不可用，请稍后重试。");
         setFeedback(d.error || "AI 推荐失败，请稍后重试。", "error");
         UI.toast(d.error || "AI 推荐失败", "error");
       }
     } catch (_) {
       replyEl.innerHTML =
-        "<strong>AI建议:</strong><br>网络异常，请稍后重试。";
+        "<strong>AI建议:</strong><br>" +
+        Safe.escapeHtml("网络异常，请稍后重试。");
       setFeedback("网络异常，AI 推荐没有完成。", "error");
       UI.toast("网络错误", "error");
     }

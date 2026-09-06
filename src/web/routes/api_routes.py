@@ -5,15 +5,46 @@ import os
 import logging
 import tempfile
 import asyncio
+import inspect
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Optional
-from fastapi import UploadFile, File, Form, HTTPException, Response, Body
+from fastapi import UploadFile, File, Form, Header, HTTPException, Response, Body, Query
+from starlette.concurrency import run_in_threadpool
+
+from src.agent.persistence.redaction import redact_sensitive
+from src.web.api_response import api_success
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_warning_strings(values: Any) -> List[str]:
+    if not isinstance(values, list):
+        return []
+    warnings = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        warning = value.strip()
+        if not warning:
+            continue
+        warning = redact_sensitive(warning)
+        if isinstance(warning, str) and warning not in warnings:
+            warnings.append(warning)
+    return warnings
+
+
+def _parse_positive_int_env(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
 _PHARM3D_EXECUTOR = ThreadPoolExecutor(
-    max_workers=max(1, int(os.getenv("REVERSE_TARGET_PHARM3D_WORKERS", "2")))
+    max_workers=_parse_positive_int_env("REVERSE_TARGET_PHARM3D_WORKERS", 2)
 )
+_PHARM3D_CONCURRENCY = _parse_positive_int_env("REVERSE_TARGET_PHARM3D_CONCURRENCY", 2)
+_PHARM3D_SEMAPHORE = asyncio.Semaphore(_PHARM3D_CONCURRENCY)
 
 
 def _get_pharm3d_timeout(default: float = 25.0) -> float:
@@ -30,6 +61,83 @@ def _get_int_env(name: str, default: int, minimum: int = 1) -> int:
         return default
 
 
+async def _read_upload_limited(upload: UploadFile, label: str) -> bytes:
+    max_bytes = _get_int_env("MEDCHAT_MAX_UPLOAD_BYTES", 25 * 1024 * 1024)
+    content = await upload.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"{label} exceeds the configured upload limit",
+        )
+    return content
+
+
+async def _invoke_in_threadpool(func, *args, **kwargs):
+    def invoke():
+        result = func(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return asyncio.run(result)
+        return result
+
+    return await run_in_threadpool(invoke)
+
+
+def _validate_report_base64_payload(
+    viewer_png_b64: Any,
+    smiles_images_b64: Any,
+) -> tuple[Optional[str], List[str]]:
+    if viewer_png_b64 is not None and not isinstance(viewer_png_b64, str):
+        raise HTTPException(
+            status_code=422,
+            detail="viewer_png_base64 must be a string or null",
+        )
+    if not isinstance(smiles_images_b64, list) or not all(
+        isinstance(value, str) for value in smiles_images_b64
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="smiles_images must be a list of strings",
+        )
+
+    max_bytes = _get_int_env(
+        "MEDCHAT_DOCKING_REPORT_MAX_BASE64_BYTES",
+        10 * 1024 * 1024,
+    )
+    total_bytes = 0
+    values = [viewer_png_b64]
+    values.extend(smiles_images_b64)
+
+    for value in values:
+        if value is None:
+            continue
+        total_bytes += len(value.encode("utf-8"))
+        if total_bytes > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail="Docking report image payload exceeds the configured limit",
+            )
+    return viewer_png_b64, smiles_images_b64
+
+
+def _validate_docking_limits(
+    *,
+    size_x: float,
+    size_y: float,
+    size_z: float,
+    exhaustiveness: int,
+    num_modes: int,
+    energy_range: float,
+) -> None:
+    if not all(0 < value <= 100 for value in (size_x, size_y, size_z)):
+        raise HTTPException(status_code=422, detail="Docking box size must be within (0, 100]")
+    if not 1 <= exhaustiveness <= 64:
+        raise HTTPException(status_code=422, detail="exhaustiveness must be between 1 and 64")
+    if not 1 <= num_modes <= 50:
+        raise HTTPException(status_code=422, detail="num_modes must be between 1 and 50")
+    if not 0 <= energy_range <= 20:
+        raise HTTPException(status_code=422, detail="energy_range must be between 0 and 20")
+
+
 def _get_pharm3d_candidate_pool_limit(top_k: int, max_refine: int) -> int:
     multiplier = _get_int_env("REVERSE_TARGET_PHARM3D_POOL_MULTIPLIER", 20, minimum=1)
     min_pool = _get_int_env("REVERSE_TARGET_PHARM3D_MIN_CANDIDATE_POOL", 250, minimum=1)
@@ -41,10 +149,11 @@ def _get_pharm3d_candidate_pool_limit(top_k: int, max_refine: int) -> int:
 async def _run_pharm3d_job(func, timeout_seconds: Optional[float] = None):
     loop = asyncio.get_running_loop()
     timeout = _get_pharm3d_timeout() if timeout_seconds is None else timeout_seconds
-    return await asyncio.wait_for(
-        loop.run_in_executor(_PHARM3D_EXECUTOR, func),
-        timeout=timeout,
-    )
+    async with _PHARM3D_SEMAPHORE:
+        return await asyncio.wait_for(
+            loop.run_in_executor(_PHARM3D_EXECUTOR, func),
+            timeout=timeout,
+        )
 
 
 def _build_pharm3d_fallback(candidates: List[Dict[str, Any]], error: str = "") -> List[Dict[str, Any]]:
@@ -64,11 +173,105 @@ def _build_pharm3d_fallback(candidates: List[Dict[str, Any]], error: str = "") -
     return fallback
 
 
-def setup_api_routes(app, docking_service=None):
-    """设置 API 路由"""
+def setup_api_routes(app, docking_service=None, task_runtime=None):
+    """设置 API 路由。"""
+
+    def current_task_runtime():
+        if task_runtime is None:
+            return None
+        return task_runtime() if callable(task_runtime) else task_runtime
 
     # ==================== 分子对接 API ====================
     
+    @app.post(
+        "/api/docking/tasks",
+        status_code=202,
+    )
+    async def submit_durable_docking_task(
+        protein_file: UploadFile = File(...),
+        ligand_file: UploadFile = File(None),
+        smiles: str = Form(None),
+        center_x: float = Form(0.0),
+        center_y: float = Form(0.0),
+        center_z: float = Form(0.0),
+        size_x: float = Form(20.0),
+        size_y: float = Form(20.0),
+        size_z: float = Form(20.0),
+        exhaustiveness: int = Form(8),
+        num_modes: int = Form(10),
+        energy_range: float = Form(3.0),
+        manual_center: bool = Form(False),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ):
+        try:
+            runtime = current_task_runtime()
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Task runtime unavailable") from exc
+        if runtime is None:
+            raise HTTPException(status_code=503, detail="Task runtime unavailable")
+        clean_smiles = (smiles or "").strip() or None
+        if ligand_file is None and clean_smiles is None:
+            raise HTTPException(status_code=400, detail="Provide a ligand file or SMILES")
+        if ligand_file is not None and clean_smiles is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide either a ligand file or SMILES, not both",
+            )
+        clean_idempotency_key = (idempotency_key or "").strip() or None
+        if clean_idempotency_key is not None and len(clean_idempotency_key) > 256:
+            raise HTTPException(status_code=422, detail="Idempotency-Key is too long")
+        _validate_docking_limits(
+            size_x=size_x,
+            size_y=size_y,
+            size_z=size_z,
+            exhaustiveness=exhaustiveness,
+            num_modes=num_modes,
+            energy_range=energy_range,
+        )
+        if not manual_center:
+            raise HTTPException(
+                status_code=422,
+                detail="Durable docking requires an explicit manual center",
+            )
+        if energy_range != 3.0:
+            raise HTTPException(
+                status_code=422,
+                detail="Durable docking currently supports energy_range=3 only",
+            )
+        receptor_bytes = await _read_upload_limited(protein_file, "protein file")
+        ligand_bytes = (
+            await _read_upload_limited(ligand_file, "ligand file")
+            if ligand_file is not None
+            else None
+        )
+        config = {
+            "center": [center_x, center_y, center_z],
+            "size": [size_x, size_y, size_z],
+            "exhaustiveness": exhaustiveness,
+            "num_modes": num_modes,
+        }
+        try:
+            receipt = await runtime.submit_docking(
+                receptor_name=protein_file.filename or "protein.pdb",
+                receptor_bytes=receptor_bytes,
+                ligand_name=(ligand_file.filename if ligand_file is not None else None),
+                ligand_bytes=ligand_bytes,
+                smiles=clean_smiles,
+                config=config,
+                idempotency_key=clean_idempotency_key,
+            )
+            record = await runtime.get(receipt.task_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Invalid docking task input") from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error("Durable docking task submission failed")
+            raise HTTPException(status_code=503, detail="Task submission unavailable") from exc
+        data = record.to_public_dict()
+        data["start_outcome"] = receipt.outcome.value
+        return api_success(data, message="Docking task submitted")
+
     @app.post("/api/docking/submit")
     async def submit_docking_job(
         protein_file: UploadFile = File(...),
@@ -89,18 +292,27 @@ def setup_api_routes(app, docking_service=None):
         if not docking_service:
             raise HTTPException(status_code=503, detail="分子对接服务不可用")
 
+        temp_paths: List[str] = []
         try:
             if not ligand_file and not smiles:
                 raise HTTPException(status_code=400, detail="请提供配体文件或SMILES字符串")
+            _validate_docking_limits(
+                size_x=size_x,
+                size_y=size_y,
+                size_z=size_z,
+                exhaustiveness=exhaustiveness,
+                num_modes=num_modes,
+                energy_range=energy_range,
+            )
 
             # 保存蛋白质文件（保留上传后缀，避免 .pdbqt 被误当成 .pdb）
-            protein_name = (protein_file.filename or "protein").lower()
             protein_name = (protein_file.filename or "protein").lower()
             _, protein_ext = os.path.splitext(protein_name)
             if protein_ext not in {".pdb", ".pdbqt"}:
                 protein_ext = ".pdb"
             protein_temp = tempfile.NamedTemporaryFile(delete=False, suffix=protein_ext)
-            protein_content = await protein_file.read()
+            temp_paths.append(protein_temp.name)
+            protein_content = await _read_upload_limited(protein_file, "protein file")
             protein_temp.write(protein_content)
             protein_temp.close()
 
@@ -118,7 +330,8 @@ def setup_api_routes(app, docking_service=None):
             # 执行对接
             ligand_temp_path = None
             if smiles:
-                result = await docking_service.perform_docking(
+                result = await _invoke_in_threadpool(
+                    docking_service.perform_docking,
                     receptor_file=protein_temp.name,
                     ligand_input=smiles,
                     config=config,
@@ -130,28 +343,36 @@ def setup_api_routes(app, docking_service=None):
                 ext = ext if ext else ".sdf"
 
                 ligand_temp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
-                ligand_content = await ligand_file.read()
+                temp_paths.append(ligand_temp.name)
+                ligand_content = await _read_upload_limited(ligand_file, "ligand file")
                 ligand_temp.write(ligand_content)
                 ligand_temp.close()
                 ligand_temp_path = ligand_temp.name
                 
-                result = await docking_service.perform_docking(
+                result = await _invoke_in_threadpool(
+                    docking_service.perform_docking,
                     receptor_file=protein_temp.name,
                     ligand_input=ligand_temp_path,
                     config=config,
                     input_type="file"
                 )
 
-            # 清理临时文件
-            os.unlink(protein_temp.name)
-            if ligand_temp_path and os.path.exists(ligand_temp_path):
-                os.unlink(ligand_temp_path)
-
+            result = dict(result)
+            result["warnings"] = _normalize_warning_strings(result.get("warnings"))
             return result
 
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"分子对接任务提交失败: {e}")
             raise HTTPException(status_code=500, detail=f"对接计算失败: {str(e)}")
+        finally:
+            for path in temp_paths:
+                try:
+                    if os.path.exists(path):
+                        os.unlink(path)
+                except Exception:
+                    pass
 
     @app.get("/api/docking/env_check")
     async def docking_env_check():
@@ -197,6 +418,20 @@ def setup_api_routes(app, docking_service=None):
 
         if not ligand_files and not smiles_rows:
             raise HTTPException(status_code=400, detail="请提供至少一个配体文件或一行 SMILES")
+        max_batch_ligands = _get_int_env("MEDCHAT_DOCKING_MAX_BATCH_LIGANDS", 100)
+        if len(ligand_files) + len(smiles_rows) > max_batch_ligands:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Batch docking accepts at most {max_batch_ligands} ligands",
+            )
+        _validate_docking_limits(
+            size_x=size_x,
+            size_y=size_y,
+            size_z=size_z,
+            exhaustiveness=exhaustiveness,
+            num_modes=num_modes,
+            energy_range=energy_range,
+        )
 
         batch_id = str(uuid.uuid4())[:8]
         temp_paths: List[str] = []
@@ -208,7 +443,7 @@ def setup_api_routes(app, docking_service=None):
                 protein_ext = ".pdb"
             protein_temp = tempfile.NamedTemporaryFile(delete=False, suffix=protein_ext)
             temp_paths.append(protein_temp.name)
-            protein_temp.write(await protein_file.read())
+            protein_temp.write(await _read_upload_limited(protein_file, "protein file"))
             protein_temp.close()
 
             from src.docking import DockingConfig
@@ -227,7 +462,7 @@ def setup_api_routes(app, docking_service=None):
                 _, ext = os.path.splitext(original_name)
                 ligand_temp = tempfile.NamedTemporaryFile(delete=False, suffix=ext or ".sdf")
                 temp_paths.append(ligand_temp.name)
-                ligand_temp.write(await ligand_file.read())
+                ligand_temp.write(await _read_upload_limited(ligand_file, "ligand file"))
                 ligand_temp.close()
                 jobs.append({
                     "ligand_name": original_name,
@@ -257,7 +492,8 @@ def setup_api_routes(app, docking_service=None):
             for index, job in enumerate(jobs, 1):
                 config = copy.deepcopy(base_config)
                 try:
-                    result = await docking_service.perform_docking(
+                    result = await _invoke_in_threadpool(
+                        docking_service.perform_docking,
                         receptor_file=protein_temp.name,
                         ligand_input=job["ligand_input"],
                         config=config,
@@ -274,6 +510,7 @@ def setup_api_routes(app, docking_service=None):
                         "best_energy": best_pose.get("binding_energy") if best_pose else None,
                         "total_poses": result.get("total_poses", 0),
                         "error": result.get("error"),
+                        "warnings": _normalize_warning_strings(result.get("warnings")),
                     })
                 except Exception as item_error:
                     logger.error(f"批量对接子任务失败 ({job['ligand_name']}): {item_error}")
@@ -287,6 +524,7 @@ def setup_api_routes(app, docking_service=None):
                         "best_energy": None,
                         "total_poses": 0,
                         "error": str(item_error),
+                        "warnings": [],
                     })
 
             completed = sum(1 for item in batch_results if item["success"])
@@ -505,77 +743,33 @@ def setup_api_routes(app, docking_service=None):
             raise HTTPException(status_code=500, detail=f"重建 pose SDF 失败: {str(e)}")
 
     @app.get("/api/docking/history")
-    async def get_docking_history():
+    async def get_docking_history(page: int = 1, limit: int = 50):
         """获取对接历史记录列表"""
-        import re
-        from datetime import datetime
-
         try:
             work_dir = docking_service.work_dir if docking_service else os.path.join(os.getcwd(), "temp_docking")
             if not os.path.isdir(work_dir):
-                return {"success": True, "history": [], "total": 0}
+                return {
+                    "success": True,
+                    "history": [],
+                    "total": 0,
+                    "page": max(1, page),
+                    "limit": max(1, limit),
+                }
 
-            history = []
-            for entry in os.scandir(work_dir):
-                if not entry.is_dir() or not entry.name.startswith("docking_"):
-                    continue
-                job_id = entry.name.replace("docking_", "")
-                result_file = os.path.join(entry.path, "result.pdbqt")
-                receptor_file = os.path.join(entry.path, "receptor.pdbqt")
-                ligand_file = os.path.join(entry.path, "ligand.pdbqt")
-                ligand_sdf = os.path.join(entry.path, "ligand_input.sdf")
+            from src.docking.history_index import read_history_page
 
-                has_result = os.path.exists(result_file)
-                has_receptor = os.path.exists(receptor_file)
-                has_ligand = os.path.exists(ligand_file)
-
-                # 时间取目录修改时间
-                mtime = entry.stat().st_mtime
-                time_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
-
-                # 解析最佳结合能
-                best_energy = None
-                pose_count = 0
-                if has_result:
-                    try:
-                        with open(result_file, 'r', errors='ignore') as rf:
-                            for line in rf:
-                                m = re.match(r"REMARK\s+VINA\s+RESULT:\s*([\-+]?\d*\.?\d+)", line)
-                                if m:
-                                    e = float(m.group(1))
-                                    pose_count += 1
-                                    if best_energy is None or e < best_energy:
-                                        best_energy = e
-                    except Exception:
-                        pass
-
-                # 计算目录大小
-                dir_size = 0
-                try:
-                    for f in os.scandir(entry.path):
-                        if f.is_file():
-                            dir_size += f.stat().st_size
-                except Exception:
-                    pass
-
-                status = "completed" if has_result else ("processing" if has_receptor else "failed")
-
-                history.append({
-                    "job_id": job_id,
-                    "time": time_str,
-                    "timestamp": mtime,
-                    "status": status,
-                    "best_energy": best_energy,
-                    "pose_count": pose_count,
-                    "has_receptor": has_receptor,
-                    "has_ligand": has_ligand,
-                    "has_result": has_result,
-                    "size_bytes": dir_size,
-                })
-
-            # 按时间倒序
-            history.sort(key=lambda x: x["timestamp"], reverse=True)
-            return {"success": True, "history": history, "total": len(history)}
+            history, total, resolved_page, resolved_limit = read_history_page(
+                work_dir,
+                page=page,
+                limit=limit,
+            )
+            return {
+                "success": True,
+                "history": history,
+                "total": total,
+                "page": resolved_page,
+                "limit": resolved_limit,
+            }
 
         except Exception as e:
             logger.error(f"获取对接历史失败: {e}")
@@ -590,6 +784,8 @@ def setup_api_routes(app, docking_service=None):
                 return {"success": True, "message": "无历史记录", "deleted": 0}
 
             import shutil as _shutil
+            from src.docking.history_index import clear_history_records
+
             deleted = 0
             for entry in os.scandir(work_dir):
                 if entry.is_dir() and entry.name.startswith("docking_"):
@@ -598,6 +794,7 @@ def setup_api_routes(app, docking_service=None):
                         deleted += 1
                     except Exception as ex:
                         logger.warning(f"删除 {entry.path} 失败: {ex}")
+            clear_history_records(work_dir)
 
             return {"success": True, "message": f"已清除 {deleted} 条历史记录", "deleted": deleted}
         except Exception as e:
@@ -608,12 +805,18 @@ def setup_api_routes(app, docking_service=None):
     async def delete_docking_job(job_id: str):
         """删除指定的对接历史记录"""
         try:
+            import re as _re
             import shutil as _shutil
+            from src.docking.history_index import remove_history_record
+
+            if not _re.fullmatch(r"[A-Za-z0-9_-]+", job_id or ""):
+                raise HTTPException(status_code=400, detail="Invalid job_id")
             work_dir = docking_service.work_dir if docking_service else os.path.join(os.getcwd(), "temp_docking")
             job_dir = os.path.join(work_dir, f"docking_{job_id}")
             if not os.path.isdir(job_dir):
                 raise HTTPException(status_code=404, detail="记录不存在")
             _shutil.rmtree(job_dir)
+            remove_history_record(work_dir, job_id)
             return {"success": True, "message": f"已删除任务 {job_id}"}
         except HTTPException:
             raise
@@ -670,7 +873,11 @@ def setup_api_routes(app, docking_service=None):
             raise HTTPException(status_code=500, detail=f"转换失败: {str(e)}")
 
     @app.get("/api/utils/smiles_to_image")
-    async def smiles_to_image(smiles: str, width: int = 300, height: int = 200):
+    async def smiles_to_image(
+        smiles: str,
+        width: int = Query(300, ge=64, le=2048),
+        height: int = Query(200, ge=64, le=2048),
+    ):
         """生成分子2D图片"""
         try:
             from rdkit import Chem
@@ -702,9 +909,9 @@ def setup_api_routes(app, docking_service=None):
     async def get_mcs(
         smiles1: str,
         smiles2: str,
-        width: int = 360,
-        height: int = 260,
-        timeout: int = 3,
+        width: int = Query(360, ge=64, le=2048),
+        height: int = Query(260, ge=64, le=2048),
+        timeout: int = Query(3, ge=1, le=30),
     ):
         """计算两分子的最大公共子结构(MCS)，返回SMARTS与高亮SVG"""
         try:
@@ -825,7 +1032,11 @@ def setup_api_routes(app, docking_service=None):
             if payload and isinstance(payload, dict):
                 fmt = str(payload.get("format", "md")).lower()
                 viewer_png_b64 = payload.get("viewer_png_base64")
-                smiles_images_b64 = payload.get("smiles_images", []) or []
+                smiles_images_b64 = payload.get("smiles_images", [])
+            viewer_png_b64, smiles_images_b64 = _validate_report_base64_payload(
+                viewer_png_b64,
+                smiles_images_b64,
+            )
 
             # 生成报告内容
             from .report_generator import generate_report
@@ -857,15 +1068,19 @@ def setup_api_routes(app, docking_service=None):
             if top_k < 1 or top_k > 100:
                 raise HTTPException(status_code=400, detail="返回数量必须在1-100之间")
             
-            from src.reverse_target.predictor import get_predictor
-            predictor = get_predictor()
-            results = predictor.predict(
-                smiles=smiles.strip(),
-                threshold=threshold,
-                top_k=top_k,
-                combine_by_target=True,
-                organism_filter=organism_filter,
-            )
+            def run_prediction():
+                from src.reverse_target.predictor import get_predictor
+
+                predictor = get_predictor()
+                return predictor.predict(
+                    smiles=smiles.strip(),
+                    threshold=threshold,
+                    top_k=top_k,
+                    combine_by_target=True,
+                    organism_filter=organism_filter,
+                )
+
+            results = await _invoke_in_threadpool(run_prediction)
             
             logger.info(f"反向寻靶预测成功: 找到 {len(results)} 个靶点")
             
@@ -896,7 +1111,7 @@ def setup_api_routes(app, docking_service=None):
             if top_k < 1 or top_k > 100:
                 raise HTTPException(status_code=400, detail="返回数量必须在1-100之间")
 
-            content = await file.read()
+            content = await _read_upload_limited(file, "reverse target batch file")
             text = content.decode("utf-8")
             
             smiles_list = []
@@ -943,15 +1158,19 @@ def setup_api_routes(app, docking_service=None):
             if not smiles_list:
                 raise HTTPException(status_code=400, detail="未能从文件中解析出有效的SMILES")
 
-            from src.reverse_target.predictor import get_predictor
-            predictor = get_predictor()
-            results = predictor.predict_batch(
-                smiles_list=smiles_list,
-                threshold=threshold,
-                top_k=top_k,
-                combine_by_target=True,
-                organism_filter=organism_filter,
-            )
+            def run_batch_prediction():
+                from src.reverse_target.predictor import get_predictor
+
+                predictor = get_predictor()
+                return predictor.predict_batch(
+                    smiles_list=smiles_list,
+                    threshold=threshold,
+                    top_k=top_k,
+                    combine_by_target=True,
+                    organism_filter=organism_filter,
+                )
+
+            results = await _invoke_in_threadpool(run_batch_prediction)
             
             logger.info(f"批量反向寻靶预测完成: {len(results)} 个分子")
             
@@ -1256,9 +1475,13 @@ def setup_api_routes(app, docking_service=None):
     ):
         """活性预测 API"""
         try:
-            from src.activity.predictor import get_predictor
-            predictor = get_predictor()
-            results = predictor.predict(smiles)
+            def run_activity_prediction():
+                from src.activity.predictor import get_predictor
+
+                predictor = get_predictor()
+                return predictor.predict(smiles)
+
+            results = await _invoke_in_threadpool(run_activity_prediction)
             return {"success": True, "results": results}
         except Exception as e:
             logger.error(f"活性预测失败: {e}")
@@ -1270,7 +1493,7 @@ def setup_api_routes(app, docking_service=None):
     ):
         """活性批量预测 API"""
         try:
-            content = await file.read()
+            content = await _read_upload_limited(file, "activity batch file")
             text = content.decode("utf-8")
             # Simple parsing
             smiles_list = []
@@ -1282,10 +1505,16 @@ def setup_api_routes(app, docking_service=None):
                     if parts:
                         smiles_list.append(parts[0])
             
-            from src.activity.predictor import get_predictor
-            predictor = get_predictor()
-            results = predictor.predict(smiles_list)
+            def run_activity_batch_prediction():
+                from src.activity.predictor import get_predictor
+
+                predictor = get_predictor()
+                return predictor.predict(smiles_list)
+
+            results = await _invoke_in_threadpool(run_activity_batch_prediction)
             return {"success": True, "results": results}
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"批量活性预测失败: {e}")
             raise HTTPException(status_code=500, detail=str(e))
@@ -1297,32 +1526,46 @@ def setup_api_routes(app, docking_service=None):
         file: UploadFile           = File(...),
         target_column: str         = Form(...),
         task_type: str             = Form("regression"),
-        epochs: int                = Form(50),
-        learning_rate: float       = Form(0.001),
-        batch_size: int            = Form(32),
-        dropout: float             = Form(0.2),
-        num_layers: int            = Form(5),
-        hidden_size: int           = Form(256),
-        weight_decay: float        = Form(0.0001),
-        patience: int              = Form(12),
+        epochs: int                = Form(50, ge=1, le=1000),
+        learning_rate: float       = Form(0.001, gt=0, le=1),
+        batch_size: int            = Form(32, ge=1, le=4096),
+        dropout: float             = Form(0.2, ge=0, le=0.9),
+        num_layers: int            = Form(5, ge=1, le=32),
+        hidden_size: int           = Form(256, ge=8, le=4096),
+        weight_decay: float        = Form(0.0001, ge=0, le=1),
+        patience: int              = Form(12, ge=1, le=1000),
         loss_metric: str           = Form("MSE"),
-        lr_scheduler: str          = Form("Cosine")
+        lr_scheduler: str          = Form("Cosine"),
+        split_strategy: str        = Form("scaffold"),
+        random_seed: int           = Form(42, ge=0, le=2147483647)
     ):
         """提交活性预测模型训练任务"""
+        temp_file = None
+        temp_path = None
+        retain_temp_file = False
         try:
+            split_strategy = split_strategy.strip().lower()
+            if split_strategy not in {"scaffold", "random"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail="split_strategy must be 'scaffold' or 'random'",
+                )
+            content = await _read_upload_limited(file, "activity training dataset")
+
             # 1. 保存上传的数据集
-            import tempfile
             from src.activity.trainer import submit_training_job
-            
+
             ext = os.path.splitext(file.filename)[1] or ".csv"
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
-            content = await file.read()
-            temp_file.write(content)
-            temp_file.close()
+            temp_path = temp_file.name
+            try:
+                temp_file.write(content)
+            finally:
+                temp_file.close()
 
             # 2. 启动后台训练
             job_id = submit_training_job(
-                file_path=temp_file.name,
+                file_path=temp_path,
                 target_column=target_column,
                 task_type=task_type,
                 epochs=epochs,
@@ -1335,13 +1578,30 @@ def setup_api_routes(app, docking_service=None):
                 weight_decay=weight_decay,
                 patience=patience,
                 loss_metric=loss_metric,
-                lr_scheduler=lr_scheduler
+                lr_scheduler=lr_scheduler,
+                split_strategy=split_strategy,
+                random_seed=random_seed,
             )
-            
+            retain_temp_file = True
+
             return {"success": True, "job_id": job_id, "message": "训练任务已启动"}
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"启动训练失败: {e}")
             raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            if temp_file is not None:
+                try:
+                    temp_file.close()
+                except Exception:
+                    pass
+            if temp_path and not retain_temp_file:
+                try:
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
+                except Exception:
+                    pass
 
     @app.get("/api/activity/train/status/{job_id}")
     async def get_training_status(job_id: str):
@@ -1355,35 +1615,44 @@ def setup_api_routes(app, docking_service=None):
     @app.get("/api/activity/models")
     async def list_activity_models():
         """列出所有已训练的活性模型"""
-        from src.activity.trainer import list_available_models, get_best_model_path
+        from src.activity.trainer import list_available_models, get_current_model_id
+
         models = list_available_models()
-        current_model_path = get_best_model_path()
-        current_model_file = None
-        if current_model_path:
-            import os
-            current_model_file = os.path.basename(current_model_path)
-            
-        return {"success": True, "models": models, "current_model": current_model_file}
+        return {
+            "success": True,
+            "models": models,
+            "current_model": get_current_model_id(),
+        }
 
     @app.post("/api/activity/models/switch")
-    async def switch_activity_model(data: Dict[str, str] = Body(...)):
+    async def switch_activity_model(data: Dict[str, Any] = Body(...)):
         """切换当前使用的活性预测模型权重"""
+        if set(data) != {"model_id"} or not isinstance(data.get("model_id"), str):
+            raise HTTPException(status_code=400, detail="仅接受 model_id 参数")
+
+        model_id = data["model_id"]
         try:
-            model_file = data.get("model_file")
-            if not model_file:
-                raise HTTPException(status_code=400, detail="缺少 model_file 参数")
-                
             from src.activity.trainer import set_active_model
-            set_active_model(model_file)
-            
+
+            set_active_model(model_id)
+
             # Force reload in predictor
             from src.activity.predictor import get_predictor
+
             predictor = get_predictor()
-            predictor._loaded = False  # trigger reload on next predict
-            
-            return {"success": True, "message": f"已切换至模型 {model_file}"}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            if hasattr(predictor, "invalidate"):
+                predictor.invalidate()
+            else:
+                predictor._loaded = False  # compatibility for injected predictors
+
+            return {"success": True, "message": f"已切换至模型 {model_id}"}
+        except ValueError:
+            raise HTTPException(status_code=400, detail="model_id 无效或模型未注册")
+        except HTTPException:
+            raise
+        except Exception:
+            logger.exception("切换活性模型失败")
+            raise HTTPException(status_code=500, detail="切换活性模型失败")
 
     @app.delete("/api/activity/models/{model_id}")
     async def remove_activity_model(model_id: str):
@@ -1391,11 +1660,20 @@ def setup_api_routes(app, docking_service=None):
         try:
             from src.activity.trainer import delete_model
             delete_model(model_id)
+
+            from src.activity.predictor import get_predictor
+
+            predictor = get_predictor()
+            if hasattr(predictor, "invalidate"):
+                predictor.invalidate()
+            else:
+                predictor._loaded = False  # compatibility for injected predictors
             return {"success": True, "message": f"模型 {model_id} 已删除"}
-        except ValueError as ve:
-            raise HTTPException(status_code=404, detail=str(ve))
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except ValueError:
+            raise HTTPException(status_code=404, detail="模型未注册或记录无效")
+        except Exception:
+            logger.exception("删除活性模型失败")
+            raise HTTPException(status_code=500, detail="删除活性模型失败")
 
     # ==================== 分子属性计算 API ====================
     

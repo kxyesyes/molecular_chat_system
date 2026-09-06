@@ -43,16 +43,20 @@ var PropertiesPanel = (function () {
   }
 
   /* ── 计算属性 ── */
-  async function calcProps(smi) {
+  async function calcProps(smi, referenceSmiles) {
     if (!smi) return;
     try {
-      var d = await Api.calcProperties(smi);
+      var d = await Api.calcProperties(smi, {
+        command: S.optimizationCommand || "",
+        reference_smiles: referenceSmiles || "",
+      });
       if (d.success) {
         S.prevProps = S.curProps;
         S.curProps = d.properties;
+        S.curGoals = d.goals;
         renderProps(d.properties, S.prevProps);
         renderRo5(d.properties);
-        renderGoals(d.properties);
+        renderGoals(d.goals || d.properties);
         renderAdvice(d.properties);
       } else {
         S.curProps = null;
@@ -69,6 +73,11 @@ var PropertiesPanel = (function () {
 
   /* ── 渲染属性值、delta 箭头、进度条 ── */
   function renderProps(p, prev) {
+    function asNumber(value) {
+      var n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    }
+
     function setP(
       vid,
       val,
@@ -81,6 +90,19 @@ var PropertiesPanel = (function () {
       lowerBetter,
     ) {
       var el = document.getElementById(vid);
+      val = asNumber(val);
+      if (val === null) {
+        el.textContent = "-";
+        el.classList.add("ph");
+        var missingDelta = document.getElementById(deltaId);
+        if (missingDelta) missingDelta.style.display = "none";
+        var missingBar = document.getElementById(bid);
+        if (missingBar) {
+          missingBar.style.width = "0%";
+          missingBar.classList.remove("good", "warn", "danger");
+        }
+        return;
+      }
       el.textContent = val.toFixed(2) + unit;
       el.classList.remove("ph", "warn", "danger");
       // 数值颜色
@@ -139,7 +161,7 @@ var PropertiesPanel = (function () {
       "dTPSA",
       true,
     );
-    if (p.sa_score !== undefined) {
+    if (p.sa_score !== undefined && p.sa_score !== null) {
       setP(
         "pSAS",
         p.sa_score,
@@ -151,6 +173,8 @@ var PropertiesPanel = (function () {
         "dSAS",
         true,
       );
+    } else {
+      setP("pSAS", null, "", null, "bSAS", 10, 3.5, "dSAS", true);
     }
   }
 
@@ -178,17 +202,33 @@ var PropertiesPanel = (function () {
   }
 
   /* ── 优化目标 ── */
-  function renderGoals(p) {
-    var goals = [
-      { l: "QED ≥ 0.7", p: (p.qed ?? 0) >= 0.7 },
-      { l: "MW ≤ 500 Da", p: (p.mw ?? 999) <= 500 },
-      { l: "LogP ≤ 5", p: (p.logp ?? 99) <= 5 },
-      { l: "SA Score ≤ 3.5", p: (p.sa_score ?? 99) <= 3.5 },
-    ];
+  function renderGoals(goalResultOrProps) {
+    var goals;
+    if (goalResultOrProps && Array.isArray(goalResultOrProps.items)) {
+      goals = goalResultOrProps.items.map(function (item) {
+        return {
+          l: item.label || item.metric,
+          p: !!item.passed,
+          available: item.available !== false,
+        };
+      });
+    } else {
+      var p = goalResultOrProps || {};
+      goals = [
+        { l: "QED ≥ 0.7", p: (p.qed ?? 0) >= 0.7, available: p.qed != null },
+        { l: "MW ≤ 500 Da", p: (p.mw ?? 999) <= 500, available: p.mw != null },
+        { l: "LogP ≤ 5", p: (p.logp ?? 99) <= 5, available: p.logp != null },
+        {
+          l: "SA Score ≤ 3.5",
+          p: (p.sa_score ?? 99) <= 3.5,
+          available: p.sa_score != null,
+        },
+      ];
+    }
     document.getElementById("goalList").innerHTML = goals
       .map(function (g) {
-        var status = g.p ? "pass" : "fail";
-        var text = g.p ? "达成" : "未达成";
+        var status = !g.available ? "pend" : g.p ? "pass" : "fail";
+        var text = !g.available ? "待计算" : g.p ? "达成" : "未达成";
         return (
           '<div class="goal-item"><span>' +
           g.l +

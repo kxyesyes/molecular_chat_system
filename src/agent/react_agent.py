@@ -11,8 +11,39 @@ from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 from .prompts import PREFIX, SUFFIX, REACT_FORMAT, SIMPLE_TOOL_TEMPLATE
 from .router import SkillRouter
+from .contracts.generation_request import (
+    DEFAULT_GENERATION_COUNT,
+    GenerationRequestError,
+    build_generation_request,
+    generation_request_error_details,
+    has_generation_intent,
+    parse_generation_count,
+    preflight_generation_request,
+)
 
 logger = logging.getLogger(__name__)
+_MOL_COUNT_UNSET = object()
+
+_TOOL_NAME_MAPPING = {
+    'property_calculator': 'property_calculator',
+    'drug_likeness_assessment': 'drug_likeness_assessment',
+    'admet_predictor': 'admet_predictor',
+    'molecular_docking': 'molecular_docking',
+    'rxn_chemistry_agent': 'rxn_chemistry_agent',
+    'molecular_generator': 'molecular_generator',
+    'llm_molecular_generator': 'llm_molecular_generator',
+    'property': 'property_calculator',
+    'admet': 'admet_predictor',
+    'docking': 'molecular_docking',
+    'reaction': 'rxn_chemistry_agent',
+    'drug_likeness': 'drug_likeness_assessment',
+    'generator': 'molecular_generator',
+    'llm_generator': 'llm_molecular_generator',
+    'ai_generator': 'llm_molecular_generator',
+    'rag_database_search': 'rag_database_search',
+    'rag_search': 'rag_database_search',
+    'database_search': 'rag_database_search',
+}
 
 
 @dataclass
@@ -28,25 +59,26 @@ class ReActStep:
 class ReActMolecularAgent:
     """基于ReAct框架的分子agent"""
 
-    def __init__(self, llm=None):
+    def __init__(self, llm=None, molecular_generator_llm=None):
         self.llm = llm
+        self.molecular_generator_llm = molecular_generator_llm
         self.tools = {}
         self.max_iterations = 5  # 最大推理循环次数
-        self._active_skill = None  # 当前激活的技能
+        self._active_skill = None  # 当前激活的工作流策略
         self._initialize_tools()
-        # 初始化 Skill 路由器
+        # 初始化工作流策略路由器
         try:
             self.skill_router = SkillRouter()
-            logger.info("✅ SkillRouter 初始化成功")
+            logger.info("✅ 工作流策略路由器初始化成功")
         except Exception as e:
-            logger.warning(f"⚠️ SkillRouter 初始化失败，将使用传统模式: {e}")
+            logger.warning(f"⚠️ 工作流策略路由器初始化失败，将使用传统模式: {e}")
             self.skill_router = None
 
     def _initialize_tools(self):
         """初始化工具集合 - 使用统一的工具注册表"""
         try:
             from .tools import get_all_tools
-            all_tools = get_all_tools()
+            all_tools = get_all_tools(self.molecular_generator_llm)
 
             for tool in all_tools:
                 self.tools[tool.name] = tool
@@ -58,8 +90,30 @@ class ReActMolecularAgent:
             logger.error(f"Tool initialization failed: {e}")
             raise
 
+    def set_llm(self, llm) -> None:
+        """Update the Agent reasoning LLM without replacing dedicated tool models."""
+        self.llm = llm
+        for tool_name, tool in self.tools.items():
+            if tool_name == "llm_molecular_generator":
+                continue
+            if hasattr(tool, "llm"):
+                tool.llm = llm
+
+    @staticmethod
+    def _is_molecular_generation_skill(skill: Any) -> bool:
+        allowed_tools = getattr(skill, "allowed_tools", ())
+        if "llm_molecular_generator" in allowed_tools:
+            return True
+        name = getattr(skill, "name", skill)
+        return name in {
+            "molecular_design",
+            "target_driven_design",
+            "hit_to_lead_optimization",
+        }
+
     def should_use_tools(self, query: str) -> bool:
         """判断是否需要使用工具处理查询"""
+        preflight_generation_request(query)
         # 检查是否包含SMILES分子结构
         if self._contains_smiles(query):
             return True
@@ -95,14 +149,20 @@ class ReActMolecularAgent:
         logger.info("未检测到需要使用工具的查询")
         return False
 
-    def execute(self, query: str, temperature: float = 0.7, mol_count: int = 5, active_skill=None) -> Dict[str, Any]:
-        """执行ReAct推理循环 - 集成 Skill 路由"""
+    def execute(
+        self,
+        query: str,
+        temperature: float = 0.7,
+        mol_count: Any = _MOL_COUNT_UNSET,
+        active_skill=None,
+        event_callback=None,
+    ) -> Dict[str, Any]:
+        """执行ReAct推理循环 - 集成工作流策略路由"""
         import time
         from .metrics import metrics_system
         start_time = time.time()
         
         self.current_temperature = temperature
-        self.current_mol_count = mol_count
         result = {
             'query': query,
             'success': True,
@@ -110,28 +170,79 @@ class ReActMolecularAgent:
             'final_answer': '',
             'reasoning_trace': [],
             'tools_used': [],
-            'active_skill': None  # 记录激活的技能
+            'active_skill': None  # 兼容字段：记录激活的工作流策略
         }
+
+        raw_requested_count: Any = None
+        try:
+            if mol_count is not _MOL_COUNT_UNSET:
+                raw_requested_count = mol_count
+            else:
+                raw_requested_count = preflight_generation_request(
+                    query,
+                    active_molecular_skill=(
+                        self._is_molecular_generation_skill(active_skill)
+                    ),
+                )
+            if raw_requested_count is None:
+                raw_requested_count = DEFAULT_GENERATION_COUNT
+            generation_request = build_generation_request(
+                query, raw_requested_count
+            )
+            requested_count = generation_request["metadata"]["requested_count"]
+        except GenerationRequestError as exc:
+            if raw_requested_count is None and exc.value is not None:
+                raw_requested_count = exc.value
+            classification = generation_request_error_details(exc)
+            result["success"] = False
+            result["final_answer"] = "Invalid molecular generation request"
+            result["error"] = {
+                "code": "invalid_input",
+                "message": str(exc),
+                "details": classification,
+            }
+            workflow_name = getattr(active_skill, "name", active_skill)
+            result["workflow_plan"] = {
+                "workflow_name": workflow_name or "molecular_design",
+                "steps": [],
+                "metadata": {
+                    "requested_count": raw_requested_count,
+                    **classification,
+                },
+            }
+            return result
+        generation_intent = has_generation_intent(query)
+        routed_skill = active_skill
+        if routed_skill is None and not generation_intent and self.skill_router:
+            routed_skill = self.skill_router.route(query, llm=self.llm)
+        self.current_mol_count = requested_count
+        self._current_generation_request = generation_request
 
         logger.info(f"=== ReAct Agent 开始执行 ===")
         logger.info(f"查询: {query}")
         logger.info(f"LLM可用: {self.llm is not None}")
 
-        # ── Skill 路由：按需加载上下文 ──────────────────────────
-        self._active_skill = active_skill
+        # ── 工作流策略路由 ──────────────────────────────────────
+        self._active_skill = routed_skill
         if not self._active_skill and self.skill_router:
             self._active_skill = self.skill_router.route(query, llm=self.llm)
             
         if self._active_skill:
             result['active_skill'] = self._active_skill.name
-            logger.info(f"🎯 激活技能: {self._active_skill.name}")
+            logger.info(f"🎯 激活工作流策略: {self._active_skill.name}")
         else:
-            logger.info("未匹配到特定技能，使用通用模式")
+            logger.info("未匹配到工作流策略，使用通用模式")
 
         try:
-            if self._active_skill and hasattr(self._active_skill, "workflow_steps"):
-                logger.info(f"使用 WorkflowOrchestrator 执行技能: {self._active_skill.name}")
-                return self._execute_workflow_skill(query, result)
+            if self._active_skill and self._active_skill.is_multi_step:
+                logger.info(
+                    f"使用 WorkflowOrchestrator 执行工作流策略: {self._active_skill.name}"
+                )
+                return self._execute_workflow_skill(
+                    query,
+                    result,
+                    event_callback=event_callback,
+                )
 
             if not self.llm:
                 logger.warning("LLM不可用，直接使用回退模式")
@@ -141,14 +252,8 @@ class ReActMolecularAgent:
             steps = []
             tools_executed = set()  # 跟踪已执行的工具，避免重复
 
-            # 编排技能需要更多推理步数来串联多个工具
-            effective_max_iterations = self.max_iterations
-            if self._active_skill and hasattr(self._active_skill, 'max_iterations_override'):
-                effective_max_iterations = self._active_skill.max_iterations_override
-                logger.info(f"📈 编排技能 {self._active_skill.name} 提升最大迭代次数: {effective_max_iterations}")
-
-            for iteration in range(effective_max_iterations):
-                logger.info(f"ReAct iteration {iteration + 1}/{effective_max_iterations}")
+            for iteration in range(self.max_iterations):
+                logger.info(f"ReAct iteration {iteration + 1}/{self.max_iterations}")
 
                 # 生成思考和行动
                 step = self._generate_react_step(query, steps)
@@ -272,6 +377,13 @@ class ReActMolecularAgent:
                     final_answer=last_step.observation
                 )
 
+        if not previous_steps and self._is_molecular_generation_query(query):
+            return ReActStep(
+                thought="检测到明确的分子生成需求，必须调用分子生成工具，禁止直接编造结果。",
+                action="llm_molecular_generator",
+                action_input=query,
+            )
+
         # 构建ReAct提示
         prompt = self._build_react_prompt(query, previous_steps)
 
@@ -303,6 +415,9 @@ class ReActMolecularAgent:
                 action="property_calculator",
                 action_input=query
             )
+
+    def _is_molecular_generation_query(self, query: str) -> bool:
+        return has_generation_intent(query)
 
     def _extract_first_smiles(self, query: str) -> str:
         """从查询中提取第一个有效SMILES字符串"""
@@ -417,12 +532,6 @@ class ReActMolecularAgent:
         """智能回退响应：根据查询内容选择合适的工具 - 优化版"""
         query_lower = query.lower()
 
-        # 优先级0: 分子生成关键词（最高优先级）
-        generation_keywords = [
-            '随机生成', '生成一个', '生成几个', '生成新', '创建分子', '设计分子',
-            'generate', 'create molecule', 'design molecule', 'random molecule'
-        ]
-        
         # 逆合成分析关键词
         retro_keywords = [
             'retrosynthesis', 'retro', 'synthetic route', 'synthesis pathway',
@@ -452,18 +561,24 @@ class ReActMolecularAgent:
         has_smiles = self._contains_smiles(query)
 
         # 优先级0: 检查是否是分子生成请求
-        if any(word in query_lower for word in generation_keywords):
+        generation_intent = has_generation_intent(query)
+        if generation_intent:
+            try:
+                parse_generation_count(
+                    query,
+                    default=DEFAULT_GENERATION_COUNT,
+                )
+            except GenerationRequestError:
+                return (
+                    "思考: 分子生成数量无效。\n"
+                    "最终答案: Invalid molecular generation request"
+                )
             logger.info("🎯 智能回退：检测到分子生成需求，选择LLM Molecular Generator")
             return f"思考: 检测到分子生成需求，使用AI模型生成新分子。\n行动: llm_molecular_generator\n行动输入: {query}"
 
         # 如果没有SMILES且不是生成请求，提示用户
-        if not has_smiles and not any(word in query_lower for word in generation_keywords):
-            # 检查是否可能是生成意图但表达不明确
-            if any(word in query_lower for word in ['生成', 'generate', '创建', 'create', '设计', 'design']):
-                logger.info("🎯 智能回退：检测到可能的生成意图，选择LLM Molecular Generator")
-                return f"思考: 检测到可能的分子生成需求。\n行动: llm_molecular_generator\n行动输入: {query}"
-            else:
-                return "思考: 没有检测到有效的分子结构或生成请求。\n最终答案: 请提供具体的分子结构（如SMILES格式）进行分析，或明确说明要生成新分子。"
+        if not has_smiles:
+            return "思考: 没有检测到有效的分子结构或生成请求。\n最终答案: 请提供具体的分子结构（如SMILES格式）进行分析，或明确说明要生成新分子。"
 
         # 按优先级检查关键词匹配
         if any(word in query_lower for word in retro_keywords):
@@ -484,23 +599,16 @@ class ReActMolecularAgent:
             return f"思考: 检测到分子结构信息，使用基础属性计算工具进行分析。\n行动: property_calculator\n行动输入: {query}"
 
     def _build_react_prompt(self, query: str, previous_steps: List[ReActStep]) -> str:
-        """构建ReAct提示 - 支持 Skill 动态上下文注入"""
+        """构建 ReAct 提示，并按工作流策略过滤工具。"""
 
-        # ── 根据是否有激活技能，决定工具范围和系统提示 ──────────
+        # WorkflowPolicy 不承载 persona/system prompt，只控制工具权限。
+        policy_extra_prompt = ""
+        active_tools = self._filter_tools_for_active_policy(self.tools)
         if self._active_skill:
-            # 技能模式：只暴露该技能声明的工具
-            active_tools = self.skill_router.get_tools_for_skill(
-                self._active_skill, self.tools
-            )
-            skill_system_prompt = self._active_skill.system_prompt
             logger.info(
-                f"[Skill模式] 技能={self._active_skill.name}, "
+                f"[WorkflowPolicy] 策略={self._active_skill.name}, "
                 f"暴露工具={list(active_tools.keys())}"
             )
-        else:
-            # 通用模式：暴露全部工具
-            active_tools = self.tools
-            skill_system_prompt = ""
 
         # 工具描述
         tool_descriptions = []
@@ -524,6 +632,16 @@ class ReActMolecularAgent:
 
         tools_text = "\n".join(tool_descriptions)
         tool_names_text = ", ".join(tool_names)
+        if tool_names:
+            tool_scope_rule = (
+                f"7. 🔬 **遵守工具范围** - 只可调用 [{tool_names_text}] 中的工具；"
+                "若没有合适工具，明确说明无法完成，禁止调用其他工具。"
+            )
+        else:
+            tool_scope_rule = (
+                "7. 🔬 **遵守工具范围** - 当前没有可用工具；"
+                "明确说明无法完成，禁止编造结果。"
+            )
 
         # 构建历史步骤
         agent_scratchpad = ""
@@ -540,35 +658,7 @@ class ReActMolecularAgent:
                         agent_scratchpad += f"观察: {obs}\n"
 
         # ── 组装最终 Prompt ───────────────────────────────────
-        if skill_system_prompt:
-            # 技能模式：注入技能专属的 System Prompt
-            complete_prompt = f"""{skill_system_prompt}
-
----
-
-## 可用工具
-{tools_text}
-
-## ReAct 推理格式
-使用以下格式进行推理和行动：
-
-思考: 分析当前情况，决定下一步行动
-行动: 选择一个工具，必须是 [{tool_names_text}] 之一
-行动输入: 工具的输入参数
-观察: 工具返回的结果
-... (可以重复多次)
-思考: 我现在有足够信息给出最终答案了
-最终答案: 对用户问题的完整回答
-
-## 当前任务
-**问题**: {query}
-{agent_scratchpad}
-
-请开始推理（从"思考:"开始）：
-"""
-        else:
-            # 通用模式：使用原有的通用提示词
-            complete_prompt = f"""# 🧬 药物设计智能Agent - ReAct推理模式
+        complete_prompt = f"""{policy_extra_prompt}# 🧬 药物设计智能Agent - ReAct推理模式
 
 ## 你的角色
 你是药物设计系统的智能Agent，负责通过推理和行动解决用户问题。
@@ -593,8 +683,8 @@ class ReActMolecularAgent:
 3. 🔄 **迭代优化** - 如果一个工具不够，可以调用多个
 4. ✅ **基于事实** - 最终答案必须基于工具观察结果
 5. 🚫 **避免重复** - 不要重复调用相同的工具和输入
-6. 🔴 **严禁编造数值** - 分子量、LogP、QED、TPSA等数值**绝对禁止**凭经验猜测！必须先调用工具才能回答。
-7. 🔬 **SMILES必须调工具** - 只要问题中包含SMILES分子结构，第一步必须调用 `property_calculator` 获取真实计算结果，禁止直接给出数值答案。
+6. 🔴 **严禁编造数值** - 任何科学数值都必须来自上述可用工具的真实计算或预测，禁止凭经验猜测。
+{tool_scope_rule}
 
 ## 当前任务
 **问题**: {query}
@@ -640,45 +730,33 @@ class ReActMolecularAgent:
     def _execute_tool(self, tool_name: str, tool_input: str) -> tuple[str, Dict[str, Any]]:
         """执行工具调用"""
         try:
-            # 标准化工具名称匹配
-            tool_name = tool_name.strip().lower()
+            requested_tool_name = tool_name.strip().lower()
+            matched_tool_name = self._resolve_registered_tool_name(
+                requested_tool_name,
+                self.tools,
+            )
 
-            # 工具名称映射
-            tool_name_mapping = {
-                'property_calculator': 'property_calculator',
-                'drug_likeness_assessment': 'drug_likeness_assessment',
-                'admet_predictor': 'admet_predictor',
-                'molecular_docking': 'molecular_docking',
-                'rxn_chemistry_agent': 'rxn_chemistry_agent',
-                'molecular_generator': 'molecular_generator',
-                'llm_molecular_generator': 'llm_molecular_generator',
-                # 允许一些别名
-                'property': 'property_calculator',
-                'admet': 'admet_predictor',
-                'docking': 'molecular_docking',
-                'reaction': 'rxn_chemistry_agent',
-                'drug_likeness': 'drug_likeness_assessment',
-                'generator': 'molecular_generator',
-                'llm_generator': 'llm_molecular_generator',
-                'ai_generator': 'llm_molecular_generator',
-                'rag_database_search': 'rag_database_search',
-                'rag_search': 'rag_database_search',
-                'database_search': 'rag_database_search'
-            }
-
-            # 尝试匹配工具名称
-            matched_tool_name = tool_name_mapping.get(tool_name)
-            if not matched_tool_name:
-                # 尝试部分匹配
-                for alias, real_name in tool_name_mapping.items():
-                    if alias in tool_name or tool_name in alias:
-                        matched_tool_name = real_name
-                        break
+            if matched_tool_name and self._active_skill:
+                allowed_tools = tuple(self._active_skill.allowed_tools)
+                policy_tools = self._filter_tools_for_active_policy(self.tools)
+                if matched_tool_name not in policy_tools:
+                    logger.error(
+                        "工作流策略 '%s' 拒绝执行工具 '%s'；允许的工具: %s",
+                        self._active_skill.name,
+                        matched_tool_name,
+                        list(allowed_tools),
+                    )
+                    return (
+                        f"错误: 工作流策略 '{self._active_skill.name}' "
+                        f"不允许执行工具 '{matched_tool_name}'。"
+                        f"允许的工具: {list(allowed_tools)}",
+                        {},
+                    )
 
             if not matched_tool_name or matched_tool_name not in self.tools:
                 available_tools = list(self.tools.keys())
-                logger.error(f"工具 '{tool_name}' 未找到。可用工具: {available_tools}")
-                return f"错误: 未找到工具 '{tool_name}'。可用工具: {available_tools}", {}
+                logger.error(f"工具 '{requested_tool_name}' 未找到。可用工具: {available_tools}")
+                return f"错误: 未找到工具 '{requested_tool_name}'。可用工具: {available_tools}", {}
 
             tool = self.tools[matched_tool_name]
             logger.info(f"执行工具: {matched_tool_name} with input: {tool_input[:100]}...")
@@ -688,7 +766,10 @@ class ReActMolecularAgent:
             
             # 特殊处理：如果是分子生成工具，传入用户在UI设置的数量
             if matched_tool_name == "llm_molecular_generator":
-                exec_params["mol_count"] = getattr(self, "current_mol_count", 5)
+                exec_params["query"] = build_generation_request(
+                    tool_input,
+                    getattr(self, "current_mol_count", 1),
+                )
                 exec_params["temperature"] = getattr(self, "current_temperature", 0.7)
             elif matched_tool_name in ["rxn_chemistry_agent", "property_calculator"]:
                 # 其他可能支持temperature的工具
@@ -717,14 +798,61 @@ class ReActMolecularAgent:
             logger.error(f"Tool execution failed: {e}")
             return f"工具执行出错: {str(e)}", {}
 
-    def _execute_workflow_skill(self, query: str, base_result: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute declarative workflow skills without relying on LLM reasoning."""
+    @staticmethod
+    def _canonical_tool_name(tool_name: str) -> str:
+        normalized = tool_name.strip().lower()
+        return _TOOL_NAME_MAPPING.get(normalized, normalized)
+
+    def _resolve_registered_tool_name(
+        self,
+        requested_name: str,
+        tools: Dict[str, Any],
+    ) -> str | None:
+        normalized = requested_name.strip().lower()
+        if normalized in tools:
+            return normalized
+
+        canonical_name = _TOOL_NAME_MAPPING.get(normalized)
+        if canonical_name is None:
+            for alias, mapped_name in _TOOL_NAME_MAPPING.items():
+                if alias in normalized or normalized in alias:
+                    canonical_name = mapped_name
+                    break
+        canonical_name = canonical_name or normalized
+
+        for registered_name in tools:
+            if self._canonical_tool_name(registered_name) == canonical_name:
+                return registered_name
+        return None
+
+    def _filter_tools_for_active_policy(
+        self,
+        tools: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not self._active_skill:
+            return dict(tools)
+
+        allowed_tools = {
+            self._canonical_tool_name(name)
+            for name in self._active_skill.allowed_tools
+        }
+        return {
+            name: tool
+            for name, tool in tools.items()
+            if self._canonical_tool_name(name) in allowed_tools
+        }
+
+    def _execute_workflow_skill(
+        self,
+        query: str,
+        base_result: Dict[str, Any],
+        event_callback=None,
+    ) -> Dict[str, Any]:
+        """Execute a declarative workflow policy without LLM reasoning."""
         from uuid import uuid4
 
         from .contracts import AgentContext
-        from .orchestrators import WorkflowOrchestrator
-        from .planning import TaskPlanner
-        from .runtime.event_bus import AgentEventBus
+        from .runtime.workflow_executor import WorkflowExecutor
 
         context = AgentContext(
             query=query,
@@ -732,20 +860,18 @@ class ReActMolecularAgent:
             active_skill=self._active_skill.name if self._active_skill else None,
             temperature=getattr(self, "current_temperature", 0.7),
             mol_count=getattr(self, "current_mol_count", 5),
+            metadata={
+                "requested_count": getattr(self, "current_mol_count", 1)
+            },
         )
-        plan = TaskPlanner().plan(context)
-        steps = list(plan.steps)
-        if not steps and self._active_skill and hasattr(self._active_skill, "workflow_steps"):
-            steps = list(self._active_skill.workflow_steps)
-
-        event_bus = AgentEventBus()
-        orchestrator = WorkflowOrchestrator(event_bus=event_bus)
-        agent_result = orchestrator.run(
+        execution = WorkflowExecutor().execute(
             context=context,
-            steps=steps,
-            tools=self.tools,
-            continue_on_error=True,
+            policy=self._active_skill,
+            all_tools=self.tools,
+            event_callback=event_callback,
         )
+        plan = execution.plan
+        agent_result = execution.result
 
         tool_results = {item.tool_name: item.to_legacy_dict() for item in agent_result.tool_results}
         base_result.update(
@@ -759,10 +885,10 @@ class ReActMolecularAgent:
                 "partial": agent_result.partial,
                 "trace_id": agent_result.trace_id,
                 "agent_result": agent_result,
-                "agent_events": [event.to_dict() for event in event_bus.events],
+                "agent_events": execution.events,
                 "workflow_plan": {
                     "workflow_name": plan.workflow_name,
-                    "steps": [step.tool_name for step in steps],
+                    "steps": [step.tool_name for step in plan.steps],
                     "metadata": plan.metadata,
                 },
             }
@@ -798,32 +924,35 @@ class ReActMolecularAgent:
             'steps': [],
             'final_answer': '',
             'reasoning_trace': ['使用简化模式处理请求'],
-            'tools_used': []
+            'tools_used': [],
+            'active_skill': self._active_skill.name if self._active_skill else None,
         }
 
         try:
-            # 找到匹配的工具
+            policy_tools = self._filter_tools_for_active_policy(self.tools)
             matching_tools = []
-            for tool_name, tool in self.tools.items():
+            for tool_name, tool in policy_tools.items():
                 if hasattr(tool, 'should_use') and tool.should_use(query):
                     matching_tools.append((tool_name, tool))
                     logger.info(f"✅ 工具 {tool_name} 匹配成功")
 
             if not matching_tools:
-                result['final_answer'] = "未找到合适的工具来处理您的请求。请提供更具体的信息或SMILES结构。"
+                if self._active_skill:
+                    result['success'] = False
+                    result['final_answer'] = (
+                        f"工作流策略 '{self._active_skill.name}' "
+                        "没有允许且匹配的可用工具；未执行任何计算或预测。"
+                    )
+                else:
+                    result['final_answer'] = "未找到合适的工具来处理您的请求。请提供更具体的信息或SMILES结构。"
                 return result
 
             # 工具优先级调整 - 优化版
             def get_tool_priority(tool_name: str, query_str: str) -> int:
                 """动态计算工具优先级，考虑查询内容"""
-                query_lower = query_str.lower()
-
                 # 分子生成请求（最高优先级）
-                generation_keywords = [
-                    '随机生成', '生成一个', '生成几个', '生成新', '创建分子', '设计分子',
-                    'generate', 'create molecule', 'design molecule', 'random'
-                ]
-                is_generation = any(kw in query_lower for kw in generation_keywords)
+                query_lower = query_str.lower()
+                is_generation = has_generation_intent(query_str)
 
                 # 逆合成分析请求
                 retro_keywords = [
@@ -873,7 +1002,16 @@ class ReActMolecularAgent:
 
             # 执行工具
             tool_start = time.time()
-            tool_result = tool.execute(query)
+            tool_input = (
+                build_generation_request(
+                    query,
+                    getattr(self, "current_mol_count", 1),
+                )
+                if self._canonical_tool_name(tool_name)
+                == "llm_molecular_generator"
+                else query
+            )
+            tool_result = tool.execute(tool_input)
             tool_elapsed = time.time() - tool_start
             
             result['tools_used'].append(tool_name)

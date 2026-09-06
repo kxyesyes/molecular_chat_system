@@ -18,7 +18,7 @@ class ActivityPredictorTool(BaseMolecularTool):
     def __init__(self):
         super().__init__(
             name="activity_predictor",
-            description="基于 RG-MPNN 图神经网络，预测分子的生物活性得分(pIC50)。输入：包含 SMILES 的查询文本。输出：活性得分与高/中/低分类。"
+            description="基于已注册 RG-MPNN 模型及其科学 metadata，按模型任务与 endpoint 返回分子活性预测。输入：包含 SMILES 的查询文本。"
         )
         self._predictor = None
 
@@ -60,41 +60,68 @@ class ActivityPredictorTool(BaseMolecularTool):
         try:
             predictor = self._get_predictor()
             predictions = predictor.predict(smiles_list)
+            successful_predictions = [
+                pred for pred in predictions if pred.get("success")
+            ]
 
             lines = [
                 "## 🔬 分子活性预测结果 (RG-MPNN)",
                 "",
-                "| SMILES | 活性得分 | 活性等级 | 置信度 | 备注 |",
-                "|--------|---------|---------|--------|------|",
+                "| SMILES | 任务 | Endpoint | 预测值 | 单位 | 备注 |",
+                "|--------|------|----------|--------|------|------|",
             ]
 
             for pred in predictions:
                 if pred.get('success'):
                     smiles = pred['smiles']
-                    score = pred['activity_score']
-                    cls = pred['class']
-                    conf = pred.get('confidence', 'N/A')
+                    task_type = pred.get('task_type', '')
+                    endpoint = pred.get('endpoint', '')
+                    units = pred.get('units', '')
                     note = pred.get('note', '')
 
-                    cls_emoji = {"High": "🟢", "Medium": "🟡", "Low": "🔴"}.get(cls, "⚪")
-
-                    if isinstance(conf, float):
-                        conf_str = f"{conf:.2f}"
+                    if task_type == "classification":
+                        prediction_value = pred.get("probability")
+                        value_label = "probability"
                     else:
-                        conf_str = str(conf)
+                        prediction_value = pred.get("value")
+                        value_label = "value"
+                    if not isinstance(prediction_value, (int, float)):
+                        lines.append(
+                            f"| `{smiles[:40]}` | {task_type or '-'} | {endpoint or '-'} | ❌ schema error | {units or '-'} | Missing numeric {value_label} |"
+                        )
+                        continue
 
                     lines.append(
-                        f"| `{smiles[:40]}` | {score:.2f} | {cls_emoji} {cls} | {conf_str} | {note} |"
+                        f"| `{smiles[:40]}` | {task_type} | {endpoint} | "
+                        f"{value_label}={float(prediction_value):.4f} | {units} | {note} |"
                     )
                 else:
                     lines.append(
-                        f"| `{pred.get('smiles', 'N/A')[:40]}` | - | ❌ 失败 | - | {pred.get('error', '')} |"
+                        f"| `{pred.get('smiles', 'N/A')[:40]}` | - | - | ❌ 失败 | - | {pred.get('error', '')} |"
                     )
 
-            result['success'] = True
+            result['success'] = bool(successful_predictions)
             result['data'] = predictions
-            result['formatted'] = "\n".join(lines)
-            result['message'] = f"完成 {len(predictions)} 个分子的活性预测"
+            result['formatted'] = "\n".join(lines) if successful_predictions else ""
+            result['message'] = (
+                f"完成 {len(successful_predictions)} 个分子的任务感知活性预测"
+                if successful_predictions
+                else "RG-MPNN 未返回任何真实活性预测结果"
+            )
+            metadata = getattr(predictor, "current_model_metadata", None) or {}
+            model_provenance = {
+                "model_id": metadata.get("model_id"),
+                "weights_sha256": metadata.get("weights_sha256"),
+                "endpoint": metadata.get("endpoint"),
+                "units": metadata.get("units"),
+                "task_type": metadata.get("task_type"),
+                "demo_mode": bool(getattr(predictor, "demo_mode", True)),
+            }
+            for prediction in successful_predictions:
+                prediction["model_provenance"] = dict(model_provenance)
+            result['quality'] = {
+                "model_provenance": model_provenance
+            }
 
         except Exception as e:
             logger.error(f"活性预测失败: {e}", exc_info=True)

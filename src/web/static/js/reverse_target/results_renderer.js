@@ -6,6 +6,8 @@
 const RtResults = (() => {
   const $ = (id) => document.getElementById(id);
   const SINGLE_PAGE_SIZE = 10;
+  const SINGLE_RESULT_COLUMN_COUNT = 7;
+  const BATCH_RESULT_COLUMN_COUNT = 7;
   const singlePageState = {
     results: [],
     is3DMode: false,
@@ -323,7 +325,7 @@ const RtResults = (() => {
     if (!resultsData || resultsData.length === 0) {
       resultCount.textContent = "未找到匹配的靶点";
       resultsBody.innerHTML =
-        '<tr><td colspan="7" style="text-align:center;padding:40px;color:#64748b;">未找到符合条件的靶点，建议尝试降低相似度阈值，或取消“仅 Human”过滤。</td></tr>';
+        `<tr><td colspan="${SINGLE_RESULT_COLUMN_COUNT}" style="text-align:center;padding:40px;color:#64748b;">未找到符合条件的靶点，建议尝试降低相似度阈值，或取消“仅 Human”过滤。</td></tr>`;
       _clearPagination();
       results.classList.add("show");
       return;
@@ -428,7 +430,7 @@ const RtResults = (() => {
     if (!resultsData || resultsData.length === 0) {
       resultCount.textContent = "未找到有效结果";
       resultsBody.innerHTML =
-        '<tr><td colspan="8" style="text-align:center;padding:40px;">无数据</td></tr>';
+        `<tr><td colspan="${BATCH_RESULT_COLUMN_COUNT}" style="text-align:center;padding:40px;">无数据</td></tr>`;
       results.classList.add("show");
       return;
     }
@@ -486,7 +488,7 @@ const RtResults = (() => {
           <tr>
             <td>#${idx++}</td>
             <td style="font-family:monospace;font-size:12px;">${escapeHtml(querySmiles)}</td>
-            <td colspan="5" style="color:#ef4444;">${escapeHtml(errorText)}</td>
+            <td colspan="${BATCH_RESULT_COLUMN_COUNT - 2}" style="color:#ef4444;">${escapeHtml(errorText)}</td>
           </tr>`;
       }
     });

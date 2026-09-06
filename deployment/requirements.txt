@@ -1,3 +1,5 @@
+# MedChat CUDA 12.1 deployment profile.
+# This profile and the root CI / CPU requirements are not interchangeable.
 # MedChat server deployment dependencies
 # Target environment: Linux + Python 3.10 + NVIDIA RTX3090 + CUDA 12.1 driver/runtime
 #

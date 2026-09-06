@@ -33,8 +33,13 @@ class MolecularDesignService:
     def substitute_fragment(self, parent_smiles: str, fragment_smiles: str) -> Dict[str, Any]:
         return substitute_fragment(parent_smiles, fragment_smiles)
 
-    def calculate_properties(self, smiles: str) -> Dict[str, Any]:
-        return calculate_properties(smiles)
+    def calculate_properties(
+        self,
+        smiles: str,
+        command: str = "",
+        reference_smiles: str = "",
+    ) -> Dict[str, Any]:
+        return calculate_properties(smiles, command=command, reference_smiles=reference_smiles)
 
     async def ai_recommend(self, command: str, current_smiles: str, current_props: Dict[str, Any]) -> Dict[str, Any]:
         recommended_fragments = self.fragments.recommend_for_command(command)

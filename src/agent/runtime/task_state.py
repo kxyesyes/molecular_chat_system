@@ -17,6 +17,9 @@ class TaskEventType(str, Enum):
     TOOL_FAILED = "tool_failed"
     VALIDATION_WARNING = "validation_warning"
     TASK_COMPLETED = "task_completed"
+    TASK_PARTIAL = "task_partial"
+    TASK_REJECTED = "task_rejected"
+    TASK_CANCELLED = "task_cancelled"
     TASK_FAILED = "task_failed"
 
 
@@ -82,6 +85,15 @@ class AgentTaskState:
             self.partial_results.append(payload)
         elif event == TaskEventType.TASK_COMPLETED:
             self.status = "completed"
+            self.progress = 1.0
+        elif event == TaskEventType.TASK_PARTIAL:
+            self.status = "partial"
+            self.progress = 1.0
+        elif event == TaskEventType.TASK_REJECTED:
+            self.status = "rejected"
+            self.progress = 1.0
+        elif event == TaskEventType.TASK_CANCELLED:
+            self.status = "cancelled"
             self.progress = 1.0
         elif event == TaskEventType.TASK_FAILED:
             self.status = "failed"

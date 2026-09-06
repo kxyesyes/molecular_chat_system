@@ -17,7 +17,7 @@ window.ActivityModels = (function () {
     if (!selector) return null;
     return (
       allModels.find(function (model) {
-        return model.weights_file === selector.value;
+        return model.model_id === selector.value;
       }) || null
     );
   }
@@ -39,70 +39,88 @@ window.ActivityModels = (function () {
     el.textContent = getTaskType() === "classification" ? "分类" : "回归";
   }
 
+  function createTextElement(tagName, className, text) {
+    const element = document.createElement(tagName);
+    if (className) element.className = className;
+    element.textContent = text;
+    return element;
+  }
+
+  function appendMetricRow(container, label, value, valueClass) {
+    const row = document.createElement("div");
+    row.className = "popover-metric-row";
+    row.append(
+      createTextElement("span", "metric-label", label),
+      createTextElement("span", valueClass || "metric-value", value),
+    );
+    container.appendChild(row);
+  }
+
   function updatePopoverContent() {
     const selector = document.getElementById("modelSelector");
     const content = document.getElementById("popoverContent");
     if (!selector || !content) return;
 
-    const selectedFile = selector.value;
+    const selectedModelId = selector.value;
     const model = allModels.find(function (item) {
-      return item.weights_file === selectedFile;
+      return item.model_id === selectedModelId;
     });
 
     if (!model) {
-      content.innerHTML = '<div class="popover-title">未发现模型详情</div>';
+      content.replaceChildren(
+        createTextElement("div", "popover-title", "未发现模型详情"),
+      );
       return;
     }
 
     const dateStr = new Date(model.created_at * 1000).toLocaleString();
-    let metricsHtml = "";
+    content.replaceChildren(
+      createTextElement("div", "popover-title", model.name),
+    );
+    appendMetricRow(
+      content,
+      "任务类型",
+      model.task_type === "regression" ? "回归" : "分类",
+    );
+    appendMetricRow(content, "目标列", model.target);
+    appendMetricRow(content, "样本数量", model.samples);
 
-    if (model.best_metrics) {
-      Object.entries(model.best_metrics).forEach(function (entry) {
-        const key = entry[0];
-        const value = entry[1];
-        metricsHtml += `
-          <div class="popover-metric-row">
-            <span class="metric-label">${String(key).toUpperCase()}</span>
-            <span class="metric-highlight">${Number(value).toFixed(4)}</span>
-          </div>
-        `;
+    const metricsTitle = createTextElement("div", "", "核心指标 · Metrics");
+    metricsTitle.style.cssText =
+      "margin: 12px 0 8px; border-top: 1px solid #f1f5f9; padding-top: 8px; font-weight:700; font-size:12px; color:#64748b;";
+    content.appendChild(metricsTitle);
+
+    const metricEntries = model.best_metrics
+      ? Object.entries(model.best_metrics)
+      : [];
+    if (metricEntries.length) {
+      metricEntries.forEach(function (entry) {
+        appendMetricRow(
+          content,
+          String(entry[0]).toUpperCase(),
+          Number(entry[1]).toFixed(4),
+          "metric-highlight",
+        );
       });
+    } else {
+      const emptyMetrics = createTextElement("div", "", "暂无评估数据");
+      emptyMetrics.style.cssText = "font-size:12px; color:var(--muted)";
+      content.appendChild(emptyMetrics);
     }
 
-    content.innerHTML = `
-      <div class="popover-title">${model.name}</div>
-      <div class="popover-metric-row">
-        <span class="metric-label">任务类型</span>
-        <span class="metric-value">${model.task_type === "regression" ? "回归" : "分类"}</span>
-      </div>
-      <div class="popover-metric-row">
-        <span class="metric-label">目标列</span>
-        <span class="metric-value">${model.target}</span>
-      </div>
-      <div class="popover-metric-row">
-        <span class="metric-label">样本数量</span>
-        <span class="metric-value">${model.samples}</span>
-      </div>
-      <div style="margin: 12px 0 8px; border-top: 1px solid #f1f5f9; padding-top: 8px; font-weight:700; font-size:12px; color:#64748b;">
-        核心指标 · Metrics
-      </div>
-      ${
-        metricsHtml ||
-        '<div style="font-size:12px; color:var(--muted)">暂无评估数据</div>'
-      }
-      <div style="margin-top: 12px; font-size: 11px; color: #94a3b8; text-align: right;">训练于: ${dateStr}</div>
-    `;
+    const date = createTextElement("div", "", `训练于: ${dateStr}`);
+    date.style.cssText =
+      "margin-top: 12px; font-size: 11px; color: #94a3b8; text-align: right;";
+    content.appendChild(date);
   }
 
-  async function switchCurrentModel(file) {
-    if (!file) return;
-
+  async function switchCurrentModel(modelId) {
+    if (!modelId) return;
     try {
       const res = await fetch("/api/activity/models/switch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model_file: file }),
+        body: JSON.stringify({ model_id: modelId }),
       });
       const data = await res.json();
 
@@ -134,10 +152,13 @@ window.ActivityModels = (function () {
 
       if (!selector) return allModels;
 
-      selector.innerHTML = "";
+      selector.replaceChildren();
 
       if (!allModels.length) {
-        selector.innerHTML = '<option value="">(尚未训练自定义模型)</option>';
+        const emptyOption = document.createElement("option");
+        emptyOption.value = "";
+        emptyOption.textContent = "(尚未训练自定义模型)";
+        selector.appendChild(emptyOption);
         if (deleteBtn) deleteBtn.style.display = "none";
         if (infoBtn) infoBtn.style.display = "none";
         updateTaskTypeStat();
@@ -150,10 +171,9 @@ window.ActivityModels = (function () {
 
       allModels.forEach(function (model) {
         const opt = document.createElement("option");
-        opt.value = model.weights_file;
-        opt.setAttribute("data-id", model.model_id);
+        opt.value = model.model_id;
         opt.textContent = model.name;
-        if (data.current_model === model.weights_file) {
+        if (data.current_model === model.model_id) {
           opt.selected = true;
         }
         selector.appendChild(opt);
@@ -175,7 +195,7 @@ window.ActivityModels = (function () {
     const selectedOpt = selector.options[selector.selectedIndex];
     if (!selectedOpt || !selectedOpt.value) return;
 
-    const modelId = selectedOpt.getAttribute("data-id");
+    const modelId = selectedOpt.value;
     const modelName = selectedOpt.textContent;
 
     if (
@@ -185,7 +205,6 @@ window.ActivityModels = (function () {
     ) {
       return;
     }
-
     try {
       const res = await fetch(`/api/activity/models/${modelId}`, {
         method: "DELETE",

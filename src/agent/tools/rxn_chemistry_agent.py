@@ -227,6 +227,9 @@ class RXNChemistryAgent(BaseMolecularTool):
 
     def _call_reaction_prediction_api(self, reactants: str) -> Optional[Dict[str, Any]]:
         """调用RXN for Chemistry反应预测API"""
+        if not self.api_key:
+            logger.error("RXN_API_KEY is not configured")
+            return None
         try:
             url = f"{self.base_url}/reaction-prediction"
             payload = {
@@ -247,37 +250,40 @@ class RXNChemistryAgent(BaseMolecularTool):
                 return data.get("payload", {})
             elif response.status_code == 401:
                 logger.error("RXN API authentication failed - API key may be invalid or expired")
-                return self._get_mock_reaction_data(reactants)
+                return None
             elif response.status_code == 403:
                 logger.error("RXN API access forbidden - insufficient permissions")
-                return self._get_mock_reaction_data(reactants)
+                return None
             elif response.status_code == 500:
                 logger.error("RXN API server error - service may be temporarily unavailable")
                 logger.debug(f"Server error details: {response.text[:500]}")
-                return self._get_mock_reaction_data(reactants)
+                return None
             else:
                 logger.error(f"RXN API unexpected status code: {response.status_code}")
                 logger.debug(f"Response text: {response.text[:200]}")
-                return self._get_mock_reaction_data(reactants)
+                return None
 
         except requests.exceptions.ConnectTimeout:
             logger.error("RXN API connection timeout - service may be unavailable")
-            return self._get_mock_reaction_data(reactants)
+            return None
         except requests.exceptions.ReadTimeout:
             logger.error("RXN API read timeout - service response too slow")
-            return self._get_mock_reaction_data(reactants)
+            return None
         except requests.exceptions.ConnectionError as e:
             logger.error(f"RXN API connection error: {e}")
-            return self._get_mock_reaction_data(reactants)
+            return None
         except requests.exceptions.RequestException as e:
             logger.error(f"RXN API request failed: {e}")
-            return self._get_mock_reaction_data(reactants)
+            return None
         except Exception as e:
             logger.error(f"Unexpected error in reaction prediction API call: {e}")
-            return self._get_mock_reaction_data(reactants)
+            return None
 
     def _call_retrosynthesis_api(self, target: str) -> Optional[Dict[str, Any]]:
         """调用RXN for Chemistry逆合成API"""
+        if not self.api_key:
+            logger.error("RXN_API_KEY is not configured")
+            return None
         try:
             url = f"{self.base_url}/retrosynthesis"
             payload = {
@@ -293,105 +299,23 @@ class RXNChemistryAgent(BaseMolecularTool):
                 return data.get("payload", {})
             else:
                 logger.error(f"RXN API error: {response.status_code}, {response.text}")
-                # 返回模拟数据用于演示
-                return self._get_mock_retrosynthesis_data(target)
+                return None
 
         except requests.exceptions.RequestException as e:
             logger.error(f"RXN API request failed: {e}")
-            # 返回模拟数据用于演示
-            return self._get_mock_retrosynthesis_data(target)
+            return None
         except Exception as e:
             logger.error(f"Unexpected error in retrosynthesis API call: {e}")
-            return self._get_mock_retrosynthesis_data(target)
-
-    def _search_literature_api(self, molecule: str) -> Optional[Dict[str, Any]]:
-        """搜索文献数据（模拟实现）"""
-        try:
-            # 注意：这是一个模拟实现，实际的RXN for Chemistry可能有不同的文献搜索端点
-            # 您可能需要根据实际API文档调整这部分代码
-
-            # 模拟返回一些文献数据
-            mock_data = {
-                "references": [
-                    {
-                        "title": f"Chemical synthesis involving {molecule}",
-                        "authors": ["Smith, J.", "Doe, A."],
-                        "journal": "Journal of Organic Chemistry",
-                        "year": 2023,
-                        "doi": "10.1021/jo.example"
-                    }
-                ],
-                "patents": [
-                    {
-                        "title": f"Method for synthesizing compounds containing {molecule}",
-                        "patent_number": "US123456789",
-                        "year": 2022
-                    }
-                ]
-            }
-
-            return mock_data
-
-        except Exception as e:
-            logger.error(f"Literature search failed: {e}")
             return None
 
-    def _get_mock_reaction_data(self, reactants: str) -> Dict[str, Any]:
-        """获取模拟反应预测数据"""
-        mock_predictions = [
-            {"products": f"{reactants}.oxidized", "confidence": 0.85},
-            {"products": f"{reactants}.reduced", "confidence": 0.72},
-            {"products": f"{reactants}.substituted", "confidence": 0.68}
-        ]
-
-        return {"predictions": mock_predictions}
-
-    def _get_mock_retrosynthesis_data(self, target: str) -> Dict[str, Any]:
-        """获取更详细的模拟逆合成数据"""
-        # 为目标分子生成更现实的逆合成路线
-        target_name = self._get_molecule_name(target)
-
-        mock_routes = [
-            {
-                "confidence": 0.78,
-                "steps": [
-                    {
-                        "reactants": "4-trifluoromethylaniline + cyclopentanone derivative",
-                        "products": target,
-                        "reaction_type": "amide formation",
-                        "description": "通过酰胺化反应连接芳香胺和环状酮"
-                    },
-                    {
-                        "reactants": "starting materials",
-                        "products": "4-trifluoromethylaniline",
-                        "reaction_type": "nitro reduction",
-                        "description": "从硝基化合物还原得到芳香胺"
-                    }
-                ]
-            },
-            {
-                "confidence": 0.65,
-                "steps": [
-                    {
-                        "reactants": "pre-formed intermediate + coupling reagent",
-                        "products": target,
-                        "reaction_type": "coupling reaction",
-                        "description": "使用偶联试剂直接连接两个片段"
-                    }
-                ]
-            }
-        ]
-
-        return {"routes": mock_routes}
-
-    def _get_molecule_name(self, smiles: str) -> str:
-        """为SMILES生成简单的分子名称"""
-        if "C(F)(F)F" in smiles:
-            return "含三氟甲基化合物"
-        elif "N" in smiles and "O" in smiles:
-            return "含氮氧化合物"
-        else:
-            return "有机化合物"
+    def _search_literature_api(self, molecule: str) -> Optional[Dict[str, Any]]:
+        """Literature search is unavailable until a real provider is configured."""
+        logger.warning(
+            "RXN literature search has no configured real endpoint; "
+            "no citations were generated for %s",
+            molecule,
+        )
+        return None
 
     def _format_reaction_prediction(self, reactants: str, prediction_data: Dict) -> str:
         """格式化反应预测结果"""

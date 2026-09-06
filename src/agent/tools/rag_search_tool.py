@@ -17,11 +17,14 @@ class RAGSearchTool(BaseMolecularTool):
     RAG 本地知识库检索工具
     """
     
-    def __init__(self):
+    def __init__(self, rag_system=None, embedding_endpoint: str = "http://localhost:11434/api/embeddings"):
         super().__init__(
-            name="rag_database_search",
+            name="rag_search",
             description="Searches the local molecular knowledge base (RAG database) for similar molecules or text context. Useful when asked to find similar molecules in the database, or when looking up known structural properties of molecules. Input should be the search query or molecule SMILES."
         )
+        self.aliases = {"rag_database_search"}
+        self.rag_system = rag_system
+        self.embedding_endpoint = embedding_endpoint
 
     def should_use(self, query: str) -> bool:
         """检查查询是否需要RAG数据库搜索"""
@@ -34,18 +37,19 @@ class RAGSearchTool(BaseMolecularTool):
         logger.info(f"RAGSearchTool triggered with query: {query}")
         
         try:
-            from src.web.app import app_instance
-            if not app_instance or not hasattr(app_instance, 'rag_system'):
-                return {"success": False, "error": "RAG system not available globally"}
-            
-            rag_sys = app_instance.rag_system
+            rag_sys = self.rag_system
+            if rag_sys is None:
+                from src.web.app import app_instance
+                if not app_instance or not hasattr(app_instance, 'rag_system'):
+                    return {"success": False, "error": "RAG system not available globally"}
+                rag_sys = app_instance.rag_system
             if not rag_sys or not rag_sys.is_initialized or rag_sys.vector_index is None:
                 return {"success": False, "error": "RAG vector database is not fully initialized"}
 
             # Get embedding synchronously
             try:
                 response = requests.post(
-                    "http://localhost:11434/api/embeddings",
+                    self.embedding_endpoint,
                     json={
                         "model": rag_sys.embedding_model_name,
                         "prompt": query
@@ -101,7 +105,19 @@ class RAGSearchTool(BaseMolecularTool):
                     "success": True,
                     "data": results,
                     "summary": summary,
-                    "message": f"Found {len(results)} similar molecules."
+                    "message": f"Found {len(results)} similar molecules.",
+                    "evidence": [
+                        {
+                            "source": "local_rag_vector_index",
+                            "record_count": len(results),
+                            "embedding_model": getattr(rag_sys, "embedding_model_name", None),
+                        }
+                    ],
+                    "quality": {
+                        "tool_name": "rag_search",
+                        "alias": "rag_database_search",
+                        "database_initialized": True,
+                    },
                 }
             except Exception as e:
                 logger.error(f"FAISS search error: {e}")

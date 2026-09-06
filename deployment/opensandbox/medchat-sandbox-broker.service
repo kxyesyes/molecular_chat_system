@@ -1,0 +1,50 @@
+[Unit]
+Description=MedChat Sandbox Broker
+After=network-online.target medchat-opensandbox.service
+Wants=network-online.target
+Requires=medchat-opensandbox.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=medchat-sandbox
+Group=medchat-sandbox
+WorkingDirectory=/opt/medchat/molecular_chat_system
+RuntimeDirectory=medchat-sandbox
+RuntimeDirectoryMode=0750
+EnvironmentFile=/etc/medchat/sandbox-broker.env
+Environment=PATH=/opt/conda/envs/medchat/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=MEDCHAT_SANDBOX_BROKER_STATE=/var/lib/medchat-sandbox
+Environment=MEDCHAT_SANDBOX_BROKER_SOCKET=/run/medchat-sandbox/broker.sock
+Environment=OPEN_SANDBOX_DOMAIN=127.0.0.1:8080
+ExecStart=/opt/conda/envs/medchat/bin/python scripts/run_sandbox_broker.py
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=330
+KillMode=mixed
+UMask=0077
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+RemoveIPC=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/medchat-sandbox /run/medchat-sandbox
+ReadOnlyPaths=/opt/medchat/molecular_chat_system /opt/conda/envs/medchat /etc/medchat/sandbox-broker.env
+InaccessiblePaths=/var/run/docker.sock /etc/medchat/opensandbox.env /etc/medchat/opensandbox.toml /var/lib/opensandbox/approved-empty
+
+[Install]
+WantedBy=multi-user.target

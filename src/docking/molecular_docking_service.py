@@ -6,14 +6,35 @@
 import os
 import subprocess
 import logging
+import math
+import inspect
+import re
 from typing import Dict, List, Any, Tuple, Optional
 import shutil
 from dataclasses import dataclass
+from pathlib import Path
 import sys
 
 from .adapters import ADFRAdapter, MeekoAdapter, OpenBabelAdapter, VinaAdapter
+from .adapters.base import (
+    CommandAdapter,
+    CommandCancelledError,
+    CommandOwnershipUncertainError,
+)
 
 logger = logging.getLogger(__name__)
+
+_SAFE_JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_DOCKING_PHASES = (
+    ("receptor_preparation", 10),
+    ("ligand_preparation", 35),
+    ("vina_running", 60),
+    ("scientific_validation", 90),
+)
+
+
+class _ProgressCallbackError(RuntimeError):
+    pass
 
 @dataclass
 class DockingResult:
@@ -89,6 +110,24 @@ class MolecularDockingService:
         """Configure docking tool paths from config or environment."""
         raw_config = config or {}
         docking_config = raw_config.get("docking", raw_config)
+
+        raw_vina_timeout = docking_config.get("vina_timeout_seconds")
+        if raw_vina_timeout is None:
+            raw_vina_timeout = os.environ.get(
+                "MOLECULAR_DOCKING_VINA_TIMEOUT_SECONDS",
+                "300",
+            )
+        try:
+            vina_timeout_seconds = float(raw_vina_timeout)
+            if not math.isfinite(vina_timeout_seconds) or vina_timeout_seconds <= 0:
+                raise ValueError("timeout must be a positive finite number")
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid Vina timeout %r; using the 300 second default",
+                raw_vina_timeout,
+            )
+            vina_timeout_seconds = 300.0
+        self.vina_timeout_seconds = vina_timeout_seconds
 
         root_dir = docking_config.get("root_dir") or os.environ.get("MOLECULAR_DOCKING_ROOT", "")
         root_dir = os.path.abspath(root_dir) if root_dir else ""
@@ -168,22 +207,31 @@ class MolecularDockingService:
 
     def _run_prepare_ligand(self, input_path: str, output_path: str,
                                job_dir: str, log_label: str,
-                               log_on_failure: bool = True) -> Tuple[bool, str]:
+                               log_on_failure: bool = True, *,
+                               cancel_event=None) -> Tuple[bool, str]:
         """Run ligand preparation and return success flag plus CLI output."""
         input_path = os.path.abspath(input_path)
         output_path = os.path.abspath(output_path)
         job_dir = os.path.abspath(job_dir)
-        cmd = self.ligand_adapter.build_prepare_command(input_path, output_path)
-        logger.info(f"执行{log_label}命令: {' '.join(cmd)}")
-        result = self.ligand_adapter.prepare_ligand(input_path, output_path, job_dir, timeout=60)
+        logger.info("Executing %s command", log_label)
+        adapter_control = {}
+        if cancel_event is not None:
+            adapter_control["cancel_event"] = cancel_event
+        result = self.ligand_adapter.prepare_ligand(
+            input_path,
+            output_path,
+            job_dir,
+            timeout=60,
+            **adapter_control,
+        )
         combined_output = (result.stderr or "") + ("\n" if result.stderr and result.stdout else "") + (result.stdout or "")
 
         if result.returncode == 0 and os.path.exists(output_path):
-            logger.info(f"{log_label}成功: {output_path}")
+            logger.info("%s succeeded", log_label)
             return True, combined_output
 
         if log_on_failure:
-            logger.error(f"{log_label}失败 (returncode={result.returncode}): {combined_output}")
+            logger.error("%s failed (returncode=%s)", log_label, result.returncode)
         return False, combined_output
 
     def _load_rdkit_mol_from_file(self, ligand_path: str):
@@ -206,7 +254,7 @@ class MolecularDockingService:
         return None
 
     def _prepare_ligand_file_with_explicit_hs(self, ligand_path: str, output_path: str,
-                                              job_dir: str) -> bool:
+                                              job_dir: str, *, cancel_event=None) -> bool:
         """Normalize ligand files through RDKit so Meeko receives explicit hydrogens."""
         try:
             from rdkit import Chem
@@ -214,7 +262,7 @@ class MolecularDockingService:
 
             mol = self._load_rdkit_mol_from_file(ligand_path)
             if mol is None:
-                logger.error(f"RDKit无法读取配体文件: {ligand_path}")
+                logger.error("RDKit could not read the ligand input")
                 return False
 
             mol = Chem.AddHs(mol, addCoords=True)
@@ -228,7 +276,10 @@ class MolecularDockingService:
             try:
                 AllChem.MMFFOptimizeMolecule(mol)
             except Exception as optimize_error:
-                logger.warning(f"配体 MMFF 优化失败，将继续使用当前构象: {optimize_error}")
+                logger.warning(
+                    "Ligand MMFF optimization failed (%s); using current conformer",
+                    type(optimize_error).__name__,
+                )
 
             normalized_sdf_path = os.path.join(job_dir, "ligand_explicit_h.sdf")
             writer = Chem.SDWriter(normalized_sdf_path)
@@ -239,10 +290,13 @@ class MolecularDockingService:
                 normalized_sdf_path,
                 output_path,
                 job_dir,
-                "配体文件准备(RDKit显式氢处理后)"
+                "配体文件准备(RDKit显式氢处理后)",
+                cancel_event=cancel_event,
             )
             return success
 
+        except (CommandCancelledError, CommandOwnershipUncertainError):
+            raise
         except Exception as e:
             logger.error(f"RDKit 显式氢处理异常: {e}")
             return False
@@ -328,15 +382,26 @@ class MolecularDockingService:
                       and info["mk_prepare_ligand"]["exists"] and info["python_env"]["has_rdkit"])
         return info
 
-    def prepare_protein(self, protein_path: str, output_path: str) -> bool:
+    def prepare_protein(
+        self,
+        protein_path: str,
+        output_path: str,
+        *,
+        cancel_event=None,
+    ) -> bool:
         """
         准备蛋白质文件 (PDB -> PDBQT)
         """
         try:
+            self._raise_if_cancelled(cancel_event)
             # 如果传入的本身是PDBQT，直接复制
             if protein_path.lower().endswith('.pdbqt'):
-                shutil.copyfile(protein_path, output_path)
-                logger.info(f"检测到PDBQT受体，已直接使用: {output_path}")
+                self._copy_file_cooperatively(
+                    protein_path,
+                    output_path,
+                    cancel_event,
+                )
+                logger.info("Using receptor input already in PDBQT format")
                 return True
 
             # 使用 ADFRsuite 的 prepare_receptor（支持 .bat / 无扩展 / .py）
@@ -345,70 +410,44 @@ class MolecularDockingService:
 
             if prepare_receptor_cmd:
                 self.receptor_adapter = ADFRAdapter(prepare_receptor_cmd)
-                cmd = self.receptor_adapter.build_prepare_command(protein_path, output_path)
-
-                logger.info(f"执行蛋白质准备命令: {' '.join(cmd)}")
-                result = self.receptor_adapter.prepare_receptor(protein_path, output_path, self.work_dir)
+                logger.info("Executing receptor preparation command")
+                adapter_control = {}
+                if cancel_event is not None:
+                    adapter_control["cancel_event"] = cancel_event
+                result = self.receptor_adapter.prepare_receptor(
+                    protein_path,
+                    output_path,
+                    self.work_dir,
+                    **adapter_control,
+                )
 
                 if result.returncode == 0:
-                    logger.info(f"蛋白质准备成功: {output_path}")
+                    logger.info("Receptor preparation succeeded")
                     return True
                 else:
-                    logger.error(f"ADFRsuite 蛋白质准备失败: {result.stderr}")
+                    logger.error(
+                        "ADFRsuite receptor preparation failed (returncode=%s)",
+                        result.returncode,
+                    )
 
-            # 回退：使用简化的 PDB→PDBQT 转换（避免 OpenBabel 格式问题）
-            logger.warning("尝试使用简化 PDB→PDBQT 转换 (回退方案)")
-            try:
-                # 读取 PDB 文件并生成简化的 PDBQT
-                with open(protein_path, 'r', encoding='utf-8') as f:
-                    pdb_lines = f.readlines()
-                
-                pdbqt_lines = []
-                pdbqt_lines.append("REMARK  Generated by simplified PDB to PDBQT converter\n")
-                
-                for line in pdb_lines:
-                    if line.startswith(('ATOM', 'HETATM')):
-                        # 提取原子信息
-                        atom_name = line[12:16].strip()
-                        res_name = line[17:20].strip()
-                        chain_id = line[21:22].strip()
-                        res_num = line[22:26].strip()
-                        x = float(line[30:38].strip())
-                        y = float(line[38:46].strip())
-                        z = float(line[46:54].strip())
-                        
-                        # 简化的原子类型映射
-                        atom_type = "C"  # 默认碳原子
-                        if atom_name.startswith('N'):
-                            atom_type = "N"
-                        elif atom_name.startswith('O'):
-                            atom_type = "O"
-                        elif atom_name.startswith('S'):
-                            atom_type = "S"
-                        elif atom_name.startswith('H'):
-                            atom_type = "H"
-                        
-                        # 生成 PDBQT 格式行
-                        pdbqt_line = f"ATOM  {line[6:11]}  {atom_name:<4} {res_name} {chain_id}{res_num:>4}    {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00      {atom_type:>2}\n"
-                        pdbqt_lines.append(pdbqt_line)
-                
-                # 写入 PDBQT 文件
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    f.writelines(pdbqt_lines)
-                    f.write("ENDMDL\n")
-                
-                logger.info(f"简化 PDBQT 转换成功: {output_path}")
-                return True
-                
-            except Exception as e:
-                logger.error(f"简化 PDBQT 转换失败: {e}")
-                return False
+            logger.error(
+                "Receptor preparation unavailable; unsafe simplified fallback disabled"
+            )
+            return False
 
+        except (CommandCancelledError, CommandOwnershipUncertainError):
+            raise
         except Exception as e:
             logger.error(f"蛋白质准备异常: {e}")
             return False
 
-    def prepare_ligand_from_smiles(self, smiles: str, output_path: str) -> bool:
+    def prepare_ligand_from_smiles(
+        self,
+        smiles: str,
+        output_path: str,
+        *,
+        cancel_event=None,
+    ) -> bool:
         """
         从SMILES生成配体PDBQT文件
         流程：SMILES -> SDF (RDKit，在当前进程内) -> PDBQT (mk_prepare_ligand.exe)
@@ -418,46 +457,71 @@ class MolecularDockingService:
             from rdkit.Chem import AllChem
 
             job_dir = os.path.dirname(output_path)
+            self._raise_if_cancelled(cancel_event)
 
             # Step 1: SMILES -> 3D SDF（在当前进程内，无需子进程）
             mol = Chem.MolFromSmiles(smiles)
             if mol is None:
-                logger.error(f"无效的 SMILES: {smiles}")
+                logger.error("Ligand SMILES input is invalid")
                 return False
 
+            self._raise_if_cancelled(cancel_event)
             mol = Chem.AddHs(mol)
             params = AllChem.ETKDGv3()
             if AllChem.EmbedMolecule(mol, params) < 0:
                 # ETKDGv3 失败时回退 ETKDG
+                self._raise_if_cancelled(cancel_event)
                 AllChem.EmbedMolecule(mol, AllChem.ETKDGv2())
+            self._raise_if_cancelled(cancel_event)
             AllChem.MMFFOptimizeMolecule(mol)
+            self._raise_if_cancelled(cancel_event)
 
             sdf_path = os.path.join(job_dir, "ligand_input.sdf")
             writer = Chem.SDWriter(sdf_path)
             writer.write(mol)
             writer.close()
+            self._raise_if_cancelled(cancel_event)
 
             # Step 2: SDF -> PDBQT (mk_prepare_ligand.exe)
-            success, _ = self._run_prepare_ligand(sdf_path, output_path, job_dir, "配体准备")
+            success, _ = self._run_prepare_ligand(
+                sdf_path,
+                output_path,
+                job_dir,
+                "配体准备",
+                cancel_event=cancel_event,
+            )
             return success
 
+        except (CommandCancelledError, CommandOwnershipUncertainError):
+            raise
         except Exception as e:
             logger.error(f"配体准备异常: {e}")
             return False
 
-    def prepare_ligand_from_file(self, ligand_path: str, output_path: str) -> bool:
+    def prepare_ligand_from_file(
+        self,
+        ligand_path: str,
+        output_path: str,
+        *,
+        cancel_event=None,
+    ) -> bool:
         """
         从文件准备配体 (SDF/MOL/PDB -> PDBQT)
         使用 mk_prepare_ligand.exe 直接转换，无需写临时 Python 脚本
         """
         try:
+            self._raise_if_cancelled(cancel_event)
             src_ext = os.path.splitext(ligand_path)[1].lower()
             job_dir = os.path.dirname(output_path)
 
             # 若输入已经是 PDBQT，直接复制并返回
             if src_ext == '.pdbqt':
-                shutil.copyfile(ligand_path, output_path)
-                logger.info(f"检测到PDBQT配体，已直接使用: {output_path}")
+                self._copy_file_cooperatively(
+                    ligand_path,
+                    output_path,
+                    cancel_event,
+                )
+                logger.info("Using ligand input already in PDBQT format")
                 return True
 
             success, error_output = self._run_prepare_ligand(
@@ -465,7 +529,8 @@ class MolecularDockingService:
                 output_path,
                 job_dir,
                 "配体文件准备",
-                log_on_failure=False
+                log_on_failure=False,
+                cancel_event=cancel_event,
             )
             if success:
                 return True
@@ -473,17 +538,32 @@ class MolecularDockingService:
             # Meeko 对部分文件要求显式氢，这里在失败后做一次 RDKit 归一化再重试
             if "implicit Hs" in error_output:
                 logger.warning("检测到配体含隐式氢，将先用 RDKit 补显式氢后再次尝试")
-                return self._prepare_ligand_file_with_explicit_hs(ligand_path, output_path, job_dir)
+                return self._prepare_ligand_file_with_explicit_hs(
+                    ligand_path,
+                    output_path,
+                    job_dir,
+                    cancel_event=cancel_event,
+                )
 
-            logger.error(f"配体文件准备失败: {error_output}")
+            logger.error("Ligand file preparation failed")
             return False
 
+        except (CommandCancelledError, CommandOwnershipUncertainError):
+            raise
         except Exception as e:
             logger.error(f"配体文件准备异常: {e}")
             return False
 
-    def run_vina_docking(self, receptor_path: str, ligand_path: str,
-                        config: DockingConfig, output_path: str) -> bool:
+    def run_vina_docking(
+        self,
+        receptor_path: str,
+        ligand_path: str,
+        config: DockingConfig,
+        output_path: str,
+        job_dir: Optional[str] = None,
+        *,
+        cancel_event=None,
+    ) -> bool:
         """
         运行AutoDock Vina对接计算
         """
@@ -541,9 +621,13 @@ class MolecularDockingService:
                     config.size_y = sy
                     config.size_z = sz
 
-            # 创建配置文件
-            config_path = os.path.join(self.work_dir, "config.txt")
-            with open(config_path, 'w') as f:
+            # 每个作业拥有独立配置文件和进程工作目录。
+            resolved_job_dir = os.path.abspath(
+                job_dir or os.path.dirname(os.path.abspath(output_path))
+            )
+            os.makedirs(resolved_job_dir, exist_ok=True)
+            config_path = os.path.join(resolved_job_dir, "config.txt")
+            with open(config_path, 'w', encoding='utf-8') as f:
                 f.write(f"receptor = {receptor_path}\n")
                 f.write(f"ligand = {ligand_path}\n")
                 f.write(f"out = {output_path}\n")
@@ -558,16 +642,34 @@ class MolecularDockingService:
                 f.write(f"energy_range = {config.energy_range}\n")
 
             # 运行Vina
-            cmd = self.vina_adapter.build_run_command(config_path)
-            result = self.vina_adapter.run_config(config_path, self.work_dir)
+            adapter_control = {}
+            if cancel_event is not None:
+                adapter_control["cancel_event"] = cancel_event
+            result = self.vina_adapter.run_config(
+                config_path,
+                resolved_job_dir,
+                timeout=self.vina_timeout_seconds,
+                **adapter_control,
+            )
 
             if result.returncode == 0:
-                logger.info(f"Vina对接计算成功: {output_path}")
+                logger.info("Vina docking command succeeded")
                 return True
             else:
-                logger.error(f"Vina对接计算失败: {result.stderr}")
+                logger.error(
+                    "Vina docking command failed (returncode=%s)",
+                    result.returncode,
+                )
                 return False
 
+        except (CommandCancelledError, CommandOwnershipUncertainError):
+            raise
+        except subprocess.TimeoutExpired:
+            logger.error(
+                "Vina docking timed out after %s seconds",
+                self.vina_timeout_seconds,
+            )
+            raise
         except Exception as e:
             logger.error(f"Vina对接计算异常: {e}")
             return False
@@ -580,7 +682,7 @@ class MolecularDockingService:
 
         try:
             if not os.path.exists(output_path):
-                logger.error(f"结果文件不存在: {output_path}")
+                logger.error("Vina result file is missing")
                 return results
 
             with open(output_path, 'r') as f:
@@ -617,151 +719,425 @@ class MolecularDockingService:
             logger.error(f"结果解析异常: {e}")
             return results
 
-    async def perform_docking(self, receptor_file: str, ligand_input: str,
-                            config: DockingConfig, input_type: str = "smiles") -> Dict[str, Any]:
-        """
-        执行完整的分子对接流程
+    @classmethod
+    def _auto_box_from_co_crystal(cls, pdb_path: str, cancel_event=None):
+        minimum = [float("inf"), float("inf"), float("inf")]
+        maximum = [float("-inf"), float("-inf"), float("-inf")]
+        excluded_residues = {
+            "HOH", "WAT", "H2O", "NA", "CL", "K", "CA", "MG", "ZN",
+            "MN", "FE", "CU", "CO", "NI", "BR", "I",
+        }
+        found = 0
+        try:
+            with open(pdb_path, "r", encoding="utf-8", errors="ignore") as stream:
+                for line_number, line in enumerate(stream):
+                    if line_number % 256 == 0:
+                        cls._raise_if_cancelled(cancel_event)
+                    if not line.startswith("HETATM"):
+                        continue
+                    residue = (line[17:20].strip() or "").upper()
+                    if not residue or residue in excluded_residues:
+                        continue
+                    try:
+                        coordinates = [
+                            float(line[30:38]),
+                            float(line[38:46]),
+                            float(line[46:54]),
+                        ]
+                    except (TypeError, ValueError):
+                        parts = line.split()
+                        if len(parts) < 9:
+                            continue
+                        coordinates = [float(parts[6]), float(parts[7]), float(parts[8])]
+                    found += 1
+                    for index, coordinate in enumerate(coordinates):
+                        minimum[index] = min(minimum[index], coordinate)
+                        maximum[index] = max(maximum[index], coordinate)
+        except CommandCancelledError:
+            raise
+        except Exception:
+            return None
+        if found == 0:
+            return None
+        center = [(low + high) / 2.0 for low, high in zip(minimum, maximum)]
+        size = [max(10.0, high - low + 8.0) for low, high in zip(minimum, maximum)]
+        return (*center, *size)
 
-        Args:
-            receptor_file: 蛋白质文件路径
-            ligand_input: 配体输入（SMILES字符串或文件路径）
-            config: 对接配置参数
-            input_type: 输入类型 ("smiles" 或 "file")
+    @staticmethod
+    def _cancel_requested(cancel_event) -> bool:
+        return bool(cancel_event is not None and cancel_event.is_set())
 
-        Returns:
-            对接结果字典
-        """
+    @classmethod
+    def _copy_file_cooperatively(
+        cls,
+        source: str,
+        destination: str,
+        cancel_event,
+    ) -> None:
+        with open(source, "rb") as reader, open(destination, "wb") as writer:
+            while True:
+                cls._raise_if_cancelled(cancel_event)
+                chunk = reader.read(1024 * 1024)
+                if not chunk:
+                    break
+                writer.write(chunk)
+            writer.flush()
+            os.fsync(writer.fileno())
+        cls._raise_if_cancelled(cancel_event)
 
-        # 生成唯一的工作子目录
+    @classmethod
+    def _raise_if_cancelled(cls, cancel_event) -> None:
+        if cls._cancel_requested(cancel_event):
+            raise CommandCancelledError()
+
+    @classmethod
+    def _emit_phase(
+        cls,
+        phase: str,
+        progress: int,
+        progress_callback,
+        cancel_event,
+    ) -> None:
+        cls._raise_if_cancelled(cancel_event)
+        if progress_callback is not None:
+            try:
+                callback_result = progress_callback(phase, progress)
+                if inspect.isawaitable(callback_result):
+                    close = getattr(callback_result, "close", None)
+                    if callable(close):
+                        close()
+                    raise TypeError("asynchronous progress callbacks are unsupported")
+            except Exception as error:
+                cls._raise_if_cancelled(cancel_event)
+                raise _ProgressCallbackError() from error
+        cls._raise_if_cancelled(cancel_event)
+
+    @staticmethod
+    def _discard_partial_job(job_dir: str) -> List[str]:
+        path = Path(job_dir)
+        if not path.exists():
+            return []
+        try:
+            shutil.rmtree(path)
+            return ["Partial docking artifacts were removed."]
+        except Exception:
+            try:
+                import uuid
+
+                quarantine = path.with_name(f".cancelled-{uuid.uuid4().hex}")
+                os.replace(path, quarantine)
+                return ["Partial docking artifacts were quarantined."]
+            except Exception:
+                return ["Partial docking artifacts could not be fully removed."]
+
+    @classmethod
+    def _failed_job_response(
+        cls,
+        job_dir: str,
+        error_code: str,
+        error: str,
+    ) -> Dict[str, Any]:
+        response: Dict[str, Any] = {
+            "success": False,
+            "error_code": error_code,
+            "error": error,
+        }
+        warnings = cls._discard_partial_job(job_dir)
+        if warnings:
+            response["warnings"] = warnings
+        return response
+
+    async def perform_docking(
+        self,
+        receptor_file: str,
+        ligand_input: str,
+        config: DockingConfig,
+        input_type: str = "smiles",
+        *,
+        job_id: str | None = None,
+        progress_callback=None,
+        cancel_event=None,
+    ) -> Dict[str, Any]:
+        """Run a traceable docking workflow with cooperative cancellation."""
         import uuid
-        job_id = str(uuid.uuid4())[:8]
-        job_dir = os.path.join(self.work_dir, f"docking_{job_id}")
-        os.makedirs(job_dir, exist_ok=True)
+
+        resolved_job_id = str(uuid.uuid4()) if job_id is None else job_id
+        try:
+            CommandAdapter._validate_cancel_event(cancel_event)
+        except TypeError:
+            return {
+                "success": False,
+                "error_code": "invalid_control",
+                "error": "Docking cancellation control is invalid",
+            }
+        if progress_callback is not None and not callable(progress_callback):
+            return {
+                "success": False,
+                "error_code": "invalid_control",
+                "error": "Docking progress callback is invalid",
+            }
+        if (
+            not isinstance(resolved_job_id, str)
+            or not _SAFE_JOB_ID.fullmatch(resolved_job_id)
+            or resolved_job_id in {".", ".."}
+            or resolved_job_id.endswith(".")
+        ):
+            return {
+                "success": False,
+                "error_code": "invalid_job_id",
+                "error": "Docking job id is invalid",
+            }
+
+        job_dir = os.path.join(self.work_dir, f"docking_{resolved_job_id}")
+        try:
+            os.mkdir(job_dir)
+        except FileExistsError:
+            return {
+                "success": False,
+                "error_code": "job_conflict",
+                "error": "Docking job already exists",
+            }
+        except OSError:
+            return {
+                "success": False,
+                "error_code": "job_directory_failed",
+                "error": "Docking job directory could not be created",
+            }
 
         try:
-            def _auto_box_from_protein_ligand(pdb_path: str) -> "Optional[Tuple[float, float, float, float, float, float]]":
-                min_x = min_y = min_z = float('inf')
-                max_x = max_y = max_z = float('-inf')
-                water_resn = {"HOH", "WAT", "H2O"}
-                ion_resn = {"NA", "CL", "K", "CA", "MG", "ZN", "MN", "FE", "CU", "CO", "NI", "BR", "I"}
-                found = 0
-                try:
-                    with open(pdb_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        for line in f:
-                            if not line.startswith('HETATM'):
-                                continue
-                            resn = (line[17:20].strip() or "").upper()
-                            if not resn or resn in water_resn or resn in ion_resn:
-                                continue
-                            try:
-                                x = float(line[30:38])
-                                y = float(line[38:46])
-                                z = float(line[46:54])
-                            except Exception:
-                                parts = line.split()
-                                if len(parts) >= 9:
-                                    x = float(parts[6]); y = float(parts[7]); z = float(parts[8])
-                                else:
-                                    continue
-                            found += 1
-                            min_x = min(min_x, x); max_x = max(max_x, x)
-                            min_y = min(min_y, y); max_y = max(max_y, y)
-                            min_z = min(min_z, z); max_z = max(max_z, z)
-                    if found == 0 or any(v in (float('inf'), float('-inf')) for v in (min_x, max_x, min_y, max_y, min_z, max_z)):
-                        return None
-                    cx = (min_x + max_x) / 2.0
-                    cy = (min_y + max_y) / 2.0
-                    cz = (min_z + max_z) / 2.0
-                    padding = 8.0
-                    sx = max(10.0, (max_x - min_x) + padding)
-                    sy = max(10.0, (max_y - min_y) + padding)
-                    sz = max(10.0, (max_z - min_z) + padding)
-                    return (cx, cy, cz, sx, sy, sz)
-                except Exception:
-                    return None
+            history_written = False
+            history_cleanup_warnings: List[str] = []
+            receptor_pdbqt = os.path.join(job_dir, "receptor.pdbqt")
+            ligand_pdbqt = os.path.join(job_dir, "ligand.pdbqt")
+            output_pdbqt = os.path.join(job_dir, "result.pdbqt")
+            command_control = {}
+            if cancel_event is not None:
+                command_control["cancel_event"] = cancel_event
 
+            self._emit_phase(*_DOCKING_PHASES[0], progress_callback, cancel_event)
             if (
                 not config.manual_center
-                and abs(config.center_x) < 1e-6 and abs(config.center_y) < 1e-6 and abs(config.center_z) < 1e-6
-                and abs(config.size_x - 20.0) < 1e-6 and abs(config.size_y - 20.0) < 1e-6 and abs(config.size_z - 20.0) < 1e-6
+                and abs(config.center_x) < 1e-6
+                and abs(config.center_y) < 1e-6
+                and abs(config.center_z) < 1e-6
+                and abs(config.size_x - 20.0) < 1e-6
+                and abs(config.size_y - 20.0) < 1e-6
+                and abs(config.size_z - 20.0) < 1e-6
             ):
-                auto_box = _auto_box_from_protein_ligand(receptor_file)
+                auto_box = self._auto_box_from_co_crystal(
+                    receptor_file,
+                    cancel_event,
+                )
                 if auto_box is not None:
-                    config.center_x, config.center_y, config.center_z, config.size_x, config.size_y, config.size_z = auto_box
+                    (
+                        config.center_x,
+                        config.center_y,
+                        config.center_z,
+                        config.size_x,
+                        config.size_y,
+                        config.size_z,
+                    ) = auto_box
+            if not self.prepare_protein(
+                receptor_file,
+                receptor_pdbqt,
+                **command_control,
+            ):
+                return self._failed_job_response(
+                    job_dir,
+                    "receptor_preparation_failed",
+                    "Receptor preparation failed",
+                )
+            self._raise_if_cancelled(cancel_event)
 
-            # 1. 准备蛋白质
-            receptor_pdbqt = os.path.join(job_dir, "receptor.pdbqt")
-            if not self.prepare_protein(receptor_file, receptor_pdbqt):
-                return {"success": False, "error": "蛋白质准备失败"}
-
-            # 2. 准备配体
-            ligand_pdbqt = os.path.join(job_dir, "ligand.pdbqt")
+            self._emit_phase(*_DOCKING_PHASES[1], progress_callback, cancel_event)
             if input_type == "smiles":
-                if not self.prepare_ligand_from_smiles(ligand_input, ligand_pdbqt):
-                    return {"success": False, "error": "配体准备失败"}
+                ligand_ready = self.prepare_ligand_from_smiles(
+                    ligand_input,
+                    ligand_pdbqt,
+                    **command_control,
+                )
             else:
-                if not self.prepare_ligand_from_file(ligand_input, ligand_pdbqt):
-                    return {"success": False, "error": "配体文件准备失败"}
+                ligand_ready = self.prepare_ligand_from_file(
+                    ligand_input,
+                    ligand_pdbqt,
+                    **command_control,
+                )
+            if not ligand_ready:
+                return self._failed_job_response(
+                    job_dir,
+                    "ligand_preparation_failed",
+                    "Ligand preparation failed",
+                )
+            self._raise_if_cancelled(cancel_event)
 
-            # 3. 运行对接计算
-            output_pdbqt = os.path.join(job_dir, "result.pdbqt")
-            if not self.run_vina_docking(receptor_pdbqt, ligand_pdbqt, config, output_pdbqt):
-                return {"success": False, "error": "对接计算失败"}
+            self._emit_phase(*_DOCKING_PHASES[2], progress_callback, cancel_event)
+            docking_succeeded = self.run_vina_docking(
+                receptor_pdbqt,
+                ligand_pdbqt,
+                config,
+                output_pdbqt,
+                job_dir=job_dir,
+                **command_control,
+            )
+            self._raise_if_cancelled(cancel_event)
+            if not docking_succeeded:
+                return self._failed_job_response(
+                    job_dir,
+                    "docking_failed",
+                    "AutoDock Vina execution failed",
+                )
 
-            # 4. 解析结果
+            self._emit_phase(*_DOCKING_PHASES[3], progress_callback, cancel_event)
             results = self.parse_vina_results(output_pdbqt)
-
+            self._raise_if_cancelled(cancel_event)
             if not results:
-                return {"success": False, "error": "结果解析失败"}
+                return self._failed_job_response(
+                    job_dir,
+                    "scientific_validation_failed",
+                    "Docking result validation failed",
+                )
 
-            # 5. 格式化返回结果
-            # 计算配体重原子数（用于配体效率 LE = ΔG / N_heavy）
             heavy_atom_count = 0
             try:
                 if input_type == "smiles":
                     from rdkit import Chem as _Chem
-                    _mol = _Chem.MolFromSmiles(ligand_input)
-                    if _mol:
-                        heavy_atom_count = _mol.GetNumHeavyAtoms()
+
+                    molecule = _Chem.MolFromSmiles(ligand_input)
+                    if molecule:
+                        heavy_atom_count = molecule.GetNumHeavyAtoms()
                 else:
-                    # 从 PDBQT 文件统计非氢 ATOM/HETATM 行
-                    with open(ligand_pdbqt, 'r', errors='ignore') as _f:
+                    with open(ligand_pdbqt, "r", errors="ignore") as stream:
                         heavy_atom_count = sum(
-                            1 for ln in _f
-                            if (ln.startswith('ATOM') or ln.startswith('HETATM'))
-                            and not ln[12:16].strip().startswith('H')
+                            1
+                            for line in stream
+                            if (line.startswith("ATOM") or line.startswith("HETATM"))
+                            and not line[12:16].strip().startswith("H")
                         )
             except Exception:
-                pass
-            if heavy_atom_count < 1:
-                heavy_atom_count = 1  # 防止除零
+                heavy_atom_count = 0
+            heavy_atom_count = max(1, heavy_atom_count)
 
-            formatted_results = []
-            for i, result in enumerate(results, 1):
-                formatted_results.append({
-                    "pose": i,
-                    "binding_energy": result.binding_energy,
-                    "rmsd_lb": result.rmsd_lb,
-                    "rmsd_ub": result.rmsd_ub,
-                    "ligand_efficiency": round(result.binding_energy / heavy_atom_count, 3)
-                })
+            formatted_results = [
+                {
+                    "pose": index,
+                    "binding_energy": item.binding_energy,
+                    "rmsd_lb": item.rmsd_lb,
+                    "rmsd_ub": item.rmsd_ub,
+                    "ligand_efficiency": round(
+                        item.binding_energy / heavy_atom_count,
+                        3,
+                    ),
+                }
+                for index, item in enumerate(results, 1)
+            ]
+            self._raise_if_cancelled(cancel_event)
 
-            return {
+            resolved_pose_file = str(Path(output_pdbqt).resolve())
+            best_pose = dict(formatted_results[0])
+            best_pose["pose_file"] = resolved_pose_file
+            history_warnings = []
+            try:
+                from src.docking.history_index import (
+                    build_history_record,
+                    remove_history_record,
+                    upsert_history_record,
+                )
+
+                self._raise_if_cancelled(cancel_event)
+                upsert_history_record(
+                    self.work_dir,
+                    build_history_record(
+                        job_dir,
+                        job_id=resolved_job_id,
+                        status="completed",
+                    ),
+                )
+                history_written = True
+                if self._cancel_requested(cancel_event):
+                    remove_history_record(self.work_dir, resolved_job_id)
+                    history_written = False
+                    raise CommandCancelledError()
+            except CommandCancelledError:
+                if history_written:
+                    try:
+                        remove_history_record(self.work_dir, resolved_job_id)
+                    except Exception:
+                        history_cleanup_warnings.append(
+                            "Docking history cleanup could not be confirmed."
+                        )
+                raise
+            except Exception:
+                history_warnings.append(
+                    "History persistence failed; docking output remains "
+                    "available through the returned job and pose references."
+                )
+
+            self._raise_if_cancelled(cancel_event)
+            response = {
                 "success": True,
-                "job_id": job_id,
+                "job_id": resolved_job_id,
                 "results": formatted_results,
-                "best_pose": formatted_results[0] if formatted_results else None,
-                "total_poses": len(formatted_results)
+                "best_pose": best_pose,
+                "pose_file": resolved_pose_file,
+                "total_poses": len(formatted_results),
             }
+            if history_warnings:
+                response["warnings"] = history_warnings
+            return response
 
-        except Exception as e:
-            logger.error(f"分子对接流程异常: {e}")
-            return {"success": False, "error": str(e)}
+        except CommandCancelledError:
+            if history_written:
+                try:
+                    from src.docking.history_index import remove_history_record
 
-        finally:
-            # 可选：清理临时文件
-            # shutil.rmtree(job_dir, ignore_errors=True)
-            pass
+                    remove_history_record(self.work_dir, resolved_job_id)
+                except Exception:
+                    warning = "Docking history cleanup could not be confirmed."
+                    if warning not in history_cleanup_warnings:
+                        history_cleanup_warnings.append(warning)
+            cancellation_warnings = list(history_cleanup_warnings)
+            cancellation_warnings.extend(self._discard_partial_job(job_dir))
+            return {
+                "success": False,
+                "error_code": "cancelled",
+                "error": "Docking was cancelled",
+                "warnings": cancellation_warnings,
+            }
+        except CommandOwnershipUncertainError:
+            self._discard_partial_job(job_dir)
+            return {
+                "success": False,
+                "error_code": "process_ownership_uncertain",
+                "error": "Docking process ownership could not be verified",
+            }
+        except subprocess.TimeoutExpired:
+            self._discard_partial_job(job_dir)
+            return {
+                "success": False,
+                "error_code": "timeout",
+                "error": "AutoDock Vina timed out",
+            }
+        except _ProgressCallbackError:
+            self._discard_partial_job(job_dir)
+            return {
+                "success": False,
+                "error_code": "progress_callback_failed",
+                "error": "Docking progress reporting failed",
+            }
+        except Exception as error:
+            cleanup_warnings = self._discard_partial_job(job_dir)
+            logger.error(
+                "Docking workflow failed (%s)",
+                type(error).__name__,
+            )
+            response = {
+                "success": False,
+                "error_code": "docking_failed",
+                "error": "Docking workflow failed",
+            }
+            if cleanup_warnings:
+                response["warnings"] = cleanup_warnings
+            return response
 
     def cleanup(self):
         """清理临时文件"""

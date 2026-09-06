@@ -12,6 +12,33 @@ window.ActivityPreflight = (function () {
     return preflightData;
   }
 
+  function createTextElement(tagName, className, text) {
+    const element = document.createElement(tagName);
+    if (className) element.className = className;
+    element.textContent = text;
+    return element;
+  }
+
+  function createMetaItem(label, value) {
+    const item = document.createElement("div");
+    item.className = "preflight-meta-item";
+    item.append(
+      createTextElement("span", "", label),
+      document.createTextNode(value),
+    );
+    return item;
+  }
+
+  function createSummaryItem(label, value) {
+    const item = document.createElement("div");
+    item.className = "summary-item";
+    item.append(
+      createTextElement("div", "summary-label", label),
+      createTextElement("div", "summary-value", value),
+    );
+    return item;
+  }
+
   function setTrainHint(msg, type) {
     const el = document.getElementById("trainHint");
     if (!el) return;
@@ -39,66 +66,71 @@ window.ActivityPreflight = (function () {
       .value.trim()
       .toLowerCase();
 
-    document.getElementById("preflight-meta").innerHTML = `
-      <div class="preflight-meta-item"><span>行数</span>${total}</div>
-      <div class="preflight-meta-item"><span>列数</span>${headers.length}</div>
-      <div class="preflight-meta-item"><span>分隔符</span>${
-        preflightData.sep === "\t" ? "Tab(\\t)" : "Comma(,)"
-      }</div>
-    `;
+    document.getElementById("preflight-meta").replaceChildren(
+      createMetaItem("行数", total),
+      createMetaItem("列数", headers.length),
+      createMetaItem(
+        "分隔符",
+        preflightData.sep === "\t" ? "Tab(\\t)" : "Comma(,)",
+      ),
+    );
 
-    const colsHtml = headers
-      .map(function (header) {
-        const lower = header.toLowerCase();
-        let badgeClass = "other";
-        let badgeText = "COL";
+    const columnItems = headers.map(function (header) {
+      const lower = String(header).toLowerCase();
+      let badgeClass = "other";
+      let badgeText = "COL";
 
-        if (
-          lower === smilesGuess ||
-          lower === "smiles" ||
-          lower === "canonical_smiles"
-        ) {
-          badgeClass = "smiles";
-          badgeText = "SMILES";
-        } else if (
-          lower === labelGuess ||
-          lower === "pic50" ||
-          lower === "label" ||
-          lower === "activity"
-        ) {
-          badgeClass = "label";
-          badgeText = "LABEL";
-        }
+      if (
+        lower === smilesGuess ||
+        lower === "smiles" ||
+        lower === "canonical_smiles"
+      ) {
+        badgeClass = "smiles";
+        badgeText = "SMILES";
+      } else if (
+        lower === labelGuess ||
+        lower === "pic50" ||
+        lower === "label" ||
+        lower === "activity"
+      ) {
+        badgeClass = "label";
+        badgeText = "LABEL";
+      }
 
-        const cls =
-          badgeClass !== "other"
-            ? "preflight-col-item highlight"
-            : "preflight-col-item";
-        return `<div class="${cls}"><span class="col-badge ${badgeClass}">${badgeText}</span>${header}</div>`;
-      })
-      .join("");
+      const cls =
+        badgeClass !== "other"
+          ? "preflight-col-item highlight"
+          : "preflight-col-item";
+      const item = document.createElement("div");
+      item.className = cls;
+      item.append(
+        createTextElement("span", `col-badge ${badgeClass}`, badgeText),
+        document.createTextNode(header),
+      );
+      return item;
+    });
 
-    document.getElementById("preflight-cols").innerHTML = colsHtml;
+    document.getElementById("preflight-cols").replaceChildren(...columnItems);
 
-    const thHtml = headers
-      .map(function (header) {
-        return `<th>${header}</th>`;
-      })
-      .join("");
+    const table = document.createElement("table");
+    table.className = "preflight-table";
+    const thead = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+    headers.forEach(function (header) {
+      headerRow.appendChild(createTextElement("th", "", header));
+    });
+    thead.appendChild(headerRow);
 
-    const tbodyHtml = rows
-      .map(function (row) {
-        return `<tr>${row
-          .map(function (cell) {
-            return `<td>${cell}</td>`;
-          })
-          .join("")}</tr>`;
-      })
-      .join("");
-
-    document.getElementById(
-      "preflight-preview",
-    ).innerHTML = `<table class="preflight-table"><thead><tr>${thHtml}</tr></thead><tbody>${tbodyHtml}</tbody></table>`;
+    const tbody = document.createElement("tbody");
+    rows.forEach(function (row) {
+      const tableRow = document.createElement("tr");
+      row.forEach(function (cell) {
+        tableRow.appendChild(createTextElement("td", "", cell));
+      });
+      tbody.appendChild(tableRow);
+    });
+    table.append(thead, tbody);
+    document.getElementById("preflight-preview").replaceChildren(table);
 
     document.getElementById("preflight-modal").style.display = "flex";
   }
@@ -163,24 +195,30 @@ window.ActivityPreflight = (function () {
     const loss = document.getElementById("trainLoss").value;
     const scheduler = document.getElementById("trainScheduler").value;
 
-    document.getElementById("launch-summary").innerHTML = `
-      <div class="summary-grid">
-        <div class="summary-item"><div class="summary-label">数据文件</div><div class="summary-value">${file.name}</div></div>
-        <div class="summary-item"><div class="summary-label">目标列 (Label)</div><div class="summary-value">${target}</div></div>
-        <div class="summary-item"><div class="summary-label">任务类型</div><div class="summary-value">${task === "regression" ? "回归 Regression" : "分类 Classification"}</div></div>
-        <div class="summary-item"><div class="summary-label">划分策略</div><div class="summary-value">${split}</div></div>
-        <div class="summary-item"><div class="summary-label">Epochs</div><div class="summary-value">${epochs}</div></div>
-        <div class="summary-item"><div class="summary-label">Learning Rate</div><div class="summary-value">${lr}</div></div>
-        <div class="summary-item"><div class="summary-label">Batch Size</div><div class="summary-value">${bs}</div></div>
-        <div class="summary-item"><div class="summary-label">Dropout</div><div class="summary-value">${dr}</div></div>
-        <div class="summary-item"><div class="summary-label">Layers</div><div class="summary-value">${layers}</div></div>
-        <div class="summary-item"><div class="summary-label">Hidden Size</div><div class="summary-value">${hidden}</div></div>
-        <div class="summary-item"><div class="summary-label">Weight Decay</div><div class="summary-value">${decay}</div></div>
-        <div class="summary-item"><div class="summary-label">Patience</div><div class="summary-value">${patience}</div></div>
-        <div class="summary-item"><div class="summary-label">Loss Fn</div><div class="summary-value">${loss}</div></div>
-        <div class="summary-item"><div class="summary-label">Scheduler</div><div class="summary-value">${scheduler}</div></div>
-      </div>
-    `;
+    const summaryGrid = document.createElement("div");
+    summaryGrid.className = "summary-grid";
+    [
+      ["数据文件", file.name],
+      ["目标列 (Label)", target],
+      [
+        "任务类型",
+        task === "regression" ? "回归 Regression" : "分类 Classification",
+      ],
+      ["划分策略", split],
+      ["Epochs", epochs],
+      ["Learning Rate", lr],
+      ["Batch Size", bs],
+      ["Dropout", dr],
+      ["Layers", layers],
+      ["Hidden Size", hidden],
+      ["Weight Decay", decay],
+      ["Patience", patience],
+      ["Loss Fn", loss],
+      ["Scheduler", scheduler],
+    ].forEach(function (entry) {
+      summaryGrid.appendChild(createSummaryItem(entry[0], entry[1]));
+    });
+    document.getElementById("launch-summary").replaceChildren(summaryGrid);
     document.getElementById("launch-modal").style.display = "flex";
   }
 

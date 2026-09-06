@@ -1,0 +1,73 @@
+name: quality
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install CPU development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run Python tests
+        run: python -m pytest tests -q -p no:cacheprovider
+
+      - name: Compile Python sources
+        run: python -m compileall -q src scripts
+
+      - name: Run Node contract tests
+        run: |
+          node tests/admin_fetch_test.js
+          node tests/frontend_safe_render_test.js
+          node tests/activity_prediction_safe_render_test.js
+          node tests/home_agent_task_panel_test.js
+          node tests/reverse_target_broad_recall_test.js
+          node tests/reverse_target_pagination_test.js
+
+      - name: Scan tracked non-document files for credential material
+        shell: bash
+        run: |
+          set +e
+          matches=$(git grep -IlE 'sk-[A-Za-z0-9]{20,}|BEGIN (RSA|OPENSSH) PRIVATE KEY' -- . ':(exclude,glob)**/*.md')
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "Credential-like material found in tracked non-document files:"
+            printf '%s\n' "$matches"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            exit "$status"
+          fi

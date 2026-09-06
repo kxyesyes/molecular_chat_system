@@ -14,5 +14,18 @@ class MeekoAdapter(CommandAdapter):
             return self.wrap_command("-i", input_path, "-o", output_path)
         return self.wrap_command("-l", input_path, "-o", output_path)
 
-    def prepare_ligand(self, input_path: str, output_path: str, cwd: str, timeout: int = 60):
-        return self.run(self.build_prepare_command(input_path, output_path), cwd=cwd, timeout=timeout)
+    def prepare_ligand(
+        self,
+        input_path: str,
+        output_path: str,
+        cwd: str,
+        timeout: int = 60,
+        *,
+        cancel_event=None,
+    ):
+        return self.run(
+            self.build_prepare_command(input_path, output_path),
+            cwd=cwd,
+            timeout=timeout,
+            cancel_event=cancel_event,
+        )

@@ -1,4 +1,6 @@
 import asyncio
+from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import os
@@ -16,10 +18,26 @@ import numpy as np
 import uvicorn
 
 from .llm_runtime_config import (
+    load_active_llm_env_config,
+    load_llm_env_config,
     load_runtime_config,
     normalize_llm_config,
     public_llm_config,
+    save_llm_env_config_snapshot,
     save_runtime_config,
+    sync_llm_process_environment,
+)
+from .models import OllamaModel, generate_for_chat
+from .rag_index import (
+    CURRENT_SCHEMA_VERSION,
+    RAGIndexCompatibilityError,
+    RAGIndexManifest,
+    atomic_save_index_pair,
+    file_sha256,
+    immutable_index_snapshot,
+    load_manifest,
+    manifest_path,
+    validate_manifest,
 )
 
 try:
@@ -106,86 +124,25 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 
 
-class OllamaModel:
-    """Ollama model interface for chat completion"""
-    
-    def __init__(self, base_url: str = "http://localhost:11434", model_name: str = "gmm-llama:latest"):
-        self.base_url = base_url
-        self.model_name = model_name
-        # 增加超时时间到150秒，与内存中的配置一致
-        self.client = httpx.AsyncClient(timeout=150.0)
-    
-    async def generate(self, prompt: str, temperature: float = 0.7, max_tokens: int = 1500) -> str:
-        """Generate response from Ollama model"""
-        try:
-            response = await self.client.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": self.model_name,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {
-                        "temperature": temperature,
-                        "num_predict": max_tokens
-                    }
-                }
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                return result.get("response", "")
-            else:
-                logger.error(f"Ollama API error: {response.status_code}")
-                return "I apologize, but I'm having trouble generating a response right now."
-                
-        except Exception as e:
-            logger.error(f"Error calling Ollama: {e}")
-            return "I apologize, but I'm experiencing technical difficulties."
-    
-    async def stream_generate(self, prompt: str, temperature: float = 0.7, max_tokens: int = 1500):
-        """Stream response from Ollama model"""
-        try:
-            async with self.client.stream(
-                "POST",
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": self.model_name,
-                    "prompt": prompt,
-                    "stream": True,
-                    "options": {
-                        "temperature": temperature,
-                        "num_predict": max_tokens
-                    }
-                }
-            ) as response:
-                
-                if response.status_code == 200:
-                    async for line in response.aiter_lines():
-                        if line:
-                            try:
-                                data = json.loads(line)
-                                if "response" in data:
-                                    yield data["response"]
-                                if data.get("done", False):
-                                    break
-                            except json.JSONDecodeError:
-                                continue
-                else:
-                    logger.error(f"Ollama streaming API error: {response.status_code}")
-                    yield "I apologize, but I'm having trouble generating a response right now."
-                    
-        except Exception as e:
-            logger.error(f"Error streaming from Ollama: {e}")
-            yield "I apologize, but I'm experiencing technical difficulties."
-
 class RAGSystem:
     """Retrieval-Augmented Generation system for molecular data"""
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.embedding_model = None
+        rag_config = self.config.get("rag", {})
+        self.embedding_model_name = rag_config.get(
+            "embedding_model",
+            "nomic-embed-text:latest",
+        )
         self.vector_index = None
         self.molecules_df: Optional[pd.DataFrame] = None
+        self.csv_path = Path(
+            rag_config.get("csv_path", "data/canonical_moses_5w.csv")
+        )
+        self.source_path = self.csv_path
+        self.manifest: Optional[RAGIndexManifest] = None
+        self.index_status = "uninitialized"
         self.is_initialized = False
     
     async def initialize(self):
@@ -193,6 +150,7 @@ class RAGSystem:
         try:
             if faiss is None:
                 logger.warning("FAISS is not installed; RAG retrieval is disabled.")
+                self.index_status = "unavailable: faiss is not installed"
                 self.is_initialized = False
                 return
 
@@ -205,23 +163,38 @@ class RAGSystem:
             self.embedding_model_name = embedding_model_name
             
             # Load molecular data
-            csv_path = self.config.get("rag", {}).get("csv_path", "data/canonical_moses_5w.csv")
-            if os.path.exists(csv_path):
-                self.molecules_df = pd.read_csv(csv_path)
-                logger.info(f"Loaded {len(self.molecules_df)} molecules from {csv_path}")
+            self.csv_path = Path(
+                self.config.get("rag", {}).get(
+                    "csv_path",
+                    "data/canonical_moses_5w.csv",
+                )
+            )
+            self.source_path = self.csv_path
+            if self.csv_path.exists():
+                self.molecules_df = pd.read_csv(self.csv_path)
+                logger.info(
+                    f"Loaded {len(self.molecules_df)} molecules from {self.csv_path}"
+                )
             else:
-                logger.warning(f"Molecular data file not found: {csv_path}")
+                logger.warning(f"Molecular data file not found: {self.csv_path}")
                 self.molecules_df = pd.DataFrame()
             
             # Load or create vector index
             vector_store_path = self.config.get("rag", {}).get("vector_store_path", "data/molecular_faiss_index")
             await self._load_or_create_index(vector_store_path)
             
-            self.is_initialized = True
-            logger.info("RAG system initialized successfully")
+            self.is_initialized = self.vector_index is not None and self.manifest is not None
+            if self.is_initialized:
+                logger.info("RAG system initialized successfully")
+            else:
+                logger.warning(
+                    "RAG system initialized without a usable index: %s",
+                    self.index_status,
+                )
             
         except Exception as e:
             logger.error(f"Failed to initialize RAG system: {e}")
+            self.index_status = "error: initialization failed"
             self.is_initialized = False
     
     async def get_embedding(self, text: str) -> np.ndarray:
@@ -248,22 +221,66 @@ class RAGSystem:
     
     async def _load_or_create_index(self, vector_store_path: str):
         """Load existing vector index or create new one"""
-        try:
-            if os.path.exists(f"{vector_store_path}.index"):
-                # Load existing index
-                self.vector_index = faiss.read_index(f"{vector_store_path}.index")
-                logger.info("Loaded existing vector index")
+        index_path = Path(f"{vector_store_path}.index")
+        index_manifest_path = manifest_path(index_path)
+        incompatible_reason: Optional[str] = None
+        self.vector_index = None
+        self.manifest = None
+
+        if index_path.is_file() and index_manifest_path.is_file():
+            try:
+                candidate_manifest = load_manifest(index_manifest_path)
+                with immutable_index_snapshot(index_path) as index_snapshot_path:
+                    candidate_index_sha256 = file_sha256(index_snapshot_path)
+                    candidate_index = faiss.read_index(str(index_snapshot_path))
+                    validate_manifest(
+                        candidate_manifest,
+                        source_path=self.source_path,
+                        index_sha256=candidate_index_sha256,
+                        embedding_model=self.embedding_model_name,
+                        vector_dimension=int(candidate_index.d),
+                        vector_count=int(candidate_index.ntotal),
+                        source_row_count=(
+                            len(self.molecules_df)
+                            if self.molecules_df is not None
+                            else 0
+                        ),
+                    )
+            except RAGIndexCompatibilityError as error:
+                incompatible_reason = str(error)
+            except Exception:
+                incompatible_reason = (
+                    "RAG index manifest incompatible: index cannot be read"
+                )
             else:
-                # Create new index
-                if self.molecules_df is not None and not self.molecules_df.empty:
-                    await self._create_index(vector_store_path)
-                else:
-                    logger.warning("No molecular data available to create index")
-                    self.vector_index = None
-                    
-        except Exception as e:
-            logger.error(f"Error with vector index: {e}")
-            self.vector_index = None
+                self.vector_index = candidate_index
+                self.manifest = candidate_manifest
+                self.index_status = "loaded"
+                logger.info("Loaded compatible vector index and manifest")
+                return
+        elif index_path.exists() or index_manifest_path.exists():
+            incompatible_reason = (
+                "RAG index manifest incompatible: index and manifest must both exist"
+            )
+
+        if incompatible_reason:
+            self.index_status = f"incompatible: {incompatible_reason}"
+            logger.warning("Rejected existing RAG index: %s", incompatible_reason)
+
+        if self.molecules_df is not None and not self.molecules_df.empty:
+            await self._create_index(vector_store_path)
+            if self.vector_index is not None and self.manifest is not None:
+                if incompatible_reason:
+                    self.index_status = "rebuilt_after_incompatible"
+                return
+
+        self.vector_index = None
+        self.manifest = None
+        if incompatible_reason:
+            self.index_status = f"incompatible: {incompatible_reason}"
+        elif self.index_status == "uninitialized":
+            self.index_status = "unavailable: no molecular data"
+            logger.warning("No molecular data available to create index")
     
     async def _create_index(self, vector_store_path: str):
         """Create vector index from molecular data"""
@@ -271,53 +288,101 @@ class RAGSystem:
             logger.info("Creating vector index from molecular data...")
             
             # Create embeddings for molecules
-            embeddings = []
+            embeddings: List[np.ndarray] = []
+            row_mapping: List[int] = []
+            embedding_dimension: Optional[int] = None
             if self.molecules_df is not None:
-                count = 0
-                for _, row in self.molecules_df.iterrows():
+                for source_position, (_, row) in enumerate(
+                    self.molecules_df.iterrows()
+                ):
                     # Create text representation of molecule
                     mol_text = f"SMILES: {row.get('SMILES', '')}"
                     embedding = await self.get_embedding(mol_text)
-                    
-                    if len(embedding) > 0:
-                        embeddings.append(embedding)
+
+                    embedding_array = np.asarray(embedding)
+                    if embedding_array.ndim != 1 or embedding_array.size == 0:
+                        continue
+                    if not np.all(np.isfinite(embedding_array)):
+                        logger.warning(
+                            "Skipping non-finite embedding for source row %s",
+                            source_position,
+                        )
+                        continue
+                    current_dimension = int(embedding_array.shape[0])
+                    if embedding_dimension is None:
+                        embedding_dimension = current_dimension
+                    elif current_dimension != embedding_dimension:
+                        logger.warning(
+                            "Skipping source row %s with incompatible embedding dimension",
+                            source_position,
+                        )
+                        continue
+                    embeddings.append(embedding_array.astype(np.float32))
+                    row_mapping.append(source_position)
                     
                     # Use counter for progress tracking
-                    if count % 100 == 0 and self.molecules_df is not None:
-                        logger.info(f"Processed {count}/{len(self.molecules_df)} molecules")
-                    count += 1
+                    if source_position % 100 == 0:
+                        logger.info(
+                            f"Processed {source_position}/{len(self.molecules_df)} molecules"
+                        )
             
             if embeddings:
                 embeddings_array = np.vstack(embeddings)
                 
                 # Create FAISS index
                 dimension = embeddings_array.shape[1]
-                self.vector_index = faiss.IndexFlatIP(dimension)  # Inner product for similarity
+                candidate_index = faiss.IndexFlatIP(dimension)  # Inner product for similarity
                 
                 # Normalize embeddings for cosine similarity
                 embeddings_float32 = embeddings_array.astype(np.float32)
                 faiss.normalize_L2(embeddings_float32)
-                if self.vector_index is not None:
-                    # Add embeddings to index - FAISS add method takes the array directly
-                    # Ignore type checking errors for FAISS methods
-                    self.vector_index.add(embeddings_float32)  # type: ignore
-                
-                # Save index
-                os.makedirs(os.path.dirname(vector_store_path), exist_ok=True)
-                if self.vector_index is not None:
-                    faiss.write_index(self.vector_index, f"{vector_store_path}.index")
+                # Add embeddings to index - FAISS add method takes the array directly
+                # Ignore type checking errors for FAISS methods
+                candidate_index.add(embeddings_float32)  # type: ignore
+
+                candidate_manifest = RAGIndexManifest(
+                    schema_version=CURRENT_SCHEMA_VERSION,
+                    source_path=str(self.source_path),
+                    source_sha256=file_sha256(self.source_path),
+                    index_sha256="",
+                    embedding_model=self.embedding_model_name,
+                    vector_dimension=dimension,
+                    vector_count=len(row_mapping),
+                    row_mapping=row_mapping,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+                persisted_manifest = atomic_save_index_pair(
+                    candidate_index,
+                    Path(f"{vector_store_path}.index"),
+                    candidate_manifest,
+                    faiss_module=faiss,
+                )
+                self.vector_index = candidate_index
+                self.manifest = persisted_manifest
+                self.index_status = "created"
                 
                 logger.info(f"Created and saved vector index with {len(embeddings)} embeddings")
             else:
                 logger.error("No valid embeddings created")
+                self.vector_index = None
+                self.manifest = None
+                self.index_status = "unavailable: no valid embeddings"
                 
         except Exception as e:
             logger.error(f"Error creating vector index: {e}")
             self.vector_index = None
+            self.manifest = None
+            self.index_status = "error: index creation failed"
     
     async def search_similar_molecules(self, query: str, k: int = 2) -> List[Dict[str, Any]]:
         """Search for similar molecules based on query"""
-        if not self.is_initialized or self.vector_index is None or self.molecules_df is None or self.molecules_df.empty:
+        if (
+            not self.is_initialized
+            or self.vector_index is None
+            or self.manifest is None
+            or self.molecules_df is None
+            or self.molecules_df.empty
+        ):
             return []
         
         try:
@@ -328,6 +393,9 @@ class RAGSystem:
             
             # Normalize query embedding
             query_embedding = query_embedding.reshape(1, -1).astype(np.float32)
+            if query_embedding.shape[1] != int(self.vector_index.d):
+                logger.warning("RAG query embedding dimension is incompatible")
+                return []
             faiss.normalize_L2(query_embedding)
             
             # Search with proper parameters
@@ -342,12 +410,31 @@ class RAGSystem:
             
             # Return results
             results = []
-            if self.molecules_df is not None:
-                for i, (score, idx) in enumerate(zip(scores[0], indices[0])):
-                    if idx < len(self.molecules_df):
-                        mol_data = self.molecules_df.iloc[idx].to_dict()
-                        mol_data['similarity_score'] = float(score)
-                        results.append(mol_data)
+            if self.molecules_df is not None and self.manifest is not None:
+                for score, label in zip(scores[0], indices[0]):
+                    vector_label = int(label)
+                    if vector_label < 0 or vector_label >= len(
+                        self.manifest.row_mapping
+                    ):
+                        continue
+                    source_position = self.manifest.row_mapping[vector_label]
+                    if source_position < 0 or source_position >= len(
+                        self.molecules_df
+                    ):
+                        continue
+                    mol_data = self.molecules_df.iloc[source_position].to_dict()
+                    mol_data['similarity_score'] = float(score)
+                    mol_data['source_index'] = source_position
+                    mol_data['provenance'] = {
+                        "source_path": self.manifest.source_path,
+                        "source_sha256": self.manifest.source_sha256,
+                        "index_sha256": self.manifest.index_sha256,
+                        "embedding_model": self.manifest.embedding_model,
+                        "manifest_schema_version": self.manifest.schema_version,
+                        "builder_version": self.manifest.builder_version,
+                        "vector_label": vector_label,
+                    }
+                    results.append(mol_data)
             
             return results
             
@@ -392,8 +479,14 @@ class MolecularChatApp:
         self.runtime_llm_config_path = Path(
             os.environ.get("MEDCHAT_LLM_CONFIG_PATH", "scratch/llm_runtime_config.json")
         )
+        self.runtime_llm_env_path = Path(
+            os.environ.get("MEDCHAT_ENV_FILE", ".env")
+        )
+        self._llm_config_lock = asyncio.Lock()
         self.active_llm_config = self._load_active_llm_config()
         self.model = self._create_model_from_llm_config(self.active_llm_config)
+        self._llm_env_signature = self._llm_env_file_signature()
+        self._llm_watch_task = None
         logger.info(
             "Active LLM provider: %s / %s",
             self.active_llm_config.get("provider"),
@@ -402,15 +495,17 @@ class MolecularChatApp:
         
         self.rag_system = RAGSystem(self.config)
         
+        self.agent_state_store = None
+        self.agent_tool_registry = None
+
         # 初始化Agent系统
         try:
-            from src.agent.react_agent import ReActMolecularAgent
-            self.agent_system = ReActMolecularAgent(llm=None)  # Agent工具使用自己的gmm-llama
+            self.molecular_generator_model = _init_ollama_model()
+            self.agent_system = self._create_chat_agent()
             logger.info("✅ Agent系统初始化成功")
         except Exception as e:
             logger.warning(f"⚠️ Agent系统初始化失败: {e}")
             self.agent_system = None
-        
         # 初始化ChatHandler
         try:
             from src.web.chat_handler import ChatHandler
@@ -431,22 +526,180 @@ class MolecularChatApp:
         self.app = FastAPI(title="Molecular Chat System")
         self._setup_routes()
 
+    def _create_chat_agent(self):
+        """Create the sole chat-facing Supervisor entry point."""
+        from src.agent.supervisor import SupervisorAgent
+        from src.agent.tools import get_all_tools
+
+        tools = {
+            tool.name: tool
+            for tool in get_all_tools(self.molecular_generator_model)
+        }
+        return SupervisorAgent(
+            tools=tools,
+            llm=self.model,
+            molecular_generator_llm=self.molecular_generator_model,
+            state_store=self._get_agent_state_store(),
+        )
+
+    def _get_agent_state_store(self):
+        from src.agent.persistence import SQLiteAgentStateStore
+
+        if self.agent_state_store is None:
+            configured_path = Path(
+                os.environ.get("AGENT_STATE_DB", "data/agent_state.sqlite3")
+            )
+            state_path = (
+                configured_path
+                if configured_path.is_absolute()
+                else project_root / configured_path
+            )
+            self.agent_state_store = SQLiteAgentStateStore(state_path)
+        return self.agent_state_store
+
+    def _create_supervisor_agent(self):
+        from src.agent.specialists import build_default_specialists
+        from src.agent.supervisor import SupervisorAgent
+        from src.agent.tooling import build_tool_registry
+
+        state_store = self._get_agent_state_store()
+        if self.agent_tool_registry is None:
+            tools = (
+                self.agent_system.tools.values()
+                if self.agent_system is not None
+                else []
+            )
+            self.agent_tool_registry = build_tool_registry(tools)
+        return SupervisorAgent(
+            tool_registry=self.agent_tool_registry,
+            specialists=build_default_specialists(),
+            state_store=state_store,
+        )
+
+    def _api_key_for_provider(self, provider: str) -> str:
+        normalized_provider = normalize_llm_config({"provider": provider})["provider"]
+        if normalized_provider in {"openai_compatible", "custom"}:
+            return str(
+                os.environ.get("OPENAI_COMPATIBLE_API_KEY")
+                or os.environ.get("EXTERNAL_LLM_API_KEY")
+                or ""
+            ).strip()
+        if normalized_provider == "modelscope":
+            modelscope_config = self.config.get("modelscope", {})
+            return str(
+                os.environ.get("MODELSCOPE_API_KEY")
+                or modelscope_config.get("api_key", "")
+                or ""
+            ).strip()
+        return ""
+
+    def _llm_stream_from_environment(self) -> bool:
+        default = bool(self.config.get("inference", {}).get("stream", True))
+        raw = os.environ.get("MEDCHAT_LLM_STREAM")
+        if raw is None:
+            return default
+        return raw.strip().lower() not in {"0", "false", "no", "off"}
+
     def _llm_config_from_yaml(self) -> Dict[str, Any]:
+        selected_provider = str(os.environ.get("MEDCHAT_LLM_PROVIDER") or "").strip()
+        if selected_provider:
+            provider = normalize_llm_config({"provider": selected_provider})["provider"]
+            stream = self._llm_stream_from_environment()
+            if provider in {"openai_compatible", "custom"}:
+                return normalize_llm_config(
+                    {
+                        "provider": provider,
+                        "base_url": (
+                            os.environ.get("OPENAI_COMPATIBLE_BASE_URL")
+                            or os.environ.get("EXTERNAL_LLM_BASE_URL")
+                            or ""
+                        ),
+                        "model_name": (
+                            os.environ.get("OPENAI_COMPATIBLE_MODEL")
+                            or os.environ.get("EXTERNAL_LLM_MODEL")
+                            or ""
+                        ),
+                        "api_key": self._api_key_for_provider(provider),
+                        "stream": stream,
+                    }
+                )
+            if provider == "modelscope":
+                modelscope_config = self.config.get("modelscope", {})
+                default_model = modelscope_config.get("default_model", "glm4")
+                return normalize_llm_config(
+                    {
+                        "provider": provider,
+                        "base_url": os.environ.get("MODELSCOPE_BASE_URL")
+                        or modelscope_config.get(
+                            "base_url",
+                            "https://api-inference.modelscope.cn/v1/chat/completions",
+                        ),
+                        "model_name": os.environ.get("MODELSCOPE_MODEL")
+                        or modelscope_config.get("models", {})
+                        .get(default_model, {})
+                        .get("name", "ZhipuAI/GLM-5.1"),
+                        "api_key": self._api_key_for_provider(provider),
+                        "stream": stream,
+                    }
+                )
+            ollama_config = self.config.get("ollama", {})
+            return normalize_llm_config(
+                {
+                    "provider": "ollama",
+                    "base_url": os.environ.get("OLLAMA_BASE_URL")
+                    or ollama_config.get("base_url", "http://localhost:11434"),
+                    "model_name": os.environ.get("OLLAMA_MODEL")
+                    or ollama_config.get("model", "gmm-llama:latest"),
+                    "stream": stream,
+                }
+            )
+
+        external_api_key = (
+            os.environ.get("OPENAI_COMPATIBLE_API_KEY")
+            or os.environ.get("EXTERNAL_LLM_API_KEY")
+            or ""
+        ).strip()
+        if external_api_key:
+            return normalize_llm_config(
+                {
+                    "provider": "openai_compatible",
+                    "base_url": (
+                        os.environ.get("OPENAI_COMPATIBLE_BASE_URL")
+                        or os.environ.get("EXTERNAL_LLM_BASE_URL")
+                        or ""
+                    ),
+                    "model_name": (
+                        os.environ.get("OPENAI_COMPATIBLE_MODEL")
+                        or os.environ.get("EXTERNAL_LLM_MODEL")
+                        or ""
+                    ),
+                    "api_key": external_api_key,
+                    "stream": self._llm_stream_from_environment(),
+                }
+            )
+
         modelscope_config = self.config.get("modelscope", {})
-        modelscope_api_key = str(modelscope_config.get("api_key", "") or "").strip()
-        if modelscope_config and modelscope_api_key:
+        modelscope_api_key = str(
+            os.environ.get("MODELSCOPE_API_KEY")
+            or modelscope_config.get("api_key", "")
+            or ""
+        ).strip()
+        if modelscope_api_key:
             default_model = modelscope_config.get("default_model", "glm4")
-            model_name = modelscope_config.get("models", {}).get(default_model, {}).get("name", "ZhipuAI/GLM-5.1")
+            model_name = (
+                os.environ.get("MODELSCOPE_MODEL")
+                or modelscope_config.get("models", {}).get(default_model, {}).get("name", "ZhipuAI/GLM-5.1")
+            )
             return normalize_llm_config(
                 {
                     "provider": "modelscope",
-                    "base_url": modelscope_config.get(
+                    "base_url": os.environ.get("MODELSCOPE_BASE_URL") or modelscope_config.get(
                         "base_url",
                         "https://api-inference.modelscope.cn/v1/chat/completions",
                     ),
                     "model_name": model_name,
                     "api_key": modelscope_api_key,
-                    "stream": self.config.get("inference", {}).get("stream", True),
+                    "stream": self._llm_stream_from_environment(),
                 }
             )
 
@@ -456,21 +709,93 @@ class MolecularChatApp:
                 "provider": "ollama",
                 "base_url": ollama_config.get("base_url", "http://localhost:11434"),
                 "model_name": ollama_config.get("model", "gmm-llama:latest"),
-                "stream": self.config.get("inference", {}).get("stream", True),
+                "stream": self._llm_stream_from_environment(),
             }
         )
 
     def _load_active_llm_config(self) -> Dict[str, Any]:
-        config = load_runtime_config(self.runtime_llm_config_path) or self._llm_config_from_yaml()
+        environment_config = self._llm_config_from_yaml()
+        runtime_config = load_runtime_config(self.runtime_llm_config_path)
+        if os.environ.get("MEDCHAT_LLM_PROVIDER"):
+            config = environment_config
+        elif runtime_config:
+            config = {**environment_config, **runtime_config}
+            config["api_key"] = self._api_key_for_provider(
+                runtime_config.get("provider", "")
+            )
+        else:
+            config = environment_config
         if not config.get("base_url"):
             config["base_url"] = (
                 "http://localhost:11434"
                 if config.get("provider") == "ollama"
-                else "https://api-inference.modelscope.cn/v1/chat/completions"
+                else (
+                    "https://api-inference.modelscope.cn/v1/chat/completions"
+                    if config.get("provider") == "modelscope"
+                    else "https://api.openai.com/v1/chat/completions"
+                )
             )
         if not config.get("model_name"):
-            config["model_name"] = "gmm-llama:latest" if config.get("provider") == "ollama" else "ZhipuAI/GLM-5.1"
+            config["model_name"] = (
+                "gmm-llama:latest"
+                if config.get("provider") == "ollama"
+                else ("ZhipuAI/GLM-5.1" if config.get("provider") == "modelscope" else "gpt-4o-mini")
+            )
         return normalize_llm_config(config)
+
+    def _llm_env_file_signature(self) -> str | None:
+        try:
+            content = self.runtime_llm_env_path.read_bytes()
+        except FileNotFoundError:
+            return None
+        return hashlib.sha256(content).hexdigest()
+
+    async def _refresh_llm_config_from_env(self) -> bool:
+        """Reload UI-managed config after another worker updates the env file."""
+        signature = self._llm_env_file_signature()
+        if signature is None or signature == self._llm_env_signature:
+            return False
+        async with self._llm_config_lock:
+            signature = self._llm_env_file_signature()
+            if signature is None or signature == self._llm_env_signature:
+                return False
+            config = load_active_llm_env_config(self.runtime_llm_env_path)
+            self._llm_env_signature = signature
+            if not config:
+                return False
+            previous_provider = self.active_llm_config.get("provider", "")
+            clear_previous = (
+                (previous_provider,)
+                if previous_provider != config.get("provider")
+                else ()
+            )
+            sync_llm_process_environment(
+                config,
+                clear_api_key=(
+                    config.get("provider") != "ollama" and not config.get("api_key")
+                ),
+                clear_api_key_providers=clear_previous,
+            )
+            self._apply_llm_config(config)
+            logger.info(
+                "Reloaded LLM configuration from local env: %s / %s",
+                config.get("provider"),
+                config.get("model_name"),
+            )
+            return True
+
+    async def _watch_llm_env_config(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(1.0)
+                await self._refresh_llm_config_from_env()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Unable to refresh LLM environment config (%s)",
+                    type(exc).__name__,
+                )
 
     def _create_model_from_llm_config(self, llm_config: Dict[str, Any]):
         config = normalize_llm_config(llm_config)
@@ -480,12 +805,22 @@ class MolecularChatApp:
                 model_name=config.get("model_name") or "gmm-llama:latest",
             )
 
-        from src.agent.modelscope_model import ModelScopeModel
+        if config.get("provider") == "modelscope":
+            from src.agent.modelscope_model import ModelScopeModel
 
-        return ModelScopeModel(
+            return ModelScopeModel(
+                api_key=config.get("api_key", ""),
+                model_name=config.get("model_name") or "ZhipuAI/GLM-5.1",
+                base_url=config.get("base_url") or "https://api-inference.modelscope.cn/v1/chat/completions",
+            )
+
+        from src.agent.openai_compatible_model import OpenAICompatibleModel
+
+        return OpenAICompatibleModel(
             api_key=config.get("api_key", ""),
-            model_name=config.get("model_name") or "ZhipuAI/GLM-5.1",
-            base_url=config.get("base_url") or "https://api-inference.modelscope.cn/v1/chat/completions",
+            model_name=config.get("model_name") or "gpt-4o-mini",
+            base_url=config.get("base_url") or "https://api.openai.com/v1/chat/completions",
+            provider_name="OpenAI-compatible",
         )
 
     def _apply_llm_config(self, llm_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -496,6 +831,11 @@ class MolecularChatApp:
         if self.chat_handler:
             self.chat_handler.model = self.model
             self.chat_handler.config = self.config
+        if self.agent_system:
+            if hasattr(self.agent_system, "set_llm"):
+                self.agent_system.set_llm(self.model)
+            else:
+                self.agent_system.llm = self.model
         return config
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
@@ -570,12 +910,12 @@ class MolecularChatApp:
         @self.app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket):
             """WebSocket endpoint for chat - 使用ChatHandler"""
+            await self._refresh_llm_config_from_env()
             if self.chat_handler:
                 # 使用新的ChatHandler（支持Agent工具）
                 await self.chat_handler.handle_websocket(websocket)
             else:
-                # 回退到旧的处理方式
-                await self._handle_websocket(websocket)
+                await self._reject_websocket_without_chat_handler(websocket)
 
         @self.app.get("/health")
         async def health_check():
@@ -591,6 +931,7 @@ class MolecularChatApp:
         @self.app.get("/api/llm/config")
         async def get_llm_config():
             """Return public LLM connection configuration without leaking API keys."""
+            await self._refresh_llm_config_from_env()
             return {
                 "success": True,
                 "config": public_llm_config(self.active_llm_config),
@@ -600,52 +941,115 @@ class MolecularChatApp:
         async def save_llm_config(request: Request):
             """Save and activate runtime LLM connection configuration."""
             payload = await request.json()
+            await self._refresh_llm_config_from_env()
             next_config = normalize_llm_config(payload)
-            clear_api_key = bool(payload.get("clear_api_key"))
-            if (
-                not clear_api_key
-                and not next_config.get("api_key")
-                and next_config.get("provider") == self.active_llm_config.get("provider")
-            ):
-                next_config["api_key"] = self.active_llm_config.get("api_key", "")
+            clear_api_key = payload.get("clear_api_key") is True
+            warnings = []
+            async with self._llm_config_lock:
+                previous_provider = self.active_llm_config.get("provider", "")
+                if clear_api_key:
+                    next_config["api_key"] = ""
+                elif not next_config.get("api_key"):
+                    if next_config.get("provider") == previous_provider:
+                        next_config["api_key"] = self.active_llm_config.get("api_key", "")
+                    else:
+                        saved_target = load_llm_env_config(
+                            self.runtime_llm_env_path,
+                            next_config.get("provider", ""),
+                        )
+                        next_config["api_key"] = (
+                            saved_target.get("api_key", "")
+                            or self._api_key_for_provider(next_config.get("provider", ""))
+                        )
 
-            saved_config = save_runtime_config(self.runtime_llm_config_path, next_config)
-            self._apply_llm_config(saved_config)
-            return {
-                "success": True,
-                "message": "模型接入配置已保存并生效",
-                "config": public_llm_config(saved_config),
-            }
+                clear_providers = (
+                    (previous_provider,)
+                    if clear_api_key and previous_provider != next_config.get("provider")
+                    else ()
+                )
+                _env_config, env_signature = save_llm_env_config_snapshot(
+                    self.runtime_llm_env_path,
+                    next_config,
+                    clear_api_key=clear_api_key,
+                    clear_api_key_providers=clear_providers,
+                )
+                sync_llm_process_environment(
+                    next_config,
+                    clear_api_key=clear_api_key,
+                    clear_api_key_providers=clear_providers,
+                )
+                self._llm_env_signature = env_signature
+                try:
+                    saved_config = save_runtime_config(
+                        self.runtime_llm_config_path,
+                        next_config,
+                    )
+                except OSError as exc:
+                    logger.warning("Unable to update LLM runtime cache: %s", exc)
+                    warnings.append("运行时缓存写入失败；本机 .env 已保存并作为重启配置来源。")
+                    saved_config = next_config
+                self._apply_llm_config(saved_config)
+                return {
+                    "success": True,
+                    "message": "模型接入配置已保存到本机 .env 并生效",
+                    "config": public_llm_config(saved_config),
+                    "warnings": warnings,
+                }
 
         @self.app.post("/api/llm/test")
         async def test_llm_config(request: Request):
             """Test a submitted LLM connection without saving it."""
             payload = await request.json()
+            await self._refresh_llm_config_from_env()
             test_config = normalize_llm_config(payload)
-            if not test_config.get("api_key") and test_config.get("provider") != "ollama":
-                test_config["api_key"] = self.active_llm_config.get("api_key", "")
+            if (
+                payload.get("clear_api_key") is not True
+                and not test_config.get("api_key")
+                and test_config.get("provider") != "ollama"
+            ):
+                if test_config.get("provider") == self.active_llm_config.get("provider"):
+                    test_config["api_key"] = self.active_llm_config.get("api_key", "")
+                else:
+                    saved_target = load_llm_env_config(
+                        self.runtime_llm_env_path,
+                        test_config.get("provider", ""),
+                    )
+                    test_config["api_key"] = (
+                        saved_target.get("api_key", "")
+                        or self._api_key_for_provider(test_config.get("provider", ""))
+                    )
 
             try:
                 test_model = self._create_model_from_llm_config(test_config)
-                response = await test_model.generate(
-                    "请用一句中文回复：连接测试成功。",
+                response = await generate_for_chat(
+                    test_model,
+                    "Reply with exactly: CONNECTION_OK",
                     temperature=0.1,
                     max_tokens=64,
                 )
-                is_success = bool(response and "失败" not in response and "未配置" not in response)
+                failure_markers = ("失败", "未配置", "HTTP ", "API Key", "Base URL", "模型名称")
+                is_success = bool(response and not any(marker in response for marker in failure_markers))
                 return {
                     "success": is_success,
-                    "message": "连接测试成功" if is_success else response,
+                    "message": (
+                        "连接测试成功"
+                        if is_success
+                        else "连接测试失败；请检查服务地址、模型名称和凭据。"
+                    ),
                     "model": test_model.model_name,
                 }
             except Exception as e:
-                logger.error(f"LLM connection test failed: {e}", exc_info=True)
-                return {"success": False, "message": f"连接测试失败: {str(e)}"}
+                logger.error("LLM connection test failed (%s)", type(e).__name__)
+                return {
+                    "success": False,
+                    "message": "连接测试失败；请检查服务地址、模型名称和凭据。",
+                }
 
         @self.app.post("/api/switch_model")
         async def switch_model(request: Request):
             """Switch model name for the current provider."""
             payload = await request.json()
+            await self._refresh_llm_config_from_env()
             model_key = str(payload.get("model") or "").strip()
             model_map = {
                 "glm4": "ZhipuAI/GLM-5.1",
@@ -655,13 +1059,30 @@ class MolecularChatApp:
             }
             next_config = dict(self.active_llm_config)
             next_config["model_name"] = model_map.get(model_key, model_key or next_config.get("model_name"))
-            saved_config = save_runtime_config(self.runtime_llm_config_path, next_config)
-            self._apply_llm_config(saved_config)
-            return {
-                "success": True,
-                "message": f"已切换到 {saved_config.get('model_name')}",
-                "config": public_llm_config(saved_config),
-            }
+            warnings = []
+            async with self._llm_config_lock:
+                _env_config, env_signature = save_llm_env_config_snapshot(
+                    self.runtime_llm_env_path,
+                    next_config,
+                )
+                sync_llm_process_environment(next_config)
+                self._llm_env_signature = env_signature
+                try:
+                    saved_config = save_runtime_config(
+                        self.runtime_llm_config_path,
+                        next_config,
+                    )
+                except OSError as exc:
+                    logger.warning("Unable to update LLM runtime cache: %s", exc)
+                    warnings.append("运行时缓存写入失败；本机 .env 已保存并作为重启配置来源。")
+                    saved_config = next_config
+                self._apply_llm_config(saved_config)
+                return {
+                    "success": True,
+                    "message": f"已切换到 {saved_config.get('model_name')}",
+                    "config": public_llm_config(saved_config),
+                    "warnings": warnings,
+                }
 
         # Register additional page routes
         from .routes.main_routes import register_main_routes
@@ -683,7 +1104,20 @@ class MolecularChatApp:
         from .routes.api_routes import setup_api_routes
         from ..docking import docking_service
         docking_service.configure(docking_config)
-        setup_api_routes(self.app, docking_service)
+        task_runtime = None
+        try:
+            from src.task_runtime import TaskRuntimeBinding
+
+            task_runtime = TaskRuntimeBinding()
+            task_runtime.install(self.app, logger)
+        except Exception:
+            logger.warning("Durable task runtime initialization failed")
+        self.task_runtime_binding = task_runtime
+        setup_api_routes(
+            self.app,
+            docking_service,
+            task_runtime=task_runtime,
+        )
 
         # Register molecular design routes
         try:
@@ -706,12 +1140,35 @@ class MolecularChatApp:
             from .routes.agent_workflow_routes import setup_agent_workflow_routes
             from .routes.system_routes import setup_system_routes
 
-            setup_task_routes(self.app)
-            setup_agent_workflow_routes(self.app)
+            setup_task_routes(self.app, task_runtime=task_runtime)
+            setup_agent_workflow_routes(
+                self.app,
+                supervisor_factory=self._create_supervisor_agent,
+            )
             setup_system_routes(self.app)
             logger.info("Task runtime and system metadata routes registered")
         except Exception as e:
             logger.warning(f"Task runtime routes registration failed: {e}")
+
+    async def _reject_websocket_without_chat_handler(self, websocket: WebSocket):
+        """Fail closed when the modern ChatHandler/Agent entrypoint is unavailable.
+
+        Falling back to the legacy websocket handler can bypass SupervisorAgent,
+        WorkflowOrchestrator, ToolResult normalization, and domain validators.
+        """
+        logger.error(
+            "ChatHandler unavailable; refusing websocket connection to avoid "
+            "bypassing the SupervisorAgent workflow"
+        )
+        await websocket.accept()
+        await websocket.send_text(json.dumps({
+            "type": "error",
+            "message": (
+                "Chat service is unavailable because the modern Agent entrypoint "
+                "was not initialized. Please check server startup logs."
+            ),
+        }, ensure_ascii=False))
+        await websocket.close(code=1011)
 
     async def _handle_websocket(self, websocket: WebSocket):
         """Handle WebSocket connections"""
@@ -797,7 +1254,8 @@ class MolecularChatApp:
                     }))
                 else:
                     # Non-streaming generation
-                    full_response = await self.model.generate(
+                    full_response = await generate_for_chat(
+                        self.model,
                         prompt,
                         temperature=self.config.get("inference", {}).get("temperature", 0.7),
                         max_tokens=self.config.get("inference", {}).get("max_tokens", 1500)
@@ -974,6 +1432,9 @@ Key guidelines:
     async def initialize(self):
         """Initialize the application"""
         logger.info("Initializing Molecular Chat System...")
+
+        if self._llm_watch_task is None or self._llm_watch_task.done():
+            self._llm_watch_task = asyncio.create_task(self._watch_llm_env_config())
         
         # Initialize RAG system
         if self.config.get("rag", {}).get("enabled", True):
@@ -998,6 +1459,38 @@ Key guidelines:
             logger.warning(f"⚠️ 无法启动反向寻靶预加载: {e}")
         
         logger.info("Molecular Chat System initialized successfully")
+
+    async def shutdown(self):
+        """Stop application-owned background tasks."""
+        if self._llm_watch_task is not None:
+            self._llm_watch_task.cancel()
+            try:
+                await self._llm_watch_task
+            except asyncio.CancelledError:
+                pass
+            self._llm_watch_task = None
+
+        registry = getattr(self, "agent_tool_registry", None)
+        self.agent_tool_registry = None
+        agent_system = getattr(self, "agent_system", None)
+        agent_tools = list(getattr(agent_system, "tools", {}).values())
+        if agent_system is not None:
+            agent_system.tools = {}
+
+        registry_tool_ids = set()
+        if registry is not None:
+            registry_tool_ids = {
+                id(tool)
+                for adapter in registry.as_mapping().values()
+                if (tool := getattr(adapter, "tool", None)) is not None
+            }
+            registry.close()
+        for tool in agent_tools:
+            if id(tool) in registry_tool_ids:
+                continue
+            close = getattr(tool, "close", None)
+            if callable(close):
+                close()
     
     def run(self, host: Optional[str] = None, port: Optional[int] = None, debug: bool = False):
         """Run the application"""
@@ -1032,6 +1525,10 @@ def create_app_sync():
         @app.on_event("startup")
         async def startup_event():
             await app_instance.initialize()
+
+        @app.on_event("shutdown")
+        async def shutdown_event():
+            await app_instance.shutdown()
 
     return app
 

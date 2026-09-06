@@ -47,6 +47,15 @@ except ModuleNotFoundError:
 
 logger = logging.getLogger(__name__)
 
+FEATURE_DISTANCE_CUTOFFS = {
+    "Hydrophobe": 2.7,
+    "Aromatic": 2.5,
+    "Donor": 2.0,
+    "Acceptor": 2.0,
+    "PosIonizable": 2.2,
+    "NegIonizable": 2.2,
+}
+
 # ─────────────────────────────────────────
 #   全局药效团特征工厂 (单例)
 # ─────────────────────────────────────────
@@ -435,6 +444,85 @@ def _rmsd(query_points: np.ndarray, hit_points: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.sum((query_points - hit_points) ** 2, axis=1))))
 
 
+def _feature_distance_cutoff(family: str, fallback: float) -> float:
+    return max(float(fallback), FEATURE_DISTANCE_CUTOFFS.get(family, float(fallback)))
+
+
+def _best_family_matches(query_group: List[Dict], hit_group: List[Dict], distance_cutoff: float) -> List[Dict]:
+    if not query_group or not hit_group:
+        return []
+
+    distances = []
+    for query in query_group:
+        for hit in hit_group:
+            distance = float(np.linalg.norm(query["pos"] - hit["aligned_pos"]))
+            if distance <= _feature_distance_cutoff(query["family"], distance_cutoff):
+                distances.append((distance, query, hit))
+
+    if not distances:
+        return []
+
+    distances.sort(key=lambda item: item[0])
+    if len(distances) > 120:
+        matched = []
+        used_query = set()
+        used_hit = set()
+        for distance, query, hit in distances:
+            if query["index"] in used_query or hit["index"] in used_hit:
+                continue
+            used_query.add(query["index"])
+            used_hit.add(hit["index"])
+            matched.append({
+                "query_index": query["index"],
+                "hit_index": hit["index"],
+                "family": query["family"],
+                "distance": round(distance, 4),
+            })
+        return matched
+
+    best_matches: List[Dict] = []
+    best_distance = float("inf")
+
+    def backtrack(position: int, used_query: set, used_hit: set, chosen: List[tuple], total_distance: float):
+        nonlocal best_matches, best_distance
+        if position >= len(distances):
+            if len(chosen) > len(best_matches) or (
+                len(chosen) == len(best_matches) and total_distance < best_distance
+            ):
+                best_matches = [
+                    {
+                        "query_index": query["index"],
+                        "hit_index": hit["index"],
+                        "family": query["family"],
+                        "distance": round(distance, 4),
+                    }
+                    for distance, query, hit in chosen
+                ]
+                best_distance = total_distance
+            return
+
+        remaining = len(distances) - position
+        if len(chosen) + remaining < len(best_matches):
+            return
+
+        distance, query, hit = distances[position]
+        query_id = query["index"]
+        hit_id = hit["index"]
+        if query_id not in used_query and hit_id not in used_hit:
+            used_query.add(query_id)
+            used_hit.add(hit_id)
+            chosen.append((distance, query, hit))
+            backtrack(position + 1, used_query, used_hit, chosen, total_distance + distance)
+            chosen.pop()
+            used_hit.remove(hit_id)
+            used_query.remove(query_id)
+
+        backtrack(position + 1, used_query, used_hit, chosen, total_distance)
+
+    backtrack(0, set(), set(), [], 0.0)
+    return best_matches
+
+
 def _score_transformed_alignment(
     query_features: List[Dict],
     hit_features: List[Dict],
@@ -452,29 +540,11 @@ def _score_transformed_alignment(
     ]
 
     matched = []
-    used_hits = set()
-
-    for query in query_features:
-        same_family_hits = [
-            hit for hit in transformed_hits
-            if hit["family"] == query["family"] and hit["index"] not in used_hits
-        ]
-        if not same_family_hits:
-            continue
-
-        best_hit = min(
-            same_family_hits,
-            key=lambda hit: float(np.linalg.norm(query["pos"] - hit["aligned_pos"])),
-        )
-        distance = float(np.linalg.norm(query["pos"] - best_hit["aligned_pos"]))
-        if distance <= distance_cutoff:
-            used_hits.add(best_hit["index"])
-            matched.append({
-                "query_index": query["index"],
-                "hit_index": best_hit["index"],
-                "family": query["family"],
-                "distance": round(distance, 4),
-            })
+    families = sorted({feature["family"] for feature in query_features} | {feature["family"] for feature in transformed_hits})
+    for family in families:
+        query_group = [feature for feature in query_features if feature["family"] == family]
+        hit_group = [feature for feature in transformed_hits if feature["family"] == family]
+        matched.extend(_best_family_matches(query_group, hit_group, distance_cutoff))
 
     possible_count = min(len(query_features), len(hit_features))
     if not matched or possible_count == 0:
