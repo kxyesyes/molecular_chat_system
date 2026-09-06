@@ -130,6 +130,110 @@ def test_non_generation_plan_accepts_harmless_valid_context_count():
     assert tool.calls == ["CCO"]
 
 
+@pytest.mark.parametrize("metadata", [{}, {"requested_count": 5}])
+def test_non_generation_plan_rejects_invalid_context_mol_count_before_tool(
+    metadata,
+):
+    tool = FakeTool("property_calculator")
+    plan = WorkflowPlan(
+        workflow_name="comprehensive_evaluation",
+        steps=[
+            WorkflowStep(
+                "properties",
+                "property_calculator",
+                input_data="CCO",
+            )
+        ],
+    )
+
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="Analyze CCO",
+            trace_id="non-generation-invalid-context-mol-count",
+            active_skill="comprehensive_evaluation",
+            mol_count=11,
+            metadata=metadata,
+        ),
+        policy=FAKE_POLICY,
+        all_tools={tool.name: tool},
+        plan=plan,
+    )
+
+    assert execution.result.success is False
+    assert execution.result.error.code == AgentErrorCode.INVALID_INPUT
+    assert execution.tool_attempt_count == 0
+    assert execution.events == []
+    assert tool.calls == []
+
+
+def test_valid_context_mol_count_does_not_override_metadata_precedence():
+    tool = FakeTool("property_calculator")
+    plan = WorkflowPlan(
+        workflow_name="comprehensive_evaluation",
+        steps=[
+            WorkflowStep(
+                "properties",
+                "property_calculator",
+                input_data="CCO",
+            )
+        ],
+    )
+
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="Analyze CCO",
+            trace_id="non-generation-valid-context-mol-count",
+            active_skill="comprehensive_evaluation",
+            mol_count=7,
+            metadata={"requested_count": 5},
+        ),
+        policy=FAKE_POLICY,
+        all_tools={tool.name: tool},
+        plan=plan,
+    )
+
+    assert execution.result.success is True
+    assert execution.tool_attempt_count == 1
+    assert execution.plan.metadata == {}
+    assert tool.calls == ["CCO"]
+
+
+def test_valid_context_mol_count_preserves_generation_metadata_precedence():
+    generator = FakeTool("llm_molecular_generator")
+    plan = WorkflowPlan(
+        workflow_name="molecular_design",
+        steps=[
+            WorkflowStep(
+                "generate",
+                "llm_molecular_generator",
+                input_data="Generate candidates",
+                capability="molecule.generate",
+            )
+        ],
+    )
+
+    execution = WorkflowExecutor().execute(
+        context=AgentContext(
+            query="Generate 3 molecules",
+            trace_id="valid-context-mol-count-precedence",
+            active_skill="molecular_design",
+            mol_count=7,
+            metadata={"requested_count": 5},
+        ),
+        policy=WorkflowPolicy(
+            name="molecular_design",
+            description="test",
+            allowed_tools=("llm_molecular_generator",),
+        ),
+        all_tools={generator.name: generator},
+        plan=plan,
+    )
+
+    assert execution.tool_attempt_count == 1
+    assert execution.plan.metadata["requested_count"] == 5
+    assert generator.calls[0]["metadata"]["requested_count"] == 5
+
+
 def test_atomic_count_conflict_fails_preflight_before_tool():
     tool = FakeTool("llm_molecular_generator")
     plan = WorkflowPlan(

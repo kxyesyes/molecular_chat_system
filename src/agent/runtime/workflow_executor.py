@@ -246,34 +246,45 @@ class WorkflowExecutor:
     ) -> PreparedWorkflow | WorkflowExecution:
         context_snapshot = _copy_boundary(context, "context")
         all_tools_snapshot = dict(all_tools)
+        try:
+            validate_generation_count(
+                context_snapshot.mol_count,
+                field="mol_count",
+            )
+        except GenerationRequestError as exc:
+            validation_plan = self._count_validation_plan(
+                context_snapshot,
+                policy,
+                plan,
+            )
+            return self._invalid_count_execution(
+                context_snapshot,
+                policy,
+                validation_plan,
+                exc,
+                field="mol_count",
+            )
         if "requested_count" in context_snapshot.metadata:
             try:
                 validated_context_count = validate_generation_count(
                     context_snapshot.metadata["requested_count"]
                 )
-            except GenerationRequestError:
-                validation_plan = (
-                    _copy_boundary(plan, "plan")
-                    if plan is not None
-                    else WorkflowPlan(
-                        workflow_name=(
-                            context_snapshot.active_skill or policy.name
-                        ),
-                        steps=[],
-                    )
+            except GenerationRequestError as exc:
+                validation_plan = self._count_validation_plan(
+                    context_snapshot,
+                    policy,
+                    plan,
                 )
                 validation_plan.metadata["requested_count"] = deepcopy(
                     context_snapshot.metadata["requested_count"]
                 )
-                _, failure = self._preflight(
-                    context=context_snapshot,
-                    policy=policy,
-                    all_tools=all_tools_snapshot,
-                    plan=validation_plan,
+                return self._invalid_count_execution(
+                    context_snapshot,
+                    policy,
+                    validation_plan,
+                    exc,
+                    field="requested_count",
                 )
-                if failure is None:  # pragma: no cover - contract invariant
-                    raise RuntimeError("invalid requested_count passed preflight")
-                return failure
             context_snapshot = replace(
                 context_snapshot,
                 metadata={
@@ -455,6 +466,52 @@ class WorkflowExecutor:
             idempotency_key=idempotency_key,
         )
 
+    @staticmethod
+    def _count_validation_plan(
+        context: AgentContext,
+        policy: WorkflowPolicy,
+        plan: WorkflowPlan | None,
+    ) -> WorkflowPlan:
+        if plan is not None:
+            return _copy_boundary(plan, "plan")
+        return WorkflowPlan(
+            workflow_name=context.active_skill or policy.name,
+            steps=[],
+        )
+
+    @staticmethod
+    def _invalid_count_execution(
+        context: AgentContext,
+        policy: WorkflowPolicy,
+        plan: WorkflowPlan,
+        exc: GenerationRequestError,
+        *,
+        field: str,
+    ) -> WorkflowExecution:
+        details = {
+            "skill": policy.name,
+            "reason": "invalid_requested_count",
+            "field": field,
+            "validation": str(exc),
+        }
+        error = AgentExecutionError(
+            code=AgentErrorCode.INVALID_INPUT,
+            message="Invalid molecular generation request",
+            details=details,
+        )
+        return WorkflowExecution(
+            plan=plan,
+            result=AgentResult(
+                trace_id=context.trace_id,
+                success=False,
+                message=error.message,
+                skill_name=policy.name,
+                error=error,
+                metadata={"preflight": details},
+            ),
+            events=[],
+        )
+
     def _preflight(
         self,
         context: AgentContext,
@@ -466,27 +523,12 @@ class WorkflowExecutor:
             try:
                 validate_generation_count(plan.metadata["requested_count"])
             except GenerationRequestError as exc:
-                details = {
-                    "skill": policy.name,
-                    "reason": "invalid_requested_count",
-                    "validation": str(exc),
-                }
-                error = AgentExecutionError(
-                    code=AgentErrorCode.INVALID_INPUT,
-                    message="Invalid molecular generation request",
-                    details=details,
-                )
-                return None, WorkflowExecution(
-                    plan=plan,
-                    result=AgentResult(
-                        trace_id=context.trace_id,
-                        success=False,
-                        message=error.message,
-                        skill_name=policy.name,
-                        error=error,
-                        metadata={"preflight": details},
-                    ),
-                    events=[],
+                return None, self._invalid_count_execution(
+                    context,
+                    policy,
+                    plan,
+                    exc,
+                    field="requested_count",
                 )
         if plan.metadata.get("reason") in {
             "invalid_requested_count",

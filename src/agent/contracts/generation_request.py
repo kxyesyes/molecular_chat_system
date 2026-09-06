@@ -108,9 +108,34 @@ _INSTRUCTION_IDENTIFIER_LEXICAL_COMBINATIONS = (
     ("return", "only"),
     ("system", "prompt"),
 )
+_INSTRUCTION_ACTION_LEXEMES = frozenset(
+    {
+        "bypass",
+        "circumvent",
+        "disable",
+        "disregard",
+        "evade",
+        "follow",
+        "ignore",
+        "obey",
+        "override",
+        "remove",
+    }
+)
+_INSTRUCTION_OBJECT_LEXEMES = frozenset(
+    {
+        "guardrail",
+        "instruction",
+        "policy",
+        "prompt",
+        "rule",
+        "safety",
+        "task",
+    }
+)
 _CREDENTIAL_TEXT_PATTERN = re.compile(
     r"(?:bearer[a-z0-9._~+/=-]{8,}|accesstoken|apikey|authtoken|"
-    r"credential|password|"
+    r"credential|githubpat|password|"
     r"secret(?:key|token|[0-9]|$))"
 )
 _UNIPROT_ACCESSION = re.compile(
@@ -152,14 +177,17 @@ _CHINESE_DECIMAL_PART = rf"(?:{_CHINESE_COUNT}|\d+)"
 _COUNT_TOKEN = rf"(?:{_ARABIC_COUNT}|{_CHINESE_COUNT}|{_ENGLISH_COUNT})"
 _ENGLISH_NOUN = r"(?:candidates?|molecules?|compounds?|structures?)"
 _GENERATION_VERB = r"(?:generate|design|create|produce|make|build|synthesize)"
+_GENERATION_CONNECTOR = (
+    r"(?:and[ \t]+(?:(?:then|also)[ \t]+)?|then[ \t]+|plus[ \t]+)"
+)
 _ENGLISH_COUNT_FOLLOW = (
     rf"(?:{_ENGLISH_NOUN}\b|for\b|"
-    rf"(?:and[ \t]+(?:then[ \t]+)?|then[ \t]+){_GENERATION_VERB}\b)"
+    rf"{_GENERATION_CONNECTOR}{_GENERATION_VERB}\b)"
 )
 _MAX_ENGLISH_COUNT_MODIFIER_TOKENS = 6
 _ENGLISH_COUNT_MODIFIER_TOKEN = (
     rf"(?!(?:{_ENGLISH_NOUN}|{_GENERATION_VERB}|but|instead|for)\b)"
-    rf"(?!(?:and[ \t]+(?:then[ \t]+)?|then[ \t]+){_GENERATION_VERB}\b)"
+    rf"(?!{_GENERATION_CONNECTOR}{_GENERATION_VERB}\b)"
     r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*"
 )
 _ENGLISH_COUNT_TAIL = (
@@ -1134,7 +1162,13 @@ def _looks_instruction_shaped_identifier(value: str) -> bool:
         prefix_match.group("suffix") if prefix_match else normalized
     )
     lexical_text = re.sub(r"[^a-z0-9]+", "", identifier_text)
-    if "instruction" in lexical_text or "systemprompt" in lexical_text:
+    has_instruction_action = any(
+        lexeme in lexical_text for lexeme in _INSTRUCTION_ACTION_LEXEMES
+    )
+    has_instruction_object = any(
+        lexeme in lexical_text for lexeme in _INSTRUCTION_OBJECT_LEXEMES
+    )
+    if has_instruction_action and has_instruction_object:
         return True
     return any(
         all(lexeme in lexical_text for lexeme in combination)

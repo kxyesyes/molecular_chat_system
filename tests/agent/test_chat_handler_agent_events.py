@@ -1946,6 +1946,8 @@ def test_chat_handler_tools_disabled_uses_plain_chat_without_agent_execution():
         "Generate 7.5 molecules",
         "Generate 7.5 potent",
         "Generate 3 potent + synthesize 4 potent",
+        "Generate 3 potent plus synthesize 4 potent",
+        "Generate 3 potent and also synthesize 4 potent",
     ],
 )
 def test_chat_handler_omitted_count_rejects_invalid_text_before_tool(query):

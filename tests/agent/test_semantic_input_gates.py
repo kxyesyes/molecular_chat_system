@@ -33,9 +33,16 @@ _SEPARATOR_FREE_INSTRUCTION_LOCAL_IDS = (
     "LOCAL_IGNOREALLINSTRUCTIONS",
     "LOCAL_DISREGARDALLINSTRUCTIONS",
     "local_disregard_every_previous_instruction",
+    "LOCAL_DISREGARDALLRULES",
+    "LOCAL_OVERRIDEALLSAFETYRULES",
+    "LOCAL_BYPASSALLGUARDRAILS",
+    "LOCAL_DISABLESYSTEMPROMPTS",
+    "LOCAL_IGNORECURRENTTASK",
     "LOCAL_ＳＹＳＴＥＭＰＲＯＭＰＴ",
     "LOCAL_ＩＧＮＯＲＥＡＬＬＩＮＳＴＲＵＣＴＩＯＮＳ",
     "LOCAL_ＤＩＳＲＥＧＡＲＤＡＬＬＩＮＳＴＲＵＣＴＩＯＮＳ",
+    "LOCAL_ＤＩＳＲＥＧＡＲＤＡＬＬＲＵＬＥＳ",
+    "LOCAL_ＯＶＥＲＲＩＤＥＡＬＬＳＡＦＥＴＹＲＵＬＥＳ",
     "LOCAL_ＲＥＳＰＯＮＤＷＩＴＨＣＣＯ",
 )
 
@@ -674,6 +681,9 @@ def test_every_target_text_field_applies_nfkc_instruction_and_credential_boundar
     [
         "LOCAL_AKIAIOSFODNN7EXAMPLE",
         "LOCAL_github_pat_11AA22BB33CC44DD55EE66FF",
+        "LOCAL_GITHUBPAT11AA22BB33CC44DD55EE66FF",
+        "LOCAL_GITHUBPAT123",
+        "LOCAL_ＧＩＴＨＵＢＰＡＴ１１ＡＡ２２ＢＢ３３ＣＣ４４ＤＤ５５ＥＥ６６ＦＦ",
         "LOCAL_sk-abcdefghijklmnopqrstuvwxyz123456",
         "LOCAL_Bearer_abcdefghijklmnopqrstuvwxyz",
         "LOCAL_api_key_abcdefghijklmnopqrstuvwxyz",
@@ -687,6 +697,45 @@ def test_local_identifier_suffix_credentials_fail_closed(identifier):
         "target_identifier": identifier,
         "source": "local_target_db",
     }
+
+    with pytest.raises(TargetEvidenceError, match="unsafe text"):
+        serialize_target_evidence(target)
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "target_identifier",
+        "uniprot_id",
+        "target_id",
+        "source_record_id",
+        "recommended_structures.structure_id",
+        "recommended_structures.source_record_id",
+        "evidence.id",
+        "evidence.source_record_id",
+        "evidence.structure_id",
+        "evidence.uniprot_id",
+    ],
+)
+def test_separator_free_github_credential_is_scanned_in_every_identifier_field(
+    location,
+):
+    unsafe = "LOCAL_GITHUBPAT123"
+    target = {
+        "gene_symbol": "PDE5A",
+        "target_identifier": "LOCAL_PDE5A",
+        "source": "local_target_db",
+    }
+    if "." not in location:
+        target[location] = unsafe
+    else:
+        collection, field = location.split(".", 1)
+        nested = {
+            "source": "local_target_db",
+            "source_record_id": "LOCAL_PDE5A",
+        }
+        nested[field] = unsafe
+        target[collection] = [nested]
 
     with pytest.raises(TargetEvidenceError, match="unsafe text"):
         serialize_target_evidence(target)

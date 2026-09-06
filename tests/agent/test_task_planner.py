@@ -371,6 +371,25 @@ def test_modifier_window_does_not_hide_conflicting_generation_clause():
 
 
 @pytest.mark.parametrize(
+    "query",
+    [
+        "Generate 3 potent plus synthesize 4 potent",
+        "Generate 3 potent and also synthesize 4 potent",
+    ],
+)
+def test_nounless_modifier_connectors_aggregate_every_generation_count(query):
+    with pytest.raises(GenerationRequestError, match="conflicting"):
+        parse_generation_count(query)
+
+
+@pytest.mark.parametrize("connector", [" plus ", " and also "])
+def test_nounless_modifier_connectors_accept_repeated_identical_counts(connector):
+    assert parse_generation_count(
+        f"Generate 3 potent{connector}synthesize 3 selective"
+    ) == 3
+
+
+@pytest.mark.parametrize(
     "separator",
     [" then ", ". ", "; ", ", ", " but ", " instead "],
 )
