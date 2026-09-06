@@ -74,6 +74,7 @@ class HybridSkillRouter:
         self,
         query: str,
         memory: list[dict[str, Any]] | None = None,
+        llm: Any = None,
     ) -> RouteDecision:
         text = query.strip()
         lower = text.lower()
@@ -250,13 +251,18 @@ class HybridSkillRouter:
         source = "rule" if top.score >= 0.9 and margin >= 0.2 else "scoring"
         decision_reasons = list(top.reasons)
 
+        effective_llm = llm if llm is not None else self.llm
         if (
-            self.llm
+            effective_llm
             and not molecular_input.blocks_execution
             and len(candidates) > 1
             and margin < self.llm_margin_threshold
         ):
-            arbitration = self._llm_arbitrate(text, candidates[:3])
+            arbitration = self._llm_arbitrate(
+                text,
+                candidates[:3],
+                effective_llm,
+            )
             allowed = {candidate.skill_name for candidate in candidates[:3]}
             if arbitration and arbitration.get("selected_skill") in allowed:
                 selected = arbitration["selected_skill"]
@@ -267,6 +273,8 @@ class HybridSkillRouter:
                     top.score,
                     min(1.0, float(arbitration.get("confidence", top.score))),
                 )
+            elif arbitration is None:
+                decision_reasons.append("llm_arbitration_unavailable")
 
         if molecular_input.blocks_execution:
             if molecular_input.validation_available:
@@ -426,7 +434,10 @@ class HybridSkillRouter:
         return reasons
 
     def _llm_arbitrate(
-        self, query: str, candidates: list[RouteCandidate]
+        self,
+        query: str,
+        candidates: list[RouteCandidate],
+        llm: Any,
     ) -> dict[str, Any] | None:
         prompt = json.dumps(
             {
@@ -442,7 +453,7 @@ class HybridSkillRouter:
             ensure_ascii=False,
         )
         try:
-            response = self.llm.generate(prompt, temperature=0.0, max_tokens=200)
+            response = llm.generate(prompt, temperature=0.0, max_tokens=200)
             if inspect.isawaitable(response):
                 response = asyncio.run(response)
             data = json.loads(str(response).strip().strip("`"))

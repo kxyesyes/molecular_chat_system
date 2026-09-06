@@ -190,9 +190,10 @@ class ChatHandler:
             and skill_router
             and hasattr(skill_router, "decide")
         ):
-            route_decision = skill_router.decide(
+            route_decision = await asyncio.to_thread(
+                skill_router.decide,
                 message,
-                llm=getattr(self.agent_system, "llm", None),
+                getattr(self.agent_system, "llm", None),
             )
             clarification = self._route_clarification(route_decision)
         if clarification:

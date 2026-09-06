@@ -66,8 +66,7 @@ class SkillRouter:
 
     def decide(self, query: str, llm=None):
         """Return the full explainable routing decision for boundary checks."""
-        self.hybrid_router.llm = llm
-        return self.hybrid_router.decide(query)
+        return self.hybrid_router.decide(query, llm=llm)
 
     def get_tools_for_skill(
         self,

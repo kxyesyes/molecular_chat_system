@@ -394,6 +394,40 @@ class ConfirmationAgentSystem:
         raise AssertionError("confirmation requests must not execute tools")
 
 
+class AsyncRoutingModel:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate(self, prompt, **kwargs):
+        self.calls += 1
+        return json.dumps(
+            {
+                "selected_skill": "activity_prediction",
+                "confidence": 0.99,
+                "reasons": ["activity endpoint requested"],
+            }
+        )
+
+
+class AsyncRoutingAgentSystem(FakeAgentSystem):
+    def __init__(self):
+        self.llm = AsyncRoutingModel()
+        self.skill_router = SkillRouter()
+        self.selected_skills = []
+
+    def should_use_tools(self, message):
+        raise AssertionError("the explainable route decision must be authoritative")
+
+    def execute(self, message, temperature=0.7, mol_count=5, active_skill=None):
+        self.selected_skills.append(active_skill.name if active_skill else None)
+        return super().execute(
+            message,
+            temperature=temperature,
+            mol_count=mol_count,
+            active_skill=active_skill,
+        )
+
+
 class RecordingLegacyRagService:
     is_initialized = True
 
@@ -2400,3 +2434,26 @@ def test_separate_websocket_connections_do_not_share_conversation_history():
     assert len(model.prompts) == 2
     assert "first-user-private-molecule" in model.prompts[0]
     assert "first-user-private-molecule" not in model.prompts[1]
+
+
+def test_chat_handler_runs_async_route_arbitration_outside_websocket_loop():
+    agent = AsyncRoutingAgentSystem()
+    handler = ChatHandler(
+        model=FakeModel(),
+        rag_service=FakeRagService(),
+        agent_system=agent,
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="Evaluate CCO pIC50 and ADMET",
+            enable_rag=False,
+            enable_tools=True,
+        )
+    )
+
+    assert agent.llm.calls == 1
+    assert agent.selected_skills == ["activity_prediction"]

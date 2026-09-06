@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -301,6 +302,58 @@ def test_llm_arbitration_is_bounded_to_ranked_candidates():
         candidate.skill_name for candidate in decision.candidates
     }
     assert decision.source == "llm"
+
+
+def test_skill_router_keeps_per_request_llm_out_of_shared_router_state():
+    class AsyncLLM:
+        async def generate(self, prompt, **kwargs):
+            return json.dumps(
+                {
+                    "selected_skill": "activity_prediction",
+                    "confidence": 0.99,
+                    "reasons": ["activity endpoint requested"],
+                }
+            )
+
+    router = SkillRouter()
+    model = AsyncLLM()
+
+    decision = router.decide("Evaluate CCO pIC50 and ADMET", llm=model)
+
+    assert decision.source == "llm"
+    assert decision.selected_skill == "activity_prediction"
+    assert router.hybrid_router.llm is None
+
+
+def test_skill_router_accepts_async_model_when_called_from_worker_thread():
+    class AsyncLLM:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate(self, prompt, **kwargs):
+            self.calls += 1
+            return json.dumps(
+                {
+                    "selected_skill": "activity_prediction",
+                    "confidence": 0.99,
+                    "reasons": ["activity endpoint requested"],
+                }
+            )
+
+    async def exercise():
+        model = AsyncLLM()
+        decision = await asyncio.to_thread(
+            SkillRouter().decide,
+            "Evaluate CCO pIC50 and ADMET",
+            model,
+        )
+        return decision, model.calls
+
+    decision, calls = asyncio.run(exercise())
+
+    assert calls == 1
+    assert decision.source == "llm"
+    assert decision.selected_skill == "activity_prediction"
 
 
 def test_skill_router_returns_workflow_policy():
