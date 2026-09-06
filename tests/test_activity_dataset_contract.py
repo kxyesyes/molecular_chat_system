@@ -99,6 +99,8 @@ def _prepared_validation_result(
     accepted: pd.DataFrame,
     *,
     ready_for_training: bool = True,
+    input_sha256: object = "1" * 64,
+    statistics_overrides: dict[str, object] | None = None,
 ) -> contract.DatasetValidationResult:
     rejected = pd.DataFrame(
         [
@@ -112,20 +114,25 @@ def _prepared_validation_result(
             }
         ]
     )
+    identity_manifest = _validation_manifest()
+    statistics: dict[str, object] = {
+        "input_rows": len(accepted) + len(rejected),
+        "accepted_rows": len(accepted),
+        "rejected_rows": len(rejected),
+        "unique_molecules": len(accepted),
+        "unique_scaffolds": accepted["scaffold_smiles"].nunique(),
+        "rejected_by_reason": {"invalid_smiles": 1},
+        "duplicate_rows_collapsed": 0,
+        "endpoint_key": identity_manifest.endpoint_key,
+        "model_contract_key": identity_manifest.model_contract_key,
+    }
+    statistics.update(statistics_overrides or {})
     return contract.DatasetValidationResult(
         accepted=accepted,
         rejected=rejected,
         warnings=["one synthetic warning"],
-        statistics={
-            "input_rows": len(accepted) + len(rejected),
-            "accepted_rows": len(accepted),
-            "rejected_rows": len(rejected),
-            "unique_molecules": len(accepted),
-            "unique_scaffolds": accepted["scaffold_smiles"].nunique(),
-            "rejected_by_reason": {"invalid_smiles": 1},
-            "duplicate_rows_collapsed": 0,
-        },
-        input_sha256="1" * 64,
+        statistics=statistics,
+        input_sha256=input_sha256,  # type: ignore[arg-type]
         ready_for_training=ready_for_training,
     )
 
@@ -1909,6 +1916,16 @@ def test_write_prepared_dataset_emits_atomic_relative_verified_artifacts(
         "test",
         "quality_report",
     }
+    for split_name in ("train", "validation", "test"):
+        artifact = payload["artifacts"][split_name]
+        assert set(artifact) == {"path", "sha256", "row_count"}
+        assert artifact["row_count"] == len(split.frames[split_name])
+    quality_artifact = payload["artifacts"]["quality_report"]
+    assert set(quality_artifact) == {"path", "sha256", "byte_size"}
+    assert quality_artifact["byte_size"] == len(
+        (dataset_dir / "quality_report.json").read_bytes()
+    )
+    assert "row_count" not in quality_artifact
     for artifact in payload["artifacts"].values():
         relative_path = Path(artifact["path"])
         assert relative_path.name == artifact["path"]
@@ -1927,6 +1944,190 @@ def test_write_prepared_dataset_emits_atomic_relative_verified_artifacts(
     assert "PRIVATE_REJECTED_VALUE" not in json.dumps(quality)
     assert not (dataset_dir / "rejected.csv").exists()
     assert not list(dataset_dir.glob("*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "input_sha256",
+    [None, "abc", "1" * 63, "1" * 65, "g" * 64, 123],
+)
+def test_write_prepared_dataset_rejects_invalid_input_digest_before_creation(
+    tmp_path: Path,
+    input_sha256: object,
+) -> None:
+    prepared = _prepared_frame()
+    manifest = _validation_manifest(dataset_id="invalid-input-digest")
+
+    with pytest.raises(ValueError, match="input_sha256"):
+        contract.write_prepared_dataset(
+            _prepared_validation_result(prepared, input_sha256=input_sha256),
+            contract.split_prepared_dataset(prepared),
+            manifest,
+            tmp_path,
+        )
+
+    assert not (tmp_path / manifest.dataset_id).exists()
+
+
+def test_write_prepared_dataset_canonicalizes_input_digest_to_lowercase(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepared_frame()
+
+    path = contract.write_prepared_dataset(
+        _prepared_validation_result(prepared, input_sha256="AB" * 32),
+        contract.split_prepared_dataset(prepared),
+        _validation_manifest(dataset_id="uppercase-input-digest"),
+        tmp_path,
+    )
+
+    payload = json.loads(path.read_text("utf-8"))
+    assert payload["input_sha256"] == "ab" * 32
+
+
+def test_write_prepared_dataset_rejects_cross_manifest_validation_identity(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepared_frame()
+    different_manifest = _validation_manifest(
+        dataset_id="cross-manifest",
+        endpoint="pKi",
+        units="pKi",
+    )
+
+    with pytest.raises(ValueError, match="endpoint_key"):
+        contract.write_prepared_dataset(
+            _prepared_validation_result(prepared),
+            contract.split_prepared_dataset(prepared),
+            different_manifest,
+            tmp_path,
+        )
+
+    assert not (tmp_path / different_manifest.dataset_id).exists()
+
+
+@pytest.mark.parametrize(
+    ("statistics_overrides", "error_match"),
+    [
+        ({"accepted_rows": 999}, "accepted_rows"),
+        ({"unique_molecules": 999}, "unique_molecules"),
+        ({"unique_scaffolds": 999}, "unique_scaffolds"),
+        ({"rejected_rows": 999}, "rejected_rows"),
+        ({"input_rows": 999}, "input_rows"),
+        ({"model_contract_key": "forged"}, "model_contract_key"),
+    ],
+)
+def test_write_prepared_dataset_rejects_inconsistent_validation_statistics(
+    tmp_path: Path,
+    statistics_overrides: dict[str, object],
+    error_match: str,
+) -> None:
+    prepared = _prepared_frame()
+    manifest = _validation_manifest(dataset_id=f"bad-{error_match.replace('_', '-')}")
+
+    with pytest.raises(ValueError, match=error_match):
+        contract.write_prepared_dataset(
+            _prepared_validation_result(
+                prepared,
+                statistics_overrides=statistics_overrides,
+            ),
+            contract.split_prepared_dataset(prepared),
+            manifest,
+            tmp_path,
+        )
+
+    assert not (tmp_path / manifest.dataset_id).exists()
+
+
+def test_write_prepared_dataset_recomputes_readiness_for_manifest(tmp_path: Path) -> None:
+    prepared = _prepared_frame()
+    manifest = _validation_manifest(
+        dataset_id="forged-readiness",
+        minimum_unique_molecules=len(prepared) + 1,
+    )
+
+    with pytest.raises(ValueError, match="readiness"):
+        contract.write_prepared_dataset(
+            _prepared_validation_result(prepared, ready_for_training=True),
+            contract.split_prepared_dataset(prepared),
+            manifest,
+            tmp_path,
+        )
+
+    assert not (tmp_path / manifest.dataset_id).exists()
+
+
+@pytest.mark.parametrize(
+    ("provenance_override", "error_match"),
+    [
+        ({"algorithm": "random_split"}, "algorithm"),
+        ({"seed": True}, "seed"),
+        ({"seed": 23}, "assignments"),
+        ({"ratios": {"train": 0.8, "validation": 0.1, "test": 0.2}}, "ratios"),
+        ({"ratios": {"train": 0.6, "validation": 0.2, "test": 0.2}}, "assignments"),
+        ({"counts": {"train": 999, "validation": 0, "test": 0}}, "counts"),
+        (
+            {"scaffold_counts": {"train": 999, "validation": 0, "test": 0}},
+            "scaffold_counts",
+        ),
+        ({"assignments_sha256": "0" * 64}, "assignments_sha256"),
+    ],
+)
+def test_write_prepared_dataset_rejects_forged_split_provenance(
+    tmp_path: Path,
+    provenance_override: dict[str, object],
+    error_match: str,
+) -> None:
+    prepared = _prepared_frame()
+    split = contract.split_prepared_dataset(prepared, seed=42)
+    forged_provenance = dict(split.provenance)
+    forged_provenance.update(provenance_override)
+    forged = contract.DatasetSplitResult(
+        frames=split.frames,
+        assignments=split.assignments,
+        provenance=forged_provenance,
+    )
+    manifest = _validation_manifest(dataset_id=f"forged-{error_match.replace('_', '-')}")
+
+    with pytest.raises(ValueError, match=error_match):
+        contract.write_prepared_dataset(
+            _prepared_validation_result(prepared),
+            forged,
+            manifest,
+            tmp_path,
+        )
+
+    assert not (tmp_path / manifest.dataset_id).exists()
+
+
+def test_write_prepared_dataset_publishes_only_controlled_provenance_keys(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepared_frame()
+    split = contract.split_prepared_dataset(prepared)
+    provenance = dict(split.provenance)
+    provenance["untrusted_extra"] = "must-not-publish"
+    extended = contract.DatasetSplitResult(
+        frames=split.frames,
+        assignments=split.assignments,
+        provenance=provenance,
+    )
+
+    path = contract.write_prepared_dataset(
+        _prepared_validation_result(prepared),
+        extended,
+        _validation_manifest(dataset_id="controlled-provenance"),
+        tmp_path,
+    )
+
+    payload = json.loads(path.read_text("utf-8"))
+    assert set(payload["split"]) == {
+        "algorithm",
+        "ratios",
+        "seed",
+        "counts",
+        "scaffold_counts",
+    }
+    assert "untrusted_extra" not in path.read_text("utf-8")
 
 
 def test_prepared_dataset_digest_is_independent_of_output_path_and_input_order(
@@ -1977,6 +2178,25 @@ def test_rejected_rows_are_written_only_to_explicit_destination(tmp_path: Path) 
     manifest_payload = json.loads(manifest_path.read_text("utf-8"))
     assert "rejected" not in manifest_payload["artifacts"]
     assert str(rejected_path) not in manifest_path.read_text("utf-8")
+
+
+def test_existing_explicit_rejected_file_is_never_overwritten(tmp_path: Path) -> None:
+    prepared = _prepared_frame()
+    manifest = _validation_manifest(dataset_id="existing-rejected-file")
+    rejected_path = tmp_path / "private-rejections.csv"
+    rejected_path.write_text("sentinel", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="rejected"):
+        contract.write_prepared_dataset(
+            _prepared_validation_result(prepared),
+            contract.split_prepared_dataset(prepared),
+            manifest,
+            tmp_path,
+            rejected_output_path=rejected_path,
+        )
+
+    assert rejected_path.read_text("utf-8") == "sentinel"
+    assert not (tmp_path / manifest.dataset_id / "dataset_manifest.json").exists()
 
 
 def test_write_prepared_dataset_refuses_not_ready_or_mismatched_splits(
