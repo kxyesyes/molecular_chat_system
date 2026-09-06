@@ -1114,36 +1114,72 @@ def test_relation_normalizes_only_surrounding_ascii_whitespace() -> None:
 
 
 @pytest.mark.parametrize(
-    ("units", "value"),
+    ("manifest_units", "row_units", "value"),
     [
-        ("M", 1e-7),
-        ("mM", 1e-4),
-        ("uM", 0.1),
-        ("µM", 0.1),
-        ("μM", 0.1),
-        ("micro-M", 0.1),
-        ("nM", 100.0),
-        (" \uff4e\uff2d ", 100.0),
-        ("pM", 100_000.0),
+        ("M", "M", 1e-7),
+        ("mM", "mM", 1e-4),
+        ("uM", "uM", 0.1),
+        ("uM", "µM", 0.1),
+        ("uM", "μM", 0.1),
+        ("uM", "micro-M", 0.1),
+        ("nM", "nM", 100.0),
+        ("nM", " \uff4e\uff2d ", 100.0),
+        ("pM", "pM", 100_000.0),
     ],
 )
 def test_molar_to_pactivity_normalizes_supported_units_to_exact_pactivity(
-    units: str,
+    manifest_units: str,
+    row_units: str,
     value: float,
 ) -> None:
     frame = pd.DataFrame(
-        [{"smiles": "CCO", "value": value, "relation": "=", "units": units}]
+        [{"smiles": "CCO", "value": value, "relation": "=", "units": row_units}]
     )
 
     result = contract.validate_activity_dataset(
         frame,
-        _validation_manifest(label_transform="molar_to_pactivity"),
+        _validation_manifest(
+            label_transform="molar_to_pactivity",
+            units=manifest_units,
+        ),
     )
 
     row = result.accepted.iloc[0]
     assert row["normalized_value"] == pytest.approx(7.0)
     assert row["normalized_units"] == "pIC50"
-    assert row["original_units"] == units
+    assert row["original_units"] == row_units
+
+
+def test_molar_to_pactivity_rejects_supported_units_not_declared_by_manifest() -> None:
+    frame = pd.DataFrame(
+        [
+            {"smiles": "CCO", "value": 100, "relation": "=", "units": "nM"},
+            {"smiles": "CCN", "value": 1e-7, "relation": "=", "units": "M"},
+            {"smiles": "CCC", "value": 1e-4, "relation": "=", "units": "mM"},
+            {"smiles": "CCCl", "value": 0.1, "relation": "=", "units": "uM"},
+            {"smiles": "CCBr", "value": 100_000, "relation": "=", "units": "pM"},
+            {"smiles": "CCF", "value": 100, "relation": "=", "units": "bananas"},
+        ]
+    )
+
+    result = contract.validate_activity_dataset(
+        frame,
+        _validation_manifest(label_transform="molar_to_pactivity", units="nM"),
+    )
+
+    assert result.accepted["canonical_smiles"].tolist() == ["CCO"]
+    assert result.accepted["normalized_value"].tolist() == [pytest.approx(7.0)]
+    assert result.rejected["rejection_reason"].tolist() == [
+        "unit_mismatch",
+        "unit_mismatch",
+        "unit_mismatch",
+        "unit_mismatch",
+        "unknown_units",
+    ]
+    assert result.statistics["rejected_by_reason"] == {
+        "unit_mismatch": 4,
+        "unknown_units": 1,
+    }
 
 
 @pytest.mark.parametrize(
@@ -1193,7 +1229,7 @@ def test_molar_to_pactivity_handles_extreme_positive_finite_values(
 
     result = contract.validate_activity_dataset(
         frame,
-        _validation_manifest(label_transform="molar_to_pactivity"),
+        _validation_manifest(label_transform="molar_to_pactivity", units=units),
     )
 
     normalized_value = result.accepted.iloc[0]["normalized_value"]
@@ -1212,7 +1248,7 @@ def test_non_finite_transformed_pactivity_is_rejected(
 
     result = contract.validate_activity_dataset(
         frame,
-        _validation_manifest(label_transform="molar_to_pactivity"),
+        _validation_manifest(label_transform="molar_to_pactivity", units="M"),
     )
 
     assert result.accepted.empty

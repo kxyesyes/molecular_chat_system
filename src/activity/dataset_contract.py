@@ -503,6 +503,8 @@ def _normalize_row_value(
         concentration_unit = _canonical_known_unit(row_units)
         if concentration_unit not in _CONCENTRATION_EXPONENTS:
             return None, "unknown_units"
+        if concentration_unit != manifest.units:
+            return None, "unit_mismatch"
         if numeric <= 0:
             return None, "non_positive_concentration"
         normalized_value = (
