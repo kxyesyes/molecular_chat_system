@@ -17,7 +17,66 @@
 `docs/superpowers/plans/2026-09-07-family-activity-data-contract.md`，
 操作说明为 `docs/activity_family_data.md`。
 
-## 当前阶段：家族模型组与两阶段后端推理
+## 当前阶段：家族预测 API / Agent / 前端接入
+
+计划：`docs/superpowers/plans/2026-09-07-family-activity-integration.md`。
+用法已并入 `docs/activity_family_models.md`。仍在独立 scientific-assets 工作树，
+没有训练或激活真实模型，没有修改或重启原始项目，没有推送 PR 或合并 main。
+
+- API 单分子/批量增加可选 `target`；明确靶点只走对应家族模型组。
+  不指定靶点保留单模型兼容入口。模型加载和计算继续使用已有线程池。
+- 统一科学状态聚合；全部失败不再外层 success=true，部分观测保留 partial。
+  HTTP 异常保持原状态码，其他服务异常不回显内部路径。
+- 按注册目录有界缓存预测器，工厂锁保护并发首次创建，不持该锁做推理。
+- 活性工具增加完整输入和靶点解析、标准 ToolResult、两模型溯源校验；
+  工作流候选绑定保留原始靶点意图，实际候选进入活性工具。
+- 页面添加 PDE/BuChE 选择，独立显示分类、概率、预测 pIC50、错误与 warnings。
+  不可用值不补 0；不使用旧模型仪表解释家族结果。来源折叠详情绑定本次响应，
+  不随表单选择变化。旧版 value/probability 也按实际字段显示。
+- 增加临时合成随机权重的 HTTP→注册组→实际 RGNN 前向集成检查；
+  数字仅测试软件链路，不能表示真实数据训练性能。
+
+本轮真实训练、正式 test 评估、模型组激活、线上重启均未执行。
+下一阶段才训练 PDE/BuChE 共四个真实模型，按已批准 validation 选模、冻结后独立 test 的流程评估。
+
+规格审查与质量审查最终通过。审查发现并补过 RED→GREEN 的问题包括：
+HTTP 错误误转 500、并发首次重复构建、前端来源缺失、明确 SMILES 被截短、
+背景靶点掩盖真实目标、无证据类别声明、全空结果冒充 passed/partial。
+
+最终验证（MedChat Conda Python，非系统默认 Python）：
+
+- Agent + 任务感知旧契约 + 家族 API + 实际 RGNN 前向集成：**1643 passed、1 skipped、8 warnings**。
+  skip 是 `test_harness_shadow.py` 的未启用性能测试；warnings 为已有 SWIG/FastAPI 弃用
+  和 RG-MPNN tensor 构造性能提示，不是失败转成功。
+- 家族模型组/推理/注册表/端点/API 扩展回归：**265 passed、1 warning**。
+  该组先于最后仅涉及领域校验器的空行修复；最终 1643 组已复跑该边界与 Agent 前向。
+- 反幻觉、平台健康契约、对接架构测试：**28 passed、9 subtests passed**。
+- 四个 Node DOM/静态测试、两个 JS 语法检查、`compileall`、`git diff --check` 通过。
+- 独立审查者最初使用默认 Python 时因缺 RDKit 未能完成 API 测试；不计为通过，
+  主流程上述结果均来自具备依赖的 MedChat 环境。
+
+实际主验证命令（以下 `python` 均指 MedChat Conda 解释器）：
+
+```powershell
+python -B -m pytest tests/agent tests/test_activity_prediction_contract.py tests/test_activity_family_api.py tests/test_activity_family_inference_integration.py -q -rs -p no:cacheprovider --tb=short
+python -B -m pytest tests/test_activity_family_models.py tests/test_activity_family_predictor.py tests/test_activity_family_api.py tests/test_activity_family_inference_integration.py tests/test_activity_model_registry.py tests/test_activity_endpoint_selection.py tests/test_activity_prediction_contract.py -q -p no:cacheprovider --tb=short
+python -B -m pytest tests/test_agent_anti_hallucination_fallbacks.py tests/test_agent_platform_health_check.py tests/test_docking_agent_architecture.py -q -p no:cacheprovider --tb=short
+node tests/activity_family_results_test.js
+node tests/activity_prediction_safe_render_test.js
+node tests/frontend_safe_render_test.js
+node tests/home_agent_task_panel_test.js
+node --check src/web/static/js/activity_prediction/main.js
+node --check src/web/static/js/activity_prediction/results_renderer.js
+python -m compileall -q src scripts
+git diff --check
+```
+
+本轮修改范围：共享 prediction_service、活性工具/输入解析/领域校验、工作流活性绑定、
+两个活性 API、活性页模板及 main/results_renderer、三份新增测试、已有前向集成测试、
+阶段计划/操作文档/本交接。未变更其他业务模块，不包含真实 CSV、权重或密钥。
+未执行全仓库测试、真实模型 real acceptance 或全平台在线 strict health；这些不属于本阶段已完成证据。
+
+## 历史阶段：家族模型组与两阶段后端推理
 
 本阶段代码位于同一独立工作树；详细计划为
 `docs/superpowers/plans/2026-09-07-family-model-bundles.md`，用法见

@@ -75,17 +75,20 @@ window.ActivityMain = (function () {
     setStatus("Predicting");
 
     try {
+      // An empty option explicitly selects the legacy endpoint contract.
+      if (formData.get("target") === "") formData.delete("target");
       const res = await fetch(url, { method: "POST", body: formData });
       const data = await res.json();
 
-      if (!data.success || !Array.isArray(data.results)) {
-        throw new Error(data.error || "预测失败");
+      if (res.ok === false || !Array.isArray(data.results)) {
+        throw new Error(data.detail || data.error || "预测失败");
       }
 
       ActivityResults.renderPredictionResults(data, {
         isSingleRequest: isSingleRequest,
       });
-      setStatus("Done");
+      const status = data.status || (data.success ? "passed" : "failed");
+      setStatus({passed: "完成", partial: "部分完成", failed: "失败"}[status] || "失败");
     } catch (e) {
       alert("请求失败: " + e.message);
       setStatus("Error");

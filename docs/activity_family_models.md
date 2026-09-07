@@ -1,6 +1,7 @@
-# 家族双模型：注册与 Python 推理
+# 家族双模型：注册、推理与 Web / Agent 接入
 
-本入口补充现有单模型/端点入口，不自动替换 Web、Agent 或 legacy 全局模型。
+本入口补充现有单模型/端点入口。Web / Agent 指定 PDE 或 BuChE 靶点时使用家族模型组，
+不指定靶点的旧调用仍走原单模型入口；家族模型缺失不会退回旧全局模型。
 模型完整性检查通过不等于科研性能认证。当前阶段没有训练或激活真实 PDE/BuChE 模型。
 
 ## 模型准备与注册
@@ -77,4 +78,45 @@ rows = predictor.predict(["CCO", "CC(C)(("], target="PDE5A")
   不回传本机私有数据路径或任意模型 metadata 扩展。
 - 合成权重测试只证明注册/前向/错误边界，不能引用其指标说明真实预测效果。
 
-Web 路由、Agent 工具适配、用户结果展示与正式四模型训练属于后续阶段。
+## HTTP / 前端入口
+
+现有 `POST /api/activity/predict` 增加可选表单字段 `target`，例如：
+
+```text
+smiles=CCO
+target=PDE5A
+```
+
+`POST /api/activity/batch_predict` 在原文件字段 `file` 之外接受同一个 `target`。
+两条路由的模型加载、校验和计算均在原线程池内。批次顺序与重复输入保留；
+空批次、全部失败都不返回科学成功。HTTP 200 仅表示完成请求处理，不等于预测通过。
+
+响应为 `{success, status, results, warnings}`，各行仍保留完整家族推理结构。
+只有全部行完整成功时外层 `success=true/status=passed`；有部分观测为 `partial`，
+全部失败为 `failed`。不依赖外层布尔值丢弃 partial 分类结果。
+
+活性预测页的单分子、批量表单都可选择 PDE / BuChE，默认 PDE；
+“旧版单模型”选项不发送 target。家族结果独立显示预测 pIC50、活性分类、活性概率、
+状态与阶段错误/warnings；不可用项显示破折号，不默认补 0、不展示旧模型区间仪表。
+每行可展开“本次预测来源”，查看响应绑定的请求靶点、模型组和两个 model ID；
+之后改变表单靶点不会改写已经显示的来源。原有单模型管理的切换不激活家族模型组。
+单模型的任务感知 `value/probability` 响应也按真实字段展示，不冒充 pIC50。
+
+`src.activity.prediction_service` 按配置的模型注册目录缓存家族 predictor，最多两个目录；
+`ACTIVITY_MODEL_DIR` 与已有训练/单模型注册入口一致。不持久化用户输入或 API key。
+这是进程内复用，不是后台任务队列或跨进程缓存。
+工厂锁串行保护并发首次构建，避免同一目录产生多个独立预测器；不持锁执行科学推理。
+
+## Agent 入口
+
+`ActivityPredictorTool` 接受自然语言请求，例如“预测 CCO 对 PDE5A 的活性”，
+也接受结构化输入 `{query, smiles, target}`。靶点由受控标识与有限文本规则提取，
+不把这层解析称为通用自然语言理解；不明确的家族请求需要澄清。
+明确给出的无效 SMILES 不会截取有效片段后预测。
+
+生成候选绑定到活性步骤时，保留原查询和靶点上下文，并把实际候选 SMILES 传入；
+返回标准 ToolResult，保留 partial、错误、warnings、两模型 provenance 与 evidence。
+领域校验器检查新增的家族数值与两模型溯源，不能把 demo 或缺证据数值作为通过结果。
+
+当前接入与合成测试不代表已有可用真实模型。正式四模型训练、独立 test 评估、
+显式激活和部署仍是后续阶段；没有自动训练、激活或重启运行中的原始项目。
