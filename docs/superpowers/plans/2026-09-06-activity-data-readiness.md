@@ -426,6 +426,13 @@ git add -- .gitignore scripts/prepare_activity_dataset.py tests/test_activity_pr
 git commit -m "feat: add activity dataset preparation CLI"
 ```
 
+## 实施检查点（2026-09-07）
+
+任务 1–4 已实现并通过规范与代码质量审查。CLI 使用说明见
+`docs/activity_data_preparation.md`，本轮验证及剩余任务见
+`docs/handoff/activity-data-readiness.md`。
+任务 5–9 尚未完成；此检查点不表示端点模型注册、训练及推理迁移已经上线。
+
 ## Task 5: Endpoint-aware atomic model registry
 
 **Files:**
