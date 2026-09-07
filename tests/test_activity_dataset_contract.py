@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
+import tracemalloc
 
 import pandas as pd
 from pandas.testing import assert_frame_equal
@@ -49,7 +51,12 @@ EVIDENCE_COLUMNS = [
     "compound_id",
     "assay_id",
 ]
-SUPPORTED_ACCEPTED_COLUMNS = [*ACCEPTED_COLUMNS, *EVIDENCE_COLUMNS]
+REPLICATE_EVIDENCE_COLUMN = "replicate_evidence"
+SUPPORTED_ACCEPTED_COLUMNS = [
+    *ACCEPTED_COLUMNS,
+    *EVIDENCE_COLUMNS,
+    REPLICATE_EVIDENCE_COLUMN,
+]
 _AUTO_INPUT_SHA = object()
 
 
@@ -1693,6 +1700,68 @@ def test_regression_duplicates_use_median_range_and_first_occurrence_order() -> 
     assert result.statistics["duplicate_rows_collapsed"] == 1
 
 
+def test_duplicate_replicate_evidence_is_complete_and_shuffle_deterministic() -> None:
+    records = []
+    for suffix, smiles, value in (
+        ("b", "CCO", 8.0),
+        ("a", "C(C)O", 6.0),
+    ):
+        record: dict[str, object] = {
+            "smiles": smiles,
+            "value": value,
+            "relation": "=",
+            "units": "pIC50",
+        }
+        record.update(
+            {
+                evidence_column: f"{evidence_column}-{suffix}"
+                for evidence_column in EVIDENCE_COLUMNS
+            }
+        )
+        records.append(record)
+    frame = pd.DataFrame(records)
+
+    first = contract.validate_activity_dataset(frame, _validation_manifest())
+    second = contract.validate_activity_dataset(
+        frame.iloc[::-1].reset_index(drop=True),
+        _validation_manifest(),
+    )
+
+    assert_frame_equal(first.accepted, second.accepted)
+    assert first.statistics["validated_content_sha256"] == second.statistics[
+        "validated_content_sha256"
+    ]
+    accepted = first.accepted.iloc[0]
+    assert accepted["replicate_count"] == 2
+    for evidence_column in EVIDENCE_COLUMNS:
+        assert json.loads(accepted[evidence_column]) == [
+            f"{evidence_column}-a",
+            f"{evidence_column}-b",
+        ]
+    replicate_evidence = json.loads(accepted["replicate_evidence"])
+    assert len(replicate_evidence) == 2
+    assert {
+        (
+            record["original_smiles"],
+            record["original_value"],
+            record["original_units"],
+            record["relation"],
+            record["normalized_value"],
+        )
+        for record in replicate_evidence
+    } == {
+        ("C(C)O", "6.0", "pIC50", "=", "6.0"),
+        ("CCO", "8.0", "pIC50", "=", "8.0"),
+    }
+    assert {
+        tuple(record[column] for column in EVIDENCE_COLUMNS)
+        for record in replicate_evidence
+    } == {
+        tuple(f"{column}-{suffix}" for column in EVIDENCE_COLUMNS)
+        for suffix in ("a", "b")
+    }
+
+
 def test_regression_even_median_is_finite_for_duplicate_large_values() -> None:
     frame = pd.DataFrame(
         [
@@ -1904,7 +1973,7 @@ def test_scaffold_split_is_nonempty_leakage_free_exact_and_stably_ordered() -> N
         assert frame["canonical_smiles"].tolist() == sorted(
             frame["canonical_smiles"].tolist()
         )
-    assert result.provenance["algorithm"] == "deterministic_scaffold_greedy_v1"
+    assert result.provenance["algorithm"] == "deterministic_scaffold_greedy_v2"
     assert result.provenance["seed"] == 42
     assert sum(result.provenance["counts"].values()) == len(prepared)
 
@@ -2090,6 +2159,7 @@ def test_raw_validation_preserves_all_evidence_through_publication_round_trip(
     assert validation.accepted.columns.tolist() == [
         *ACCEPTED_COLUMNS,
         *EVIDENCE_COLUMNS,
+        REPLICATE_EVIDENCE_COLUMN,
     ]
     assert "private_extra" not in validation.accepted.columns
     loaded = pd.concat(
@@ -2112,14 +2182,18 @@ def test_raw_validation_preserves_all_evidence_through_publication_round_trip(
     assert payload["csv_schema"]["columns"] == [
         *ACCEPTED_COLUMNS,
         *EVIDENCE_COLUMNS,
+        REPLICATE_EVIDENCE_COLUMN,
     ]
     assert set(payload["csv_schema"]["dtypes"]) == set(
         payload["csv_schema"]["columns"]
     )
     assert {
         column: payload["csv_schema"]["dtypes"][column]
-        for column in EVIDENCE_COLUMNS
-    } == {column: "string" for column in EVIDENCE_COLUMNS}
+        for column in [*EVIDENCE_COLUMNS, REPLICATE_EVIDENCE_COLUMN]
+    } == {
+        column: "string"
+        for column in [*EVIDENCE_COLUMNS, REPLICATE_EVIDENCE_COLUMN]
+    }
 
     mutated_raw = raw.copy(deep=True)
     mutated_raw.loc[0, "reference"] = "doi:10.1000/changed"
@@ -2831,6 +2905,66 @@ def test_scaffold_split_reports_and_deterministically_improves_ratio_deviation()
     }
 
 
+def test_scaffold_assignment_improvement_is_bounded_for_10k_scaffolds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scaffold_count = 10_000
+    assignments = {
+        f"scaffold-{index:05d}": ("train", "validation", "test")[index % 3]
+        for index in range(scaffold_count)
+    }
+    group_sizes = {
+        scaffold: (index % 17) + 1
+        for index, scaffold in enumerate(assignments)
+    }
+    counts = {
+        split_name: sum(
+            group_sizes[scaffold]
+            for scaffold, assigned_split in assignments.items()
+            if assigned_split == split_name
+        )
+        for split_name in ("train", "validation", "test")
+    }
+    total = sum(counts.values())
+    target_counts = {
+        "train": total * 0.70,
+        "validation": total * 0.15,
+        "test": total * 0.15,
+    }
+    real_deviation = contract._split_deviation
+    deviation_calls = 0
+
+    def bounded_deviation(
+        candidate_counts: dict[str, int],
+        targets: dict[str, float],
+    ) -> float:
+        nonlocal deviation_calls
+        deviation_calls += 1
+        if deviation_calls > 500_000:
+            raise AssertionError("scaffold optimization exceeded bounded work")
+        return real_deviation(candidate_counts, targets)
+
+    monkeypatch.setattr(contract, "_split_deviation", bounded_deviation)
+    tracemalloc.start()
+    started = time.perf_counter()
+    try:
+        contract._improve_scaffold_assignments(
+            assignments,
+            group_sizes,
+            counts,
+            target_counts,
+            seed=42,
+        )
+        elapsed = time.perf_counter() - started
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert deviation_calls < 500_000
+    assert elapsed < 10.0
+    assert peak_bytes < 64 * 1024 * 1024
+
+
 def test_rejected_rows_are_written_only_to_explicit_destination(tmp_path: Path) -> None:
     prepared = _prepared_frame()
     validation = _prepared_validation_result(prepared)
@@ -3035,6 +3169,100 @@ def test_write_prepared_dataset_refuses_existing_destination(tmp_path: Path) -> 
     assert sentinel.read_text("utf-8") == "existing"
 
 
+def test_dataset_artifacts_remain_private_until_directory_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = _prepared_frame()
+    manifest = _validation_manifest(dataset_id="staged-publication")
+    destination = tmp_path / manifest.dataset_id
+    observed_parents: list[Path] = []
+    real_write_verified = contract._write_verified
+
+    def inspect_staged_write(path: Path, content: bytes) -> str:
+        assert not destination.exists()
+        assert path.parent != destination
+        assert path.parent.parent == tmp_path
+        observed_parents.append(path.parent)
+        return real_write_verified(path, content)
+
+    monkeypatch.setattr(contract, "_write_verified", inspect_staged_write)
+
+    manifest_path = contract.write_prepared_dataset(
+        _prepared_validation_result(prepared),
+        contract.split_prepared_dataset(prepared),
+        manifest,
+        tmp_path,
+    )
+
+    assert manifest_path == destination / "dataset_manifest.json"
+    assert observed_parents
+    assert len(set(observed_parents)) == 1
+    assert not list(tmp_path.glob(f".{manifest.dataset_id}.*.staging"))
+
+
+def test_directory_identity_rejects_windows_reparse_points() -> None:
+    stat_result = type(
+        "ReparseDirectoryStat",
+        (),
+        {
+            "st_mode": 0o040000,
+            "st_dev": 1,
+            "st_ino": 2,
+            "st_file_attributes": 0x00000400,
+        },
+    )()
+
+    class ReparseDirectory:
+        name = "junction"
+
+        @staticmethod
+        def stat(*, follow_symlinks: bool) -> object:
+            assert follow_symlinks is False
+            return stat_result
+
+        @staticmethod
+        def is_symlink() -> bool:
+            return False
+
+    with pytest.raises(OSError, match="regular directory"):
+        contract._directory_identity(ReparseDirectory())  # type: ignore[arg-type]
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX symlink race regression; Windows symlinks require privileges",
+)
+def test_atomic_directory_publish_rejects_destination_symlink_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = _prepared_frame()
+    manifest = _validation_manifest(dataset_id="directory-symlink-race")
+    destination = tmp_path / manifest.dataset_id
+    attacker_directory = tmp_path / "attacker"
+    attacker_directory.mkdir()
+    real_publish = contract._publish_directory_no_replace
+
+    def race_publish(staging: Path, target: Path, *args: object) -> None:
+        target.symlink_to(attacker_directory, target_is_directory=True)
+        real_publish(staging, target, *args)
+
+    monkeypatch.setattr(contract, "_publish_directory_no_replace", race_publish)
+
+    with pytest.raises(FileExistsError):
+        contract.write_prepared_dataset(
+            _prepared_validation_result(prepared),
+            contract.split_prepared_dataset(prepared),
+            manifest,
+            tmp_path,
+        )
+
+    assert destination.is_symlink()
+    assert not (attacker_directory / "dataset_manifest.json").exists()
+    assert not list(tmp_path.glob(f".{manifest.dataset_id}.*.staging"))
+
+
 def test_atomic_replace_failure_leaves_no_publishable_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3062,3 +3290,4 @@ def test_atomic_replace_failure_leaves_no_publishable_manifest(
         )
 
     assert not (tmp_path / manifest.dataset_id / "dataset_manifest.json").exists()
+    assert not list(tmp_path.glob(f".{manifest.dataset_id}.*.staging"))

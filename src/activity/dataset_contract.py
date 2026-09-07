@@ -7,8 +7,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from collections import Counter
+from bisect import bisect_left
 import copy
+import ctypes
 from dataclasses import dataclass, field, fields
+import errno
 import hashlib
 import io
 import json
@@ -18,6 +21,8 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
+import sys
 import tempfile
 from types import MappingProxyType
 import unicodedata
@@ -113,7 +118,7 @@ _REJECTED_COLUMNS = [
     "rejection_reason",
 ]
 _SPLIT_NAMES = ("train", "validation", "test")
-_SPLIT_ALGORITHM = "deterministic_scaffold_greedy_v1"
+_SPLIT_ALGORITHM = "deterministic_scaffold_greedy_v2"
 _SPLIT_REQUIRED_COLUMNS = (
     "canonical_smiles",
     "normalized_value",
@@ -127,7 +132,12 @@ _SUPPORTED_EVIDENCE_COLUMNS = (
     "compound_id",
     "assay_id",
 )
-_SUPPORTED_PREPARED_COLUMNS = [*_ACCEPTED_COLUMNS, *_SUPPORTED_EVIDENCE_COLUMNS]
+_REPLICATE_EVIDENCE_COLUMN = "replicate_evidence"
+_SUPPORTED_PREPARED_COLUMNS = [
+    *_ACCEPTED_COLUMNS,
+    *_SUPPORTED_EVIDENCE_COLUMNS,
+    _REPLICATE_EVIDENCE_COLUMN,
+]
 _SAFE_DATASET_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _SHA256_HEX = re.compile(r"[0-9A-Fa-f]{64}\Z")
 _PREPARED_CSV_DTYPES = {
@@ -142,6 +152,7 @@ _PREPARED_CSV_DTYPES = {
     "replicate_range": "float64",
     "scaffold_smiles": "string",
     **{name: "string" for name in _SUPPORTED_EVIDENCE_COLUMNS},
+    _REPLICATE_EVIDENCE_COLUMN: "string",
 }
 
 
@@ -597,6 +608,62 @@ def _evidence_text(value: Any) -> str:
     return str(value)
 
 
+def _compact_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _stable_group_record_key(
+    record: Mapping[str, Any],
+    evidence_columns: list[str],
+) -> tuple[str, ...]:
+    keys = (
+        "original_smiles",
+        "original_value",
+        "original_units",
+        "relation",
+        "normalized_value",
+        "scaffold_smiles",
+        *evidence_columns,
+    )
+    return tuple(_evidence_text(record.get(name)) for name in keys)
+
+
+def _aggregated_replicate_evidence(
+    group: list[dict[str, Any]],
+    evidence_columns: list[str],
+) -> dict[str, str]:
+    if not evidence_columns:
+        return {}
+    replicate_columns = (
+        "original_smiles",
+        "original_value",
+        "original_units",
+        "relation",
+        "normalized_value",
+        *evidence_columns,
+    )
+    replicate_records = [
+        {
+            name: _evidence_text(record[name])
+            for name in replicate_columns
+        }
+        for record in group
+    ]
+    replicate_records.sort(key=_compact_json)
+    aggregated: dict[str, str] = {}
+    for name in evidence_columns:
+        values = sorted({record[name] for record in replicate_records})
+        aggregated[name] = values[0] if len(values) == 1 else _compact_json(values)
+    aggregated[_REPLICATE_EVIDENCE_COLUMN] = _compact_json(replicate_records)
+    return aggregated
+
+
 def _rejected_record(
     row: pd.Series,
     manifest: DatasetManifest,
@@ -890,7 +957,13 @@ def validate_activity_dataset(
             )
             continue
 
-        first = group[0]
+        first = min(
+            group,
+            key=lambda record: _stable_group_record_key(
+                record,
+                evidence_columns,
+            ),
+        )
         if (
             manifest.task_type == "regression"
             or manifest.label_transform == "binary_threshold"
@@ -928,7 +1001,7 @@ def validate_activity_dataset(
             "scaffold_smiles": first["scaffold_smiles"],
         }
         accepted_record.update(
-            {name: first[name] for name in evidence_columns}
+            _aggregated_replicate_evidence(group, evidence_columns)
         )
         accepted_records.append(accepted_record)
         duplicate_rows_collapsed += len(group) - 1
@@ -939,7 +1012,11 @@ def validate_activity_dataset(
 
     accepted = pd.DataFrame(
         accepted_records,
-        columns=[*_ACCEPTED_COLUMNS, *evidence_columns],
+        columns=[
+            *_ACCEPTED_COLUMNS,
+            *evidence_columns,
+            *([_REPLICATE_EVIDENCE_COLUMN] if evidence_columns else []),
+        ],
     )
     rejected = pd.DataFrame(rejected_records, columns=_REJECTED_COLUMNS)
     unique_molecules = len(accepted)
@@ -1045,7 +1122,7 @@ def _accepted_snapshot(frame: pd.DataFrame) -> pd.DataFrame:
     snapshot = copy.deepcopy(frame.loc[:, columns].copy(deep=True)).reset_index(
         drop=True
     )
-    for name in _SUPPORTED_EVIDENCE_COLUMNS:
+    for name in (*_SUPPORTED_EVIDENCE_COLUMNS, _REPLICATE_EVIDENCE_COLUMN):
         if name in snapshot.columns:
             snapshot[name] = pd.Series(
                 [_evidence_text(value) for value in snapshot[name].tolist()],
@@ -1231,14 +1308,24 @@ def _improve_scaffold_assignments(
     target_counts: Mapping[str, float],
     seed: int,
 ) -> None:
-    """Apply the best deterministic single move or swap that improves ratios."""
+    """Apply one deterministic improving move or near-optimal indexed swap."""
 
     current_deviation = _split_deviation(counts, target_counts)
     scaffold_counts = Counter(assignments.values())
-    candidates: list[
-        tuple[float, str, tuple[str, str, str | None]]
-    ] = []
     scaffolds = sorted(assignments)
+    best: tuple[float, str, tuple[str, str, str | None]] | None = None
+
+    def consider(
+        deviation: float,
+        token: str,
+        action: tuple[str, str, str | None],
+    ) -> None:
+        nonlocal best
+        candidate = (deviation, token, action)
+        if deviation < current_deviation - 1e-12 and (
+            best is None or candidate < best
+        ):
+            best = candidate
 
     for scaffold in scaffolds:
         source = assignments[scaffold]
@@ -1252,36 +1339,62 @@ def _improve_scaffold_assignments(
             projected[source] -= size
             projected[destination] += size
             deviation = _split_deviation(projected, target_counts)
-            if deviation < current_deviation - 1e-12:
-                candidates.append(
-                    (
-                        deviation,
-                        _stable_split_token(
-                            seed,
-                            "move",
-                            scaffold,
-                            source,
-                            destination,
-                        ),
-                        (scaffold, destination, None),
-                    )
-                )
+            consider(
+                deviation,
+                _stable_split_token(
+                    seed,
+                    "move",
+                    scaffold,
+                    source,
+                    destination,
+                ),
+                (scaffold, destination, None),
+            )
 
-    for left_index, left_scaffold in enumerate(scaffolds):
-        left_split = assignments[left_scaffold]
-        left_size = group_sizes[left_scaffold]
-        for right_scaffold in scaffolds[left_index + 1 :]:
-            right_split = assignments[right_scaffold]
-            if left_split == right_split:
+    by_split: dict[str, list[tuple[int, str]]] = {
+        name: [] for name in _SPLIT_NAMES
+    }
+    for scaffold in scaffolds:
+        by_split[assignments[scaffold]].append((group_sizes[scaffold], scaffold))
+    for values in by_split.values():
+        values.sort()
+
+    for left_index, left_split in enumerate(_SPLIT_NAMES):
+        for right_split in _SPLIT_NAMES[left_index + 1 :]:
+            right_values = by_split[right_split]
+            right_sizes = [size for size, _ in right_values]
+            if not right_values:
                 continue
-            right_size = group_sizes[right_scaffold]
-            projected = dict(counts)
-            projected[left_split] += right_size - left_size
-            projected[right_split] += left_size - right_size
-            deviation = _split_deviation(projected, target_counts)
-            if deviation < current_deviation - 1e-12:
-                candidates.append(
-                    (
+            desired_low = min(
+                target_counts[left_split] - counts[left_split],
+                counts[right_split] - target_counts[right_split],
+            )
+            desired_high = max(
+                target_counts[left_split] - counts[left_split],
+                counts[right_split] - target_counts[right_split],
+            )
+            desired_midpoint = (desired_low + desired_high) / 2.0
+            for left_size, left_scaffold in by_split[left_split]:
+                candidate_indices: set[int] = set()
+                for desired_delta in (
+                    desired_low,
+                    desired_midpoint,
+                    desired_high,
+                ):
+                    insertion = bisect_left(
+                        right_sizes,
+                        left_size + desired_delta,
+                    )
+                    for candidate_index in (insertion - 1, insertion):
+                        if 0 <= candidate_index < len(right_values):
+                            candidate_indices.add(candidate_index)
+                for candidate_index in sorted(candidate_indices):
+                    right_size, right_scaffold = right_values[candidate_index]
+                    projected = dict(counts)
+                    projected[left_split] += right_size - left_size
+                    projected[right_split] += left_size - right_size
+                    deviation = _split_deviation(projected, target_counts)
+                    consider(
                         deviation,
                         _stable_split_token(
                             seed,
@@ -1291,11 +1404,10 @@ def _improve_scaffold_assignments(
                         ),
                         (left_scaffold, right_split, right_scaffold),
                     )
-                )
 
-    if not candidates:
+    if best is None:
         return
-    _, _, (left_scaffold, destination, right_scaffold) = min(candidates)
+    _, _, (left_scaffold, destination, right_scaffold) = best
     source = assignments[left_scaffold]
     left_size = group_sizes[left_scaffold]
     if right_scaffold is None:
@@ -1536,10 +1648,97 @@ def _rollback_created_file(path: Path, identity: tuple[int, int]) -> None:
         stat_result = path.stat(follow_symlinks=False)
     except FileNotFoundError:
         return
-    if path.is_symlink():
+    if _is_reparse_entry(stat_result):
         return
     if (stat_result.st_dev, stat_result.st_ino) == identity:
         path.unlink(missing_ok=True)
+
+
+def _is_reparse_entry(stat_result: Any) -> bool:
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x00000400)
+    return stat.S_ISLNK(stat_result.st_mode) or bool(
+        getattr(stat_result, "st_file_attributes", 0) & reparse_attribute
+    )
+
+
+def _directory_identity(path: Path) -> tuple[int, int]:
+    stat_result = path.stat(follow_symlinks=False)
+    if _is_reparse_entry(stat_result) or not stat.S_ISDIR(stat_result.st_mode):
+        raise OSError(f"Expected private regular directory: {path.name}")
+    return stat_result.st_dev, stat_result.st_ino
+
+
+def _verify_directory_identity(path: Path, identity: tuple[int, int]) -> None:
+    try:
+        current = _directory_identity(path)
+    except FileNotFoundError:
+        raise OSError(f"Publication directory disappeared: {path.name}") from None
+    if current != identity:
+        raise OSError(f"Publication directory identity changed: {path.name}")
+
+
+def _rollback_created_directory(path: Path, identity: tuple[int, int]) -> None:
+    try:
+        current = _directory_identity(path)
+    except (FileNotFoundError, OSError):
+        return
+    if current == identity:
+        shutil.rmtree(path)
+
+
+def _raise_directory_publish_error(error_number: int, destination: Path) -> None:
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise FileExistsError(
+            f"Prepared dataset destination already exists: {destination.name}"
+        )
+    raise OSError(error_number, os.strerror(error_number), str(destination))
+
+
+def _publish_directory_no_replace(source: Path, destination: Path) -> None:
+    """Atomically rename a complete directory without replacing its destination."""
+
+    if os.name == "nt":
+        try:
+            os.rename(source, destination)
+        except FileExistsError:
+            raise FileExistsError(
+                f"Prepared dataset destination already exists: {destination.name}"
+            ) from None
+        return
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    if sys.platform.startswith("linux"):
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            raise OSError(errno.ENOTSUP, "renameat2 is required for safe publication")
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        if renameat2(-100, source_bytes, -100, destination_bytes, 1) == 0:
+            return
+        _raise_directory_publish_error(ctypes.get_errno(), destination)
+
+    if sys.platform == "darwin":
+        renamex_np = getattr(libc, "renamex_np", None)
+        if renamex_np is None:
+            raise OSError(errno.ENOTSUP, "renamex_np is required for safe publication")
+        renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        renamex_np.restype = ctypes.c_int
+        if renamex_np(source_bytes, destination_bytes, 0x00000004) == 0:
+            return
+        _raise_directory_publish_error(ctypes.get_errno(), destination)
+
+    raise OSError(
+        errno.ENOTSUP,
+        "Atomic no-replace directory publication is unsupported on this platform",
+    )
 
 
 def _safe_dataset_directory(output_dir: str | Path, dataset_id: str) -> Path:
@@ -1901,6 +2100,57 @@ def _publication_snapshots(
     return validation_snapshot, split_snapshot
 
 
+def _verify_staged_publication(
+    staging_directory: Path,
+    staging_identity: tuple[int, int],
+    split_result: DatasetSplitResult,
+    quality_report: Mapping[str, Any],
+    dataset_manifest: Mapping[str, Any],
+) -> None:
+    _verify_directory_identity(staging_directory, staging_identity)
+    expected_names = {
+        "train.csv",
+        "validation.csv",
+        "test.csv",
+        "quality_report.json",
+        "dataset_manifest.json",
+    }
+    if {path.name for path in staging_directory.iterdir()} != expected_names:
+        raise OSError("Staged dataset artifacts do not match publication schema")
+
+    for split_name in _SPLIT_NAMES:
+        artifact_path = staging_directory / f"{split_name}.csv"
+        artifact_stat = artifact_path.stat(follow_symlinks=False)
+        if _is_reparse_entry(artifact_stat) or not stat.S_ISREG(artifact_stat.st_mode):
+            raise OSError(f"Staged artifact is not a regular file: {artifact_path.name}")
+        loaded = read_prepared_split(artifact_path)
+        if _csv_bytes(loaded) != artifact_path.read_bytes():
+            raise OSError(f"Staged CSV failed typed round-trip: {artifact_path.name}")
+        if set(loaded["canonical_smiles"]) != set(
+            split_result.frames[split_name]["canonical_smiles"]
+        ):
+            raise OSError(f"Staged CSV content mismatch: {artifact_path.name}")
+
+    for filename, expected_payload in (
+        ("quality_report.json", quality_report),
+        ("dataset_manifest.json", dataset_manifest),
+    ):
+        artifact_path = staging_directory / filename
+        artifact_stat = artifact_path.stat(follow_symlinks=False)
+        if _is_reparse_entry(artifact_stat) or not stat.S_ISREG(artifact_stat.st_mode):
+            raise OSError(f"Staged artifact is not a regular file: {filename}")
+        try:
+            reparsed = json.loads(
+                artifact_path.read_text(encoding="utf-8"),
+                object_pairs_hook=_reject_duplicate_object_members,
+            )
+        except (json.JSONDecodeError, UnicodeError, ValueError):
+            raise OSError(f"Staged JSON failed reparsing: {filename}") from None
+        if reparsed != expected_payload:
+            raise OSError(f"Staged JSON content mismatch: {filename}")
+    _verify_directory_identity(staging_directory, staging_identity)
+
+
 def write_prepared_dataset(
     validation_result: DatasetValidationResult,
     split_result: DatasetSplitResult,
@@ -1954,14 +2204,21 @@ def write_prepared_dataset(
                 f"Explicit rejected output already exists: {rejected_path.name}"
             )
     output_root.mkdir(parents=True, exist_ok=True)
-    try:
-        dataset_directory.mkdir()
-    except FileExistsError:
+    if os.path.lexists(dataset_directory):
         raise FileExistsError(
             f"Prepared dataset destination already exists: {manifest.dataset_id}"
-        ) from None
+        )
+    staging_directory = Path(
+        tempfile.mkdtemp(
+            dir=output_root,
+            prefix=f".{manifest.dataset_id}.",
+            suffix=".staging",
+        )
+    )
+    staging_identity = _directory_identity(staging_directory)
 
     rejected_identity: tuple[int, int] | None = None
+    published_identity: tuple[int, int] | None = None
     try:
         counts = {
             name: len(split_result.frames[name]) for name in _SPLIT_NAMES
@@ -2005,7 +2262,9 @@ def write_prepared_dataset(
         for name in _SPLIT_NAMES:
             filename = f"{name}.csv"
             content = _csv_bytes(split_result.frames[name])
-            digest = _write_verified(dataset_directory / filename, content)
+            _verify_directory_identity(staging_directory, staging_identity)
+            digest = _write_verified(staging_directory / filename, content)
+            _verify_directory_identity(staging_directory, staging_identity)
             artifacts[name] = {
                 "path": filename,
                 "sha256": digest,
@@ -2014,10 +2273,12 @@ def write_prepared_dataset(
             del content
 
         quality_payload = _json_bytes(quality_report)
+        _verify_directory_identity(staging_directory, staging_identity)
         quality_digest = _write_verified(
-            dataset_directory / "quality_report.json",
+            staging_directory / "quality_report.json",
             quality_payload,
         )
+        _verify_directory_identity(staging_directory, staging_identity)
         artifacts["quality_report"] = {
             "path": "quality_report.json",
             "sha256": quality_digest,
@@ -2085,11 +2346,31 @@ def write_prepared_dataset(
             },
             "artifacts": artifacts,
         }
-        manifest_path = dataset_directory / "dataset_manifest.json"
-        _write_verified(manifest_path, _json_bytes(dataset_manifest))
-        return manifest_path
+        staged_manifest_path = staging_directory / "dataset_manifest.json"
+        _verify_directory_identity(staging_directory, staging_identity)
+        _write_verified(staged_manifest_path, _json_bytes(dataset_manifest))
+        _verify_staged_publication(
+            staging_directory,
+            staging_identity,
+            split_result,
+            quality_report,
+            dataset_manifest,
+        )
+        _publish_directory_no_replace(staging_directory, dataset_directory)
+        published_identity = staging_identity
+        _verify_directory_identity(dataset_directory, published_identity)
+        _verify_staged_publication(
+            dataset_directory,
+            published_identity,
+            split_result,
+            quality_report,
+            dataset_manifest,
+        )
+        return dataset_directory / "dataset_manifest.json"
     except Exception:
-        shutil.rmtree(dataset_directory, ignore_errors=True)
+        _rollback_created_directory(staging_directory, staging_identity)
+        if published_identity is not None:
+            _rollback_created_directory(dataset_directory, published_identity)
         if rejected_path is not None and rejected_identity is not None:
             _rollback_created_file(rejected_path, rejected_identity)
         raise
