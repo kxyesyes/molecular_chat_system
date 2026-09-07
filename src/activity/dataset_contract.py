@@ -742,7 +742,13 @@ def _safe_regression_aggregate(
 
 def _scaffold_identity(molecule: Any) -> str:
     try:
-        scaffold = MurckoScaffold.GetScaffoldForMol(molecule)
+        # Murcko removes side chains which may carry the only slash direction
+        # markers. Populate equivalent neighbor directions from bond stereo
+        # first, so original and canonical-roundtripped parents agree. Work on
+        # a copy; retain E/Z distinctions and do not mutate the source molecule.
+        parent = Chem.Mol(molecule)
+        Chem.SetDoubleBondNeighborDirections(parent)
+        scaffold = MurckoScaffold.GetScaffoldForMol(parent)
         return Chem.MolToSmiles(
             scaffold,
             canonical=True,
@@ -779,12 +785,17 @@ def _verify_source_snapshot_matches_frame(
     input_format: str,
 ) -> None:
     separator = {"csv": ",", "tsv": "\t"}[input_format]
+    # Preserve explicitly textual columns, including threshold-adjacent decimal
+    # labels. Legacy numeric DataFrames retain their existing parsing contract.
+    text_columns = {name: str for name in frame.columns
+                    if frame[name].map(lambda value: isinstance(value, str)).all()}
     try:
         source_frame = pd.read_csv(
             io.BytesIO(input_bytes),
             encoding="utf-8",
             keep_default_na=False,
             sep=separator,
+            dtype=text_columns or None,
         )
     except (UnicodeError, pd.errors.ParserError, pd.errors.EmptyDataError):
         raise ValueError(

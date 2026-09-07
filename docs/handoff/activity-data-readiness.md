@@ -11,11 +11,61 @@
 模型卡与机器溯源仍保留真实数据范围。
 
 书面设计：`docs/superpowers/specs/2026-09-07-family-activity-two-stage-design.md`。
-当前等待用户审阅，尤其是重复记录的混合中位数聚合策略；尚未编写扩展代码或执行真实训练。
+用户已批准设计及重复记录混合中位数策略；家族配对数据包代码和本地发布已完成，未执行真实训练。
 原任务 7 需按此设计扩展为家族级分类/回归模型组，而非只完成单模型端点加载。
-真实数据文件未修改、未复制进 Git；本次仅更新设计和交接文档。
+真实数据文件未修改、未复制进 Git。实施计划为
+`docs/superpowers/plans/2026-09-07-family-activity-data-contract.md`，
+操作说明为 `docs/activity_family_data.md`。
 
-## 当前检查点：任务 6 完成
+## 当前检查点：家族配对数据包
+
+- 新增 `family_contract.py`：PDE/BuChE 受控标识、固定 5 阈值与双任务 manifest。
+- 新增 `family_dataset.py`：原始字节和适配字节分别绑定，同源中位数聚合、
+  同骨架拆分、配对标签核验、原子发布与原始来源重验。
+- 新增 `scripts/prepare_family_activity_dataset.py`、三份 family 测试和操作文档。
+- 最小修改 `dataset_contract.py`：保存文本标签的阈值边界精度；骨架提取前
+  在母体副本补全双键邻接方向，修复原始与 canonical 往返身份不一致。
+- CSV 行宽异常在 pandas 解析前明确拒绝，不静默丢列或推断私有索引。
+- 独立规格审查及质量审查通过。七模块扩展回归：**524 passed、5 skipped、2 warnings**；
+  五个 skip 为本机符号链接权限限制，两个 warning 为既有 PyG 弃用/张量构造提示。
+  `compileall -q src scripts`、`git diff --check` 通过；没有重跑全量测试。
+
+真实数据（不是合成验收数字）：
+
+| 家族 | 原始行 | 聚合后分子 | 拒绝 | train / validation / test |
+|---|---:|---:|---:|---|
+| PDE | 4,012 | 2,642 | 0 | 1,850 / 396 / 396 |
+| BuChE | 2,361 | 2,285 | 26 多片段 | 1,599 / 343 / 343 |
+
+两份原始 CSV 均先执行 `--validate-only`，再执行 `--prepare`，退出码 0。
+首次 BuChE 预检的骨架一致性失败已诚实记录，修复后重新验证通过，未绕过质量门。
+新包为 `data/activity/prepared/pde-family-v1/` 和 `data/activity/prepared/buche-family-v1/`，
+两个包及源快照均保持 Git 忽略；不是已训练权重，未改变活动模型或正在运行的原始项目。
+发布后独立 loader 复验结果见下方最终验收记录。
+
+最终验收记录：两个已发布 `family_dataset.json` 分别再次通过
+`load_family_dataset`，退出码 0、`verified=true`、`source_unchanged=true`。
+原始 SHA-256 与预检及包内源快照一致；`git check-ignore` 确认两个描述文件和
+源快照均被忽略，发布目录没有遗留 staging 半包。
+
+复现命令（使用实际私有输入替换占位路径；在 MedChat Conda 环境运行）：
+
+```powershell
+python scripts/prepare_family_activity_dataset.py --input <PDE.csv> --family PDE --package-id pde-family-v1 --output-dir data/activity/prepared --validate-only
+python scripts/prepare_family_activity_dataset.py --input <PDE.csv> --family PDE --package-id pde-family-v1 --output-dir data/activity/prepared --prepare
+python scripts/prepare_family_activity_dataset.py --input <BUCHE.csv> --family BuChE --package-id buche-family-v1 --output-dir data/activity/prepared --validate-only
+python scripts/prepare_family_activity_dataset.py --input <BUCHE.csv> --family BuChE --package-id buche-family-v1 --output-dir data/activity/prepared --prepare
+python -m pytest tests/test_activity_family_contract.py tests/test_activity_family_dataset.py tests/test_activity_family_prepare_cli.py tests/test_activity_dataset_contract.py tests/test_activity_prepare_cli.py tests/test_activity_prepared_training_data.py tests/test_activity_prepared_training_loop.py -q -p no:cacheprovider --tb=short
+```
+
+已存在的包不可再次覆盖；仅需检查时使用 validate-only 或 loader。
+
+后续：实现家族分类/回归模型组的成组注册、就绪检查和端点推理；再接 API/Agent，
+最后训练两个家族共四个真实模型并独立评估。不能将本轮标签分布当作预测性能。
+数据发布的多重化学复验有较高常数开销，本次未作无关性能重构；后续可做计时分析，
+但不能为了提速删去来源/摘要/标签/拆分核验。
+
+## 历史检查点：任务 6 完成
 
 本阶段规范与代码质量审查均已通过。独立质量审查另检查了实际 RGNN 的
 batch size 2/4/6 与逐分子前向结果一致性（含尾批）；仅为合成工程检验。
@@ -158,5 +208,5 @@ python -m pytest tests/test_activity_model_registry.py tests/test_activity_endpo
 任务 7 迁移端点推理、Web 服务端 dataset ID 解析与 Agent 调用，
 任务 8–9 完成健康检查、最终文档及 PR。
 
-真实 PDE/BuChE 数据尚待用户提供。本轮只使用临时合成数据验证工程契约，
+任务 1–4 当时真实 PDE/BuChE 数据尚待用户提供。该历史阶段只使用临时合成数据验证工程契约，
 没有训练真实模型，也没有评估真实活性预测性能。
