@@ -7,8 +7,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from collections import Counter
+import copy
 from dataclasses import dataclass, field, fields
 import hashlib
+import io
 import json
 import math
 import numbers
@@ -113,12 +115,25 @@ _REJECTED_COLUMNS = [
 _SPLIT_NAMES = ("train", "validation", "test")
 _SPLIT_ALGORITHM = "deterministic_scaffold_greedy_v1"
 _SPLIT_REQUIRED_COLUMNS = (
+    "original_smiles",
     "canonical_smiles",
     "normalized_value",
     "scaffold_smiles",
 )
 _SAFE_DATASET_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _SHA256_HEX = re.compile(r"[0-9A-Fa-f]{64}\Z")
+_PREPARED_CSV_DTYPES = {
+    "original_smiles": "string",
+    "original_value": "string",
+    "original_units": "string",
+    "relation": "string",
+    "canonical_smiles": "string",
+    "normalized_value": "float64",
+    "normalized_units": "string",
+    "replicate_count": "int64",
+    "replicate_range": "float64",
+    "scaffold_smiles": "string",
+}
 
 
 def _normalized_text(value: str) -> str:
@@ -430,6 +445,7 @@ class DatasetValidationResult:
     statistics: dict[str, Any]
     input_sha256: str | None
     ready_for_training: bool
+    input_snapshot: bytes | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -667,11 +683,32 @@ def _reject_valid_group(
         rejected_records.append(rejected)
 
 
+def _verify_source_snapshot_matches_frame(
+    input_bytes: bytes,
+    frame: pd.DataFrame,
+) -> None:
+    try:
+        source_frame = pd.read_csv(
+            io.BytesIO(input_bytes),
+            encoding="utf-8",
+            keep_default_na=False,
+        )
+    except (UnicodeError, pd.errors.ParserError, pd.errors.EmptyDataError):
+        raise ValueError("Invalid UTF-8 CSV source snapshot") from None
+    source_frame = source_frame.reset_index(drop=True)
+    input_frame = frame.reset_index(drop=True)
+    if source_frame.columns.tolist() != input_frame.columns.tolist():
+        raise ValueError("Supplied source snapshot does not match input dataframe")
+    if _csv_bytes(source_frame) != _csv_bytes(input_frame):
+        raise ValueError("Supplied source snapshot does not match input dataframe")
+
+
 def validate_activity_dataset(
     frame: pd.DataFrame,
     manifest: DatasetManifest,
     *,
     input_sha256: str | None = None,
+    input_bytes: bytes | None = None,
 ) -> DatasetValidationResult:
     """Validate, normalize, and aggregate activity rows for model training."""
 
@@ -834,14 +871,92 @@ def validate_activity_dataset(
         "endpoint_key": manifest.endpoint_key,
         "model_contract_key": manifest.model_contract_key,
     }
+    validated_content_sha256 = _validated_content_sha256(accepted)
+    statistics["validated_content_sha256"] = validated_content_sha256
+    input_snapshot: bytes | None = None
+    if input_bytes is None:
+        if input_sha256 is not None:
+            normalized_input_sha256 = _validated_input_sha256(input_sha256)
+            if normalized_input_sha256 != validated_content_sha256:
+                raise ValueError(
+                    "input_sha256 does not match deterministic validated content"
+                )
+        normalized_input_sha256 = validated_content_sha256
+    else:
+        if not isinstance(input_bytes, bytes):
+            raise ValueError("Invalid input_bytes: expected immutable bytes")
+        input_snapshot = bytes(input_bytes)
+        _verify_source_snapshot_matches_frame(input_snapshot, frame)
+        source_sha256 = _sha256_bytes(input_snapshot)
+        if input_sha256 is not None:
+            normalized_input_sha256 = _validated_input_sha256(input_sha256)
+            if normalized_input_sha256 != source_sha256:
+                raise ValueError("input_sha256 does not match supplied source bytes")
+        normalized_input_sha256 = source_sha256
+    statistics["input_binding_sha256"] = _input_binding_sha256(
+        normalized_input_sha256,
+        validated_content_sha256,
+        manifest.endpoint_key,
+        manifest.model_contract_key,
+    )
     return DatasetValidationResult(
         accepted=accepted,
         rejected=rejected,
         warnings=[],
         statistics=statistics,
-        input_sha256=input_sha256,
+        input_sha256=normalized_input_sha256,
         ready_for_training=ready_for_training,
+        input_snapshot=input_snapshot,
     )
+
+
+def _snapshot_columns(
+    frame: pd.DataFrame,
+    columns: list[str],
+    frame_name: str,
+) -> pd.DataFrame:
+    duplicate_columns = frame.columns[frame.columns.duplicated()].tolist()
+    if duplicate_columns:
+        names = ", ".join(str(name) for name in duplicate_columns)
+        raise ValueError(f"Duplicate {frame_name} dataframe column(s): {names}")
+    missing_columns = [name for name in columns if name not in frame.columns]
+    if missing_columns:
+        names = ", ".join(missing_columns)
+        raise ValueError(f"Missing required {frame_name} dataframe column(s): {names}")
+    return copy.deepcopy(frame.loc[:, columns].copy(deep=True)).reset_index(drop=True)
+
+
+def _accepted_snapshot(frame: pd.DataFrame) -> pd.DataFrame:
+    return _snapshot_columns(frame, _ACCEPTED_COLUMNS, "accepted")
+
+
+def _rejected_snapshot(frame: pd.DataFrame) -> pd.DataFrame:
+    return _snapshot_columns(frame, _REJECTED_COLUMNS, "rejected")
+
+
+def _validated_content_sha256(accepted: pd.DataFrame) -> str:
+    canonical_snapshot = _accepted_snapshot(accepted).sort_values(
+        "canonical_smiles",
+        kind="mergesort",
+    )
+    return _sha256_bytes(_csv_bytes(canonical_snapshot))
+
+
+def _verify_prepared_chemistry(prepared: pd.DataFrame) -> None:
+    for row_number in range(len(prepared)):
+        row = prepared.iloc[row_number]
+        canonical_smiles, molecule, reason = _canonical_parent(
+            row["original_smiles"]
+        )
+        if reason is not None or canonical_smiles is None or molecule is None:
+            raise ValueError(
+                f"Prepared molecule at row {row_number} is not a valid canonical parent"
+            )
+        if canonical_smiles != row["canonical_smiles"]:
+            raise ValueError(f"canonical_smiles mismatch at prepared row {row_number}")
+        scaffold_smiles = _scaffold_identity(molecule)
+        if scaffold_smiles != row["scaffold_smiles"]:
+            raise ValueError(f"scaffold_smiles mismatch at prepared row {row_number}")
 
 
 def _validate_split_input(prepared: pd.DataFrame) -> None:
@@ -868,6 +983,8 @@ def _validate_split_input(prepared: pd.DataFrame) -> None:
     scaffold_values = prepared["scaffold_smiles"].tolist()
     if any(not isinstance(value, str) for value in scaffold_values):
         raise ValueError("Invalid scaffold_smiles: expected strings")
+
+    _verify_prepared_chemistry(prepared)
 
     for value in prepared["normalized_value"].tolist():
         if isinstance(value, bool) or not isinstance(value, numbers.Real):
@@ -968,6 +1085,100 @@ def _verify_split_invariants(
         raise ValueError("Dataset split rows do not exactly equal their input")
 
 
+def _split_deviation(
+    counts: Mapping[str, int],
+    target_counts: Mapping[str, float],
+) -> float:
+    return sum(abs(counts[name] - target_counts[name]) for name in _SPLIT_NAMES)
+
+
+def _improve_scaffold_assignments(
+    assignments: dict[str, str],
+    group_sizes: Mapping[str, int],
+    counts: dict[str, int],
+    target_counts: Mapping[str, float],
+    seed: int,
+) -> None:
+    """Apply the best deterministic single move or swap that improves ratios."""
+
+    current_deviation = _split_deviation(counts, target_counts)
+    scaffold_counts = Counter(assignments.values())
+    candidates: list[
+        tuple[float, str, tuple[str, str, str | None]]
+    ] = []
+    scaffolds = sorted(assignments)
+
+    for scaffold in scaffolds:
+        source = assignments[scaffold]
+        if scaffold_counts[source] <= 1:
+            continue
+        size = group_sizes[scaffold]
+        for destination in _SPLIT_NAMES:
+            if destination == source:
+                continue
+            projected = dict(counts)
+            projected[source] -= size
+            projected[destination] += size
+            deviation = _split_deviation(projected, target_counts)
+            if deviation < current_deviation - 1e-12:
+                candidates.append(
+                    (
+                        deviation,
+                        _stable_split_token(
+                            seed,
+                            "move",
+                            scaffold,
+                            source,
+                            destination,
+                        ),
+                        (scaffold, destination, None),
+                    )
+                )
+
+    for left_index, left_scaffold in enumerate(scaffolds):
+        left_split = assignments[left_scaffold]
+        left_size = group_sizes[left_scaffold]
+        for right_scaffold in scaffolds[left_index + 1 :]:
+            right_split = assignments[right_scaffold]
+            if left_split == right_split:
+                continue
+            right_size = group_sizes[right_scaffold]
+            projected = dict(counts)
+            projected[left_split] += right_size - left_size
+            projected[right_split] += left_size - right_size
+            deviation = _split_deviation(projected, target_counts)
+            if deviation < current_deviation - 1e-12:
+                candidates.append(
+                    (
+                        deviation,
+                        _stable_split_token(
+                            seed,
+                            "swap",
+                            left_scaffold,
+                            right_scaffold,
+                        ),
+                        (left_scaffold, right_split, right_scaffold),
+                    )
+                )
+
+    if not candidates:
+        return
+    _, _, (left_scaffold, destination, right_scaffold) = min(candidates)
+    source = assignments[left_scaffold]
+    left_size = group_sizes[left_scaffold]
+    if right_scaffold is None:
+        assignments[left_scaffold] = destination
+        counts[source] -= left_size
+        counts[destination] += left_size
+        return
+
+    right_size = group_sizes[right_scaffold]
+    assignments[left_scaffold] = destination
+    assignments[right_scaffold] = source
+    counts[source] += right_size - left_size
+    counts[destination] += left_size - right_size
+
+
 def split_prepared_dataset(
     prepared: pd.DataFrame,
     *,
@@ -976,10 +1187,11 @@ def split_prepared_dataset(
 ) -> DatasetSplitResult:
     """Partition canonical rows by complete scaffold groups without leakage."""
 
-    _validate_split_input(prepared)
+    prepared_snapshot = _accepted_snapshot(prepared)
+    _validate_split_input(prepared_snapshot)
     seed, normalized_ratios = _validated_split_parameters(seed, ratios)
 
-    positional = prepared.reset_index(drop=True)
+    positional = prepared_snapshot.reset_index(drop=True)
     scaffold_groups = {
         scaffold: tuple(group.index.tolist())
         for scaffold, group in positional.groupby("scaffold_smiles", sort=False)
@@ -996,7 +1208,7 @@ def split_prepared_dataset(
         ),
     )
     target_counts = {
-        name: len(prepared) * ratio
+        name: len(prepared_snapshot) * ratio
         for name, ratio in zip(_SPLIT_NAMES, normalized_ratios)
     }
     counts = {name: 0 for name in _SPLIT_NAMES}
@@ -1027,6 +1239,17 @@ def split_prepared_dataset(
         assigned_indices[chosen].extend(indices)
         counts[chosen] += len(indices)
 
+    _improve_scaffold_assignments(
+        assignments,
+        {scaffold: len(indices) for scaffold, indices in ordered_groups},
+        counts,
+        target_counts,
+        seed,
+    )
+    assigned_indices = {name: [] for name in _SPLIT_NAMES}
+    for scaffold, indices in ordered_groups:
+        assigned_indices[assignments[scaffold]].extend(indices)
+
     frames = {
         name: _sorted_prepared_frame(
             positional.iloc[assigned_indices[name]].copy(deep=True)
@@ -1035,7 +1258,7 @@ def split_prepared_dataset(
     }
     if any(frame.empty for frame in frames.values()):
         raise ValueError("Scaffold split could not preserve nonempty partitions")
-    _verify_split_invariants(prepared, frames)
+    _verify_split_invariants(prepared_snapshot, frames)
 
     scaffold_counts = {
         name: int(frames[name]["scaffold_smiles"].nunique(dropna=False))
@@ -1043,12 +1266,21 @@ def split_prepared_dataset(
     }
     ordered_assignments = dict(sorted(assignments.items()))
     ratio_mapping = dict(zip(_SPLIT_NAMES, normalized_ratios))
+    achieved_ratios = {
+        name: counts[name] / len(prepared_snapshot) for name in _SPLIT_NAMES
+    }
+    ratio_deviations = {
+        name: achieved_ratios[name] - ratio_mapping[name]
+        for name in _SPLIT_NAMES
+    }
     provenance = {
         "algorithm": _SPLIT_ALGORITHM,
         "seed": seed,
         "ratios": ratio_mapping,
         "counts": counts,
         "scaffold_counts": scaffold_counts,
+        "achieved_ratios": achieved_ratios,
+        "ratio_deviations": ratio_deviations,
         "assignments_sha256": _assignment_sha256(ordered_assignments),
     }
     return DatasetSplitResult(
@@ -1073,6 +1305,22 @@ def _json_bytes(payload: Any) -> bytes:
 
 def _csv_bytes(frame: pd.DataFrame) -> bytes:
     return frame.to_csv(index=False, lineterminator="\n").encode("utf-8")
+
+
+def read_prepared_split(path: str | Path) -> pd.DataFrame:
+    """Read a prepared split with the stable scientific CSV type contract."""
+
+    frame = pd.read_csv(
+        Path(path),
+        encoding="utf-8",
+        keep_default_na=False,
+        float_precision="round_trip",
+        dtype=_PREPARED_CSV_DTYPES,
+    )
+    if frame.columns.tolist() != _ACCEPTED_COLUMNS:
+        raise ValueError("Prepared split CSV columns do not match schema")
+    _validate_split_input(frame)
+    return frame
 
 
 def _sha256_bytes(content: bytes) -> str:
@@ -1110,6 +1358,57 @@ def _write_verified(path: Path, content: bytes) -> str:
     return actual_digest
 
 
+def _write_new_verified(
+    path: Path,
+    content: bytes,
+) -> tuple[str, tuple[int, int]]:
+    """Atomically create a regular file without replacing any directory entry."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if os.path.lexists(path):
+        raise FileExistsError(f"Explicit rejected output already exists: {path.name}")
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_path = Path(temporary.name)
+        try:
+            os.link(temporary_path, path, follow_symlinks=False)
+        except FileExistsError:
+            raise FileExistsError(
+                f"Explicit rejected output already exists: {path.name}"
+            ) from None
+        expected_digest = _sha256_bytes(content)
+        actual_digest = _sha256_bytes(path.read_bytes())
+        if actual_digest != expected_digest:
+            path.unlink(missing_ok=True)
+            raise OSError(f"SHA-256 verification failed for {path.name}")
+        stat_result = path.stat(follow_symlinks=False)
+        return actual_digest, (stat_result.st_dev, stat_result.st_ino)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _rollback_created_file(path: Path, identity: tuple[int, int]) -> None:
+    try:
+        stat_result = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if path.is_symlink():
+        return
+    if (stat_result.st_dev, stat_result.st_ino) == identity:
+        path.unlink(missing_ok=True)
+
+
 def _safe_dataset_directory(output_dir: str | Path, dataset_id: str) -> Path:
     if not _SAFE_DATASET_ID.fullmatch(dataset_id) or dataset_id in {".", ".."}:
         raise ValueError("Invalid dataset_id for artifact path")
@@ -1124,6 +1423,27 @@ def _validated_input_sha256(value: Any) -> str:
     if not isinstance(value, str) or not _SHA256_HEX.fullmatch(value):
         raise ValueError("Invalid input_sha256: expected exactly 64 hexadecimal characters")
     return value.lower()
+
+
+def _input_binding_sha256(
+    input_sha256: str,
+    validated_content_sha256: str,
+    endpoint_key: str,
+    model_contract_key: str,
+) -> str:
+    content = json.dumps(
+        {
+            "endpoint_key": endpoint_key,
+            "input_sha256": input_sha256,
+            "model_contract_key": model_contract_key,
+            "validated_content_sha256": validated_content_sha256,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return _sha256_bytes(content)
 
 
 def _expected_rejection_counts(rejected: pd.DataFrame) -> dict[str, int]:
@@ -1149,7 +1469,7 @@ def _validated_count_statistic(
 def _validate_validation_result(
     validation_result: DatasetValidationResult,
     manifest: DatasetManifest,
-) -> str:
+) -> tuple[str, str, str]:
     input_sha256 = _validated_input_sha256(validation_result.input_sha256)
     if validation_result.ready_for_training is not True:
         raise ValueError("Activity dataset is not ready for training")
@@ -1165,6 +1485,30 @@ def _validate_validation_result(
         )
 
     _validate_split_input(validation_result.accepted)
+    validated_content_sha256 = _validated_content_sha256(
+        validation_result.accepted
+    )
+    recorded_content_sha256 = statistics.get("validated_content_sha256")
+    if recorded_content_sha256 != validated_content_sha256:
+        raise ValueError(
+            "Validation validated_content_sha256 does not match accepted snapshot"
+        )
+    if validation_result.input_snapshot is None:
+        if input_sha256 != validated_content_sha256:
+            raise ValueError(
+                "input_sha256 does not match deterministic validated content"
+            )
+    elif _sha256_bytes(validation_result.input_snapshot) != input_sha256:
+        raise ValueError("input_sha256 does not match retained source snapshot")
+    input_binding_sha256 = _input_binding_sha256(
+        input_sha256,
+        validated_content_sha256,
+        manifest.endpoint_key,
+        manifest.model_contract_key,
+    )
+    if statistics.get("input_binding_sha256") != input_binding_sha256:
+        raise ValueError("Validation input_binding_sha256 does not match provenance")
+
     accepted_rows = len(validation_result.accepted)
     rejected_rows = len(validation_result.rejected)
     unique_molecules = validation_result.accepted["canonical_smiles"].nunique(
@@ -1205,7 +1549,7 @@ def _validate_validation_result(
     )
     if not expected_readiness:
         raise ValueError("Validation readiness does not match dataset manifest")
-    return input_sha256
+    return input_sha256, validated_content_sha256, input_binding_sha256
 
 
 def _validated_provenance_counts(
@@ -1223,6 +1567,31 @@ def _validated_provenance_counts(
         normalized[split_name] = int(count)
     if normalized != dict(expected):
         raise ValueError(f"Split provenance {name} does not match frames")
+    return normalized
+
+
+def _validated_provenance_ratios(
+    value: Any,
+    expected: Mapping[str, float],
+    name: str,
+) -> dict[str, float]:
+    if not isinstance(value, Mapping) or set(value) != set(_SPLIT_NAMES):
+        raise ValueError(f"Invalid split provenance {name}")
+    normalized: dict[str, float] = {}
+    for split_name in _SPLIT_NAMES:
+        ratio = value[split_name]
+        if isinstance(ratio, bool) or not isinstance(ratio, numbers.Real):
+            raise ValueError(f"Invalid split provenance {name}")
+        normalized[split_name] = float(ratio)
+        if not math.isfinite(normalized[split_name]):
+            raise ValueError(f"Invalid split provenance {name}")
+        if not math.isclose(
+            normalized[split_name],
+            expected[split_name],
+            rel_tol=0.0,
+            abs_tol=1e-15,
+        ):
+            raise ValueError(f"Split provenance {name} does not match frames")
     return normalized
 
 
@@ -1270,6 +1639,23 @@ def _normalized_split_provenance(
         actual_scaffold_counts,
         "scaffold_counts",
     )
+    achieved_expected = {
+        name: actual_counts[name] / len(prepared) for name in _SPLIT_NAMES
+    }
+    achieved_ratios = _validated_provenance_ratios(
+        provenance.get("achieved_ratios"),
+        achieved_expected,
+        "achieved_ratios",
+    )
+    deviations_expected = {
+        name: achieved_expected[name] - normalized_ratios[name]
+        for name in _SPLIT_NAMES
+    }
+    ratio_deviations = _validated_provenance_ratios(
+        provenance.get("ratio_deviations"),
+        deviations_expected,
+        "ratio_deviations",
+    )
 
     actual_assignments: dict[str, str] = {}
     for name in _SPLIT_NAMES:
@@ -1297,6 +1683,8 @@ def _normalized_split_provenance(
         "ratios": normalized_ratios,
         "counts": counts,
         "scaffold_counts": scaffold_counts,
+        "achieved_ratios": achieved_ratios,
+        "ratio_deviations": ratio_deviations,
     }
 
 
@@ -1304,8 +1692,13 @@ def _validate_result_matches_split(
     validation_result: DatasetValidationResult,
     split_result: DatasetSplitResult,
     manifest: DatasetManifest,
-) -> tuple[str, dict[str, Any]]:
-    input_sha256 = _validate_validation_result(validation_result, manifest)
+) -> tuple[str, str, str, dict[str, Any]]:
+    input_sha256, validated_content_sha256, input_binding_sha256 = (
+        _validate_validation_result(
+            validation_result,
+            manifest,
+        )
+    )
     if set(split_result.frames) != set(_SPLIT_NAMES):
         raise ValueError("Split frames must contain train, validation, and test")
     for name in _SPLIT_NAMES:
@@ -1317,7 +1710,12 @@ def _validate_result_matches_split(
         validation_result.accepted,
         split_result,
     )
-    return input_sha256, normalized_provenance
+    return (
+        input_sha256,
+        validated_content_sha256,
+        input_binding_sha256,
+        normalized_provenance,
+    )
 
 
 def _explicit_rejected_path(
@@ -1326,12 +1724,41 @@ def _explicit_rejected_path(
 ) -> Path:
     requested = Path(rejected_output_path)
     if requested.is_absolute():
-        return requested.resolve()
+        return requested.parent.resolve() / requested.name
     output_root = Path(output_dir).resolve()
-    resolved = (output_root / requested).resolve()
-    if output_root != resolved and output_root not in resolved.parents:
+    parent = (output_root / requested).parent.resolve()
+    resolved = parent / requested.name
+    if output_root != parent and output_root not in parent.parents:
         raise ValueError("Relative rejected_output_path escapes output_dir")
     return resolved
+
+
+def _publication_snapshots(
+    validation_result: DatasetValidationResult,
+    split_result: DatasetSplitResult,
+) -> tuple[DatasetValidationResult, DatasetSplitResult]:
+    validation_snapshot = DatasetValidationResult(
+        accepted=_accepted_snapshot(validation_result.accepted),
+        rejected=_rejected_snapshot(validation_result.rejected),
+        warnings=copy.deepcopy(list(validation_result.warnings)),
+        statistics=copy.deepcopy(dict(validation_result.statistics)),
+        input_sha256=copy.deepcopy(validation_result.input_sha256),
+        ready_for_training=validation_result.ready_for_training,
+        input_snapshot=(
+            bytes(validation_result.input_snapshot)
+            if validation_result.input_snapshot is not None
+            else None
+        ),
+    )
+    split_snapshot = DatasetSplitResult(
+        frames={
+            name: _accepted_snapshot(frame)
+            for name, frame in split_result.frames.items()
+        },
+        assignments=copy.deepcopy(dict(split_result.assignments)),
+        provenance=copy.deepcopy(dict(split_result.provenance)),
+    )
+    return validation_snapshot, split_snapshot
 
 
 def write_prepared_dataset(
@@ -1344,16 +1771,32 @@ def write_prepared_dataset(
 ) -> Path:
     """Atomically publish validated split artifacts and their integrity manifest."""
 
-    input_sha256, split_provenance = _validate_result_matches_split(
+    validation_result, split_result = _publication_snapshots(
         validation_result,
         split_result,
-        manifest,
+    )
+    (
+        input_sha256,
+        validated_content_sha256,
+        input_binding_sha256,
+        split_provenance,
+    ) = _validate_result_matches_split(
+            validation_result,
+            split_result,
+            manifest,
     )
     dataset_directory = _safe_dataset_directory(output_dir, manifest.dataset_id)
     output_root = Path(output_dir).resolve()
     rejected_path: Path | None = None
     if rejected_output_path is not None:
         rejected_path = _explicit_rejected_path(output_dir, rejected_output_path)
+        if (
+            rejected_path.parent == dataset_directory
+            or dataset_directory in rejected_path.parents
+        ):
+            raise ValueError(
+                "rejected_output_path cannot be inside publishable dataset directory"
+            )
         reserved_paths = {
             (dataset_directory / filename).resolve()
             for filename in (
@@ -1366,7 +1809,7 @@ def write_prepared_dataset(
         }
         if rejected_path in reserved_paths:
             raise ValueError("rejected_output_path conflicts with dataset artifact")
-        if rejected_path.exists():
+        if os.path.lexists(rejected_path):
             raise FileExistsError(
                 f"Explicit rejected output already exists: {rejected_path.name}"
             )
@@ -1378,10 +1821,8 @@ def write_prepared_dataset(
             f"Prepared dataset destination already exists: {manifest.dataset_id}"
         ) from None
 
+    rejected_identity: tuple[int, int] | None = None
     try:
-        artifact_payloads = {
-            name: _csv_bytes(split_result.frames[name]) for name in _SPLIT_NAMES
-        }
         counts = {
             name: len(split_result.frames[name]) for name in _SPLIT_NAMES
         }
@@ -1416,54 +1857,50 @@ def write_prepared_dataset(
             "split_summary": {
                 "counts": counts,
                 "scaffold_counts": scaffold_counts,
+                "achieved_ratios": split_provenance["achieved_ratios"],
+                "ratio_deviations": split_provenance["ratio_deviations"],
             },
         }
-        quality_payload = _json_bytes(quality_report)
-        artifact_payloads["quality_report"] = quality_payload
-
-        artifact_filenames = {
-            "train": "train.csv",
-            "validation": "validation.csv",
-            "test": "test.csv",
-            "quality_report": "quality_report.json",
-        }
         artifacts: dict[str, dict[str, Any]] = {}
-        for name, filename in artifact_filenames.items():
-            content = artifact_payloads[name]
+        for name in _SPLIT_NAMES:
+            filename = f"{name}.csv"
+            content = _csv_bytes(split_result.frames[name])
             digest = _write_verified(dataset_directory / filename, content)
-            artifact = {
+            artifacts[name] = {
                 "path": filename,
                 "sha256": digest,
+                "row_count": counts[name],
             }
-            if name in _SPLIT_NAMES:
-                artifact["row_count"] = counts[name]
-            else:
-                artifact["byte_size"] = len(content)
-            artifacts[name] = artifact
+            del content
 
-        canonical_content = _csv_bytes(
-            _sorted_prepared_frame(validation_result.accepted)[
-                list(_SPLIT_REQUIRED_COLUMNS)
-            ]
+        quality_payload = _json_bytes(quality_report)
+        quality_digest = _write_verified(
+            dataset_directory / "quality_report.json",
+            quality_payload,
         )
+        artifacts["quality_report"] = {
+            "path": "quality_report.json",
+            "sha256": quality_digest,
+            "byte_size": len(quality_payload),
+        }
+        del quality_payload
+
         prepared_digest_payload = _json_bytes(
             {
-                "canonical_scientific_content_sha256": _sha256_bytes(
-                    canonical_content
-                ),
+                "canonical_scientific_content_sha256": validated_content_sha256,
                 "artifact_sha256": {
-                    name: artifacts[name]["sha256"] for name in artifact_filenames
+                    name: artifacts[name]["sha256"]
+                    for name in (*_SPLIT_NAMES, "quality_report")
                 },
             }
         )
         prepared_dataset_sha256 = _sha256_bytes(prepared_digest_payload)
 
         if rejected_path is not None:
-            if rejected_path.exists():
-                raise FileExistsError(
-                    f"Explicit rejected output already exists: {rejected_path.name}"
-                )
-            _write_verified(rejected_path, _csv_bytes(validation_result.rejected))
+            _, rejected_identity = _write_new_verified(
+                rejected_path,
+                _csv_bytes(validation_result.rejected),
+            )
 
         dataset_manifest = {
             "schema_version": 1,
@@ -1481,13 +1918,26 @@ def write_prepared_dataset(
             "endpoint_key": manifest.endpoint_key,
             "model_contract_key": manifest.model_contract_key,
             "input_sha256": input_sha256,
+            "input_binding_sha256": input_binding_sha256,
+            "validated_content_sha256": validated_content_sha256,
             "prepared_dataset_sha256": prepared_dataset_sha256,
+            "csv_schema": {
+                "schema_version": 1,
+                "columns": list(_ACCEPTED_COLUMNS),
+                "dtypes": dict(_PREPARED_CSV_DTYPES),
+                "reader": {
+                    "keep_default_na": False,
+                    "float_precision": "round_trip",
+                },
+            },
             "split": {
                 "algorithm": split_provenance["algorithm"],
                 "ratios": split_provenance["ratios"],
                 "seed": split_provenance["seed"],
                 "counts": split_provenance["counts"],
                 "scaffold_counts": split_provenance["scaffold_counts"],
+                "achieved_ratios": split_provenance["achieved_ratios"],
+                "ratio_deviations": split_provenance["ratio_deviations"],
             },
             "artifacts": artifacts,
         }
@@ -1496,6 +1946,8 @@ def write_prepared_dataset(
         return manifest_path
     except Exception:
         shutil.rmtree(dataset_directory, ignore_errors=True)
+        if rejected_path is not None and rejected_identity is not None:
+            _rollback_created_file(rejected_path, rejected_identity)
         raise
 
 
