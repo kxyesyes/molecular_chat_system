@@ -118,7 +118,15 @@ _SPLIT_REQUIRED_COLUMNS = (
     "canonical_smiles",
     "normalized_value",
 )
-_SUPPORTED_EVIDENCE_COLUMNS = ("assay_id",)
+_SUPPORTED_EVIDENCE_COLUMNS = (
+    "source",
+    "reference",
+    "organism",
+    "assay_type",
+    "measurement_date",
+    "compound_id",
+    "assay_id",
+)
 _SUPPORTED_PREPARED_COLUMNS = [*_ACCEPTED_COLUMNS, *_SUPPORTED_EVIDENCE_COLUMNS]
 _SAFE_DATASET_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _SHA256_HEX = re.compile(r"[0-9A-Fa-f]{64}\Z")
@@ -133,7 +141,7 @@ _PREPARED_CSV_DTYPES = {
     "replicate_count": "int64",
     "replicate_range": "float64",
     "scaffold_smiles": "string",
-    "assay_id": "string",
+    **{name: "string" for name in _SUPPORTED_EVIDENCE_COLUMNS},
 }
 
 
@@ -576,6 +584,19 @@ def _source_record(
     }
 
 
+def _evidence_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        if bool(pd.isna(value)):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value)
+
+
 def _rejected_record(
     row: pd.Series,
     manifest: DatasetManifest,
@@ -784,6 +805,11 @@ def validate_activity_dataset(
     if missing_columns:
         names = ", ".join(missing_columns)
         raise ValueError(f"Missing required dataframe column(s): {names}")
+    evidence_columns = [
+        name
+        for name in _SUPPORTED_EVIDENCE_COLUMNS
+        if name in frame.columns and name not in required_columns
+    ]
 
     valid_groups: dict[str, list[dict[str, Any]]] = {}
     rejected_records: list[dict[str, Any]] = []
@@ -835,6 +861,12 @@ def validate_activity_dataset(
             continue
 
         record = _source_record(row, manifest, canonical_smiles)
+        record.update(
+            {
+                name: _evidence_text(row[name])
+                for name in evidence_columns
+            }
+        )
         record["normalized_value"] = normalized_value
         if canonical_smiles not in scaffold_cache:
             scaffold_cache[canonical_smiles] = _scaffold_identity(molecule)
@@ -883,27 +915,32 @@ def validate_activity_dataset(
         if not math.isfinite(normalized_value) or not math.isfinite(replicate_range):
             _reject_valid_group(group, "non_finite_aggregate", rejected_records)
             continue
-        accepted_records.append(
-            {
-                "original_smiles": first["original_smiles"],
-                "original_value": first["original_value"],
-                "original_units": first["original_units"],
-                "relation": first["relation"],
-                "canonical_smiles": canonical_smiles,
-                "normalized_value": normalized_value,
-                "normalized_units": manifest.output_units or manifest.units,
-                "replicate_count": len(group),
-                "replicate_range": replicate_range,
-                "scaffold_smiles": first["scaffold_smiles"],
-            }
+        accepted_record = {
+            "original_smiles": first["original_smiles"],
+            "original_value": first["original_value"],
+            "original_units": first["original_units"],
+            "relation": first["relation"],
+            "canonical_smiles": canonical_smiles,
+            "normalized_value": normalized_value,
+            "normalized_units": manifest.output_units or manifest.units,
+            "replicate_count": len(group),
+            "replicate_range": replicate_range,
+            "scaffold_smiles": first["scaffold_smiles"],
+        }
+        accepted_record.update(
+            {name: first[name] for name in evidence_columns}
         )
+        accepted_records.append(accepted_record)
         duplicate_rows_collapsed += len(group) - 1
 
     rejected_records.sort(key=lambda record: record["_input_order"])
     for record in rejected_records:
         record.pop("_input_order", None)
 
-    accepted = pd.DataFrame(accepted_records, columns=_ACCEPTED_COLUMNS)
+    accepted = pd.DataFrame(
+        accepted_records,
+        columns=[*_ACCEPTED_COLUMNS, *evidence_columns],
+    )
     rejected = pd.DataFrame(rejected_records, columns=_REJECTED_COLUMNS)
     unique_molecules = len(accepted)
     unique_scaffolds = accepted["scaffold_smiles"].nunique(dropna=False)
@@ -1005,7 +1042,16 @@ def _accepted_snapshot(frame: pd.DataFrame) -> pd.DataFrame:
     columns = [
         name for name in _SUPPORTED_PREPARED_COLUMNS if name in frame.columns
     ]
-    return copy.deepcopy(frame.loc[:, columns].copy(deep=True)).reset_index(drop=True)
+    snapshot = copy.deepcopy(frame.loc[:, columns].copy(deep=True)).reset_index(
+        drop=True
+    )
+    for name in _SUPPORTED_EVIDENCE_COLUMNS:
+        if name in snapshot.columns:
+            snapshot[name] = pd.Series(
+                [_evidence_text(value) for value in snapshot[name].tolist()],
+                dtype="string",
+            )
+    return snapshot
 
 
 def _rejected_snapshot(frame: pd.DataFrame) -> pd.DataFrame:

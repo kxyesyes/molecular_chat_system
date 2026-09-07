@@ -40,7 +40,16 @@ ACCEPTED_COLUMNS = [
     "replicate_range",
     "scaffold_smiles",
 ]
-SUPPORTED_ACCEPTED_COLUMNS = [*ACCEPTED_COLUMNS, "assay_id"]
+EVIDENCE_COLUMNS = [
+    "source",
+    "reference",
+    "organism",
+    "assay_type",
+    "measurement_date",
+    "compound_id",
+    "assay_id",
+]
+SUPPORTED_ACCEPTED_COLUMNS = [*ACCEPTED_COLUMNS, *EVIDENCE_COLUMNS]
 _AUTO_INPUT_SHA = object()
 
 
@@ -2037,6 +2046,144 @@ def test_scaffold_split_preserves_declared_evidence_but_not_arbitrary_columns() 
         zip(prepared["canonical_smiles"], prepared["assay_id"])
     )
     assert all("private_extra" not in frame for frame in result.frames.values())
+
+
+def test_raw_validation_preserves_all_evidence_through_publication_round_trip(
+    tmp_path: Path,
+) -> None:
+    raw_records = []
+    for index, row in _prepared_frame().iterrows():
+        raw_records.append(
+            {
+                "smiles": row["original_smiles"],
+                "value": row["original_value"],
+                "relation": row["relation"],
+                "units": row["original_units"],
+                "source": f"source-{index}",
+                "reference": f"doi:10.1000/{index}",
+                "organism": f"organism-{index}",
+                "assay_type": f"assay-type-{index}",
+                "measurement_date": f"2026-01-{index + 1:02d}",
+                "compound_id": f"COMPOUND-{index}",
+                "assay_id": f"ASSAY-{index}",
+                "private_extra": f"PRIVATE-{index}",
+            }
+        )
+    raw = pd.DataFrame(raw_records)
+    source_bytes = raw.to_csv(index=False, lineterminator="\n").encode("utf-8")
+    manifest = _validation_manifest(dataset_id="raw-evidence-round-trip")
+
+    validation = contract.validate_activity_dataset(
+        raw,
+        manifest,
+        input_bytes=source_bytes,
+        input_format="csv",
+    )
+    split = contract.split_prepared_dataset(validation.accepted, seed=19)
+    manifest_path = contract.write_prepared_dataset(
+        validation,
+        split,
+        manifest,
+        tmp_path,
+    )
+
+    assert validation.accepted.columns.tolist() == [
+        *ACCEPTED_COLUMNS,
+        *EVIDENCE_COLUMNS,
+    ]
+    assert "private_extra" not in validation.accepted.columns
+    loaded = pd.concat(
+        [
+            contract.read_prepared_split(
+                manifest_path.parent / f"{split_name}.csv"
+            )
+            for split_name in ("train", "validation", "test")
+        ],
+        ignore_index=True,
+    ).sort_values("canonical_smiles", kind="mergesort")
+    expected = validation.accepted.sort_values(
+        "canonical_smiles",
+        kind="mergesort",
+    )
+    for evidence_column in EVIDENCE_COLUMNS:
+        assert loaded[evidence_column].tolist() == expected[evidence_column].tolist()
+        assert str(loaded[evidence_column].dtype) == "string"
+    payload = json.loads(manifest_path.read_text("utf-8"))
+    assert payload["csv_schema"]["columns"] == [
+        *ACCEPTED_COLUMNS,
+        *EVIDENCE_COLUMNS,
+    ]
+    assert set(payload["csv_schema"]["dtypes"]) == set(
+        payload["csv_schema"]["columns"]
+    )
+    assert {
+        column: payload["csv_schema"]["dtypes"][column]
+        for column in EVIDENCE_COLUMNS
+    } == {column: "string" for column in EVIDENCE_COLUMNS}
+
+    mutated_raw = raw.copy(deep=True)
+    mutated_raw.loc[0, "reference"] = "doi:10.1000/changed"
+    mutated_source = mutated_raw.to_csv(index=False, lineterminator="\n").encode(
+        "utf-8"
+    )
+    mutated_validation = contract.validate_activity_dataset(
+        mutated_raw,
+        manifest,
+        input_bytes=mutated_source,
+        input_format="csv",
+    )
+    assert mutated_validation.statistics["validated_content_sha256"] != (
+        validation.statistics["validated_content_sha256"]
+    )
+
+
+def test_minimal_split_preserves_all_evidence_through_typed_csv_round_trip(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepared_frame().loc[
+        :, ["canonical_smiles", "normalized_value"]
+    ]
+    for evidence_column in EVIDENCE_COLUMNS:
+        prepared[evidence_column] = [
+            f"{evidence_column}-{index}" for index in range(len(prepared))
+        ]
+    prepared["private_extra"] = "must-not-publish"
+    original = prepared.copy(deep=True)
+
+    split = contract.split_prepared_dataset(prepared, seed=29)
+    normalized = pd.concat(split.frames.values(), ignore_index=True)
+    validation = _prepared_validation_result(normalized)
+    manifest_path = contract.write_prepared_dataset(
+        validation,
+        split,
+        _validation_manifest(dataset_id="minimal-evidence-round-trip"),
+        tmp_path,
+    )
+
+    assert_frame_equal(prepared, original)
+    expected_columns = [
+        "canonical_smiles",
+        "normalized_value",
+        "scaffold_smiles",
+        *EVIDENCE_COLUMNS,
+    ]
+    assert all(
+        frame.columns.tolist() == expected_columns
+        for frame in split.frames.values()
+    )
+    loaded = pd.concat(
+        [
+            contract.read_prepared_split(
+                manifest_path.parent / f"{split_name}.csv"
+            )
+            for split_name in ("train", "validation", "test")
+        ],
+        ignore_index=True,
+    )
+    for evidence_column in EVIDENCE_COLUMNS:
+        assert set(loaded[evidence_column]) == set(prepared[evidence_column])
+        assert str(loaded[evidence_column].dtype) == "string"
+    assert "private_extra" not in loaded.columns
 
 
 def test_publication_rechecks_chemistry_after_split_result_mutation(
