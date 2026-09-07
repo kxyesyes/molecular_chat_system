@@ -638,7 +638,7 @@ def _aggregated_replicate_evidence(
     group: list[dict[str, Any]],
     evidence_columns: list[str],
 ) -> dict[str, str]:
-    if not evidence_columns:
+    if not evidence_columns and len(group) <= 1:
         return {}
     replicate_columns = (
         "original_smiles",
@@ -1010,12 +1010,18 @@ def validate_activity_dataset(
     for record in rejected_records:
         record.pop("_input_order", None)
 
+    include_replicates = bool(evidence_columns) or any(
+        _REPLICATE_EVIDENCE_COLUMN in record for record in accepted_records
+    )
+    if include_replicates:
+        for record in accepted_records:
+            record.setdefault(_REPLICATE_EVIDENCE_COLUMN, "")
     accepted = pd.DataFrame(
         accepted_records,
         columns=[
             *_ACCEPTED_COLUMNS,
             *evidence_columns,
-            *([_REPLICATE_EVIDENCE_COLUMN] if evidence_columns else []),
+            *([_REPLICATE_EVIDENCE_COLUMN] if include_replicates else []),
         ],
     )
     rejected = pd.DataFrame(rejected_records, columns=_REJECTED_COLUMNS)

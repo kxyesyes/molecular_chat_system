@@ -1762,6 +1762,37 @@ def test_duplicate_replicate_evidence_is_complete_and_shuffle_deterministic() ->
     }
 
 
+def test_duplicates_without_optional_columns_preserve_measurements(tmp_path: Path) -> None:
+    frame = pd.DataFrame([
+        {"smiles": "CCO", "value": 8.0, "units": "pIC50", "relation": "="},
+        {"smiles": "C(C)O", "value": 6.0, "units": "pIC50", "relation": "="},
+        {"smiles": "c1ccccc1", "value": 5.0, "units": "pIC50", "relation": "="},
+        {"smiles": "C1CCCCC1", "value": 4.0, "units": "pIC50", "relation": "="},
+    ])
+    manifest = _validation_manifest()
+    first = contract.validate_activity_dataset(
+        frame, manifest, input_bytes=frame.to_csv(index=False).encode(), input_format="csv",
+    )
+    second = contract.validate_activity_dataset(frame.iloc[::-1].reset_index(drop=True), manifest)
+    assert "replicate_evidence" in first.accepted.columns
+    assert_frame_equal(
+        first.accepted.sort_values("canonical_smiles").reset_index(drop=True),
+        second.accepted.sort_values("canonical_smiles").reset_index(drop=True),
+    )
+    assert first.statistics["validated_content_sha256"] == second.statistics["validated_content_sha256"]
+    duplicate = first.accepted.loc[first.accepted.canonical_smiles == "CCO"].iloc[0]
+    measurements = json.loads(duplicate["replicate_evidence"])
+    assert {float(row["original_value"]) for row in measurements} == {6.0, 8.0}
+    assert len(measurements) == 2
+    split = contract.split_prepared_dataset(first.accepted)
+    published = contract.write_prepared_dataset(first, split, manifest, tmp_path)
+    reloaded = pd.concat([
+        contract.read_prepared_split(published.parent / f"{name}.csv")
+        for name in ("train", "validation", "test")
+    ])
+    assert reloaded.loc[reloaded.canonical_smiles == "CCO", "replicate_evidence"].iloc[0] == duplicate["replicate_evidence"]
+
+
 def test_regression_even_median_is_finite_for_duplicate_large_values() -> None:
     frame = pd.DataFrame(
         [
