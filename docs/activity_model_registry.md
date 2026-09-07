@@ -1,9 +1,11 @@
 # 按靶点与终点选择活性模型
 
-`src/activity/model_registry.py` 的注册状态现采用版本 2。
-旧的全局 `active_model_id` 保留，新增 `active_models_by_endpoint` 映射，
-每个端点分别选择模型。现有训练循环、网页和 Agent 推理入口的迁移是后续任务；
-本阶段提供注册和元数据接口，不自动训练或激活新模型。
+`src/activity/model_registry.py` 的注册状态现采用版本 3，兼容读取版本 1/2。
+全局 `active_model_id` 与版本 2 的 `active_models_by_endpoint` 映射保留，
+每个端点仍可分别选择模型。版本 3 新增家族双模型组事务，见
+[`activity_family_models.md`](activity_family_models.md)。
+prepared 训练内部入口与家族 Python 推理入口已实现；网页与 Agent 的迁移仍是后续任务。
+注册不自动训练或激活新模型。
 
 ## 端点身份
 

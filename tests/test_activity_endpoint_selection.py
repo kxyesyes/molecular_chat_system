@@ -89,7 +89,8 @@ def test_v1_migration_preserves_global_without_inference(tmp_path):
     registry.state_path.write_text(json.dumps(state), encoding="utf-8")
     registry = ActivityModelRegistry(tmp_path)
     migrated = json.loads(registry.state_path.read_text())
-    assert migrated["version"] == 2
+    assert migrated["version"] == 3
+    assert migrated["family_bundles"] == migrated["active_family_bundles"] == {}
     assert migrated["active_models_by_endpoint"] == {}
     assert registry.get_active()["model_id"] == "legacy"
     assert registry.get_active_for_endpoint(item["endpoint_key"]) is None

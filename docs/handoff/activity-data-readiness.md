@@ -17,7 +17,50 @@
 `docs/superpowers/plans/2026-09-07-family-activity-data-contract.md`，
 操作说明为 `docs/activity_family_data.md`。
 
-## 当前检查点：家族配对数据包
+## 当前阶段：家族模型组与两阶段后端推理
+
+本阶段代码位于同一独立工作树；详细计划为
+`docs/superpowers/plans/2026-09-07-family-model-bundles.md`，用法见
+`docs/activity_family_models.md`。没有改动原始项目或桌面源 CSV，未训练真实模型。
+
+- 注册库 v3 保留 v1/v2 全局及端点选择，新增原子家族 bundle 注册/激活。
+  两阶段必须绑定同一已验证数据包的对应子 manifest、prepared 摘要与真实模型卡。
+- 源与许可、标签契约和拆分种子分别核验；训练随机种子不必等于拆分种子。
+- 注册时完整验证私有数据，在线读取只验证固定数据证据和模型产物，不扫描原始 CSV。
+- 耗时预检在事务外执行，入锁后读取最新状态并验证模型；通过事件屏障验证健康读取不阻塞、
+  并发同 ID 单赢家、预检期间删除模型导致注册失败。描述 JSON 原文快照独立重算摘要，
+  不复制待验证摘要进行自比较，不把原始 CSV 放入注册库。
+- 新增 `FamilyActivityPredictor`，固定一次请求的完整模型组、安全权重字节加载、有界缓存，
+  所有分类成功分子均回归，失败/partial 不造数，矛盾保留原值。
+- 修复共享 predictor 在 sigmoid 前漏检原始无限值的问题，避免 inf 被变成假正常概率。
+- 新增临时合成权重的注册→重开注册表→真实 RGNN 前向测试；没有使用真实 test 调参，
+  不将这些结果表述为真实 PDE/BuChE 性能。
+
+本阶段交接不意味着 Web/Agent 已接通：后续须迁移领域工具、API 与显示，
+随后才正式训练两个家族共四个模型、独立评估并显式激活。
+
+最终验收：独立规格审查、质量审查及增量复核通过。
+MedChat Conda 环境八模块 **334 passed、3 skipped、1 warning**；
+三个 skip 为已有本机符号链接权限限制，warning 为既有 RG-MPNN 特征 tensor 构造提示。
+`compileall` 和 `git diff --check` 通过，未重复运行整个仓库测试。
+本阶段不修改部署/真实数据，未运行依赖在线服务的全平台 strict health check。
+
+```powershell
+python -m pytest tests/test_activity_family_models.py tests/test_activity_family_predictor.py tests/test_activity_family_inference_integration.py tests/test_activity_model_registry.py tests/test_activity_endpoint_selection.py tests/test_activity_prediction_contract.py tests/test_activity_prepared_training_data.py tests/test_activity_prepared_training_loop.py -q -p no:cacheprovider --tb=short
+python -m compileall -q src scripts
+git diff --check
+```
+
+首次综合回归的两项失败为旧版 `version==2` 断言，已更新为 v3 并核对新映射为空，
+最终上述完整复跑通过。审查发现的无限 logits、摘要自比较和长时间持锁问题
+均补过失败回归并修复；没有通过删除科学校验放行。
+
+新增：`src/activity/family_models.py`、`src/activity/family_predictor.py`、
+`tests/family_model_test_support.py`、三份 family 模型/推理测试和用法文档。
+修改：注册表、共享 predictor 的原始输出有限性检查、两份旧迁移测试及相关文档。
+只提交代码、合成测试和文档；无密钥读取、外部模型调用、真实训练、部署重启或 main 合并。
+
+## 历史检查点：家族配对数据包
 
 - 新增 `family_contract.py`：PDE/BuChE 受控标识、固定 5 阈值与双任务 manifest。
 - 新增 `family_dataset.py`：原始字节和适配字节分别绑定，同源中位数聚合、

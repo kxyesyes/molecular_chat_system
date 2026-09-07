@@ -425,6 +425,10 @@ class ActivityPredictor:
                 rg_batch = Batch.from_data_list(valid_rg_data).to(self.device)
                 with torch.no_grad():
                     output, _fingerprint = self.model(atom_batch, rg_batch)
+                    # Sigmoid maps infinities to apparently valid 0/1 values.
+                    # Reject numerical failures before applying any transform.
+                    if not torch.isfinite(output).all().item():
+                        raise ValueError("Model returned a non-finite raw output")
                     if metadata["task_type"] == "classification":
                         predictions = (
                             torch.sigmoid(output)
