@@ -3,7 +3,55 @@
 分支：`codex/activity-data-readiness`。在独立 `scientific-assets` 工作树实施。
 原始项目混杂工作树未改动，未合并 main。
 
-## 当前检查点：任务 5 完成
+## 当前检查点：任务 6 完成
+
+本阶段规范与代码质量审查均已通过。独立质量审查另检查了实际 RGNN 的
+batch size 2/4/6 与逐分子前向结果一致性（含尾批）；仅为合成工程检验。
+
+prepared 数据训练内部入口已接通，显式传入 `prepared_manifest_path` 后不回退旧 CSV：
+验证已发布字节快照的全部 artifact/内容/source binding 哈希、标签、身份与拆分；
+训练只使用 train，validation 选模和早停，恢复最佳权重后 test 只评估一次。
+模型卡保存独立指标、测试预测摘要、数据质量、来源/许可、代码版本与文件摘要。
+失败不删除 prepared 数据，注册失败清理本次权重/卡；注册不自动激活。
+
+新增真实 RGNN 的临时合成数据工程烟雾测试，发现单层配置索引越界，
+已按现有网络要求提前拒绝 `num_layers < 2`，未重构网络。
+同时修正训练种子仅初始化生效的问题：完整训练 RNG 作用域加进程内锁，
+验证 CPU 非零 dropout 顺序重复训练的权重与指标一致、外部 RNG 恢复。
+并不承诺与无关 Torch 调用并发或跨 GPU 平台的逐位确定性。
+
+本阶段新增：
+
+- `src/activity/model_card.py`
+- `src/activity/prepared_training.py`
+- `tests/test_activity_prepared_training_data.py`
+- `tests/test_activity_prepared_training_loop.py`
+- `docs/activity_prepared_training.md`
+
+修改 `src/activity/trainer.py`、`tests/test_activity_trainer_endpoint_metadata.py`，
+以及本交接与实施计划检查点。旧 metadata 明确为 `legacy_unvalidated`。
+
+验证（MedChat Conda Python）：
+
+- 本阶段聚焦三模块：115 passed、3 skipped。
+- 十模块扩展回归：584 passed、5 skipped、2 warnings。
+- 额外 `tests/test_docking_agent_architecture.py`：10 passed、9 subtests passed。
+- 新增三个 skip 均为本机无创建符号链接权限；另两个是既有数据契约链接测试。
+- warnings 为已有 PyG 弃用提示、图特征 tensor 构造性能提示。
+- `python -m compileall -q src scripts` 和 `git diff --check` 最终通过。
+- 未重复运行全量 `tests`，下面的全量测试记录属于任务 1–4。
+
+扩展命令：
+
+```powershell
+python -m pytest tests/test_activity_model_registry.py tests/test_activity_endpoint_selection.py tests/test_activity_trainer_endpoint_metadata.py tests/test_activity_prepared_training_data.py tests/test_activity_prepared_training_loop.py tests/test_activity_prediction_contract.py tests/test_activity_dataset_contract.py tests/test_activity_prepare_cli.py tests/test_rg_mpnn_legacy_modules.py tests/test_phase2_phase3_routes.py -q -p no:cacheprovider --tb=short
+```
+
+没有使用真实 PDE/BuChE 数据，没有训练、安装或发布用于科研的真实活性模型。
+临时合成数据下网络/优化器实际运行，仅验证工程生命周期，不能引用指标证明预测性能。
+Web dataset ID 解析、按端点推理与 Agent 接入仍待任务 7；没有修改正在运行的原始项目。
+
+## 历史检查点：任务 5 完成
 
 注册状态升级为版本 2，增加 `active_models_by_endpoint`，保留旧全局选择。
 不同端点只能选择身份匹配的就绪模型；不存在或权重/模型卡内容损坏时不回退到全局模型。
@@ -95,8 +143,7 @@ python -m pytest tests/test_activity_model_registry.py tests/test_activity_endpo
 
 ## 后续
 
-继续任务 6：衔接 prepared dataset 训练、独立测试集指标和模型卡生成。
-随后任务 7 迁移端点推理与 Agent 调用，
+任务 7 迁移端点推理、Web 服务端 dataset ID 解析与 Agent 调用，
 任务 8–9 完成健康检查、最终文档及 PR。
 
 真实 PDE/BuChE 数据尚待用户提供。本轮只使用临时合成数据验证工程契约，

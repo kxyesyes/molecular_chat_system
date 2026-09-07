@@ -102,7 +102,7 @@ def test_legacy_builder_does_not_claim_endpoint_readiness(builder):
     kwargs, _, _ = builder
     result = trainer._build_model_metadata(**kwargs)
     assert "endpoint_key" not in result
-    assert "scientific_readiness" not in result
+    assert result["scientific_readiness"] == "legacy_unvalidated"
 
 
 def test_prepared_counts_must_match_actual_training_sample_count(builder):

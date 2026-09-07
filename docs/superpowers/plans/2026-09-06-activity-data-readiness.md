@@ -432,7 +432,9 @@ git commit -m "feat: add activity dataset preparation CLI"
 `docs/activity_data_preparation.md`，端点模型注册说明见
 `docs/activity_model_registry.md`，本轮验证及剩余任务见
 `docs/handoff/activity-data-readiness.md`。
-任务 6–9 尚未完成；训练及推理迁移尚未上线，本分支也未合并 main。
+任务 6 已实现内部 prepared 训练、模型卡与三路评估，扩展回归 584 passed、5 skipped；
+规范与代码质量审查均通过。使用说明见 `docs/activity_prepared_training.md`。
+任务 7–9 尚未完成；Web/Agent 推理迁移尚未上线，本分支也未合并 main。
 
 ## Task 5: Endpoint-aware atomic model registry
 
