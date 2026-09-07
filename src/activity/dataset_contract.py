@@ -115,11 +115,11 @@ _REJECTED_COLUMNS = [
 _SPLIT_NAMES = ("train", "validation", "test")
 _SPLIT_ALGORITHM = "deterministic_scaffold_greedy_v1"
 _SPLIT_REQUIRED_COLUMNS = (
-    "original_smiles",
     "canonical_smiles",
     "normalized_value",
-    "scaffold_smiles",
 )
+_SUPPORTED_EVIDENCE_COLUMNS = ("assay_id",)
+_SUPPORTED_PREPARED_COLUMNS = [*_ACCEPTED_COLUMNS, *_SUPPORTED_EVIDENCE_COLUMNS]
 _SAFE_DATASET_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _SHA256_HEX = re.compile(r"[0-9A-Fa-f]{64}\Z")
 _PREPARED_CSV_DTYPES = {
@@ -133,6 +133,7 @@ _PREPARED_CSV_DTYPES = {
     "replicate_count": "int64",
     "replicate_range": "float64",
     "scaffold_smiles": "string",
+    "assay_id": "string",
 }
 
 
@@ -446,6 +447,7 @@ class DatasetValidationResult:
     input_sha256: str | None
     ready_for_training: bool
     input_snapshot: bytes | None = field(default=None, repr=False)
+    input_format: str | None = None
 
 
 @dataclass(frozen=True)
@@ -686,15 +688,20 @@ def _reject_valid_group(
 def _verify_source_snapshot_matches_frame(
     input_bytes: bytes,
     frame: pd.DataFrame,
+    input_format: str,
 ) -> None:
+    separator = {"csv": ",", "tsv": "\t"}[input_format]
     try:
         source_frame = pd.read_csv(
             io.BytesIO(input_bytes),
             encoding="utf-8",
             keep_default_na=False,
+            sep=separator,
         )
     except (UnicodeError, pd.errors.ParserError, pd.errors.EmptyDataError):
-        raise ValueError("Invalid UTF-8 CSV source snapshot") from None
+        raise ValueError(
+            f"Invalid UTF-8 {input_format.upper()} source snapshot"
+        ) from None
     source_frame = source_frame.reset_index(drop=True)
     input_frame = frame.reset_index(drop=True)
     if source_frame.columns.tolist() != input_frame.columns.tolist():
@@ -703,12 +710,60 @@ def _verify_source_snapshot_matches_frame(
         raise ValueError("Supplied source snapshot does not match input dataframe")
 
 
+def _source_snapshot(
+    *,
+    input_bytes: bytes | None,
+    input_path: str | Path | None,
+    input_format: str | None,
+) -> tuple[bytes | None, str | None]:
+    if input_bytes is not None and input_path is not None:
+        raise ValueError("Specify only one source snapshot: input_bytes or input_path")
+
+    snapshot: bytes | None
+    inferred_format: str | None = None
+    if input_path is not None:
+        if not isinstance(input_path, (str, Path)):
+            raise ValueError("Invalid input_path")
+        source_path = Path(input_path)
+        suffix = source_path.suffix.casefold()
+        inferred_format = {".csv": "csv", ".tsv": "tsv"}.get(suffix)
+        snapshot = source_path.read_bytes()
+    elif input_bytes is not None:
+        if not isinstance(input_bytes, bytes):
+            raise ValueError("Invalid input_bytes: expected immutable bytes")
+        snapshot = bytes(input_bytes)
+    else:
+        snapshot = None
+
+    if input_format is not None:
+        if not isinstance(input_format, str):
+            raise ValueError("Invalid input_format: expected csv or tsv")
+        normalized_format = input_format.strip().casefold()
+        if normalized_format not in {"csv", "tsv"}:
+            raise ValueError("Invalid input_format: expected csv or tsv")
+    else:
+        normalized_format = inferred_format
+
+    if snapshot is None:
+        if normalized_format is not None:
+            raise ValueError("input_format requires a source snapshot")
+        return None, None
+    if normalized_format is None:
+        raise ValueError(
+            "Source snapshot format is required; use a .csv/.tsv input_path "
+            "or input_format"
+        )
+    return snapshot, normalized_format
+
+
 def validate_activity_dataset(
     frame: pd.DataFrame,
     manifest: DatasetManifest,
     *,
     input_sha256: str | None = None,
     input_bytes: bytes | None = None,
+    input_path: str | Path | None = None,
+    input_format: str | None = None,
 ) -> DatasetValidationResult:
     """Validate, normalize, and aggregate activity rows for model training."""
 
@@ -873,32 +928,41 @@ def validate_activity_dataset(
     }
     validated_content_sha256 = _validated_content_sha256(accepted)
     statistics["validated_content_sha256"] = validated_content_sha256
-    input_snapshot: bytes | None = None
-    if input_bytes is None:
+    input_snapshot, normalized_input_format = _source_snapshot(
+        input_bytes=input_bytes,
+        input_path=input_path,
+        input_format=input_format,
+    )
+    normalized_input_sha256: str | None
+    if input_snapshot is None:
         if input_sha256 is not None:
-            normalized_input_sha256 = _validated_input_sha256(input_sha256)
-            if normalized_input_sha256 != validated_content_sha256:
-                raise ValueError(
-                    "input_sha256 does not match deterministic validated content"
-                )
-        normalized_input_sha256 = validated_content_sha256
+            _validated_input_sha256(input_sha256)
+            raise ValueError(
+                "A verified source snapshot is required when input_sha256 is supplied"
+            )
+        normalized_input_sha256 = None
     else:
-        if not isinstance(input_bytes, bytes):
-            raise ValueError("Invalid input_bytes: expected immutable bytes")
-        input_snapshot = bytes(input_bytes)
-        _verify_source_snapshot_matches_frame(input_snapshot, frame)
+        if normalized_input_format is None:  # Defensive narrowing.
+            raise ValueError("Source snapshot format is required")
+        _verify_source_snapshot_matches_frame(
+            input_snapshot,
+            frame,
+            normalized_input_format,
+        )
         source_sha256 = _sha256_bytes(input_snapshot)
         if input_sha256 is not None:
             normalized_input_sha256 = _validated_input_sha256(input_sha256)
             if normalized_input_sha256 != source_sha256:
                 raise ValueError("input_sha256 does not match supplied source bytes")
         normalized_input_sha256 = source_sha256
-    statistics["input_binding_sha256"] = _input_binding_sha256(
-        normalized_input_sha256,
-        validated_content_sha256,
-        manifest.endpoint_key,
-        manifest.model_contract_key,
-    )
+    if normalized_input_sha256 is not None:
+        statistics["input_binding_sha256"] = _input_binding_sha256(
+            normalized_input_sha256,
+            validated_content_sha256,
+            manifest.endpoint_key,
+            manifest.model_contract_key,
+            normalized_input_format,
+        )
     return DatasetValidationResult(
         accepted=accepted,
         rejected=rejected,
@@ -907,6 +971,7 @@ def validate_activity_dataset(
         input_sha256=normalized_input_sha256,
         ready_for_training=ready_for_training,
         input_snapshot=input_snapshot,
+        input_format=normalized_input_format,
     )
 
 
@@ -927,7 +992,20 @@ def _snapshot_columns(
 
 
 def _accepted_snapshot(frame: pd.DataFrame) -> pd.DataFrame:
-    return _snapshot_columns(frame, _ACCEPTED_COLUMNS, "accepted")
+    duplicate_columns = frame.columns[frame.columns.duplicated()].tolist()
+    if duplicate_columns:
+        names = ", ".join(str(name) for name in duplicate_columns)
+        raise ValueError(f"Duplicate accepted dataframe column(s): {names}")
+    missing_columns = [
+        name for name in _SPLIT_REQUIRED_COLUMNS if name not in frame.columns
+    ]
+    if missing_columns:
+        names = ", ".join(missing_columns)
+        raise ValueError(f"Missing required accepted dataframe column(s): {names}")
+    columns = [
+        name for name in _SUPPORTED_PREPARED_COLUMNS if name in frame.columns
+    ]
+    return copy.deepcopy(frame.loc[:, columns].copy(deep=True)).reset_index(drop=True)
 
 
 def _rejected_snapshot(frame: pd.DataFrame) -> pd.DataFrame:
@@ -942,11 +1020,12 @@ def _validated_content_sha256(accepted: pd.DataFrame) -> str:
     return _sha256_bytes(_csv_bytes(canonical_snapshot))
 
 
-def _verify_prepared_chemistry(prepared: pd.DataFrame) -> None:
+def _verify_prepared_chemistry(prepared: pd.DataFrame) -> list[str]:
+    derived_scaffolds: list[str] = []
     for row_number in range(len(prepared)):
         row = prepared.iloc[row_number]
         canonical_smiles, molecule, reason = _canonical_parent(
-            row["original_smiles"]
+            row["canonical_smiles"]
         )
         if reason is not None or canonical_smiles is None or molecule is None:
             raise ValueError(
@@ -954,39 +1033,36 @@ def _verify_prepared_chemistry(prepared: pd.DataFrame) -> None:
             )
         if canonical_smiles != row["canonical_smiles"]:
             raise ValueError(f"canonical_smiles mismatch at prepared row {row_number}")
+        if "original_smiles" in prepared.columns:
+            original_canonical, _, original_reason = _canonical_parent(
+                row["original_smiles"]
+            )
+            if original_reason is not None or original_canonical != canonical_smiles:
+                raise ValueError(
+                    f"canonical_smiles mismatch at prepared row {row_number}"
+                )
         scaffold_smiles = _scaffold_identity(molecule)
-        if scaffold_smiles != row["scaffold_smiles"]:
+        if (
+            "scaffold_smiles" in prepared.columns
+            and scaffold_smiles != row["scaffold_smiles"]
+        ):
             raise ValueError(f"scaffold_smiles mismatch at prepared row {row_number}")
+        derived_scaffolds.append(scaffold_smiles)
+    return derived_scaffolds
 
 
-def _validate_split_input(prepared: pd.DataFrame) -> None:
-    duplicate_columns = prepared.columns[prepared.columns.duplicated()].tolist()
-    if duplicate_columns:
-        names = ", ".join(str(name) for name in duplicate_columns)
-        raise ValueError(f"Duplicate dataframe column(s): {names}")
-    if prepared.empty:
+def _validate_split_input(prepared: pd.DataFrame) -> pd.DataFrame:
+    prepared_snapshot = _accepted_snapshot(prepared)
+    if prepared_snapshot.empty:
         raise ValueError("Prepared dataframe must not be empty")
 
-    missing_columns = [
-        name for name in _SPLIT_REQUIRED_COLUMNS if name not in prepared.columns
-    ]
-    if missing_columns:
-        names = ", ".join(missing_columns)
-        raise ValueError(f"Missing required prepared dataframe column(s): {names}")
-
-    canonical_values = prepared["canonical_smiles"].tolist()
+    canonical_values = prepared_snapshot["canonical_smiles"].tolist()
     if any(not isinstance(value, str) or not value for value in canonical_values):
         raise ValueError("Invalid canonical_smiles: expected nonblank strings")
-    if prepared["canonical_smiles"].duplicated().any():
+    if prepared_snapshot["canonical_smiles"].duplicated().any():
         raise ValueError("Duplicate canonical SMILES are not allowed")
 
-    scaffold_values = prepared["scaffold_smiles"].tolist()
-    if any(not isinstance(value, str) for value in scaffold_values):
-        raise ValueError("Invalid scaffold_smiles: expected strings")
-
-    _verify_prepared_chemistry(prepared)
-
-    for value in prepared["normalized_value"].tolist():
+    for value in prepared_snapshot["normalized_value"].tolist():
         if isinstance(value, bool) or not isinstance(value, numbers.Real):
             raise ValueError("Expected finite normalized_value values")
         try:
@@ -995,6 +1071,16 @@ def _validate_split_input(prepared: pd.DataFrame) -> None:
             finite = False
         if not finite:
             raise ValueError("Expected finite normalized_value values")
+
+    derived_scaffolds = _verify_prepared_chemistry(prepared_snapshot)
+    if "scaffold_smiles" not in prepared_snapshot.columns:
+        prepared_snapshot["scaffold_smiles"] = derived_scaffolds
+    columns = [
+        name
+        for name in _SUPPORTED_PREPARED_COLUMNS
+        if name in prepared_snapshot.columns
+    ]
+    return prepared_snapshot.loc[:, columns]
 
 
 def _validated_split_parameters(
@@ -1187,8 +1273,7 @@ def split_prepared_dataset(
 ) -> DatasetSplitResult:
     """Partition canonical rows by complete scaffold groups without leakage."""
 
-    prepared_snapshot = _accepted_snapshot(prepared)
-    _validate_split_input(prepared_snapshot)
+    prepared_snapshot = _validate_split_input(prepared)
     seed, normalized_ratios = _validated_split_parameters(seed, ratios)
 
     positional = prepared_snapshot.reset_index(drop=True)
@@ -1317,10 +1402,12 @@ def read_prepared_split(path: str | Path) -> pd.DataFrame:
         float_precision="round_trip",
         dtype=_PREPARED_CSV_DTYPES,
     )
-    if frame.columns.tolist() != _ACCEPTED_COLUMNS:
+    if "scaffold_smiles" not in frame.columns:
         raise ValueError("Prepared split CSV columns do not match schema")
-    _validate_split_input(frame)
-    return frame
+    normalized = _validate_split_input(frame)
+    if normalized.columns.tolist() != frame.columns.tolist():
+        raise ValueError("Prepared split CSV columns do not match schema")
+    return normalized
 
 
 def _sha256_bytes(content: bytes) -> str:
@@ -1430,10 +1517,12 @@ def _input_binding_sha256(
     validated_content_sha256: str,
     endpoint_key: str,
     model_contract_key: str,
+    input_format: str,
 ) -> str:
     content = json.dumps(
         {
             "endpoint_key": endpoint_key,
+            "input_format": input_format,
             "input_sha256": input_sha256,
             "model_contract_key": model_contract_key,
             "validated_content_sha256": validated_content_sha256,
@@ -1484,7 +1573,7 @@ def _validate_validation_result(
             "Validation model_contract_key does not match dataset manifest"
         )
 
-    _validate_split_input(validation_result.accepted)
+    validation_result.accepted = _validate_split_input(validation_result.accepted)
     validated_content_sha256 = _validated_content_sha256(
         validation_result.accepted
     )
@@ -1494,17 +1583,19 @@ def _validate_validation_result(
             "Validation validated_content_sha256 does not match accepted snapshot"
         )
     if validation_result.input_snapshot is None:
-        if input_sha256 != validated_content_sha256:
-            raise ValueError(
-                "input_sha256 does not match deterministic validated content"
-            )
-    elif _sha256_bytes(validation_result.input_snapshot) != input_sha256:
+        raise ValueError(
+            "A retained source snapshot is required to verify input_sha256"
+        )
+    if validation_result.input_format not in {"csv", "tsv"}:
+        raise ValueError("Validation source snapshot format must be csv or tsv")
+    if _sha256_bytes(validation_result.input_snapshot) != input_sha256:
         raise ValueError("input_sha256 does not match retained source snapshot")
     input_binding_sha256 = _input_binding_sha256(
         input_sha256,
         validated_content_sha256,
         manifest.endpoint_key,
         manifest.model_contract_key,
+        validation_result.input_format,
     )
     if statistics.get("input_binding_sha256") != input_binding_sha256:
         raise ValueError("Validation input_binding_sha256 does not match provenance")
@@ -1702,7 +1793,9 @@ def _validate_result_matches_split(
     if set(split_result.frames) != set(_SPLIT_NAMES):
         raise ValueError("Split frames must contain train, validation, and test")
     for name in _SPLIT_NAMES:
-        _validate_split_input(split_result.frames[name])
+        normalized_frame = _validate_split_input(split_result.frames[name])
+        if not normalized_frame.equals(split_result.frames[name]):
+            raise ValueError("Split frame does not match normalized prepared schema")
         if split_result.frames[name].empty:
             raise ValueError("Split frames must all be nonempty")
     _verify_split_invariants(validation_result.accepted, split_result.frames)
@@ -1738,7 +1831,7 @@ def _publication_snapshots(
     split_result: DatasetSplitResult,
 ) -> tuple[DatasetValidationResult, DatasetSplitResult]:
     validation_snapshot = DatasetValidationResult(
-        accepted=_accepted_snapshot(validation_result.accepted),
+        accepted=_validate_split_input(validation_result.accepted),
         rejected=_rejected_snapshot(validation_result.rejected),
         warnings=copy.deepcopy(list(validation_result.warnings)),
         statistics=copy.deepcopy(dict(validation_result.statistics)),
@@ -1749,10 +1842,11 @@ def _publication_snapshots(
             if validation_result.input_snapshot is not None
             else None
         ),
+        input_format=copy.deepcopy(validation_result.input_format),
     )
     split_snapshot = DatasetSplitResult(
         frames={
-            name: _accepted_snapshot(frame)
+            name: _validate_split_input(frame)
             for name, frame in split_result.frames.items()
         },
         assignments=copy.deepcopy(dict(split_result.assignments)),
@@ -1918,13 +2012,17 @@ def write_prepared_dataset(
             "endpoint_key": manifest.endpoint_key,
             "model_contract_key": manifest.model_contract_key,
             "input_sha256": input_sha256,
+            "input_format": validation_result.input_format,
             "input_binding_sha256": input_binding_sha256,
             "validated_content_sha256": validated_content_sha256,
             "prepared_dataset_sha256": prepared_dataset_sha256,
             "csv_schema": {
                 "schema_version": 1,
-                "columns": list(_ACCEPTED_COLUMNS),
-                "dtypes": dict(_PREPARED_CSV_DTYPES),
+                "columns": validation_result.accepted.columns.tolist(),
+                "dtypes": {
+                    name: _PREPARED_CSV_DTYPES[name]
+                    for name in validation_result.accepted.columns
+                },
                 "reader": {
                     "keep_default_na": False,
                     "float_precision": "round_trip",

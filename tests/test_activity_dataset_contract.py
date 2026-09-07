@@ -40,6 +40,7 @@ ACCEPTED_COLUMNS = [
     "replicate_range",
     "scaffold_smiles",
 ]
+SUPPORTED_ACCEPTED_COLUMNS = [*ACCEPTED_COLUMNS, "assay_id"]
 _AUTO_INPUT_SHA = object()
 
 
@@ -119,7 +120,8 @@ def _prepared_frame() -> pd.DataFrame:
 
 
 def _test_validated_content_sha256(accepted: pd.DataFrame) -> str:
-    snapshot = accepted.loc[:, ACCEPTED_COLUMNS].sort_values(
+    columns = [name for name in SUPPORTED_ACCEPTED_COLUMNS if name in accepted.columns]
+    snapshot = accepted.loc[:, columns].sort_values(
         "canonical_smiles",
         kind="mergesort",
     )
@@ -132,10 +134,12 @@ def _test_input_binding_sha256(
     validated_content_sha256: str,
     endpoint_key: str,
     model_contract_key: str,
+    input_format: str = "csv",
 ) -> str:
     content = json.dumps(
         {
             "endpoint_key": endpoint_key,
+            "input_format": input_format,
             "input_sha256": input_sha256.lower(),
             "model_contract_key": model_contract_key,
             "validated_content_sha256": validated_content_sha256,
@@ -191,8 +195,12 @@ def _prepared_validation_result(
     )
     identity_manifest = _validation_manifest()
     validated_content_sha256 = _test_validated_content_sha256(accepted)
+    source_snapshot = accepted.loc[
+        :, [name for name in SUPPORTED_ACCEPTED_COLUMNS if name in accepted.columns]
+    ].to_csv(index=False, lineterminator="\n").encode("utf-8")
+    source_sha256 = hashlib.sha256(source_snapshot).hexdigest()
     if input_sha256 is _AUTO_INPUT_SHA:
-        input_sha256 = validated_content_sha256
+        input_sha256 = source_sha256
     normalized_input_sha256 = str(input_sha256).lower()
     statistics: dict[str, object] = {
         "input_rows": len(accepted) + len(rejected),
@@ -220,6 +228,8 @@ def _prepared_validation_result(
         statistics=statistics,
         input_sha256=input_sha256,  # type: ignore[arg-type]
         ready_for_training=ready_for_training,
+        input_snapshot=source_snapshot,
+        input_format="csv",
     )
 
 
@@ -1066,8 +1076,8 @@ def test_validation_result_and_statistics_for_one_acyclic_molecule() -> None:
     )
 
     assert isinstance(result, contract.DatasetValidationResult)
-    assert result.input_sha256 == result.statistics["validated_content_sha256"]
-    assert len(result.input_sha256) == 64
+    assert result.input_sha256 is None
+    assert len(result.statistics["validated_content_sha256"]) == 64
     assert result.ready_for_training is True
     assert result.warnings == []
     assert result.rejected.empty
@@ -1095,8 +1105,9 @@ def test_validation_result_and_statistics_for_one_acyclic_molecule() -> None:
         "duplicate_rows_collapsed": 0,
         "endpoint_key": _validation_manifest().endpoint_key,
         "model_contract_key": _validation_manifest().model_contract_key,
-        "validated_content_sha256": result.input_sha256,
-        "input_binding_sha256": result.statistics["input_binding_sha256"],
+        "validated_content_sha256": result.statistics[
+            "validated_content_sha256"
+        ],
     }
 
 
@@ -1937,9 +1948,17 @@ def test_scaffold_split_rejects_empty_missing_duplicate_and_nonfinite_data() -> 
     with pytest.raises(ValueError, match="empty"):
         contract.split_prepared_dataset(_prepared_frame().iloc[0:0])
 
-    for missing in ("canonical_smiles", "normalized_value", "scaffold_smiles"):
+    for missing in ("canonical_smiles", "normalized_value"):
         with pytest.raises(ValueError, match=missing):
             contract.split_prepared_dataset(_prepared_frame().drop(columns=missing))
+
+    without_scaffold = contract.split_prepared_dataset(
+        _prepared_frame().drop(columns="scaffold_smiles")
+    )
+    assert all(
+        "scaffold_smiles" in frame.columns
+        for frame in without_scaffold.frames.values()
+    )
 
     duplicate_columns = pd.concat(
         [_prepared_frame(), _prepared_frame()[["canonical_smiles"]]], axis=1
@@ -1977,6 +1996,47 @@ def test_scaffold_split_rejects_forged_canonical_identity() -> None:
 
     with pytest.raises(ValueError, match="canonical_smiles mismatch"):
         contract.split_prepared_dataset(prepared)
+
+
+def test_scaffold_split_accepts_minimal_contract_and_derives_chemistry() -> None:
+    prepared = _prepared_frame().loc[
+        :, ["canonical_smiles", "normalized_value"]
+    ]
+
+    result = contract.split_prepared_dataset(prepared, seed=11)
+
+    emitted = pd.concat(result.frames.values(), ignore_index=True).sort_values(
+        "canonical_smiles",
+        kind="mergesort",
+    )
+    expected = _prepared_frame().loc[
+        :, ["canonical_smiles", "normalized_value", "scaffold_smiles"]
+    ].sort_values("canonical_smiles", kind="mergesort")
+    assert_frame_equal(
+        emitted.reset_index(drop=True),
+        expected.reset_index(drop=True),
+    )
+
+
+def test_scaffold_split_preserves_declared_evidence_but_not_arbitrary_columns() -> None:
+    prepared = _prepared_frame().loc[
+        :, ["canonical_smiles", "normalized_value"]
+    ]
+    prepared["assay_id"] = [f"ASSAY-{index}" for index in range(len(prepared))]
+    prepared["private_extra"] = "must-not-publish"
+
+    result = contract.split_prepared_dataset(prepared)
+
+    assert all(
+        frame.columns.tolist()
+        == ["canonical_smiles", "normalized_value", "scaffold_smiles", "assay_id"]
+        for frame in result.frames.values()
+    )
+    emitted = pd.concat(result.frames.values(), ignore_index=True)
+    assert dict(zip(emitted["canonical_smiles"], emitted["assay_id"])) == dict(
+        zip(prepared["canonical_smiles"], prepared["assay_id"])
+    )
+    assert all("private_extra" not in frame for frame in result.frames.values())
 
 
 def test_publication_rechecks_chemistry_after_split_result_mutation(
@@ -2138,7 +2198,10 @@ def test_write_prepared_dataset_canonicalizes_input_digest_to_lowercase(
     tmp_path: Path,
 ) -> None:
     prepared = _prepared_frame()
-    expected_digest = _test_validated_content_sha256(prepared)
+    source_snapshot = prepared.to_csv(index=False, lineterminator="\n").encode(
+        "utf-8"
+    )
+    expected_digest = hashlib.sha256(source_snapshot).hexdigest()
 
     path = contract.write_prepared_dataset(
         _prepared_validation_result(
@@ -2154,24 +2217,17 @@ def test_write_prepared_dataset_canonicalizes_input_digest_to_lowercase(
     assert payload["input_sha256"] == expected_digest
 
 
-def test_write_prepared_dataset_rejects_unbound_valid_source_digest(
-    tmp_path: Path,
-) -> None:
-    prepared = _prepared_frame()
-    unrelated_digest = hashlib.sha256(b"unrelated source").hexdigest()
+def test_validation_rejects_claimed_source_digest_without_source_snapshot() -> None:
+    frame = pd.DataFrame(
+        [{"smiles": "CCO", "value": 7.0, "relation": "=", "units": "pIC50"}]
+    )
 
-    with pytest.raises(ValueError, match="input_sha256.*validated content"):
-        contract.write_prepared_dataset(
-            _prepared_validation_result(
-                prepared,
-                input_sha256=unrelated_digest,
-            ),
-            contract.split_prepared_dataset(prepared),
-            _validation_manifest(dataset_id="unbound-source-digest"),
-            tmp_path,
+    with pytest.raises(ValueError, match="source snapshot.*input_sha256"):
+        contract.validate_activity_dataset(
+            frame,
+            _validation_manifest(),
+            input_sha256=hashlib.sha256(b"unrelated source").hexdigest(),
         )
-
-    assert not (tmp_path / "unbound-source-digest").exists()
 
 
 def test_write_prepared_dataset_rejects_accepted_content_mutation(
@@ -2207,6 +2263,7 @@ def test_validation_verifies_explicit_source_snapshot_bytes() -> None:
         frame,
         _validation_manifest(),
         input_bytes=source_bytes,
+        input_format="csv",
         input_sha256=source_digest.upper(),
     )
 
@@ -2217,6 +2274,7 @@ def test_validation_verifies_explicit_source_snapshot_bytes() -> None:
         result.statistics["validated_content_sha256"],
         _validation_manifest().endpoint_key,
         _validation_manifest().model_contract_key,
+        "csv",
     )
 
     with pytest.raises(ValueError, match="input_sha256.*source bytes"):
@@ -2224,6 +2282,7 @@ def test_validation_verifies_explicit_source_snapshot_bytes() -> None:
             frame,
             _validation_manifest(),
             input_bytes=source_bytes,
+            input_format="csv",
             input_sha256="0" * 64,
         )
 
@@ -2233,8 +2292,54 @@ def test_validation_verifies_explicit_source_snapshot_bytes() -> None:
             frame,
             _validation_manifest(),
             input_bytes=unrelated_bytes,
+            input_format="csv",
             input_sha256=hashlib.sha256(unrelated_bytes).hexdigest(),
         )
+
+
+def test_validation_verifies_tsv_source_snapshot_from_path(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        [
+            {"smiles": "CCO", "value": 7.0, "relation": "=", "units": "pIC50"},
+            {"smiles": "c1ccccc1", "value": 8.0, "relation": "=", "units": "pIC50"},
+        ]
+    )
+    source_path = tmp_path / "activity.tsv"
+    source_bytes = (
+        b"smiles\tvalue\trelation\tunits\n"
+        b"CCO\t7.0\t=\tpIC50\n"
+        b"c1ccccc1\t8.0\t=\tpIC50\n"
+    )
+    source_path.write_bytes(source_bytes)
+
+    result = contract.validate_activity_dataset(
+        frame,
+        _validation_manifest(),
+        input_path=source_path,
+    )
+
+    assert result.input_sha256 == hashlib.sha256(source_bytes).hexdigest()
+    assert result.input_format == "tsv"
+    assert result.input_snapshot == source_bytes
+    assert result.statistics["validated_content_sha256"] != result.input_sha256
+
+
+def test_write_prepared_dataset_rejects_mutated_source_format(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepared_frame()
+    validation = _prepared_validation_result(prepared)
+    validation.input_format = "tsv"
+
+    with pytest.raises(ValueError, match="input_binding_sha256"):
+        contract.write_prepared_dataset(
+            validation,
+            contract.split_prepared_dataset(prepared),
+            _validation_manifest(dataset_id="mutated-input-format"),
+            tmp_path,
+        )
+
+    assert not (tmp_path / "mutated-input-format").exists()
 
 
 def test_write_prepared_dataset_rejects_cross_manifest_validation_identity(
@@ -2463,6 +2568,7 @@ def test_prepared_csv_reader_preserves_empty_scaffold_and_float_bits(
     assert str(loaded["canonical_smiles"].dtype) == "string"
     assert str(loaded["normalized_value"].dtype) == "float64"
     assert str(loaded["replicate_count"].dtype) == "int64"
+    assert str(loaded["scaffold_smiles"].dtype) == "string"
 
 
 def test_split_and_publication_whitelist_stable_scientific_schema(
