@@ -195,12 +195,18 @@ def _build_model_metadata(
     random_seed: int = 42,
     split_warnings: List[str] | None = None,
     created_at: float | None = None,
+    prepared_metadata: dict | None = None,
 ) -> dict:
+    """Build legacy metadata or attach an explicitly validated endpoint contract.
+
+    Prepared training will supply this extension after its independent test-set
+    evaluation. This helper does not register or activate a model.
+    """
     created_at = time.time() if created_at is None else created_at
     metrics = dict(best_metrics or {})
     endpoint = target_column if endpoint is None else endpoint
     actual_split_strategy = actual_split_strategy or requested_split_strategy
-    return {
+    metadata = {
         "model_id": model_id,
         "created_at": created_at,
         "task_type": task_type,
@@ -222,6 +228,21 @@ def _build_model_metadata(
         "weights_file": weights_file,
         "name": f"{target_column} ({task_type}) - {time.strftime('%Y%m%d%H%M', time.localtime(created_at))}",
     }
+    if prepared_metadata is not None:
+        from src.activity.model_registry import (
+            ENDPOINT_METADATA_FIELDS, validate_endpoint_metadata,
+        )
+
+        if (
+            not isinstance(prepared_metadata, dict)
+            or prepared_metadata.get("scientific_readiness") != "endpoint_ready"
+            or set(prepared_metadata) - ENDPOINT_METADATA_FIELDS
+        ):
+            raise ValueError("Invalid prepared_metadata extension")
+        metadata = validate_endpoint_metadata({**metadata, **prepared_metadata})
+        if sum(metadata["split_counts"].values()) != samples:
+            raise ValueError("Prepared split_counts do not match samples")
+    return metadata
 
 class ActivityTrainer:
     def __init__(self, job_id: str):
