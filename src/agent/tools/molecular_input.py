@@ -5,6 +5,21 @@ import re
 _MARKER = re.compile(r'(?<![A-Za-z0-9_])SMILES\s*[:：=][ \t]*', re.I)
 _FIELD_END = re.compile(r'[\r\n；。;]')
 _INVALID = 'SMILES 无效或缺失；请提供完整结构，使用换行或分号分隔，不会提取片段替代。'
+_PROSE_WORDS = frozenset({
+    'please', 'for', 'and', 'the', 'of', 'in', 'on', 'with', 'from', 'this', 'that',
+    'smiles', 'qed', 'logp', 'tpsa', 'hbd', 'hba', 'admet', 'pic50', 'ic50',
+})
+
+
+def _looks_like_structure(value, tool):
+    if value.casefold() in tool.exclude_words | _PROSE_WORDS:
+        return False
+    if not re.search(r'[A-Za-z]', value):
+        return False
+    # Keep an entire malformed candidate, not just its valid prefix. A capital
+    # first letter alone (Please/Calculate) is not evidence of molecular input.
+    return (tool._is_plausible_smiles_lexeme(value)
+            or bool(re.match(r'^(?:[BCNOPSFI]{2}|[BCNOPSFIbcnops][0-9()[\]=#@+\-]|\[)', value)))
 
 
 def parse_molecular_smiles(text, tool):
@@ -54,20 +69,20 @@ def _bare_values(text, tool):
         if not fragment:
             continue
         first = fragment.split()[0]
-        structure_leading = (first[0] in '[BCNOPSFIbcnops'
-                             and first.casefold() not in tool.exclude_words)
+        if fragment.casefold() in tool.exclude_words | _PROSE_WORDS:
+            continue
+        structure_leading = _looks_like_structure(_unquote(first), tool)
         # Standalone batch fields are authoritative even with illegal suffixes.
         # A structure-leading ASCII field with spaces is not a molecule name.
         if (not re.search(r'[\u4e00-\u9fff]', fragment)
                 and (len(fragment.split()) == 1
-                     or structure_leading
-                     or tool._is_plausible_smiles_lexeme(first))):
+                     or structure_leading)):
             values.append(_unquote(fragment))
             continue
         tokens = re.findall(r'[^\s\u4e00-\u9fff，！？：、]+', fragment)
         for token in tokens:
             value = _unquote(token)
-            if re.search(r'[A-Za-z]', value) and tool._is_plausible_smiles_lexeme(value):
+            if _looks_like_structure(value, tool):
                 values.append(value)
     return values
 

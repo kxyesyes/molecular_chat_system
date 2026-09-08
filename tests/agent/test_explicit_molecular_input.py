@@ -12,6 +12,9 @@ def calculator(request):
 
 @pytest.mark.parametrize('query, expected', [
     ('CCN', ['CCN']),
+    ('Please analyze QED for SMILES: CCO', ['CCO']),
+    ('Calculate SMILES: CCO', ['CCO']),
+    ('Please analyze QED for CCO', ['CCO']),
     ('SMILES: CCO\nSMILES: CCN', ['CCO', 'CCN']),
     ('CCO\nCCN', ['CCO', 'CCN']),
     ('SMILES: CCO\nCCN', ['CCO', 'CCN']),
@@ -33,6 +36,9 @@ def test_full_batch_is_computed(calculator, query, expected):
 
 @pytest.mark.parametrize('query', [
     'SMILES: cco',
+    '分析 CCN 和 CCN)INVALID 的性质',
+    '分析 CCN 和 CCOfoo 的性质',
+    'Please analyze QED for CCN and CCN)INVALID',
     'SMILES: CCO.',
     'SMILES: CCO)INVALID',
     'SMILES: CCO molecule-name',
@@ -61,6 +67,10 @@ def test_invalid_input_cannot_be_silently_repaired_or_dropped(calculator, query)
 
 def test_plain_chat_does_not_select_analysis_tool(calculator):
     assert not calculator.should_use('你好，请介绍系统功能')
+
+
+def test_english_instruction_selects_analysis_tool(calculator):
+    assert calculator.should_use('Please analyze QED for SMILES: CCO')
 
 
 def test_missing_rdkit_is_unavailable_not_heuristic_success(calculator, monkeypatch):
