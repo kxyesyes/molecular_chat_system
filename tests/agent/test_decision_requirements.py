@@ -167,18 +167,16 @@ def test_real_rdkit_two_molecule_properties_and_drug_likeness(setup_loop):
     assert all(c['passed'] and c['valid_unique_count'] == 2 for c in result.metadata['task_acceptance']['checks'])
 
 
-def test_legacy_short_smiles_omission_is_partial_not_false_success(setup_loop):
+def test_short_smiles_batch_meets_exact_subject_requirements(setup_loop):
     from src.agent.contracts import AgentContext
     from src.agent.tools.property_calculator import PropertyCalculator
     b = setup_loop([tool(), finish_last], [PropertyCalculator()])
     result = asyncio.run(b.loop.run(AgentContext('SMILES: CCO\nSMILES: CCN', 'short-smiles'),
         request_kind='scientific', allowed_tools={'property_calculator'}, required_tools={'property_calculator'},
         requirements=requirements(2, expected_smiles=['CCO', 'CCN']), event_bus=b.bus))
-    # The existing BaseMolecularTool parser drops short CCN. This increment
-    # detects the lost subject; migrating that parser is a separate input task.
-    assert result.outcome == RunOutcome.PARTIAL and not result.success
+    assert result.success, result.metadata
     check = result.metadata['task_acceptance']['checks'][0]
-    assert check['valid_unique_count'] == 1 and 'subject_mismatch' in check['reason_codes']
+    assert check['valid_unique_count'] == 2 and check['passed']
 
 
 @pytest.mark.parametrize('value', [float('nan'), float('inf'), float('-inf'), True, '0.2', None])

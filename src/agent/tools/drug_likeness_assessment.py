@@ -15,6 +15,7 @@ except ImportError:
     RDKIT_AVAILABLE = False
 
 from .base_tool import BaseMolecularTool
+from .molecular_input import parse_molecular_smiles
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,10 @@ class DrugLikenessAssessment(BaseMolecularTool):
         has_trigger = any(word in query_lower for word in self.trigger_words)
 
         # 提取并验证SMILES
-        smiles_list = self.extract_smiles(query)
+        try:
+            smiles_list = parse_molecular_smiles(query, self)
+        except ValueError:
+            return False
         has_valid_smiles = len(smiles_list) > 0
 
         result = has_trigger and has_valid_smiles
@@ -63,12 +67,7 @@ class DrugLikenessAssessment(BaseMolecularTool):
 
         try:
             # 提取SMILES
-            smiles_list = self.extract_smiles(query)
-
-            if not smiles_list:
-                result['message'] = "在查询中未找到有效的SMILES分子结构。"
-                result['reasoning'] = "我在输入中搜索了SMILES模式，但无法识别任何有效的分子结构。"
-                return result
+            smiles_list = parse_molecular_smiles(query, self)
 
             # 计算所有SMILES的类药性质
             calculated_results = []
@@ -101,6 +100,9 @@ class DrugLikenessAssessment(BaseMolecularTool):
 
             result['message'] = f"成功评估了 {len(calculated_results)} 个分子的类药性质"
 
+        except ValueError as e:
+            result['message'] = str(e)
+            result['reasoning'] = '输入校验失败，未进行类药性计算。'
         except Exception as e:
             logger.error(f"Drug-likeness assessment failed: {e}")
             result['message'] = f"评估失败: {str(e)}"

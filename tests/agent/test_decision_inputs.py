@@ -65,14 +65,21 @@ def test_cache_key_includes_resolved_input(setup_loop):
     assert len(result.tool_results) == 2
 
 
-def test_real_rdkit_property_to_drug_likeness(setup_loop):
+@pytest.mark.parametrize('query, count', [('SMILES: CCO', 1), ('SMILES: CCO\nSMILES: CCN', 2)])
+def test_real_rdkit_property_to_drug_likeness(setup_loop, query, count):
     from src.agent.tools.property_calculator import PropertyCalculator
     from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
     b = setup_loop([tool(), downstream, finish_last], [PropertyCalculator(), DrugLikenessAssessment()])
-    result = run(b, required_tools={'property_calculator', 'drug_likeness_assessment'})
+    result = asyncio.run(b.loop.run(AgentContext(query, 'real-binding'), request_kind='scientific',
+        allowed_tools={'property_calculator', 'drug_likeness_assessment'},
+        required_tools={'property_calculator', 'drug_likeness_assessment'}, event_bus=b.bus))
     assert result.success, result.metadata
     assert len(result.tool_results) == 2
     assert all(r.quality['validated'] for r in result.tool_results)
+    assert all(len(r.data) == count for r in result.tool_results)
+    first, second = result.tool_results
+    assert [r['smiles'] for r in second.data] == [r['smiles'] for r in first.data]
+    assert second.quality['input_evidence_ids'] == [first.quality['evidence_id']]
 
 
 def test_final_answer_cannot_render_mutated_tool_data(setup_loop):
