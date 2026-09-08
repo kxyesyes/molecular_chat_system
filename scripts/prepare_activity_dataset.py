@@ -43,6 +43,7 @@ def _run(args):
     import pandas as pd
     from rdkit import rdBase
     from src.activity.dataset_contract import (
+        _reject_nul_source_bytes,
         load_dataset_manifest, split_prepared_dataset,
         validate_activity_dataset, write_prepared_dataset,
     )
@@ -52,6 +53,7 @@ def _run(args):
     if input_format is None:
         raise ValueError("unsupported_input_format")
     source_bytes = args.input.read_bytes()
+    _reject_nul_source_bytes(source_bytes)
     delimiter = "\t" if input_format == "tsv" else ","
     with io.TextIOWrapper(io.BytesIO(source_bytes), encoding="utf-8-sig", newline="") as source:
         header = next(csv.reader(source, delimiter=delimiter), [])

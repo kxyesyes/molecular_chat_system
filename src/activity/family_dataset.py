@@ -36,6 +36,7 @@ def _package_id(value):
 
 
 def _adapt_source(data, input_format):
+    dc._reject_nul_source_bytes(data)
     separator = "," if input_format == "csv" else "\t"
     rows = csv.reader(io.StringIO(data.decode("utf-8-sig")), delimiter=separator, strict=True)
     header = next(rows, [])

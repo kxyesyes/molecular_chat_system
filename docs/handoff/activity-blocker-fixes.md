@@ -215,3 +215,80 @@ this; no source changes were needed. `git diff --check` passed at every commit.
   assets/services beyond this task. No JavaScript or deployment files changed.
 - Scientific model performance, production inference, and model activation are
   outside this validation. Placeholder metadata/bytes are explicitly synthetic.
+
+## Bacon P2 follow-up: reject raw NUL before parsing
+
+Date: 2026-09-09; review base `b9da918`, same branch/worktree. Bacon identified
+that `dtype=str` does not prevent pandas' C parser from truncating cells at
+actual NUL bytes. Parsing the raw snapshot the same way then certifies the
+truncated values. This follow-up does not change the three earlier fix contracts.
+
+Precisely scoped files for this follow-up:
+
+- `src/activity/dataset_contract.py`: shared raw-byte NUL rejection, called at
+  snapshot acquisition and before the snapshot verifier's pandas parser.
+- `scripts/prepare_activity_dataset.py`: invoke rejection immediately after
+  reading source bytes, before either CSV header or pandas parsing.
+- `src/activity/family_dataset.py`: **explicitly authorized scope addition**;
+  one guard before `_adapt_source` parses or re-encodes the original bytes.
+- `tests/test_activity_nul_source.py`: new synthetic CSV/TSV regressions.
+- `docs/handoff/activity-blocker-fixes.md`: this audit record.
+
+Production changes are 11 added lines across the three production files. The
+fixed library error is `NUL bytes are not allowed in activity source`; it contains
+no source rows, suffixes, identifiers, or paths. The public generic CLI retains
+exit code 2 and its fixed `contract_rejected` JSON with `ready_for_training=false`.
+There is no stripping, replacement, cleaning, automatic correction, or publication
+of the rejected bytes. All bytes are scanned, including headers and unused cells.
+
+### Effective RED and GREEN
+
+The 12-row synthetic repro carries actual `0x00` in value, compound ID, and
+target ID cells (e.g. `4.8` / `000123` / `pde-family` followed by NUL and a synthetic
+discarded suffix), with endpoint `pIC50`. Direct tests explicitly observe pandas
+returning the truncated values before asserting snapshot rejection.
+
+The first test-fixture attempt encountered **32 setup errors** because this
+environment's CSV writer refuses NUL. The fixture was corrected to insert actual
+NUL bytes after serialization; this is test construction, not production input
+cleaning. No production code was changed before the next effective RED run.
+
+The effective pre-fix run was **32 failed**, with no setup errors: generic CLI
+`--prepare`/`--validate-only` incorrectly returned code 0; `_run` and public
+snapshot validation did not reject; parser-order guards proved that parsing was
+reached before rejection. Tests cover CSV and TSV, byte/path snapshots, headers,
+value/identity/evidence/unused columns, and family validation/publication modes.
+
+On this MedChat Python version, the family adapter's existing Python CSV reader
+already raises `csv.Error: line contains NUL` while reading the body. Thus family
+publication bypass was **not reproduced on this interpreter**. The new guard
+makes rejection explicit, fixed, and pre-parser rather than relying on that
+version-specific parser behavior before adapter byte rewriting.
+
+After the minimal fix, the same command produced **32 passed**:
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -B -m pytest tests/test_activity_nul_source.py -q -p no:cacheprovider --tb=short
+```
+
+Related regression: **475 passed, 5 skipped** in 156.90 seconds. The five skips
+are the existing Windows symlink-privilege cases, not NUL rejection failures.
+Command:
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -B -m pytest tests/test_activity_nul_source.py tests/test_activity_dataset_blockers.py tests/test_activity_dataset_contract.py tests/test_activity_prepare_cli.py tests/test_activity_family_dataset.py tests/test_activity_family_prepare_cli.py tests/test_activity_prepared_training_data.py -q -p no:cacheprovider
+```
+
+Changed Python files compiled successfully with a temporary bytecode cache;
+`git diff --check` also passed:
+
+```powershell
+$compileCache = Join-Path ([IO.Path]::GetTempPath()) ('ac-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -B -X "pycache_prefix=$compileCache" -m compileall -q src/activity/dataset_contract.py src/activity/family_dataset.py scripts/prepare_activity_dataset.py tests/test_activity_nul_source.py
+git diff --check
+```
+
+All follow-up inputs/files were synthetic and temporary. No real assets,
+credentials, environment files, network, training, or model activation were used.
+No other worktree was modified. Bacon's follow-up review remains pending; no
+push, merge, or review approval is implied by GREEN.

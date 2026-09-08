@@ -791,11 +791,18 @@ def _reject_valid_group(
         rejected_records.append(rejected)
 
 
+def _reject_nul_source_bytes(content: bytes) -> None:
+    # pandas' C parser can silently truncate a cell even with dtype=str.
+    if b"\x00" in content:
+        raise ValueError("NUL bytes are not allowed in activity source")
+
+
 def _verify_source_snapshot_matches_frame(
     input_bytes: bytes,
     frame: pd.DataFrame,
     input_format: str,
 ) -> None:
+    _reject_nul_source_bytes(input_bytes)
     separator = {"csv": ",", "tsv": "\t"}[input_format]
     # Source text is authoritative. Inferring its types from the supplied frame
     # would repeat (and thereby certify) lost precision or stripped leading zeros.
@@ -862,6 +869,7 @@ def _source_snapshot(
             "Source snapshot format is required; use a .csv/.tsv input_path "
             "or input_format"
         )
+    _reject_nul_source_bytes(snapshot)
     return snapshot, normalized_format
 
 
