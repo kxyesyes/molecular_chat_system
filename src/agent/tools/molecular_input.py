@@ -11,15 +11,23 @@ _PROSE_WORDS = frozenset({
 })
 
 
+def _is_prose_word(value, tool):
+    # SMILES is case-sensitive: ON/IN/OF are structures, on/in/of are prose.
+    return (value.casefold() in tool.exclude_words | _PROSE_WORDS
+            and not (value.isupper() and tool._is_plausible_smiles_lexeme(value)))
+
+
 def _looks_like_structure(value, tool):
-    if value.casefold() in tool.exclude_words | _PROSE_WORDS:
+    if _is_prose_word(value, tool):
         return False
     if not re.search(r'[A-Za-z]', value):
         return False
     # Keep an entire malformed candidate, not just its valid prefix. A capital
     # first letter alone (Please/Calculate) is not evidence of molecular input.
     return (tool._is_plausible_smiles_lexeme(value)
-            or bool(re.match(r'^(?:[BCNOPSFI]{2}|[BCNOPSFIbcnops][0-9()[\]=#@+\-]|\[)', value)))
+            or bool(re.match(
+                r'^(?:[BCNOPSFI]{2}|(?:Cl|Br)(?=[BCNOPSFIbcnops0-9()[\]])'
+                r'|[BCNOPSFIbcnops][0-9()[\]=#@+\-]|\[)', value)))
 
 
 def parse_molecular_smiles(text, tool):
@@ -69,7 +77,7 @@ def _bare_values(text, tool):
         if not fragment:
             continue
         first = fragment.split()[0]
-        if fragment.casefold() in tool.exclude_words | _PROSE_WORDS:
+        if _is_prose_word(fragment, tool):
             continue
         structure_leading = _looks_like_structure(_unquote(first), tool)
         # Standalone batch fields are authoritative even with illegal suffixes.

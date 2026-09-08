@@ -12,6 +12,10 @@ def calculator(request):
 
 @pytest.mark.parametrize('query, expected', [
     ('CCN', ['CCN']),
+    ('CCO\nON', ['CCO', 'ON']),
+    ('CCO\nIN', ['CCO', 'IN']),
+    ('CCO\nOF', ['CCO', 'OF']),
+    ('分析 CCO 和 ON 的性质', ['CCO', 'ON']),
     ('Please analyze QED for SMILES: CCO', ['CCO']),
     ('Calculate SMILES: CCO', ['CCO']),
     ('Please analyze QED for CCO', ['CCO']),
@@ -36,6 +40,10 @@ def test_full_batch_is_computed(calculator, query, expected):
 
 @pytest.mark.parametrize('query', [
     'SMILES: cco',
+    '分析 SMILES: CCN\nClCCO)INVALID molecule-name',
+    '分析 SMILES: CCN\nBrCCO)INVALID molecule-name',
+    '分析 CCN 和 ClCCO)INVALID 的性质',
+    '分析 CCN 和 BrCCO)INVALID 的性质',
     '分析 CCN 和 CCN)INVALID 的性质',
     '分析 CCN 和 CCOfoo 的性质',
     'Please analyze QED for CCN and CCN)INVALID',
