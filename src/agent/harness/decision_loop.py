@@ -22,7 +22,7 @@ from src.agent.runtime.task_state import TaskEventType
 
 from .decision_policy import (
     DecisionBoundaryError, authorized_catalog, encode_observation,
-    scientific_answer, usable, verify_finish, model_call_metadata,
+    scientific_answer, usable, verify_finish, model_call_metadata, schema_correction,
 )
 from .decision_execution import DecisionEvents, SingleAttemptTool, settle_action, retry_persistence
 from .decision_inputs import resolve_decision_input, active_results
@@ -41,6 +41,8 @@ class _Run:
     messages: list[dict[str, Any]]
     deadline: float
     model_requests: int = 0
+    protocol_repairs: int = 0
+    protocol_feedback: str | None = None
     tool_budget_reserved: int = 0
     reused_decisions: int = 0
     response: Any = None
@@ -57,6 +59,7 @@ class _Run:
 
     def counters(self):
         return {'model_requests': self.model_requests,
+                'protocol_repairs': self.protocol_repairs,
                 'tool_budget_reserved': self.tool_budget_reserved,
                 'reused_decisions': self.reused_decisions,
                 'model_calls': self.model_calls}
@@ -165,7 +168,7 @@ class ModelDecisionLoop:
                 {'role': 'user', 'content': clarified_query},
             ]
             state.deadline = time.monotonic() + restored['remaining_seconds']
-            for key in ('model_requests', 'tool_budget_reserved', 'reused_decisions', 'model_calls'):
+            for key in ('model_requests', 'protocol_repairs', 'tool_budget_reserved', 'reused_decisions', 'model_calls'):
                 setattr(state, key, deepcopy(restored[key]))
             state.call_ids = set(restored['call_ids'])
             state.observed = {r.quality['operation_key']: r for r in active_results(session)}
@@ -195,13 +198,30 @@ class ModelDecisionLoop:
             persist('deciding')
             emit(TaskEventType.PLANNING_STARTED, 'Model decision started',
                  {'round': state.model_requests, 'decision_id': state.decision_id})
+            messages = deepcopy(state.messages)
+            if state.protocol_feedback is not None:
+                messages.insert(1, {'role': 'system', 'content': state.protocol_feedback})
+                state.protocol_feedback = None
             response = await asyncio.wait_for(self.model.decide(
-                deepcopy(state.messages), mode=self.mode, timeout_seconds=min(60, remaining)),
+                messages, mode=self.mode, timeout_seconds=min(60, remaining)),
                 timeout=min(60, remaining))
             state.model_calls.append({**model_call_metadata(response),
                                       'decision_id': state.decision_id, 'round': state.model_requests})
             persist('decision_received')
             if not response.success:
+                feedback = schema_correction(response)
+                if feedback is not None and state.protocol_repairs == 0:
+                    if state.model_requests >= self.max_model_requests:
+                        raise DecisionBoundaryError('model_budget_exhausted')
+                    state.protocol_repairs += 1
+                    # Preserve paired native observations. Do not replay malformed
+                    # assistant calls or echo provider text into history/state.
+                    state.protocol_feedback = feedback
+                    persist('protocol_correction_scheduled')
+                    emit(TaskEventType.PLANNING_COMPLETED, 'Model decision rejected; one protocol correction scheduled',
+                         {'round': state.model_requests, 'decision_id': state.decision_id,
+                          'accepted': False, 'reason': 'invalid_decision_schema'})
+                    return {'route': 'decide'}
                 raise DecisionBoundaryError('model_decision_unavailable')
             decision = parse_decision_json(encode_observation({'decision': response.decision.model_dump()}))
             if self.mode == 'native':
@@ -300,7 +320,7 @@ class ModelDecisionLoop:
         graph.add_node('decide', decide)
         graph.add_node('tool', execute)
         graph.set_entry_point('decide')
-        graph.add_conditional_edges('decide', lambda s: s['route'], {'tool': 'tool', 'end': END})
+        graph.add_conditional_edges('decide', lambda s: s['route'], {'tool': 'tool', 'decide': 'decide', 'end': END})
         graph.add_edge('tool', 'decide')
         error = None
         try:
@@ -311,7 +331,7 @@ class ModelDecisionLoop:
             error = AgentExecutionError(AgentErrorCode.CANCELLED, 'Decision run cancelled')
         except Exception as exc:
             state.stop_reason = str(exc) if isinstance(exc, DecisionBoundaryError) else (
-                'task_deadline_exceeded' if isinstance(exc, TimeoutError) else 'decision_runtime_failed')
+                'task_deadline_exceeded' if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) else 'decision_runtime_failed')
             state.outcome = RunOutcome.PARTIAL if any(map(usable, active_results(session))) else RunOutcome.FAILED
             error = AgentExecutionError(AgentErrorCode.VALIDATION_ERROR, 'Decision run did not complete',
                                         {'reason': state.stop_reason})

@@ -31,7 +31,7 @@ def configuration_digest(loop, context, request_kind, allowed, required, specs, 
     # Never inspect model.__dict__ or credentials, even for a fingerprint.
     model = loop.model
     return EvidenceLedger.output_digest({
-        'schema': 1, 'request': asdict(context), 'kind': request_kind,
+        'schema': 1, 'decision_protocol_revision': 2, 'request': asdict(context), 'kind': request_kind,
         'allowed': sorted(allowed), 'required': sorted(required),
         'mode': loop.mode, 'limits': [loop.max_model_requests, loop.max_tool_attempts, loop.timeout_seconds],
         'specs': {n: spec_value(s) for n, s in specs.items()},
@@ -113,6 +113,7 @@ def claim_continuation(loop, session, fingerprint, continuation_id, clarified_qu
             raise ValueError('invalid continuation snapshot')
         snapshot = payload['snapshot']
         for key, limit in (('model_requests', loop.max_model_requests),
+                           ('protocol_repairs', 1),
                            ('tool_budget_reserved', loop.max_tool_attempts),
                            ('tool_attempt_count', loop.max_tool_attempts),
                            ('reused_decisions', loop.max_model_requests)):

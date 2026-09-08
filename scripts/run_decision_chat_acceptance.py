@@ -33,11 +33,15 @@ class DecisionProbe:
             setattr(self, name, getattr(model, name, None))
 
     async def decide(self, *args, **kwargs):
+        from src.agent.contracts.decision import public_schema_issues
         response = await self._model.decide(*args, **kwargs)
         reason = (response.error.details or {}).get('reason') if response.error else None
+        http_status = (response.error.details or {}).get('http_status') if response.error else None
         self.calls.append({'success': response.success,
             'error_code': response.error.code.value if response.error else None,
-            'reason': reason if isinstance(reason, str) and re.fullmatch(r'[a-z0-9_]{1,80}', reason) else None})
+            'reason': reason if isinstance(reason, str) and re.fullmatch(r'[a-z0-9_]{1,80}', reason) else None,
+            'http_status': http_status if type(http_status) is int and 100 <= http_status <= 599 else None,
+            'schema_issues': public_schema_issues((response.error.details or {}).get('schema_issues')) if response.error else []})
         return response
 
 

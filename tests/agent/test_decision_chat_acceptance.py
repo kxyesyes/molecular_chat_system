@@ -49,3 +49,18 @@ def test_report_keeps_public_protocol_reason_not_raw_error():
     assert report['status'] == 'failed'
     assert report['cases'][0]['model_calls'][0]['reason'] == 'unexpected_finish_reason'
     assert 'synthetic-private-provider-body' not in json.dumps(report)
+
+
+def test_probe_preserves_http_status_and_schema_diagnostics_not_private_fields():
+    import asyncio
+    from src.agent.contracts import AgentErrorCode, AgentExecutionError
+    from src.agent.decision_transport import DecisionResponse
+    class InvalidModel:
+        async def decide(self, *a, **kw):
+            return DecisionResponse(None, AgentExecutionError(AgentErrorCode.PROVIDER_ERROR,
+                'private-body', {'reason': 'decision_http_error', 'http_status': 503,
+                                 'raw': 'private-value'}), None, {'request_attempts': 1})
+    probe = module().DecisionProbe(InvalidModel())
+    asyncio.run(probe.decide([]))
+    assert probe.calls[0]['http_status'] == 503
+    assert 'private-' not in json.dumps(probe.calls)

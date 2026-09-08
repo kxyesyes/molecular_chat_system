@@ -4,7 +4,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from src.agent.contracts import ObservationStatus, ToolResult
+from src.agent.contracts import AgentErrorCode, ObservationStatus, ToolResult
+from src.agent.contracts.decision import public_schema_issues
 from src.agent.persistence.redaction import redact_sensitive
 from src.agent.tooling.factory import TOOL_AGENT_OWNERS
 
@@ -89,7 +90,27 @@ def model_call_metadata(response) -> dict:
         clean['usage_unit'] = 'tokens'
     if response.error:
         clean['error_code'] = response.error.code.value
+        if (response.error.details or {}).get('reason') == 'invalid_decision_schema':
+            clean['reason'] = 'invalid_decision_schema'
+            clean['schema_issues'] = public_schema_issues(response.error.details.get('schema_issues'))
     return clean
+
+
+def schema_correction(response):
+    """Return only trusted protocol feedback, never the rejected model proposal."""
+    if (not response.error or response.error.code != AgentErrorCode.INVALID_OUTPUT
+            or (response.error.details or {}).get('reason') != 'invalid_decision_schema'):
+        return None
+    return (
+        'The previous proposal was rejected: invalid_decision_schema. No action from it was executed. '
+        'Propose one valid decision envelope using the existing schema and unchanged permissions. '
+        'Include version as the string "1" inside every decision; include all required fields, '
+        'no extra fields. Tool arguments must use input_ref, not invented literal inputs. '
+        'For finish, text must be nonempty even for scientific results; chat evidence_ids must be [], '
+        'scientific evidence_ids must be nonempty, unique IDs from actual observations. '
+        'If inputs or evidence are missing, clarify instead of claiming completion. '
+        'Safe schema issues: ' + encode_observation(public_schema_issues(
+            response.error.details.get('schema_issues'))))
 
 
 def scientific_answer(results: list[ToolResult]) -> str:

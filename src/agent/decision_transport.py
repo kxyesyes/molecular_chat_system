@@ -212,11 +212,13 @@ async def request_decision(model, messages, *, mode="native", max_tokens=1500, t
         "request_attempts": 0, "finish_reason": None, "usage": None,
     }
 
-    def failure(code, reason, *, http_status=None):
+    def failure(code, reason, *, http_status=None, schema_issues=None):
         metadata["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
         details = {"reason": reason}
         if http_status is not None:
             details["http_status"] = http_status
+        if schema_issues:
+            details["schema_issues"] = schema_issues
         return DecisionResponse(None, AgentExecutionError(
             code, "Model decision unavailable", details,
         ), None, dict(metadata))
@@ -250,7 +252,7 @@ async def request_decision(model, messages, *, mode="native", max_tokens=1500, t
         body = decode_protocol_json(raw_body.decode("utf-8"), max_bytes=_MAX_WIRE_BYTES)
         decision, call_id = _parse_response(body, mode, previous_calls, metadata)
     except DecisionProtocolError as exc:
-        return failure(AgentErrorCode.INVALID_OUTPUT, exc.code)
+        return failure(AgentErrorCode.INVALID_OUTPUT, exc.code, schema_issues=exc.schema_issues)
     except (UnicodeError, ValueError, TypeError, RecursionError):
         return failure(AgentErrorCode.INVALID_OUTPUT, "invalid_decision_response")
     metadata["elapsed_ms"] = int((time.perf_counter() - started) * 1000)

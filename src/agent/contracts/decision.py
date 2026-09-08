@@ -19,11 +19,41 @@ EvidenceId = Annotated[str, StringConstraints(
 )]
 
 
-class DecisionProtocolError(ValueError):
-    """Contains only a fixed reason code, never provider or user payload."""
+_SCHEMA_FIELDS = frozenset({
+    'decision', 'tool', 'clarify', 'finish', 'version', 'action', 'tool_name',
+    'arguments', 'purpose', 'question', 'missing_fields', 'response_kind',
+    'text', 'evidence_ids', '*', '$',
+})
+_SCHEMA_ERROR_TYPES = frozenset({
+    'missing', 'extra_forbidden', 'literal_error', 'string_type', 'dict_type',
+    'list_type', 'string_too_short', 'string_too_long', 'string_pattern_mismatch',
+    'too_short', 'too_long', 'union_tag_invalid', 'union_tag_not_found',
+    'model_type', 'value_error', 'invalid-json-value', 'validation_error',
+})
 
-    def __init__(self, code: str):
+
+def public_schema_issues(issues) -> list[dict[str, str]]:
+    """Closed vocabulary only; never retain dynamic keys, values or error text."""
+    clean = []
+    if type(issues) is not list:
+        return clean
+    for issue in issues[:8]:
+        if type(issue) is not dict:
+            continue
+        path = issue.get('path')
+        parts = path.split('.')[:6] if type(path) is str and len(path) <= 256 else ['$']
+        kind = issue.get('type')
+        clean.append({'path': '.'.join(p if p in _SCHEMA_FIELDS else '*' for p in parts),
+                      'type': kind if type(kind) is str and kind in _SCHEMA_ERROR_TYPES else 'validation_error'})
+    return clean
+
+
+class DecisionProtocolError(ValueError):
+    """Fixed reason and allowlisted schema coordinates, never response payload."""
+
+    def __init__(self, code: str, *, schema_issues=None):
         self.code = code
+        self.schema_issues = public_schema_issues(schema_issues)
         super().__init__(code)
 
 
@@ -129,5 +159,11 @@ def parse_decision_json(raw: str) -> AgentDecision:
     value = decode_protocol_json(raw)
     try:
         return DecisionEnvelope.model_validate(value, strict=True).decision
-    except ValidationError:
-        raise DecisionProtocolError("invalid_decision_schema") from None
+    except ValidationError as exc:
+        issues = []
+        for error in exc.errors(include_input=False, include_context=False, include_url=False)[:8]:
+            # Locations can contain arbitrary provider-controlled extra keys.
+            parts = [part if type(part) is str and part in _SCHEMA_FIELDS else '*'
+                     for part in error['loc'][:6]]
+            issues.append({'path': '.'.join(parts) or '$', 'type': error['type']})
+        raise DecisionProtocolError("invalid_decision_schema", schema_issues=issues) from None
