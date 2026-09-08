@@ -374,18 +374,9 @@ class WorkflowRunSession:
             payload=result.to_legacy_dict(),
         )
 
-        if step.required and not result.success:
-            should_continue = False
-        elif step.continue_on_error is not None:
-            should_continue = step.continue_on_error
-        else:
-            should_continue = (
-                not step.required or self.continue_on_error
-            )
-
         terminal = index == len(self.steps) - 1
         reason = "last_step" if terminal else None
-        if not result.success and not should_continue:
+        if not result.success and not step.continue_after_failure():
             terminal = True
             reason = (
                 "required_step_failed" if step.required else "step_failed"

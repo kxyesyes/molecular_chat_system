@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any
 
 
@@ -11,6 +13,19 @@ class WorkflowArtifact:
     label: str
     mime_type: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "WorkflowArtifact":
+        if not isinstance(payload, Mapping):
+            raise ValueError("Artifact must be an object")
+        artifact = cls(**deepcopy(dict(payload)))
+        if any(not isinstance(value, str) or not value.strip()
+               for value in (artifact.artifact_type, artifact.path)):
+            raise ValueError("Artifact type and path must be non-empty strings")
+        if (not isinstance(artifact.label, str) or not isinstance(artifact.metadata, dict)
+                or (artifact.mime_type is not None and not isinstance(artifact.mime_type, str))):
+            raise ValueError("Invalid artifact metadata")
+        return artifact
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -16,6 +16,7 @@ from src.agent.contracts import (
     ObservationStatus,
     ToolProvenance,
     ToolResult,
+    WorkflowArtifact,
 )
 from src.agent.contracts.generation_request import (
     build_generation_request,
@@ -196,17 +197,22 @@ class WorkflowOrchestrator:
         input_hash: str,
         tool_version: str,
         model_version: str,
+        *,
+        adapter_version: str | None = None,
+        state_store: AgentStateStore | None = None,
     ) -> dict[str, Any] | None:
-        if not self.state_store:
+        store = state_store if state_store is not None else self.state_store
+        if not store:
             return None
-        checkpoint = self.state_store.latest_checkpoint(trace_id, step.name)
+        checkpoint = store.latest_checkpoint(trace_id, step.name)
         if not checkpoint or checkpoint.get("status") != "succeeded":
             return None
         expected = {
+            "tool_name": step.tool_name,
             "workflow_version": self.workflow_version,
             "input_hash": input_hash,
             "tool_version": tool_version,
-            "adapter_version": self.adapter_version,
+            "adapter_version": self.adapter_version if adapter_version is None else adapter_version,
             "model_version": model_version,
         }
         if any(str(checkpoint.get(key) or "") != str(value or "") for key, value in expected.items()):
@@ -232,6 +238,10 @@ class WorkflowOrchestrator:
         )
         data = output.get("data")
         quality = output.get("quality") or {}
+        artifacts = output.get("artifacts", [])
+        if not isinstance(artifacts, list):
+            raise ValueError("Checkpoint artifacts must be a list")
+        artifacts = [WorkflowArtifact.from_dict(item) for item in artifacts]
         if (
             tool_name == "llm_molecular_generator"
             and quality.get("output_contract") == "CandidateSet@1"
@@ -245,76 +255,10 @@ class WorkflowOrchestrator:
             elapsed_ms=output.get("elapsed_ms"),
             warnings=output.get("warnings", []),
             evidence=output.get("evidence", []),
+            artifacts=artifacts,
             quality=quality,
             status=status,
             provenance=provenance,
-        )
-
-    def _save_checkpoint(
-        self,
-        context: AgentContext,
-        step: WorkflowStep,
-        status: str,
-        input_hash: str,
-        tool_version: str,
-        model_version: str,
-        output: Any = None,
-        error: Any = None,
-    ) -> None:
-        if not self.state_store:
-            return
-        self.state_store.save_checkpoint(
-            {
-                "trace_id": context.trace_id,
-                "step_id": step.name,
-                "workflow_version": self.workflow_version,
-                "status": status,
-                "input_hash": input_hash,
-                "tool_name": step.tool_name,
-                "tool_version": tool_version,
-                "adapter_version": self.adapter_version,
-                "model_version": model_version,
-                "output": output,
-                "error": error,
-                "metadata": step.metadata,
-            }
-        )
-
-    def _persist_execution(
-        self,
-        context: AgentContext,
-        step: WorkflowStep,
-        input_data: Any,
-        result: ToolResult,
-        input_hash: str,
-        tool_version: str,
-        model_version: str,
-    ) -> None:
-        if not self.state_store:
-            return
-        legacy_result = result.to_legacy_dict()
-        persisted_status = self._result_persistence_status(result)
-        self.state_store.record_tool_execution(
-            {
-                "trace_id": context.trace_id,
-                "step_id": step.name,
-                "tool_name": step.tool_name,
-                "status": persisted_status,
-                "input": input_data,
-                "output": legacy_result if result.success else None,
-                "error": legacy_result.get("error"),
-                "elapsed_ms": result.elapsed_ms,
-            }
-        )
-        self._save_checkpoint(
-            context,
-            step,
-            status=persisted_status,
-            input_hash=input_hash,
-            tool_version=tool_version,
-            model_version=model_version,
-            output=legacy_result if result.success else None,
-            error=legacy_result.get("error"),
         )
 
     @staticmethod

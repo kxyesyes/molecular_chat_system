@@ -62,6 +62,28 @@ def test_target_request_uses_shared_service(boundary, payload, target):
     assert result.success
 
 
+@pytest.mark.parametrize("metric", ["pIC50", "IC50", "pic50", "PIC50"])
+def test_metric_label_in_prose_is_not_a_second_smiles(boundary, metric):
+    tool, calls, _ = boundary
+    result = execute_tool_compat(tool, f"请预测 CCO 对 PDE5A 的活性和 {metric}。")
+    assert result.success
+    assert calls == [(["CCO"], "PDE5A")]
+
+
+@pytest.mark.parametrize("query", [
+    "请预测 CC(C)(( 对 PDE5A 的 pIC50。",
+    "请预测 PDE5A 活性；SMILES: pIC50",
+    "请预测 PDE5A 活性；SMILES: CCO pIC50",
+    "请预测 CCO CC(C)(( 对 PDE5A 的 pIC50。",
+])
+def test_metric_filter_cannot_salvage_an_invalid_structure(boundary, query):
+    tool, calls, _ = boundary
+    result = execute_tool_compat(tool, query)
+    assert not result.success
+    assert not calls
+    assert result.status == ObservationStatus.INVALID_INPUT
+
+
 @pytest.mark.parametrize("payload", [
     "预测CCO对PDE5A和BuChE的活性",
     {"smiles": "CCO", "target": "PDE5A BuChE"},

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.agent.contracts import (
     AgentContext,
     CandidateRecord,
@@ -7,6 +9,7 @@ from src.agent.contracts import (
     ObservationStatus,
     ToolProvenance,
     ToolResult,
+    WorkflowArtifact,
 )
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.persistence import SQLiteAgentStateStore
@@ -26,6 +29,44 @@ class CountingTool:
             "data": self.output,
             "formatted": f"{self.name}: {query}",
         }
+
+
+def test_checkpoint_cannot_attribute_one_tools_data_to_another(tmp_path):
+    store = SQLiteAgentStateStore(tmp_path / "identity.sqlite3")
+    orchestrator = WorkflowOrchestrator(state_store=store)
+    context = AgentContext(query="CCO", trace_id="same-step-different-tool")
+    first = CountingTool("properties", {"producer": "properties"})
+    second = CountingTool("drug_likeness", {"producer": "drug_likeness"})
+    orchestrator.run(context, [WorkflowStep("evaluate", first.name)], {first.name: first})
+    result = orchestrator.run(context, [WorkflowStep("evaluate", second.name)], {second.name: second})
+    assert second.calls == ["CCO"]
+    assert result.tool_results[0].data == {"producer": "drug_likeness"}
+    assert not result.metadata["reused_steps"]
+
+
+def test_checkpoint_restores_artifacts_in_result_state_and_evidence(tmp_path):
+    store = SQLiteAgentStateStore(tmp_path / "artifact.sqlite3")
+    orchestrator = WorkflowOrchestrator(state_store=store)
+    artifact = WorkflowArtifact("report", "outputs/synthetic.json", "Synthetic reference")
+    class ArtifactTool(CountingTool):
+        def execute(self, query):
+            self.calls.append(query)
+            return ToolResult.success_result(self.name, data={"fixture": True}, artifacts=[artifact])
+    tool = ArtifactTool("artifact_tool", None)
+    context = AgentContext(query="CCO", trace_id="artifact-resume")
+    steps = [WorkflowStep("evaluate", tool.name)]
+    orchestrator.run(context, steps, {tool.name: tool})
+    resumed = orchestrator.run(context, steps, {tool.name: tool})
+    assert tool.calls == ["CCO"]
+    assert [a.to_dict() for a in resumed.artifacts] == [artifact.to_dict()]
+    assert resumed.metadata["workflow_state"]["artifacts"] == [artifact.to_dict()]
+    assert resumed.metadata["evidence_ledger"][0]["artifacts"] == [artifact.to_dict()]
+
+
+@pytest.mark.parametrize("artifacts", ["bad", [{}], [{"artifact_type": "report", "path": 7, "label": "x"}]])
+def test_malformed_checkpoint_artifacts_are_not_silently_dropped(artifacts):
+    with pytest.raises((TypeError, ValueError)):
+        WorkflowOrchestrator._result_from_checkpoint("fixture", {"output": {"artifacts": artifacts}})
 
 
 class CountingCandidateGenerator:

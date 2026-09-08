@@ -5,6 +5,9 @@ from collections.abc import Mapping
 from src.activity.family_contract import resolve_activity_family
 
 
+_ACTIVITY_METRIC_LABELS = frozenset({"ic50", "pic50", "ec50", "pec50", "ki", "pki", "kd", "pkd"})
+
+
 def activity_target(text, validate_smiles):
     # Only explicitly labelled background clauses are excluded, not inferred intent.
     text = "；".join(clause for clause in re.split(r"[；;。\n，,]", text)
@@ -70,7 +73,10 @@ def parse_activity_input(payload, tool):
             # Whole tokens only: unmatched parentheses and invalid suffixes survive.
             tokens = re.findall(r"[^\s\u4e00-\u9fff，；。;]+", text)
             values = [t.strip("`\"',") for t in tokens]
-            values = [t for t in values if tool._is_plausible_smiles_lexeme(t)]
+            # Metric names in prose are not structures. Explicit SMILES fields
+            # above remain untouched and must pass complete-structure validation.
+            values = [t for t in values if t.casefold() not in _ACTIVITY_METRIC_LABELS
+                      and tool._is_plausible_smiles_lexeme(t)]
     if (not isinstance(values, (list, tuple)) or not values
             or any(not isinstance(s, str) or not s or re.search(r"\s", s)
                    or not tool.validate_smiles(s) for s in values)):

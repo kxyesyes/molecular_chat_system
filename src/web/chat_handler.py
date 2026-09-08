@@ -682,7 +682,9 @@ class ChatHandler:
         final_answer, sensitive = safe_content(agent_result.get("final_answer"))
         if sensitive:
             return _AGENT_FAILURE_FALLBACK
-        if final_answer:
+        if final_answer and final_answer.casefold() not in {
+            "workflow failed", "no workflow steps were executed"
+        }:
             return final_answer
 
         error = agent_result.get("error")
