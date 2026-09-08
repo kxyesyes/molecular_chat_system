@@ -256,6 +256,17 @@ class OpenAICompatibleModel:
             if not meaningful_content:
                 yield self._empty_response_message()
 
+    async def decide(
+        self, messages, *, mode="native", max_tokens=1500, timeout_seconds=60.0,
+    ):
+        """Return a validated proposal, never execute a tool or a workflow."""
+        from src.agent.decision_transport import request_decision
+
+        return await request_decision(
+            self, messages, mode=mode, max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
+        )
+
     async def close(self) -> None:
         close = getattr(self.client, "aclose", None) if self.client is not None else None
         if close:
