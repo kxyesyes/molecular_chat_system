@@ -196,3 +196,27 @@ def test_generic_cli_preserves_source_lexemes_in_published_artifacts(tmp_path, i
         for name in ("compound_id", "assay_id", "reference"):
             assert actual[name] == row[name]
             assert json.loads(actual["replicate_evidence"])[0][name] == row[name]
+
+
+def test_family_adapter_cannot_silently_relabel_conflicting_identity(tmp_path, monkeypatch):
+    from src.activity import family_contract as fc
+    from src.activity.family_dataset import prepare_family_dataset
+
+    original = fc.build_family_manifest
+    monkeypatch.setattr(fc, "build_family_manifest", lambda family, dataset_id, task_type:
+                        original(family, dataset_id, task_type,
+                                 minimum_unique_molecules=3, minimum_scaffolds=3))
+    frame = source_frame(target_id="pde-family", endpoint="pIC50")
+    frame["value"] = ["4.8", "5.2"] * 6
+    frame = frame.rename(columns={"smiles": "Smiles", "value": "pIC50"})
+    path = tmp_path / "synthetic-family.csv"
+    output = tmp_path / "prepared"
+    frame.to_csv(path, index=False)
+    assert prepare_family_dataset(path, family="PDE", package_id="synthetic-family",
+                                  output_dir=output, validate_only=True)["ready_for_training"]
+    frame["target_id"], frame["endpoint"] = "buche-family", "pKi"
+    frame.to_csv(path, index=False)
+    with pytest.raises(ValueError, match="quality gate rejected"):
+        prepare_family_dataset(path, family="PDE", package_id="synthetic-family",
+                               output_dir=output, validate_only=True)
+    assert not output.exists()

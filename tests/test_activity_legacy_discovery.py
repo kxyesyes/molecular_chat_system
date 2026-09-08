@@ -113,3 +113,29 @@ def test_skipping_prepared_hardcoded_path_continues_historical_search(tmp_path, 
     legacy_path = Path(HISTORICAL_PATHS[1])
     legacy_path.write_bytes(b"SYNTHETIC HISTORICAL FILE - NEVER LOADED")
     assert object.__new__(ActivityPredictor)._find_checkpoint() == (legacy_path, None)
+
+
+def test_endpoint_selection_is_not_implicit_global_selection(registry):
+    legacy = register_legacy(registry)
+    prepared = register_prepared(registry, "pde-family", "classification")
+    registry.select_for_endpoint(prepared["endpoint_key"], prepared["model_id"])
+    assert registry.get_active() is None
+    assert trainer.get_best_model() == legacy
+
+
+def test_registering_real_family_bundle_keeps_legacy_choice(registry, tmp_path, monkeypatch):
+    from tests.family_model_test_support import make_package, make_pair, register_bundle
+
+    legacy = register_legacy(registry)
+    predictor = object.__new__(ActivityPredictor)
+    before = predictor._find_checkpoint()
+    path = make_package(tmp_path, monkeypatch)
+    pair = make_pair(registry, path, overrides={
+        task: {"created_at": 2} for task in ("regression", "classification")
+    })
+    register_bundle(registry, path, pair)
+    assert registry.get_active() is None
+    assert registry.get_active_family_bundle("pde-family") is None
+    assert registry.list()[0]["scientific_readiness"] == "endpoint_ready"
+    assert trainer.get_best_model() == legacy
+    assert predictor._find_checkpoint() == before
