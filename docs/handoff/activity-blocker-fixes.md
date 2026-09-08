@@ -1,7 +1,7 @@
 # Activity integration blocker fixes
 
 Date: 2026-09-09. Local fixes and synthetic validation only; independent review
-and staged integration are still pending. This is not approval to publish, merge,
+is closed below, while staged integration is pending. This is not approval to publish, merge,
 train, or activate any production model.
 
 ## Scope and commits
@@ -198,8 +198,8 @@ this; no source changes were needed. `git diff --check` passed at every commit.
 ## Review/integration concerns
 
 - Herschel's independent specification review of `942fd28..0816913` was started
-  by the parent before this documentation commit; its outcome remains pending
-  here. No CI/PR state was queried because this task was local/offline. Do not
+  by the parent before this documentation commit; see the final closure below.
+  No CI/PR state was queried because this task was local/offline. Do not
   treat these results as merge authorization.
 - Existing prepared datasets that lost source identities/lexemes may need
   re-preparation from their original authorized sources. No real assets were
@@ -290,5 +290,20 @@ git diff --check
 
 All follow-up inputs/files were synthetic and temporary. No real assets,
 credentials, environment files, network, training, or model activation were used.
-No other worktree was modified. Bacon's follow-up review remains pending; no
-push, merge, or review approval is implied by GREEN.
+No other worktree was modified. No push or merge is implied by GREEN.
+
+## Independent review closure
+
+- Herschel approved specification compliance at `0816913`; independently ran the
+  original 53 regressions. Identity conflict, model discovery isolation and
+  source lexeme preservation matched the agreed scope.
+- Bacon initially withheld quality approval for the reproducible NUL truncation
+  boundary. At `7a64a8b`, the generic CLI, source snapshot and family adapter
+  reject original NUL bytes before parsing. The original CSV/TSV publication
+  probes now reject without artifacts; truncated frames fail source verification.
+- Bacon approved code quality at `7a64a8b`: no remaining P0/P1/P2 in the reviewed
+  scope; independently ran **85 passed**. The parent independently repeated
+  `test_activity_dataset_blockers.py`, `test_activity_legacy_discovery.py` and
+  `test_activity_nul_source.py`: **85 passed**.
+- These are isolated code-review/test approvals, not PR merge authorization,
+  real-model performance acceptance or production activation.
