@@ -119,6 +119,25 @@ def contains_credential(value: Any) -> bool:
     return isinstance(value, str) and looks_like_credential(value)
 
 
+def contains_secret_material(value: Any) -> bool:
+    """Credential-only guard for input/history; molecular slash syntax is valid.
+
+    Detect explicit secret assignments as well as known credential shapes.
+    This is not a general-purpose DLP classifier for arbitrary unlabelled text.
+    """
+    if isinstance(value, Mapping):
+        return any(contains_secret_material(str(key)) or contains_secret_material(item)
+                   for key, item in value.items()) or redact_sensitive(value) != value
+    if isinstance(value, (list, tuple)):
+        return any(contains_secret_material(item) for item in value)
+    if not isinstance(value, str):
+        return False
+    return bool(looks_like_credential(value) or _CONTEXT_SECRET.search(value)
+                or _AUTHORIZATION_CREDENTIAL.search(value) or _BEARER.search(value)
+                or any('@' in m.group(0).split('://', 1)[1].split('/', 1)[0]
+                       or _URL_SECRET_QUERY.search(m.group(0)) for m in _URL.finditer(value)))
+
+
 def contains_sensitive_text(value: Any) -> bool:
     """Return whether text contains credentials, secret assignments, or paths."""
 

@@ -19,13 +19,16 @@ from src.agent.orchestrators.workflow import WorkflowOrchestrator
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.run_session import WorkflowRunSession
 from src.agent.runtime.task_state import TaskEventType
+from src.agent.persistence.redaction import contains_secret_material
 
 from .decision_policy import (
     DecisionBoundaryError, authorized_catalog, encode_observation,
     scientific_answer, usable, verify_finish, model_call_metadata, schema_correction,
 )
 from .decision_execution import DecisionEvents, SingleAttemptTool, settle_action, retry_persistence
-from .decision_inputs import resolve_decision_input, active_results
+from .decision_inputs import (
+    resolve_decision_input, active_results, verify_observation_integrity, decision_input_digest,
+)
 from .decision_clarification import scientific_clarification
 from .decision_requirements import prepare_requirements, evaluate_requirements
 from .decision_continuation import (
@@ -95,6 +98,11 @@ class ModelDecisionLoop:
         from langgraph.graph import END, StateGraph
 
         context = deepcopy(context)
+        if contains_secret_material(context.query):
+            return AgentResult(context.trace_id, False, 'Input contains credential material',
+                error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Remove credentials from the request'),
+                outcome=RunOutcome.REJECTED,
+                metadata={'backend': 'model_decision_loop', 'stop_reason': 'sensitive_input_rejected'})
         if request_kind not in {'chat', 'scientific'}:
             raise ValueError('request_kind must be explicit')
         required_tools = frozenset(required_tools)
@@ -128,6 +136,7 @@ class ModelDecisionLoop:
         fingerprint = configuration_digest(self, context, request_kind, allowed_tools, required_tools, specs, adapters,
             requirements=requirement_payload if requirements.molecular_results or requirements.forbidden_tools else None)
         restored, prior_payload = None, None
+        session.input_queries = [context.query]
         if continuation_id is not None or clarified_query is not None:
             try:
                 restored, previous_results, prior_payload = claim_continuation(
@@ -138,6 +147,7 @@ class ModelDecisionLoop:
                     outcome=RunOutcome.REJECTED,
                     metadata={'backend': 'model_decision_loop', 'stop_reason': 'continuation_rejected'})
             context.query = clarified_query
+            session.input_queries = list(restored['input_queries']) + [clarified_query]
         try:
             session.start(resume_claimed=restored is not None)
         except sqlite3.IntegrityError:
@@ -269,6 +279,7 @@ class ModelDecisionLoop:
             key = EvidenceLedger.output_digest([decision.tool_name, adapter.spec.version, input_data])
             if key in state.observed:
                 observed = state.observed[key]
+                verify_observation_integrity(observed, session)
                 state.reused_decisions += 1
             else:
                 attempts = adapter.spec.retry_policy.max_attempts
@@ -285,7 +296,7 @@ class ModelDecisionLoop:
                     output_key=state.decision_id, timeout_seconds=remaining,
                     metadata={'tool_version': adapter.spec.version,
                               'input_evidence_ids': evidence_ids, 'operation_key': key,
-                              'request_input_digest': EvidenceLedger.output_digest(context.query),
+                              'request_input_digest': decision_input_digest(session, decision.tool_name),
                               'decision_id': state.decision_id, 'round': state.model_requests,
                               'tool_call_id': state.response.tool_call_id,
                               'model_version': str(getattr(getattr(getattr(adapter, 'tool', None),
@@ -295,8 +306,12 @@ class ModelDecisionLoop:
                 observed = session.results[-1]
                 state.observed[key] = observed
             state.task_acceptance = evaluate_requirements(requirements, session, required_tools)
+            # Serialize an isolated, verified observation before persistence
+            # callbacks can mutate the tool's retained object again.
+            outgoing = deepcopy(observed)
+            verify_observation_integrity(outgoing, session)
+            content = encode_observation({**outgoing.to_legacy_dict(), 'task_acceptance': state.task_acceptance})
             persist('observed')
-            content = encode_observation({**observed.to_legacy_dict(), 'task_acceptance': state.task_acceptance})
             if self.mode == 'native':
                 call_id = state.response.tool_call_id
                 if not isinstance(call_id, str) or not call_id:
@@ -313,7 +328,7 @@ class ModelDecisionLoop:
                     {'role': 'assistant', 'content': encode_observation({'decision': decision.model_dump()})},
                     {'role': 'user', 'content': content},
                 ])
-            if observed.error and observed.error.code == AgentErrorCode.TOOL_TIMEOUT:
+            if outgoing.error and outgoing.error.code == AgentErrorCode.TOOL_TIMEOUT:
                 raise DecisionBoundaryError('tool_execution_state_unconfirmed')
             return {'route': 'decide'}
 
@@ -338,6 +353,29 @@ class ModelDecisionLoop:
                                         {'reason': state.stop_reason})
             if state.stop_reason == 'task_requirements_unfulfilled':
                 state.answer = scientific_answer(active_results(session)) + '\n\n任务要求尚未全部满足，请查看结构化验收差项。'
+        # Seal the settled results before callbacks/persistence can run again.
+        # Tools may retain their own mutable result objects, never these copies.
+        session.results = deepcopy(session.results)
+        # Rebuild from verified observations, not stale state aliases: a tool
+        # can replace its data with an equal copy while mutating the old object.
+        session.outputs = {}
+        session.state.outputs = session.outputs
+        session.state.artifacts = []
+        # Every terminal path (including clarify/authorization errors) must
+        # reject mutable observations before final aggregation or persistence.
+        for observed in session.results:
+            try:
+                verify_observation_integrity(observed, session)
+            except DecisionBoundaryError:
+                state.waiting_for_input = False
+                state.stop_reason, state.outcome = 'input_evidence_integrity_failed', RunOutcome.FAILED
+                state.answer = '工具证据完整性校验失败，不能输出或继续使用该结果。'
+                error = AgentExecutionError(AgentErrorCode.INVALID_OUTPUT, 'Observation integrity check failed')
+            else:
+                record = session.ledger.get(observed.quality['evidence_id'])
+                if observed.success:
+                    session.outputs[record['step_id']] = deepcopy(observed.data)
+                session.state.artifacts.extend(deepcopy(record['artifacts']))
         try:
             state.task_acceptance = evaluate_requirements(requirements, session, required_tools)
         except Exception:

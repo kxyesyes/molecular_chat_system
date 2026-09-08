@@ -248,8 +248,9 @@ def test_rotation_closes_idle_socket_without_waiting_for_a_new_command(tmp_path)
                 timer.cancel()
 
 
-@pytest.mark.parametrize('query', ['   ', '测' * 6000, 'Bearer synthetic-private-value'],
-                         ids=['blank', 'oversized_utf8', 'redacted_input'])
+@pytest.mark.parametrize('query', ['   ', '测' * 6000, 'Bearer synthetic-private-value',
+                                 'SMILES: CCO\npassword=synthetic-review-marker'],
+                         ids=['blank', 'oversized_utf8', 'redacted_input', 'contextual_secret'])
 def test_invalid_clarification_can_be_corrected_without_losing_ownership(tmp_path, query):
     model = ScriptedModel([clarify(), tool(), finish_last])
     with client(lab(model, tmp_path)) as c:

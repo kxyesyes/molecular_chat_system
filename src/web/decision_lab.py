@@ -20,7 +20,7 @@ from src.agent.contracts import AgentContext
 from src.agent.contracts.decision import decode_protocol_json, DecisionProtocolError
 from src.agent.harness.decision_loop import ModelDecisionLoop
 from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
-from src.agent.persistence.redaction import redact_sensitive
+from src.agent.persistence.redaction import contains_secret_material
 from src.agent.tooling.factory import build_tool_registry
 from src.agent.tools.property_calculator import PropertyCalculator
 from src.web.chat_handler import ChatHandler
@@ -246,7 +246,7 @@ def create_decision_lab(model, db_path, *, port=6012, mode='native', session_ttl
                     started_runs += 1
                 else:
                     if (not command.query.strip() or len(command.query.encode('utf-8')) > 16384
-                            or redact_sensitive(command.query) != command.query):
+                            or contains_secret_material(command.query)):
                         await error(ws, 'invalid_clarification')
                         continue
                     options = session.pending.pop(command.continuation_id, None)

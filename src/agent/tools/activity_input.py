@@ -18,6 +18,9 @@ def activity_target(text, validate_smiles):
     explicit = [value for value in explicit if value.lower() not in {"activity", "potency"}]
     # A bounded target-label position, not arbitrary biomedical intent inference.
     labelled = re.findall(r"(?:预测|评估)\s*([A-Za-z][A-Za-z0-9_-]*)\s*(?:的)?活性", text)
+    labelled.extend(re.findall(
+        r"\b(?:predict|assess|evaluate)\s+([A-Za-z][A-Za-z0-9_-]*)\s+(?:activity|potency)\b",
+        text, re.I))
     explicit.extend(value for value in labelled if not validate_smiles(value))
     for value in explicit:
         resolve_activity_family(value)  # Unknown explicit targets cannot be masked by aliases.

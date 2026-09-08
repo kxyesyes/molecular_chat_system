@@ -15,7 +15,7 @@ from src.agent.contracts import (
     AgentExecutionError, AgentErrorCode,
 )
 from src.agent.evidence import EvidenceLedger
-from src.agent.persistence.redaction import redact_sensitive
+from src.agent.persistence.redaction import contains_secret_material
 from .decision_policy import DecisionBoundaryError
 
 
@@ -31,7 +31,7 @@ def configuration_digest(loop, context, request_kind, allowed, required, specs, 
     # Never inspect model.__dict__ or credentials, even for a fingerprint.
     model = loop.model
     return EvidenceLedger.output_digest({
-        'schema': 1, 'decision_protocol_revision': 2, 'request': asdict(context), 'kind': request_kind,
+        'schema': 1, 'decision_protocol_revision': 3, 'request': asdict(context), 'kind': request_kind,
         'allowed': sorted(allowed), 'required': sorted(required),
         'mode': loop.mode, 'limits': [loop.max_model_requests, loop.max_tool_attempts, loop.timeout_seconds],
         'specs': {n: spec_value(s) for n, s in specs.items()},
@@ -49,6 +49,7 @@ def snapshot_payload(state, session, fingerprint):
     snapshot = {
         **state.counters(), 'messages': state.messages,
         'call_ids': sorted(state.call_ids), 'current_query': session.context.query,
+        'input_queries': list(getattr(session, 'input_queries', [session.context.query])),
         'remaining_seconds': max(0, state.deadline - time.monotonic()),
         'tool_attempt_count': session.tool_attempt_count,
         'results': [{'tool_name': r.tool_name, **r.to_legacy_dict()} for r in session.results],
@@ -56,7 +57,7 @@ def snapshot_payload(state, session, fingerprint):
     payload = {'schema': 1, 'id': uuid4().hex, 'configuration': fingerprint, 'snapshot': snapshot}
     payload['checksum'] = EvidenceLedger.output_digest(payload)
     if (len(json.dumps(payload, ensure_ascii=False).encode('utf-8')) > 512 * 1024
-            or redact_sensitive(payload) != payload):
+            or contains_secret_material(payload)):
         raise DecisionBoundaryError('continuation_snapshot_not_persistable')
     # Detach live ToolResult/message objects before any persistence callback.
     return json.loads(json.dumps(payload, ensure_ascii=False, allow_nan=False))
@@ -103,7 +104,7 @@ def claim_continuation(loop, session, fingerprint, continuation_id, clarified_qu
                 or record['user_id'] != context.user_id or record['session_id'] != context.session_id
                 or type(clarified_query) is not str or not clarified_query.strip()
                 or len(clarified_query.encode('utf-8')) > 16 * 1024
-                or redact_sensitive(clarified_query) != clarified_query):
+                or contains_secret_material(clarified_query)):
             raise ValueError('invalid continuation request')
         payload = record['metadata']['decision_continuation']
         if (payload['id'] != continuation_id or payload.get('claimed_by')
@@ -112,6 +113,12 @@ def claim_continuation(loop, session, fingerprint, continuation_id, clarified_qu
                     k: v for k, v in payload.items() if k != 'checksum'})):
             raise ValueError('invalid continuation snapshot')
         snapshot = payload['snapshot']
+        queries = snapshot['input_queries']
+        if (not isinstance(queries, list) or not 1 <= len(queries) <= loop.max_model_requests
+                or any(type(q) is not str for q in queries)
+                or queries[0] != context.query or queries[-1] != snapshot['current_query']
+                or contains_secret_material(snapshot)):
+            raise ValueError('invalid input history')
         for key, limit in (('model_requests', loop.max_model_requests),
                            ('protocol_repairs', 1),
                            ('tool_budget_reserved', loop.max_tool_attempts),

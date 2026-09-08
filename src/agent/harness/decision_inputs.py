@@ -16,21 +16,81 @@ MOLECULAR_INPUT_TOOLS = frozenset({
 def verify_observation_integrity(source, session):
     record = next((r for r in session.ledger.to_list()
                    if r['evidence_id'] == source.quality.get('evidence_id')), None)
-    if (record is None or record['trace_id'] != session.context.trace_id
-            or record['step_id'] != source.quality.get('step_id')
-            or record['tool_name'] != source.tool_name
-            or record['status'] != source.status.value
-            or not source.provenance
-            or record['provenance'] != source.provenance.to_dict()
-            or record['scientific_usable'] != bool(source.success and not source.provenance.demo_mode
-                                                   and not source.provenance.fallback_used)
-            or record.get('input_binding') != {name: source.quality.get(name) for name in (
+    try:
+        intact = (record is not None and record['trace_id'] == session.context.trace_id
+            and record['step_id'] == source.quality.get('step_id')
+            and record['tool_name'] == source.tool_name
+            and record['status'] == source.status.value
+            and source.provenance is not None
+            and record['provenance'] == source.provenance.to_dict()
+            and record['evidence'] == source.evidence
+            and record['artifacts'] == [a.to_dict() for a in source.artifacts]
+            and record['scientific_usable'] == bool(source.success and not source.provenance.demo_mode
+                                                    and not source.provenance.fallback_used)
+            and record.get('input_binding') == {name: source.quality.get(name) for name in (
                 'request_input_digest', 'input_evidence_ids', 'operation_key')}
-            or source.provenance.output_digest != EvidenceLedger.output_digest(source.data)):
+            and source.provenance.output_digest == EvidenceLedger.output_digest(source.data))
+    except (AttributeError, TypeError, ValueError):
+        intact = False
+    if not intact:
         source.success, source.status = False, ObservationStatus.REJECTED
+        # Dynamic steps use their server-issued step ID as output key. The
+        # state output points at the original mutable data, not source.data.
+        if record is not None:
+            session.outputs.pop(record['step_id'], None)
+        else:
+            session.outputs.clear()
         source.data, source.formatted = None, ''
+        source.evidence, source.artifacts = [], []
         source.error = AgentExecutionError(AgentErrorCode.INVALID_OUTPUT, 'Observation integrity check failed')
         raise DecisionBoundaryError('input_evidence_integrity_failed')
+
+
+def activity_input_target(session):
+    """Bind only user-authored target obligations across clarification turns.
+
+    Never concatenate old molecular input or infer a target from model messages.
+    Explicit target changes require a new request rather than silent retargeting.
+    """
+    from rdkit import Chem, rdBase
+    from src.agent.tools.activity_input import activity_target
+    from src.activity.family_contract import resolve_activity_family
+
+    def valid_smiles(text):
+        with rdBase.BlockLogs():
+            return Chem.MolFromSmiles(text) is not None
+
+    targets = []
+    if 'target' in session.context.metadata:
+        targets.append(session.context.metadata['target'])
+    try:
+        for query in getattr(session, 'input_queries', [session.context.query]):
+            target = activity_target(query, valid_smiles)
+            if target is not None:
+                targets.append(target)
+        normalized = set()
+        for target in targets:
+            family = resolve_activity_family(target)
+            normalized.add(family if family == 'buche-family' else target.casefold())
+        if len(normalized) > 1:
+            raise ValueError('conflicting targets')
+    except (TypeError, ValueError):
+        raise DecisionBoundaryError('activity_target_conflict_or_unknown') from None
+    return targets[0] if targets else None
+
+
+def decision_input_digest(session, tool_name):
+    """Activity evidence belongs to both a molecule request and its target.
+
+    Adding a target during clarification cannot reactivate a targetless result
+    merely by repeating an earlier SMILES query. Other tools retain their input
+    identity and can still supply molecular structures for a new activity call.
+    """
+    target = activity_input_target(session) if tool_name == 'activity_predictor' else None
+    payload = session.context.query
+    if target is not None:
+        payload = {'query': payload, 'target': target}
+    return EvidenceLedger.output_digest(payload)
 
 
 def resolve_decision_input(decision, session):
@@ -38,14 +98,17 @@ def resolve_decision_input(decision, session):
     if set(arguments) != {'input_ref'} or type(arguments['input_ref']) is not str:
         raise DecisionBoundaryError('untrusted_tool_input')
     ref = arguments['input_ref']
+    target = activity_input_target(session) if decision.tool_name == 'activity_predictor' else None
     if ref == 'user':
+        if target is not None:
+            return {'query': {'query': session.context.query, 'target': target}}, []
         return {'query': session.context.query}, []
     source = next((r for r in session.results if r.quality.get('evidence_id') == ref), None)
     if (source is None or not usable(source) or decision.tool_name not in MOLECULAR_INPUT_TOOLS
             or source.tool_name not in MOLECULAR_INPUT_TOOLS):
         raise DecisionBoundaryError('unusable_input_reference')
     verify_observation_integrity(source, session)
-    if source.quality.get('request_input_digest') != EvidenceLedger.output_digest(session.context.query):
+    if source.quality.get('request_input_digest') != decision_input_digest(session, source.tool_name):
         raise DecisionBoundaryError('stale_input_reference')
     rows = source.data if isinstance(source.data, list) else [source.data]
     if (not rows or len(rows) > 100 or any(not isinstance(row, dict)
@@ -62,14 +125,23 @@ def resolve_decision_input(decision, session):
     text = BindingResolver().resolve('$.outputs.source', 'smiles_text', {}, {'source': rows})
     if decision.tool_name == 'activity_predictor':
         payload = {'query': session.context.query, 'smiles': text.splitlines()}
-        if 'target' in session.context.metadata:
-            payload['target'] = session.context.metadata['target']
+        if target is not None:
+            payload['target'] = target
         return {'query': payload}, [ref]
     return {'query': text}, [ref]
 
 
 def active_results(session):
-    digest = EvidenceLedger.output_digest(session.context.query)
+    digests = {}
+    for result in session.results:
+        if result.tool_name not in digests:
+            try:
+                digests[result.tool_name] = decision_input_digest(session, result.tool_name)
+            except DecisionBoundaryError:
+                # Conflicting target obligations cannot validate old activity;
+                # they need not discard independent property observations.
+                digests[result.tool_name] = None
     active_ids = {r['evidence_id'] for r in session.ledger.to_list()
-                  if r.get('input_binding', {}).get('request_input_digest') == digest}
+                  if digests.get(r['tool_name']) is not None and
+                  r.get('input_binding', {}).get('request_input_digest') == digests[r['tool_name']]}
     return [r for r in session.results if r.quality.get('evidence_id') in active_ids]
