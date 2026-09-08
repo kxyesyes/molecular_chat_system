@@ -124,6 +124,8 @@ _SPLIT_REQUIRED_COLUMNS = (
     "normalized_value",
 )
 _SUPPORTED_EVIDENCE_COLUMNS = (
+    "target_id",
+    "endpoint",
     "source",
     "reference",
     "organism",
@@ -592,6 +594,14 @@ def _source_record(
         "original_units": row[_UNITS_COLUMN],
         "relation": row[manifest.relation_column],
         "canonical_smiles": canonical_smiles,
+        **{
+            name: _evidence_text(row[name])
+            for name in _SUPPORTED_EVIDENCE_COLUMNS
+            if name in row.index and name not in (
+                manifest.smiles_column, manifest.value_column,
+                manifest.relation_column, _UNITS_COLUMN,
+            )
+        },
     }
 
 
@@ -775,6 +785,8 @@ def _reject_valid_group(
                 "_input_order",
             )
         }
+        rejected.update({name: record[name] for name in _SUPPORTED_EVIDENCE_COLUMNS
+                         if name in record})
         rejected["rejection_reason"] = reason
         rejected_records.append(rejected)
 
@@ -895,6 +907,19 @@ def validate_activity_dataset(
 
     for input_order in range(len(frame)):
         row = frame.iloc[input_order]
+        # The declaration supplies absent identity, never overrides source identity.
+        # Compare source endpoint (not the transformed output endpoint) using the
+        # same text normalization as the manifest's identity key.
+        identity_reason = next((
+            f"{name}_mismatch" for name in ("target_id", "endpoint")
+            if name in frame.columns and (
+                not isinstance(row[name], str)
+                or _normalized_choice(row[name]) != _normalized_choice(getattr(manifest, name))
+            )
+        ), None)
+        if identity_reason is not None:
+            rejected_records.append(_rejected_record(row, manifest, identity_reason, input_order))
+            continue
         canonical_smiles, molecule, structure_reason = _canonical_parent(
             row[manifest.smiles_column]
         )
@@ -939,12 +964,6 @@ def validate_activity_dataset(
             continue
 
         record = _source_record(row, manifest, canonical_smiles)
-        record.update(
-            {
-                name: _evidence_text(row[name])
-                for name in evidence_columns
-            }
-        )
         record["normalized_value"] = normalized_value
         if canonical_smiles not in scaffold_cache:
             scaffold_cache[canonical_smiles] = _scaffold_identity(molecule)
@@ -1035,7 +1054,7 @@ def validate_activity_dataset(
             *([_REPLICATE_EVIDENCE_COLUMN] if include_replicates else []),
         ],
     )
-    rejected = pd.DataFrame(rejected_records, columns=_REJECTED_COLUMNS)
+    rejected = pd.DataFrame(rejected_records, columns=[*_REJECTED_COLUMNS, *evidence_columns])
     unique_molecules = len(accepted)
     unique_scaffolds = accepted["scaffold_smiles"].nunique(dropna=False)
     rejected_by_reason = dict(Counter(rejected["rejection_reason"].tolist()))
@@ -1149,7 +1168,9 @@ def _accepted_snapshot(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _rejected_snapshot(frame: pd.DataFrame) -> pd.DataFrame:
-    return _snapshot_columns(frame, _REJECTED_COLUMNS, "rejected")
+    columns = [*_REJECTED_COLUMNS,
+               *(name for name in _SUPPORTED_EVIDENCE_COLUMNS if name in frame.columns)]
+    return _snapshot_columns(frame, columns, "rejected")
 
 
 def _validated_content_sha256(accepted: pd.DataFrame) -> str:
