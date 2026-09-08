@@ -114,6 +114,12 @@ class ActivityPredictor:
 
         for p in possible_paths:
             if p.exists():
+                # A historical filename does not turn a registered prepared
+                # model into a legacy checkpoint or imply global activation.
+                metadata = self._get_model_info_for_checkpoint(p)
+                if (metadata is not None
+                        and metadata.get("scientific_readiness", "legacy_unvalidated") != "legacy_unvalidated"):
+                    continue
                 return p, None
         return None, None
 

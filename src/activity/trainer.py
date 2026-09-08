@@ -54,8 +54,10 @@ def get_best_model():
     if active is not None:
         return active
 
-    models = registry.list()
-    return models[0] if models else None
+    # Registration is not global activation. Prepared endpoint models (including
+    # family members) require selection; only historical models may auto-discover.
+    return next((model for model in registry.list()
+                 if model.get("scientific_readiness", "legacy_unvalidated") == "legacy_unvalidated"), None)
 
 def get_best_model_path():
     model = get_best_model()
