@@ -143,9 +143,13 @@ class WorkflowRunSession:
     def step_count(self) -> int:
         return len(self.steps)
 
-    def start(self) -> None:
+    def start(self, *, resume_claimed: bool = False) -> None:
         if self.started:
             raise SessionLifecycleError("workflow session has already started")
+        if resume_claimed:
+            if not self.dynamic:
+                raise SessionLifecycleError("only dynamic sessions accept claimed continuation")
+            self._start_run_persisted = True
 
         from src.agent.orchestrators.base import WorkflowState
 
@@ -235,6 +239,26 @@ class WorkflowRunSession:
             },
         )
 
+    def restore_observations(self, results: list[ToolResult], tool_attempt_count: int) -> None:
+        """Install prevalidated settled observations after the caller's atomic claim."""
+        self._require_active()
+        if not self.dynamic or self.steps or self.results:
+            raise SessionLifecycleError("restoration requires a fresh dynamic session")
+        for result in results:
+            evidence_id = self.ledger.register_tool_result(
+                result.quality['step_id'], result.provenance.input_digest, result)
+            if evidence_id != result.quality['evidence_id']:
+                raise SessionLifecycleError("restored evidence identity changed")
+            self.results.append(result)
+            if result.success:
+                self.outputs[result.quality['output_key']] = result.data
+            self.state.warnings.extend(result.warnings)
+            self.state.artifacts.extend(a.to_dict() for a in result.artifacts)
+            if result.error:
+                self.state.errors.append({'step': result.quality['step_id'],
+                    'tool': result.tool_name, 'error': result.error.to_dict()})
+        self._tool_attempt_count = tool_attempt_count
+
     def append_step(self, step: WorkflowStep) -> None:
         """Authorize one already-gated model action, without a precompiled plan."""
         self._require_active()
@@ -259,7 +283,7 @@ class WorkflowRunSession:
             result.outcome = outcome
             result.success = outcome == RunOutcome.COMPLETED
             result.partial = outcome == RunOutcome.PARTIAL
-        result.error = error or result.error
+        result.error = error if result.success else error or result.error
         result.metadata.update(metadata or {})
         result.message = "Agent decision run " + result.outcome.value
         self._final_result, self._final_message = result, result.message
@@ -328,6 +352,11 @@ class WorkflowRunSession:
                 result,
                 trusted_checkpoint=journal.checkpoint_reused,
             )
+            if self.dynamic:
+                result.quality.update({key: step.metadata.get(key) for key in (
+                    "input_evidence_ids", "operation_key", "request_input_digest")})
+                result.provenance = replace(result.provenance,
+                    output_digest=EvidenceLedger.output_digest(result.data))
             candidate_source = step.metadata.get("candidate_source")
             if candidate_source and result.success:
                 result = align_candidate_results(
@@ -784,7 +813,8 @@ class WorkflowRunSession:
             message=message,
             final_answer=final_answer,
             metadata={
-                "step_count": len(self.steps),
+                "step_count": (len(self.results) + len(self.steps) - self.next_index
+                               if self.dynamic else len(self.steps)),
                 "completed_count": len(self.results),
                 "tool_attempt_count": self.tool_attempt_count,
                 "reused_steps": self.reused_steps,

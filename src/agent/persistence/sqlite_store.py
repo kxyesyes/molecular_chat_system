@@ -231,6 +231,40 @@ class SQLiteAgentStateStore:
                 (_json_dump(merged), time.time(), trace_id),
             )
 
+    def transition_decision_continuation(
+        self, trace_id: str, *, user_id: str, session_id: str,
+        expected: dict | None, replacement: dict, claim: bool,
+    ) -> bool:
+        """CAS a waiting continuation across processes; never replay an active run.
+
+        Publishing is idempotent. Claiming is deliberately single-use, including
+        after an uncertain commit: the caller must not dispatch on uncertainty.
+        """
+        if not user_id or not session_id or redact_sensitive(replacement) != replacement:
+            return False
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM agent_runs WHERE trace_id = ?", (trace_id,)
+            ).fetchone()
+            if row is None or row['user_id'] != user_id or row['session_id'] != session_id:
+                return False
+            metadata = _json_load(row['metadata_json'], {})
+            current = metadata.get('decision_continuation')
+            if not claim and current == replacement and row['status'] == 'waiting_for_input':
+                return True
+            statuses = {'waiting_for_input'} if claim else {'partial', 'rejected'}
+            if current != expected or row['status'] not in statuses:
+                return False
+            if claim and (not current or current.get('claimed_by')):
+                return False
+            metadata['decision_continuation'] = replacement
+            connection.execute(
+                "UPDATE agent_runs SET status=?, metadata_json=?, updated_at=? WHERE trace_id=?",
+                ('running' if claim else 'waiting_for_input', _json_dump(metadata), time.time(), trace_id),
+            )
+            return True
+
     def get_run(self, trace_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(

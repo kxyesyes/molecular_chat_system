@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from dataclasses import replace
 from typing import Any
 
@@ -13,6 +14,11 @@ class EvidenceLedger:
         self.trace_id = trace_id
         self._records: dict[str, dict[str, Any]] = {}
         self._claims: dict[str, ScientificClaim] = {}
+
+    @staticmethod
+    def output_digest(data: Any) -> str:
+        return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False,
+                                         allow_nan=False).encode('utf-8')).hexdigest()
 
     def prepare_provenance(
         self,
@@ -62,6 +68,9 @@ class EvidenceLedger:
                 and not provenance.fallback_used
             ),
         }
+        if result.quality.get('request_input_digest') is not None:
+            payload['input_binding'] = {name: deepcopy(result.quality.get(name)) for name in (
+                'request_input_digest', 'input_evidence_ids', 'operation_key')}
         digest = hashlib.sha256(
             json.dumps(
                 payload,
@@ -71,11 +80,11 @@ class EvidenceLedger:
             ).encode("utf-8")
         ).hexdigest()
         evidence_id = f"evidence-{digest[:20]}"
-        self._records[evidence_id] = {"evidence_id": evidence_id, **payload}
+        self._records[evidence_id] = deepcopy({"evidence_id": evidence_id, **payload})
         return evidence_id
 
     def get(self, evidence_id: str) -> dict[str, Any]:
-        return dict(self._records[evidence_id])
+        return deepcopy(self._records[evidence_id])
 
     def accept_claim(self, claim: ScientificClaim) -> None:
         missing = [
@@ -98,4 +107,4 @@ class EvidenceLedger:
         return dict(self._claims)
 
     def to_list(self) -> list[dict[str, Any]]:
-        return [dict(self._records[key]) for key in sorted(self._records)]
+        return [deepcopy(self._records[key]) for key in sorted(self._records)]

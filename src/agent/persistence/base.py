@@ -11,6 +11,11 @@ class AgentStateStore(Protocol):
 
     def get_run(self, trace_id: str) -> dict[str, Any] | None: ...
 
+    def transition_decision_continuation(
+        self, trace_id: str, *, user_id: str, session_id: str,
+        expected: dict | None, replacement: dict, claim: bool,
+    ) -> bool: ...
+
     def update_run_metadata(
         self, trace_id: str, metadata: dict[str, Any]
     ) -> None: ...

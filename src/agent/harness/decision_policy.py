@@ -111,15 +111,18 @@ def scientific_answer(results: list[ToolResult]) -> str:
 
 
 def verify_finish(decision, session, required_tools, request_kind):
+    from .decision_inputs import active_results, verify_observation_integrity
     if decision.response_kind != request_kind:
         raise DecisionBoundaryError('finish_kind_mismatch')
     if request_kind == 'chat':
         if session.results or required_tools:
             raise DecisionBoundaryError('scientific_obligations_unfulfilled')
         return
-    records = {r.quality.get('evidence_id'): r for r in session.results}
+    for result in session.results:
+        verify_observation_integrity(result, session)
+    records = {r.quality.get('evidence_id'): r for r in active_results(session)}
     if any(eid not in records or not usable(records[eid]) for eid in decision.evidence_ids):
         raise DecisionBoundaryError('evidence_not_usable_in_this_trace')
-    completed = {r.tool_name for r in session.results if usable(r)}
+    completed = {r.tool_name for r in active_results(session) if usable(r)}
     if not required_tools <= completed:
         raise DecisionBoundaryError('scientific_obligations_unfulfilled')
