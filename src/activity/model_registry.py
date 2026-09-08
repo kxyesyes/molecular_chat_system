@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import copy
 import hashlib
 import json
 import logging
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 REGISTRY_STATE_FILE = "registry_state.json"
 REGISTRY_LOCK_FILE = "registry_state.lock"
-REGISTRY_STATE_VERSION = 1
+REGISTRY_STATE_VERSION = 3
 DEFAULT_LOCK_TIMEOUT_SECONDS = 10.0
 DEFAULT_LOCK_POLL_SECONDS = 0.05
 
@@ -44,6 +45,142 @@ _TASK_TYPES = {"regression", "classification"}
 _MODEL_FORMATS = {"pytorch_state_dict"}
 _INVALID_ENDPOINTS = {"unknown", "unspecified"}
 _REGISTRY_THREAD_LOCK = threading.RLock()
+
+_ENDPOINT_REQUIRED_FIELDS = frozenset({
+    "target_id", "target_name", "endpoint_key", "label_transform",
+    "prepared_dataset_sha256", "split_counts", "split_scaffold_counts",
+    "test_metrics", "model_card_file", "model_card_sha256", "scientific_readiness",
+})
+# Trainer may merge only these extension fields, never overwrite base provenance.
+ENDPOINT_METADATA_FIELDS = _ENDPOINT_REQUIRED_FIELDS | frozenset({
+    "demo_mode", "fallback_used",
+})
+
+
+def _artifact_basename(value: Any, field: str) -> str:
+    if (not isinstance(value, str) or not value or value in {".", ".."}
+            or any(c in value for c in '/\\:<>"|?*')
+            or any(ord(c) < 32 for c in value)
+            or value.endswith((".", " ")) or Path(value).name != value):
+        raise ValueError(f"Invalid {field}")
+    if value.split(".", 1)[0].rstrip().upper() in {
+        "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+        *(f"COM{i}" for i in "123456789¹²³"),
+        *(f"LPT{i}" for i in "123456789¹²³"),
+    }:
+        raise ValueError(f"Invalid {field}: reserved device name")
+    return value
+
+
+def _finite_metric(value: Any) -> bool:
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except (OverflowError, ValueError):
+        return False
+
+
+def validate_endpoint_metadata(metadata: dict) -> dict:
+    """Deep-copy and validate conditional endpoint evidence, without artifact I/O.
+
+    endpoint/units describe model outputs (not pre-transform source labels).
+    Ordinary legacy metadata is passed through unchanged. Artifact authenticity
+    remains the registry's responsibility; this helper never loads weights.
+    """
+    if not isinstance(metadata, dict):
+        raise ValueError("Invalid model metadata")
+    result = copy.deepcopy(metadata)
+    claim = bool((_ENDPOINT_REQUIRED_FIELDS - {"scientific_readiness"}) & result.keys())
+    readiness = result.get("scientific_readiness", "legacy_unvalidated")
+    if not claim and readiness == "legacy_unvalidated":
+        return result
+    if readiness != "endpoint_ready" or not _ENDPOINT_REQUIRED_FIELDS <= result.keys():
+        raise ValueError("Incomplete endpoint_ready metadata")
+    if result.get("split_strategy") != "scaffold":
+        raise ValueError("Invalid split_strategy: endpoint_ready requires scaffold")
+
+    # Reuse the dataset contract's canonicalization, but keep legacy reads light.
+    from .dataset_contract import (
+        _canonical_endpoint, _canonical_manifest_unit, _identity_component,
+        _normalized_choice, _validate_metadata_string,
+    )
+
+    for field in ("target_id", "target_name", "endpoint_key", "label_transform", "task_type"):
+        result[field] = _validate_metadata_string(result.get(field), field)
+    result["target_id"] = _identity_component(result["target_id"], "target_id")
+    result["endpoint"] = _canonical_endpoint(result.get("endpoint"), "endpoint")
+    result["units"] = _canonical_manifest_unit(result.get("units"), "units")
+    result["task_type"] = _normalized_choice(result["task_type"])
+    result["label_transform"] = _normalized_choice(result["label_transform"])
+    task, transform = result["task_type"], result["label_transform"]
+    allowed = {"regression": {"identity", "molar_to_pactivity"},
+               "classification": {"identity", "binary_threshold"}}
+    if task not in allowed or transform not in allowed[task]:
+        raise ValueError("Invalid label_transform or task_type")
+    endpoint, units = result["endpoint"], result["units"]
+    pactivity = {"pIC50", "pKi", "pEC50", "pKd"}
+    if task == "regression":
+        if units not in pactivity | {"M", "mM", "uM", "nM", "pM"}:
+            raise ValueError("Invalid regression units")
+        if (units in pactivity and endpoint != units) or (endpoint in pactivity and units != endpoint):
+            raise ValueError("Inconsistent endpoint units")
+        if transform == "molar_to_pactivity" and units not in pactivity:
+            raise ValueError("Invalid molar_to_pactivity output units")
+    elif units != ("probability" if transform == "binary_threshold" else "binary"):
+        raise ValueError("Invalid classification output units")
+    key = ":".join(_identity_component(result[field], field)
+                   for field in ("target_id", "endpoint", "units", "task_type"))
+    if _normalized_choice(result["endpoint_key"]) != key:
+        raise ValueError("endpoint_key does not match model identity")
+    result["endpoint_key"] = key
+    for field, expected in (("output_endpoint", endpoint), ("output_units", units)):
+        if field in result and result[field] != expected:
+            raise ValueError(f"Inconsistent {field}")
+    for field in ("dataset_sha256", "weights_sha256", "prepared_dataset_sha256", "model_card_sha256"):
+        value = result.get(field)
+        if not isinstance(value, str) or not _SHA256_PATTERN.fullmatch(value):
+            raise ValueError(f"Invalid {field}")
+        result[field] = value.lower()
+    card = _artifact_basename(result["model_card_file"], "model_card_file")
+    if (card.casefold() in {REGISTRY_STATE_FILE, REGISTRY_LOCK_FILE, "active_model.json"}
+            or card.casefold().endswith("_info.json")
+            or card.casefold() == str(result.get("weights_file", "")).casefold()):
+        raise ValueError("model_card_file collides with registry artifact")
+    for field in ("demo_mode", "fallback_used"):
+        if result.get(field, False) is not False:
+            raise ValueError(f"Invalid {field}: endpoint_ready requires false")
+    for field in ("split_counts", "split_scaffold_counts"):
+        counts = result[field]
+        if (not isinstance(counts, dict) or set(counts) != {"train", "validation", "test"}
+                or any(type(n) is not int or n <= 0 for n in counts.values())):
+            raise ValueError(f"Invalid {field}: expected positive split counts")
+    if any(result["split_scaffold_counts"][s] > n for s, n in result["split_counts"].items()):
+        raise ValueError("split_scaffold_counts exceeds rows")
+    metrics = result["test_metrics"]
+    required = {"rmse", "mae", "r2"} if task == "regression" else {"roc_auc", "pr_auc", "balanced_accuracy"}
+    if not isinstance(metrics, dict) or not required <= metrics.keys():
+        raise ValueError("Incomplete test_metrics")
+    for name, value in metrics.items():
+        if name == "confusion_matrix" and task == "classification":
+            continue
+        if not _finite_metric(value):
+            raise ValueError("Invalid test_metrics: expected finite numbers")
+    if task == "regression":
+        if metrics["rmse"] < 0 or metrics["mae"] < 0 or metrics["r2"] > 1:
+            raise ValueError("Invalid regression test_metrics")
+    else:
+        if any(not 0 <= metrics[name] <= 1 for name in required):
+            raise ValueError("Invalid classification test_metrics")
+        matrix = metrics.get("confusion_matrix")
+        if (not isinstance(matrix, dict) or set(matrix) != {"tn", "fp", "fn", "tp"}
+                or any(type(n) is not int or n < 0 for n in matrix.values())
+                or sum(matrix.values()) != result["split_counts"]["test"]
+                or matrix["tn"] + matrix["fp"] == 0 or matrix["fn"] + matrix["tp"] == 0):
+            raise ValueError("Invalid classification confusion_matrix")
+    try:
+        json.dumps(result, allow_nan=False)
+    except (TypeError, ValueError):
+        raise ValueError("Model metadata is not JSON serializable") from None
+    return result
 
 
 def _configured_positive_float(name: str, default: float) -> float:
@@ -184,16 +321,7 @@ class ActivityModelRegistry:
 
     @staticmethod
     def _validate_weights_basename(weights_file: Any) -> str:
-        if not isinstance(weights_file, str) or not weights_file:
-            raise ValueError("Invalid weights_file")
-        if (
-            Path(weights_file).is_absolute()
-            or Path(weights_file).name != weights_file
-            or "/" in weights_file
-            or "\\" in weights_file
-        ):
-            raise ValueError("Invalid weights_file")
-        return weights_file
+        return _artifact_basename(weights_file, "weights_file")
 
     def _resolve_weights_name(self, weights_file: Any) -> Path:
         safe_weights_file = self._validate_weights_basename(weights_file)
@@ -214,6 +342,7 @@ class ActivityModelRegistry:
     def _validate_metadata(self, metadata: Any) -> Dict[str, Any]:
         if not isinstance(metadata, dict) or not _REQUIRED_FIELDS.issubset(metadata):
             raise ValueError("Incomplete model metadata")
+        metadata = validate_endpoint_metadata(metadata)
 
         self._validate_model_id(metadata.get("model_id"))
         weights_path = self._resolve_weights_name(metadata.get("weights_file"))
@@ -248,7 +377,80 @@ class ActivityModelRegistry:
             json.dumps(metadata, ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError):
             raise ValueError("Model metadata is not JSON serializable") from None
+        if metadata.get("scientific_readiness") == "endpoint_ready":
+            self._verify_model_card(metadata)
         return dict(metadata)
+
+    def _resolve_card(self, name: str) -> Path:
+        _artifact_basename(name, "model_card_file")
+        candidate = self.models_dir / name
+        try:
+            resolved = candidate.resolve(strict=True)
+            if (candidate.is_symlink() or resolved.parent != self.models_dir
+                    or not resolved.is_file() or resolved.stat().st_nlink != 1):
+                raise ValueError("Invalid model_card_file")
+            return resolved
+        except (OSError, RuntimeError):
+            raise ValueError("Model card is missing or unavailable") from None
+
+    def _verify_model_card(self, metadata: dict) -> dict:
+        card_path = self._resolve_card(metadata["model_card_file"])
+        try:
+            content = card_path.read_bytes()
+            if hashlib.sha256(content).hexdigest() != metadata["model_card_sha256"]:
+                raise ValueError("model_card_sha256 mismatch")
+            from .dataset_contract import _reject_duplicate_object_members
+
+            card = json.loads(content, object_pairs_hook=_reject_duplicate_object_members)
+            if not isinstance(card, dict):
+                raise ValueError("Invalid model card")
+            # Validate identity with the same pure rules without requiring the
+            # impossible self-referential card digest in the card itself.
+            normalized = validate_endpoint_metadata(dict(
+                card, model_card_file=metadata["model_card_file"],
+                model_card_sha256=metadata["model_card_sha256"],
+            ))
+            fields = ("model_id", "weights_file", "target_id", "target_name", "endpoint_key", "endpoint",
+                      "units", "task_type", "label_transform", "weights_sha256",
+                      "prepared_dataset_sha256", "dataset_sha256", "split_counts",
+                      "split_scaffold_counts", "test_metrics", "scientific_readiness",
+                      "random_seed", "split_strategy", "model_config", "model_format", "metrics")
+            if any(normalized.get(field) != metadata.get(field) for field in fields):
+                raise ValueError("Model card content does not match metadata")
+            if any(card.get(field) is not False for field in ("demo_mode", "fallback_used")):
+                raise ValueError("Model card demo/fallback flags must be false")
+            return normalized
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            raise ValueError("Invalid model card") from None
+
+    def _validate_artifact_ownership(self, models: dict) -> None:
+        """Reserve paths symmetrically, including records added after a card."""
+        reserved = (REGISTRY_STATE_FILE, REGISTRY_LOCK_FILE, "active_model.json")
+        owners = {name.casefold() for name in reserved}
+
+        def resolved_key(name: str) -> str:
+            try:
+                resolved = (self.models_dir / name).resolve(strict=False)
+            except (OSError, RuntimeError):
+                raise ValueError("Invalid registry artifact path") from None
+            if resolved.parent != self.models_dir:
+                raise ValueError("Registry artifact path escapes model directory")
+            return str(resolved).casefold()
+
+        resolved_owners = {resolved_key(name) for name in reserved}
+        for model_id, record in models.items():
+            names = [f"{model_id}_info.json", record["weights_file"]]
+            if "model_card_file" in record:
+                names.append(_artifact_basename(record["model_card_file"], "model_card_file"))
+            for name in names:
+                key = name.casefold()
+                if key in owners:
+                    raise ValueError("Registry artifact path collision")
+                actual_key = resolved_key(name)
+                if actual_key in resolved_owners:
+                    raise ValueError("Registry resolved artifact path collision")
+                owners.add(key)
+                resolved_owners.add(actual_key)
 
     @staticmethod
     def _new_state() -> Dict[str, Any]:
@@ -256,6 +458,9 @@ class ActivityModelRegistry:
             "version": REGISTRY_STATE_VERSION,
             "models": {},
             "active_model_id": None,
+            "active_models_by_endpoint": {},
+            "family_bundles": {},
+            "active_family_bundles": {},
         }
 
     def _atomic_write_json_unlocked(
@@ -302,7 +507,8 @@ class ActivityModelRegistry:
 
         if (
             not isinstance(payload, dict)
-            or payload.get("version") != REGISTRY_STATE_VERSION
+            or type(payload.get("version")) is not int
+            or payload.get("version") not in {1, 2, REGISTRY_STATE_VERSION}
             or not isinstance(payload.get("models"), dict)
         ):
             raise ValueError("Invalid activity model registry state")
@@ -318,16 +524,41 @@ class ActivityModelRegistry:
                 raise ValueError("Invalid activity model registry state")
             seen_weights.add(weights_file)
 
+        self._validate_artifact_ownership(models)
+
         active_model_id = payload.get("active_model_id")
         if active_model_id is not None:
             self._validate_model_id(active_model_id)
             if active_model_id not in models:
                 raise ValueError("Invalid activity model registry state")
-        return {
+        mapping = {} if payload["version"] == 1 else payload.get("active_models_by_endpoint")
+        if not isinstance(mapping, dict):
+            raise ValueError("Invalid active_models_by_endpoint")
+        for key, model_id in mapping.items():
+            if (not isinstance(key, str) or not isinstance(model_id, str)
+                    or model_id not in models):
+                raise ValueError("Invalid active_models_by_endpoint")
+            record = validate_endpoint_metadata(models[model_id])
+            if record.get("scientific_readiness") != "endpoint_ready" or record.get("endpoint_key") != key:
+                raise ValueError("Invalid active_models_by_endpoint endpoint_key")
+        bundles = {} if payload["version"] < 3 else payload.get("family_bundles")
+        active_bundles = {} if payload["version"] < 3 else payload.get("active_family_bundles")
+        # Preserve lightweight legacy reads until a family bundle is present.
+        if bundles or active_bundles or not isinstance(bundles, dict) or not isinstance(active_bundles, dict):
+            from .family_models import validate_bundle_mappings
+
+            validate_bundle_mappings(bundles, active_bundles)
+        state = {
             "version": REGISTRY_STATE_VERSION,
             "models": dict(models),
             "active_model_id": active_model_id,
+            "active_models_by_endpoint": dict(mapping),
+            "family_bundles": dict(bundles),
+            "active_family_bundles": dict(active_bundles),
         }
+        if payload["version"] != REGISTRY_STATE_VERSION:
+            self._atomic_write_json_unlocked(self.state_path, state)
+        return state
 
     def _load_legacy_active_unlocked(self, models: Dict[str, Dict[str, Any]]) -> Optional[str]:
         if not self._legacy_active_path.exists() or self._legacy_active_path.is_symlink():
@@ -388,6 +619,7 @@ class ActivityModelRegistry:
                     raise ValueError("Invalid model registry sidecar")
                 if metadata["weights_file"] in seen_weights:
                     raise ValueError("Duplicate weights_file in model registry sidecars")
+                self._validate_artifact_ownership({**state["models"], model_id: metadata})
                 state["models"][model_id] = metadata
                 seen_weights.add(metadata["weights_file"])
             except (OSError, json.JSONDecodeError, ValueError):
@@ -440,6 +672,7 @@ class ActivityModelRegistry:
                 for item in state["models"].values()
             ):
                 raise ValueError("weights_file is already registered")
+            self._validate_artifact_ownership({**state["models"], model_id: validated})
             state["models"][model_id] = validated
             self._atomic_write_json_unlocked(self.state_path, state)
             self._write_sidecar_best_effort(validated)
@@ -512,6 +745,29 @@ class ActivityModelRegistry:
                 logger.warning("Ignoring invalid active activity model selection: %s", exc)
                 return None
 
+    def select_for_endpoint(self, endpoint_key: str, model_id: str) -> Dict[str, Any]:
+        with self._transaction():
+            state = self._load_state_unlocked()
+            metadata = self._get_validated_unlocked(state, model_id)
+            if (metadata.get("scientific_readiness") != "endpoint_ready"
+                    or metadata.get("endpoint_key") != endpoint_key):
+                raise ValueError("endpoint_key does not match endpoint_ready model")
+            state["active_models_by_endpoint"][endpoint_key] = metadata["model_id"]
+            self._atomic_write_json_unlocked(self.state_path, state)
+            return metadata
+
+    def get_active_for_endpoint(self, endpoint_key: str) -> Optional[Dict[str, Any]]:
+        with self._transaction():
+            state = self._load_state_unlocked()
+            model_id = state["active_models_by_endpoint"].get(endpoint_key) if isinstance(endpoint_key, str) else None
+            if model_id is None:
+                return None
+            try:
+                return self._get_validated_unlocked(state, model_id)
+            except ValueError:
+                logger.warning("Ignoring invalid endpoint activity model: unavailable")
+                return None
+
     def get_active(self) -> Optional[Dict[str, Any]]:
         with self._transaction():
             state = self._load_state_unlocked()
@@ -523,6 +779,81 @@ class ActivityModelRegistry:
             except ValueError as exc:
                 logger.warning("Ignoring invalid active activity model selection: %s", exc)
                 return None
+
+    def _build_family_bundle_unlocked(self, state, bundle_id, dataset_sha256, descriptor,
+                                      model_ids, dataset_snapshot):
+        from .family_models import TASKS, build_bundle_record
+
+        if model_ids["classification"] == model_ids["regression"]:
+            raise ValueError("Family bundle requires two distinct models")
+        models = {task: self._get_validated_unlocked(state, model_ids[task]) for task in TASKS}
+        if any(item.get("scientific_readiness") != "endpoint_ready" for item in models.values()):
+            raise ValueError("Family bundle requires endpoint_ready models")
+        cards = {task: self._verify_model_card(models[task]) for task in TASKS}
+        return build_bundle_record(bundle_id, dataset_sha256, descriptor, models, cards, dataset_snapshot)
+
+    def register_family_bundle(self, *, bundle_id, family_dataset_path,
+                               classification_model_id, regression_model_id) -> dict:
+        """Verify data outside the lock, then atomically bind current models."""
+        from .family_models import load_bundle_dataset
+
+        bundle_id = self._validate_model_id(bundle_id)
+        # Package verification can take minutes. Its detached evidence does not
+        # require the source to remain available while binding current models.
+        digest, descriptor, snapshot = load_bundle_dataset(family_dataset_path)
+        with self._transaction():
+            state = self._load_state_unlocked()
+            if bundle_id in state["family_bundles"]:
+                raise ValueError("Family bundle is already registered")
+            record = self._build_family_bundle_unlocked(
+                state, bundle_id, digest, descriptor,
+                dict(classification=classification_model_id, regression=regression_model_id), snapshot)
+            state["family_bundles"][bundle_id] = record
+            self._atomic_write_json_unlocked(self.state_path, state)
+            return copy.deepcopy(record)
+
+    def _get_family_bundle_unlocked(self, state, bundle_id):
+        from .family_models import require_pinned_record
+
+        bundle_id = self._validate_model_id(bundle_id)
+        pinned = state["family_bundles"].get(bundle_id)
+        if pinned is None:
+            raise ValueError("Family bundle is not registered")
+        try:
+            record = self._build_family_bundle_unlocked(
+                state, bundle_id, pinned["family_dataset_sha256"], pinned["dataset_evidence"],
+                {task: item["model_id"] for task, item in pinned["models"].items()},
+                pinned["family_dataset_snapshot"])
+            require_pinned_record(record, pinned)
+            return record
+        except (KeyError, TypeError, OSError):
+            raise ValueError("Invalid family bundle evidence") from None
+
+    def select_family_bundle(self, bundle_id) -> dict:
+        """Revalidate both pinned models before one atomic family selection."""
+        with self._transaction():
+            state = self._load_state_unlocked()
+            record = self._get_family_bundle_unlocked(state, bundle_id)
+            state["active_family_bundles"][record["family_id"]] = record["bundle_id"]
+            self._atomic_write_json_unlocked(self.state_path, state)
+            return copy.deepcopy(record)
+
+    def get_active_family_bundle(self, family) -> Optional[dict]:
+        """Verify pinned data evidence and current models, without reopening data.
+
+        Dataset artifacts are checked once at registration. Serving does not
+        depend on retention of private training sources; absence is None and
+        corrupt model/bundle evidence raises instead of falling back.
+        """
+        from .family_contract import resolve_activity_family
+
+        family_id = resolve_activity_family(family)
+        with self._transaction():
+            state = self._load_state_unlocked()
+            bundle_id = state["active_family_bundles"].get(family_id)
+            if bundle_id is None:
+                return None
+            return copy.deepcopy(self._get_family_bundle_unlocked(state, bundle_id))
 
     def _cleanup_artifact_best_effort(self, artifact: Path) -> None:
         try:
@@ -539,13 +870,29 @@ class ActivityModelRegistry:
             metadata = self._get_validated_unlocked(state, model_id)
             weights_path = self._resolve_weights_name(metadata["weights_file"])
             sidecar_path = self._metadata_path(metadata["model_id"])
+            card_path = (self._resolve_card(metadata["model_card_file"])
+                         if metadata.get("scientific_readiness") == "endpoint_ready" else None)
             was_active = state["active_model_id"] == metadata["model_id"]
             del state["models"][metadata["model_id"]]
             if was_active:
                 state["active_model_id"] = None
+            state["active_models_by_endpoint"] = {
+                key: selected for key, selected in state["active_models_by_endpoint"].items()
+                if selected != metadata["model_id"]
+            }
+            state["family_bundles"] = {
+                key: bundle for key, bundle in state["family_bundles"].items()
+                if all(item["model_id"] != model_id for item in bundle["models"].values())
+            }
+            state["active_family_bundles"] = {
+                family: selected for family, selected in state["active_family_bundles"].items()
+                if selected in state["family_bundles"]
+            }
             self._atomic_write_json_unlocked(self.state_path, state)
             self._cleanup_artifact_best_effort(sidecar_path)
             self._cleanup_artifact_best_effort(weights_path)
+            if card_path is not None:
+                self._cleanup_artifact_best_effort(card_path)
             if was_active:
                 self._cleanup_artifact_best_effort(self._legacy_active_path)
         return True

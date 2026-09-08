@@ -230,7 +230,9 @@ last_run.log
 *.faiss
 
 # Project data artifacts that should be provisioned separately
-data/activity/models/
+data/activity/models/**
+!data/activity/models/**/
+!data/activity/models/**/*.md
 data/design_results/
 data/molecular_faiss_index/
 data/molecular_faiss_index.index
@@ -248,6 +250,15 @@ brics/sa*_with_methyl.csv
 # Test caches should stay local even though tests are tracked
 tests/**/__pycache__/
 tests/**/*.pyc
+
+# Private activity datasets and generated training assets (keep documentation)
+data/activity/raw/**
+data/activity/prepared/**
+!data/activity/raw/**/
+!data/activity/prepared/**/
+!data/activity/raw/**/*.md
+!data/activity/prepared/**/*.md
+outputs/activity/
 
 # Stray local encoding marker
 /utf8
