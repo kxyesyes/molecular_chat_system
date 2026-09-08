@@ -10,16 +10,20 @@ loss_metric=MSE (classification uses BCEWithLogitsLoss), random_seed=42.
 No hyperparameter search, automatic retries, activation or restart.
 Validation selects checkpoints; fit_prepared restores best weights and evaluates test once.
 
-- [ ] Test frozen configuration, serial runner, failure reporting, baselines and no activation.
-- [ ] Add scripts/train_family_activity_models.py reusing run_prepared_training and registry.
+- [x] Test frozen configuration, serial runner, failure reporting, baselines and no activation.
+- [x] Add scripts/train_family_activity_models.py reusing run_prepared_training and registry.
   Reports/progress go under ignored outputs; weights/cards/registry into a new ignored run directory.
   Exclusive run directory prevents overwrite/rerun. No raw CSV rows or credentials in reports.
-- [ ] Run tests and independent review before real training.
-- [ ] Verify both packages, run four real jobs serially, persist progress between jobs.
-- [ ] Evaluate train-derived constant baselines on held-out labels after training; never rerun the trained
+- [x] Run tests and independent review before real training.
+- [x] Verify both packages, run four real jobs serially, persist progress between jobs.
+- [x] Evaluate train-derived constant baselines on held-out labels after training; never rerun the trained
   network on test. Report ROC/PR AUC, balanced accuracy, confusion matrix, RMSE/MAE/R² honestly.
-- [ ] Register complete pairs without activation; report incomplete pairs and poor metrics explicitly.
-- [ ] Update handoff, commit only script/tests/docs, no private assets.
+- [x] Register complete pairs without activation; report incomplete pairs and poor metrics explicitly.
+- [x] Update handoff, commit only script/tests/docs, no private assets.
+
+Completed run: baseline-20260908-v1, 928.109 seconds, four models and two inactive bundles.
+96 tests passed, 3 Windows symlink skips. Training code frozen in commit 81ca08b.
+Results and limitations: docs/activity_family_baseline_20260908.md.
 
 This is one frozen baseline, not exhaustive optimization or evidence of clinical utility.
 The trainer does not retain per-molecule held-out outputs: do not invent joint classification/regression

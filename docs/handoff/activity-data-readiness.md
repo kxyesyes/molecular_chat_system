@@ -1,7 +1,33 @@
-# 活性数据就绪层实施检查点：2026-09-07
+# 活性数据就绪层实施检查点：2026-09-08
 
 分支：`codex/activity-data-readiness`。在独立 `scientific-assets` 工作树实施。
 原始项目混杂工作树未改动，未合并 main。
+
+## 当前阶段：四个真实基线模型已训练，尚未启用
+
+2026-09-08 按用户批准的冻结参数，在 RTX 5060 Laptop GPU 上完成
+`baseline-20260908-v1`：PDE 分类/回归、BuChE 分类/回归共四个真实 RG-MPNN。
+训练脚本与协议先冻结提交 `81ca08b`，训练期间源码未修改。
+总耗时 928.109 秒，四任务 completed，两个配对组注册成功，0 失败、0 自动重试。
+每模型恢复 validation 最佳权重后仅评估 test 一次；未重新运行测试推理。
+
+结果和模型 ID 详见 [真实训练报告](../activity_family_baseline_20260908.md)。
+PDE 分类测试 ROC-AUC=0.712055、平衡准确率=0.516094，区分负类较弱；
+BuChE 分类为 0.818198 / 0.790939。PDE / BuChE 回归 RMSE 为 1.703752 / 0.926840，
+R² 为 0.203562 / 0.229635。均优于常数基线，但不能称为高精度预测或部署质量通过。
+
+本轮增加 `scripts/train_family_activity_models.py`、`tests/test_family_training_run.py`、
+冻结计划和报告，更新训练说明；未修改业务训练算法。
+聚焦测试 **96 passed、3 skipped**（Windows 符号链接权限），CUDA 网络训练冒烟及
+compileall 通过。独立审查通过；真实权重、模型卡和注册记录验证通过，demo/fallback=false。
+
+本地资产位于 `outputs/activity_training/baseline-20260908-v1/` 和
+`data/activity/models/baseline-20260908-v1/`，不提交 Git。
+四个模型未激活，两个模型组无 active 选择；没有重启或更改原始项目。
+联合分类/回归测试一致性尚不可获得（未保留逐行输出），真实权重在线联调尚未执行。
+下一步先隔离接入验收，再决定是否启用；不得拿本次已查看的 test 反复调参选模。
+
+以下各节为历史检查点，关于“尚未真实训练”的表述仅对应当时阶段。
 
 ## 最新需求补充：PDE / BuChE 家族双模型
 
@@ -17,7 +43,7 @@
 `docs/superpowers/plans/2026-09-07-family-activity-data-contract.md`，
 操作说明为 `docs/activity_family_data.md`。
 
-## 当前阶段：家族预测 API / Agent / 前端接入
+## 历史检查点：家族预测 API / Agent / 前端接入
 
 计划：`docs/superpowers/plans/2026-09-07-family-activity-integration.md`。
 用法已并入 `docs/activity_family_models.md`。仍在独立 scientific-assets 工作树，
