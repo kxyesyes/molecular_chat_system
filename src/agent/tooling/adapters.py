@@ -40,7 +40,7 @@ class ToolAdapter(ABC):
             "capabilities": sorted(self.spec.capabilities),
         }
 
-    def execute(self, input_data: Any) -> ToolResult:
+    def execute(self, input_data: Any, *, allow_retry: bool = True) -> ToolResult:
         if not self._available:
             return ToolResult.error_result(
                 self.spec.name,
@@ -59,14 +59,15 @@ class ToolAdapter(ABC):
 
         policy = self.spec.retry_policy
         last_result: ToolResult | None = None
-        for attempt in range(1, policy.max_attempts + 1):
+        max_attempts = policy.max_attempts if allow_retry else 1
+        for attempt in range(1, max_attempts + 1):
             last_result = self._execute_once(payload)
             if last_result.success:
                 return self._validate_output(last_result)
             error_code = last_result.error.code.value if last_result.error else ""
             explicitly_retryable = last_result.quality.get("retryable")
             if (
-                attempt >= policy.max_attempts
+                attempt >= max_attempts
                 or error_code not in policy.retryable_error_codes
                 or explicitly_retryable is False
             ):

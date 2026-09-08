@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -82,6 +82,8 @@ class WorkflowRunSession:
         tools: Mapping[str, Any],
         continue_on_error: bool = False,
         idempotency_key: str | None = None,
+        *,
+        dynamic: bool = False,
     ) -> None:
         self.orchestrator = orchestrator
         self.context = context
@@ -89,6 +91,9 @@ class WorkflowRunSession:
         self.tools = tools
         self.continue_on_error = continue_on_error
         self.idempotency_key = idempotency_key
+        if dynamic and (steps or idempotency_key):
+            raise SessionLifecycleError("dynamic sessions require an empty new run")
+        self.dynamic = dynamic
         self._session_attempt_id = uuid4().hex
         self._started = False
         self._finished = False
@@ -174,7 +179,8 @@ class WorkflowRunSession:
                     "user_id": context.user_id,
                     "session_id": context.session_id,
                     "metadata": context.metadata,
-                }
+                },
+                **({"exclusive": True} if self.dynamic else {}),
             )
             self._start_run_persisted = True
         elif not self.orchestrator.state_store:
@@ -187,6 +193,26 @@ class WorkflowRunSession:
             "Agent workflow started",
             progress=0.0,
         )
+        self._emit_initial_planning(context)
+
+        self.context = context
+        self.results = []
+        self.state = state
+        self.ledger = ledger
+        self.outputs = state.outputs
+        self.reused_steps = []
+        self.checkpoint_warnings = []
+        self.skipped_steps = []
+        self.semantic_evidence = []
+        self._next_index = 0
+        self._executed_indices = set()
+        self._step_journals = {}
+        self._terminal_reached = not self.steps and not self.dynamic
+        self._started = True
+
+    def _emit_initial_planning(self, context: AgentContext) -> None:
+        if self.dynamic:
+            return
         self._emit_once(
             "start:planning_started",
             context,
@@ -209,20 +235,36 @@ class WorkflowRunSession:
             },
         )
 
-        self.context = context
-        self.results = []
-        self.state = state
-        self.ledger = ledger
-        self.outputs = state.outputs
-        self.reused_steps = []
-        self.checkpoint_warnings = []
-        self.skipped_steps = []
-        self.semantic_evidence = []
-        self._next_index = 0
-        self._executed_indices = set()
-        self._step_journals = {}
-        self._terminal_reached = not self.steps
-        self._started = True
+    def append_step(self, step: WorkflowStep) -> None:
+        """Authorize one already-gated model action, without a precompiled plan."""
+        self._require_active()
+        if (not self.dynamic or self._terminal_reached
+                or self._next_index != len(self.steps)):
+            raise SessionLifecycleError("session cannot accept another action")
+        if any(previous.name == step.name for previous in self.steps):
+            raise SessionLifecycleError("action identifier must be unique")
+        self.steps.append(step)
+
+    def finish_dynamic(
+        self, final_answer: str, *, outcome: RunOutcome | None = None,
+        error: AgentExecutionError | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AgentResult:
+        self._require_active()
+        if not self.dynamic or (self._next_index != len(self.steps) and self._runtime_error is None):
+            raise SessionLifecycleError("dynamic action must settle before finish")
+        result, _ = self._build_final_result()
+        result.final_answer = final_answer
+        if outcome is not None:
+            result.outcome = outcome
+            result.success = outcome == RunOutcome.COMPLETED
+            result.partial = outcome == RunOutcome.PARTIAL
+        result.error = error or result.error
+        result.metadata.update(metadata or {})
+        result.message = "Agent decision run " + result.outcome.value
+        self._final_result, self._final_message = result, result.message
+        self._terminal_reached = True
+        return self.finish()
 
     def execute_step(self, index: int) -> StepAdvance:
         self._require_active()
@@ -261,6 +303,15 @@ class WorkflowRunSession:
         result = journal.result
         assert result is not None
         if not journal.normalized:
+            if self.dynamic:
+                if result.tool_name != step.tool_name:
+                    result = ToolResult.error_result(
+                        step.tool_name, AgentErrorCode.INVALID_OUTPUT,
+                        "Tool result identity does not match dispatched action",
+                    )
+                result.quality = {**result.quality, "tool_version": journal.tool_version}
+                if result.provenance is not None:
+                    result.provenance = replace(result.provenance, tool_version=journal.tool_version)
             if (
                 journal.checkpoint_warning
                 and journal.checkpoint_warning not in result.warnings
@@ -370,11 +421,11 @@ class WorkflowRunSession:
             event_type,
             result.message or f"{step.name} completed",
             tool=step.tool_name,
-            progress=(index + 1) / self.total_steps,
+            progress=None if self.dynamic else (index + 1) / self.total_steps,
             payload=result.to_legacy_dict(),
         )
 
-        terminal = index == len(self.steps) - 1
+        terminal = not self.dynamic and index == len(self.steps) - 1
         reason = "last_step" if terminal else None
         if not result.success and not step.continue_after_failure():
             terminal = True
@@ -485,7 +536,7 @@ class WorkflowRunSession:
             TaskEventType.TOOL_STARTED,
             f"Running {step.name}",
             tool=step.tool_name,
-            progress=index / self.total_steps,
+            progress=None if self.dynamic else index / self.total_steps,
         )
         if not journal.input_hash:
             journal.input_hash = self.orchestrator._input_hash(
@@ -588,7 +639,7 @@ class WorkflowRunSession:
                     "tool_name": step.tool_name,
                     "status": persisted_status,
                     "input": journal.input_data,
-                    "output": legacy_result if result.success else None,
+                    "output": legacy_result if result.success or self.dynamic else None,
                     "error": legacy_result.get("error"),
                     "elapsed_ms": result.elapsed_ms,
                 }
@@ -600,7 +651,7 @@ class WorkflowRunSession:
                 journal,
                 status=persisted_status,
                 checkpoint_phase="result",
-                output=legacy_result if result.success else None,
+                output=legacy_result if result.success or self.dynamic else None,
                 error=legacy_result.get("error"),
             )
             journal.checkpoint_saved = True
@@ -792,6 +843,13 @@ class WorkflowRunSession:
             return
         event_bus = self.orchestrator.event_bus
         if event_bus is not None:
+            if self.dynamic and kwargs.get("tool") and self._next_index < len(self.steps):
+                step = self.steps[self._next_index]
+                kwargs["payload"] = {
+                    **(kwargs.get("payload") or {}),
+                    **{name: step.metadata.get(name)
+                       for name in ("decision_id", "tool_call_id", "round")},
+                }
             event_bus.emit(
                 trace_id=context.trace_id,
                 event=event,

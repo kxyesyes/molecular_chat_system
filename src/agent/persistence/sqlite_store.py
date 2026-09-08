@@ -159,17 +159,10 @@ class SQLiteAgentStateStore:
         with self._lock, self._connect() as connection:
             connection.executescript(schema)
 
-    def start_run(self, run: dict[str, Any]) -> None:
+    def start_run(self, run: dict[str, Any], *, exclusive: bool = False) -> None:
         data = redact_sensitive(run)
         now = time.time()
-        with self._lock, self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO agent_runs (
-                    trace_id, status, skill_name, query, workflow_version,
-                    idempotency_key, user_id, session_id, metadata_json,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        conflict = "" if exclusive else """
                 ON CONFLICT(trace_id) DO UPDATE SET
                     status=excluded.status,
                     skill_name=excluded.skill_name,
@@ -180,7 +173,16 @@ class SQLiteAgentStateStore:
                     session_id=excluded.session_id,
                     metadata_json=excluded.metadata_json,
                     updated_at=excluded.updated_at
-                """,
+        """
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO agent_runs (
+                    trace_id, status, skill_name, query, workflow_version,
+                    idempotency_key, user_id, session_id, metadata_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """ + conflict,
                 (
                     data["trace_id"],
                     data.get("status", "pending"),
