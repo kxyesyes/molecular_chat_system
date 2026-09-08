@@ -26,6 +26,7 @@ from .decision_policy import (
 )
 from .decision_execution import DecisionEvents, SingleAttemptTool, settle_action, retry_persistence
 from .decision_inputs import resolve_decision_input, active_results
+from .decision_requirements import prepare_requirements, evaluate_requirements
 from .decision_continuation import (
     configuration_digest, snapshot_payload, claim_continuation, publish_continuation,
 )
@@ -52,6 +53,7 @@ class _Run:
     waiting_for_input: bool = False
     model_calls: list[dict] = field(default_factory=list)
     call_ids: set[str] = field(default_factory=set)
+    task_acceptance: dict = field(default_factory=dict)
 
     def counters(self):
         return {'model_requests': self.model_requests,
@@ -85,7 +87,7 @@ class ModelDecisionLoop:
         self.max_tool_attempts, self.timeout_seconds = max_tool_attempts, timeout_seconds
 
     async def run(self, context, *, request_kind, allowed_tools, required_tools, event_bus=None,
-                  continuation_id=None, clarified_query=None):
+                  continuation_id=None, clarified_query=None, requirements=None):
         from langgraph.graph import END, StateGraph
 
         context = deepcopy(context)
@@ -93,17 +95,34 @@ class ModelDecisionLoop:
             raise ValueError('request_kind must be explicit')
         required_tools = frozenset(required_tools)
         allowed_tools = frozenset(allowed_tools)
+        try:
+            requirements = prepare_requirements(requirements, request_kind=request_kind,
+                allowed_tools=allowed_tools, required_tools=required_tools)
+        except (ValueError, ImportError):
+            return AgentResult(context.trace_id, False, 'Task requirements invalid or unavailable',
+                error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Task requirements could not be validated'),
+                outcome=RunOutcome.REJECTED,
+                metadata={'backend': 'model_decision_loop', 'stop_reason': 'invalid_task_requirements'})
+        requirement_payload = requirements.model_dump(mode='json')
+        required_tools |= {r.tool_name for r in requirements.molecular_results}
         bus = event_bus or AgentEventBus(state_store=self.store)
         if bus.state_store is not self.store:
             raise ValueError('event and run stores must have the same authority')
         bus = DecisionEvents(bus)
-        catalog, adapters = authorized_catalog(self.registry, context, request_kind, allowed_tools)
+        catalog, adapters = authorized_catalog(self.registry, context, request_kind,
+                                               allowed_tools - set(requirements.forbidden_tools))
+        if not {r.tool_name for r in requirements.molecular_results} <= set(adapters):
+            return AgentResult(context.trace_id, False, 'Task requirements exceed effective tool authorization',
+                error=AgentExecutionError(AgentErrorCode.UNAUTHORIZED_TOOL, 'Required molecular tools are not authorized'),
+                outcome=RunOutcome.REJECTED,
+                metadata={'backend': 'model_decision_loop', 'stop_reason': 'task_requirements_not_authorized'})
         specs = {name: deepcopy(adapter.spec) for name, adapter in adapters.items()}
         session = WorkflowRunSession(
             WorkflowOrchestrator(state_store=self.store, event_bus=bus, workflow_version='decision-loop-1'),
             context, [], {name: SingleAttemptTool(adapter) for name, adapter in adapters.items()}, dynamic=True,
         )
-        fingerprint = configuration_digest(self, context, request_kind, allowed_tools, required_tools, specs, adapters)
+        fingerprint = configuration_digest(self, context, request_kind, allowed_tools, required_tools, specs, adapters,
+            requirements=requirement_payload if requirements.molecular_results or requirements.forbidden_tools else None)
         restored, prior_payload = None, None
         if continuation_id is not None or clarified_query is not None:
             try:
@@ -135,7 +154,8 @@ class ModelDecisionLoop:
                 'its text is not rendered. Use chat finish only for chat requests. '
                 'Request kind: ' + request_kind + '. Required tools (not an ordered plan): '
                 + encode_observation(sorted(required_tools)) + '. Tool catalog: '
-                + encode_observation(catalog))},
+                + encode_observation(catalog) + '. Immutable result requirements (not a tool sequence): '
+                + encode_observation(requirement_payload))},
             {'role': 'user', 'content': context.query},
         ], time.monotonic() + self.timeout_seconds)
         if restored is not None:
@@ -149,6 +169,7 @@ class ModelDecisionLoop:
                 setattr(state, key, deepcopy(restored[key]))
             state.call_ids = set(restored['call_ids'])
             state.observed = {r.quality['operation_key']: r for r in active_results(session)}
+        state.task_acceptance = evaluate_requirements(requirements, session, required_tools)
 
         def persist(phase):
             retry_persistence(lambda: self.store.update_run_metadata(context.trace_id, {
@@ -156,6 +177,7 @@ class ModelDecisionLoop:
                                   'decision_id': state.decision_id,
                                   'required_tools': sorted(required_tools),
                                   'allowed_tools': sorted(adapters), 'request_kind': request_kind},
+                'task_requirements': requirement_payload, 'task_acceptance': state.task_acceptance,
             }))
 
         def emit(event, message, payload=None):
@@ -204,6 +226,9 @@ class ModelDecisionLoop:
                 state.stop_reason = 'clarification_required'
             else:
                 verify_finish(decision, session, required_tools, request_kind)
+                state.task_acceptance = evaluate_requirements(requirements, session, required_tools)
+                if not state.task_acceptance['satisfied']:
+                    raise DecisionBoundaryError('task_requirements_unfulfilled')
                 state.answer = decision.text if request_kind == 'chat' else scientific_answer(active_results(session))
                 state.outcome = (RunOutcome.COMPLETED if request_kind == 'chat' or all(map(usable, active_results(session)))
                                  else RunOutcome.PARTIAL)
@@ -212,6 +237,8 @@ class ModelDecisionLoop:
 
         async def execute(_):
             decision = state.decision
+            if decision.tool_name in requirements.forbidden_tools:
+                raise DecisionBoundaryError('tool_forbidden_by_task')
             if decision.tool_name not in adapters:
                 raise DecisionBoundaryError('tool_not_authorized')
             input_data, evidence_ids = resolve_decision_input(decision, session)
@@ -246,8 +273,9 @@ class ModelDecisionLoop:
                 await settle_action(session)
                 observed = session.results[-1]
                 state.observed[key] = observed
+            state.task_acceptance = evaluate_requirements(requirements, session, required_tools)
             persist('observed')
-            content = encode_observation(observed.to_legacy_dict())
+            content = encode_observation({**observed.to_legacy_dict(), 'task_acceptance': state.task_acceptance})
             if self.mode == 'native':
                 call_id = state.response.tool_call_id
                 if not isinstance(call_id, str) or not call_id:
@@ -287,6 +315,18 @@ class ModelDecisionLoop:
             state.outcome = RunOutcome.PARTIAL if any(map(usable, active_results(session))) else RunOutcome.FAILED
             error = AgentExecutionError(AgentErrorCode.VALIDATION_ERROR, 'Decision run did not complete',
                                         {'reason': state.stop_reason})
+            if state.stop_reason == 'task_requirements_unfulfilled':
+                state.answer = scientific_answer(active_results(session)) + '\n\n任务要求尚未全部满足，请查看结构化验收差项。'
+        try:
+            state.task_acceptance = evaluate_requirements(requirements, session, required_tools)
+        except Exception:
+            state.task_acceptance = {'version': '1', 'satisfied': False, 'checks': [],
+                                     'reason_codes': ['acceptance_verification_failed']}
+        if state.outcome == RunOutcome.COMPLETED and not state.task_acceptance['satisfied']:
+            state.outcome = RunOutcome.PARTIAL if any(map(usable, active_results(session))) else RunOutcome.FAILED
+            state.stop_reason = 'task_requirements_unfulfilled'
+            state.answer = '任务成果复核未通过，不能声明任务已完成。'
+            error = AgentExecutionError(AgentErrorCode.VALIDATION_ERROR, 'Task acceptance did not pass')
         persist('waiting_for_input' if state.waiting_for_input else 'terminal')
         if session.next_index != session.step_count:
             session.fail_runtime('action_journal_incomplete')
@@ -301,6 +341,7 @@ class ModelDecisionLoop:
                 state.waiting_for_input = False
                 state.stop_reason = 'continuation_snapshot_not_persistable'
         metadata = {**state.counters(), 'backend': 'model_decision_loop',
+                    'task_requirements': requirement_payload, 'task_acceptance': state.task_acceptance,
                     'active_input_digest': EvidenceLedger.output_digest(context.query),
                     'stop_reason': state.stop_reason, 'waiting_for_input': state.waiting_for_input,
                     'event_delivery_retries': bus.delivery_retries}

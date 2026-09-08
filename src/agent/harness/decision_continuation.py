@@ -19,7 +19,7 @@ from src.agent.persistence.redaction import redact_sensitive
 from .decision_policy import DecisionBoundaryError
 
 
-def configuration_digest(loop, context, request_kind, allowed, required, specs, adapters):
+def configuration_digest(loop, context, request_kind, allowed, required, specs, adapters, *, requirements=None):
     def spec_value(value):
         if isinstance(value, type):
             return value.model_json_schema()
@@ -38,6 +38,7 @@ def configuration_digest(loop, context, request_kind, allowed, required, specs, 
         'adapter_versions': {n: a.adapter_version for n, a in adapters.items()},
         'model_type': type(model).__module__ + '.' + type(model).__qualname__,
         'model': {n: getattr(model, n, None) for n in ('provider', 'model_name', 'base_url')},
+        **({'task_requirements': requirements} if requirements else {}),
     })
 
 
