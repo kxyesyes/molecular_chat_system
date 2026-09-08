@@ -20,6 +20,17 @@ from src.agent.decision_privacy import private_decision_request
 
 
 _FUNCTION = "agent_decision"
+_NATIVE_INSTRUCTION = (
+    'The only callable function is agent_decision. For every tool, clarify, or finish action, '
+    'call agent_decision and place exactly one {"decision": {...}} envelope in its arguments. '
+    'Scientific tool names in the catalog are NOT callable API functions. '
+    'To request a scientific tool, put its authorized name in decision.tool_name, '
+    'set decision.action to "tool", and use decision.arguments with input_ref. '
+    'Never put a scientific tool name in function.name or call it directly. '
+    'Include decision.version as the string "1" and all fields required by the schema. '
+    'For clarify and finish, still call agent_decision rather than returning free text. '
+    'The harness alone validates and executes authorized scientific tools.'
+)
 _CALL_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _FINISH_REASONS = frozenset({"stop", "tool_calls", "length", "content_filter"})
 _MAX_WIRE_BYTES = 131072
@@ -110,10 +121,12 @@ def _payload(model, messages, mode, max_tokens):
     payload["messages"] = messages
     schema = decision_json_schema()
     if mode == "native":
+        payload["messages"] = [{"role": "system", "content": _NATIVE_INSTRUCTION}, *messages]
         payload.update(
             tools=[{"type": "function", "function": {
                 "name": _FUNCTION,
-                "description": "Propose exactly one next action; never execute it yourself.",
+                "description": "Submit one decision envelope to the harness. Scientific tool names "
+                               "belong in decision.tool_name, never in function.name.",
                 "parameters": schema,
             }}],
             tool_choice={"type": "function", "function": {"name": _FUNCTION}},

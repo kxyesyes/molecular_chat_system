@@ -72,7 +72,7 @@ async def test_native_round_preserves_history_call_id_and_old_adapter_state(mode
     assert result.metadata["usage"]["total_tokens"] == 30
     assert result.metadata["request_attempts"] == 1
     assert result.metadata["elapsed_ms"] >= 0
-    assert requests[0]["messages"] == messages
+    assert requests[0]["messages"][1:] == messages
     assert requests[0]["tools"][0]["function"]["name"] == "agent_decision"
     assert requests[0]["tool_choice"]["function"]["name"] == "agent_decision"
     assert requests[0]["parallel_tool_calls"] is False
@@ -100,6 +100,53 @@ async def test_json_mode_is_explicit_and_uses_same_contract(model_factory):
     assert "tools" not in requests[0]
     assert requests[0]["response_format"] == {"type": "json_object"}
     assert "decision" in requests[0]["messages"][0]["content"]
+
+
+@run_async
+async def test_native_instruction_distinguishes_wire_function_from_scientific_catalog(model_factory):
+    requests = []
+    messages = [
+        {"role": "system", "content": 'Tool catalog: [{"name":"property_calculator"}]'},
+        {"role": "user", "content": "SMILES: CCO\nSMILES: CCN"},
+    ]
+    before = json.dumps(messages)
+
+    def handle(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=native_wire())
+
+    result = await model_factory(handle).decide(messages, mode="native")
+    assert result.success and len(requests) == 1
+    payload = requests[0]
+    instruction = payload["messages"][0]
+    assert instruction["role"] == "system"
+    assert "only callable function is agent_decision" in instruction["content"]
+    assert "decision.tool_name" in instruction["content"]
+    assert "input_ref" in instruction["content"]
+    assert payload["messages"][1:] == messages
+    assert json.dumps(messages) == before
+    assert [t["function"]["name"] for t in payload["tools"]] == ["agent_decision"]
+    assert payload["tool_choice"]["function"]["name"] == "agent_decision"
+    assert "response_format" not in payload
+
+
+@pytest.mark.parametrize("name", ["property_calculator", "run_docking", "unknown_tool"])
+@run_async
+async def test_wrong_native_name_with_valid_envelope_is_not_rewritten_or_retried(model_factory, name):
+    requests = []
+    decision = {"version": "1", "action": "tool", "tool_name": "property_calculator",
+                "arguments": {"input_ref": "user"}, "purpose": "Calculate supplied inputs"}
+    body = native_wire(decision)
+    body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] = name
+
+    def handle(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=body)
+
+    result = await model_factory(handle).decide([{"role": "user", "content": "SMILES: CCO"}])
+    assert not result.success and result.decision is None and result.tool_call_id is None
+    assert result.error.details["reason"] == "invalid_function_call"
+    assert len(requests) == 1 and "tools" in requests[0]
 
 
 @pytest.mark.parametrize("status", [401, 403, 429, 500, 503])

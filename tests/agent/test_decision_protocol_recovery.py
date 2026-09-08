@@ -76,6 +76,7 @@ def test_correction_cannot_exceed_model_budget(setup_loop):
     ('decision_timeout', AgentErrorCode.PROVIDER_ERROR),
     ('decision_refused', AgentErrorCode.INVALID_OUTPUT),
     ('invalid_decision_json', AgentErrorCode.INVALID_OUTPUT),
+    ('invalid_function_call', AgentErrorCode.INVALID_OUTPUT),
     ('invalid_decision_schema', AgentErrorCode.INVALID_INPUT),
 ])
 def test_only_schema_output_failure_is_correctable(setup_loop, reason, code):
