@@ -26,6 +26,7 @@ from .decision_policy import (
 )
 from .decision_execution import DecisionEvents, SingleAttemptTool, settle_action, retry_persistence
 from .decision_inputs import resolve_decision_input, active_results
+from .decision_clarification import scientific_clarification
 from .decision_requirements import prepare_requirements, evaluate_requirements
 from .decision_continuation import (
     configuration_digest, snapshot_payload, claim_continuation, publish_continuation,
@@ -241,7 +242,7 @@ class ModelDecisionLoop:
                 state.waiting_for_input = True
                 # Free scientific prose must not smuggle fabricated results into clarify.
                 state.answer = (decision.question if request_kind == 'chat'
-                                else '需要补充或确认输入；本次任务尚未完成，请核对原始分子或靶点信息。')
+                                else scientific_clarification(context.query, required_tools))
                 state.outcome = RunOutcome.PARTIAL if any(map(usable, active_results(session))) else RunOutcome.REJECTED
                 state.stop_reason = 'clarification_required'
             else:
