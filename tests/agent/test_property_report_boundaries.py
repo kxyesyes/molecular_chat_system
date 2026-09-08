@@ -1,8 +1,4 @@
-"""Real RDKit/report tests; selected-SMILES fixtures isolate the legacy parser.
-
-Main's query extractor predates the staged molecular-input fixes. These tests
-stub selection only, never RDKit calculations, and are not parser acceptance.
-"""
+"""Real RDKit descriptors and synthetic rule-boundary presentation regressions."""
 from copy import deepcopy
 
 import pytest
@@ -53,7 +49,7 @@ def assert_bounded(text):
 
 
 @pytest.mark.parametrize("smiles", SMILES)
-def test_real_descriptor_values_and_legacy_schema_are_unchanged(calculator, smiles, monkeypatch):
+def test_real_descriptor_values_and_legacy_schema_are_unchanged(calculator, smiles):
     mol = Chem.MolFromSmiles(smiles)
     expected = {
         "molecular_formula": Chem.rdMolDescriptors.CalcMolFormula(mol),
@@ -66,7 +62,6 @@ def test_real_descriptor_values_and_legacy_schema_are_unchanged(calculator, smil
         "qed": round(QED.qed(mol), 3),
     }
     assert calculator.calculate_properties(smiles) == expected
-    monkeypatch.setattr(calculator, 'extract_smiles', lambda query: [smiles])
     result = calculator.execute(f"SMILES: {smiles}")
     assert result["success"], result["message"]
     assert result["data"] == [{"smiles": smiles, "properties": expected}]
@@ -75,8 +70,7 @@ def test_real_descriptor_values_and_legacy_schema_are_unchanged(calculator, smil
     assert_bounded(result["reasoning"])
 
 
-def test_batch_reasoning_and_each_report_are_bounded(calculator, monkeypatch):
-    monkeypatch.setattr(calculator, 'extract_smiles', lambda query: list(SMILES))
+def test_batch_reasoning_and_each_report_are_bounded(calculator):
     result = calculator.execute("\n".join(f"SMILES: {s}" for s in SMILES))
     assert result["success"]
     assert [row["smiles"] for row in result["data"]] == list(SMILES)
@@ -86,18 +80,8 @@ def test_batch_reasoning_and_each_report_are_bounded(calculator, monkeypatch):
     assert result["formatted"].count("RDKit") >= len(SMILES)
 
 
-def test_aspirin_report_with_main_query_parser_and_real_rdkit(calculator):
-    smiles = 'CC(=O)Oc1ccccc1C(=O)O'
-    result = calculator.execute(f'SMILES: {smiles}')
-    assert result['success'], result['message']
-    assert result['data'] == [{'smiles': smiles, 'properties': calculator.calculate_properties(smiles)}]
-    assert_bounded(result['formatted'])
-    assert_bounded(result['reasoning'])
-
-
 @pytest.mark.parametrize("smiles", SMILES)
-def test_single_report_does_not_repeat_summary_or_disclaimer(calculator, smiles, monkeypatch):
-    monkeypatch.setattr(calculator, 'extract_smiles', lambda query: [smiles])
+def test_single_report_does_not_repeat_summary_or_disclaimer(calculator, smiles):
     result = calculator.execute(f"SMILES: {smiles}")
     assert result["success"]
     props = result["data"][0]["properties"]

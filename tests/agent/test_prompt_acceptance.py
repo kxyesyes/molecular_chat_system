@@ -104,20 +104,27 @@ def test_hf002_invalid_smiles_does_not_return_fake_properties():
     )
 
 
-def test_property_calculator_extracts_short_smiles_after_smiles_label():
+def test_property_calculator_requires_unambiguous_short_smiles_field():
     result = PropertyCalculator().execute(
         "Hit-to-lead optimization for lead SMILES: CCO. Lower LogP and improve QED."
     )
-
+    # A trailing dot can be an unfinished disconnected component. Never repair it.
+    assert result['success'] is False and result['data'] is None
+    result = PropertyCalculator().execute(
+        'Hit-to-lead optimization for lead SMILES: "CCO"\nLower LogP and improve QED.'
+    )
     assert result["success"] is True
     assert result["data"][0]["smiles"] == "CCO"
 
 
-def test_property_calculator_extracts_long_smiles_before_sentence_period():
+def test_property_calculator_does_not_strip_structural_dot():
     result = PropertyCalculator().execute(
         "Run reverse target prediction. SMILES: CCCCCCCCCCCCCCCCCCCCC."
     )
-
+    assert result['success'] is False and result['data'] is None
+    result = PropertyCalculator().execute(
+        'Run reverse target prediction. SMILES: "CCCCCCCCCCCCCCCCCCCCC"'
+    )
     assert result["success"] is True
     assert result["data"][0]["smiles"] == "CCCCCCCCCCCCCCCCCCCCC"
 
