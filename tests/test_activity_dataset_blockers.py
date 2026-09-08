@@ -1,5 +1,9 @@
 """Synthetic-only regressions for the held activity integration blockers."""
+import io
 import json
+from pathlib import Path
+import subprocess
+import sys
 
 import pandas as pd
 import pytest
@@ -114,3 +118,81 @@ def test_conflicting_identity_does_not_contaminate_matching_replicates():
     assert result.statistics["accepted_rows"] == 12
     assert set(result.accepted["normalized_value"]) == {4.8}
     assert set(result.accepted["replicate_count"]) == {1}
+
+
+def threshold_manifest(**overrides):
+    return manifest(task_type="classification", label_transform="binary_threshold",
+                    classification_threshold=5, classification_direction="greater_or_equal",
+                    output_endpoint="active", output_units="probability", **overrides)
+
+
+@pytest.mark.parametrize("input_format,separator", [("csv", ","), ("tsv", "\t")])
+@pytest.mark.parametrize("value,compound_id", [
+    ("4.9999999999999994", "123"),  # Isolate rounding from ID corruption.
+    ("5", "000123"),               # Isolate ID corruption from rounding.
+    ("4.9999999999999994", "000123"),
+    ("5.0000", "123"),             # Numeric equality cannot prove lexical identity.
+    ("5e0", "123"),
+])
+def test_source_snapshot_rejects_lossy_inferred_parse(input_format, separator, value, compound_id):
+    source = ("smiles,value,units,relation,compound_id\n"
+              f"CCO,{value},pIC50,=,{compound_id}\n").replace(",", separator).encode()
+    inferred = pd.read_csv(io.BytesIO(source), sep=separator, keep_default_na=False)
+    with pytest.raises(ValueError, match="source snapshot.*dataframe"):
+        dc.validate_activity_dataset(inferred, threshold_manifest(),
+                                     input_bytes=source, input_format=input_format)
+
+
+@pytest.mark.parametrize("input_format,separator", [("csv", ","), ("tsv", "\t")])
+def test_exact_source_text_preserves_threshold_and_ids(input_format, separator):
+    source = ("smiles,value,units,relation,compound_id\n"
+              "CCO,4.9999999999999994,pIC50,=,000123\n"
+              "c1ccccc1,5,pIC50,=,000124\n"
+              "c1ccncc1,5.0000,pIC50,=,000125\n").replace(",", separator).encode()
+    frame = pd.read_csv(io.BytesIO(source), sep=separator, keep_default_na=False, dtype=str)
+    declaration = threshold_manifest()
+    result = dc.validate_activity_dataset(frame, declaration, input_bytes=source, input_format=input_format)
+    assert declaration.classification_threshold == 5
+    assert result.ready_for_training
+    assert result.accepted["normalized_value"].tolist() == [0, 1, 1]
+    assert result.accepted["original_value"].tolist() == frame["value"].tolist()
+    assert result.accepted["compound_id"].tolist() == frame["compound_id"].tolist()
+
+
+@pytest.mark.parametrize("input_format,separator", [("csv", ","), ("tsv", "\t")])
+def test_generic_cli_preserves_source_lexemes_in_published_artifacts(tmp_path, input_format, separator):
+    source = ("smiles,value,units,relation,compound_id,assay_id,reference\n"
+              "CCO,4.9999999999999994,pIC50,=,000123,000007,00123\n"
+              "c1ccccc1,5,pIC50,=,000124,000008,00124\n"
+              "c1ccncc1,5.0000,pIC50,=,000125,000009,00125\n")
+    path = tmp_path / f"synthetic.{input_format}"
+    path.write_text(source.replace(",", separator), encoding="utf-8")
+    declaration = threshold_manifest()
+    manifest_path = tmp_path / "manifest.json"
+    # Do not serialize the dataclass's derived defaults: the strict manifest
+    # loader distinguishes omitted optional declarations from null fields.
+    fields = {name: getattr(declaration, name) for name in (
+        "dataset_id", "target_id", "target_name", "task_type", "endpoint", "units",
+        "label_transform", "source", "license", "minimum_unique_molecules", "minimum_scaffolds",
+        "classification_threshold", "classification_direction", "output_endpoint", "output_units",
+    )}
+    manifest_path.write_text(json.dumps(fields), encoding="utf-8")
+    script = Path(__file__).resolve().parents[1] / "scripts/prepare_activity_dataset.py"
+    result = subprocess.run(
+        [sys.executable, "-B", str(script), "--input", str(path), "--manifest", str(manifest_path),
+         "--output-dir", str(tmp_path / "prepared"), "--prepare"],
+        cwd=tmp_path, capture_output=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout.decode("utf-8") + result.stderr.decode("utf-8")
+    assert json.loads(result.stdout)["ready_for_training"] is True
+    directory = tmp_path / "prepared" / declaration.dataset_id
+    published = pd.concat([dc.read_prepared_split(directory / f"{name}.csv")
+                           for name in ("train", "validation", "test")]).set_index("original_smiles")
+    original = pd.read_csv(io.StringIO(source), dtype=str, keep_default_na=False).set_index("smiles")
+    for smiles, row in original.iterrows():
+        actual = published.loc[smiles]
+        assert actual["original_value"] == row["value"]
+        assert actual["normalized_value"] == (0 if smiles == "CCO" else 1)
+        for name in ("compound_id", "assay_id", "reference"):
+            assert actual[name] == row[name]
+            assert json.loads(actual["replicate_evidence"])[0][name] == row[name]

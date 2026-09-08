@@ -58,7 +58,7 @@ def _run(args):
     if not header or len(set(header)) != len(header):
         raise ValueError("invalid_columns")
     frame = pd.read_csv(io.BytesIO(source_bytes), encoding="utf-8",
-                        keep_default_na=False, sep=delimiter)
+                        keep_default_na=False, sep=delimiter, dtype=str)
     # RDKit parse errors include the input molecule; keep them out of stderr.
     with rdBase.BlockLogs():
         result = validate_activity_dataset(frame, manifest, input_bytes=source_bytes,

@@ -797,17 +797,15 @@ def _verify_source_snapshot_matches_frame(
     input_format: str,
 ) -> None:
     separator = {"csv": ",", "tsv": "\t"}[input_format]
-    # Preserve explicitly textual columns, including threshold-adjacent decimal
-    # labels. Legacy numeric DataFrames retain their existing parsing contract.
-    text_columns = {name: str for name in frame.columns
-                    if frame[name].map(lambda value: isinstance(value, str)).all()}
+    # Source text is authoritative. Inferring its types from the supplied frame
+    # would repeat (and thereby certify) lost precision or stripped leading zeros.
     try:
         source_frame = pd.read_csv(
             io.BytesIO(input_bytes),
             encoding="utf-8",
             keep_default_na=False,
             sep=separator,
-            dtype=text_columns or None,
+            dtype=str,
         )
     except (UnicodeError, pd.errors.ParserError, pd.errors.EmptyDataError):
         raise ValueError(
