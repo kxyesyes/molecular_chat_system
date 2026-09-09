@@ -432,6 +432,10 @@ class ActivityPredictor:
                 rg_batch = Batch.from_data_list(valid_rg_data).to(self.device)
                 with torch.no_grad():
                     output, _fingerprint = self.model(atom_batch, rg_batch)
+                    # Sigmoid can conceal infinite logits as finite probabilities.
+                    # Validate raw outputs before any task-specific transform.
+                    if not torch.isfinite(output).all().item():
+                        raise ValueError("Model returned a non-finite raw prediction")
                     if metadata["task_type"] == "classification":
                         predictions = (
                             torch.sigmoid(output)

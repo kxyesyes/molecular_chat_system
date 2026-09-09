@@ -1,5 +1,11 @@
 # Latest handoff
 
+## 家族双模型隔离推理（2026-09-10）
+
+PR #12 已合并为 main `132a600`。本批记录见
+[activity-family-predictor-integration.md](activity-family-predictor-integration.md)，
+仅集成 Python 预测器，不接线线上入口、不启用生产模型。以下旧交接保留。
+
 ## 家族双模型成组管理（2026-09-09）
 
 PR #11 已合并为 main `c85775a`。下一批独立集成见

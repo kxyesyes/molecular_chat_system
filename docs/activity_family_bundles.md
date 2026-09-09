@@ -46,5 +46,6 @@ descriptor 与模型卡/权重的一致性。模型或证据损坏时抛出错�
 ## 范围
 
 测试仅使用临时合成数据和明确不可用于推理的占位权重字节；没有训练或启用真实模型。
-家族预测器、两阶段计算、API/UI、Agent 调用与真实模型晋级保留在后续独立批次。
+隔离 Python 预测入口见 [activity_family_inference.md](activity_family_inference.md)。
+API/UI、Agent 调用与真实模型晋级保留在后续独立批次。
 运行记录及迁移来源见 [本批交接](handoff/activity-family-bundle-integration.md)。
