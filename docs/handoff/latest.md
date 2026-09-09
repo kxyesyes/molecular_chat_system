@@ -1,3 +1,11 @@
+# Latest handoff
+
+## 家族数据层分批集成（2026-09-09）
+
+最新任务见 [activity-family-data-integration.md](activity-family-data-integration.md)。
+PR #1 已作为旧版文档关闭；本批从已合并 PR #10 的 main 拆出家族数据层，
+不启用模型，不改变线上入口。下方既有 OpenSandbox 记录保留供追溯。
+
 # OpenSandbox docking broker handoff
 
 ## OpenSandbox runtime remediation plan finalized (2026-08-31)
