@@ -231,6 +231,12 @@ last_run.log
 
 # Project data artifacts that should be provisioned separately
 data/activity/models/
+data/activity/raw/**
+data/activity/prepared/**
+!data/activity/raw/**/
+!data/activity/prepared/**/
+!data/activity/raw/**/*.md
+!data/activity/prepared/**/*.md
 data/design_results/
 data/molecular_faiss_index/
 data/molecular_faiss_index.index
