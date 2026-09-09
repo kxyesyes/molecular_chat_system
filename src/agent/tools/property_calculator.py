@@ -16,6 +16,7 @@ except ImportError:
     RDKIT_AVAILABLE = False
 
 from .base_tool import BaseMolecularTool
+from .molecular_input import parse_molecular_smiles
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,10 @@ class PropertyCalculator(BaseMolecularTool):
         query_lower = query.lower()
 
         # 先提取 SMILES，有效 SMILES 是使用本工具的必要条件
-        smiles_list = self.extract_smiles(query)
+        try:
+            smiles_list = parse_molecular_smiles(query, self)
+        except ValueError:
+            return False
         has_valid_smiles = len(smiles_list) > 0
         if not has_valid_smiles:
             return False
@@ -76,12 +80,7 @@ class PropertyCalculator(BaseMolecularTool):
 
         try:
             # 提取SMILES
-            smiles_list = self.extract_smiles(query)
-
-            if not smiles_list:
-                result['message'] = "在查询中未找到有效的SMILES分子结构。"
-                result['reasoning'] = "我在输入中搜索了SMILES模式，但无法识别任何有效的分子结构。"
-                return result
+            smiles_list = parse_molecular_smiles(query, self)
 
             # 计算所有SMILES的属性
             calculated_results = []
@@ -116,6 +115,9 @@ class PropertyCalculator(BaseMolecularTool):
 
             result['message'] = f"成功计算了 {len(calculated_results)} 个分子的属性"
 
+        except ValueError as e:
+            result['message'] = str(e)
+            result['reasoning'] = '输入校验失败，未进行分子性质计算。'
         except Exception as e:
             logger.error(f"Property calculation failed: {e}")
             result['message'] = f"计算失败: {str(e)}"
