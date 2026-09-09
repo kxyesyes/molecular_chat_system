@@ -57,7 +57,9 @@ def atom_feature(mol,
 
             
         if exp_val == True:
-            explicit_valence = atom.GetValence(rdchem.ValenceType.EXPLICIT)
+            get_valence = getattr(atom, 'GetValence', None)
+            explicit_valence = (get_valence(rdchem.ValenceType.EXPLICIT)
+                                if callable(get_valence) else atom.GetExplicitValence())
             _ = onehot(explicit_valence,exp_val_types,other=True) 
             feats.append(_) 
         

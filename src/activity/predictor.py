@@ -114,6 +114,12 @@ class ActivityPredictor:
 
         for p in possible_paths:
             if p.exists():
+                # A historical filename does not imply global activation of a
+                # registered prepared endpoint model.
+                metadata = self._get_model_info_for_checkpoint(p)
+                if (metadata is not None
+                        and metadata.get("scientific_readiness", "legacy_unvalidated") != "legacy_unvalidated"):
+                    continue
                 return p, None
         return None, None
 
@@ -330,7 +336,8 @@ class ActivityPredictor:
             atom_data = Data(x=x,
                            edge_index=edge_index.long(),
                            edge_attr=edge_attr,
-                           pool_index=pool_index.long())
+                           pool_index=pool_index.long(),
+                           feature_smiles=Chem.MolToSmiles(mol, canonical=True))
             
             rg_data = Data(x=rg_x,
                           edge_index=rg_edge_index.long(),

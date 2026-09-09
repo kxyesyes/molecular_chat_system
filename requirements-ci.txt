@@ -6,4 +6,8 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.4.0+cpu
 torch-geometric==2.6.1
+# Compiled RGNN operators must match the existing CPU Torch ABI.
+--find-links https://data.pyg.org/whl/torch-2.4.0+cpu.html
+torch-scatter==2.1.2+pt24cpu
+torch-sparse==0.6.18+pt24cpu
 pytest-timeout==2.3.1
