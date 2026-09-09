@@ -1,5 +1,11 @@
 # Latest handoff
 
+## 家族双模型成组管理（2026-09-09）
+
+PR #11 已合并为 main `c85775a`。下一批独立集成见
+[activity-family-bundle-integration.md](activity-family-bundle-integration.md)，
+仅含成组注册与选择，不训练或切换线上模型。以下旧交接保留。
+
 ## 家族数据层分批集成（2026-09-09）
 
 最新任务见 [activity-family-data-integration.md](activity-family-data-integration.md)。
