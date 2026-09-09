@@ -286,6 +286,8 @@ def test_legacy_sidecars_migrate_once_into_atomic_state(tmp_path: Path) -> None:
     assert registry.get_active_model_id() == "legacy-model"
     state = json.loads(registry.state_path.read_text(encoding="utf-8"))
     assert state["active_model_id"] == "legacy-model"
+    assert state["version"] == 2
+    assert state["active_models_by_endpoint"] == {}
     migrated = state["models"]["legacy-model"]
     assert migrated["model_format"] == "pytorch_state_dict"
     assert migrated["weights_sha256"] == WEIGHTS_SHA256

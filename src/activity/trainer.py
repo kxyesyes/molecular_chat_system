@@ -54,8 +54,10 @@ def get_best_model():
     if active is not None:
         return active
 
-    models = registry.list()
-    return models[0] if models else None
+    # Registration is not global activation. Prepared endpoint models require
+    # selection; only historical models may be discovered automatically.
+    return next((model for model in registry.list()
+                 if model.get("scientific_readiness", "legacy_unvalidated") == "legacy_unvalidated"), None)
 
 def get_best_model_path():
     model = get_best_model()
@@ -195,12 +197,18 @@ def _build_model_metadata(
     random_seed: int = 42,
     split_warnings: List[str] | None = None,
     created_at: float | None = None,
+    prepared_metadata: dict | None = None,
 ) -> dict:
+    """Build legacy metadata or attach an explicitly validated endpoint contract.
+
+    Prepared training will supply this extension after its independent test-set
+    evaluation. This helper does not register or activate a model.
+    """
     created_at = time.time() if created_at is None else created_at
     metrics = dict(best_metrics or {})
     endpoint = target_column if endpoint is None else endpoint
     actual_split_strategy = actual_split_strategy or requested_split_strategy
-    return {
+    metadata = {
         "model_id": model_id,
         "created_at": created_at,
         "task_type": task_type,
@@ -220,8 +228,24 @@ def _build_model_metadata(
         "samples": samples,
         "best_metrics": metrics,
         "weights_file": weights_file,
+        "scientific_readiness": "legacy_unvalidated",
         "name": f"{target_column} ({task_type}) - {time.strftime('%Y%m%d%H%M', time.localtime(created_at))}",
     }
+    if prepared_metadata is not None:
+        from src.activity.model_registry import (
+            ENDPOINT_METADATA_FIELDS, validate_endpoint_metadata,
+        )
+
+        if (
+            not isinstance(prepared_metadata, dict)
+            or prepared_metadata.get("scientific_readiness") != "endpoint_ready"
+            or set(prepared_metadata) - ENDPOINT_METADATA_FIELDS
+        ):
+            raise ValueError("Invalid prepared_metadata extension")
+        metadata = validate_endpoint_metadata({**metadata, **prepared_metadata})
+        if sum(metadata["split_counts"].values()) != samples:
+            raise ValueError("Prepared split_counts do not match samples")
+    return metadata
 
 class ActivityTrainer:
     def __init__(self, job_id: str):
@@ -268,8 +292,8 @@ class ActivityTrainer:
             self.status["best_metrics"] = best_metrics
         
     def start_training(self, 
-                       file_path: str, 
-                       target_column: str,
+                       file_path: str = "",
+                       target_column: str = "normalized_value",
                        task_type: str = "regression",
                        epochs: int = 50,
                        lr: float = 0.001,
@@ -282,21 +306,40 @@ class ActivityTrainer:
                        loss_metric: str = "MSE",
                        lr_scheduler: str = "Cosine",
                        split_strategy: str = "scaffold",
-                       random_seed: int = 42):
+                       random_seed: int = 42,
+                       prepared_manifest_path: str | None = None):
         
         thread = threading.Thread(
             target=self._train_loop, 
             args=(file_path, target_column, task_type, epochs, lr, batch_size, dropout, 
                   num_layers, hidden_size, weight_decay, patience, loss_metric, lr_scheduler,
-                  split_strategy, random_seed)
+                  split_strategy, random_seed),
+            kwargs={"prepared_manifest_path": prepared_manifest_path}
         )
         thread.start()
         
     def _train_loop(self, file_path, target_column, task_type, total_epochs, lr, batch_size, dropout,
                     num_layers, hidden_size, weight_decay, patience, loss_metric, lr_scheduler,
-                    split_strategy, random_seed):
+                    split_strategy, random_seed, prepared_manifest_path=None):
         start_time = time.time()
         self.status["state"] = "running"
+        if prepared_manifest_path is not None:
+            try:
+                from src.activity.prepared_training import run_prepared_training
+                run_prepared_training(
+                    self, prepared_manifest_path, epochs=total_epochs, lr=lr,
+                    batch_size=batch_size, dropout=dropout, num_layers=num_layers,
+                    hidden_size=hidden_size, weight_decay=weight_decay, patience=patience,
+                    loss_metric=loss_metric, lr_scheduler=lr_scheduler, random_seed=random_seed,
+                )
+            except Exception as exc:
+                self.status["state"] = "failed"
+                self.status["error"] = str(exc)
+                self._log(f"Prepared training failed: {exc}")
+            finally:
+                self.status["elapsed"] = time.time() - start_time
+            # Prepared artifacts are immutable inputs, never temporary uploads.
+            return
         self._log(f"Starting training job {self.job_id}")
         self._log(f"Config: layers={num_layers}, hidden={hidden_size}, decay={weight_decay}, patience={patience}, loss={loss_metric}, scheduler={lr_scheduler}, split={split_strategy}, seed={random_seed}")
         
