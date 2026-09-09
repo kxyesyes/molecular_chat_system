@@ -62,6 +62,13 @@
 - contract：34/34 passed；8 个 Node `*_test.js` 脚本通过；compileall 和
   `git diff --check` 通过。文件名级敏感模式扫描无匹配，不输出任何凭据内容。
 - Linux CI 结果在 PR 中记录；本地跳过不得记为通过。
+- 首次 Linux CI（b2e9515）：root 6 failed、1927 passed、72 skipped；
+  Agent、sandbox-api/core、task-runtime 和 static-quality 均通过。
+  六个失败均来自固定 RDKit 2023.9.2 无 `Atom.GetValence()` 的兼容问题。
+  新增新旧 API 回归先得到 2 failed、2 passed，再按可用方法选择显式价态 API；
+  不修改 RDKit 版本、特征编码或跳过真实网络测试。
+- 兼容修复后聚焦 34 passed；全部 `test_activity_*.py` 796 passed、5 skipped，
+  108.44s；compileall 通过。最小兼容补丁独立静态复审通过，Linux 重跑结果见 PR。
 
 以上测试在具备 RDKit/PyTorch/PyG 的 MedChat Conda 环境执行。关键命令：
 

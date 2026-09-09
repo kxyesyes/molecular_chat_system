@@ -65,6 +65,8 @@ status = get_job_status(job_id)
 [PyG 官方 CPU 索引](https://data.pyg.org/whl/torch-2.4.0%2Bcpu.html)，
 对应关系见 [官方安装说明](https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html)。
 本批未改动现有 Conda 环境或 CUDA 部署依赖。
+原子显式价态特征兼容仓库固定的 RDKit 2023.9.2 与新版 RDKit：新版使用
+`GetValence(EXPLICIT)`，旧版使用等价的 `GetExplicitValence()`，不改变特征编码。
 
 ```powershell
 python -m pytest tests/test_activity_prepared_training_data.py tests/test_activity_prepared_training_loop.py tests/test_activity_trainer_endpoint_metadata.py -q -p no:cacheprovider
@@ -72,6 +74,7 @@ python -m pytest tests/test_activity_prediction_contract.py tests/test_activity_
 python -m pytest tests/test_activity_prepared_input_integrity.py tests/test_activity_training_integration_guards.py -q -p no:cacheprovider
 python -m pytest tests/test_activity_training_ci_dependencies.py -q -p no:cacheprovider
 python -m pytest tests/test_activity_feature_split_integrity.py -q -p no:cacheprovider
+python -m pytest tests/test_activity_rdkit_valence_compat.py -q -p no:cacheprovider
 python -m compileall -q src scripts
 ```
 
