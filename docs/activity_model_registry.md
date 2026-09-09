@@ -1,9 +1,12 @@
 # 按靶点与终点选择活性模型
 
-`src/activity/model_registry.py` 的注册状态现采用版本 2。
+`src/activity/model_registry.py` 的注册状态现采用版本 3，兼容迁移 v1/v2。
 旧的全局 `active_model_id` 保留，新增 `active_models_by_endpoint` 映射，
 每个端点分别选择模型。prepared 训练已有内部 Python 接口，网页和 Agent
 端点推理入口迁移仍是后续任务；导入模块不会自动训练或激活新模型。
+
+家族成组状态新增 `family_bundles` / `active_family_bundles`，不替代端点与全局选择。
+成组注册和显式选择见 [activity_family_bundles.md](activity_family_bundles.md)。
 
 ## 端点身份
 
@@ -72,8 +75,10 @@ test_metrics, model_card_file, model_card_sha256, scientific_readiness
 
 ## 迁移与训练接入
 
-版本 1 状态在持有现有进程/线程锁时原子升级，保留已注册模型和全局选择，
-新增的端点选择映射为空。不会根据旧模型名字自动推断靶点。
+版本 1/2 状态在持有现有进程/线程锁时原子升级，保留已注册模型和全局选择。
+版本 1 的端点选择映射初始化为空；版本 2 的已有端点选择保留。
+两种旧版本的家族映射初始化为空，不根据旧模型名字自动推断靶点或选用家族包。
+旧程序不支持 v3，部署前需备份并单独验证状态迁移；不要让旧程序直接管理升级后的目录。
 
 `trainer._build_model_metadata()` 新增可选 `prepared_metadata` 参数，
 仅允许端点扩展字段，不能覆盖实际计算的权重/数据哈希或基础模型身份。

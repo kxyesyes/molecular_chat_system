@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 REGISTRY_STATE_FILE = "registry_state.json"
 REGISTRY_LOCK_FILE = "registry_state.lock"
-REGISTRY_STATE_VERSION = 2
+REGISTRY_STATE_VERSION = 3
 DEFAULT_LOCK_TIMEOUT_SECONDS = 10.0
 DEFAULT_LOCK_POLL_SECONDS = 0.05
 
@@ -411,7 +411,7 @@ class ActivityModelRegistry:
         except (OSError, RuntimeError):
             raise ValueError("Model card is missing or unavailable") from None
 
-    def _verify_model_card(self, metadata: dict) -> None:
+    def _verify_model_card(self, metadata: dict) -> dict:
         card_path = self._resolve_card(metadata["model_card_file"])
         try:
             content = card_path.read_bytes()
@@ -458,6 +458,7 @@ class ActivityModelRegistry:
                             raise ValueError(f"Model card {field} does not match validation metrics")
             if any(card.get(field) is not False for field in ("demo_mode", "fallback_used")):
                 raise ValueError("Model card demo/fallback flags must be false")
+            return normalized
         except (OSError, UnicodeError, json.JSONDecodeError):
             raise ValueError("Invalid model card") from None
 
@@ -497,6 +498,8 @@ class ActivityModelRegistry:
             "models": {},
             "active_model_id": None,
             "active_models_by_endpoint": {},
+            "family_bundles": {},
+            "active_family_bundles": {},
         }
 
     def _atomic_write_json_unlocked(
@@ -544,7 +547,7 @@ class ActivityModelRegistry:
         if (
             not isinstance(payload, dict)
             or type(payload.get("version")) is not int
-            or payload.get("version") not in {1, REGISTRY_STATE_VERSION}
+            or payload.get("version") not in {1, 2, REGISTRY_STATE_VERSION}
             or not isinstance(payload.get("models"), dict)
         ):
             raise ValueError("Invalid activity model registry state")
@@ -577,13 +580,22 @@ class ActivityModelRegistry:
             record = validate_endpoint_metadata(models[model_id])
             if record.get("scientific_readiness") != "endpoint_ready" or record.get("endpoint_key") != key:
                 raise ValueError("Invalid active_models_by_endpoint endpoint_key")
+        bundles = {} if payload["version"] < 3 else payload.get("family_bundles")
+        active_bundles = {} if payload["version"] < 3 else payload.get("active_family_bundles")
+        # Preserve lightweight legacy reads until a family bundle is present.
+        if bundles or active_bundles or not isinstance(bundles, dict) or not isinstance(active_bundles, dict):
+            from .family_models import validate_bundle_mappings
+
+            validate_bundle_mappings(bundles, active_bundles)
         state = {
             "version": REGISTRY_STATE_VERSION,
             "models": dict(models),
             "active_model_id": active_model_id,
             "active_models_by_endpoint": dict(mapping),
+            "family_bundles": dict(bundles),
+            "active_family_bundles": dict(active_bundles),
         }
-        if payload["version"] == 1:
+        if payload["version"] != REGISTRY_STATE_VERSION:
             self._atomic_write_json_unlocked(self.state_path, state)
         return state
 
@@ -807,6 +819,81 @@ class ActivityModelRegistry:
                 logger.warning("Ignoring invalid active activity model selection: %s", exc)
                 return None
 
+    def _build_family_bundle_unlocked(self, state, bundle_id, dataset_sha256, descriptor,
+                                      model_ids, dataset_snapshot):
+        from .family_models import TASKS, build_bundle_record
+
+        if model_ids["classification"] == model_ids["regression"]:
+            raise ValueError("Family bundle requires two distinct models")
+        models = {task: self._get_validated_unlocked(state, model_ids[task]) for task in TASKS}
+        if any(item.get("scientific_readiness") != "endpoint_ready" for item in models.values()):
+            raise ValueError("Family bundle requires endpoint_ready models")
+        cards = {task: self._verify_model_card(models[task]) for task in TASKS}
+        return build_bundle_record(bundle_id, dataset_sha256, descriptor, models, cards, dataset_snapshot)
+
+    def register_family_bundle(self, *, bundle_id, family_dataset_path,
+                               classification_model_id, regression_model_id) -> dict:
+        """Verify data outside the lock, then atomically bind current models."""
+        from .family_models import load_bundle_dataset
+
+        bundle_id = self._validate_model_id(bundle_id)
+        # Package verification can take minutes. Its detached evidence does not
+        # require the source to remain available while binding current models.
+        digest, descriptor, snapshot = load_bundle_dataset(family_dataset_path)
+        with self._transaction():
+            state = self._load_state_unlocked()
+            if bundle_id in state["family_bundles"]:
+                raise ValueError("Family bundle is already registered")
+            record = self._build_family_bundle_unlocked(
+                state, bundle_id, digest, descriptor,
+                dict(classification=classification_model_id, regression=regression_model_id), snapshot)
+            state["family_bundles"][bundle_id] = record
+            self._atomic_write_json_unlocked(self.state_path, state)
+            return copy.deepcopy(record)
+
+    def _get_family_bundle_unlocked(self, state, bundle_id):
+        from .family_models import require_pinned_record
+
+        bundle_id = self._validate_model_id(bundle_id)
+        pinned = state["family_bundles"].get(bundle_id)
+        if pinned is None:
+            raise ValueError("Family bundle is not registered")
+        try:
+            record = self._build_family_bundle_unlocked(
+                state, bundle_id, pinned["family_dataset_sha256"], pinned["dataset_evidence"],
+                {task: item["model_id"] for task, item in pinned["models"].items()},
+                pinned["family_dataset_snapshot"])
+            require_pinned_record(record, pinned)
+            return record
+        except (KeyError, TypeError, OSError):
+            raise ValueError("Invalid family bundle evidence") from None
+
+    def select_family_bundle(self, bundle_id) -> dict:
+        """Revalidate both pinned models before one atomic family selection."""
+        with self._transaction():
+            state = self._load_state_unlocked()
+            record = self._get_family_bundle_unlocked(state, bundle_id)
+            state["active_family_bundles"][record["family_id"]] = record["bundle_id"]
+            self._atomic_write_json_unlocked(self.state_path, state)
+            return copy.deepcopy(record)
+
+    def get_active_family_bundle(self, family) -> Optional[dict]:
+        """Verify pinned data evidence and current models, without reopening data.
+
+        Dataset artifacts are checked once at registration. Serving does not
+        depend on retention of private training sources; absence is None and
+        corrupt model/bundle evidence raises instead of falling back.
+        """
+        from .family_contract import resolve_activity_family
+
+        family_id = resolve_activity_family(family)
+        with self._transaction():
+            state = self._load_state_unlocked()
+            bundle_id = state["active_family_bundles"].get(family_id)
+            if bundle_id is None:
+                return None
+            return copy.deepcopy(self._get_family_bundle_unlocked(state, bundle_id))
+
     def _cleanup_artifact_best_effort(self, artifact: Path) -> None:
         try:
             artifact.unlink(missing_ok=True)
@@ -831,6 +918,14 @@ class ActivityModelRegistry:
             state["active_models_by_endpoint"] = {
                 key: selected for key, selected in state["active_models_by_endpoint"].items()
                 if selected != metadata["model_id"]
+            }
+            state["family_bundles"] = {
+                key: bundle for key, bundle in state["family_bundles"].items()
+                if all(item["model_id"] != model_id for item in bundle["models"].values())
+            }
+            state["active_family_bundles"] = {
+                family: selected for family, selected in state["active_family_bundles"].items()
+                if selected in state["family_bundles"]
             }
             self._atomic_write_json_unlocked(self.state_path, state)
             self._cleanup_artifact_best_effort(sidecar_path)
