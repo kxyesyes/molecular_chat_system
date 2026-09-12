@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from pydantic import BaseModel
 
 from src.agent.contracts import AgentContext
@@ -122,6 +123,115 @@ def build_registry(excluded=(), target_output=None, target_quality=None):
             )
         )
     return registry, tools
+
+
+@pytest.mark.parametrize("required,continue_on_error,continues", [
+    (True, None, False), (True, True, False), (False, None, True), (False, False, False),
+])
+@pytest.mark.parametrize("missing_specialist", [False, True])
+def test_delegated_failure_obeys_common_required_step_policy(
+    monkeypatch, required, continue_on_error, continues, missing_specialist
+):
+    plan = WorkflowPlan(workflow_name="comprehensive_evaluation", steps=[
+        WorkflowStep("first", "activity_predictor", input_data="CCO", required=required,
+                     continue_on_error=continue_on_error),
+        WorkflowStep("second", "property_calculator", input_data="CCO"),
+    ])
+    class FixedPlanner:
+        def plan(self, context):
+            return plan
+    registry, tools = build_registry()
+    monkeypatch.setattr(tools["activity_predictor"], "execute",
+                        lambda query: {"success": False, "message": "Synthetic required failure"})
+    specialists = build_default_specialists()
+    if missing_specialist:
+        specialists.pop("activity")
+    result = SupervisorAgent(planner=FixedPlanner(), tools=tools,
+        tool_registry=registry, specialists=specialists).run("evaluate CCO",
+                                                           skill_name="comprehensive_evaluation")
+    assert bool(tools["property_calculator"].calls) is continues
+    assert result["status"] == ("partial" if continues else "failed")
+
+
+def test_delegated_checkpoint_is_bound_to_tool_identity(tmp_path):
+    from src.agent.persistence import SQLiteAgentStateStore
+    class MutablePlanner:
+        tool = "property_calculator"
+        def plan(self, context):
+            return WorkflowPlan(workflow_name="comprehensive_evaluation", steps=[
+                WorkflowStep("evaluate", self.tool, input_data="CCO")])
+    planner = MutablePlanner()
+    registry, tools = build_registry()
+    supervisor = SupervisorAgent(planner=planner, tools=tools, tool_registry=registry,
+        specialists=build_default_specialists(), state_store=SQLiteAgentStateStore(tmp_path / "resume.db"))
+    supervisor.run("evaluate CCO", skill_name="comprehensive_evaluation", trace_id="same-tool-step")
+    planner.tool = "drug_likeness_assessment"
+    result = supervisor.run("evaluate CCO", skill_name="comprehensive_evaluation", trace_id="same-tool-step")
+    assert result["status"] == "succeeded"
+    assert tools[planner.tool].calls == ["CCO"]
+    assert result["result"]["tool_result_sequence"][0]["data"]["tool"] == planner.tool
+
+
+@pytest.mark.parametrize("change", ["model_version", "malformed_artifact"])
+def test_delegated_invalidated_checkpoint_executes_tool_again(tmp_path, monkeypatch, change):
+    from copy import deepcopy
+    from src.agent.persistence import SQLiteAgentStateStore
+    class Planner:
+        version = "first"
+        def plan(self, context):
+            return WorkflowPlan(workflow_name="comprehensive_evaluation", steps=[
+                WorkflowStep("evaluate", "property_calculator", input_data="CCO",
+                             metadata={"model_version": self.version})])
+    planner = Planner()
+    registry, tools = build_registry()
+    store = SQLiteAgentStateStore(tmp_path / "version.db")
+    supervisor = SupervisorAgent(planner=planner, tools=tools, tool_registry=registry,
+        specialists=build_default_specialists(), state_store=store)
+    def run():
+        return supervisor.run("evaluate CCO", skill_name="comprehensive_evaluation", trace_id="version-check")
+    run()
+    assert store.latest_checkpoint("version-check", "evaluate")["model_version"] == "first"
+    if change == "model_version":
+        planner.version = "second"
+    else:
+        original = store.latest_checkpoint
+        def broken(*args):
+            checkpoint = deepcopy(original(*args))
+            checkpoint["output"]["artifacts"] = [{}]
+            return checkpoint
+        monkeypatch.setattr(store, "latest_checkpoint", broken)
+    result = run()
+    assert result["status"] == "succeeded"
+    assert tools["property_calculator"].calls == ["CCO", "CCO"]
+    if change == "malformed_artifact":
+        assert result["result"]["metadata"]["checkpoint_warnings"] == [
+            {"step": "evaluate", "reason": "checkpoint_deserialization_failed"}]
+
+
+@pytest.mark.parametrize("foreign_has_checkpoint", [False, True])
+def test_delegated_checkpoints_read_and_write_the_supervisor_store(tmp_path, foreign_has_checkpoint):
+    from src.agent.orchestrators import WorkflowOrchestrator
+    from src.agent.persistence import SQLiteAgentStateStore
+    own = SQLiteAgentStateStore(tmp_path / "own.db")
+    foreign = SQLiteAgentStateStore(tmp_path / "foreign.db")
+    registry, tools = build_registry()
+    class Planner:
+        def plan(self, context):
+            return WorkflowPlan(workflow_name="comprehensive_evaluation", steps=[
+                WorkflowStep("evaluate", "property_calculator", input_data="CCO")])
+    foreign_orchestrator = WorkflowOrchestrator(state_store=foreign)
+    if foreign_has_checkpoint:
+        foreign_orchestrator.run(AgentContext(query="CCO", trace_id="store-owner"),
+            Planner().plan(None).steps,
+            {"property_calculator": FakeTool("property_calculator", output={"foreign": True})})
+    supervisor = SupervisorAgent(planner=Planner(), tools=tools, tool_registry=registry,
+        specialists=build_default_specialists(), state_store=own,
+        orchestrator=foreign_orchestrator)
+    for _ in range(2):
+        supervisor.run("CCO", skill_name="comprehensive_evaluation", trace_id="store-owner")
+    assert tools["property_calculator"].calls == ["CCO"]
+    assert own.latest_checkpoint("store-owner", "evaluate") is not None
+    assert (foreign.latest_checkpoint("store-owner", "evaluate") is not None) is foreign_has_checkpoint
 
 
 def test_delegated_supervisor_does_not_bypass_target_evidence_gate():

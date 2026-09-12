@@ -22,6 +22,12 @@ class WorkflowStep:
     output_contract: str | None = None
     preconditions: tuple[str, ...] = ()
 
+    def continue_after_failure(self) -> bool:
+        """Required steps always stop; optional steps continue unless overridden."""
+        if self.required:
+            return False
+        return True if self.continue_on_error is None else bool(self.continue_on_error)
+
     def __post_init__(self) -> None:
         if not isinstance(self.preconditions, tuple):
             raise ValueError("preconditions must be an immutable tuple")
