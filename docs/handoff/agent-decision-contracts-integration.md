@@ -44,7 +44,7 @@ tests/test_agent_platform_health_check.py -q -p no:cacheprovider --tb=short`：
 独立规格审查：118 项现有测试 + 204 项额外合成测试，**322 passed（-W error）**；
 另两个精确字节边界探针通过，公开接口与源兼容，无规格阻断。
 初轮质量审查 118 项现有 + 167 项合成测试，**285 passed（-W error）**，无移植回归阻断；
-发现源版本也存在默认字段导致快照超预算的边界问题，已补最小修复，待增量复审。
+发现源版本也存在默认字段导致快照超预算的边界问题，已补最小修复；增量复审结果见下节。
 源码 compileall（临时 pycache）、全部 8 个 Node 测试及 contract 也通过。
 
 ### 默认字段扩展预算
@@ -61,3 +61,12 @@ tests/test_agent_platform_health_check.py -q -p no:cacheprovider --tb=short`：
 所有通过仅证明协议/工程边界，不证明动态循环、真实模型执行或服务器部署完成。
 
 原始混杂工作树保持不变。PR #15 等未获得具体授权的 PR 不自动合并。
+
+## PR #19 与 main 更新
+
+原 head `b099b59` 的 Linux CI run `34688294504` 全 7 项通过。PR #18 获具体授权
+合并为 main `18f9dc3` 后，本分支普通 merge 最新 main，不强推。冲突仅在两份状态文档，
+按事实合并：保留训练入口和原始混杂树的细查结果、决策协议新增记录，并记录 PR #15
+最新 task-runtime CI 失败，不能沿用该 PR 旧 head 的通过结论。
+四份协议代码/测试与已双审 head `b099b59` 的 diff 为空；训练代码来自已批准的 PR #18。
+更新后的合并提交须重新取得 CI 通过及用户针对 PR #19 的具体授权，不自动合并。
