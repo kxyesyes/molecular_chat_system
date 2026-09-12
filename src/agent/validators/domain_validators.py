@@ -154,6 +154,58 @@ class ActivityResultValidator:
         if result.tool_name != "activity_predictor":
             return None
         entries = result.data if isinstance(result.data, list) else []
+        for entry in entries:
+            if not isinstance(entry, dict) or not any(
+                key in entry for key in ("family_id", "predicted_pIC50", "activity_probability", "activity_class")
+            ):
+                continue
+            if all(entry.get(key) is None for key in ("predicted_pIC50", "activity_probability", "activity_class")):
+                if entry.get("status") != "failed" or entry.get("success") is not False:
+                    return "Empty family activity result cannot claim successful or partial observations"
+                continue
+            if entry.get("units") != "pIC50" or entry.get("label_threshold") != 5.0:
+                return "Family activity claim does not match the fixed pIC50 label contract"
+            for key in ("predicted_pIC50", "activity_probability"):
+                value = entry.get(key)
+                if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
+                    return "Family activity result contains an invalid numeric prediction"
+            probability = entry.get("activity_probability")
+            if probability is not None and not 0 <= probability <= 1:
+                return "Family activity probability is outside the unit interval"
+            activity_class = entry.get("activity_class")
+            if (activity_class not in ("有活性", "无活性") or probability is None
+                    or entry.get("probability_threshold") != 0.5
+                    or activity_class != ("有活性" if probability >= 0.5 else "无活性")):
+                return "Family activity classification lacks a valid probability decision"
+            errors = entry.get("errors")
+            if not isinstance(errors, dict) or any(key != "regression" for key in errors):
+                return "Family activity claim contradicts stage errors"
+            if entry.get("status") == "passed":
+                valid_stage = entry.get("success") is True and entry.get("predicted_pIC50") is not None and not errors
+            elif entry.get("status") == "partial":
+                valid_stage = entry.get("success") is False and entry.get("predicted_pIC50") is None
+            else:
+                valid_stage = False
+            if not valid_stage:
+                return "Family activity claim contradicts stage status"
+            provenance = entry.get("provenance")
+            if (not isinstance(provenance, dict) or not provenance.get("bundle_id")
+                    or provenance["bundle_id"] != entry.get("bundle_id")):
+                return "Family activity result lacks pinned two-model provenance"
+            models = provenance.get("models")
+            if not isinstance(models, dict):
+                return "Family activity result lacks pinned two-model provenance"
+            for task in ("classification", "regression"):
+                model = models.get(task)
+                if (not isinstance(model, dict) or not model.get("model_id")
+                        or any(not isinstance(model.get(key), str)
+                               or not _SHA256_PATTERN.fullmatch(model[key])
+                               for key in ("weights_sha256", "model_card_sha256", "prepared_dataset_sha256"))
+                        or model.get("task_type") != task
+                        or model.get("target_id") != entry.get("family_id")
+                        or model.get("demo_mode") is not False
+                        or model.get("fallback_used") is not False):
+                    return "Family activity result lacks real two-model provenance"
         has_activity_claim = any(
             isinstance(entry, dict)
             and (

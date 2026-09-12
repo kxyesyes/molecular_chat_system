@@ -336,6 +336,13 @@ class WorkflowOrchestrator:
         outputs: Mapping[str, Any],
     ) -> Any:
         input_data = cls._resolve_semantic_input(context, step, outputs)
+        if (step.tool_name == "activity_predictor" and BindingResolver.OUTPUT.fullmatch(
+                BindingResolver.derive_selector(step.input_binding, step.input_from) or "")):
+            # Actual bound candidates, with the original user's target context.
+            activity_input = {"query": context.query, "smiles": cls._smiles_text(input_data).splitlines()}
+            if "target" in context.metadata:
+                activity_input["target"] = context.metadata["target"]
+            return activity_input
         if cls._is_generation_step(step):
             return cls._canonical_generation_input(
                 context,

@@ -7,6 +7,9 @@
 
 from typing import Dict, Any
 import logging
+from copy import deepcopy
+from src.agent.contracts import AgentErrorCode, ObservationStatus, ToolProvenance, ToolResult
+from .activity_input import parse_activity_input
 from .base_tool import BaseMolecularTool
 
 logger = logging.getLogger(__name__)
@@ -35,22 +38,100 @@ class ActivityPredictorTool(BaseMolecularTool):
         return self._predictor
 
     def should_use(self, query: str) -> bool:
-        query_lower = query.lower()
+        try:
+            text, smiles, _ = parse_activity_input(query, self)
+        except ValueError:
+            return False
+        query_lower = text.lower()
         keywords = [
             '活性', 'ic50', 'pic50', '抑制',
             'activity', 'potency', 'inhibition', '活性预测',
         ]
         has_keyword = any(kw in query_lower for kw in keywords)
-        has_smiles = bool(self.extract_smiles(query))
+        has_smiles = bool(smiles)
         return has_keyword and has_smiles
 
-    def execute(self, query: str) -> Dict[str, Any]:
+    def execute(self, query):
+        try:
+            text, smiles, target = parse_activity_input(query, self)
+        except ValueError as exc:
+            return ToolResult.error_result(
+                self.name, AgentErrorCode.INVALID_INPUT, str(exc),
+                status=ObservationStatus.INVALID_INPUT)
+        if target is None:
+            return self._execute_legacy(text, smiles)
+        try:
+            from src.activity.prediction_service import predict_activity
+            summary = predict_activity(smiles, target=target)
+        except Exception:
+            return ToolResult.error_result(
+                self.name, AgentErrorCode.MODEL_UNAVAILABLE,
+                "家族活性预测服务不可用；未使用其他模型替代。",
+                status=ObservationStatus.UNAVAILABLE)
+        from src.activity.family_contract import resolve_activity_family
+        from src.activity.prediction_service import summarize_predictions
+
+        try:
+            rows = deepcopy(summary["results"])
+            expected = summarize_predictions(rows)
+            aligned = len(rows) == len(smiles) and all(
+                row.get("smiles") == smi and row.get("requested_target") == target
+                and row.get("family_id") == resolve_activity_family(target)
+                for row, smi in zip(rows, smiles)
+            )
+            if (not aligned or summary["status"] != expected["status"]
+                    or summary["success"] is not expected["success"]):
+                raise ValueError("Family result contract mismatch")
+        except (KeyError, TypeError, ValueError):
+            return ToolResult.error_result(self.name, AgentErrorCode.INVALID_OUTPUT,
+                                          "家族活性结果与请求或阶段状态不一致。")
+        from src.agent.validators.domain_validators import ActivityResultValidator
+        invalid = ActivityResultValidator().validate(ToolResult(self.name, False, "", data=rows))
+        if invalid:
+            return ToolResult.error_result(self.name, AgentErrorCode.INVALID_OUTPUT,
+                                          "家族活性结果未通过数值或双模型溯源校验。")
+        status = summary["status"]
+        service_warnings = summary.get("warnings", [])
+        warnings = [warning for warning in service_warnings if isinstance(warning, str)] \
+            if isinstance(service_warnings, list) else []
+        # Reuse the shared warning contract without altering original observations.
+        warnings = list(dict.fromkeys(warnings + expected["warnings"]))
+        labels = {"passed": "完成", "partial": "部分完成", "failed": "失败"}
+        lines = ["## 分子活性模型预测（非实验结论）",
+                 f"状态：{labels[status]}",
+                 "| SMILES | 活性分类 | 活性概率 | 预测 pIC50 | 状态/阶段错误 |",
+                 "|---|---|---|---|---|"]
+
+        def cell(value):
+            return str(value).replace("|", "\\|").replace("\n", " ").replace("<", "&lt;").replace(">", "&gt;")
+
+        def number(value):
+            return f"{value:.4f}" if type(value) in (int, float) else "不可用"
+
+        for row in rows:
+            detail = labels.get(row.get("status"), "失败")
+            if row.get("errors"):
+                detail += "；" + str(row["errors"])
+            lines.append("| " + " | ".join(map(cell, [row.get("smiles", ""),
+                row.get("activity_class") or "不可用", number(row.get("activity_probability")),
+                number(row.get("predicted_pIC50")), detail])) + " |")
+        lines.extend(cell(warning) for warning in warnings)
+        return ToolResult(
+            tool_name=self.name, success=summary["success"] is True and status == "passed",
+            message=f"家族活性预测{labels[status]}，仅完整双阶段结果视为成功。",
+            data=rows, formatted="\n".join(lines), warnings=warnings,
+            status={"passed": ObservationStatus.SUCCEEDED, "partial": ObservationStatus.PARTIAL,
+                    "failed": ObservationStatus.FAILED}[status],
+            quality={"prediction_status": status, "model_provenance": [deepcopy(r.get("provenance", {})) for r in rows]},
+            evidence=[{"prediction": deepcopy(row)} for row in rows],
+            provenance=ToolProvenance(tool_name=self.name, model_name="FamilyActivityPredictor"))
+
+    def _execute_legacy(self, query: str, smiles_list) -> Dict[str, Any]:
         result = self._create_base_result(query)
 
         if not self._check_rdkit(result):
             return result
 
-        smiles_list = self.extract_smiles(query)
         if not smiles_list:
             result['message'] = "未在查询中检测到有效的 SMILES 结构。请提供分子的 SMILES 字符串。"
             return result
