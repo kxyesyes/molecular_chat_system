@@ -785,9 +785,12 @@ def test_metadata_read_merge_write_serializes_with_other_store(store, monkeypatc
 
 
 @pytest.mark.parametrize("kind", ["dotted", "near_budget", "many_urls"])
-def test_guard_url_scan_is_bounded_and_checks_all_credentials_near_end(kind):
+@pytest.mark.parametrize("group", range(5))
+def test_guard_url_scan_is_bounded_and_checks_all_credentials_near_end(kind, group):
     # Isolate regressions: subprocess.run kills and waits for the child on timeout.
-    # Budget includes interpreter startup and all synthetic credential cases.
+    # Keep the same 10-second single-scan guard, but split the 75 suffixes into
+    # five disjoint batches. CI must not fit 75 full-size scans into one scan's
+    # deadline; every batch still checks full-size valid and secret envelopes.
     child = r'''
 import json
 import sys
@@ -810,7 +813,12 @@ tails += ["gh" + prefix + "_" + "a" * 20 for prefix in "pousr"]
 for label in labels:
     tails += [label + "=synthetic", json.dumps({label: "synthetic"}),
               "https://example.invalid/?" + label.replace(" ", "_") + "=synthetic"]
-for tail in tails:
+assert len(tails) == 75
+group = int(sys.argv[3])
+assert 0 <= group < 5
+selected = tails[group::5]
+assert len(selected) == 15
+for tail in selected:
     text = padding + " " + tail
     assert contains_secret_material(text), tail
 # Exercise both many-URL traversal and full-envelope rejection at the far end.
@@ -824,10 +832,10 @@ else:
 '''
     try:
         result = subprocess.run([sys.executable, "-B", "-c", child, kind,
-                                 json.dumps(CREDENTIAL_LABELS)],
+                                 json.dumps(CREDENTIAL_LABELS), str(group)],
                                 capture_output=True, text=True, timeout=10)
     except subprocess.TimeoutExpired:
-        pytest.fail(f"{kind} full-text guard exceeded 10 seconds; child terminated")
+        pytest.fail(f"{kind}/{group} full-text guard exceeded 10 seconds; child terminated")
     assert result.returncode == 0, result.stderr
 
 
