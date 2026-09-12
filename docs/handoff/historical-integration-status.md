@@ -1,6 +1,6 @@
 # 历史代码集成状态台账
 
-日期：2026-09-12。核对 main `becb6ab`（PR #14、#16 已获具体授权合并）；总状态 **partial**。
+日期：2026-09-12。核对 main `c642bae`（PR #14、#16、#17 已获具体授权合并）；总状态 **partial**。
 用户要求先完成代码集成，目标服务器验收 deferred。局部 PR 通过不代表全部集成。
 实施顺序见 [总体计划](../superpowers/plans/2026-09-12-historical-integration-completion.md)。
 
@@ -13,10 +13,11 @@
 | 数据准备、端点注册、prepared training、家族数据/bundle/pinned predictor | `5432968`，main PR #9–#13 | 已集成且加强，不重新覆盖底层实现。 |
 | 共享预测服务/API | prediction_service.py、api_routes.py | PR #14 已合并为 `370898a`，独立审查及 Linux CI 7/7 通过；本地沙盒一次失败仍保留待查。 |
 | Agent 家族活性接线 | `9312bf5`，tools/activity_input.py、activity_predictor_tool.py、workflow、domain_validators | PR #16 已合并为 `becb6ab`；独立审查及 CI 7/7 通过，最新本地 Agent 1933 passed/1 skipped。输入边界、双模型证据、partial 已进入 main。 |
-| 活性前端 | `5432968`，activity_prediction/main.js、results_renderer.js、template | PR #15（`ab3f49e`）draft，独立规格/质量审查和 Node 18/18 通过，合成浏览器验收及 CI 7/7 通过；具体合并授权待完成。 |
-| 家族训练编排 | `5432968`，scripts/train_family_activity_models.py、test_family_training_run.py | 独立分支完成 TDD：73 项聚焦、426 passed/3 skipped 回归；尚待独立审查和 PR，不自动运行真实训练。 |
-| 旧 Agent 审计与恢复修复 | `9312bf5`，domain/orchestrators/supervisor/run_session/chat_handler/validators | 恢复审计子批次 `34d95ad` 已实现；首轮 18 failed → 聚焦 47 passed，扩展 Agent/反幻觉/健康 1975 passed/1 skipped；独立规格 222 项、质量 236 项通过，尚未合并。非阻断旧 run 版本与深拷贝固定回归记录见本批交接。 |
-| 决策协议与执行/证据/续接 | `9312bf5`，contracts、harness/decision_*、transport/privacy、ledger、persistence、runtime | 待分批移植；包含敏感输入拒绝、target 续接及证据完整性。revision 3 必须明确拒绝旧等待快照。 |
+| 活性前端 | `5432968`，activity_prediction/main.js、results_renderer.js、template | PR #15 更新为 `33eed11`，合入 main c642bae 后 UI 代码/测试不变，Agent/API 1998 passed/1 skipped、9 Node、compile/contract 通过。新 CI 与当前 head 具体授权待确认；旧 head 审查和浏览器证据保留。 |
+| 家族训练编排 | `5432968`，scripts/train_family_activity_models.py、test_family_training_run.py | PR #18 当前 `e37e54b`，独立双审通过。初次 Linux CI 暴露 4 项设备名校验失败，已最小修复 6 failed → 19 passed，完整 runner 102 passed；最新 CI 7/7 通过，尚待具体合并授权。不运行真实训练。 |
+| 旧 Agent 审计与恢复修复 | `9312bf5`，domain/orchestrators/supervisor/run_session/chat_handler/validators | PR #17 已合并为 `c642bae`；独立双审及 CI 7/7 通过，Agent/反幻觉/健康 1975 passed/1 skipped。旧 run 版本显示和深拷贝固定回归为非阻断待改项。 |
+| 决策基础协议 | `9312bf5`，contracts/decision.py、task_requirements.py | 独立分支 `eb8a862` + `7f58400` 已实现并修复构造实例/快照预算边界；双审通过，契约 120 passed，Agent/反幻觉/健康 2095 passed/1 skipped；待 PR CI 与授权。解析通过不等于执行授权或科研证据成立。 |
+| 决策执行/证据/续接 | `9312bf5`，harness/decision_*、transport/privacy、ledger、persistence、runtime | 仍待分批移植；包含敏感输入拒绝、target 续接及证据完整性。revision 3 必须明确拒绝旧等待快照。 |
 | 隔离验收入口 | `9312bf5`，web/decision_chat.py、decision_lab.py、静态 lab、run_decision 脚本 | 决策基础集成后移植，不自动接管生产首页。 |
 | 真实权重全链路测试 | `9312bf5`，tests/test_activity_family_real_acceptance.py | 待随 API/Agent/UI 集成；保持显式 opt-in，不把合成前向当真实模型验收。 |
 | 沙盒产物持久化稳定性 | main 既有 tests/sandbox_broker/test_service.py | 本轮扩大回归发生 1 次 artifact_failed 后无 manifest；单项及模块 172 项重跑通过，触发因素待查。保留失败证据，不放宽 fail-closed。 |
