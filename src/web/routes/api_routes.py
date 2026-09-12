@@ -1471,25 +1471,26 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
     
     @app.post("/api/activity/predict")
     async def activity_predict(
-        smiles: str = Form(...)
+        smiles: str = Form(...),
+        target: Optional[str] = Form(None),
     ):
         """活性预测 API"""
         try:
             def run_activity_prediction():
-                from src.activity.predictor import get_predictor
+                from src.activity.prediction_service import predict_activity
+                return predict_activity(smiles, target=target)
 
-                predictor = get_predictor()
-                return predictor.predict(smiles)
-
-            results = await _invoke_in_threadpool(run_activity_prediction)
-            return {"success": True, "results": results}
-        except Exception as e:
-            logger.error(f"活性预测失败: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            return await _invoke_in_threadpool(run_activity_prediction)
+        except HTTPException:
+            raise
+        except Exception:
+            logger.error("活性预测请求失败")
+            raise HTTPException(status_code=500, detail="活性预测服务不可用")
 
     @app.post("/api/activity/batch_predict")
     async def activity_batch_predict(
-        file: UploadFile = File(...)
+        file: UploadFile = File(...),
+        target: Optional[str] = Form(None),
     ):
         """活性批量预测 API"""
         try:
@@ -1506,18 +1507,15 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
                         smiles_list.append(parts[0])
             
             def run_activity_batch_prediction():
-                from src.activity.predictor import get_predictor
+                from src.activity.prediction_service import predict_activity
+                return predict_activity(smiles_list, target=target)
 
-                predictor = get_predictor()
-                return predictor.predict(smiles_list)
-
-            results = await _invoke_in_threadpool(run_activity_batch_prediction)
-            return {"success": True, "results": results}
+            return await _invoke_in_threadpool(run_activity_batch_prediction)
         except HTTPException:
             raise
-        except Exception as e:
-            logger.error(f"批量活性预测失败: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            logger.error("批量活性预测请求失败")
+            raise HTTPException(status_code=500, detail="批量活性预测服务不可用")
 
     # ==================== 活性模型训练与管理 API ====================
     

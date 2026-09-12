@@ -1,5 +1,12 @@
 # Latest handoff
 
+## 历史代码集成持续任务（2026-09-12）
+
+PR #13 已合并为 main `1a1677b`，但历史功能集成尚未全部完成。
+总体计划见 [历史集成计划](../superpowers/plans/2026-09-12-historical-integration-completion.md)，
+当前批次见 [family-activity-api-integration.md](family-activity-api-integration.md)。
+用户优先代码集成；不启动生产模型或部署服务。以下旧交接仅作历史依据。
+
 ## 家族双模型隔离推理（2026-09-10）
 
 PR #12 已合并为 main `132a600`。本批记录见
