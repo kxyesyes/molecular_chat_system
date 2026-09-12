@@ -1,6 +1,7 @@
 # 家族双模型隔离推理
 
-本批只提供 Python 入口，不改变现有 Web/API/Agent 调用或默认单模型选择。
+预测器本身只提供 Python 入口；HTTP 接线见 [activity_family_api.md](activity_family_api.md)。
+默认单模型选择与 Agent 调用不由该预测器隐式修改。
 模型组的注册、数据绑定和 v3 状态迁移见 [activity_family_bundles.md](activity_family_bundles.md)。
 
 ## 调用与前置条件
