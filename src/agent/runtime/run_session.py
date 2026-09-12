@@ -4,7 +4,7 @@ import hashlib
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
 
 from src.agent.contracts import (
@@ -60,6 +60,7 @@ class _StepJournal:
     tool_attempted: bool = False
     result: ToolResult | None = None
     normalized: bool = False
+    observation_captured: bool = False
     execution_recorded: bool = False
     checkpoint_saved: bool = False
     reused_recorded: bool = False
@@ -86,6 +87,7 @@ class WorkflowRunSession:
         idempotency_key: str | None = None,
         *,
         dynamic: bool = False,
+        observation_capture: Callable[[ToolResult], None] | None = None,
     ) -> None:
         self.orchestrator = orchestrator
         self.context = context
@@ -96,6 +98,9 @@ class WorkflowRunSession:
         if dynamic and (self.steps or idempotency_key is not None):
             raise SessionLifecycleError("dynamic sessions require an empty new run")
         self.dynamic = dynamic
+        if observation_capture is not None and (not dynamic or not callable(observation_capture)):
+            raise SessionLifecycleError("observation capture requires a dynamic session and callable")
+        self._observation_capture = observation_capture
         self._resume_claimed = False
         self._observations_restored = False
         self._restored_step_ids: set[str] = set()
@@ -465,6 +470,14 @@ class WorkflowRunSession:
                     result.warnings.append(optional_warning)
             journal.result = result
             journal.normalized = True
+
+        # Opt-in caller boundary: capture the complete validated observation
+        # once, before result persistence or warning/completion callbacks. A
+        # settlement retry must never replace the original authoritative seal.
+        if not journal.observation_captured:
+            if self._observation_capture is not None:
+                self._observation_capture(result)
+            journal.observation_captured = True
 
         if journal.checkpoint_reused and not journal.reused_recorded:
             self.reused_steps.append(step.name)

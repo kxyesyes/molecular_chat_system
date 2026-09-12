@@ -40,7 +40,12 @@ class ToolAdapter(ABC):
             "capabilities": sorted(self.spec.capabilities),
         }
 
-    def execute(self, input_data: Any) -> ToolResult:
+    def execute(self, input_data: Any, *, allow_retry: bool = True,
+                raw_validator: Callable[[Any], None] | None = None) -> ToolResult:
+        if type(allow_retry) is not bool:
+            raise TypeError("allow_retry must be a bool")
+        if raw_validator is not None and not callable(raw_validator):
+            raise TypeError("raw_validator must be callable")
         if not self._available:
             return ToolResult.error_result(
                 self.spec.name,
@@ -58,15 +63,17 @@ class ToolAdapter(ABC):
             )
 
         policy = self.spec.retry_policy
+        max_attempts = policy.max_attempts if allow_retry else 1
         last_result: ToolResult | None = None
-        for attempt in range(1, policy.max_attempts + 1):
-            last_result = self._execute_once(payload)
+        for attempt in range(1, max_attempts + 1):
+            last_result = (self._execute_once(payload) if raw_validator is None else
+                           self._execute_once(payload, raw_validator=raw_validator))
             if last_result.success:
                 return self._validate_output(last_result)
             error_code = last_result.error.code.value if last_result.error else ""
             explicitly_retryable = last_result.quality.get("retryable")
             if (
-                attempt >= policy.max_attempts
+                attempt >= max_attempts
                 or error_code not in policy.retryable_error_codes
                 or explicitly_retryable is False
             ):
@@ -91,7 +98,7 @@ class ToolAdapter(ABC):
             return data["query"]
         return data
 
-    def _execute_once(self, payload: Any) -> ToolResult:
+    def _execute_once(self, payload: Any, *, raw_validator=None) -> ToolResult:
         if not self._invocation_slots.acquire(blocking=False):
             return ToolResult.error_result(
                 self.spec.name,
@@ -113,7 +120,8 @@ class ToolAdapter(ABC):
                 quality={"retryable": False},
             )
         try:
-            future = executor.submit(self.invoke, payload)
+            future = (executor.submit(self.invoke, payload) if raw_validator is None else
+                      executor.submit(self._invoke_guarded, payload, raw_validator))
         except BaseException:
             self._invocation_slots.release()
             executor.shutdown(wait=False, cancel_futures=True)
@@ -154,6 +162,12 @@ class ToolAdapter(ABC):
                 "invocation_may_still_be_running": True,
             },
         )
+
+    def _invoke_guarded(self, payload: Any, raw_validator) -> Any:
+        """Per-invocation opt-in boundary, inside the same slot and deadline."""
+        raw = self.invoke(payload)
+        raw_validator(raw)
+        return raw
 
     def _normalize(self, raw: Any, elapsed_ms: int) -> ToolResult:
         if isinstance(raw, ToolResult):
@@ -218,9 +232,14 @@ class LegacyPythonToolAdapter(ToolAdapter):
         self.tool = tool
 
     def invoke(self, payload: Any) -> Any:
+        return self._invoke_guarded(payload, None)
+
+    def _invoke_guarded(self, payload: Any, raw_validator) -> Any:
         from src.agent.tools.base_tool import execute_tool_compat
 
         raw = self.tool.execute(payload)
+        if raw_validator is not None:
+            raw_validator(raw)
         if isinstance(raw, ToolResult):
             return raw
 

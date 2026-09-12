@@ -126,7 +126,7 @@ class InputValidator:
                 try:
                     validation = "valid" if chem.MolFromSmiles(value) else "invalid"
                 except Exception:
-                    validation = "invalid"
+                    validation = "unavailable"
 
             if validation == "invalid" and chem is not None:
                 inner = self._square_delimited_inner(value)
@@ -136,7 +136,7 @@ class InputValidator:
                             value = inner
                             validation = "valid"
                     except Exception:
-                        pass
+                        validation = "unavailable"
 
             candidate = MolecularInputCandidate(
                 value=value,
