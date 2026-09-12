@@ -9,6 +9,7 @@ from importlib import metadata as importlib_metadata
 from typing import Dict, List, Optional, Any
 import logging
 import json
+import re
 
 ADME = None
 ADME_PY_VERSION = None
@@ -38,8 +39,13 @@ except ImportError:
     RDKIT_AVAILABLE = False
 
 from .base_tool import BaseMolecularTool
+from .molecular_input import MolecularInputUnavailable, parse_molecular_smiles
 
 logger = logging.getLogger(__name__)
+_ADMET_PROSE_PATTERN = re.compile(
+    r'(?<![A-Za-z0-9_])(?:BBB|CNS)[ \t]*(?:permeability|penetration|通透性|渗透性)(?![A-Za-z0-9_])',
+    re.I,
+)
 
 
 class ADMETPredictor(BaseMolecularTool):
@@ -68,7 +74,10 @@ class ADMETPredictor(BaseMolecularTool):
         has_trigger = any(word in query_lower for word in self.trigger_words)
 
         # 提取并验证SMILES
-        smiles_list = self.extract_smiles(query)
+        try:
+            smiles_list = parse_molecular_smiles(query, self, prose_pattern=_ADMET_PROSE_PATTERN)
+        except Exception:
+            return False
         has_valid_smiles = len(smiles_list) > 0
 
         result = has_trigger and has_valid_smiles
@@ -87,13 +96,21 @@ class ADMETPredictor(BaseMolecularTool):
 
         try:
             # 提取SMILES
-            smiles_list = self.extract_smiles(query)
+            smiles_list = parse_molecular_smiles(query, self, prose_pattern=_ADMET_PROSE_PATTERN)
+        except ValueError as e:
+            result['message'] = str(e)
+            result['reasoning'] = (
+                "无法确认完整结构，不将校验服务异常判断为分子无效。"
+                if isinstance(e, MolecularInputUnavailable)
+                else "完整 SMILES 输入校验未通过，未使用有效片段替代原始结构。"
+            )
+            return result
+        except Exception:
+            result['message'] = "SMILES 校验暂不可用，未执行 ADME 计算。"
+            result['reasoning'] = "无法确认完整结构，不将校验服务异常判断为分子无效。"
+            return result
 
-            if not smiles_list:
-                result['message'] = "未在查询中找到有效的SMILES分子结构。"
-                result['reasoning'] = "我在输入中搜索了SMILES模式，但无法识别任何有效的分子结构。"
-                return result
-
+        try:
             # 为所有SMILES计算ADMET属性
             calculated_results = []
             formatted_outputs = []
