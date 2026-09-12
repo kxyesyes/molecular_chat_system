@@ -1,6 +1,6 @@
 # 历史代码集成状态台账
 
-日期：2026-09-12。核对 main `15061b2`（PR #14、#16、#17、#18、#19 已获具体授权合并）；总状态 **partial**。
+日期：2026-09-12。核对 main `9876cc4`（PR #14、#16、#17、#18、#19、#21 已获具体授权合并）；总状态 **partial**。
 用户要求先完成代码集成，目标服务器验收 deferred。局部 PR 通过不代表全部集成。
 实施顺序见 [总体计划](../superpowers/plans/2026-09-12-historical-integration-completion.md)。
 
@@ -17,9 +17,10 @@
 | 家族训练编排 | `5432968`，scripts/train_family_activity_models.py、test_family_training_run.py | PR #18 `e37e54b` 已获具体授权 squash 为 `18f9dc3`，合并文件树一致。独立双审通过；Linux 设备名问题 6 failed → 19 passed，完整 runner 102 passed，最新 CI run 34687875759 全7项通过。未运行真实训练或激活模型。 |
 | 旧 Agent 审计与恢复修复 | `9312bf5`，domain/orchestrators/supervisor/run_session/chat_handler/validators | PR #17 已合并为 `c642bae`；独立双审及 CI 7/7 通过，Agent/反幻觉/健康 1975 passed/1 skipped。旧 run 版本显示和深拷贝固定回归为非阻断待改项。 |
 | 决策基础协议 | `9312bf5`，contracts/decision.py、task_requirements.py | PR #19 `d2e04c6` 已获具体授权 squash 为 `15061b2`，文件树一致。双审通过，最新 CI run34688705201全7项通过；联合2197 passed/1 skipped。解析通过不等于执行授权或科研证据成立。 |
-| 决策传输/隐私 | `9312bf5`，decision_transport.py、decision_privacy.py、openai_compatible_model.py | 独立分支已移植并双审通过，修复错误信封/refusal形状及序列化前资源预算三项源缺口。聚焦318 passed，最终Agent等2293 passed/1 skipped，详见专属交接；待PR CI/授权，不切换生产入口。 |
+| 决策传输/隐私 | `9312bf5`，decision_transport.py、decision_privacy.py、openai_compatible_model.py | PR #21 `0158c2a` 已获具体授权 squash 为 `9876cc4`，整树一致。双审及 CI run34690453243全7项通过；修复错误信封/refusal形状及序列化前资源预算，聚焦318 passed，最终Agent等2293 passed/1 skipped。不切换生产入口。 |
 | 关闭测试时序与失败清理 | tests/task_runtime/test_local_backend.py | PR #20 `00ab837`，双审及CI run34689938899全7项通过；原PR15 CI问题有可控复现，修复事件同步/异常清理及首次关闭断言防假阳性，最终联合3607 passed/22 skipped。待具体授权，未改生产后端。 |
-| 决策执行/证据/续接 | `9312bf5`，harness/decision_*、transport/privacy、ledger、persistence、runtime | 仍待分批移植；包含敏感输入拒绝、target 续接及证据完整性。revision 3 必须明确拒绝旧等待快照。 |
+| 证据隔离/续接存储基础 | `9312bf5`，evidence/ledger.py、persistence/* | 独立分支 codex/agent-evidence-continuation-store 双审通过；五项审查问题已复现修复，严格 JSON、输入绑定、记录/claim 深拷贝、独占运行和跨进程 CAS。最终联合2674 passed/1 skipped，质量516 passed及21190组URL差分检查；待 PR CI/具体授权，不等于调用方证据完整性/续接授权已接线。 |
+| 决策执行/调用方续接 | `9312bf5`，harness/decision_*、runtime | 仍待分批移植；包含敏感输入拒绝、target 续接及输出 hash/证据完整性。revision 3 必须明确拒绝旧等待快照；存储 CAS 不替代调用方鉴权和科学校验。 |
 | 隔离验收入口 | `9312bf5`，web/decision_chat.py、decision_lab.py、静态 lab、run_decision 脚本 | 决策基础集成后移植，不自动接管生产首页。 |
 | 真实权重全链路测试 | `9312bf5`，tests/test_activity_family_real_acceptance.py | 待随 API/Agent/UI 集成；保持显式 opt-in，不把合成前向当真实模型验收。 |
 | 沙盒产物持久化稳定性 | main 既有 tests/sandbox_broker/test_service.py | 本轮扩大回归发生 1 次 artifact_failed 后无 manifest；单项及模块 172 项重跑通过，触发因素待查。保留失败证据，不放宽 fail-closed。 |
