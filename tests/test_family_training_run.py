@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import subprocess
 import sys
 import threading
 from types import SimpleNamespace
@@ -94,6 +95,7 @@ def test_poor_metrics_are_not_scientific_success():
 @pytest.fixture
 def rig(tmp_path, monkeypatch):
     import pandas as pd
+    import torch
     # Import consumers before patching their dependencies: they bind these
     # callables at import time, and must not retain a stub after fixture teardown.
     from src.activity import family_dataset, model_card, model_registry, trainer
@@ -103,12 +105,10 @@ def rig(tmp_path, monkeypatch):
     real_prepared = model_card.load_prepared_training_data
     real_registry = model_registry.ActivityModelRegistry
     monkeypatch.setenv("ACTIVITY_MODEL_DIR", "synthetic-original")
-    torch = SimpleNamespace(
-        cuda=SimpleNamespace(is_available=lambda: True, get_device_name=lambda _i: "synthetic-device",
-                             empty_cache=lambda: None),
-        device=lambda name: SimpleNamespace(type=name), __version__="synthetic")
-    monkeypatch.setitem(sys.modules, "torch", torch)
-    monkeypatch.setitem(sys.modules, "src.activity.rg_mpnn.Nets.ReduceGNN", SimpleNamespace(RGNN=object))
+    # Keep the import stack real; only hardware probes and training are stubbed.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _i: "synthetic-device")
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     calls, bundles, verified = [], [], []
 
     def load(path):
@@ -252,6 +252,38 @@ def test_preflight_failure_prevents_every_train_call(rig, tmp_path, monkeypatch,
     assert "PRIVATE_SOURCE_LABELS" not in json.dumps(report) + out.out + out.err
 
 
+@pytest.mark.parametrize("dependency", [
+    "sklearn.metrics", "scipy.special", "torch_geometric.data",
+    "torch.optim", "torch.optim.lr_scheduler", "src.activity.prepared_training",
+    "src.activity.predictor", "src.activity.trainer",
+    "src.activity.rg_mpnn.molecular_network.mol_feature.atom_feature",
+    "src.activity.rg_mpnn.molecular_network.mol_feature.bond_feature",
+    "src.activity.rg_mpnn.molecular_network.mol_feature.reduceGraph_feature",
+    "src.activity.rg_mpnn.molecular_network.util.wash",
+])
+def test_delayed_dependency_failure_prevents_every_train_call(
+    rig, tmp_path, monkeypatch, capsys, dependency,
+):
+    original_import = builtins.__import__
+    blocked = []
+
+    def guarded(name, *args, **kwargs):
+        if name == dependency:
+            blocked.append(name)
+            raise ImportError("SYNTHETIC_PRIVATE_DEPENDENCY")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded)
+    report = rig.runner.run("synthetic", root=tmp_path)
+    captured = capsys.readouterr()
+    assert rig.calls == [], "A missing runtime dependency must fail before any training"
+    assert blocked, "The actual dependency must be imported, not just discoverable"
+    assert report["status"] == "failed" and report["error_type"] == "ImportError"
+    assert report["jobs"] == report["bundles"] == rig.bundles == []
+    assert json.loads(report_file(tmp_path).read_text(encoding="utf-8")) == report
+    assert "SYNTHETIC_PRIVATE" not in json.dumps(report) + captured.out + captured.err
+
+
 def test_training_adapter_preserves_main_owner_and_fixed_cuda(rig, tmp_path, monkeypatch):
     from src.activity import prepared_training
     runner = module()  # Unpatched train_job, but no real training.
@@ -327,24 +359,111 @@ def test_malformed_trainer_fields_fail_without_leaking(rig, tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize("present", [False, True])
-def test_process_overrides_restored_after_interruption(rig, tmp_path, monkeypatch, present):
+@pytest.mark.parametrize("interruption", [KeyboardInterrupt(), SystemExit(0),
+                                         SystemExit("SYNTHETIC_PRIVATE_INTERRUPTION")])
+def test_process_overrides_restored_after_interruption(rig, tmp_path, monkeypatch, present, interruption):
     if not present:
         monkeypatch.delenv("ACTIVITY_MODEL_DIR")
     old = logging.root.manager.disable
     monkeypatch.setattr(logging.root.manager, "disable", logging.ERROR)
 
     def interrupt(*_args):
-        raise KeyboardInterrupt()
+        raise interruption
 
     monkeypatch.setattr(rig.runner, "train_job", interrupt)
-    with pytest.raises(KeyboardInterrupt):
+    streams = sys.stdout, sys.stderr
+    with pytest.raises(type(interruption)) as raised:
         rig.runner.run("synthetic", root=tmp_path)
+    assert raised.value is interruption  # Low-level callers retain interruption semantics.
+    assert (sys.stdout, sys.stderr) == streams
+    assert not rig.runner._RUN_LOCK.locked()
     assert os.environ.get("ACTIVITY_MODEL_DIR") == ("synthetic-original" if present else None)
     assert logging.root.manager.disable == logging.ERROR
     report = json.loads(report_file(tmp_path).read_text(encoding="utf-8"))
     assert report["status"] == "failed"
     assert report["jobs"][0]["status"] == "failed"
     logging.disable(old)
+
+
+def _cli_interrupt_probe(root, kind, fail_at):
+    """Subprocess-only harness: real CLI/run/report, synthetic trainer and packages."""
+    root = Path(root)
+    with pytest.MonkeyPatch.context() as patches:
+        harness = rig.__wrapped__(root, patches)
+        runner = harness.runner
+        original_run = runner.run
+        patches.setattr(runner, "run", lambda run_id: original_run(run_id, root=root))
+        private = "SYNTHETIC_PRIVATE_INTERRUPTION"
+        interruption = {"zero": SystemExit(0), "string": SystemExit(private),
+                        "keyboard": KeyboardInterrupt(private)}[kind]
+
+        def train(*args):
+            result = harness.train(*args)
+            if len(harness.calls) == fail_at:
+                print(private)
+                print(private, file=sys.stderr)
+                raise interruption
+            return result
+
+        patches.setattr(runner, "train_job", train)
+        streams = sys.stdout, sys.stderr
+        disabled = logging.root.manager.disable
+        try:
+            return runner.main(["--run-id", "synthetic"])
+        finally:
+            assert len(harness.calls) == fail_at
+            assert (sys.stdout, sys.stderr) == streams
+            assert logging.root.manager.disable == disabled
+            assert os.environ["ACTIVITY_MODEL_DIR"] == "synthetic-original"
+            assert not runner._RUN_LOCK.locked()
+
+
+def _isolated_cli_process(code, *arguments):
+    # Do not read/copy the host environment or forward credentials to the probe.
+    python_dir = Path(sys.executable).parent
+    return subprocess.run([sys.executable, "-B", "-c", code, *map(str, arguments)],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=90,
+        env={"SYSTEMROOT": "C:/Windows", "WINDIR": "C:/Windows",
+             "PATH": os.pathsep.join(map(str, (python_dir, python_dir / "Library/bin",
+                                               Path("C:/Windows/System32"))))})
+
+
+@pytest.mark.parametrize("kind,error_type", [("zero", "SystemExit"), ("string", "SystemExit"),
+                                          ("keyboard", "KeyboardInterrupt")])
+@pytest.mark.parametrize("fail_at", [1, 2])
+def test_cli_training_interruptions_exit_nonzero_without_private_output(tmp_path, kind, error_type, fail_at):
+    child = _isolated_cli_process(
+        "import sys; from tests.test_family_training_run import _cli_interrupt_probe; "
+        "raise SystemExit(_cli_interrupt_probe(sys.argv[1], sys.argv[2], int(sys.argv[3])))",
+        tmp_path, kind, fail_at)
+    persisted = report_file(tmp_path).read_text(encoding="utf-8")
+    report = json.loads(persisted)
+    assert report["status"] == ("failed" if fail_at == 1 else "partial")
+    assert report["error_type"] == error_type
+    assert len(report["jobs"]) == fail_at and report["jobs"][-1]["status"] == "failed"
+    assert report["jobs"][-1]["error_type"] == error_type
+    assert report["bundles"] == [] and report["activated"] is False
+    assert "SYNTHETIC_PRIVATE" not in child.stdout + child.stderr + persisted
+    assert child.stderr == ""
+    assert child.returncode == 1
+    summary = json.loads(child.stdout.splitlines()[-1])
+    assert summary == dict(status="failed", activated=False, error_type=error_type)
+
+
+def test_cli_help_still_exits_zero_without_scientific_imports():
+    child = _isolated_cli_process("""
+import builtins
+from tests.test_family_training_run import module
+runner = module()
+original = builtins.__import__
+def guarded(name, *args, **kwargs):
+    assert not name.startswith(("src.", "torch", "rdkit", "sklearn"))
+    return original(name, *args, **kwargs)
+builtins.__import__ = guarded
+runner.main(["--help"])
+""")
+    assert child.returncode == 0 and child.stderr == ""
+    assert "--run-id" in child.stdout and "usage:" in child.stdout
 
 
 def test_same_module_concurrent_run_rejected_before_global_overrides(rig, tmp_path, monkeypatch):

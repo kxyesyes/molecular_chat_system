@@ -160,9 +160,30 @@ def _execute(root, models, run_id, report, report_path, events):
     from src.activity.model_registry import ActivityModelRegistry
     if not torch.cuda.is_available():
         raise RuntimeError("Approved GPU baseline requires CUDA")
-    # Import the actual graph stack before starting any job. No model is created
-    # and no missing CUDA/PyG dependency can trigger a CPU fallback.
+    # Resolve the prepared lifecycle's delayed imports before ANY job starts.
+    # Import symbols, not just package specs: installed but broken dependencies
+    # must fail preflight too. No predictor/model/optimizer is instantiated.
     from src.activity.rg_mpnn.Nets.ReduceGNN import RGNN
+    from src.activity.prepared_training import run_prepared_training, calculate_metrics
+    from src.activity.predictor import get_predictor
+    # ActivityPredictor.process_smiles and _PairedBatches.__iter__.
+    from src.activity.rg_mpnn.molecular_network.mol_feature.atom_feature import atom_feature, atom_types
+    from src.activity.rg_mpnn.molecular_network.mol_feature.bond_feature import bond_feature
+    from src.activity.rg_mpnn.molecular_network.mol_feature.reduceGraph_feature import rg_feature, rg_x_feature
+    from src.activity.rg_mpnn.molecular_network.util.wash import NeutraliseCharges
+    from torch_geometric.data import Data, Batch
+    # Frozen optimizer/scheduler/losses and calculate_metrics/evaluate.
+    from torch.optim import Adam
+    from torch.optim.lr_scheduler import CosineAnnealingLR
+    from torch.nn import MSELoss, BCEWithLogitsLoss
+    from sklearn.metrics import (average_precision_score, balanced_accuracy_score,
+                                 confusion_matrix, mean_absolute_error,
+                                 mean_squared_error, r2_score, roc_auc_score)
+    from scipy.special import expit
+    # publish_model imports these after fitting and held-out evaluation.
+    from src.activity.trainer import get_activity_models_dir, save_model_info
+    from src.activity.model_card import build_model_card, write_model_card
+    from src.activity.model_registry import validate_endpoint_metadata
     report["device"] = dict(name=torch.cuda.get_device_name(0), torch=torch.__version__)
 
     def emit(event, **fields):
@@ -325,7 +346,13 @@ def main(argv=None):
         # this module has no path, model, environment or logging side effects.
         if str(ROOT) not in sys.path:
             sys.path.insert(0, str(ROOT))
-        result = run(args.run_id)
+        try:
+            result = run(args.run_id)
+        except (KeyboardInterrupt, SystemExit) as exc:
+            # run() has persisted failure and restored process globals. Never
+            # forward training's exit code/message to the interpreter. Keep
+            # argparse's normal --help SystemExit(0) outside this boundary.
+            result = dict(status="failed", activated=False, error_type=_error_type(exc))
     except Exception as exc:
         result = dict(status="failed", activated=False, error_type=_error_type(exc))
     print(json.dumps(result, ensure_ascii=False, allow_nan=False), flush=True)
