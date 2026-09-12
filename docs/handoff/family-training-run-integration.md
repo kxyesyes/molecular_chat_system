@@ -81,3 +81,16 @@ python -B scripts/run_agent_acceptance.py --mode contract
 107 passed、3 deselected；无阻断质量问题。审查再次确认总 completed 需要四项任务完成且
 两组 bundle 均通过实际注册校验。单项训练完成不等同对应 bundle 已接纳，CLI 同模块并发
 保证不扩展为 Web 线程或多个独立模块实例的全局隔离。下一关为 PR CI 与具体合并授权。
+
+## Linux CI 的跨平台 run-id 修复
+
+PR #18 初次 CI run `34687329743`：root 组 **4 failed、2375 passed、72 skipped**，
+失败项为 `NUL/con/COM1/LPT9`。原因是原 `Path.is_reserved()` 随宿主平台变化；
+Linux 放行 Windows 设备名，使同一 run-id 在两种系统上的契约不一致。
+
+保留原始失败用例，补充在任意测试宿主模拟 POSIX reserved 判断的 6 项回归，并禁止实际
+目录创建；**6 failed → 与原非法 run-id 合计 19 passed**。使用 `PureWindowsPath`
+只做跨平台名称判断，不把输出路径改为 Windows 路径，不改变运行根目录和训练参数。
+修复后完整 runner **102 passed**；独立规格审查另跑 **19 passed**，独立质量审查通过
+（质量审查未重跑测试，仅审查最小差异及父任务测试证据）。新 CI 尚待完成，
+不以 Windows 上模拟 POSIX 语义的测试替代实际 Linux 验证。

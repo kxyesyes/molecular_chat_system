@@ -213,6 +213,22 @@ def test_invalid_run_id_has_no_writes_or_train_calls(rig, tmp_path, run_id):
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.parametrize("run_id", ["NUL", "con", "COM1", "LPT9", "AUX", "prn"])
+def test_reserved_run_ids_rejected_when_native_path_has_posix_semantics(tmp_path, monkeypatch, run_id):
+    runner = module()
+    # Reproduce Linux Path.is_reserved on every test host. Never attempt to
+    # create device-named paths if validation regresses on Windows.
+    monkeypatch.setattr(runner.Path, "is_reserved", lambda self: False)
+
+    def forbid_write(*args, **kwargs):
+        raise AssertionError("Invalid run ID reached filesystem creation")
+
+    monkeypatch.setattr(runner.Path, "mkdir", forbid_write)
+    with pytest.raises(ValueError, match="^Invalid run ID$"):
+        runner.run(run_id, root=tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.parametrize("directory", ["outputs/activity_training", "data/activity/models"])
 def test_reused_run_id_in_either_namespace_is_rejected(rig, tmp_path, directory):
     (tmp_path / directory / "synthetic").mkdir(parents=True)

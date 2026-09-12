@@ -13,7 +13,7 @@ import json
 import logging
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import sys
 import tempfile
@@ -288,7 +288,8 @@ def run(run_id, *, root=ROOT):
 
 def _run(run_id, *, root):
     if (not isinstance(run_id, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", run_id)
-            or Path(run_id).is_reserved()):
+            # Run directories must remain portable when copied between hosts.
+            or PureWindowsPath(run_id).is_reserved()):
         raise ValueError("Invalid run ID")
     output = root / "outputs/activity_training" / run_id
     models = root / "data/activity/models" / run_id
