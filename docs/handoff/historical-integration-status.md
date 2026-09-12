@@ -1,6 +1,6 @@
 # 历史代码集成状态台账
 
-日期：2026-09-12。核对 main `becb6ab`（PR #14、#16 已获具体授权合并）；总状态 **partial**。
+日期：2026-09-12。核对 main `c642bae`（PR #14、#16、#17 已获具体授权合并）；总状态 **partial**。
 用户要求先完成代码集成，目标服务器验收 deferred。局部 PR 通过不代表全部集成。
 实施顺序见 [总体计划](../superpowers/plans/2026-09-12-historical-integration-completion.md)。
 
@@ -14,8 +14,8 @@
 | 共享预测服务/API | prediction_service.py、api_routes.py | PR #14 已合并为 `370898a`，独立审查及 Linux CI 7/7 通过；本地沙盒一次失败仍保留待查。 |
 | Agent 家族活性接线 | `9312bf5`，tools/activity_input.py、activity_predictor_tool.py、workflow、domain_validators | PR #16 已合并为 `becb6ab`；独立审查及 CI 7/7 通过，最新本地 Agent 1933 passed/1 skipped。输入边界、双模型证据、partial 已进入 main。 |
 | 活性前端 | `5432968`，activity_prediction/main.js、results_renderer.js、template | PR #15（`ab3f49e`）draft，独立规格/质量审查和 Node 18/18 通过，合成浏览器验收及 CI 7/7 通过；具体合并授权待完成。 |
-| 家族训练编排 | `5432968`，scripts/train_family_activity_models.py、test_family_training_run.py | 独立分支完成 TDD：73 项聚焦、426 passed/3 skipped 回归；尚待独立审查和 PR，不自动运行真实训练。 |
-| 旧 Agent 审计与恢复修复 | `9312bf5`，domain/orchestrators/supervisor/run_session/chat_handler/validators | 恢复审计子批次 `34d95ad` 已实现；首轮 18 failed → 聚焦 47 passed，扩展 Agent/反幻觉/健康 1975 passed/1 skipped；独立规格 222 项、质量 236 项通过，尚未合并。非阻断旧 run 版本与深拷贝固定回归记录见本批交接。 |
+| 家族训练编排 | `5432968`，scripts/train_family_activity_models.py、test_family_training_run.py | 独立分支 `07baefe`：依赖预检/CLI 中断审查缺口已修复；规格复审 284 passed/3 skipped，质量审查 203 passed/3 deselected；联合回归 2406 passed/4 skipped，编译/8 Node/contract 通过。待 PR CI 和具体合并授权，未执行真实训练。 |
+| 旧 Agent 审计与恢复修复 | `9312bf5`，domain/orchestrators/supervisor/run_session/chat_handler/validators | PR #17 已获具体授权合并为 `c642bae`，独立双审及 CI 7/7 通过；扩展 Agent/反幻觉/健康 1975 passed/1 skipped。旧 run 版本显示与深拷贝固定回归为非阻断待改项。 |
 | 决策协议与执行/证据/续接 | `9312bf5`，contracts、harness/decision_*、transport/privacy、ledger、persistence、runtime | 待分批移植；包含敏感输入拒绝、target 续接及证据完整性。revision 3 必须明确拒绝旧等待快照。 |
 | 隔离验收入口 | `9312bf5`，web/decision_chat.py、decision_lab.py、静态 lab、run_decision 脚本 | 决策基础集成后移植，不自动接管生产首页。 |
 | 真实权重全链路测试 | `9312bf5`，tests/test_activity_family_real_acceptance.py | 待随 API/Agent/UI 集成；保持显式 opt-in，不把合成前向当真实模型验收。 |
@@ -34,9 +34,9 @@
 
 | 残差 | 处置边界 |
 |---|---|
-| reporting/target_design.py、supervisor 接线和测试 | 独有功能待核查；属性复用未证明被覆盖，不直接恢复固定科研断言。 |
+| reporting/target_design.py、supervisor 接线和测试 | 已只读检查：旧 presenter 消费原始分子 list，未核对工具成功态就关联属性，并固定声称没有 docking；不能直接套到 CandidateSet。中文汇总与属性复用是否被新链路覆盖仍待验证，不能恢复固定科研断言。 |
 | 原 chat/home/index 候选卡片协议 | 核心功能已被 CandidateSet 事件/生命周期替代，不恢复旧 complete.molecules 协议。 |
-| 原 base_tool 整行解析 | 性质/类药性已有更强替代；其他继承 extractor 的调用者待核查。 |
+| 原 base_tool 整行解析 | 性质/类药性 execute 已走更强整结构 parser；旧 patch 只是整行快捷分支。只读探针 `CCO\nOCC\nCCN` 的 inherited extractor 仍只返回 CCO；ADMET、reverse-target、RXN 等仍有调用，应另建实际输入传递回归。PropertyCalculator 继承方法的探针不能等同其 execute 有回归。 |
 | 更早工作树逐块语义与最终全链路 | 尚未全部细查；本台账不是全仓逐行审计结论。 |
 | CSV、模型、索引、运行报告和历史性能文档 | 本地资产或历史证据，不读取/提交，不作为当前 main 科研性能或部署依据。 |
 
