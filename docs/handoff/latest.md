@@ -2,15 +2,16 @@
 
 ## 历史代码集成持续任务（2026-09-12）
 
-PR #14、#16、#17、#18、#19 已获具体授权并合并，main 为 `15061b2`；历史功能集成尚未全部完成。
+PR #14、#16、#17、#18、#19、#21 已获具体授权并合并，main 为 `9876cc4`；历史功能集成尚未全部完成。
 总体计划见 [历史集成计划](../superpowers/plans/2026-09-12-historical-integration-completion.md)，
-当前传输子批次见 [agent-decision-transport-integration.md](agent-decision-transport-integration.md)，
+当前证据/续接存储子批次见 [agent-evidence-continuation-store.md](agent-evidence-continuation-store.md)，
 完整残差见 [historical-integration-status.md](historical-integration-status.md)。
 PR #18 修复 Linux run-id 问题后 CI 7/7 通过并合并；详情见
 [family-training-run-integration.md](family-training-run-integration.md)。前端 PR #15 最新 CI 有关闭测试失败，独立排查中，暂停合并。
 决策协议 PR #19 最新 head 双审、本地回归及 CI 7/7 通过，已获具体授权合并。
-PR #20 独立修复关闭测试，双审及CI 7/7通过、等待授权；传输子批次双审通过、待PR CI，
-执行/证据/续接与隔离入口仍未集成完成。
+PR #20 独立修复关闭测试，双审及 CI 7/7 通过、等待授权；PR #21 经双审和 CI 7/7 通过后获授权合并。
+证据隔离/续接存储已通过双审，修复五项已复现审查问题，联合 2674 passed/1 skipped；待 PR CI 和具体合并授权。
+动态执行、调用方续接校验与隔离入口仍未集成完成。
 用户优先代码集成；不启动生产模型或部署服务。以下旧交接仅作历史依据。
 
 ## 家族双模型隔离推理（2026-09-10）
