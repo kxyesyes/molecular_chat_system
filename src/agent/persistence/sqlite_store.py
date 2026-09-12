@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import threading
 import time
@@ -8,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .redaction import contains_credential, redact_sensitive
+from .redaction import contains_credential, contains_secret_material, redact_sensitive
 
 
 def _json_dump(value: Any) -> str:
@@ -19,6 +20,76 @@ def _json_load(value: str | None, default: Any = None) -> Any:
     if value in (None, ""):
         return default
     return json.loads(value)
+
+
+def _continuation_json(value: Any) -> tuple[dict[str, Any], str]:
+    """Detach strict JSON before credential traversal, without lossy coercion.
+
+    Each envelope (including claimed_by) is limited to 512 KiB of UTF-8 JSON,
+    32 levels, 65536 nodes and 4096-bit integers. Over-budget values fail rather
+    than truncate. Leave headroom for the claim marker when publishing.
+    """
+    limit = 512 * 1024
+    nodes = text_bytes = 0
+
+    def copy_json(item: Any, depth: int) -> Any:
+        nonlocal nodes, text_bytes
+        nodes += 1
+        if depth > 32 or nodes > 65536:
+            raise ValueError("continuation JSON exceeds structural budget")
+        kind = type(item)
+        if kind is str:
+            if len(item) > limit:
+                raise ValueError("continuation JSON exceeds byte budget")
+            text_bytes += len(item.encode("utf-8"))
+            if text_bytes > limit:
+                raise ValueError("continuation JSON exceeds byte budget")
+            return item
+        if item is None or kind is bool:
+            return item
+        if kind is int and item.bit_length() <= 4096:
+            return item
+        if kind is float and math.isfinite(item):
+            return item
+        if kind is list:
+            if len(item) + nodes > 65536:
+                raise ValueError("continuation JSON exceeds structural budget")
+            return [copy_json(child, depth + 1) for child in item]
+        if kind is dict:
+            if 2 * len(item) + nodes > 65536:
+                raise ValueError("continuation JSON exceeds structural budget")
+            result = {}
+            for key, child in item.items():
+                if type(key) is not str:
+                    raise ValueError("continuation JSON keys must be strings")
+                result[copy_json(key, depth + 1)] = copy_json(child, depth + 1)
+            return result
+        raise ValueError("continuation requires strict JSON values")
+
+    if type(value) is not dict:
+        raise ValueError("continuation envelope must be an object")
+    detached = copy_json(value, 0)
+    chunks: list[str] = []
+    encoded_bytes = 0
+    encoder = json.JSONEncoder(ensure_ascii=False, sort_keys=True, allow_nan=False)
+    for chunk in encoder.iterencode(detached):
+        encoded_bytes += len(chunk.encode("utf-8"))
+        if encoded_bytes > limit:
+            raise ValueError("continuation JSON exceeds byte budget")
+        chunks.append(chunk)
+    encoded = "".join(chunks)
+    if contains_secret_material(detached):
+        raise ValueError("continuation JSON contains credential material")
+    if (type(detached.get("schema")) is not int or detached["schema"] != 1
+            or any(type(detached.get(key)) is not str or not detached[key].strip()
+                   for key in ("id", "configuration", "checksum"))
+            or type(detached.get("snapshot")) is not dict):
+        raise ValueError("invalid continuation envelope")
+    if "claimed_by" in detached and (
+        type(detached["claimed_by"]) is not str or not detached["claimed_by"].strip()
+    ):
+        raise ValueError("invalid continuation claim marker")
+    return detached, encoded
 
 
 class SQLiteAgentStateStore:
@@ -159,17 +230,12 @@ class SQLiteAgentStateStore:
         with self._lock, self._connect() as connection:
             connection.executescript(schema)
 
-    def start_run(self, run: dict[str, Any]) -> None:
+    def start_run(self, run: dict[str, Any], *, exclusive: bool = False) -> None:
+        if type(exclusive) is not bool:
+            raise TypeError("exclusive must be a bool")
         data = redact_sensitive(run)
         now = time.time()
-        with self._lock, self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO agent_runs (
-                    trace_id, status, skill_name, query, workflow_version,
-                    idempotency_key, user_id, session_id, metadata_json,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        conflict = "" if exclusive else """
                 ON CONFLICT(trace_id) DO UPDATE SET
                     status=excluded.status,
                     skill_name=excluded.skill_name,
@@ -180,7 +246,16 @@ class SQLiteAgentStateStore:
                     session_id=excluded.session_id,
                     metadata_json=excluded.metadata_json,
                     updated_at=excluded.updated_at
-                """,
+                """
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO agent_runs (
+                    trace_id, status, skill_name, query, workflow_version,
+                    idempotency_key, user_id, session_id, metadata_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """ + conflict,
                 (
                     data["trace_id"],
                     data.get("status", "pending"),
@@ -208,8 +283,13 @@ class SQLiteAgentStateStore:
         trace_id: str,
         metadata: dict[str, Any],
     ) -> None:
+        """Merge ordinary metadata; continuation writes require the CAS boundary."""
+        if "decision_continuation" in metadata:
+            raise ValueError("use transition_decision_continuation for continuation writes")
         incoming = redact_sensitive(metadata)
         with self._lock, self._connect() as connection:
+            # Serialize the read/merge/write with CAS and other store instances.
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT metadata_json FROM agent_runs WHERE trace_id = ?",
                 (trace_id,),
@@ -219,15 +299,111 @@ class SQLiteAgentStateStore:
             current = _json_load(row["metadata_json"], {})
             if not isinstance(current, dict):
                 current = {}
+            continuation = None
+            if "decision_continuation" in current:
+                try:
+                    continuation, _ = _continuation_json(current["decision_continuation"])
+                except (ValueError, TypeError, RecursionError):
+                    # Malformed legacy values get no exemption from redaction.
+                    pass
+                else:
+                    current.pop("decision_continuation")
             merged = redact_sensitive({**current, **incoming})
+            if continuation is not None:
+                merged["decision_continuation"] = continuation
             connection.execute(
                 """
                 UPDATE agent_runs
                 SET metadata_json = ?, updated_at = ?
                 WHERE trace_id = ?
                 """,
-                (_json_dump(merged), time.time(), trace_id),
+                (json.dumps(merged, ensure_ascii=False, sort_keys=True), time.time(), trace_id),
             )
+
+    def transition_decision_continuation(
+        self,
+        trace_id: str,
+        *,
+        user_id: str,
+        session_id: str,
+        expected: dict[str, Any] | None,
+        replacement: dict[str, Any],
+        claim: bool,
+    ) -> bool:
+        """Publish idempotently or consume a waiting snapshot once, across processes.
+
+        The local DB and externally supplied caller identity are trusted. This
+        checks storage shape, not checksums, scientific validity or authorization.
+        Claim may only add claimed_by; subsequent publication needs a new id.
+        Database/commit errors propagate: the caller must not dispatch on an
+        uncertain claim, even if its write actually committed. Not crash recovery.
+        """
+        if type(claim) is not bool or any(
+            type(value) is not str or not value.strip()
+            for value in (trace_id, user_id, session_id)
+        ):
+            return False
+        try:
+            replacement, replacement_json = _continuation_json(replacement)
+            expected_json = None
+            if expected is not None:
+                expected, expected_json = _continuation_json(expected)
+            if claim:
+                if (expected is None or "claimed_by" in expected
+                        or "claimed_by" not in replacement):
+                    return False
+                # JSON text comparison is type-strict (unlike False == 0 == 0.0).
+                _, unclaimed_json = _continuation_json({
+                    key: value for key, value in replacement.items() if key != "claimed_by"
+                })
+                if unclaimed_json != expected_json:
+                    return False
+            elif "claimed_by" in replacement:
+                return False
+        except (ValueError, TypeError, RecursionError):
+            return False
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status, user_id, session_id, metadata_json FROM agent_runs WHERE trace_id=?",
+                (trace_id,),
+            ).fetchone()
+            if row is None or row["user_id"] != user_id or row["session_id"] != session_id:
+                return False
+            try:
+                metadata = _json_load(row["metadata_json"], {})
+                if type(metadata) is not dict:
+                    return False
+                current_json = None
+                if "decision_continuation" in metadata:
+                    _, current_json = _continuation_json(metadata["decision_continuation"])
+            except (ValueError, TypeError, RecursionError):
+                return False
+            if (not claim and current_json == replacement_json
+                    and row["status"] == "waiting_for_input"):
+                return True
+            if not claim and expected is not None and expected["id"] == replacement["id"]:
+                return False
+            statuses = {"waiting_for_input"} if claim else {"partial", "rejected"}
+            if current_json != expected_json or row["status"] not in statuses:
+                return False
+            # Keep legacy redaction outside the already validated, detached
+            # continuation. Redacting it again would corrupt ordinary counters
+            # such as token_count and break exact snapshot comparisons on claim.
+            metadata = redact_sensitive({
+                key: value for key, value in metadata.items()
+                if key != "decision_continuation"
+            })
+            metadata["decision_continuation"] = replacement
+            metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+            connection.execute(
+                "UPDATE agent_runs SET status=?, metadata_json=?, updated_at=? WHERE trace_id=?",
+                ("running" if claim else "waiting_for_input", metadata_json,
+                 time.time(), trace_id),
+            )
+        # Do not report success until the connection context has committed.
+        return True
 
     def get_run(self, trace_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:

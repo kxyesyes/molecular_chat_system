@@ -1,6 +1,6 @@
 # 历史代码集成状态台账
 
-日期：2026-09-12。核对 main `becb6ab`（PR #14、#16 已获具体授权合并）；总状态 **partial**。
+日期：2026-09-12。核对 main `57c677e`（PR #14、#16、#17、#18、#19、#21、#22 已获具体授权合并）；总状态 **partial**。
 用户要求先完成代码集成，目标服务器验收 deferred。局部 PR 通过不代表全部集成。
 实施顺序见 [总体计划](../superpowers/plans/2026-09-12-historical-integration-completion.md)。
 
@@ -13,10 +13,16 @@
 | 数据准备、端点注册、prepared training、家族数据/bundle/pinned predictor | `5432968`，main PR #9–#13 | 已集成且加强，不重新覆盖底层实现。 |
 | 共享预测服务/API | prediction_service.py、api_routes.py | PR #14 已合并为 `370898a`，独立审查及 Linux CI 7/7 通过；本地沙盒一次失败仍保留待查。 |
 | Agent 家族活性接线 | `9312bf5`，tools/activity_input.py、activity_predictor_tool.py、workflow、domain_validators | PR #16 已合并为 `becb6ab`；独立审查及 CI 7/7 通过，最新本地 Agent 1933 passed/1 skipped。输入边界、双模型证据、partial 已进入 main。 |
-| 活性前端 | `5432968`，activity_prediction/main.js、results_renderer.js、template | PR #15（`ab3f49e`）draft，独立规格/质量审查和 Node 18/18 通过，合成浏览器验收及 CI 7/7 通过；具体合并授权待完成。 |
-| 家族训练编排 | `5432968`，scripts/train_family_activity_models.py、test_family_training_run.py | 独立分支完成 TDD：73 项聚焦、426 passed/3 skipped 回归；尚待独立审查和 PR，不自动运行真实训练。 |
-| 旧 Agent 审计与恢复修复 | `9312bf5`，domain/orchestrators/supervisor/run_session/chat_handler/validators | 恢复审计子批次 `34d95ad` 已实现；首轮 18 failed → 聚焦 47 passed，扩展 Agent/反幻觉/健康 1975 passed/1 skipped；独立规格 222 项、质量 236 项通过，尚未合并。非阻断旧 run 版本与深拷贝固定回归记录见本批交接。 |
-| 决策协议与执行/证据/续接 | `9312bf5`，contracts、harness/decision_*、transport/privacy、ledger、persistence、runtime | 待分批移植；包含敏感输入拒绝、target 续接及证据完整性。revision 3 必须明确拒绝旧等待快照。 |
+| 活性前端 | `5432968`，activity_prediction/main.js、results_renderer.js、template | PR #15 当前 `33eed11`；Agent/API 1998 passed/1 skipped、9 Node、compile/contract 通过。最新 CI run 34687945728 的 task-runtime 为 1548 passed/1 failed/3 skipped，关闭测试取消状态断言失败后线程未释放导致超时124；正在独立分支排查，暂停合并。原 UI 审查/浏览器证据保留。 |
+| 家族训练编排 | `5432968`，scripts/train_family_activity_models.py、test_family_training_run.py | PR #18 `e37e54b` 已获具体授权 squash 为 `18f9dc3`，合并文件树一致。独立双审通过；Linux 设备名问题 6 failed → 19 passed，完整 runner 102 passed，最新 CI run 34687875759 全7项通过。未运行真实训练或激活模型。 |
+| 旧 Agent 审计与恢复修复 | `9312bf5`，domain/orchestrators/supervisor/run_session/chat_handler/validators | PR #17 已合并为 `c642bae`；独立双审及 CI 7/7 通过，Agent/反幻觉/健康 1975 passed/1 skipped。旧 run 版本显示和深拷贝固定回归为非阻断待改项。 |
+| 决策基础协议 | `9312bf5`，contracts/decision.py、task_requirements.py | PR #19 `d2e04c6` 已获具体授权 squash 为 `15061b2`，文件树一致。双审通过，最新 CI run34688705201全7项通过；联合2197 passed/1 skipped。解析通过不等于执行授权或科研证据成立。 |
+| 决策传输/隐私 | `9312bf5`，decision_transport.py、decision_privacy.py、openai_compatible_model.py | PR #21 `0158c2a` 已获具体授权 squash 为 `9876cc4`，整树一致。双审及 CI run34690453243全7项通过；修复错误信封/refusal形状及序列化前资源预算，聚焦318 passed，最终Agent等2293 passed/1 skipped。不切换生产入口。 |
+| 关闭测试时序与失败清理 | tests/task_runtime/test_local_backend.py | PR #20 `00ab837`，双审及CI run34689938899全7项通过；原PR15 CI问题有可控复现，修复事件同步/异常清理及首次关闭断言防假阳性，最终联合3607 passed/22 skipped。待具体授权，未改生产后端。 |
+| 证据隔离/续接存储基础 | `9312bf5`，evidence/ledger.py、persistence/* | PR #22 `8ae557f` 已获具体授权 squash 为 `57c677e`，整树一致。五项审查问题已修复；首轮 Linux CI 长文本矩阵超时及既有沙盒时序失败保留。矩阵完整分组后独立双审、联合2686 passed/1 skipped，最新CI run34693786199全7项通过。不是调用方完整鉴权/证据接线；沙盒修复另批处理。 |
+| 动态执行会话 | `9312bf5`，runtime/run_session.py | 独立本地分支，动态58项、最终联合2744 passed/1 skipped；规格复审233 passed、质量215+11 passed，修复带结构化error却COMPLETED与错误引用未隔离两项问题，待独立PR/CI。未切换生产入口；来源loop的修正输入续接需另对齐PARTIAL语义。 |
+| 沙盒 late-create 测试同步 | tests/sandbox_broker/test_service.py | PR #23 `00967ad`，单测试及交接，独立双审通过、联合532 passed/2 skipped，CI进行中。650ms通知延迟可控复现；保持20ms创建期限和清理前主要断言，不声称复现实际CI调度原因。 |
+| 决策执行/调用方续接 | `9312bf5`，harness/decision_*、runtime | 仍待分批移植；包含敏感输入拒绝、target 续接及输出 hash/证据完整性。revision 3 必须明确拒绝旧等待快照；存储 CAS 不替代调用方鉴权和科学校验。 |
 | 隔离验收入口 | `9312bf5`，web/decision_chat.py、decision_lab.py、静态 lab、run_decision 脚本 | 决策基础集成后移植，不自动接管生产首页。 |
 | 真实权重全链路测试 | `9312bf5`，tests/test_activity_family_real_acceptance.py | 待随 API/Agent/UI 集成；保持显式 opt-in，不把合成前向当真实模型验收。 |
 | 沙盒产物持久化稳定性 | main 既有 tests/sandbox_broker/test_service.py | 本轮扩大回归发生 1 次 artifact_failed 后无 manifest；单项及模块 172 项重跑通过，触发因素待查。保留失败证据，不放宽 fail-closed。 |
@@ -34,9 +40,9 @@
 
 | 残差 | 处置边界 |
 |---|---|
-| reporting/target_design.py、supervisor 接线和测试 | 独有功能待核查；属性复用未证明被覆盖，不直接恢复固定科研断言。 |
+| reporting/target_design.py、supervisor 接线和测试 | 已只读检查：旧 presenter 消费原始分子 list，未核对工具成功态就关联属性，并固定声称没有 docking；不能直接套到 CandidateSet。中文汇总与属性复用是否被新链路覆盖仍待验证，不能恢复固定科研断言。 |
 | 原 chat/home/index 候选卡片协议 | 核心功能已被 CandidateSet 事件/生命周期替代，不恢复旧 complete.molecules 协议。 |
-| 原 base_tool 整行解析 | 性质/类药性已有更强替代；其他继承 extractor 的调用者待核查。 |
+| 原 base_tool 整行解析 | 性质/类药性 execute 已走更强整结构 parser；旧 patch 只是整行快捷分支。只读探针 `CCO\nOCC\nCCN` 的 inherited extractor 仍只返回 CCO；ADMET、reverse-target、RXN 等仍有调用，应另建实际输入传递回归。PropertyCalculator 继承方法的探针不能等同其 execute 有回归。 |
 | 更早工作树逐块语义与最终全链路 | 尚未全部细查；本台账不是全仓逐行审计结论。 |
 | CSV、模型、索引、运行报告和历史性能文档 | 本地资产或历史证据，不读取/提交，不作为当前 main 科研性能或部署依据。 |
 

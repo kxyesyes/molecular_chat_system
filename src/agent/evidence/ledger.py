@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+from copy import deepcopy
 from dataclasses import replace
 from typing import Any
 
@@ -13,6 +15,47 @@ class EvidenceLedger:
         self.trace_id = trace_id
         self._records: dict[str, dict[str, Any]] = {}
         self._claims: dict[str, ScientificClaim] = {}
+
+    @staticmethod
+    def output_digest(data: Any) -> str:
+        """Hash JSON output using the decision/continuation wire representation."""
+        active: set[int] = set()
+
+        def validate(item: Any) -> None:
+            kind = type(item)
+            if item is None or kind in (str, bool, int):
+                return
+            if kind is float:
+                if not math.isfinite(item):
+                    raise ValueError("output digest requires finite JSON numbers")
+                return
+            if kind not in (list, dict):
+                raise TypeError("output digest requires exact JSON builtin types")
+            identity = id(item)
+            if identity in active:
+                raise ValueError("Circular reference in output digest JSON")
+            active.add(identity)
+            try:
+                if kind is dict:
+                    for key, child in item.items():
+                        if type(key) is not str:
+                            raise TypeError("output digest JSON keys must be strings")
+                        validate(child)
+                else:
+                    for child in item:
+                        validate(child)
+            finally:
+                active.remove(identity)
+
+        validate(data)
+        return hashlib.sha256(
+            json.dumps(
+                data,
+                sort_keys=True,
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
 
     def prepare_provenance(
         self,
@@ -62,6 +105,15 @@ class EvidenceLedger:
                 and not provenance.fallback_used
             ),
         }
+        if result.quality.get("request_input_digest") is not None:
+            payload["input_binding"] = {
+                name: deepcopy(result.quality.get(name))
+                for name in (
+                    "request_input_digest",
+                    "input_evidence_ids",
+                    "operation_key",
+                )
+            }
         digest = hashlib.sha256(
             json.dumps(
                 payload,
@@ -71,11 +123,11 @@ class EvidenceLedger:
             ).encode("utf-8")
         ).hexdigest()
         evidence_id = f"evidence-{digest[:20]}"
-        self._records[evidence_id] = {"evidence_id": evidence_id, **payload}
+        self._records[evidence_id] = deepcopy({"evidence_id": evidence_id, **payload})
         return evidence_id
 
     def get(self, evidence_id: str) -> dict[str, Any]:
-        return dict(self._records[evidence_id])
+        return deepcopy(self._records[evidence_id])
 
     def accept_claim(self, claim: ScientificClaim) -> None:
         missing = [
@@ -92,10 +144,10 @@ class EvidenceLedger:
         ]
         if unusable:
             raise ValueError(f"Scientifically unusable evidence ids: {unusable}")
-        self._claims[claim.claim_id] = claim
+        self._claims[claim.claim_id] = deepcopy(claim)
 
     def claims(self) -> dict[str, ScientificClaim]:
-        return dict(self._claims)
+        return deepcopy(self._claims)
 
     def to_list(self) -> list[dict[str, Any]]:
-        return [dict(self._records[key]) for key in sorted(self._records)]
+        return [deepcopy(self._records[key]) for key in sorted(self._records)]

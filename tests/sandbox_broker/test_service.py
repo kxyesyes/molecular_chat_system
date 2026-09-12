@@ -1660,6 +1660,7 @@ def test_blocking_reconciliation_is_bounded_by_absolute_create_deadline(
 
 def test_late_cancellation_resistant_create_is_owned_and_cleaned_before_stop(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class LateCreateClient(FakeSandboxClient):
         def __init__(self) -> None:
@@ -1686,50 +1687,70 @@ def test_late_cancellation_resistant_create_is_owned_and_cleaned_before_stop(
             self.destroyed_ids.append(handle.sandbox_id)
             self.live_ids.discard(handle.sandbox_id)
 
-    async def scenario() -> tuple[object, LateCreateClient, bool, list[str]]:
+    async def scenario() -> None:
         sdk = LateCreateClient()
         service, _, config = _service(tmp_path, sdk)
         service._create_hard_timeout_seconds = 0.02
-        await service.start()
-        job = await service.submit(_prepared(config), "idem-late-create-cleanup")
-        await sdk.create_started.wait()
-        terminal = await asyncio.wait_for(
-            service.wait_terminal(job.job_id), timeout=0.5
-        )
-        assert sdk.create_cancelled.is_set()
+        terminal_notified = asyncio.Event()
+        original_notify_terminal = service._notify_terminal
 
-        stop_incomplete = False
+        async def notify_terminal() -> None:
+            await original_notify_terminal()
+            terminal_notified.set()
+
+        monkeypatch.setattr(service, "_notify_terminal", notify_terminal)
         try:
-            await service.stop(timeout=0.05)
-        except StopIncomplete:
-            stop_incomplete = True
-        tracked_before_release = bool(service._create_tasks)
+            await service.start()
+            job = await service.submit(_prepared(config), "idem-late-create-cleanup")
+            # Observe lifecycle milestones, not a 0.5s provisioning/publication
+            # budget. These timeouts are deadlock guards; release stays closed.
+            await asyncio.wait_for(sdk.create_started.wait(), timeout=5.0)
+            await asyncio.wait_for(sdk.create_cancelled.wait(), timeout=5.0)
+            await asyncio.wait_for(terminal_notified.wait(), timeout=5.0)
+            terminal = await asyncio.wait_for(
+                service.wait_terminal(job.job_id), timeout=0.5
+            )
+            assert terminal.status is BrokerJobStatus.FAILED
+            assert terminal.error_code == BrokerErrorCode.CLEANUP_FAILED.value
+            assert terminal.cleanup_status == "failed"
+            assert "sandbox_auto_expires_within_configured_remote_lifetime" in terminal.warnings
+            assert not sdk.create_release.is_set()
+            assert sdk.destroy_count == 0
+            assert sdk.live_ids == set()
+            late_create = service._create_tasks[job.job_id]
+            assert not late_create.done()
 
-        sdk.create_release.set()
-        await service.stop(timeout=1.0)
-        await asyncio.sleep(0)
-        leaked = [
-            task.get_name()
-            for task in asyncio.all_tasks()
-            if task is not asyncio.current_task()
-            and task.get_name().startswith("sandbox-broker-")
-        ]
-        assert service._create_tasks == {}
-        assert service._cleanup_tasks == {}
-        assert service._isolated_tasks == set()
-        return terminal, sdk, stop_incomplete and tracked_before_release, leaked
+            with pytest.raises(StopIncomplete):
+                await service.stop(timeout=0.05)
+            assert service._create_tasks[job.job_id] is late_create
+            assert not late_create.done()
+            assert not sdk.create_release.is_set()
 
-    terminal, sdk, shutdown_waited, leaked = asyncio.run(scenario())
-    assert shutdown_waited is True
-    assert terminal.status is BrokerJobStatus.FAILED
-    assert terminal.error_code == BrokerErrorCode.CLEANUP_FAILED.value
-    assert terminal.cleanup_status == "failed"
-    assert "sandbox_auto_expires_within_configured_remote_lifetime" in terminal.warnings
-    assert sdk.create_count == 1
-    assert sdk.destroy_count == 1
-    assert sdk.destroyed_ids == [f"sandbox-{terminal.job_id}-late"]
-    assert sdk.live_ids == set()
-    assert leaked == []
+            sdk.create_release.set()
+            await service.stop(timeout=1.0)
+            await asyncio.sleep(0)
+            assert sdk.create_count == 1
+            assert sdk.run_count == 0
+            assert sdk.destroy_count == 1
+            assert sdk.destroyed_ids == [f"sandbox-{terminal.job_id}-late"]
+            assert sdk.live_ids == set()
+            assert service._job_tasks == {}
+            assert service._create_tasks == {}
+            assert service._cleanup_tasks == {}
+            assert service._isolated_tasks == set()
+            assert not [
+                task.get_name()
+                for task in asyncio.all_tasks()
+                if task is not asyncio.current_task()
+                and task.get_name().startswith("sandbox-broker-")
+            ]
+        finally:
+            # Failure teardown must not strand the cancellation-resistant fake.
+            # Keep all ownership/destroy/leak assertions above this fallback.
+            sdk.create_release.set()
+            await service.stop(timeout=5.0)
+
+    asyncio.run(scenario())
 
 
 def test_execution_timeout_and_command_failure_are_stable_and_cleanup(
