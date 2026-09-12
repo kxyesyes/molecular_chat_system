@@ -31,6 +31,12 @@ API Linux CI run `34683624419` 已 7/7 通过；root 2283 passed/72 skipped，sa
 位置/分隔/冲突/完整结构检查通过。全部 8 个 Node、compileall、diff check 通过。
 质量审查、CI 与本批具体合并授权为独立后续门槛。
 
+质量审查随后发现中文/带引号的未知靶点及背景说明后的明确靶点会被忽略，
+父任务补 20 项 RED 复现；另补 4 项已知靶点前缀截断 RED。修复为先识别明确
+靶点位置，再验证完整候选值；背景仅忽略明确声明之前的文本，不忽略之后的声明。
+最新聚焦 255 passed，全 Agent 1925 passed/1 skipped/7 warnings（18.81 秒），
+compileall、contract、diff check 通过。质量重审中，先前 SPEC 计数不覆盖这次新修复。
+
 实施者生成的五个 temp_task2_* 根目录临时产物未暂存，后续测试改用忽略目录或系统临时目录。
 清理尝试受执行策略阻止，暂留原处，不以 git clean 或覆盖操作绕过。
 

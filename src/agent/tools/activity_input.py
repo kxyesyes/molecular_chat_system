@@ -13,6 +13,11 @@ _METRICS = frozenset({"ic50", "pic50", "ec50", "pec50", "ki", "pki", "kd", "pkd"
 _CONTEXT_WORDS = frozenset({"target", "activity", "potency", "inhibition", "assess"})
 _BACKGROUND = re.compile(r"\s*(?:研究背景|背景|background\b)", re.I)
 _TARGET_LABEL = r"(针对|靶点\s*[:：]?|对|(?<![A-Za-z])(?:target|for|against)\s*[:=：]?)\s*"
+# Include unrecognized values so explicit intent cannot vanish before validation.
+_TARGET_VALUE = (
+    r"((?:丁酰胆碱酯酶|[A-Za-z][A-Za-z0-9_-]*)(?=$|[\s；，,/和及与、]|(?:的)?活性)"
+    r"|[^\s；，,/和及与、]+)"
+)
 _LABELLED_TARGET = re.compile(
     r"(?:预测|评估)\s*([A-Za-z][A-Za-z0-9_-]*)\s*(?:的)?活性|"
     r"\b(?:predict|assess|evaluate)\s+([A-Za-z][A-Za-z0-9_-]*)\s+(?:activity|potency)\b",
@@ -35,6 +40,11 @@ def _strict_family(value):
     return families.pop()
 
 
+def _target_context_start(text):
+    matches = (re.search(_TARGET_LABEL, text, re.I), _LABELLED_TARGET.search(text))
+    return min((match.start() for match in matches if match), default=None)
+
+
 def _context_clauses(text):
     for clause in _FIELD_END.split(text):
         marker = _MARKER.search(clause)
@@ -43,13 +53,15 @@ def _context_clauses(text):
             # A structure field must not hide a later explicit target, especially
             # when generated SMILES arrive separately in a structured payload.
             tail = clause[marker.end():]
-            later_target = re.search(_TARGET_LABEL, tail, re.I)
-            labelled_target = _LABELLED_TARGET.search(tail)
-            starts = [match.start() for match in (later_target, labelled_target) if match]
-            if starts:
-                context += "；" + tail[min(starts):]
-        if not _BACKGROUND.match(context):
-            yield context
+            start = _target_context_start(tail)
+            if start is not None:
+                context += "；" + tail[start:]
+        if _BACKGROUND.match(context):
+            start = _target_context_start(context)
+            if start is None:
+                continue
+            context = context[start:]
+        yield context
 
 
 def activity_target(text, validate_smiles):
@@ -58,18 +70,21 @@ def activity_target(text, validate_smiles):
     explicit = re.findall(r"(?:靶点|\btarget)\s*(?:[:：=]|\s)\s*([^；，,]*)", text, re.I)
     for value in explicit:
         _strict_family(value)
-    positions = re.finditer(
-        _TARGET_LABEL + r"(丁酰胆碱酯酶|[A-Za-z][A-Za-z0-9_-]*)", text, re.I)
+    positions = re.finditer(_TARGET_LABEL, text, re.I)
     # Preserve the legacy 'predict activity for CCO' molecule position. Explicit
     # target labels above are still authoritative, including target: CCO.
     positioned = []
     for match in positions:
-        label, value = match.groups()
+        label = match[1]
+        value_match = re.match(_TARGET_VALUE, text[match.end():])
+        if value_match is None:
+            raise ValueError("Missing explicit target")
+        value = value_match[1]
         values = [value]
-        tail = text[match.end():]
+        tail = text[match.end() + value_match.end():]
         while following := re.match(
                 r"\s*(?:和|及|与|、|[,，/]|\band\b|\bor\b)\s*"
-                r"(丁酰胆碱酯酶|[A-Za-z][A-Za-z0-9_-]*)", tail, re.I):
+                + _TARGET_VALUE, tail, re.I):
             values.append(following[1])
             tail = tail[following.end():]
         positioned.extend(value for value in values

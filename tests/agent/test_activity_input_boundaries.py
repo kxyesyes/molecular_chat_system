@@ -172,3 +172,46 @@ def test_late_positioned_target_uses_full_label_grammar(
     result = execute_tool_compat(tool, payload)
     assert result.status == ObservationStatus.INVALID_INPUT
     assert not calls
+
+
+@pytest.mark.parametrize("payload", [
+    "预测CCO对乙酰胆碱酯酶的活性",
+    'Predict activity of CCO for "EGFR"',
+    "预测CCO对PDE5A和乙酰胆碱酯酶的活性",
+    'Predict activity of CCO for PDE5A and "EGFR"',
+    {"query": "SMILES: CCO, against 乙酰胆碱酯酶", "smiles": "CCN"},
+    {"query": 'SMILES: CCO, for "EGFR"', "smiles": "CCN", "target": "PDE5A"},
+    "Predict activity of CCO for ;",
+])
+def test_unknown_or_missing_positioned_values_never_disappear(boundary, payload):
+    tool, calls, _ = boundary
+    result = execute_tool_compat(tool, payload)
+    assert result.status == ObservationStatus.INVALID_INPUT
+    assert not calls
+
+
+@pytest.mark.parametrize("prefix", ["background: PDE5A, ", "研究背景：PDE5A，"])
+@pytest.mark.parametrize("declaration", ["target: EGFR", "Predict EGFR activity", "对乙酰胆碱酯酶的活性"])
+@pytest.mark.parametrize("structured", [False, True])
+def test_background_cannot_hide_explicit_target_declarations(boundary, prefix, declaration, structured):
+    tool, calls, _ = boundary
+    query = prefix + declaration
+    payload = {"query": query, "target": "BuChE", "smiles": "CCO"} if structured else query + "; SMILES: CCO"
+    result = execute_tool_compat(tool, payload)
+    assert result.status == ObservationStatus.INVALID_INPUT
+    assert not calls
+
+
+def test_explicit_known_target_after_background_overrides_background_alias(boundary):
+    tool, calls, _ = boundary
+    result = execute_tool_compat(tool, "background: BuChE, target: PDE5A; SMILES: CCO")
+    assert result.success
+    assert calls == [(["CCO"], "PDE5A")]
+
+
+@pytest.mark.parametrize("target", ["PDE5A$EGFR", "PDE5A.EGFR", "PDE5A:EGFR", "PDE5A乙酰胆碱酯酶"])
+def test_positioned_target_cannot_be_truncated_to_known_prefix(boundary, target):
+    tool, calls, _ = boundary
+    result = execute_tool_compat(tool, {"query": f"Predict activity for {target}", "smiles": "CCO"})
+    assert result.status == ObservationStatus.INVALID_INPUT
+    assert not calls
