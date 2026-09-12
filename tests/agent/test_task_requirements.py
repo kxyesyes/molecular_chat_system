@@ -1,4 +1,5 @@
 """Strict service-owned requirements, not model-supplied success criteria."""
+import json
 import pytest
 
 from src.agent.contracts.task_requirements import (
@@ -8,6 +9,32 @@ from src.agent.contracts.task_requirements import (
 
 def payload(**kw):
     return {'version': '1', 'molecular_results': [{'tool_name': 'property_calculator', **kw}]}
+
+
+def _document_with_size(byte_count):
+    subjects = ['C' * 8192, 'N' * 8192, 'O' * 8192, '']
+    value = payload(expected_smiles=subjects)
+    padding = byte_count - len(json.dumps(value).encode('utf-8'))
+    assert 1 <= padding <= 8192
+    subjects[-1] = 'F' * padding
+    return value
+
+
+def test_size_budget_also_covers_defaults_in_persistable_snapshot():
+    value = _document_with_size(32768)
+    with pytest.raises(ValueError, match='^invalid_task_requirements$'):
+        parse_task_requirements(value)
+
+
+def test_maximum_accepted_snapshot_can_be_revalidated():
+    small = _document_with_size(32000)
+    normalized = parse_task_requirements(small).model_dump(mode='json')
+    overhead = len(json.dumps(normalized).encode('utf-8')) - 32000
+    accepted = parse_task_requirements(_document_with_size(32768 - overhead))
+    snapshot = accepted.model_dump(mode='json')
+    assert len(json.dumps(snapshot).encode('utf-8')) == 32768
+    assert parse_task_requirements(snapshot) == accepted
+    assert parse_task_requirements(accepted) == accepted
 
 
 @pytest.mark.parametrize('value', [True, '2', 0, -1, 101, 1.5])

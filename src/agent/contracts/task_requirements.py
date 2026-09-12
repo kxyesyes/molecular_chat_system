@@ -64,6 +64,12 @@ def parse_task_requirements(value) -> TaskRequirements:
         raw = json.dumps(value, ensure_ascii=False, allow_nan=False)
         if len(raw.encode('utf-8')) > 32768:
             raise ValueError('requirements too large')
-        return TaskRequirements.model_validate_json(raw, strict=True)
+        result = TaskRequirements.model_validate_json(raw, strict=True)
+        # Defaults enlarge persisted snapshots. Accept only results that can
+        # pass this same bounded parser again during continuation/restoration.
+        snapshot = json.dumps(result.model_dump(mode='json'), ensure_ascii=False, allow_nan=False)
+        if len(snapshot.encode('utf-8')) > 32768:
+            raise ValueError('requirements snapshot too large')
+        return result
     except (TypeError, ValueError, RecursionError):
         raise ValueError('invalid_task_requirements') from None
