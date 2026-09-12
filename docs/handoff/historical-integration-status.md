@@ -1,6 +1,6 @@
 # 历史代码集成状态台账
 
-日期：2026-09-12。核对 main `c642bae`（PR #14、#16、#17 已获具体授权合并）；总状态 **partial**。
+日期：2026-09-12。核对 main `18f9dc3`（PR #14、#16、#17、#18 已获具体授权合并）；总状态 **partial**。
 用户要求先完成代码集成，目标服务器验收 deferred。局部 PR 通过不代表全部集成。
 实施顺序见 [总体计划](../superpowers/plans/2026-09-12-historical-integration-completion.md)。
 
@@ -13,10 +13,11 @@
 | 数据准备、端点注册、prepared training、家族数据/bundle/pinned predictor | `5432968`，main PR #9–#13 | 已集成且加强，不重新覆盖底层实现。 |
 | 共享预测服务/API | prediction_service.py、api_routes.py | PR #14 已合并为 `370898a`，独立审查及 Linux CI 7/7 通过；本地沙盒一次失败仍保留待查。 |
 | Agent 家族活性接线 | `9312bf5`，tools/activity_input.py、activity_predictor_tool.py、workflow、domain_validators | PR #16 已合并为 `becb6ab`；独立审查及 CI 7/7 通过，最新本地 Agent 1933 passed/1 skipped。输入边界、双模型证据、partial 已进入 main。 |
-| 活性前端 | `5432968`，activity_prediction/main.js、results_renderer.js、template | PR #15（`ab3f49e`）draft，独立规格/质量审查和 Node 18/18 通过，合成浏览器验收及 CI 7/7 通过；具体合并授权待完成。 |
-| 家族训练编排 | `5432968`，scripts/train_family_activity_models.py、test_family_training_run.py | 独立分支 `07baefe`：依赖预检/CLI 中断审查缺口已修复；规格复审 284 passed/3 skipped，质量审查 203 passed/3 deselected；联合回归 2406 passed/4 skipped，编译/8 Node/contract 通过。待 PR CI 和具体合并授权，未执行真实训练。 |
-| 旧 Agent 审计与恢复修复 | `9312bf5`，domain/orchestrators/supervisor/run_session/chat_handler/validators | PR #17 已获具体授权合并为 `c642bae`，独立双审及 CI 7/7 通过；扩展 Agent/反幻觉/健康 1975 passed/1 skipped。旧 run 版本显示与深拷贝固定回归为非阻断待改项。 |
-| 决策协议与执行/证据/续接 | `9312bf5`，contracts、harness/decision_*、transport/privacy、ledger、persistence、runtime | 待分批移植；包含敏感输入拒绝、target 续接及证据完整性。revision 3 必须明确拒绝旧等待快照。 |
+| 活性前端 | `5432968`，activity_prediction/main.js、results_renderer.js、template | PR #15 当前 `33eed11`；Agent/API 1998 passed/1 skipped、9 Node、compile/contract 通过。最新 CI run 34687945728 的 task-runtime 为 1548 passed/1 failed/3 skipped，关闭测试取消状态断言失败后线程未释放导致超时124；正在独立分支排查，暂停合并。原 UI 审查/浏览器证据保留。 |
+| 家族训练编排 | `5432968`，scripts/train_family_activity_models.py、test_family_training_run.py | PR #18 `e37e54b` 已获具体授权 squash 为 `18f9dc3`，合并文件树一致。独立双审通过；Linux 设备名问题 6 failed → 19 passed，完整 runner 102 passed，最新 CI run 34687875759 全7项通过。未运行真实训练或激活模型。 |
+| 旧 Agent 审计与恢复修复 | `9312bf5`，domain/orchestrators/supervisor/run_session/chat_handler/validators | PR #17 已合并为 `c642bae`；独立双审及 CI 7/7 通过，Agent/反幻觉/健康 1975 passed/1 skipped。旧 run 版本显示和深拷贝固定回归为非阻断待改项。 |
+| 决策基础协议 | `9312bf5`，contracts/decision.py、task_requirements.py | PR #19 `b099b59` 双审通过，契约120 passed，Agent/反幻觉/健康2095 passed/1 skipped，CI run34688294504全7项通过。合入 main18f9dc3 的文档冲突按事实整合；更新 head 仍需新CI及具体授权。解析通过不等于执行授权或科研证据成立。 |
+| 决策执行/证据/续接 | `9312bf5`，harness/decision_*、transport/privacy、ledger、persistence、runtime | 仍待分批移植；包含敏感输入拒绝、target 续接及证据完整性。revision 3 必须明确拒绝旧等待快照。 |
 | 隔离验收入口 | `9312bf5`，web/decision_chat.py、decision_lab.py、静态 lab、run_decision 脚本 | 决策基础集成后移植，不自动接管生产首页。 |
 | 真实权重全链路测试 | `9312bf5`，tests/test_activity_family_real_acceptance.py | 待随 API/Agent/UI 集成；保持显式 opt-in，不把合成前向当真实模型验收。 |
 | 沙盒产物持久化稳定性 | main 既有 tests/sandbox_broker/test_service.py | 本轮扩大回归发生 1 次 artifact_failed 后无 manifest；单项及模块 172 项重跑通过，触发因素待查。保留失败证据，不放宽 fail-closed。 |
