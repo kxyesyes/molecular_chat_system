@@ -16,6 +16,7 @@ from src.agent.contracts import (
     ObservationStatus,
     ToolProvenance,
     ToolResult,
+    WorkflowArtifact,
 )
 from src.agent.contracts.generation_request import (
     build_generation_request,
@@ -196,17 +197,22 @@ class WorkflowOrchestrator:
         input_hash: str,
         tool_version: str,
         model_version: str,
+        *,
+        adapter_version: str | None = None,
+        state_store: AgentStateStore | None = None,
     ) -> dict[str, Any] | None:
-        if not self.state_store:
+        store = state_store if state_store is not None else self.state_store
+        if not store:
             return None
-        checkpoint = self.state_store.latest_checkpoint(trace_id, step.name)
+        checkpoint = store.latest_checkpoint(trace_id, step.name)
         if not checkpoint or checkpoint.get("status") != "succeeded":
             return None
         expected = {
+            "tool_name": step.tool_name,
             "workflow_version": self.workflow_version,
             "input_hash": input_hash,
             "tool_version": tool_version,
-            "adapter_version": self.adapter_version,
+            "adapter_version": self.adapter_version if adapter_version is None else adapter_version,
             "model_version": model_version,
         }
         if any(str(checkpoint.get(key) or "") != str(value or "") for key, value in expected.items()):
@@ -232,6 +238,10 @@ class WorkflowOrchestrator:
         )
         data = output.get("data")
         quality = output.get("quality") or {}
+        artifacts = output.get("artifacts", [])
+        if not isinstance(artifacts, list):
+            raise ValueError("Checkpoint artifacts must be a list")
+        artifacts = [WorkflowArtifact.from_dict(item) for item in artifacts]
         if (
             tool_name == "llm_molecular_generator"
             and quality.get("output_contract") == "CandidateSet@1"
@@ -245,6 +255,7 @@ class WorkflowOrchestrator:
             elapsed_ms=output.get("elapsed_ms"),
             warnings=output.get("warnings", []),
             evidence=output.get("evidence", []),
+            artifacts=artifacts,
             quality=quality,
             status=status,
             provenance=provenance,
@@ -336,6 +347,13 @@ class WorkflowOrchestrator:
         outputs: Mapping[str, Any],
     ) -> Any:
         input_data = cls._resolve_semantic_input(context, step, outputs)
+        if (step.tool_name == "activity_predictor" and BindingResolver.OUTPUT.fullmatch(
+                BindingResolver.derive_selector(step.input_binding, step.input_from) or "")):
+            # Actual bound candidates, with the original user's target context.
+            activity_input = {"query": context.query, "smiles": cls._smiles_text(input_data).splitlines()}
+            if "target" in context.metadata:
+                activity_input["target"] = context.metadata["target"]
+            return activity_input
         if cls._is_generation_step(step):
             return cls._canonical_generation_input(
                 context,

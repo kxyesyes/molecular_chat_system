@@ -15,7 +15,6 @@ from src.agent.contracts.generation_request import (
     DEFAULT_GENERATION_COUNT,
     GenerationRequestError,
     generation_request_error_details,
-    has_generation_intent,
     preflight_generation_request,
     preserve_target_quality,
 )
@@ -239,11 +238,7 @@ class SupervisorAgent:
                     },
                 },
             }
-        generation_intent = has_generation_intent(query)
-        selected_policy = None
-        if active_skill is not None or not generation_intent:
-            selected_policy = self._resolve_policy(query, active_skill)
-        policy = selected_policy or self._resolve_policy(query, active_skill)
+        policy = self._resolve_policy(query, active_skill)
         if policy is None:
             return {
                 "success": False,
@@ -316,6 +311,9 @@ class SupervisorAgent:
         legacy_result = result.to_legacy_dict()
         return {
             "success": result.success or result.partial,
+            "status": legacy_result["status"],
+            "error": legacy_result["error"],
+            "warnings": legacy_result["warnings"],
             "final_answer": result.final_answer or result.message,
             "tools_used": [item.tool_name for item in result.tool_results],
             "active_skill": policy.name,
@@ -677,6 +675,7 @@ class SupervisorAgent:
         tool_attempt_count = 0
         skipped_steps: list[dict[str, str]] = []
         semantic_evidence: list[dict[str, str]] = []
+        checkpoint_warnings: list[dict[str, str]] = []
         idempotency_key = context.metadata.get("idempotency_key")
 
         if self.state_store:
@@ -737,7 +736,7 @@ class SupervisorAgent:
                         "error": missing.error.to_dict(),
                     }
                 )
-                if step.required and not step.continue_on_error:
+                if not step.continue_after_failure():
                     break
                 continue
 
@@ -805,24 +804,21 @@ class SupervisorAgent:
                 require_available=False,
             )
             input_hash = self.orchestrator._input_hash(input_data)
-            checkpoint = (
-                self.state_store.latest_checkpoint(context.trace_id, step.name)
-                if self.state_store
-                else None
-            )
-            reusable = bool(
-                checkpoint
-                and checkpoint.get("status") == "succeeded"
-                and checkpoint.get("input_hash") == input_hash
-                and str(checkpoint.get("tool_version") or "")
-                == str(adapter.spec.version)
-                and str(checkpoint.get("adapter_version") or "")
-                == str(adapter.adapter_version)
-            )
-            if reusable:
-                reused_result = self.orchestrator._result_from_checkpoint(
-                    step.tool_name, checkpoint
-                )
+            model_version = str(step.metadata.get("model_version", ""))
+            checkpoint = self.orchestrator._compatible_checkpoint(
+                context.trace_id, step, input_hash, str(adapter.spec.version),
+                model_version, adapter_version=str(adapter.adapter_version),
+                state_store=self.state_store,
+            ) if self.state_store is not None else None
+            reused_result = None
+            if checkpoint is not None:
+                try:
+                    reused_result = self.orchestrator._result_from_checkpoint(step.tool_name, checkpoint)
+                except (AttributeError, KeyError, TypeError, ValueError):
+                    checkpoint_warnings.append({
+                        "step": step.name, "reason": "checkpoint_deserialization_failed"})
+            reusable = reused_result is not None
+            if reused_result is not None:
                 task_result = AgentTaskResult(
                     task_id=task.task_id,
                     status="succeeded",
@@ -849,6 +845,7 @@ class SupervisorAgent:
                         item,
                         tool_version=adapter.spec.version,
                         adapter_version=adapter.adapter_version,
+                        model_version=model_version,
                     )
             if task_result.status == "succeeded" and step.output_key:
                 output = task_result.outputs.get(step.tool_name)
@@ -891,12 +888,7 @@ class SupervisorAgent:
                 payload=task_result.to_dict(),
             )
             if task_result.status != "succeeded":
-                should_continue = (
-                    step.continue_on_error
-                    if step.continue_on_error is not None
-                    else True
-                )
-                if not should_continue:
+                if not step.continue_after_failure():
                     break
 
         successful = sum(1 for item in tool_results if item.success)
@@ -938,6 +930,7 @@ class SupervisorAgent:
             metadata={
                 "skipped_steps": skipped_steps,
                 "semantic_evidence": semantic_evidence,
+                "checkpoint_warnings": checkpoint_warnings,
                 "request_metadata": {
                     "requested_count": context.metadata["requested_count"]
                 }
@@ -1020,6 +1013,7 @@ class SupervisorAgent:
         result,
         tool_version: str = "1",
         adapter_version: str = "1",
+        model_version: str = "",
     ) -> None:
         if not self.state_store:
             return
@@ -1041,13 +1035,13 @@ class SupervisorAgent:
             {
                 "trace_id": context.trace_id,
                 "step_id": step.name,
-                "workflow_version": "1",
+                "workflow_version": self.orchestrator.workflow_version,
                 "status": "succeeded" if result.success else "failed",
                 "input_hash": input_hash,
                 "tool_name": step.tool_name,
                 "tool_version": tool_version,
                 "adapter_version": adapter_version,
-                "model_version": "",
+                "model_version": model_version,
                 "output": legacy if result.success else None,
                 "error": legacy.get("error"),
             }

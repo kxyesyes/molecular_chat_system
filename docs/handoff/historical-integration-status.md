@@ -1,6 +1,6 @@
 # 历史代码集成状态台账
 
-日期：2026-09-12。核对 main `1a1677b`；总状态 **partial**。
+日期：2026-09-12。核对 main `becb6ab`（PR #14、#16 已获具体授权合并）；总状态 **partial**。
 用户要求先完成代码集成，目标服务器验收 deferred。局部 PR 通过不代表全部集成。
 实施顺序见 [总体计划](../superpowers/plans/2026-09-12-historical-integration-completion.md)。
 
@@ -11,11 +11,11 @@
 | 平台基础、LangGraph、Temporal、OpenSandbox、靶点搜索、候选展示 | 平台快照 `a63e385` | 已集成或被替代；与 main 历史 `6daa70f` 整树相同，squash 造成祖先关系不同不等于丢代码。 |
 | 性质报告与完整分子输入 | `f06492f`、`76dae50`，property/drug-likeness/molecular_input | 已集成，main 输入边界更强。 |
 | 数据准备、端点注册、prepared training、家族数据/bundle/pinned predictor | `5432968`，main PR #9–#13 | 已集成且加强，不重新覆盖底层实现。 |
-| 共享预测服务/API | prediction_service.py、api_routes.py | 本批本地实现、规格/质量审查通过；待根回归收尾、发布、CI、具体 PR 合并。 |
-| Agent 家族活性接线 | `9312bf5`，tools/activity_input.py、activity_predictor_tool.py、workflow、domain_validators | 待移植：target 传递、候选绑定、双模型证据、partial；适配 main 完整输入边界。 |
-| 活性前端 | `5432968`，activity_prediction/main.js、results_renderer.js、template | 待移植：目标选择、分类概率、null 回归、来源及部分失败展示。 |
-| 家族训练编排 | `5432968`，scripts/train_family_activity_models.py、test_family_training_run.py | 待适配；历史 CUDA/路径默认值与 main 强校验需验证，不自动运行真实训练。 |
-| 旧 Agent 审计与恢复修复 | `9312bf5`，domain/orchestrators/supervisor/run_session/chat_handler/validators | 待逐块移植：checkpoint 身份版本、artifacts 恢复、必需步骤失败、错误透传、重复路由及解析异常。不能由新决策循环替代审查。 |
+| 共享预测服务/API | prediction_service.py、api_routes.py | PR #14 已合并为 `370898a`，独立审查及 Linux CI 7/7 通过；本地沙盒一次失败仍保留待查。 |
+| Agent 家族活性接线 | `9312bf5`，tools/activity_input.py、activity_predictor_tool.py、workflow、domain_validators | PR #16 已合并为 `becb6ab`；独立审查及 CI 7/7 通过，最新本地 Agent 1933 passed/1 skipped。输入边界、双模型证据、partial 已进入 main。 |
+| 活性前端 | `5432968`，activity_prediction/main.js、results_renderer.js、template | PR #15（`ab3f49e`）draft，独立规格/质量审查和 Node 18/18 通过，合成浏览器验收及 CI 7/7 通过；具体合并授权待完成。 |
+| 家族训练编排 | `5432968`，scripts/train_family_activity_models.py、test_family_training_run.py | 独立分支完成 TDD：73 项聚焦、426 passed/3 skipped 回归；尚待独立审查和 PR，不自动运行真实训练。 |
+| 旧 Agent 审计与恢复修复 | `9312bf5`，domain/orchestrators/supervisor/run_session/chat_handler/validators | 恢复审计子批次 `34d95ad` 已实现；首轮 18 failed → 聚焦 47 passed，扩展 Agent/反幻觉/健康 1975 passed/1 skipped；独立规格 222 项、质量 236 项通过，尚未合并。非阻断旧 run 版本与深拷贝固定回归记录见本批交接。 |
 | 决策协议与执行/证据/续接 | `9312bf5`，contracts、harness/decision_*、transport/privacy、ledger、persistence、runtime | 待分批移植；包含敏感输入拒绝、target 续接及证据完整性。revision 3 必须明确拒绝旧等待快照。 |
 | 隔离验收入口 | `9312bf5`，web/decision_chat.py、decision_lab.py、静态 lab、run_decision 脚本 | 决策基础集成后移植，不自动接管生产首页。 |
 | 真实权重全链路测试 | `9312bf5`，tests/test_activity_family_real_acceptance.py | 待随 API/Agent/UI 集成；保持显式 opt-in，不把合成前向当真实模型验收。 |
@@ -42,7 +42,7 @@
 
 ## 后续顺序与部署边界
 
-1. 完成 API 批次回归与 PR，再移植 Agent 活性接线和 UI，验证跨入口数据链路。
+1. API 批次已合并，继续完成 Agent 活性接线和 UI 的独立 PR，验证跨入口数据链路。
 2. 适配家族训练编排，不激活生产模型。
 3. 集成旧 Agent 恢复修复，再分层移植决策协议、证据、续接及隔离入口。
 4. 核查原始专用报告等独有残差，最终整树回归并更新每项处置证据。
