@@ -1,13 +1,13 @@
 # 家族活性结果前端集成
 
-日期：2026-09-12。分支 `codex/family-activity-ui-integration`，基线 API 提交 `3261d7f`。
-父批次 [PR #14](https://github.com/kxyesyes/molecular_chat_system/pull/14) CI 7/7 已通过，仍待具体合并授权。
-本分支与 Agent 接线并行，但只修改活性页面及其测试，不修改 Agent/后端/权限。
+日期：2026-09-12。分支 `codex/family-activity-ui-integration`，当前基线 main `c642bae`。
+PR #14、#16、#17 已获具体授权并合并；本分支通过普通 merge 更新 main，无强推或覆盖工作树。
+相对当前 main，功能差异仍仅为活性页面及其测试，不额外修改 Agent/后端/权限。
 
 实施总体计划 Task 3：显式目标选择、保留 legacy、partial 行展示、零值/null 区分、结果来源、安全渲染。
 候选源为 `5432968` 的前端片段，不能覆盖 main 已有的安全契约。
 
-状态：本地实现、独立 SPEC/QUALITY 与桌面浏览器契约冒烟通过；尚未发布/合并。
+状态：本地实现、独立 SPEC/QUALITY 与桌面浏览器契约冒烟通过；PR #15 为 draft，尚未合并。
 不把 UI 测试桩或临时合成结果当成真实科研预测，不启用生产模型，不重启用户服务。
 
 ## 文件和测试
@@ -33,3 +33,13 @@
 并非该调试地址的日志断言。移动端断点/目标服务器和真实模型端到端仍未验证。
 测试后关闭浏览器页并停止本任务的临时服务器，未动生产端口/服务。
 fixture 脚本与合成文件位于忽略的 scratch/，不提交。
+
+## 更新 main 基线后的验证
+
+合并 main 到本任务分支的提交为 `c582853`；与原审查 head `ab3f49e` 比较，
+四份 UI 代码/测试的 diff 为空，PR 相对 main 仍只有原五个文件。
+两个修改 JS 的 `node --check`、9 个 Node 脚本（家族页面 18/18）再次通过。
+联合 Agent/API 回归（`python -B -m pytest tests/agent tests/test_activity_family_api.py -q -p no:cacheprovider`）
+**1998 passed、1 skipped、7 warnings，23.28 秒**；编译及 contract 通过。
+新 head CI 待完成；旧 head 的 CI 7/7 不视为此次新基线已验证。
+先前针对旧提交的待确认合并请求不自动延用，完成新验证后按当前 head 再确认。
