@@ -2,9 +2,11 @@
 
 ## 历史代码集成持续任务（2026-09-12）
 
-PR #13 已合并为 main `1a1677b`，但历史功能集成尚未全部完成。
+PR #14、#16 已获具体授权并合并，main 为 `becb6ab`；历史功能集成尚未全部完成。
 总体计划见 [历史集成计划](../superpowers/plans/2026-09-12-historical-integration-completion.md)，
-当前批次见 [family-activity-api-integration.md](family-activity-api-integration.md)。
+当前恢复审计批次见 [agent-recovery-audit-integration.md](agent-recovery-audit-integration.md)，
+完整残差见 [historical-integration-status.md](historical-integration-status.md)。
+前端 PR #15 尚待具体合并授权；恢复批次独立双审通过，家族训练编排在独立分支完成首轮 TDD，尚待审查。
 用户优先代码集成；不启动生产模型或部署服务。以下旧交接仅作历史依据。
 
 ## 家族双模型隔离推理（2026-09-10）
