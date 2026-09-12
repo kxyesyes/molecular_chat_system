@@ -24,7 +24,7 @@
       <div class="nav-section" style="display: flex; gap: 10px; align-items: center;">
         <div class="model-status-header">
           <button id="modelInfoBtn" class="info-trigger" title="查看训练详情">🔥</button>
-          <span class="label">当前模型:</span>
+          <span class="label">旧版单模型:</span>
           <select id="modelSelector">
             <option value="">(Loading...)</option>
           </select>
@@ -54,14 +54,14 @@
         <div class="quick-stats">
           <div class="stat-card" style="animation-delay: 0.1s;">
             <div class="stat-label">模型状态</div>
-            <div class="stat-value" style="color:var(--success)">Ready</div>
+            <div class="stat-value">请求时校验</div>
           </div>
           <div class="stat-card" style="animation-delay: 0.2s;">
             <div class="stat-label">推理架构</div>
             <div class="stat-value">RG-MPNN</div>
           </div>
           <div class="stat-card" style="animation-delay: 0.3s;">
-            <div class="stat-label">当前任务</div>
+            <div class="stat-label">旧版单模型任务</div>
             <div id="taskTypeStat" class="stat-value">回归</div>
           </div>
           <div class="stat-card" style="animation-delay: 0.4s;">
@@ -101,13 +101,22 @@
               <div>
                 <div class="panel-title">单分子推理</div>
                 <div class="panel-desc">
-                  输入一个 SMILES，立即得到活性值、类别和置信度。
+                  选择靶点，查看返回的活性分类、活性概率与独立预测 pIC50；不可用阶段会明确标注。
                 </div>
               </div>
               <span class="chip">Low-latency Inference</span>
             </div>
 
             <form id="predictForm">
+              <div class="form-group" style="margin-bottom: 24px">
+                <label for="activityTarget">预测靶点</label>
+                <select id="activityTarget" name="target" aria-describedby="activityTargetHint">
+                  <option value="PDE">PDE</option>
+                  <option value="BuChE">BuChE</option>
+                  <option value="">旧版单模型（按已注册任务）</option>
+                </select>
+                <p id="activityTargetHint" class="panel-desc">PDE/BuChE 使用对应家族模型组，不使用顶部旧版单模型；缺少模型时不会回退。</p>
+              </div>
               <div class="form-group" style="margin-bottom: 24px">
                 <label
                   >SMILES 分子结构
@@ -140,13 +149,22 @@
               <div>
                 <div class="panel-title">批量推理流水线</div>
                 <div class="panel-desc">
-                  上传分子数据集并进行批量预测，可控制解析策略与结果导出格式。
+                  选择靶点并上传分子数据集，按返回顺序查看完整、部分完成和失败的逐行结果。
                 </div>
               </div>
               <span class="chip">Queue + Batch</span>
             </div>
 
             <form id="batchForm">
+              <div class="form-group" style="margin-bottom: 24px">
+                <label for="batchActivityTarget">预测靶点</label>
+                <select id="batchActivityTarget" name="target" aria-describedby="batchActivityTargetHint">
+                  <option value="PDE">PDE</option>
+                  <option value="BuChE">BuChE</option>
+                  <option value="">旧版单模型（按已注册任务）</option>
+                </select>
+                <p id="batchActivityTargetHint" class="panel-desc">家族模型组在请求时校验；部分或失败结果仍保留，不代表实验验证。</p>
+              </div>
               <div
                 class="upload-area"
                 onclick="document.getElementById('batchFile').click()"
@@ -279,12 +297,13 @@
 
           <div class="results-container" id="results">
             <div class="results-title">预测分析报告</div>
+            <div id="predictionStatus" role="status" aria-live="polite" class="panel-desc"></div>
             <div id="singleSummary" class="single-summary" style="display: none;">
               <div class="single-summary-top">
                 <div class="single-hero-card">
                   <div class="single-eyebrow">单分子结果</div>
                   <div class="single-score-row">
-                    <div id="singleScoreValue" class="single-score-value">0.000</div>
+                    <div id="singleScoreValue" class="single-score-value">不可用</div>
                     <span id="singleClassTag" class="tag tag-neutral">Unknown</span>
                   </div>
                   <div id="singleModelMeta" class="single-model-meta">活性回归</div>
@@ -320,7 +339,7 @@
                   <div class="activity-band-segment band-medium"><span>中</span></div>
                   <div class="activity-band-segment band-high"><span>高</span></div>
                   <div id="activityBandMarker" class="activity-band-marker">
-                    <span id="activityBandMarkerLabel" class="activity-band-marker-label">0.000</span>
+                    <span id="activityBandMarkerLabel" class="activity-band-marker-label">不可用</span>
                   </div>
                 </div>
 
@@ -336,7 +355,7 @@
             <div class="results-table-wrap">
             <table class="results-table">
               <thead>
-                <tr>
+                <tr id="resultsHeader">
                   <th>SMILES</th>
                   <th>预测活性值</th>
                   <th>分类</th>
@@ -496,10 +515,10 @@
     <script src="/static/js/activity_prediction/utils.js"></script>
     <script src="/static/js/activity_prediction/model_manager.js?v=20260902-admin-auth-removed"></script>
     <script src="/static/js/activity_prediction/charts.js"></script>
-    <script src="/static/js/activity_prediction/results_renderer.js"></script>
+    <script src="/static/js/activity_prediction/results_renderer.js?v=20260912-family"></script>
     <script src="/static/js/activity_prediction/preflight.js"></script>
     <script src="/static/js/activity_prediction/training_monitor.js?v=20260902-admin-auth-removed"></script>
-    <script src="/static/js/activity_prediction/main.js?v=20260902-admin-auth-removed"></script>
+    <script src="/static/js/activity_prediction/main.js?v=20260912-family"></script>
     <script>
       document.addEventListener("DOMContentLoaded", function () {
         ActivityMain.init();

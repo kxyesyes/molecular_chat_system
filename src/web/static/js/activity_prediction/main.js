@@ -75,17 +75,22 @@ window.ActivityMain = (function () {
     setStatus("Predicting");
 
     try {
+      // Omitting target preserves the registered legacy single-model contract.
+      if (formData.get("target") === "") formData.delete("target");
       const res = await fetch(url, { method: "POST", body: formData });
       const data = await res.json();
 
-      if (!data.success || !Array.isArray(data.results)) {
-        throw new Error(data.error || "预测失败");
+      if (res.ok === false || !Array.isArray(data.results)) {
+        throw new Error(data.detail || data.error || "预测失败");
       }
 
       ActivityResults.renderPredictionResults(data, {
         isSingleRequest: isSingleRequest,
       });
-      setStatus("Done");
+      const status = data.results.length
+        ? data.status || (data.success === true ? "passed" : "failed")
+        : "failed";
+      setStatus(ActivityResults.statusLabel(status));
     } catch (e) {
       alert("请求失败: " + e.message);
       setStatus("Error");
