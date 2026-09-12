@@ -10,17 +10,18 @@ from .molecular_input import (
 
 _TOKENS = re.compile(r"[A-Za-z0-9_-]+|丁酰胆碱酯酶")
 _METRICS = frozenset({"ic50", "pic50", "ec50", "pec50", "ki", "pki", "kd", "pkd"})
+_GENERIC_SUBJECTS = frozenset({"分子", "这个分子", "该分子"})
 _CONTEXT_WORDS = frozenset({"target", "activity", "potency", "inhibition", "assess"})
 _BACKGROUND = re.compile(r"\s*(?:研究背景|背景|background\b)", re.I)
 _TARGET_LABEL = r"(针对|靶点\s*[:：]?|对|(?<![A-Za-z])(?:target|for|against)\s*[:=：]?)\s*"
 # Include unrecognized values so explicit intent cannot vanish before validation.
 _TARGET_VALUE = (
-    r"((?:丁酰胆碱酯酶|[A-Za-z][A-Za-z0-9_-]*)(?=$|[\s；，,/和及与、]|(?:的)?活性)"
+    r"((?:丁酰胆碱酯酶|[A-Za-z][A-Za-z0-9_-]*)(?=$|[\s；，,/和及与、]|(?:的)?(?:抑制活性|活性|p?IC50|p?EC50|p?Ki|p?Kd))"
     r"|[^\s；，,/和及与、]+)"
 )
 _LABELLED_TARGET = re.compile(
-    r"(?:预测|评估)\s*([A-Za-z][A-Za-z0-9_-]*)\s*(?:的)?活性|"
-    r"\b(?:predict|assess|evaluate)\s+([A-Za-z][A-Za-z0-9_-]*)\s+(?:activity|potency)\b",
+    r"(?:预测|评估)\s*([^\s；，,对]+?)\s*(?:的)?活性|"
+    r"\b(?:predict|assess|evaluate)\s+([^\s；，,]+)\s+(?:activity|potency)\b",
     re.I,
 )
 _INVALID = "SMILES 无效或缺失；请提供完整结构，并用换行或分号分隔，不会提取片段替代。"
@@ -76,7 +77,7 @@ def activity_target(text, validate_smiles):
     positioned = []
     for match in positions:
         label = match[1]
-        value_match = re.match(_TARGET_VALUE, text[match.end():])
+        value_match = re.match(_TARGET_VALUE, text[match.end():], re.I)
         if value_match is None:
             raise ValueError("Missing explicit target")
         value = value_match[1]
@@ -91,7 +92,7 @@ def activity_target(text, validate_smiles):
                           if not (label.strip().casefold() == "for" and validate_smiles(value)))
     labelled = [match[1] or match[2] for match in _LABELLED_TARGET.finditer(text)]
     positioned.extend(value for value in labelled
-                      if value.casefold() not in _METRICS and not validate_smiles(value))
+                      if value.casefold() not in _METRICS | _GENERIC_SUBJECTS and not validate_smiles(value))
     for value in positioned:
         _strict_family(value)
     matches = []

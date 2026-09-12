@@ -37,6 +37,11 @@ API Linux CI run `34683624419` 已 7/7 通过；root 2283 passed/72 skipped，sa
 最新聚焦 255 passed，全 Agent 1925 passed/1 skipped/7 warnings（18.81 秒），
 compileall、contract、diff check 通过。质量重审中，先前 SPEC 计数不覆盖这次新修复。
 
+进一步重审的 labelled 未知靶点与已支持指标后缀回归新增 5 项 RED；
+修复后主动补充普通中文“分子/这个分子/该分子”无靶点请求兼容性，3 项 RED 后修复。
+最新结果为聚焦 263 passed，全 Agent 1933 passed/1 skipped/7 warnings（18.96 秒）。
+这些均为输入契约测试，不代表真实模型性能；最终独立质量意见及 PR 状态另行补录。
+
 实施者生成的五个 temp_task2_* 根目录临时产物未暂存，后续测试改用忽略目录或系统临时目录。
 清理尝试受执行策略阻止，暂留原处，不以 git clean 或覆盖操作绕过。
 

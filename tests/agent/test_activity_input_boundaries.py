@@ -87,7 +87,11 @@ def test_unlabelled_invalid_full_structures_cannot_fall_back_global(boundary, pa
     assert not calls
 
 
-def test_targetless_legacy_predictor_interface_remains_in_use(monkeypatch):
+@pytest.mark.parametrize("query", [
+    "预测活性；SMILES: CCO", "预测分子活性；SMILES: CCO",
+    "预测这个分子的活性；SMILES: CCO", "评估该分子的活性；SMILES: CCO",
+])
+def test_targetless_legacy_predictor_interface_remains_in_use(monkeypatch, query):
     calls = []
 
     class Legacy:
@@ -101,7 +105,7 @@ def test_targetless_legacy_predictor_interface_remains_in_use(monkeypatch):
 
     tool = ActivityPredictorTool()
     monkeypatch.setattr(tool, "_get_predictor", lambda: Legacy())
-    result = tool.execute("预测活性；SMILES: CCO")
+    result = tool.execute(query)
     assert isinstance(result, dict) and result["success"]
     assert calls == [["CCO"]]
 
@@ -215,3 +219,21 @@ def test_positioned_target_cannot_be_truncated_to_known_prefix(boundary, target)
     result = execute_tool_compat(tool, {"query": f"Predict activity for {target}", "smiles": "CCO"})
     assert result.status == ObservationStatus.INVALID_INPUT
     assert not calls
+
+
+@pytest.mark.parametrize("phrase", ['Predict "EGFR" activity', "预测乙酰胆碱酯酶活性", "评估乙酰胆碱酯酶的活性"])
+def test_labelled_unknown_target_values_fail_closed(boundary, phrase):
+    tool, calls, _ = boundary
+    result = execute_tool_compat(tool, phrase + "; SMILES: CCO")
+    assert result.status == ObservationStatus.INVALID_INPUT
+    assert not calls
+
+
+@pytest.mark.parametrize("query,target", [
+    ("预测CCO对PDE5A的pIC50", "PDE5A"),
+    ("预测CCO对BuChE的抑制活性", "BuChE"),
+])
+def test_known_targets_keep_supported_metric_suffixes(boundary, query, target):
+    tool, calls, _ = boundary
+    assert execute_tool_compat(tool, query).success
+    assert calls == [(["CCO"], target)]
