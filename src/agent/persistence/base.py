@@ -7,9 +7,26 @@ from typing import Any, Protocol
 class AgentStateStore(Protocol):
     db_path: Path
 
-    def start_run(self, run: dict[str, Any]) -> None: ...
+    def start_run(self, run: dict[str, Any], *, exclusive: bool = False) -> None: ...
 
     def get_run(self, trace_id: str) -> dict[str, Any] | None: ...
+
+    def transition_decision_continuation(
+        self,
+        trace_id: str,
+        *,
+        user_id: str,
+        session_id: str,
+        expected: dict[str, Any] | None,
+        replacement: dict[str, Any],
+        claim: bool,
+    ) -> bool:
+        """Owner-bound CAS; only a committed True permits a single-use claim.
+
+        Invalid input/conflicts return False; persistence errors propagate.
+        Callers must not dispatch or retry a claim after an uncertain commit.
+        """
+        ...
 
     def update_run_metadata(
         self, trace_id: str, metadata: dict[str, Any]
