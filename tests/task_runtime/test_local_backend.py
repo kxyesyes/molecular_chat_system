@@ -1403,37 +1403,82 @@ async def test_done_callback_retries_transient_projection_terminal_failure(
 
 
 @pytest.mark.anyio
-async def test_close_waits_for_real_sync_worker_before_cancel_terminal(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cancel_delay", [0.0, 0.2], ids=["normal", "slow-store"])
+async def test_close_waits_for_real_sync_worker_before_cancel_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_delay: float,
+) -> None:
     worker_started = threading.Event()
     release_worker = threading.Event()
+    worker_exited = threading.Event()
+    cancel_signal: threading.Event | None = None
 
     def sync_worker() -> dict[str, Any]:
         worker_started.set()
-        release_worker.wait()
-        return {"success": True}
+        try:
+            assert release_worker.wait(5.0), "test did not release the sync worker"
+            return {"success": True}
+        finally:
+            worker_exited.set()
 
     async def handler(submission, cancel_event, progress):
+        nonlocal cancel_signal
+        cancel_signal = cancel_event
         return await asyncio.to_thread(sync_worker)
 
+    async def wait_for_cancel_signal() -> None:
+        assert cancel_signal is not None
+        while not cancel_signal.is_set():
+            await asyncio.sleep(0.005)
+
     store = TaskStore(tmp_path / "tasks.sqlite")
+    request_cancel = store.request_cancel
+
+    def delayed_request_cancel(*args, **kwargs):
+        # Fault injection only: persistence can take longer than the old 50 ms sleep.
+        time.sleep(cancel_delay)
+        return request_cancel(*args, **kwargs)
+
+    monkeypatch.setattr(store, "request_cancel", delayed_request_cancel)
     backend = LocalTaskBackend(
         store,
         {"docking": handler},
         shutdown_timeout=2.0,
     )
-    await backend.submit(_submission())
-    await asyncio.to_thread(worker_started.wait, 1.0)
+    close_task = None
+    try:
+        await backend.submit(_submission())
+        assert await asyncio.to_thread(worker_started.wait, 2.0), "worker did not start"
 
-    close_task = asyncio.create_task(backend.close())
-    await asyncio.sleep(0.05)
-    assert not close_task.done()
-    assert store.get("task-1").status is TaskStatus.CANCEL_REQUESTED
-    assert not any(event.is_terminal for event in store.events("task-1"))
+        close_task = asyncio.create_task(backend.close())
+        # close signals cancellation only after request_cancel has committed.
+        await asyncio.wait_for(wait_for_cancel_signal(), timeout=2.0)
+        assert not close_task.done()
+        assert not worker_exited.is_set()
+        assert backend.background_task_count == 1
+        record = store.get("task-1")
+        assert record.status is TaskStatus.CANCEL_REQUESTED
+        assert record.finished_at is None
+        events = store.events("task-1")
+        assert any(event.event_type == "task_cancel_requested" for event in events)
+        assert not any(event.is_terminal for event in events)
 
-    release_worker.set()
-    await close_task
-    assert store.get("task-1").status is TaskStatus.CANCELED
-    assert backend.background_task_count == 0
+        release_worker.set()
+        await asyncio.wait_for(asyncio.shield(close_task), timeout=5.0)
+        # Verify the first close before fallback cleanup can repair a bad return.
+        assert worker_exited.is_set()
+        assert store.get("task-1").status is TaskStatus.CANCELED
+        assert sum(event.is_terminal for event in store.events("task-1")) == 1
+        assert backend.background_task_count == 0
+    finally:
+        # Assertion failures must not strand an executor thread at pytest shutdown.
+        release_worker.set()
+        try:
+            if close_task is not None:
+                await asyncio.wait_for(asyncio.shield(close_task), timeout=5.0)
+        finally:
+            await asyncio.wait_for(backend.close(), timeout=5.0)
 
 
 @pytest.mark.anyio
