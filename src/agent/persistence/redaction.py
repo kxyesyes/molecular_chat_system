@@ -119,6 +119,74 @@ def contains_credential(value: Any) -> bool:
     return isinstance(value, str) and looks_like_credential(value)
 
 
+# Deliberately independent of legacy substring-based redaction: token counts and
+# scientific metadata are not credential fields. Match whole labels, normalizing
+# common separators without rewriting molecular strings or paths.
+_SECRET_LABEL = (
+    r"(?:x[-_ \t]?)?api[-_ \t]?key|"
+    r"(?:secret[-_ \t]?)?access[-_ \t]?key(?:[-_ \t]?id)?|"
+    r"client[-_ \t]?secret|private[-_ \t]?key|"
+    r"(?:refresh|access|id|auth|session)[-_ \t]?token|"
+    r"(?:(?:set|session)[-_ \t]?)?cookie|"
+    r"(?:proxy[-_ \t]?)?authorization|credentials?|password|passwd|pwd|secret|token"
+)
+_SECRET_LABEL_KEY = re.compile(rf"(?:{_SECRET_LABEL})", re.IGNORECASE)
+_SECRET_LABEL_ASSIGNMENT = re.compile(
+    rf"(?i)(?<![A-Za-z0-9_-])[\"']?(?:{_SECRET_LABEL})[\"']?\s*[:=]\s*"
+    r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;&}\]]+)"
+)
+_SECRET_LABEL_QUERY = re.compile(rf"(?i)[?&](?:{_SECRET_LABEL})=")
+# Scan each maximal scheme-character run only once, including failed candidates.
+# The legacy \b scheme regex retries at every dot in long non-URL strings.
+# Check its word/letter boundary separately in the original text, so punctuation
+# prefixes (e.g. .https or _a.https) keep their existing credential coverage.
+_SECRET_URL_CANDIDATE = re.compile(
+    r"(?i)(?<![a-z0-9+.-])([a-z0-9+.-]+)://"
+)
+_SECRET_URL_SCHEME_START = re.compile(r"(?i)\b[a-z]")
+_SECRET_URL_BODY = re.compile(r"[^\s<>\"']+")
+
+
+def _contains_secret_url(value: str) -> bool:
+    consumed = 0
+    for match in _SECRET_URL_CANDIDATE.finditer(value):
+        if match.start() < consumed:
+            continue
+        if not _SECRET_URL_SCHEME_START.search(value, match.start(1), match.end(1)):
+            # An invalid prefix must not consume a later valid URL's body.
+            continue
+        body = _SECRET_URL_BODY.match(value, match.end())
+        if body is not None:
+            consumed = body.end()
+            text = body.group(0)
+            if '@' in text.split('/', 1)[0] or _SECRET_LABEL_QUERY.search(text):
+                return True
+    return False
+
+
+def contains_secret_material(value: Any) -> bool:
+    """Credential-only guard; molecular slashes and ordinary paths are valid.
+
+    Callers must bound untrusted containers before traversal. This detects
+    labelled secrets/known credential shapes, not arbitrary unlabelled secrets.
+    """
+    if isinstance(value, Mapping):
+        return any(
+            _SECRET_LABEL_KEY.fullmatch(str(key).strip()) is not None
+            or contains_secret_material(str(key)) or contains_secret_material(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(contains_secret_material(item) for item in value)
+    if not isinstance(value, str):
+        return False
+    return bool(
+        looks_like_credential(value) or _SECRET_LABEL_ASSIGNMENT.search(value)
+        or _AUTHORIZATION_CREDENTIAL.search(value) or _BEARER.search(value)
+        or _contains_secret_url(value)
+    )
+
+
 def contains_sensitive_text(value: Any) -> bool:
     """Return whether text contains credentials, secret assignments, or paths."""
 
