@@ -1,6 +1,6 @@
 # 历史代码集成状态台账
 
-日期：2026-09-15。核对 main `40fcd2a`（PR #26、#27 已授权合并；此前已实施批次含 #15、#20、#23、#25）；总状态 **partial**。
+日期：2026-09-15。核对 main `57680aa`（PR #26、#27、#28 已授权合并；此前已实施批次含 #15、#20、#23、#25）；总状态 **partial**。
 用户要求先完成代码集成，目标服务器验收 deferred。局部 PR 通过不代表全部集成。
 实施顺序见 [总体计划](../superpowers/plans/2026-09-12-historical-integration-completion.md)。
 
@@ -25,8 +25,8 @@
 | 决策执行/调用方续接 | `9312bf5`，harness/decision_*、runtime | PR #26 已授权 squash 为 `4cef43b`，合并树一致。独立双审、联合3165 passed/1 skipped、9Node/compileall/contract、CI run34699410617全7项通过。revision4、回调前观察封存、CAS前语义历史核对、转换前原始结果门禁已进入main；未切换生产入口。 |
 | ADMET完整输入与异常隔离 | tools/admet_predictor.py、molecular_input.py | PR #25已获具体授权合并为59e8cde；双审、2723 passed/1 skipped、9Node/compileall/contract及CI run34698556963全7项通过。不把规则结果冒充模型，不修复本批以外的后端部分行失败语义。 |
 | 隔离服务端聊天桥接 | `9312bf5`，web/decision_chat.py、ChatHandler、test_decision_chat*.py | PR #27 获具体授权 squash 为 `40fcd2a`；整树与 head7cc54ff 一致，双审、3202 passed/1 skipped、9Node、compile/contract、CI run34945834822全7项通过。详见 [聊天桥接交接](isolated-chat-bridge-integration.md)。不自动接管生产首页。 |
-| 隔离验收页面/脚本 | `9312bf5`，decision_lab.py、静态 lab、run_decision 脚本 | 已在独立分支移植并补充会话/发送/取消边界测试；尚未合并。见 [本批交接](isolated-decision-lab-integration.md)。仅离线模型替身+真实 RDKit 验证，不等于外部 API 或真实权重验收。 |
-| 真实权重全链路测试 | `9312bf5`，tests/test_activity_family_real_acceptance.py | 待随 API/Agent/UI 集成；保持显式 opt-in，不把合成前向当真实模型验收。 |
+| 隔离验收页面/脚本 | `9312bf5`，decision_lab.py、静态 lab、run_decision 脚本 | PR #28已获明确授权 squash 为57680aa；整树与已审查head6ee6d1b一致，最新CI run34950563640全7项通过。首轮旧Starlette构造器失败与修复证据保留在[交接](isolated-decision-lab-integration.md)。仅离线模型替身+真实 RDKit 验证，不等于外部 API 或真实权重验收。 |
+| 真实权重全链路测试 | `9312bf5`，tests/test_activity_family_real_acceptance.py | 用户已确认方案A；[实施计划](../superpowers/plans/2026-09-15-family-real-acceptance-integration.md)完成，代码尚待实施。本批仅合成资产工程验收；真实目录和精确bundle另行配置授权，不把合成前向当真实模型验收。 |
 | 沙盒产物持久化稳定性 | main 既有 tests/sandbox_broker/test_service.py | 本轮扩大回归发生 1 次 artifact_failed 后无 manifest；单项及模块 172 项重跑通过，触发因素待查。保留失败证据，不放宽 fail-closed。 |
 
 ## 明确不回退的保护
@@ -51,8 +51,8 @@
 ## 后续顺序与部署边界
 
 1. API、Agent活性、UI、训练编排、恢复及决策层代码已分批合并；不据此宣称真实模型验收完成。
-2. 服务端桥接已合并；完成本批隔离页面/CLI 的独立审查、回归、PR 与授权合并。
-3. 集成显式opt-in真实权重测试并在受控环境实际验收；不自动激活生产模型。
+2. 服务端桥接与隔离页面/CLI均已分批审查、回归并获授权合并；不自动接管生产入口。
+3. 按已确认方案A集成显式opt-in真实权重测试，先完成合成资产工程验收；后续获明确目录/bundle及授权再执行真实权重验收，不自动激活生产模型。
 4. 核查原始专用报告等独有残差，最终整树回归并更新每项处置证据。
 5. 服务器系统、硬件、HTTPS、部署方式由用户后续提供；当前无管理员令牌的管理接口契约不是公网安全证明，必须另行确认防护。历史 QEMU/Temporal/OpenSandbox 验收不替代目标宿主测试。
 

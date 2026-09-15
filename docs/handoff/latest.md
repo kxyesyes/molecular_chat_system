@@ -1,5 +1,16 @@
 # Latest handoff
 
+## 家族真实权重验收：设计已确认，实施计划完成（2026-09-15）
+
+当前任务分支为 `codex/family-real-acceptance-integration`，独立工作树
+`family-real-acceptance-integration`，基于 main `57680aa`（PR #28 已授权合并）。
+用户确认方案A：本批先集成验收代码，不读取真实权重、不调用外部模型、不启用生产模型。
+
+已批准的[设计](../superpowers/specs/2026-09-15-family-real-acceptance-design.md)与
+[逐步实施计划](../superpowers/plans/2026-09-15-family-real-acceptance-integration.md)已落盘。
+本轮只修改文档，尚未实现新增测试或运行其回归；下一步选择子代理逐任务开发或本任务内逐批执行，按计划TDD实施。
+原始混杂工作树保持原样；真实权重验收、独立报告展示残差和部署验收仍未完成。
+
 ## 隔离验收页面与 CLI（2026-09-15）
 
 PR #26 逐轮决策 harness 已合并为 `4cef43b`；PR #27 服务端聊天桥接已获具体授权
