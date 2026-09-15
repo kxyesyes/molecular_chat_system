@@ -37,6 +37,14 @@
 - 独立 QUALITY 首审复现接收端吞取消、shutdown等待会话锁时取消会绕过清理。新增对应 RED 回归并修复；另补关闭期间接收完成不能派发的回归，修复后桥接+lab78 passed（12生命周期+29lab+37桥接）。此前全量3282 passed/2 skipped（114.79秒）不能覆盖这两个缺陷，保留为阶段证据。
 - 独立 QUALITY 复审通过：120 passed/1 skipped、Node30项及语法通过；接收取消/关闭竞态各重复3/3、零模型调用；等锁关闭探针重复取消5次仍等待清理后关闭registry、reset返回503且无遗留lab任务。无剩余重要审查问题；CI 和具体 PR 合并授权待完成。
 
+## PR #28 CI 兼容性修复
+
+已创建 draft PR #28，首个提交 `eb49582`。首次 CI run34949647619：Agent 24 failed/3171 passed/1 skipped，原因均为 CI 固定旧 Starlette 不支持 `TestClient(client=...)`；其它5个执行组通过，聚合门禁失败。保留失败记录，不靠重跑掩盖。
+
+增加模拟旧构造器的 RED 回归，改为仅测试内 ASGI peer scope 注入；未修改生产 loopback/Host/Origin 校验或升级依赖。补充合法 cookie/Host/Origin 下非本地 peer 的 HTTP/WebSocket 拒绝测试。lab+生命周期44 passed；指定 MedChat Python 最终整体 **3288 passed/2 skipped/7 warnings（115.31秒）**，独立增量复审和新 head CI 记录以 PR 为准。
+
+独立增量复审通过：指定 MedChat Python 下 lab32 passed，新兼容性/peer3项另跑通过。审查者首次误用 Conda base 得到22 passed/10 failed，直接原因是该环境缺少langgraph（亦未安装RDKit），不是本批peer注入回归；已纠正解释器并保留失败记录。旧固定依赖的实际运行以新 head CI 为最终验证，不以本机新版本替代。
+
 ## 后续显式运行方法（本轮未连接真实模型）
 
 本轮已运行的验证命令（科学依赖位于 MedChat Conda 环境；以下路径相对本工作树）：

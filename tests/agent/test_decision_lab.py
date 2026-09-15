@@ -18,8 +18,14 @@ def lab(model, tmp_path, **kwargs):
     return create_decision_lab(model, tmp_path / 'lab.sqlite', port=6012, **kwargs)
 
 
-def client(app):
-    return TestClient(app, base_url=ORIGIN, client=('127.0.0.1', 50000))
+def client(app, *, peer=('127.0.0.1', 50000)):
+    # CI pins Starlette before TestClient's client= argument existed. Inject only
+    # the test transport peer, never relax the application's loopback gate.
+    async def transport(scope, receive, send):
+        if scope['type'] in ('http', 'websocket'):
+            scope = dict(scope, client=peer)
+        await app(scope, receive, send)
+    return TestClient(transport, base_url=ORIGIN)
 
 
 def establish(c):
@@ -45,6 +51,33 @@ def complete(ws):
 def test_factory_rejects_non_loopback_origin_configuration(tmp_path):
     with pytest.raises(ValueError):
         lab(ScriptedModel([]), tmp_path, session_ttl=0)
+
+
+def test_client_supports_ci_starlette_without_client_keyword(tmp_path, monkeypatch):
+    original = TestClient
+    def legacy_constructor(app, *, base_url):
+        return original(app, base_url=base_url)
+    monkeypatch.setitem(globals(), 'TestClient', legacy_constructor)
+    with client(lab(ScriptedModel([]), tmp_path)) as c:
+        assert establish(c).status_code == 200
+
+
+@pytest.mark.parametrize('peer', ['203.0.113.10', 'testclient'])
+def test_transport_peer_gate_not_bypassed_by_valid_host_origin(tmp_path, peer):
+    model = ScriptedModel([])
+    app = lab(model, tmp_path)
+    with client(app) as local:
+        cookie = establish(local).cookies['medchat_decision_lab_session']
+        foreign = client(app, peer=(peer, 50001))
+        try:
+            foreign.cookies.set('medchat_decision_lab_session', cookie, path=PREFIX)
+            assert foreign.post(PREFIX + 'session', headers={'origin': ORIGIN}).status_code == 403
+            with pytest.raises(WebSocketDisconnect):
+                with connect(foreign):
+                    pytest.fail('non-loopback peer accepted')
+        finally:
+            foreign.close()
+        assert not model.messages
 
 
 def test_cookie_private_and_host_origin_are_enforced(tmp_path):
@@ -106,7 +139,7 @@ def test_same_session_resume_and_cross_session_rejection(tmp_path):
             assert waiting['status'] == 'waiting_for_input'
             cid = waiting['continuation_id']
         # Separate browser cookie jar, same running server/lifespan.
-        other = TestClient(app, base_url=ORIGIN, client=('127.0.0.1', 50001))
+        other = client(app, peer=('127.0.0.1', 50001))
         try:
             establish(other)
             with connect(other) as ws:
