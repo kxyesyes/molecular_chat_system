@@ -1,6 +1,6 @@
 # 历史代码集成状态台账
 
-日期：2026-09-12。核对 main `59e8cde`（PR #14–#25 中已实施批次，含 #15、#20、#23、#25，已获具体授权合并）；总状态 **partial**。
+日期：2026-09-15。核对 main `4cef43b`（PR #26 已授权合并；此前已实施批次含 #15、#20、#23、#25）；总状态 **partial**。
 用户要求先完成代码集成，目标服务器验收 deferred。局部 PR 通过不代表全部集成。
 实施顺序见 [总体计划](../superpowers/plans/2026-09-12-historical-integration-completion.md)。
 
@@ -22,9 +22,10 @@
 | 证据隔离/续接存储基础 | `9312bf5`，evidence/ledger.py、persistence/* | PR #22 `8ae557f` 已获具体授权 squash 为 `57c677e`，整树一致。五项审查问题已修复；首轮 Linux CI 长文本矩阵超时及既有沙盒时序失败保留。矩阵完整分组后独立双审、联合2686 passed/1 skipped，最新CI run34693786199全7项通过。不是调用方完整鉴权/证据接线；沙盒修复另批处理。 |
 | 动态执行会话 | `9312bf5`，runtime/run_session.py | PR #24 `1cb1348` 已获具体授权 squash 为 `6aa5299`，整树一致。动态58项、最终联合2744 passed/1 skipped；双审通过，CI run34694932136全7项成功。未切换生产入口。 |
 | 沙盒 late-create 测试同步 | tests/sandbox_broker/test_service.py | PR #23 已授权合并为3988def；最新head9b90513独立复审、联合638 passed/2 skipped、CI run34697341444全7项通过。650ms通知延迟可控复现；保持20ms创建期限及清理前主断言，不声称复现实际CI调度原因。 |
-| 决策执行/调用方续接 | `9312bf5`，harness/decision_*、runtime | 独立harness分支已实施8模块及最小兼容接点，修复SPEC/QUALITY发现的证据/状态/布尔边界，最终独立双审通过；父联合3165 passed/1 skipped、9Node/compileall/contract通过。revision4、回调前观察封存、CAS前语义历史核对、转换前原始结果门禁已实现；准备独立PR/CI与具体授权，不视为已集成main。 |
+| 决策执行/调用方续接 | `9312bf5`，harness/decision_*、runtime | PR #26 已授权 squash 为 `4cef43b`，合并树一致。独立双审、联合3165 passed/1 skipped、9Node/compileall/contract、CI run34699410617全7项通过。revision4、回调前观察封存、CAS前语义历史核对、转换前原始结果门禁已进入main；未切换生产入口。 |
 | ADMET完整输入与异常隔离 | tools/admet_predictor.py、molecular_input.py | PR #25已获具体授权合并为59e8cde；双审、2723 passed/1 skipped、9Node/compileall/contract及CI run34698556963全7项通过。不把规则结果冒充模型，不修复本批以外的后端部分行失败语义。 |
-| 隔离验收入口 | `9312bf5`，web/decision_chat.py、decision_lab.py、静态 lab、run_decision 脚本 | 决策基础集成后移植，不自动接管生产首页。 |
+| 隔离服务端聊天桥接 | `9312bf5`，web/decision_chat.py、ChatHandler、test_decision_chat*.py | 本批独立分支实施有界事件传输、错误和取消收尾；状态及验证见 [聊天桥接交接](isolated-chat-bridge-integration.md)。未合并，不自动接管生产首页。 |
+| 隔离验收页面/脚本 | `9312bf5`，decision_lab.py、静态 lab、run_decision 脚本 | 服务端桥接之后单独集成；本批未移植、未启动。 |
 | 真实权重全链路测试 | `9312bf5`，tests/test_activity_family_real_acceptance.py | 待随 API/Agent/UI 集成；保持显式 opt-in，不把合成前向当真实模型验收。 |
 | 沙盒产物持久化稳定性 | main 既有 tests/sandbox_broker/test_service.py | 本轮扩大回归发生 1 次 artifact_failed 后无 manifest；单项及模块 172 项重跑通过，触发因素待查。保留失败证据，不放宽 fail-closed。 |
 
@@ -32,7 +33,7 @@
 
 - 活性旧 blocker 已在 main 关闭：target/endpoint 冲突、CSV 文本精度/ID、NUL 截断、未激活 prepared 模型混入 legacy。
 - main 的 CSV 行宽、prepared 身份再验证、模型卡字段/指标一致性、特征拆分防泄漏、RDKit 兼容和完整 SMILES 解析必须保留。
-- 新 Agent 的敏感澄清、续接 target、登记后 evidence/artifacts 修改三个 blocker 在源 `9312bf5` 已修复，但对应新功能尚未进入 main。不得退回较旧 `eb93c43`。
+- 新 Agent 的敏感澄清、续接 target、登记后 evidence/artifacts 修改边界已随分批决策集成进入 main，并加强为 revision4。仍需验收入口验证，不得退回较旧 `eb93c43`。
 - 不整体合并滞后分支：差异中的文件删除可能只是源缺少 main 新增保护，并非应该删除。
 
 ## 原始混杂树与未完成细查
@@ -43,15 +44,15 @@
 |---|---|
 | reporting/target_design.py、supervisor 接线和测试 | 已只读检查：旧 presenter 消费原始分子 list，未核对工具成功态就关联属性，并固定声称没有 docking；不能直接套到 CandidateSet。中文汇总与属性复用是否被新链路覆盖仍待验证，不能恢复固定科研断言。 |
 | 原 chat/home/index 候选卡片协议 | 核心功能已被 CandidateSet 事件/生命周期替代，不恢复旧 complete.molecules 协议。 |
-| 原 base_tool 整行解析 | 性质/类药性 execute 已走更强整结构 parser；旧 patch 只是整行快捷分支。只读探针 `CCO\nOCC\nCCN` 的 inherited extractor 仍只返回 CCO；ADMET、reverse-target、RXN 等仍有调用，应另建实际输入传递回归。PropertyCalculator 继承方法的探针不能等同其 execute 有回归。 |
+| 原 base_tool 整行解析 | 性质/类药性 execute 已走更强整结构 parser；ADMET完整输入已由PR #25修复。旧 patch 只是整行快捷分支，reverse-target、RXN等剩余调用仍需实际输入传递回归。PropertyCalculator 继承方法的截断探针不能等同其 execute 有回归。 |
 | 更早工作树逐块语义与最终全链路 | 尚未全部细查；本台账不是全仓逐行审计结论。 |
 | CSV、模型、索引、运行报告和历史性能文档 | 本地资产或历史证据，不读取/提交，不作为当前 main 科研性能或部署依据。 |
 
 ## 后续顺序与部署边界
 
-1. API 批次已合并，继续完成 Agent 活性接线和 UI 的独立 PR，验证跨入口数据链路。
-2. 适配家族训练编排，不激活生产模型。
-3. 集成旧 Agent 恢复修复，再分层移植决策协议、证据、续接及隔离入口。
+1. API、Agent活性、UI、训练编排、恢复及决策层代码已分批合并；不据此宣称真实模型验收完成。
+2. 先完成服务端隔离聊天桥接的独立审查、回归与PR，再单独集成隔离页面和验收脚本。
+3. 集成显式opt-in真实权重测试并在受控环境实际验收；不自动激活生产模型。
 4. 核查原始专用报告等独有残差，最终整树回归并更新每项处置证据。
 5. 服务器系统、硬件、HTTPS、部署方式由用户后续提供；当前无管理员令牌的管理接口契约不是公网安全证明，必须另行确认防护。历史 QEMU/Temporal/OpenSandbox 验收不替代目标宿主测试。
 
