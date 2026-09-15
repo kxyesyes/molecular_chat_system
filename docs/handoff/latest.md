@@ -1,5 +1,18 @@
 # Latest handoff
 
+## 隔离验收页面与 CLI（2026-09-15）
+
+PR #26 逐轮决策 harness 已合并为 `4cef43b`；PR #27 服务端聊天桥接已获具体授权
+squash 合并为 `40fcd2a`，合并树与已审查 head 一致，CI run34945834822 全7项通过。
+下方旧记录保留其当时状态，不代表当前 main。
+
+本批在独立分支 `codex/agent-isolated-lab-integration` 集成 loopback 验收页面和 CLI，
+当前尚未合并。范围、运行方法和证据见
+[隔离验收入口交接](isolated-decision-lab-integration.md)。
+不接管生产首页，不调用真实外部模型、不读取或启用训练权重。
+真实权重 opt-in 全链路、原始报告展示等历史残差、目标服务器验证仍未完成；
+以 [状态台账](historical-integration-status.md) 为准。
+
 ## 历史代码集成持续任务（2026-09-12）
 
 PR #14–#25 中已实施批次（含 #15、#20、#23、#25）均已获具体授权并合并，当前 main 为 `59e8cde`；历史功能集成尚未全部完成。
