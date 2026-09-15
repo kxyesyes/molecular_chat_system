@@ -150,6 +150,22 @@ async def _settle(task):
         task.result()
 
 
+async def await_with_deadline(operation, *, timeout):
+    """Preserve caller cancellation even if I/O finishes at the same time.
+
+    Explicit wait avoids the wait_for completed-child/caller-cancel race on our
+    Python 3.10 runtime. Every exit retains ownership until the operation settles.
+    """
+    pending = asyncio.ensure_future(operation)
+    try:
+        completed, _ = await asyncio.wait({pending}, timeout=timeout)
+        if not completed:
+            raise asyncio.TimeoutError()
+        return pending.result()
+    finally:
+        await _settle(pending)
+
+
 async def process_decision_message(handler, websocket, *, context, decision_loop,
                                    request_kind, allowed_tools, required_tools,
                                    requirements=None, continuation_id=None, clarified_query=None):
@@ -179,7 +195,7 @@ async def process_decision_message(handler, websocket, *, context, decision_loop
             buffer.finish()
 
     async def send(text):
-        await asyncio.wait_for(websocket.send_text(text), timeout=SEND_TIMEOUT_SECONDS)
+        await await_with_deadline(websocket.send_text(text), timeout=SEND_TIMEOUT_SECONDS)
 
     task = asyncio.create_task(run(), name='isolated-decision-chat')
     display_changed = False

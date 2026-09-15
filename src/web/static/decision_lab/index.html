@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Decision lab · Isolated acceptance</title>
+    <link rel="stylesheet" href="/decision-lab/style.css">
+    <script src="/decision-lab/app.js" defer></script>
+</head>
+<body>
+    <main>
+        <header class="masthead">
+            <div>
+                <p class="eyebrow">MedChat / Decision lab</p>
+                <h1>Isolated acceptance</h1>
+                <p class="scope">Not production. Not a full scientific benchmark. Not a general chat interface.</p>
+            </div>
+            <p class="connection" id="lab-connection" role="status">Initializing</p>
+        </header>
+
+        <div class="workspace">
+            <section class="controls panel" aria-labelledby="controls-title">
+                <p class="eyebrow">01 / Control</p>
+                <h2 id="controls-title">Run a fixed case</h2>
+                <p class="hint">These four presets are isolated acceptance obligations, not general chat workflows. The server owns prompts, tools and permissions. Start sends only the selected case ID.</p>
+                <label for="lab-case">Isolated acceptance case</label>
+                <select id="lab-case" disabled>
+                    <option value="chat">Chat — no tools · isolated acceptance</option>
+                    <option value="properties">CCO + CCN properties · isolated acceptance</option>
+                    <option value="clarify">Missing SMILES clarification → CCN · isolated acceptance</option>
+                    <option value="invalid">Invalid SMILES — CC(C)(( · isolated acceptance</option>
+                </select>
+                <button type="button" id="lab-start" class="primary" disabled>Start</button>
+
+                <div class="resume-controls">
+                    <label for="lab-query">Clarification reply</label>
+                    <input id="lab-query" type="text" value="SMILES: CCN" autocomplete="off" spellcheck="false" aria-describedby="resume-hint" disabled>
+                    <p id="resume-hint" class="hint">The clarification preset's expected reply is SMILES: CCN. Other molecules do not satisfy this fixed acceptance case. Resume is available only after a waiting_for_input complete message, not merely agent_result. The continuation stays in this page's memory.</p>
+                    <button type="button" id="lab-resume" disabled>Resume</button>
+                </div>
+
+                <div class="session-controls">
+                    <h3>Connection &amp; session</h3>
+                    <div class="button-row">
+                        <button type="button" id="lab-disconnect" disabled>Disconnect</button>
+                        <button type="button" id="lab-reconnect" disabled>Reconnect</button>
+                    </div>
+                    <button type="button" id="lab-reset" disabled>Reset session</button>
+                    <p class="hint">Reconnect uses the existing server-owned HttpOnly cookie; it never replays work. Reset closes this connection, rotates the session and clears local results.</p>
+                    <p class="caution">A closed connection leaves execution uncertain. It does not prove a server tool has physically stopped.</p>
+                </div>
+            </section>
+
+            <div class="output-column">
+                <section class="panel" aria-labelledby="result-title">
+                    <div class="section-heading">
+                        <div>
+                            <p class="eyebrow">02 / Result</p>
+                            <h2 id="result-title">Execution record</h2>
+                        </div>
+                        <p id="lab-status" class="status" role="status">Idle</p>
+                    </div>
+                    <dl class="identifiers">
+                        <div><dt>Trace</dt><dd id="lab-trace">—</dd></div>
+                        <div><dt>Continuation</dt><dd id="lab-continuation">None</dd></div>
+                    </dl>
+                    <pre id="lab-error" class="error" role="alert"></pre>
+                    <h3>Terminal text</h3>
+                    <pre id="lab-terminal" class="terminal" tabindex="0">No result received.</pre>
+                    <h3>Warnings &amp; display limits</h3>
+                    <pre id="lab-warnings" class="warnings" tabindex="0">None reported.</pre>
+                    <h3>Structured tool results</h3>
+                    <p class="hint">Server-provided data, provenance and acceptance metadata. No scientific values or molecule cards are inferred from text.</p>
+                    <pre id="lab-results" class="structured" tabindex="0">No structured tool results received.</pre>
+                </section>
+
+                <section class="panel" aria-labelledby="events-title">
+                    <div class="section-heading">
+                        <div>
+                            <p class="eyebrow">03 / Events</p>
+                            <h2 id="events-title">Live transport record</h2>
+                        </div>
+                        <p id="lab-event-count" class="hint">0 / 200 retained</p>
+                    </div>
+                    <p class="hint">Newest 200 events in arrival order. Model text and JSON are displayed as plain text, never executed.</p>
+                    <ol id="lab-events" class="events" aria-label="Agent events"></ol>
+                </section>
+            </div>
+        </div>
+        <footer>Temporary session · Fixed acceptance cases · No automatic replay</footer>
+    </main>
+</body>
+</html>
