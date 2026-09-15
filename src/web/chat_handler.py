@@ -54,6 +54,17 @@ class ChatHandler:
         self.agent_system = agent_system
         self.config = config
         self.conversation_history = []
+
+    async def process_decision_message(self, websocket, *, context, decision_loop,
+                                       request_kind, allowed_tools, required_tools,
+                                       requirements=None, continuation_id=None, clarified_query=None):
+        """Server-only opt-in bridge; never dispatch browser kwargs into this API."""
+        from .decision_chat import process_decision_message
+        return await process_decision_message(
+            self, websocket, context=context, decision_loop=decision_loop,
+            request_kind=request_kind, allowed_tools=allowed_tools, required_tools=required_tools,
+            requirements=requirements, continuation_id=continuation_id, clarified_query=clarified_query,
+        )
     
     async def handle_websocket(self, websocket: WebSocket):
         """处理 WebSocket 连接"""
@@ -934,13 +945,15 @@ class ChatHandler:
         value: Any,
         *,
         depth: int = 0,
+        max_depth: int = _AGENT_EVENT_MAX_DEPTH,
+        max_items: int = _AGENT_EVENT_MAX_ITEMS,
     ) -> Any:
-        if depth >= _AGENT_EVENT_MAX_DEPTH:
+        if depth >= max_depth:
             return value
         if isinstance(value, Mapping):
             sanitized_mapping = {}
             for index, (key, child) in enumerate(value.items()):
-                if index >= _AGENT_EVENT_MAX_ITEMS:
+                if index >= max_items:
                     break
                 sanitized_key = cls._safe_agent_event_key(key)
                 if not sanitized_key or sanitized_key in sanitized_mapping:
@@ -948,17 +961,18 @@ class ChatHandler:
                 sanitized_mapping[sanitized_key] = cls._sanitize_agent_event_keys(
                     child,
                     depth=depth + 1,
+                    max_depth=max_depth, max_items=max_items,
                 )
             return sanitized_mapping
         if isinstance(value, list):
             return [
-                cls._sanitize_agent_event_keys(child, depth=depth + 1)
-                for child in value[:_AGENT_EVENT_MAX_ITEMS]
+                cls._sanitize_agent_event_keys(child, depth=depth + 1, max_depth=max_depth, max_items=max_items)
+                for child in value[:max_items]
             ]
         if isinstance(value, tuple):
             return tuple(
-                cls._sanitize_agent_event_keys(child, depth=depth + 1)
-                for child in value[:_AGENT_EVENT_MAX_ITEMS]
+                cls._sanitize_agent_event_keys(child, depth=depth + 1, max_depth=max_depth, max_items=max_items)
+                for child in value[:max_items]
             )
         return value
 
