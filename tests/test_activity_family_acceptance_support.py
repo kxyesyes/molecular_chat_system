@@ -806,6 +806,46 @@ def test_snapshot_rechecks_source_through_completion(snapshot_source, tmp_path, 
     assert mutated
 
 
+@pytest.mark.parametrize("task", ["classification", "regression"])
+def test_snapshot_final_recheck_rejects_registry_change_during_asset_reads(
+        snapshot_source, tmp_path, monkeypatch, task):
+    from src.activity.model_registry import ActivityModelRegistry, REGISTRY_STATE_FILE
+
+    support = snapshot_api()
+    config, _, selected = snapshot_source
+    registry_path = config.source / REGISTRY_STATE_FILE
+    asset_names = [selected[stage][field] for stage in ("classification", "regression")
+                   for field in ("weights_file", "model_card_file")]
+    target = selected[task]["weights_file"]
+    original_select = ActivityModelRegistry.select_family_bundle
+    original_read = support._bounded_file
+    final_pass, changed, final_reads = [], [], []
+
+    def select_then_arm(self, bundle_id):
+        result = original_select(self, bundle_id)
+        final_pass.append(True)
+        return result
+
+    def read_then_change_registry(path, *args, **kwargs):
+        assert path.parent == config.source
+        assert path.name in {REGISTRY_STATE_FILE, *asset_names}
+        result = original_read(path, *args, **kwargs)
+        if final_pass:
+            final_reads.append(path.name)
+            if path.name == target and not changed:
+                with registry_path.open("ab") as handle:
+                    handle.write(b"\n")
+                changed.append(True)
+        return result
+
+    monkeypatch.setattr(ActivityModelRegistry, "select_family_bundle", select_then_arm)
+    monkeypatch.setattr(support, "_bounded_file", read_then_change_registry)
+    with pytest.raises(ValueError, match="^source_changed$"):
+        support.snapshot_family(config, "pde-family", tmp_path / "copy")
+    assert changed == [True]
+    assert final_reads == [REGISTRY_STATE_FILE, *asset_names, REGISTRY_STATE_FILE]
+
+
 @pytest.mark.parametrize("fault", ["identity", "growth"])
 def test_snapshot_checks_open_handle_before_read(snapshot_source, tmp_path, monkeypatch, fault):
     import os

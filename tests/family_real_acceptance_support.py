@@ -267,12 +267,15 @@ def _source_baseline(config, family_id):
 
 
 def _recheck_source(config, assets, digests):
+    """Bracket pinned asset reads with manifest checks, not an atomic snapshot."""
     from src.activity.model_registry import REGISTRY_STATE_FILE
 
     checks = {"registry": (REGISTRY_STATE_FILE, REGISTRY_LIMIT, None), **assets}
     for logical, (name, limit, _) in checks.items():
         if _bounded_file(config.source / name, limit)[0] != digests.get(logical):
             _fail("source_changed")
+    if _bounded_file(config.source / REGISTRY_STATE_FILE, REGISTRY_LIMIT)[0] != digests.get("registry"):
+        _fail("source_changed")
 
 
 def _destination(source, destination):
@@ -362,8 +365,6 @@ def verify_source(config, snapshot):
         if digests != snapshot.source_digests:
             _fail("source_changed")
         _recheck_source(config, assets, digests)
-        if _bounded_file(registry_path, REGISTRY_LIMIT)[0] != digest:
-            _fail("source_changed")
         return True
     except ImportError:
         _fail("dependency_unavailable")
