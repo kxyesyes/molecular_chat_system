@@ -21,7 +21,7 @@
 | 4. DOM fixture与生产渲染断言 | 完成，SPEC/QUALITY通过，旧18/18、新15/15 |
 | 5. 预测/API/逐轮决策/ASGI链路 | 完成，SPEC/QUALITY复审通过，六组255 passed |
 | 6. opt-in入口与报告 | 完成，SPEC/QUALITY均通过；父级11组680 passed/5 skipped |
-| 7. 全回归、双审、PR | 进行中：修正Task5测试时间戳误报、补CI显式覆盖；全批审查/PR待完成 |
+| 7. 全回归、双审、PR | 本地回归和全批SPEC/QUALITY均通过；draft PR与Linux CI发布验证中 |
 
 ## 已取得的验证证据
 
@@ -90,6 +90,7 @@
 - 全批SPEC/QUALITY、draft PR和最新Linux CI尚未完成；没有合并授权。历史报告展示残差、真实训练权重、外部主模型、真实浏览器和部署仍未执行。
 - `44e8f4ba`最小修正三文件：确定性时间戳RED与科学字段断言；CI显式DOM自测、root Node20、全局真实开关0。RED5 failed/4 passed→聚焦18 passed/1 skipped；CI契约7 passed、默认真实入口1 skipped；11组680 passed/5 skipped/2 warnings（262.72秒）。旧10个Node、新DOM15项、两份语法及diff检查通过。实施者compile+清理组合再次被策略整体拒绝、没有执行；父级此前短缓存compile已成功，生产源码未变。全批独立审查以44e8f4ba为代码head。
 - 父级在Task7提交后单独重跑短缓存`compileall -q src scripts`通过，缓存留在系统temp，未执行删除。全批独立SPEC批准44e8f4ba：chain/process/默认真实入口/CI契约152 passed、2 skipped（183.50秒），support风险选择83 passed/122 deselected，实际双家族及分别损坏家族的6个worker探针3 passed（46.12秒）；Node15+18项、语法与diff通过。全批QUALITY仍待完成，Linux CI尚未运行。
+- 全批独立QUALITY批准44e8f4ba：support/process/默认入口/CI契约261 passed/5 skipped；链路风险选择26 passed/67 deselected；独立两家族各19类损坏、数值容差、实际ASGI篡改探针4 passed；Node15/18项、语法及diff通过。各组相同2项既有警告。无剩余重要审查意见；仅代码发布认可，不是合并授权。原始混杂工作树13项保持不变，凭据模式检查仅输出匹配文件名、未发现匹配；没有资产、运行报告或src进入本批修改。
 
 ## 后续真实权重执行（本轮未执行）
 

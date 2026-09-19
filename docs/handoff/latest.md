@@ -8,7 +8,7 @@
 
 已批准的[设计](../superpowers/specs/2026-09-15-family-real-acceptance-design.md)与
 [逐步实施计划](../superpowers/plans/2026-09-15-family-real-acceptance-integration.md)已落盘。
-用户已选择子代理逐任务TDD实施。Task1–6已通过独立SPEC、QUALITY复审；父级家族相关11组680 passed、5 skipped，既有Agent/model/fallback联合回归3288 passed、2 skipped。Task7正在修正独立审查复现的时间戳断言误报，并补CI新DOM驱动显式覆盖；全批双审与PR尚未完成。完整证据见[本批交接](family-real-acceptance-integration.md)，不将离线工程通过当作真实权重验收。
+用户已选择子代理逐任务TDD实施。Task1–6及Task7全批独立SPEC、QUALITY均通过；家族相关11组680 passed、5 skipped，既有Agent/model/fallback联合回归3288 passed、2 skipped。时间戳断言误报已修复，新DOM驱动已加入CI显式覆盖；draft PR与Linux CI发布验证中。完整证据见[本批交接](family-real-acceptance-integration.md)，不将离线工程通过当作真实权重验收。
 原始混杂工作树保持原样；真实权重验收、独立报告展示残差和部署验收仍未完成。
 
 ## 隔离验收页面与 CLI（2026-09-15）
