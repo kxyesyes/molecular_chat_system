@@ -5,6 +5,273 @@ from pathlib import Path
 import pytest
 
 
+def test_default_entry_skips_before_support_import_or_source_io(monkeypatch):
+    import builtins
+    import importlib
+    module = importlib.import_module('tests.test_activity_family_real_acceptance')
+    original = builtins.__import__
+    def guarded(name, *args, **kwargs):
+        assert name not in {'src.activity.model_registry', 'tests.family_real_acceptance_support'}
+        return original(name, *args, **kwargs)
+    monkeypatch.setenv('MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE', '0')
+    monkeypatch.setattr(builtins, '__import__', guarded)
+    monkeypatch.setattr(Path, 'stat', lambda *a, **k: pytest.fail('source stat'))
+    with pytest.raises(pytest.skip.Exception):
+        module.test_trained_family_acceptance()
+
+
+def test_entry_enabled_invalid_configuration_fails_not_skips(monkeypatch):
+    from tests import test_activity_family_real_acceptance as entry
+    # Replace the mapping, never inherit host configuration or set the real gate.
+    monkeypatch.setattr(entry, 'acceptance_environment', lambda: {'MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE': '1'})
+    with pytest.raises(pytest.fail.Exception, match='invalid_configuration'):
+        entry.test_trained_family_acceptance()
+
+
+@pytest.mark.parametrize('bad', [{}, {'status': 'passed', 'stages': {}},
+    {'status': 'passed', 'mode': 'synthetic_fixture', 'decision_model': 'scripted', 'stages': {}}])
+def test_public_report_never_trusts_empty_success(bad):
+    from tests import family_real_acceptance_support as support
+    report = support.public_report(bad, mode='synthetic_fixture')
+    assert report['status'] == 'failed'
+    assert report['scope']['production_selection'] == 'not_verified'
+    assert report['scope']['external_model'] == 'not_run'
+    assert report['decision_model_kind'] == 'scripted'
+    tool = next(case for case in report['cases'] if case['case_id'] == 'valid.tool')
+    dom = next(case for case in report['cases'] if case['case_id'] == 'valid.dom')
+    assert tool['actual_tools'] == []
+    assert dom['result_status'] is None
+    assert dom['actual_identity'] == {}
+
+
+@pytest.mark.parametrize('source_check,selection', [('passed', 'unchanged'),
+    ('changed', 'changed'), ('not_completed', 'not_verified')])
+def test_failed_scientific_report_preserves_source_state(source_check, selection):
+    from tests import family_real_acceptance_support as support
+    result = support.public_report({'status': 'failed', 'reason': 'chain_mismatch',
+        'source_check': source_check}, mode='trained_weights')
+    assert result['status'] == 'failed'
+    assert result['source_check'] == source_check
+    assert result['scope']['production_selection'] == selection
+
+
+@pytest.mark.parametrize('noise', [float('nan'), ['x'] * 129, 'x' * 513,
+    'C:/synthetic-private/model', 'sk-' + 'synthetic' * 4])
+def test_public_projection_drops_private_metadata_and_fails_bad_evidence(noise):
+    import json
+    from tests import family_real_acceptance_support as support
+    private = {'status': 'passed', 'mode': 'synthetic_fixture', 'decision_model': 'scripted',
+        'expected_identity': {'family_id': noise}, 'private_metadata': noise,
+        'stdout': noise, 'source': noise, 'stages': {}}
+    report = support.public_report(private, mode='synthetic_fixture')
+    assert report['status'] == 'failed'
+    encoded = json.dumps(report, allow_nan=False)
+    assert 'synthetic-private' not in encoded and 'synthetic' * 4 not in encoded
+    assert 'private_metadata' not in encoded and 'stdout' not in encoded
+
+
+def test_report_write_is_exclusive_and_prevalidates_before_open(tmp_path, monkeypatch):
+    import json
+    from tests import family_real_acceptance_support as support
+    report = support.public_report({}, mode='synthetic_fixture')
+    path = tmp_path / 'report.json'
+    support.write_report(path, report)
+    assert json.loads(path.read_text()) == report
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match='^invalid_report$'):
+        support.write_report(path, report)
+    assert path.read_bytes() == before
+    for bad in ({**report, 'latency_ms': float('nan')}, {**report, 'noise': 'x' * (2 << 20)}):
+        with pytest.raises(ValueError, match='^invalid_report$'):
+            support.write_report(tmp_path / 'absent.json', bad)
+        assert not (tmp_path / 'absent.json').exists()
+
+
+@pytest.mark.parametrize('payload', [{}, {'status': 'passed'}, {
+    'status': 'passed', 'mode': 'synthetic_fixture', 'decision_model_kind': 'scripted',
+    'scope': {'external_model': 'not_run', 'production_selection': 'unchanged'},
+    'source_check': 'passed', 'error_code': None, 'families': []}, {
+    'status': 'passed', 'mode': 'synthetic_fixture', 'decision_model_kind': 'scripted',
+    'scope': {'external_model': 'not_run', 'production_selection': 'unchanged'},
+    'source_check': 'passed', 'error_code': None,
+    'families': [{'family_id': 'pde-family'}, {'family_id': 'buche-family'}]}])
+def test_writer_rejects_incomplete_success_before_open(tmp_path, payload):
+    from tests import family_real_acceptance_support as support
+    with pytest.raises(ValueError, match='^invalid_report$'):
+        support.write_report(tmp_path / 'no.json', payload)
+    assert not (tmp_path / 'no.json').exists()
+
+
+def test_disabled_parent_uses_no_allocation_and_no_source(tmp_path, monkeypatch):
+    import tempfile
+    from tests import family_real_acceptance_support as support
+    def forbidden(*a, **k):
+        pytest.fail('disabled parent must not allocate or access source')
+    monkeypatch.setattr(tempfile, 'mkdtemp', forbidden)
+    monkeypatch.setattr(support, 'verify_source', forbidden)
+    monkeypatch.setattr(support, 'snapshot_family', forbidden)
+    report = support.run_acceptance({}, repo_dir=tmp_path, runner=forbidden)
+    assert report['status'] == 'skipped'
+    assert report['families'] == [] and report['scope']['production_selection'] == 'not_verified'
+
+
+@pytest.mark.parametrize('reason,released', [('child_timeout', True), ('ownership_uncertain', False)])
+def test_parent_missing_reports_never_rechecks_source_and_respects_ownership(tmp_path, monkeypatch, reason, released):
+    from tests import family_real_acceptance_support as support
+    from tests.family_acceptance_process_support import ChildResult
+    calls = []
+    def runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        assert argv[1:4] == ['-B', '-m', 'tests.family_acceptance_chain_support']
+        assert kwargs['cwd'] == Path(__file__).absolute().parents[1]
+        assert kwargs['environment_dir'].parent == tmp_path
+        assert kwargs['timeout'] == 120
+        assert 'PYTHONPATH' not in kwargs['env']
+        return ChildResult('failed', reason, None, None, released, released)
+    monkeypatch.setattr(support, 'snapshot_family', lambda *a: pytest.fail('parent source access'))
+    monkeypatch.setattr(support, 'verify_source', lambda *a: pytest.fail('parent source access'))
+    report = support.run_acceptance(explicit_config(tmp_path),
+        repo_dir=Path(__file__).absolute().parents[1], temporary_root=tmp_path, runner=runner,
+        mode='synthetic_fixture')
+    assert report['status'] == 'failed' and len(calls) == 2
+    assert all(f['source_check'] == 'not_completed' for f in report['families'])
+    assert all(f['error_code'] == reason for f in report['families'])
+    assert all(f['cleanup_complete'] is released for f in report['families'])
+    assert all(kwargs['environment_dir'].exists() is (not released) for _, kwargs in calls)
+
+
+def test_write_rejects_unprojected_nested_payload_before_open(tmp_path):
+    from tests import family_real_acceptance_support as support
+    report = support.public_report({}, mode='synthetic_fixture')
+    report['cases'][0]['raw_model_metadata'] = {'training_note': 'private'}
+    with pytest.raises(ValueError, match='^invalid_report$'):
+        support.write_report(tmp_path / 'no.json', report)
+    assert not (tmp_path / 'no.json').exists()
+
+
+def test_report_link_and_reparse_paths_are_rejected(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from tests import family_real_acceptance_support as support
+    report = support.public_report({}, mode='synthetic_fixture')
+    original = Path.lstat
+    def reparse(path, *a, **k):
+        value = original(path, *a, **k)
+        if path == tmp_path:
+            fields = {name: getattr(value, name) for name in dir(value) if name.startswith('st_')}
+            fields['st_file_attributes'] = 0x400
+            return SimpleNamespace(**fields)
+        return value
+    monkeypatch.setattr(Path, 'lstat', reparse)
+    with pytest.raises(ValueError, match='^invalid_report$'):
+        support.write_report(tmp_path / 'no.json', report)
+    assert not (tmp_path / 'no.json').exists()
+
+
+def test_cleanup_checks_tree_identity_and_deadline(tmp_path, monkeypatch):
+    from tests import family_real_acceptance_support as support
+    directory = tmp_path / 'owned'
+    directory.mkdir()
+    (directory / 'file').write_text('synthetic')
+    identity = support._checked_path(directory, directory=True)[0][-1]
+    assert support._cleanup_owned(directory, ('not', 'the', 'owner')) is False
+    assert support._cleanup_owned(directory, identity, timeout=0) is False
+    assert (directory / 'file').exists()
+    assert support._cleanup_owned(directory, identity) is True
+    assert not directory.exists()
+
+
+def test_parent_raised_runner_retains_unproven_directory(tmp_path):
+    from tests import family_real_acceptance_support as support
+    directories = []
+    def runner(*a, **kwargs):
+        directories.append(kwargs['environment_dir'])
+        raise RuntimeError('synthetic private runner error')
+    report = support.run_acceptance(explicit_config(tmp_path), repo_dir=Path(__file__).absolute().parents[1],
+        temporary_root=tmp_path, mode='synthetic_fixture', runner=runner)
+    assert len(directories) == 2 and all(path.is_dir() for path in directories)
+    assert all(f['error_code'] == 'ownership_uncertain' and not f['cleanup_complete'] for f in report['families'])
+
+
+def test_cleanup_rechecks_owned_root_identity_before_deleting_leaf(tmp_path, monkeypatch):
+    from tests import family_real_acceptance_support as support
+    directory = tmp_path / 'owned'
+    directory.mkdir()
+    (directory / 'keep').write_text('synthetic')
+    original = support._checked_path
+    identity = original(directory, directory=True)[0][-1]
+    checks = []
+    def replaced(path, **kwargs):
+        result = original(path, **kwargs)
+        if path == directory:
+            checks.append(True)
+            if len(checks) >= 4:
+                return ([('changed-root', 0, 0)], result[1])
+        return result
+    monkeypatch.setattr(support, '_checked_path', replaced)
+    assert support._cleanup_owned(directory, identity) is False
+    assert (directory / 'keep').exists()
+
+
+def test_cleanup_deadline_does_not_wait_on_a_stalled_file_operation(tmp_path, monkeypatch):
+    import threading
+    import time
+    from tests import family_real_acceptance_support as support
+    directory = tmp_path / 'owned'
+    directory.mkdir()
+    leaf = directory / 'synthetic'
+    leaf.write_text('temporary')
+    identity = support._checked_path(directory, directory=True)[0][-1]
+    release, finished = threading.Event(), threading.Event()
+    original = Path.unlink
+    def stalled(path, *a, **k):
+        if path == leaf:
+            release.wait(.6)
+        try:
+            return original(path, *a, **k)
+        finally:
+            finished.set()
+    monkeypatch.setattr(Path, 'unlink', stalled)
+    started = time.perf_counter()
+    try:
+        assert support._cleanup_owned(directory, identity, timeout=.05) is False
+        assert time.perf_counter() - started < .3
+    finally:
+        release.set()
+        assert finished.wait(1)
+
+
+@pytest.mark.parametrize('reason,source_check', [('invalid_registry', 'not_completed'), ('source_changed', 'changed')])
+def test_parent_preserves_worker_failure_without_expected_identity(tmp_path, reason, source_check):
+    from tests import family_real_acceptance_support as support
+    from tests.family_acceptance_process_support import ChildResult
+    def runner(*a, **k):
+        return ChildResult('passed', None, 0, {'status': 'passed', 'scientific_report': {
+            'status': 'failed', 'reason': reason, 'source_check': source_check}}, True, True)
+    report = support.run_acceptance(explicit_config(tmp_path), repo_dir=Path(__file__).absolute().parents[1],
+        temporary_root=tmp_path, mode='synthetic_fixture', runner=runner)
+    assert all(f['error_code'] == reason and f['cleanup_complete'] for f in report['families'])
+    assert all(f['source_check'] == source_check for f in report['families'])
+
+
+@pytest.mark.parametrize('value', [None, [], 'synthetic-invalid'])
+def test_malformed_child_scientific_document_is_fixed_invalid_report(value):
+    from tests import family_real_acceptance_support as support
+    report = support.public_report(value, mode='synthetic_fixture')
+    assert report['status'] == 'failed' and report['error_code'] == 'invalid_report'
+    assert report['source_check'] == 'not_completed'
+
+
+def test_report_existing_hardlink_never_replaced(tmp_path):
+    import os
+    from tests import family_real_acceptance_support as support
+    original, link = tmp_path / 'original.json', tmp_path / 'linked.json'
+    original.write_text('synthetic keep')
+    os.link(original, link)
+    with pytest.raises(ValueError, match='^invalid_report$'):
+        support.write_report(link, support.public_report({}, mode='synthetic_fixture'))
+    assert original.read_text() == link.read_text() == 'synthetic keep'
+
+
 def explicit_config(tmp_path):
     return {
         "MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE": "1",

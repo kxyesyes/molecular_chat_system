@@ -185,12 +185,14 @@ def _parse_report(stdout):
     return report
 
 
-def run_owned_child(argv, *, env, cwd, timeout, cancel_event=None):
+def run_owned_child(argv, *, env, cwd, timeout, cancel_event=None, environment_dir=None):
     """Supervise a trusted explicit executable, never a shell command.
 
     Family callers supply <=120s; Node callers supply min(30s, remaining family
     time) and an executable already resolved by the parent. This boundary caps
     every invocation at 120s. It never deletes cwd, logs output or reads assets.
+    environment_dir separates module resolution (repo cwd) from owned HOME/TMP.
+    Omission preserves Task3's cwd-based environment exactly.
     """
     try:
         if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
@@ -199,10 +201,11 @@ def run_owned_child(argv, *, env, cwd, timeout, cancel_event=None):
                 or any(not isinstance(arg, str) or "\x00" in arg for arg in argv)
                 or not Path(argv[0]).is_absolute()
                 or Path(argv[0]).suffix.lower() in (".bat", ".cmd")
-                or not Path(cwd).is_absolute()):
+                or not Path(cwd).is_absolute()
+                or (environment_dir is not None and not Path(environment_dir).is_absolute())):
             return _failed("invalid_configuration")
         CommandAdapter._validate_cancel_event(cancel_event)
-        environment = child_environment(env, cwd)
+        environment = child_environment(env, cwd if environment_dir is None else environment_dir)
     except (TypeError, ValueError):
         return _failed("invalid_configuration")
 

@@ -1,5 +1,6 @@
 """Synthetic process tests: no scientific assets, providers or inherited secrets."""
 import os
+from pathlib import Path
 import shutil
 import sys
 import threading
@@ -67,6 +68,32 @@ def test_child_environment_is_an_allowlist(support, tmp_path):
         assert result[key] == "1"
     assert result["CUDA_VISIBLE_DEVICES"] == ""
     assert result["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_module_cwd_can_differ_from_owned_environment(support, tmp_path):
+    from pathlib import Path
+    repo = Path(__file__).absolute().parents[1]
+    code = """
+import json, os, pathlib
+import tests.family_real_acceptance_support
+assert pathlib.Path.cwd() != pathlib.Path(os.environ['HOME'])
+assert os.environ['HOME'] == os.environ['TEMP'] == os.environ['TMP']
+assert 'PYTHONPATH' not in os.environ
+print(json.dumps({'status': 'passed', 'isolated': True}))
+"""
+    result = support.run_owned_child([sys.executable, '-B', '-c', code],
+        env=support.child_environment(os.environ, tmp_path), cwd=repo,
+        environment_dir=tmp_path, timeout=10)
+    assert result.status == 'passed'
+    assert result.report == {'status': 'passed', 'isolated': True}
+    assert_released(result, tmp_path)
+
+
+def test_relative_environment_directory_fails_before_spawn(support, tmp_path, monkeypatch):
+    monkeypatch.setattr(support, '_spawn', lambda *a: pytest.fail('must not spawn'))
+    result = support.run_owned_child([sys.executable, '-B', '-c', 'pass'],
+        env={}, cwd=tmp_path, environment_dir=Path('relative'), timeout=1)
+    assert_failed(result, 'invalid_configuration')
 
 
 def test_actual_child_sees_only_isolated_environment(support, tmp_path):

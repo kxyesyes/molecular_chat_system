@@ -1,6 +1,6 @@
 """Private, offline chain checks. Caller owns the snapshot and 120s worker bound.
 
-No discovery, activation, publication or worker CLI lives here. A future authorized
+No discovery, activation or publication lives here. An explicitly invoked internal
 worker may pass trained_weights; synthetic_fixture means untrained CPU engineering
 coverage only. The private report must still pass Task6's publication projection.
 """
@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import shutil
 import time
+from time import perf_counter
 from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
@@ -33,6 +34,25 @@ ROW_FIELDS = ("smiles", "requested_target", "status", "success", "family_id", "b
 
 class ChainFailure(ValueError):
     """Fixed public reason only; never retain exception text."""
+
+
+class EntryTimings:
+    """One running entry; close in the chain's finally, including failed calls."""
+    def __init__(self):
+        self.active = None
+
+    def start(self, entries, name):
+        self.close()
+        entries[name] = {'status': 'failed'}
+        self.active = (entries, name, perf_counter())
+
+    def close(self):
+        if self.active is not None:
+            entries, name, started = self.active
+            record = entries[name]
+            record['latency_ms'] = (perf_counter() - started) * 1000
+            record.setdefault('checks', {})['entry_validated'] = record.get('status') == 'passed'
+            self.active = None
 
 
 def require(condition):
@@ -461,29 +481,34 @@ def check_failed_row(row, snapshot, *, smiles, target):
     require(row["errors"] == {"input": "unknown_or_ambiguous_family" if unknown else "invalid_smiles"})
 
 
-def run_rejection_case(snapshot, predictor, client, *, work_dir, target, smiles, remaining, record):
+def run_rejection_case(snapshot, predictor, client, *, work_dir, target, smiles, remaining, record, timings):
     """Executed by the runner in both modes, not only by pytest negative tests."""
     from src.activity import prediction_service
     from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
     record.update(status="failed", stages={})
     stages = record["stages"]
     remaining()
+    timings.start(stages, 'predictor')
     baseline = prediction_service.summarize_predictions(predictor.predict([smiles], target=target))
     stages["predictor"] = summary_record(baseline)
     record["scientific_status"] = baseline["status"]
     require(baseline["status"] == "failed" and baseline["success"] is False and len(baseline["results"]) == 1)
     check_failed_row(baseline["results"][0], snapshot, smiles=smiles, target=target)
     stages["predictor"]["status"] = "passed"
+    timings.close()
     for name in ("api_single", "api_batch"):
         remaining()
+        timings.start(stages, name)
         summary = api_summary(client, [smiles], target, batch=name == "api_batch")
         stages[name] = summary_record(summary)
         require(summary == baseline)
         stages[name]["status"] = "passed"
+        timings.close()
 
     # Delegate unchanged if accidentally called, but fail even if the error is
     # swallowed. Invalid parse/preflight must never reach the scientific service.
     with patch.object(prediction_service, "predict_activity", wraps=prediction_service.predict_activity) as service:
+        timings.start(stages, 'tool')
         tool = ActivityPredictorTool().execute({"smiles": smiles, "target": target})
         stages["tool"] = {"status": "failed", "scientific_status": "failed",
             "observation_status": tool.status.value, "error": tool.error.code.value if tool.error else None,
@@ -491,7 +516,9 @@ def run_rejection_case(snapshot, predictor, client, *, work_dir, target, smiles,
         require(not tool.success and tool.error.code.value == "invalid_input" and tool.status.value == "invalid_input")
         require(tool.data is None and not tool.evidence and service.call_count == 0)
         stages["tool"]["status"] = "passed"
+        timings.close()
         for name in ("decision", "websocket"):
+            timings.start(stages, name)
             stages[name] = {"status": "failed"}
             with decision_session(work_dir, target=target, query=f"SMILES: {smiles}", timeout=remaining()) as session:
                 if name == "decision":
@@ -504,6 +531,7 @@ def run_rejection_case(snapshot, predictor, client, *, work_dir, target, smiles,
                 require(service.call_count == 0)
                 stages[name].update(status="passed", checks={"rejected_without_service": True,
                     "public_matches_actual": frames is not None, "terminal": frames is not None})
+            timings.close()
     record["status"] = "passed"
     return baseline
 
@@ -531,15 +559,18 @@ def run_dom(summary, *, work_dir, remaining, record):
     remaining()
 
 
-def run_family_chain(snapshot, *, work_dir, mode):
+def run_family_chain(snapshot, *, work_dir, mode, deadline=None):
     """Bounded private report, never a transport-success or scientific-performance claim.
 
     Cooperative deadlines cover stages; Task3's owning worker supplies the hard
     family deadline for synchronous native inference/ASGI and separate cleanup.
     """
     report = {"status": "failed", "mode": mode, "decision_model": "scripted", "stages": {}}
-    deadline = time.monotonic() + 120
+    # The internal worker includes snapshot time; standalone fixtures retain the
+    # original 120s default. The owner also bounds spawn/native work externally.
+    deadline = min(time.monotonic() + 120, deadline) if deadline is not None else time.monotonic() + 120
     predictor = None
+    timings = EntryTimings()
 
     def remaining():
         value = deadline - time.monotonic()
@@ -564,6 +595,7 @@ def run_family_chain(snapshot, *, work_dir, mode):
             from fastapi.testclient import TestClient
             from src.web.routes.api_routes import setup_api_routes
             target, alias = ALIASES[snapshot.family_id]
+            timings.start(report['stages'], 'predictor')
             report["stages"]["predictor"] = {"status": "failed", "rows": []}
             try:
                 predictor = FamilyActivityPredictor(ActivityModelRegistry(snapshot.models_dir))
@@ -578,11 +610,13 @@ def run_family_chain(snapshot, *, work_dir, mode):
             check_rows(rows, rows, snapshot, target=target)
             require(all(stage.device.type == "cpu" for _, stages in predictor._cache.values() for stage in stages.values()))
             report["stages"]["predictor"]["status"] = "passed"
+            timings.close()
             remaining()
             app = FastAPI()
             setup_api_routes(app)
             with TestClient(app) as client:
                 for name, requested in (("api_single", target), ("api_batch", alias)):
+                    timings.start(report['stages'], name)
                     if name == "api_single":
                         responses = [client.post("/api/activity/predict", data={"smiles": smi, "target": requested}) for smi in SMILES]
                     else:
@@ -595,8 +629,10 @@ def run_family_chain(snapshot, *, work_dir, mode):
                     check_rows(actual, rows, snapshot, target=requested)
                     require(all(summary == prediction_service.summarize_predictions(summary["results"]) for summary in summaries))
                     report["stages"][name]["status"] = "passed"
+                    timings.close()
                     remaining()
                 summary = summaries[0]  # The actual batch API response, unchanged.
+            timings.start(report['stages'], 'tool')
             tool = ActivityPredictorTool().execute({"smiles": SMILES[:2], "target": alias})
             report["stages"]["tool"] = {"status": "failed", "observation_status": tool.status.value,
                 "error": tool.error.code.value if tool.error else None, "warnings": deepcopy(tool.warnings),
@@ -609,7 +645,9 @@ def run_family_chain(snapshot, *, work_dir, mode):
                     require(f"{row[field]:.4f}" in tool.formatted)
             report["stages"]["tool"]["checks"] = {"formatted_numbers": True}
             report["stages"]["tool"]["status"] = "passed"
+            timings.close()
             for name in ("decision", "websocket"):
+                timings.start(report['stages'], name)
                 report["stages"][name] = {"status": "failed"}
                 with decision_session(work_dir, target=alias, query="SMILES: CCO\nSMILES: CCN",
                                       timeout=remaining()) as session:
@@ -619,27 +657,35 @@ def run_family_chain(snapshot, *, work_dir, mode):
                         result, frames = websocket_decision(session)
                     report["stages"][name] = decision_record(session, result, frames)
                     report["stages"][name].update(check_decision(session, result, rows[:2], snapshot, alias, frames))
+                timings.close()
                 remaining()
+            timings.start(report['stages'], 'dom')
             report["stages"]["dom"] = {}
             run_dom(summary, work_dir=work_dir, remaining=remaining, record=report["stages"]["dom"])
+            timings.close()
             report["rejections"] = {}
             with TestClient(app) as client:
                 for case, smi, requested in (("invalid_smiles", INVALID_SMILES, alias),
                                              ("unknown_target", "CCO", "AChE")):
                     report["rejections"][case] = {}
                     rejected = run_rejection_case(snapshot, predictor, client, work_dir=work_dir,
-                        target=requested, smiles=smi, remaining=remaining, record=report["rejections"][case])
+                        target=requested, smiles=smi, remaining=remaining, record=report["rejections"][case], timings=timings)
                     if case == "invalid_smiles":
                         invalid_row = rejected["results"][0]
+                timings.start(report, 'mixed')
                 mixed = api_summary(client, MIXED_SMILES, alias, batch=True)
                 report["mixed"] = summary_record(mixed)
                 require(mixed == prediction_service.summarize_predictions(mixed["results"]))
                 require(mixed["status"] == "partial" and len(mixed["results"]) == 4)
                 require(mixed["results"][1] == invalid_row)
                 check_rows([mixed["results"][index] for index in (0, 2, 3)], rows, snapshot, target=alias)
+                report['mixed']['status'] = 'passed'
+                timings.close()
+                timings.start(report['mixed'], 'dom')
                 report["mixed"]["dom"] = {}
                 run_dom(mixed, work_dir=work_dir, remaining=remaining, record=report["mixed"]["dom"])
                 report["mixed"]["status"] = "passed"
+                timings.close()
             remaining()
         report["status"] = "passed"
     except ChainFailure as exc:
@@ -649,6 +695,7 @@ def run_family_chain(snapshot, *, work_dir, mode):
     except Exception:
         report["reason"] = "chain_mismatch"
     finally:
+        timings.close()
         if predictor is not None:
             predictor._cache.clear()
     try:
@@ -656,3 +703,85 @@ def run_family_chain(snapshot, *, work_dir, mode):
     except (ValueError, TypeError, RecursionError):
         return {"status": "failed", "reason": "invalid_report", "stages": {}}
     return report
+
+
+@contextmanager
+def _quiet_worker():
+    """Discard Python AND native model output; restore the JSON protocol fd."""
+    import sys
+    from contextlib import redirect_stdout, redirect_stderr
+    saved = []
+    with open(os.devnull, 'w', encoding='utf-8') as sink:
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            for fd in (1, 2):
+                saved.append((fd, os.dup(fd)))
+                os.dup2(sink.fileno(), fd)
+            with redirect_stdout(sink), redirect_stderr(sink):
+                yield
+        finally:
+            sink.flush()
+            for fd, original in saved:
+                os.dup2(original, fd)
+                os.close(original)
+
+
+def worker_main(argv=None):
+    """Internal -m worker: runtime arguments only; no pytest recursion/config log."""
+    deadline = time.monotonic() + 120
+    import argparse
+    from tests.family_real_acceptance_support import (
+        AcceptanceConfig, PUBLIC_ERRORS, _local_path, _checked_path, snapshot_family, verify_source,
+    )
+    class Parser(argparse.ArgumentParser):
+        def error(self, message):
+            raise ValueError('invalid_configuration')
+    report = {'status': 'failed', 'reason': 'invalid_configuration', 'source_check': 'not_completed'}
+    snapshot = None
+    with _quiet_worker():
+        try:
+            parser = Parser(add_help=False, allow_abbrev=False)
+            parser.add_argument('--source', required=True)
+            parser.add_argument('--family', required=True, choices=tuple(ALIASES))
+            parser.add_argument('--bundle', required=True)
+            parser.add_argument('--work-dir', required=True)
+            parser.add_argument('--mode', required=True, choices=('trained_weights', 'synthetic_fixture'))
+            args = parser.parse_args(argv)
+            source, directory = _local_path(args.source), _local_path(args.work_dir)
+            _checked_path(directory, directory=True)
+            config = AcceptanceConfig(source,
+                args.bundle if args.family == 'pde-family' else 'unused-pde',
+                args.bundle if args.family == 'buche-family' else 'unused-buche')
+            snapshot = snapshot_family(config, args.family, directory / 'models')
+            report = run_family_chain(snapshot, work_dir=directory / 'chain', mode=args.mode, deadline=deadline)
+        except ImportError:
+            report = {'status': 'failed', 'reason': 'dependency_unavailable'}
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, ValueError) and str(exc) in PUBLIC_ERRORS else 'chain_mismatch'
+            report = {'status': 'failed', 'reason': reason}
+        finally:
+            report['source_check'] = 'not_completed'
+            if snapshot is not None:
+                report['source_digests'] = snapshot.source_digests
+                try:
+                    if verify_source(config, snapshot) is not True:
+                        raise ValueError('source_changed')
+                    report['source_check'] = 'passed'
+                except Exception as exc:
+                    changed = isinstance(exc, ValueError) and str(exc) == 'source_changed'
+                    report.update(status='failed', source_check='changed' if changed else 'not_completed',
+                                  reason='source_changed' if changed else 'chain_mismatch')
+    # Failed scientific evidence lives INSIDE a successful transport envelope.
+    try:
+        payload = json.dumps({'status': 'passed', 'scientific_report': report}, allow_nan=False)
+        _parse_report(payload)
+    except (ValueError, TypeError, RecursionError):
+        payload = json.dumps({'status': 'passed', 'scientific_report': {
+            'status': 'failed', 'reason': 'invalid_report', 'source_check': 'not_completed'}})
+    print(payload)
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(worker_main())
