@@ -15,6 +15,7 @@ from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.run_session import WorkflowRunSession, SessionLifecycleError
 from src.agent.tooling.factory import build_tool_registry
+from tests.agent.test_family_activity_tool import boundary as family_boundary, conflict_row
 
 
 def tool(name='property_calculator', arguments=None):
@@ -183,6 +184,210 @@ def test_demo_cannot_be_promoted_to_scientific_success(setup_loop):
     result = run(b)
     assert not result.success
     assert '46.069' not in result.final_answer
+
+
+@pytest.mark.parametrize('transport', ['loop', 'chat'])
+@pytest.mark.parametrize('mixed', [False, True, 'classification_failed', 'regression_failed'])
+def test_family_conflict_finish_preserves_review_not_scientific_success(setup_loop, family_boundary, transport, mixed):
+    from src.agent.contracts import ObservationStatus
+    from src.agent.harness.decision_policy import usable
+    from tests.agent.test_family_activity_tool import family_row
+    from test_decision_chat import handler, Socket, terminal
+    activity, calls, state = family_boundary
+    rows = [conflict_row()]
+    if mixed is True:
+        rows.append(family_row(smiles='CCN', execution_status='passed'))
+    elif mixed:
+        sibling = family_row(smiles='CCN', success=False, status='partial', execution_status='partial',
+                             predicted_pIC50=None, classification_regression_consistent=None,
+                             errors={'regression': 'synthetic_unavailable'})
+        if mixed == 'classification_failed':
+            sibling.update(status='failed', execution_status='failed', activity_class=None,
+                           activity_probability=None, errors={'classification': 'synthetic_unavailable'})
+        rows.append(sibling)
+    state.update(rows=rows, status='partial')
+    b = setup_loop([tool('activity_predictor'), finish_last], [activity])
+    ctx = AgentContext('预测PDE5A活性；SMILES: CCO' + ('；SMILES: CCN' if mixed else ''),
+                       'family-review', user_id='test-owner', session_id='test-session')
+    options = dict(request_kind='scientific', allowed_tools={'activity_predictor'},
+                   required_tools={'activity_predictor'})
+    ws = Socket()
+    if transport == 'chat':
+        result = asyncio.run(handler().process_decision_message(
+            ws, context=ctx, decision_loop=b.loop, **options))
+    else:
+        result = asyncio.run(b.loop.run(ctx, event_bus=b.bus, **options))
+    observation = result.tool_results[0]
+    assert observation.status == ObservationStatus.PARTIAL
+    assert observation.error is None
+    assert observation.data == rows
+    assert not usable(observation)
+    assert result.outcome == RunOutcome.PARTIAL
+    assert not result.success
+    assert not result.metadata['task_acceptance']['satisfied']
+    assert result.metadata['stop_reason'] == 'prediction_needs_review'
+    assert b.store.get_run(ctx.trace_id)['status'] == 'partial'
+    assert len(calls) == 1 and len(b.model.messages) == 2
+    assert '需复核' in result.final_answer
+    assert 'model prose' not in result.final_answer
+    answer = json.loads(result.final_answer.removeprefix('```json\n').removesuffix('\n```'))
+    assert answer['status'] == 'partial' and answer['scientific_usable'] is False
+    assert answer['data'] == rows
+    if isinstance(mixed, str):
+        assert '计算已完成' not in answer['review_message']
+        assert '阶段错误' in answer['review_message']
+        assert answer['data'][1]['predicted_pIC50'] is None
+        assert answer['data'][1]['errors'] == rows[1]['errors']
+    assert answer['warnings'] == observation.warnings
+    assert answer['evidence_id'] == observation.quality['evidence_id']
+    assert observation.evidence == [{'prediction': row} for row in rows]
+    assert last_observation(b.model.messages[1])['data'] == rows
+    if transport == 'chat':
+        assert terminal(ws)['status'] == 'partial'
+        assert terminal(ws)['content'] == result.final_answer
+        envelope = next(m for m in ws.messages if m['type'] == 'agent_result')
+        assert envelope['tool_result_sequence'][0]['data'] == rows
+
+
+@pytest.mark.parametrize('damage', ['regression_failure', 'demo', 'fallback', 'unproven', 'forged', 'legacy'])
+def test_non_review_partial_cannot_enter_review_finish(setup_loop, family_boundary, damage):
+    activity, calls, state = family_boundary
+    row = conflict_row()
+    if damage == 'regression_failure':
+        row.update(execution_status='partial', predicted_pIC50=None,
+                   classification_regression_consistent=None, errors={'regression': 'unavailable'})
+    elif damage in {'demo', 'fallback'}:
+        row['provenance']['models']['classification'][damage + ('_mode' if damage == 'demo' else '_used')] = True
+    elif damage == 'unproven':
+        row['provenance'] = {}
+    elif damage == 'forged':
+        row['classification_regression_consistent'] = True
+    else:
+        row = {'smiles': 'CCO', 'status': 'partial', 'success': False, 'value': 6.2}
+    state.update(rows=[row], status='partial')
+    b = setup_loop([tool('activity_predictor'), finish_last], [activity])
+    result = asyncio.run(b.loop.run(AgentContext('预测PDE5A活性；SMILES: CCO', 'non-review'),
+        request_kind='scientific', allowed_tools={'activity_predictor'},
+        required_tools={'activity_predictor'}, event_bus=b.bus))
+    assert not result.success
+    assert result.metadata['stop_reason'] != 'prediction_needs_review'
+    assert '6.2' not in result.final_answer
+
+
+@pytest.mark.parametrize('cite_review', [False, True])
+@pytest.mark.parametrize('count,metrics', [(2, ('molecular_weight',)), (1, ('qed',))])
+def test_only_cited_review_can_finish_and_other_constraints_remain_unsatisfied(setup_loop, family_boundary, cite_review, count, metrics):
+    from test_decision_requirements import requirements
+    activity, calls, state = family_boundary
+    state.update(rows=[conflict_row()], status='partial')
+    def finish_selected(messages):
+        ids = [last_observation(messages)['quality']['evidence_id']]
+        if cite_review:
+            observations = [json.loads(m['content']) for m in messages if m.get('role') == 'tool']
+            ids.append(observations[0]['quality']['evidence_id'])
+        return finish(ids)
+    b = setup_loop([tool('activity_predictor'), tool(), finish_selected], [activity, CountingTool()])
+    result = asyncio.run(b.loop.run(AgentContext('预测PDE5A活性；SMILES: CCO', 'cited-review'),
+        request_kind='scientific', allowed_tools={'activity_predictor', 'property_calculator'},
+        required_tools={'activity_predictor', 'property_calculator'} if cite_review else {'property_calculator'},
+        requirements=requirements(count, metrics), event_bus=b.bus))
+    assert not result.success and result.outcome == RunOutcome.PARTIAL
+    assert result.metadata['stop_reason'] == 'task_requirements_unfulfilled'
+    assert result.error is not None
+    assert result.error.details['reason'] == 'task_requirements_unfulfilled'
+    assert '需复核' in result.final_answer and '6.2' in result.final_answer
+    report = result.metadata['task_acceptance']
+    assert not report['satisfied'] and not report['checks'][0]['passed']
+    assert len(calls) == 1
+
+
+def test_cited_review_cannot_excuse_missing_other_required_tool(setup_loop, family_boundary):
+    activity, calls, state = family_boundary
+    state.update(rows=[conflict_row()], status='partial')
+    b = setup_loop([tool('activity_predictor'), finish_last], [activity, CountingTool()])
+    result = asyncio.run(b.loop.run(AgentContext('预测PDE5A活性；SMILES: CCO', 'missing-other'),
+        request_kind='scientific', allowed_tools={'activity_predictor', 'property_calculator'},
+        required_tools={'activity_predictor', 'property_calculator'}, event_bus=b.bus))
+    assert result.outcome == RunOutcome.PARTIAL and not result.success
+    assert result.metadata['stop_reason'] == 'task_requirements_unfulfilled'
+    assert result.error is not None
+    assert 'property_calculator' in result.metadata['task_acceptance']['missing_required_tools']
+    assert '需复核' in result.final_answer and '6.2' in result.final_answer
+    assert len(calls) == 1
+
+
+def test_review_exception_rejects_executed_forbidden_tool_report(setup_loop, family_boundary, monkeypatch):
+    from src.agent.harness import decision_loop
+    activity, calls, state = family_boundary
+    state.update(rows=[conflict_row()], status='partial')
+    evaluate = decision_loop.evaluate_requirements
+    def report(*args):
+        result = evaluate(*args)
+        result.update(satisfied=False, executed_forbidden_tools=['property_calculator'])
+        return result
+    monkeypatch.setattr(decision_loop, 'evaluate_requirements', report)
+    b = setup_loop([tool('activity_predictor'), finish_last], [activity])
+    result = asyncio.run(b.loop.run(AgentContext('预测PDE5A活性；SMILES: CCO', 'forbidden-report'),
+        request_kind='scientific', allowed_tools={'activity_predictor'},
+        required_tools={'activity_predictor'}, event_bus=b.bus))
+    assert result.outcome == RunOutcome.PARTIAL and not result.success
+    assert result.metadata['stop_reason'] == 'task_requirements_unfulfilled'
+    assert result.error is not None
+    assert result.metadata['task_acceptance']['executed_forbidden_tools'] == ['property_calculator']
+    assert '需复核' in result.final_answer and '6.2' in result.final_answer
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('damage', ['demo', 'fallback', 'quality_demo', 'quality_fallback', 'error', 'legacy', 'null', 'forged'])
+def test_review_renderer_rechecks_evidence_and_keeps_other_partial_data_unusable(damage):
+    from src.agent.contracts import ObservationStatus, ToolProvenance, AgentExecutionError
+    from src.agent.harness.decision_policy import scientific_answer, family_review_observation, usable
+    observation = ToolResult('activity_predictor', False, '', data=[conflict_row()],
+        status=ObservationStatus.PARTIAL, provenance=ToolProvenance(tool_name='activity_predictor'))
+    if damage == 'demo': observation.provenance = replace(observation.provenance, demo_mode=True)
+    elif damage == 'fallback': observation.provenance = replace(observation.provenance, fallback_used=True)
+    elif damage == 'quality_demo': observation.quality['demo_mode'] = True
+    elif damage == 'quality_fallback': observation.quality['fallback_used'] = True
+    elif damage == 'error': observation.error = AgentExecutionError(AgentErrorCode.INVALID_OUTPUT, 'invalid')
+    elif damage == 'legacy': observation.data = [{'value': 6.2}]
+    elif damage == 'null': observation.data[0]['predicted_pIC50'] = None
+    else: observation.data[0]['classification_regression_consistent'] = True
+    assert not family_review_observation(observation) and not usable(observation)
+    answer = json.loads(scientific_answer([observation]).removeprefix('```json\n').removesuffix('\n```'))
+    assert answer['data'] is None and not answer['scientific_usable']
+
+
+@pytest.mark.parametrize('changes', [
+    {'errors': {}}, {'errors': {'unknown': 'failure'}}, {'errors': {'regression': 'failure'}},
+    {'errors': {'classification': False}}, {'classification_regression_consistent': False},
+    {'predicted_pIC50': 9.9}, {'success': True}, {'execution_status': 'passed'},
+])
+def test_review_batch_does_not_admit_forged_failed_siblings(changes):
+    from src.agent.contracts import ObservationStatus, ToolProvenance
+    from src.agent.harness.decision_policy import family_review_observation, scientific_answer, usable
+    from tests.agent.test_family_activity_tool import family_row
+    sibling = family_row(smiles='CCN', success=False, status='failed', execution_status='failed',
+                         predicted_pIC50=None, activity_class=None, activity_probability=None,
+                         classification_regression_consistent=None, provenance={},
+                         errors={'classification': 'synthetic_failure'})
+    sibling.update(changes)
+    result = ToolResult('activity_predictor', False, '', data=[conflict_row(), sibling],
+                        status=ObservationStatus.PARTIAL,
+                        provenance=ToolProvenance(tool_name='activity_predictor'))
+    assert not family_review_observation(result) and not usable(result)
+    answer = json.loads(scientific_answer([result]).removeprefix('```json\n').removesuffix('\n```'))
+    assert answer['data'] is None and not answer['scientific_usable']
+
+
+def test_duplicate_family_review_does_not_rerun_inference(setup_loop, family_boundary):
+    activity, calls, state = family_boundary
+    state.update(rows=[conflict_row()], status='partial')
+    b = setup_loop([tool('activity_predictor'), tool('activity_predictor'), finish_last], [activity])
+    result = asyncio.run(b.loop.run(AgentContext('预测PDE5A活性；SMILES: CCO', 'review-duplicate'),
+        request_kind='scientific', allowed_tools={'activity_predictor'},
+        required_tools={'activity_predictor'}, event_bus=b.bus))
+    assert result.outcome == RunOutcome.PARTIAL and not result.success
+    assert len(calls) == 1 and result.metadata['reused_decisions'] == 1
 
 
 def test_duplicate_action_reuses_observation_without_reexecuting(setup_loop):

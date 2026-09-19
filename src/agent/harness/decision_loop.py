@@ -24,7 +24,8 @@ from src.agent.persistence.redaction import contains_secret_material
 
 from .decision_policy import (
     DecisionBoundaryError, authorized_catalog, encode_observation,
-    scientific_answer, usable, verify_finish, model_call_metadata, schema_correction, decision_system_message,
+    scientific_answer, usable, verify_finish, family_review_observation,
+    model_call_metadata, schema_correction, decision_system_message,
 )
 from .decision_execution import DecisionEvents, SingleAttemptTool, settle_action, retry_persistence
 from .decision_inputs import (
@@ -272,14 +273,19 @@ class ModelDecisionLoop:
                 state.outcome = RunOutcome.PARTIAL if any(map(usable, active_results(session))) else RunOutcome.REJECTED
                 state.stop_reason = 'clarification_required'
             else:
-                verify_finish(decision, session, required_tools, request_kind)
+                needs_review = verify_finish(decision, session, required_tools, request_kind)
                 state.task_acceptance = evaluate_requirements(requirements, session, required_tools)
-                if not state.task_acceptance['satisfied']:
+                review_only_missing_tool = (
+                    needs_review
+                    and set(state.task_acceptance['missing_required_tools']) == {'activity_predictor'}
+                    and not state.task_acceptance['executed_forbidden_tools']
+                    and all(check['passed'] is True for check in state.task_acceptance['checks']))
+                if not state.task_acceptance['satisfied'] and not review_only_missing_tool:
                     raise DecisionBoundaryError('task_requirements_unfulfilled')
                 state.answer = decision.text if request_kind == 'chat' else scientific_answer(active_results(session))
-                state.outcome = (RunOutcome.COMPLETED if all(map(usable, session.results))
+                state.outcome = (RunOutcome.COMPLETED if not needs_review and all(map(usable, session.results))
                                  else RunOutcome.PARTIAL)
-                state.stop_reason = 'model_finished'
+                state.stop_reason = 'prediction_needs_review' if needs_review else 'model_finished'
             return {'route': 'end'}
 
         async def execute(_):
@@ -370,6 +376,8 @@ class ModelDecisionLoop:
             error = AgentExecutionError(AgentErrorCode.VALIDATION_ERROR, 'Decision run did not complete',
                                         {'reason': state.stop_reason})
             if state.stop_reason == 'task_requirements_unfulfilled':
+                if any(map(family_review_observation, active_results(session))):
+                    state.outcome = RunOutcome.PARTIAL
                 state.answer = scientific_answer(active_results(session)) + '\n\n任务要求尚未全部满足，请查看结构化验收差项。'
         # Seal the settled results before callbacks/persistence can run again.
         # Tools may retain their own mutable result objects, never these copies.

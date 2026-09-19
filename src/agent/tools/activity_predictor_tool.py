@@ -97,8 +97,11 @@ class ActivityPredictorTool(BaseMolecularTool):
         # Reuse the shared warning contract without altering original observations.
         warnings = list(dict.fromkeys(warnings + expected["warnings"]))
         labels = {"passed": "完成", "partial": "部分完成", "failed": "失败"}
+        needs_review = any(row.get("classification_regression_consistent") is False for row in rows)
+        review_message = "计算已完成，分类与回归不一致，需复核"
+        summary_label = labels[status] + ("；含需复核结果" if needs_review else "")
         lines = ["## 分子活性模型预测（非实验结论）",
-                 f"状态：{labels[status]}",
+                 f"状态：{summary_label}",
                  "| SMILES | 活性分类 | 活性概率 | 预测 pIC50 | 状态/阶段错误 |",
                  "|---|---|---|---|---|"]
 
@@ -110,6 +113,8 @@ class ActivityPredictorTool(BaseMolecularTool):
 
         for row in rows:
             detail = labels.get(row.get("status"), "失败")
+            if row.get("classification_regression_consistent") is False:
+                detail = review_message
             if row.get("errors"):
                 detail += "；" + str(row["errors"])
             lines.append("| " + " | ".join(map(cell, [row.get("smiles", ""),
@@ -118,7 +123,7 @@ class ActivityPredictorTool(BaseMolecularTool):
         lines.extend(cell(warning) for warning in warnings)
         return ToolResult(
             tool_name=self.name, success=summary["success"] is True and status == "passed",
-            message=f"家族活性预测{labels[status]}，仅完整双阶段结果视为成功。",
+            message=f"家族活性预测{summary_label}；模型预测不等同于实验结论。",
             data=rows, formatted="\n".join(lines), warnings=warnings,
             status={"passed": ObservationStatus.SUCCEEDED, "partial": ObservationStatus.PARTIAL,
                     "failed": ObservationStatus.FAILED}[status],

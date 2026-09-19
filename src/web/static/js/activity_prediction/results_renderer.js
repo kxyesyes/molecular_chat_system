@@ -15,9 +15,20 @@ window.ActivityResults = (function () {
   }
 
   function rowStatus(item) {
+    if (item.status === "failed" || item.execution_status === "failed") return "failed";
+    if (needsReview(item)) return "partial";
     if (item.status === "partial") return "partial";
     return item.success === true && (!item.status || item.status === "passed")
       ? "passed" : "failed";
+  }
+
+  function needsReview(item) {
+    if (item.status === "failed" || item.execution_status === "failed"
+        || item.errors && Object.keys(item.errors).length) return false;
+    const probability = item.activity_probability;
+    const value = item.predicted_pIC50;
+    return isNumber(probability) && probability >= 0 && probability <= 1 && isNumber(value)
+      && (item.classification_regression_consistent === false || (probability >= 0.5) !== (value >= 5));
   }
 
   function warningStrings(warnings) {
@@ -187,9 +198,11 @@ window.ActivityResults = (function () {
   function renderPredictionResults(data, options) {
     const results = document.getElementById("results");
     resetViews();
-    const status = data.results.length
+    const review = data.results.some(item => item && needsReview(item));
+    const status = review ? "partial" : data.results.length
       ? data.status || (data.success === true ? "passed" : "failed") : "failed";
     ActivityUtils.setText("predictionStatus", [statusLabel(status),
+      review ? "含分类与回归不一致的结果，需复核" : "",
       !data.results.length ? "无预测结果" : "",
       ...warningStrings(data.warnings)].filter(Boolean).join("；"));
 
@@ -248,8 +261,15 @@ window.ActivityResults = (function () {
         notes.push(`${stage}: ${typeof error === "string" ? error : JSON.stringify(error)}`);
       });
     }
-    if (item.classification_regression_consistent === false) {
-      notes.push("分类与回归预测不一致，保留两项原始结果。");
+    if (needsReview(item)) {
+      const source = item.provenance;
+      const complete = item.execution_status === "passed" && source && item.bundle_id
+        && source.bundle_id === item.bundle_id && source.models
+        && source.models.classification && source.models.classification.model_id
+        && source.models.regression && source.models.regression.model_id;
+      notes.push(complete
+        ? "计算已完成，分类与回归不一致，需复核；已保留两项原始结果。"
+        : "分类与回归结果不一致，需复核；执行状态或来源未确认，已保留返回数值。");
     }
     const cell = createCell(notes.join("；") || "—", "word-break: break-word;");
     const provenance = item.provenance || {};
@@ -287,7 +307,7 @@ window.ActivityResults = (function () {
         createCell(status !== "failed" && isNumber(value) ? value.toFixed(4) : "不可用"),
         createCell(item.activity_class || "不可用"),
         createCell(status !== "failed" ? formatProbability(item.activity_probability) : "不可用"),
-        createCell(statusLabel(status)), resultDetails(item),
+        createCell(needsReview(item) ? "需复核" : statusLabel(status)), resultDetails(item),
       );
       tbody.appendChild(row);
     });

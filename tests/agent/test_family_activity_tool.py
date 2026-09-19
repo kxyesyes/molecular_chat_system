@@ -11,10 +11,10 @@ from src.agent.tools.base_tool import execute_tool_compat
 def family_row(**changes):
     row = dict(smiles="CCO", requested_target="PDE5A", family_id="pde-family",
                bundle_id="synthetic-bundle", success=True, status="passed",
-               activity_class="无活性", activity_probability=0.0, predicted_pIC50=6.2,
+               activity_class="无活性", activity_probability=0.0, predicted_pIC50=4.2,
                units="pIC50", label_threshold=5.0, probability_threshold=0.5,
-               classification_regression_consistent=False,
-               warnings=["分类与回归预测不一致，已保留两项原始结果。"], errors={},
+               classification_regression_consistent=True,
+               warnings=["synthetic-domain-warning"], errors={},
                provenance={"bundle_id": "synthetic-bundle", "source_sha256": "a" * 64,
                            "models": {task: {"model_id": "synthetic-" + task,
                                              "weights_sha256": "b" * 64,
@@ -156,6 +156,7 @@ def test_compat_preserves_rows_status_provenance_and_honest_format(boundary, sta
     row = family_row()
     if status != "passed":
         row.update(success=False, status=status, predicted_pIC50=None,
+                   classification_regression_consistent=None,
                    errors={"regression" if status == "partial" else "bundle": "unavailable"})
     if status == "failed":
         row.update(activity_class=None, activity_probability=None, provenance={})
@@ -174,9 +175,9 @@ def test_compat_preserves_rows_status_provenance_and_honest_format(boundary, sta
     if status != "failed":
         assert "无活性" in result.formatted and "0.0000" in result.formatted
     if status == "passed":
-        assert "6.2000" in result.formatted
+        assert "4.2000" in result.formatted
     else:
-        assert "不可用" in result.formatted and "6.2000" not in result.formatted
+        assert "不可用" in result.formatted and "4.2000" not in result.formatted
         assert "unavailable" in result.formatted
 
 
@@ -220,7 +221,9 @@ def test_family_validator_rejects_unproven_numeric_claims(damage):
 def test_family_validator_accepts_pinned_partial_and_full_rows():
     from src.agent.contracts import ToolResult
     from src.agent.validators.domain_validators import ActivityResultValidator
-    for row in [family_row(), family_row(success=False, status="partial", predicted_pIC50=None)]:
+    for row in [family_row(), family_row(success=False, status="partial", predicted_pIC50=None,
+                                        classification_regression_consistent=None,
+                                        errors={"regression": "synthetic_unavailable"})]:
         assert ActivityResultValidator().validate(ToolResult("activity_predictor", row["success"], "", data=[row])) is None
 
 
@@ -379,6 +382,7 @@ def test_genuine_failed_null_row_keeps_errors_without_model_provenance(boundary)
     tool, _, state = boundary
     row = family_row(success=False, status="failed", activity_class=None,
                      activity_probability=None, predicted_pIC50=None, provenance={},
+                     classification_regression_consistent=None,
                      errors={"classification": "classification_failed_or_invalid_output"})
     state.update(rows=[row], status="failed")
     result = execute_tool_compat(tool, {"smiles": "CCO", "target": "PDE5A"})
@@ -463,6 +467,7 @@ def test_mixed_batch_keeps_failed_null_row_and_partial_status(boundary):
     tool, _, state = boundary
     failed = family_row(smiles="CCN", success=False, status="failed", activity_class=None,
                         activity_probability=None, predicted_pIC50=None, provenance={},
+                        classification_regression_consistent=None,
                         errors={"bundle": "synthetic_unavailable"})
     state.update(rows=[family_row(), failed], status="partial")
     result = execute_tool_compat(tool, {"target": "PDE5A", "smiles": ["CCO", "CCN"]})
@@ -485,3 +490,88 @@ def test_family_service_exception_is_sanitized_and_never_uses_global(boundary, m
     assert result.error.code.value == "model_unavailable"
     assert "private diagnostic" not in str(result.to_legacy_dict())
     assert not calls
+
+
+def conflict_row(**changes):
+    row = family_row(success=False, status="partial", execution_status="passed",
+                     predicted_pIC50=6.2, classification_regression_consistent=False,
+                     warnings=["分类与回归预测不一致，需复核；已保留两项原始结果。"])
+    row.update(changes)
+    return row
+
+
+@pytest.mark.parametrize("probability,value", [(0., 6.2), (.8, 4.2), (.499, 5.), (.5, 4.999)])
+def test_validator_accepts_only_complete_numeric_review_conflict(probability, value):
+    from src.agent.contracts import ToolResult
+    from src.agent.validators.domain_validators import ActivityResultValidator
+    row = conflict_row(activity_probability=probability, predicted_pIC50=value,
+                       activity_class="有活性" if probability >= .5 else "无活性")
+    assert ActivityResultValidator().validate(ToolResult("activity_predictor", False, "", data=[row])) is None
+
+
+@pytest.mark.parametrize("changes", [
+    {"classification_regression_consistent": True}, {"classification_regression_consistent": None},
+    {"classification_regression_consistent": 0}, {"status": "passed", "success": True},
+    {"success": True}, {"execution_status": "partial"}, {"execution_status": None},
+    {"execution_status": "failed"}, {"predicted_pIC50": 4.2},
+    {"errors": {"regression": "failed"}}, {"errors": []},
+    {"errors": {"regression": None}}, {"provenance": {}},
+    {"predicted_pIC50": float("nan")}, {"activity_probability": float("inf")},
+    {"probability_threshold": .4}, {"label_threshold": 4.},
+])
+def test_validator_rejects_forged_conflict_contract(changes):
+    from src.agent.contracts import ToolResult
+    from src.agent.validators.domain_validators import ActivityResultValidator
+    row = conflict_row(**changes)
+    assert ActivityResultValidator().validate(ToolResult("activity_predictor", False, "", data=[row])) is not None
+
+
+@pytest.mark.parametrize("changes", [
+    {"classification_regression_consistent": False}, {"classification_regression_consistent": 1},
+    {"predicted_pIC50": 6.2}, {"execution_status": "partial"},
+])
+def test_validator_recomputes_passed_consistency(changes):
+    from src.agent.contracts import ToolResult
+    from src.agent.validators.domain_validators import ActivityResultValidator
+    assert ActivityResultValidator().validate(ToolResult.success_result(
+        "activity_predictor", data=[family_row(**changes)])) is not None
+
+
+def test_conflict_tool_preserves_review_observation_without_reexecution(boundary):
+    tool, calls, state = boundary
+    row = conflict_row()
+    state.update(rows=[row], status="partial")
+    result = execute_tool_compat(tool, {"target": "PDE5A", "smiles": "CCO"})
+    assert result.status == ObservationStatus.PARTIAL
+    assert result.success is False and result.error is None
+    assert result.data == [row]
+    assert result.evidence == [{"prediction": row}]
+    assert result.quality["model_provenance"] == [row["provenance"]]
+    assert row["warnings"][0] in result.warnings
+    assert "计算已完成，分类与回归不一致，需复核" in result.formatted
+    assert "需复核" in result.message
+    assert "6.2000" in result.formatted and "0.0000" in result.formatted
+    assert calls == [(["CCO"], "PDE5A")]
+
+
+@pytest.mark.parametrize("errors", [None, [], {"regression": None}, {"regression": False}, {}])
+def test_regression_failure_partial_requires_real_stage_error(errors):
+    from src.agent.contracts import ToolResult
+    from src.agent.validators.domain_validators import ActivityResultValidator
+    row = family_row(success=False, status="partial", execution_status="partial",
+                     predicted_pIC50=None, classification_regression_consistent=None, errors=errors)
+    assert ActivityResultValidator().validate(ToolResult("activity_predictor", False, "", data=[row])) is not None
+
+
+@pytest.mark.parametrize("changes", [
+    {"errors": []}, {"errors": None}, {"execution_status": "passed"},
+    {"classification_regression_consistent": False},
+])
+def test_failed_null_row_rejects_forged_execution_flags_or_errors(changes):
+    from src.agent.contracts import ToolResult
+    from src.agent.validators.domain_validators import ActivityResultValidator
+    row = family_row(success=False, status="failed", execution_status="failed", activity_class=None,
+                     activity_probability=None, predicted_pIC50=None, provenance={},
+                     classification_regression_consistent=None, errors={"input": "invalid_smiles"})
+    row.update(changes)
+    assert ActivityResultValidator().validate(ToolResult("activity_predictor", False, "", data=[row])) is not None
