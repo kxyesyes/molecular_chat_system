@@ -352,3 +352,615 @@ def test_forward_fixture_constructs_on_cpu_under_meta_context(
     assert torch.empty(0).device == caller_device
     assert calls == dict(features=1, networks=2, saves=2)
     assert accelerator_seed_calls == []
+
+
+# Task 2 uses tiny sealed contract artifacts; no network or weight loading.
+@pytest.fixture(scope="module")
+def sealed_snapshot_files(tmp_path_factory):
+    """Seal tiny synthetic records once; each negative case gets private bytes."""
+    from src.activity.model_registry import ActivityModelRegistry
+    from tests.family_model_test_support import make_package, make_pair, register_bundle
+
+    root = tmp_path_factory.mktemp("sealed-snapshot-seed")
+    with pytest.MonkeyPatch.context() as patch:
+        package = make_package(root, patch)
+        registry = ActivityModelRegistry(root / "source")
+        selected = make_pair(registry, package, prefix="older")
+        register_bundle(registry, package, selected, "older-bundle")
+        newer = make_pair(registry, package, prefix="newer")
+        register_bundle(registry, package, newer, "newer-bundle")
+        registry.select_family_bundle("newer-bundle")
+    files = {registry.state_path.name: registry.state_path.read_bytes()}
+    for model in (*selected.values(), *newer.values()):
+        for field in ("weights_file", "model_card_file"):
+            files[model[field]] = (registry.models_dir / model[field]).read_bytes()
+    return files
+
+
+@pytest.fixture
+def snapshot_source(tmp_path, sealed_snapshot_files):
+    import json
+    from src.activity.model_registry import REGISTRY_STATE_FILE
+    from tests.family_real_acceptance_support import AcceptanceConfig
+
+    source = tmp_path / "source"
+    source.mkdir()
+    for name, content in sealed_snapshot_files.items():
+        (source / name).write_bytes(content)
+    config = AcceptanceConfig(source, "older-bundle", "buche-bundle")
+    state = json.loads(sealed_snapshot_files[REGISTRY_STATE_FILE])
+    selected = {task: state["models"]["older-" + task] for task in ("classification", "regression")}
+    return config, state, selected
+
+
+def save_source_state(config, state):
+    import json
+    from src.activity.model_registry import REGISTRY_STATE_FILE
+
+    (config.source / REGISTRY_STATE_FILE).write_text(json.dumps(state), encoding="utf-8")
+
+
+def snapshot_api():
+    from tests import family_real_acceptance_support as support
+
+    assert callable(getattr(support, "snapshot_family", None)), "Task2 snapshot_family is missing"
+    assert callable(getattr(support, "verify_source", None)), "Task2 verify_source is missing"
+    return support
+
+
+def test_snapshot_pins_older_bundle_and_never_opens_unselected_assets(
+        snapshot_source, tmp_path, monkeypatch):
+    import builtins
+    import hashlib
+    import io
+    import json
+    import os
+    from src.activity.model_registry import ActivityModelRegistry, REGISTRY_STATE_FILE
+
+    support = snapshot_api()
+    config, state, selected = snapshot_source
+    destination = tmp_path / "snapshot"
+    names = {REGISTRY_STATE_FILE} | {item[field] for item in selected.values()
+                                   for field in ("weights_file", "model_card_file")}
+    before = {name: hashlib.sha256((config.source / name).read_bytes()).hexdigest() for name in names}
+    original_init, original_select = ActivityModelRegistry.__init__, ActivityModelRegistry.select_family_bundle
+    initial_states, selections = [], []
+
+    def initialize(self, directory):
+        assert Path(directory) == destination, "Must never construct the source registry"
+        assert {p.name for p in destination.iterdir()} == names
+        initial_states.append(json.loads((destination / REGISTRY_STATE_FILE).read_bytes()))
+        original_init(self, directory)
+
+    def select(self, bundle_id):
+        selections.append(bundle_id)
+        return original_select(self, bundle_id)
+
+    def guard_open(original, low_level=False):
+        def guarded(file, mode="r", *args, **kwargs):
+            if not isinstance(file, int):
+                path = Path(file)
+                assert path.suffix.lower() != ".csv", "Sealed data must not be reopened"
+                if path.is_relative_to(config.source):
+                    assert path.parent == config.source and path.name in names
+                    if low_level:
+                        assert not mode & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC)
+                    else:
+                        assert not any(flag in mode for flag in "wax+")
+            return original(file, mode, *args, **kwargs)
+        return guarded
+
+    def no_scan(*args, **kwargs):
+        raise AssertionError("Source discovery is forbidden")
+
+    original_scandir, original_listdir = os.scandir, os.listdir
+
+    def guard_scan(original):
+        def guarded(path):
+            assert not Path(path).is_relative_to(config.source), "Source scans are forbidden"
+            return original(path)
+        return guarded
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ActivityModelRegistry, "__init__", initialize)
+        patch.setattr(ActivityModelRegistry, "select_family_bundle", select)
+        patch.setattr(ActivityModelRegistry, "register_family_bundle", no_scan)
+        patch.setattr(builtins, "open", guard_open(builtins.open))
+        patch.setattr(io, "open", guard_open(io.open))
+        patch.setattr(os, "open", guard_open(os.open, True))
+        patch.setattr(os, "scandir", guard_scan(original_scandir))
+        patch.setattr(os, "listdir", guard_scan(original_listdir))
+        patch.setattr(Path, "glob", no_scan)
+        snapshot = support.snapshot_family(config, "pde-family", destination)
+        assert support.verify_source(config, snapshot) is True
+    assert snapshot.bundle_id == "older-bundle"
+    assert snapshot.family_id == "pde-family"
+    assert snapshot.models_dir == destination
+    for task in ("classification", "regression"):
+        for key in ("model_id", "weights_sha256", "model_card_sha256"):
+            assert snapshot.expected_models[task][key] == selected[task][key]
+    assert initial_states == [dict(version=3, models={m["model_id"]: m for m in selected.values()},
+                                   active_model_id=None, active_models_by_endpoint={},
+                                   family_bundles={"older-bundle": state["family_bundles"]["older-bundle"]},
+                                   active_family_bundles={})]
+    assert selections == ["older-bundle"]
+    assert json.loads((config.source / REGISTRY_STATE_FILE).read_bytes()) == state
+    assert before == {name: hashlib.sha256((config.source / name).read_bytes()).hexdigest() for name in names}
+    assert set(snapshot.source_digests) == {"registry", "classification.weights", "classification.card",
+                                            "regression.weights", "regression.card"}
+    assert snapshot.source_digests["registry"] == before[REGISTRY_STATE_FILE]
+    assert support.FamilySnapshot.__dataclass_params__.repr is False
+    with pytest.raises(FrozenInstanceError):
+        snapshot.bundle_id = "newer-bundle"
+
+
+@pytest.mark.parametrize("fault,code", [
+    ("wrong-family", "bundle_mismatch"), ("missing-stage", "bundle_mismatch"),
+    ("duplicate-model", "bundle_mismatch"), ("unknown-bundle", "bundle_mismatch"),
+    ("model-identity", "bundle_mismatch"), ("unbound-model", "bundle_mismatch"),
+    ("version", "invalid_registry"), ("bool-version", "invalid_registry"),
+    ("bad-hash", "asset_digest_mismatch"), ("sealed-record", "bundle_mismatch"),
+    ("sealed-data", "bundle_mismatch"), ("missing-record", "bundle_mismatch"),
+])
+def test_snapshot_rejects_bad_selection(snapshot_source, tmp_path, fault, code):
+    support = snapshot_api()
+    config, state, selected = snapshot_source
+    bundle = state["family_bundles"]["older-bundle"]
+    model = state["models"][selected["classification"]["model_id"]]
+    if fault == "wrong-family":
+        bundle["family_id"] = "buche-family"
+    elif fault == "missing-stage":
+        del bundle["models"]["regression"]
+    elif fault == "duplicate-model":
+        bundle["models"]["regression"] = bundle["models"]["classification"]
+    elif fault == "unknown-bundle":
+        del state["family_bundles"]["older-bundle"]
+    elif fault == "model-identity":
+        model["model_id"] = "not-the-key"
+    elif fault == "unbound-model":
+        model["weights_file"] = "newer-classification.pt"
+    elif fault == "missing-record":
+        del state["models"][model["model_id"]]
+    elif fault in ("version", "bool-version"):
+        state["version"] = 99 if fault == "version" else True
+    elif fault == "bad-hash":
+        (config.source / model["weights_file"]).write_bytes(b"corrupt")
+    elif fault == "sealed-record":
+        bundle["assignment_sha256"] = "0" * 64
+    elif fault == "sealed-data":
+        bundle["family_dataset_snapshot"] += " "
+    save_source_state(config, state)
+    with pytest.raises(ValueError, match=f"^{code}$"):
+        support.snapshot_family(config, "pde-family", tmp_path / "copy")
+
+
+@pytest.mark.parametrize("field", ["weights_file", "model_card_file"])
+@pytest.mark.parametrize("name", ["../escape", r"sub\escape", "/escape", "C:escape", "x:stream",
+                                  "NUL.pt", "COM1", "registry_state.json", "REGISTRY_STATE.LOCK",
+                                  "older-regression_info.json", "x. "])
+def test_snapshot_rejects_asset_paths_before_writes(snapshot_source, tmp_path, field, name):
+    support = snapshot_api()
+    config, state, selected = snapshot_source
+    model = state["models"][selected["classification"]["model_id"]]
+    model[field] = name
+    state["family_bundles"]["older-bundle"]["models"]["classification"][field] = name
+    save_source_state(config, state)
+    destination = tmp_path / "copy"
+    with pytest.raises(ValueError, match="^unsafe_source$"):
+        support.snapshot_family(config, "pde-family", destination)
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("case_only", [False, True])
+def test_snapshot_rejects_shared_asset_names(snapshot_source, tmp_path, case_only):
+    support = snapshot_api()
+    config, state, selected = snapshot_source
+    name = selected["classification"]["weights_file"]
+    name = name.upper() if case_only else name
+    state["models"][selected["regression"]["model_id"]]["weights_file"] = name
+    state["family_bundles"]["older-bundle"]["models"]["regression"]["weights_file"] = name
+    save_source_state(config, state)
+    with pytest.raises(ValueError, match="^unsafe_source$"):
+        support.snapshot_family(config, "pde-family", tmp_path / "copy")
+
+
+@pytest.mark.parametrize("asset", ["registry", "card", "weights"])
+@pytest.mark.parametrize("fault", ["directory", "oversize"])
+def test_snapshot_asset_types_and_limits(snapshot_source, tmp_path, monkeypatch, asset, fault):
+    from src.activity.model_registry import REGISTRY_STATE_FILE
+
+    support = snapshot_api()
+    config, _, selected = snapshot_source
+    name = {"registry": REGISTRY_STATE_FILE, "card": selected["classification"]["model_card_file"],
+            "weights": selected["classification"]["weights_file"]}[asset]
+    path = config.source / name
+    if fault == "directory":
+        path.unlink()
+        path.mkdir()
+    else:
+        monkeypatch.setattr(support, {"registry": "REGISTRY_LIMIT", "card": "CARD_LIMIT",
+                                     "weights": "WEIGHTS_LIMIT"}[asset], path.stat().st_size - 1)
+    with pytest.raises(ValueError, match="^" + ("unsafe_source" if fault == "directory" else "asset_limit_exceeded") + "$"):
+        support.snapshot_family(config, "pde-family", tmp_path / "copy")
+
+
+@pytest.mark.parametrize("asset", ["registry", "card"])
+@pytest.mark.parametrize("fault", ["duplicate", "nan", "infinity", "overflow", "depth", "invalid"])
+def test_snapshot_strict_json(snapshot_source, tmp_path, asset, fault):
+    import hashlib
+    from src.activity.model_registry import REGISTRY_STATE_FILE
+
+    support = snapshot_api()
+    config, state, selected = snapshot_source
+    path = config.source / (REGISTRY_STATE_FILE if asset == "registry" else selected["classification"]["model_card_file"])
+    additions = {"duplicate": '"extra":1,"extra":2', "nan": '"extra":NaN',
+                 "infinity": '"extra":Infinity', "overflow": '"extra":1e999',
+                 "depth": '"extra":' + '[' * 33 + '0' + ']' * 33}
+    content = b"not json" if fault == "invalid" else ("{" + additions[fault] + ",").encode() + path.read_bytes()[1:]
+    path.write_bytes(content)
+    if asset == "card":
+        digest = hashlib.sha256(content).hexdigest()
+        state["models"][selected["classification"]["model_id"]]["model_card_sha256"] = digest
+        state["family_bundles"]["older-bundle"]["models"]["classification"]["model_card_sha256"] = digest
+        save_source_state(config, state)
+    with pytest.raises(ValueError, match="^invalid_registry$"):
+        support.snapshot_family(config, "pde-family", tmp_path / "copy")
+
+
+@pytest.mark.parametrize("location", ["same", "inside", "above"])
+def test_snapshot_rejects_overlap_before_writes(snapshot_source, location):
+    support = snapshot_api()
+    config, _, _ = snapshot_source
+    destination = {"same": config.source, "inside": config.source / "nested", "above": config.source.parent}[location]
+    with pytest.raises(ValueError, match="^unsafe_source$"):
+        support.snapshot_family(config, "pde-family", destination)
+    assert not (config.source / "nested").exists()
+
+
+@pytest.mark.parametrize("location", ["root", "ancestor", "leaf"])
+def test_snapshot_rejects_symlinks(snapshot_source, tmp_path, location):
+    import os
+    from dataclasses import replace
+
+    support = snapshot_api()
+    config, _, selected = snapshot_source
+    link = tmp_path / "link"
+    target = config.source if location == "root" else config.source.parent
+    if location == "leaf":
+        link = config.source / selected["classification"]["weights_file"]
+        target = tmp_path / "moved-weight"
+        link.rename(target)
+    try:
+        link.symlink_to(target, target_is_directory=location != "leaf")
+    except OSError:
+        if os.name != "nt":
+            raise
+        pytest.skip("Windows symlink creation privilege unavailable; reparse test runs separately")
+    if location != "leaf":
+        config = replace(config, source=link if location == "root" else link / "source")
+    with pytest.raises(ValueError, match="^unsafe_source$"):
+        support.snapshot_family(config, "pde-family", tmp_path / "copy")
+
+
+@pytest.mark.parametrize("location", ["root", "ancestor", "leaf"])
+def test_snapshot_rejects_reparse_attributes(snapshot_source, tmp_path, monkeypatch, location):
+    from types import SimpleNamespace
+
+    support = snapshot_api()
+    config, _, selected = snapshot_source
+    target = {"root": config.source, "ancestor": config.source.parent,
+              "leaf": config.source / selected["classification"]["weights_file"]}[location]
+    original = Path.lstat
+
+    def reparse(path, *args, **kwargs):
+        value = original(path, *args, **kwargs)
+        if path == target:
+            fields = {name: getattr(value, name) for name in dir(value) if name.startswith("st_")}
+            fields["st_file_attributes"] = 0x400
+            return SimpleNamespace(**fields)
+        return value
+
+    monkeypatch.setattr(Path, "lstat", reparse)
+    with pytest.raises(ValueError, match="^unsafe_source$"):
+        support.snapshot_family(config, "pde-family", tmp_path / "copy")
+
+
+@pytest.mark.parametrize("asset", ["registry", "classification.weights", "classification.card", "regression.weights", "regression.card"])
+def test_verify_source_detects_each_changed_asset(snapshot_source, tmp_path, asset):
+    from src.activity.model_registry import REGISTRY_STATE_FILE
+
+    support = snapshot_api()
+    config, _, selected = snapshot_source
+    snapshot = support.snapshot_family(config, "pde-family", tmp_path / "copy")
+    if asset == "registry":
+        name = REGISTRY_STATE_FILE
+    else:
+        task, kind = asset.split(".")
+        name = selected[task]["weights_file" if kind == "weights" else "model_card_file"]
+    with (config.source / name).open("ab") as handle:
+        handle.write(b" ")
+    with pytest.raises(ValueError, match="^source_changed$"):
+        support.verify_source(config, snapshot)
+
+
+@pytest.mark.parametrize("field,value", [("bundle_id", "newer-bundle"), ("family_id", "buche-family"),
+                                         ("expected_models", {}), ("source_digests", {})])
+def test_verify_source_rejects_snapshot_identity_tampering(snapshot_source, tmp_path, field, value):
+    from dataclasses import replace
+
+    support = snapshot_api()
+    config, _, _ = snapshot_source
+    snapshot = support.snapshot_family(config, "pde-family", tmp_path / "copy")
+    with pytest.raises(ValueError, match="^(bundle_mismatch|source_changed)$"):
+        support.verify_source(config, replace(snapshot, **{field: value}))
+
+
+def test_snapshot_limits_are_fixed():
+    support = snapshot_api()
+    assert (support.REGISTRY_LIMIT, support.CARD_LIMIT, support.WEIGHTS_LIMIT,
+            support.READ_CHUNK, support.JSON_DEPTH) == (16 << 20, 2 << 20, 512 << 20, 1 << 20, 32)
+
+
+@pytest.mark.parametrize("phase", ["during-copy", "after-copy", "final"])
+def test_snapshot_rechecks_source_through_completion(snapshot_source, tmp_path, monkeypatch, phase):
+    import os
+    from src.activity.model_registry import ActivityModelRegistry
+
+    support = snapshot_api()
+    config, _, selected = snapshot_source
+    target = config.source / selected["classification"]["weights_file"]
+    original_open, original_init, original_select = os.open, ActivityModelRegistry.__init__, ActivityModelRegistry.select_family_bundle
+    mutated = []
+
+    def mutate():
+        if not mutated:
+            with target.open("ab") as handle:
+                handle.write(b"changed")
+            mutated.append(True)
+
+    def opening(path, flags, *args, **kwargs):
+        # A destination exclusive asset creation occurs after the baseline hashes.
+        if phase == "during-copy" and Path(path).parent == tmp_path / "copy" and flags & os.O_EXCL:
+            mutate()
+        return original_open(path, flags, *args, **kwargs)
+
+    def initialize(self, directory):
+        if phase == "after-copy":
+            mutate()
+        original_init(self, directory)
+
+    def select(self, bundle_id):
+        result = original_select(self, bundle_id)
+        if phase == "final":
+            mutate()
+        return result
+
+    monkeypatch.setattr(os, "open", opening)
+    monkeypatch.setattr(ActivityModelRegistry, "__init__", initialize)
+    monkeypatch.setattr(ActivityModelRegistry, "select_family_bundle", select)
+    with pytest.raises(ValueError, match="^source_changed$"):
+        support.snapshot_family(config, "pde-family", tmp_path / "copy")
+    assert mutated
+
+
+@pytest.mark.parametrize("fault", ["identity", "growth"])
+def test_snapshot_checks_open_handle_before_read(snapshot_source, tmp_path, monkeypatch, fault):
+    import os
+    from types import SimpleNamespace
+
+    support = snapshot_api()
+    config, _, _ = snapshot_source
+    original = os.fstat
+
+    def changed(fd):
+        value = original(fd)
+        fields = {name: getattr(value, name) for name in dir(value) if name.startswith("st_")}
+        if fault == "identity":
+            fields["st_ino"] += 1
+        else:
+            fields["st_size"] = support.REGISTRY_LIMIT + 1
+        return SimpleNamespace(**fields)
+
+    monkeypatch.setattr(os, "fstat", changed)
+    with pytest.raises(ValueError, match="^(source_changed|asset_limit_exceeded)$"):
+        support.snapshot_family(config, "pde-family", tmp_path / "copy")
+
+
+def test_snapshot_hashes_all_five_sources_before_after_copy_and_final(
+        snapshot_source, tmp_path, monkeypatch):
+    import os
+    from src.activity.model_registry import ActivityModelRegistry, REGISTRY_STATE_FILE
+
+    support = snapshot_api()
+    config, _, selected = snapshot_source
+    names = {REGISTRY_STATE_FILE} | {m[k] for m in selected.values() for k in ("weights_file", "model_card_file")}
+    counts = dict.fromkeys(names, 0)
+    checkpoints = []
+    original_open, original_init = os.open, ActivityModelRegistry.__init__
+
+    def opening(path, flags, *args, **kwargs):
+        path = Path(path)
+        if path.parent == config.source and path.name in counts:
+            counts[path.name] += 1
+        if path.parent == tmp_path / "copy" and flags & os.O_EXCL and not checkpoints:
+            checkpoints.append(counts.copy())
+        return original_open(path, flags, *args, **kwargs)
+
+    def initialize(self, directory):
+        checkpoints.append(counts.copy())
+        original_init(self, directory)
+
+    monkeypatch.setattr(os, "open", opening)
+    monkeypatch.setattr(ActivityModelRegistry, "__init__", initialize)
+    support.snapshot_family(config, "pde-family", tmp_path / "copy")
+    assert len(checkpoints) == 2
+    assert all(value >= 1 for value in checkpoints[0].values())
+    assert all(checkpoints[1][name] > checkpoints[0][name] for name in names)
+    assert all(counts[name] > checkpoints[1][name] for name in names)
+
+
+@pytest.mark.parametrize("source", ["relative", "../models", r"C:models", r"\\server\share\models",
+                                     r"\\?\C:\models", r"\\.\C:\models", "parent", "ads", "device"])
+def test_snapshot_rejects_nonlocal_source_without_open(tmp_path, monkeypatch, source):
+    import os
+
+    support = snapshot_api()
+    source = {"parent": tmp_path / "x" / ".." / "models", "ads": tmp_path / "x:stream",
+              "device": tmp_path / "NUL"}.get(source, Path(source))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Unsafe source must fail before any open")
+
+    monkeypatch.setattr(os, "open", forbidden)
+    config = support.AcceptanceConfig(source, "pde", "buche")
+    with pytest.raises(ValueError, match="^unsafe_source$"):
+        support.snapshot_family(config, "pde-family", tmp_path / "copy")
+    assert not (tmp_path / "copy").exists()
+
+
+def test_snapshot_never_overwrites_existing_destination(snapshot_source, tmp_path):
+    support = snapshot_api()
+    config, _, _ = snapshot_source
+    destination = tmp_path / "copy"
+    destination.mkdir()
+    sentinel = destination / "keep"
+    sentinel.write_bytes(b"untouched")
+    with pytest.raises(ValueError, match="^unsafe_source$"):
+        support.snapshot_family(config, "pde-family", destination)
+    assert sentinel.read_bytes() == b"untouched"
+
+
+def test_snapshot_rejects_directory_identity_alias_before_writes(snapshot_source, tmp_path, monkeypatch):
+    """Lexically different paths can identify the same directory (e.g. 8.3 names)."""
+    support = snapshot_api()
+    config, _, _ = snapshot_source
+    alias = tmp_path / "source-alias"
+    alias.mkdir()
+    destination = alias / "copy"
+    original = Path.lstat
+    source_info = original(config.source)
+
+    def alias_stat(path, *args, **kwargs):
+        return source_info if path == alias else original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", alias_stat)
+    with pytest.raises(ValueError, match="^unsafe_source$"):
+        support.snapshot_family(config, "pde-family", destination)
+    assert not destination.exists()
+
+
+def test_snapshot_buche_uses_only_explicit_buche_id(tmp_path, monkeypatch):
+    from src.activity.model_registry import ActivityModelRegistry
+    from tests.family_model_test_support import make_package, make_pair, register_bundle
+
+    support = snapshot_api()
+    package = make_package(tmp_path, monkeypatch, "BuChE", "synthetic-buche")
+    registry = ActivityModelRegistry(tmp_path / "source")
+    models = make_pair(registry, package)
+    register_bundle(registry, package, models, "explicit-buche")
+    config = support.AcceptanceConfig(registry.models_dir, "absent-pde", "explicit-buche")
+    snapshot = support.snapshot_family(config, "buche-family", tmp_path / "copy")
+    assert snapshot.bundle_id == "explicit-buche"
+    assert snapshot.expected_models == models
+    assert support.verify_source(config, snapshot)
+
+
+@pytest.mark.parametrize("field,value", [("model_id", "other"), ("weights_sha256", "0" * 64),
+                                         ("source_sha256", "0" * 64), ("random_seed", True)])
+def test_snapshot_copy_registry_independently_validates_actual_card(snapshot_source, tmp_path, field, value):
+    import hashlib
+    import json
+
+    support = snapshot_api()
+    config, state, selected = snapshot_source
+    model = selected["classification"]
+    path = config.source / model["model_card_file"]
+    card = json.loads(path.read_bytes())
+    card[field] = value
+    path.write_text(json.dumps(card), encoding="utf-8")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    # Both registry records coherently claim the new bytes; digest checks alone
+    # cannot catch the discrepancy between the actual card and model metadata.
+    state["models"][model["model_id"]]["model_card_sha256"] = digest
+    state["family_bundles"]["older-bundle"]["models"]["classification"]["model_card_sha256"] = digest
+    save_source_state(config, state)
+    with pytest.raises(ValueError, match="^bundle_mismatch$"):
+        support.snapshot_family(config, "pde-family", tmp_path / "copy")
+
+
+@pytest.mark.parametrize("phase", ["stream", "post-read"])
+def test_snapshot_checks_stream_growth_and_post_read_identity(snapshot_source, tmp_path, monkeypatch, phase):
+    import os
+    from types import SimpleNamespace
+
+    support = snapshot_api()
+    config, _, _ = snapshot_source
+    original_fdopen, original_fstat = os.fdopen, os.fstat
+    stats, reads = [], []
+
+    def fstat(fd):
+        value = original_fstat(fd)
+        stats.append(fd)
+        if phase == "post-read" and len(stats) == 2:
+            fields = {key: getattr(value, key) for key in dir(value) if key.startswith("st_")}
+            fields["st_mtime_ns"] += 1
+            return SimpleNamespace(**fields)
+        return value
+
+    class Reader:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.handle.close()
+
+        def fileno(self):
+            return self.handle.fileno()
+
+        def read(self, size):
+            reads.append(size)
+            assert size == 1 << 20, "Source reads must be bounded 1 MiB binary chunks"
+            return b"x" * size if phase == "stream" else self.handle.read(size)
+
+    def fdopen(fd, mode):
+        return Reader(original_fdopen(fd, mode))
+
+    monkeypatch.setattr(os, "fstat", fstat)
+    monkeypatch.setattr(os, "fdopen", fdopen)
+    with pytest.raises(ValueError, match="^" + ("asset_limit_exceeded" if phase == "stream" else "source_changed") + "$"):
+        support.snapshot_family(config, "pde-family", tmp_path / "copy")
+    assert reads
+
+
+def test_strict_json_depth32_and_escaped_strings_are_accepted():
+    import json
+
+    support = snapshot_api()
+    # Root object + 31 arrays is exactly depth 32. Strings are not containers.
+    content = ('{"nested":' + '[' * 31 + '0' + ']' * 31
+               + ',"text":' + json.dumps('\\"' + '[' * 40) + '}').encode()
+    assert support._strict_json(content)["text"] == '\\"' + '[' * 40
+
+
+@pytest.mark.parametrize("entrypoint", ["snapshot_family", "verify_source"])
+def test_snapshot_public_errors_do_not_expose_missing_dependency(tmp_path, monkeypatch, entrypoint):
+    import builtins
+
+    support = snapshot_api()
+    original = builtins.__import__
+
+    def missing(name, *args, **kwargs):
+        if name == "src.activity.family_models":
+            raise ImportError("private dependency installation path")
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing)
+    config = support.AcceptanceConfig(tmp_path / "source", "pde", "buche")
+    with pytest.raises(ValueError, match="^dependency_unavailable$"):
+        if entrypoint == "snapshot_family":
+            support.snapshot_family(config, "pde-family", tmp_path / "copy")
+        else:
+            support.verify_source(config, support.FamilySnapshot(tmp_path / "copy", "pde-family", "pde", {}, {}))
