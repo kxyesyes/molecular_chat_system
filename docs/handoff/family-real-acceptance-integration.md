@@ -19,8 +19,8 @@
 | 2. 精确bundle快照与摘要 | 完成，SPEC/QUALITY均通过，306 passed、3 skipped |
 | 3. 隔离进程与资源回收 | 完成，SPEC/QUALITY均通过，50 passed、1 skipped；Linux待CI |
 | 4. DOM fixture与生产渲染断言 | 完成，SPEC/QUALITY通过，旧18/18、新15/15 |
-| 5. 预测/API/逐轮决策/ASGI链路 | SPEC三项已关闭；QUALITY发现事件完整性漏检，修复中 |
-| 6. opt-in入口与报告 | 未实施 |
+| 5. 预测/API/逐轮决策/ASGI链路 | 完成，SPEC/QUALITY复审通过，六组255 passed |
+| 6. opt-in入口与报告 | 实施中 |
 | 7. 全回归、双审、PR | 未完成 |
 
 ## 已取得的验证证据
@@ -73,3 +73,4 @@
 - 独立SPEC复审249 passed/2 warnings（87.27秒），原额外尾帧和伪completed+pIC50探针现在均正确失败，三项发现关闭并批准。QUALITY审查中；Task6逐入口计时与公开报告仍待实施。
 - QUALITY独立六组249 passed/2 warnings（87.29秒）后，用实际ASGI探针复现事件trace改写、task_completed重复、拒绝事件全部删除仍passed（3个预期拒绝断言失败）。已核对现有检查只覆盖部分事件名/顺序，要求共享事件一致性断言及RED/GREEN修复；该发现是验收漏检，不声明生产已发生串线。
 - `a5409df`新增共享内部/公开事件一致性检查：实施者原3个ASGI探针RED，Task5 GREEN56 passed，六组255 passed/2 warnings；SPEC增量与QUALITY复审待完成。
+- 独立SPEC增量批准：聚焦事件7 passed、原探针3 passed、Task5全56 passed、六组255 passed/2 warnings（114.24秒）。独立QUALITY原探针3 passed（15.87秒）、六组255 passed/2 warnings（100.86秒），批准，无剩余审查项。只验证合成工程链路，不代表真实训练权重或外部模型验收。

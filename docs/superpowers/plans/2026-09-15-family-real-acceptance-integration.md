@@ -321,9 +321,11 @@ node --check tests/activity_family_acceptance_dom.js
 
 ## Task 5: 同一快照的真实前向、API、逐轮决策与WebSocket
 
+实施完成（2026-09-19）：`74d84f0`、`82f2efe`、`a5409df`；SPEC/QUALITY复审通过，六组255 passed、2 warnings；四项验收漏检及修复证据保留在交接。
+
 **Files:** chain support及单测；Task1–4 support按内部接口调用。
 
-- [ ] **Step 1 — 编写链路RED测试。** 参数化PDE/PDE5A和BuChE/BChE，Task1合成真实前向，Task2创建临时副本；指定本测试ACTIVITY_MODEL_DIR后依次执行各入口。基准固定`['CCO', 'CCN', 'CCO']`，另外独立测试无效输入`CC(C)((`和未知靶点`AChE`。
+- [x] **Step 1 — 编写链路RED测试。** 参数化PDE/PDE5A和BuChE/BChE，Task1合成真实前向，Task2创建临时副本；指定本测试ACTIVITY_MODEL_DIR后依次执行各入口。基准固定`['CCO', 'CCN', 'CCO']`，另外独立测试无效输入`CC(C)((`和未知靶点`AChE`。
 
 每条有效行必须比较status/family/bundle/两阶段model和hash/阈值/类别/warnings/errors；核心数值校验：
 
@@ -342,13 +344,13 @@ def assert_numbers(actual, expected):
 
 API必须实际FastAPI setup_api_routes+TestClient，单条`/api/activity/predict`及multipart`/api/activity/batch_predict`；不能替换handler返回值。未知target与invalid返回failed/null；批量保序、重复不丢；将实际summary交Task4 Node驱动。
 
-- [ ] **Step 2 — 跑RED。**
+- [x] **Step 2 — 跑RED。**
 
 ```powershell
 & $py -B -m pytest tests/test_activity_family_acceptance_chain.py -q -p no:cacheprovider --tb=short
 ```
 
-- [ ] **Step 3 — 实现严格脚本决策模型。** 使用现有ToolDecision/FinishDecision/DecisionResponse，不加入预测数值；第二轮从真实observation取evidence_id。测试专属model只复制Task API必要的短逻辑，不引入对`test_decision_loop`的脆弱顶层import路径依赖。
+- [x] **Step 3 — 实现严格脚本决策模型。** 使用现有ToolDecision/FinishDecision/DecisionResponse，不加入预测数值；第二轮从真实observation取evidence_id。测试专属model只复制Task API必要的短逻辑，不引入对`test_decision_loop`的脆弱顶层import路径依赖。
 
 ```python
 def activity_decision():
@@ -367,7 +369,7 @@ def finish_observed(messages):
 
 真实ActivityPredictorTool注册到build_tool_registry，新ModelDecisionLoop+临时SQLiteAgentStateStore，context明确本次target/SMILES，allowed_tools=required_tools={'activity_predictor'}。Spy包裹实际execute保留完整行为和输入记录，不替换scientific结果；patch静态Planner和旧global predictor为fail守卫。必须看到两轮模型调用、第二轮观察来自刚执行的tool、metadata.backend=model_decision_loop、最终答案数值来自tool。
 
-- [ ] **Step 4 — 实现ChatHandler显式桥接与in-process ASGI。** 禁止访问生产app全局启动。ForbiddenLegacy传入ChatHandler；测试app WebSocket endpoint调用process_decision_message，显式授权activity工具；新建独立trace和store防旧证据重用。兼容旧CI Starlette，不用TestClient(client=...)。
+- [x] **Step 4 — 实现ChatHandler显式桥接与in-process ASGI。** 禁止访问生产app全局启动。ForbiddenLegacy传入ChatHandler；测试app WebSocket endpoint调用process_decision_message，显式授权activity工具；新建独立trace和store防旧证据重用。兼容旧CI Starlette，不用TestClient(client=...)。
 
 终结断言：
 
@@ -384,17 +386,17 @@ def assert_terminal(messages, trace_id):
 
 额外核对event序列task_started/planning/tool/terminal、工具provenance输入摘要、warnings/errors/status和最终答案；valid为completed，invalid为failed/rejected，不能出现分子可视化或无证据pIC50。`AgentResult.status`与验收status分别保留，不强求所有层枚举字符串相同。
 
-- [ ] **Step 5 — 新增故障RED后最小补全断言。** 在临时副本做缺权重/坏card/hash/缺阶段；在synthetic service边界注入跨family/跨SMILES/空成功/demo/fallback/wronghash行。它们只能是负例，不能计入真实前向成功数。错误应保留原公开码和已有阶段；禁止把MODEL_UNAVAILABLE当预期invalid SMILES通过。
+- [x] **Step 5 — 新增故障RED后最小补全断言。** 在临时副本做缺权重/坏card/hash/缺阶段；在synthetic service边界注入跨family/跨SMILES/空成功/demo/fallback/wronghash行。它们只能是负例，不能计入真实前向成功数。错误应保留原公开码和已有阶段；禁止把MODEL_UNAVAILABLE当预期invalid SMILES通过。
 
 续接负例使用ClarifyDecision →本次修正输入→实际tool，证明旧目标/旧证据不污染当前结果；越权tool决策被拒绝且execute次数0。若生产行为已正确只补测试；如发现真实生产缺陷，保留RED并按设计升级范围，不静默改公共契约。
 
-- [ ] **Step 6 — GREEN并关闭缓存/registry/store。**
+- [x] **Step 6 — GREEN并关闭缓存/registry/store。**
 
 ```powershell
 & $py -B -m pytest tests/test_activity_family_acceptance_chain.py tests/agent/test_family_activity_tool.py tests/agent/test_decision_chat.py tests/agent/test_decision_chat_transport.py tests/test_activity_family_api.py tests/test_activity_family_inference_integration.py -q -p no:cacheprovider --tb=short
 ```
 
-- [ ] **Step 7 — 显式提交。** `test: exercise family inference through isolated decision chat`。
+- [x] **Step 7 — 显式提交。** `test: exercise family inference through isolated decision chat`。
 
 ## Task 6: 唯一opt-in入口与可信报告
 
