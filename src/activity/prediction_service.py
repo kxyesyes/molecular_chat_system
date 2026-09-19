@@ -4,7 +4,10 @@ An explicit target never selects a legacy/global checkpoint. Scientific statuses
 describe observations, not merely successful HTTP transport.
 """
 from functools import lru_cache
+import math
 from threading import Lock
+
+from .family_contract import LABEL_THRESHOLD, PROBABILITY_THRESHOLD
 
 
 _factory_lock = Lock()
@@ -29,9 +32,22 @@ def get_family_predictor():
 def summarize_predictions(rows):
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise ValueError("Invalid prediction result contract")
-    complete = [row for row in rows if row.get("success") is True
-                and row.get("status", "passed") == "passed"]
-    observed = complete or any(row.get("status") == "partial" for row in rows)
+    def conflict(row):
+        if row.get("status") == "failed" or row.get("execution_status") == "failed":
+            return False
+        if row.get("classification_regression_consistent") is False:
+            return True
+        probability, value = row.get("activity_probability"), row.get("predicted_pIC50")
+        return (type(probability) in (int, float) and math.isfinite(probability)
+                and 0 <= probability <= 1 and type(value) in (int, float) and math.isfinite(value)
+                and (probability >= PROBABILITY_THRESHOLD) != (value >= LABEL_THRESHOLD))
+
+    conflicts = [conflict(row) for row in rows]
+    complete = [row for row, needs_review in zip(rows, conflicts) if not needs_review
+                and row.get("execution_status", "passed") == "passed"
+                and row.get("success") is True and row.get("status", "passed") == "passed"]
+    observed = complete or any(conflicts) or any(row.get("status") == "partial"
+                and row.get("execution_status") != "failed" for row in rows)
     status = "passed" if rows and len(complete) == len(rows) else "partial" if observed else "failed"
     warnings = list(dict.fromkeys(
         warning for row in rows

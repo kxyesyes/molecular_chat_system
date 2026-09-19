@@ -19,13 +19,24 @@
 响应保留 `results`，增加 `status` 和汇总 `warnings`。外层 `success` 表示科学步骤完成情况，
 不再只表示 HTTP 调用结束；HTTP 200 不等于有可用科学预测。
 
-- 非空且每行完整成功：`passed / success=true`。
+- 非空且每行完整成功、没有分类/回归冲突：`passed / success=true`。
 - 至少一行完整成功或有部分观察，但未全部完整成功：`partial / success=false`。
 - 空结果或全部失败：`failed / success=false`。
 
 行内分类概率、类别、pIC50、provenance、warnings 和错误原样保留。回归失败的 null 不补 0，
 概率 0 不当成缺失。汇总警告只接受列表中的字符串并去重；畸形可选 warnings 字段仍留在原行，
 不将字符串拆成字符、不因 null 警告让已有观察丢失。
+
+家族双模型行新增 `execution_status`。两阶段完成但预测分歧时，该字段为 `passed`，
+行和汇总 `status` 为 `partial`、`success=false`，`classification_regression_consistent=false`，
+并显示“需复核”。这种 partial 仍有真实 pIC50；不能再假设所有 partial 都没有回归值。
+分类成功而回归失败仍是 execution_status=partial，pIC50=null。未提供 target 的
+legacy 单模型路径不增加这个字段。
+
+Agent 对已校验的冲突观察保留数值、来源和警告，但不作为无条件成功的科研证据。
+隔离验收报告的工程检查可以通过，同时被测预测结果仍为 partial；不能混淆两种状态。
+报告以 `result_status` 保留被测结果状态，API 用 `api_outcomes` 记录每次 HTTP 响应的
+实际 status/success，并独立核对行状态；不以生产 summarizer 自我验证替代验收。
 
 内部异常返回固定错误消息，不回显堆栈/路径；显式 HTTPException 的状态码与 headers 保留。
 原有上传限制和模型管理接口不在本批变更范围。

@@ -6,6 +6,31 @@ import urllib.request
 import pytest
 
 
+@pytest.mark.parametrize('probability,value', [(.2, 6.1), (.8, 4.1), (.5, 5.), (.49, 4.9)])
+def test_chain_checks_completed_computation_separately_from_review(probability, value):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from tests.agent.test_family_activity_tool import family_row
+    from tests.family_acceptance_chain_support import check_rows, project_row, ChainFailure
+    consistent = (probability >= .5) == (value >= 5.)
+    row = family_row(activity_probability=probability, predicted_pIC50=value,
+        activity_class='有活性' if probability >= .5 else '无活性',
+        classification_regression_consistent=consistent, execution_status='passed',
+        status='passed' if consistent else 'partial', success=consistent)
+    row['provenance']['family_id'] = row['family_id']
+    snapshot = SimpleNamespace(family_id=row['family_id'], bundle_id=row['bundle_id'],
+        expected_models=row['provenance']['models'])
+    expected = deepcopy(row)
+    check_rows([row], [expected], snapshot, target='PDE5A')
+    assert project_row(row)['execution_status'] == 'passed'
+    assert row == expected
+    for changes in ({'execution_status': 'failed'}, {'execution_status': None},
+                    {'classification_regression_consistent': not consistent},
+                    {'success': not consistent}, {'status': 'partial' if consistent else 'passed'}):
+        with pytest.raises(ChainFailure):
+            check_rows([{**row, **changes}], [expected], snapshot, target='PDE5A')
+
+
 def test_entry_timing_uses_actual_high_resolution_clock_even_on_failure(monkeypatch):
     from tests import family_acceptance_chain_support as chain
     ticks = iter([2.0, 2.125])
@@ -356,12 +381,15 @@ def synthetic_snapshot(tmp_path, monkeypatch, request):
     monkeypatch.setattr(requests.Session, "send", forbidden)
     monkeypatch.setattr(urllib.request.OpenerDirector, "open", forbidden)
     family = getattr(request, "param", "PDE")
+    constant_outputs = None
+    if isinstance(family, tuple):
+        family, constant_outputs = family
     threads = torch.get_num_threads()
     prediction_service._family_predictor.cache_clear()
     try:
         torch.set_num_threads(1)
         registry, _ = make_forward_bundle(tmp_path, monkeypatch, family=family,
-                                          bundle_id="synthetic-selected")
+            bundle_id="synthetic-selected", **({"constant_outputs": constant_outputs} if constant_outputs else {}))
         config = read_config({"MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE": "1",
             "MEDCHAT_FAMILY_ACCEPTANCE_MODELS_DIR": str(registry.models_dir),
             "MEDCHAT_FAMILY_ACCEPTANCE_PDE_BUNDLE_ID": "synthetic-selected" if family == "PDE" else "unused-pde",
@@ -445,6 +473,58 @@ def test_same_snapshot_reaches_all_real_entrypoints(synthetic_snapshot, tmp_path
     assert "model_config" not in encoded and "weights_file" not in encoded
     from src.activity import prediction_service
     assert prediction_service._family_predictor.cache_info().currsize == 0
+
+
+@pytest.mark.parametrize('synthetic_snapshot', [
+    ('PDE', {'classification': .4, 'regression': 4.}),
+    ('BuChE', {'classification': -.4, 'regression': 6.}),
+], indirect=True)
+def test_synthetic_conflict_forward_preserves_partial_across_full_chain(synthetic_snapshot, tmp_path):
+    """Deliberate constant untrained heads; exercise actual RGNN, not model performance."""
+    from tests.family_acceptance_chain_support import run_family_chain
+    from tests.family_real_acceptance_support import public_report
+    report = run_family_chain(synthetic_snapshot, work_dir=tmp_path / 'review-chain', mode='synthetic_fixture')
+    assert report['status'] == 'passed', (report.get('reason'), {
+        name: (stage.get('status'), stage.get('agent_status'), stage.get('stop_reason'))
+        for name, stage in report['stages'].items()})
+    report.update(source_check='passed', source_digests=synthetic_snapshot.source_digests)
+    public = public_report(report, mode='synthetic_fixture')
+    assert public['status'] == 'passed', public
+    assert len(public['cases']) == 21
+    for case in public['cases'][:7]:
+        assert case['status'] == 'passed' and case['result_status'] == 'partial'
+        for row in case['rows']:
+            assert row['execution_status'] == 'passed'
+            assert row['status'] == 'partial' and row['success'] is False
+            assert row['classification_regression_consistent'] is False
+            assert row['predicted_pIC50'] == (4. if synthetic_snapshot.family_id == 'pde-family' else 6.)
+        if case['entry'] in ('decision', 'websocket'):
+            assert case['events'][-1] == 'task_partial'
+            assert case['event_trace'][-1]['payload'] == {'success': False, 'status': 'partial', 'partial': True}
+            assert case['tool_trace'][0]['status'] == 'partial'
+
+
+@pytest.mark.parametrize('synthetic_snapshot', [
+    ('PDE', {'classification': .4, 'regression': 4.}),
+], indirect=True)
+def test_chain_rejects_api_conflict_summary_even_when_production_summarizer_agrees(
+        synthetic_snapshot, tmp_path, monkeypatch):
+    from src.activity import prediction_service
+    from tests.family_acceptance_chain_support import run_family_chain
+    original = prediction_service.summarize_predictions
+
+    def corrupted(rows):
+        summary = original(rows)
+        if len(rows) == 1 and rows[0].get('execution_status') == 'passed':
+            summary.update(status='passed', success=True)
+        return summary
+
+    monkeypatch.setattr(prediction_service, 'summarize_predictions', corrupted)
+    report = run_family_chain(synthetic_snapshot, work_dir=tmp_path / 'bad-summary', mode='synthetic_fixture')
+    assert report['status'] == 'failed'
+    assert report['stages']['api_single']['status'] == 'failed'
+    assert report['stages']['api_single']['scientific_status'] == 'passed'
+    assert report['stages']['api_single']['scientific_success'] is True
 
 
 @pytest.mark.parametrize("synthetic_snapshot", ["PDE", "BuChE"], indirect=True)

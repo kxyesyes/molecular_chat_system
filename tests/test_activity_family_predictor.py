@@ -42,7 +42,7 @@ def harness(tmp_path, monkeypatch):
             return [dict(smiles=smi, success=True, task_type=self.task,
                          endpoint="activity" if self.task == "classification" else "pIC50",
                          units="probability" if self.task == "classification" else "pIC50",
-                         **{key: .2 if self.task == "classification" else 6.1}) for smi in smiles]
+                         **{key: .2 if self.task == "classification" else 4.1}) for smi in smiles]
     monkeypatch.setattr(module(), "_PinnedPredictor", Stage)
     predictor = module().FamilyActivityPredictor(Registry())
     return predictor, calls, bundle, weights, Stage
@@ -52,15 +52,26 @@ def test_public_api():
     assert callable(module().FamilyActivityPredictor)
 
 
-def test_inactive_still_regresses_and_contradiction_not_clipped(harness):
-    predictor, calls, _, _, _ = harness
+def test_inactive_still_regresses_and_contradiction_not_clipped(harness, monkeypatch):
+    predictor, calls, _, _, Stage = harness
+    original = Stage.predict
+    def conflict(self, smiles):
+        rows = original(self, smiles)
+        if self.task == "regression":
+            for row in rows:
+                row["value"] = 6.1
+        return rows
+    monkeypatch.setattr(Stage, "predict", conflict)
     row = predictor.predict("CCO", target="PDE5A")[0]
-    assert row["success"] is True
+    assert row["success"] is False
+    assert row["status"] == "partial"
+    assert row["execution_status"] == "passed"
+    assert row["errors"] == {}
     assert row["activity_class"] == "无活性"
     assert row["activity_probability"] == .2
     assert row["predicted_pIC50"] == 6.1
     assert row["classification_regression_consistent"] is False
-    assert row["warnings"]
+    assert "分类与回归预测不一致，需复核；已保留两项原始结果。" in row["warnings"]
     assert [task for task, _ in calls if task in {"classification", "regression"}] == ["classification", "regression"]
     assert row["provenance"]["models"]["classification"]["model_id"] == "classification"
 
@@ -70,6 +81,7 @@ def test_invalid_input_never_loads_or_calls_models(harness):
     rows = predictor.predict(["CC(C)((", "CCO.CCC", "", None], target="PDE5A")
     assert not calls
     assert all(r["status"] == "failed" and r["predicted_pIC50"] is None for r in rows)
+    assert all(r["execution_status"] == "failed" for r in rows)
 
 
 @pytest.mark.parametrize("target", ["AChE", "PDE BuChE", "", None, "BuChE"])
@@ -77,6 +89,7 @@ def test_no_unknown_or_cross_family_fallback(harness, target):
     predictor, calls, *_ = harness
     row = predictor.predict("CCO", target=target)[0]
     assert row["status"] == "failed"
+    assert row["execution_status"] == "failed"
     assert row["predicted_pIC50"] is None
     assert not any(task in {"classification", "regression", "load"} for task, _ in calls)
 
@@ -92,6 +105,8 @@ def test_stage_failure(harness, monkeypatch, stage, status):
     monkeypatch.setattr(Stage, "predict", predict)
     row = predictor.predict("CCO", target="PDE")[0]
     assert row["status"] == status
+    assert row["execution_status"] == status
+    assert row["classification_regression_consistent"] is None
     assert row["success"] is False
     assert row["predicted_pIC50"] is None
     assert row["errors"][stage]
@@ -315,7 +330,10 @@ def test_nonfinite_logit_cannot_be_hidden_by_sigmoid(harness, monkeypatch, logit
     original = Stage.predict
     def logits(self, smiles):
         if self.task != "classification":
-            return original(self, smiles)
+            rows = original(self, smiles)
+            for row in rows:
+                row["value"] = 6.1 if logit > 0 else 4.1
+            return rows
         core, _ = _fake_loaded_predictor(dict(model_id="synthetic", weights_sha256="a" * 64,
             task_type="classification", endpoint="activity", units="probability"), [logit] * len(smiles))
         return core.predict(smiles)
@@ -365,6 +383,33 @@ def test_pinned_loader_checks_digest_before_deserialization(monkeypatch):
     with pytest.raises(ValueError, match="digest mismatch"):
         stage.load()
     assert not stage._loaded
+
+
+@pytest.mark.parametrize("probability,value,consistent", [
+    (.2, 6.1, False), (.8, 4.1, False), (.5, 4.999, False),
+    (.499, 5., False), (.5, 5., True), (.499, 4.999, True),
+    (0., 0., True), (1., 6.1, True),
+])
+def test_execution_is_independent_of_prediction_consistency(harness, monkeypatch, probability, value, consistent):
+    predictor, calls, _, _, Stage = harness
+    original = Stage.predict
+    def predict(self, smiles):
+        rows = original(self, smiles)
+        for row in rows:
+            row["probability" if self.task == "classification" else "value"] = (
+                probability if self.task == "classification" else value)
+        return rows
+    monkeypatch.setattr(Stage, "predict", predict)
+    row = predictor.predict("CCO", target="PDE5A")[0]
+    assert row["execution_status"] == "passed"
+    assert row["status"] == ("passed" if consistent else "partial")
+    assert row["success"] is consistent
+    assert row["classification_regression_consistent"] is consistent
+    assert row["activity_probability"] == probability
+    assert row["predicted_pIC50"] == value
+    assert row["errors"] == {}
+    assert any("需复核" in warning for warning in row["warnings"]) is (not consistent)
+    assert len([task for task, _ in calls if task == "regression"]) == 1
 
 
 def test_pinned_rg_nn_forward_on_synthetic_weights_only(monkeypatch):

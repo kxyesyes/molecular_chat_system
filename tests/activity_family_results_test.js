@@ -238,6 +238,61 @@ test("consistency warning preserves both original outputs", () => {
   assert.match(h.ids.resultsBody.textContent, /0\.0%/);
 });
 
+test("numeric conflicts and explicit false flags show safe global and row needs-review", () => {
+  for (const changes of [
+    {success: false, status: "partial", execution_status: "passed", classification_regression_consistent: false},
+    {classification_regression_consistent: false},
+    {classification_regression_consistent: true},
+    {},
+  ]) {
+    for (const mixed of [false, true]) {
+      const h = setup();
+      const conflict = family({predicted_pIC50: 6.2, ...changes});
+      const rows = mixed ? [family(), conflict, family()] : [conflict];
+      const before = JSON.stringify(rows);
+      h.render(rows, {isSingleRequest: !mixed});
+      assert.match(h.ids.predictionStatus.textContent, /需复核/);
+      const row = cells(h.ids.resultsBody.children[mixed ? 1 : 0]);
+      assert.match(row[4], /需复核/);
+      if (conflict.execution_status === "passed") assert.match(row[5], /计算已完成.*需复核/);
+      else assert.ok(!row[5].includes("计算已完成"));
+      assert.equal(row[1], "6.2000");
+      assert.equal(row[3], "0.0%");
+      assert.equal(JSON.stringify(rows), before);
+      assertNoExecutableNodes(h.ids.resultsBody);
+      assertNoExecutableNodes(h.ids.predictionStatus);
+    }
+  }
+});
+
+test("failed rows with stale conflicts never become completed review observations", () => {
+  for (const value of [null, 6.2]) {
+    const h = setup();
+    h.render([family({status: "failed", execution_status: "failed", success: false,
+      predicted_pIC50: value, activity_probability: value === null ? null : 0,
+      classification_regression_consistent: false, provenance: {}, errors: {bundle: "unavailable"}})],
+    {}, {status: "failed", success: false});
+    assert.equal(h.ids.predictionStatus.textContent, "失败");
+    const row = cells(h.ids.resultsBody.children[0]);
+    assert.equal(row[4], "失败");
+    assert.ok(!row[5].includes("计算已完成"));
+    assert.equal(row[1], "不可用");
+  }
+});
+
+test("null outputs or missing provenance do not establish completed execution", () => {
+  for (const changes of [
+    {predicted_pIC50: null, errors: {regression: "unavailable"}, execution_status: "partial"},
+    {provenance: {}}, {provenance: {models: {classification: {model_id: "one-only"}}}},
+  ]) {
+    const h = setup();
+    h.render([family({success: false, status: "partial", execution_status: "passed",
+      predicted_pIC50: 6.2, classification_regression_consistent: false, ...changes})],
+    {}, {success: false, status: "partial"});
+    assert.ok(!h.ids.resultsBody.textContent.includes("计算已完成"));
+  }
+});
+
 test("task-aware legacy endpoint values retain units, zero and errors without pIC50 inference", () => {
   const h = setup();
   h.render([{smiles: "CCO", success: true, task_type: "regression", endpoint: "Ki", units: "nM", value: 0},
@@ -335,6 +390,27 @@ test("legacy optional target is omitted and HTTP/shape/network errors retain saf
     assert.equal(h.ids.submitBtn.disabled, false);
     assert.ok(!h.ids.loading.classes.has("show"));
     assert.ok(!h.ids.results.classes.has("show"));
+  }
+});
+
+test("main renders actual conflict partial success-false responses for single and batch", async () => {
+  for (const endpoint of ["predict", "batch_predict"]) {
+    const h = setup();
+    const row = family({success: false, status: "partial", execution_status: "passed",
+      predicted_pIC50: 6.2, classification_regression_consistent: false});
+    let calls = 0;
+    h.context.fetch = async () => {
+      calls++;
+      return {ok: true, json: async () => ({success: false, status: "partial", results: [row]})};
+    };
+    await h.context.ActivityMain.handlePredict("/api/activity/" + endpoint,
+      new Map([["target", "PDE5A"]]), endpoint === "predict" ? "submitBtn" : "batchSubmitBtn");
+    assert.equal(calls, 1);
+    assert.equal(h.calls.alerts.length, 0);
+    assert.equal(h.ids.statusStat.textContent, "部分完成");
+    assert.match(h.ids.predictionStatus.textContent, /需复核/);
+    assert.match(h.ids.resultsBody.textContent, /6\.2000.*需复核/);
+    assert.ok(h.ids.results.classes.has("show"));
   }
 });
 

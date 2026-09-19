@@ -14,6 +14,16 @@ const PUBLIC_FAILURE = {status: "failed", error: "family_dom_acceptance_failed"}
 const STATUS_LABELS = {passed: "完成", partial: "部分完成", failed: "失败"};
 const isRecord = value => value !== null && typeof value === "object" && !Array.isArray(value);
 
+// Independent expectation for displayed family conflicts, including old responses.
+function needsReview(row) {
+  return row.status !== "failed" && row.execution_status !== "failed"
+    && !Object.keys(row.errors || {}).length
+    && Number.isFinite(row.activity_probability) && row.activity_probability >= 0
+    && row.activity_probability <= 1 && Number.isFinite(row.predicted_pIC50)
+    && (row.classification_regression_consistent === false
+      || (row.activity_probability >= .5) !== (row.predicted_pIC50 >= 5));
+}
+
 function assertDisplayedPrediction(row, expected) {
   const shown = cells(row);
   assert.equal(shown.length, 6);
@@ -24,7 +34,7 @@ function assertDisplayedPrediction(row, expected) {
   const probability = expected.activity_probability;
   assert.equal(shown[3], expected.status !== "failed" && Number.isFinite(probability)
     && probability >= 0 && probability <= 1 ? (100 * probability).toFixed(1) + "%" : "不可用");
-  assert.equal(shown[4], STATUS_LABELS[expected.status]);
+  assert.equal(shown[4], needsReview(expected) ? "需复核" : STATUS_LABELS[expected.status]);
 
   const detailCell = row.children[5];
   const source = detailCell.children.find(node => node.tagName === "details");
@@ -43,8 +53,13 @@ function assertDisplayedPrediction(row, expected) {
   for (const [stage, error] of Object.entries(expected.errors)) {
     notes.push(`${stage}: ${typeof error === "string" ? error : JSON.stringify(error)}`);
   }
-  if (expected.classification_regression_consistent === false) {
-    notes.push("分类与回归预测不一致，保留两项原始结果。");
+  if (needsReview(expected)) {
+    const source = expected.provenance;
+    const complete = expected.execution_status === "passed" && expected.bundle_id
+      && source?.bundle_id === expected.bundle_id && source.models?.classification?.model_id
+      && source.models?.regression?.model_id;
+    notes.push(complete ? "计算已完成，分类与回归不一致，需复核；已保留两项原始结果。"
+      : "分类与回归结果不一致，需复核；执行状态或来源未确认，已保留返回数值。");
   }
   assert.equal(detailCell.textContent, (notes.join("；") || "—") + source.textContent);
   assertNoExecutableNodes(row);
@@ -97,7 +112,8 @@ function assertSummary(summary) {
     assert.equal(h.ids.resultsBody.children.length, summary.results.length);
     h.ids.resultsBody.children.forEach((row, index) => assertDisplayedPrediction(row, summary.results[index]));
     assert.equal(h.ids.predictionStatus.textContent, [
-      STATUS_LABELS[summary.results.length ? summary.status : "failed"],
+      STATUS_LABELS[summary.results.some(needsReview) ? "partial" : summary.results.length ? summary.status : "failed"],
+      ...(summary.results.some(needsReview) ? ["含分类与回归不一致的结果，需复核"] : []),
       ...(!summary.results.length ? ["无预测结果"] : []), ...summary.warnings,
     ].join("；"));
     assertNoExecutableNodes(h.ids.predictionStatus);
@@ -179,6 +195,20 @@ function runSelfTests() {
   });
   test("returned numbers and provenance", () => {
     assert.deepEqual(assertSummary(syntheticSummary()), {status: "passed", rows: 1});
+  });
+  test("computed conflict stays partial and visibly needs review", () => {
+    const summary = syntheticSummary();
+    Object.assign(summary, {status: "partial", success: false});
+    Object.assign(summary.results[0], {status: "partial", success: false,
+      execution_status: "passed", classification_regression_consistent: false,
+      activity_probability: 0.2, predicted_pIC50: 6.1,
+      warnings: ["分类与回归预测不一致，需复核；已保留两项原始结果。"]});
+    assert.deepEqual(assertSummary(summary), {status: "passed", rows: 1});
+  });
+  test("legacy conflict does not invent completed execution", () => {
+    const summary = syntheticSummary();
+    summary.results[0].predicted_pIC50 = 6.1;
+    assert.deepEqual(assertSummary(summary), {status: "passed", rows: 1});
   });
   test("mixed order duplicates partial zero null and errors", () => {
     const summary = syntheticSummary();

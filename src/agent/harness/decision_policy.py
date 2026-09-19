@@ -99,6 +99,29 @@ def usable(result: ToolResult) -> bool:
                 and not result.quality.get('fallback_used'))
 
 
+def family_review_observation(result: ToolResult) -> bool:
+    """Display completed family disagreements, never authorize scientific claims."""
+    from src.agent.validators.domain_validators import ActivityResultValidator
+    if (result.tool_name != 'activity_predictor' or result.success is not False
+            or result.status != ObservationStatus.PARTIAL or result.error is not None
+            or not result.provenance or result.provenance.demo_mode is not False
+            or result.provenance.fallback_used is not False
+            or result.quality.get('demo_mode') or result.quality.get('fallback_used')
+            or not isinstance(result.data, list) or not result.data):
+        return False
+    if not all(isinstance(row, dict) and row.get('family_id')
+               and row.get('execution_status') in ('passed', 'partial', 'failed') for row in result.data):
+        return False
+    # Failed siblings carry only unavailable values and genuine stage errors;
+    # their presence does not erase a separately validated review observation.
+    if any(row.get('status') == 'failed' and (
+            not isinstance(row.get('errors'), dict) or not row['errors']
+            or not set(row['errors']) <= {'input', 'bundle', 'classification'}) for row in result.data):
+        return False
+    return (ActivityResultValidator().validate(result) is None
+            and any(row.get('classification_regression_consistent') is False for row in result.data))
+
+
 def model_call_metadata(response) -> dict:
     """Allowlist public A1 metadata; never copy raw replies or private reasoning."""
     raw = response.metadata
@@ -147,21 +170,28 @@ def scientific_answer(results: list[ToolResult]) -> str:
     """Never render model-authored scientific text or unverified result values."""
     blocks = []
     for result in results:
+        review = family_review_observation(result)
         body = {
             'tool': result.tool_name, 'status': result.status.value,
             'scientific_usable': usable(result),
-            'data': result.data if usable(result) else None,
+            'data': result.data if usable(result) or review else None,
             'error': result.error.code.value if result.error else None,
             'warnings': result.warnings,
             'provenance': result.provenance.to_dict() if result.provenance else None,
             'evidence_id': result.quality.get('evidence_id'),
             'artifacts': [item.to_dict() for item in result.artifacts] if usable(result) else [],
         }
+        if review:
+            body['review_message'] = (
+                '计算已完成，分类与回归不一致，需复核；已保留两项原始结果。'
+                if all(row['execution_status'] == 'passed' for row in result.data) else
+                '部分行计算未完成；已完成行的分类与回归不一致，需复核；保留原始结果及阶段错误。')
         blocks.append('```json\n' + encode_observation(body) + '\n```')
     return '\n\n'.join(blocks)
 
 
 def verify_finish(decision, session, required_tools, request_kind):
+    """Return True only for a bounded review finish, not scientific completion."""
     from .decision_inputs import active_results, verify_observation_integrity
     if decision.response_kind != request_kind:
         raise DecisionBoundaryError('finish_kind_mismatch')
@@ -172,8 +202,13 @@ def verify_finish(decision, session, required_tools, request_kind):
     for result in session.results:
         verify_observation_integrity(result, session)
     records = {r.quality.get('evidence_id'): r for r in active_results(session)}
-    if any(eid not in records or not usable(records[eid]) for eid in decision.evidence_ids):
+    review_ids = {eid for eid, result in records.items() if family_review_observation(result)}
+    if any(eid not in records or not (usable(records[eid]) or eid in review_ids)
+           for eid in decision.evidence_ids):
         raise DecisionBoundaryError('evidence_not_usable_in_this_trace')
     completed = {r.tool_name for r in active_results(session) if usable(r)}
-    if not required_tools <= completed:
-        raise DecisionBoundaryError('scientific_obligations_unfulfilled')
+    cited_reviews = {records[eid].tool_name for eid in decision.evidence_ids if eid in review_ids}
+    if not required_tools <= completed | cited_reviews:
+        raise DecisionBoundaryError('task_requirements_unfulfilled' if cited_reviews
+                                    else 'scientific_obligations_unfulfilled')
+    return bool(cited_reviews)

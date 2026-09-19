@@ -159,8 +159,13 @@ class ActivityResultValidator:
                 key in entry for key in ("family_id", "predicted_pIC50", "activity_probability", "activity_class")
             ):
                 continue
+            errors = entry.get("errors")
+            if not isinstance(errors, dict) or any(not isinstance(error, str) or not error for error in errors.values()):
+                return "Family activity result contains invalid stage errors"
             if all(entry.get(key) is None for key in ("predicted_pIC50", "activity_probability", "activity_class")):
-                if entry.get("status") != "failed" or entry.get("success") is not False:
+                if (entry.get("status") != "failed" or entry.get("success") is not False
+                        or entry.get("execution_status", "failed") != "failed"
+                        or entry.get("classification_regression_consistent") is not None):
                     return "Empty family activity result cannot claim successful or partial observations"
                 continue
             if entry.get("units") != "pIC50" or entry.get("label_threshold") != 5.0:
@@ -177,15 +182,22 @@ class ActivityResultValidator:
                     or entry.get("probability_threshold") != 0.5
                     or activity_class != ("有活性" if probability >= 0.5 else "无活性")):
                 return "Family activity classification lacks a valid probability decision"
-            errors = entry.get("errors")
-            if not isinstance(errors, dict) or any(key != "regression" for key in errors):
+            if any(key != "regression" for key in errors):
                 return "Family activity claim contradicts stage errors"
-            if entry.get("status") == "passed":
-                valid_stage = entry.get("success") is True and entry.get("predicted_pIC50") is not None and not errors
-            elif entry.get("status") == "partial":
-                valid_stage = entry.get("success") is False and entry.get("predicted_pIC50") is None
+            value = entry.get("predicted_pIC50")
+            consistent = None if value is None else (probability >= 0.5) == (value >= 5.0)
+            if entry.get("classification_regression_consistent") is not consistent:
+                return "Family activity consistency flag contradicts numeric predictions"
+            if value is None:
+                valid_stage = (entry.get("status") == "partial" and entry.get("success") is False
+                               and entry.get("execution_status", "partial") == "partial" and bool(errors))
+            elif consistent:
+                valid_stage = (entry.get("status") == "passed" and entry.get("success") is True
+                               and entry.get("execution_status", "passed") == "passed" and not errors)
             else:
-                valid_stage = False
+                # Only a fully executed, proven two-model conflict may retain regression in partial.
+                valid_stage = (entry.get("status") == "partial" and entry.get("success") is False
+                               and entry.get("execution_status") == "passed" and not errors)
             if not valid_stage:
                 return "Family activity claim contradicts stage status"
             provenance = entry.get("provenance")

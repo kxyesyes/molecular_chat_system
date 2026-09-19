@@ -52,7 +52,7 @@ class _PinnedPredictor(ActivityPredictor):
 
 def _row(smiles, target):
     return dict(smiles=smiles, requested_target=target, family_id=None, bundle_id=None,
-                success=False, status="failed", activity_class=None, activity_probability=None,
+                success=False, status="failed", execution_status="failed", activity_class=None, activity_probability=None,
                 predicted_pIC50=None, units="pIC50", label_threshold=LABEL_THRESHOLD,
                 probability_threshold=PROBABILITY_THRESHOLD,
                 classification_regression_consistent=None, warnings=[], errors={}, provenance={})
@@ -191,7 +191,7 @@ class FamilyActivityPredictor:
                     continue
                 row.update(activity_probability=probability,
                            activity_class="有活性" if probability >= PROBABILITY_THRESHOLD else "无活性",
-                           status="partial")
+                           status="partial", execution_status="partial")
                 regress.append(index)
             if regress:
                 outputs = _stage_results(stages["regression"], [rows[i]["canonical_smiles"] for i in regress], "regression")
@@ -204,8 +204,9 @@ class FamilyActivityPredictor:
                         row["errors"]["regression"] = "regression_failed_or_invalid_output"
                         continue
                     consistent = (row["activity_probability"] >= PROBABILITY_THRESHOLD) == (value >= LABEL_THRESHOLD)
-                    row.update(success=True, status="passed", predicted_pIC50=value,
+                    row.update(success=consistent, status="passed" if consistent else "partial",
+                               execution_status="passed", predicted_pIC50=value,
                                classification_regression_consistent=consistent)
                     if not consistent:
-                        row["warnings"].append("分类与回归预测不一致，已保留两项原始结果。")
+                        row["warnings"].append("分类与回归预测不一致，需复核；已保留两项原始结果。")
         return rows

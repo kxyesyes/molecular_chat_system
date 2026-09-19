@@ -27,7 +27,7 @@ MIXED_SMILES = ["CCO", INVALID_SMILES, "CCN", "CCO"]
 ALIASES = {"pde-family": ("PDE", "PDE5A"), "buche-family": ("BuChE", "BChE")}
 MODEL_FIELDS = ("model_id", "target_id", "task_type", "weights_sha256", "model_card_sha256",
                 "demo_mode", "fallback_used")
-ROW_FIELDS = ("smiles", "requested_target", "status", "success", "family_id", "bundle_id",
+ROW_FIELDS = ("smiles", "requested_target", "status", "success", "execution_status", "family_id", "bundle_id",
               "activity_probability", "predicted_pIC50", "activity_class", "label_threshold",
               "probability_threshold", "units", "classification_regression_consistent", "warnings", "errors")
 
@@ -78,7 +78,7 @@ def check_rows(rows, expected, snapshot, *, target):
     for row, baseline in zip(rows, expected):
         require(row["requested_target"] == target)
         require(row["family_id"] == snapshot.family_id and row["bundle_id"] == snapshot.bundle_id)
-        require(row["status"] == "passed" and row["success"] is True)
+        require(row.get("execution_status") == "passed" and row.get("errors") == {})
         require(row["label_threshold"] == 5.0 and row["probability_threshold"] == .5)
         require(row["units"] == "pIC50")
         for field in ("activity_probability", "predicted_pIC50"):
@@ -86,6 +86,10 @@ def check_rows(rows, expected, snapshot, *, target):
             require(type(value) in (int, float) and math.isfinite(value))
             require(math.isclose(value, baseline[field], abs_tol=1e-6, rel_tol=1e-6))
         require(0 <= row["activity_probability"] <= 1)
+        consistent = (row["activity_probability"] >= .5) == (row["predicted_pIC50"] >= 5.)
+        require(row["classification_regression_consistent"] is consistent)
+        require(row["success"] is consistent and row["status"] == ("passed" if consistent else "partial"))
+        require(row["activity_class"] == ("有活性" if row["activity_probability"] >= .5 else "无活性"))
         for key in ("smiles", "activity_class", "warnings", "errors", "classification_regression_consistent"):
             require(row[key] == baseline[key])
         provenance = row["provenance"]
@@ -375,7 +379,10 @@ def decision_record(session, result, frames=None):
 
 
 def check_decision(session, result, expected, snapshot, target, frames=None):
-    require(result.success and result.metadata["backend"] == "model_decision_loop")
+    review = any(row["classification_regression_consistent"] is False for row in expected)
+    require(result.success is (not review) and result.metadata["backend"] == "model_decision_loop")
+    require(result.outcome.value == ("partial" if review else "completed"))
+    require(result.error is None and result.metadata["task_acceptance"]["satisfied"] is (not review))
     require(len(session.model.messages) == 2 and len(session.inputs) == 1)
     require(session.inputs == [{"query": session.context.query, "target": target}])
     envelope = result.to_legacy_dict()
@@ -386,11 +393,21 @@ def check_decision(session, result, expected, snapshot, target, frames=None):
     check_rows(tool["data"], expected, snapshot, target=target)
     require(tool["evidence"] == [{"prediction": row} for row in tool["data"]])
     require(tool["quality"]["model_provenance"] == [row["provenance"] for row in tool["data"]])
-    require(tool["warnings"] == session.outputs[0].warnings and tool["error"] is None)
+    expected_warnings = list(session.outputs[0].warnings)
+    if review:
+        first_plan = next(event for event in session.bus.events if event.event.value == "planning_started")
+        expected_warnings.append(
+            f"Optional step {first_plan.payload['decision_id']} (activity_predictor) failed: "
+            f"{session.outputs[0].message}")
+    require(observed["warnings"] == tool["warnings"] == expected_warnings and tool["error"] is None)
     # Scientific answer is the real observation JSON, not scripted prose or rounded fabrication.
     answer = json.loads(result.final_answer.removeprefix("```json\n").removesuffix("\n```"))
     require(answer["data"] == tool["data"] and answer["evidence_id"] == tool["quality"]["evidence_id"])
     require(answer["warnings"] == tool["warnings"] and answer["error"] is None)
+    require(answer["status"] == ("partial" if review else "succeeded"))
+    require(answer["scientific_usable"] is (not review))
+    if review:
+        require("需复核" in answer.get("review_message", ""))
     if frames is not None:
         check_public_result(session, result, frames)
     check_event_sequence(session, result, frames)
@@ -401,7 +418,7 @@ def check_decision(session, result, expected, snapshot, target, frames=None):
     require(provenance["input_digest"] == WorkflowOrchestrator._input_hash({"query": session.inputs[0]}))
     require(provenance["output_digest"] == EvidenceLedger.output_digest(tool["data"]))
     require(tool["quality"]["request_input_digest"] == EvidenceLedger.output_digest(session.inputs[0]))
-    require(session.store.get_run(session.context.trace_id)["status"] == "succeeded")
+    require(session.store.get_run(session.context.trace_id)["status"] == ("partial" if review else "succeeded"))
     return {"status": "passed",
             "checks": {"observed_evidence": True, "answer_from_tool": True,
                        "input_digest": True, "terminal": frames is not None}}
@@ -465,13 +482,30 @@ def api_summary(client, smiles, target, *, batch=False):
 
 def summary_record(summary):
     return {"status": "failed", "scientific_status": summary["status"],
+            "scientific_success": summary["success"],
+            "api_outcomes": [{"status": summary["status"], "success": summary["success"]}],
             "warnings": deepcopy(summary["warnings"]),
             "rows": [project_row(row) for row in summary["results"]]}
+
+
+def check_summary(summary):
+    """Independently check the actual summary of already validated rows."""
+    rows = summary['results']
+    status = ('passed' if rows and all(row['status'] == 'passed' for row in rows) else
+              'partial' if any(row['status'] in ('passed', 'partial') for row in rows) else 'failed')
+    require(summary['status'] == status and summary['success'] is (status == 'passed'))
+    warnings = []
+    for row in rows:
+        for warning in row['warnings']:
+            if warning not in warnings:
+                warnings.append(warning)
+    require(summary['warnings'] == warnings)
 
 
 def check_failed_row(row, snapshot, *, smiles, target):
     require(row["smiles"] == smiles and row["requested_target"] == target)
     require(row["status"] == "failed" and row["success"] is False)
+    require(row.get("execution_status") == "failed" and row.get("classification_regression_consistent") is None)
     require(row["predicted_pIC50"] is row["activity_probability"] is row["activity_class"] is None)
     require(row["bundle_id"] is None and row["provenance"] == {})
     require(row["label_threshold"] == 5.0 and row["probability_threshold"] == .5)
@@ -501,6 +535,7 @@ def run_rejection_case(snapshot, predictor, client, *, work_dir, target, smiles,
         timings.start(stages, name)
         summary = api_summary(client, [smiles], target, batch=name == "api_batch")
         stages[name] = summary_record(summary)
+        check_summary(summary)
         require(summary == baseline)
         stages[name]["status"] = "passed"
         timings.close()
@@ -539,6 +574,7 @@ def run_rejection_case(snapshot, predictor, client, *, work_dir, target, smiles,
 def run_dom(summary, *, work_dir, remaining, record):
     """Send the unchanged actual HTTP summary through the owned Node process."""
     record["status"] = "failed"
+    record["scientific_status"] = summary["status"]
     node = shutil.which("node")
     if node is None:
         raise ChainFailure("dependency_unavailable")
@@ -625,9 +661,16 @@ def run_family_chain(snapshot, *, work_dir, mode, deadline=None):
                     require(all(response.status_code == 200 for response in responses))
                     summaries = [response.json() for response in responses]
                     actual = [row for summary in summaries for row in summary["results"]]
-                    report["stages"][name] = {"status": "failed", "rows": [project_row(row) for row in actual]}
+                    outcomes = [{"status": item['status'], "success": item['success']} for item in summaries]
+                    outcome_status = ('passed' if all(item['status'] == 'passed' for item in outcomes) else
+                        'failed' if all(item['status'] == 'failed' for item in outcomes) else 'partial')
+                    report["stages"][name] = {"status": "failed", "rows": [project_row(row) for row in actual],
+                        "scientific_status": outcome_status,
+                        "scientific_success": all(item['success'] is True for item in outcomes),
+                        "api_outcomes": outcomes}
                     check_rows(actual, rows, snapshot, target=requested)
-                    require(all(summary == prediction_service.summarize_predictions(summary["results"]) for summary in summaries))
+                    for item in summaries:
+                        check_summary(item)
                     report["stages"][name]["status"] = "passed"
                     timings.close()
                     remaining()
@@ -637,7 +680,10 @@ def run_family_chain(snapshot, *, work_dir, mode, deadline=None):
             report["stages"]["tool"] = {"status": "failed", "observation_status": tool.status.value,
                 "error": tool.error.code.value if tool.error else None, "warnings": deepcopy(tool.warnings),
                 "rows": [project_row(row) for row in tool.data or []]}
-            require(tool.success and tool.evidence == [{"prediction": row} for row in tool.data])
+            review = any(row["classification_regression_consistent"] is False for row in rows[:2])
+            require(tool.success is (not review) and tool.error is None)
+            require(tool.status.value == ("partial" if review else "succeeded"))
+            require(tool.evidence == [{"prediction": row} for row in tool.data])
             require(tool.quality["model_provenance"] == [row["provenance"] for row in tool.data])
             check_rows(tool.data, rows[:2], snapshot, target=alias)
             for row in tool.data:
@@ -675,7 +721,7 @@ def run_family_chain(snapshot, *, work_dir, mode, deadline=None):
                 timings.start(report, 'mixed')
                 mixed = api_summary(client, MIXED_SMILES, alias, batch=True)
                 report["mixed"] = summary_record(mixed)
-                require(mixed == prediction_service.summarize_predictions(mixed["results"]))
+                check_summary(mixed)
                 require(mixed["status"] == "partial" and len(mixed["results"]) == 4)
                 require(mixed["results"][1] == invalid_row)
                 check_rows([mixed["results"][index] for index in (0, 2, 3)], rows, snapshot, target=alias)

@@ -52,6 +52,64 @@ def test_aggregate_scientific_status(statuses, expected):
     assert result["warnings"] == (["test warning"] if rows else [])
 
 
+@pytest.mark.parametrize("marker", [False, True, None])
+@pytest.mark.parametrize("probability,value", [(.2, 6.1), (.8, 4.1), (.499, 5.), (.5, 4.999)])
+def test_summary_detects_old_passed_conflicts_without_rewriting_rows(marker, probability, value):
+    from copy import deepcopy
+    from src.activity.prediction_service import summarize_predictions
+    row = dict(family_id="pde-family", success=True, status="passed", warnings=[],
+               activity_probability=probability, predicted_pIC50=value)
+    if marker is not None:
+        row["classification_regression_consistent"] = marker
+    rows = [row]
+    before = deepcopy(rows)
+    result = summarize_predictions(rows)
+    assert result["status"] == "partial"
+    assert result["success"] is False
+    assert result["results"] is rows
+    assert rows == before
+    assert "execution_status" not in row
+
+
+def test_summary_explicit_false_consistency_is_never_passed():
+    from src.activity.prediction_service import summarize_predictions
+    row = dict(family_id="pde-family", success=True, status="passed",
+               classification_regression_consistent=False)
+    assert summarize_predictions([row])["status"] == "partial"
+
+
+@pytest.mark.parametrize("values", [(None, None), (.2, 6.1)])
+@pytest.mark.parametrize("stage", ["input", "bundle", "classification"])
+def test_failed_rows_with_stale_conflict_never_become_partial(values, stage):
+    from copy import deepcopy
+    from src.activity.prediction_service import summarize_predictions
+    row = dict(family_id="pde-family", success=False, status="failed", execution_status="failed",
+               classification_regression_consistent=False, activity_probability=values[0],
+               predicted_pIC50=values[1], errors={stage: "unavailable"}, provenance={})
+    original = deepcopy(row)
+    result = summarize_predictions([row])
+    assert result["status"] == "failed" and result["success"] is False
+    assert result["results"] == [original]
+
+
+@pytest.mark.parametrize("endpoint", ["predict", "batch_predict"])
+@pytest.mark.parametrize("old_passed", [False, True])
+def test_api_retains_conflict_values_and_conservative_summary(client, monkeypatch, endpoint, old_passed):
+    from types import SimpleNamespace
+    from src.activity import prediction_service
+    row = dict(smiles="CCO", family_id="pde-family", status="passed" if old_passed else "partial",
+               success=old_passed, activity_probability=.2, predicted_pIC50=6.1,
+               classification_regression_consistent=False, errors={}, warnings=["需复核"],
+               provenance={"bundle_id": "synthetic"})
+    if not old_passed:
+        row["execution_status"] = "passed"
+    monkeypatch.setattr(prediction_service, "get_family_predictor",
+                        lambda: SimpleNamespace(predict=lambda *a, **k: [row]))
+    response = _post_prediction(client, endpoint, target="PDE5A")
+    assert response.status_code == 200
+    assert response.json() == dict(success=False, status="partial", results=[row], warnings=["需复核"])
+
+
 def test_batch_order_and_invalid_input_retained(client):
     response = client.post("/api/activity/batch_predict", data={"target": "BuChE"},
         files={"file": ("synthetic.smi", b"CCO\nCC(C)((\nCCO\n", "text/plain")})
