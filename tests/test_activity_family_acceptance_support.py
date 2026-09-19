@@ -5,6 +5,404 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture
+def projected_chain():
+    """Hand-built report evidence only: no production checker, model or dataset."""
+    from copy import deepcopy
+    from tests import family_real_acceptance_support as support
+
+    identity = {'family_id': 'pde-family', 'bundle_id': 'synthetic-review', 'models': {
+        task: {'model_id': 'synthetic-' + task, 'target_id': 'PDE', 'task_type': task,
+               'weights_sha256': str(index) * 64, 'model_card_sha256': str(index + 2) * 64,
+               'demo_mode': False, 'fallback_used': False}
+        for index, task in enumerate(('classification', 'regression'), 1)}}
+
+    def row(smiles, target, rejected=None):
+        return {**deepcopy(identity), 'smiles': smiles, 'requested_target': target,
+            'status': 'failed' if rejected else 'passed', 'success': not rejected,
+            'execution_status': 'failed' if rejected else 'passed',
+            'activity_probability': None if rejected else .8,
+            'predicted_pIC50': None if rejected else 6.,
+            'activity_class': None if rejected else '有活性',
+            'label_threshold': 5., 'probability_threshold': .5, 'units': 'pIC50',
+            'classification_regression_consistent': None if rejected else True,
+            'warnings': [], 'errors': {'input': rejected} if rejected else {},
+            **({'models': {'classification': {}, 'regression': {}}, 'bundle_id': None,
+                'family_id': None if target == 'AChE' else 'pde-family'} if rejected else {})}
+
+    def stage(entry, kind='valid'):
+        rejected = kind != 'valid'
+        target = 'AChE' if kind == 'unknown_target' else 'PDE' if not rejected and entry in (
+            'predictor', 'api_single') else 'PDE5A'
+        code = 'unknown_or_ambiguous_family' if kind == 'unknown_target' else 'invalid_smiles'
+        result = {'status': 'passed', 'latency_ms': 1., 'checks': {'entry_validated': True},
+                  'scientific_status': 'failed' if rejected else 'passed', 'artifacts': []}
+        if entry == 'dom':
+            result.update(rows=3, exit_code=0, ownership_released=True, cleanup_complete=True)
+            return result
+        if entry in ('predictor', 'api_single', 'api_batch'):
+            result['scientific_success'] = not rejected
+        result['rows'] = ([row('invalid', target, code)] if rejected else
+            [row(smi, target) for smi in ('CCO', 'CCN', 'CCO')[:2 if entry in (
+                'tool', 'decision', 'websocket') else 3]])
+        if entry in ('api_single', 'api_batch'):
+            result['api_outcomes'] = [{'status': result['scientific_status'],
+                'success': result['scientific_success']} for _ in range(
+                    len(result['rows']) if entry == 'api_single' else 1)]
+        if entry == 'tool':
+            result.update(observation_status='invalid_input' if rejected else 'succeeded',
+                          error='invalid_input' if rejected else None, data=None)
+            result['checks']['formatted_numbers'] = True
+            if rejected:
+                result['rows'] = []
+        if entry in ('decision', 'websocket'):
+            status = 'rejected' if kind == 'unknown_target' else 'failed' if rejected else 'completed'
+            result.update(agent_status=status, scientific_status=status, trace_id='synthetic-trace')
+            result['checks'].update(observed_evidence=True, answer_from_tool=True,
+                input_digest=True, terminal=True, rejected_without_service=True)
+            trace = [] if kind == 'unknown_target' else [{
+                'tool_name': 'activity_predictor', 'status': 'invalid_input' if rejected else 'succeeded',
+                'error': 'invalid_input' if rejected else None, 'evidence_id': 'synthetic-evidence',
+                'input_digest': 'a' * 64, 'output_digest': 'b' * 64, 'warnings': []}]
+            names = ['task_started', 'planning_started', 'planning_completed']
+            if trace:
+                names += ['tool_started', 'tool_failed' if rejected else 'tool_completed',
+                          'planning_started', 'planning_completed']
+            names += ['task_' + status]
+            events, round_number = [], 0
+            for name in names:
+                payload = {}
+                if name == 'planning_started':
+                    round_number += 1
+                if name.startswith('planning_'):
+                    payload.update(round=round_number, decision_id='synthetic-' + str(round_number))
+                    if name == 'planning_completed':
+                        payload['action'] = 'tool' if round_number == 1 else 'finish'
+                if name in ('tool_completed', 'tool_failed'):
+                    payload.update(status=trace[0]['status'], success=not rejected)
+                if name == names[-1]:
+                    payload.update(status=status, success=not rejected, partial=False)
+                events.append({'event': name, 'timestamp': float(len(events)),
+                    'trace_id': result['trace_id'], 'tool': 'activity_predictor' if name.startswith('tool_') else None,
+                    'payload': payload})
+            result.update(tool_trace=trace, events=names, event_trace=events)
+            if rejected:
+                result['rows'] = []
+        return result
+
+    report = {'status': 'passed', 'mode': 'synthetic_fixture', 'decision_model': 'scripted',
+        'source_check': 'passed', 'expected_identity': deepcopy(identity), 'actual_identity': deepcopy(identity),
+        'source_digests': {'registry': 'f' * 64, **{task + '.' + kind: model[field]
+            for task, model in identity['models'].items()
+            for kind, field in (('weights', 'weights_sha256'), ('card', 'model_card_sha256'))}},
+        'stages': {entry: stage(entry) for entry in support.ENTRIES},
+        'rejections': {kind: {'stages': {entry: stage(entry, kind) for entry in support.ENTRIES[:-1]}}
+                       for kind in ('invalid_smiles', 'unknown_target')}}
+    mixed = deepcopy(report['stages']['api_batch'])
+    mixed['rows'].insert(1, deepcopy(report['rejections']['invalid_smiles']['stages']['api_batch']['rows'][0]))
+    mixed.update(scientific_status='partial', scientific_success=False,
+                 api_outcomes=[{'status': 'partial', 'success': False}],
+                 dom={**stage('dom'), 'rows': 4, 'scientific_status': 'partial'})
+    report['mixed'] = mixed
+    return report
+
+
+def _review_stages(report):
+    return [*report['stages'].values(), report['mixed'], report['mixed']['dom'],
+            *(stage for case in report['rejections'].values() for stage in case['stages'].values())]
+
+
+def _set_review_conflicts(report, probability=.8, pic50=4.):
+    """Synthetic evidence transformation, never used to validate a report."""
+    for stage in [*report['stages'].values(), report['mixed']]:
+        rows = stage.get('rows')
+        for row in rows if isinstance(rows, list) else []:
+            if row['execution_status'] == 'passed':
+                row.update(activity_probability=probability, predicted_pIC50=pic50,
+                    activity_class='有活性' if probability >= .5 else '无活性',
+                    status='partial', success=False, classification_regression_consistent=False,
+                    warnings=['分类与回归预测不一致，需复核；已保留两项原始结果。'])
+        stage['scientific_status'] = 'partial'
+        if 'scientific_success' in stage:
+            stage['scientific_success'] = False
+        for outcome in stage.get('api_outcomes', []):
+            outcome.update(status='partial', success=False)
+        if 'observation_status' in stage:
+            stage['observation_status'] = 'partial'
+        if 'agent_status' in stage:
+            stage['agent_status'] = 'partial'
+            stage['tool_trace'][0]['status'] = 'partial'
+            for event in stage['event_trace']:
+                if event['event'] == 'tool_completed':
+                    event.update(event='tool_failed', payload={'status': 'partial', 'success': False})
+                if event['event'] == 'task_completed':
+                    event.update(event='task_partial', payload={'status': 'partial', 'success': False, 'partial': True})
+            stage['events'] = [event['event'] for event in stage['event_trace']]
+    return report
+
+
+def test_review_projection_accepts_consistent_evidence(projected_chain):
+    from tests.family_real_acceptance_support import public_report
+    assert public_report(projected_chain)['status'] == 'passed'
+
+
+@pytest.mark.parametrize('errors', [None, [], ['regression failed'], 'regression failed',
+    {'unexpected': 'failure'}, {'regression': None}, {'regression': []}, {'regression': ''},
+    {'input': 'invalid_smiles', 'unexpected': 'failure'}])
+@pytest.mark.parametrize('conflict', [False, True])
+def test_review_projection_rejects_original_error_shape(projected_chain, errors, conflict):
+    from copy import deepcopy
+    from tests.family_real_acceptance_support import public_report
+    if conflict:
+        _set_review_conflicts(projected_chain)
+    for stage in _review_stages(projected_chain):
+        rows = stage.get('rows')
+        for row in rows if isinstance(rows, list) else []:
+            if row['execution_status'] == 'passed':
+                row['errors'] = deepcopy(errors)
+    before = deepcopy(projected_chain)
+    assert public_report(projected_chain)['status'] == 'failed'
+    assert projected_chain == before
+
+
+def test_review_projection_rejects_missing_original_errors(projected_chain):
+    from tests.family_real_acceptance_support import public_report
+    _set_review_conflicts(projected_chain)
+    for stage in _review_stages(projected_chain):
+        rows = stage.get('rows')
+        for row in rows if isinstance(rows, list) else []:
+            if row['execution_status'] == 'passed':
+                row.pop('errors')
+    assert public_report(projected_chain)['status'] == 'failed'
+
+
+@pytest.mark.parametrize('errors', [{'input': 'invalid_smiles'}, {'bundle': 'family_bundle_unavailable'},
+    {'classification': 'classification_failed_or_invalid_output'},
+    {'regression': 'regression_failed_or_invalid_output'}])
+def test_review_projection_preserves_documented_errors(projected_chain, errors):
+    from tests.family_real_acceptance_support import public_report
+    _set_review_conflicts(projected_chain)
+    projected_chain['stages']['predictor']['rows'][0]['errors'] = errors.copy()
+    public = public_report(projected_chain)
+    assert public['status'] == 'failed'
+    case = next(case for case in public['cases'] if case['case_id'] == 'valid.predictor')
+    assert case['rows'][0]['errors'] == errors
+
+
+@pytest.mark.parametrize('case_id', ['valid.api_single', 'valid.api_batch', 'mixed.api_batch',
+    'invalid_smiles.api_single', 'invalid_smiles.api_batch', 'invalid_smiles.predictor',
+    'unknown_target.api_single', 'unknown_target.api_batch', 'unknown_target.predictor', 'valid.predictor'])
+@pytest.mark.parametrize('fault', ['missing_status', 'missing_success', 'null_status', 'null_success',
+    'forged_status', 'forged_success', 'integer_success'])
+@pytest.mark.parametrize('conflict', [False, True])
+def test_review_projection_requires_actual_summary_fields(projected_chain, case_id, fault, conflict):
+    from tests.family_real_acceptance_support import public_report
+    if conflict:
+        _set_review_conflicts(projected_chain)
+    assert public_report(projected_chain)['status'] == 'passed'
+    kind, entry = case_id.split('.')
+    stage = (projected_chain['stages'][entry] if kind == 'valid' else projected_chain['mixed']
+             if kind == 'mixed' else projected_chain['rejections'][kind]['stages'][entry])
+    field = 'scientific_status' if fault.endswith('status') else 'scientific_success'
+    if fault.startswith('missing'):
+        stage.pop(field)
+    elif fault.startswith('null'):
+        stage[field] = None
+    elif fault == 'forged_status':
+        stage[field] = 'passed' if stage[field] != 'passed' else 'partial'
+    elif fault == 'forged_success':
+        stage[field] = not stage[field]
+    else:
+        stage[field] = int(stage[field])
+    public = public_report(projected_chain)
+    assert public['status'] == 'failed'
+    case = next(case for case in public['cases'] if case['case_id'] == case_id)
+    assert case['status'] == 'failed'
+    if fault in ('missing_status', 'null_status'):
+        assert case['result_status'] is None, 'Missing observations must never be synthesized'
+
+
+@pytest.mark.parametrize('case_id', ['valid.api_single', 'valid.api_batch', 'mixed.api_batch',
+    'invalid_smiles.api_single', 'invalid_smiles.api_batch', 'unknown_target.api_single', 'unknown_target.api_batch'])
+@pytest.mark.parametrize('fault', ['missing', 'empty', 'non_list', 'count', 'missing_status', 'missing_success',
+    'forged_status', 'forged_success', 'integer_success', 'unknown_key', 'malformed'])
+def test_review_projection_checks_each_api_outcome(projected_chain, case_id, fault):
+    from tests.family_real_acceptance_support import public_report
+    _set_review_conflicts(projected_chain)
+    kind, entry = case_id.split('.')
+    stage = (projected_chain['stages'][entry] if kind == 'valid' else projected_chain['mixed']
+             if kind == 'mixed' else projected_chain['rejections'][kind]['stages'][entry])
+    assert public_report(projected_chain)['status'] == 'passed'
+    outcomes = stage['api_outcomes']
+    if fault == 'missing':
+        stage.pop('api_outcomes')
+    elif fault == 'empty':
+        stage['api_outcomes'] = []
+    elif fault == 'non_list':
+        stage['api_outcomes'] = outcomes[0]
+    elif fault == 'count':
+        outcomes.append(outcomes[0].copy())
+    elif fault.startswith('missing_'):
+        outcomes[0].pop(fault.removeprefix('missing_'))
+    elif fault == 'forged_status':
+        outcomes[0]['status'] = 'passed'
+    elif fault == 'forged_success':
+        outcomes[0]['success'] = True
+    elif fault == 'integer_success':
+        outcomes[0]['success'] = 0
+    elif fault == 'unknown_key':
+        outcomes[0]['unexpected'] = 'failure'
+    else:
+        outcomes[0] = None
+    public = public_report(projected_chain)
+    assert public['status'] == 'failed'
+    assert next(case for case in public['cases'] if case['case_id'] == case_id)['status'] == 'failed'
+
+
+def test_review_projection_preserves_individual_api_outcomes(projected_chain):
+    from copy import deepcopy
+    from tests.family_real_acceptance_support import public_report, _validate_public_schema
+    _set_review_conflicts(projected_chain)
+    # Only CCO conflicts: the individual CCN response genuinely passes.
+    for stage in _review_stages(projected_chain):
+        rows = stage.get('rows')
+        for row in rows if isinstance(rows, list) else []:
+            if row['smiles'] == 'CCN':
+                row.update(status='passed', success=True, predicted_pIC50=6.,
+                           classification_regression_consistent=True, warnings=[])
+    outcomes = projected_chain['stages']['api_single']['api_outcomes']
+    outcomes[1] = {'status': 'passed', 'success': True}
+    before = deepcopy(projected_chain)
+    public = public_report(projected_chain)
+    assert public['status'] == 'passed'
+    _validate_public_schema(public)
+    assert projected_chain == before
+    for case in public['cases']:
+        kind, entry = case['case_id'].split('.')
+        if entry in ('api_single', 'api_batch'):
+            stage = (projected_chain['stages'][entry] if kind == 'valid' else projected_chain['mixed']
+                     if kind == 'mixed' else projected_chain['rejections'][kind]['stages'][entry])
+            assert case['api_outcomes'] == stage['api_outcomes']
+        else:
+            assert case['api_outcomes'] == []
+    # Aggregate remains partial/false; a forged individual response must fail.
+    outcomes[1] = {'status': 'partial', 'success': False}
+    assert public_report(projected_chain)['status'] == 'failed'
+
+
+@pytest.mark.parametrize('probability,pic50', [(.8, 4.), (.2, 6.), (.5, 4.999), (.499, 5.)])
+def test_review_projection_preserves_justified_partial(projected_chain, probability, pic50):
+    from copy import deepcopy
+    from tests.family_real_acceptance_support import public_report, _validate_public_schema
+    report = _set_review_conflicts(projected_chain, probability, pic50)
+    before = deepcopy(report)
+    public = public_report(report)
+    assert public['status'] == 'passed', public
+    assert report == before
+    _validate_public_schema(public)
+    for case in public['cases']:
+        if case['case_id'].startswith(('valid.', 'mixed.')):
+            assert case['result_status'] == 'partial'
+            assert case['status'] == 'passed'
+            for row in case['rows']:
+                if row['status'] == 'partial':
+                    assert row['execution_status'] == 'passed'
+                    assert row['activity_probability'] == probability and row['predicted_pIC50'] == pic50
+                    assert row['warnings'] and row['models'] == report['expected_identity']['models']
+            if case['entry'] != 'dom':
+                assert case['available_stages'] == ['classification', 'regression']
+                assert case['checks']['baseline_matches'] is True
+
+
+@pytest.mark.parametrize('field,value', [('execution_status', None), ('execution_status', 'partial'),
+    ('execution_status', 'failed'), ('execution_status', True), ('execution_status', 'completed'),
+    ('classification_regression_consistent', False), ('classification_regression_consistent', None),
+    ('classification_regression_consistent', 1)])
+def test_review_projection_rejects_coherently_forged_rows(projected_chain, field, value):
+    from tests.family_real_acceptance_support import public_report
+    for stage in _review_stages(projected_chain):
+        rows = stage.get('rows')
+        for row in rows if isinstance(rows, list) else []:
+            if row['status'] == 'passed':
+                if value is None:
+                    row.pop(field)
+                else:
+                    row[field] = value
+    assert public_report(projected_chain)['status'] == 'failed'
+
+
+@pytest.mark.parametrize('entry', ['predictor', 'api_single', 'api_batch', 'tool', 'decision', 'websocket'])
+@pytest.mark.parametrize('damage', ['passed_conflict', 'forged_consistency', 'partial_laundering', 'missing_execution'])
+def test_review_projection_rejects_each_corrupt_stage(projected_chain, entry, damage):
+    from tests.family_real_acceptance_support import public_report
+    stage = projected_chain['stages'][entry]
+    if damage in ('forged_consistency', 'partial_laundering'):
+        _set_review_conflicts(projected_chain)
+    for row in stage['rows']:
+        if damage == 'passed_conflict':
+            row.update(predicted_pIC50=4., classification_regression_consistent=False)
+        elif damage == 'forged_consistency':
+            row['classification_regression_consistent'] = True
+        elif damage == 'partial_laundering':
+            row.update(predicted_pIC50=6., classification_regression_consistent=True)
+        else:
+            row.pop('execution_status')
+    public = public_report(projected_chain)
+    case = next(case for case in public['cases'] if case['case_id'] == 'valid.' + entry)
+    assert case['status'] == 'failed'
+
+
+@pytest.mark.parametrize('kind', ['invalid_smiles', 'unknown_target'])
+@pytest.mark.parametrize('execution', [None, 'passed', 'partial', True])
+def test_review_projection_rejects_failed_row_execution_forgery(projected_chain, kind, execution):
+    from tests.family_real_acceptance_support import public_report
+    for stage in projected_chain['rejections'][kind]['stages'].values():
+        for row in stage.get('rows', []):
+            if execution is None:
+                row.pop('execution_status')
+            else:
+                row['execution_status'] = execution
+    assert public_report(projected_chain)['status'] == 'failed'
+
+
+@pytest.mark.parametrize('entry', ['predictor', 'api_single', 'api_batch', 'tool', 'decision', 'websocket', 'dom'])
+@pytest.mark.parametrize('conflict', [False, True])
+def test_review_projection_rejects_stage_status_laundering(projected_chain, entry, conflict):
+    from tests.family_real_acceptance_support import public_report
+    if conflict:
+        _set_review_conflicts(projected_chain)
+    stage = projected_chain['stages'][entry]
+    stage['scientific_status'] = 'passed' if conflict else 'partial'
+    assert public_report(projected_chain)['status'] == 'failed'
+
+
+@pytest.mark.parametrize('entry', ['decision', 'websocket'])
+@pytest.mark.parametrize('conflict', [False, True])
+@pytest.mark.parametrize('fault', ['terminal_success', 'terminal_partial', 'tool_success', 'tool_status',
+    'trace_status', 'agent_status'])
+def test_review_projection_rejects_terminal_and_tool_state_forgery(projected_chain, entry, conflict, fault):
+    from tests.family_real_acceptance_support import public_report
+    if conflict:
+        _set_review_conflicts(projected_chain)
+    stage = projected_chain['stages'][entry]
+    terminal = stage['event_trace'][-1]['payload']
+    tool = next(event['payload'] for event in stage['event_trace'] if event['event'] in ('tool_completed', 'tool_failed'))
+    if fault == 'terminal_success':
+        terminal['success'] = conflict
+    elif fault == 'terminal_partial':
+        terminal['partial'] = not conflict
+    elif fault == 'tool_success':
+        tool['success'] = conflict
+    elif fault == 'tool_status':
+        tool['status'] = 'succeeded' if conflict else 'partial'
+    elif fault == 'trace_status':
+        stage['tool_trace'][0]['status'] = 'succeeded' if conflict else 'partial'
+    else:
+        stage['agent_status'] = 'completed' if conflict else 'partial'
+    public = public_report(projected_chain)
+    assert next(case for case in public['cases'] if case['case_id'] == 'valid.' + entry)['status'] == 'failed'
+
+
 def test_default_entry_skips_before_support_import_or_source_io(monkeypatch):
     import builtins
     import importlib

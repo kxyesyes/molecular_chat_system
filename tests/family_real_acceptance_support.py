@@ -420,11 +420,17 @@ def _valid_identity(value):
 
 
 def _public_row(row):
-    result = _pick(row, ('smiles', 'requested_target', 'status', 'success', 'family_id', 'bundle_id',
+    # Validate the original object before a whitelist can erase failure evidence.
+    error_keys = ('input', 'bundle', 'classification', 'regression')
+    errors = row.get('errors') if isinstance(row, dict) else None
+    if (not isinstance(errors, dict) or set(errors) - set(error_keys)
+            or any(not isinstance(value, str) or not value for value in errors.values())):
+        raise ValueError('invalid_report')
+    result = _pick(row, ('smiles', 'requested_target', 'status', 'execution_status', 'success', 'family_id', 'bundle_id',
         'activity_probability', 'predicted_pIC50', 'activity_class', 'label_threshold',
         'probability_threshold', 'units', 'classification_regression_consistent', 'warnings'))
     result['models'] = _public_identity(row).get('models', {})
-    result['errors'] = _pick(row.get('errors'), ('input', 'bundle', 'classification', 'regression'))
+    result['errors'] = errors.copy()
     return result
 
 
@@ -434,16 +440,36 @@ def _finite_number(value):
 
 def _row_contract(row, requested_target):
     """Independent obligations, not values learned from a possibly corrupt baseline."""
-    required = {'label_threshold', 'probability_threshold', 'units', 'requested_target', 'activity_class'}
+    required = {'label_threshold', 'probability_threshold', 'units', 'requested_target', 'activity_class',
+                'execution_status', 'classification_regression_consistent'}
     probability = row.get('activity_probability')
     classification = (None if probability is None else
         '有活性' if _finite_number(probability) and probability >= .5 else '无活性')
-    return (required.issubset(row) and requested_target is not None
+    valid = (required.issubset(row) and requested_target is not None
         and row['requested_target'] == requested_target and row['units'] == 'pIC50'
         and _finite_number(row['label_threshold']) and row['label_threshold'] == 5.0
         and _finite_number(row['probability_threshold']) and row['probability_threshold'] == .5
         and (probability is None or _finite_number(probability) and 0 <= probability <= 1)
         and row['activity_class'] == classification)
+    if not valid:
+        return False
+    pic50 = row.get('predicted_pIC50')
+    if row['execution_status'] == 'passed':
+        if not (_finite_number(probability) and _finite_number(pic50)):
+            return False
+        consistent = (probability >= .5) == (pic50 >= 5.)
+        return (row.get('status') == ('passed' if consistent else 'partial')
+                and row.get('success') is consistent
+                and row['classification_regression_consistent'] is consistent
+                and row.get('errors') == {}
+                and isinstance(row.get('warnings'), list)
+                and all(isinstance(warning, str) for warning in row['warnings'])
+                and (consistent or bool(row['warnings'])))
+    # A partial computation is retained as evidence, but cannot satisfy this
+    # full dual-model acceptance run. Rejected inputs must invent no numbers.
+    return (row['execution_status'] == 'failed' and row.get('status') == 'failed'
+            and row.get('success') is False and probability is None and pic50 is None
+            and row['classification_regression_consistent'] is None)
 
 
 def _available_stages(rows):
@@ -458,6 +484,14 @@ def _available_stages(rows):
                     and _finite_number(value) and (task != 'classification' or 0 <= value <= 1)):
                 available.add(task)
     return [task for task in _TASKS if task in available]
+
+
+def _scientific_outcome(rows):
+    """Aggregate independently checked rows without consulting production code."""
+    statuses = [row.get('status') for row in rows]
+    status = ('passed' if statuses and all(value == 'passed' for value in statuses) else
+              'failed' if not statuses or all(value == 'failed' for value in statuses) else 'partial')
+    return {'status': status, 'success': status == 'passed'}
 
 
 def _case_record(stage, entry, kind, expected, actual):
@@ -478,43 +512,62 @@ def _case_record(stage, entry, kind, expected, actual):
     target, alias = FAMILY_TARGETS.get(expected.get('family_id'), (None, None))
     requested_target = ('AChE' if kind == 'unknown_target' else
         target if kind == 'valid' and entry in ('predictor', 'api_single') else alias)
-    result_status = stage.get('scientific_status', stage.get('agent_status', stage.get('observation_status')))
+    api_entry = entry in ('api_single', 'api_batch')
+    summary_stage = api_entry or (entry == 'predictor' and (rejected or
+        'scientific_status' in stage or 'scientific_success' in stage))
+    result_status = (stage.get('scientific_status') if summary_stage else
+        stage.get('scientific_status', stage.get('agent_status', stage.get('observation_status'))))
+    raw_outcomes = stage.get('api_outcomes') if api_entry else []
+    api_outcomes = [_pick(item, ('status', 'success')) for item in raw_outcomes] if isinstance(raw_outcomes, list) else []
+    row_status = None
     if rows:
-        successful = [row for row in rows if row.get('status') == 'passed']
+        successful = [row for row in rows if row.get('execution_status') == 'passed']
         if rejected:
             valid = valid and not successful
         actual = _public_identity(successful[0] if successful else rows[0])
-        if result_status is None:
-            result_status = ('passed' if len(successful) == len(rows) else
-                'partial' if successful or any(row.get('status') == 'partial' for row in rows) else 'failed')
+        row_status = _scientific_outcome(rows)['status']
+        if result_status is None and not summary_stage:
+            result_status = row_status
         for row in rows:
             valid = valid and _row_contract(row, requested_target)
-            if row.get('status') == 'passed':
-                probability, pic50 = row.get('activity_probability'), row.get('predicted_pIC50')
-                valid = valid and (_public_identity(row) == expected and row.get('success') is True
-                    and type(probability) in (int, float) and math.isfinite(probability) and 0 <= probability <= 1
-                    and type(pic50) in (int, float) and math.isfinite(pic50))
+            if row.get('execution_status') == 'passed':
+                valid = valid and not rejected and _public_identity(row) == expected
             else:
-                valid = valid and (row.get('status') == 'failed' and row.get('success') is False
-                    and row.get('activity_probability') is None and row.get('predicted_pIC50') is None
-                    and row.get('errors', {}).get('input') in ('invalid_smiles', 'unknown_or_ambiguous_family'))
+                input_error = 'unknown_or_ambiguous_family' if kind == 'unknown_target' else 'invalid_smiles'
+                valid = valid and ((rejected or kind == 'mixed')
+                    and row.get('errors') == {'input': input_error}
+                    and row.get('bundle_id') is None
+                    and row.get('family_id') == (None if kind == 'unknown_target' else expected.get('family_id'))
+                    and not any(row.get('models', {}).values()) and row.get('warnings') == [])
         required_count = 1 if rejected else 4 if kind == 'mixed' else 2 if entry in ('tool', 'decision', 'websocket') else 3
         valid = valid and len(rows) == required_count
     elif entry not in ('dom', 'decision', 'websocket') and not (rejected and entry == 'tool'):
         valid = False
+    if summary_stage:
+        valid = valid and (bool(rows) and stage.get('scientific_status') == row_status
+            and stage.get('scientific_success') is (row_status == 'passed'))
+    if api_entry:
+        groups = [[row] for row in rows] if entry == 'api_single' else [rows]
+        valid = valid and isinstance(raw_outcomes, list) and len(raw_outcomes) == len(groups)
+        if valid:
+            for outcome, group in zip(raw_outcomes, groups):
+                expected_outcome = _scientific_outcome(group)
+                valid = valid and (isinstance(outcome, dict) and set(outcome) == {'status', 'success'}
+                    and outcome.get('status') == expected_outcome['status']
+                    and outcome.get('success') is expected_outcome['success'])
     if entry == 'dom':
         valid = valid and (type(stage.get('rows')) is int and stage['rows'] == (4 if kind == 'mixed' else 3)
             and stage.get('exit_code') == 0 and stage.get('ownership_released') is True
             and stage.get('cleanup_complete') is True)
-        result_status = ('partial' if kind == 'mixed' else 'passed') if stage.get('status') == 'passed' else None
         if not stage:
             actual = {}
     if entry == 'tool':
-        valid = valid and stage.get('observation_status') == ('invalid_input' if rejected else 'succeeded')
+        valid = valid and stage.get('observation_status') == ('invalid_input' if rejected else
+            'partial' if row_status == 'partial' else 'succeeded')
         if rejected:
             valid = valid and stage.get('error') == 'invalid_input' and stage.get('data') is None
         else:
-            valid = valid and checks.get('formatted_numbers') is True
+            valid = valid and checks.get('formatted_numbers') is True and stage.get('error') is None
     if entry in ('decision', 'websocket'):
         valid = valid and bool(stage.get('trace_id')) and bool(events)
         valid = valid and [item.get('event') for item in events] == stage.get('events')
@@ -528,21 +581,30 @@ def _case_record(stage, entry, kind, expected, actual):
             valid = valid and len(rows) == 2
             valid = valid and all(checks.get(key) is True for key in ('observed_evidence', 'answer_from_tool', 'input_digest'))
             valid = valid and len(trace) == 1 and all(trace[0].get(key) for key in ('evidence_id', 'input_digest', 'output_digest'))
+            valid = valid and trace[0].get('status') == ('partial' if row_status == 'partial' else 'succeeded')
+            valid = valid and trace[0].get('error') is None
         if entry == 'websocket':
             valid = valid and checks.get('terminal') is True
         valid = valid and all(item.get('tool_name') == 'activity_predictor' for item in trace)
-        valid = valid and _event_integrity(events, trace, result_status)
+        agent_status = stage.get('agent_status')
+        valid = valid and _event_integrity(events, trace, agent_status)
+        valid = valid and (agent_status in ('failed', 'rejected') if rejected else
+            agent_status == ('partial' if row_status == 'partial' else 'completed'))
     if rejected:
         valid = valid and result_status in ('failed', 'rejected')
     elif kind == 'mixed':
-        valid = valid and result_status == 'partial'
+        valid = valid and result_status == 'partial' and (entry == 'dom' or row_status == 'partial')
+    elif entry == 'dom':
+        # Compared independently with the API rows in _matching_rows below.
+        valid = valid and result_status in ('passed', 'partial')
     else:
-        valid = valid and result_status in ('passed', 'completed', 'succeeded')
+        valid = valid and (result_status == 'partial' if row_status == 'partial' else
+            result_status in ('passed', 'completed', 'succeeded'))
     artifacts = stage.get('artifacts', [])
     valid = valid and artifacts == []
     return {'case_id': kind + '.' + entry, 'entry': entry, 'status': 'passed' if valid else 'failed',
         'expected_identity': expected, 'actual_identity': actual, 'latency_ms': latency,
-        'checks': checks, 'result_status': result_status,
+        'checks': checks, 'result_status': result_status, 'api_outcomes': api_outcomes,
         'error_code': None if valid else 'chain_mismatch',
         'scientific_error_code': stage.get('error') if stage.get('error') in ('invalid_input',) else None,
         'actual_tools': [item.get('tool_name') for item in trace] if entry in ('decision', 'websocket') else
@@ -554,7 +616,7 @@ def _case_record(stage, entry, kind, expected, actual):
 
 
 def _event_integrity(events, trace, status):
-    if not events or status not in ('completed', 'failed', 'rejected'):
+    if not events or status not in ('completed', 'partial', 'failed', 'rejected'):
         return False
     names = [event.get('event') for event in events]
     tool_end = 'tool_completed' if status == 'completed' else 'tool_failed'
@@ -583,8 +645,18 @@ def _event_integrity(events, trace, status):
                 or end.get('action') != ('tool' if index == 0 else 'finish')):
             return False
     terminal = events[-1]['payload']
+    if trace:
+        if len(trace) != 1:
+            return False
+        tool = events[names.index(tool_end)]['payload']
+        observation = trace[0].get('status')
+        expected_observation = ('succeeded' if status == 'completed' else
+                                'partial' if status == 'partial' else 'invalid_input')
+        if (observation != expected_observation or tool.get('status') != observation
+                or tool.get('success') is not (status == 'completed')):
+            return False
     return (terminal.get('status') == status and terminal.get('success') is (status == 'completed')
-            and terminal.get('partial') is False)
+            and terminal.get('partial') is (status == 'partial'))
 
 
 def _matching_rows(cases):
@@ -608,6 +680,15 @@ def _matching_rows(cases):
         return True
     all_matched = True
     for case in cases:
+        if case['entry'] == 'dom':
+            expected_status = ('partial' if case['case_id'].startswith('mixed.') or
+                any(row.get('status') == 'partial' for row in baseline) else 'passed')
+            matched = case['result_status'] == expected_status
+            case['checks']['baseline_matches'] = matched
+            if not matched:
+                case.update(status='failed', error_code='chain_mismatch')
+            all_matched = all_matched and matched
+            continue
         if case['case_id'].startswith('valid.') and case['entry'] != 'dom':
             expected = baseline[:2] if case['entry'] in ('tool', 'decision', 'websocket') else baseline
         elif case['case_id'] == 'mixed.api_batch':
@@ -616,7 +697,7 @@ def _matching_rows(cases):
             expected = baseline
         else:
             continue
-        actual = [row for row in case['rows'] if row.get('status') == 'passed']
+        actual = [row for row in case['rows'] if row.get('execution_status') == 'passed']
         matched = matches(expected, actual)
         case['checks']['baseline_matches'] = matched
         if not matched:
@@ -653,7 +734,7 @@ def _validate_public_schema(report):
     scalar = None
     model = dict.fromkeys(MODEL_KEYS, scalar)
     identity = {'family_id': scalar, 'bundle_id': scalar, 'models': dict.fromkeys(_TASKS, model)}
-    row = dict.fromkeys(('smiles', 'requested_target', 'status', 'success', 'family_id', 'bundle_id',
+    row = dict.fromkeys(('smiles', 'requested_target', 'status', 'execution_status', 'success', 'family_id', 'bundle_id',
         'activity_probability', 'predicted_pIC50', 'activity_class', 'label_threshold',
         'probability_threshold', 'units', 'classification_regression_consistent'), scalar)
     row.update(models=dict.fromkeys(_TASKS, model), warnings=[scalar],
@@ -666,7 +747,8 @@ def _validate_public_schema(report):
         'scientific_error_code', 'trace_id', 'state_ref'), scalar)
     case.update(expected_identity=identity, actual_identity=identity, checks=dict.fromkeys(CHECK_KEYS, scalar),
         actual_tools=[scalar], events=[scalar], event_trace=[event], tool_trace=[trace], rows=[row],
-        warnings=[scalar], available_stages=[scalar], artifacts=[scalar])
+        warnings=[scalar], available_stages=[scalar], artifacts=[scalar],
+        api_outcomes=[dict.fromkeys(('status', 'success'), scalar)])
     root = dict.fromkeys(('status', 'mode', 'decision_model_kind', 'source_check', 'error_code'), scalar)
     root.update(scope=dict.fromkeys(('external_model', 'production_selection'), scalar),
         expected_identity=identity, actual_identity=identity, cases=[case], source_digests=dict.fromkeys(DIGEST_KEYS, scalar))

@@ -64,7 +64,7 @@ def register_bundle(registry, path, models, bundle_id="bundle-a"):
         regression_model_id=models["regression"]["model_id"])
 
 
-def make_forward_bundle(tmp_path, monkeypatch, *, family, bundle_id):
+def make_forward_bundle(tmp_path, monkeypatch, *, family, bundle_id, constant_outputs=None):
     """Register untrained, real CPU RGNN weights under the caller's pytest tmp_path.
 
     Never accepts a source model directory or selects a global/family model.
@@ -99,6 +99,12 @@ def make_forward_bundle(tmp_path, monkeypatch, *, family, bundle_id):
 
             def real_test_weights(registry, metadata):
                 network = RGNN(**config).to(torch.device("cpu")).eval()
+                if constant_outputs is not None:
+                    # Deliberately untrained test heads: classification is a raw logit,
+                    # regression a raw value. The full real graph forward still runs.
+                    with torch.no_grad():
+                        network.lin2.weight.zero_()
+                        network.lin2.bias.fill_(constant_outputs[metadata["task_type"]])
                 weights = registry.models_dir / metadata["weights_file"]
                 torch.save({"state_dict": network.state_dict()}, weights)
                 metadata.update(model_config=config, random_seed=71,
