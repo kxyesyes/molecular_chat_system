@@ -288,3 +288,67 @@ def test_forward_fixture_preserves_seed71_weights_and_real_forward(
                 assert [row[key] for row in rows] == output.reshape(-1).tolist()
     finally:
         torch.set_num_threads(threads)
+
+
+@pytest.mark.parametrize("fail_save", [False, True], ids=["success", "save-exception"])
+def test_forward_fixture_constructs_on_cpu_under_meta_context(
+        tmp_path, monkeypatch, accelerator_seed_calls, fail_save):
+    import torch
+    from src.activity.predictor import ActivityPredictor
+    from src.activity.rg_mpnn.Nets.ReduceGNN import RGNN
+    from tests.family_model_test_support import make_forward_bundle
+
+    caller_device = torch.empty(0).device
+    with torch.device("cpu"):
+        registry, models = make_forward_bundle(
+            tmp_path, monkeypatch, family="PDE", bundle_id="cpu-reference")
+        expected = [torch.load(registry.models_dir / models[task]["weights_file"],
+                               map_location="cpu", weights_only=True)["state_dict"]
+                    for task in ("classification", "regression")]
+
+    process_smiles, initialize, save = ActivityPredictor.process_smiles, RGNN.__init__, torch.save
+    calls = dict(features=0, networks=0, saves=0)
+
+    def cpu_features(self, smiles):
+        pair = process_smiles(self, smiles)
+        assert pair is not None, "Features must construct successfully under ambient meta"
+        assert all(value.device.type == "cpu" for data in pair
+                   for value in data.to_dict().values() if torch.is_tensor(value))
+        calls["features"] += 1
+        return pair
+
+    def cpu_network(self, *args, **kwargs):
+        initialize(self, *args, **kwargs)
+        assert all(value.device.type == "cpu"
+                   for value in (*self.parameters(), *self.buffers()))
+        calls["networks"] += 1
+
+    def cpu_save(payload, path):
+        state = payload["state_dict"]
+        reference = expected[calls["saves"]]
+        assert state.keys() == reference.keys()
+        assert all(value.device.type == "cpu" and torch.equal(value, reference[key])
+                   for key, value in state.items())
+        calls["saves"] += 1
+        if fail_save and calls["saves"] == 2:
+            raise RuntimeError("synthetic meta-context save failure")
+        return save(payload, path)
+
+    monkeypatch.setattr(ActivityPredictor, "process_smiles", cpu_features)
+    monkeypatch.setattr(RGNN, "__init__", cpu_network)
+    monkeypatch.setattr(torch, "save", cpu_save)
+    rng, threads = torch.get_rng_state().clone(), torch.get_num_threads()
+    with torch.device("meta"):
+        try:
+            if fail_save:
+                with pytest.raises(RuntimeError, match="synthetic meta-context save failure"):
+                    make_forward_bundle(tmp_path, monkeypatch, family="PDE", bundle_id="meta-caller")
+            else:
+                make_forward_bundle(tmp_path, monkeypatch, family="PDE", bundle_id="meta-caller")
+        finally:
+            assert torch.empty(0).device.type == "meta"
+            assert torch.equal(torch.get_rng_state(), rng)
+            assert torch.get_num_threads() == threads
+    assert torch.empty(0).device == caller_device
+    assert calls == dict(features=1, networks=2, saves=2)
+    assert accelerator_seed_calls == []

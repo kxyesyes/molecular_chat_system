@@ -83,7 +83,7 @@ def make_forward_bundle(tmp_path, monkeypatch, *, family, bundle_id):
     threads = torch.get_num_threads()
     try:
         torch.set_num_threads(1)
-        with torch.random.fork_rng(devices=[]):
+        with torch.device("cpu"), torch.random.fork_rng(devices=[]):
             # fork_rng(devices=[]) restores CPU only; never seed/queue accelerators.
             torch.random.default_generator.manual_seed(71)
             path = make_package(tmp_path, monkeypatch, family, package_id=prefix)
