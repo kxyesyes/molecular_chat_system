@@ -124,7 +124,7 @@ class ChildResult:
 
 **Files:** 新增support及其单测；修改现有两个family fixture/inference文件。
 
-- [ ] **Step 1 — 写默认关闭和显式选择的RED测试。** 单测使用显式dict，不读取本机模型配置。证明关闭时连其它字段也不访问：
+- [x] **Step 1 — 写默认关闭和显式选择的RED测试。** 单测使用显式dict，不读取本机模型配置。证明关闭时连其它字段也不访问：
 
 ```python
 def test_disabled_gate_does_not_read_other_configuration():
@@ -144,7 +144,7 @@ def test_enabled_requires_both_explicit_bundle_ids():
 
 另参数化`''/0/true/yes/1`，只有字符串`'1'`启用；缺一个ID、同一ID、非法ID、相对/UNC源路径失败。关闭时patch Path.stat/open抛错仍应通过，证明未触文件系统。
 
-- [ ] **Step 2 — 运行RED。**
+- [x] **Step 2 — 运行RED。**
 
 ```powershell
 & $py -B -m pytest tests/test_activity_family_acceptance_support.py -q -p no:cacheprovider --tb=short
@@ -152,7 +152,7 @@ def test_enabled_requires_both_explicit_bundle_ids():
 
 预期因待建模块/接口缺失失败；保留失败原因，不当作真实依赖问题。
 
-- [ ] **Step 3 — 实现纯配置解析，提取现有真实RGNN合成构造。** 不复写scientific predictor。将现有inference测试中seed71、channels8、CPU、真实torch.save逻辑提取为`make_forward_bundle(tmp_path, monkeypatch, *, family, bundle_id)`，返回`(registry, models)`；生成package ID和model前缀随family区分。使用`torch.random.fork_rng`，恢复线程数，所有文件在tmp_path。
+- [x] **Step 3 — 实现纯配置解析，提取现有真实RGNN合成构造。** 不复写scientific predictor。将现有inference测试中seed71、channels8、CPU、真实torch.save逻辑提取为`make_forward_bundle(tmp_path, monkeypatch, *, family, bundle_id)`，返回`(registry, models)`；生成package ID和model前缀随family区分。使用`torch.random.fork_rng`，恢复线程数，所有文件在tmp_path。
 
 ```python
 def test_forward_fixture_is_temporary_and_has_no_global_selection(tmp_path, monkeypatch):
@@ -166,19 +166,21 @@ def test_forward_fixture_is_temporary_and_has_no_global_selection(tmp_path, monk
 
 离线chain fixture只接受测试合成的目录，强制禁用全局模型fallback、CSV重开和网络transport；CPU设备是显式选择。不要用生成fixture前的ActivityPredictor全局加载去发现磁盘模型。
 
-- [ ] **Step 4 — GREEN及旧fixture回归。**
+- [x] **Step 4 — GREEN及旧fixture回归。**
 
 ```powershell
 & $py -B -m pytest tests/test_activity_family_acceptance_support.py tests/test_activity_family_inference_integration.py tests/test_activity_family_models.py -q -p no:cacheprovider --tb=short
 ```
 
-- [ ] **Step 5 — 显式提交该批文件。** `test: add isolated family acceptance configuration fixtures`。
+- [x] **Step 5 — 显式提交该批文件。** `test: add isolated family acceptance configuration fixtures`。
 
 ## Task 2: 源只读快照、精确bundle和证据核对
 
+实施完成（2026-09-19）：`321c858`、`35d9d09`、`6022c6e`；独立双审通过，306 passed、3 skipped（Windows symlink权限）、2 warnings。
+
 **Files:** support、support单测。
 
-- [ ] **Step 1 — 写RED。** 用Task1合成源注册两个同家族bundle，明确选择较早的一组；源原本active选择另一组。以下断言禁止默认/最后选择：
+- [x] **Step 1 — 写RED。** 用Task1合成源注册两个同家族bundle，明确选择较早的一组；源原本active选择另一组。以下断言禁止默认/最后选择：
 
 ```python
 def assert_snapshot_selection(snapshot, selected_id, expected_models):
@@ -193,9 +195,9 @@ def assert_snapshot_selection(snapshot, selected_id, expected_models):
 
 参数化负例：错家族、缺阶段、重复model ID、未知bundle、registry/card重复JSON键、unsupported version、坏hash、源变化、大小超限、目录代替文件、`../`、Windows反斜线、ADS、设备名、symlink/reparse、共享文件名/大小写碰撞。超限用小测试常量或稀疏临时文件，不分配512MiB数组。
 
-- [ ] **Step 2 — 运行Task2测试为RED。** 使用Task1相同support测试命令，确认新增边界失败。
+- [x] **Step 2 — 运行Task2测试为RED。** 使用Task1相同support测试命令，确认新增边界失败。
 
-- [ ] **Step 3 — 实现快照核心。** 先受限只读严格解析registry，获取指定bundle完整封存记录，再取得两个selected model records；拒绝无关联资产引用。复制每个文件使用独占新建、读取前lstat和打开后fstat、边读边限额/摘要、读后身份复核。不要先resolve再检查symlink，否则会丢失链接信息。
+- [x] **Step 3 — 实现快照核心。** 先受限只读严格解析registry，获取指定bundle完整封存记录，再取得两个selected model records；拒绝无关联资产引用。复制每个文件使用独占新建、读取前lstat和打开后fstat、边读边限额/摘要、读后身份复核。不要先resolve再检查symlink，否则会丢失链接信息。
 
 副本state精确投影为当前version3：
 
@@ -214,8 +216,8 @@ def minimal_state(bundle, selected_models):
 
 随后**仅在副本**调用ActivityModelRegistry与select_family_bundle，使现有权重/card/数据封存证据一致性校验真正执行；不调用register_family_bundle重开数据。复制前后及完成前核对源registry/四资产摘要；最终报告用`registry`、`classification.weights`等逻辑名。
 
-- [ ] **Step 4 — GREEN。** support+family_models+family_predictor+inference回归；Linux必须实际覆盖symlink，Windows不可创建链接时单列skip，reparse属性负例仍运行。
-- [ ] **Step 5 — 显式提交。** `test: pin and isolate selected family acceptance assets`。
+- [x] **Step 4 — GREEN。** support+family_models+family_predictor+inference回归；Linux必须实际覆盖symlink，Windows不可创建链接时单列skip，reparse属性负例仍运行。
+- [x] **Step 5 — 显式提交。** `test: pin and isolate selected family acceptance assets`。
 
 ## Task 3: 环境白名单、子进程所有权与超时
 
