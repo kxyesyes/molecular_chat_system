@@ -89,6 +89,7 @@
 - CI静态发现`*_test.js`不会自动执行新DOM驱动的15个默认自测；本批将补显式命令及契约测试，并为Python root组明确Node依赖和关闭真实验收开关。保留原五组Python、旧10个Node脚本和最终质量门。
 - 全批SPEC/QUALITY、draft PR和最新Linux CI尚未完成；没有合并授权。历史报告展示残差、真实训练权重、外部主模型、真实浏览器和部署仍未执行。
 - `44e8f4ba`最小修正三文件：确定性时间戳RED与科学字段断言；CI显式DOM自测、root Node20、全局真实开关0。RED5 failed/4 passed→聚焦18 passed/1 skipped；CI契约7 passed、默认真实入口1 skipped；11组680 passed/5 skipped/2 warnings（262.72秒）。旧10个Node、新DOM15项、两份语法及diff检查通过。实施者compile+清理组合再次被策略整体拒绝、没有执行；父级此前短缓存compile已成功，生产源码未变。全批独立审查以44e8f4ba为代码head。
+- 父级在Task7提交后单独重跑短缓存`compileall -q src scripts`通过，缓存留在系统temp，未执行删除。全批独立SPEC批准44e8f4ba：chain/process/默认真实入口/CI契约152 passed、2 skipped（183.50秒），support风险选择83 passed/122 deselected，实际双家族及分别损坏家族的6个worker探针3 passed（46.12秒）；Node15+18项、语法与diff通过。全批QUALITY仍待完成，Linux CI尚未运行。
 
 ## 后续真实权重执行（本轮未执行）
 
