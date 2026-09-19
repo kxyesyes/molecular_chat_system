@@ -19,7 +19,7 @@
 | 2. 精确bundle快照与摘要 | 完成，SPEC/QUALITY均通过，306 passed、3 skipped |
 | 3. 隔离进程与资源回收 | 完成，SPEC/QUALITY均通过，50 passed、1 skipped；Linux待CI |
 | 4. DOM fixture与生产渲染断言 | 完成，SPEC/QUALITY通过，旧18/18、新15/15 |
-| 5. 预测/API/逐轮决策/ASGI链路 | 三项漏检已修复，SPEC复审通过，QUALITY审查中 |
+| 5. 预测/API/逐轮决策/ASGI链路 | SPEC三项已关闭；QUALITY发现事件完整性漏检，修复中 |
 | 6. opt-in入口与报告 | 未实施 |
 | 7. 全回归、双审、PR | 未完成 |
 
@@ -71,3 +71,5 @@
 - 独立SPEC复跑231 passed/2 warnings（56.40秒）仍发现3项P2验收漏检：复用链路只含正向输入；WebSocket首个complete后停止读取遗漏后续重复终结/分子帧；无效输入测试没有核对公开失败内容。独立探针分别使额外终结/分子帧、伪completed+pIC50混入而仍通过。父级核对代码后要求补RED并修复；尚未批准Task5，不将这些探针等同已确认生产缺陷。
 - `82f2efe`补可复用拒绝用例与真实混合批次/DOM、读取到正常WebSocket关闭并核对完整帧、对比公开拒绝结果。实施者记录12项问题RED及额外边界RED，六组GREEN249 passed/2 warnings（87.33秒）；SPEC复审中。
 - 独立SPEC复审249 passed/2 warnings（87.27秒），原额外尾帧和伪completed+pIC50探针现在均正确失败，三项发现关闭并批准。QUALITY审查中；Task6逐入口计时与公开报告仍待实施。
+- QUALITY独立六组249 passed/2 warnings（87.29秒）后，用实际ASGI探针复现事件trace改写、task_completed重复、拒绝事件全部删除仍passed（3个预期拒绝断言失败）。已核对现有检查只覆盖部分事件名/顺序，要求共享事件一致性断言及RED/GREEN修复；该发现是验收漏检，不声明生产已发生串线。
+- `a5409df`新增共享内部/公开事件一致性检查：实施者原3个ASGI探针RED，Task5 GREEN56 passed，六组255 passed/2 warnings；SPEC增量与QUALITY复审待完成。
