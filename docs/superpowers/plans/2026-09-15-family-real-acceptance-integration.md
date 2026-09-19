@@ -221,9 +221,11 @@ def minimal_state(bundle, selected_models):
 
 ## Task 3: 环境白名单、子进程所有权与超时
 
+实施完成（2026-09-19）：`1dcc610`；SPEC/QUALITY均通过，50 passed、1 skipped。Windows真实短进程验证完成，Linux执行保留为Task7 CI门禁。
+
 **Files:** process support、process tests；support报告错误映射。
 
-- [ ] **Step 1 — 写RED。** 以短Python子进程验证允许环境；只使用synthetic值，禁止枚举/传递真实key：
+- [x] **Step 1 — 写RED。** 以短Python子进程验证允许环境；只使用synthetic值，禁止枚举/传递真实key：
 
 ```python
 def test_child_environment_is_an_allowlist(tmp_path):
@@ -242,13 +244,13 @@ OS继承只读取SystemRoot/WINDIR/PATH/PATHEXT/SYSTEMDRIVE五项；TMP/TEMP/TMP
 
 真实短子进程测试：正常退出、非零退出、睡眠超时、派生睡眠后代、主进程先退出而后代仍运行、取消、输出超限；断言无存活的本次后代、错误码和临时清理。不得只mock subprocess就声称回收有效。
 
-- [ ] **Step 2 — 跑RED。**
+- [x] **Step 2 — 跑RED。**
 
 ```powershell
 & $py -B -m pytest tests/test_activity_family_acceptance_process.py -q -p no:cacheprovider --tb=short
 ```
 
-- [ ] **Step 3 — 建立验收专属薄进程适配。** 复用`src/docking/adapters/base.py`的Job Object挂载/受限捕获/终止回收原语，不调用docking工具、不修改生产适配器、不新增进程管理平台。Windows以测试局部Popen factory传env，先挂载suspended进程再resume；POSIX使用Popen(env=白名单,start_new_session=True)和现有capture/group cleanup。禁止全局patch Popen或临时清空父os.environ。
+- [x] **Step 3 — 建立验收专属薄进程适配。** 复用`src/docking/adapters/base.py`的Job Object挂载/受限捕获/终止回收原语，不调用docking工具、不修改生产适配器、不新增进程管理平台。Windows以测试局部Popen factory传env，先挂载suspended进程再resume；POSIX使用Popen(env=白名单,start_new_session=True)和现有capture/group cleanup。禁止全局patch Popen或临时清空父os.environ。
 
 Windows环境注入的复用点明确为现有可注入工厂：
 
@@ -265,8 +267,8 @@ def windows_spawn(args, cwd, env):
 
 失败报告不包含stdout/stderr/raw exception。CPU子进程异常、Node超时/缺失、报告缺失都不能通过。KeyboardInterrupt同样进入已拥有进程回收；清理失败单独failed，保留临时目录是故障证据而非成功清理。
 
-- [ ] **Step 4 — GREEN。** process测试分别在Windows和Linux实际执行；已有CommandAdapter相关测试随全回归一起验证。只在确认owned tree回收后清理父目录。
-- [ ] **Step 5 — 显式提交。** `test: supervise isolated family acceptance processes`。
+- [x] **Step 4 — GREEN。** process测试分别在Windows和Linux实际执行；已有CommandAdapter相关测试随全回归一起验证。只在确认owned tree回收后清理父目录。
+- [x] **Step 5 — 显式提交。** `test: supervise isolated family acceptance processes`。
 
 ## Task 4: 显式复用生产renderer的DOM测试fixture
 
@@ -418,6 +420,8 @@ def assert_report_scope(report, mode):
 - [ ] **Step 3 — 实现报告投影和聚合。** 复用`src/agent/persistence/redaction.py:sanitize_bounded`和`scripts/run_decision_chat_acceptance.py:open_report`，导入后不得执行main或provider配置读取。保留逻辑ID和hash，不投影任意模型metadata。sanitize发生必要证据截断/缺失时report failed，不删除失败再算通过率。
 
 成功条件是全部必需case通过、source复核通过、子进程exit0、所有权已释放、临时清理完成；清理/源复核状态由实际完成方填写。一个family失败另一个通过为partial；全部失败为failed；显式关闭为skipped。预期拒绝的case验收passed仍保留scientific result_status failed/rejected。`production_selection=unchanged`只用于源状态复核通过的报告；复核未完成为`not_verified`，源状态变化为`changed`，不能在失败报告中预填unchanged。
+
+Task3内部协议区分传输与科学状态：成功收集的信封为`{status: "passed", scientific_report: {...}}`，内层科学报告仍可failed/partial并保留source_check。`ChildResult.status`不是科学通过依据；顶层failed仅记录传输错误，不返回未可信报告。
 
 输出用新UUID文件名`outputs/agent_evaluation/family_acceptance_<id>.json`、allow_nan=False，禁止覆盖已有文件；只写完成投影的有界结果。不传递原始stdout、错误堆栈、环境全集、source绝对路径或私有训练元数据。异常/超时缺子报告时父仅写固定错误与`source_check=not_completed`，不读源补验。
 

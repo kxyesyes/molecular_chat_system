@@ -17,8 +17,8 @@
 |---|---|
 | 1. 配置与合成前向fixture | 完成，SPEC/QUALITY均通过，最终135 passed |
 | 2. 精确bundle快照与摘要 | 完成，SPEC/QUALITY均通过，306 passed、3 skipped |
-| 3. 隔离进程与资源回收 | 实施中，尚未验收 |
-| 4. DOM fixture与生产渲染断言 | 未实施 |
+| 3. 隔离进程与资源回收 | 完成，SPEC/QUALITY均通过，50 passed、1 skipped；Linux待CI |
+| 4. DOM fixture与生产渲染断言 | 实施中 |
 | 5. 预测/API/逐轮决策/ASGI链路 | 未实施 |
 | 6. opt-in入口与报告 | 未实施 |
 | 7. 全回归、双审、PR | 未完成 |
@@ -29,6 +29,7 @@
 - 实施前Agent/model/fallback联合基线：3288 passed、2 skipped、7 warnings，123.08秒；没有把两个skip计为科研通过。运行命令为计划Task7 Step2的Python联合回归命令，使用指定MedChat解释器并关闭真实验收开关。
 - CI实际配置是`.github/workflows/quality.yml`；root pytest组自动收集根目录新增Python测试，static组只运行`*_test.js`。新的DOM验收驱动需要由其Python链路/Node既有测试显式覆盖，不能只创建文件就声称CI覆盖。
 - Python科学环境固定为MedChat Conda解释器；不使用缺RDKit/LangGraph的默认环境。
+- Task3实施期间父级补跑既有家族API、Agent家族工具、decision_chat及transport四组：196 passed，5.98秒；使用MedChat解释器、`-B -m pytest ... -q -p no:cacheprovider --tb=short`及真实开关0，未运行未来Task5链路。
 
 本记录会随每项真实执行与审查结果更新，未标完成的项不可解释为通过。
 
@@ -49,3 +50,10 @@
 - 首次SPEC发现P1：verify_source重新跟随修改后的源registry，在报source_changed之前读取了另一组资产。`35d9d09`改为先核对registry摘要、只解析该次固定字节、匹配快照身份后读原资产、结束再查registry。实施者RED3项→聚焦14 passed→全304 passed/3 skipped。
 - 独立SPEC复审7个合成重定向探针均通过（新资产打开次数0），完整304 passed/3 skipped/2 warnings，85.52秒；批准。QUALITY审查尚在进行。
 - QUALITY发现复核期间registry可能在四资产读取时改变；`6022c6e`将共享复核统一为registry→原四资产→registry，不声称跨文件原子性。实施者RED2项→聚焦18 passed→全306 passed/3 skipped/2 warnings。独立SPEC增量18 passed；独立QUALITY重跑原复现及四组回归306 passed/3 skipped/2 warnings（89.88秒），批准，无剩余审查项。
+
+## Task3证据
+
+- `1dcc610`：只修改tests内进程support及测试，复用已有CommandAdapter原语，环境白名单、限时及后代进程回收。实施者记录RED28项→最终50 passed/1 skipped（三次连续通过）；Linux实际执行尚待CI，不冒充完成。
+- 父级既有`tests/test_docking_command_cancellation.py`完整回归48 passed/1 skipped，5.75秒。未启动对接工具或科学服务。
+- 独立SPEC运行50 passed/1 skipped并批准；额外探针确认成功传输信封内的科学failed/partial报告及source_check能够完整保留。Task6必须按内层科学状态汇总，不能仅因ChildResult.status=passed就声称科研通过；顶层failed仅用于传输错误。QUALITY审查中，跨平台实际执行仍待CI。
+- 独立QUALITY运行50 passed/1 skipped，另8个有界探针通过，批准；明确只验证Windows，Linux留给CI。没有剩余审查项，未修改生产适配器。
