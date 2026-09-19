@@ -53,7 +53,7 @@ tests/activity_family_acceptance_dom.js and their existing test modules.
 - [x] Run the existing opt-in `tests/test_activity_family_real_acceptance.py` with the previously authorized exact PDE/BuChE bundle IDs supplied only as runtime environment settings. No discovery, external model calls, raw training data access or source asset writes.
 - [x] Verify source hashes and cleanup, per-row execution/result status, unchanged raw predictions compared with the prior local report, and explicit partial conflict rendering. Report engineering acceptance separately from model consistency/performance.
 - [x] Update docs/activity_family_inference.md, docs/activity_family_api.md and docs/handoff/latest.md with accurate results and limitations.
-- [ ] Explicitly stage only this task's code/tests/docs, commit, create one draft PR targeting main and attach it. Never merge without separate explicit authorization.
+- [x] Explicitly stage only this task's code/tests/docs, commit, create one draft PR targeting main and attach it. Never merge without separate explicit authorization.
 
 ## Execution environment and completion criteria
 

@@ -14,7 +14,7 @@ PR #29 已合并为 `86639344c472549fb9552a9eaae1682c72b86139`；下方旧记录
 与上次 100 个预测字段（含空值）完全相同，源哈希/生产选择未变，临时资源清理完成。
 未调用外部主模型、未重训或激活生产模型；不能据此声称预测性能达标。
 
-详见[本批交接及真实报告位置](family-prediction-review.md)。Draft PR 发布记录随后补齐；
+详见[本批交接及真实报告位置](family-prediction-review.md)。[Draft PR #30](https://github.com/kxyesyes/molecular_chat_system/pull/30) 已创建，未合并；
 下一步在指定 PR 审查/CI 通过并获得明确授权后再合并，不自动接管生产入口。
 
 ## 家族真实权重验收：代码完成，draft PR待合并（2026-09-19）

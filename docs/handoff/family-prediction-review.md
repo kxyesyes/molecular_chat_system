@@ -109,3 +109,18 @@ Task2 最终四文件联合回归（chain/support/process/inference_integration�
 
 不读取原始训练数据或密钥，不更改权重/注册选择，不部署或重启服务，
 不调用外部主模型，不以冲突展示修复宣称模型性能提升。
+
+## 交付与额外回归
+
+- 核心提交 `358f542`，验收接线 `dfda3dd`，文档 `ac0449f`。
+- [Draft PR #30](https://github.com/kxyesyes/molecular_chat_system/pull/30)，目标 main；
+  已附加当前任务，未合并、未部署。CI 以该 PR 最新 head 检查为准，创建时尚未完成。
+- 额外广泛回归命令：`python -B -m pytest tests --ignore=tests/agent --ignore=tests/sandbox_broker --ignore=tests/task_runtime -q -p no:cacheprovider --tb=short`，
+  显式 `MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE=0`：2851 passed、146 skipped、
+  171 subtests passed、6 个已有 warnings，856.47 秒。146 个跳过不计入通过数。
+  该长运行在最后的报告校验修订前已开始/收集，不能作为新测试全量结果；
+  最终六个验收相关文件由修订后四模块联合 681 passed/4 skipped 单独覆盖。
+- 凭据形状扫描仅打印命中文件名，本批无 tracked 非文档命中；运行报告被 Git 忽略，
+  没有权重/注册库/运行输出进入提交。
+- 后续仅在 CI/审查通过并得到具体 PR 合并授权后合并。模型分歧的性能研究或重新训练、
+  生产入口启用与外部主模型验收仍需独立任务，不能由本 PR 自动扩大范围。
