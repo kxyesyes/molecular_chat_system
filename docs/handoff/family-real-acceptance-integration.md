@@ -17,7 +17,7 @@
 |---|---|
 | 1. 配置与合成前向fixture | 完成，SPEC/QUALITY均通过，最终135 passed |
 | 2. 精确bundle快照与摘要 | 完成，SPEC/QUALITY均通过，306 passed、3 skipped |
-| 3. 隔离进程与资源回收 | 未实施 |
+| 3. 隔离进程与资源回收 | 实施中，尚未验收 |
 | 4. DOM fixture与生产渲染断言 | 未实施 |
 | 5. 预测/API/逐轮决策/ASGI链路 | 未实施 |
 | 6. opt-in入口与报告 | 未实施 |

@@ -1,6 +1,6 @@
 # 历史代码集成状态台账
 
-日期：2026-09-15。核对 main `57680aa`（PR #26、#27、#28 已授权合并；此前已实施批次含 #15、#20、#23、#25）；总状态 **partial**。
+日期：2026-09-19。核对 main `57680aa`（PR #26、#27、#28 已授权合并；此前已实施批次含 #15、#20、#23、#25）；总状态 **partial**。
 用户要求先完成代码集成，目标服务器验收 deferred。局部 PR 通过不代表全部集成。
 实施顺序见 [总体计划](../superpowers/plans/2026-09-12-historical-integration-completion.md)。
 
@@ -26,7 +26,7 @@
 | ADMET完整输入与异常隔离 | tools/admet_predictor.py、molecular_input.py | PR #25已获具体授权合并为59e8cde；双审、2723 passed/1 skipped、9Node/compileall/contract及CI run34698556963全7项通过。不把规则结果冒充模型，不修复本批以外的后端部分行失败语义。 |
 | 隔离服务端聊天桥接 | `9312bf5`，web/decision_chat.py、ChatHandler、test_decision_chat*.py | PR #27 获具体授权 squash 为 `40fcd2a`；整树与 head7cc54ff 一致，双审、3202 passed/1 skipped、9Node、compile/contract、CI run34945834822全7项通过。详见 [聊天桥接交接](isolated-chat-bridge-integration.md)。不自动接管生产首页。 |
 | 隔离验收页面/脚本 | `9312bf5`，decision_lab.py、静态 lab、run_decision 脚本 | PR #28已获明确授权 squash 为57680aa；整树与已审查head6ee6d1b一致，最新CI run34950563640全7项通过。首轮旧Starlette构造器失败与修复证据保留在[交接](isolated-decision-lab-integration.md)。仅离线模型替身+真实 RDKit 验证，不等于外部 API 或真实权重验收。 |
-| 真实权重全链路测试 | `9312bf5`，tests/test_activity_family_real_acceptance.py | 用户已确认方案A；[实施计划](../superpowers/plans/2026-09-15-family-real-acceptance-integration.md)完成，代码尚待实施。本批仅合成资产工程验收；真实目录和精确bundle另行配置授权，不把合成前向当真实模型验收。 |
+| 真实权重全链路测试 | `9312bf5`，tests/test_activity_family_real_acceptance.py | 方案A实施中，Task1配置/fixture与Task2只读精确快照已双审通过，Task3进程监督正在实施；尚未创建本批PR。进度与实际测试见[交接](family-real-acceptance-integration.md)。真实目录和精确bundle另行配置授权，不把合成前向当真实模型验收。 |
 | 沙盒产物持久化稳定性 | main 既有 tests/sandbox_broker/test_service.py | 本轮扩大回归发生 1 次 artifact_failed 后无 manifest；单项及模块 172 项重跑通过，触发因素待查。保留失败证据，不放宽 fail-closed。 |
 
 ## 明确不回退的保护
