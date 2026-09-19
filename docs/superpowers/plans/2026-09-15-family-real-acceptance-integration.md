@@ -440,7 +440,7 @@ Task3内部协议区分传输与科学状态：成功收集的信封为`{status:
 
 **Files:** 本计划状态、设计状态、三份交接/台账；必要的本批修正。
 
-- [ ] **Step 1 — 聚焦回归。** 本地仍设置`MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE=0`：
+- [x] **Step 1 — 聚焦回归。** 本地仍设置`MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE=0`：
 
 ```powershell
 & $py -B -m pytest tests/test_activity_family_acceptance_support.py tests/test_activity_family_acceptance_process.py tests/test_activity_family_acceptance_chain.py tests/test_activity_family_real_acceptance.py tests/test_activity_family_inference_integration.py tests/test_activity_family_api.py tests/test_activity_family_models.py tests/test_activity_family_predictor.py tests/agent/test_family_activity_tool.py -q -p no:cacheprovider --tb=short
@@ -448,7 +448,7 @@ Task3内部协议区分传输与科学状态：成功收集的信封为`{status:
 
 预期离线工程测试通过，唯一真实项明确skip；记录实际数量，不预填通过数。
 
-- [ ] **Step 2 — Agent及已有model/fallback联合回归。**
+- [x] **Step 2 — Agent及已有model/fallback联合回归。**
 
 ```powershell
 & $py -B -m pytest tests/agent tests/test_agent_decision_model.py tests/test_openai_compatible_model.py tests/test_agent_anti_hallucination_fallbacks.py tests/test_agent_platform_health_check.py tests/test_admet_predictor_fallback.py -q -p no:cacheprovider --tb=short
@@ -464,12 +464,14 @@ git diff --check
 
 现有10个Node脚本都保留；新DOM驱动额外执行。compile缓存需在确认目录位于系统temp且进程已退出后清理，不使用未经检查的递归删除。不得运行real/all模式或带实际模型配置入口。
 
-- [ ] **Step 3 — 独立规格审查，再独立质量审查。** 提供精确head、指定MedChat解释器、该设计/计划、原始工作树禁改边界、实际RED/GREEN记录。重要发现必须最小修复后重测；CI缺依赖/平台特定失败如实保留，不重复重跑冒充修复。
+- [x] **Step 3 — 独立规格审查，再独立质量审查。** 提供精确head、指定MedChat解释器、该设计/计划、原始工作树禁改边界、实际RED/GREEN记录。重要发现必须最小修复后重测；CI缺依赖/平台特定失败如实保留，不重复重跑冒充修复。
 
-- [ ] **Step 4 — 更新台账。** PR #28确认为已合并57680aa、CI34950563640全7项；保留初次Starlette CI失败记录。本批状态只能写“代码集成/离线合成验收”，另列“真实训练权重、外部主模型、真实浏览器、生产部署未执行”。历史报告展示残差仍是另一批，不因这次完成而关闭。
+- [x] **Step 4 — 更新台账。** PR #28确认为已合并57680aa、CI34950563640全7项；保留初次Starlette CI失败记录。本批状态只能写“代码集成/离线合成验收”，另列“真实训练权重、外部主模型、真实浏览器、生产部署未执行”。历史报告展示残差仍是另一批，不因这次完成而关闭。
 
-- [ ] **Step 5 — 发布前检查并显式暂存。** 确认没有weights/CSV/JSON运行报告/env/log/temp进入diff，列出实际文件后逐项git add。分支始终不是main；检查原始脏工作树未变化。
-- [ ] **Step 6 — 创建单主题draft PR到main，检查最新head Linux CI及审查意见。** CI缺少新测试时必须修正测试收集/命令范围再重跑，不能仅凭旧suite绿灯通过。仅在用户明确指定该PR授权后合并，不推断本次“确认”是未来PR合并授权。
+- [x] **Step 5 — 发布前检查并显式暂存。** 确认没有weights/CSV/JSON运行报告/env/log/temp进入diff，列出实际文件后逐项git add。分支始终不是main；检查原始脏工作树未变化。
+- [x] **Step 6 — 创建单主题draft PR到main，检查最新head Linux CI及审查意见。** CI缺少新测试时必须修正测试收集/命令范围再重跑，不能仅凭旧suite绿灯通过。仅在用户明确指定该PR授权后合并，不推断本次“确认”是未来PR合并授权。
+
+Task7发布证据：draft PR #29，代码终点44e8f4ba全批双审通过；e409125的Linux CI run35443974454全7项成功，未解决审查线程0。后续文档提交仍须核对PR最新head CI；本计划不替代实时检查。合成工程完成不代表真实权重、外部模型、浏览器或部署验收完成。
 
 ## 自检映射与实施交接
 
@@ -488,6 +490,6 @@ git diff --check
 - [x] 已核对没有用旧Supervisor或合成前向替代真实训练权重验收。
 - [x] 已明确Windows late-create/所有权不确定不能冒充正常清理。
 - [x] 选择执行方式：用户选择1，子代理逐任务开发/两阶段审查。
-- [ ] 实施各Task并将实际RED/GREEN、提交及CI结果写入交接。
+- [x] 实施各Task并将实际RED/GREEN、提交及CI结果写入交接。
 
-本文件是实施计划，不是整体验收完成声明。Task1–6已实施并通过双审，Task7正在完成测试误报修正、CI覆盖与全批审查；后续各项以勾选状态及交接证据为准。未读取真实权重，未调用外部模型。
+本批七项代码集成与离线工程任务已实施，双审、PR与Linux CI证据见交接；文档后续head的CI以PR实时检查为准。尚未合并，未读取真实权重，未调用外部模型，不是整体科研/生产验收完成声明。

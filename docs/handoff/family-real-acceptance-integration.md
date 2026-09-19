@@ -21,7 +21,7 @@
 | 4. DOM fixture与生产渲染断言 | 完成，SPEC/QUALITY通过，旧18/18、新15/15 |
 | 5. 预测/API/逐轮决策/ASGI链路 | 完成，SPEC/QUALITY复审通过，六组255 passed |
 | 6. opt-in入口与报告 | 完成，SPEC/QUALITY均通过；父级11组680 passed/5 skipped |
-| 7. 全回归、双审、PR | 本地回归和全批SPEC/QUALITY均通过；draft PR与Linux CI发布验证中 |
+| 7. 全回归、双审、PR | 代码与本地/独立审查完成，draft PR #29；e409125首轮Linux CI全7项成功，后续文档head以PR最新检查为准 |
 
 ## 已取得的验证证据
 
@@ -91,6 +91,14 @@
 - `44e8f4ba`最小修正三文件：确定性时间戳RED与科学字段断言；CI显式DOM自测、root Node20、全局真实开关0。RED5 failed/4 passed→聚焦18 passed/1 skipped；CI契约7 passed、默认真实入口1 skipped；11组680 passed/5 skipped/2 warnings（262.72秒）。旧10个Node、新DOM15项、两份语法及diff检查通过。实施者compile+清理组合再次被策略整体拒绝、没有执行；父级此前短缓存compile已成功，生产源码未变。全批独立审查以44e8f4ba为代码head。
 - 父级在Task7提交后单独重跑短缓存`compileall -q src scripts`通过，缓存留在系统temp，未执行删除。全批独立SPEC批准44e8f4ba：chain/process/默认真实入口/CI契约152 passed、2 skipped（183.50秒），support风险选择83 passed/122 deselected，实际双家族及分别损坏家族的6个worker探针3 passed（46.12秒）；Node15+18项、语法与diff通过。全批QUALITY仍待完成，Linux CI尚未运行。
 - 全批独立QUALITY批准44e8f4ba：support/process/默认入口/CI契约261 passed/5 skipped；链路风险选择26 passed/67 deselected；独立两家族各19类损坏、数值容差、实际ASGI篡改探针4 passed；Node15/18项、语法及diff通过。各组相同2项既有警告。无剩余重要审查意见；仅代码发布认可，不是合并授权。原始混杂工作树13项保持不变，凭据模式检查仅输出匹配文件名、未发现匹配；没有资产、运行报告或src进入本批修改。
+
+## 发布记录
+
+- [Draft PR #29](https://github.com/kxyesyes/molecular_chat_system/pull/29)，目标main，尚未合并；分支`codex/family-real-acceptance-integration`。代码审查终点44e8f4ba，后续仅交接文档更新。
+- head `e409125`的[Linux CI run 35443974454](https://github.com/kxyesyes/molecular_chat_system/actions/runs/35443974454)全7项成功：五组Python、static-quality、offline-quality。日志确认root使用Node20.20.2；新DOM自测属于static显式命令，真实权重开关始终0。
+- Python日志汇总：agent 3198 passed/1 skipped；sandbox-api 153 passed；sandbox-core 1928 passed/4 skipped；task-runtime 1550 passed/3 skipped；root 2799 passed/78 skipped（476.53秒）。合计9628 passed/86 skipped；这些skip不计为科学通过，未逐项重新归因既有全部skip。已有大量依赖弃用警告仍保留，没有因本批而屏蔽。
+- 本地与Linux都仅做合成资产工程验收。真实权重、外部主模型、浏览器、生产部署及原始reporting残差依然未完成。
+- 首次push遇TLS握手错误，保持证书校验后重试成功；首次创建PR连接失败，先确认没有已创建的PR再重试，最终只有#29。未执行合并。当前无未解决GitHub审查线程；文档更新后的最新head CI应查看PR检查，不能把本条旧head结果冒充新head结果。
 
 ## 后续真实权重执行（本轮未执行）
 
