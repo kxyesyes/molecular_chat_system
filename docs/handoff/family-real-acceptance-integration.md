@@ -19,7 +19,7 @@
 | 2. 精确bundle快照与摘要 | 完成，SPEC/QUALITY均通过，306 passed、3 skipped |
 | 3. 隔离进程与资源回收 | 完成，SPEC/QUALITY均通过，50 passed、1 skipped；Linux待CI |
 | 4. DOM fixture与生产渲染断言 | 完成，SPEC/QUALITY通过，旧18/18、新15/15 |
-| 5. 预测/API/逐轮决策/ASGI链路 | 首次SPEC未通过，正在修复3项验收漏检 |
+| 5. 预测/API/逐轮决策/ASGI链路 | 三项漏检已修复，SPEC复审通过，QUALITY审查中 |
 | 6. opt-in入口与报告 | 未实施 |
 | 7. 全回归、双审、PR | 未完成 |
 
@@ -69,3 +69,5 @@
 
 - `74d84f0`实现者自测Task5 32 passed，六组联合231 passed/2 warnings（56.74秒）；科学结果来自合成RGNN真实前向，不是外部模型。
 - 独立SPEC复跑231 passed/2 warnings（56.40秒）仍发现3项P2验收漏检：复用链路只含正向输入；WebSocket首个complete后停止读取遗漏后续重复终结/分子帧；无效输入测试没有核对公开失败内容。独立探针分别使额外终结/分子帧、伪completed+pIC50混入而仍通过。父级核对代码后要求补RED并修复；尚未批准Task5，不将这些探针等同已确认生产缺陷。
+- `82f2efe`补可复用拒绝用例与真实混合批次/DOM、读取到正常WebSocket关闭并核对完整帧、对比公开拒绝结果。实施者记录12项问题RED及额外边界RED，六组GREEN249 passed/2 warnings（87.33秒）；SPEC复审中。
+- 独立SPEC复审249 passed/2 warnings（87.27秒），原额外尾帧和伪completed+pIC50探针现在均正确失败，三项发现关闭并批准。QUALITY审查中；Task6逐入口计时与公开报告仍待实施。
