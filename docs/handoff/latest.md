@@ -1,5 +1,16 @@
 # Latest handoff
 
+## 家族真实权重验收：代码完成，draft PR待合并（2026-09-19）
+
+当前任务分支为 `codex/family-real-acceptance-integration`，独立工作树
+`family-real-acceptance-integration`，基于 main `57680aa`（PR #28 已授权合并）。
+用户确认方案A：本批先集成验收代码，不读取真实权重、不调用外部模型、不启用生产模型。
+
+已批准的[设计](../superpowers/specs/2026-09-15-family-real-acceptance-design.md)与
+[逐步实施计划](../superpowers/plans/2026-09-15-family-real-acceptance-integration.md)已落盘。
+用户已选择子代理逐任务TDD实施。Task1–6及Task7全批独立SPEC、QUALITY均通过；家族相关11组680 passed、5 skipped，既有Agent/model/fallback联合回归3288 passed、2 skipped。[Draft PR #29](https://github.com/kxyesyes/molecular_chat_system/pull/29)已创建，e409125的Linux CI run35443974454全7项通过（Python合计9628 passed/86 skipped）；后续文档head以PR最新检查为准，尚未合并。完整证据见[本批交接](family-real-acceptance-integration.md)，不将离线工程通过当作真实权重验收。
+原始混杂工作树保持原样；真实权重验收、独立报告展示残差和部署验收仍未完成。
+
 ## 隔离验收页面与 CLI（2026-09-15）
 
 PR #26 逐轮决策 harness 已合并为 `4cef43b`；PR #27 服务端聊天桥接已获具体授权

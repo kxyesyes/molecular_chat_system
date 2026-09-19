@@ -360,7 +360,9 @@ test("registered submit handlers pass each form's own target and file/smiles", a
   ]);
 });
 
-(async () => {
+module.exports = {setup, cells, assertNoExecutableNodes};
+
+if (require.main === module) (async () => {
   let failed = 0;
   for (const {name, run} of tests) {
     try { await run(); console.log("PASS " + name); }

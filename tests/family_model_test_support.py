@@ -1,4 +1,5 @@
 """Synthetic package/card fixtures; no training or scientific performance claims."""
+import hashlib
 import json
 
 from src.activity import family_contract as fc
@@ -61,3 +62,50 @@ def register_bundle(registry, path, models, bundle_id="bundle-a"):
         bundle_id=bundle_id, family_dataset_path=path,
         classification_model_id=models["classification"]["model_id"],
         regression_model_id=models["regression"]["model_id"])
+
+
+def make_forward_bundle(tmp_path, monkeypatch, *, family, bundle_id):
+    """Register untrained, real CPU RGNN weights under the caller's pytest tmp_path.
+
+    Never accepts a source model directory or selects a global/family model.
+    Multiple families/bundles can share this temporary registry. Metrics remain
+    synthetic contract fixtures, not scientific performance measurements.
+    """
+    import torch
+    from rdkit.Chem.SaltRemover import SaltRemover
+    from src.activity.model_registry import ActivityModelRegistry
+    from src.activity.predictor import ActivityPredictor
+    from src.activity.rg_mpnn.Nets.ReduceGNN import RGNN
+
+    family_id = fc.resolve_activity_family(family)
+    bundle_id = ActivityModelRegistry._validate_model_id(bundle_id)
+    prefix = f"{family_id}-{bundle_id}"
+    threads = torch.get_num_threads()
+    try:
+        torch.set_num_threads(1)
+        with torch.device("cpu"), torch.random.fork_rng(devices=[]):
+            # fork_rng(devices=[]) restores CPU only; never seed/queue accelerators.
+            torch.random.default_generator.manual_seed(71)
+            path = make_package(tmp_path, monkeypatch, family, package_id=prefix)
+            registry = ActivityModelRegistry(tmp_path / "models")
+            # process_smiles only needs the salt remover. Bypass initialization
+            # and all checkpoint discovery; reuse the scientific featurizer.
+            features = ActivityPredictor.__new__(ActivityPredictor)
+            features.remover = SaltRemover()
+            pair = features.process_smiles("CCO")
+            config = dict(in_channels=pair[0].x.shape[1], edge_dim=pair[0].edge_attr.shape[1],
+                          channels=8, out_channels=1, num_passing_atom=2, num_passing_pool=1,
+                          num_passing_rg=1, num_passing_mol=1, dropout=0.)
+
+            def real_test_weights(registry, metadata):
+                network = RGNN(**config).to(torch.device("cpu")).eval()
+                weights = registry.models_dir / metadata["weights_file"]
+                torch.save({"state_dict": network.state_dict()}, weights)
+                metadata.update(model_config=config, random_seed=71,
+                                weights_sha256=hashlib.sha256(weights.read_bytes()).hexdigest())
+
+            models = make_pair(registry, path, prefix=prefix, before_register=real_test_weights)
+            register_bundle(registry, path, models, bundle_id=bundle_id)
+        return registry, models
+    finally:
+        torch.set_num_threads(threads)
