@@ -341,15 +341,28 @@ def snapshot_family(config, family_id, destination):
 
 
 def verify_source(config, snapshot):
-    """Compare a bounded fresh selection and logical digests, without any writes."""
+    """Verify pinned assets without following a changed source manifest."""
     try:
         from src.activity.family_models import require_pinned_record
+        from src.activity.model_registry import REGISTRY_STATE_FILE
 
-        bundle, models, _, digests = _source_baseline(config, snapshot.family_id)
+        _local_path(config.source)
+        registry_path = config.source / REGISTRY_STATE_FILE
+        digest, content = _bounded_file(registry_path, REGISTRY_LIMIT, retain=True)
+        if digest != snapshot.source_digests["registry"]:
+            _fail("source_changed")
+        # Parse ONLY these hash-matched bytes, never a subsequent registry read.
+        # Selection is pure; bind every filename/identity to the snapshot before
+        # opening any asset. Later registry reads below are digest checks only.
+        bundle, models, assets = _selection(config, snapshot.family_id, _strict_json(content))
         if bundle["bundle_id"] != snapshot.bundle_id:
             _fail("source_changed")
         require_pinned_record(models, snapshot.expected_models)
+        digests = {"registry": digest, **{key: item[2] for key, item in assets.items()}}
         if digests != snapshot.source_digests:
+            _fail("source_changed")
+        _recheck_source(config, assets, digests)
+        if _bounded_file(registry_path, REGISTRY_LIMIT)[0] != digest:
             _fail("source_changed")
         return True
     except ImportError:

@@ -695,6 +695,69 @@ def test_verify_source_rejects_snapshot_identity_tampering(snapshot_source, tmp_
         support.verify_source(config, replace(snapshot, **{field: value}))
 
 
+@pytest.mark.parametrize("when", ["before-verify", "after-registry-read", "during-asset-reads"])
+def test_verify_source_never_follows_redirected_bundle_assets(snapshot_source, tmp_path, monkeypatch, when):
+    import builtins
+    from copy import deepcopy
+    import io
+    import os
+    from src.activity.model_registry import REGISTRY_STATE_FILE
+
+    support = snapshot_api()
+    config, state, selected = snapshot_source
+    snapshot = support.snapshot_family(config, "pde-family", tmp_path / "copy")
+    redirected = deepcopy(state["family_bundles"]["newer-bundle"])
+    redirected["bundle_id"] = snapshot.bundle_id
+    pinned_names = {item[field] for item in selected.values()
+                    for field in ("weights_file", "model_card_file")}
+    newer_names = {item[field] for item in redirected["models"].values()
+                   for field in ("weights_file", "model_card_file")}
+    assert pinned_names.isdisjoint(newer_names)
+    forbidden_opens, pinned_opens, mutations = [], [], []
+
+    def redirect():
+        state["family_bundles"][snapshot.bundle_id] = redirected
+        save_source_state(config, state)
+        mutations.append(True)
+
+    def guard_open(original):
+        def guarded(file, *args, **kwargs):
+            if not isinstance(file, int):
+                path = Path(file)
+                if path.is_relative_to(config.source):
+                    if path.name in newer_names:
+                        forbidden_opens.append(path.name)
+                        raise AssertionError("verify_source must not open redirected assets")
+                    if path.name in pinned_names:
+                        pinned_opens.append(path.name)
+                    assert path.parent == config.source
+                    assert path.name in pinned_names | {REGISTRY_STATE_FILE}
+            return original(file, *args, **kwargs)
+        return guarded
+
+    bounded_file = support._bounded_file
+
+    def read_then_redirect(path, *args, **kwargs):
+        result = bounded_file(path, *args, **kwargs)
+        if not mutations and ((when == "after-registry-read" and path.name == REGISTRY_STATE_FILE)
+                              or (when == "during-asset-reads" and path.name in pinned_names)):
+            redirect()
+        return result
+
+    if when == "before-verify":
+        redirect()
+    monkeypatch.setattr(builtins, "open", guard_open(builtins.open))
+    monkeypatch.setattr(io, "open", guard_open(io.open))
+    monkeypatch.setattr(os, "open", guard_open(os.open))
+    monkeypatch.setattr(support, "_bounded_file", read_then_redirect)
+    with pytest.raises(ValueError, match="^source_changed$"):
+        support.verify_source(config, snapshot)
+    assert mutations == [True]
+    assert forbidden_opens == []
+    if when == "before-verify":
+        assert pinned_opens == [], "A changed registry must fail before any asset open"
+
+
 def test_snapshot_limits_are_fixed():
     support = snapshot_api()
     assert (support.REGISTRY_LIMIT, support.CARD_LIMIT, support.WEIGHTS_LIMIT,
