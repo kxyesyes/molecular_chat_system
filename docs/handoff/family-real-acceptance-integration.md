@@ -20,8 +20,8 @@
 | 3. 隔离进程与资源回收 | 完成，SPEC/QUALITY均通过，50 passed、1 skipped；Linux待CI |
 | 4. DOM fixture与生产渲染断言 | 完成，SPEC/QUALITY通过，旧18/18、新15/15 |
 | 5. 预测/API/逐轮决策/ASGI链路 | 完成，SPEC/QUALITY复审通过，六组255 passed |
-| 6. opt-in入口与报告 | SPEC三项问题已修复并独立复审批准；QUALITY审查中 |
-| 7. 全回归、双审、PR | 未完成 |
+| 6. opt-in入口与报告 | 完成，SPEC/QUALITY均通过；父级11组680 passed/5 skipped |
+| 7. 全回归、双审、PR | 进行中：修正Task5测试时间戳误报、补CI显式覆盖；全批审查/PR待完成 |
 
 ## 已取得的验证证据
 
@@ -81,6 +81,13 @@
 - `37efdbaa`修复上述三项：原SPEC探针4 failed/2 passed→6 passed，本地25项RED→11组680 passed、5 skipped、2 warnings；独立复审中，尚不宣称Task6双审完成。未修改生产代码或独立探针。
 - 独立SPEC复审批准：原探针6 passed、Task6四组347 passed/5 skipped/2 warnings、默认真实入口1 skipped、diff检查通过；三个finding全部关闭。QUALITY由新的独立审查者进行，未提前进入下一Task。
 - 父级独立重跑11组（support/process/chain/real/inference/API/models/predictor、Agent family tool/decision chat/transport）：680 passed、5 skipped、2 warnings，270.29秒；真实开关0。该数量包含离线真实RGNN前向，不包含真实训练权重测试通过。
+- 独立QUALITY批准Task6；另发现Task5继承断言扫描整个JSON中的`9.9`会误中事件时间戳，四组346 passed/1 failed/5 skipped（203.53秒），不能抹去这次失败。原SPEC探针6 passed，新增实际双worker探针3 passed，定点时间戳复现2 passed。双worker探针覆盖分别破坏第一/第二家族，验证另一家族实际执行、partial、源未变和自有目录清理。Task7将按TDD修正误报并保留伪造科学值拒绝断言。
+
+## Task7执行边界
+
+- 五个本地skip分别是默认关闭真实入口1项、Windows symlink权限3项、POSIX专属1项；Linux真实执行留待本批CI，不把skip统计为科研成功。
+- CI静态发现`*_test.js`不会自动执行新DOM驱动的15个默认自测；本批将补显式命令及契约测试，并为Python root组明确Node依赖和关闭真实验收开关。保留原五组Python、旧10个Node脚本和最终质量门。
+- 全批SPEC/QUALITY、draft PR和最新Linux CI尚未完成；没有合并授权。历史报告展示残差、真实训练权重、外部主模型、真实浏览器和部署仍未执行。
 
 - 父级重跑Agent/model/fallback联合回归：3288 passed、2 skipped、7 warnings，108.52秒；这些src/既有测试在本批未修改，Task6新增测试仍待单独验收。
 - 10个既有Node脚本、新DOM15项、两份JS语法检查、contract均通过。无效SMILES的RDKit解析日志为预期拒绝，不是伪造性质。

@@ -402,7 +402,7 @@ def assert_terminal(messages, trace_id):
 
 **Files:** real acceptance入口、support/report单测；复用process+chain。
 
-- [ ] **Step 1 — 编写入口和报告RED。** 默认关闭时test函数在任何源stat/registry导入之前pytest.skip；enabled配置错误failed而非skip。离线测试以synthetic环境调用read_config/child runner，不从宿主读取真实配置。
+- [x] **Step 1 — 编写入口和报告RED。** 默认关闭时test函数在任何源stat/registry导入之前pytest.skip；enabled配置错误failed而非skip。离线测试以synthetic环境调用read_config/child runner，不从宿主读取真实配置。
 
 真实入口使用单个pytest项顺序运行两个家族并汇总；一个失败不把另一个标成未执行的成功。两个child各自只复制两阶段资产，不递归再次启动pytest。child worker使用`python -B -m tests.family_acceptance_chain_support`明确内部参数，所需source路径和bundle只在运行时传递；禁止写参数快照日志。
 
@@ -421,9 +421,9 @@ def assert_report_scope(report, mode):
 
 每个case记录expected/actual身份摘要、入口、actual_tools、trace/events、latency_ms、checks、result_status、公开error_code、warnings、available_stages。没有artifacts则空列表，不能伪造pose或分子结果。持久化Agent状态在临时目录，报告只记录逻辑引用，不导出原始聊天/内部模型消息。
 
-- [ ] **Step 2 — 跑RED。** support/process/chain测试加入口默认关闭测试；真实测试预期1 skipped，不能称真实passed。
+- [x] **Step 2 — 跑RED。** support/process/chain测试加入口默认关闭测试；真实测试预期1 skipped，不能称真实passed。
 
-- [ ] **Step 3 — 实现报告投影和聚合。** 复用`src/agent/persistence/redaction.py:sanitize_bounded`和`scripts/run_decision_chat_acceptance.py:open_report`，导入后不得执行main或provider配置读取。保留逻辑ID和hash，不投影任意模型metadata。sanitize发生必要证据截断/缺失时report failed，不删除失败再算通过率。
+- [x] **Step 3 — 实现报告投影和聚合。** 复用`src/agent/persistence/redaction.py:sanitize_bounded`和`scripts/run_decision_chat_acceptance.py:open_report`，导入后不得执行main或provider配置读取。保留逻辑ID和hash，不投影任意模型metadata。sanitize发生必要证据截断/缺失时report failed，不删除失败再算通过率。
 
 成功条件是全部必需case通过、source复核通过、子进程exit0、所有权已释放、临时清理完成；清理/源复核状态由实际完成方填写。一个family失败另一个通过为partial；全部失败为failed；显式关闭为skipped。预期拒绝的case验收passed仍保留scientific result_status failed/rejected。`production_selection=unchanged`只用于源状态复核通过的报告；复核未完成为`not_verified`，源状态变化为`changed`，不能在失败报告中预填unchanged。
 
@@ -431,8 +431,10 @@ Task3内部协议区分传输与科学状态：成功收集的信封为`{status:
 
 输出用新UUID文件名`outputs/agent_evaluation/family_acceptance_<id>.json`、allow_nan=False，禁止覆盖已有文件；只写完成投影的有界结果。不传递原始stdout、错误堆栈、环境全集、source绝对路径或私有训练元数据。异常/超时缺子报告时父仅写固定错误与`source_check=not_completed`，不读源补验。
 
-- [ ] **Step 4 — GREEN及脱敏负例。** 注入synthetic路径/secret风格文本/超长字段/NaN/大数组，证明拒绝或脱敏；报告已有目标/链接路径拒绝；异常后目录清理检查。只检查已知测试常量，不扫描真实key。
-- [ ] **Step 5 — 显式提交。** `test: add opt-in trained family acceptance reporting`。
+- [x] **Step 4 — GREEN及脱敏负例。** 注入synthetic路径/secret风格文本/超长字段/NaN/大数组，证明拒绝或脱敏；报告已有目标/链接路径拒绝；异常后目录清理检查。只检查已知测试常量，不扫描真实key。
+- [x] **Step 5 — 显式提交。** `test: add opt-in trained family acceptance reporting`。
+
+完成证据：`cae31875`、`37efdbaa`；SPEC三项报告问题修复后独立复审及QUALITY批准。父级11组680 passed/5 skipped。QUALITY另复现Task5全JSON数值断言误中时间戳，在Task7补确定性回归与最小修复，不把该失败隐藏为成功。
 
 ## Task 7: 全回归、独立审查、交接与PR
 
@@ -488,4 +490,4 @@ git diff --check
 - [x] 选择执行方式：用户选择1，子代理逐任务开发/两阶段审查。
 - [ ] 实施各Task并将实际RED/GREEN、提交及CI结果写入交接。
 
-本文件是实施计划，不是整体验收完成声明。Task1–5已实施并通过双审，Task6独立SPEC发现的报告缺口正在修复；后续各项以勾选状态及交接证据为准。未读取真实权重，未调用外部模型。
+本文件是实施计划，不是整体验收完成声明。Task1–6已实施并通过双审，Task7正在完成测试误报修正、CI覆盖与全批审查；后续各项以勾选状态及交接证据为准。未读取真实权重，未调用外部模型。
