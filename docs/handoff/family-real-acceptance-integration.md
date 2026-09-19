@@ -88,6 +88,22 @@
 - 五个本地skip分别是默认关闭真实入口1项、Windows symlink权限3项、POSIX专属1项；Linux真实执行留待本批CI，不把skip统计为科研成功。
 - CI静态发现`*_test.js`不会自动执行新DOM驱动的15个默认自测；本批将补显式命令及契约测试，并为Python root组明确Node依赖和关闭真实验收开关。保留原五组Python、旧10个Node脚本和最终质量门。
 - 全批SPEC/QUALITY、draft PR和最新Linux CI尚未完成；没有合并授权。历史报告展示残差、真实训练权重、外部主模型、真实浏览器和部署仍未执行。
+- `44e8f4ba`最小修正三文件：确定性时间戳RED与科学字段断言；CI显式DOM自测、root Node20、全局真实开关0。RED5 failed/4 passed→聚焦18 passed/1 skipped；CI契约7 passed、默认真实入口1 skipped；11组680 passed/5 skipped/2 warnings（262.72秒）。旧10个Node、新DOM15项、两份语法及diff检查通过。实施者compile+清理组合再次被策略整体拒绝、没有执行；父级此前短缓存compile已成功，生产源码未变。全批独立审查以44e8f4ba为代码head。
+
+## 后续真实权重执行（本轮未执行）
+
+需另行取得明确授权，并指定可信本地注册表目录及两个精确bundle ID；不自动扫描、选择最新bundle或读取原始训练数据。不需要外部主模型API，因为本入口使用明确的scripted决策替身，只验收已训练权重的工程调用链。
+
+| 运行时环境变量 | 用途 |
+|---|---|
+| `MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE` | 仅字面值`1`开启；本轮与CI始终为`0` |
+| `MEDCHAT_FAMILY_ACCEPTANCE_MODELS_DIR` | 授权的可信本地绝对模型目录，不接受网络路径 |
+| `MEDCHAT_FAMILY_ACCEPTANCE_PDE_BUNDLE_ID` | 精确PDE分类/回归bundle ID |
+| `MEDCHAT_FAMILY_ACCEPTANCE_BUCHE_BUNDLE_ID` | 精确BuChE分类/回归bundle ID，须与PDE ID不同 |
+
+授权并注入上述配置后才运行：`python -B -m pytest tests/test_activity_family_real_acceptance.py -q -p no:cacheprovider --tb=short`。
+该入口顺序执行两个家族；每个受监督子进程最长120秒，另有有界清理。报告写入新的`outputs/agent_evaluation/family_acceptance_<uuid>.json`，不覆盖旧报告、不提交Git。配置错误直接failed；传输成功不等于科研成功；部分阶段和失败仍保留。
+权重完整性检查不是恶意权重的安全沙盒。报告通过只说明这组输入上的调用一致性、数据和模型溯源，不证明泛化性能、药效或实验结论；不自动激活生产模型。
 
 - 父级重跑Agent/model/fallback联合回归：3288 passed、2 skipped、7 warnings，108.52秒；这些src/既有测试在本批未修改，Task6新增测试仍待单独验收。
 - 10个既有Node脚本、新DOM15项、两份JS语法检查、contract均通过。无效SMILES的RDKit解析日志为预期拒绝，不是伪造性质。
