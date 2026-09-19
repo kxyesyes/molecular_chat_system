@@ -25,15 +25,18 @@ BuChE/BChE 使用 `buche-family`；未知、歧义或未配置模型组明确失
 有效输入规范化 → 固定一个已验证模型组 → 分类 → 分类成功行全部进入回归。
 分类阴性也进行回归，不从概率推算 pIC50，不补 0/4.99，不裁剪矛盾数值。
 
-| 行状态 | 含义 |
-|---|---|
-| `passed`，`success=true` | 两阶段均通过输出校验，返回概率、类别和回归 pIC50 |
-| `partial`，`success=false` | 分类成功、回归失败；保留分类，pIC50 为 null |
-| `failed`，`success=false` | 输入、模型组或分类失败；不得声称两阶段完成 |
+| 行状态 | execution_status | 含义 |
+|---|---|---|
+| `passed`，`success=true` | `passed` | 两阶段通过输出校验且分类与回归阈值判断一致 |
+| `partial`，`success=false` | `passed` | 两阶段完成但判断冲突；需复核，保留原始概率、类别和 pIC50 |
+| `partial`，`success=false` | `partial` | 分类成功、回归失败；保留分类，pIC50 为 null |
+| `failed`，`success=false` | `failed` | 输入、模型组或分类失败；不得声称两阶段完成 |
 
 训练标签阈值为 pIC50 5，推理分类概率阈值为 0.5，两者不能混淆。
 分类与回归在阈值两侧矛盾时，保留原值并设置
-`classification_regression_consistent=false` 和 warning，不掩盖矛盾。
+`classification_regression_consistent=false` 和“需复核” warning，不掩盖矛盾。
+`execution_status=passed` 只表示计算完成，不能代替结果 `status` 或证明预测准确。
+即使两模型判断一致，也不是实验验证。冲突不是模型调用错误，不制造虚假阶段 errors。
 每阶段校验批次数量、SMILES 对齐、任务/单位、有限数值及 demo/fallback 状态。
 原始网络输出在 sigmoid 前检查，避免无限值被转换为正常的 0/1 概率。
 

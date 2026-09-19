@@ -1,5 +1,22 @@
 # Latest handoff
 
+## 家族预测冲突复核：实现与隔离真实复测完成（2026-09-19）
+
+PR #29 已合并为 `86639344c472549fb9552a9eaae1682c72b86139`；下方旧记录保留当时状态。
+本批分支 `codex/family-prediction-review`，核心提交 `358f542`，验收适配 `dfda3dd`。
+尚未合并或部署；原始混杂工作树保持原样。
+
+分类与回归冲突现在区分计算 `execution_status=passed` 和结果 `status=partial`，
+原值/来源/警告保留，前端显示需复核，不允许伪装科研成功。
+独立 SPEC/QUALITY 均通过，Agent 3269 passed/2 skipped；修订后的验收四模块
+681 passed/4 skipped；10 个 Node 脚本及额外 17/17 DOM 通过。
+固定真实 PDE/BuChE 权重隔离验收 42/42 工程检查通过，BuChE 七入口科学状态均 partial。
+与上次 100 个预测字段（含空值）完全相同，源哈希/生产选择未变，临时资源清理完成。
+未调用外部主模型、未重训或激活生产模型；不能据此声称预测性能达标。
+
+详见[本批交接及真实报告位置](family-prediction-review.md)。Draft PR 发布记录随后补齐；
+下一步在指定 PR 审查/CI 通过并获得明确授权后再合并，不自动接管生产入口。
+
 ## 家族真实权重验收：代码完成，draft PR待合并（2026-09-19）
 
 当前任务分支为 `codex/family-real-acceptance-integration`，独立工作树
