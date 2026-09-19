@@ -272,9 +272,11 @@ def windows_spawn(args, cwd, env):
 
 ## Task 4: 显式复用生产renderer的DOM测试fixture
 
+实施完成（2026-09-19）：`fee957b`；SPEC/QUALITY均通过，旧18/18、新15/15，两个语法检查通过；父级已通过Task3监督执行Node驱动。
+
 **Files:** `tests/activity_family_results_test.js`、新增DOM驱动。
 
-- [ ] **Step 1 — 写RED。** 独立Node驱动require现有test文件，要求setup/cells/assertNoExecutableNodes导出；require不能自动跑旧18项测试或写stdout。
+- [x] **Step 1 — 写RED。** 独立Node驱动require现有test文件，要求setup/cells/assertNoExecutableNodes导出；require不能自动跑旧18项测试或写stdout。
 
 ```javascript
 const assert = require('node:assert/strict');
@@ -284,8 +286,8 @@ assert.equal(typeof cells, 'function');
 assert.equal(typeof assertNoExecutableNodes, 'function');
 ```
 
-- [ ] **Step 2 — 运行RED。** `node tests/activity_family_acceptance_dom.js`的self-test路径应因缺少导出失败；不读取实际模型。
-- [ ] **Step 3 — 给已有执行循环加main guard并导出fixture。**
+- [x] **Step 2 — 运行RED。** `node tests/activity_family_acceptance_dom.js`的self-test路径应因缺少导出失败；不读取实际模型。
+- [x] **Step 3 — 给已有执行循环加main guard并导出fixture。**
 
 ```javascript
 module.exports = {setup, cells, assertNoExecutableNodes};
@@ -306,7 +308,7 @@ function assertDisplayedPrediction(row, expected) {
 
 保留所有旧partial/null/zero/XSS断言；新增实际API rows的概率、类别、模型ID/hash存在断言。负例用恶意字符串仅验证惰性展示，不给真实计算结果换标签。
 
-- [ ] **Step 4 — GREEN。**
+- [x] **Step 4 — GREEN。**
 
 ```powershell
 node tests/activity_family_results_test.js
@@ -315,7 +317,7 @@ node --check tests/activity_family_results_test.js
 node --check tests/activity_family_acceptance_dom.js
 ```
 
-- [ ] **Step 5 — 显式提交。** `test: expose family result DOM fixture for acceptance`。
+- [x] **Step 5 — 显式提交。** `test: expose family result DOM fixture for acceptance`。
 
 ## Task 5: 同一快照的真实前向、API、逐轮决策与WebSocket
 

@@ -18,8 +18,8 @@
 | 1. 配置与合成前向fixture | 完成，SPEC/QUALITY均通过，最终135 passed |
 | 2. 精确bundle快照与摘要 | 完成，SPEC/QUALITY均通过，306 passed、3 skipped |
 | 3. 隔离进程与资源回收 | 完成，SPEC/QUALITY均通过，50 passed、1 skipped；Linux待CI |
-| 4. DOM fixture与生产渲染断言 | 实施中 |
-| 5. 预测/API/逐轮决策/ASGI链路 | 未实施 |
+| 4. DOM fixture与生产渲染断言 | 完成，SPEC/QUALITY通过，旧18/18、新15/15 |
+| 5. 预测/API/逐轮决策/ASGI链路 | 实施中 |
 | 6. opt-in入口与报告 | 未实施 |
 | 7. 全回归、双审、PR | 未完成 |
 
@@ -63,3 +63,4 @@
 
 - `fee957b`：显式导出现有DOM fixture与main guard，新增有界JSON驱动。实施者记录缺导出RED、驱动2/13及13/15后最终15/15；旧18项完整通过。只修改两个测试JS文件。
 - 独立SPEC复核旧18/18、新15/15、两个node --check及静默导入/非法参数探针通过；父级另9个现有Node脚本均通过。QUALITY审查中；这些只是生产renderer的离线DOM契约，不等于真实浏览器或科学模型验收。
+- 独立QUALITY批准：旧18项、28项内存断言及输入边界探针通过；澄清“禁止spawn”指子代理而非测试进程后，另独立重跑新15/15通过。父级通过Task3受监督进程执行完整Node驱动15/15，exit0、ownership_released/cleanup_complete均true，之后清理自有临时目录。
