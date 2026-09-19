@@ -80,6 +80,7 @@
 - `cae31875`实现唯一opt-in入口、逐家族受监督worker和脱敏报告；实施者11组656 passed、5 skipped、2 warnings。独立SPEC聚焦323 passed、5 skipped，仍用仓库外合成探针复现3项缺口：必需科学字段一致损坏仍passed、classification成功/regression失败被投影为无可用阶段、快照阶段source_changed被覆写为not_completed。已要求先补RED再修复，不能以既有绿灯代替这些失败证据；默认真实入口单独1 skipped，不代表真实验收通过。
 - `37efdbaa`修复上述三项：原SPEC探针4 failed/2 passed→6 passed，本地25项RED→11组680 passed、5 skipped、2 warnings；独立复审中，尚不宣称Task6双审完成。未修改生产代码或独立探针。
 - 独立SPEC复审批准：原探针6 passed、Task6四组347 passed/5 skipped/2 warnings、默认真实入口1 skipped、diff检查通过；三个finding全部关闭。QUALITY由新的独立审查者进行，未提前进入下一Task。
+- 父级独立重跑11组（support/process/chain/real/inference/API/models/predictor、Agent family tool/decision chat/transport）：680 passed、5 skipped、2 warnings，270.29秒；真实开关0。该数量包含离线真实RGNN前向，不包含真实训练权重测试通过。
 
 - 父级重跑Agent/model/fallback联合回归：3288 passed、2 skipped、7 warnings，108.52秒；这些src/既有测试在本批未修改，Task6新增测试仍待单独验收。
 - 10个既有Node脚本、新DOM15项、两份JS语法检查、contract均通过。无效SMILES的RDKit解析日志为预期拒绝，不是伪造性质。
