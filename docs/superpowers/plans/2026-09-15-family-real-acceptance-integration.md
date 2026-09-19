@@ -404,6 +404,8 @@ def assert_terminal(messages, trace_id):
 
 真实入口使用单个pytest项顺序运行两个家族并汇总；一个失败不把另一个标成未执行的成功。两个child各自只复制两阶段资产，不递归再次启动pytest。child worker使用`python -B -m tests.family_acceptance_chain_support`明确内部参数，所需source路径和bundle只在运行时传递；禁止写参数快照日志。
 
+实施接口补充（2026-09-19，只涉及tests内部）：已用临时空目录与白名单环境复现`-m tests...`无法定位仓库模块。Task6允许给`run_owned_child`增加可选`environment_dir`（默认仍为cwd，兼容Task3），让worker的cwd为仓库、HOME/TMP等指向父级拥有的临时目录。需先补真实短进程RED并验证这两个目录各自用途；不继承PYTHONPATH、不复制仓库、不修改生产接口。Task6独立审查需覆盖此增量。
+
 报告检查独立字段：
 
 ```python
