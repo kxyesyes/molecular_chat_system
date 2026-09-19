@@ -21,6 +21,8 @@ from tests.family_acceptance_process_support import child_environment, run_owned
 
 
 SMILES = ["CCO", "CCN", "CCO"]
+INVALID_SMILES = "CC(C)(("
+MIXED_SMILES = ["CCO", INVALID_SMILES, "CCN", "CCO"]
 ALIASES = {"pde-family": ("PDE", "PDE5A"), "buche-family": ("BuChE", "BChE")}
 MODEL_FIELDS = ("model_id", "target_id", "task_type", "weights_sha256", "model_card_sha256",
                 "demo_mode", "fallback_used")
@@ -156,33 +158,104 @@ def websocket_decision(session):
     app = FastAPI()
     handler = ChatHandler(ForbiddenLegacy(), ForbiddenLegacy(), ForbiddenLegacy(), {})
     returned = []
+    timed_out = []
+    timeout = min(120, session.loop.timeout_seconds)
+    deadline = time.monotonic() + timeout
 
-    @app.websocket("/isolated-family")
-    async def receive(socket: WebSocket):
-        await socket.accept()
+    async def bridge_and_close(socket):
         returned.append(await handler.process_decision_message(socket, context=session.context,
             decision_loop=session.loop, request_kind="scientific",
             allowed_tools={"activity_predictor"}, required_tools={"activity_predictor"}))
         await socket.close()
 
+    @app.websocket("/isolated-family")
+    async def receive(socket: WebSocket):
+        await socket.accept()
+        try:
+            await asyncio.wait_for(bridge_and_close(socket), timeout=timeout)
+        except asyncio.TimeoutError:
+            timed_out.append(True)
+            await socket.close(code=1011)
+
     frames = []
+    size = 0
     with TestClient(app) as client:
         with client.websocket_connect("/isolated-family") as socket:
-            while not frames or frames[-1]["type"] != "complete":
+            # Complete is a data frame, not EOF. Observe the normal ASGI close,
+            # including malicious tails. The owning Task3 worker additionally
+            # enforces the hard deadline if native/synchronous code blocks.
+            while True:
+                if time.monotonic() >= deadline:
+                    raise ChainFailure("child_timeout")
+                message = socket.receive()
+                if time.monotonic() >= deadline:
+                    raise ChainFailure("child_timeout")
+                if message["type"] == "websocket.close":
+                    if timed_out:
+                        raise ChainFailure("child_timeout")
+                    require(message.get("code") == 1000)
+                    break
+                require(message["type"] == "websocket.send" and isinstance(message.get("text"), str))
                 require(len(frames) < 128)
-                frames.append(socket.receive_json())
+                size += len(message["text"].encode("utf-8"))
+                require(size <= 1 << 20)
+                frames.append(json.loads(message["text"]))
+    require(len(returned) == 1)
     return returned[0], frames
 
 
-def check_terminal(frames, trace_id):
+def check_terminal(frames, trace_id, *, require_tool=True):
     complete = [item for item in frames if item["type"] == "complete"]
     results = [item for item in frames if item["type"] == "agent_result"]
     require(len(complete) == len(results) == 1 and frames[-1]["type"] == "complete")
+    require([item["type"] for item in frames[-2:]] == ["agent_result", "complete"])
+    require(all(item["type"] in {"agent_event", "agent_result", "complete"} for item in frames))
     require(complete[0]["trace_id"] == results[0]["trace_id"] == trace_id)
     require(not any(item["type"] == "molecular_generation" for item in frames))
-    require(bool(results[0]["tool_result_sequence"]))
+    if require_tool:
+        require(bool(results[0]["tool_result_sequence"]))
     require(complete[0]["content"] == results[0]["final_answer"])
     return results[0]
+
+
+def check_public_result(session, result, frames):
+    """Match the actual accepted/rejected result; never trust public status alone."""
+    envelope = result.to_legacy_dict()
+    public = check_terminal(frames, session.context.trace_id, require_tool=bool(result.tool_results))
+    # Only the known legacy Markdown header transformation is permitted here.
+    # Numerical rows, errors, evidence and the answer are not normalized.
+    from src.agent.persistence.redaction import sanitize_sensitive_text
+    expected_tools = deepcopy(envelope["tool_result_sequence"])
+    for item in expected_tools:
+        item["formatted"], _ = sanitize_sensitive_text(item["formatted"], max_chars=16384)
+    require(public["tool_result_sequence"] == expected_tools)
+    for key in ("success", "status", "partial", "error", "evidence"):
+        require(public[key] == envelope[key])
+    require(public["final_answer"] == (result.final_answer or result.message))
+    require(frames[-1]["status"] == envelope["status"])
+    require(frames[-1]["continuation_id"] == result.metadata.get("continuation_id"))
+
+
+def check_rejected_decision(session, result, frames=None):
+    """Unknown target rejects pre-dispatch; malformed SMILES yields INVALID_INPUT."""
+    require(not result.success and result.to_legacy_dict()["status"] in {"failed", "rejected"})
+    require(result.metadata["backend"] == "model_decision_loop")
+    require('"predicted_pIC50":' not in result.final_answer and not result.artifacts)
+    unknown = session.context.metadata["target"] == "AChE"
+    if unknown:
+        require(session.inputs == session.outputs == result.tool_results == [])
+        require(result.metadata["stop_reason"] == "activity_target_conflict_or_unknown")
+    else:
+        require(len(session.inputs) == len(session.outputs) == len(result.tool_results) == 1)
+        require(session.inputs[0] == {"query": session.context.query, "target": session.context.metadata["target"]})
+        require(len(session.model.messages) == 2)
+        observation = json.loads(session.model.messages[1][-1]["content"])
+        require(observation["error"]["code"] == "invalid_input" and observation["data"] is None)
+        for output in [*session.outputs, *result.tool_results]:
+            require(output.error.code.value == "invalid_input" and output.status.value == "invalid_input")
+            require(output.data is None and not output.evidence and not output.artifacts)
+    if frames is not None:
+        check_public_result(session, result, frames)
 
 
 def decision_record(session, result, frames=None):
@@ -227,15 +300,7 @@ def check_decision(session, result, expected, snapshot, target, frames=None):
     if frames is None:
         events = [event.event.value for event in session.bus.events]
     else:
-        public = check_terminal(frames, session.context.trace_id)
-        # Legacy Markdown's slash-containing table header is path-redacted.
-        # All scientific fields, including raw rows/evidence, must remain exact.
-        from src.agent.persistence.redaction import sanitize_sensitive_text
-        expected_transport = deepcopy(envelope["tool_result_sequence"])
-        for item in expected_transport:
-            item["formatted"], _ = sanitize_sensitive_text(item["formatted"], max_chars=16384)
-        require(public["tool_result_sequence"] == expected_transport)
-        require(public["final_answer"] == result.final_answer and public["status"] == "completed")
+        check_public_result(session, result, frames)
         events = [item["event"]["event"] for item in frames if item["type"] == "agent_event"]
     require(events[0] == "task_started" and events[-1] == "task_completed")
     require(events.count("planning_started") == events.count("planning_completed") == 2)
@@ -297,6 +362,104 @@ def isolated_runtime(snapshot):
     finally:
         prediction_service._family_predictor.cache_clear()
         torch.set_num_threads(threads)
+
+
+def api_summary(client, smiles, target, *, batch=False):
+    if batch:
+        response = client.post("/api/activity/batch_predict", data={"target": target},
+            files={"file": ("acceptance.smi", "\n".join(smiles).encode(), "text/plain")})
+    else:
+        response = client.post("/api/activity/predict", data={"smiles": smiles[0], "target": target})
+    require(response.status_code == 200)
+    return response.json()
+
+
+def summary_record(summary):
+    return {"status": "failed", "scientific_status": summary["status"],
+            "warnings": deepcopy(summary["warnings"]),
+            "rows": [project_row(row) for row in summary["results"]]}
+
+
+def check_failed_row(row, snapshot, *, smiles, target):
+    require(row["smiles"] == smiles and row["requested_target"] == target)
+    require(row["status"] == "failed" and row["success"] is False)
+    require(row["predicted_pIC50"] is row["activity_probability"] is row["activity_class"] is None)
+    require(row["bundle_id"] is None and row["provenance"] == {})
+    require(row["label_threshold"] == 5.0 and row["probability_threshold"] == .5)
+    require(row["units"] == "pIC50" and row["warnings"] == [])
+    unknown = target == "AChE"
+    require(row["family_id"] == (None if unknown else snapshot.family_id))
+    require(row["errors"] == {"input": "unknown_or_ambiguous_family" if unknown else "invalid_smiles"})
+
+
+def run_rejection_case(snapshot, predictor, client, *, work_dir, target, smiles, remaining, record):
+    """Executed by the runner in both modes, not only by pytest negative tests."""
+    from src.activity import prediction_service
+    from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
+    record.update(status="failed", stages={})
+    stages = record["stages"]
+    remaining()
+    baseline = prediction_service.summarize_predictions(predictor.predict([smiles], target=target))
+    stages["predictor"] = summary_record(baseline)
+    record["scientific_status"] = baseline["status"]
+    require(baseline["status"] == "failed" and baseline["success"] is False and len(baseline["results"]) == 1)
+    check_failed_row(baseline["results"][0], snapshot, smiles=smiles, target=target)
+    stages["predictor"]["status"] = "passed"
+    for name in ("api_single", "api_batch"):
+        remaining()
+        summary = api_summary(client, [smiles], target, batch=name == "api_batch")
+        stages[name] = summary_record(summary)
+        require(summary == baseline)
+        stages[name]["status"] = "passed"
+
+    # Delegate unchanged if accidentally called, but fail even if the error is
+    # swallowed. Invalid parse/preflight must never reach the scientific service.
+    with patch.object(prediction_service, "predict_activity", wraps=prediction_service.predict_activity) as service:
+        tool = ActivityPredictorTool().execute({"smiles": smiles, "target": target})
+        stages["tool"] = {"status": "failed", "scientific_status": "failed",
+            "observation_status": tool.status.value, "error": tool.error.code.value if tool.error else None,
+            "data": deepcopy(tool.data), "warnings": deepcopy(tool.warnings)}
+        require(not tool.success and tool.error.code.value == "invalid_input" and tool.status.value == "invalid_input")
+        require(tool.data is None and not tool.evidence and service.call_count == 0)
+        stages["tool"]["status"] = "passed"
+        for name in ("decision", "websocket"):
+            stages[name] = {"status": "failed"}
+            with decision_session(work_dir, target=target, query=f"SMILES: {smiles}", timeout=remaining()) as session:
+                if name == "decision":
+                    result, frames = invoke_decision(session), None
+                else:
+                    result, frames = websocket_decision(session)
+                stages[name] = decision_record(session, result, frames)
+                stages[name]["scientific_status"] = result.to_legacy_dict()["status"]
+                check_rejected_decision(session, result, frames)
+                require(service.call_count == 0)
+                stages[name].update(status="passed", checks={"rejected_without_service": True,
+                    "public_matches_actual": frames is not None, "terminal": frames is not None})
+    record["status"] = "passed"
+    return baseline
+
+
+def run_dom(summary, *, work_dir, remaining, record):
+    """Send the unchanged actual HTTP summary through the owned Node process."""
+    record["status"] = "failed"
+    node = shutil.which("node")
+    if node is None:
+        raise ChainFailure("dependency_unavailable")
+    summary_path = work_dir / f"api-summary-{uuid4().hex}.json"
+    with summary_path.open("x", encoding="utf-8") as handle:
+        json.dump(summary, handle, ensure_ascii=False, allow_nan=False)
+    child = run_owned_child([node, str(Path(__file__).with_name("activity_family_acceptance_dom.js")),
+                             "--input", str(summary_path)],
+                            env=child_environment(os.environ, work_dir), cwd=work_dir,
+                            timeout=min(30, remaining()))
+    record.update(exit_code=child.exit_code, ownership_released=child.ownership_released,
+                  cleanup_complete=child.cleanup_complete)
+    if child.status != "passed":
+        raise ChainFailure(child.reason)
+    require(child.exit_code == 0 and child.ownership_released and child.cleanup_complete)
+    require(child.report == {"status": "passed", "rows": len(summary["results"])})
+    record.update(status="passed", rows=len(summary["results"]))
+    remaining()
 
 
 def run_family_chain(snapshot, *, work_dir, mode):
@@ -378,6 +541,7 @@ def run_family_chain(snapshot, *, work_dir, mode):
             report["stages"]["tool"]["checks"] = {"formatted_numbers": True}
             report["stages"]["tool"]["status"] = "passed"
             for name in ("decision", "websocket"):
+                report["stages"][name] = {"status": "failed"}
                 with decision_session(work_dir, target=alias, query="SMILES: CCO\nSMILES: CCN",
                                       timeout=remaining()) as session:
                     if name == "decision":
@@ -387,23 +551,26 @@ def run_family_chain(snapshot, *, work_dir, mode):
                     report["stages"][name] = decision_record(session, result, frames)
                     report["stages"][name].update(check_decision(session, result, rows[:2], snapshot, alias, frames))
                 remaining()
-            node = shutil.which("node")
-            if node is None:
-                raise ChainFailure("dependency_unavailable")
-            summary_path = work_dir / f"api-summary-{uuid4().hex}.json"
-            with summary_path.open("x", encoding="utf-8") as handle:
-                json.dump(summary, handle, ensure_ascii=False, allow_nan=False)
-            child = run_owned_child([node, str(Path(__file__).with_name("activity_family_acceptance_dom.js")),
-                                     "--input", str(summary_path)],
-                                    env=child_environment(os.environ, work_dir), cwd=work_dir,
-                                    timeout=min(30, remaining()))
-            report["stages"]["dom"] = {"status": "failed", "exit_code": child.exit_code,
-                "ownership_released": child.ownership_released, "cleanup_complete": child.cleanup_complete}
-            if child.status != "passed":
-                raise ChainFailure(child.reason)
-            require(child.exit_code == 0 and child.ownership_released and child.cleanup_complete)
-            require(child.report == {"status": "passed", "rows": len(SMILES)})
-            report["stages"]["dom"].update(status="passed", rows=len(SMILES))
+            report["stages"]["dom"] = {}
+            run_dom(summary, work_dir=work_dir, remaining=remaining, record=report["stages"]["dom"])
+            report["rejections"] = {}
+            with TestClient(app) as client:
+                for case, smi, requested in (("invalid_smiles", INVALID_SMILES, alias),
+                                             ("unknown_target", "CCO", "AChE")):
+                    report["rejections"][case] = {}
+                    rejected = run_rejection_case(snapshot, predictor, client, work_dir=work_dir,
+                        target=requested, smiles=smi, remaining=remaining, record=report["rejections"][case])
+                    if case == "invalid_smiles":
+                        invalid_row = rejected["results"][0]
+                mixed = api_summary(client, MIXED_SMILES, alias, batch=True)
+                report["mixed"] = summary_record(mixed)
+                require(mixed == prediction_service.summarize_predictions(mixed["results"]))
+                require(mixed["status"] == "partial" and len(mixed["results"]) == 4)
+                require(mixed["results"][1] == invalid_row)
+                check_rows([mixed["results"][index] for index in (0, 2, 3)], rows, snapshot, target=alias)
+                report["mixed"]["dom"] = {}
+                run_dom(mixed, work_dir=work_dir, remaining=remaining, record=report["mixed"]["dom"])
+                report["mixed"]["status"] = "passed"
             remaining()
         report["status"] = "passed"
     except ChainFailure as exc:

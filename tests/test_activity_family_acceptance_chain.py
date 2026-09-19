@@ -108,7 +108,9 @@ def test_invalid_inputs_are_not_model_unavailability(synthetic_snapshot, tmp_pat
     from src.activity import prediction_service
     from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
     from src.web.routes.api_routes import setup_api_routes
-    from tests.family_acceptance_chain_support import ALIASES, decision_session, invoke_decision, websocket_decision
+    from tests.family_acceptance_chain_support import (
+        ALIASES, decision_session, invoke_decision, websocket_decision, check_rejected_decision,
+    )
     target = "AChE" if bad_input == "target" else ALIASES[synthetic_snapshot.family_id][1]
     smiles = "CC(C)((" if bad_input == "smiles" else "CCO"
     app = FastAPI()
@@ -136,18 +138,9 @@ def test_invalid_inputs_are_not_model_unavailability(synthetic_snapshot, tmp_pat
         with decision_session(tmp_path, target=target, query=f"SMILES: {smiles}") as session:
             if transport:
                 result, frames = websocket_decision(session)
-                assert len([f for f in frames if f["type"] == "complete"]) == 1
-                assert len([f for f in frames if f["type"] == "agent_result"]) == 1
-                assert frames[-1]["type"] == "complete"
-                assert frames[-1]["trace_id"] == session.context.trace_id
-                assert not any(f["type"] == "molecular_generation" for f in frames)
             else:
                 result = invoke_decision(session)
-            assert not result.success and result.to_legacy_dict()["status"] in {"failed", "rejected"}
-            assert '"predicted_pIC50":' not in result.final_answer
-            for output in session.outputs:
-                assert output.error.code.value == "invalid_input"
-                assert output.data is None
+            check_rejected_decision(session, result, frames if transport else None)
 
 
 @pytest.mark.parametrize("damage", ["missing_weights", "bad_card", "bad_hash", "missing_stage"])
@@ -396,3 +389,199 @@ def test_settings_and_caches_restore_even_when_node_is_missing(synthetic_snapsho
     assert os.environ["ACTIVITY_MODEL_DIR"] == original_dir
     assert torch.cuda.is_available is original_cuda and torch.get_num_threads() == threads
     assert prediction_service._family_predictor.cache_info().currsize == 0
+
+
+@pytest.mark.parametrize("synthetic_snapshot", ["PDE", "BuChE"], indirect=True)
+def test_runner_reports_real_rejections_and_mixed_api_dom(synthetic_snapshot, tmp_path, monkeypatch):
+    from tests import family_acceptance_chain_support as chain
+    summaries = []
+    original = chain.run_owned_child
+
+    def capture_summary(argv, **kwargs):
+        summaries.append(json.loads(Path(argv[-1]).read_bytes()))
+        return original(argv, **kwargs)
+
+    monkeypatch.setattr(chain, "run_owned_child", capture_summary)
+    report = chain.run_family_chain(synthetic_snapshot, work_dir=tmp_path / "chain", mode="synthetic_fixture")
+    assert report["status"] == "passed", report
+    assert set(report["rejections"]) == {"invalid_smiles", "unknown_target"}
+    for name, case in report["rejections"].items():
+        assert case["status"] == "passed" and case["scientific_status"] == "failed"
+        assert set(case["stages"]) == {"predictor", "api_single", "api_batch", "tool", "decision", "websocket"}
+        assert all(stage["status"] == "passed" for stage in case["stages"].values())
+        for entry in ("predictor", "api_single", "api_batch"):
+            stage = case["stages"][entry]
+            assert stage["scientific_status"] == "failed"
+            row = stage["rows"][0]
+            assert row["status"] == "failed" and not row["success"]
+            assert row["predicted_pIC50"] is row["activity_probability"] is None
+            assert row["errors"] == {"input": "invalid_smiles" if name == "invalid_smiles" else "unknown_or_ambiguous_family"}
+        assert case["stages"]["tool"]["error"] == "invalid_input"
+        for entry in ("decision", "websocket"):
+            assert case["stages"][entry]["agent_status"] in {"failed", "rejected"}
+            assert case["stages"][entry]["checks"]["rejected_without_service"] is True
+        assert case["stages"]["websocket"]["checks"]["public_matches_actual"] is True
+    mixed = report["mixed"]
+    assert mixed["status"] == "passed" and mixed["scientific_status"] == "partial"
+    assert [row["smiles"] for row in mixed["rows"]] == ["CCO", "CC(C)((", "CCN", "CCO"]
+    assert [row["status"] for row in mixed["rows"]] == ["passed", "failed", "passed", "passed"]
+    assert mixed["rows"][0] == mixed["rows"][3]
+    assert mixed["dom"]["status"] == "passed" and mixed["dom"]["rows"] == 4
+    assert len(summaries) == 2
+    assert summaries[0]["status"] == "passed" and summaries[1]["status"] == "partial"
+    assert mixed["rows"] == [chain.project_row(row) for row in summaries[1]["results"]]
+
+
+@pytest.mark.parametrize("tail", ["complete", "molecular_generation", "agent_event", "overflow"])
+def test_tail_frames_after_bridge_cannot_pass(synthetic_snapshot, tmp_path, monkeypatch, tail):
+    from src.web.chat_handler import ChatHandler
+    from tests import family_acceptance_chain_support as chain
+    original = ChatHandler.process_decision_message
+
+    async def with_tail(self, socket, **kwargs):
+        result = await original(self, socket, **kwargs)
+        frame = {"type": "agent_event" if tail == "overflow" else tail,
+                 "trace_id": result.trace_id, "event": {"event": "tool_progress"}}
+        for _ in range(130 if tail == "overflow" else 1):
+            await socket.send_text(json.dumps(frame))
+        return result
+
+    monkeypatch.setattr(ChatHandler, "process_decision_message", with_tail)
+    report = chain.run_family_chain(synthetic_snapshot, work_dir=tmp_path / "chain", mode="synthetic_fixture")
+    assert report["status"] == "failed", "Tail frames were silently discarded"
+    assert report["reason"] == "chain_mismatch"
+    assert report["stages"]["websocket"]["status"] == "failed"
+
+
+@pytest.mark.parametrize("bad_input", ["smiles", "target"])
+@pytest.mark.parametrize("forgery", ["completed_numeric", "error", "tool_sequence"])
+def test_invalid_assertions_reject_forged_public_frames(synthetic_snapshot, tmp_path, monkeypatch, bad_input, forgery):
+    from tests import family_acceptance_chain_support as chain
+    original = chain.websocket_decision
+
+    def forged(session):
+        result, frames = original(session)
+        public = next(frame for frame in frames if frame["type"] == "agent_result")
+        if forgery == "completed_numeric":
+            public.update(success=True, status="completed", final_answer='{"predicted_pIC50": 9.9}')
+            frames[-1].update(status="completed", content=public["final_answer"])
+        elif forgery == "error":
+            public["error"] = None
+        else:
+            public["tool_result_sequence"] = [{"data": [{"predicted_pIC50": 9.9}]}]
+        return result, frames
+
+    monkeypatch.setattr(chain, "websocket_decision", forged)
+    # The same checker serves standalone negatives and the later opt-in runner.
+    target = "AChE" if bad_input == "target" else chain.ALIASES[synthetic_snapshot.family_id][1]
+    smiles = chain.INVALID_SMILES if bad_input == "smiles" else "CCO"
+    with chain.decision_session(tmp_path, target=target, query=f"SMILES: {smiles}") as session:
+        result, frames = chain.websocket_decision(session)
+        with pytest.raises(chain.ChainFailure, match="^chain_mismatch$"):
+            chain.check_rejected_decision(session, result, frames)
+
+
+def test_websocket_wait_for_close_has_a_cooperative_deadline(synthetic_snapshot, tmp_path, monkeypatch):
+    import asyncio
+    from src.web.chat_handler import ChatHandler
+    from tests import family_acceptance_chain_support as chain
+    cancelled = []
+
+    async def stalled(*args, **kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(True)
+
+    monkeypatch.setattr(ChatHandler, "process_decision_message", stalled)
+    with chain.decision_session(tmp_path, target="PDE5A", query="SMILES: CCO", timeout=.05) as session:
+        with pytest.raises(chain.ChainFailure, match="^child_timeout$"):
+            chain.websocket_decision(session)
+    assert cancelled == [True]
+
+
+def test_websocket_requires_normal_server_close(synthetic_snapshot, tmp_path, monkeypatch):
+    from fastapi import WebSocket
+    from tests import family_acceptance_chain_support as chain
+    original = WebSocket.close
+
+    async def abnormal(self, code=1000, reason=None):
+        await original(self, code=1008, reason=reason)
+
+    monkeypatch.setattr(WebSocket, "close", abnormal)
+    report = chain.run_family_chain(synthetic_snapshot, work_dir=tmp_path / "chain", mode="synthetic_fixture")
+    assert report["status"] == "failed" and report["reason"] == "chain_mismatch"
+
+
+def test_websocket_rejects_close_received_after_deadline(synthetic_snapshot, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from starlette.testclient import WebSocketTestSession
+    from tests import family_acceptance_chain_support as chain
+    original = WebSocketTestSession.receive
+    now = [0.0]
+
+    def delayed_close(self):
+        message = original(self)
+        if message["type"] == "websocket.close":
+            now[0] = 121.0
+        return message
+
+    monkeypatch.setattr(chain, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(WebSocketTestSession, "receive", delayed_close)
+    with chain.decision_session(tmp_path, target="PDE5A", query="SMILES: CCO") as session:
+        with pytest.raises(chain.ChainFailure, match="^child_timeout$"):
+            chain.websocket_decision(session)
+
+
+@pytest.mark.parametrize("bad_input", ["smiles", "target"])
+def test_runner_rejects_forged_rejection_over_actual_asgi(synthetic_snapshot, tmp_path, monkeypatch, bad_input):
+    from src.web.chat_handler import ChatHandler
+    from tests import family_acceptance_chain_support as chain
+    original = ChatHandler.process_decision_message
+
+    async def forge_rejection(self, socket, **kwargs):
+        context = kwargs["context"]
+        matches = (context.metadata["target"] == "AChE" if bad_input == "target"
+                   else chain.INVALID_SMILES in context.query)
+        if not matches:
+            return await original(self, socket, **kwargs)
+
+        class ForgingSocket:
+            async def send_text(self, text):
+                frame = json.loads(text)
+                if frame["type"] == "agent_result":
+                    frame.update(success=True, status="completed", final_answer='{"predicted_pIC50": 9.9}')
+                elif frame["type"] == "complete":
+                    frame.update(status="completed", content='{"predicted_pIC50": 9.9}')
+                await socket.send_text(json.dumps(frame))
+
+        return await original(self, ForgingSocket(), **kwargs)
+
+    monkeypatch.setattr(ChatHandler, "process_decision_message", forge_rejection)
+    report = chain.run_family_chain(synthetic_snapshot, work_dir=tmp_path / "chain", mode="synthetic_fixture")
+    assert report["status"] == "failed" and report["reason"] == "chain_mismatch"
+    assert report["stages"]["websocket"]["status"] == "passed"
+    case = "unknown_target" if bad_input == "target" else "invalid_smiles"
+    stage = report["rejections"][case]["stages"]["websocket"]
+    assert stage["status"] == "failed" and stage["agent_status"] in {"failed", "rejected"}
+    assert "9.9" not in json.dumps(stage)
+
+
+def test_runner_does_not_accept_model_unavailable_as_invalid_smiles(synthetic_snapshot, tmp_path, monkeypatch):
+    from src.activity import prediction_service
+    from tests import family_acceptance_chain_support as chain
+    original = prediction_service.predict_activity
+
+    def unavailable(smiles, **kwargs):
+        summary = original(smiles, **kwargs)
+        for row in summary["results"]:
+            if row["smiles"] == chain.INVALID_SMILES:
+                row["errors"] = {"bundle": "family_model_bundle_unavailable_or_invalid"}
+        return summary
+
+    monkeypatch.setattr(prediction_service, "predict_activity", unavailable)
+    report = chain.run_family_chain(synthetic_snapshot, work_dir=tmp_path / "chain", mode="synthetic_fixture")
+    assert report["status"] == "failed" and report["reason"] == "chain_mismatch"
+    stage = report["rejections"]["invalid_smiles"]["stages"]["api_single"]
+    assert stage["status"] == stage["scientific_status"] == "failed"
+    assert stage["rows"][0]["errors"] == {"bundle": "family_model_bundle_unavailable_or_invalid"}
