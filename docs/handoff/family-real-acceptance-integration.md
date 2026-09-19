@@ -19,7 +19,7 @@
 | 2. 精确bundle快照与摘要 | 完成，SPEC/QUALITY均通过，306 passed、3 skipped |
 | 3. 隔离进程与资源回收 | 完成，SPEC/QUALITY均通过，50 passed、1 skipped；Linux待CI |
 | 4. DOM fixture与生产渲染断言 | 完成，SPEC/QUALITY通过，旧18/18、新15/15 |
-| 5. 预测/API/逐轮决策/ASGI链路 | 实施中 |
+| 5. 预测/API/逐轮决策/ASGI链路 | 首次SPEC未通过，正在修复3项验收漏检 |
 | 6. opt-in入口与报告 | 未实施 |
 | 7. 全回归、双审、PR | 未完成 |
 
@@ -64,3 +64,8 @@
 - `fee957b`：显式导出现有DOM fixture与main guard，新增有界JSON驱动。实施者记录缺导出RED、驱动2/13及13/15后最终15/15；旧18项完整通过。只修改两个测试JS文件。
 - 独立SPEC复核旧18/18、新15/15、两个node --check及静默导入/非法参数探针通过；父级另9个现有Node脚本均通过。QUALITY审查中；这些只是生产renderer的离线DOM契约，不等于真实浏览器或科学模型验收。
 - 独立QUALITY批准：旧18项、28项内存断言及输入边界探针通过；澄清“禁止spawn”指子代理而非测试进程后，另独立重跑新15/15通过。父级通过Task3受监督进程执行完整Node驱动15/15，exit0、ownership_released/cleanup_complete均true，之后清理自有临时目录。
+
+## Task5证据
+
+- `74d84f0`实现者自测Task5 32 passed，六组联合231 passed/2 warnings（56.74秒）；科学结果来自合成RGNN真实前向，不是外部模型。
+- 独立SPEC复跑231 passed/2 warnings（56.40秒）仍发现3项P2验收漏检：复用链路只含正向输入；WebSocket首个complete后停止读取遗漏后续重复终结/分子帧；无效输入测试没有核对公开失败内容。独立探针分别使额外终结/分子帧、伪completed+pIC50混入而仍通过。父级核对代码后要求补RED并修复；尚未批准Task5，不将这些探针等同已确认生产缺陷。
