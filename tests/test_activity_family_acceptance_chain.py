@@ -87,6 +87,10 @@ def test_same_snapshot_reaches_all_real_entrypoints(synthetic_snapshot, tmp_path
         assert stage["tool_trace"][0]["input_digest"]
         assert stage["checks"]["observed_evidence"] is True
         assert stage["checks"]["input_digest"] is True
+        assert [event["event"] for event in stage["event_trace"]] == stage["events"]
+        assert all(event["trace_id"] == stage["trace_id"] for event in stage["event_trace"])
+        assert all(type(event["timestamp"]) in (int, float) for event in stage["event_trace"])
+        assert stage["event_trace"][-1]["payload"] == {"success": True, "status": "completed", "partial": False}
     assert report["stages"]["websocket"]["checks"]["terminal"] is True
     decision = report["stages"]["decision"]
     websocket = report["stages"]["websocket"]
@@ -420,6 +424,10 @@ def test_runner_reports_real_rejections_and_mixed_api_dom(synthetic_snapshot, tm
         for entry in ("decision", "websocket"):
             assert case["stages"][entry]["agent_status"] in {"failed", "rejected"}
             assert case["stages"][entry]["checks"]["rejected_without_service"] is True
+            stage = case["stages"][entry]
+            assert stage["event_trace"][-1]["event"] == "task_" + stage["agent_status"]
+            assert stage["event_trace"][-1]["payload"]["status"] == stage["agent_status"]
+            assert stage["events"].count("tool_started") == (0 if name == "unknown_target" else 1)
         assert case["stages"]["websocket"]["checks"]["public_matches_actual"] is True
     mixed = report["mixed"]
     assert mixed["status"] == "passed" and mixed["scientific_status"] == "partial"
@@ -565,6 +573,62 @@ def test_runner_rejects_forged_rejection_over_actual_asgi(synthetic_snapshot, tm
     stage = report["rejections"][case]["stages"]["websocket"]
     assert stage["status"] == "failed" and stage["agent_status"] in {"failed", "rejected"}
     assert "9.9" not in json.dumps(stage)
+
+
+@pytest.mark.parametrize("corruption", ["wrong_trace", "duplicate_terminal", "drop_rejection_events"])
+def test_runner_rejects_event_stream_corruption(synthetic_snapshot, tmp_path, monkeypatch, corruption):
+    from src.web.chat_handler import ChatHandler
+    from tests import family_acceptance_chain_support as chain
+    original = ChatHandler.process_decision_message
+    mutations = []
+
+    async def corrupt(self, socket, **kwargs):
+        context = kwargs["context"]
+        is_rejection = context.metadata["target"] == "AChE" or chain.INVALID_SMILES in context.query
+
+        class CorruptingSocket:
+            async def send_text(self, text):
+                frame = json.loads(text)
+                if frame["type"] == "agent_event":
+                    if corruption == "wrong_trace":
+                        frame["event"]["trace_id"] = "previous-unrelated-trace"
+                        mutations.append(True)
+                    elif corruption == "drop_rejection_events" and is_rejection:
+                        mutations.append(True)
+                        return
+                    elif corruption == "duplicate_terminal" and frame["event"]["event"] == "task_completed":
+                        mutations.append(True)
+                        await socket.send_text(json.dumps(frame))
+                await socket.send_text(json.dumps(frame))
+
+        return await original(self, CorruptingSocket(), **kwargs)
+
+    monkeypatch.setattr(ChatHandler, "process_decision_message", corrupt)
+    report = chain.run_family_chain(synthetic_snapshot, work_dir=tmp_path / "chain", mode="synthetic_fixture")
+    assert mutations
+    assert report["status"] == "failed", "Corrupted public event stream was accepted"
+    assert report["reason"] == "chain_mismatch"
+    stage = (report["rejections"]["invalid_smiles"]["stages"]["websocket"]
+             if corruption == "drop_rejection_events" else report["stages"]["websocket"])
+    assert stage["status"] == "failed"
+
+
+@pytest.mark.parametrize("corruption", ["internal_trace", "public_timestamp", "public_terminal_status"])
+def test_event_checker_compares_actual_bus_and_public_provenance(synthetic_snapshot, tmp_path, corruption):
+    from tests import family_acceptance_chain_support as chain
+    target = chain.ALIASES[synthetic_snapshot.family_id][1]
+    with chain.decision_session(tmp_path, target=target, query=f"SMILES: {chain.INVALID_SMILES}") as session:
+        result, frames = chain.websocket_decision(session)
+        chain.check_rejected_decision(session, result, frames)
+        events = [frame["event"] for frame in frames if frame["type"] == "agent_event"]
+        if corruption == "internal_trace":
+            session.bus.events[0].trace_id = "unrelated-internal-trace"
+        elif corruption == "public_timestamp":
+            events[0]["timestamp"] += 1
+        else:
+            events[-1]["payload"]["status"] = "completed"
+        with pytest.raises(chain.ChainFailure, match="^chain_mismatch$"):
+            chain.check_rejected_decision(session, result, frames)
 
 
 def test_runner_does_not_accept_model_unavailable_as_invalid_smiles(synthetic_snapshot, tmp_path, monkeypatch):

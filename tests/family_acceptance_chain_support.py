@@ -163,9 +163,18 @@ def websocket_decision(session):
     deadline = time.monotonic() + timeout
 
     async def bridge_and_close(socket):
-        returned.append(await handler.process_decision_message(socket, context=session.context,
-            decision_loop=session.loop, request_kind="scientific",
-            allowed_tools={"activity_predictor"}, required_tools={"activity_predictor"}))
+        run = session.loop.run
+
+        async def observe_bus(*args, **kwargs):
+            # The real bridge owns a fresh bus. Observe it without replacing
+            # its callbacks, persistence, events, or scientific execution.
+            session.bus = kwargs["event_bus"]
+            return await run(*args, **kwargs)
+
+        with patch.object(session.loop, "run", observe_bus):
+            returned.append(await handler.process_decision_message(socket, context=session.context,
+                decision_loop=session.loop, request_kind="scientific",
+                allowed_tools={"activity_predictor"}, required_tools={"activity_predictor"}))
         await socket.close()
 
     @app.websocket("/isolated-family")
@@ -236,6 +245,67 @@ def check_public_result(session, result, frames):
     require(frames[-1]["continuation_id"] == result.metadata.get("continuation_id"))
 
 
+def event_record(event):
+    """Project event provenance, not messages or full scientific payloads."""
+    payload = event.get("payload") or {}
+    return {**{key: event.get(key) for key in ("event", "trace_id", "timestamp", "tool", "progress")},
+            "payload": {key: deepcopy(payload[key]) for key in
+                        ("round", "decision_id", "action", "success", "status", "partial") if key in payload}}
+
+
+def check_event_sequence(session, result, frames=None):
+    """Check the actual bus and, when present, its public stream projection."""
+    require(result.trace_id == session.context.trace_id)
+    internal = [event.to_dict() for event in session.bus.events]
+    envelope = result.to_legacy_dict()
+    terminal = "task_" + result.outcome.value
+    tool_terminal = ("tool_completed" if result.tool_results[0].success else "tool_failed") if result.tool_results else None
+    expected = ["task_started"]
+    require(len(result.tool_results) == len(session.inputs) <= 1)
+    require(len(session.model.messages) == (2 if result.tool_results else 1))
+    for round_number in range(1, len(session.model.messages) + 1):
+        expected.extend(["planning_started", "planning_completed"])
+        if round_number == 1 and result.tool_results:
+            expected.extend(["tool_started", tool_terminal])
+    expected.append(terminal)
+
+    streams = [internal]
+    if frames is not None:
+        streams.append([frame["event"] for frame in frames if frame["type"] == "agent_event"])
+    for events in streams:
+        require(bool(events))
+        require(all(event["trace_id"] == result.trace_id for event in events))
+        require(all(type(event["timestamp"]) in (int, float) and math.isfinite(event["timestamp"])
+                    for event in events))
+        names = [event["event"] for event in events]
+        optional = {"tool_progress", "validation_warning"}
+        # Exact core order also excludes duplicate starts/terminals and extra
+        # tool/planning events. Unknown targets legitimately have no tool pair.
+        require([name for name in names if name not in optional] == expected)
+        require(names[0] == "task_started" and names[-1] == terminal)
+        for index, event in enumerate(events):
+            if event["event"] in optional or event["event"].startswith("tool_"):
+                require(bool(result.tool_results) and event["tool"] == result.tool_results[0].tool_name)
+            if event["event"] in optional:
+                require(names.index("tool_started") < index < names.index(tool_terminal))
+        planning = [event for event in events if event["event"].startswith("planning_")]
+        for index in range(0, len(planning), 2):
+            start, end = planning[index]["payload"], planning[index + 1]["payload"]
+            require(start["round"] == end["round"] == index // 2 + 1)
+            require(bool(start["decision_id"]) and start["decision_id"] == end["decision_id"])
+            require(end["action"] == ("tool" if index == 0 else "finish"))
+        for key in ("success", "status", "partial"):
+            require(events[-1]["payload"][key] == envelope[key])
+        if result.tool_results:
+            tool = result.tool_results[0].to_legacy_dict()
+            tool_end = events[names.index(tool_terminal)]["payload"]
+            require(tool_end["status"] == tool["status"] and tool_end["success"] == tool["success"])
+    if frames is not None:
+        # Terminal payloads are intentionally compacted by the bridge; only
+        # unchanged identity/time/status fields are compared, without normalizing.
+        require([event_record(event) for event in streams[1]] == [event_record(event) for event in internal])
+
+
 def check_rejected_decision(session, result, frames=None):
     """Unknown target rejects pre-dispatch; malformed SMILES yields INVALID_INPUT."""
     require(not result.success and result.to_legacy_dict()["status"] in {"failed", "rejected"})
@@ -256,6 +326,7 @@ def check_rejected_decision(session, result, frames=None):
             require(output.data is None and not output.evidence and not output.artifacts)
     if frames is not None:
         check_public_result(session, result, frames)
+    check_event_sequence(session, result, frames)
 
 
 def decision_record(session, result, frames=None):
@@ -268,6 +339,9 @@ def decision_record(session, result, frames=None):
         "rows": [project_row(row) for tool in result.tool_results for row in tool.data or []],
         "events": ([event.event.value for event in session.bus.events] if frames is None else
                    [frame["event"]["event"] for frame in frames if frame["type"] == "agent_event"]),
+        "event_trace": [event_record(event) for event in
+                        ([event.to_dict() for event in session.bus.events] if frames is None else
+                         [frame["event"] for frame in frames if frame["type"] == "agent_event"])],
         "tool_trace": [{"tool_name": tool.tool_name, "status": tool.status.value,
                         "evidence_id": tool.quality.get("evidence_id"),
                         "error": tool.error.code.value if tool.error else None,
@@ -297,14 +371,9 @@ def check_decision(session, result, expected, snapshot, target, frames=None):
     answer = json.loads(result.final_answer.removeprefix("```json\n").removesuffix("\n```"))
     require(answer["data"] == tool["data"] and answer["evidence_id"] == tool["quality"]["evidence_id"])
     require(answer["warnings"] == tool["warnings"] and answer["error"] is None)
-    if frames is None:
-        events = [event.event.value for event in session.bus.events]
-    else:
+    if frames is not None:
         check_public_result(session, result, frames)
-        events = [item["event"]["event"] for item in frames if item["type"] == "agent_event"]
-    require(events[0] == "task_started" and events[-1] == "task_completed")
-    require(events.count("planning_started") == events.count("planning_completed") == 2)
-    require(events.index("planning_started") < events.index("tool_started") < events.index("tool_completed") < len(events) - 1)
+    check_event_sequence(session, result, frames)
     provenance = tool["provenance"]
     require(bool(provenance["input_digest"]) and not provenance["fallback_used"] and not provenance["demo_mode"])
     from src.agent.orchestrators.workflow import WorkflowOrchestrator
