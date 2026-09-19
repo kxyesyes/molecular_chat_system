@@ -191,3 +191,100 @@ def test_forward_fixture_restores_rng_and_threads_on_failure(tmp_path, monkeypat
         make_forward_bundle(tmp_path, monkeypatch, family="PDE", bundle_id="synthetic-pde")
     assert torch.equal(torch.get_rng_state(), rng)
     assert torch.get_num_threads() == threads
+
+
+@pytest.fixture
+def accelerator_seed_calls(monkeypatch):
+    """Observe forbidden seeds without touching accelerator state or lazy queues."""
+    import torch
+
+    calls = []
+
+    def record_seed(*args, **kwargs):
+        calls.append(args)
+
+    def no_initialization(*args, **kwargs):
+        pytest.fail("Synthetic CPU tests must not initialize accelerators")
+
+    for backend in (torch.cuda, torch.mps, torch.xpu):
+        monkeypatch.setattr(backend, "_is_in_bad_fork", lambda: False)
+        for name in ("manual_seed", "manual_seed_all", "seed", "seed_all"):
+            if hasattr(backend, name):
+                monkeypatch.setattr(backend, name, record_seed)
+        for name in ("init", "_lazy_init", "_lazy_call"):
+            if hasattr(backend, name):
+                monkeypatch.setattr(backend, name, no_initialization)
+    monkeypatch.setattr(torch.random, "_seed_custom_device", record_seed)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    return calls
+
+
+@pytest.mark.parametrize("fail_save", [False, True], ids=["success", "save-exception"])
+def test_forward_fixture_never_seeds_accelerators(
+        tmp_path, monkeypatch, accelerator_seed_calls, fail_save):
+    import torch
+    from tests.family_model_test_support import make_forward_bundle
+
+    rng = torch.get_rng_state().clone()
+    threads = torch.get_num_threads()
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("synthetic save failure")
+
+    if fail_save:
+        monkeypatch.setattr(torch, "save", fail)
+        with pytest.raises(RuntimeError, match="synthetic save failure"):
+            make_forward_bundle(tmp_path, monkeypatch, family="PDE", bundle_id="cpu-only")
+    else:
+        registry, models = make_forward_bundle(
+            tmp_path, monkeypatch, family="PDE", bundle_id="cpu-only")
+        assert set(models) == {"classification", "regression"}
+        assert registry.get_active_model_id() is None
+    assert torch.equal(torch.get_rng_state(), rng)
+    assert torch.get_num_threads() == threads
+    assert accelerator_seed_calls == []
+
+
+def test_forward_fixture_preserves_seed71_weights_and_real_forward(
+        tmp_path, monkeypatch, accelerator_seed_calls):
+    import torch
+    from rdkit.Chem.SaltRemover import SaltRemover
+    from torch_geometric.data import Batch
+    from src.activity.family_predictor import FamilyActivityPredictor
+    from src.activity.predictor import ActivityPredictor
+    from src.activity.rg_mpnn.Nets.ReduceGNN import RGNN
+    from tests.family_model_test_support import make_forward_bundle
+
+    threads = torch.get_num_threads()
+    try:
+        torch.set_num_threads(1)
+        with torch.random.fork_rng(devices=[]):
+            registry, models = make_forward_bundle(
+                tmp_path, monkeypatch, family="PDE", bundle_id="seed-reference")
+            registry.select_family_bundle("seed-reference")
+            rows = FamilyActivityPredictor(registry).predict(["CCO", "CCN"], target="PDE")
+            assert all(row["success"] for row in rows)
+
+            # Independent CPU reference for the original seed71 network sequence.
+            # This test also runs before the fix, with accelerator seeds intercepted.
+            torch.random.default_generator.manual_seed(71)
+            references = {task: RGNN(**models[task]["model_config"]).cpu().eval()
+                          for task in ("classification", "regression")}
+            features = ActivityPredictor.__new__(ActivityPredictor)
+            features.remover = SaltRemover()
+            pairs = [features.process_smiles(smiles) for smiles in ("CCO", "CCN")]
+            for task, network in references.items():
+                state = torch.load(registry.models_dir / models[task]["weights_file"],
+                                   map_location="cpu", weights_only=True)["state_dict"]
+                assert state.keys() == network.state_dict().keys()
+                assert all(torch.equal(state[key], value)
+                           for key, value in network.state_dict().items())
+                with torch.no_grad():
+                    output, _ = network(Batch.from_data_list([pair[0] for pair in pairs]),
+                                        Batch.from_data_list([pair[1] for pair in pairs]))
+                    if task == "classification":
+                        output = torch.sigmoid(output)
+                key = "activity_probability" if task == "classification" else "predicted_pIC50"
+                assert [row[key] for row in rows] == output.reshape(-1).tolist()
+    finally:
+        torch.set_num_threads(threads)

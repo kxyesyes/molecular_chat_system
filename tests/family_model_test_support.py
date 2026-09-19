@@ -84,7 +84,8 @@ def make_forward_bundle(tmp_path, monkeypatch, *, family, bundle_id):
     try:
         torch.set_num_threads(1)
         with torch.random.fork_rng(devices=[]):
-            torch.manual_seed(71)
+            # fork_rng(devices=[]) restores CPU only; never seed/queue accelerators.
+            torch.random.default_generator.manual_seed(71)
             path = make_package(tmp_path, monkeypatch, family, package_id=prefix)
             registry = ActivityModelRegistry(tmp_path / "models")
             # process_smiles only needs the salt remover. Bypass initialization
