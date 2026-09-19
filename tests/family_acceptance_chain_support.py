@@ -761,7 +761,9 @@ def worker_main(argv=None):
             reason = str(exc) if isinstance(exc, ValueError) and str(exc) in PUBLIC_ERRORS else 'chain_mismatch'
             report = {'status': 'failed', 'reason': reason}
         finally:
-            report['source_check'] = 'not_completed'
+            # Snapshot construction can detect mutation before returning an
+            # object. That positive evidence must not become "not verified".
+            report['source_check'] = 'changed' if report.get('reason') == 'source_changed' else 'not_completed'
             if snapshot is not None:
                 report['source_digests'] = snapshot.source_digests
                 try:

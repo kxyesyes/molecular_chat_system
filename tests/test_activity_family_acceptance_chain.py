@@ -140,6 +140,91 @@ def test_public_report_never_accepts_forged_rejection_rows(synthetic_snapshot, t
     assert public_report(report)['status'] == 'failed'
 
 
+@pytest.mark.parametrize('synthetic_snapshot', ['PDE', 'BuChE'], indirect=True)
+@pytest.mark.parametrize('field,value', [('label_threshold', 6.0), ('probability_threshold', .7),
+    ('units', 'nM'), ('requested_target', 'AChE'), ('activity_class', 'unsupported')])
+@pytest.mark.parametrize('damage', ['missing', 'changed'])
+def test_public_contract_rejects_consistently_corrupted_baseline(
+        synthetic_snapshot, tmp_path, field, value, damage):
+    from tests.family_acceptance_chain_support import run_family_chain
+    from tests.family_real_acceptance_support import public_report
+    report = run_family_chain(synthetic_snapshot, work_dir=tmp_path / 'chain', mode='synthetic_fixture')
+    report.update(source_check='passed', source_digests=synthetic_snapshot.source_digests)
+    assert public_report(report)['status'] == 'passed'
+    stages = [*report['stages'].values(), report['mixed']]
+    stages += [stage for case in report['rejections'].values() for stage in case['stages'].values()]
+    for stage in stages:
+        rows = stage.get('rows')
+        for row in rows if isinstance(rows, list) else []:
+            if damage == 'missing':
+                row.pop(field)
+            else:
+                row[field] = value
+    public = public_report(report)
+    assert public['status'] == 'failed'
+    assert next(case for case in public['cases'] if case['case_id'] == 'valid.predictor')['status'] == 'failed'
+
+
+@pytest.mark.parametrize('synthetic_snapshot', ['PDE', 'BuChE'], indirect=True)
+def test_public_contract_validates_each_entry_target_and_probability_class(synthetic_snapshot, tmp_path):
+    from copy import deepcopy
+    from tests.family_acceptance_chain_support import ALIASES, run_family_chain
+    from tests.family_real_acceptance_support import public_report
+    original = run_family_chain(synthetic_snapshot, work_dir=tmp_path / 'chain', mode='synthetic_fixture')
+    original.update(source_check='passed', source_digests=synthetic_snapshot.source_digests)
+    assert public_report(original)['status'] == 'passed'
+    target, alias = ALIASES[synthetic_snapshot.family_id]
+    mutations = [('valid', name, alias if name in ('predictor', 'api_single') else target)
+        for name in ('predictor', 'api_single', 'api_batch', 'tool', 'decision', 'websocket')]
+    mutations += [('invalid_smiles', name, target) for name in ('predictor', 'api_single', 'api_batch')]
+    mutations += [('unknown_target', name, alias) for name in ('predictor', 'api_single', 'api_batch')]
+    mutations += [('mixed', 'api_batch', target)]
+    accepted = []
+    for kind, entry, wrong_target in mutations:
+        report = deepcopy(original)
+        stage = report['stages'][entry] if kind == 'valid' else report['mixed'] if kind == 'mixed' else report['rejections'][kind]['stages'][entry]
+        for row in stage['rows']:
+            row['requested_target'] = wrong_target
+        if public_report(report)['status'] != 'failed':
+            accepted.append((kind, entry))
+    report = deepcopy(original)
+    for stage in [*report['stages'].values(), report['mixed']]:
+        rows = stage.get('rows')
+        for row in rows if isinstance(rows, list) else []:
+            if row['status'] == 'passed':
+                row['activity_class'] = '无活性' if row['activity_probability'] >= .5 else '有活性'
+    if public_report(report)['status'] != 'failed':
+        accepted.append('classification disagrees with probability')
+    assert accepted == [], accepted
+
+
+def test_worker_snapshot_change_before_assignment_keeps_changed(synthetic_snapshot, tmp_path, monkeypatch, capfd):
+    from tests import family_acceptance_chain_support as chain
+    from tests import family_real_acceptance_support as support
+    owned = tmp_path / 'worker'
+    owned.mkdir()
+    original_recheck = support._recheck_source
+    changed = []
+    def change_before_recheck(config, assets, digests):
+        if not changed:
+            assert config.source == synthetic_snapshot.models_dir
+            with (config.source / 'registry_state.json').open('ab') as handle:
+                handle.write(b'\n')
+            changed.append(True)
+        return original_recheck(config, assets, digests)
+    monkeypatch.setattr(support, '_recheck_source', change_before_recheck)
+    monkeypatch.setattr(support, 'verify_source', lambda *a: pytest.fail('no completed snapshot to verify'))
+    monkeypatch.setattr(chain, 'run_family_chain', lambda *a, **k: pytest.fail('snapshot did not complete'))
+    assert chain.worker_main(['--source', str(synthetic_snapshot.models_dir), '--family', synthetic_snapshot.family_id,
+        '--bundle', synthetic_snapshot.bundle_id, '--work-dir', str(owned), '--mode', 'synthetic_fixture']) == 0
+    envelope = json.loads(capfd.readouterr().out)
+    assert changed == [True] and envelope['status'] == 'passed'
+    report = envelope['scientific_report']
+    assert report['status'] == 'failed' and report['reason'] == 'source_changed'
+    assert report['source_check'] == 'changed'
+    assert support.public_report(report, mode='synthetic_fixture')['scope']['production_selection'] == 'changed'
+
+
 def test_public_report_rejects_missing_or_mutated_obligations(synthetic_snapshot, tmp_path):
     from copy import deepcopy
     from tests.family_acceptance_chain_support import run_family_chain
@@ -211,7 +296,11 @@ def test_parent_aggregates_nested_report_and_real_directory_cleanup(synthetic_sn
             value = deepcopy(report)
             if argv[argv.index('--family') + 1] == 'buche-family':
                 # Synthetic protocol fixture, NOT a second scientific inference.
-                value = json.loads(json.dumps(value).replace('pde-family', 'buche-family').replace('synthetic-selected', 'synthetic-buche'))
+                # Its entry targets must also obey the BuChE protocol; changing
+                # only family IDs is now correctly rejected by publication.
+                value = json.loads(json.dumps(value).replace('pde-family', 'buche-family')
+                    .replace('synthetic-selected', 'synthetic-buche')
+                    .replace('"PDE"', '"BuChE"').replace('"PDE5A"', '"BChE"'))
                 value['status'] = status
             return ChildResult('passed', None, 0, {'status': 'passed', 'scientific_report': value}, True, True)
         public = support.run_acceptance(config, repo_dir=Path(__file__).absolute().parents[1],
@@ -474,6 +563,7 @@ def test_service_corruption_cannot_count_as_forward_success(synthetic_snapshot, 
     assert "decision" not in report["stages"]
 
 
+@pytest.mark.parametrize('synthetic_snapshot', ['PDE', 'BuChE'], indirect=True)
 def test_partial_forward_keeps_classification_and_both_pins(synthetic_snapshot, tmp_path, monkeypatch):
     from src.activity.family_predictor import _PinnedPredictor
     from tests.family_acceptance_chain_support import run_family_chain
@@ -492,6 +582,14 @@ def test_partial_forward_keeps_classification_and_both_pins(synthetic_snapshot, 
         assert 0 <= row["activity_probability"] <= 1
         assert row["errors"] == {"regression": "regression_failed_or_invalid_output"}
         assert set(row["models"]) == {"classification", "regression"}
+    from tests.family_real_acceptance_support import public_report
+    report.update(source_check='passed', source_digests=synthetic_snapshot.source_digests)
+    public = public_report(report)
+    case = next(case for case in public['cases'] if case['case_id'] == 'valid.predictor')
+    assert public['status'] == case['status'] == 'failed'
+    assert case['result_status'] == 'partial'
+    assert case['available_stages'] == ['classification']
+    assert case['rows'] == report['stages']['predictor']['rows']
 
 
 @pytest.mark.parametrize("synthetic_snapshot", ["PDE", "BuChE"], indirect=True)

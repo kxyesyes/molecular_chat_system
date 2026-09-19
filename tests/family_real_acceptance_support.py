@@ -385,6 +385,7 @@ MODEL_KEYS = ('model_id', 'target_id', 'task_type', 'weights_sha256', 'model_car
 CHECK_KEYS = ('entry_validated', 'formatted_numbers', 'observed_evidence', 'answer_from_tool',
               'input_digest', 'terminal', 'rejected_without_service', 'public_matches_actual', 'baseline_matches')
 DIGEST_KEYS = ('registry', 'classification.weights', 'classification.card', 'regression.weights', 'regression.card')
+FAMILY_TARGETS = {'pde-family': ('PDE', 'PDE5A'), 'buche-family': ('BuChE', 'BChE')}
 
 
 def _pick(value, keys):
@@ -427,6 +428,38 @@ def _public_row(row):
     return result
 
 
+def _finite_number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def _row_contract(row, requested_target):
+    """Independent obligations, not values learned from a possibly corrupt baseline."""
+    required = {'label_threshold', 'probability_threshold', 'units', 'requested_target', 'activity_class'}
+    probability = row.get('activity_probability')
+    classification = (None if probability is None else
+        '有活性' if _finite_number(probability) and probability >= .5 else '无活性')
+    return (required.issubset(row) and requested_target is not None
+        and row['requested_target'] == requested_target and row['units'] == 'pIC50'
+        and _finite_number(row['label_threshold']) and row['label_threshold'] == 5.0
+        and _finite_number(row['probability_threshold']) and row['probability_threshold'] == .5
+        and (probability is None or _finite_number(probability) and 0 <= probability <= 1)
+        and row['activity_class'] == classification)
+
+
+def _available_stages(rows):
+    """Available evidence is independent of the whole-row acceptance verdict."""
+    available = set()
+    for row in rows:
+        if row.get('status') not in ('passed', 'partial'):
+            continue
+        for task, field in (('classification', 'activity_probability'), ('regression', 'predicted_pIC50')):
+            value = row.get(field)
+            if (row.get('models', {}).get(task) and task not in row.get('errors', {})
+                    and _finite_number(value) and (task != 'classification' or 0 <= value <= 1)):
+                available.add(task)
+    return [task for task in _TASKS if task in available]
+
+
 def _case_record(stage, entry, kind, expected, actual):
     """Closed projection; never traverse arbitrary metadata or message payloads."""
     stage = stage if isinstance(stage, dict) else {}
@@ -442,6 +475,9 @@ def _case_record(stage, entry, kind, expected, actual):
     valid = (stage.get('status') == 'passed' and checks.get('entry_validated') is True
              and type(latency) in (int, float) and math.isfinite(latency) and latency >= 0)
     rejected = kind in ('invalid_smiles', 'unknown_target')
+    target, alias = FAMILY_TARGETS.get(expected.get('family_id'), (None, None))
+    requested_target = ('AChE' if kind == 'unknown_target' else
+        target if kind == 'valid' and entry in ('predictor', 'api_single') else alias)
     result_status = stage.get('scientific_status', stage.get('agent_status', stage.get('observation_status')))
     if rows:
         successful = [row for row in rows if row.get('status') == 'passed']
@@ -449,8 +485,10 @@ def _case_record(stage, entry, kind, expected, actual):
             valid = valid and not successful
         actual = _public_identity(successful[0] if successful else rows[0])
         if result_status is None:
-            result_status = 'passed' if len(successful) == len(rows) else 'partial' if successful else 'failed'
+            result_status = ('passed' if len(successful) == len(rows) else
+                'partial' if successful or any(row.get('status') == 'partial' for row in rows) else 'failed')
         for row in rows:
+            valid = valid and _row_contract(row, requested_target)
             if row.get('status') == 'passed':
                 probability, pic50 = row.get('activity_probability'), row.get('predicted_pIC50')
                 valid = valid and (_public_identity(row) == expected and row.get('success') is True
@@ -511,8 +549,7 @@ def _case_record(stage, entry, kind, expected, actual):
                         ['activity_predictor'] if entry == 'tool' and stage.get('observation_status') else [],
         'trace_id': stage.get('trace_id'), 'events': stage.get('events', []),
         'event_trace': events, 'tool_trace': trace, 'rows': rows,
-        'warnings': stage.get('warnings', []), 'available_stages': list(_TASKS) if rows and any(
-            row.get('status') == 'passed' for row in rows) else [], 'artifacts': [],
+        'warnings': stage.get('warnings', []), 'available_stages': _available_stages(rows), 'artifacts': [],
         'state_ref': 'temporary_agent_state' if stage.get('trace_id') else None}
 
 
@@ -564,6 +601,8 @@ def _matching_rows(cases):
                     value = right.get(key)
                     if type(value) not in (int, float) or not math.isclose(left[key], value, rel_tol=1e-6, abs_tol=1e-6):
                         return False
+                # Targets intentionally differ by entry; _row_contract checks
+                # each independently before this cross-entry comparison.
                 elif key != 'requested_target' and left[key] != right.get(key):
                     return False
         return True
