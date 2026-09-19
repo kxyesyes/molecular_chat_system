@@ -895,9 +895,20 @@ def test_websocket_rejects_close_received_after_deadline(synthetic_snapshot, tmp
 
 @pytest.mark.parametrize("bad_input", ["smiles", "target"])
 def test_runner_rejects_forged_rejection_over_actual_asgi(synthetic_snapshot, tmp_path, monkeypatch, bad_input):
+    from src.agent.runtime.task_state import TaskEvent
     from src.web.chat_handler import ChatHandler
     from tests import family_acceptance_chain_support as chain
     original = ChatHandler.process_decision_message
+    original_event_init = TaskEvent.__init__
+    timestamp = 1789820219.904245
+    actual_rejections = []
+
+    def fixed_timestamp(self, *args, **kwargs):
+        kwargs.setdefault("timestamp", timestamp)
+        return original_event_init(self, *args, **kwargs)
+
+    # Event provenance may contain "9.9" without containing a scientific score.
+    monkeypatch.setattr(TaskEvent, "__init__", fixed_timestamp)
 
     async def forge_rejection(self, socket, **kwargs):
         context = kwargs["context"]
@@ -915,7 +926,9 @@ def test_runner_rejects_forged_rejection_over_actual_asgi(synthetic_snapshot, tm
                     frame.update(status="completed", content='{"predicted_pIC50": 9.9}')
                 await socket.send_text(json.dumps(frame))
 
-        return await original(self, ForgingSocket(), **kwargs)
+        result = await original(self, ForgingSocket(), **kwargs)
+        actual_rejections.append(result)
+        return result
 
     monkeypatch.setattr(ChatHandler, "process_decision_message", forge_rejection)
     report = chain.run_family_chain(synthetic_snapshot, work_dir=tmp_path / "chain", mode="synthetic_fixture")
@@ -924,7 +937,14 @@ def test_runner_rejects_forged_rejection_over_actual_asgi(synthetic_snapshot, tm
     case = "unknown_target" if bad_input == "target" else "invalid_smiles"
     stage = report["rejections"][case]["stages"]["websocket"]
     assert stage["status"] == "failed" and stage["agent_status"] in {"failed", "rejected"}
-    assert "9.9" not in json.dumps(stage)
+    assert stage["event_trace"] and all(event["timestamp"] == timestamp for event in stage["event_trace"])
+    assert stage["rows"] == []
+    assert len(actual_rejections) == 1
+    assert '"predicted_pIC50":' not in actual_rejections[0].final_answer
+    assert "9.9" not in json.dumps({
+        "rows": stage["rows"], "tool_trace": stage["tool_trace"],
+        "answer": actual_rejections[0].final_answer,
+    })
 
 
 @pytest.mark.parametrize("corruption", ["wrong_trace", "duplicate_terminal", "drop_rejection_events"])

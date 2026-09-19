@@ -32,6 +32,34 @@ def test_quality_workflow_runs_every_tracked_node_contract() -> None:
     assert 'node "$test_file"' in workflow
 
 
+def test_quality_workflow_runs_family_dom_selftests_in_static_job() -> None:
+    workflow = (ROOT / ".github/workflows/quality.yml").read_text("utf-8")
+    static_job = workflow.split("  static-quality:\n", 1)[1].split("  offline-quality:\n", 1)[0]
+
+    assert "          node tests/activity_family_acceptance_dom.js\n" in static_job
+
+
+def test_quality_workflow_installs_node_for_root_python_chain() -> None:
+    workflow = (ROOT / ".github/workflows/quality.yml").read_text("utf-8")
+    python_job = workflow.split("  python-tests:\n", 1)[1].split("  static-quality:\n", 1)[0]
+
+    assert (
+        "        if: matrix.name == 'root'\n"
+        "        uses: actions/setup-node@v4\n"
+        "        with:\n"
+        '          node-version: "20"\n'
+    ) in python_job
+    assert python_job.index("uses: actions/setup-node@v4") < python_job.index("- name: Run Python tests")
+
+
+def test_quality_workflow_disables_real_family_acceptance_for_all_jobs() -> None:
+    workflow = (ROOT / ".github/workflows/quality.yml").read_text("utf-8")
+    workflow_settings = workflow.split("\njobs:\n", 1)[0]
+
+    assert '\nenv:\n  MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE: "0"\n' in workflow_settings
+    assert workflow.count("MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE:") == 1
+
+
 def test_quality_workflow_shards_python_suite_and_preserves_final_gate() -> None:
     workflow = (ROOT / ".github/workflows/quality.yml").read_text("utf-8")
 
