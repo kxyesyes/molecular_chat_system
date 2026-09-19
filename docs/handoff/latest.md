@@ -1,5 +1,18 @@
 # Latest handoff
 
+## 部署前隔离验收：partial，未部署（2026-09-20）
+
+PR #30 已授权 squash 合并为 `cd041120c85e49a7de01a789430635f98a660bdc`，
+合并树与审查 head `6824137` 一致；下方历史“未合并”记录保留当时状态。
+本批 `codex/deployment-preflight` 只更新文档，原始混杂工作树保持原样。
+
+Windows 聚焦回归 417 passed/84 skipped；contract 34/34、Node 30/30 与 22/22、
+compileall、OpenSandbox 静态检查通过。健康检查 19/23，新工作树运行资产尚未配置齐全。
+Temporal 静态计算 partial，CLI 因输出父目录 DACL 不可信而拒绝发布报告，未修改权限或安全门。
+未调用外部主模型、未启用权重、未切换生产入口、未重启或部署服务。
+管理面访问控制/HTTPS、目标服务器资料、原生 Linux 与真实负载验收仍待确认/完成。
+详见[部署前验收与命令](deployment-preflight.md)。
+
 ## 家族预测冲突复核：实现与隔离真实复测完成（2026-09-19）
 
 PR #29 已合并为 `86639344c472549fb9552a9eaae1682c72b86139`；下方旧记录保留当时状态。
