@@ -74,3 +74,9 @@
 - QUALITY独立六组249 passed/2 warnings（87.29秒）后，用实际ASGI探针复现事件trace改写、task_completed重复、拒绝事件全部删除仍passed（3个预期拒绝断言失败）。已核对现有检查只覆盖部分事件名/顺序，要求共享事件一致性断言及RED/GREEN修复；该发现是验收漏检，不声明生产已发生串线。
 - `a5409df`新增共享内部/公开事件一致性检查：实施者原3个ASGI探针RED，Task5 GREEN56 passed，六组255 passed/2 warnings；SPEC增量与QUALITY复审待完成。
 - 独立SPEC增量批准：聚焦事件7 passed、原探针3 passed、Task5全56 passed、六组255 passed/2 warnings（114.24秒）。独立QUALITY原探针3 passed（15.87秒）、六组255 passed/2 warnings（100.86秒），批准，无剩余审查项。只验证合成工程链路，不代表真实训练权重或外部模型验收。
+
+## Task6实施期间的既有模块回归
+
+- 父级重跑Agent/model/fallback联合回归：3288 passed、2 skipped、7 warnings，108.52秒；这些src/既有测试在本批未修改，Task6新增测试仍待单独验收。
+- 10个既有Node脚本、新DOM15项、两份JS语法检查、contract均通过。无效SMILES的RDKit解析日志为预期拒绝，不是伪造性质。
+- 首次带清理的组合命令被工具策略拒绝，未执行。拆分非删除命令后，长临时缓存前缀导致3个compileall文件创建失败；实测失败路径长度265，短前缀同类路径221。仅缩短PYTHONPYCACHEPREFIX后`compileall -q src scripts`通过，未改源码；临时编译缓存保留在系统temp，不声称已清理，未进入Git。计划命令同步使用短前缀。

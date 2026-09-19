@@ -454,7 +454,7 @@ Get-ChildItem tests -File -Filter '*test.js' | ForEach-Object { node $_.FullName
 node tests/activity_family_acceptance_dom.js
 node --check tests/activity_family_results_test.js
 node --check tests/activity_family_acceptance_dom.js
-$env:PYTHONPYCACHEPREFIX = Join-Path ([IO.Path]::GetTempPath()) ('medchat-family-pycache-' + [guid]::NewGuid().ToString('N'))
+$env:PYTHONPYCACHEPREFIX = Join-Path ([IO.Path]::GetTempPath()) ('mc-' + [guid]::NewGuid().ToString('N').Substring(0,8))
 & $py -m compileall -q src scripts
 & $py -B scripts/run_agent_acceptance.py --mode contract
 git diff --check
