@@ -55,5 +55,11 @@
 
 - `1dcc610`：只修改tests内进程support及测试，复用已有CommandAdapter原语，环境白名单、限时及后代进程回收。实施者记录RED28项→最终50 passed/1 skipped（三次连续通过）；Linux实际执行尚待CI，不冒充完成。
 - 父级既有`tests/test_docking_command_cancellation.py`完整回归48 passed/1 skipped，5.75秒。未启动对接工具或科学服务。
+- Task3双审后父级合并运行support/process/inference/models/predictor五组：356 passed、4 skipped、2 warnings，89.70秒；未读取真实资产。
 - 独立SPEC运行50 passed/1 skipped并批准；额外探针确认成功传输信封内的科学failed/partial报告及source_check能够完整保留。Task6必须按内层科学状态汇总，不能仅因ChildResult.status=passed就声称科研通过；顶层failed仅用于传输错误。QUALITY审查中，跨平台实际执行仍待CI。
 - 独立QUALITY运行50 passed/1 skipped，另8个有界探针通过，批准；明确只验证Windows，Linux留给CI。没有剩余审查项，未修改生产适配器。
+
+## Task4证据
+
+- `fee957b`：显式导出现有DOM fixture与main guard，新增有界JSON驱动。实施者记录缺导出RED、驱动2/13及13/15后最终15/15；旧18项完整通过。只修改两个测试JS文件。
+- 独立SPEC复核旧18/18、新15/15、两个node --check及静默导入/非法参数探针通过；父级另9个现有Node脚本均通过。QUALITY审查中；这些只是生产renderer的离线DOM契约，不等于真实浏览器或科学模型验收。
