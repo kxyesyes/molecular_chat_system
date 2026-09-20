@@ -48,12 +48,13 @@ _AGENT_FAILURE_EVENT_TYPES = frozenset({
 class ChatHandler:
     """聊天消息处理器"""
     
-    def __init__(self, model, rag_service, agent_system, config):
+    def __init__(self, model, rag_service, agent_system, config, refresh_model_config=None):
         self.model = model
         self.rag_service = rag_service
         self.agent_system = agent_system
         self.config = config
         self.conversation_history = []
+        self.refresh_model_config = refresh_model_config
 
     async def process_decision_message(self, websocket, *, context, decision_loop,
                                        request_kind, allowed_tools, required_tools,
@@ -105,6 +106,18 @@ class ChatHandler:
 
                 if not message.strip():
                     continue
+
+                # Long-lived sockets must not reuse revoked or corrupt configuration.
+                if self.refresh_model_config is not None:
+                    try:
+                        await self.refresh_model_config()
+                    except Exception:
+                        await websocket.send_text(json.dumps({
+                            "type": "error",
+                            "message": "本机模型配置不可用；请检查配置文件与目录权限。",
+                        }))
+                        await websocket.close(code=1011)
+                        return
 
                 # 发送确认
                 await self._send_status(websocket, "Processing your message...")

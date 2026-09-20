@@ -259,7 +259,7 @@ class LLMRuntimeConfigTest(unittest.TestCase):
 
         self.assertTrue(public["api_key_configured"])
         self.assertNotIn("api_key", public)
-        self.assertEqual(public["api_key_hint"], "sk-s...alue")
+        self.assertEqual(public["api_key_hint"], "********")
 
     def test_save_and_load_runtime_config_normalizes_values(self):
         from src.web.llm_runtime_config import load_runtime_config, save_runtime_config
@@ -314,9 +314,10 @@ class LLMRuntimeConfigTest(unittest.TestCase):
         self.assertNotIn("legacy-secret-key", persisted_text)
         self.assertNotIn("api_key", persisted_text)
 
-    def test_app_merges_runtime_non_secret_config_with_environment_key(self):
+    def test_app_ignores_runtime_cache_and_environment_key(self):
         from src.web.app import MolecularChatApp
         from src.web.llm_runtime_config import save_runtime_config
+        from src.web.user_llm_config import default_user_llm_config, user_llm_config_path
 
         with tempfile.TemporaryDirectory(prefix="llm_config_env_") as tmp:
             path = Path(tmp) / "llm_runtime_config.json"
@@ -332,6 +333,7 @@ class LLMRuntimeConfigTest(unittest.TestCase):
             )
             app = MolecularChatApp.__new__(MolecularChatApp)
             app.runtime_llm_config_path = path
+            app.runtime_llm_env_path = user_llm_config_path()
             app.config = {}
 
             with mock.patch.dict(
@@ -341,24 +343,29 @@ class LLMRuntimeConfigTest(unittest.TestCase):
                     "OPENAI_COMPATIBLE_BASE_URL": "https://env.example.com",
                     "OPENAI_COMPATIBLE_MODEL": "env-model",
                 },
-                clear=True,
+                clear=False,
             ):
                 loaded = app._load_active_llm_config()
 
             persisted_text = path.read_text(encoding="utf-8")
 
-        self.assertEqual(loaded["provider"], "openai_compatible")
-        self.assertEqual(loaded["base_url"], "https://runtime.example.com")
-        self.assertEqual(loaded["model_name"], "runtime-model")
-        self.assertEqual(loaded["api_key"], "runtime-environment-key")
+        self.assertEqual(loaded, default_user_llm_config())
         self.assertNotIn("must-not-persist", persisted_text)
         self.assertNotIn("runtime-environment-key", persisted_text)
 
-    def test_modelscope_environment_config_does_not_require_yaml_section(self):
+    def test_modelscope_user_config_does_not_require_yaml_section(self):
         from src.web.app import MolecularChatApp
+        from src.web.user_llm_config import save_user_llm_config, user_llm_config_path
 
         app = MolecularChatApp.__new__(MolecularChatApp)
         app.config = {"inference": {"stream": True}}
+        app.runtime_llm_env_path = user_llm_config_path()
+        saved, _ = save_user_llm_config(app.runtime_llm_env_path, {
+            "provider": "modelscope",
+            "api_key": "modelscope-store-test-key",
+            "base_url": "https://modelscope.example.com/v1/chat/completions",
+            "model_name": "Vendor/Stored-Model",
+        })
 
         with mock.patch.dict(
             "os.environ",
@@ -367,21 +374,19 @@ class LLMRuntimeConfigTest(unittest.TestCase):
                 "MODELSCOPE_BASE_URL": "https://modelscope.example.com/v1/chat/completions",
                 "MODELSCOPE_MODEL": "Vendor/Test-Model",
             },
-            clear=True,
-        ), mock.patch.dict(app.config, {"modelscope": {}}, clear=False):
-            loaded = app._llm_config_from_yaml()
+            clear=False,
+        ):
+            loaded = app._load_active_llm_config()
 
-        self.assertEqual(loaded["provider"], "modelscope")
-        self.assertEqual(loaded["api_key"], "modelscope-test-key")
-        self.assertEqual(loaded["model_name"], "Vendor/Test-Model")
+        self.assertEqual(loaded, saved)
 
-    def test_runtime_provider_selects_its_own_key_when_multiple_keys_exist(self):
+    def test_user_provider_does_not_borrow_multiple_environment_keys(self):
         from src.web.app import MolecularChatApp
-        from src.web.llm_runtime_config import save_runtime_config
+        from src.web.user_llm_config import save_user_llm_config, user_llm_config_path
 
         with tempfile.TemporaryDirectory(prefix="llm_provider_select_") as tmp:
-            runtime_path = Path(tmp) / "runtime.json"
-            save_runtime_config(
+            runtime_path = user_llm_config_path()
+            save_user_llm_config(
                 runtime_path,
                 {
                     "provider": "modelscope",
@@ -391,7 +396,7 @@ class LLMRuntimeConfigTest(unittest.TestCase):
                 },
             )
             app = MolecularChatApp.__new__(MolecularChatApp)
-            app.runtime_llm_config_path = runtime_path
+            app.runtime_llm_env_path = runtime_path
             app.config = {"inference": {"stream": True}, "modelscope": {}}
 
             with mock.patch.dict(
@@ -400,16 +405,17 @@ class LLMRuntimeConfigTest(unittest.TestCase):
                     "OPENAI_COMPATIBLE_API_KEY": "openai-key",
                     "MODELSCOPE_API_KEY": "modelscope-key",
                 },
-                clear=True,
+                clear=False,
             ):
                 loaded = app._load_active_llm_config()
 
         self.assertEqual(loaded["provider"], "modelscope")
-        self.assertEqual(loaded["api_key"], "modelscope-key")
+        self.assertEqual(loaded["api_key"], "")
 
-    def test_env_provider_marker_is_canonical_over_stale_runtime_cache(self):
+    def test_user_store_is_canonical_over_env_marker_and_stale_runtime_cache(self):
         from src.web.app import MolecularChatApp
         from src.web.llm_runtime_config import save_runtime_config
+        from src.web.user_llm_config import save_user_llm_config, user_llm_config_path
 
         with tempfile.TemporaryDirectory(prefix="llm_env_canonical_") as tmp:
             runtime_path = Path(tmp) / "runtime.json"
@@ -424,6 +430,14 @@ class LLMRuntimeConfigTest(unittest.TestCase):
             )
             app = MolecularChatApp.__new__(MolecularChatApp)
             app.runtime_llm_config_path = runtime_path
+            app.runtime_llm_env_path = user_llm_config_path()
+            saved, _ = save_user_llm_config(app.runtime_llm_env_path, {
+                "provider": "custom",
+                "base_url": "https://stored.example.com/v1/chat/completions",
+                "model_name": "stored-model",
+                "api_key": "stored-test-key",
+                "stream": False,
+            })
             app.config = {"inference": {"stream": True}, "modelscope": {}}
 
             with mock.patch.dict(
@@ -435,23 +449,20 @@ class LLMRuntimeConfigTest(unittest.TestCase):
                     "MODELSCOPE_BASE_URL": "https://canonical.example.com",
                     "MODELSCOPE_MODEL": "Canonical/Model",
                 },
-                clear=True,
+                clear=False,
             ):
                 loaded = app._load_active_llm_config()
 
-        self.assertEqual(loaded["provider"], "modelscope")
-        self.assertEqual(loaded["base_url"], "https://canonical.example.com")
-        self.assertEqual(loaded["model_name"], "Canonical/Model")
-        self.assertEqual(loaded["api_key"], "canonical-key")
+        self.assertEqual(loaded, saved)
 
-    def test_second_worker_refreshes_model_after_env_changes(self):
+    def test_second_worker_refreshes_model_after_user_store_changes(self):
         from src.web.app import MolecularChatApp
-        from src.web.llm_runtime_config import save_llm_env_config
+        from src.web.user_llm_config import save_user_llm_config, user_llm_config_path
 
         with tempfile.TemporaryDirectory(prefix="llm_worker_refresh_") as tmp:
-            env_path = Path(tmp) / ".env"
+            env_path = user_llm_config_path()
             runtime_path = Path(tmp) / "runtime.json"
-            save_llm_env_config(
+            save_user_llm_config(
                 env_path,
                 {
                     "provider": "ollama",
@@ -476,7 +487,7 @@ class LLMRuntimeConfigTest(unittest.TestCase):
             applied = {}
             app._apply_llm_config = lambda config: applied.update(config) or config
 
-            save_llm_env_config(
+            save_user_llm_config(
                 env_path,
                 {
                     "provider": "modelscope",
@@ -487,18 +498,19 @@ class LLMRuntimeConfigTest(unittest.TestCase):
                 },
             )
             refreshed = asyncio.run(app._refresh_llm_config_from_env())
+            self.assertFalse(asyncio.run(app._refresh_llm_config_from_env()))
 
         self.assertTrue(refreshed)
         self.assertEqual(applied["provider"], "modelscope")
         self.assertEqual(applied["api_key"], "worker-shared-key")
 
-    def test_custom_runtime_provider_reuses_openai_compatible_key(self):
+    def test_custom_user_provider_does_not_reuse_openai_environment_key(self):
         from src.web.app import MolecularChatApp
-        from src.web.llm_runtime_config import save_runtime_config
+        from src.web.user_llm_config import save_user_llm_config, user_llm_config_path
 
         with tempfile.TemporaryDirectory(prefix="llm_custom_select_") as tmp:
-            runtime_path = Path(tmp) / "runtime.json"
-            save_runtime_config(
+            runtime_path = user_llm_config_path()
+            save_user_llm_config(
                 runtime_path,
                 {
                     "provider": "custom",
@@ -508,18 +520,18 @@ class LLMRuntimeConfigTest(unittest.TestCase):
                 },
             )
             app = MolecularChatApp.__new__(MolecularChatApp)
-            app.runtime_llm_config_path = runtime_path
+            app.runtime_llm_env_path = runtime_path
             app.config = {"inference": {"stream": True}}
 
             with mock.patch.dict(
                 "os.environ",
                 {"OPENAI_COMPATIBLE_API_KEY": "custom-shared-key"},
-                clear=True,
+                clear=False,
             ):
                 loaded = app._load_active_llm_config()
 
         self.assertEqual(loaded["provider"], "custom")
-        self.assertEqual(loaded["api_key"], "custom-shared-key")
+        self.assertEqual(loaded["api_key"], "")
 
 
 if __name__ == "__main__":

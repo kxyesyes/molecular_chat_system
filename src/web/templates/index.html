@@ -2178,7 +2178,7 @@
             <select id="llmProvider">
               <option value="ollama">本地 Ollama</option>
               <option value="modelscope">ModelScope</option>
-              <option value="openai_compatible">OpenAI 兼容接口</option>
+              <option value="openai_compatible" selected>OpenAI 兼容接口</option>
               <option value="custom">自定义接口</option>
             </select>
           </div>
@@ -2192,11 +2192,11 @@
         </div>
         <div class="llm-settings-field">
           <label for="llmBaseUrl">Base URL</label>
-          <input id="llmBaseUrl" type="text" placeholder="http://localhost:11434 或 https://api.xxx.com/v1/chat/completions" />
+          <input id="llmBaseUrl" type="text" placeholder="https://api.deepseek.com/chat/completions" />
         </div>
         <div class="llm-settings-field">
           <label for="llmModelName">模型名称</label>
-          <input id="llmModelName" type="text" placeholder="gmm-llama:latest / ZhipuAI/GLM-5.1 / qwen..." />
+          <input id="llmModelName" type="text" placeholder="deepseek-v4-pro" />
         </div>
         <div class="llm-settings-field">
           <label for="llmApiKey">API Key</label>
@@ -2204,9 +2204,10 @@
           <div class="llm-key-hint" id="llmApiKeyHint">未读取配置</div>
           <label class="llm-key-clear" for="clearLlmApiKey">
             <input id="clearLlmApiKey" type="checkbox" />
-            <span>清除已保存在本机 .env 中的 API Key</span>
+            <span>勾选后点击“保存并启用”，清除本机用户配置目录中已保存的 API Key</span>
           </label>
         </div>
+        <div class="llm-key-hint">配置保存在仓库之外的本机用户配置目录，不写入项目 .env。保存一次后，同一台电脑、同一操作系统账号下，重启应用、更新代码或切换工作树均可继续使用。删除用户配置目录、重装系统或更换电脑/账号后需重新配置。API Key 以明文保存在受本机访问权限保护的配置文件中，不存入浏览器存储。</div>
         <div class="llm-settings-status" id="llmSettingsStatus"></div>
         <div class="llm-settings-actions">
           <button class="llm-test-btn" type="button" id="testLlmConfig">测试连接</button>

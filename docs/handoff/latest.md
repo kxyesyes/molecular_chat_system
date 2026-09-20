@@ -1,5 +1,12 @@
 # Latest handoff
 
+## 主模型默认值与本机持久化（2026-09-20）
+
+本批 `codex/persistent-user-llm-config` 将首页默认配置改为 DeepSeek 官方接口与空 Key，
+用户保存后使用仓库外、同一系统账号共享的私有配置文件。旧隐式 Key 不迁移，
+分子生成 Ollama 配置不变。范围、验证及生效状态见
+[本批交接](persistent-user-llm-config.md)。不直接提交或合并 main。
+
 ## 部署前隔离验收：partial，未部署（2026-09-20）
 
 PR #30 已授权 squash 合并为 `cd041120c85e49a7de01a789430635f98a660bdc`，

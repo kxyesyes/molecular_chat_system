@@ -55,6 +55,30 @@ python main.py
 
 启动后访问 `http://127.0.0.1:6001` 即可开始使用。端口、主机、worker 数等运行参数可通过 `.env` 或命令行覆盖；命令行参数优先级最高。
 
+### 主模型接入与一次保存
+
+首页默认使用 DeepSeek 官方 OpenAI 兼容接口 `https://api.deepseek.com/chat/completions`、
+`deepseek-v4-pro`、流式输出；API Key 初始为空。在“模型接入设置”中填写自己的 Key 并保存，
+同一本机、同一系统账号下重启、更新代码或切换工作树均会继续读取它。
+接口/模型依据：[DeepSeek 官方文档](https://api-docs.deepseek.com/zh-cn/)。
+
+- Windows：`%LOCALAPPDATA%/MedChat/config/llm.env`。
+- Linux/其他系统：`${XDG_CONFIG_HOME:-~/.config}/medchat/llm.env`。
+- 可通过 `MEDCHAT_USER_CONFIG_DIR` 选择仓库外的绝对目录（服务账号也需明确自己的配置目录）。
+
+配置为本机私有明文文件，不上传 GitHub、不在公开 API 中返回 Key。POSIX 目录/文件权限为
+0700/0600；Windows 检查目录/文件 owner 和 ACL，不允许不可信账号读写。权限不符会拒绝保存，
+请选用当前账号的私有目录，不要降低权限检查。该机制不抵御已控制当前系统账号的进程。
+
+密码框留空只会在相同服务商、相同接口地址时保留已保存 Key；换接口应填写对应的新 Key。
+勾选“清除”可移除已保存 Key。保存成功不等于连接成功，请另外点击“测试连接”。
+删除配置目录、重装系统、更换电脑或系统账号需要恢复配置；并非云端永久保存。
+
+**兼容变化：** 首页不再隐式读取仓库 `.env`、旧 `scratch/llm_runtime_config.json`、
+`MEDCHAT_LLM_CONFIG_PATH` 或 `OPENAI_COMPATIBLE_*` 等主模型环境设置，避免恢复历史接口/密钥。
+已有的旧 Key 不自动迁移；首次升级需填写一次新 Key。独立验收 CLI 的显式环境变量接口仍保留，
+端口、科学资产及 Ollama 配置不受影响。分子生成工具仍使用本地 `gmm-llama:latest`。
+
 ## 项目结构
 
 ```text
