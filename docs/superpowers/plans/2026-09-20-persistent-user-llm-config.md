@@ -59,7 +59,7 @@ Files only: `src/web/static/js/home/main.js`, `src/web/templates/index.html`, ne
 - [x] Update `.env.example`, README and handoff: new user path, plaintext/private boundary, old UI env precedence intentionally removed, acceptance CLI still uses env, generator unchanged. No real key values.
 - [x] Run combined tests, `tests/agent`, relevant Node scripts and `python -m compileall -q src scripts`.
 - [x] Independent specification review then independent quality review; fix actionable issues with tests.
-- [ ] Commit only scoped files; create draft PR targeting main. Do not merge without specific PR authorization.
-- [ ] Local activation is a separate bounded operation after reviewed code is ready: preserve non-LLM runtime fields; do not inspect/output credentials; do not use user history keys. Never claim external connectivity without an actual separately authorized request.
+- [x] Commit only scoped files; create draft PR targeting main. Do not merge without specific PR authorization.
+- [x] Local activation is a separate bounded operation after reviewed code is ready: preserve non-LLM runtime fields; do not inspect/output credentials; do not use user history keys. Never claim external connectivity without an actual separately authorized request.
 
 Tests use synthetic credentials and temporary directories only. Runtime activation status must be reported separately from code completion.

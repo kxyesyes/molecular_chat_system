@@ -6,6 +6,8 @@
 用户保存后使用仓库外、同一系统账号共享的私有配置文件。旧隐式 Key 不迁移，
 分子生成 Ollama 配置不变。范围、验证及生效状态见
 [本批交接](persistent-user-llm-config.md)。不直接提交或合并 main。
+实现 `f7bfae7`、Draft PR #32；3365 passed/5 skipped，独立双审通过。
+本机 loopback 服务已切换到该提交试运行，DeepSeek 空 Key 配置与首页 200 已核验；PR 未合并。
 
 ## 部署前隔离验收：partial，未部署（2026-09-20）
 

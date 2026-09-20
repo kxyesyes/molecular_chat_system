@@ -59,3 +59,18 @@ node tests/home_agent_task_panel_test.js
 本批不使用任何聊天历史中的真实 Key，不执行付费外部模型调用，不训练/激活模型权重。
 本地配置/页面通过不等于 DeepSeek 真实连通成功；需用户填写有效 Key 后测试。
 PR 与本地启动状态分别记录，不把本地试运行描述成 main 已合并。
+
+## 交付与本地生效
+
+实现提交 `f7bfae7`；[Draft PR #32](https://github.com/kxyesyes/molecular_chat_system/pull/32)
+目标为 main，未合并，CI 最终状态仍待 PR 检查。
+
+经本地回归和独立双审后，现有 `main-runtime` 切换到该提交的 detached 本地预览；
+只清理其 `.env` 的旧主模型字段与指定旧 runtime 缓存，未修改其他工作树或科学配置。
+原始混杂工作树未更改。旧进程 22288 已停止，新进程 42420 监听 loopback 6001。
+
+实际 HTTP 验证：首页 200、`/health` 为 ok、`/api/llm/config` 为
+`openai_compatible` / `https://api.deepseek.com/chat/completions` /
+`deepseek-v4-pro` / stream=true / API key present=false。
+用户配置文件尚不存在（默认值生效）；等待用户自己在页面填入 Key 并保存。
+日志前缀为 `logs/start-20260920-170635`，仅本机运行产物，不提交。
