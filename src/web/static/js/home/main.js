@@ -628,22 +628,24 @@
     }
 
     function fillLlmSettingsForm(config) {
-      if (elements.llmProvider) elements.llmProvider.value = config.provider || "ollama";
+      const provider = config.provider || "openai_compatible";
+      const useDeepSeekDefaults = provider === "openai_compatible";
+      if (elements.llmProvider) elements.llmProvider.value = provider;
       if (elements.llmStream) elements.llmStream.value = String(config.stream !== false);
-      if (elements.llmBaseUrl) elements.llmBaseUrl.value = config.base_url || "";
-      if (elements.llmModelName) elements.llmModelName.value = config.model_name || "";
+      if (elements.llmBaseUrl) elements.llmBaseUrl.value = config.base_url ?? (useDeepSeekDefaults ? "https://api.deepseek.com/chat/completions" : "");
+      if (elements.llmModelName) elements.llmModelName.value = config.model_name ?? (useDeepSeekDefaults ? "deepseek-v4-pro" : "");
       if (elements.llmApiKey) elements.llmApiKey.value = "";
       if (elements.llmClearApiKey) elements.llmClearApiKey.checked = false;
       if (elements.llmApiKeyHint) {
         elements.llmApiKeyHint.textContent = config.api_key_configured
-          ? `已配置：${config.api_key_hint || "******"}。留空保存会沿用原 Key。`
-          : "未配置 API Key。本地 Ollama 可留空。";
+          ? "已保存，无需重复填写。同一服务商和接口地址下，留空保存会保留已保存的 Key；更换服务商或接口地址需填写新 Key。"
+          : "未配置 API Key。外部 API 请填写 Key，本地 Ollama 可留空。";
       }
     }
 
     function collectLlmSettingsForm() {
       return {
-        provider: elements.llmProvider ? elements.llmProvider.value : "ollama",
+        provider: elements.llmProvider ? elements.llmProvider.value : "openai_compatible",
         base_url: elements.llmBaseUrl ? elements.llmBaseUrl.value : "",
         model_name: elements.llmModelName ? elements.llmModelName.value : "",
         api_key: elements.llmApiKey ? elements.llmApiKey.value : "",
@@ -692,12 +694,7 @@
           throw new Error(result.message || "保存失败");
         }
         fillLlmSettingsForm(result.config || {});
-        setLlmSettingsStatus(result.message || "模型接入配置已保存并启用。");
-        if (elements.connectionStatus) {
-          elements.connectionStatus.textContent = "已连接";
-          elements.connectionStatus.style.backgroundColor = "#d1fae5";
-          elements.connectionStatus.style.color = "#065f46";
-        }
+        setLlmSettingsStatus("模型接入配置已保存并启用，尚未验证远程连接。可点击“测试连接”单独验证（不会保存配置）。");
         HomeChatRenderer.showToast("模型接入配置已保存", "success");
       } catch (error) {
         console.error("保存 LLM 配置失败:", error);

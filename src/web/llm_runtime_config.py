@@ -58,11 +58,7 @@ def normalize_llm_config(raw: Dict[str, Any] | None) -> Dict[str, Any]:
 
 
 def api_key_hint(api_key: str) -> str:
-    if not api_key:
-        return ""
-    if len(api_key) <= 8:
-        return "*" * len(api_key)
-    return f"{api_key[:4]}...{api_key[-4:]}"
+    return "********" if api_key else ""
 
 
 def public_llm_config(raw: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -378,3 +374,19 @@ def save_llm_env_config(
         clear_api_key_providers=clear_api_key_providers,
     )
     return config
+
+
+def retire_legacy_ui_llm_config(env_path: str | Path, runtime_path: str | Path) -> None:
+    """Explicit operator migration for one checkout; never run automatically.
+
+    Remove only retired main-model fields, keep scientific/service configuration,
+    and never log/read out old values or create a credential-bearing backup.
+    """
+    fields = {"MEDCHAT_LLM_PROVIDER", "MEDCHAT_LLM_STREAM", "MEDCHAT_LLM_CONFIG_PATH"}
+    for provider in ("openai_compatible", "modelscope"):
+        fields.update(PROVIDER_ENV_FIELDS[provider].values())
+    fields.update({"EXTERNAL_LLM_API_KEY", "EXTERNAL_LLM_BASE_URL", "EXTERNAL_LLM_MODEL"})
+    if Path(env_path).exists():
+        _atomic_update_env_file(env_path, {field: None for field in fields})
+    if Path(runtime_path).exists():
+        _atomic_write_text(runtime_path, "{}\n")

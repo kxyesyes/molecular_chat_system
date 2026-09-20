@@ -1,6 +1,5 @@
 import asyncio
 from datetime import datetime, timezone
-import hashlib
 import json
 import logging
 import os
@@ -9,7 +8,7 @@ import sys
 from typing import List, Dict, Any, Optional
 import httpx
 import yaml
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
@@ -18,14 +17,12 @@ import numpy as np
 import uvicorn
 
 from .llm_runtime_config import (
-    load_active_llm_env_config,
-    load_llm_env_config,
-    load_runtime_config,
     normalize_llm_config,
     public_llm_config,
-    save_llm_env_config_snapshot,
-    save_runtime_config,
-    sync_llm_process_environment,
+)
+from .user_llm_config import (
+    load_user_llm_config, save_user_llm_config, user_llm_config_path,
+    user_llm_signature, resolve_user_llm_request, default_user_llm_config,
 )
 from .models import OllamaModel, generate_for_chat
 from .rag_index import (
@@ -456,36 +453,13 @@ class MolecularChatApp:
                 model_name=ollama_config.get("model", "gmm-llama:latest")
             )
 
-        modelscope_config = self.config.get("modelscope", {})
-        modelscope_api_key = str(modelscope_config.get("api_key", "") or "").strip()
-        if modelscope_config and modelscope_api_key:
-            # 使用ModelScope API模型
-            from src.agent.modelscope_model import ModelScopeModel
-            default_model = modelscope_config.get("default_model", "glm4")
-            model_name = modelscope_config.get("models", {}).get(default_model, {}).get("name", "ZhipuAI/GLM-4.6")
-            
-            self.model = ModelScopeModel(
-                api_key=modelscope_api_key,
-                model_name=model_name,
-                base_url=modelscope_config.get("base_url", "https://api-inference.modelscope.cn/v1/chat/completions")
-            )
-            logger.info(f"✅ 使用ModelScope API模型: {model_name}")
-        else:
-            # 使用Ollama本地模型
-            if modelscope_config:
-                logger.warning("ModelScope API key is empty; falling back to local Ollama model.")
-            self.model = _init_ollama_model()
-            logger.info(f"✅ 使用Ollama本地模型: {self.model.model_name}")
-        self.runtime_llm_config_path = Path(
-            os.environ.get("MEDCHAT_LLM_CONFIG_PATH", "scratch/llm_runtime_config.json")
-        )
-        self.runtime_llm_env_path = Path(
-            os.environ.get("MEDCHAT_ENV_FILE", ".env")
-        )
+        # Main chat settings are independent from checkout env and scientific tools.
+        self.runtime_llm_env_path = user_llm_config_path()
         self._llm_config_lock = asyncio.Lock()
-        self.active_llm_config = self._load_active_llm_config()
-        self.model = self._create_model_from_llm_config(self.active_llm_config)
         self._llm_env_signature = self._llm_env_file_signature()
+        self.active_llm_config = self._load_active_llm_config()
+        self.config.setdefault("inference", {})["stream"] = self.active_llm_config["stream"]
+        self.model = self._create_model_from_llm_config(self.active_llm_config)
         self._llm_watch_task = None
         logger.info(
             "Active LLM provider: %s / %s",
@@ -513,7 +487,8 @@ class MolecularChatApp:
                 model=self.model,
                 rag_service=self.rag_system,
                 agent_system=self.agent_system,
-                config=self.config
+                config=self.config,
+                refresh_model_config=self._refresh_llm_config_from_env,
             )
             logger.info("✅ ChatHandler初始化成功")
         except Exception as e:
@@ -576,213 +551,41 @@ class MolecularChatApp:
             state_store=state_store,
         )
 
-    def _api_key_for_provider(self, provider: str) -> str:
-        normalized_provider = normalize_llm_config({"provider": provider})["provider"]
-        if normalized_provider in {"openai_compatible", "custom"}:
-            return str(
-                os.environ.get("OPENAI_COMPATIBLE_API_KEY")
-                or os.environ.get("EXTERNAL_LLM_API_KEY")
-                or ""
-            ).strip()
-        if normalized_provider == "modelscope":
-            modelscope_config = self.config.get("modelscope", {})
-            return str(
-                os.environ.get("MODELSCOPE_API_KEY")
-                or modelscope_config.get("api_key", "")
-                or ""
-            ).strip()
-        return ""
-
-    def _llm_stream_from_environment(self) -> bool:
-        default = bool(self.config.get("inference", {}).get("stream", True))
-        raw = os.environ.get("MEDCHAT_LLM_STREAM")
-        if raw is None:
-            return default
-        return raw.strip().lower() not in {"0", "false", "no", "off"}
-
-    def _llm_config_from_yaml(self) -> Dict[str, Any]:
-        selected_provider = str(os.environ.get("MEDCHAT_LLM_PROVIDER") or "").strip()
-        if selected_provider:
-            provider = normalize_llm_config({"provider": selected_provider})["provider"]
-            stream = self._llm_stream_from_environment()
-            if provider in {"openai_compatible", "custom"}:
-                return normalize_llm_config(
-                    {
-                        "provider": provider,
-                        "base_url": (
-                            os.environ.get("OPENAI_COMPATIBLE_BASE_URL")
-                            or os.environ.get("EXTERNAL_LLM_BASE_URL")
-                            or ""
-                        ),
-                        "model_name": (
-                            os.environ.get("OPENAI_COMPATIBLE_MODEL")
-                            or os.environ.get("EXTERNAL_LLM_MODEL")
-                            or ""
-                        ),
-                        "api_key": self._api_key_for_provider(provider),
-                        "stream": stream,
-                    }
-                )
-            if provider == "modelscope":
-                modelscope_config = self.config.get("modelscope", {})
-                default_model = modelscope_config.get("default_model", "glm4")
-                return normalize_llm_config(
-                    {
-                        "provider": provider,
-                        "base_url": os.environ.get("MODELSCOPE_BASE_URL")
-                        or modelscope_config.get(
-                            "base_url",
-                            "https://api-inference.modelscope.cn/v1/chat/completions",
-                        ),
-                        "model_name": os.environ.get("MODELSCOPE_MODEL")
-                        or modelscope_config.get("models", {})
-                        .get(default_model, {})
-                        .get("name", "ZhipuAI/GLM-5.1"),
-                        "api_key": self._api_key_for_provider(provider),
-                        "stream": stream,
-                    }
-                )
-            ollama_config = self.config.get("ollama", {})
-            return normalize_llm_config(
-                {
-                    "provider": "ollama",
-                    "base_url": os.environ.get("OLLAMA_BASE_URL")
-                    or ollama_config.get("base_url", "http://localhost:11434"),
-                    "model_name": os.environ.get("OLLAMA_MODEL")
-                    or ollama_config.get("model", "gmm-llama:latest"),
-                    "stream": stream,
-                }
-            )
-
-        external_api_key = (
-            os.environ.get("OPENAI_COMPATIBLE_API_KEY")
-            or os.environ.get("EXTERNAL_LLM_API_KEY")
-            or ""
-        ).strip()
-        if external_api_key:
-            return normalize_llm_config(
-                {
-                    "provider": "openai_compatible",
-                    "base_url": (
-                        os.environ.get("OPENAI_COMPATIBLE_BASE_URL")
-                        or os.environ.get("EXTERNAL_LLM_BASE_URL")
-                        or ""
-                    ),
-                    "model_name": (
-                        os.environ.get("OPENAI_COMPATIBLE_MODEL")
-                        or os.environ.get("EXTERNAL_LLM_MODEL")
-                        or ""
-                    ),
-                    "api_key": external_api_key,
-                    "stream": self._llm_stream_from_environment(),
-                }
-            )
-
-        modelscope_config = self.config.get("modelscope", {})
-        modelscope_api_key = str(
-            os.environ.get("MODELSCOPE_API_KEY")
-            or modelscope_config.get("api_key", "")
-            or ""
-        ).strip()
-        if modelscope_api_key:
-            default_model = modelscope_config.get("default_model", "glm4")
-            model_name = (
-                os.environ.get("MODELSCOPE_MODEL")
-                or modelscope_config.get("models", {}).get(default_model, {}).get("name", "ZhipuAI/GLM-5.1")
-            )
-            return normalize_llm_config(
-                {
-                    "provider": "modelscope",
-                    "base_url": os.environ.get("MODELSCOPE_BASE_URL") or modelscope_config.get(
-                        "base_url",
-                        "https://api-inference.modelscope.cn/v1/chat/completions",
-                    ),
-                    "model_name": model_name,
-                    "api_key": modelscope_api_key,
-                    "stream": self._llm_stream_from_environment(),
-                }
-            )
-
-        ollama_config = self.config.get("ollama", {})
-        return normalize_llm_config(
-            {
-                "provider": "ollama",
-                "base_url": ollama_config.get("base_url", "http://localhost:11434"),
-                "model_name": ollama_config.get("model", "gmm-llama:latest"),
-                "stream": self._llm_stream_from_environment(),
-            }
-        )
-
     def _load_active_llm_config(self) -> Dict[str, Any]:
-        environment_config = self._llm_config_from_yaml()
-        runtime_config = load_runtime_config(self.runtime_llm_config_path)
-        if os.environ.get("MEDCHAT_LLM_PROVIDER"):
-            config = environment_config
-        elif runtime_config:
-            config = {**environment_config, **runtime_config}
-            config["api_key"] = self._api_key_for_provider(
-                runtime_config.get("provider", "")
-            )
-        else:
-            config = environment_config
-        if not config.get("base_url"):
-            config["base_url"] = (
-                "http://localhost:11434"
-                if config.get("provider") == "ollama"
-                else (
-                    "https://api-inference.modelscope.cn/v1/chat/completions"
-                    if config.get("provider") == "modelscope"
-                    else "https://api.openai.com/v1/chat/completions"
-                )
-            )
-        if not config.get("model_name"):
-            config["model_name"] = (
-                "gmm-llama:latest"
-                if config.get("provider") == "ollama"
-                else ("ZhipuAI/GLM-5.1" if config.get("provider") == "modelscope" else "gpt-4o-mini")
-            )
-        return normalize_llm_config(config)
+        return load_user_llm_config(self.runtime_llm_env_path)
 
     def _llm_env_file_signature(self) -> str | None:
-        try:
-            content = self.runtime_llm_env_path.read_bytes()
-        except FileNotFoundError:
-            return None
-        return hashlib.sha256(content).hexdigest()
+        return user_llm_signature(self.runtime_llm_env_path)
 
     async def _refresh_llm_config_from_env(self) -> bool:
-        """Reload UI-managed config after another worker updates the env file."""
-        signature = self._llm_env_file_signature()
-        if signature is None or signature == self._llm_env_signature:
-            return False
-        async with self._llm_config_lock:
+        """Observe updates or removal in the authoritative per-user store."""
+        try:
             signature = self._llm_env_file_signature()
-            if signature is None or signature == self._llm_env_signature:
+            if signature == self._llm_env_signature:
                 return False
-            config = load_active_llm_env_config(self.runtime_llm_env_path)
-            self._llm_env_signature = signature
-            if not config:
-                return False
-            previous_provider = self.active_llm_config.get("provider", "")
-            clear_previous = (
-                (previous_provider,)
-                if previous_provider != config.get("provider")
-                else ()
-            )
-            sync_llm_process_environment(
-                config,
-                clear_api_key=(
-                    config.get("provider") != "ollama" and not config.get("api_key")
-                ),
-                clear_api_key_providers=clear_previous,
-            )
+            async with self._llm_config_lock:
+                signature = self._llm_env_file_signature()
+                if signature == self._llm_env_signature:
+                    return False
+                config = self._load_active_llm_config()
+                self._apply_llm_config(config)
+                self._llm_env_signature = signature
+                return True
+        except (OSError, ValueError, RuntimeError):
+            raise HTTPException(status_code=503, detail="本机模型配置不可用；请检查配置文件与目录权限。") from None
+
+    async def _persist_user_llm_config(self, payload: dict) -> dict:
+        async with self._llm_config_lock:
+            try:
+                config, signature = save_user_llm_config(
+                    self.runtime_llm_env_path, payload,
+                    clear_api_key=payload.get("clear_api_key") is True,
+                )
+            except (OSError, ValueError, RuntimeError):
+                raise HTTPException(status_code=503, detail="模型配置未保存；请检查输入、配置文件与目录权限。") from None
             self._apply_llm_config(config)
-            logger.info(
-                "Reloaded LLM configuration from local env: %s / %s",
-                config.get("provider"),
-                config.get("model_name"),
-            )
-            return True
+            self._llm_env_signature = signature
+            return config
 
     async def _watch_llm_env_config(self) -> None:
         while True:
@@ -818,8 +621,8 @@ class MolecularChatApp:
 
         return OpenAICompatibleModel(
             api_key=config.get("api_key", ""),
-            model_name=config.get("model_name") or "gpt-4o-mini",
-            base_url=config.get("base_url") or "https://api.openai.com/v1/chat/completions",
+            model_name=config.get("model_name") or default_user_llm_config()["model_name"],
+            base_url=config.get("base_url") or default_user_llm_config()["base_url"],
             provider_name="OpenAI-compatible",
         )
 
@@ -910,7 +713,13 @@ class MolecularChatApp:
         @self.app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket):
             """WebSocket endpoint for chat - 使用ChatHandler"""
-            await self._refresh_llm_config_from_env()
+            try:
+                await self._refresh_llm_config_from_env()
+            except HTTPException:
+                await websocket.accept()
+                await websocket.send_json({"type": "error", "message": "本机模型配置不可用；请检查配置文件与目录权限。"})
+                await websocket.close(code=1011)
+                return
             if self.chat_handler:
                 # 使用新的ChatHandler（支持Agent工具）
                 await self.chat_handler.handle_websocket(websocket)
@@ -939,150 +748,66 @@ class MolecularChatApp:
 
         @self.app.post("/api/llm/config")
         async def save_llm_config(request: Request):
-            """Save and activate runtime LLM connection configuration."""
+            """Persist before activation; a successful save is not a connection test."""
             payload = await request.json()
-            await self._refresh_llm_config_from_env()
-            next_config = normalize_llm_config(payload)
-            clear_api_key = payload.get("clear_api_key") is True
-            warnings = []
-            async with self._llm_config_lock:
-                previous_provider = self.active_llm_config.get("provider", "")
-                if clear_api_key:
-                    next_config["api_key"] = ""
-                elif not next_config.get("api_key"):
-                    if next_config.get("provider") == previous_provider:
-                        next_config["api_key"] = self.active_llm_config.get("api_key", "")
-                    else:
-                        saved_target = load_llm_env_config(
-                            self.runtime_llm_env_path,
-                            next_config.get("provider", ""),
-                        )
-                        next_config["api_key"] = (
-                            saved_target.get("api_key", "")
-                            or self._api_key_for_provider(next_config.get("provider", ""))
-                        )
-
-                clear_providers = (
-                    (previous_provider,)
-                    if clear_api_key and previous_provider != next_config.get("provider")
-                    else ()
-                )
-                _env_config, env_signature = save_llm_env_config_snapshot(
-                    self.runtime_llm_env_path,
-                    next_config,
-                    clear_api_key=clear_api_key,
-                    clear_api_key_providers=clear_providers,
-                )
-                sync_llm_process_environment(
-                    next_config,
-                    clear_api_key=clear_api_key,
-                    clear_api_key_providers=clear_providers,
-                )
-                self._llm_env_signature = env_signature
-                try:
-                    saved_config = save_runtime_config(
-                        self.runtime_llm_config_path,
-                        next_config,
-                    )
-                except OSError as exc:
-                    logger.warning("Unable to update LLM runtime cache: %s", exc)
-                    warnings.append("运行时缓存写入失败；本机 .env 已保存并作为重启配置来源。")
-                    saved_config = next_config
-                self._apply_llm_config(saved_config)
-                return {
-                    "success": True,
-                    "message": "模型接入配置已保存到本机 .env 并生效",
-                    "config": public_llm_config(saved_config),
-                    "warnings": warnings,
-                }
+            if not isinstance(payload, dict):
+                raise HTTPException(status_code=422, detail="模型配置必须为对象。")
+            saved = await self._persist_user_llm_config(payload)
+            return {
+                "success": True,
+                "message": "模型配置已保存到本机用户目录并生效；连接状态请使用测试连接确认。",
+                "config": public_llm_config(saved),
+                "warnings": [],
+            }
 
         @self.app.post("/api/llm/test")
         async def test_llm_config(request: Request):
-            """Test a submitted LLM connection without saving it."""
+            """Test without saving or borrowing credentials from another endpoint."""
             payload = await request.json()
+            if not isinstance(payload, dict):
+                raise HTTPException(status_code=422, detail="模型配置必须为对象。")
             await self._refresh_llm_config_from_env()
-            test_config = normalize_llm_config(payload)
-            if (
-                payload.get("clear_api_key") is not True
-                and not test_config.get("api_key")
-                and test_config.get("provider") != "ollama"
-            ):
-                if test_config.get("provider") == self.active_llm_config.get("provider"):
-                    test_config["api_key"] = self.active_llm_config.get("api_key", "")
-                else:
-                    saved_target = load_llm_env_config(
-                        self.runtime_llm_env_path,
-                        test_config.get("provider", ""),
-                    )
-                    test_config["api_key"] = (
-                        saved_target.get("api_key", "")
-                        or self._api_key_for_provider(test_config.get("provider", ""))
-                    )
-
             try:
+                test_config = resolve_user_llm_request(
+                    payload, self.active_llm_config,
+                    clear_api_key=payload.get("clear_api_key") is True,
+                )
                 test_model = self._create_model_from_llm_config(test_config)
                 response = await generate_for_chat(
-                    test_model,
-                    "Reply with exactly: CONNECTION_OK",
-                    temperature=0.1,
-                    max_tokens=64,
+                    test_model, "Reply with exactly: CONNECTION_OK",
+                    temperature=0.1, max_tokens=64,
                 )
                 failure_markers = ("失败", "未配置", "HTTP ", "API Key", "Base URL", "模型名称")
                 is_success = bool(response and not any(marker in response for marker in failure_markers))
                 return {
                     "success": is_success,
-                    "message": (
-                        "连接测试成功"
-                        if is_success
-                        else "连接测试失败；请检查服务地址、模型名称和凭据。"
-                    ),
+                    "message": "连接测试成功" if is_success else "连接测试失败；请检查服务地址、模型名称和凭据。",
                     "model": test_model.model_name,
                 }
-            except Exception as e:
-                logger.error("LLM connection test failed (%s)", type(e).__name__)
-                return {
-                    "success": False,
-                    "message": "连接测试失败；请检查服务地址、模型名称和凭据。",
-                }
+            except Exception as exc:
+                logger.error("LLM connection test failed (%s)", type(exc).__name__)
+                return {"success": False, "message": "连接测试失败；请检查服务地址、模型名称和凭据。"}
 
         @self.app.post("/api/switch_model")
         async def switch_model(request: Request):
-            """Switch model name for the current provider."""
             payload = await request.json()
+            if not isinstance(payload, dict):
+                raise HTTPException(status_code=422, detail="模型配置必须为对象。")
             await self._refresh_llm_config_from_env()
             model_key = str(payload.get("model") or "").strip()
             model_map = {
-                "glm4": "ZhipuAI/GLM-5.1",
-                "glm5.1": "ZhipuAI/GLM-5.1",
-                "qwen3": "Qwen/Qwen3-235B-A22B-Instruct-2507",
-                "gmm-llama": "gmm-llama:latest",
+                "glm4": "ZhipuAI/GLM-5.1", "glm5.1": "ZhipuAI/GLM-5.1",
+                "qwen3": "Qwen/Qwen3-235B-A22B-Instruct-2507", "gmm-llama": "gmm-llama:latest",
             }
             next_config = dict(self.active_llm_config)
-            next_config["model_name"] = model_map.get(model_key, model_key or next_config.get("model_name"))
-            warnings = []
-            async with self._llm_config_lock:
-                _env_config, env_signature = save_llm_env_config_snapshot(
-                    self.runtime_llm_env_path,
-                    next_config,
-                )
-                sync_llm_process_environment(next_config)
-                self._llm_env_signature = env_signature
-                try:
-                    saved_config = save_runtime_config(
-                        self.runtime_llm_config_path,
-                        next_config,
-                    )
-                except OSError as exc:
-                    logger.warning("Unable to update LLM runtime cache: %s", exc)
-                    warnings.append("运行时缓存写入失败；本机 .env 已保存并作为重启配置来源。")
-                    saved_config = next_config
-                self._apply_llm_config(saved_config)
-                return {
-                    "success": True,
-                    "message": f"已切换到 {saved_config.get('model_name')}",
-                    "config": public_llm_config(saved_config),
-                    "warnings": warnings,
-                }
+            next_config["model_name"] = model_map.get(model_key, model_key or next_config["model_name"])
+            # Resolve against the saved state under the file lock, not a stale key.
+            next_config["api_key"] = ""
+            saved = await self._persist_user_llm_config(next_config)
+            return {
+                "success": True, "message": f"已切换到 {saved.get('model_name')}",
+                "config": public_llm_config(saved), "warnings": [],
+            }
 
         # Register additional page routes
         from .routes.main_routes import register_main_routes
