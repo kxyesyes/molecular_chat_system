@@ -301,3 +301,13 @@ tests/test_rag_service_boundary.py ad3176a96d63b3a1459721f74753125861e0dabacb51a
 - QUALITY：独立核对相同快照，59 passed、5 deselected，9.17秒、exit0。五个全局 app 组装用例未在此次窄回归重跑，已由实现者及SPEC完整覆盖；不把 deselected 计为 passed。确认新测试无 lifespan/后台任务启动，隔离临时目录正常清理；8文件内存编译与diff-check通过。
 - 两次审查均只读；联合4181通过/8跳过及离线contract34/34是实现者的已核验证据，审查者未声称各自重跑全量或真实科学工具。
 - 仅计划追加此节，代码快照仍为上列 `c9be016f...`。父任务接下来精确提交九路径；前置批次尚须逐项发布，不能将累计分支直接作为单个PR推送或标记任务书全部完成。
+
+### 最新依赖组合验证（父任务，2026-09-24）
+
+前置模板兼容、匿名会话、T01共享RAG、T06-B静态备份清理及T03预算修复已分批合并。T05仍独立Draft PR44；本地已审的T05静态测试适配通过SPEC/QUALITY，只移除重复model.close并增加实际gate.closed断言。其后顺序传播到T06A/T06C/T11A，原三批3/3/10路径binary主题补丁逐字节不变；独立增量审查APPROVED，未再修改生产代码。
+
+本次受测HEAD为`00a00cd0be3c44f5f5b628ac3bcdacda00b9a1dd`，完整tree为`f5193ba4bf91b7a12c2aae4a0e81a4a7237e0213`。在上述JOINT十八路径基础上加入`tests/test_main_routes_template_compat.py`与`tests/test_static_placeholder_cleanup.py`，使用完全相同的正常`-m pytest`隔离包装和参数，结果为 **4231 passed、8 skipped、7 warnings，289.04秒，exit0**。这是Agent/Web/RAG/生命周期组合，不是全仓或真实模型科研验收；八项跳过及警告原因仍与上文相同，没有新增skip。
+
+同一临时环境和显式socket联网阻断下，重跑`run_agent_acceptance.py --mode contract`，输出到忽略路径`scratch/t11a-contract-static-combination.json`，**34/34 passed、pass_rate=1.0、exit0**。报告SHA256为`0977d3744d5a48174c33eeb086f0bea8997d691f063f01f4a5d77bf6e54d3d9b`；未提交产物。RDKit日志中的无效SMILES属于预期拒绝用例，不是调用真实外部模型。
+
+`src`与`scripts`全部302个跟踪Python文件内存编译通过，未写pyc；diff检查通过。独立审查者核对了增量blob/mode、原主题补丁、关闭责任、无lifespan/索引初始化边界，没有声称自行重跑4231项。此后只追加本节执行记录。仍须依次完成T05/T06A/T06C发布，才能给本批创建精确PR；没有部署或更改生产资产。
