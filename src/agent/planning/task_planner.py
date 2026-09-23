@@ -5,12 +5,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.agent.contracts import AgentContext
+from src.agent.contracts.target_request import analyze_target_request, TARGET_CLARIFICATION
 from src.agent.contracts.generation_request import (
     DEFAULT_GENERATION_COUNT,
     GenerationRequestError,
     MAX_GENERATION_COUNT,
     MIN_GENERATION_COUNT,
     build_generation_request,
+    has_generation_intent,
     generation_request_error_details,
     parse_generation_count,
     validate_generation_count,
@@ -48,19 +50,39 @@ class TaskPlanner:
             return self._target_driven_design_plan(query, context.metadata)
 
         if skill == "hit_to_lead_optimization":
+            request = analyze_target_request(query)
+            if (request.explicit or request.targets) and request.needs_clarification:
+                return self._target_clarification_plan(skill, request.targets)
             return self._lead_optimization_plan(query, context.metadata)
 
         if skill == "molecular_design":
+            request = analyze_target_request(query)
+            if (request.explicit or request.targets) and request.needs_clarification:
+                return self._target_clarification_plan(skill, request.targets)
             return self._molecular_design_plan(query, context.metadata)
 
         if skill == "target_database_search":
+            target_request = analyze_target_request(query)
+            search_input = self._extract_target_hint(query)
+            if (
+                len(target_request.targets) > 1
+                and not target_request.unknown
+                and not target_request.qualified
+            ):
+                # TargetDatabaseTool searches at most five distinct queries.
+                # Reject the whole comparison rather than silently omit a target.
+                if len(target_request.targets) > 5:
+                    plan = self._target_clarification_plan(skill, target_request.targets)
+                    plan.metadata["message"] = "每次最多比较 5 个靶点，请缩小比较范围后重试。"
+                    return plan
+                search_input = list(target_request.targets)
             return WorkflowPlan(
                 workflow_name="target_database_search",
                 steps=[
                     WorkflowStep(
                         name="target_database_search",
                         tool_name="target_database_search",
-                        input_data=self._extract_target_hint(query),
+                        input_data=search_input,
                         output_key="result",
                     )
                 ],
@@ -211,6 +233,9 @@ class TaskPlanner:
         request_metadata: dict[str, Any] | None = None,
     ) -> WorkflowPlan:
         target_hint = self._extract_target_hint(query)
+        target_request = analyze_target_request(query)
+        if target_request.needs_clarification:
+            return self._target_clarification_plan("target_driven_design", target_request.targets)
         request_metadata = request_metadata or {}
         requested_count: Any = None
         try:
@@ -465,14 +490,25 @@ class TaskPlanner:
         )
 
     @staticmethod
+    def _target_clarification_plan(workflow_name: str, targets: tuple[str, ...]) -> WorkflowPlan:
+        return WorkflowPlan(
+            workflow_name=workflow_name,
+            steps=[],
+            metadata={
+                "reason": "target_clarification_required",
+                "message": TARGET_CLARIFICATION,
+                "target_candidates": list(targets),
+            },
+        )
+
+    @staticmethod
     def _looks_like_design(query: str) -> bool:
-        query_lower = query.lower()
-        return any(token in query_lower for token in ["设计", "生成", "候选", "design", "generate"])
+        return has_generation_intent(query)
 
     @staticmethod
     def _extract_target_hint(query: str) -> str:
-        match = re.search(r"(PDE\d+[A-Z]?|EGFR|BACE1|KRAS|BRAF|JAK2|ALK|MET|CDK2|KDR)", query, re.I)
-        return match.group(1).upper() if match else query.strip()
+        request = analyze_target_request(query)
+        return request.targets[0] if not request.needs_clarification else query.strip()
 
     @staticmethod
     def _looks_like_unauthorized_tool_request(query: str) -> bool:
