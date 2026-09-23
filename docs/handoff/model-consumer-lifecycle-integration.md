@@ -256,3 +256,21 @@ $env:PYTHONDONTWRITEBYTECODE='1'
 - QUALITY 独立四文件聚焦 59 passed，另外复验原实际 adapter 故障探针：六个流清理组合与一个 Ollama 双客户端关闭检查全部通过；302 文件内存编译通过。
 - 两审均核对 11 个源码/测试 SHA-256 与最终联合回归快照一致，无新增阻断项。未重跑全量 4k、未调用真实网络或模型。
 - 父任务对严格 12 路径进行凭据模式扫描，无匹配；diff 检查通过。后续仅精确本地提交，不将本地复审视为 PR37 或旧 Starlette CI 已解决，也不部署或启用真实模型。
+
+## 最新依赖组合与静态测试所有权适配（2026-09-24）
+
+模板兼容、会话归属、RAG行映射及静态清理已分别发布；当前本地组合head3914834088f39077d6fe74945ef6217df047bb29基于已审T03候选，完整tree7f13738ef8833d4c1d4107208e5b26f745f1eb94。此前每次对齐的原12路径补丁逐字节保持，增量审查通过。
+
+静态测试加入后的实际RED为 **7 failed、205 passed、7 warnings，31.63秒、exit1**。七个失败均来自静态测试夹具仍在app.shutdown之后直接关闭两个模型：T05已将模型关闭归属应用，计数实际[2,2]、期望[1,1]，已创建的HTTP客户端open_count均0。真实页面与备份404断言通过，但不能忽略重复关闭失败。
+
+本次仅扩大一条测试写集 `tests/test_static_placeholder_cleanup.py`：删除重复的两个model.close回调，保留app.shutdown回调、实际HTTP/Jinja请求、恰好一次关闭、零泄漏、异常分支、父应用隔离及最终独立safety net；新增应用request_gate_closed断言。断言仍先于紧急清理，关闭缺失会失败，不把兜底清理当被测成功。未修改任何生产代码或放松原断言。
+
+正常conftest、白名单环境、临时cwd/配置/DB、real开关0下，MedChat Python执行以下实际十路径（在临时cwd中使用仓库绝对测试路径）：
+
+```text
+python -B -m pytest tests/test_static_placeholder_cleanup.py tests/test_model_request_lifecycle.py tests/test_design_model_switch.py tests/test_web_app_lifecycle.py tests/test_user_llm_routes.py tests/test_main_routes_template_compat.py tests/test_agent_session_entrypoints.py tests/agent/test_browser_session_integration.py tests/agent/test_chat_input_budget.py tests/test_rag_index_manifest.py -q -p no:cacheprovider --tb=short -rs
+```
+
+最小fixture修正后同矩阵 **212 passed、7 warnings，28.63秒、exit0**。警告为既有SWIG/FastAPI弃用。原4145/8和后续4224/8属于此前代码组合，不冒称已经包含本次新静态fixture；本次独立SPEC→QUALITY复核仍需单独记录，最新PR CI尚未执行。
+
+后续独立SPEC与QUALITY均APPROVED，无P0/P1/P2待修项。两者只读核对生产关闭所有权、provider关闭异常后的继续清理、泄漏断言先于紧急清理和实际gate状态，未自行重跑测试；上面的212项由父任务实际运行。审查测试SHA256均为90D0849A7E9D358368CC5084A741B3FB3A961F9C9579C1AC53BAC6DD2C9AD69E、Git blob为370b2804215bd2c0954168e90e567e172bfb06d2；测试停写，后续只追加本段审查记录。当前可精确本地提交该两路径增量，发布仍需对齐T03最终main、最新CI和合并前核对。
