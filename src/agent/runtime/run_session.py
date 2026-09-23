@@ -54,6 +54,7 @@ class _StepJournal:
     semantic_evidence_entry: dict[str, str] | None = None
     checkpoint_checked: bool = False
     checkpoint_reused: bool = False
+    reused_result_changed: bool = False
     checkpoint_warning: str | None = None
     checkpoint_warning_entry: dict[str, str] | None = None
     running_checkpoint_saved: bool = False
@@ -427,6 +428,7 @@ class WorkflowRunSession:
             }
             assert self.ledger is not None
             self.ledger.prepare_provenance(journal.input_hash, result)
+            prior_outcome = (result.success, result.status, deepcopy(result.error))
             result = self.orchestrator.validator.validate_tool_result(
                 result,
                 trusted_checkpoint=journal.checkpoint_reused,
@@ -438,6 +440,8 @@ class WorkflowRunSession:
                     result,
                     required=step.required,
                 )
+            journal.reused_result_changed = journal.checkpoint_reused and prior_outcome != (
+                result.success, result.status, result.error)
             if self.dynamic:
                 # Validators may scrub provenance/quality; alignment changes data.
                 # Bind only the accepted representation, never the raw tool payload.
@@ -494,7 +498,7 @@ class WorkflowRunSession:
         ):
             self.semantic_evidence.append(journal.semantic_evidence_entry)
             journal.semantic_evidence_recorded = True
-        if not journal.checkpoint_reused:
+        if not journal.checkpoint_reused or journal.reused_result_changed:
             self._persist_step_result(step, journal, result)
         if not journal.output_applied:
             if result.success and step.output_key:
@@ -772,7 +776,7 @@ class WorkflowRunSession:
                     "tool_name": step.tool_name,
                     "status": persisted_status,
                     "input": journal.input_data,
-                    "output": legacy_result if result.success or self.dynamic else None,
+                    "output": legacy_result,
                     "error": legacy_result.get("error"),
                     "elapsed_ms": result.elapsed_ms,
                 }
@@ -784,7 +788,7 @@ class WorkflowRunSession:
                 journal,
                 status=persisted_status,
                 checkpoint_phase="result",
-                output=legacy_result if result.success or self.dynamic else None,
+                output=legacy_result,
                 error=legacy_result.get("error"),
             )
             journal.checkpoint_saved = True

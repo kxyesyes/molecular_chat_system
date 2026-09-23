@@ -11,6 +11,12 @@ class TargetAgent(SpecialistAgent):
     allowed_tools = {"target_database_search"}
 
 
+class RAGAgent(SpecialistAgent):
+    """Execution-only knowledge owner; no model or independent planning loop."""
+    name = "rag"
+    allowed_tools = {"rag_search", "rag_database_search"}
+
+
 class ReverseTargetAgent(SpecialistAgent):
     name = "reverse_target"
     allowed_tools = {"reverse_target_predictor"}
@@ -78,6 +84,7 @@ class ReportAgent(SpecialistAgent):
 
 def build_default_specialists() -> dict[str, SpecialistAgent]:
     agents = [
+        RAGAgent(),
         TargetAgent(),
         ReverseTargetAgent(),
         MolecularDesignAgent(),

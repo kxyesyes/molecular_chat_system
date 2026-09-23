@@ -510,6 +510,9 @@ class MolecularChatApp:
             tool.name: tool
             for tool in get_all_tools(self.molecular_generator_model)
         }
+        for tool in tools.values():
+            if hasattr(tool, "rag_system") and tool.rag_system is None:
+                tool.rag_system = getattr(self, "rag_system", None)
         return SupervisorAgent(
             tools=tools,
             llm=self.model,
@@ -536,6 +539,7 @@ class MolecularChatApp:
         from src.agent.specialists import build_default_specialists
         from src.agent.supervisor import SupervisorAgent
         from src.agent.tooling import build_tool_registry
+        from src.agent.tooling.registration import audit_registration
 
         state_store = self._get_agent_state_store()
         if self.agent_tool_registry is None:
@@ -545,9 +549,14 @@ class MolecularChatApp:
                 else []
             )
             self.agent_tool_registry = build_tool_registry(tools)
+        specialists = build_default_specialists()
+        self.agent_registration_report = audit_registration(self.agent_tool_registry, specialists)
+        if self.agent_registration_report["errors"]:
+            raise ValueError("Agent registration invalid: " + "; ".join(self.agent_registration_report["errors"]))
         return SupervisorAgent(
+            tools={},  # Registry owns these tools; do not construct a second pool.
             tool_registry=self.agent_tool_registry,
-            specialists=build_default_specialists(),
+            specialists=specialists,
             state_store=state_store,
         )
 

@@ -100,6 +100,12 @@ def test_dynamic_completion_rejects_preserved_structured_error(make_session, out
     bundle.session.start()
     settle(bundle)
     assert bundle.session.results[0].error == observed.error
+    if outcome is None:
+        final = bundle.session.finish_dynamic("model unavailable")
+        assert final.outcome == RunOutcome.FAILED
+        assert not final.success and final.error == observed.error
+        assert terminal_events(bundle)[0].event == TaskEventType.TASK_FAILED
+        return
     with pytest.raises(SessionLifecycleError, match="known execution failure"):
         bundle.session.finish_dynamic("must remain truthful", outcome=outcome)
     assert not terminal_events(bundle)

@@ -139,11 +139,12 @@ class AgentResult:
             item
             for item in tool_results
             if item.success
+            and item.error is None
             and item.status
             in {ObservationStatus.SUCCEEDED, ObservationStatus.PARTIAL}
         ]
         all_succeeded = bool(tool_results) and all(
-            item.success and item.status == ObservationStatus.SUCCEEDED
+            item.success and item.error is None and item.status == ObservationStatus.SUCCEEDED
             for item in tool_results
         )
         any_succeeded = bool(successful_observations)

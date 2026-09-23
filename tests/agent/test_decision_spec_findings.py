@@ -255,7 +255,7 @@ def test_full_seal_precedes_every_publication(setup_loop, monkeypatch, boundary,
         monkeypatch.setattr(b.store, name, write)
     else:
         def callback(event):
-            if event.event.value == ('validation_warning' if boundary == 'warning' else 'tool_completed'):
+            if event.event.value == ('validation_warning' if boundary == 'warning' else 'tool_failed'):
                 mutate()
         b.bus.on_event = callback
     result = run(b)
@@ -313,7 +313,7 @@ def test_error_cannot_be_erased_before_first_observation_seal(setup_loop):
     erased = []
 
     def callback(event):
-        if event.event.value == 'tool_completed':
+        if event.event.value == 'tool_failed':
             assert event.payload['error']['code'] == 'provider_error'
             source.last.error = None
             erased.append(True)

@@ -13,12 +13,14 @@ class ToolRegistry:
 
     def register(self, adapter: ToolAdapter) -> None:
         name = adapter.spec.name
-        if name in self._tools:
+        if name in self._tools or name in self._aliases:
             raise ValueError(f"Tool already registered: {name}")
+        for alias in adapter.spec.aliases:
+            if alias == name or alias in self._aliases or alias in self._tools:
+                raise ValueError(f"Tool alias already registered: {alias}")
+        # Validate every name first: a rejected registration must be atomic.
         self._tools[name] = adapter
         for alias in adapter.spec.aliases:
-            if alias in self._aliases or alias in self._tools:
-                raise ValueError(f"Tool alias already registered: {alias}")
             self._aliases[alias] = name
         for capability in adapter.spec.capabilities:
             self._capabilities[capability].add(name)
@@ -38,7 +40,7 @@ class ToolRegistry:
             raise PermissionError(
                 f"Agent {agent_name} is not authorized to use {canonical}"
             )
-        if require_available and not adapter.health()["available"]:
+        if require_available and adapter.health()["available"] is False:
             raise RuntimeError(
                 f"Tool {canonical} is unavailable: {adapter.health()['message']}"
             )
@@ -51,7 +53,7 @@ class ToolRegistry:
             self._tools[name] for name in sorted(self._capabilities.get(capability, set()))
         ]
         if require_available:
-            adapters = [item for item in adapters if item.health()["available"]]
+            adapters = [item for item in adapters if item.health()["available"] is not False]
         return adapters
 
     def resolve_capability(

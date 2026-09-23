@@ -26,6 +26,13 @@ class RAGSearchTool(BaseMolecularTool):
         self.rag_system = rag_system
         self.embedding_endpoint = embedding_endpoint
 
+    def registration_health(self):
+        """Local readiness only; never initialize an index or contact a model."""
+        ready = bool(self.rag_system is not None
+                     and getattr(self.rag_system, "is_initialized", False)
+                     and getattr(self.rag_system, "vector_index", None) is not None)
+        return {"available": ready, "message": "ready" if ready else "RAG index is not initialized"}
+
     def should_use(self, query: str) -> bool:
         """检查查询是否需要RAG数据库搜索"""
         query_lower = query.lower()

@@ -51,6 +51,7 @@ _BY_TOOL = {
     for item in CAPABILITY_CATALOG
     for tool_name in item.tool_names
 }
+TOOL_ALIASES = {"rag_database_search": "rag_search"}
 
 
 def get_capability(name: str) -> CapabilitySpec:
@@ -62,6 +63,6 @@ def get_capability(name: str) -> CapabilitySpec:
 
 def capability_for_tool(tool_name: str) -> CapabilitySpec:
     try:
-        return _BY_TOOL[tool_name]
+        return _BY_TOOL[TOOL_ALIASES.get(tool_name, tool_name)]
     except KeyError as exc:
         raise KeyError(f"Unknown tool capability: {tool_name}") from exc

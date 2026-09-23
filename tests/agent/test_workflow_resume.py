@@ -327,6 +327,7 @@ def test_checkpoint_result_restores_status_and_provenance():
                 status=ObservationStatus.PARTIAL,
             ).to_dict(),
             "message": "stored",
+            "success": True,
             "status": "partial",
             "quality": {},
             "provenance": provenance.to_dict(),

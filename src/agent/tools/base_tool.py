@@ -181,6 +181,7 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
 
     from src.agent.contracts import (
         AgentErrorCode,
+        ObservationStatus,
         ToolProvenance,
         ToolResult,
         WorkflowArtifact,
@@ -236,6 +237,13 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
             return raw_result
 
         if isinstance(raw_result, dict):
+            status = None
+            if raw_result.get("status") is not None:
+                try:
+                    status = ObservationStatus(raw_result["status"])
+                except (ValueError, TypeError):
+                    return ToolResult.error_result(tool_name, AgentErrorCode.INVALID_OUTPUT,
+                                                   "Invalid observation status")
             try:
                 provenance = normalize_provenance(raw_result)
             except ValueError:
@@ -245,7 +253,7 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
                     message="Tool provenance failed strict validation",
                     elapsed_ms=elapsed_ms,
                 )
-            if raw_result.get("success", False):
+            if raw_result.get("success", False) and not raw_result.get("error"):
                 return ToolResult.success_result(
                     tool_name=tool_name,
                     data=raw_result.get("data"),
@@ -257,6 +265,7 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
                     artifacts=normalize_artifacts(raw_result.get("artifacts")),
                     quality=dict(raw_result.get("quality") or {}),
                     provenance=provenance,
+                    status=status,
                 )
             raw_error = raw_result.get("error") or {}
             if isinstance(raw_error, dict):
@@ -271,7 +280,7 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
                 )
                 error_code = raw_result.get("error_code")
                 error_details = {"raw_result": raw_result}
-            return ToolResult.error_result(
+            result = ToolResult.error_result(
                 tool_name=tool_name,
                 code=normalize_error_code(error_code),
                 message=error_message,
@@ -282,7 +291,12 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
                 artifacts=normalize_artifacts(raw_result.get("artifacts")),
                 quality=dict(raw_result.get("quality") or {}),
                 provenance=provenance,
+                status=status,
             )
+            if status == ObservationStatus.PARTIAL:
+                result.data = raw_result.get("data")
+                result.formatted = raw_result.get("formatted", "")
+            return result
 
         return ToolResult.success_result(
             tool_name=tool_name,

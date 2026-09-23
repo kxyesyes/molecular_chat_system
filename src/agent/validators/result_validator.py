@@ -49,6 +49,29 @@ class AgentResultValidator:
         *,
         trusted_checkpoint: bool = False,
     ) -> ToolResult:
+        try:
+            result.status = ObservationStatus(result.status)
+        except (ValueError, TypeError):
+            result.success = False
+            result.status = ObservationStatus.FAILED
+            result.formatted = ""
+            result.error = AgentExecutionError(
+                AgentErrorCode.INVALID_OUTPUT, "Invalid observation status")
+        if result.success and result.status not in {
+            ObservationStatus.SUCCEEDED, ObservationStatus.PARTIAL,
+        }:
+            result.success = False
+            result.formatted = ""
+            result.warnings.append("Success flag conflicts with observation status")
+        if not result.success and result.status == ObservationStatus.SUCCEEDED:
+            result.status = ObservationStatus.FAILED
+            result.formatted = ""
+            result.warnings.append("Failed observation cannot have succeeded status")
+        if result.success and result.error is not None:
+            result.success = False
+            result.status = ObservationStatus.FAILED
+            result.formatted = ""
+            result.warnings.append("Conflicting success flag and structured error")
         if result.tool_name == "llm_molecular_generator" and result.success:
             return self._validate_generator_result(
                 result,
