@@ -959,7 +959,7 @@ def test_docking_plan_uses_structured_metadata_when_available():
 def test_rag_search_tool_registry_alias_matches_planner_name():
     registry = build_tool_registry([RAGSearchTool()])
 
-    adapter = registry.resolve("rag_search")
+    adapter = registry.resolve("rag_search", require_available=False)
 
     assert adapter.spec.name == "rag_search"
     assert "rag_database_search" in adapter.spec.aliases

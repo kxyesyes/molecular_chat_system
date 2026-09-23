@@ -112,7 +112,7 @@ def test_reverse_target_tool_registry_owner_and_capability_are_explicit():
         "reverse_target_predictor", agent_name="reverse_target"
     )
     assert adapter.spec.owner_agents == {"reverse_target"}
-    assert adapter.spec.capabilities == {"reverse_target"}
+    assert adapter.spec.capabilities == {"reverse_target", "target.reverse_predict"}
     with pytest.raises(PermissionError):
         registry.resolve(
             "reverse_target_predictor", agent_name="target"

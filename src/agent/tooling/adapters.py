@@ -11,7 +11,7 @@ from typing import Any, Callable
 import httpx
 from pydantic import ValidationError
 
-from src.agent.contracts import AgentErrorCode, ToolResult
+from src.agent.contracts import AgentErrorCode, ObservationStatus, ToolResult
 from src.agent.persistence import redact_sensitive
 
 from .spec import ToolSpec
@@ -227,9 +227,45 @@ class ToolAdapter(ABC):
 
 
 class LegacyPythonToolAdapter(ToolAdapter):
-    def __init__(self, spec: ToolSpec, tool: Any):
+    def health(self) -> dict[str, Any]:
+        health = super().health()
+        health["readiness"] = "not_probed" if self.readiness_unknown else "adapter_ready"
+        if self.readiness_unknown and health["available"]:
+            health.update(available=None, message="Runtime dependencies not probed; lazy execution permitted")
+        probe = getattr(self.tool, "registration_health", None)
+        if health["available"] is not False and callable(probe):
+            # Opt-in contract: inspect existing local state only, no loading/I/O.
+            state = probe()
+            health.update(available=state["available"], message=state["message"])
+            health["readiness"] = "local_state_ready" if state["available"] else "unavailable"
+        if health["available"] is False:
+            health["readiness"] = "unavailable"
+        if self._last_execution:
+            health.update(self._last_execution)
+        return health
+
+    def __init__(self, spec: ToolSpec, tool: Any, *, readiness_unknown: bool = False):
         super().__init__(spec)
         self.tool = tool
+        self.readiness_unknown = readiness_unknown
+        self._last_execution = {}
+
+    def execute(self, input_data: Any, **kwargs) -> ToolResult:
+        result = super().execute(input_data, **kwargs)
+        # A request-specific failure/success cannot establish tool-wide readiness.
+        # Telemetry must not throw before the caller validates a raw observation,
+        # nor retain arbitrary provider text in these enum-only health fields.
+        valid_status = isinstance(result.status, ObservationStatus)
+        error_code = getattr(result.error, "code", None)
+        self._last_execution = {
+            "last_execution_status": result.status.value if valid_status else "failed",
+            "last_error_code": (
+                error_code.value if isinstance(error_code, AgentErrorCode)
+                else AgentErrorCode.INVALID_OUTPUT.value
+                if not valid_status or result.error is not None else None
+            ),
+        }
+        return result
 
     def invoke(self, payload: Any) -> Any:
         return self._invoke_guarded(payload, None)

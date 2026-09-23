@@ -21,6 +21,7 @@ from src.agent.contracts.generation_request import (
     preflight_generation_request,
     preserve_target_quality,
 )
+from src.agent.capabilities.catalog import TOOL_ALIASES
 from src.agent.harness import HarnessFactory
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.planning import PlanCompiler, WorkflowPlan
@@ -1107,12 +1108,18 @@ class SupervisorAgent:
         capabilities = context.capabilities
         if not capabilities["scientific_tools"]:
             return {}
+        tools = dict(self.tools)
+        for alias, canonical in TOOL_ALIASES.items():
+            if alias in tools:
+                # Preserve an explicitly provided canonical tool. Legacy raw
+                # maps may retain both entries; registry conflicts stay strict.
+                tools.setdefault(canonical, tools[alias])
         if capabilities["rag"]:
-            return dict(self.tools)
+            return tools
         rag_names = self._rag_tool_names()
         return {
             name: tool
-            for name, tool in self.tools.items()
+            for name, tool in tools.items()
             if name not in rag_names
         }
 
