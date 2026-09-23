@@ -16,7 +16,7 @@ import pytest
 
 faiss = pytest.importorskip("faiss")
 
-from src.web.rag_index import (  # noqa: E402
+from src.rag.index import (  # noqa: E402
     CURRENT_SCHEMA_VERSION,
     RAGIndexCompatibilityError,
     RAGIndexManifest,
@@ -26,7 +26,7 @@ from src.web.rag_index import (  # noqa: E402
     manifest_path,
     validate_manifest,
 )
-from src.web.app import RAGSystem  # noqa: E402
+from src.rag.service import RAGSystem  # noqa: E402
 from src.agent.tools.rag_search_tool import RAGSearchTool  # noqa: E402
 
 
@@ -352,7 +352,7 @@ def test_load_uses_one_generation_when_index_is_replaced_between_hash_and_read(
             replacement_performed = True
         return digest
 
-    monkeypatch.setattr("src.web.app.file_sha256", hash_then_replace_final_index)
+    monkeypatch.setattr("src.rag.service.file_sha256", hash_then_replace_final_index)
     rag = RAGSystem({"rag": {}})
     rag.csv_path = source_path
     rag.source_path = source_path
@@ -418,7 +418,7 @@ def test_atomic_pair_failure_preserves_last_usable_index_and_manifest(
             raise OSError("simulated manifest commit failure")
         return real_replace(source, destination)
 
-    monkeypatch.setattr("src.web.rag_index.os.replace", fail_manifest_commit)
+    monkeypatch.setattr("src.rag.index.os.replace", fail_manifest_commit)
 
     with pytest.raises(OSError, match="simulated manifest commit failure"):
         atomic_save_index_pair(
@@ -470,8 +470,8 @@ def test_atomic_pair_fsyncs_both_temps_before_replacing_index_then_manifest(
         events.append(("replace", Path(source), Path(destination)))
         return real_replace(source, destination)
 
-    monkeypatch.setattr("src.web.rag_index.os.fsync", record_fsync)
-    monkeypatch.setattr("src.web.rag_index.os.replace", record_replace)
+    monkeypatch.setattr("src.rag.index.os.fsync", record_fsync)
+    monkeypatch.setattr("src.rag.index.os.replace", record_replace)
 
     persisted_manifest = atomic_save_index_pair(
         _make_index(2, [[1.0, 0.0]]),
