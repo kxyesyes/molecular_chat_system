@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -20,6 +21,7 @@ from src.agent.contracts import (
 from src.agent.contracts.generation_request import preserve_target_quality
 from src.agent.evidence import EvidenceLedger
 from src.agent.persistence.redaction import redact_sensitive
+from src.agent.persistence.base import RunOwnershipConflict
 from src.agent.planning.bindings import BindingResolutionError
 from src.agent.runtime.task_state import TaskEventType
 from src.agent.validators import align_candidate_results
@@ -195,10 +197,25 @@ class WorkflowRunSession:
         from src.agent.orchestrators.base import WorkflowState
 
         if self._start_context is None:
-            context = self.orchestrator._resolve_idempotent_context(
-                self.context,
-                self.idempotency_key,
-            )
+            if resume_claimed:
+                # The decision-continuation CAS already consumed its nonce
+                # and validated the original query/history. The current query
+                # is now the clarification, not a fixed-workflow replay. Do
+                # not claim again or apply the fixed request-identity check.
+                context = self.context
+                store = self.orchestrator.state_store
+                existing = store.get_run(context.trace_id) if store else None
+                if (existing is None or existing.get("status") != "running"
+                        or existing.get("session_id") != context.session_id
+                        or existing.get("user_id") != context.user_id
+                        or existing.get("skill_name") != context.active_skill
+                        or existing.get("idempotency_key") != self.idempotency_key):
+                    raise RunClaimConflict(None)
+            else:
+                context = self.orchestrator._resolve_idempotent_context(
+                    self.context,
+                    self.idempotency_key,
+                )
             self._start_context = context
             self._start_state = WorkflowState(
                 trace_id=context.trace_id,
@@ -215,8 +232,27 @@ class WorkflowRunSession:
         claim_run = getattr(self.orchestrator, "run_claim", None)
         if self.orchestrator.state_store and not self._start_run_persisted and callable(claim_run):
             self._start_run_persisted = claim_run(context, self.idempotency_key) is True
-        if self.orchestrator.state_store and not self._start_run_persisted:
-            self.orchestrator.state_store.start_run(
+            if not self._start_run_persisted and (
+                    context.session_id is not None or context.user_id is not None):
+                raise RunClaimConflict(None)
+        if (
+            self.orchestrator.state_store
+            and not self._start_run_persisted
+            and (context.session_id is not None or context.user_id is not None)
+        ):
+            store = self.orchestrator.state_store
+            claim = getattr(store, "claim_workflow_run", None)
+            if not callable(claim):
+                raise RunClaimConflict(None)
+            existing = store.get_run(context.trace_id)
+            status = existing["status"] if existing else None
+            if self.dynamic and existing is not None:
+                # Preserve the original exclusive-start exception contract.
+                # Dynamic continuation must use its separate successful CAS.
+                raise sqlite3.IntegrityError("Dynamic run already exists")
+            if status in {"cancelled", "rejected", "running"}:
+                raise RunClaimConflict(status)
+            claimed = claim(
                 {
                     "trace_id": context.trace_id,
                     "status": "running",
@@ -228,8 +264,32 @@ class WorkflowRunSession:
                     "session_id": context.session_id,
                     "metadata": context.metadata,
                 },
-                **({"exclusive": True} if self.dynamic else {}),
+                expected_status=status,
             )
+            if claimed is not True:
+                if self.dynamic:
+                    raise sqlite3.IntegrityError("Dynamic run claim conflicted")
+                raise RunClaimConflict(status)
+            self._start_run_persisted = True
+        if self.orchestrator.state_store and not self._start_run_persisted:
+            store = self.orchestrator.state_store
+            guarded_start = getattr(store, "start_unowned_run", None)
+            if not callable(guarded_start):
+                raise RunClaimConflict(None)
+            try:
+                guarded_start({
+                    "trace_id": context.trace_id,
+                    "status": "running",
+                    "skill_name": context.active_skill,
+                    "query": context.query,
+                    "workflow_version": self.orchestrator.workflow_version,
+                    "idempotency_key": self.idempotency_key,
+                    "user_id": context.user_id,
+                    "session_id": context.session_id,
+                    "metadata": context.metadata,
+                }, **({"exclusive": True} if self.dynamic else {}))
+            except RunOwnershipConflict as exc:
+                raise RunClaimConflict(None) from exc
             self._start_run_persisted = True
         elif not self.orchestrator.state_store:
             self._start_run_persisted = True

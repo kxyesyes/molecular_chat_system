@@ -57,6 +57,8 @@ class SpecialistDispatch:
             }, expected_status=status) is not True:
                 raise RunClaimConflict(status)
             return True
+        if context.session_id is not None or context.user_id is not None:
+            raise RunClaimConflict(status)
         return False
 
     def __call__(self, tool, input_data, step):

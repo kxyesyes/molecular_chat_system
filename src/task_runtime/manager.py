@@ -54,6 +54,8 @@ class TaskManager:
         payload: dict[str, Any],
         handler: TaskHandler,
         task_id: str | None = None,
+        *,
+        owner_session_id: str | None = None,
     ) -> TaskRecord:
         task_id = task_id or str(uuid4())
         snapshot = strict_json_roundtrip(payload)
@@ -72,7 +74,9 @@ class TaskManager:
             ).hexdigest(),
             "field_count": len(snapshot),
         }
-        self.store.create(task_id, task_type, projection)
+        self.store.create(
+            task_id, task_type, projection, owner_session_id=owner_session_id
+        )
 
         try:
             future = self.executor.submit(self._run_task, task_id, handler, snapshot)
