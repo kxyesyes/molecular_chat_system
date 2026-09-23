@@ -34,10 +34,10 @@ def build_tools():
                 }
             ],
         ),
-        FakeTool("llm_molecular_generator", [{"smiles": "CCO"}]),
-        FakeTool("property_calculator"),
-        FakeTool("admet_predictor"),
-        FakeTool("activity_predictor"),
+        FakeTool("llm_molecular_generator", [{"smiles": s} for s in ("CCO", "CCN", "CCC")]),
+        FakeTool("property_calculator", [{"smiles": s} for s in ("CCO", "CCN", "CCC")]),
+        FakeTool("admet_predictor", [{"smiles": s} for s in ("CCO", "CCN", "CCC")]),
+        FakeTool("activity_predictor", [{"smiles": s} for s in ("CCO", "CCN", "CCC")]),
         FakeTool("candidate_ranker"),
         FakeTool("molecular_docking"),
     ]

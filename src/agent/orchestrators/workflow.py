@@ -205,7 +205,7 @@ class WorkflowOrchestrator:
         if not store:
             return None
         checkpoint = store.latest_checkpoint(trace_id, step.name)
-        if not checkpoint or checkpoint.get("status") != "succeeded":
+        if not checkpoint or checkpoint.get("status") not in {"succeeded", "partial"}:
             return None
         expected = {
             "tool_name": step.tool_name,
@@ -223,8 +223,14 @@ class WorkflowOrchestrator:
     def _result_from_checkpoint(
         tool_name: str, checkpoint: Mapping[str, Any]
     ) -> ToolResult:
-        output = checkpoint.get("output") or {}
-        status_value = output.get("status")
+        output = checkpoint.get("output")
+        if (not isinstance(output, Mapping) or output.get("success") is not True
+                or output.get("error")
+                or output.get("status", "succeeded") not in {None, "succeeded", "partial"}):
+            raise ValueError("Checkpoint observation cannot be reused as successful")
+        status_value = output.get("status") or checkpoint.get("status")
+        if checkpoint.get("status") == "partial":
+            status_value = "partial"
         status = (
             ObservationStatus(status_value)
             if status_value is not None
@@ -330,14 +336,7 @@ class WorkflowOrchestrator:
 
     @staticmethod
     def _result_persistence_status(result: ToolResult) -> str:
-        if result.success:
-            return "succeeded"
-        if result.status in {
-            ObservationStatus.REJECTED,
-            ObservationStatus.CANCELLED,
-        }:
-            return result.status.value
-        return "failed"
+        return result.status.value
 
     @classmethod
     def _resolve_input(
@@ -494,11 +493,14 @@ class WorkflowOrchestrator:
     def _build_message(results: list[ToolResult]) -> str:
         if not results:
             return "No workflow steps were executed"
-        if all(item.success for item in results):
-            return "Workflow completed"
-        if any(item.success for item in results):
-            return "Workflow returned partial results"
-        return "Workflow failed"
+        result = AgentResult.from_tool_results("", None, results)
+        return {
+            "completed": "Workflow completed",
+            "partial": "Workflow returned partial results",
+            "cancelled": "Workflow cancelled",
+            "rejected": "Workflow rejected",
+            "failed": "Workflow failed",
+        }[result.outcome.value]
 
     def _emit(
         self,

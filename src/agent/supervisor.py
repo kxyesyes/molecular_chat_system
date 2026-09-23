@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from copy import deepcopy
 from typing import Any, Mapping
 from uuid import uuid4
 
@@ -9,6 +10,8 @@ from src.agent.contracts import (
     AgentErrorCode,
     AgentExecutionError,
     AgentResult,
+    ObservationStatus,
+    RunOutcome,
     ToolResult,
 )
 from src.agent.contracts.generation_request import (
@@ -34,6 +37,7 @@ from src.agent.runtime.workflow_executor import (
     WorkflowExecutor,
 )
 from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
+from src.agent.validators import align_candidate_results
 
 
 RAG_TOOL_NAMES = frozenset(
@@ -818,6 +822,9 @@ class SupervisorAgent:
                     checkpoint_warnings.append({
                         "step": step.name, "reason": "checkpoint_deserialization_failed"})
             reusable = reused_result is not None
+            reused_outcome = (
+                reused_result.success, reused_result.status, deepcopy(reused_result.error)
+            ) if reusable else None
             if reused_result is not None:
                 task_result = AgentTaskResult(
                     task_id=task.task_id,
@@ -829,14 +836,35 @@ class SupervisorAgent:
             else:
                 tool_attempt_count += 1
                 task_result = specialist.execute_task(task, self.tool_registry)
+            normalized_results = []
+            task_result.outputs = {}
             for item in task_result.tool_results:
+                item = self.orchestrator.validator.validate_tool_result(
+                    item, trusted_checkpoint=reusable)
+                candidate_source = step.metadata.get("candidate_source")
+                if candidate_source and item.success:
+                    item = align_candidate_results(
+                        outputs.get(str(candidate_source)), item, required=step.required)
                 item.quality = {
                     **item.quality,
                     "step_id": step.name,
                     "output_key": step.output_key,
                 }
+                normalized_results.append(item)
+                if item.success:
+                    task_result.outputs[item.tool_name] = item.data
+            task_result.tool_results = normalized_results
+            aggregate = AgentResult.from_tool_results(context.trace_id, context.active_skill, normalized_results)
+            task_result.status = "succeeded" if aggregate.success else aggregate.outcome.value
+            task_result.error = aggregate.error
+            task_result.warnings = aggregate.warnings
+            task_result.evidence = aggregate.evidence
+            task_result.artifacts = aggregate.artifacts
             tool_results.extend(task_result.tool_results)
-            if not reusable:
+            if not reusable or any(
+                (item.success, item.status, item.error) != reused_outcome
+                for item in task_result.tool_results
+            ):
                 for item in task_result.tool_results:
                     self._persist_delegated_result(
                         context,
@@ -847,7 +875,7 @@ class SupervisorAgent:
                         adapter_version=adapter.adapter_version,
                         model_version=model_version,
                     )
-            if task_result.status == "succeeded" and step.output_key:
+            if any(item.success for item in task_result.tool_results) and step.output_key:
                 output = task_result.outputs.get(step.tool_name)
                 if step.output_key == "target":
                     source_result = next(
@@ -879,7 +907,7 @@ class SupervisorAgent:
                 context,
                 (
                     TaskEventType.TOOL_COMPLETED
-                    if task_result.status == "succeeded"
+                    if all(item.success for item in task_result.tool_results) and task_result.tool_results
                     else TaskEventType.TOOL_FAILED
                 ),
                 f"{step.name} {task_result.status}",
@@ -887,67 +915,58 @@ class SupervisorAgent:
                 progress=(index + 1) / max(len(steps), 1),
                 payload=task_result.to_dict(),
             )
-            if task_result.status != "succeeded":
+            if not task_result.tool_results or any(not item.success for item in task_result.tool_results):
                 if not step.continue_after_failure():
                     break
 
-        successful = sum(1 for item in tool_results if item.success)
-        failed = sum(1 for item in tool_results if not item.success)
-        status = "succeeded" if successful and not failed else "partial" if successful else "failed"
-        if skipped_steps:
-            status = "partial" if successful else "failed"
-        final_answer = "\n\n".join(
-            item.formatted for item in tool_results if item.success and item.formatted
-        )
-        self._emit(
-            context,
-            (
-                TaskEventType.TASK_COMPLETED
-                if status == "succeeded"
-                else TaskEventType.TASK_PARTIAL
-                if status == "partial"
-                else TaskEventType.TASK_FAILED
-            ),
-            f"Supervisor workflow {status}",
-            progress=1.0,
-        )
-        if self.state_store:
-            self.state_store.update_run_status(context.trace_id, status)
-        agent_result = AgentResult(
+        agent_result = AgentResult.from_tool_results(
             trace_id=context.trace_id,
-            success=status == "succeeded",
-            partial=status == "partial",
-            message=(
-                "Workflow completed"
-                if status == "succeeded"
-                else "Workflow returned partial results"
-                if status == "partial"
-                else "Workflow failed"
-            ),
             skill_name=context.active_skill,
-            final_answer=final_answer,
             tool_results=tool_results,
+            message=self.orchestrator._build_message(tool_results),
+            final_answer="\n\n".join(
+                item.formatted for item in tool_results if item.success and item.formatted
+            ),
             metadata={
                 "skipped_steps": skipped_steps,
                 "semantic_evidence": semantic_evidence,
                 "checkpoint_warnings": checkpoint_warnings,
                 "request_metadata": {
                     "requested_count": context.metadata["requested_count"]
-                }
-                if "requested_count" in context.metadata
-                else {},
+                } if "requested_count" in context.metadata else {},
                 "_harness_delegations": delegations,
             },
-            error=(
-                AgentExecutionError(
-                    code=AgentErrorCode.VALIDATION_ERROR,
-                    message="Scientific workflow precondition failed",
-                    details={"skipped_steps": skipped_steps},
-                )
-                if skipped_steps
-                else None
-            ),
         )
+        if skipped_steps:
+            has_success = any(item.success for item in tool_results)
+            agent_result.success = False
+            agent_result.partial = has_success
+            agent_result.outcome = RunOutcome.PARTIAL if has_success else RunOutcome.FAILED
+            agent_result.message = (
+                "Workflow returned partial results because a scientific precondition failed"
+                if has_success else "Workflow failed because a scientific precondition failed"
+            )
+            agent_result.error = AgentExecutionError(
+                code=AgentErrorCode.VALIDATION_ERROR,
+                message="Scientific workflow precondition failed",
+                details={"skipped_steps": skipped_steps},
+            )
+        status = "succeeded" if agent_result.success else agent_result.outcome.value
+        self._emit(
+            context,
+            {
+                RunOutcome.COMPLETED: TaskEventType.TASK_COMPLETED,
+                RunOutcome.PARTIAL: TaskEventType.TASK_PARTIAL,
+                RunOutcome.CANCELLED: TaskEventType.TASK_CANCELLED,
+                RunOutcome.REJECTED: TaskEventType.TASK_REJECTED,
+                RunOutcome.FAILED: TaskEventType.TASK_FAILED,
+            }[agent_result.outcome],
+            agent_result.message,
+            progress=1.0,
+            payload=agent_result.to_legacy_dict(),
+        )
+        if self.state_store:
+            self.state_store.update_run_status(context.trace_id, status)
         events = (
             [event.to_dict() for event in self.event_bus.events]
             if self.event_bus
@@ -965,14 +984,11 @@ class SupervisorAgent:
         execution: WorkflowExecution,
     ) -> dict[str, Any]:
         result = execution.result
-        status = (
-            "succeeded" if result.success else "partial" if result.partial else "failed"
-        )
         serialized_results = result.to_legacy_dict()
         delegations = list(result.metadata.pop("_harness_delegations", []))
         return {
             "trace_id": result.trace_id,
-            "status": status,
+            "status": "succeeded" if serialized_results["status"] == "completed" else serialized_results["status"],
             "message": result.message,
             "plan": {
                 "workflow_name": execution.plan.workflow_name,
@@ -982,18 +998,14 @@ class SupervisorAgent:
                     for step in execution.plan.steps
                 ],
             },
-            "summary": {
-                "completed_steps": len(result.tool_results),
-                "successful_steps": sum(
-                    1 for item in result.tool_results if item.success
-                ),
-                "failed_steps": sum(
-                    1 for item in result.tool_results if not item.success
-                ),
-            },
+            "summary": SupervisorAgent._result_summary(result),
             "delegations": delegations,
             "agent_events": execution.events,
             "result": {
+                "status": serialized_results["status"],
+                "warnings": serialized_results["warnings"],
+                "evidence": serialized_results["evidence"],
+                "artifacts": serialized_results["artifacts"],
                 "success": result.success,
                 "partial": result.partial,
                 "final_answer": result.final_answer,
@@ -1024,9 +1036,9 @@ class SupervisorAgent:
                 "trace_id": context.trace_id,
                 "step_id": step.name,
                 "tool_name": step.tool_name,
-                "status": "succeeded" if result.success else "failed",
+                "status": self.orchestrator._result_persistence_status(result),
                 "input": input_data,
-                "output": legacy if result.success else None,
+                "output": legacy,
                 "error": legacy.get("error"),
                 "elapsed_ms": result.elapsed_ms,
             }
@@ -1036,13 +1048,13 @@ class SupervisorAgent:
                 "trace_id": context.trace_id,
                 "step_id": step.name,
                 "workflow_version": self.orchestrator.workflow_version,
-                "status": "succeeded" if result.success else "failed",
+                "status": self.orchestrator._result_persistence_status(result),
                 "input_hash": input_hash,
                 "tool_name": step.tool_name,
                 "tool_version": tool_version,
                 "adapter_version": adapter_version,
                 "model_version": model_version,
-                "output": legacy if result.success else None,
+                "output": legacy,
                 "error": legacy.get("error"),
             }
         )
@@ -1177,27 +1189,35 @@ class SupervisorAgent:
         return data
 
     @staticmethod
+    def _result_summary(result: AgentResult) -> dict[str, int]:
+        return {
+            "completed_steps": len(result.tool_results),
+            "successful_steps": sum(
+                item.success and item.status == ObservationStatus.SUCCEEDED and item.error is None
+                for item in result.tool_results),
+            "failed_steps": sum(not item.success for item in result.tool_results),
+            "partial_steps": sum(item.status == ObservationStatus.PARTIAL for item in result.tool_results),
+        }
+
+    @staticmethod
     def _format_run_result(
         workflow_name: str,
         plan_metadata: dict[str, Any],
         steps: list[WorkflowStep],
         result: AgentResult,
     ) -> dict[str, Any]:
+        serialized = result.to_legacy_dict()
         return {
             "trace_id": result.trace_id,
-            "status": "succeeded" if result.success else "partial" if result.partial else "failed",
+            "status": "succeeded" if serialized["status"] == "completed" else serialized["status"],
             "message": result.message,
             "plan": {
                 "workflow_name": workflow_name,
                 "metadata": plan_metadata,
                 "steps": [SupervisorAgent._step_to_dict(step) for step in steps],
             },
-            "summary": {
-                "completed_steps": len(result.tool_results),
-                "successful_steps": sum(1 for item in result.tool_results if item.success),
-                "failed_steps": sum(1 for item in result.tool_results if not item.success),
-            },
-            "result": result.to_legacy_dict(),
+            "summary": SupervisorAgent._result_summary(result),
+            "result": serialized,
         }
 
 

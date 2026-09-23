@@ -321,15 +321,15 @@ def test_supervisor_delegates_each_step_to_declared_specialist():
         skill_name="target_driven_design",
     )
 
-    assert result["status"] == "succeeded"
+    assert result["status"] == "partial"
+    # The fixture returns a non-list candidate assessment; validation must reject it.
+    assert result["result"]["tool_results"]["property_calculator"]["success"] is False
     assert [item["agent_name"] for item in result["delegations"]] == [
         "target",
         "molecular_design",
         "property_admet",
-        "property_admet",
-        "activity",
-        "molecular_design",
     ]
+    assert tools["activity_predictor"].calls == []  # Required assessment failed validation.
     assert tools["llm_molecular_generator"].calls
     assert tools["property_calculator"].calls == ["CCO"]
     assert tools["molecular_docking"].calls == []
@@ -360,7 +360,9 @@ def test_delegated_supervisor_uses_prepared_authoritative_count_metadata():
         skill_name="target_driven_design",
     )
 
-    assert result["status"] == "succeeded"
+    assert result["status"] == "partial"
+    # The fixture returns a non-list candidate assessment; validation must reject it.
+    assert result["result"]["tool_results"]["property_calculator"]["success"] is False
     assert result["plan"]["metadata"]["requested_count"] == 5
     assert result["result"]["metadata"]["request_metadata"] == {
         "requested_count": 5
@@ -384,7 +386,9 @@ def test_delegated_public_mol_count_is_authoritative():
         mol_count=7,
     )
 
-    assert result["status"] == "succeeded"
+    assert result["status"] == "partial"
+    # The fixture returns a non-list candidate assessment; validation must reject it.
+    assert result["result"]["tool_results"]["property_calculator"]["success"] is False
     assert result["plan"]["metadata"]["requested_count"] == 7
     assert tools["llm_molecular_generator"].calls[0]["metadata"] == {
         "requested_count": 7
@@ -437,7 +441,9 @@ def test_delegated_plan_count_overrides_conflicting_context_metadata():
         metadata={"requested_count": 2, "secret": "must-not-bind"},
     )
 
-    assert result["status"] == "succeeded"
+    assert result["status"] == "partial"
+    # The fixture returns a non-list candidate assessment; validation must reject it.
+    assert result["result"]["tool_results"]["property_calculator"]["success"] is False
     assert result["plan"]["metadata"]["requested_count"] == 5
     assert result["result"]["metadata"]["request_metadata"] == {
         "requested_count": 5

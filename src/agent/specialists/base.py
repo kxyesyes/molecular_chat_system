@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from src.agent.contracts import AgentErrorCode, ToolResult
+from src.agent.contracts import AgentErrorCode, AgentResult, ToolResult
 from src.agent.tooling import ToolRegistry
 
 from .contracts import AgentTask, AgentTaskResult
@@ -53,7 +53,7 @@ class SpecialistAgent:
             else:
                 return AgentTaskResult(
                     task_id=task.task_id,
-                    status="failed",
+                    status=AgentResult.from_tool_results(task.trace_id, None, tool_results).outcome.value,
                     outputs=outputs,
                     tool_results=tool_results,
                     artifacts=[
@@ -69,9 +69,10 @@ class SpecialistAgent:
                     metrics={"elapsed_ms": int((time.perf_counter() - started) * 1000)},
                 )
 
+        aggregate = AgentResult.from_tool_results(task.trace_id, None, tool_results)
         return AgentTaskResult(
             task_id=task.task_id,
-            status="succeeded",
+            status="succeeded" if aggregate.success else aggregate.outcome.value,
             outputs=outputs,
             tool_results=tool_results,
             artifacts=[
