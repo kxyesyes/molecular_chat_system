@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
 import logging
@@ -25,6 +26,7 @@ from .user_llm_config import (
     user_llm_signature, resolve_user_llm_request, default_user_llm_config,
 )
 from .models import OllamaModel, generate_for_chat
+from .model_lifecycle import ModelRequestGate, close_owned_model, finish_on_cancel
 from src.rag.retrieval import search_molecular_index
 from .rag_presentation import format_rag_context, rag_info_molecule
 from .rag_index import (
@@ -434,6 +436,7 @@ class MolecularChatApp:
         # Main chat settings are independent from checkout env and scientific tools.
         self.runtime_llm_env_path = user_llm_config_path()
         self._llm_config_lock = asyncio.Lock()
+        self.model_request_gate = ModelRequestGate()
         self._llm_env_signature = self._llm_env_file_signature()
         self.active_llm_config = self._load_active_llm_config()
         self.config.setdefault("inference", {})["stream"] = self.active_llm_config["stream"]
@@ -469,6 +472,7 @@ class MolecularChatApp:
                 refresh_model_config=self._refresh_llm_config_from_env,
             )
             logger.info("✅ ChatHandler初始化成功")
+            self.chat_handler.model_request_gate = self.model_request_gate
         except Exception as e:
             logger.error(f"❌ ChatHandler初始化失败: {e}")
             self.chat_handler = None
@@ -554,7 +558,7 @@ class MolecularChatApp:
                 if signature == self._llm_env_signature:
                     return False
                 config = self._load_active_llm_config()
-                self._apply_llm_config(config)
+                await self._replace_llm_config(config)
                 self._llm_env_signature = signature
                 return True
         except (OSError, ValueError, RuntimeError):
@@ -562,16 +566,20 @@ class MolecularChatApp:
 
     async def _persist_user_llm_config(self, payload: dict) -> dict:
         async with self._llm_config_lock:
-            try:
-                config, signature = save_user_llm_config(
-                    self.runtime_llm_env_path, payload,
-                    clear_api_key=payload.get("clear_api_key") is True,
-                )
-            except (OSError, ValueError, RuntimeError):
-                raise HTTPException(status_code=503, detail="模型配置未保存；请检查输入、配置文件与目录权限。") from None
-            self._apply_llm_config(config)
-            self._llm_env_signature = signature
-            return config
+            gate = getattr(self, 'model_request_gate', None)
+            async with gate.exclusive() if gate is not None else nullcontext():
+                if gate is not None and gate.closed:
+                    raise HTTPException(status_code=503, detail="Model service is shutting down")
+                try:
+                    config, signature = save_user_llm_config(
+                        self.runtime_llm_env_path, payload,
+                        clear_api_key=payload.get("clear_api_key") is True,
+                    )
+                except (OSError, ValueError, RuntimeError):
+                    raise HTTPException(status_code=503, detail="模型配置未保存；请检查输入、配置文件与目录权限。") from None
+                await self._apply_and_close_llm(config)
+                self._llm_env_signature = signature
+                return config
 
     async def _watch_llm_env_config(self) -> None:
         while True:
@@ -611,6 +619,22 @@ class MolecularChatApp:
             base_url=config.get("base_url") or default_user_llm_config()["base_url"],
             provider_name="OpenAI-compatible",
         )
+
+    async def _replace_llm_config(self, config):
+        gate = getattr(self, 'model_request_gate', None)
+        if gate is None:
+            return self._apply_llm_config(config)
+        async with gate.exclusive():
+            if gate.closed:
+                raise RuntimeError('Model service is shutting down')
+            return await self._apply_and_close_llm(config)
+
+    async def _apply_and_close_llm(self, config):
+        old_model = getattr(self, 'model', None)
+        result = self._apply_llm_config(config)
+        if old_model is not getattr(self, 'model', None):
+            await finish_on_cancel(close_owned_model(old_model))
+        return result
 
     def _apply_llm_config(self, llm_config: Dict[str, Any]) -> Dict[str, Any]:
         config = normalize_llm_config(llm_config)
@@ -753,16 +777,17 @@ class MolecularChatApp:
             if not isinstance(payload, dict):
                 raise HTTPException(status_code=422, detail="模型配置必须为对象。")
             await self._refresh_llm_config_from_env()
+            test_model = None
             try:
                 test_config = resolve_user_llm_request(
                     payload, self.active_llm_config,
                     clear_api_key=payload.get("clear_api_key") is True,
                 )
                 test_model = self._create_model_from_llm_config(test_config)
-                response = await generate_for_chat(
+                response = await finish_on_cancel(generate_for_chat(
                     test_model, "Reply with exactly: CONNECTION_OK",
                     temperature=0.1, max_tokens=64,
-                )
+                ))
                 failure_markers = ("失败", "未配置", "HTTP ", "API Key", "Base URL", "模型名称")
                 is_success = bool(response and not any(marker in response for marker in failure_markers))
                 return {
@@ -773,6 +798,8 @@ class MolecularChatApp:
             except Exception as exc:
                 logger.error("LLM connection test failed (%s)", type(exc).__name__)
                 return {"success": False, "message": "连接测试失败；请检查服务地址、模型名称和凭据。"}
+            finally:
+                await finish_on_cancel(close_owned_model(test_model))
 
         @self.app.post("/api/switch_model")
         async def switch_model(request: Request):
@@ -833,7 +860,8 @@ class MolecularChatApp:
         # Register molecular design routes
         try:
             from .routes.design_routes import setup_design_routes
-            setup_design_routes(self.app, model=self.model, config=self.config)
+            setup_design_routes(self.app, config=self.config, model_provider=lambda: self.model,
+                                model_request_gate=self.model_request_gate)
             logger.info("✅ 分子设计模块路由注册成功")
         except Exception as e:
             logger.warning(f"⚠️ 分子设计模块路由注册失败: {e}")
@@ -855,6 +883,7 @@ class MolecularChatApp:
             setup_agent_workflow_routes(
                 self.app,
                 supervisor_factory=self._create_supervisor_agent,
+                model_request_gate=self.model_request_gate,
             )
             setup_system_routes(self.app)
             logger.info("Task runtime and system metadata routes registered")
@@ -1150,6 +1179,10 @@ Key guidelines:
         logger.info("Molecular Chat System initialized successfully")
 
     async def shutdown(self):
+        # A cancelled server shutdown must still finish closing every resource.
+        await finish_on_cancel(self._shutdown())
+
+    async def _shutdown(self):
         """Stop application-owned background tasks."""
         if self._llm_watch_task is not None:
             self._llm_watch_task.cancel()
@@ -1158,6 +1191,17 @@ Key guidelines:
             except asyncio.CancelledError:
                 pass
             self._llm_watch_task = None
+
+        gate = getattr(self, 'model_request_gate', None)
+        if gate is not None:
+            async with gate.exclusive():
+                if not gate.closed:
+                    gate.closed = True
+                    seen = set()
+                    for model in (getattr(self, 'model', None), getattr(self, 'molecular_generator_model', None)):
+                        if model is not None and id(model) not in seen:
+                            seen.add(id(model))
+                            await finish_on_cancel(close_owned_model(model))
 
         registry = getattr(self, "agent_tool_registry", None)
         self.agent_tool_registry = None

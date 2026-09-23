@@ -274,6 +274,7 @@ class OllamaModel:
 
     async def close(self):
         """关闭HTTP客户端连接"""
-        await self.client.aclose()
-        self.sync_client.close()
-
+        try:
+            await self.client.aclose()
+        finally:
+            self.sync_client.close()

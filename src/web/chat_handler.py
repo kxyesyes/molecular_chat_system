@@ -28,6 +28,7 @@ from src.web.prompt_budget import (
     InputBudgetExceeded, STATUS_RESERVE, assemble, bounded_record, character_limit, validate_question,
 )
 from src.web.models import generate_for_chat
+from src.web.model_lifecycle import model_request, finish_on_cancel
 from src.web.rag_presentation import format_rag_context, rag_info_molecule
 
 logger = logging.getLogger(__name__)
@@ -154,13 +155,16 @@ class ChatHandler:
                 except:
                     pass
     
-    async def _process_message(self, websocket: WebSocket, message: str, 
+    @model_request
+    async def _process_message(self, websocket: WebSocket, message: str,
                               enable_rag: bool, enable_tools: bool, 
                               rag_count: int = 5, temperature: float = 0.7,
                               mol_count: int | None = None,
                               conversation_history: List[Dict[str, Any]] | None = None,
                               session_id: str | None = None):
         """处理用户消息 - 性能优化版"""
+        # Hold one client for generation, retries and completion metadata.
+        request_model = self.model
         history = (
             conversation_history
             if conversation_history is not None
@@ -416,7 +420,12 @@ class ChatHandler:
                     history=history,
                 )
                 return
-        
+            finally:
+                # Event delivery may fail while the executor thread still owns
+                # the model. Drain it before releasing the request lease.
+                if not agent_task.done():
+                    await finish_on_cancel(agent_task)
+
         # 如果没有触发 Agent 技能但启用了 RAG 开关，则执行传统 RAG（保留向后兼容性）
         if (
             not agent_used
@@ -499,29 +508,37 @@ class ChatHandler:
         # 生成响应
         await self._send_status(websocket, "🤖 AI正在生成回答...")
         
-        model_max_tokens = self._model_max_tokens()
+        model_max_tokens = self._model_max_tokens(request_model)
 
         if self.config.get("inference", {}).get("stream", True):
             try:
                 chunk_count = 0
-                async for chunk in self.model.stream_generate(
+                stream = request_model.stream_generate(
                     prompt,
                     temperature=self.config.get("inference", {}).get("temperature", 0.7),
                     max_tokens=model_max_tokens,
-                ):
-                    if chunk:
-                        full_response += chunk
-                        chunk_count += 1
-                        await websocket.send_text(json.dumps({
-                            "type": "stream",
-                            "content": chunk
-                        }))
-                        # 优化4: 减少sleep时间，提高响应速度
-                        if chunk_count % 5 == 0:  # 每5个chunk才sleep一次
-                            await asyncio.sleep(0.001)
+                )
+                try:
+                    async for chunk in stream:
+                        if chunk:
+                            full_response += chunk
+                            chunk_count += 1
+                            await websocket.send_text(json.dumps({
+                                "type": "stream",
+                                "content": chunk
+                            }))
+                            # 优化4: 减少sleep时间，提高响应速度
+                            if chunk_count % 5 == 0:  # 每5个chunk才sleep一次
+                                await asyncio.sleep(0.001)
+                finally:
+                    # Consumer errors do not close async generators implicitly.
+                    # Keep the request lease until its HTTP response has drained.
+                    close = getattr(stream, "aclose", None)
+                    if callable(close):
+                        await finish_on_cancel(close())
                 
                 full_response, warning_chunk, completion_meta = (
-                    self._finalize_model_response(full_response)
+                    self._finalize_model_response(full_response, request_model)
                 )
                 if warning_chunk:
                     await websocket.send_text(json.dumps({
@@ -546,13 +563,13 @@ class ChatHandler:
                 logger.error(f"流式生成错误: {stream_error}")
                 await self._send_status(websocket, "⚠️ 切换到标准生成模式...")
                 full_response = await generate_for_chat(
-                    self.model,
+                    request_model,
                     prompt,
                     temperature=self.config.get("inference", {}).get("temperature", 0.7),
                     max_tokens=model_max_tokens,
                 )
                 full_response, _, completion_meta = self._finalize_model_response(
-                    full_response
+                    full_response, request_model
                 )
                 await websocket.send_text(json.dumps({
                     "type": "message",
@@ -561,13 +578,13 @@ class ChatHandler:
                 }, ensure_ascii=False))
         else:
             full_response = await generate_for_chat(
-                self.model,
+                request_model,
                 prompt,
                 temperature=self.config.get("inference", {}).get("temperature", 0.7),
                 max_tokens=model_max_tokens,
             )
             full_response, _, completion_meta = self._finalize_model_response(
-                full_response
+                full_response, request_model
             )
             await websocket.send_text(json.dumps({
                 "type": "message",
@@ -633,10 +650,10 @@ class ChatHandler:
                 }
             # 在线程池中执行同步的agent.execute，传递temperature和mol_count参数
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
+            result = await finish_on_cancel(loop.run_in_executor(
                 None, 
                 lambda: self.agent_system.execute(message, **execute_kwargs)
-            )
+            ))
             return result
         except GenerationRequestError as exc:
             return {
@@ -1154,17 +1171,17 @@ class ChatHandler:
             history_cap -= len(text) + len("历史") + 4
         return assemble(user_message, self._input_limit(), blocks, chronological_history=True)
 
-    def _model_max_tokens(self) -> int:
+    def _model_max_tokens(self, model=None) -> int:
         """Select an output budget without leaking local GPU limits to remote APIs."""
         inference = self.config.get("inference", {})
         local_limit = int(inference.get("max_tokens", 1500))
-        if getattr(self.model, "provider_name", None):
+        if getattr(self.model if model is None else model, "provider_name", None):
             return int(inference.get("external_max_tokens", 4096))
         return local_limit
 
-    def _finalize_model_response(self, content: str):
+    def _finalize_model_response(self, content: str, model=None):
         """Expose safe completion state and make provider truncation visible."""
-        metadata = getattr(self.model, "last_response_metadata", {}) or {}
+        metadata = getattr(self.model if model is None else model, "last_response_metadata", {}) or {}
         finish_reason = metadata.get("finish_reason")
         completion_meta = {}
         warning = ""

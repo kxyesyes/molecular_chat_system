@@ -98,6 +98,18 @@ class TaskManager:
     def get(self, task_id: str) -> TaskRecord:
         return self.store.get(task_id)
 
+    def wait_for_completion(self, task_id: str) -> None:
+        """Wait for the accepted worker, including queued/cancelled submissions.
+
+        Call outside the event loop. A missing future has already completed
+        (or submission failed); terminal database state alone cannot prove a
+        running worker released its resources.
+        """
+        with self._lock:
+            future = self._futures.get(task_id)
+        if future is not None:
+            future.result()
+
     def list(
         self,
         limit: int = 20,
