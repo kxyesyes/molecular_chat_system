@@ -83,7 +83,7 @@ def _open_client(directory):
         resources.callback(lambda: asyncio.run(app_instance.molecular_generator_model.close()))
         resources.callback(lambda: asyncio.run(app_instance.model.close()))
         resources.callback(lambda: asyncio.run(app_instance.shutdown()))
-        session = TestClient(app_instance.app)
+        session = TestClient(app_instance.app, base_url='http://localhost')
         resources.callback(session.close)
         # Deliberately not `with TestClient(...)`: that would start real lifespan.
         yield session

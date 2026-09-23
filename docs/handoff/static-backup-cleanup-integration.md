@@ -194,3 +194,19 @@ no-index 对新增内容返回差异退出码 1 不等于 whitespace 错误；
 原 SPEC、QUALITY 两位审查者分别复审上述自动隔离变更，均 APPROVED；原测试自身隔离/清理 P2 阻断解除。SPEC普通pytest有限回归12 passed，QUALITY单文件7 passed / 21.33秒。确认泄漏断言在兜底清理之前执行，不会因强制关闭客户端而掩盖真实未关闭。
 
 旧 Starlette 模板依赖仍为发布阻断；本地新版通过不替代CI。父任务仅精确提交三个允许路径并对齐当前main，暂不推送/创建PR，等待模板兼容修复。上文未提交为原实现交接时点。
+
+## 已发布依赖组合与测试地址适配（2026-09-24）
+
+模板兼容 PR40 已合并，PR41 原候选858368d的CI35896666732最终七门禁全部成功。其后P05会话归属PR37合并至main6d295ef，本地对齐为7b81b5，原三路径补丁完整保留，未改任何生产代码或安全策略。
+
+组合测试首次复现：**1 failed、65 passed、7 warnings，34.27秒，exit1**。唯一失败是静态测试home worker默认TestClient地址 `http://testserver/` 被真实会话中间件拒绝为403。`_is_safe_transport`明确只允许本机HTTP或有效HTTPS；同仓会话测试使用localhost。
+
+最小调整仅将 `_open_client` 的TestClient增加 `base_url='http://localhost'`，所有真实Jinja/静态资源、脚本顺序、旧备份404、资源关闭及异常清理断言不变；不禁用中间件、不mock首页、不添加skip。
+
+使用MedChat Python3.10、白名单环境和临时cwd/用户配置/DB、real开关0、正常conftest重跑：
+
+```text
+python -B -m pytest tests/test_static_placeholder_cleanup.py tests/test_main_routes_template_compat.py tests/test_user_llm_routes.py tests/test_agent_session_entrypoints.py tests/agent/test_browser_session_integration.py -q -p no:cacheprovider --tb=short -rs
+```
+
+测试路径在临时cwd中使用本工作树绝对路径；runner finally调用logging.shutdown后清理。最终 **66 passed、7 warnings，26.45秒，exit0**。7项为既有SWIG/FastAPI弃用警告。本结果不等于新head远端CI；发布前仍需独立增量复核、精确提交及最新七门禁。
