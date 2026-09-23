@@ -396,6 +396,7 @@ class SupervisorAgent:
                 "invalid_requested_count_type",
                 "malformed_requested_count",
                 "requested_count_out_of_range",
+                "target_clarification_required",
             }:
                 execution = WorkflowExecutor(
                     planner=self.planner,

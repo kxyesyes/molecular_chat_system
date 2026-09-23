@@ -558,6 +558,7 @@ class WorkflowExecutor:
             "invalid_requested_count_type",
             "malformed_requested_count",
             "requested_count_out_of_range",
+            "target_clarification_required",
         }:
             details = {
                 "skill": policy.name,
@@ -566,9 +567,17 @@ class WorkflowExecutor:
                     "supported_requested_count"
                 ),
             }
+            message = "Invalid molecular generation request"
+            if plan.metadata["reason"] == "target_clarification_required":
+                clarification = plan.metadata.get("message")
+                message = (
+                    clarification.strip()
+                    if isinstance(clarification, str) and clarification.strip()
+                    else "请明确本次使用的单一靶点标识后重试。"
+                )
             error = AgentExecutionError(
                 code=AgentErrorCode.INVALID_INPUT,
-                message="Invalid molecular generation request",
+                message=message,
                 details=details,
             )
             return None, WorkflowExecution(

@@ -9,22 +9,16 @@ from __future__ import annotations
 import re
 from typing import Literal
 
+from src.target_identifiers import (
+    BUCHE_ALIASES as _BUCHE_ALIASES,
+    PDE_ALIASES as _PDE_ALIASES,
+)
 from .dataset_contract import DatasetManifest
 
 
 LABEL_THRESHOLD = 5.0
 PROBABILITY_THRESHOLD = 0.5
 
-# Deliberately bounded aliases; arbitrary digits/letters after PDE are not genes.
-_PDE_SUBTYPES = (
-    "1A", "1B", "1C", "2A", "3A", "3B", "4A", "4B", "4C", "4D",
-    "5A", "6A", "6B", "6C", "6D", "6G", "6H", "7A", "7B", "8A",
-    "8B", "9A", "10A", "11A",
-)
-_PDE_ALIASES = {"pde", "pde-family"} | {
-    f"pde{subtype.lower()}" for subtype in _PDE_SUBTYPES
-} | {f"pde{number}" for number in range(1, 12)}
-_BUCHE_ALIASES = {"buche", "bche", "buche-family", "丁酰胆碱酯酶"}
 # Keep hyphenated and underscore-connected tokens intact to reject partial IDs.
 # Unicode word boundaries also reject identifiers embedded in other words.
 _IDENTIFIER = re.compile(r"[\w-]+")

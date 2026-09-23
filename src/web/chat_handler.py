@@ -1038,6 +1038,10 @@ class ChatHandler:
         if not route_decision or not route_decision.requires_confirmation:
             return ""
         reasons = " ".join(route_decision.reasons)
+        if "target_clarification_required" in route_decision.reasons:
+            from src.agent.contracts.target_request import TARGET_CLARIFICATION
+
+            return TARGET_CLARIFICATION
         if "invalid SMILES" in reasons:
             return (
                 "你提供的 SMILES 无效，请检查并更正结构后重试。"

@@ -233,11 +233,12 @@ def test_candidate_coverage_changes_scientific_outcome(tmp_path, monkeypatch, en
     store = SQLiteAgentStateStore(tmp_path / "coverage.db")
     supervisor = SupervisorAgent(tools=tools, planner=Planner(), tool_registry=registry,
         specialists=build_default_specialists(), state_store=store)
+    query = "针对 PDE5A 设计 2 个候选分子"
     if entry == "run":
-        response = supervisor.run("design 2 molecules", skill_name="target_driven_design", mol_count=2)
+        response = supervisor.run(query, skill_name="target_driven_design", mol_count=2)
         result = response["result"]
     else:
-        response = supervisor.execute("design 2 molecules", active_skill="target_driven_design", mol_count=2)
+        response = supervisor.execute(query, active_skill="target_driven_design", mol_count=2)
         result = response["agent_result"].to_legacy_dict()
     assert result["status"] == "partial"
     observation = result["tool_result_sequence"][-1]
